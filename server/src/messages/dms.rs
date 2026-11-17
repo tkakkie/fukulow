@@ -5,6 +5,7 @@ use sqlx::{PgConnection, Row};
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Dm {
+    pub history_generation: Uuid,
     pub id: Uuid,
     pub kind: DmKind,
     pub peer: DmPeer,
@@ -22,6 +23,7 @@ pub struct Dm {
 }
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DmList {
+    pub history_generation: Uuid,
     pub dms: Vec<Dm>,
     #[schema(required = true)]
     pub next_cursor: Option<String>,
@@ -32,6 +34,8 @@ async fn baselines(
     auth: &Auth,
     identities: Vec<DmDiscovery>,
 ) -> Result<Vec<Dm>, ApiError> {
+    let history_generation =
+        auth::history::generation(tx, auth.identity.organization.organization_id).await?;
     let ids = identities.iter().map(|d| d.id).collect::<Vec<_>>();
     let rows = sqlx::query(unread::LIST_COUNTS_SQL)
         .bind(auth.identity.organization.organization_id)
@@ -58,6 +62,7 @@ async fn baselines(
             let (as_of_seq, read_seq, unread_count, mention_unread_count) =
                 counts.remove(&d.id).ok_or(sqlx::Error::RowNotFound)?;
             Ok(Dm {
+                history_generation,
                 id: d.id,
                 kind: d.kind,
                 peer: d.peer,
@@ -134,8 +139,9 @@ pub async fn open(
         .into_response())
 }
 
-#[utoipa::path(get,path="/api/v1/orgs/{org}/dms",operation_id="list_dms",params(("org"=Uuid,Path),("cursor"=Option<String>,Query,description="Creation-order continuation, exclusive"),("channel_id"=Option<Vec<Uuid>>,Query,description="Repeated distinct ids, 1..50; exclusive with cursor")),security(("cookie"=[]),("bearer"=[])),
+#[utoipa::path(get,path="/api/v1/orgs/{org}/dms",operation_id="list_dms",params(("org"=Uuid,Path),("history_generation"=Option<Uuid>,Query,description="Organization history epoch"),("cursor"=Option<String>,Query,description="Creation-order continuation, exclusive"),("channel_id"=Option<Vec<Uuid>>,Query,description="Repeated distinct ids, 1..50; exclusive with cursor")),security(("cookie"=[]),("bearer"=[])),
     responses((status=200,description="At most 50 current participant DMs in one snapshot; ordinary Channels excluded",body=DmList),
+    (status=409,description="history_generation_changed for a stale Organization epoch",body=ErrorBody),
     (status=400,description="invalid input, including cursor scope, unknown fields or duplicate ids",body=ErrorBody),(status=401,description="invalid credentials",body=ErrorBody),
     (status=404,description="organization_unavailable",body=ErrorBody),(status=500,description="internal error",body=ErrorBody)))]
 pub async fn list(
@@ -150,9 +156,14 @@ pub async fn list(
             auth::members::require_current(tx, &auth).await?;
             let Query(query) = query.map_err(|_| ApiError::bad_request())?;
             let mut token = None;
+            let mut generation = None;
             let mut ids = Vec::new();
             for (k, v) in query {
                 match k.as_str() {
+                    "history_generation" if generation.is_none() => {
+                        generation =
+                            Some(Uuid::parse_str(&v).map_err(|_| ApiError::bad_request())?);
+                    }
                     "cursor" if token.is_none() => token = Some(v),
                     "channel_id" => {
                         let id = Uuid::parse_str(&v).map_err(|_| ApiError::bad_request())?;
@@ -167,6 +178,9 @@ pub async fn list(
             if ids.len() > 50 || (token.is_some() && !ids.is_empty()) {
                 return Err(ApiError::bad_request());
             }
+            let history_generation =
+                auth::history::validate(tx, auth.identity.organization.organization_id, generation)
+                    .await?;
             let cursor = token
                 .map(|t| Cursor::decode(&t, &state.setup_token, &auth, "list"))
                 .transpose()?;
@@ -205,7 +219,11 @@ pub async fn list(
             .await?;
             Ok((
                 [(header::CACHE_CONTROL, "no-store")],
-                Json(DmList { dms, next_cursor }),
+                Json(DmList {
+                    history_generation,
+                    dms,
+                    next_cursor,
+                }),
             )
                 .into_response())
         },

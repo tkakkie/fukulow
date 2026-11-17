@@ -11,7 +11,7 @@ it('the build switch preserves the bounded sync contract and never changes API v
   const inputs: Input[] = [
     { type: 'session_start', selfId: self }, { type: 'connection_ready', connection: 1 },
     { type: 'watch', channel },
-    { type: 'history_result', request: 3, page: { messages: [], has_more: false } },
+    { type: 'history_result', request: 3, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } },
     { type: 'user_send', channel, clientMessageId: self, body: '本文\n👋', topic_name: 'Topic' },
     { type: 'channel_unavailable', channel }, { type: 'organization_unavailable' },
     { type: 'stop' }, { type: 'stop' },

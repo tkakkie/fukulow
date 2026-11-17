@@ -10,6 +10,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
         ("refresh", "websocket_refresh"),
         ("snapshot", "websocket_replay"),
         ("subscribed_seq", "websocket_subscribed_seq"),
+        ("handoff_generation", "websocket_authorize"),
     ] {
         let f = fixture(&pool).await;
         if phase == "snapshot" {

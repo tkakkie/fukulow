@@ -42,3 +42,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [auth](auth.md): `#304 PUT /api/v1/me/password takes`, `#304 wrong current password is 403`
 
 - [auth](auth.md): `#303 management follows`, `#303 retains random UUID cursor anchors`
+
+- [messages](messages.md): `#515 uses Organization UUID epochs`

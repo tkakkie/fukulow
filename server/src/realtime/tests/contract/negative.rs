@@ -277,7 +277,7 @@ async fn handoff_contract_rejects_omission_and_reordering(pool: PgPool) {
 async fn silence_barrier_rejects_late_wrong_delivery_and_close() {
     for wrong in [1, 2, 3, 0] {
         let channel = Uuid::new_v4();
-        let subscribed = json!({"type":"subscribed","channel_id":channel,"caught_up_seq":0});
+        let subscribed = json!({"type":"subscribed","channel_id":channel,"caught_up_seq":0,"history_generation":Uuid::nil()});
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {

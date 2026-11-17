@@ -121,7 +121,7 @@ const channelKey = (ref: Json): string =>
 
 // Topic, Reply and Unread projections run at the controller layer.
 const plannedTypes = new Set(['load_unread', 'unread_result', 'fetch_unread', 'open_topic', 'load_main_timeline', 'main_timeline_result', 'fetch_main_timeline', 'main_timeline', 'open_reply_chain', 'load_reply_chain', 'reply_chain_result', 'reply_chain_failed', 'fetch_reply_chain'])
-const plannedKeys = new Set(['unread', 'topic', 'topics', 'main_timeline', 'as_of_seq', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'])
+const plannedKeys = new Set(['unread', 'topic', 'topics', 'main_timeline', 'before_position', 'reply_to', 'reply_root_id', 'reply_chain'])
 
 /** The path of the first planned term in a scenario, or null. */
 function plannedTerm(value: Json, path: string, delivery = false, controller = false): string | null {
@@ -469,7 +469,7 @@ export type ObservedChannel = {
   pending: { client_message_id: string; state: string }[]
   main_timeline?: ({ created_seq: number } | { topic: string; position: number; message_count: number | null })[]
   topics?: Record<string, { visible: number[]; messages?: Message[] }>
-  reply_chain?: { root_id: string | null; topic?: string; visible: number[]; has_more: boolean; error?: boolean; messages?: Message[] }
+  reply_chain?: {  root_id: string | null; topic?: string; visible: number[]; has_more: boolean; error?: boolean; messages?: Message[] }
 }
 export type Observed = { session?: string; organization?: string; channels: Record<string, ObservedChannel> }
 /** What a client must provide to run fixtures. */
@@ -492,7 +492,7 @@ export function partitionScenarios<T extends { proposed?: Proposed }>(all: T[]):
 
 export function expandMessage(spec: Record<string, Json>, channel?: string): Message[] {
   const seqs = 'created_seq' in spec ? [spec.created_seq as number] : Array.from({ length: (spec.to as number) - (spec.from as number) + 1 }, (_, i) => (spec.from as number) + i)
-  return seqs.map((seq) => ({
+  return seqs.map((seq) => ({ history_generation: typeof spec.history_generation === 'string' ? spec.history_generation : '00000000-0000-4000-8000-000000000515',
     created_seq: seq, version: (spec.version as number | undefined) ?? seq, deleted: spec.deleted === true,
     ...(typeof spec.topic === 'string' ? { topic: spec.topic } : {}),
     ...(typeof spec.reply_to === 'string' ? { reply_to: spec.reply_to } : {}),

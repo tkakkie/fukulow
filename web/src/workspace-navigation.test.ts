@@ -49,7 +49,7 @@ it.each([null, 'topic'])('explicitly selecting the current C9 Channel from view 
   try {
     net.socket.onReady()
     net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     expect(session.channels.get().selectedId).toBe('A')
     expect(nav.get().target?.topicId).toBe(topicId)
@@ -88,7 +88,7 @@ it.each([null, 'topic'])('explicitly selecting the current ready Channel from vi
   const { nav, pushState, replaceState } = navigation(topicId)
   try {
     net.socket.onReady()
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 0)
     await settle()

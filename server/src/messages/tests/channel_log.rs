@@ -308,7 +308,10 @@ async fn channel_event_pages_are_bounded_exclusive_and_hydrate_current_state(poo
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,version,sender,client_message_id,body) VALUES ($1,gen_random_uuid(),$2,206,206,$3,gen_random_uuid(),'not logged')")
         .bind(org).bind(channel).bind(sender).execute(&pool).await.unwrap();
     let page = body(event_response(&app, &token, channel, "?after_seq=205").await).await;
-    assert_eq!(page, json!({"events":[],"has_more":false}));
+    assert_eq!(
+        page,
+        json!({"history_generation":page["history_generation"],"events":[],"has_more":false})
+    );
     // Validate every limited position before acknowledging any part of its page.
     sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=2")
         .bind(org)
@@ -445,7 +448,12 @@ async fn channel_event_pages_exclude_uncommitted_tail_until_shared_watermark_adv
     // Position 11 is visible first, but the committed-prefix watermark remains 9.
     let response = event_response(&app, &token, channel, "?after_seq=9").await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(body(response).await, json!({"events":[],"has_more":false}));
+    let page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    assert_eq!(
+        page,
+        json!({"history_generation":page["history_generation"],"events":[],"has_more":false})
+    );
     sqlx::query(
         "UPDATE channel_message_sequences SET seq=11 WHERE organization_id=$1 AND channel_id=$2",
     )
@@ -636,6 +644,7 @@ async fn channel_event_pages_recheck_extracted_authorization_after_access_and_me
             extracted,
             Ok(Path((org, target))),
             Ok(Query(fukulow_api::ListChannelEventsQuery {
+                history_generation: None,
                 after_seq: 0,
                 limit: None,
             })),

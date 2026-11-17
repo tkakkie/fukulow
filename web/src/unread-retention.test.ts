@@ -25,15 +25,15 @@ it('coalesces overflow recovery through in-flight reads and backoff until the co
     expect(listRead).toHaveBeenCalledTimes(1)
     expect(summaryRead.mock.calls.map(([, id]) => id).sort()).toEqual(['T', 'U'])
     // Sufficient completions need no follow-up; insufficient ones retain backoff across more overflows.
-    list.resolve(ok({ channels: [row({ as_of_seq: baseline, main_unread_count: baseline, unread_count: baseline })] }))
-    for (const [id, topic] of topics) topic.resolve(ok({ as_of_seq: baseline, topic: summary(id, baseline, 0, 0) }))
+    list.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: baseline, main_unread_count: baseline, unread_count: baseline })] }))
+    for (const [id, topic] of topics) topic.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: baseline, topic: summary(id, baseline, 0, 0) }))
     await flush()
     for (let seq = 5001; seq <= 9000; seq++) c.feed([msg(seq)])
     await flush()
     expect(listRead).toHaveBeenCalledTimes(1)
     expect(summaryRead).toHaveBeenCalledTimes(2)
-    listRead.mockImplementation(async () => ok({ channels: [row({ as_of_seq: 9000, main_unread_count: 9000, unread_count: 9000 })] }))
-    summaryRead.mockImplementation(async (_channel, id) => ok({ as_of_seq: 9000, topic: summary(id, 9000, 0, 0) }))
+    listRead.mockImplementation(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 9000, main_unread_count: 9000, unread_count: 9000 })] }))
+    summaryRead.mockImplementation(async (_channel, id) => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 9000, topic: summary(id, 9000, 0, 0) }))
     await vi.advanceTimersByTimeAsync(500)
     const attempts = baseline === 1 ? 2 : 1
     expect(listRead).toHaveBeenCalledTimes(attempts)
@@ -115,7 +115,7 @@ it('releases unresolved visit rows when its boundary resolves and filters old pr
   await c.unread.refresh()
   await c.enter(); expect(c.unread.get('A').entry?.boundary).toBeNull()
   expect([...c.records.keys()]).toEqual([1, 2, 3])
-  c.setList(async () => ok({ channels: [row({ as_of_seq: 3, read_seq: 3, main_unread_count: 0, unread_count: 0 })] }))
+  c.setList(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, read_seq: 3, main_unread_count: 0, unread_count: 0 })] }))
   await c.unread.refresh()
   expect(c.unread.get('A').entry?.boundary).toBe(3)
   expect(c.records.size).toBe(0)
@@ -133,17 +133,17 @@ it('keeps aggregate suffix rows while a Topic mark holds the old position and re
   c.setList(() => (++requests === 1 ? stale.promise : fresh.promise))
   const list = c.unread.refresh(); await flush()
   const id = await c.enter('T'); await c.present(id, [2, 3])
-  mark.resolve(ok({ read_seq: 3 })); await flush()
+  mark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 3 })); await flush()
   c.topic('T', 3, 3, 0); c.feed([])
   // Switching visits clears the visit pin; the aggregate alone must retain these rows.
   await c.enter()
   expect([...c.records.keys()]).toEqual([2, 3])
   expect(c.unread.get('A').unreadCount).toBe(2)
-  stale.resolve(ok({ channels: [row({ as_of_seq: 3, read_seq: 1, main_unread_count: 0, unread_count: 0 })] }))
+  stale.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, read_seq: 1, main_unread_count: 0, unread_count: 0 })] }))
   await list; await flush()
   expect(c.unread.get('A').unreadCount).toBe(2)
   expect([...c.records.keys()]).toEqual([2, 3])
-  fresh.resolve(ok({ channels: [row({ as_of_seq: 3, read_seq: 1, main_unread_count: 0, unread_count: 0 })] })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, read_seq: 1, main_unread_count: 0, unread_count: 0 })] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(0); expect(c.records.size).toBe(0)
   c.close()
 })
@@ -166,11 +166,11 @@ it.each([
   expect(c.records.size).toBe(0)
   let requests = 0
   if (topicId === null) {
-    c.setList(async () => ok({ channels: [row({ as_of_seq: 4, read_seq: ++requests === 1 ? 0 : 3,
+    c.setList(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: ++requests === 1 ? 0 : 3,
       main_unread_count: requests === 1 ? 4 : 1, unread_count: requests === 1 ? 4 : 1 })] }))
     await c.unread.refresh()
   } else {
-    c.api.getTopicSummary = async () => ok({ as_of_seq: 4,
+    c.api.getTopicSummary = async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4,
       topic: summary(topicId, 4, ++requests === 1 ? 0 : 3, requests === 1 ? 4 : 1) })
     c.topic(topicId, 4, 0, 4)
     await flush()
@@ -199,7 +199,7 @@ it('leaves a backward winning Topic baseline unresolved until a post-position su
   expect(c.unread.get('A').topics.T).toMatchObject({ position: 3, unreadCount: null })
   await flush(); expect(requests).toBe(1)
   c.feed([]); c.feed([]); await flush(); expect(requests).toBe(1)
-  fresh.resolve(ok({ as_of_seq: 4, topic: summary('T', 4, 3, 0) }))
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, 3, 0) }))
   await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
   c.feed([]); await flush(); expect(requests).toBe(1)
@@ -216,7 +216,7 @@ it('filters available sync rows after merging a replacement Topic baseline', asy
   expect([...c.records.keys()]).toEqual([2, 3])
   // Even available rows cannot make a baseline below the persisted position authoritative.
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
-  fresh.resolve(ok({ as_of_seq: 4, topic: summary('T', 4, 3, 0) })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, 3, 0) })); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
   expect(c.records.size).toBe(0)
   c.close()
@@ -231,7 +231,7 @@ it('backs off a stale Topic recovery response after rejecting old sync rows', as
   let requests = 0
   c.api.getTopicSummary = async () => {
     requests++
-    return ok({ as_of_seq: 4, topic: summary('T', 4, requests === 1 ? 0 : 3, requests === 1 ? 2 : 0) })
+    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, requests === 1 ? 0 : 3, requests === 1 ? 2 : 0) })
   }
   c.topic('T', 4, 0, 2); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
@@ -252,13 +252,13 @@ it.each(['failure', 'unresolved success'] as const)('coalesces pending recovery 
   expect(c.records.size).toBe(0)
   const pending = held<TopicSummaryResponse>()
   let requests = 0
-  c.api.getTopicSummary = () => ++requests === 1 ? pending.promise : Promise.resolve(ok({
+  c.api.getTopicSummary = () => ++requests === 1 ? pending.promise : Promise.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515',
     as_of_seq: 4, topic: summary('T', 4, 3, 0) }))
   c.topic('T', 4, 0, 2); await flush()
   for (let i = 0; i < 3; i++) c.topic('T', 4, 0, 2)
   await flush(); expect(requests).toBe(1)
   pending.resolve(result === 'failure' ? { ok: false, kind: 'network', retryAfterMs: 3000 }
-    : ok({ as_of_seq: 4, topic: summary('T', 4, 0, 2) }))
+    : ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, 0, 2) }))
   await flush()
   expect(requests).toBe(1)
   expect(c.unread.get('A').topics.T).toMatchObject({ position: 3, unreadCount: null, error: true })
@@ -281,9 +281,9 @@ it('keeps recovery active when leaving a visit fences an in-flight summary', asy
   c.api.getTopicSummary = () => (++requests === 1 ? old.promise : fresh.promise)
   c.topic('T', 4, 0, 2); await flush()
   c.unread.leave(id); await flush(); expect(requests).toBe(2)
-  old.resolve(ok({ as_of_seq: 4, topic: summary('T', 4, 0, 2) })); await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, 0, 2) })); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
-  fresh.resolve(ok({ as_of_seq: 4, topic: summary('T', 4, 3, 0) })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, 3, 0) })); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
   expect(requests).toBe(2)
   c.close()
@@ -294,7 +294,7 @@ it('also holds main and aggregate counts unresolved and refetches after a backwa
   const c = retentionClient(); await c.boot(); c.feed([msg(2), msg(3)])
   await c.baseline(3, 3, 0, 0); c.feed([])
   let requests = 0
-  c.setList(async () => ok({ channels: [row({ as_of_seq: 4, read_seq: ++requests === 1 ? 0 : 3,
+  c.setList(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: ++requests === 1 ? 0 : 3,
     main_unread_count: requests === 1 ? 3 : 0, unread_count: requests === 1 ? 3 : 0 })] }))
   await c.unread.refresh()
   expect(c.unread.get('A').main.unreadCount).toBeNull()
@@ -353,7 +353,7 @@ it.each([1, 73, 272])('matches an unpruned controller after every seeded event (
         // Recovery depends on persisted positions, so both retention modes stay unresolved.
         clients.forEach(c => expect(c.unread.get('A').topics.T.unreadCount).toBeNull())
         await run(async (_c, i) => {
-          recoveries[i].resolve(ok({ as_of_seq: seq, topic: summary('T', seq, seq, 0) })); await flush()
+          recoveries[i].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: seq, topic: summary('T', seq, seq, 0) })); await flush()
         })
         await run(c => c.topic('T', seq - 1, 0, beforeRead))
         await run(c => c.topic('T', seq, seq, 0))

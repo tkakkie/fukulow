@@ -1,0 +1,53 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "explicit-empty-bootstrap-at-positive-event-watermark",
+      "title": "A trusted snapshot bootstraps at W with no visible Message at that event position",
+      "covers": ["C2", "C8"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","as_of_seq":7,"messages":[],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":7,"as":"subscription"}]},"observe":{"channels":{"A":{"cursor":7,"visible":[]}}}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"subscription","caught_up_seq":7},"observe":{"channels":{"A":{"state":"ready","cursor":7,"visible":[]}}}},
+        {"input":{"type":"refresh","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"refresh"}]}},
+        {"input":{"type":"history_result","respond_to":"refresh","as_of_seq":40,"messages":[],"has_more":false},"observe":{"channels":{"A":{"cursor":7,"visible":[]}}}}
+      ]
+    },
+    {
+      "id": "organization-generation-change-preserves-send-intent",
+      "title": "A changed epoch resets even after history has grown past the old cursor and preserves an in-flight send",
+      "covers": ["C2", "C5", "C6", "C8"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","as_of_seq":7,"messages":[{"created_seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":7,"as":"old-sub"}]}},
+        {"input":{"type":"user_send","channel":"A","client_message_id":"pending","body":"keep"},"effects":{"required":[{"type":"send","channel":"A","as":"old-send"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"old-sub","caught_up_seq":20,"history_generation":"00000000-0000-4000-8000-000000000516"},"effects":{"required":[{"type":"unsubscribe","channel":"A"},{"type":"connect"},{"type":"fetch_history","channel":"A","page":"latest","as":"fresh"}],"forbidden":[{"type":"send"}]},"observe":{"channels":{"A":{"cursor":null,"visible":[],"pending":[{"client_message_id":"pending","state":"unknown"}]}}}},
+        {"input":{"type":"ack","respond_to":"old-send","message":{"created_seq":21,"sender":"me","client_message_id":"pending","body":"keep"}},"observe":{"channels":{"A":{"cursor":null,"visible":[],"pending":[{"client_message_id":"pending","state":"unknown"}]}}}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"history_result","respond_to":"fresh","as_of_seq":20,"history_generation":"00000000-0000-4000-8000-000000000516","messages":[],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":20,"as":"new-sub"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"new-sub","caught_up_seq":20,"history_generation":"00000000-0000-4000-8000-000000000516"}},
+        {"input":{"type":"user_retry","client_message_id":"pending"},"effects":{"required":[{"type":"send","channel":"A","client_message_id":"pending","as":"retry"}]}},
+        {"input":{"type":"ack","respond_to":"retry","message":{"created_seq":21,"sender":"me","client_message_id":"pending","body":"keep","history_generation":"00000000-0000-4000-8000-000000000516"}},"observe":{"channels":{"A":{"cursor":20,"visible":[21],"pending":[]}}}}
+      ]
+    },
+    {
+      "id": "snapshot-expiry-replaces-only-the-history-window",
+      "title": "Expiry reanchors the window once without resetting the event cursor or subscription",
+      "covers": ["C2", "C3", "C8"],
+      "steps": [
+        {"input":{"type":"session_start"}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","as_of_seq":10,"messages":[{"created_seq":5}],"has_more":true},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":10,"as":"sub"}]}},
+        {"input":{"type":"subscribed","channel":"A","respond_to":"sub","caught_up_seq":10}},
+        {"input":{"type":"load_older","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"before","as":"older"}]}},
+        {"input":{"type":"history_failed","respond_to":"older","status":409,"error":"snapshot_expired"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"fresh"}],"forbidden":[{"type":"unsubscribe"},{"type":"connect"},{"type":"subscribe"}]},"observe":{"channels":{"A":{"state":"ready","cursor":10,"visible":[]}}}},
+        {"input":{"type":"history_failed","respond_to":"fresh","status":409,"error":"snapshot_expired"},"effects":{"forbidden":[{"type":"fetch_history"},{"type":"unsubscribe"},{"type":"connect"}]},"observe":{"channels":{"A":{"state":"ready","cursor":10}}}}
+      ]
+    }
+  ]
+}

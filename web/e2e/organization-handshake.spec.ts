@@ -35,11 +35,11 @@ async function fixture(
     if (path === `/api/v1/orgs/${org}/channels`) {
       return json({
         channels: options.withChannel
-          ? [{ id: channel, kind: 'channel', name: 'general', visibility: 'public', created_at: '2026-01-01T00:00:00Z' }]
+          ? [{ history_generation: '00000000-0000-4000-8000-000000000515', id: channel, kind: 'channel', name: 'general', visibility: 'public', created_at: '2026-01-01T00:00:00Z' }]
           : [],
       })
     }
-    const retainedMessage = {
+    const retainedMessage = { history_generation: '00000000-0000-4000-8000-000000000515',
       id: '00000000-0000-0000-0000-000000000004',
       channel_id: channel,
       created_seq: 1, version: 1, deleted: false,
@@ -53,13 +53,13 @@ async function fixture(
       reply_root_id: null,
     }
     if (path === `/api/v1/orgs/${org}/channels/${channel}/messages`) {
-      return json({
+      return json({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([retainedMessage]).at(-1)?.created_seq ?? 0,
         messages: [retainedMessage],
         has_more: false,
       })
     }
     if (path === `/api/v1/orgs/${org}/channels/${channel}/timeline`) {
-      return json({
+      return json({ history_generation: '00000000-0000-4000-8000-000000000515',
         as_of_seq: 1,
         items: [{ kind: 'message', message: retainedMessage }],
         has_more: false,

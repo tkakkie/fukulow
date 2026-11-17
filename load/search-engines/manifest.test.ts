@@ -8,8 +8,25 @@ const frozen = snapshot();
 const document = {sha256:hash(JSON.stringify(frozen)),frozen};
 const recorded = (version: number) => JSON.parse(readFileSync(new URL(`./manifest-v${version}.json`,import.meta.url),'utf8'));
 test('checked-in current manifest matches the evaluation inputs',()=>{
-  assert.equal(manifestFile,'load/search-engines/manifest-v2.json');
-  assert.equal(verifyManifest(recorded(2)),document.sha256);
+  assert.equal(manifestFile,'load/search-engines/manifest-v3.json');
+  assert.equal(verifyManifest(recorded(3)),document.sha256);
+});
+test('manifest v2 stays as recorded for the #153 1M run',()=>{
+  const v2 = recorded(2);
+  assert.equal(v2.sha256,'9b649cf9773b4926d28e2ef30d57fe74175d449c5d85bf9b560ee4694234e272');
+  assert.equal(hash(JSON.stringify(v2.frozen)),v2.sha256);
+});
+test('v3 changes only the version and sourceHashes; every condition equals v2',()=>{
+  const strip = ({version,sourceHashes,...rest}: Record<string,unknown>) => rest;
+  // Recorded v3, not the live snapshot: the guarantee must not depend on the local Node version.
+  const v2 = recorded(2).frozen, v3 = recorded(3).frozen;
+  assert.deepEqual(strip(v3),strip(v2));
+  assert.equal(v3.version,3);
+  const before = new Map(v2.sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  const changed = v3.sourceHashes.filter((s: {path:string;sha256:string})=>before.get(s.path)!==s.sha256).map((s: {path:string})=>s.path);
+  // Reviewed: the slice-4 migration, its column grants, its LF attribute line and the version pointer itself.
+  assert.deepEqual(changed,['.gitattributes','deploy/db-grants.sql','load/search-engines/manifest.ts','server/migrations/202611190515_history_generation.sql']);
+  assert.ok(v2.sourceHashes.every((s: {path:string})=>v3.sourceHashes.some((t: {path:string})=>t.path===s.path)));
 });
 test('manifest v1 stays as recorded for the 2026-11-17 results',()=>{
   const v1 = recorded(1);
@@ -17,10 +34,11 @@ test('manifest v1 stays as recorded for the 2026-11-17 results',()=>{
   assert.equal(hash(JSON.stringify(v1.frozen)),v1.sha256);
 });
 test('v2 changes only the query path and sources; performance conditions equal v1',()=>{
+  const v2 = recorded(2).frozen;
   const strip = ({version,date,sourceHashes,queryPath,...rest}: Record<string,unknown>) => rest;
-  assert.deepEqual(strip(frozen),strip(recorded(1).frozen));
-  assert.deepEqual([frozen.version,frozen.date],[2,'2026-11-17']);
-  assert.ok(frozen.sourceHashes.some(s=>s.path==='load/search-engines/definer.sql'));
+  assert.deepEqual(strip(v2),strip(recorded(1).frozen));
+  assert.deepEqual([v2.version,v2.date],[2,'2026-11-17']);
+  assert.ok(v2.sourceHashes.some((s: {path:string})=>s.path==='load/search-engines/definer.sql'));
 });
 test('queryPath carries no planner or executor setting beyond the query-path need',()=>{
   assert.deepEqual(Object.keys(frozen.queryPath.functionSettings).sort(),['plan_cache_mode','search_path']);
@@ -38,7 +56,7 @@ test('LF attributes cover exactly the frozen inputs and manifests',()=>{
   const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
     .split('\n').filter(line=>line && !line.startsWith('#'));
   assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),
-    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json']
+    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json']
     .sort().map(path=>`/${path} text eol=lf`));
 });
 test('manifest content tampering is refused',()=>{

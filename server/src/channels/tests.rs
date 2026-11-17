@@ -110,7 +110,13 @@ async fn list(app: &Router, token: &str) -> Value {
     let response = request(app, "GET", "/api/v1/channels", token, Value::Null).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    body(response).await
+    let mut page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    page.as_object_mut().unwrap().remove("history_generation");
+    for row in page["channels"].as_array_mut().unwrap() {
+        row.as_object_mut().unwrap().remove("history_generation");
+    }
+    page
 }
 
 fn unread_channel(channel: &Value) -> Value {
@@ -291,7 +297,13 @@ async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body(response).await, expected);
+        let mut actual = body(response).await;
+        assert!(Uuid::parse_str(actual["history_generation"].as_str().unwrap()).is_ok());
+        actual.as_object_mut().unwrap().remove("history_generation");
+        for row in actual["channels"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("history_generation");
+        }
+        assert_eq!(actual, expected);
         let response = request(
             &app,
             "POST",

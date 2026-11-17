@@ -14,6 +14,7 @@ export function createNavigationTargets(reads: Reads) {
   let state = { topic: idle, reply: idle }
   let generation = 0
   let key = ''
+  let currentTarget: NavigationTarget | undefined
   let closed = false
   const pending = new Set<() => void>()
   const listeners = new Set<() => void>()
@@ -28,6 +29,7 @@ export function createNavigationTargets(reads: Reads) {
     })
   }
   async function load(target: NavigationTarget, retry = false) {
+    currentTarget = target
     const nextKey = JSON.stringify([target.channelId, target.topicId, target.panel?.startsWith('reply:') ? target.panel : null])
     if (closed || (!retry && nextKey === key)) return
     key = nextKey
@@ -70,6 +72,11 @@ export function createNavigationTargets(reads: Reads) {
     get: () => state,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     load,
+    resetHistory() {
+      generation++; key = ''; pending.forEach(cancel => cancel())
+      state = { topic: idle, reply: idle }; publish()
+      if (currentTarget) void load(currentTarget)
+    },
     close() { closed = true; generation++; pending.forEach(cancel => cancel()); listeners.clear() },
   }
 }

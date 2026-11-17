@@ -18,7 +18,7 @@ it('Topic projections refresh same-Message Mention names independently of count 
   const initial = { ...summary('T', 8, 3), latest_message: message('Old name'), unread_count: 2, mention_unread_count: 1 }
   rememberIdentityResponse(initial)
   const c = topicClient()
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 10, has_more: false,
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, has_more: false,
     items: [{ kind: 'topic', topic: initial }, { kind: 'message', message: msg(10) }] }))
   try {
     await c.boot()
@@ -40,7 +40,7 @@ it('Topic projections refresh same-Message Mention names independently of count 
     // A later authorized response can have an older count snapshot.
     const refetched = { ...initial, latest_message: message('Refetched rename'), unread_count: 3, mention_unread_count: 2 }
     rememberIdentityResponse(refetched)
-    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 9, topics: [refetched], has_more: false }))
+    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 9, topics: [refetched], has_more: false }))
     await c.topics.loadList('A')
     expectPreview('Refetched rename')
 
@@ -57,7 +57,7 @@ it('bounds repeated stale successful summaries after arrivals checkpoint their e
   const c = topicClient()
   try {
     await c.boot()
-    c.topicsApi.getTopicSummary.mockResolvedValue(ok({ as_of_seq: 10, topic: summary('T', 10, 3) }))
+    c.topicsApi.getTopicSummary.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: summary('T', 10, 3) }))
     for (let seq = 11; seq <= 1010; seq++) c.event(seq, seq % 2 ? 'T' : 'U')
     await flush()
     expect(c.topics.get('A').topics.find(t => t.topicId === 'T')?.messageCount).toBeNull()
@@ -76,7 +76,7 @@ it('bounds repeated stale successful summaries after arrivals checkpoint their e
     expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(5)
     expect(vi.getTimerCount()).toBe(0)
 
-    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 1010, topics: [summary('T', 1009, 503)], has_more: false }))
+    c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1010, topics: [summary('T', 1009, 503)], has_more: false }))
     await c.topics.loadList('A')
     expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 503, summaryError: null })
     c.event(1011, 'T')
@@ -84,7 +84,7 @@ it('bounds repeated stale successful summaries after arrivals checkpoint their e
     expect(c.sync.get().channels.A.cursor).toBe(1011)
 
     // Restored authority releases the old budget; a later checkpoint starts at 500 ms again.
-    c.topicsApi.getTopicSummary.mockResolvedValue(ok({ as_of_seq: 1010, topic: summary('T', 1009, 503) }))
+    c.topicsApi.getTopicSummary.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1010, topic: summary('T', 1009, 503) }))
     for (let seq = 1012; seq <= 2010; seq++) c.event(seq, seq % 2 ? 'T' : 'U')
     await flush()
     expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(6)
@@ -103,8 +103,8 @@ it('handles a successful active-Topic summary evicted by 400 newer main Messages
     const before = c.topics.get('A').lines
     expect(before).toHaveLength(400)
     expect(before[0]).toMatchObject({ message: { created_seq: 601 } })
-    c.options.listTopicMessages = async () => ok({ messages: [msg(1, 'T')], has_more: false })
-    const getSummary = vi.fn(async () => ok({ as_of_seq: 1000, topic: summary('T', 1, 1) }))
+    c.options.listTopicMessages = async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(1, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(1, 'T')], has_more: false })
+    const getSummary = vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1000, topic: summary('T', 1, 1) }))
     c.options.getTopicSummary = getSummary
     await c.topics.loadTopic('A', 'T')
     await expect(c.topics.ensureSummary('A', 'T')).resolves.toBeUndefined()
@@ -131,7 +131,7 @@ it('handles a successful active-Topic summary evicted by 400 newer main Messages
 it('bootstraps from the first timeline W and pages by its boundary despite posting during paging', async () => {
   const c = topicClient()
   await c.boot()
-  expect(c.controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
+  expect(c.controls).toContainEqual({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel_id: 'A', after_seq: 10 })
   expect(c.listMessages).not.toHaveBeenCalled()
   expect(c.sync.get().channels.A.cursor).toBe(10)
   expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.created_seq : l.position)).toEqual([8, 10])
@@ -140,9 +140,9 @@ it('bootstraps from the first timeline W and pages by its boundary despite posti
   const loading = c.topics.loadMain('A')
   await flush()
   c.event(11, 'T'); c.event(12, 'U'); c.event(13, 'U')
-  older.resolve(ok({ as_of_seq: 10, has_more: false, items: [{ kind: 'topic', topic: summary('U', 7, 2) }] }))
+  older.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, has_more: false, items: [{ kind: 'topic', topic: summary('U', 7, 2) }] }))
   await loading
-  expect(c.topicsApi.listTimeline.mock.calls).toEqual([['A', {}], ['A', { as_of_seq: 10, before_position: 8 }]])
+  expect(c.topicsApi.listTimeline.mock.calls).toEqual([['A', {}], ['A', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, before_position: 8 }]])
   expect(c.topics.get('A').topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([['T', 11, 4], ['U', 13, 4]])
   expect(c.sync.get().channels.A.cursor).toBe(13)
   await c.sync.close()
@@ -156,9 +156,9 @@ it('uses zero for an empty initial timeline, independent of an ack received duri
   const watching = c.sync.watch('A')
   await c.sync.getTimeline('A').send('hello')
   expect(c.sync.get().channels.A.cursor).toBeNull()
-  first.resolve(ok({ as_of_seq: 0, items: [], has_more: false }))
+  first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, items: [], has_more: false }))
   await watching
-  expect(c.controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 0 })
+  expect(c.controls).toContainEqual({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel_id: 'A', after_seq: 0 })
   expect(c.sync.get().channels.A.cursor).toBe(0)
   await c.sync.close()
 })
@@ -171,8 +171,8 @@ it('UI retry after a bootstrap 503 requests a fresh initial timeline and subscri
   await c.topics.loadMain('A')
   expect(c.topicsApi.listTimeline.mock.calls).toEqual([['A', {}], ['A', {}]])
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 10, historyError: false })
-  expect(c.controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
+  expect(c.controls).toContainEqual({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel_id: 'A', after_seq: 10 })
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
   expect(c.sync.get().channels.A.state).toBe('ready')
   await c.sync.close()
 })
@@ -189,8 +189,8 @@ it('an in-flight UI loadMain coalesces with bootstrap and cannot strand the Chan
   first.resolve(ok(page()))
   await Promise.all([loading, refreshing])
   expect(c.sync.get().channels.A.cursor).toBe(10)
-  expect(c.controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
+  expect(c.controls).toContainEqual({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel_id: 'A', after_seq: 10 })
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
   expect(c.sync.get().channels.A.state).toBe('ready')
   await c.sync.close()
 })
@@ -201,8 +201,8 @@ it('bootstrap resets a populated main window and fences its in-flight projection
   c.topicsApi.listTimeline.mockReturnValueOnce(older.promise)
   const loading = c.topics.loadMain('A'); await flush()
   await c.topics.bootstrap('A')
-  expect(c.topicsApi.listTimeline.mock.calls[2]).toEqual(['A', {}])
-  older.resolve(ok({ as_of_seq: 10, items: [{ kind: 'message', message: msg(2) }], has_more: false }))
+  expect(c.topicsApi.listTimeline.mock.calls[2]).toEqual(['A', { history_generation: '00000000-0000-4000-8000-000000000515' }])
+  older.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, items: [{ kind: 'message', message: msg(2) }], has_more: false }))
   await loading
   expect(c.topics.get('A').main).toMatchObject({ before: 8, hasMore: true, loading: false })
   expect(c.topics.get('A').lines.some(l => l.kind === 'message' && l.message.created_seq === 2)).toBe(false)
@@ -234,10 +234,10 @@ it('Topic history settles only matching own sends without supplying cursor or co
   await c.sync.getTimeline('A').send('unknown')
   const pending = c.sync.get().channels.A.pending[0]!
   const own = { ...msg(12, 'T'), sender: 'me', client_message_id: pending.clientMessageId }
-  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [{ ...own, id: 'other-message', created_seq: 9, version: 9, sender: 'other' }], has_more: true }))
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...own, id: 'other-message', created_seq: 9, version: 9, sender: 'other' }]).at(-1)?.created_seq ?? 0,  messages: [{ ...own, id: 'other-message', created_seq: 9, version: 9, sender: 'other' }], has_more: true }))
   await c.topics.loadTopic('A', 'T')
   expect(c.sync.get().channels.A.pending).toEqual([pending])
-  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [own], has_more: false }))
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([own]).at(-1)?.created_seq ?? 0,  messages: [own], has_more: false }))
   await c.topics.loadTopic('A', 'T')
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 10, pending: [], advancing: [] })
   expect(c.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([10])
@@ -260,9 +260,9 @@ it('post-clamp initial history settles an invalidated send below W without reviv
   c.topicsApi.listTimeline.mockReturnValueOnce(initial.promise)
   c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(500)
   c.handlers.at(-1)!.onReady()
-  c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 2 })
+  c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 2 })
   expect(c.sync.get().channels.A.pending[0]?.state).toBe('unknown')
-  initial.resolve(ok({ as_of_seq: 2, items: [{ kind: 'message', message: own }, { kind: 'message', message: msg(2) }], has_more: false }))
+  initial.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, items: [{ kind: 'message', message: own }, { kind: 'message', message: msg(2) }], has_more: false }))
   await flush()
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 2, pending: [], advancing: [] })
   expect(c.topics.get('A').lines.map(l => l.kind === 'message' && l.message.created_seq)).toEqual([1, 2])
@@ -274,7 +274,7 @@ it('post-clamp initial history settles an invalidated send below W without reviv
 it('keeps filtered records out of cursor evidence and fills a real gap only with unfiltered history', async () => {
   const c = topicClient()
   await c.boot()
-  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(12, 'T')], has_more: false }))
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(12, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(12, 'T')], has_more: false }))
   await c.topics.loadTopic('A', 'T')
   expect(c.sync.get().channels.A.cursor).toBe(10)
   expect(c.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([10])
@@ -282,7 +282,7 @@ it('keeps filtered records out of cursor evidence and fills a real gap only with
   expect(vi.getTimerCount()).toBe(0)
   c.event(13)
   await vi.advanceTimersByTimeAsync(100)
-  expect(c.listChannelEvents.mock.calls).toEqual([['A', { after_seq: 10 }]])
+  expect(c.listChannelEvents.mock.calls).toEqual([['A', { history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 10 }]])
   expect(c.sync.get().channels.A.cursor).toBe(13)
   expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([10, 12])
   await c.sync.close()
@@ -305,7 +305,7 @@ it('keeps a live-only Topic count unknown until its summary arrives', async () =
   const c = topicClient()
   await c.boot(); c.event(11, 'U'); c.event(12, 'U')
   expect(c.topics.get('A').topics.find(t => t.topicId === 'U')?.messageCount).toBeNull()
-  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 11, topic: summary('U', 11, 1) }))
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topic: summary('U', 11, 1) }))
   await c.topics.loadSummary('A', 'U')
   expect(c.topics.get('A').topics.find(t => t.topicId === 'U')).toMatchObject({ position: 12, messageCount: 2 })
   await c.sync.close()
@@ -315,14 +315,14 @@ it('pages Topic history and the Topic list by response boundaries while live act
   const c = topicClient()
   await c.boot()
   await c.topics.loadTopic('A', 'T'); c.event(11, 'T')
-  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(2, 'T')], has_more: false }))
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(2, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(2, 'T')], has_more: false }))
   await c.topics.loadTopic('A', 'T')
-  expect(c.topicsApi.listTopicMessages.mock.calls).toEqual([['A', 'T', {}], ['A', 'T', { before_seq: 5 }]])
+  expect(c.topicsApi.listTopicMessages.mock.calls).toEqual([['A', 'T', { history_generation: '00000000-0000-4000-8000-000000000515' }], ['A', 'T', {as_of_seq: 10, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 5 }]])
   expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([2, 5, 10, 11])
-  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('T', 10, 3)], has_more: true }))
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topics: [summary('T', 10, 3)], has_more: true }))
   await c.topics.loadList('A')
   await c.topics.loadList('A')
-  expect(c.topicsApi.listTopics.mock.calls[1]).toEqual(['A', { as_of_seq: 10, before_position: 10 }])
+  expect(c.topicsApi.listTopics.mock.calls[1]).toEqual(['A', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, before_position: 10 }])
   await c.sync.close()
 })
 
@@ -332,14 +332,14 @@ it('discards W, baselines and filtered windows on clamp and fences a late older 
   const older = deferred<Result<TimelinePage>>()
   c.topicsApi.listTimeline.mockReturnValueOnce(older.promise)
   const loading = c.topics.loadMain('A'); await flush()
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 2, items: [{ kind: 'message', message: msg(2) }], has_more: false }))
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, items: [{ kind: 'message', message: msg(2) }], has_more: false }))
   c.handlers[0].onClose(1006)
   await vi.advanceTimersByTimeAsync(500)
   c.handlers.at(-1)!.onReady()
-  c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 2 })
+  c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 2 })
   await flush()
   older.resolve(ok(page())); await loading
-  expect(c.topicsApi.listTimeline.mock.calls[2]).toEqual(['A', {}])
+  expect(c.topicsApi.listTimeline.mock.calls[2]).toEqual(['A', { history_generation: '00000000-0000-4000-8000-000000000515' }])
   expect(c.sync.get().channels.A.cursor).toBe(2)
   expect(c.topics.get('A').main.asOfSeq).toBe(2)
   expect(c.topics.get('A').topics).toEqual([])
@@ -358,7 +358,7 @@ it.each(['unwatch', 'subscription refusal', 'Organization loss', 'session replac
     if (reason === 'subscription refusal') c.handlers[0].onEvent({ type: 'error', channel_id: 'A', code: 'channel_not_found' })
     if (reason === 'Organization loss') await c.sync.unavailable()
     if (reason === 'session replacement') await c.sync.replaceSession('next')
-    older.resolve(ok({ as_of_seq: 10, items: [{ kind: 'topic', topic: summary('stale', 3, 1) }], has_more: false }))
+    older.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, items: [{ kind: 'topic', topic: summary('stale', 3, 1) }], has_more: false }))
     await loading
     expect(c.topics.get('A').topics.some(t => t.topicId === 'stale')).toBe(false)
     if (reason === 'subscription refusal' || reason === 'Organization loss') {
@@ -373,7 +373,7 @@ it.each(['unwatch', 'subscription refusal', 'Organization loss', 'session replac
 it('C9 and C10 keep loaded Topic projections while fencing in-flight reads', async () => {
   for (const trigger of ['sync.unavailable', 'ws_4003', 'channel_access_lost'] as const) {
     const c = topicClient()
-    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 3,
       items: [{ kind: 'message', message: msg(3) }],
       has_more: true,
@@ -381,9 +381,9 @@ it('C9 and C10 keep loaded Topic projections while fencing in-flight reads', asy
     await c.sync.start()
     c.handlers[0].onReady()
     await c.sync.watch('A')
-    c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 3 })
+    c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 3 })
 
-    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 3,
       items: [
         { kind: 'message', message: msg(1) },
@@ -392,7 +392,7 @@ it('C9 and C10 keep loaded Topic projections while fencing in-flight reads', asy
       has_more: false,
     }))
     await c.topics.loadMain('A')
-    c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(2, 'T')], has_more: false }))
+    c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(2, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(2, 'T')], has_more: false }))
     await c.topics.loadTopic('A', 'T')
 
     // Sync holds only the bootstrap Message at W=3; [1, 2] live in Topic projections.
@@ -414,7 +414,7 @@ it('C9 and C10 keep loaded Topic projections while fencing in-flight reads', asy
     expect(c.topics.get('A').lines.map(l => (l.kind === 'message' ? l.message.created_seq : l.position))).toEqual([1, 2, 3])
     expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([2])
 
-    inFlightList.resolve(ok({ as_of_seq: 3, topics: [summary('stale', 1, 1)], has_more: false }))
+    inFlightList.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topics: [summary('stale', 1, 1)], has_more: false }))
     await loadingList
     expect(c.topics.get('A').topics.map(t => t.topicId)).toEqual(['T'])
     expect(c.topics.get('A').list.loading).toBe(false)
@@ -445,9 +445,9 @@ it('current projection 403 and 404 refuse Channel sends and retries while other 
   for (const status of [403, 404]) {
     const c = topicClient()
     await c.boot()
-    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 0, items: [], has_more: false }))
+    c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, items: [], has_more: false }))
     await c.sync.watch('B')
-    c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'B', caught_up_seq: 0 })
+    c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'B', caught_up_seq: 0 })
     const other = c.sync.get().channels.B
     c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
     await c.sync.getTimeline('A').send('unknown')
@@ -521,12 +521,12 @@ it('organization_unavailable bypasses C9 even before the C10 handler runs', asyn
 it('list and summary baselines stay outside main lines until main paging or stream loads the Topic', async () => {
   const c = topicClient()
   await c.boot()
-  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('U', 3, 1)], has_more: false }))
-  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 10, topic: summary('V', 5, 2) }))
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topics: [summary('U', 3, 1)], has_more: false }))
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: summary('V', 5, 2) }))
   await c.topics.loadList('A'); await c.topics.loadSummary('A', 'V')
   expect(c.topics.get('A').topics.map(t => t.topicId)).toEqual(['U', 'V', 'T'])
   expect(c.topics.get('A').lines.filter(l => l.kind === 'topic').map(t => t.topicId)).toEqual(['T'])
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 10, items: [{ kind: 'topic', topic: summary('U', 3, 1) }], has_more: false }))
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, items: [{ kind: 'topic', topic: summary('U', 3, 1) }], has_more: false }))
   await c.topics.loadMain('A')
   expect(c.topics.get('A').lines.filter(l => l.kind === 'topic').map(t => t.topicId)).toEqual(['U', 'T'])
   c.event(11, 'V')
@@ -576,24 +576,24 @@ function deferRead(c: ReturnType<typeof topicClient>, kind: ReadKind) {
     case 'main': {
       const first = deferred<Result<TimelinePage>>()
       c.topicsApi.listTimeline.mockReturnValueOnce(first.promise)
-      return { fail: first.resolve, succeed: () => first.resolve(ok({ as_of_seq: 20,
+      return { fail: first.resolve, succeed: () => first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20,
         items: [{ kind: 'message', message: msg(2) }], has_more: false })) }
     }
     case 'list': {
       const first = deferred<Awaited<ReturnType<typeof c.topicsApi.listTopics>>>()
       c.topicsApi.listTopics.mockReturnValueOnce(first.promise)
-      return { fail: first.resolve, succeed: () => first.resolve(ok({ as_of_seq: 20,
+      return { fail: first.resolve, succeed: () => first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20,
         topics: [summary('stale', 2, 1)], has_more: true })) }
     }
     case 'summary': {
       const first = deferred<Result<TopicSummaryResponse>>()
       c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise)
-      return { fail: first.resolve, succeed: () => first.resolve(ok({ as_of_seq: 20, topic: summary('T', 20, 99) })) }
+      return { fail: first.resolve, succeed: () => first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, topic: summary('T', 20, 99) })) }
     }
     case 'topic': {
       const first = deferred<Awaited<ReturnType<typeof c.topicsApi.listTopicMessages>>>()
       c.topicsApi.listTopicMessages.mockReturnValueOnce(first.promise)
-      return { fail: first.resolve, succeed: () => first.resolve(ok({ messages: [msg(2, 'T')], has_more: false })) }
+      return { fail: first.resolve, succeed: () => first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(2, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(2, 'T')], has_more: false })) }
     }
   }
 }
@@ -614,9 +614,9 @@ it.each(readKinds)('timed-out %s read cannot overwrite its completed retry', asy
   expect(settled).not.toHaveBeenCalled()
   if (kind === 'main' || kind === 'list' || kind === 'topic') {
     await retryRead(c, kind)
-    if (kind === 'main') expect(c.topicsApi.listTimeline.mock.calls.at(-1)).toEqual(['A', { as_of_seq: 10, before_position: 8 }])
+    if (kind === 'main') expect(c.topicsApi.listTimeline.mock.calls.at(-1)).toEqual(['A', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, before_position: 8 }])
     if (kind === 'list') expect(c.topicsApi.listTopics).toHaveBeenCalledTimes(2)
-    if (kind === 'topic') expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', { before_seq: 5 }])
+    if (kind === 'topic') expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', {as_of_seq: 10, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 5 }])
   }
   await c.sync.close()
 })
@@ -706,7 +706,7 @@ it('posting during an older timeline request merges ack, page and echo once with
   expect(await c.sync.getTimeline('A').send('during paging')).toBe(true)
   const confirmed = c.sync.get().channels.A.messages.find(m => m.created_seq === 11)!
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 10, pending: [] })
-  older.resolve(ok({ as_of_seq: 10, items: [{ kind: 'message', message: msg(4) }], has_more: false }))
+  older.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, items: [{ kind: 'message', message: msg(4) }], has_more: false }))
   await loading
   expect(c.sync.get().channels.A.cursor).toBe(10)
   c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (confirmed).created_seq, message: confirmed })
@@ -748,7 +748,7 @@ it('session replacement and close clear Topic projections before sync notifies s
   c.handlers.at(-1)!.onReady()
   await c.sync.watch('A')
   lateAuth.resolve({ ok: false, kind: 'http', status: 401 })
-  lateList.resolve(ok({ as_of_seq: 10, topics: [summary('stale', 2, 1)], has_more: false }))
+  lateList.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topics: [summary('stale', 2, 1)], has_more: false }))
   await Promise.all([loadingSummary, loadingList])
   expect(c.onSessionEnded).not.toHaveBeenCalled()
   expect(c.topics.get('A').topics.some(t => t.topicId === 'stale')).toBe(false)
@@ -791,7 +791,7 @@ it('reconciles Topic snapshots across sync listener ordering and coalesces own-s
   await c.sync.getTimeline('A').send('unknown own')
   const pending = c.sync.get().channels.A.pending[0]!
   const own = { ...msg(4), sender: 'me', client_message_id: pending.clientMessageId }
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 10, items: [{ kind: 'message', message: own }], has_more: true }))
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, items: [{ kind: 'message', message: own }], has_more: true }))
   let topicNotifications = 0
   const unsub = c.topics.subscribe(() => {
     topicNotifications++
@@ -824,7 +824,7 @@ it('ensureSummary deduplicates concurrent callers, retries retryable failures wi
   const first = deferred<Result<TopicSummaryResponse>>()
   c.topicsApi.getTopicSummary
     .mockReturnValueOnce(first.promise)
-    .mockResolvedValueOnce({ ok: true, data: { as_of_seq: 11, topic: { ...summary('U', 11, 2), name: 'Recovered' } } })
+    .mockResolvedValueOnce({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topic: { ...summary('U', 11, 2), name: 'Recovered' } } })
 
   // Concurrent ensureSummary calls from Timeline + TopicList deduplicate into one HTTP request
   const p1 = c.topics.ensureSummary('A', 'U')
@@ -908,7 +908,7 @@ it('ensureSummary bounds automatic retries on persistent 503 and network failure
     // Explicit user retry clears terminal error and restarts bounded retry -> succeeds on the retry backoff
     c.topicsApi.getTopicSummary
       .mockImplementationOnce(async () => makeFailure())
-      .mockImplementationOnce(async () => ok({ as_of_seq: 11, topic: { ...summary('U', 11, 2), name: 'Recovered U' } }))
+      .mockImplementationOnce(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topic: { ...summary('U', 11, 2), name: 'Recovered U' } }))
     await c.topics.retrySummary('A', 'U')
     expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(callsAtTerminal + 1)
     await vi.advanceTimersByTimeAsync(500)
@@ -932,10 +932,10 @@ it('ensureSummary bounds automatic retries on persistent 503 and network failure
     c.handlers[0].onEvent({ type: 'channel_access_lost', channel_id: 'A' })
     await flush()
     c.topicsApi.getTopicSummary.mockImplementationOnce(async () =>
-      ok({ as_of_seq: 12, topic: { ...summary('V', 12, 1), name: 'Recovered V' } }),
+      ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, topic: { ...summary('V', 12, 1), name: 'Recovered V' } }),
     )
     await c.sync.watch('A')
-    c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 12 })
+    c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 12 })
     await flush()
     expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(beforeRecoveryCalls + 1)
     expect(c.topics.get('A').topics.find(t => t.topicId === 'V')).toMatchObject({
@@ -977,7 +977,7 @@ it('ensureSummary makes no further automatic requests after non-retryable 400 an
 
     // Explicit retry restarts and resolves the summary baseline
     c.topicsApi.getTopicSummary.mockResolvedValueOnce(
-      ok({ as_of_seq: 11, topic: { ...summary('U', 11, 1), name: 'Explicit Retry' } }),
+      ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topic: { ...summary('U', 11, 1), name: 'Explicit Retry' } }),
     )
     await c.topics.retrySummary('A', 'U')
     expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
@@ -1007,20 +1007,20 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
       can_leave: { allowed: false },
     },
   }
-  const listMessages = vi.fn(async (): Promise<Result<MessagePage>> => ok({ messages: [], has_more: false }))
+  const listMessages = vi.fn(async (): Promise<Result<MessagePage>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }))
   const sendMessage = vi.fn(async () => ok(msg(99)))
   const topicsApi = {
     listTimeline: vi.fn(async () => ok(page(10))),
-    listTopics: vi.fn(async (): Promise<Result<TopicPage>> => ok({ as_of_seq: 10, has_more: false, topics: [] })),
-    getTopicSummary: vi.fn(async (): Promise<Result<TopicSummaryResponse>> => ok({ as_of_seq: 10, topic: summary('T', 10, 3) })),
-    listTopicMessages: vi.fn(async (): Promise<Result<MessagePage>> => ok({ messages: [], has_more: false })),
+    listTopics: vi.fn(async (): Promise<Result<TopicPage>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, has_more: false, topics: [] })),
+    getTopicSummary: vi.fn(async (): Promise<Result<TopicSummaryResponse>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: summary('T', 10, 3) })),
+    listTopicMessages: vi.fn(async (): Promise<Result<MessagePage>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false })),
   }
   const session = createSession({
     selfId: 'me',
     organizationId: 'org-1',
     onEnded: vi.fn(),
     channelsApi: {
-      listChannels: vi.fn(async () => ok({ channels: [channelA] })),
+      listChannels: vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channelA] })),
       createChannel: vi.fn(async () => ok(channelA)),
     },
     topicsApi,
@@ -1035,33 +1035,33 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
 
   handlers[0]!.onReady()
   await flush()
-  expect(controls).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
-  handlers[0]!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
+  expect(controls).toContainEqual({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel_id: 'A', after_seq: 10 })
+  handlers[0]!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
   await flush()
 
   // 1. Fully load Topic T history (2 pages -> has_more: false) and partially load Topic U (1 page -> has_more: true)
   topicsApi.listTopicMessages
-    .mockResolvedValueOnce(ok({ messages: [msg(5, 'T'), msg(10, 'T')], has_more: true }))
-    .mockResolvedValueOnce(ok({ messages: [msg(2, 'T')], has_more: false }))
-    .mockResolvedValueOnce(ok({ messages: [msg(7, 'U')], has_more: true }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(5, 'T'), msg(10, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(5, 'T'), msg(10, 'T')], has_more: true }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(2, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(2, 'T')], has_more: false }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(7, 'U')]).at(-1)?.created_seq ?? 0,  messages: [msg(7, 'U')], has_more: true }))
   await session.topics.loadTopic('A', 'T')
   await session.topics.loadTopic('A', 'T')
   await session.topics.loadTopic('A', 'U')
   expect(topicsApi.listTopicMessages.mock.calls).toEqual([
-    ['A', 'T', {}],
-    ['A', 'T', { before_seq: 5 }],
-    ['A', 'U', {}],
+    ['A', 'T', { history_generation: '00000000-0000-4000-8000-000000000515' }],
+    ['A', 'T', {as_of_seq: 10, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 5 }],
+    ['A', 'U', { history_generation: '00000000-0000-4000-8000-000000000515' }],
   ])
 
   // 2. Fully load the Topic list (2 pages -> has_more: false)
   topicsApi.listTopics
-    .mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('U', 7, 2), summary('T', 10, 3)], has_more: true }))
-    .mockResolvedValueOnce(ok({ as_of_seq: 10, topics: [summary('V', 3, 1)], has_more: false }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topics: [summary('U', 7, 2), summary('T', 10, 3)], has_more: true }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topics: [summary('V', 3, 1)], has_more: false }))
   await session.topics.loadList('A')
   await session.topics.loadList('A')
   expect(topicsApi.listTopics.mock.calls).toEqual([
-    ['A', {}],
-    ['A', { as_of_seq: 10, before_position: 7 }],
+    ['A', { history_generation: '00000000-0000-4000-8000-000000000515' }],
+    ['A', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, before_position: 7 }],
   ])
 
   const beforeLoss = session.topics.get('A')
@@ -1101,7 +1101,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
 
   session.channels.select('A')
   await flush()
-  expect(controls).toEqual([{ type: 'subscribe', channel_id: 'A', after_seq: 10 }])
+  expect(controls).toEqual([{ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel_id: 'A', after_seq: 10 }])
   expect(topicsApi.listTimeline).not.toHaveBeenCalled()
   expect(topicsApi.listTopics).not.toHaveBeenCalled()
   expect(topicsApi.listTopicMessages).not.toHaveBeenCalled()
@@ -1123,7 +1123,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   handlers[0]!.onEvent({ type: 'message', kind: 'create', seq: (msg(11, 'T')).created_seq, message: msg(11, 'T') })
   handlers[0]!.onEvent({ type: 'message', kind: 'create', seq: (msg(12, 'V')).created_seq, message: msg(12, 'V') })
   handlers[0]!.onEvent({ type: 'message', kind: 'create', seq: (msg(13, null)).created_seq, message: msg(13, null) })
-  handlers[0]!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 13 })
+  handlers[0]!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 13 })
   await flush()
 
   expect(session.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 13 })
@@ -1150,14 +1150,14 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   expect(topicsApi.listTopicMessages).not.toHaveBeenCalled()
   expect(topicsApi.listTopics).not.toHaveBeenCalled()
 
-  topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(1, 'U')], has_more: false }))
+  topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(1, 'U')]).at(-1)?.created_seq ?? 0,  messages: [msg(1, 'U')], has_more: false }))
   await session.topics.loadTopic('A', 'U')
-  expect(topicsApi.listTopicMessages.mock.calls).toEqual([['A', 'U', { before_seq: 7 }]])
+  expect(topicsApi.listTopicMessages.mock.calls).toEqual([['A', 'U', {as_of_seq: 7, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 7 }]])
   expect(session.topics.get('A').topic('U').messages.map(m => m.created_seq)).toEqual([1, 7])
   expect(session.topics.get('A').topic('U').hasMore).toBe(false)
 
   topicsApi.listTimeline.mockResolvedValueOnce(
-    ok({
+    ok({ history_generation: '00000000-0000-4000-8000-000000000515',
       as_of_seq: 10,
       items: [
         { kind: 'topic', topic: summary('V', 3, 1) },
@@ -1168,7 +1168,7 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
     }),
   )
   expect(await session.topics.loadMain('A')).toBe(true)
-  expect(topicsApi.listTimeline.mock.calls).toEqual([['A', { as_of_seq: 10, before_position: 8 }]])
+  expect(topicsApi.listTimeline.mock.calls).toEqual([['A', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, before_position: 8 }]])
   expect(
     session.topics.get('A').lines.map(l =>
       l.kind === 'message' ? { created_seq: l.message.created_seq } : { topic: l.topicId, position: l.position, count: l.messageCount },
@@ -1195,16 +1195,16 @@ it.each(['list', 'history'] as const)('fences a late Topic %s page when reconnec
   else c.topicsApi.listTopicMessages.mockReturnValueOnce(lateHistory.promise)
   const loading = kind === 'list' ? c.topics.loadList('A') : c.topics.loadTopic('A', 'T')
   await flush()
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 2, items: [{ kind: 'topic', topic: summary('T', 2, 1) }], has_more: false }))
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, items: [{ kind: 'topic', topic: summary('T', 2, 1) }], has_more: false }))
   c.handlers[0].onClose(1006)
   await vi.advanceTimersByTimeAsync(500)
   c.handlers.at(-1)!.onReady()
-  c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 2 })
+  c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 2 })
   await flush()
-  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ messages: [msg(2, 'T')], has_more: false }))
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(2, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(2, 'T')], has_more: false }))
   await c.topics.loadTopic('A', 'T')
-  lateList.resolve(ok({ as_of_seq: 10, topics: [summary('stale', 9, 9)], has_more: false }))
-  lateHistory.resolve(ok({ messages: [msg(1, 'T'), msg(5, 'T')], has_more: false }))
+  lateList.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topics: [summary('stale', 9, 9)], has_more: false }))
+  lateHistory.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(1, 'T'), msg(5, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(1, 'T'), msg(5, 'T')], has_more: false }))
   await loading
   expect(c.sync.get().channels.A.cursor).toBe(2)
   expect(c.topics.get('A').topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual([['T', 2, 1]])
@@ -1220,10 +1220,10 @@ it('keeps the open Topic cursor and window on reconnect catch-up without clamp',
   c.handlers[0].onClose(1006)
   await vi.advanceTimersByTimeAsync(500)
   c.handlers.at(-1)!.onReady()
-  expect(c.controls.at(-1)).toEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10 })
+  expect(c.controls.at(-1)).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel_id: 'A', after_seq: 10 })
   expect(c.sync.get().channels.A.cursor).toBe(10)
   c.event(11, 'T'); c.event(11, 'T'); c.event(12)
-  c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 12 })
+  c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 12 })
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 12, state: 'ready' })
   expect(c.topics.get('A').generation).toBe(generation)
   expect(c.topics.get('A').topic('T')).toMatchObject({ before: 5, initialized: true, hasMore: true })
@@ -1244,11 +1244,11 @@ it.each(['list', 'history'] as const)('merges live and own Messages once during 
   const loading = kind === 'list' ? c.topics.loadList('A') : c.topics.loadTopic('A', 'T')
   await flush()
   if (kind === 'list') {
-    expect(c.topicsApi.listTopics.mock.calls).toEqual([['A', {}]])
+    expect(c.topicsApi.listTopics.mock.calls).toEqual([['A', { history_generation: '00000000-0000-4000-8000-000000000515' }]])
     expect(c.topics.get('A').list.loading).toBe(true)
     expect(c.topics.get('A').topics.map(t => t.topicId)).toEqual(['T'])
   } else {
-    expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', { before_seq: 5 }])
+    expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', {as_of_seq: 10, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 5 }])
     expect(c.topics.get('A').topic('T').loading).toBe(true)
   }
   c.event(11, 'T')
@@ -1261,15 +1261,15 @@ it.each(['list', 'history'] as const)('merges live and own Messages once during 
   const own = result.data
   c.handlers.at(-1)!.onEvent({ type: 'message', kind: 'create', seq: (own).created_seq, message: own })
   c.event(11, 'T')
-  list.resolve(ok({ as_of_seq: 11, topics: [summary('U', 3, 1), summary('T', 11, 4)], has_more: true }))
-  history.resolve(ok({ messages: [msg(2, 'T')], has_more: false }))
+  list.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topics: [summary('U', 3, 1), summary('T', 11, 4)], has_more: true }))
+  history.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(2, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(2, 'T')], has_more: false }))
   await loading
   expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual(kind === 'list' ? [5, 10, 11, 12] : [2, 5, 10, 11, 12])
   expect(c.topics.get('A').topics.map(t => [t.topicId, t.position, t.messageCount])).toEqual(kind === 'list' ? [['U', 3, 1], ['T', 12, 5]] : [['T', 12, 5]])
   if (kind === 'list') expect(c.topics.get('A').list.loading).toBe(false)
   expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.created_seq : l.position)).toEqual([8, 12])
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 12, pending: [] })
-  if (kind === 'history') expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', { before_seq: 5 }])
+  if (kind === 'history') expect(c.topicsApi.listTopicMessages.mock.calls.at(-1)).toEqual(['A', 'T', {as_of_seq: 10, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 5 }])
   await c.sync.close()
 })
 
@@ -1288,10 +1288,10 @@ it('creates a Topic via topic_name from the Topic composer during main paging ex
   if (!result.ok) throw new Error('expected canonical ACK')
   const own = result.data
   c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (own).created_seq, message: own })
-  older.resolve(ok({ as_of_seq: 10, items: [{ kind: 'topic', topic: summary('U', 3, 1) }], has_more: false }))
+  older.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, items: [{ kind: 'topic', topic: summary('U', 3, 1) }], has_more: false }))
   await loading
   c.handlers[0].onEvent({ type: 'message', kind: 'create', seq: (own).created_seq, message: own })
-  expect(c.topicsApi.listTimeline.mock.calls[1]).toEqual(['A', { as_of_seq: 10, before_position: 8 }])
+  expect(c.topicsApi.listTimeline.mock.calls[1]).toEqual(['A', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, before_position: 8 }])
   expect(c.topics.get('A').lines.map(l => l.kind === 'message' ? l.message.created_seq : [l.topicId, l.position])).toEqual([['U', 3], 8, ['T', 10], ['new', 11]])
   expect(c.topics.get('A').topic('new').messages).toEqual([own])
   expect(c.sync.get().channels.A.pending).toEqual([])
@@ -1303,25 +1303,25 @@ it('recovers C9 Topic state by selecting a different Channel and back', async ()
   const c = topicClient()
   const channel = (id: string): Channel => ({ id, kind: 'channel', name: id, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true } } })
   const session = createSession({ selfId: 'me', onEnded: vi.fn(), topicsApi: c.topicsApi,
-    channelsApi: { listChannels: async () => ok({ channels: [channel('A'), channel('B')] }), createChannel: async () => ok(channel('B')) },
+    channelsApi: { listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('B')] }), createChannel: async () => ok(channel('B')) },
     sync: { api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: c.listMessages, sendMessage: c.sendMessage },
       connect(h) { c.handlers.push(h); return { send: m => { c.controls.push(m) }, close: vi.fn() } } },
   })
   c.handlers[0].onReady(); await flush()
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
   await session.topics.loadTopic('A', 'T')
   const composer = session.sync.getTimeline('A').topic('T')
   composer.setDraft('kept draft')
   c.handlers[0].onEvent({ type: 'channel_access_lost', channel_id: 'A' })
   expect(session.topics.get('A').unavailable).toBe(true)
   expect(await composer.submit('Topic T')).toBe(false)
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 0, items: [], has_more: false }))
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, items: [], has_more: false }))
   session.channels.select('B'); await flush()
   expect(session.sync.get().channels.B?.cursor).toBe(0)
   expect(session.topics.get('A').unavailable).toBe(true)
   session.channels.select('A'); await flush()
   await session.topics.loadMain('A')
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
   await session.topics.loadTopic('A', 'T')
   expect(session.sync.get().channels.A).toMatchObject({ state: 'ready', cursor: 10 })
   expect(session.topics.get('A').unavailable).toBe(false)

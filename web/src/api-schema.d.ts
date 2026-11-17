@@ -720,9 +720,13 @@ export interface components {
         ChannelEventPage: {
             events: components["schemas"]["ServerEvent"][];
             has_more: boolean;
+            /** Format: uuid */
+            history_generation: string;
         };
         ChannelList: {
             channels: components["schemas"]["UnreadChannel"][];
+            /** Format: uuid */
+            history_generation: string;
         };
         ChannelListChanged: {
             /**
@@ -779,6 +783,8 @@ export interface components {
             as_of_seq: number;
             capabilities: components["schemas"]["ChannelCapabilities"];
             /** Format: uuid */
+            history_generation: string;
+            /** Format: uuid */
             id: string;
             kind: components["schemas"]["DmKind"];
             /** Format: int64 */
@@ -806,6 +812,8 @@ export interface components {
         DmKind: "dm";
         DmList: {
             dms: components["schemas"]["Dm"][];
+            /** Format: uuid */
+            history_generation: string;
             next_cursor: string | null;
         };
         /** @description Own-Member DM list invalidation. */
@@ -860,11 +868,15 @@ export interface components {
              * @description Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
              */
             after_seq?: number | null;
+            /** Format: int64 */
+            as_of_seq?: number | null;
             /**
              * Format: int64
              * @description Return created_seq < before_seq. Cannot combine with after_seq.
              */
             before_seq?: number | null;
+            /** Format: uuid */
+            history_generation?: string | null;
             /**
              * Format: int32
              * @description Page size, default 50, maximum 200.
@@ -883,10 +895,14 @@ export interface components {
              * @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.
              */
             before_position?: number | null;
+            /** Format: uuid */
+            history_generation?: string | null;
             /** Format: int32 */
             limit?: number | null;
         };
         MarkReadRequest: {
+            /** Format: uuid */
+            history_generation?: string | null;
             /**
              * Format: int64
              * @description Monotonic max, clamped to the latest committed Channel seq. Sending never marks read.
@@ -930,6 +946,8 @@ export interface components {
             created_seq: number;
             deleted: boolean;
             /** Format: uuid */
+            history_generation: string;
+            /** Format: uuid */
             id: string;
             /** @description Persisted accepted ids, sorted by UUID, with current retained display names. */
             mentions?: components["schemas"]["Mention"][];
@@ -970,11 +988,18 @@ export interface components {
         };
         MessagePage: {
             /**
+             * Format: int64
+             * @description Trusted committed event watermark; usable as the initial bootstrap cursor.
+             */
+            as_of_seq: number;
+            /**
              * @description More messages exist in the queried direction (older for latest/before_seq,
              *     newer for after_seq). Continue after_seq with the last created_seq or before_seq
              *     with the first created_seq; continue the latest page toward older messages with before_seq.
              */
             has_more: boolean;
+            /** Format: uuid */
+            history_generation: string;
             /** @description Always ascending created_seq (newest last), including latest and before_seq pages. */
             messages: components["schemas"]["Message"][];
         };
@@ -1017,6 +1042,8 @@ export interface components {
             role: components["schemas"]["Role"];
         };
         ReadPosition: {
+            /** Format: uuid */
+            history_generation: string;
             /** Format: int64 */
             read_seq: number;
         };
@@ -1034,8 +1061,12 @@ export interface components {
             type: "read_position_changed";
         };
         ReplyChainPage: {
+            /** Format: int64 */
+            as_of_seq: number;
             /** @description More matching Messages follow; continue after the last returned seq. */
             has_more: boolean;
+            /** Format: uuid */
+            history_generation: string;
             /** @description Root and all descendants, ascending by seq. Projection only: never moves the sync cursor. */
             messages: components["schemas"]["Message"][];
             /** Format: uuid */
@@ -1047,6 +1078,10 @@ export interface components {
              * @description Exclusive forward continuation; omitted/0 starts with the root.
              */
             after_seq?: number | null;
+            /** Format: int64 */
+            as_of_seq?: number | null;
+            /** Format: uuid */
+            history_generation?: string | null;
             /** Format: int32 */
             limit?: number | null;
         };
@@ -1073,8 +1108,12 @@ export interface components {
              *     Unknown and foreign ids are omitted without distinction.
              */
             counts: components["schemas"]["ReplyCount"][];
+            /** Format: uuid */
+            history_generation: string;
         };
         ReplyCountRequest: {
+            /** Format: uuid */
+            history_generation?: string | null;
             /** @description Root or descendant ids. Limit applies before duplicate ids are merged. */
             ids: string[];
         };
@@ -1094,6 +1133,8 @@ export interface components {
             body: string;
             /** Format: uuid */
             client_message_id: string;
+            /** Format: uuid */
+            history_generation?: string | null;
             /**
              * Format: uuid
              * @description Confirmed parent in this Organization/Channel. Omitted/null is a non-Reply.
@@ -1144,6 +1185,8 @@ export interface components {
             after_seq: number;
             /** Format: uuid */
             channel_id: string;
+            /** Format: uuid */
+            history_generation?: string | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -1159,6 +1202,8 @@ export interface components {
             caught_up_seq: number;
             /** Format: uuid */
             channel_id: string;
+            /** Format: uuid */
+            history_generation: string;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -1178,6 +1223,8 @@ export interface components {
             /** Format: int64 */
             as_of_seq: number;
             has_more: boolean;
+            /** Format: uuid */
+            history_generation: string;
             /** @description Ascending W-relative positions, newest last. Continue older with the first position. */
             items: components["schemas"]["TimelineItem"][];
         };
@@ -1193,6 +1240,8 @@ export interface components {
             /** Format: int64 */
             as_of_seq: number;
             has_more: boolean;
+            /** Format: uuid */
+            history_generation: string;
             topics: components["schemas"]["TopicSummary"][];
         };
         TopicSummary: {
@@ -1231,6 +1280,8 @@ export interface components {
         TopicSummaryResponse: {
             /** Format: int64 */
             as_of_seq: number;
+            /** Format: uuid */
+            history_generation: string;
             topic: components["schemas"]["TopicSummary"];
         };
         UnreadChannel: components["schemas"]["Channel"] & {
@@ -1239,6 +1290,8 @@ export interface components {
              * @description Latest committed Channel seq in the positions/counts snapshot; 0 if empty.
              */
             as_of_seq: number;
+            /** Format: uuid */
+            history_generation: string;
             /** Format: int64 */
             main_mention_unread_count: number;
             /**
@@ -1740,7 +1793,9 @@ export interface operations {
     };
     list_channels: {
         parameters: {
-            query?: never;
+            query?: {
+                history_generation?: string;
+            };
             header?: never;
             path: {
                 /** @description Organization id */
@@ -1779,6 +1834,15 @@ export interface operations {
             };
             /** @description Non-Member, unknown Organization or deactivated Member: organization_unavailable */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description history_generation_changed for a stale Organization epoch */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1925,6 +1989,7 @@ export interface operations {
     list_channel_events: {
         parameters: {
             query: {
+                history_generation?: string;
                 /** @description Exclusive event position; 0 starts at the beginning. */
                 after_seq: number;
                 /** @description Page size, default 50, maximum 200. */
@@ -1968,6 +2033,15 @@ export interface operations {
             };
             /** @description organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description history_generation_changed for a stale Organization epoch */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2375,6 +2449,8 @@ export interface operations {
     list_messages: {
         parameters: {
             query?: {
+                history_generation?: string;
+                as_of_seq?: number;
                 /** @description Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq. */
                 after_seq?: number;
                 /** @description Return created_seq < before_seq. Cannot combine with after_seq. */
@@ -2429,6 +2505,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Database failure while resolving the session, checking Channel visibility, or listing Messages */
             500: {
                 headers: {
@@ -2438,7 +2523,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            /** @description Committed watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */
@@ -2507,7 +2592,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed */
+            /** @description history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2572,6 +2657,8 @@ export interface operations {
     reply_chain: {
         parameters: {
             query?: {
+                history_generation?: string;
+                as_of_seq?: number;
                 /** @description Exclusive forward continuation; omitted/0 starts with the root. */
                 after_seq?: number;
                 limit?: number;
@@ -2618,6 +2705,15 @@ export interface operations {
             };
             /** @description organization_unavailable or channel not found for authorization; reply_chain_not_found for unknown or foreign Organization/Channel anchor */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2694,6 +2790,15 @@ export interface operations {
             };
             /** @description organization_unavailable or channel not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description history_generation_changed for a stale Organization epoch */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2797,6 +2902,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Request too large */
             413: {
                 headers: {
@@ -2842,6 +2956,7 @@ export interface operations {
     list_timeline: {
         parameters: {
             query?: {
+                history_generation?: string;
                 /** @description Omit on the initial page to choose W under the commit barrier; future W is invalid. */
                 as_of_seq?: number;
                 /** @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position. */
@@ -2893,6 +3008,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Database failure or commit barrier timeout reading the projection */
             500: {
                 headers: {
@@ -2920,6 +3044,7 @@ export interface operations {
     list_topics: {
         parameters: {
             query?: {
+                history_generation?: string;
                 /** @description Omit on the initial page to choose W under the commit barrier; future W is invalid. */
                 as_of_seq?: number;
                 /** @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position. */
@@ -2971,6 +3096,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Database failure or barrier timeout listing Topics */
             500: {
                 headers: {
@@ -2997,7 +3131,9 @@ export interface operations {
     };
     topic_summary: {
         parameters: {
-            query?: never;
+            query?: {
+                history_generation?: string;
+            };
             header?: never;
             path: {
                 org: string;
@@ -3044,6 +3180,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Database failure or barrier timeout reading the Topic summary */
             500: {
                 headers: {
@@ -3071,6 +3216,8 @@ export interface operations {
     topic_history: {
         parameters: {
             query?: {
+                history_generation?: string;
+                as_of_seq?: number;
                 /** @description Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq. */
                 after_seq?: number;
                 /** @description Return created_seq < before_seq. Cannot combine with after_seq. */
@@ -3117,6 +3264,15 @@ export interface operations {
             };
             /** @description organization_unavailable, channel not found or topic_not_found; foreign and unknown Topics are identical */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3201,6 +3357,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description history_generation_changed for a stale Organization epoch */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Request body exceeds size limit */
             413: {
                 headers: {
@@ -3246,6 +3411,8 @@ export interface operations {
     list_dms: {
         parameters: {
             query?: {
+                /** @description Organization history epoch */
+                history_generation?: string;
                 /** @description Creation-order continuation, exclusive */
                 cursor?: string;
                 /** @description Repeated distinct ids, 1..50; exclusive with cursor */
@@ -3288,6 +3455,15 @@ export interface operations {
             };
             /** @description organization_unavailable */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description history_generation_changed for a stale Organization epoch */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

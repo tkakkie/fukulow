@@ -11,6 +11,7 @@ pub struct Mention {
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Message {
+    pub history_generation: Uuid,
     pub id: Uuid,
     pub channel_id: Uuid,
     /// Immutable creation position in the Channel log.
@@ -48,6 +49,7 @@ pub struct Message {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
+    pub history_generation: Option<Uuid>,
     pub client_message_id: Uuid,
     /// 1..=4000 Unicode scalar values; no NUL or whitespace-only body. Stored without trimming.
     #[schema(min_length = 1, max_length = 4000)]
@@ -61,10 +63,19 @@ pub struct SendMessageRequest {
     pub reply_to: Option<Uuid>,
 }
 
+#[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
+pub struct HistoryQuery {
+    pub history_generation: Option<Uuid>,
+}
+
 /// Use after_seq XOR before_seq, or neither for the latest page. Cursors are exclusive.
 #[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct ListMessagesQuery {
+    pub history_generation: Option<Uuid>,
+    #[param(minimum = 0)]
+    pub as_of_seq: Option<i64>,
     /// Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.
     #[param(minimum = 0)]
     #[schema(minimum = 0)]
@@ -81,6 +92,10 @@ pub struct ListMessagesQuery {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct MessagePage {
+    pub history_generation: Uuid,
+    /// Trusted committed event watermark; usable as the initial bootstrap cursor.
+    #[schema(minimum = 0)]
+    pub as_of_seq: i64,
     /// Always ascending created_seq (newest last), including latest and before_seq pages.
     pub messages: Vec<Message>,
     /// More messages exist in the queried direction (older for latest/before_seq,
@@ -92,6 +107,7 @@ pub struct MessagePage {
 /// Bounded ascending Channel log page, with the same envelopes as WebSocket replay.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ChannelEventPage {
+    pub history_generation: Uuid,
     pub events: Vec<ServerEvent>,
     pub has_more: bool,
 }
@@ -99,6 +115,7 @@ pub struct ChannelEventPage {
 #[derive(Debug, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct ListChannelEventsQuery {
+    pub history_generation: Option<Uuid>,
     /// Exclusive event position; 0 starts at the beginning.
     #[param(minimum = 0)]
     pub after_seq: i64,
@@ -121,6 +138,8 @@ pub const CLOSE_RATE_LIMITED: u16 = 4029;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     Subscribe {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_generation: Option<Uuid>,
         channel_id: Uuid,
         /// Replay committed Channel events with seq > after_seq; 0 starts at the beginning.
         #[schema(minimum = 0)]
@@ -180,6 +199,7 @@ pub enum ServerEvent {
     },
     /// Sent after committed replay and queued live events have been handed off.
     Subscribed {
+        history_generation: Uuid,
         channel_id: Uuid,
         /// Last sequence caught up through; 0 when the channel has no messages.
         #[schema(minimum = 0)]

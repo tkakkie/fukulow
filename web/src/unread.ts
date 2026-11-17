@@ -15,10 +15,10 @@ export type UnreadApi = {
   markRead(scope: UnreadScope, body: MarkReadRequest): Promise<Result<ReadPosition>>
   getTopicSummary(channel: string, topic: string): Promise<Result<TopicSummaryResponse>>
 }
-export const unreadApi = (org: string): UnreadApi => ({
-  listChannels: signal => api.listChannels(org, undefined, signal),
+export const unreadApi = (org: string, generation: () => string | undefined = () => undefined): UnreadApi => ({
+  listChannels: signal => api.listChannels(org, undefined, signal, { history_generation: generation() }),
   markRead: (s, body) => s.topicId === null ? api.markChannelRead(org, s.channel, body) : api.markTopicRead(org, s.channel, s.topicId, body),
-  getTopicSummary: (c, t) => api.getTopicSummary(org, c, t),
+  getTopicSummary: (c, t) => api.getTopicSummary(org, c, t, undefined, undefined, { history_generation: generation() }),
 })
 // At most the union of sync, main and the active Topic bodies, plus one visit marker.
 export const UNREAD_RECORD_LIMIT = MAIN_MESSAGE_LIMIT * 2 + TOPIC_MESSAGE_LIMIT
@@ -164,10 +164,15 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
     })
     try {
+      const historyEpoch = sync.get().historyEpoch
       const result = await Promise.race([operation, new Promise<Result<T>>(resolve => {
         timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
         deadlines.set(timer, { channel, cancel: () => resolve({ ok: false, kind: 'network' }) })
       })])
+      if (historyEpoch !== sync.get().historyEpoch) return { ok: false, kind: 'network' }
+      const generation = result.ok && result.data && typeof result.data === 'object' && 'history_generation' in result.data ? result.data.history_generation : undefined
+      if (typeof generation === 'string' && !sync.observeHistoryGeneration(generation)) return { ok: false, kind: 'network' }
+      if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return { ok: false, kind: 'network' } }
       return result.ok && !completeCountFields(result.data) ? { ok: false, kind: 'network' } : result
     } finally { if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) } }
   }
@@ -304,7 +309,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (count(v.scope.channel, c, v.scope.topicId) === null) return
     const seq = sequenceToSubmit(s.position, c.records.values(), coverage(v.scope), v.presented, v.scope, sync.get().selfId)
     if (seq <= s.position || seq <= (s.intent?.read_seq ?? 0) || seq <= (s.queued?.read_seq ?? 0)) return
-    s.queued = { read_seq: seq }
+    s.queued = { history_generation: sync.get().historyGeneration, read_seq: seq }
     if (!s.intent) void submit(v, c, s)
   }
   async function submit(v: Visit, c: Channel, s: Scope) {
@@ -445,6 +450,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const next = sync.get(), before = previous
     previous = next
     if (!next.running || next.organization !== 'available') { if (before.running) reset(); return }
+    if (before.historyEpoch !== next.historyEpoch) reset()
     let rebootstrap = false
     const changed = new Set<string>()
     const selfChanged = before.selfId !== next.selfId
@@ -472,7 +478,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         fence(id, c); c.records.clear(); c.heldPositions.clear()
         channelChanged = true
       }
-      const resetHistory = old?.cursor != null && now?.cursor === null
+      const resetHistory = (old?.cursor != null && now?.cursor === null) || before.historyEpoch !== next.historyEpoch
       const selected = now?.watched && (!old?.watched || old.state === 'unavailable')
       if (resetHistory || selected) {
         const oldBaselines = options.topics?.get(id).topics.flatMap(t => t.baseline ? [t.baseline] : []) ?? []

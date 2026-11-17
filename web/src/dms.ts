@@ -115,6 +115,12 @@ export function createDms(options: {
     get: () => ({ ...state, busy, message: error || (state.error ? 'ダイレクトメッセージを確認できませんでした。通信状況を確認して、もう一度お試しください。' : '') }),
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     activityTarget,
+    resetHistory() {
+      if (closed) return
+      target.suspend(); mutationTarget.suspend()
+      active = undefined; mutation = undefined; busy = false; error = ''
+      dispatch({ type: 'history_reset' })
+    },
     ready() { dispatch({ type: 'resume' }); invalidate('reconcile') },
     trackSelection(id: string | null) { dispatch({ type: 'select', id }) },
     select(id: string) { dispatch({ type: 'select', id }); options.select(id) },

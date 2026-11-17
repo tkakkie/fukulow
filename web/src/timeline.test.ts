@@ -346,13 +346,13 @@ it('an admission refusal cannot restore a draft after the Account Session store 
 it('timeline delegates preserve pending across selection and settle history before retry', async () => {
   vi.useFakeTimers()
   const sendMessage = vi.fn().mockResolvedValue({ ok: false, kind: 'network' })
-  const listMessages = vi.fn().mockResolvedValue({ ok: true, data: { messages: [{ ...record(7), sender: 'me', client_message_id: 'c1' }], has_more: false } })
+  const listMessages = vi.fn().mockResolvedValue({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...record(7), sender: 'me', client_message_id: 'c1' }]).at(-1)?.created_seq ?? 0,  messages: [{ ...record(7), sender: 'me', client_message_id: 'c1' }], has_more: false } })
   const sync = createSync({ selfId: 'me', newId: () => 'c1', connect: () => ({ send() {}, close() {} }), api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages, sendMessage } })
   await sync.start()
   const a = sync.getTimeline('A')
   expect(await a.send('   ')).toBe(false)
   await a.send(' hi ')
-  expect(sendMessage).toHaveBeenCalledWith('A', { client_message_id: 'c1', body: ' hi ' })
+  expect(sendMessage).toHaveBeenCalledWith('A', {client_message_id: 'c1', body: ' hi ' })
   expect(a.get().pending).toEqual([{ clientMessageId: 'c1', body: ' hi ', status: 'failed', retryable: true }])
   sync.getTimeline('B')
   expect(sync.getTimeline('A')).toBe(a)
@@ -411,7 +411,7 @@ it('validates whitespace-only bodies with trim but sends surrounding whitespace 
   const untrimmed = '\u3000  hello\nworld  \t'
   t.setDraft(untrimmed)
   expect(await t.submit()).toBe(true)
-  expect(sendMessage).toHaveBeenCalledWith('A', { client_message_id: 'c1', body: untrimmed })
+  expect(sendMessage).toHaveBeenCalledWith('A', {client_message_id: 'c1', body: untrimmed })
   expect(t.composer.get().draft).toBe('')
   await sync.close()
 })
@@ -454,7 +454,7 @@ it('restores only non-retryable failed sends into the Composer draft for editing
 
   t.setDraft('edited text')
   expect(await t.submit()).toBe(true)
-  expect(sendMessage).toHaveBeenLastCalledWith('A', { client_message_id: 'c3', body: 'edited text' })
+  expect(sendMessage).toHaveBeenLastCalledWith('A', {client_message_id: 'c3', body: 'edited text' })
   await sync.close()
 })
 
@@ -504,7 +504,7 @@ it('restores a refused send together with its Topic intent and replaces any conf
 it('reports loadOlder failures in olderError and clears olderError on retry', async () => {
   let resolveRetry!: (r: Result<MessagePage>) => void
   const listMessages = vi.fn()
-    .mockResolvedValueOnce({ ok: true, data: { messages: [record(10)], has_more: true } })
+    .mockResolvedValueOnce({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(10)]).at(-1)?.created_seq ?? 0,  messages: [record(10)], has_more: true } })
     .mockResolvedValueOnce({ ok: false, kind: 'network' })
     .mockImplementationOnce(() => new Promise(r => { resolveRetry = r }))
   const sync = createSync({
@@ -522,7 +522,7 @@ it('reports loadOlder failures in olderError and clears olderError on retry', as
 
   const retry = t.loadOlder()
   expect(t.get()).toMatchObject({ status: 'ready', hasOlder: true, loadingOlder: true, olderError: false })
-  resolveRetry({ ok: true, data: { messages: [record(9)], has_more: true } })
+  resolveRetry({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(9)]).at(-1)?.created_seq ?? 0,  messages: [record(9)], has_more: true } })
   await retry
   expect(t.get()).toMatchObject({
     status: 'ready',
@@ -540,7 +540,7 @@ it('tracks unsaved drafts and pending sends across all Channels for session-leve
     selfId: 'me',
     newId: () => 'c1',
     connect: () => ({ send() {}, close() {} }),
-    api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [], has_more: false } }), sendMessage },
+    api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: vi.fn().mockResolvedValue({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } }), sendMessage },
   })
   await sync.start()
   const a = sync.getTimeline('A')
@@ -574,7 +574,7 @@ it('no-op extra patches and dispatches leaving olderError false notify no Channe
   let closeSocket!: (code: number) => void
   const listMessages = vi.fn().mockImplementation(async (channel: string) => ({
     ok: true,
-    data: { messages: [record(1, channel)], has_more: false },
+    data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, channel)]).at(-1)?.created_seq ?? 0,  messages: [record(1, channel)], has_more: false },
   }))
   const sync = createSync({
     selfId: 'me',
@@ -638,7 +638,7 @@ it('typing in composer notifies composer subscribers without changing timeline s
       return { send() {}, close() {} }
     },
     api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
-      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [record(1, 'A')], has_more: false } }),
+      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'A')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'A')], has_more: false } }),
       sendMessage,
     },
   })
@@ -691,7 +691,7 @@ it('Topic and Reply composer listener maps delete their entry after the last uns
       return { send() {}, close() {} }
     },
     api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
-      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [record(1, 'A')], has_more: false } }),
+      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'A')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'A')], has_more: false } }),
       sendMessage: vi.fn(),
     },
   })
@@ -785,7 +785,7 @@ it('multiple handles for the same Topic or Reply key share one listener Set acro
       return { send() {}, close() {} }
     },
     api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
-      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { messages: [record(1, 'A')], has_more: false } }),
+      listMessages: vi.fn().mockResolvedValue({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'A')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'A')], has_more: false } }),
       sendMessage: vi.fn(),
     },
   })

@@ -74,14 +74,14 @@ describe('channel and message calls', () => {
       const m = vi.fn().mockResolvedValue(new Response('{"error":"send_rate_limited"}', {
         status: 429, headers: header === null ? {} : { 'Retry-After': header! },
       }))
-      expect(await sendMessage('o', 'c', { body: 'x', client_message_id: 'same-key' }, m)).toEqual({
+      expect(await sendMessage('o', 'c', { history_generation: '00000000-0000-4000-8000-000000000515', body: 'x', client_message_id: 'same-key' }, m)).toEqual({
         ok: false, kind: 'http', status: 429, error: 'send_rate_limited', retryAfterMs,
       })
     }
   })
   it('retains the 429 delay even when ErrorBody is malformed', async () => {
     const m = vi.fn().mockResolvedValue(new Response('broken', { status: 429, headers: { 'Retry-After': '2' } }))
-    expect(await sendMessage('o', 'c', { body: 'x', client_message_id: 'same-key' }, m)).toEqual({
+    expect(await sendMessage('o', 'c', { history_generation: '00000000-0000-4000-8000-000000000515', body: 'x', client_message_id: 'same-key' }, m)).toEqual({
       ok: false, kind: 'http', status: 429, retryAfterMs: 2000,
     })
   })

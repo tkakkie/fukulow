@@ -765,6 +765,7 @@ mod tests {
 
     fn committed_message(channel: Uuid) -> Message {
         Message {
+            history_generation: uuid::Uuid::nil(),
             id: Uuid::new_v4(),
             channel_id: channel,
             created_seq: 1,
@@ -1248,6 +1249,7 @@ mod tests {
         delivery.notification(organization, channel, 1).spawn(
             pool,
             Message {
+                history_generation: uuid::Uuid::nil(),
                 id: Uuid::new_v4(),
                 channel_id: channel,
                 created_seq: 1,
@@ -1315,6 +1317,7 @@ mod tests {
         delivery.notification(organization, channel, 1).spawn(
             pool,
             Message {
+                history_generation: uuid::Uuid::nil(),
                 id: Uuid::new_v4(),
                 channel_id: channel,
                 created_seq: 1,

@@ -205,6 +205,7 @@ async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: 
         for (name, auth) in SURFACES.into_iter().zip(captured) {
             let page = || {
                 Ok(Query(ListProjectionQuery {
+                    history_generation: None,
                     as_of_seq: None,
                     before_position: None,
                     limit: None,
@@ -217,6 +218,7 @@ async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: 
                         DeferredOrganizationAuth(Some(auth)),
                         Ok(Path((org, channel))),
                         ApiJson(SendMessageRequest {
+                            history_generation: None,
                             client_message_id: if name == "retry" { key } else { Uuid::new_v4() },
                             body: "Topic Message".into(),
                             reply_to: None,
@@ -233,7 +235,15 @@ async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: 
                     list_topics(State(state.clone()), auth, Ok(Path((org, channel))), page()).await
                 }
                 "summary" => {
-                    topic_summary(State(state.clone()), auth, Ok(Path((org, channel, topic)))).await
+                    topic_summary(
+                        State(state.clone()),
+                        auth,
+                        Ok(Path((org, channel, topic))),
+                        Ok(Query(fukulow_api::HistoryQuery {
+                            history_generation: None,
+                        })),
+                    )
+                    .await
                 }
                 "history" => {
                     topic_history(
@@ -241,6 +251,8 @@ async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: 
                         auth,
                         Ok(Path((org, channel, topic))),
                         Ok(Query(ListMessagesQuery {
+                            as_of_seq: None,
+                            history_generation: None,
                             after_seq: None,
                             before_seq: None,
                             limit: None,

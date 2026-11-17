@@ -30,7 +30,7 @@ const isSequence = (value: unknown, minimum: number): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= minimum
 
 function isMessage(value: unknown): value is Message {
-  return isObject(value) && !('seq' in value) && typeof value.channel_id === 'string' && isSequence(value.created_seq, 1) && isSequence(value.version, 1) && value.version >= value.created_seq && typeof value.deleted === 'boolean' &&
+  return isObject(value) && typeof value.history_generation === 'string' && !('seq' in value) && typeof value.channel_id === 'string' && isSequence(value.created_seq, 1) && isSequence(value.version, 1) && value.version >= value.created_seq && typeof value.deleted === 'boolean' &&
     typeof value.id === 'string' && typeof value.sender === 'string' &&
     typeof value.client_message_id === 'string' &&
     typeof value.created_at === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') &&
@@ -52,7 +52,7 @@ function isServerEvent(value: unknown): value is ServerEvent {
       return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
     case 'message': return isSequence(value.seq, 1) && value.kind === 'create' && isMessage(value.message) && value.message.created_seq === value.seq
     case 'channel_access_lost': return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
-    case 'subscribed': return typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)
+    case 'subscribed': return typeof value.history_generation === 'string' && typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)
     case 'error': return typeof value.code === 'string' &&
       (value.channel_id === undefined || value.channel_id === null || typeof value.channel_id === 'string')
     default: return false

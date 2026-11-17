@@ -113,3 +113,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [web](web.md): `Capabilities ({allowed, reason?}) come from authorize:`
 
 - [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`, `#311 The private-Channel trigger locks its Channel row`
+
+- [messages](messages.md): `#515 uses Organization UUID epochs`

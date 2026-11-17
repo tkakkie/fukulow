@@ -29,7 +29,18 @@ impl Runner {
                 json!({"read_seq":seq}),
             )
             .await;
-            if status != 200 || body != json!({"read_seq":expected}) {
+            if status == 200
+                && body["history_generation"]
+                    .as_str()
+                    .and_then(|g| Uuid::parse_str(g).ok())
+                    .is_none()
+            {
+                return Err(Failure::Unread { step });
+            }
+            if status != 200
+                || body
+                    != json!({"history_generation":body["history_generation"],"read_seq":expected})
+            {
                 eprintln!("mark_read expected {expected}, got {status} {body}");
                 return Err(Failure::Unread { step });
             }

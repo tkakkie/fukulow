@@ -139,11 +139,12 @@ pub(crate) async fn authorized_replay_page(
         organization,
         member,
         channel,
-        after,
-        through,
+        (after, through),
         REPLAY_PAGE_SIZE,
+        None,
     )
     .await
+    .map(|(_, events)| events)
 }
 
 async fn authorized_page(
@@ -151,10 +152,11 @@ async fn authorized_page(
     organization: Uuid,
     member: (Uuid, i64),
     channel: Uuid,
-    after: i64,
-    through: i64,
+    bounds: (i64, i64),
     limit: i64,
-) -> Result<Vec<ChannelEvent>, MessageError> {
+    generation: Option<Uuid>,
+) -> Result<(Uuid, Vec<ChannelEvent>), MessageError> {
+    let (after, through) = bounds;
     let sql = format!(
         "WITH access AS MATERIALIZED (SELECT ({}) AS visible) \
          SELECT access.visible,m.* FROM access LEFT JOIN LATERAL ({}) m ON true ORDER BY m.event_seq",
@@ -189,7 +191,14 @@ async fn authorized_page(
         Some(false) => return Err(MessageError::NotFound),
         Some(true) => {}
     }
-    Ok(hydrate(rows, after)?)
+    let history_generation: Uuid = rows
+        .first()
+        .ok_or(sqlx::Error::RowNotFound)?
+        .try_get("history_generation")?;
+    if generation.is_some_and(|old| old != history_generation) {
+        return Err(MessageError::HistoryGenerationChanged);
+    }
+    Ok((history_generation, hydrate(rows, after)?))
 }
 
 /// Read event positions for C3 gap recovery. Auth extraction and query validation
@@ -200,6 +209,7 @@ async fn authorized_page(
     responses((status = 200, description = "Ascending Channel event envelopes after the exclusive event cursor, with current-state replay hydration and directional has_more", body = fukulow_api::ChannelEventPage),
         (status = 400, description = "Malformed Organization or Channel id, missing or negative event cursor, or page limit outside 1 through 200", body = crate::auth::ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = crate::auth::ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence", body = crate::auth::ErrorBody),
         (status = 503, description = "Committed watermark admission unavailable", body = crate::auth::ErrorBody, headers(("Retry-After" = u64, description = "Retry seconds"))),
         (status = 500, description = "Database failure, missing log coverage, unsupported event kind, or Message state that cannot be hydrated; no positions are acknowledged", body = crate::auth::ErrorBody)))]
@@ -223,14 +233,14 @@ pub async fn list_channel_events(
     let member = (auth.identity.member.id, auth.membership_revision);
     super::require_visible_scoped(&state.pool, organization, member, channel).await?;
     let through = super::topics::watermark(&state, organization, channel).await?;
-    let mut events = authorized_page(
+    let (history_generation, mut events) = authorized_page(
         &state.pool,
         auth.identity.organization.organization_id,
         (auth.identity.member.id, auth.membership_revision),
         channel,
-        query.after_seq,
-        through,
+        (query.after_seq, through),
         i64::from(limit) + 1,
+        query.history_generation,
     )
     .await?;
     let has_more = events.len() > usize::from(limit);
@@ -245,7 +255,11 @@ pub async fn list_channel_events(
         .collect();
     Ok((
         [(axum::http::header::CACHE_CONTROL, "no-store")],
-        axum::Json(fukulow_api::ChannelEventPage { events, has_more }),
+        axum::Json(fukulow_api::ChannelEventPage {
+            history_generation,
+            events,
+            has_more,
+        }),
     )
         .into_response())
 }

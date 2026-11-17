@@ -454,7 +454,7 @@ export function createSync(options: SyncOptions) {
             socket.subscriptions.set(effect.channel, pending)
           }
           socket?.transport.send(effect.type === 'subscribe'
-            ? { type: 'subscribe', channel_id: effect.channel, after_seq: effect.after_seq }
+            ? { type: 'subscribe', channel_id: effect.channel, after_seq: effect.after_seq, history_generation: effect.history_generation }
             : { type: 'unsubscribe', channel_id: effect.channel })
         } catch {
           if (state.connection !== null) void dispatch({ type: 'socket_closed', connection: state.connection, code: 1006 })
@@ -462,21 +462,21 @@ export function createSync(options: SyncOptions) {
         break
       case 'fetch_history': {
         if (effect.page === 'after') {
-          const result = await request(effect.id, () => transport.listChannelEvents(effect.channel, { after_seq: effect.seq! }))
+          const result = await request(effect.id, () => transport.listChannelEvents(effect.channel, { after_seq: effect.seq!, history_generation: effect.history_generation }))
           await dispatch(result.ok ? { type: 'events_result', request: effect.id, page: result.data }
-            : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network' })
+            : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network', error: result.kind === 'http' ? result.error : undefined })
           break
         }
-        const query = { before_seq: effect.seq }
+        const query = { before_seq: effect.seq, as_of_seq: effect.as_of_seq, history_generation: effect.history_generation }
         const result = await request(effect.id, () => effect.page === 'latest'
-          ? transport.listMessages(effect.channel) : transport.listMessages(effect.channel, query))
+          ? transport.listMessages(effect.channel, { history_generation: effect.history_generation }) : transport.listMessages(effect.channel, query))
         await dispatch(result.ok ? { type: 'history_result', request: effect.id, page: result.data }
-          : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network' })
+          : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network', error: result.kind === 'http' ? result.error : undefined })
         break
       }
       case 'send': {
         const result = await request(effect.id, () => transport.sendMessage(effect.channel,
-          { client_message_id: effect.client_message_id, body: effect.body,
+          { history_generation: effect.history_generation, client_message_id: effect.client_message_id, body: effect.body,
             ...(effect.reply_to ? { reply_to: effect.reply_to } : {}),
             ...(effect.topic_name ? { topic_name: effect.topic_name } : {}) }).then(result => {
           const draft = submitted.get(effect.client_message_id)
@@ -831,6 +831,11 @@ export function createSync(options: SyncOptions) {
     unwatch: (channel: string) => dispatch({ type: 'unwatch', channel }),
     close: () => dispatch({ type: 'stop' }),
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
+    observeHistoryGeneration(generation?: string) {
+      const before = state.historyEpoch
+      void dispatch({ type: 'history_generation', generation })
+      return before === state.historyEpoch
+    },
     settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     hasUnsavedChanges(): boolean {
       if (options.drafts?.hasDrafts()) return true

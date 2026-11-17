@@ -84,7 +84,7 @@ it('notifies only the changed Channel and keeps unaffected Channel snapshots ref
   const c = topicClient()
   await c.boot()
   await c.sync.watch('B')
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'B', caught_up_seq: 10 })
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'B', caught_up_seq: 10 })
   await settle()
 
   const adapterA = topicsAdapter(c.topics, 'A')

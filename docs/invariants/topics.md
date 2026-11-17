@@ -64,3 +64,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`
 
 - [sync](sync.md): `an unpinned main window updates retained identities without inserting out-of-window mutations`, `a Topic latest read started after retirement cannot resurrect a subsequently retired tombstone`
+
+- [messages](messages.md): `fixed_windows_expire_atomically_but_creations_keep_old_watermarks`, `page_watermarks_share_the_mutation_snapshot_after_the_commit_barrier`

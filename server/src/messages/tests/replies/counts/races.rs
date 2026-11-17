@@ -1,9 +1,7 @@
 use super::*;
 
 #[fukulow_test::test]
-async fn reply_counts_bound_anchors_and_descendants_by_watermark_before_data_snapshot(
-    pool: PgPool,
-) {
+async fn reply_counts_bound_anchors_and_descendants_by_watermark_in_data_snapshot(pool: PgPool) {
     let (app, org, sender, channel, token) = fixture(&pool).await;
     let root = sent(&app, &token, channel, input(Uuid::new_v4(), "Root")).await;
     let child = sent(&app, &token, channel, reply_input(Uuid::new_v4(), &root)).await;

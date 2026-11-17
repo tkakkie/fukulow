@@ -304,6 +304,8 @@ async fn reply_stale_member_and_queued_access_loss_deny_send_retry_and_chain(poo
             DeferredOrganizationAuth(Some(chain_auth)),
             Ok(Path((org, channel, id(&canonical)))),
             Ok(Query(ReplyChainQuery {
+                as_of_seq: None,
+                history_generation: None,
                 after_seq: None,
                 limit: None,
             })),
