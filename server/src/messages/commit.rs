@@ -168,7 +168,6 @@ mod tests {
     async fn both_barriers_set_transaction_local_timeouts(pool: sqlx::PgPool) {
         let pool = crate::database::PoolConfig::configured(Some("3"), None)
             .unwrap()
-            .options()
             .connect_with(pool.connect_options().as_ref().clone())
             .await
             .unwrap();

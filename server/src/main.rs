@@ -64,7 +64,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             .as_deref(),
     )?;
     let pool = fukulow_server::database::PoolConfig::from_env()?
-        .options()
         .connect(&database_url)
         .await
         .map_err(|error| {
@@ -75,6 +74,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         pool.clone(),
     ));
     fukulow_server::database::validate_migrations(&pool).await?;
+    fukulow_server::database::validate_session_settings(&pool).await?;
     let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

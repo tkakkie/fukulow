@@ -5,7 +5,7 @@ use sqlx::PgPool;
 fn pool_configuration_defaults_bounds_and_overrides() {
     let defaults = PoolConfig::configured(None, None).unwrap().options();
     assert_eq!(defaults.get_max_connections(), 20);
-    assert_eq!(defaults.get_acquire_timeout(), Duration::from_secs(1));
+    assert_eq!(defaults.get_acquire_timeout(), Duration::from_secs(5));
     for size in ["3", "4", "20", "100"] {
         for timeout in ["1", "250", "5000"] {
             let options = PoolConfig::configured(Some(size), Some(timeout))
@@ -68,25 +68,24 @@ async fn maximum_pool_constructs_and_next_size_is_rejected(pool: PgPool) {
 
 #[fukulow_test::test]
 async fn configured_pool_bounds_acquisition_and_sets_every_new_connection(pool: PgPool) {
+    // URL-supplied options cannot weaken the app's own startup parameters.
     let app = PoolConfig::configured(Some("3"), Some("1000"))
         .unwrap()
-        .options()
-        .connect_with(pool.connect_options().as_ref().clone())
+        .connect_with(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .options([("statement_timeout", "0"), ("jit", "on")]),
+        )
         .await
         .unwrap();
     let mut held = Vec::new();
     for _ in 0..3 {
         let mut connection = app.acquire().await.unwrap();
-        let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
-            .fetch_one(&mut *connection)
-            .await
-            .unwrap();
-        assert_eq!(timeout, "10s");
-        let jit: String = sqlx::query_scalar("SHOW jit")
-            .fetch_one(&mut *connection)
-            .await
-            .unwrap();
-        assert_eq!(jit, "off");
+        assert_eq!(
+            settings(&mut connection).await,
+            ("10s".into(), "off".into())
+        );
         held.push(connection);
     }
     let started = tokio::time::Instant::now();
@@ -99,17 +98,87 @@ async fn configured_pool_bounds_acquisition_and_sets_every_new_connection(pool: 
     for connection in held {
         connection.close().await.unwrap();
     }
-    let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
-        .fetch_one(&app)
-        .await
-        .unwrap();
-    assert_eq!(timeout, "10s");
-    let jit: String = sqlx::query_scalar("SHOW jit")
-        .fetch_one(&app)
-        .await
-        .unwrap();
-    assert_eq!(jit, "off");
+    // Replacement connections carry them too.
+    let mut connection = app.acquire().await.unwrap();
+    assert_eq!(
+        settings(&mut connection).await,
+        ("10s".into(), "off".into())
+    );
+    drop(connection);
+    validate_session_settings(&app).await.unwrap();
     app.close().await;
+}
+
+async fn settings(connection: &mut sqlx::PgConnection) -> (String, String) {
+    sqlx::query_as("SELECT current_setting('statement_timeout'), current_setting('jit')")
+        .fetch_one(connection)
+        .await
+        .unwrap()
+}
+
+#[fukulow_test::test]
+async fn default_acquire_timeout_outlasts_a_1500_ms_pool_wait(pool: PgPool) {
+    let app = PoolConfig::configured(Some("3"), None)
+        .unwrap()
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(app.acquire().await.unwrap());
+    }
+    let started = tokio::time::Instant::now();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        drop(held);
+    });
+    // 1 s (#388) failed this wait with PoolTimedOut; 5 s waits and succeeds.
+    let value: i32 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&app)
+        .await
+        .unwrap();
+    assert_eq!(value, 1);
+    assert!(started.elapsed() >= Duration::from_millis(1_500));
+    release.await.unwrap();
+    app.close().await;
+}
+
+#[fukulow_test::test]
+async fn startup_session_check_fails_closed_without_session_parameters(pool: PgPool) {
+    let check = async |app: PgPool| {
+        let result = validate_session_settings(&app)
+            .await
+            .map_err(|error| error.to_string());
+        app.close().await;
+        result
+    };
+    let base = || pool.connect_options().as_ref().clone();
+    // Pools built without PoolConfig::connect_with lack the startup parameters.
+    for options in [
+        base(),
+        base().options([("statement_timeout", "0"), ("jit", "off")]),
+        base().options([("statement_timeout", "5s"), ("jit", "off")]),
+        base().options([("statement_timeout", "10s"), ("jit", "on")]),
+    ] {
+        let app = PoolConfig::configured(Some("3"), None)
+            .unwrap()
+            .options()
+            .connect_with(options)
+            .await
+            .unwrap();
+        let error = check(app).await.unwrap_err();
+        assert!(
+            error.contains("statement_timeout = 10s and jit = off"),
+            "{error}"
+        );
+        assert!(error.contains("startup parameters"), "{error}");
+    }
+    let app = PoolConfig::configured(Some("3"), None)
+        .unwrap()
+        .connect_with(base())
+        .await
+        .unwrap();
+    check(app).await.unwrap();
 }
 
 #[fukulow_test::test]
@@ -117,7 +186,6 @@ async fn ordinary_statement_timeout_fires_and_local_context_clears(pool: PgPool)
     let restricted = crate::test_app_pool(pool).await;
     let app = PoolConfig::configured(Some("3"), None)
         .unwrap()
-        .options()
         .connect_with(restricted.connect_options().as_ref().clone())
         .await
         .unwrap();
