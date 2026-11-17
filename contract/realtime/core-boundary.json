@@ -1,0 +1,499 @@
+{
+  "self": "00000000-0000-0000-0000-000000000001",
+  "initial": {
+    "view": {
+      "selfId": "00000000-0000-0000-0000-000000000001",
+      "historyEpoch": 0,
+      "organization": "available",
+      "session": "signed_in",
+      "running": false,
+      "next": 1,
+      "connection": null,
+      "connected": false,
+      "reconnectAttempt": 0,
+      "channels": {}
+    },
+    "requests": {},
+    "timers": {}
+  },
+  "steps": [
+    {
+      "input": {
+        "type": "session_start",
+        "selfId": "00000000-0000-0000-0000-000000000001"
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "available",
+          "session": "signed_in",
+          "running": true,
+          "next": 2,
+          "connection": 1,
+          "connected": false,
+          "reconnectAttempt": 0,
+          "channels": {}
+        },
+        "requests": {},
+        "timers": {},
+        "result": {
+          "effects": [
+            {
+              "type": "connect",
+              "id": 1
+            }
+          ],
+          "changedChannels": [],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "connection_ready",
+        "connection": 1
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "available",
+          "session": "signed_in",
+          "running": true,
+          "next": 2,
+          "connection": 1,
+          "connected": true,
+          "reconnectAttempt": 0,
+          "channels": {}
+        },
+        "requests": {},
+        "timers": {},
+        "result": {
+          "effects": [],
+          "changedChannels": [],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "watch",
+        "channel": "00000000-0000-0000-0000-000000000002"
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "available",
+          "session": "signed_in",
+          "running": true,
+          "next": 4,
+          "connection": 1,
+          "connected": true,
+          "reconnectAttempt": 0,
+          "channels": {
+            "00000000-0000-0000-0000-000000000002": {
+              "state": "loading",
+              "watched": true,
+              "cursor": null,
+              "mutationSeq": 0,
+              "messages": [],
+              "versions": {},
+              "retiredVersions": [],
+              "versionEpoch": 0,
+              "advancing": [],
+              "pending": [],
+              "hasOlder": false,
+              "historyError": false,
+              "fillAttempt": 0,
+              "lastUsed": 2,
+              "latest": 3,
+              "retainedCount": 0
+            }
+          }
+        },
+        "requests": {
+          "3": {
+            "type": "history",
+            "mutationSeq": 0,
+            "channel": "00000000-0000-0000-0000-000000000002",
+            "page": "latest"
+          }
+        },
+        "timers": {},
+        "result": {
+          "effects": [
+            {
+              "type": "fetch_history",
+              "id": 3,
+              "channel": "00000000-0000-0000-0000-000000000002",
+              "page": "latest"
+            }
+          ],
+          "changedChannels": [
+            "00000000-0000-0000-0000-000000000002"
+          ],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "history_result",
+        "request": 3,
+        "page": {
+          "history_generation": "00000000-0000-4000-8000-000000000515",
+          "as_of_seq": 0,
+          "messages": [],
+          "has_more": false
+        }
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "available",
+          "session": "signed_in",
+          "running": true,
+          "next": 5,
+          "connection": 1,
+          "connected": true,
+          "reconnectAttempt": 0,
+          "channels": {
+            "00000000-0000-0000-0000-000000000002": {
+              "state": "loading",
+              "watched": true,
+              "cursor": 0,
+              "mutationSeq": 0,
+              "messages": [],
+              "versions": {},
+              "retiredVersions": [],
+              "versionEpoch": 0,
+              "advancing": [],
+              "pending": [],
+              "hasOlder": false,
+              "historyError": false,
+              "fillAttempt": 0,
+              "lastUsed": 2,
+              "retainedCount": 0,
+              "snapshotSeq": 0,
+              "streamBase": 0,
+              "subscription": {
+                "id": 4,
+                "after": 0,
+                "confirmed": false,
+                "watermark": 0
+              }
+            }
+          },
+          "historyGeneration": "00000000-0000-4000-8000-000000000515"
+        },
+        "requests": {},
+        "timers": {},
+        "result": {
+          "effects": [
+            {
+              "type": "subscribe",
+              "history_generation": "00000000-0000-4000-8000-000000000515",
+              "id": 4,
+              "channel": "00000000-0000-0000-0000-000000000002",
+              "after_seq": 0
+            }
+          ],
+          "changedChannels": [
+            "00000000-0000-0000-0000-000000000002"
+          ],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "user_send",
+        "channel": "00000000-0000-0000-0000-000000000002",
+        "clientMessageId": "00000000-0000-0000-0000-000000000001",
+        "body": "本文\n👋",
+        "topic_name": "Topic"
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "available",
+          "session": "signed_in",
+          "running": true,
+          "next": 6,
+          "connection": 1,
+          "connected": true,
+          "reconnectAttempt": 0,
+          "channels": {
+            "00000000-0000-0000-0000-000000000002": {
+              "state": "loading",
+              "watched": true,
+              "cursor": 0,
+              "mutationSeq": 0,
+              "messages": [],
+              "versions": {},
+              "retiredVersions": [],
+              "versionEpoch": 0,
+              "advancing": [],
+              "pending": [
+                {
+                  "clientMessageId": "00000000-0000-0000-0000-000000000001",
+                  "body": "本文\n👋",
+                  "state": "sending",
+                  "request": 5,
+                  "topic_name": "Topic"
+                }
+              ],
+              "hasOlder": false,
+              "historyError": false,
+              "fillAttempt": 0,
+              "lastUsed": 2,
+              "retainedCount": 0,
+              "snapshotSeq": 0,
+              "streamBase": 0,
+              "subscription": {
+                "id": 4,
+                "after": 0,
+                "confirmed": false,
+                "watermark": 0
+              }
+            }
+          },
+          "historyGeneration": "00000000-0000-4000-8000-000000000515"
+        },
+        "requests": {
+          "5": {
+            "type": "send",
+            "channel": "00000000-0000-0000-0000-000000000002",
+            "clientMessageId": "00000000-0000-0000-0000-000000000001"
+          }
+        },
+        "timers": {},
+        "result": {
+          "effects": [
+            {
+              "type": "send",
+              "history_generation": "00000000-0000-4000-8000-000000000515",
+              "id": 5,
+              "channel": "00000000-0000-0000-0000-000000000002",
+              "client_message_id": "00000000-0000-0000-0000-000000000001",
+              "body": "本文\n👋",
+              "topic_name": "Topic"
+            }
+          ],
+          "changedChannels": [
+            "00000000-0000-0000-0000-000000000002"
+          ],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "channel_unavailable",
+        "channel": "00000000-0000-0000-0000-000000000002"
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "available",
+          "session": "signed_in",
+          "running": true,
+          "next": 6,
+          "connection": 1,
+          "connected": true,
+          "reconnectAttempt": 0,
+          "channels": {
+            "00000000-0000-0000-0000-000000000002": {
+              "state": "unavailable",
+              "watched": true,
+              "cursor": 0,
+              "mutationSeq": 0,
+              "messages": [],
+              "versions": {},
+              "retiredVersions": [],
+              "versionEpoch": 0,
+              "advancing": [],
+              "pending": [
+                {
+                  "clientMessageId": "00000000-0000-0000-0000-000000000001",
+                  "body": "本文\n👋",
+                  "state": "failed",
+                  "request": 5,
+                  "topic_name": "Topic"
+                }
+              ],
+              "hasOlder": false,
+              "historyError": false,
+              "fillAttempt": 0,
+              "lastUsed": 2,
+              "retainedCount": 0,
+              "snapshotSeq": 0,
+              "streamBase": 0
+            }
+          },
+          "historyGeneration": "00000000-0000-4000-8000-000000000515"
+        },
+        "requests": {
+          "5": {
+            "type": "send",
+            "channel": "00000000-0000-0000-0000-000000000002",
+            "clientMessageId": "00000000-0000-0000-0000-000000000001",
+            "stale": true
+          }
+        },
+        "timers": {},
+        "result": {
+          "effects": [
+            {
+              "type": "unsubscribe",
+              "channel": "00000000-0000-0000-0000-000000000002"
+            }
+          ],
+          "changedChannels": [
+            "00000000-0000-0000-0000-000000000002"
+          ],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "organization_unavailable"
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "unavailable",
+          "session": "signed_in",
+          "running": false,
+          "next": 6,
+          "connection": null,
+          "connected": false,
+          "reconnectAttempt": 0,
+          "channels": {
+            "00000000-0000-0000-0000-000000000002": {
+              "state": "unavailable",
+              "watched": true,
+              "cursor": 0,
+              "mutationSeq": 0,
+              "messages": [],
+              "versions": {},
+              "retiredVersions": [],
+              "versionEpoch": 0,
+              "advancing": [],
+              "pending": [
+                {
+                  "clientMessageId": "00000000-0000-0000-0000-000000000001",
+                  "body": "本文\n👋",
+                  "state": "failed",
+                  "request": 5,
+                  "topic_name": "Topic"
+                }
+              ],
+              "hasOlder": false,
+              "historyError": false,
+              "fillAttempt": 0,
+              "lastUsed": 2,
+              "retainedCount": 0,
+              "snapshotSeq": 0,
+              "streamBase": 0
+            }
+          },
+          "historyGeneration": "00000000-0000-4000-8000-000000000515"
+        },
+        "requests": {},
+        "timers": {},
+        "result": {
+          "effects": [
+            {
+              "type": "close"
+            }
+          ],
+          "changedChannels": [
+            "00000000-0000-0000-0000-000000000002"
+          ],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "stop"
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "unavailable",
+          "session": "signed_in",
+          "running": false,
+          "next": 6,
+          "connection": null,
+          "connected": false,
+          "reconnectAttempt": 0,
+          "channels": {},
+          "historyGeneration": "00000000-0000-4000-8000-000000000515"
+        },
+        "requests": {},
+        "timers": {},
+        "result": {
+          "effects": [
+            {
+              "type": "close"
+            }
+          ],
+          "changedChannels": [
+            "00000000-0000-0000-0000-000000000002"
+          ],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "stop"
+      },
+      "expected": {
+        "view": {
+          "selfId": "00000000-0000-0000-0000-000000000001",
+          "historyEpoch": 0,
+          "organization": "unavailable",
+          "session": "signed_in",
+          "running": false,
+          "next": 6,
+          "connection": null,
+          "connected": false,
+          "reconnectAttempt": 0,
+          "channels": {},
+          "historyGeneration": "00000000-0000-4000-8000-000000000515"
+        },
+        "requests": {},
+        "timers": {},
+        "result": {
+          "effects": [
+            {
+              "type": "close"
+            }
+          ],
+          "changedChannels": [],
+          "records": [],
+          "stateChanged": true
+        }
+      }
+    }
+  ]
+}

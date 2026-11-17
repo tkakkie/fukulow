@@ -1,50 +1,25 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import ts from 'typescript'
-import { checkProtocolImports } from './protocol-imports.ts'
-
-const generatedTypes = [{ path: './api-schema.d.ts', typeOnly: true }]
-function imports(source: string) {
-  return ts.createSourceFile('protocol.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-    .statements.filter(ts.isImportDeclaration).map(node => ({
-      path: ts.isStringLiteralLike(node.moduleSpecifier) ? node.moduleSpecifier.text : null,
-      typeOnly: node.importClause?.isTypeOnly === true,
-    }))
-}
-
-describe('protocol direct-import scan (not transitive purity)', () => {
-  it('rejects svelte and every svelte subpath with negative controls', () => {
-    for (const path of ['svelte', 'svelte/reactivity', 'svelte/store', 'svelte/internal/client']) {
-      for (const source of [`import { x } from '${path}'`, `import '${path}'`, `export * from '${path}'`,
-        `const x = import('${path}')`, `type X = import('${path}').X`, `const x = require('${path}')`,
-        `import x = require('${path}')`]) expect(checkProtocolImports(source), source).toEqual([`protocol.ts directly imports ${path}`])
+import { checkCoreDependencies, checkCoreSource, checkRustCore } from './protocol-imports.ts'
+describe('Rust core purity guard (not transitive purity)', () => {
+  it('rejects I/O clock randomness imports aliases and calls with negative controls', () => {
+    for (const source of ['use std::fs;', 'use std::{time::Instant as Clock};', 'use std::{net, io};',
+      'std::thread::spawn(f);', 'std::env::var("HOME");', 'Uuid::new_v4();',
+      'println!("I/O");', 'use rand::random as r;', 'use web_sys::Window;', 'extern "C" {}', 'include!("other.rs");']) {
+      expect(checkCoreSource(source), source).not.toEqual([])
     }
+    expect(checkCoreSource('use std::{collections::BTreeMap, rc::Rc}; use uuid::Uuid;')).toEqual([])
   })
-  it('allows generated types and ignores comments and unrelated string literals', () => {
-    expect(checkProtocolImports(`import type { components } from './api-schema.d.ts';
-      // import 'svelte'
-      const text = "import 'svelte/store'"`)).toEqual([])
-  })
-  it('the production protocol passes the direct-import scan and imports generated types only', () => {
-    const source = readFileSync(new URL('../src/protocol.ts', import.meta.url), 'utf8')
-    expect(checkProtocolImports(source)).toEqual([])
-    expect(imports(source)).toEqual(generatedTypes)
-    expect(source).not.toMatch(/\b(?:Date|performance|crypto|fetch|WebSocket|setTimeout|setInterval)\b|Math\.random/)
-  })
-  it('generated-types-only assertion rejects additional multiline imports with negative controls', () => {
-    const allowed = `import type {
-      components, ServerEvent,
-    } from './api-schema.d.ts'`
-    expect(imports(allowed)).toEqual(generatedTypes)
-    for (const extra of [`import {
-      step,
-    } from './other'`, `import type {
-      Other,
-    } from './other'`, `import './side-effect'`]) {
-      expect(imports(`${allowed}\n${extra}`)).not.toEqual(generatedTypes)
+  it('rejects added dependencies renamed dependencies and randomness features with negative controls', () => {
+    for (const extra of ['tokio = "1"', 'rand = "1"', 'serde = { package = "reqwest", version = "1" }',
+      'uuid = { version = "1", features = ["v4"] }', 'uuid = { version = "1", features = ["js"] }',
+      'uuid = {\n version = "1",\n features = ["v4"]\n}', '[dependencies.serde]\npackage = "reqwest"']) {
+      expect(checkCoreDependencies(`[dependencies]\n${extra}`), extra).not.toEqual([])
     }
-    expect(imports(`import {
-      components,
-    } from './api-schema.d.ts'`)).not.toEqual(generatedTypes)
+    expect(checkCoreDependencies('[features]\nrng = ["uuid/v4"]')).not.toEqual([])
+    expect(checkCoreDependencies('[target.x.dependencies]\nreqwest = "1"')).not.toEqual([])
+    expect(checkCoreDependencies('[dependencies]\nserde = { version = "1", features = ["derive", "rc"] }\nuuid = { version = "1", features = ["serde"] }')).toEqual([])
+  })
+  it('the Rust core passes the source and dependency purity guard', () => {
+    expect(checkRustCore(new URL('../../client-core', import.meta.url).pathname)).toEqual([])
   })
 })

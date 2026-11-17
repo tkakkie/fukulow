@@ -1,3 +1,4 @@
+import * as driver from '../src/protocol-driver.ts'
 import { describe, expect, it } from 'vitest'
 import { loadClientScenarios, makeProtocolClient } from './measure-fixture-client.ts'
 import { partitionScenarios, runClientScenario } from './realtime-fixtures.ts'
@@ -10,7 +11,7 @@ describe('measurement fixture client', () => {
   it('replays every running protocol fixture, including events_result inputs', () => {
     const types = new Set<string>()
     for (const scenario of running) {
-      const errs = runClientScenario(scenario, makeProtocolClient((input) => types.add(input.type)))
+      const errs = runClientScenario(scenario, makeProtocolClient((input) => types.add(input.type), driver))
       expect(errs, scenario.id).toEqual([])
     }
     expect(types).toContain('events_result')

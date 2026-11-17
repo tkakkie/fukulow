@@ -1,30 +1,53 @@
-// Direct-import scan only: this does not prove transitive purity of arbitrary dependencies.
-import ts from 'typescript'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
-
-export function checkProtocolImports(source: string): string[] {
-  const file = ts.createSourceFile('protocol.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+// Conservative source/dependency guard, not a proof of transitive purity.
+// Allowlist changes require review: no runtime I/O, clock or randomness dependency belongs here.
+import { readFileSync, readdirSync } from 'node:fs'
+import { resolve, join } from 'node:path'
+// Closed inline declarations also fence features, renames and target-specific entries.
+const allowed: Record<string, RegExp> = {
+  'fukulow-api': /^\{path="\.\.\/api-types"\}$/,
+  serde: /^\{version="[^"]+",features=\["derive","rc"\]\}$/,
+  serde_json: /^"[^"]+"$/,
+  uuid: /^\{version="[^"]+",features=\["serde"\]\}$/,
+  'wasm-bindgen': /^\{version="=[^"]+",optional=true\}$/,
+}
+export function checkCoreDependencies(manifest: string): string[] {
   const errors: string[] = []
-  const check = (node: ts.Node | undefined) => {
-    if (node && ts.isStringLiteralLike(node) && (node.text === 'svelte' || node.text.startsWith('svelte/'))) {
-      errors.push(`protocol.ts directly imports ${node.text}`)
+  let section = ''
+  for (const line of manifest.split('\n')) {
+    const header = /^\s*\[([^\]]+)\]/.exec(line)
+    if (header) { section = header[1]; continue }
+    const entry = line.replace(/#.*$/, '').trim()
+    if (!entry) continue
+    if (section === 'features' && entry.replace(/\s/g, '') !== 'wasm=["dep:wasm-bindgen"]') errors.push(`unapproved core feature: ${entry}`)
+    if (!/(?:^|[.-])dependencies$/.test(section)) continue
+    const dependency = /^([\w-]+)\s*=\s*(.*)$/.exec(entry)
+    if (!dependency || !allowed[dependency[1]]?.test(dependency[2].replace(/\s/g, ''))) {
+      errors.push(`unapproved core dependency declaration: ${entry}`)
     }
   }
-  const visit = (node: ts.Node) => {
-    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) check(node.moduleSpecifier)
-    if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) check(node.argument.literal)
-    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) check(node.moduleReference.expression)
-    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-      (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) check(node.arguments[0])
-    ts.forEachChild(node, visit)
-  }
-  visit(file)
+  // Dependency subtables can conceal renames/features; the core uses inline entries only.
+  if (/^\s*\[[^\]]*dependencies\./m.test(manifest)) errors.push('dependency subtables require review')
   return errors
 }
-
+export function checkCoreSource(source: string): string[] {
+  // Match identifiers even in grouped imports and aliases; intentionally conservative about comments/strings.
+  const forbidden = /\b(?:fs|io|net|time|thread|process|env|random|rand|getrandom|SystemTime|Instant|new_v[147]|print|println|eprint|eprintln|dbg|extern|include|include_str|include_bytes)\b|\b(?:js_sys|web_sys|tokio|reqwest)\b/g
+  return [...new Set(source.match(forbidden) ?? [])].map(name => `core source requires purity review: ${name}`)
+}
+export function checkRustCore(root: string): string[] {
+  const errors = checkCoreDependencies(readFileSync(join(root, 'Cargo.toml'), 'utf8'))
+  function scan(dir: string) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) scan(path)
+      else if (entry.name.endsWith('.rs')) errors.push(...checkCoreSource(readFileSync(path, 'utf8')).map(e => `${path}: ${e}`))
+    }
+  }
+  scan(join(root, 'src'))
+  return errors
+}
 if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
-  const errors = checkProtocolImports(readFileSync(resolve(import.meta.dirname, '../src/protocol.ts'), 'utf8'))
+  const errors = checkRustCore(resolve(import.meta.dirname, '../../client-core'))
   if (errors.length) { errors.forEach(e => console.error(e)); process.exit(1) }
-  console.log('protocol direct-import scan OK')
+  console.log('Rust core source/dependency purity guard OK (not a transitive proof)')
 }

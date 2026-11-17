@@ -1,6 +1,6 @@
-// Issue #466 measurement harness for Rust/wasm vs TypeScript sync core.
+// Rust/wasm measurement harness; historical #466 TS arms run from their original checkout.
 // Usage:
-//   node --expose-gc web/scripts/measure-wasm-core.ts --core wasm|ts|main-ts --out <dir> [--round <n>] [--smoke]
+//   node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --out <dir> [--round <n>] [--smoke]
 //   node web/scripts/measure-wasm-core.ts --aggregate --out <dir>
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
@@ -10,9 +10,9 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { components } from '../src/api-schema.d.ts'
 import {
-  initialState, MAIN_MESSAGE_LIMIT, REPLY_MESSAGE_LIMIT, step, TOPIC_MESSAGE_LIMIT, TOTAL_MESSAGE_LIMIT,
+  MAIN_MESSAGE_LIMIT, REPLY_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT, TOTAL_MESSAGE_LIMIT,
   type Effect, type Input, type State,
-} from '../src/protocol.ts'
+} from '../src/protocol-types.ts'
 import { aggregateDirectory, nearestRank, olsSlope, type Arm } from './aggregate-wasm-core.ts'
 import { fixtureUuid, normalizeInput } from './client-core-ids.ts'
 import { loadClientScenarios, makeProtocolClient } from './measure-fixture-client.ts'
@@ -79,45 +79,6 @@ type CreateUnreadFn = (sync: SyncInstance, opts: {
   }
 }) => UnreadInstance
 
-const viewOf = ({ requests: _r, timers: _t, ...view }: State): SyncView => view
-
-// Adapter identical to web/src/core-ts.ts so the same script drives main's protocol.ts (--core main-ts).
-export function createMainTsCore(selfId: string): SyncCore {
-  let state = initialState(selfId), view = viewOf(state)
-  return {
-    get: () => view,
-    request: (id) => state.requests[id],
-    timer: (id) => state.timers[id],
-    hasPending: () => Object.values(state.channels).some((c) => c.pending.length > 0),
-    step(input) {
-      const previous = state, result = step(state, input)
-      state = result.state
-      const stateChanged = state !== previous
-      if (stateChanged) view = viewOf(state)
-      return { effects: result.effects, changedChannels: result.changedChannels, records: result.records, stateChanged }
-    },
-  }
-}
-
-const MAIN_TS_CORE_SOURCE = `
-import { initialState, step } from './protocol.ts'
-export const initCore = async () => {}
-const viewOf = ({ requests: _r, timers: _t, ...view }) => view
-export function createCore(selfId) {
-  let state = initialState(selfId), view = viewOf(state)
-  return {
-    get: () => view, request: id => state.requests[id], timer: id => state.timers[id],
-    hasPending: () => Object.values(state.channels).some(c => c.pending.length > 0),
-    step(input) {
-      const previous = state, result = step(state, input)
-      state = result.state; const stateChanged = state !== previous
-      if (stateChanged) view = viewOf(state)
-      return { effects: result.effects, changedChannels: result.changedChannels, records: result.records, stateChanged }
-    },
-  }
-}
-`
-
 const scriptDir = dirname(fileURLToPath(import.meta.url)), webDir = resolve(scriptDir, '..')
 const BASE_PHRASE = '業務連絡: リリース前確認と同期プロトコル検証を実施します。各チャネルの順序保証・重複排除・再接続差分取得を確認してください。'
 const body155 = (seq: number, ch: string) => [...(`[${ch.slice(0, 8)}#${seq}] ` + BASE_PHRASE.repeat(3))].slice(0, 155).join('')
@@ -170,7 +131,8 @@ const summarizeSamples = (samples: number[]) => ({
   p99: Number(nearestRank(samples, 99).toFixed(3)),
 })
 
-function buildMixedTraces(): { id: string; inputs: Input[] }[] {
+function buildMixedTraces(driver: Pick<typeof import('../src/protocol-driver.ts'), 'initialState' | 'step'>): { id: string; inputs: Input[] }[] {
+  const { initialState, step } = driver
   const scenarios = loadClientScenarios()
   const rec = (seq: number, channel = 'A'): Message => ({ history_generation: '00000000-0000-4000-8000-000000000515',
     mentions: [], channel_id: channel, created_seq: seq, version: seq, deleted: false, body: `m${seq}`, id: `id${seq}`, sender: 'other',
@@ -188,7 +150,7 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
   const traces: { id: string; inputs: Input[] }[] = []
   for (const scenario of partitionScenarios(scenarios).running.filter((s) => s.layer !== 'controller')) {
     const d = makeRecorder(scenario.id)
-    const errs = runClientScenario(scenario, makeProtocolClient(d.feed))
+    const errs = runClientScenario(scenario, makeProtocolClient(d.feed, driver))
     if (errs.length > 0) throw new Error(`Fixture ${scenario.id} failed: ${errs.join('; ')}`)
     traces.push({ id: d.id, inputs: d.inputs })
   }
@@ -329,13 +291,13 @@ function bootstrapGridCore(createCoreFn: (selfId: string) => SyncCore, channelsC
 async function main() {
   const args = process.argv.slice(2), outIdx = args.indexOf('--out')
   const outDir = outIdx >= 0 && args[outIdx + 1] ? resolve(args[outIdx + 1]) : ''
-  if (!outDir) { console.error('Usage: node --expose-gc web/scripts/measure-wasm-core.ts --core wasm|ts|main-ts --out <dir> [--smoke]'); process.exit(1) }
+  if (!outDir) { console.error('Usage: node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --out <dir> [--smoke]'); process.exit(1) }
   if (args.includes('--aggregate')) { console.log(aggregateDirectory(outDir).markdownTable); return }
 
-  const coreIdx = args.indexOf('--core'), coreKind = (coreIdx >= 0 ? args[coreIdx + 1] : 'wasm') as 'wasm' | 'ts' | 'main-ts'
-  if (!['wasm', 'ts', 'main-ts'].includes(coreKind)) throw new Error(`--core must be wasm, ts, or main-ts (got ${coreKind})`)
+  const coreIdx = args.indexOf('--core'), coreKind = (coreIdx >= 0 ? args[coreIdx + 1] : 'wasm') as 'wasm'
+  if (coreKind !== 'wasm') throw new Error(`--core must be wasm (got ${coreKind}); use the historical checkout for TS measurements`)
   const smoke = args.includes('--smoke'), armIdx = args.indexOf('--arm')
-  const arm: Arm = (armIdx >= 0 ? args[armIdx + 1] : coreKind === 'main-ts' ? 'B' : coreKind === 'wasm' ? 'W' : 'R') as Arm
+  const arm: Arm = (armIdx >= 0 ? args[armIdx + 1] : 'W') as Arm
 
   mkdirSync(outDir, { recursive: true })
   const roundIdx = args.indexOf('--round')
@@ -343,26 +305,21 @@ async function main() {
   if (roundIdx < 0) while (existsSync(join(outDir, `round-${round}-${coreKind}.jsonl`))) round++
   const outFile = join(outDir, `round-${round}-${coreKind}.jsonl`)
 
-  const virtualMainTsUrl = pathToFileURL(resolve(webDir, 'src/__virtual_main_ts_core__.js')).href
-  const useVirtualMainTs = coreKind === 'main-ts' || (coreKind === 'ts' && !existsSync(resolve(webDir, 'src/core-ts.ts')))
-  const syncCoreTargetUrl = coreKind === 'wasm' ? pathToFileURL(resolve(webDir, 'src/core-wasm.ts')).href
-    : useVirtualMainTs ? virtualMainTsUrl : pathToFileURL(resolve(webDir, 'src/core-ts.ts')).href
+  const syncCoreTargetUrl = pathToFileURL(resolve(webDir, 'src/core-wasm.ts')).href
 
   registerHooks({
     resolve(specifier, context, nextResolve) {
+      if (specifier === './core-values') return { url: pathToFileURL(resolve(webDir, 'scripts/core-test-values.ts')).href, shortCircuit: true }
       if (specifier === '#sync-core') return { url: syncCoreTargetUrl, shortCircuit: true }
       if ((specifier.startsWith('./') || specifier.startsWith('../')) && context.parentURL) {
         const base = dirname(fileURLToPath(context.parentURL))
+        if (specifier.endsWith('.js') && existsSync(resolve(base, specifier.slice(0, -3) + '.ts'))) return nextResolve(pathToFileURL(resolve(base, specifier.slice(0, -3) + '.ts')).href, context)
         for (const ext of ['', '.ts', '.js']) {
           const full = resolve(base, specifier + ext)
           if (existsSync(full)) return nextResolve(pathToFileURL(full).href, context)
         }
       }
       return nextResolve(specifier, context)
-    },
-    load(url, context, nextLoad) {
-      if (url === virtualMainTsUrl) return { format: 'module', shortCircuit: true, source: MAIN_TS_CORE_SOURCE }
-      return nextLoad(url, context)
     },
   })
 
@@ -376,8 +333,7 @@ async function main() {
   const releaseCores = async () => {
     if (typeof global.gc === 'function') { global.gc(); await delay(0); global.gc(); await delay(0) }
   }
-  const createSelectedCore: (selfId: string) => SyncCore = useVirtualMainTs ? createMainTsCore
-    : ((await import(syncCoreTargetUrl)) as { createCore: (selfId: string) => SyncCore }).createCore
+  const createSelectedCore: (selfId: string) => SyncCore = ((await import(syncCoreTargetUrl)) as { createCore: (selfId: string) => SyncCore }).createCore
 
   const jsonLines: string[] = [], emit = (record: Record<string, unknown>) => jsonLines.push(JSON.stringify(record))
   emit({ type: 'meta', arm, core: coreKind, round, smoke, nodeVersion: process.version, timestamp: new Date().toISOString() })
@@ -601,7 +557,8 @@ async function main() {
     }
   }
 
-  const mixedTraces = buildMixedTraces()
+  const driver = await import('../src/protocol-driver.ts')
+  const mixedTraces = buildMixedTraces(driver)
   const totalTraceSteps = mixedTraces.reduce((acc, t) => acc + t.inputs.length, 0)
   if (totalTraceSteps <= 6000) throw new Error(`Expected >6000 trace steps, got ${totalTraceSteps}`)
   { const warmCore = createSelectedCore(SELF_UUID); for (const input of mixedTraces[0].inputs.slice(0, warmupSteps)) warmCore.step(input) }

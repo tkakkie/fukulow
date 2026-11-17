@@ -1,21 +1,43 @@
 use fukulow_client_core::{Core, StepInput};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeSet,
-    error::Error,
-    fs,
-    io::{BufRead, BufReader},
-    path::PathBuf,
-    process::Command,
-};
+use std::{collections::BTreeSet, error::Error, fs, path::PathBuf};
 use uuid::Uuid;
 
 #[derive(Deserialize)]
 struct TraceStep {
     trace: String,
-    input: Value,
-    expected: Value,
+    input: usize,
+    expected: usize,
+}
+
+#[derive(Deserialize)]
+struct Contract {
+    values: Vec<Value>,
+    steps: Vec<TraceStep>,
+}
+
+// Container children index earlier values; scalars are literal JSON. The shared table
+// losslessly stores the original TS oracle, including metadata and effect ordering.
+fn expand(values: &[Value], index: usize) -> Result<Value, Box<dyn Error>> {
+    let value = values.get(index).ok_or("missing contract value")?;
+    let child = |v: &Value| -> Result<Value, Box<dyn Error>> {
+        let id = usize::try_from(v.as_u64().ok_or("invalid contract reference")?)?;
+        if id >= index {
+            return Err("contract references must point to earlier values".into());
+        }
+        expand(values, id)
+    };
+    Ok(match value {
+        Value::Array(items) => Value::Array(items.iter().map(child).collect::<Result<_, _>>()?),
+        Value::Object(items) => Value::Object(
+            items
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), child(v)?)))
+                .collect::<Result<_, Box<dyn Error>>>()?,
+        ),
+        scalar => scalar.clone(),
+    })
 }
 
 fn difference(actual: &Value, expected: &Value, path: &str) -> Option<String> {
@@ -61,27 +83,11 @@ fn comparison_rejects_missing_metadata_state_and_changed_effect_order() {
 }
 
 #[test]
-fn live_typescript_fixtures_and_seeded_sequences_match_every_step() -> Result<(), Box<dyn Error>> {
+fn recorded_fixtures_and_seeded_sequences_match_every_step() -> Result<(), Box<dyn Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    let path =
-        std::env::temp_dir().join(format!("fukulow-core-traces-{}.jsonl", std::process::id()));
-    let output = Command::new("npm")
-        .current_dir(&root)
-        .args([
-            "--prefix",
-            "web",
-            "test",
-            "--",
-            "src/client-core-traces.test.ts",
-        ])
-        .env("CLIENT_CORE_TRACE_FILE", &path)
-        .output()?;
-    assert!(
-        output.status.success(),
-        "TS reference failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let contract: Contract = serde_json::from_str(&fs::read_to_string(
+        root.join("contract/realtime/core-traces.json"),
+    )?)?;
     let mut trace_count = 0;
     let mut current_trace = String::new();
     let mut core = Core::new(Uuid::nil());
@@ -89,11 +95,13 @@ fn live_typescript_fixtures_and_seeded_sequences_match_every_step() -> Result<()
     let mut tokens = BTreeSet::new();
     let mut index = 0;
     let mut count = 0;
-    // Read one step at a time: neither test process needs all Channel snapshots in memory.
-    for line in BufReader::new(fs::File::open(&path)?).lines() {
-        let step: TraceStep = serde_json::from_str(&line?)?;
+    let mut counts = std::collections::BTreeMap::new();
+    for step in contract.steps {
+        let expected = expand(&contract.values, step.expected)?;
+        let raw_input = expand(&contract.values, step.input)?;
+        *counts.entry(step.trace.clone()).or_insert(0) += 1;
         if step.trace != current_trace {
-            let initial: Uuid = serde_json::from_value(step.expected["session"]["selfId"].clone())?;
+            let initial: Uuid = serde_json::from_value(expected["session"]["selfId"].clone())?;
             core = Core::new(initial);
             current_trace = step.trace;
             channels.clear();
@@ -102,7 +110,7 @@ fn live_typescript_fixtures_and_seeded_sequences_match_every_step() -> Result<()
             trace_count += 1;
         }
         index += 1;
-        let input: StepInput = serde_json::from_value(step.input.clone())?;
+        let input: StepInput = serde_json::from_value(raw_input.clone())?;
         let result = core.step(input);
         for id in &result.changed_channels {
             channels.insert(*id);
@@ -130,22 +138,28 @@ fn live_typescript_fixtures_and_seeded_sequences_match_every_step() -> Result<()
                 observed["timers"][token.to_string()] = serde_json::to_value(timer)?;
             }
         }
-        let mismatch = difference(&observed, &step.expected, "step");
+        let mismatch = difference(&observed, &expected, "step");
         assert!(
             mismatch.is_none(),
             "{} step {} input {}: {}",
             current_trace,
             index,
-            step.input,
+            raw_input,
             mismatch.unwrap_or_default()
         );
         count += 1;
     }
-    fs::remove_file(path)?;
-    assert!(trace_count > 4);
-    assert!(count > 6000);
+    assert_eq!(trace_count, 66);
+    assert_eq!(count, 9170);
+    assert_eq!(
+        counts.get("retention-ranges-and-reference-identity"),
+        Some(&923)
+    );
+    for (seed, steps) in [(1_u64, 1907), (42, 1907), (464, 1907), (0xdeadbeef, 1911)] {
+        assert_eq!(counts.get(&format!("generated-{seed}")), Some(&steps));
+    }
     println!(
-        "Matched {trace_count} live TS traces, {count} steps ({} core fixtures, retention/identity, four seeds)",
+        "Matched {trace_count} recorded contract traces, {count} steps ({} core fixtures, retention/identity, four seeds)",
         trace_count - 5
     );
     Ok(())

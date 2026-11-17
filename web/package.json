@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "wasm": "node ../scripts/build-wasm.ts",
-    "dev": "node ../scripts/build-wasm.ts --unless-ts && vite",
-    "prebuild": "node ../scripts/build-wasm.ts --unless-ts",
+    "dev": "node ../scripts/build-wasm.ts && vite",
+    "prebuild": "node ../scripts/build-wasm.ts",
     "build": "vite build",
     "preview": "vite preview",
     "precheck": "npm run wasm",
