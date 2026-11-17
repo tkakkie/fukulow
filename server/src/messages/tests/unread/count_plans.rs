@@ -361,7 +361,7 @@ async fn unread_topic_mentions_scan_channel_set_once(pool: PgPool) {
                     work.loops, work.buffers
                 );
                 // Each of the two scopes may scan the Member's Channel set once.
-                // The buffer allowance covers that set's index pages, not 100
+                // The buffer allowance covers those index pages once, not 100
                 // repeated scans, and never depends on wall-clock timing.
                 let bounded = work.loops <= 2.0 && work.buffers <= 256;
                 if arm == "old" {
