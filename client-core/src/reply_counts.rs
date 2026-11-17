@@ -40,6 +40,10 @@ pub enum CountInput {
         id: String,
         seq: i64,
     },
+    Seed {
+        root: String,
+        seq: i64,
+    },
     Invalidate {
         root: String,
         seq: i64,
@@ -127,6 +131,15 @@ impl ReplyCounts {
                     }
                 }
             }
+            CountInput::Seed { root, seq } => {
+                if let Some(r) = self.roots.get_mut(&root)
+                    && seq >= r.floor
+                    && r.baseline.is_none_or(|(w, _)| seq >= w)
+                {
+                    r.baseline = Some((seq, 0));
+                    r.evidence.retain(|_, evidence_seq| *evidence_seq > seq);
+                }
+            }
             CountInput::Create { root, id, seq } => {
                 if let Some(r) = self.roots.get_mut(&root)
                     && seq > r.floor
@@ -188,5 +201,115 @@ impl ReplyCounts {
                 .collect(),
             tickets: self.roots.iter().map(ticket).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(core: &mut ReplyCounts, roots: &[&str]) -> Vec<CountTicket> {
+        core.step(CountInput::Track {
+            roots: roots.iter().map(|id| (*id).to_owned()).collect(),
+        })
+        .tickets
+    }
+    fn create(core: &mut ReplyCounts, root: &str, seq: i64) {
+        core.step(CountInput::Create {
+            root: root.to_owned(),
+            id: format!("m{seq}"),
+            seq,
+        });
+    }
+    fn install(core: &mut ReplyCounts, ticket: &CountTicket, watermark: i64, count: i64) {
+        core.step(CountInput::Install {
+            ticket: ticket.clone(),
+            watermark,
+            count,
+        });
+    }
+
+    #[test]
+    fn baselines_reconcile_unique_suffix_and_never_rewind() {
+        let mut core = ReplyCounts::default();
+        let ticket = track(&mut core, &["r"])[0].clone();
+        create(&mut core, "r", 11);
+        create(&mut core, "r", 12);
+        create(&mut core, "r", 12);
+        install(&mut core, &ticket, 10, 4);
+        assert_eq!(core.view().counts["r"], Some(6));
+        install(&mut core, &ticket, 11, 5);
+        install(&mut core, &ticket, 9, 999);
+        create(&mut core, "r", 11);
+        assert_eq!(core.view().counts["r"], Some(6));
+    }
+
+    #[test]
+    fn overflow_floors_and_reset_fence_stale_tickets() {
+        let mut core = ReplyCounts::default();
+        let ticket = track(&mut core, &["r"])[0].clone();
+        for seq in 1..=401 {
+            create(&mut core, "r", seq);
+        }
+        let next = core.view().needed[0].clone();
+        assert_ne!(ticket.generation, next.generation);
+        install(&mut core, &ticket, 500, 500);
+        install(&mut core, &next, 400, 400);
+        assert_eq!(core.view().counts["r"], None);
+        for seq in 1..=401 {
+            create(&mut core, "r", seq);
+        }
+        create(&mut core, "r", 402);
+        install(&mut core, &next, 401, 401);
+        assert_eq!(core.view().counts["r"], Some(402));
+        let reset = core.step(CountInput::Reset).needed[0].clone();
+        install(&mut core, &next, 1000, 1000);
+        assert_eq!(core.view().counts["r"], None);
+        install(&mut core, &reset, 1, 7);
+        assert_eq!(core.view().counts["r"], Some(7));
+    }
+
+    #[test]
+    fn mutation_and_eviction_fence_only_the_affected_root() {
+        let mut core = ReplyCounts::default();
+        let tickets = track(&mut core, &["r", "s"]);
+        core.step(CountInput::Begin {
+            tickets: tickets.clone(),
+        });
+        core.step(CountInput::Invalidate {
+            root: "r".to_owned(),
+            seq: 12,
+        });
+        install(&mut core, &tickets[0], 13, 999);
+        install(&mut core, &tickets[1], 10, 5);
+        assert_eq!(core.view().counts["r"], None);
+        assert_eq!(core.view().counts["s"], Some(5));
+        let next = core.view().needed[0].clone();
+        install(&mut core, &next, 11, 9);
+        assert_eq!(core.view().counts["r"], None);
+        install(&mut core, &next, 12, 4);
+        track(&mut core, &["s"]);
+        track(&mut core, &["s", "r"]);
+        install(&mut core, &next, 13, 999);
+        assert_eq!(core.view().counts["r"], None);
+        assert_eq!(core.view().counts["s"], Some(5));
+    }
+
+    #[test]
+    fn root_seed_keeps_unique_suffix_and_newer_authority() {
+        let mut core = ReplyCounts::default();
+        let ticket = track(&mut core, &["r"])[0].clone();
+        create(&mut core, "r", 12);
+        core.step(CountInput::Seed {
+            root: "r".to_owned(),
+            seq: 10,
+        });
+        assert_eq!(core.view().counts["r"], Some(1));
+        install(&mut core, &ticket, 13, 4);
+        core.step(CountInput::Seed {
+            root: "r".to_owned(),
+            seq: 10,
+        });
+        assert_eq!(core.view().counts["r"], Some(4));
     }
 }

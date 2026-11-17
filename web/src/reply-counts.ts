@@ -10,7 +10,7 @@ import type { Topics } from './topics'
 type Sync = ReturnType<typeof createSync>
 export type ReplyCountsApi = (channel: string, body: ReplyCountRequest, signal: AbortSignal) => Promise<Result<ReplyCountPage>>
 type Batch = { tickets: CountTicket[]; abort: AbortController; timeout: ReturnType<typeof setTimeout> }
-type Channel = { core: CountCore; view: CountView; batch?: Batch; retry?: ReturnType<typeof setTimeout>; attempt: number; stopped: boolean; expired: boolean }
+type Channel = { core: CountCore; view: CountView; roots: Set<string>; tickets: Map<string, number>; batch?: Batch; retry?: ReturnType<typeof setTimeout>; attempt: number; stopped: boolean; expired: Set<string>; blocked: Set<string>; omissions: Map<string, number> }
 const empty: Readonly<Record<string, number | null>> = Object.freeze({})
 
 /** I/O only: Rust owns authority, deduplication, floors and per-root generations. */
@@ -19,25 +19,31 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
 }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
-  let closed = false, session = 0, queued = false
-  const notify = () => listeners.forEach(l => l())
+  let closed = false, session = 0, queued = false, dirty = false
+  const notify = () => { if (dirty) { dirty = false; listeners.forEach(l => l()) } }
   const usable = (id: string) => {
     const s = sync.get(), c = s.channels[id]
     return !closed && s.running && s.organization === 'available' && c?.watched && c.state !== 'unavailable'
   }
-  const update = (c: Channel, input: CountInput) => { c.view = c.core.step(input) }
-  const valid = (c: Channel, t: CountTicket) => c.view.tickets.some(now => now.root === t.root && now.generation === t.generation)
+  const update = (c: Channel, input: CountInput) => {
+    const view = c.core.step(input), previous = c.view.counts
+    if (Object.keys(previous).length === Object.keys(view.counts).length && Object.entries(view.counts).every(([id, count]) => previous[id] === count)) view.counts = previous
+    else dirty = true
+    c.view = view; c.tickets = new Map(view.tickets.map(t => [t.root, t.generation]))
+  }
+  const valid = (c: Channel, t: CountTicket) => c.tickets.get(t.root) === t.generation
   const cancel = (c: Channel) => {
     if (c.batch) { clearTimeout(c.batch.timeout); c.batch.abort.abort(); update(c, { type: 'failed', tickets: c.batch.tickets }); c.batch = undefined }
   }
   const drop = (id: string, c: Channel) => {
     cancel(c); if (c.retry !== undefined) clearTimeout(c.retry)
-    c.core.free(); channels.delete(id)
+    c.core.free(); channels.delete(id); dirty = true
   }
-  const recover = (c: Channel) => {
+  const recover = (c: Channel, fresh = true) => {
     cancel(c)
-    if (c.retry !== undefined) clearTimeout(c.retry)
-    c.retry = undefined; c.attempt = 0; c.stopped = false; c.expired = false
+    // Authority changes immediately; retry deadlines and attempts survive recoverable transitions.
+    c.stopped = false
+    if (fresh) { c.expired.clear(); c.blocked.clear(); c.omissions.clear() }
     update(c, { type: 'reset' })
   }
   const defer = () => {
@@ -58,38 +64,43 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
     }
     wait(ms)
   }
-  function reconcile() {
+  function reconcile(changed?: ReadonlySet<string>) {
     const s = sync.get()
     for (const [id, c] of channels) if (!usable(id)) drop(id, c)
-    for (const [id, state] of Object.entries(s.channels)) {
+    for (const id of changed ?? Object.keys(s.channels)) {
       if (!usable(id)) continue
+      const state = s.channels[id]
       const panel = sources.replies.get(id)
       const members: Iterable<Message>[] = [state.messages, ...sources.topics?.countMessages(id) ?? [], panel.messages, panel.anchor ? [panel.anchor] : []]
-      const roots = new Set<string>()
+      const roots = new Set<string>(panel.rootId ? [panel.rootId] : [])
       for (const source of members) for (const m of source) roots.add(m.reply_root_id ?? m.id)
-      if (panel.rootId) roots.add(panel.rootId)
       let c = channels.get(id)
       if (!c) {
         const core = createReplyCountCore()
-        channels.set(id, c = { core, view: core.step({ type: 'track', roots: [] }), attempt: 0, stopped: false, expired: false })
+        channels.set(id, c = { core, view: core.step({ type: 'track', roots: [] }), roots: new Set(), tickets: new Map(), attempt: 0, stopped: false, expired: new Set(), blocked: new Set(), omissions: new Map() })
       }
-      update(c, { type: 'track', roots: [...roots] })
-      if (c.batch?.tickets.some(t => !valid(c, t))) cancel(c)
+      if (roots.size !== c.roots.size || [...roots].some(root => !c.roots.has(root))) {
+        update(c, { type: 'track', roots: [...roots] })
+        for (const root of c.roots) if (!roots.has(root)) { c.expired.delete(root); c.blocked.delete(root); c.omissions.delete(root) }
+      }
+      c.roots = roots
     }
     notify(); defer()
   }
   function pump(id: string, c: Channel) {
-    if (!usable(id) || channels.get(id) !== c || !sync.get().connected || c.batch || c.retry !== undefined || c.stopped) return
-    const tickets = c.view.needed.slice(0, 100)
+    const state = sync.get().channels[id]
+    if (!usable(id) || channels.get(id) !== c || !sync.get().connected || state.cursor === null || !state.subscription?.confirmed || c.batch || c.retry !== undefined || c.stopped) return
+    const needed = new Map(c.view.needed.map(t => [t.root, t]))
+    const tickets = [...c.roots].flatMap(root => { const t = needed.get(root); return t && !c.blocked.has(root) ? [t] : [] }).slice(0, 100)
     if (!tickets.length) return
     update(c, { type: 'begin', tickets })
-    const abort = new AbortController(), account = session, { historyEpoch, historyGeneration } = sync.get()
+    const abort = new AbortController(), account = session, { historyGeneration } = sync.get()
     const batch: Batch = { tickets, abort, timeout: setTimeout(() => {
       if (c.batch !== batch) return
       cancel(c); backoff(c); notify()
     }, options.requestTimeoutMs ?? 30_000) }
     c.batch = batch
-    const current = () => !closed && channels.get(id) === c && c.batch === batch && usable(id) && sync.get().historyEpoch === historyEpoch
+    const current = () => !closed && channels.get(id) === c && c.batch === batch && usable(id)
     void Promise.resolve().then(() => current() ? options.api(id, { ids: tickets.map(t => t.root), history_generation: historyGeneration }, abort.signal) : { ok: false, kind: 'network' } as const)
       .catch((): Result<ReplyCountPage> => ({ ok: false, kind: 'network' }))
       .then(result => {
@@ -103,17 +114,30 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
         clearTimeout(batch.timeout); c.batch = undefined
         update(c, { type: 'failed', tickets })
         if (result.ok) {
-          c.expired = false
+          const rows = new Map(result.data.counts.filter(row => row.root_id === row.message_id).map(row => [row.message_id, row]))
           for (const t of tickets) {
-            const row = result.data.counts.find(row => row.message_id === t.root && row.root_id === t.root)
-            if (row) update(c, { type: 'install', ticket: t, watermark: result.data.as_of_seq, count: row.reply_count })
+            if (!valid(c, t)) continue
+            const row = rows.get(t.root)
+            if (row) {
+              update(c, { type: 'install', ticket: t, watermark: result.data.as_of_seq, count: row.reply_count })
+              if (c.view.counts[t.root] !== null) c.expired.delete(t.root)
+              c.omissions.delete(t.root)
+            } else {
+              const misses = (c.omissions.get(t.root) ?? 0) + 1
+              c.omissions.set(t.root, misses)
+              if (misses >= 2) c.blocked.add(t.root)
+            }
           }
           // Omitted anchors remain unresolved; an insufficient W never gains authority.
-          if (tickets.some(t => valid(c, t) && c.view.counts[t.root] === null)) backoff(c)
+          if (tickets.some(t => !c.blocked.has(t.root) && valid(c, t) && c.view.counts[t.root] === null)) backoff(c)
           else c.attempt = 0
         } else if (result.kind === 'http' && result.status === 409 && result.error === 'snapshot_expired') {
-          const repeated = c.expired
-          recover(c); c.expired = true; c.stopped = repeated
+          for (const t of tickets) {
+            if (!valid(c, t)) continue
+            if (c.expired.has(t.root)) c.blocked.add(t.root)
+            c.expired.add(t.root)
+          }
+          recover(c, false)
         } else if (result.kind === 'http' && [403, 404].includes(result.status)) {
           void sync.channelUnavailable(id)
         } else if (result.kind === 'network' || (result.kind === 'http' && (result.status >= 500 || result.status === 429))) backoff(c, result.retryAfterMs)
@@ -125,7 +149,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
     if (input.type === 'session_replaced' || input.type === 'session_start') {
       session++; for (const [id, c] of channels) drop(id, c)
     }
-    reconcile()
+    reconcile(result.changedChannels)
     const after = sync.get()
     for (const [id, c] of channels) {
       const old = before.channels[id], now = after.channels[id]
@@ -148,10 +172,10 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       if (event.type !== 'message') continue
       const m = event.message, c = channels.get(m.channel_id)
       if (!c || (event.kind === 'create' && event.seq !== m.created_seq)) continue
-      const root = m.reply_root_id ?? m.id
+      const root = m.reply_root_id ?? m.id, cursor = before.channels[m.channel_id]?.cursor
       if (event.kind !== 'create' || m.deleted || m.version !== m.created_seq) update(c, { type: 'invalidate', root, seq: Math.max(event.seq, m.version) })
       else if (m.reply_root_id) update(c, { type: 'create', root, id: m.id, seq: event.seq })
-      if (c.batch?.tickets.some(t => !valid(c, t))) { cancel(c); backoff(c) }
+      else if (cursor != null && event.seq > cursor) update(c, { type: 'seed', root, seq: event.seq })
     }
     notify(); defer()
   })

@@ -8,5 +8,6 @@ export type CountInput =
   | { type: 'install'; ticket: CountTicket; watermark: number; count: number }
   | { type: 'create'; root: string; id: string; seq: number }
   | { type: 'invalidate'; root: string; seq: number }
+  | { type: 'seed'; root: string; seq: number }
 export type CountView = { counts: Record<string, number | null>; needed: CountTicket[]; tickets: CountTicket[] }
 export type CountCore = { step(input: CountInput): CountView; free(): void }

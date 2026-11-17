@@ -83,3 +83,25 @@ it('mutation invalidation requires a covering snapshot without guessing mutation
   expect(install(core, next, 12, 4999).counts.r).toBe(4999)
   core.free()
 })
+
+it('new root seeds preserve newer baselines and reconcile only the unique Reply suffix', () => {
+  const { core, ticket } = tracked()
+  core.step(create(12))
+  expect(core.step({ type: 'seed', root: 'r', seq: 10 }).counts.r).toBe(1)
+  expect(install(core, ticket, 9, 999).counts.r).toBe(1)
+  expect(core.step(create(12)).counts.r).toBe(1)
+  expect(install(core, ticket, 13, 4).counts.r).toBe(4)
+  expect(core.step({ type: 'seed', root: 'r', seq: 10 }).counts.r).toBe(4)
+  core.free()
+})
+
+it('root ticket ordering and generations are lexical regardless of tracking insertion order', () => {
+  const core = createReplyCountCore()
+  expect(core.step({ type: 'track', roots: ['z', 'b', 'a'] }).needed).toEqual([
+    { root: 'a', generation: 1 }, { root: 'b', generation: 2 }, { root: 'z', generation: 3 },
+  ])
+  expect(core.step({ type: 'reset' }).needed).toEqual([
+    { root: 'a', generation: 4 }, { root: 'b', generation: 5 }, { root: 'z', generation: 6 },
+  ])
+  core.free()
+})

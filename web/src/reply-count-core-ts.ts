@@ -10,19 +10,20 @@ export function createReplyCountCore(): CountCore {
     for (const [id, seq] of r.evidence) if (seq <= r.floor) r.evidence.delete(id)
   }
   const ticket = ([root, r]: [string, Root]): CountTicket => ({ root, generation: r.generation })
+  const entries = () => [...roots].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
   const view = (): CountView => ({
-    counts: Object.fromEntries([...roots].map(([id, r]) => [id, r.baseline ? r.baseline.count + r.evidence.size : null])),
-    needed: [...roots].filter(([, r]) => !r.baseline && !r.pending).map(ticket), tickets: [...roots].map(ticket),
+    counts: Object.fromEntries(entries().map(([id, r]) => [id, r.baseline ? r.baseline.count + r.evidence.size : null])),
+    needed: entries().filter(([, r]) => !r.baseline && !r.pending).map(ticket), tickets: entries().map(ticket),
   })
   return {
     free: () => roots.clear(),
     step(input) {
       if (input.type === 'track') {
-        const wanted = new Set(input.roots)
+        const wanted = new Set([...input.roots].sort())
         for (const id of roots.keys()) if (!wanted.has(id)) roots.delete(id)
         for (const id of wanted) if (!roots.has(id)) roots.set(id, fresh())
       } else if (input.type === 'reset') {
-        for (const id of roots.keys()) roots.set(id, fresh())
+        for (const [id] of entries()) roots.set(id, fresh())
       } else if (input.type === 'begin' || input.type === 'failed') {
         for (const t of input.tickets) { const r = roots.get(t.root); if (r?.generation === t.generation) r.pending = input.type === 'begin' }
       } else if (input.type === 'install') {
@@ -34,6 +35,12 @@ export function createReplyCountCore(): CountCore {
             for (const [id, seq] of r.evidence) if (seq <= input.watermark) r.evidence.delete(id)
           }
         }
+      } else if (input.type === 'seed') {
+        const r = roots.get(input.root)
+        if (r && input.seq >= r.floor && input.seq >= (r.baseline?.watermark ?? 0)) {
+          r.baseline = { watermark: input.seq, count: 0 }
+          for (const [id, seq] of r.evidence) if (seq <= input.seq) r.evidence.delete(id)
+        }
       } else {
         const r = roots.get(input.root)
         if (r && input.seq > r.floor && input.seq > (r.baseline?.watermark ?? 0)) {
@@ -42,7 +49,7 @@ export function createReplyCountCore(): CountCore {
         }
       }
       while ([...roots.values()].reduce((n, r) => n + r.evidence.size, 0) > 400) {
-        const oldest = [...roots.values()].filter(r => r.evidence.size).sort((a, b) => Math.min(...a.evidence.values()) - Math.min(...b.evidence.values()))[0]
+        const oldest = entries().map(([, r]) => r).filter(r => r.evidence.size).sort((a, b) => Math.min(...a.evidence.values()) - Math.min(...b.evidence.values()))[0]
         invalidate(oldest, Math.max(...oldest.evidence.values()))
       }
       return view()
