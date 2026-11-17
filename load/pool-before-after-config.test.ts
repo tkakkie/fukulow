@@ -2,6 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { allowanceSeconds, generatorConfig } from './pool-before-after-config.ts';
 
+test('no scenario preallocates fewer VUs than origin/main', () => {
+  // Verified from origin/main:load/pool-before-after-load.ts for PR #570.
+  const previous = {send:100,reads:50,signin:10,reader:10};
+  for (const smoke of [false,true]) for (const mixed of [false,true]) {
+    const {lanes,scenarios} = generatorConfig(smoke,mixed);
+    for (const lane of lanes) {
+      assert.ok(scenarios[lane.name].preAllocatedVUs >= previous[lane.exec as keyof typeof previous],
+        `${lane.name} (smoke=${smoke}, mixed=${mixed}) must retain its previous VU floor`);
+    }
+  }
+});
+
 test('every rate preallocates the startup allowance subject to unchanged caps', () => {
   assert.equal(allowanceSeconds,3);
   for (const smoke of [false,true]) for (const mixed of [false,true]) {
@@ -9,7 +21,8 @@ test('every rate preallocates the startup allowance subject to unchanged caps', 
     for (const lane of lanes) {
       const config = scenarios[lane.name];
       const cap = lane.exec === 'send' ? 2000 : lane.exec === 'reads' ? 1000 : 100;
-      assert.equal(config.preAllocatedVUs,Math.min(cap,Math.ceil(lane.rate*allowanceSeconds)));
+      const previous = lane.exec === 'send' ? 100 : lane.exec === 'reads' ? 50 : 10;
+      assert.equal(config.preAllocatedVUs,Math.min(cap,Math.max(previous,Math.ceil(lane.rate*allowanceSeconds))));
       assert.equal(config.maxVUs,cap);
       assert.ok(config.preAllocatedVUs <= cap);
       // A three-second allowance cannot fit at every rate under the old caps.
@@ -26,9 +39,9 @@ test('every rate preallocates the startup allowance subject to unchanged caps', 
 
 type Scenarios = ReturnType<typeof generatorConfig>['scenarios'];
 
-// k6 constant-arrival-rate reserves planned VUs through duration + gracefulStop.
-// Equal-time transitions follow scenario order (startTime, then name), so an
-// earlier step releases its VUs before the next step reserves them.
+// Compute the planned peak over duration + gracefulStop, processing equal-time
+// events in scenario order (startTime, then name). This does not assert when
+// k6 actually initializes or releases VUs at a step boundary.
 function peakPlannedVUs(scenarios:Scenarios) {
   const ordered = Object.entries(scenarios).sort(([an,a],[bn,b])=>
     parseFloat(a.startTime)-parseFloat(b.startTime) || an.localeCompare(bn));
@@ -50,8 +63,8 @@ test('peak initialized VUs are bounded for smoke/formal send/mixed execution pla
       preAllocatedVUs:s.exec==='send'?100:s.exec==='reads'?50:10}]));
     assert.equal(peakPlannedVUs(original),mixed ? 100+50+10+10 : 100+10);
     assert.equal(peakPlannedVUs(fullCaps),mixed ? 2000+1000+100+100 : 2000+100);
-    assert.equal(peakPlannedVUs(scenarios),smoke ? (mixed ? 150+1000+60+6 : 150+6) :
-      (mixed ? 2000+1000+60+6 : 2000+6));
+    assert.equal(peakPlannedVUs(scenarios),smoke ? (mixed ? 150+1000+60+10 : 150+10) :
+      (mixed ? 2000+1000+60+10 : 2000+10));
   }
 });
 
@@ -59,7 +72,7 @@ test('peak calculation includes graceful-stop overlaps rather than only active a
   const {scenarios} = generatorConfig(false,false);
   // Moving step 2 one second earlier creates a real overlap with step 1's drain.
   scenarios.step_2_send.startTime='70s';
-  assert.equal(peakPlannedVUs(scenarios),750+1500+6);
+  assert.equal(peakPlannedVUs(scenarios),750+1500+10);
 });
 
 test('measured schedules, drains, rates and executors remain unchanged with no warm-up', () => {

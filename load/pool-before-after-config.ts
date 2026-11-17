@@ -18,8 +18,9 @@ export function generatorConfig(smoke = false, mixed = false) {
   lanes.push({name:'reader',rate:2,seconds:duration,start:0,exec:'reader'});
   const scenarios = Object.fromEntries(lanes.map(l => {
     const cap = l.exec === 'send' ? 2000 : l.exec === 'reads' ? 1000 : 100;
+    const previous = l.exec === 'send' ? 100 : l.exec === 'reads' ? 50 : 10;
     return [l.name, {executor:'constant-arrival-rate' as const,rate:l.rate,timeUnit:'1s',duration:`${l.seconds}s`,
-      startTime:`${l.start}s`,exec:l.exec,preAllocatedVUs:Math.min(cap,Math.ceil(l.rate*allowanceSeconds)),maxVUs:cap,gracefulStop:'11s'}];
+      startTime:`${l.start}s`,exec:l.exec,preAllocatedVUs:Math.min(cap,Math.max(previous,Math.ceil(l.rate*allowanceSeconds))),maxVUs:cap,gracefulStop:'11s'}];
   }));
   return {lanes,duration,scenarios};
 }
