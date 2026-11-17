@@ -6,6 +6,8 @@
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
+pub type Digest = sha2::digest::Output<sha2::Sha256>;
+
 /// Lifetime approved on #515. A receipt older than this is ignored and may be
 /// replaced. The retry is then a new request, and its stale `expected_version`
 /// keeps it from re-executing.
@@ -37,7 +39,8 @@ pub struct Operation {
     pub kind: Kind,
     pub channel: Uuid,
     pub target: Uuid,
-    pub intent: [u8; 32],
+    /// SHA-256 of the operation's canonical intent.
+    pub intent: Digest,
 }
 
 /// What the committed operation produced: the version it wrote, and whether

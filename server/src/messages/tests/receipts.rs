@@ -238,7 +238,7 @@ fn operation(actor: Uuid, channel: Uuid, target: Uuid) -> Operation {
         kind: Kind::Edit,
         channel,
         target,
-        intent: [7; 32],
+        intent: [7; 32].into(),
     }
 }
 
@@ -314,7 +314,7 @@ async fn operation_receipts_answer_same_intent_conflict_otherwise_and_expire_aft
             ..op
         },
         Operation {
-            intent: [8; 32],
+            intent: [8; 32].into(),
             ..op
         },
     ] {
