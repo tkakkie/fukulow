@@ -16,6 +16,7 @@ pub(super) mod authors;
 mod channel_log;
 mod dms_pool;
 mod mentions;
+mod receipts;
 mod text_input;
 pub(super) mod unread;
 

@@ -1,5 +1,5 @@
 {
-  "sha256": "90a056eddccf6da730fae4b261bf370c42eddbaa120041c8ee39ee4a8c10b015",
+  "sha256": "9b649cf9773b4926d28e2ef30d57fe74175d449c5d85bf9b560ee4694234e272",
   "frozen": {
     "version": 2,
     "date": "2026-11-17",
@@ -12,7 +12,7 @@
     "sourceHashes": [
       {
         "path": ".gitattributes",
-        "sha256": "69ecfaa44b82b1bcb16b53c6b1c6556ef0f4f9fe255898225e711aabf508a78b"
+        "sha256": "a184a6700775068cd31d269a481910dcd535b0a2b7944e9086264fedb8f485b4"
       },
       {
         "path": ".node-version",
@@ -229,6 +229,10 @@
       {
         "path": "server/migrations/202611170515_channel_log.sql",
         "sha256": "8fcb2c959e81b10ee283db3a7da67b9fbbd36f124d0fff35c2ae5c631109d69c"
+      },
+      {
+        "path": "server/migrations/202611180515_message_receipts.sql",
+        "sha256": "6806e4032e519ff56c9e414528d81a5a62ed33a3edc3df326bb1e91f1bdab29b"
       }
     ],
     "quality": {

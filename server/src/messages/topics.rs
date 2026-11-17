@@ -81,24 +81,6 @@ impl ListProjectionQuery {
     }
 }
 
-pub(super) async fn name_key<'e, E: sqlx::PgExecutor<'e>>(
-    executor: E,
-    organization: Uuid,
-    topic: Option<Uuid>,
-) -> Result<Option<String>, sqlx::Error> {
-    match topic {
-        None => Ok(None),
-        Some(topic) => {
-            sqlx::query_scalar("SELECT name_key FROM topics WHERE organization_id = $1 AND id = $2")
-                .bind(organization)
-                .bind(topic)
-                .fetch_one(executor)
-                .await
-                .map(Some)
-        }
-    }
-}
-
 pub(super) async fn join(
     connection: &mut sqlx::PgConnection,
     organization: Uuid,

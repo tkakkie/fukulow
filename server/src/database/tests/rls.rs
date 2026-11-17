@@ -4,7 +4,7 @@ use crate::database;
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-const TABLES: [&str; 12] = [
+const TABLES: [&str; 13] = [
     "organizations",
     "users",
     "channels",
@@ -12,6 +12,7 @@ const TABLES: [&str; 12] = [
     "channel_message_sequences",
     "messages",
     "channel_log",
+    "operation_receipts",
     "message_mentions",
     "topics",
     "channel_read_positions",
@@ -52,6 +53,7 @@ async fn tenant(admin: &PgPool) -> Tenant {
         "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) VALUES ($1, $4, $5, 'topic', 1, 1, 1)",
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id) VALUES ($1, gen_random_uuid(), $4, 1, $3, gen_random_uuid(), 'hello', $5)",
         "INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages WHERE organization_id=$1 AND channel_id=$4",
+        "INSERT INTO operation_receipts (organization_id,actor,operation_id,kind,channel_id,target_id,intent_digest,outcome_version,outcome_deleted) SELECT $1,$3,gen_random_uuid(),'edit',$4,id,sha256('intent'::bytea),1,false FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id) SELECT $1,$4,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO channel_read_positions (organization_id, channel_id, member_id, membership_revision, initial_seq, read_seq) SELECT $1, $4, $3, membership_revision, 0, 0 FROM users WHERE organization_id = $1 AND id = $3 ON CONFLICT DO NOTHING",
         "INSERT INTO topic_read_positions (organization_id, channel_id, member_id, topic_id, read_seq) VALUES ($1, $4, $3, $5, 0) ON CONFLICT DO NOTHING",
