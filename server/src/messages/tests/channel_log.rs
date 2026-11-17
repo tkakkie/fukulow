@@ -159,6 +159,27 @@ async fn channel_log_runtime_denies_update_delete_and_truncate_with_read_insert_
             "{sql}"
         );
     }
+    // Even with UPDATE/DELETE granted (grants step not yet run), RLS has no
+    // policy for them, so the log stays append-only.
+    sqlx::query("GRANT UPDATE, DELETE ON channel_log TO fukulow_sqlx_test_app")
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::database::organization(&app_pool, org, async |tx: &mut sqlx::PgConnection| {
+        for sql in [
+            "UPDATE channel_log SET kind=kind",
+            "DELETE FROM channel_log",
+        ] {
+            assert_eq!(
+                sqlx::query(sql).execute(&mut *tx).await?.rows_affected(),
+                0,
+                "{sql}"
+            );
+        }
+        Ok::<_, sqlx::Error>(())
+    })
+    .await
+    .unwrap();
     assert_eq!(positions(&pool, org, channel).await, [1]);
 }
 

@@ -44,9 +44,13 @@ fn page_sql(channel: usize, authorized: bool) -> String {
 
 fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<Message>, sqlx::Error> {
     let mut messages = Vec::with_capacity(rows.len());
+    let only = rows.len() == 1;
     for row in rows {
         let Some(position) = row.try_get::<Option<i64>, _>("event_seq")? else {
-            continue; // Authorized empty page's LEFT JOIN sentinel.
+            if only {
+                continue; // Authorized empty page's LEFT JOIN sentinel.
+            }
+            return Err(sqlx::Error::RowNotFound);
         };
         if after.checked_add(1) != Some(position)
             || row.try_get::<&str, _>("kind")? != "create"

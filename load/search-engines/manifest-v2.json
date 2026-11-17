@@ -1,5 +1,5 @@
 {
-  "sha256": "2fe5c02389370ca3942005e6ac70e5a0120b14e8fe677c1b6320cdf882e80463",
+  "sha256": "d106fcdbd6bc6f2b8278d2ff890b5fe44f1d1cfd78a03a540a01c9a8e060d4a0",
   "frozen": {
     "version": 2,
     "date": "2026-11-17",
@@ -228,7 +228,7 @@
       },
       {
         "path": "server/migrations/202611170515_channel_log.sql",
-        "sha256": "3cef8b1ee40dc57952a471e0686354d5957713bd1c0dad2db839ec88fc6898fc"
+        "sha256": "8fcb2c959e81b10ee283db3a7da67b9fbbd36f124d0fff35c2ae5c631109d69c"
       }
     ],
     "quality": {

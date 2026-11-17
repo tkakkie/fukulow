@@ -19,6 +19,9 @@ INSERT INTO channel_log (organization_id, channel_id, event_seq, kind, message_i
     SELECT organization_id, channel_id, seq, 'create', id, sender, client_message_id FROM messages;
 
 ALTER TABLE channel_log ENABLE ROW LEVEL SECURITY;
-CREATE POLICY org_isolation ON channel_log FOR ALL
-    USING (organization_id = fukulow_current_org())
+-- Append-only even if the separate grants step has not run yet: with no
+-- UPDATE or DELETE policy, those statements match no rows.
+CREATE POLICY org_read ON channel_log FOR SELECT
+    USING (organization_id = fukulow_current_org());
+CREATE POLICY org_append ON channel_log FOR INSERT
     WITH CHECK (organization_id = fukulow_current_org());
