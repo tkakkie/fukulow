@@ -886,7 +886,7 @@ it('drops a Create envelope whose seq differs from its created_seq', () => {
   const page = boot()
   page.event(103)
   const request = id(page.feed({ type: 'timer_elapsed', id: page.get().channels.A.wait! }), 'fetch_history')
-  const result = step(page.get(), { type: 'events_result', request, page: { has_more: false, events: [
+  const result = step(page.get(), { type: 'events_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: false, events: [
     { type: 'message', seq: 101, kind: 'create', message: record(102) },
     { type: 'message', seq: 102, kind: 'create', message: record(102) },
   ] } })
