@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { checkVersions } from './check-versions.ts'
+import { checkInventory, checkVersions, type Entry } from './check-versions.ts'
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
 const files = { rust: read('rust-toolchain.toml'), node: read('.node-version'),
@@ -92,4 +92,29 @@ test('wasm-bindgen library and locked CLI installs must agree', () => {
     assert.throws(() => checkVersions({ ...files, [name]: `${files[name]}\n      - run: cargo install wasm-bindgen-cli` }), /pinned form/)
   }
   assert.throws(() => checkVersions({ ...files, wasmBuild: files.wasmBuild.replaceAll("'--locked'", '') }), /must use --locked/)
+})
+
+const inventory: Entry[] = JSON.parse(read('versions.json')).entries
+
+test('inventory versions agree with their pinned files', () => {
+  checkInventory(inventory, read)
+})
+
+test('inventory rejects version drift, ambiguous patterns and missing components', () => {
+  const changed = (index: number, change: Partial<Entry>) => inventory.map((entry, at) => at === index ? { ...entry, ...change } : entry)
+  for (const index of inventory.keys()) {
+    assert.throws(() => checkInventory(changed(index, { version: '0.0.0-drift' }), read), /version must agree/)
+  }
+  const rust = inventory.findIndex(entry => entry.component === 'Rust')
+  assert.throws(() => checkInventory(inventory, path => path === 'rust-toolchain.toml' ? 'channel = "0.0.1"\n' : read(path)), /version must agree/)
+  assert.throws(() => checkInventory(changed(rust, { pattern: '"' }), read), /exactly once/)
+  assert.throws(() => checkInventory(changed(rust, { pattern: 'no such pin (\\S+)' }), read), /exactly once/)
+  assert.throws(() => checkInventory(inventory.filter(entry => entry.component !== 'k6'), read), /must cover k6/)
+  assert.throws(() => checkInventory([...inventory, inventory[0]], read), /unique/)
+  assert.throws(() => checkInventory(changed(rust, { support: 'soon' }), read), /support must be/)
+  assert.throws(() => checkInventory(changed(rust, { updates: 'renovate' }), read), /unknown updates/)
+  assert.throws(() => checkInventory(changed(rust, { class: 'minor' }), read), /unknown update class/)
+  assert.throws(() => checkInventory(changed(rust, { latest: undefined }), read), /weekly-check entries/)
+  const caddy = inventory.findIndex(entry => entry.component === 'Caddy')
+  assert.throws(() => checkInventory(changed(caddy, { latest: { github: 'caddyserver/caddy' } }), read), /weekly-check entries/)
 })

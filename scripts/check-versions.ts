@@ -1,6 +1,32 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
+export type Entry = {
+  component: string, version: string, file: string, pattern: string, support: string,
+  updates: string, class: string, cycle?: string, endoflife?: string,
+  latest?: { endoflife: string, lts?: boolean } | { github: string },
+}
+
+export const requiredComponents = ['Rust', 'Node.js', 'PostgreSQL', 'Debian runtime base', 'Caddy', 'nginx', 'k6',
+  'wasm-bindgen-cli', 'Playwright', 'axum', 'tokio', 'sqlx', 'Svelte', 'Vite', 'TypeScript']
+
+// versions.json (#512): every entry names the version pinned in its file; one capture of `pattern` must equal it.
+export function checkInventory(entries: Entry[], read: (path: string) => string): void {
+  const names = entries.map(entry => entry.component)
+  assert.equal(new Set(names).size, names.length, 'inventory components must be unique')
+  for (const name of requiredComponents) assert.ok(names.includes(name), `inventory must cover ${name}`)
+  for (const entry of entries) {
+    const at = `inventory ${entry.component}`
+    assert.ok(['dependabot', 'weekly-check', 'manual'].includes(entry.updates), `${at}: unknown updates source`)
+    assert.ok(['security', 'patch-minor', 'toolchain', 'major', 'manual-major'].includes(entry.class), `${at}: unknown update class`)
+    assert.match(entry.support, /^(latest only|\d{4}-\d{2}-\d{2})$/, `${at}: support must be a date or "latest only"`)
+    assert.equal(entry.updates === 'weekly-check', entry.latest !== undefined, `${at}: weekly-check entries, and only they, name a latest source`)
+    const found = [...read(entry.file).matchAll(new RegExp(entry.pattern, 'gm'))]
+    assert.equal(found.length, 1, `${at}: pattern must match ${entry.file} exactly once`)
+    assert.equal(found[0][1], entry.version, `${at}: version must agree with ${entry.file}`)
+  }
+}
+
 export function checkVersions(files: {
   rust: string, node: string, webNode: string, loadNode: string, dockerfile: string,
   playwright: string, webLock: string, e2e: string,
@@ -66,4 +92,5 @@ if (import.meta.main) {
     playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
     webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
     compose: read('compose.yml'), acme: read('scripts/compose-acme.ts'), core: read('client-core/Cargo.toml'), wasmBuild: read('scripts/build-wasm.ts'), ci: read('.github/workflows/ci.yml') })
+  checkInventory(JSON.parse(read('versions.json')).entries, read)
 }
