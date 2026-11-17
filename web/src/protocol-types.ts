@@ -20,7 +20,7 @@ export type ChannelState = {
   messages: Message[]
   versions: Record<string, [number, boolean, number]>
   retiredVersions: { start: number; end: number }[]
-  versionFloor: number
+  retiredThrough?: number
   versionEpoch: number
   /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
   advancing: { start: number; end: number }[]

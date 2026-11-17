@@ -857,3 +857,34 @@ it('periodic access reconciliation replaces unwatched baselines even when the ne
   expect(c.unread.get('A').generation).not.toBe(generation)
   await c.sync.close()
 })
+
+it('refetches baseline W100 for Message90 mutations v101', async () => {
+  for (const change of ['delete', 'remove mention', 'add mention'] as const) {
+    const c = unreadClient()
+    const mentions = change === 'add mention' ? [] : [{ member_id: 'me', name: 'Me' }]
+    await c.boot()
+    c.event({ ...msg(90), mentions }); await flush()
+    c.rows[0] = row({ as_of_seq: 100, main_unread_count: 1, unread_count: 1,
+      main_mention_unread_count: mentions.length, mention_unread_count: mentions.length })
+    await c.unread.refresh()
+    expect(c.unread.get('A').main.mentionUnreadCount).toBe(mentions.length)
+    const pending = deferred<Result<ChannelList>>()
+    c.unreadApi.listChannels.mockReturnValueOnce(pending.promise)
+    const calls = c.unreadApi.listChannels.mock.calls.length
+    const message = { ...msg(90), version: 101, deleted: change === 'delete',
+      mentions: change === 'add mention' ? [{ member_id: 'me', name: 'Me' }] : [] }
+    c.handlers.at(-1)!.onEvent({ type: 'message', seq: 101, kind: change === 'delete' ? 'delete' : 'edit', message })
+    await flush()
+    expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(calls + 1)
+    expect(c.unread.get('A').main.unreadCount).toBeNull()
+    expect(c.unread.get('A').main.mentionUnreadCount).toBeNull()
+    expect(scopeCount({ asOfSeq: 100, readSeq: 0, count: 1, mentionCount: mentions.length }, 0, [message], main, 'me')).toBeNull()
+    pending.resolve(ok({ channels: [row({ as_of_seq: 101, unread_count: change === 'delete' ? 0 : 1,
+      main_unread_count: change === 'delete' ? 0 : 1, mention_unread_count: change === 'add mention' ? 1 : 0,
+      main_mention_unread_count: change === 'add mention' ? 1 : 0 })] }))
+    await flush()
+    expect(c.unread.get('A').main.unreadCount).toBe(change === 'delete' ? 0 : 1)
+    expect(c.unread.get('A').main.mentionUnreadCount).toBe(change === 'add mention' ? 1 : 0)
+    await c.sync.close()
+  }
+})

@@ -102,7 +102,8 @@ pub struct ChannelView {
     pub cursor: Option<i64>,
     pub messages: Rc<Vec<Rc<Message>>>,
     pub versions: Rc<std::collections::BTreeMap<Uuid, (i64, bool, i64)>>,
-    pub version_floor: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired_through: Option<i64>,
     pub retired_versions: Rc<Vec<Range>>,
     pub version_epoch: Token,
     pub advancing: Rc<Vec<Range>>,
@@ -139,7 +140,7 @@ impl Default for ChannelView {
             cursor: None,
             messages: Rc::default(),
             versions: Rc::default(),
-            version_floor: 0,
+            retired_through: None,
             retired_versions: Rc::default(),
             version_epoch: 0,
             advancing: Rc::default(),
@@ -168,7 +169,7 @@ impl ChannelView {
             && Rc::ptr_eq(&self.messages, &other.messages)
             && Rc::ptr_eq(&self.versions, &other.versions)
             && Rc::ptr_eq(&self.retired_versions, &other.retired_versions)
-            && self.version_floor == other.version_floor
+            && self.retired_through == other.retired_through
             && self.version_epoch == other.version_epoch
             && Rc::ptr_eq(&self.pending, &other.pending)
             && Rc::ptr_eq(&self.advancing, &other.advancing)

@@ -23,10 +23,12 @@ export function chooseChannelBaseline<T extends AggregateBaseline>(old: T | unde
     main_mention_unread_count: Math.min(old.main_mention_unread_count, next.main_mention_unread_count) }
   return old
 }
-export function scopeCount(b: ScopeBaseline, position: number, records: Iterable<UnreadRecord>, scope: UnreadScope, self: string, mention = false): number {
+export function scopeCount(b: ScopeBaseline, position: number, records: Iterable<UnreadRecord>, scope: UnreadScope, self: string, mention = false): number | null {
   let count = mention ? b.mentionCount : b.count
   const seen = new Set<number>()
   for (const m of records) {
+    if (inScope(m, scope) && m.sender !== self && m.created_seq <= b.asOfSeq &&
+      (m.deleted || (m.version ?? m.created_seq) > m.created_seq) && (m.version ?? 0) > b.asOfSeq) return null
     if (m.deleted || !inScope(m, scope) || m.sender === self || (mention && !(m.mentions ?? []).some(target => target.member_id === self)) || seen.has(m.created_seq)) continue
     seen.add(m.created_seq)
     if (m.created_seq > b.readSeq && m.created_seq <= Math.min(position, b.asOfSeq)) count--

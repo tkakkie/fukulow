@@ -110,9 +110,20 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       !c.summaryReads.has(topic) && !c.summaryTimers.has(topic)) void refreshTopic(id, topic)
   }
   function collectRecord(c: Channel, m: Message): boolean {
-    if (m.sender === sync.get().selfId) return false
+    let invalidated = false
+    if (m.deleted || m.version > m.created_seq) {
+      const baselines = [c.main.baseline?.asOfSeq, c.aggregate?.as_of_seq, ...[...c.topics.values()].map(s => s.baseline?.asOfSeq)]
+      if (m.version > c.requiredBase && baselines.some(w => w !== undefined && m.created_seq <= w && m.version > w)) {
+        c.requiredBase = m.version
+        invalidated = true
+        if (!list && listTimer === undefined) void refresh()
+        for (const [topic, s] of c.topics) if (needsRecovery(c, s) &&
+          !c.summaryReads.has(topic) && !c.summaryTimers.has(topic)) void refreshTopic(m.channel_id, topic)
+      }
+    }
+    if (m.sender === sync.get().selfId) return invalidated
     const old = c.records.get(m.created_seq)
-    if (!needed(c, m) || (old?.id === m.id && ((old.version ?? 0) >= m.version || (old.deleted && !m.deleted)))) return false
+    if (!needed(c, m) || (old?.id === m.id && ((old.version ?? 0) >= m.version || (old.deleted && !m.deleted)))) return invalidated
     const { id, created_seq, channel_id, topic_id, sender, version, deleted } = m
     const mentions = (m.mentions ?? []).some(target => target.member_id === sync.get().selfId) ? [{ member_id: sync.get().selfId }] : []
     c.records.set(m.created_seq, { id, created_seq, channel_id, topic_id, sender, version, deleted, mentions })
@@ -256,7 +267,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const b = c.aggregate, main = count(id, c, null, c.records.values(), mention)
     if (!b || c.accepted < c.requiredAggregateAfter || b.as_of_seq < c.requiredBase || main === null) return null
     let topicPart = mention ? b.mention_unread_count - b.main_mention_unread_count : b.unread_count - b.main_unread_count
-    for (const m of c.records.values()) if (m.topic_id !== null && m.sender !== sync.get().selfId && m.created_seq > b.as_of_seq &&
+    for (const m of c.records.values()) if (!m.deleted && m.topic_id !== null && m.sender !== sync.get().selfId && m.created_seq > b.as_of_seq &&
       m.created_seq > (c.heldPositions.get(m.topic_id) ?? c.topics.get(m.topic_id)?.position ?? 0) &&
       (!mention || (m.mentions ?? []).some(target => target.member_id === sync.get().selfId))) topicPart++
     return main + topicPart

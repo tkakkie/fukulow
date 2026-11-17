@@ -4,6 +4,8 @@ Sending, admission, fan-out, removal, delivery, message body and drafts. Writing
 
 | Rule | Test |
 |---|---|
+| Event pages exclude tails above the shared committed watermark, including out-of-order commit visibility | `server/src/messages/tests/channel_log.rs::channel_event_pages_exclude_uncommitted_tail_until_shared_watermark_advances` |
+| Event pages deny ungranted Guests, DM nonparticipants of every Role, lost grants and Memberships; extracted authorization is rechecked | `server/src/messages/tests/channel_log.rs::channel_event_pages_deny_ungranted_public_guests_and_dm_nonparticipants_with_controls`, `server/src/messages/tests/channel_log.rs::channel_event_pages_recheck_extracted_authorization_after_access_and_membership_loss` |
 | Every committed send appends one scoped Create position; concurrent sends stay consecutive and duplicate retries append nothing | `server/src/messages/tests/channel_log.rs::channel_log_concurrent_sends_and_duplicate_retries_append_exactly_once`, `server/src/messages/tests/context.rs::conflict_lookup_topic_reply_and_mark_read_require_context` |
 | A failed COMMIT rolls back Message, Create log entry, Topic and counter together | `server/src/messages/tests/channel_log.rs::channel_log_failure_rolls_back_message_counter_and_topic` |
 | Log positions survive Message state deletion; replay and shared gap recovery hydrate current bodies and fail closed on missing state | `server/src/messages/tests/channel_log.rs::channel_log_reconciles_current_body_and_fails_closed_on_missing_state` |

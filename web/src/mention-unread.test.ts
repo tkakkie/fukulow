@@ -197,7 +197,7 @@ it('Unread replaces Mention evidence by version for edits and tombstones of the 
 it('a plain create below a retired mutation version floor still enters Unread', async () => {
   const c = client(); await c.boot()
   await c.sync.settleHistory('A', Array.from({ length: 1501 }, (_, i) => ({ ...msg(100 + i), version: 10_000 + i })))
-  expect(c.sync.get().channels.A.versionFloor).toBeGreaterThan(4)
+  expect(c.sync.get().channels.A.retiredVersions).toContainEqual({ start: 100, end: 100 })
   c.rows[0] = row({ as_of_seq: 1600, read_seq: 1600, main_unread_count: 0, unread_count: 0, main_mention_unread_count: 0, mention_unread_count: 0 })
   await c.unread.refresh()
   c.event(mentioned(1700)); await flush()

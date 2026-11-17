@@ -62,7 +62,7 @@ export function retentionClient() {
     async boot(messages: Message[] = [msg(1)]) {
       for (const id of ['T', 'U']) baselines.set(id, { asOfSeq: 0, summary: summary(id, 0, 0, 0) })
       state = { ...state, running: true, connected: true, channels: { A: { state: 'ready', watched: true, cursor: 0,
-        messages: [], versions: {}, retiredVersions: [], versionFloor: 0, versionEpoch: 0, advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 } } }
+        messages: [], versions: {}, retiredVersions: [], versionEpoch: 0, advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 } } }
       capture(() => listeners.forEach(l => l())); await flush()
       feed(messages); await flush()
     },

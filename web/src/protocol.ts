@@ -20,7 +20,7 @@ export type ChannelState = {
   messages: Message[]
   versions: Record<string, [number, boolean, number]>
   retiredVersions: { start: number; end: number }[]
-  versionFloor: number
+  retiredThrough?: number
   versionEpoch: number
   /** Buffered stream/ack/after seqs; only adjacent stream/after input may advance the cursor. */
   advancing: { start: number; end: number }[]
@@ -97,7 +97,7 @@ export function initialState(selfId = ''): State {
   return { selfId, organization: 'available', session: 'signed_in', running: false, next: 1, connection: null, connected: false,
     reconnectAttempt: 0, channels: {}, requests: {}, timers: {} }
 }
-const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [], versions: {}, retiredVersions: [], versionFloor: 0, versionEpoch: 0,
+const emptyChannel = (): ChannelState => ({ state: 'loading', watched: false, cursor: null, messages: [], versions: {}, retiredVersions: [], versionEpoch: 0,
   advancing: [], pending: [], hasOlder: false, historyError: false, fillAttempt: 0 })
 const sameFields = <T extends object>(a: T, b: T) => {
   const keys = Object.keys(a) as (keyof T)[]
@@ -218,7 +218,6 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       const entries = Object.entries(c.versions).sort((a, b) => a[1][0] - b[1][0] || a[0].localeCompare(b[0]))
       const retired = entries.splice(0, entries.length - limit)
       c.versions = Object.fromEntries(entries)
-      c.versionFloor = Math.max(c.versionFloor, ...retired.map(([, value]) => value[0]))
       const ranges = [...c.retiredVersions, ...retired.map(([, value]) => ({ start: value[2], end: value[2] }))].sort((a, b) => a.start - b.start)
       const merged: typeof ranges = []
       for (const range of ranges) {
@@ -226,10 +225,16 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
         if (last && range.start <= last.end + 1) last.end = Math.max(last.end, range.end)
         else merged.push({ ...range })
       }
-      while (merged.length > MAIN_MESSAGE_LIMIT) { const first = merged.shift()!; merged[0].start = first.start }
-      c.retiredVersions = merged
+      const overflow = merged.length > MAIN_MESSAGE_LIMIT
+      if (overflow || c.retiredThrough !== undefined) {
+        c.retiredThrough = Math.max(c.retiredThrough ?? 0, ...merged.map(r => r.end))
+        c.retiredVersions = []
+        if (overflow) { c.messages = []; c.hasOlder = true }
+      } else c.retiredVersions = merged
+      const recoverWindow = overflow || c.latest !== undefined
       invalidate(id)
       c.versionEpoch = token()
+      if (recoverWindow && c.watched) history(id, 'latest')
     }
   }
   const gap = (c: ChannelState) => c.cursor !== null &&
@@ -275,13 +280,18 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
     }
     let merged = c.messages
     const accepted: Message[] = []
+    let recovery = false
     for (let m of [...byId.values()].sort((a, b) => a.created_seq - b.created_seq)) {
       const version = c.versions[m.id]
-      if (version ? version[0] > m.version || (version[1] && !m.deleted) :
-        c.retiredVersions.some(r => r.start <= m.created_seq && m.created_seq <= r.end) && (source === 'stream' || source === 'ack')) continue
-      if ((m.deleted || m.version > m.created_seq) && (!version || version[0] !== m.version || version[1] !== m.deleted)) c.versions = { ...c.versions, [m.id]: [m.version, m.deleted, m.created_seq] }
       const index = merged.findIndex(held => held.id === m.id)
       const held = merged[index]
+      if (version && (version[0] > m.version || (version[1] && !m.deleted))) continue
+      if (!version && !held && (source === 'stream' || source === 'ack') &&
+        (m.created_seq <= (c.retiredThrough ?? 0) || c.retiredVersions.some(r => r.start <= m.created_seq && m.created_seq <= r.end))) {
+        recovery = true
+        continue
+      }
+      if ((m.deleted || m.version > m.created_seq) && (!version || version[0] !== m.version || version[1] !== m.deleted)) c.versions = { ...c.versions, [m.id]: [m.version, m.deleted, m.created_seq] }
       if (held) {
         if (held.version > m.version) continue
         if (held.version === m.version) m = held.deleted ? held : { ...held, mentions: m.mentions }
@@ -310,6 +320,7 @@ export function step(previous: State, input: Input): { state: State; effects: Ef
       c.hasOlder = true
     }
     capVersions(id, TOTAL_MESSAGE_LIMIT)
+    if (recovery && c.watched) history(id, 'latest')
     settle(id, valid)
     if (source !== 'window' && source !== 'projection') {
       const ranges = [...c.advancing.map(r => ({ ...r })), ...positions.filter(seq => c.cursor === null || seq > c.cursor).map(seq => ({ start: seq, end: seq }))]

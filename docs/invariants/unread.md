@@ -4,6 +4,7 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 
 | Rule | Test |
 |---|---|
+| Mutations below a count baseline invalidate it and refetch through the mutation version; unresolved counts stay hidden | `web/src/unread.test.ts::refetches baseline W100 for Message90 mutations v101` |
 | Overflow recovery coalesces with pending Channel-list and per-Topic reads/backoff; sufficient completed baselines need no follow-up | `web/src/unread-retention.test.ts::coalesces overflow recovery through in-flight reads and backoff until the completed baselines suffice` |
 | Long visits bound Unread metadata even with stalled refreshes; the first-Unread marker survives eviction | `web/src/message-window-review.test.ts::bounds a long active Unread visit including stalled refreshes while preserving its first-Unread marker` |
 | Checkpointed Unread counts refresh; evicted unread prefixes must be refetched and presented before marking | `web/src/message-window-review.test.ts::refreshes bounded Unread counts and refetches the evicted first-Unread prefix before marking it` |

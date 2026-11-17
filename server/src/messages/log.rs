@@ -201,6 +201,7 @@ async fn authorized_page(
         (status = 400, description = "Malformed Organization or Channel id, missing or negative event cursor, or page limit outside 1 through 200", body = crate::auth::ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence", body = crate::auth::ErrorBody),
+        (status = 503, description = "Committed watermark admission unavailable", body = crate::auth::ErrorBody, headers(("Retry-After" = u64, description = "Retry seconds"))),
         (status = 500, description = "Database failure, missing log coverage, unsupported event kind, or Message state that cannot be hydrated; no positions are acknowledged", body = crate::auth::ErrorBody)))]
 pub async fn list_channel_events(
     axum::extract::State(state): axum::extract::State<crate::AppState>,
@@ -218,13 +219,17 @@ pub async fn list_channel_events(
     if query.after_seq < 0 || !(1..=200).contains(&limit) {
         return Err(MessageError::InvalidInput);
     }
+    let organization = auth.identity.organization.organization_id;
+    let member = (auth.identity.member.id, auth.membership_revision);
+    super::require_visible_scoped(&state.pool, organization, member, channel).await?;
+    let through = super::topics::watermark(&state, organization, channel).await?;
     let mut events = authorized_page(
         &state.pool,
         auth.identity.organization.organization_id,
         (auth.identity.member.id, auth.membership_revision),
         channel,
         query.after_seq,
-        i64::MAX,
+        through,
         i64::from(limit) + 1,
     )
     .await?;

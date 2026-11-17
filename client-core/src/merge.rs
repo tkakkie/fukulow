@@ -98,6 +98,7 @@ impl Step<'_> {
             event_seq.into_iter().collect()
         };
         let mut accepted = Vec::new();
+        let mut recovery = false;
         let mut incoming: BTreeMap<Uuid, Message> = BTreeMap::new();
         for m in &valid {
             if incoming
@@ -117,12 +118,16 @@ impl Step<'_> {
                 if *version > m.version || (*deleted && !m.deleted) {
                     continue;
                 }
-            } else if c
-                .retired_versions
-                .iter()
-                .any(|r| r.start <= m.created_seq && m.created_seq <= r.end)
+            } else if !c.messages.iter().any(|held| held.id == m.id)
+                && (c
+                    .retired_through
+                    .is_some_and(|through| m.created_seq <= through)
+                    || c.retired_versions
+                        .iter()
+                        .any(|r| r.start <= m.created_seq && m.created_seq <= r.end))
                 && (source == Source::Stream || source == Source::Ack)
             {
+                recovery = true;
                 continue;
             }
             // Creation-only state needs no retained floor once its body is evicted.
@@ -190,6 +195,9 @@ impl Step<'_> {
             c.has_older = true;
         }
         self.cap_versions(id, TOTAL_MESSAGE_LIMIT);
+        if recovery && self.channel(id).watched {
+            self.history(id, Page::Latest, None);
+        }
         self.settle(id, &valid);
         if source == Source::Projection {
             accepted.retain(|m| m.deleted || m.version > m.created_seq);
@@ -274,9 +282,8 @@ impl Step<'_> {
                 .iter()
                 .min_by_key(|(id, (version, _, _))| (*version, **id))
                 .map(|(id, value)| (*id, *value));
-            if let Some((key, (version, _, created_seq))) = oldest {
+            if let Some((key, (_, _, created_seq))) = oldest {
                 Rc::make_mut(&mut c.versions).remove(&key);
-                c.version_floor = c.version_floor.max(version);
                 retired.push(Range {
                     start: created_seq,
                     end: created_seq,
@@ -297,16 +304,28 @@ impl Step<'_> {
                     merged.push(range);
                 }
             }
-            // Widen the oldest fence at the range cap; only a fresh authorized
-            // snapshot may admit an identity in a conservatively covered hole.
-            while merged.len() > MAIN_MESSAGE_LIMIT {
-                let first = merged.remove(0);
-                merged[0].start = first.start;
+            let overflow = merged.len() > MAIN_MESSAGE_LIMIT;
+            if overflow || c.retired_through.is_some() {
+                c.retired_through = Some(
+                    c.retired_through
+                        .unwrap_or(0)
+                        .max(merged.last().map_or(0, |r| r.end)),
+                );
+                *ranges = Vec::new();
+                if overflow {
+                    c.messages = Rc::default();
+                    c.has_older = true;
+                }
+            } else {
+                *ranges = merged;
             }
-            *ranges = merged;
+            let recover_window = overflow || c.latest.is_some();
             self.invalidate(id, false);
             let epoch = self.token();
             self.channel(id).version_epoch = epoch;
+            if recover_window && self.channel(id).watched {
+                self.history(id, Page::Latest, None);
+            }
         }
     }
 }
