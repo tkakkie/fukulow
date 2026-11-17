@@ -79,6 +79,7 @@ export function ceilingCause(result: RunResult, requestedSockets: number): Pick<
       .map(([code, close]) => `app sent ${close.count} closes with ${code}`),
     // Which close site sent the 1011s: a live notification failure, a Session failure or a connection error.
     ...Object.entries(evidence.causes1011 ?? {}).filter(([, n]) => n).map(([cause, n]) => `app 1011 from ${cause}: ${n}`),
+    ...Object.entries(evidence.recheckFailures ?? {}).filter(([, n]) => n).map(([key, n]) => `subscription recheck failed ${key}: ${n}`),
     ...Object.entries(evidence.databaseFailures).filter(([, n]) => n).map(([kind, n]) => `database_failure ${kind}: ${n}`),
     ...(['acquire_timeout', 'acquire_closed', 'acquire_io', 'acquire_database', 'acquire_other'] as const)
       .filter(key => evidence.pool?.deltas[key]).map(key => `pool ${key}: ${evidence.pool!.deltas[key]}`),

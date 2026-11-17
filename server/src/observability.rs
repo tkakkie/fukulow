@@ -235,6 +235,12 @@ impl Metrics {
     }
 }
 
+/// One event per failed Subscription recheck pass (not per socket); every
+/// subscription in scope is then closed with 1011 `access_recheck` (#469).
+pub(crate) fn subscription_recheck_failed(scope: &'static str, kind: &'static str) {
+    tracing::warn!(target: TARGET, event = "subscription_recheck_failed", scope, kind);
+}
+
 // Error Display/Debug/source, DB details and SQLSTATE are deliberately never logged.
 pub fn database_failure(error: &sqlx::Error) {
     let kind = match error {

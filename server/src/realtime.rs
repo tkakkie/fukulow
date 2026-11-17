@@ -162,6 +162,7 @@ async fn connected_with_lifecycle(
         cursors: HashMap::new(),
         access: HashMap::new(),
         permit,
+        close_cause: "connection",
     };
     // The cause is a fixed label so a 1011 can be told apart without logging entities (#469).
     let code = tokio::select! {
@@ -172,6 +173,10 @@ async fn connected_with_lifecycle(
         _ = notification_failed.failed() => Some((1011, "notification")),
         result = connection.run(&mut socket, lifecycle) => result.err().map(|code| (code, "connection")),
     };
+    let code = code.map(|(code, cause)| match (code, cause) {
+        (1011, "connection") => (code, connection.close_cause),
+        _ => (code, cause),
+    });
     if let Some((code, cause)) = code {
         close(&mut socket, code, cause).await;
     } else {

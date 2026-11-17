@@ -131,6 +131,9 @@ async fn lost_sign_out_notification_is_bounded_for_idle_and_replaying_sockets(po
 
 #[fukulow_test::test]
 async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
+    // sqlx::test runs on one thread, so the server's socket tasks log into this capture.
+    let output = crate::observability::tests::Capture::default();
+    let _capture = tracing::subscriber::set_default(output.subscriber());
     let f = fixture(&pool).await;
     let isolated_pool = crate::database::PoolConfig::configured(Some("3"), None)
         .unwrap()
@@ -152,6 +155,28 @@ async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
     ready(&mut socket, f.channel, 0).await;
     isolated_pool.close().await;
     fallback_close(&mut socket, 1011).await;
+    let fields = |name: &str| -> Vec<serde_json::Value> {
+        output
+            .events()
+            .into_iter()
+            .filter(|event| event["fields"]["event"] == name)
+            .map(|event| event["fields"].clone())
+            .collect()
+    };
+    // The failed pass is logged with a fixed kind; the periodic pass also ends the session,
+    // so the close is attributed to `session`, not to `connection` (#469).
+    assert_eq!(
+        fields("subscription_recheck_failed").first(),
+        Some(&json!({"event":"subscription_recheck_failed", "scope":"all", "kind":"error"})),
+        "{}",
+        output.text()
+    );
+    assert_eq!(
+        fields("websocket_closed"),
+        [json!({"event":"websocket_closed", "code":"1011", "cause":"session"})],
+        "{}",
+        output.text()
+    );
     // A DB check error must never masquerade as a revoked session.
     let mut reconnect = f.server.connect(&f.token).await;
     subscribe(&mut reconnect, f.channel, 0).await;

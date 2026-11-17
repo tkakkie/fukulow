@@ -43,6 +43,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                                         cursors: HashMap::new(),
                                         access: HashMap::new(),
                                         permit,
+                                        close_cause: "connection",
                                     };
                                     let code = connection
                                         .run(&mut socket, connection::Lifecycle::default())

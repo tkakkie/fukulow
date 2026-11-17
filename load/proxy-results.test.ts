@@ -103,8 +103,13 @@ test('connection ceilings are attributed to the app, the proxy or unknown from a
   assert.match(cause(client(3), app1011(3)).reasons.join(), /app-side cause is not identified/);
   assert.equal(cause(client(3), app1011(3)).cause, 'app');
   // The close site names the path: three 1011s from failed live notifications identify it.
-  const notified = { ...app1011(3), causes1011: { shutdown: 0, session: 0, overflow: 0, notification: 3, connection: 0, peer: 0 } };
+  const notified = { ...app1011(3), causes1011: { shutdown: 0, session: 0, overflow: 0, notification: 3, connection: 0, peer: 0,
+    access_recheck: 0, database: 0, replay_error: 0, replay_empty: 0, authorize_error: 0 } };
   assert.deepEqual(cause(client(3), notified), { cause: 'app', reasons: ['app sent 3 closes with 1011', 'app 1011 from notification: 3'] });
+  const rechecked = { ...app1011(2), causes1011: { ...notified.causes1011, notification: 0, access_recheck: 2 },
+    recheckFailures: { 'all:error': 0, 'all:timeout': 0, 'all:deadline': 0, 'scoped:error': 0, 'scoped:timeout': 1 } };
+  assert.deepEqual(cause(client(2), rechecked), { cause: 'app', reasons: ['app sent 2 closes with 1011',
+    'app 1011 from access_recheck: 2', 'subscription recheck failed scoped:timeout: 1'] });
   // More client 1011s than the app sent: some did not come from the app.
   assert.equal(cause(client(5), app1011(3)).cause, 'unknown');
   // App-side failures that no client 1011 ties to the failure are not decided either way.
