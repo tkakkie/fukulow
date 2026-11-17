@@ -16,6 +16,7 @@ export const repliesApi = (organizationId: string): RepliesApi => ({
 const ANCHOR_CONTEXT = 25
 const chain = (anchor: Message, openedThrough: number) => ({ anchor, openedThrough, rootId: anchor.reply_root_id ?? anchor.id,
   messages: new Map<string, Message>([[anchor.id, anchor]]),
+  asOfSeq: undefined as number | undefined,
   after: anchor.reply_root_id ? Math.max(0, anchor.created_seq - ANCHOR_CONTEXT) : 0,
   hasMore: true, hasOlder: Boolean(anchor.reply_root_id && anchor.created_seq > ANCHOR_CONTEXT),
   following: true, hasNewer: false, newerCount: 0,
@@ -81,7 +82,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       if (w && before && after && before.versionEpoch !== after.versionEpoch) { w.read = Symbol(); w.loading = false }
       if (w) {
         if (!next.running || next.organization === 'unavailable' || !after?.watched || after.state === 'unavailable' ||
-          (before?.cursor != null && after.cursor === null)) { release(w); chains.delete(id); changed.add(id) }
+          (before?.cursor != null && after.cursor === null) || previous.historyEpoch !== next.historyEpoch) { release(w); chains.delete(id); changed.add(id) }
         else {
           const oldPending = pending(w, before)
           if ((before?.messages !== after.messages || records?.has(id)) && mergeStream(id, w, records?.get(id))) changed.add(id)
@@ -102,16 +103,17 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     sync.get().channels[channel]?.watched === true && sync.get().channels[channel]?.state !== 'unavailable'
   const release = (w: Chain) => { w.messages.clear(); w.anchor = { ...w.anchor, body: '' } }
 
-  async function readMore(channel: string) {
+  async function readMore(channel: string, restarted = false) {
     const w = chains.get(channel)
     if (!w || !current(channel, w) || w.loading || (!w.hasMore && !w.restart)) return
     const requestedAfter = w.restart ? 0 : w.after
+    const mutationFloor = sync.get().channels[channel]?.mutationSeq ?? 0
     const versionEpoch = sync.get().channels[channel]?.versionEpoch
     const token = Symbol(), session = sessionToken
     w.read = token; w.loading = true; w.error = false; notify()
     const isCurrent = () => current(channel, w) && w.read === token && sync.get().channels[channel]?.versionEpoch === versionEpoch
     let timer: ReturnType<typeof setTimeout> | undefined
-    const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, w.anchor.id, { after_seq: requestedAfter }))
+    const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, w.anchor.id, { history_generation: sync.get().historyGeneration, as_of_seq: w.restart ? undefined : w.asOfSeq, after_seq: requestedAfter }))
       .catch((): Result<ReplyChainPage> => ({ ok: false, kind: 'network' }))
     // C6 late 401 and C10 remain authoritative for this Account Session, even after timeout or unwatch.
     void operation.then(r => {
@@ -122,6 +124,16 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     const apply = operation.then(result => {
       if (!isCurrent()) return
       w.loading = false
+      const generation = result.ok ? result.data.history_generation : undefined
+      if (generation !== undefined && !sync.observeHistoryGeneration(generation)) return
+      if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
+      if (mutationFloor < (sync.get().channels[channel]?.mutationSeq ?? 0) && result.ok && result.data.as_of_seq < (sync.get().channels[channel]?.mutationSeq ?? 0)) result = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
+      if (!result.ok && result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) {
+        w.messages.clear(); w.asOfSeq = undefined; w.after = 0; w.restart = true; w.hasMore = true
+        const state = sync.get().channels[channel]
+        for (const m of state?.messages ?? []) if (belongs(w, m) && (m.version >= state!.mutationSeq || m.id === w.rootId)) w.messages.set(m.id, m)
+        return readMore(channel, true)
+      }
       if (!result.ok) {
         w.error = true
         if (!api.isOrganizationUnavailable(result) && result.kind === 'http' && [403, 404].includes(result.status) &&
@@ -131,6 +143,8 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       } else if (result.data.root_id !== w.rootId) {
         w.error = true
       } else {
+        if (w.restart) w.asOfSeq = result.data.as_of_seq
+        else w.asOfSeq ??= result.data.as_of_seq
         const messages = result.data.messages.filter(m => m.channel_id === channel && belongs(w, m))
         if (w.restart) {
           w.messages.clear(); w.after = 0; w.hasOlder = w.hasNewer = false; w.newerCount = 0

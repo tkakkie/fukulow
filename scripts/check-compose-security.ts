@@ -224,7 +224,8 @@ async function check(profile: string) {
     if (process.env.CHECK_COMPOSE_ACCEPTANCE === '1') {
       execFileSync('npm', ['--prefix', 'web', 'run', 'e2e:compose'], { cwd, stdio: 'inherit',
         env: { ...process.env, E2E_BASE_URL: `https://${testDomain}:${tlsPort()}`,
-          E2E_TEST_DOMAIN: testDomain, E2E_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN } })
+          E2E_TEST_DOMAIN: testDomain, E2E_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN,
+          E2E_ROTATE_NETWORK: `${project}_backend`, E2E_ROTATE_IMAGE: image } })
     } else assert.equal(request('/api/v1/setup', { ...setup, setup_token: env.FUKULOW_SETUP_TOKEN }).status, 201)
     assert.equal(request('/api/v1/session', owner).status, 200)
     const native = request('/api/v1/native/session', owner)

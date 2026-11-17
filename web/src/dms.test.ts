@@ -13,7 +13,7 @@ function client(timeoutMs = 1000) {
   const baseline = vi.fn(), drop = vi.fn(), select = vi.fn(), processed = vi.fn()
   const api = {
     changes: vi.fn<DmsApi['changes']>(async q => ok({ dms: rows.map(({ id, kind, peer }) => ({ id, kind, peer })), next_cursor: `${q.lane}-cursor`, caught_up: true })),
-    list: vi.fn<DmsApi['list']>(async q => ok({ dms: q.channel_id ? rows.filter(row => q.channel_id?.includes(row.id)) : rows, next_cursor: null })),
+    list: vi.fn<DmsApi['list']>(async q => ok({ history_generation: '00000000-0000-4000-8000-000000000515', dms: q.channel_id ? rows.filter(row => q.channel_id?.includes(row.id)) : rows, next_cursor: null })),
     open: vi.fn<DmsApi['open']>(async () => ok(rows[0]!)),
   }
   let dms!: ReturnType<typeof createDms>
@@ -40,6 +40,29 @@ it('lost notices and delayed COMMIT converge on the existing O5 schedule with no
   expect(c.api.changes.mock.calls.some(([q]) => q.lane === 'delta' && q.cursor === 'delta-cursor')).toBe(true)
   expect(c.api.changes.mock.calls.some(([q]) => q.lane === 'coverage' && q.cursor === 'coverage-cursor')).toBe(true)
   c.close(); expect(vi.getTimerCount()).toBe(0)
+})
+
+it('history reset aborts and fences old discovery and open results before restarting every lane', async () => {
+  const c = client(); c.rows = [dm('old')]; await c.ready()
+  c.dms.browse(); await vi.advanceTimersByTimeAsync(1000)
+  const old = held<Awaited<ReturnType<DmsApi['changes']>>>(), opening = held<Result<Dm>>()
+  c.api.changes.mockReturnValueOnce(old.promise)
+  await vi.advanceTimersByTimeAsync(14_000)
+  const signal = c.api.changes.mock.calls.at(-1)![1]
+  c.api.open.mockReturnValueOnce(opening.promise)
+  const pendingOpen = c.dms.open('peer-old')
+  c.dms.resetHistory(); await flush()
+  expect(signal.aborted).toBe(true)
+  expect(c.dms.get()).toMatchObject({ rows: [], busy: false, budget: 5 })
+  expect(c.dms.get().recoveryPeer).toBeUndefined()
+  old.resolve(ok({ dms: [dm('late')], next_cursor: 'stale', caught_up: true }))
+  opening.resolve(ok(dm('late'))); await pendingOpen; await flush()
+  expect(c.dms.get().rows).toEqual([]); expect(c.select).not.toHaveBeenCalled()
+  c.rows = [dm('new', { as_of_seq: 0 })]; c.api.changes.mockClear()
+  await c.ready(); c.dms.browse(); await vi.advanceTimersByTimeAsync(1000)
+  expect(c.api.changes.mock.calls.slice(0, 2).map(([q]) => q)).toEqual([{ lane: 'delta' }, { lane: 'coverage' }])
+  expect(c.dms.get().rows.map(r => r.identity.id)).toEqual(['new'])
+  c.close()
 })
 
 it('duplicate reordered notices coalesce behind one in-flight request and one queued demand', async () => {
@@ -93,7 +116,7 @@ it('unknown open outcome traverses authorized pages while definitive refusals ne
   const c = client(); await c.ready()
   c.api.open.mockResolvedValueOnce({ ok: false, kind: 'network' })
   const first = [dm('other')], found = dm('target', { peer: { id: 'target-peer', name: 'Target', active: false } })
-  c.api.list.mockImplementation(async q => q.channel_id ? ok({ dms: [], next_cursor: null }) : q.cursor ? ok({ dms: [found], next_cursor: null }) : ok({ dms: first, next_cursor: 'below-other' }))
+  c.api.list.mockImplementation(async q => q.channel_id ? ok({ history_generation: '00000000-0000-4000-8000-000000000515', dms: [], next_cursor: null }) : q.cursor ? ok({ history_generation: '00000000-0000-4000-8000-000000000515', dms: [found], next_cursor: null }) : ok({ history_generation: '00000000-0000-4000-8000-000000000515', dms: first, next_cursor: 'below-other' }))
   await c.dms.open('target-peer'); await vi.advanceTimersByTimeAsync(2000)
   expect(c.api.open).toHaveBeenCalledOnce(); expect(c.select).toHaveBeenCalledWith('target')
   expect(c.dms.get().recoveryAbsent).toBe(false)
@@ -207,7 +230,7 @@ it('a refused held-id lane stays visibly failed until refresh notice reconnect o
 
 it('Unread-only DM responses cannot cover Mention invalidations and retry through the shared schedule', async () => {
   const c = client(); c.rows = [dm('A', { mention_unread_count: 2 })]
-  c.api.list.mockResolvedValueOnce(ok({ dms: [{ ...dm('A'), mention_unread_count: undefined } as unknown as Dm], next_cursor: null }))
+  c.api.list.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', dms: [{ ...dm('A'), mention_unread_count: undefined } as unknown as Dm], next_cursor: null }))
   await c.ready()
   expect(c.baseline).not.toHaveBeenCalled()
   await vi.advanceTimersByTimeAsync(16_000)

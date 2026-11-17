@@ -63,9 +63,9 @@ async function request(url: string, path: string, data?: unknown, token?: string
   return response.json()
 }
 
-// #515 slice 2 adds messages.version and send_digest; the upgrade backfills them (checked below).
+// #515 backfills Message state/receipts and Organization epochs (checked below).
 const snapshot = () => JSON.parse(sql(`SELECT json_build_object(
-  'organizations', (SELECT json_agg(t ORDER BY organization_id) FROM organizations t),
+  'organizations', (SELECT json_agg(to_jsonb(t) - 'history_generation' ORDER BY organization_id) FROM organizations t),
   'accounts', (SELECT json_agg(t ORDER BY id) FROM accounts t),
   'members', (SELECT json_agg(t ORDER BY organization_id, id) FROM users t),
   'messages', (SELECT json_agg(to_jsonb(t) - 'version' - 'send_digest' ORDER BY organization_id, id) FROM messages t),
@@ -166,6 +166,7 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     // A Message sent by a pre-#515 image gains the default empty accepted Mention set (#152)
     // and is served in the #515 wire shape: seq becomes created_seq, version starts at it.
     // An older image already serving that shape (main since #532) is returned unchanged.
+    // Either way the upgraded server adds the Organization history_generation (#515 slice 4).
     let upgraded = message
     if ('seq' in message) {
       const { seq, ...unchanged } = message
@@ -174,7 +175,15 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
       assert.ok(Number.isInteger(message.created_seq) && message.version === message.created_seq,
         'old image Message has neither the pre-#515 nor the #515 wire shape')
     }
+    const createdSeq = upgraded.created_seq
+    assert.ok(Number.isSafeInteger(createdSeq) && createdSeq > 0)
+    const historyGeneration = sql(`SELECT history_generation FROM organizations WHERE organization_id='${organization}'`)
+    assert.match(historyGeneration, /^[0-9a-f-]{36}$/)
+    upgraded = { ...upgraded, history_generation: historyGeneration }
     assert.deepEqual(history.messages, [upgraded])
+    assert.equal(history.history_generation, historyGeneration)
+    assert.equal(history.as_of_seq, createdSeq)
+    assert.equal(sql('SELECT count(*) FROM channel_message_sequences WHERE mutation_seq<>0'), '0')
     await request(url, '/session', owner)
     dc('restart', 'app')
     url = await health(current)

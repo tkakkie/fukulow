@@ -8,14 +8,14 @@ async function bootstrap(client: ReturnType<typeof controllerClient>, open = tru
   await client.feed({ type: 'session_start' })
   if (open) await client.feed({ type: 'connection_ready' })
   const history = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
   return client.sync.getTimeline('A')
 }
 
 it('delegate keeps history and pending entries visible throughout reconnect before subscription confirmation', async () => {
   const client = controllerClient()
   const t = await bootstrap(client)
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1', body: 'sending' })
   const content = t.get()
   expect(content).toMatchObject({ status: 'ready', messages: [record(100)],
@@ -26,7 +26,7 @@ it('delegate keeps history and pending entries visible throughout reconnect befo
   expect(t.get()).toEqual(content)
   await client.feed({ type: 'connection_ready' })
   expect(t.get()).toEqual(content)
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   expect(t.get()).toEqual(content)
   await client.sync.close()
 })
@@ -48,7 +48,7 @@ it('delegate shows fetched history and acknowledged and pending sends when the s
 it('delegate shows cached Channel content immediately after unwatch and re-select', async () => {
   const client = controllerClient()
   const t = await bootstrap(client)
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
   await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' })
   const content = t.get()
   await client.sync.unwatch('A')
@@ -70,7 +70,7 @@ it('delegate stays loading without a bootstrap base even with an acknowledgement
   const send = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'c1' })).find(e => e.type === 'send')!
   await client.feed({ type: 'ack', respond_to: send, message: { ...record(1), sender: 'me', client_message_id: 'c1' } })
   expect(t.get().status).toBe('loading')
-  await client.feed({ type: 'history_result', respond_to: history, messages: [], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  type: 'history_result', respond_to: history, messages: [], has_more: false })
   expect(t.get()).toMatchObject({ status: 'ready', messages: [{ created_seq: 1 }], pending: [] })
   await client.sync.close()
 })

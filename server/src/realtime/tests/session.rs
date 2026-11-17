@@ -521,6 +521,7 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
     control(
         &mut idle,
         ClientMessage::Subscribe {
+            history_generation: None,
             channel_id: Uuid::new_v4(),
             after_seq: 0,
         },

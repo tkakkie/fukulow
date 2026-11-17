@@ -44,7 +44,7 @@ async fn read(client: &mut Client) -> Result<tungstenite::Message, Assertion> {
 
 pub(super) async fn json(
     client: &mut Client,
-    expected: Value,
+    mut expected: Value,
     assertion: Assertion,
 ) -> Result<(), Assertion> {
     let frame = read(client).await?;
@@ -52,6 +52,14 @@ pub(super) async fn json(
         tungstenite::Message::Text(text) => serde_json::from_str::<Value>(text).ok(),
         _ => None,
     };
+    if expected["type"] == "subscribed" {
+        let generation = actual
+            .as_ref()
+            .and_then(|v| v["history_generation"].as_str())
+            .ok_or(assertion)?;
+        Uuid::parse_str(generation).map_err(|_| assertion)?;
+        expected["history_generation"] = json!(generation);
+    }
     if actual.as_ref() != Some(&expected) {
         eprintln!("{assertion:?}: expected {expected}, got {frame:?}");
         return Err(assertion);
@@ -132,6 +140,7 @@ pub(super) async fn barrier_controls(
     control(
         client,
         ClientMessage::Subscribe {
+            history_generation: None,
             channel_id: channel,
             after_seq: caught_up_seq,
         },

@@ -22,6 +22,7 @@ impl Step<'_> {
         let Some(Request::History {
             channel: id,
             page,
+            mutation_seq,
             stale,
             ..
         }) = self.core.requests.remove(&request)
@@ -32,6 +33,29 @@ impl Step<'_> {
         if stale {
             if matches!(result, Err(Failure::Status(401))) {
                 self.stop(true);
+            }
+            return;
+        }
+        let generation = match &result {
+            Ok(HistoryPage::Messages(p)) => Some(p.history_generation),
+            Ok(HistoryPage::Events(p)) => Some(p.history_generation),
+            _ => None,
+        };
+        if generation.is_some_and(|g| !self.accept_generation(g)) {
+            return;
+        }
+        if let Ok(HistoryPage::Messages(result)) = &result
+            && mutation_seq < self.channel(id).mutation_seq
+            && result.as_of_seq < self.channel(id).mutation_seq
+        {
+            let retry = page != Page::Latest || mutation_seq < self.channel(id).mutation_seq;
+            let c = self.channel(id);
+            c.snapshot_seq = None;
+            c.latest = None;
+            c.older = None;
+            c.history_error = !retry;
+            if retry {
+                self.history(id, Page::Latest, None);
             }
             return;
         }
@@ -84,9 +108,10 @@ impl Step<'_> {
                 let before = c.cursor;
                 let bootstrap = c.cursor.is_none() && page == Page::Latest;
                 if bootstrap {
-                    c.cursor = Some(result.messages.last().map_or(0, |m| m.created_seq));
+                    c.cursor = Some(result.as_of_seq);
                     c.stream_base = c.cursor;
                 }
+                c.snapshot_seq = Some(result.as_of_seq);
                 let first = result.messages.first().map(|m| m.created_seq);
                 if page == Page::Latest {
                     // Release only the creation range covered by this authoritative page.
@@ -155,9 +180,17 @@ impl Step<'_> {
             }
             return;
         }
+        if matches!(&result, Err((Failure::Status(409), _, Some(error))) if error == "history_generation_changed")
+        {
+            self.reset_history(None);
+            return;
+        }
         self.channel(id);
         match result {
             Ok(message) => {
+                if !self.accept_generation(message.history_generation) {
+                    return;
+                }
                 self.merge(id, vec![message], Source::Ack);
                 self.reconcile(id, false);
             }

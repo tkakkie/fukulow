@@ -206,12 +206,13 @@ impl Connection<'_> {
         .await
     }
 
-    async fn visible(&self, channel: Uuid) -> Result<(), MessageError> {
-        messages::require_visible_scoped(
+    async fn visible(&self, channel: Uuid, generation: Option<Uuid>) -> Result<Uuid, MessageError> {
+        messages::history::authorized_generation(
             &self.state.pool,
             self.auth.identity.organization.organization_id,
             (self.auth.identity.member.id, self.auth.membership_revision),
             channel,
+            generation,
         )
         .await
     }
@@ -324,11 +325,34 @@ impl Connection<'_> {
             ClientMessage::Subscribe {
                 channel_id,
                 after_seq,
+                history_generation,
             } => {
-                // Already subscribed here: no authorization query, watermark, replay or
-                // reply, whatever after_seq (even an invalid one). The client holds this
-                // subscription's cursor; older history is REST.
+                // Duplicate controls never replay or change the cursor. A carried epoch
+                // still requires fresh authorization before it can be compared.
                 if self.cursors.contains_key(&channel_id) {
+                    if history_generation.is_some() {
+                        match self.visible(channel_id, history_generation).await {
+                            Ok(_) => {}
+                            Err(MessageError::HistoryGenerationChanged) => {
+                                self.unsubscribe(channel_id);
+                                return Self::error(
+                                    socket,
+                                    Some(channel_id),
+                                    "history_generation_changed",
+                                )
+                                .await;
+                            }
+                            Err(MessageError::NotFound) => {
+                                self.unsubscribe(channel_id);
+                                return Self::error(socket, Some(channel_id), "channel_not_found")
+                                    .await;
+                            }
+                            Err(MessageError::OrganizationUnavailable) => {
+                                return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
+                            }
+                            Err(_) => return Err(1011),
+                        }
+                    }
                     return Ok(());
                 }
                 if after_seq < 0 {
@@ -339,8 +363,12 @@ impl Connection<'_> {
                 }
                 #[cfg(test)]
                 super::tests::access_loss::pause(channel_id, "authorize", 0).await;
-                match self.visible(channel_id).await {
-                    Ok(()) => {}
+                match self.visible(channel_id, history_generation).await {
+                    Ok(_) => {}
+                    Err(MessageError::HistoryGenerationChanged) => {
+                        return Self::error(socket, Some(channel_id), "history_generation_changed")
+                            .await;
+                    }
                     Err(MessageError::NotFound) => {
                         return Self::error(socket, Some(channel_id), "channel_not_found").await;
                     }
@@ -422,10 +450,33 @@ impl Connection<'_> {
                     if !self.protected(socket, channel_id).await? {
                         return Ok(());
                     }
+                    #[cfg(test)]
+                    super::tests::access_loss::pause(channel_id, "handoff_generation", 0).await;
+                    let history_generation = match self.visible(channel_id, None).await {
+                        Ok(generation) => generation,
+                        Err(MessageError::NotFound) => {
+                            self.unsubscribe(channel_id);
+                            return Self::event(
+                                socket,
+                                ServerEvent::ChannelAccessLost { channel_id },
+                            )
+                            .await;
+                        }
+                        Err(MessageError::OrganizationUnavailable) => {
+                            return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
+                        }
+                        Err(MessageError::Database(error)) => {
+                            tracing::info_span!(target: "fukulow", "database", operation = "websocket_authorize")
+                                .in_scope(|| crate::observability::database_failure(&error));
+                            return Err(1011);
+                        }
+                        Err(_) => return Err(1011),
+                    };
                     self.protected_event(
                         socket,
                         channel_id,
                         ServerEvent::Subscribed {
+                            history_generation,
                             channel_id,
                             caught_up_seq: caught_up_seq.min(latest),
                         },

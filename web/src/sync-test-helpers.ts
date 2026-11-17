@@ -80,7 +80,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
   const unread = withUnread ? createUnread(sync, { api: {
     listChannels: () => {
       const channel = unreadSubject; unreadSubject = undefined
-      return channel ? request({ type: 'fetch_unread', channel }) : Promise.resolve({ ok: true, data: { channels: [] } })
+      return channel ? request({ type: 'fetch_unread', channel }) : Promise.resolve({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', channels: [] } })
     },
     markRead: async () => ({ ok: false, kind: 'network' }),
     getTopicSummary: async () => ({ ok: false, kind: 'network' }),
@@ -135,38 +135,39 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         case 'connection_ready': socket.onReady(); break
         case 'socket_closed': socket.onClose(i.code as number); break
         case 'message': socket.onEvent({ type: 'message', kind: (i.kind ?? 'create') as 'create', seq: typeof i.seq === 'number' ? i.seq : message(i.message, channel).created_seq, message: message(i.message, channel) }); break
-        case 'subscribed': (e?.socket as RealtimeHandlers ?? socket).onEvent({ type: 'subscribed', channel_id: channel,
+        case 'subscribed': (e?.socket as RealtimeHandlers ?? socket).onEvent({ history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel,
           caught_up_seq: i.caught_up_seq as number }); break
         case 'channel_access_lost': socket.onEvent({ type: 'channel_access_lost', channel_id: channel }); break
         case 'error_event': socket.onEvent({ type: 'error', channel_id: channel, code: i.code as string }); break
-        case 'events_result': resolve({ ok: true, data: { events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[]).map(e => ({ type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })), has_more: i.has_more } }); break
+        case 'events_result': resolve({ ok: true, data: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[]).map(e => ({ type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })), has_more: i.has_more } }); break
         case 'history_result': resolve({ ok: true, data: e?.page === 'after'
-          ? { events: i.messages!.map(m => ({ type: 'message', seq: m.created_seq, kind: 'create', message: message(m, channel) })), has_more: i.has_more }
-          : { messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
+          ? { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', events: i.messages!.map(m => ({ type: 'message', seq: m.created_seq, kind: 'create', message: message(m, channel) })), has_more: i.has_more }
+          : { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', as_of_seq: (i.as_of_seq as number | undefined) ?? i.messages!.at(-1)?.created_seq ?? 0,  messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
         case 'ack': resolve({ ok: true, data: message(i.message, channel) }); break
         case 'membership_check_result': resolve(i.status === 200 ? { ok: true, data: {} } : typeof i.status === 'number'
           ? { ok: false, kind: 'http', status: i.status, ...(i.error === undefined ? {} : { error: i.error as string }) }
           : { ok: false, kind: 'network' }); break
         case 'history_failed': case 'send_failed': resolve(typeof i.status === 'number'
-          ? { ok: false, kind: 'http', status: i.status,
+          ? { ok: false, kind: 'http', status: i.status, ...(i.error === undefined ? {} : { error: i.error as string }),
             ...(i.retry_after_ms === undefined ? {} : { retryAfterMs: i.retry_after_ms as number }) } : { ok: false, kind: 'network' }); break
         case 'open_reply_chain': void replies!.open(channel, message(i.message, channel)); break
         case 'load_reply_chain': void replies!.loadMore(channel); break
-        case 'reply_chain_result': resolve({ ok: true, data: { root_id: i.root_id,
+        case 'reply_chain_result': resolve({ ok: true, data: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', as_of_seq: (i.as_of_seq as number | undefined) ?? i.messages!.at(-1)?.created_seq ?? 0,  root_id: i.root_id,
           messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
         case 'reply_chain_failed': resolve(typeof i.status === 'number'
           ? { ok: false, kind: 'http', status: i.status, ...(i.error === undefined ? {} : { error: i.error as string }) }
           : { ok: false, kind: 'network' }); break
         case 'load_main_timeline': void topics.loadMain(channel); break
         case 'load_unread': unreadIds.add(channel); unreadSubject = channel; void unread!.refresh(); break
-        case 'unread_result': resolve({ ok: true, data: { channels: [{ mention_unread_count: 0, main_mention_unread_count: 0, id: channel, name: channel, visibility: 'public',
+        case 'unread_result': resolve({ ok: true, data: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', channels: [{ mention_unread_count: 0, main_mention_unread_count: 0, id: channel, name: channel, visibility: 'public',
           capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_leave: { allowed: false } },
+          history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515',
           ...(i.baseline as Pick<UnreadChannel, 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count'>),
         }] } }); break
         case 'open_topic': void topics.loadTopic(channel, i.topic as string); break
         case 'main_timeline_result': {
           const items = i.items as ({ kind: 'message'; message: Record<string, unknown> } | { kind: 'topic'; topic: { name: string; last_seq: number; message_count: number } })[]
-          const page: TimelinePage = { as_of_seq: i.as_of_seq as number, has_more: i.has_more as boolean,
+          const page: TimelinePage = { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', as_of_seq: i.as_of_seq as number, has_more: i.has_more as boolean,
             items: items.map(item => {
               if (item.kind === 'message') return { kind: 'message', message: message(expandMessage(item.message, channel)[0], channel) }
               const t = item.topic

@@ -26,23 +26,23 @@ it('bounds sync bodies during an unresolved gap and keeps evicted continuation e
   feed({ type: 'session_start', selfId: 'me' })
   feed({ type: 'connection_ready', connection: state.connection! })
   feed({ type: 'watch', channel: 'A' })
-  feed({ type: 'history_result', request: state.channels.A.latest!, page: { messages: [record(1)], has_more: false } })
-  feed({ type: 'event', connection: state.connection!, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 1 } })
+  feed({ type: 'history_result', request: state.channels.A.latest!, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1)]).at(-1)?.created_seq ?? 0,  messages: [record(1)], has_more: false } })
+  feed({ type: 'event', connection: state.connection!, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 1 } })
   for (let seq = 3; seq <= 1200; seq++) feed({ type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: (record(seq)).created_seq, message: record(seq) } })
   expect(state.channels.A.cursor).toBe(1)
   expect(state.channels.A.messages).toHaveLength(MAIN_MESSAGE_LIMIT)
   expect(state.channels.A.messages[0].created_seq).toBe(801)
   const fill = feed({ type: 'timer_elapsed', id: state.channels.A.wait! }).find(e => e.type === 'fetch_history')!
   expect(fill).toMatchObject({ page: 'after', seq: 1 })
-  feed({ type: 'events_result', request: fill.id, page: { events: [{ type: 'message', kind: 'create', seq: 2, message: record(2) }], has_more: false } })
+  feed({ type: 'events_result', request: fill.id, page: { history_generation: '00000000-0000-4000-8000-000000000515', events: [{ type: 'message', kind: 'create', seq: 2, message: record(2) }], has_more: false } })
   expect(state.channels.A.cursor).toBe(1200)
   for (const seq of [3, 1000, 1200]) feed({ type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: (record(seq)).created_seq, message: record(seq) } })
   expect(new Set(state.channels.A.messages.map(m => m.created_seq)).size).toBe(state.channels.A.messages.length)
   feed({ type: 'socket_closed', connection: state.connection!, code: 1006 })
   feed({ type: 'timer_elapsed', id: state.reconnectWait! })
   const subscriptions = feed({ type: 'connection_ready', connection: state.connection! })
-  expect(subscriptions).toContainEqual(expect.objectContaining({ type: 'subscribe', after_seq: 1200 }))
-  feed({ type: 'event', connection: state.connection!, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 10 } })
+  expect(subscriptions).toContainEqual(expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', after_seq: 1200 }))
+  feed({ type: 'event', connection: state.connection!, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 10 } })
   expect(state.channels.A).toMatchObject({ cursor: null, messages: [], advancing: [] })
 })
 
@@ -53,7 +53,7 @@ it('enforces named caps and five inactive Channel LRU slots without discarding p
   for (let i = 0; i < 9; i++) {
     const channel = String(i)
     feed({ type: 'watch', channel })
-    feed({ type: 'history_result', request: state.channels[channel].latest!, page: {
+    feed({ type: 'history_result', request: state.channels[channel].latest!, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 200 }, (_, n) => record(n + 1, channel))).at(-1)?.created_seq ?? 0,
       messages: Array.from({ length: 200 }, (_, n) => record(n + 1, channel)), has_more: false } })
     feed({ type: 'user_send', channel, body: 'pending', clientMessageId: channel })
     feed({ type: 'unwatch', channel })
@@ -78,10 +78,10 @@ it('refetches main pages at fixed W beyond the cap in both directions during liv
   expect(c.topics.get('A').lines).toEqual(lines)
   expect(c.sync.get().channels.A.cursor).toBe(1001)
   await c.topics.loadMain('A')
-  expect(c.mainQueries.at(-1)).toEqual({ as_of_seq: 1000, before_position: 351 })
+  expect(c.mainQueries.at(-1)).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1000, before_position: 351 })
   expect(c.topics.get('A').lines[0]).toMatchObject({ message: { created_seq: 301 } })
   await c.topics.loadMainLatest('A')
-  expect(c.mainQueries.at(-1)).toEqual({})
+  expect(c.mainQueries.at(-1)).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515' })
   expect(c.topics.get('A').main.asOfSeq).toBe(1001)
   expect(c.topics.get('A').lines.at(-1)).toMatchObject({ message: { created_seq: 1001 } })
   expect(c.sync.get().channels.A.cursor).toBe(1001)
@@ -93,7 +93,7 @@ it('bounds Topic and Reply stores with independent continuations and releases in
   for (let i = 0; i < 9; i++) await c.topics.loadTopic('A', 'T')
   expect(c.topics.get('A').topic('T').messages).toHaveLength(TOPIC_MESSAGE_LIMIT)
   expect(c.topics.get('A').topic('T').hasNewer).toBe(true)
-  expect(c.topicQueries.at(-1)).toEqual({ before_seq: 601 })
+  expect(c.topicQueries.at(-1)).toEqual({as_of_seq: 650, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 601 })
   await c.topics.loadTopicLatest('A', 'T')
   expect(c.topics.get('A').topic('T').messages.at(-1)?.created_seq).toBe(1000)
   await c.topics.loadTopic('A', 'U')
@@ -133,7 +133,7 @@ it('keeps the unpinned window through trimming and fences late Topic responses a
   const first = c.topics.loadTopic('A', 'T'); await flush()
   c.topics.releaseTopic('A', 'T')
   const second = c.topics.loadTopic('A', 'T'); await flush()
-  held.resolve(ok({ messages: [msg(2, 'T')], has_more: false })); await Promise.all([first, second])
+  held.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(2, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(2, 'T')], has_more: false })); await Promise.all([first, second])
   expect(c.topics.get('A').topic('T').messages.map(m => m.created_seq)).toEqual([2])
   await c.close()
 })
@@ -169,7 +169,7 @@ it.each(['refusal', 'channel', 'organization', 'session', 'replacement'] as cons
   if (loss === 'replacement') await c.sync.replaceSession('other-account')
   const before = c.sync.get()
   held.resolve(loss === 'replacement' ? { ok: false, kind: 'http', status: 401, error: 'ended' } :
-    ok({ messages: [msg(2, 'T')], has_more: false }))
+    ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(2, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(2, 'T')], has_more: false }))
   await pending; await flush()
   expect(c.sync.get()).toBe(before)
   if (loss === 'refusal' || loss === 'channel') expect(c.sync.get().channels.A.state).toBe('unavailable')
@@ -180,7 +180,7 @@ it.each(['refusal', 'channel', 'organization', 'session', 'replacement'] as cons
 it('delivers gap-fill records to projections even when the display evicts the entire returned page', async () => {
   vi.useFakeTimers()
   const c = topicClient(); await c.boot()
-  c.listMessages.mockResolvedValue(ok({ messages: Array.from({ length: 200 }, (_, i) => msg(11 + i, 'T')), has_more: true }))
+  c.listMessages.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 200 }, (_, i) => msg(11 + i, 'T'))).at(-1)?.created_seq ?? 0,  messages: Array.from({ length: 200 }, (_, i) => msg(11 + i, 'T')), has_more: true }))
   for (let seq = 211; seq <= 1200; seq++) c.event(seq, 'T')
   await vi.advanceTimersByTimeAsync(100)
   await flush()
@@ -229,7 +229,7 @@ it('reanchors W before refetching evicted live history without dropping the visi
   for (let seq = 1001; seq <= 2000; seq++) { const m = record(seq); c.records.push(m); c.event(m) }
   expect(c.topics.get('A').lines[0]).toMatchObject({ message: { created_seq: 1601 } })
   await c.topics.loadMain('A')
-  expect(c.mainQueries.slice(-2)).toEqual([{}, { as_of_seq: 2000, before_position: 1601 }])
+  expect(c.mainQueries.slice(-2)).toEqual([{}, { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2000, before_position: 1601 }])
   expect(c.topics.get('A').lines[0]).toMatchObject({ message: { created_seq: 1551 } })
   expect(c.topics.get('A').lines.some(l => l.kind === 'message' && l.message.created_seq === 1601)).toBe(true)
   expect(c.sync.get().channels.A.cursor).toBe(2000)
@@ -246,7 +246,7 @@ it('retains Topic positions after evicting their latest body and refetches the e
   c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'network' })
   await c.topics.loadSummary('A', 'T')
   expect(c.topics.get('A').lines.find(l => l.kind === 'topic')).toMatchObject({ summaryError: 'retryable' })
-  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 1000,
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1000,
     topic: { mention_unread_count: 0, id: 'T', name: 'Topic T', first_seq: 1, last_seq: 11, message_count: 4, latest_message: msg(11, 'T'), read_seq: 0, unread_count: 0 } }))
   await c.topics.retrySummary('A', 'T')
   expect(c.topics.get('A').lines.find(l => l.kind === 'topic')).toMatchObject({ position: 11, messageCount: 4, latestMessage: { created_seq: 11 } })
@@ -256,10 +256,10 @@ it('retains Topic positions after evicting their latest body and refetches the e
 
 it('Reply history failure keeps its bounded window and a superseded restart cannot deny the Channel', async () => {
   const c = replyClient(); await c.boot()
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', has_more: true,
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), ...Array.from({ length: 199 }, (_, n) => reply(n + 2))]).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: true,
     messages: [root(), ...Array.from({ length: 199 }, (_, n) => reply(n + 2))] }))
   await c.replies.open('A', root())
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', has_more: false,
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 50 }, (_, n) => reply(n + 201))).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: false,
     messages: Array.from({ length: 50 }, (_, n) => reply(n + 201)) }))
   await c.replies.loadMore('A')
   const before = c.replies.get('A').messages
@@ -269,7 +269,7 @@ it('Reply history failure keeps its bounded window and a superseded restart cann
   const held = deferred<Result<ReplyChainPage>>()
   c.listReplyChain.mockReturnValueOnce(held.promise)
   const first = c.replies.loadOlder('A'); await flush()
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', has_more: true,
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), ...Array.from({ length: 49 }, (_, n) => reply(n + 2))]).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: true,
     messages: [root(), ...Array.from({ length: 49 }, (_, n) => reply(n + 2))] }))
   await c.replies.loadOlder('A')
   held.resolve({ ok: false, kind: 'http', status: 403, error: 'denied' }); await first
@@ -311,7 +311,7 @@ it('a Topic latest read started after retirement cannot resurrect a subsequently
   for (let n = 11; n < 462; n++) c.event(n, 'T')
   expect(c.sync.get().channels.A.versions.id5).toBeUndefined()
   expect(c.sync.get().channels.A.messages.some(m => m.id === 'id5')).toBe(false)
-  old.resolve(ok({ messages: [msg(5, 'T')], has_more: false })); await loading; await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(5, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(5, 'T')], has_more: false })); await loading; await flush()
   expect(c.topics.get('A').topic('T').messages.some(m => m.id === 'id5' && !m.deleted)).toBe(false)
   expect(c.sync.get().channels.A.versionEpoch).toBeGreaterThan(epoch)
   await c.sync.close()

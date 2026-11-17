@@ -36,7 +36,8 @@ impl Runner {
                     }})
                 }
             }).collect::<Vec<_>>();
-            let expected = json!({"as_of_seq":spec.expect.as_of_seq,"items":items,"has_more":spec.expect.has_more});
+            assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+            let expected = json!({"history_generation":page["history_generation"],"as_of_seq":spec.expect.as_of_seq,"items":items,"has_more":spec.expect.has_more});
             if status != spec.expect.status || page != expected {
                 eprintln!(
                     "timeline: expected status {} {expected}, got {status} {page}",

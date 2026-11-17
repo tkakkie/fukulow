@@ -15,9 +15,9 @@ const controls = (net: ReturnType<typeof fakeNetwork>) => net.sockets.flatMap((s
 describe('session controllers', () => {
   it('watches the selected Channel and moves the watch when the selection changes (unwatch before watch)', async () => {
     const { net, session } = open()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
-    net.pages.B = ok({ messages: [record(200, 'B')], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('A'), channel('B')] }))
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
+    net.pages.B = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(200, 'B')]).at(-1)?.created_seq ?? 0,  messages: [record(200, 'B')], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('B')] }))
     await settle()
     expect(session.channels.get().selectedId).toBe('A')
     expect(net.history.map((h) => h.channel)).toEqual(['A'])
@@ -36,7 +36,7 @@ describe('session controllers', () => {
     const { net, session } = open()
     session.close()
     expect(net.socket.closed).toBe(true)
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     expect(session.channels.get()).toMatchObject({ status: 'loading', selectedId: null })
     expect(net.history).toEqual([]) // nothing was selected, so nothing was watched
@@ -45,7 +45,7 @@ describe('session controllers', () => {
 
   it('close stops following the selection', async () => {
     const { net, session } = open()
-    net.lists[0].resolve(ok({ channels: [channel('A'), channel('B')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('B')] }))
     await settle()
     session.close()
     const requests = net.history.length
@@ -59,9 +59,9 @@ describe('session controllers', () => {
     const first = open()
     first.session.close()
     const second = open()
-    second.net.lists[0].resolve(ok({ channels: [channel('X')] }))
+    second.net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('X')] }))
     await settle()
-    first.net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    first.net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     expect(second.session.channels.get().channels.map((c) => c.id)).toEqual(['X'])
     expect(second.net.history.map((h) => h.channel)).toEqual(['X'])
@@ -71,8 +71,8 @@ describe('session controllers', () => {
 
   it('a refusal from the server ends the session through onEnded only (401 on a send)', async () => {
     const { net, session, onEnded } = open()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 100)
     void session.sync.getTimeline('A').send('hi')
@@ -90,8 +90,8 @@ it('ordinary REST organization_unavailable ends only its Organization', async ()
     const { net, session, onEnded } = open()
     const other = open()
     try {
-      net.pages.A = ok({ messages: [record(100)], has_more: false })
-      net.lists[0].resolve(ok({ channels: [channel('A')] }))
+      net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
+      net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
       await settle()
       net.subscribed('A', 100)
       void session.sync.getTimeline('A').send('pending')
@@ -130,7 +130,7 @@ it('ordinary REST organization_unavailable ends only its Organization', async ()
 it('ordinary history channel_not_found stays terminal for the Channel under C9', async () => {
   const { net, session, onEnded } = open()
   net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
-  net.lists[0].resolve(ok({ channels: [channel('A')] }))
+  net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
   await settle()
   expect(session.sync.get()).toMatchObject({ organization: 'available', running: true,
     channels: { A: { state: 'unavailable' } } })
@@ -146,7 +146,7 @@ it('explicitly reselecting the only Channel in C9 triggers one retry attempt, re
   try {
     // 1. Single Channel enters C9 on initial history 404: no automatic retry or reload side-effect.
     net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     expect(session.sync.get().channels.A.state).toBe('unavailable')
     expect(session.sync.getTimeline('A').get().status).toBe('unavailable')
@@ -154,7 +154,7 @@ it('explicitly reselecting the only Channel in C9 triggers one retry attempt, re
 
     await vi.advanceTimersByTimeAsync(60_000)
     void session.channels.load()
-    net.lists[1].resolve(ok({ channels: [channel('A')] }))
+    net.lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     expect(net.history).toHaveLength(1)
     expect(watch).toHaveBeenCalledTimes(1)
@@ -171,7 +171,7 @@ it('explicitly reselecting the only Channel in C9 triggers one retry attempt, re
     expect(watch).toHaveBeenCalledTimes(2)
 
     // Server now allows access: explicit reselect tries once and recovers to ready.
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     session.channels.select('A')
     await settle()
     expect(watch).toHaveBeenCalledTimes(3)
@@ -224,7 +224,7 @@ it('a URL re-render with the same Channel hint does not retry C9', async () => {
   const { net, session } = open()
   try {
     net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     expect(session.sync.get().channels.A.state).toBe('unavailable')
     const watch = vi.spyOn(session.sync, 'watch')
@@ -241,7 +241,7 @@ it.each(['C10', 'close', '4001', '401'] as const)('an explicit C9 reselect after
   const { net, session, onEnded } = open()
   try {
     net.pages.A = { ok: false, kind: 'http', status: 404, error: 'channel_not_found' }
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     expect(session.sync.get().channels.A.state).toBe('unavailable')
     if (end === 'close') session.close()
@@ -274,8 +274,8 @@ it.each(['C10', 'close', '4001', '401'] as const)('an explicit C9 reselect after
 it('explicitly selecting the current C9 Channel reattempts it while another Organization stays ready', async () => {
   const a = open(), b = open()
   for (const c of [a, b]) {
-    c.net.pages.A = ok({ messages: [record(100)], has_more: false })
-    c.net.lists[0].resolve(ok({ channels: [channel('A')] })); await settle(); c.net.subscribed('A', 100)
+    c.net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
+    c.net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await settle(); c.net.subscribed('A', 100)
   }
   a.net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
   await settle(); expect(a.session.sync.get().channels.A.state).toBe('unavailable')
@@ -292,8 +292,8 @@ it('a Member panel created during C9 recovers on explicit Channel re-selection',
   }))
   const { net, session } = open()
   try {
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 100)
     net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
@@ -325,8 +325,8 @@ it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without
   const { net, session } = open()
   const watch = vi.spyOn(session.sync, 'watch')
   try {
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 100)
     session.sync.getTimeline('A').setDraft('失わない下書き')
@@ -346,7 +346,7 @@ it.each([403, 404])('a Member panel %s during C9 reselect stays terminal without
     expect(session.sync.get().channels.A.state).toBe('unavailable')
     session.channels.selectHint('A')
     void session.channels.load()
-    net.lists[1].resolve(ok({ channels: [channel('A')] }))
+    net.lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     await vi.advanceTimersByTimeAsync(60_000)
     expect(watch).toHaveBeenCalledTimes(2)
@@ -393,8 +393,8 @@ it('refreshes Channel capabilities from the server when the メンバー tab is 
     },
   })
   try {
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
-    net.lists[0].resolve(ok({ channels: [privateChannel(false)] }))
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [privateChannel(false)] }))
     await settle()
     net.subscribed('A', 100)
     await settle()
@@ -403,7 +403,7 @@ it('refreshes Channel capabilities from the server when the メンバー tab is 
     // Opening the メンバー tab refreshes Channel records/capabilities from the server.
     const firstTab = session.channelMembers('A')
     expect(net.lists).toHaveLength(2)
-    net.lists[1].resolve(ok({ channels: [privateChannel(true)] }))
+    net.lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [privateChannel(true)] }))
     await settle()
     expect(session.channels.get().channels[0].capabilities).toMatchObject({
       can_add_members: { allowed: true },
@@ -422,7 +422,7 @@ it('refreshes Channel capabilities from the server when the メンバー tab is 
     await settle()
     expect(patch).toHaveBeenCalledWith('', 'A', 'me', { manager: false })
     expect(net.lists).toHaveLength(3)
-    net.lists[2].resolve(ok({ channels: [privateChannel(false)] }))
+    net.lists[2].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [privateChannel(false)] }))
     await changing
     expect(firstTab.get().members[0].manager).toBe(false)
     expect(session.channels.get().channels[0].capabilities).toMatchObject({
@@ -435,7 +435,7 @@ it('refreshes Channel capabilities from the server when the メンバー tab is 
     firstTab.close()
     const reopenedTab = session.channelMembers('A')
     expect(net.lists).toHaveLength(4)
-    net.lists[3].resolve(ok({ channels: [privateChannel(true)] }))
+    net.lists[3].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [privateChannel(true)] }))
     await settle()
     expect(reopenedTab.get().loading).toBe(false)
     expect(session.channels.get().channels[0].capabilities).toMatchObject({
@@ -455,13 +455,13 @@ it('composes replies and topics over a single sync instance and fences replaceSe
   try {
     expect(net.sockets).toHaveLength(1)
     const anchor = record(100, 'A')
-    net.pages.A = ok({ messages: [anchor], has_more: false })
-    net.replyChains['A:id100'] = ok({
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor]).at(-1)?.created_seq ?? 0,  messages: [anchor], has_more: false })
+    net.replyChains['A:id100'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }]).at(-1)?.created_seq ?? 0,
       root_id: 'id100',
       messages: [anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }],
       has_more: false,
     })
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 100)
     await settle()
@@ -499,8 +499,8 @@ it('composes unread, replies and topics over a single sync instance and fences r
   try {
     expect(net.sockets).toHaveLength(1)
     const anchor = { ...record(100, 'A'), sender: 'other' }
-    net.pages.A = ok({ messages: [anchor], has_more: false })
-    net.unreadChannels.A = {
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor]).at(-1)?.created_seq ?? 0,  messages: [anchor], has_more: false })
+    net.unreadChannels.A = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       id: 'A',
       kind: 'channel',
@@ -517,12 +517,12 @@ it('composes unread, replies and topics over a single sync instance and fences r
       unread_count: 1,
       main_unread_count: 1,
     }
-    net.replyChains['A:id100'] = ok({
+    net.replyChains['A:id100'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }]).at(-1)?.created_seq ?? 0,
       root_id: 'id100',
       messages: [anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }],
       has_more: false,
     })
-    net.lists[0].resolve(ok({ channels: [channel('A')] }))
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 100)
     await settle()

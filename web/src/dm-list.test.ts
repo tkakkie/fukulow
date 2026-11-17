@@ -19,14 +19,14 @@ it('stale list pages cannot add identities advance continuations or exhaust a tr
   const c = client(); c.discovery()
   c.feed({ type: 'browse' }); const old = c.wake()
   c.feed({ type: 'demand', boundary: true, replace: [] })
-  c.result(old, { dms: [dm('hidden')], next_cursor: null })
+  c.result(old, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('hidden')], next_cursor: null })
   expect(c.state.rows).toEqual([]); expect(c.state.lanes.browse).toMatchObject({ done: false, pending: true })
   expect(c.state.queued).toBe(true)
   const current = c.wake(); expect(current.lane).toBe('browse'); expect(current.cursor).toBeUndefined()
-  c.result(current, { dms: [dm('allowed')], next_cursor: 'below-allowed' })
+  c.result(current, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('allowed')], next_cursor: 'below-allowed' })
   expect(c.state.rows.map(r => r.identity.id)).toEqual(['allowed'])
   expect(c.state.lanes.browse.cursor).toBe('below-allowed')
-  c.result(old, { dms: [dm('hidden')], next_cursor: null })
+  c.result(old, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('hidden')], next_cursor: null })
   expect(c.state.rows.map(r => r.identity.id)).toEqual(['allowed'])
   expect(c.state.lanes.browse.done).toBe(false)
 })
@@ -35,11 +35,11 @@ it('access loss and gain fence old identities counts and mutation snapshots with
   const c = client(); c.discovery([dm('A')]); const old = c.wake()
   const oldAccess = c.state.rows[0]!.access
   c.feed({ type: 'access', id: 'A', revoked: true }); c.feed({ type: 'access', id: 'A', revoked: false })
-  c.result(old, { dms: [dm('A', { as_of_seq: 100 })], next_cursor: null })
+  c.result(old, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('A', { as_of_seq: 100 })], next_cursor: null })
   c.feed({ type: 'opened', generation: old.generation, dm: dm('A') })
   expect(c.state.rows).toEqual([])
   c.run(); c.discovery([dm('A')]); const q = c.wake()
-  c.result(q, { dms: [dm('A', { as_of_seq: 1, read_seq: 1, unread_count: 0, main_unread_count: 0 })], next_cursor: null })
+  c.result(q, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('A', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, read_seq: 1, unread_count: 0, main_unread_count: 0 })], next_cursor: null })
   expect(c.state.rows[0]!.access).not.toBe(oldAccess)
   expect(c.state.rows[0]!.baseline?.as_of_seq).toBe(1)
   const before = c.state.rows[0]!.access
@@ -50,9 +50,9 @@ it('access loss and gain fence old identities counts and mutation snapshots with
 it('only an id-batch omission drops its requested rows and page absence preserves off-page access', () => {
   const c = client(); c.discovery([dm('A'), dm('B')])
   const batch = c.wake(); expect(batch.ids).toEqual(['A', 'B'])
-  const effects = c.result(batch, { dms: [dm('B')], next_cursor: null })
+  const effects = c.result(batch, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('B')], next_cursor: null })
   expect(effects).toContainEqual({ type: 'drop', id: 'A' })
-  c.feed({ type: 'browse' }); c.result(c.wake(), { dms: [], next_cursor: null })
+  c.feed({ type: 'browse' }); c.result(c.wake(), { history_generation: '00000000-0000-4000-8000-000000000515', dms: [], next_cursor: null })
   expect(c.state.rows.map(r => r.identity.id)).toEqual(['B'])
 })
 
@@ -62,7 +62,7 @@ it('P8 accepts one atomic winning tuple and rejects contradictory equal-position
   expect(chooseDmBaseline(old, contradictory)).toBe(old)
   const lower = dm('A', { main_unread_count: 7, unread_count: 7, mention_unread_count: 1 })
   expect(chooseDmBaseline(old, lower)).toBe(lower)
-  expect(chooseDmBaseline(old, dm('A', { as_of_seq: 9, read_seq: 9 }))).toBe(old)
+  expect(chooseDmBaseline(old, dm('A', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 9, read_seq: 9 }))).toBe(old)
   const newer = dm('A', { as_of_seq: 11, main_unread_count: 9, unread_count: 9 })
   expect(chooseDmBaseline(old, newer)).toBe(newer)
   const read = dm('A', { read_seq: 3, main_unread_count: 7, unread_count: 7 })
@@ -92,9 +92,9 @@ it('frozen held-id rounds finish within four runs despite newly discovered rows 
     c.run()
     for (let slot = 0; slot < 5; slot++) {
       const q = c.wake(); expect(q).toBeDefined()
-      if (q.lane === 'held') { batches.push(q.ids!); c.result(q, { dms: q.ids!.map(id => dm(id)), next_cursor: null }) }
+      if (q.lane === 'held') { batches.push(q.ids!); c.result(q, { history_generation: '00000000-0000-4000-8000-000000000515', dms: q.ids!.map(id => dm(id)), next_cursor: null }) }
       else if (q.lane === 'delta' || q.lane === 'coverage') c.result(q, changes(run ? [dm('new')] : [], `${q.lane}-${run}`))
-      else c.result(q, { dms: [], next_cursor: `below-${q.lane}-${run}` })
+      else c.result(q, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [], next_cursor: `below-${q.lane}-${run}` })
     }
     c.feed({ type: 'browse' })
   }
@@ -134,12 +134,12 @@ it('browse and unknown-open recovery preserve independent keys beyond eviction a
     // Shared service rotates, but each traversal receives its own boundary once per run.
     for (let slot = 0; slot < 3; slot++) {
       const q = c.wake(); if (!q) break
-      if (q.lane === 'held') { c.result(q, { dms: q.ids!.map(id => dm(id)), next_cursor: null }); continue }
+      if (q.lane === 'held') { c.result(q, { history_generation: '00000000-0000-4000-8000-000000000515', dms: q.ids!.map(id => dm(id)), next_cursor: null }); continue }
       expect(['browse', 'recovery']).toContain(q.lane)
       expect(q.cursor).toBe(page ? `${q.lane}-${page}` : undefined)
-      const data = { dms: Array.from({ length: 50 }, (_, i) => dm(String(page * 50 + i))), next_cursor: page === 109 ? null : `${q.lane}-${page + 1}` }
+      const data = { history_generation: '00000000-0000-4000-8000-000000000515', dms: Array.from({ length: 50 }, (_, i) => dm(String(page * 50 + i))), next_cursor: page === 109 ? null : `${q.lane}-${page + 1}` }
       c.result(q, data)
-      c.result(q, { dms: [dm('late-duplicate')], next_cursor: null })
+      c.result(q, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('late-duplicate')], next_cursor: null })
       expect(c.state.rows.some(r => r.identity.id === 'late-duplicate')).toBe(false)
     }
     c.feed({ type: 'browse' })
@@ -153,30 +153,30 @@ it('browse and unknown-open recovery preserve independent keys beyond eviction a
 
 it('reconnect preserves all cursors but fences old requests and close stops all work', () => {
   const c = client(); c.discovery(); c.feed({ type: 'browse' }); const old = c.wake()
-  c.feed({ type: 'pause' }); c.result(old, { dms: [dm('old')], next_cursor: null }); expect(c.wake()).toBeUndefined()
+  c.feed({ type: 'pause' }); c.result(old, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('old')], next_cursor: null }); expect(c.wake()).toBeUndefined()
   expect(c.state.lanes.delta.cursor).toBe('next'); expect(c.state.lanes.coverage.cursor).toBe('next')
   c.feed({ type: 'resume' }); c.run(); c.discovery(); const current = c.wake()
   expect(current.lane).toBe('browse'); expect(current.cursor).toBeUndefined()
-  c.result(current, { dms: [dm('fresh')], next_cursor: 'below-fresh' }); expect(c.state.rows).toHaveLength(1)
+  c.result(current, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('fresh')], next_cursor: 'below-fresh' }); expect(c.state.rows).toHaveLength(1)
   c.feed({ type: 'close' }); c.run(); expect(c.wake()).toBeUndefined()
 })
 
 it('O5 fences a delayed continuation without rewinding its accepted boundary or restoring stale peer identity', () => {
-  const c = client(); c.discovery([dm('A')]); c.result(c.wake(), { dms: [dm('A')], next_cursor: null })
-  c.feed({ type: 'browse' }); c.result(c.wake(), { dms: [dm('B')], next_cursor: 'below-B' })
+  const c = client(); c.discovery([dm('A')]); c.result(c.wake(), { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('A')], next_cursor: null })
+  c.feed({ type: 'browse' }); c.result(c.wake(), { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('B')], next_cursor: 'below-B' })
   c.feed({ type: 'browse' }); c.run(); c.discovery()
   let old = c.wake()
-  if (old.lane === 'held') { c.result(old, { dms: old.ids!.map(id => dm(id)), next_cursor: null }); old = c.wake() }
+  if (old.lane === 'held') { c.result(old, { history_generation: '00000000-0000-4000-8000-000000000515', dms: old.ids!.map(id => dm(id)), next_cursor: null }); old = c.wake() }
   expect(old.lane).toBe('browse'); expect(old.cursor).toBe('below-B')
   c.run()
-  c.result(old, { dms: [dm('B', { peer: { id: 'peer-B', name: 'Stale name', active: false } }), dm('stale')], next_cursor: null })
+  c.result(old, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('B', { peer: { id: 'peer-B', name: 'Stale name', active: false } }), dm('stale')], next_cursor: null })
   expect(c.state.lanes.browse.cursor).toBe('below-B'); expect(c.state.lanes.browse.done).toBe(false)
   expect(c.state.rows.find(row => row.identity.id === 'B')!.identity.peer.name).toBe('Peer B')
   c.discovery()
   let fresh = c.wake()
-  if (fresh.lane === 'held') { c.result(fresh, { dms: fresh.ids!.map(id => dm(id)), next_cursor: null }); fresh = c.wake() }
+  if (fresh.lane === 'held') { c.result(fresh, { history_generation: '00000000-0000-4000-8000-000000000515', dms: fresh.ids!.map(id => dm(id)), next_cursor: null }); fresh = c.wake() }
   expect(fresh.cursor).toBe('below-B')
-  c.result(fresh, { dms: [dm('C')], next_cursor: null })
+  c.result(fresh, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('C')], next_cursor: null })
   expect(c.state.rows.some(row => row.identity.id === 'C')).toBe(true)
   expect(c.state.rows.some(row => row.identity.id === 'stale')).toBe(false)
   expect(c.state.lanes.browse.done).toBe(true)
@@ -186,7 +186,7 @@ it('later demand reopens a refused lane without clearing its error budget contin
   const c = client(); c.discovery([dm('A')])
   const refused = c.wake(); expect(refused.lane).toBe('held')
   c.feed({ type: 'failure', request: refused, retryAt: 20_000, terminal: true })
-  c.feed({ type: 'browse' }); c.result(c.wake(), { dms: [], next_cursor: null })
+  c.feed({ type: 'browse' }); c.result(c.wake(), { history_generation: '00000000-0000-4000-8000-000000000515', dms: [], next_cursor: null })
   expect(c.state.status).toBe('error') // Successful discovery/browsing cannot hide a failed lane.
   expect(c.state.error).toBe(true)
   const budget = c.state.budget
@@ -197,7 +197,7 @@ it('later demand reopens a refused lane without clearing its error budget contin
   c.feed({ type: 'wake', now: 20_000 })
   const retried = c.state.request!
   expect(retried.lane).toBe('held'); expect(retried.ids).toEqual(refused.ids)
-  c.result(retried, { dms: [dm('A')], next_cursor: null })
+  c.result(retried, { history_generation: '00000000-0000-4000-8000-000000000515', dms: [dm('A')], next_cursor: null })
   expect(c.state.status).toBe('ready'); expect(c.state.error).toBe(false)
 })
 
@@ -213,10 +213,10 @@ it('a frozen recovery result retains the selected oldest row and evicts exactly 
   c.feed({ type: 'select', id: '1' })
   c.feed({ type: 'recover', peer: 'peer-0' })
   const held = c.wake(); expect(held.lane).toBe('held')
-  c.result(held, { dms: held.ids!.map(id => dm(id)), next_cursor: null })
+  c.result(held, { history_generation: '00000000-0000-4000-8000-000000000515', dms: held.ids!.map(id => dm(id)), next_cursor: null })
   const request = c.wake(); expect(request.lane).toBe('recovery')
   const prior = c.state
-  const input: DmInput = { type: 'result', request, data: {
+  const input: DmInput = { type: 'result', request, data: { history_generation: '00000000-0000-4000-8000-000000000515',
     dms: [dm('0'), dm('200'), dm('201'), dm('202')], next_cursor: null,
   } }
   const before = structuredClone({ prior, input })
@@ -252,7 +252,7 @@ it('transitions preserve frozen prior state and input across retained rows reque
     feed({ type: 'wake', now: 1000 })
     const request = state.request!
     feed({ type: 'result', request, data: request.lane === 'held'
-      ? { dms: request.ids!.slice(1).map(id => dm(id)), next_cursor: null }
+      ? { history_generation: '00000000-0000-4000-8000-000000000515', dms: request.ids!.slice(1).map(id => dm(id)), next_cursor: null }
       : changes() })
   }
   expect(state.round).toHaveLength(3)

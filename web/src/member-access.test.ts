@@ -37,19 +37,19 @@ it('refreshes Members on Channel list additions removals access loss and reconne
   const stop = watchMemberAccess(session.channels, session.sync, refresh)
   net.socket.onReady(); await settle()
   expect(refresh).toHaveBeenCalledTimes(1)
-  net.lists[0].resolve(ok({ channels: [channel('A')] })); await settle()
+  net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await settle()
   expect(refresh).toHaveBeenCalledTimes(2)
   net.subscribed('A', 0); await settle()
   refresh.mockClear()
   // A list reload with the same Channels is not an access change.
   const reload = session.channels.load()
-  net.lists.at(-1)!.resolve(ok({ channels: [channel('A')] })); await reload
+  net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await reload
   expect(refresh).not.toHaveBeenCalled()
   const added = session.channels.load()
-  net.lists.at(-1)!.resolve(ok({ channels: [channel('A'), channel('B')] })); await added
+  net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('B')] })); await added
   expect(refresh).toHaveBeenCalledTimes(1)
   const removed = session.channels.load()
-  net.lists.at(-1)!.resolve(ok({ channels: [channel('A')] })); await removed
+  net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await removed
   expect(refresh).toHaveBeenCalledTimes(2)
   net.event({ type: 'channel_access_lost', channel_id: 'A' }); await settle()
   expect(refresh).toHaveBeenCalledTimes(3)
@@ -59,7 +59,7 @@ it('refreshes Members on Channel list additions removals access loss and reconne
   expect(refresh).toHaveBeenCalledTimes(4)
   stop()
   const after = session.channels.load()
-  net.lists.at(-1)!.resolve(ok({ channels: [] })); await after
+  net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] })); await after
   expect(refresh).toHaveBeenCalledTimes(4)
   session.close()
 })

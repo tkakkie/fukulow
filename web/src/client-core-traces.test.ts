@@ -15,7 +15,7 @@ function recorder(id: string) {
   const trace: Trace = { id, steps: 0 }
   function feed(raw: Input) {
     let input = normalizeInput(raw)
-    if (input.type === "history_result" && state.requests[input.request]?.type === "history" && (state.requests[input.request] as { page: string }).page === "after") input = { type: "events_result", request: input.request, page: { events: input.page.messages.map(message => ({ type: "message", seq: message.created_seq, kind: "create", message })), has_more: input.page.has_more } }
+    if (input.type === "history_result" && state.requests[input.request]?.type === "history" && (state.requests[input.request] as { page: string }).page === "after") input = { type: "events_result", request: input.request, page: { history_generation: '00000000-0000-4000-8000-000000000515', events: input.page.messages.map(message => ({ type: "message", seq: message.created_seq, kind: "create", message })), has_more: input.page.has_more } }
     const result = step(state, input)
     const { channels, requests, timers, ...session } = result.state
     const actual = wasm.step(input)
@@ -49,9 +49,9 @@ function generated(seed: number): Trace {
       const effects = d.feed({ type: 'watch', channel })
       const request = effects.find(e => e.type === 'fetch_history')!
       if (request.type !== 'fetch_history') throw new Error('missing bootstrap')
-      d.feed({ type: 'history_result', request: request.id, page: {
+      d.feed({ type: 'history_result', request: request.id, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 200 }, (_,i) => record(i + 1, channel))).at(-1)?.created_seq ?? 0,
         messages: Array.from({ length: 200 }, (_,i) => record(i + 1, channel)), has_more: true } })
-      d.feed({ type: 'event', connection: d.get().connection!, event: { type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
+      d.feed({ type: 'event', connection: d.get().connection!, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
     }
   }
   boot()
@@ -75,7 +75,7 @@ function generated(seed: number): Trace {
       { type: 'user_retry', channel, clientMessageId: pending?.clientMessageId ?? 'c1' },
       { type: 'user_discard', channel, clientMessageId: pending?.clientMessageId ?? 'c1' },
       { type: 'event', connection, event: { type: 'message', kind: 'create', seq: (message).created_seq, message }, ...(random(5) === 0 ? { refreshMentionNames: true } : {}) },
-      { type: 'event', connection, event: { type: 'subscribed', channel_id: channel, caught_up_seq: random(500) },
+      { type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: random(500) },
         ...(random(3) === 0 ? { subscription: 99999 } : {}) },
       { type: 'event', connection, event: { type: 'error', channel_id: channel, code: ['channel_not_found','subscription_limit','unknown'][random(3)] } },
       { type: 'event', connection, event: { type: 'channel_access_lost', channel_id: channel } },
@@ -86,9 +86,9 @@ function generated(seed: number): Trace {
     if (request) {
       const [token,r] = request
       if (r.type === 'history') {
-        choices.push({ type: 'history_result', request: Number(token), page: { has_more: random(2) === 0,
-          messages: Array.from({ length: random(8) },(_,i) => ({ ...record((r.seq ?? 190) + i + 1, r.channel),
-            ...(random(5) === 0 ? { sender: 'me', client_message_id: 'c1' } : {}) })) } })
+        const hasMore = random(2) === 0
+        const messages = Array.from({ length: random(8) }, (_, i) => ({ ...record((r.seq ?? 190) + i + 1, r.channel), ...(random(5) === 0 ? { sender: 'me', client_message_id: 'c1' } : {}) }))
+        choices.push({ type: 'history_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: messages.at(-1)?.created_seq ?? 0, messages, has_more: hasMore } })
         choices.push({ type: 'history_failed', request: Number(token), status: [401,403,404,500,'network','timeout'][random(6)] as 401 })
       } else {
         choices.push({ type: 'ack', request: Number(token), message: { ...message, channel_id: r.channel, sender: 'me', client_message_id: r.clientMessageId } })
@@ -114,11 +114,11 @@ function retentionAndIdentity(): Trace {
   const view = () => d.get().channels[fixtureUuid(channel)]
   const event = (seq: number) => d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (record(seq)).created_seq, message: record(seq) } })
   const page = (request: number, start: number, length: number) => d.feed({ type: 'history_result', request,
-    page: { messages: Array.from({ length }, (_,i) => record(start + i)), has_more: true } })
+    page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length }, (_,i) => record(start + i))).at(-1)?.created_seq ?? 0,  messages: Array.from({ length }, (_,i) => record(start + i)), has_more: true } })
   d.feed({ type: 'watch', channel })
   page(view().latest!, 1, 200)
-  d.feed({ type: 'event', connection, subscription: -1, event: { type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
-  d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
+  d.feed({ type: 'event', connection, subscription: -1, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
+  d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
   for (let i = 0; i < 425; i++) event(202 + i * 2)
   expect(view().advancing).toHaveLength(400)
   expect(view().forgottenThrough).toBeGreaterThan(1000)
@@ -139,7 +139,7 @@ function retentionAndIdentity(): Trace {
   page(view().older!, 1, 200)
   d.feed({ type: 'refresh', channel })
   // Unsorted, repeated seqs exercise last-record-wins dedup and original records order.
-  d.feed({ type: 'history_result', request: view().latest!, page: {
+  d.feed({ type: 'history_result', request: view().latest!, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1901), record(1900), { ...record(1901), body: 'canonical' }]).at(-1)?.created_seq ?? 0,
     messages: [record(1901), record(1900), { ...record(1901), body: 'canonical' }], has_more: false } })
   d.feed({ type: 'user_send', channel, clientMessageId: 'reply', body: 'pending', reply_to: 'parent', replyRootId: 'root' })
   d.feed({ type: 'user_send', channel, clientMessageId: 'reply', body: 'same key' })
@@ -147,7 +147,7 @@ function retentionAndIdentity(): Trace {
   for (const channel of ['B','C','D','E','F','G','H']) {
     d.feed({ type: 'watch', channel })
     const c = d.get().channels[fixtureUuid(channel)]
-    d.feed({ type: 'history_result', request: c.latest!, page: {
+    d.feed({ type: 'history_result', request: c.latest!, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 200 },(_,i) => record(i+1,channel))).at(-1)?.created_seq ?? 0,
       messages: Array.from({ length: 200 },(_,i) => record(i+1,channel)), has_more: true } })
     d.feed({ type: 'unwatch', channel })
   }
@@ -156,7 +156,7 @@ function retentionAndIdentity(): Trace {
   expect(retained.every(c => c.messages.length === 50)).toBe(true)
   expect(view().pending).toHaveLength(1)
   d.feed({ type: 'watch', channel })
-  d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: channel, caught_up_seq: 2 } })
+  d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 2 } })
   return d.trace
 }
 

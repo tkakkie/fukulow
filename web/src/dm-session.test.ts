@@ -8,26 +8,28 @@ const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve()
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 function client() {
-  const first: Message = { mentions: [], id: 'first', channel_id: 'D', client_message_id: 'first-key', created_seq: 1, version: 1, deleted: false, sender: 'peer', body: 'First before selection', topic_id: null, reply_to: null, reply_root_id: null, created_at: '2026-11-14T00:00:00Z' }
-  let rows: Dm[] = [dm('D', { as_of_seq: 1, read_seq: 0, main_unread_count: 1, unread_count: 1 })]
+  const first: Message = { history_generation: '00000000-0000-4000-8000-000000000515', mentions: [], id: 'first', channel_id: 'D', client_message_id: 'first-key', created_seq: 1, version: 1, deleted: false, sender: 'peer', body: 'First before selection', topic_id: null, reply_to: null, reply_root_id: null, created_at: '2026-11-14T00:00:00Z' }
+  let rows: Dm[] = [dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, read_seq: 0, main_unread_count: 1, unread_count: 1 })]
   let socket!: RealtimeHandlers
-  const listMessages = vi.fn(async () => ok({ messages: [first], has_more: false }))
-  const listTimeline = vi.fn(async (): Promise<Result<TimelinePage>> => ok({ as_of_seq: 1, items: [{ kind: 'message', message: first }], has_more: false }))
+  const listMessages = vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([first]).at(-1)?.created_seq ?? 0,  messages: [first], has_more: false }))
+  const listTimeline = vi.fn(async (): Promise<Result<TimelinePage>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, items: [{ kind: 'message', message: first }], has_more: false }))
   const markRead = vi.fn(async (_scope, body) => ok(body))
-  const listChannels = vi.fn(async () => ok({ channels: [] }))
+  const listChannels = vi.fn(async () => ok({ history_generation: rows[0]?.history_generation ?? first.history_generation, channels: [] }))
   const onEnded = vi.fn(), open = vi.fn(async (): Promise<Result<Dm>> => ok(rows[0]!))
+  const changes = vi.fn(async ({ lane }: import('./api').DmChangesQuery) => ok({ dms: rows.map(({ id, kind, peer }) => ({ id, kind, peer })), next_cursor: lane, caught_up: true }))
+  const listDms = vi.fn(async (q: import('./api').DmListQuery) => ok({ history_generation: rows[0]?.history_generation ?? first.history_generation, dms: q.channel_id ? rows.filter(row => q.channel_id!.includes(row.id)) : rows, next_cursor: null }))
   const session = createSession({ selfId: 'me', organizationId: 'org', onEnded,
     channelsApi: { listChannels, createChannel: async () => ({ ok: false, kind: 'network' }) },
     dmsApi: {
-      changes: async ({ lane }) => ok({ dms: rows.map(({ id, kind, peer }) => ({ id, kind, peer })), next_cursor: lane, caught_up: true }),
-      list: async q => ok({ dms: q.channel_id ? rows.filter(row => q.channel_id!.includes(row.id)) : rows, next_cursor: null }),
+      changes,
+      list: listDms,
       open,
     },
     topicsApi: { listTimeline, listTopics: async () => ({ ok: false, kind: 'network' }), getTopicSummary: async () => ({ ok: false, kind: 'network' }), listTopicMessages: async () => ({ ok: false, kind: 'network' }) },
     unreadApi: { listChannels, markRead, getTopicSummary: async () => ({ ok: false, kind: 'network' }) },
     sync: { connect(h) { socket = h; return { send() {}, close() {} } }, api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages, sendMessage: async () => ({ ok: false, kind: 'network' }) }, random: () => 0.5 },
   })
-  return { session, listMessages, listTimeline, markRead, first, onEnded, open,
+  return { session, listMessages, listTimeline, markRead, first, onEnded, open, changes, listDms,
     set rows(value: Dm[]) { rows = value }, get socket() { return socket },
     async ready() { socket.onReady(); socket.onEvent({ type: 'activity_ready' }); await vi.advanceTimersByTimeAsync(1000) },
   }
@@ -40,7 +42,7 @@ it('DM discovery neither watches nor marks read and selection bootstraps the fir
   expect(c.listMessages).not.toHaveBeenCalled(); expect(c.markRead).not.toHaveBeenCalled()
   c.session.dms.select('D'); await flush()
   expect(c.listMessages).toHaveBeenCalledOnce(); expect(c.listTimeline).not.toHaveBeenCalled()
-  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 1 }); await flush()
+  c.socket.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'D', caught_up_seq: 1 }); await flush()
   await vi.advanceTimersByTimeAsync(1000)
   expect(c.session.sync.get().channels.D.messages).toEqual([c.first])
   expect(c.session.sync.get().channels.D.cursor).toBe(1)
@@ -48,27 +50,52 @@ it('DM discovery neither watches nor marks read and selection bootstraps the fir
   c.session.unread.visibility(true)
   const visit = await c.session.unread.enter({ channel: 'D', topicId: null })
   c.session.unread.presented(visit!, [1]); await flush()
-  expect(c.markRead).toHaveBeenCalledWith({ channel: 'D', topicId: null }, { read_seq: 1 })
+  expect(c.markRead).toHaveBeenCalledWith({ channel: 'D', topicId: null }, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })
+  c.session.close()
+})
+
+it('Organization history reset restarts DM discovery and browsing with fresh lower baselines', async () => {
+  const c = client(); await c.ready()
+  c.session.dms.browse(); await vi.advanceTimersByTimeAsync(1000)
+  expect(c.session.dms.get().lanes.browse.done).toBe(true)
+  expect(c.session.dms.get().lanes.delta.cursor).toBe('delta')
+  expect(c.session.unread.get('D').unreadCount).toBe(1)
+  const fresh = '00000000-0000-4000-8000-000000000516'
+  c.rows = [dm('D', { history_generation: fresh, as_of_seq: 0, read_seq: 0, unread_count: 0, main_unread_count: 0 })]
+  c.session.sync.observeHistoryGeneration(fresh)
+  expect(c.session.sync.get().historyEpoch).toBe(1)
+  expect(c.session.dms.get().rows).toEqual([])
+  for (const lane of Object.values(c.session.dms.get().lanes)) {
+    expect(lane.cursor).toBeUndefined(); expect(lane.done).toBe(false)
+  }
+  c.changes.mockClear(); c.listDms.mockClear()
+  await c.ready()
+  c.session.dms.browse(); await vi.advanceTimersByTimeAsync(1000)
+  expect(c.changes.mock.calls.slice(0, 2).map(([q]) => q)).toEqual([{ lane: 'delta' }, { lane: 'coverage' }])
+  expect(c.listDms.mock.calls.some(([q]) => q.cursor === undefined && q.channel_id === undefined)).toBe(true)
+  expect(c.session.dms.get().rows[0]?.baseline?.as_of_seq).toBe(0)
+  expect(c.session.unread.get('D').unreadCount).toBe(0)
+  expect(c.listMessages).not.toHaveBeenCalled(); expect(c.markRead).not.toHaveBeenCalled()
   c.session.close()
 })
 
 it('unknown-kind direct links reload common DM history after discovery and keep older Messages pageable', async () => {
   const c = client(); c.rows = []
   const messages = [1, 2, 3].map(seq => ({ ...c.first, id: String(seq), created_seq: seq, version: seq, deleted: false }))
-  c.listTimeline.mockResolvedValue(ok({ as_of_seq: 3, items: messages.slice(1).map(message => ({ kind: 'message' as const, message })), has_more: true }))
-  c.listMessages.mockResolvedValueOnce(ok({ messages: messages.slice(1), has_more: true }))
-    .mockResolvedValueOnce(ok({ messages: messages.slice(0, 1), has_more: false }))
+  c.listTimeline.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, items: messages.slice(1).map(message => ({ kind: 'message' as const, message })), has_more: true }))
+  c.listMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages.slice(1)).at(-1)?.created_seq ?? 0,  messages: messages.slice(1), has_more: true }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages.slice(0, 1)).at(-1)?.created_seq ?? 0,  messages: messages.slice(0, 1), has_more: false }))
   c.socket.onReady(); c.session.channels.selectHint('D'); await flush()
   expect(c.listTimeline).toHaveBeenCalledOnce()
   expect(c.session.sync.get().channels.D.messages.map(m => m.created_seq)).toEqual([3])
-  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 3 }); await flush()
+  c.socket.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'D', caught_up_seq: 3 }); await flush()
   c.rows = [dm('D', { as_of_seq: 3 })]
   c.socket.onEvent({ type: 'activity_ready' }); await vi.advanceTimersByTimeAsync(1000)
   expect(c.listMessages).toHaveBeenCalledOnce()
   expect(c.session.sync.get().channels.D.messages.map(m => m.created_seq)).toEqual([2, 3])
   expect(c.session.sync.getTimeline('D').get().hasOlder).toBe(true)
   await c.session.sync.getTimeline('D').loadOlder(); await flush()
-  expect(c.listMessages).toHaveBeenLastCalledWith('D', { before_seq: 2 })
+  expect(c.listMessages).toHaveBeenLastCalledWith('D', {as_of_seq: 3, history_generation: '00000000-0000-4000-8000-000000000515', before_seq: 2 })
   expect(c.session.sync.get().channels.D.messages.map(m => m.created_seq)).toEqual([1, 2, 3])
   expect(c.session.sync.get().channels.D.cursor).toBe(3)
   expect(c.session.sync.getTimeline('D').get().hasOlder).toBe(false)
@@ -91,17 +118,17 @@ it('list rediscovery cannot revive C9 and explicit DM reselection authorizes a f
 
 it('DM access generations discard pending marks and a late old mark cannot replace the renewed baseline', async () => {
   const c = client(); await c.ready(); c.session.dms.select('D'); await flush()
-  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 1 }); await flush()
+  c.socket.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'D', caught_up_seq: 1 }); await flush()
   await vi.advanceTimersByTimeAsync(1000)
   let resolve!: (value: Result<ReadPosition>) => void
   c.markRead.mockImplementationOnce(() => new Promise(r => { resolve = r }))
   c.session.unread.visibility(true); const visit = await c.session.unread.enter({ channel: 'D', topicId: null })
   c.session.unread.presented(visit!, [1]); await flush(); expect(c.markRead).toHaveBeenCalledOnce()
   const generation = c.session.unread.get('D').generation
-  c.rows = [dm('D', { as_of_seq: 1, read_seq: 1, main_unread_count: 0, unread_count: 0 })]
+  c.rows = [dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, read_seq: 1, main_unread_count: 0, unread_count: 0 })]
   c.socket.onEvent({ type: 'channel_access_gained', channel_id: 'D' }); await vi.advanceTimersByTimeAsync(16_000)
   expect(c.session.unread.get('D').generation).not.toBe(generation)
-  resolve(ok({ read_seq: 99 })); await flush()
+  resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 99 })); await flush()
   expect(c.session.unread.get('D').main.position).toBe(1)
   expect(c.markRead).toHaveBeenCalledOnce()
   c.session.close()
@@ -125,12 +152,12 @@ it('DM discovery during an unknown-kind bootstrap uses common history before est
   const messages = [1, 2, 3].map(seq => ({ ...c.first, id: String(seq), created_seq: seq, version: seq, deleted: false }))
   let resolve!: (value: Result<TimelinePage>) => void
   c.listTimeline.mockImplementationOnce(() => new Promise(r => { resolve = r }))
-  c.listMessages.mockResolvedValueOnce(ok({ messages: messages.slice(1), has_more: true }))
+  c.listMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages.slice(1)).at(-1)?.created_seq ?? 0,  messages: messages.slice(1), has_more: true }))
   c.socket.onReady(); c.session.channels.selectHint('D'); await flush()
   expect(c.session.sync.get().channels.D.cursor).toBeNull()
   c.rows = [dm('D', { as_of_seq: 3 })]
   c.socket.onEvent({ type: 'activity_ready' }); await vi.advanceTimersByTimeAsync(1000)
-  resolve(ok({ as_of_seq: 3, items: messages.map(message => ({ kind: 'message', message })), has_more: false }))
+  resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, items: messages.map(message => ({ kind: 'message', message })), has_more: false }))
   await flush()
   expect(c.listMessages).toHaveBeenCalledOnce()
   expect(c.session.sync.get().channels.D.messages.map(m => m.created_seq)).toEqual([2, 3])
@@ -142,11 +169,11 @@ it('DM discovery during an unknown-kind bootstrap uses common history before est
 it('DM Mention counts converge across live duplicate replay reconnect marks and access loss', async () => {
   const c = client()
   c.first.mentions = [{ member_id: 'me', name: 'Me' }]
-  c.rows = [dm('D', { as_of_seq: 1, read_seq: 0, main_unread_count: 1, unread_count: 1, mention_unread_count: 1 })]
+  c.rows = [dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1, read_seq: 0, main_unread_count: 1, unread_count: 1, mention_unread_count: 1 })]
   await c.ready()
   expect(c.session.unread.get('D').mentionUnreadCount).toBe(1)
   c.session.dms.select('D'); await flush()
-  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 1 }); await flush()
+  c.socket.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'D', caught_up_seq: 1 }); await flush()
   await vi.advanceTimersByTimeAsync(1000)
   expect(c.session.unread.get('D').mentionUnreadCount).toBe(1)
   const live: Message = { ...c.first, id: 'second', client_message_id: 'second-key', created_seq: 2, version: 2, deleted: false }
@@ -154,14 +181,14 @@ it('DM Mention counts converge across live duplicate replay reconnect marks and 
   await flush()
   expect(c.session.unread.get('D').mentionUnreadCount).toBe(2)
   expect(c.session.unread.get('D').unreadCount).toBe(2)
-  c.rows = [dm('D', { as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2, mention_unread_count: 2 })]
+  c.rows = [dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2, mention_unread_count: 2 })]
   c.socket.onClose(1001); await vi.advanceTimersByTimeAsync(1000)
   c.socket.onReady(); c.socket.onEvent({ type: 'activity_ready' })
   c.socket.onEvent({ type: 'message', kind: 'create', seq: (live).created_seq, message: live }); c.socket.onEvent({ type: 'message', kind: 'create', seq: (live).created_seq, message: live })
-  c.socket.onEvent({ type: 'subscribed', channel_id: 'D', caught_up_seq: 2 })
+  c.socket.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'D', caught_up_seq: 2 })
   await vi.advanceTimersByTimeAsync(16_000)
   expect(c.session.unread.get('D').mentionUnreadCount).toBe(2)
-  c.rows = [dm('D', { as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0, mention_unread_count: 0 })]
+  c.rows = [dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0, mention_unread_count: 0 })]
   c.socket.onEvent({ type: 'read_position_changed', channel_id: 'D', topic_id: null, read_seq: 2 })
   await vi.advanceTimersByTimeAsync(16_000)
   expect(c.session.unread.get('D').mentionUnreadCount).toBe(0)
@@ -175,13 +202,13 @@ it('DM Mention counts converge across live duplicate replay reconnect marks and 
 
 it('unwatched DM Mention baselines follow activity notices and cross-device marks without watching or marking', async () => {
   const c = client(); await c.ready()
-  c.rows = [dm('D', { as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2, mention_unread_count: 1 })]
+  c.rows = [dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2, mention_unread_count: 1 })]
   c.socket.onEvent({ type: 'channel_activity', channel_id: 'D', seq: 2 })
   c.socket.onEvent({ type: 'channel_activity', channel_id: 'D', seq: 2 })
   await vi.advanceTimersByTimeAsync(16_000)
   expect(c.session.unread.get('D').mentionUnreadCount).toBe(1)
   expect(c.session.sync.get().channels.D).toBeUndefined()
-  c.rows = [dm('D', { as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0, mention_unread_count: 0 })]
+  c.rows = [dm('D', { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0, mention_unread_count: 0 })]
   c.socket.onEvent({ type: 'read_position_changed', channel_id: 'D', topic_id: null, read_seq: 2 })
   await vi.advanceTimersByTimeAsync(16_000)
   expect(c.session.unread.get('D').mentionUnreadCount).toBe(0)

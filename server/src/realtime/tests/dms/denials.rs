@@ -140,7 +140,10 @@ async fn dm_denied_mark_read_and_lost_caller_retries_publish_nothing_with_active
                 axum::extract::State(f.state.clone()),
                 captured.clone(),
                 Ok(axum::extract::Path((f.organization, c))),
-                crate::auth::ApiJson(messages::MarkReadRequest { read_seq: 999 }),
+                crate::auth::ApiJson(messages::MarkReadRequest {
+                    history_generation: None,
+                    read_seq: 999,
+                }),
             )
             .await
             .unwrap_err()

@@ -23,6 +23,7 @@ mod commit;
 mod delivery;
 pub mod dms;
 mod failure;
+pub(crate) mod history;
 mod limiter;
 pub(crate) mod log;
 pub(crate) use log::ChannelEvent;
@@ -58,6 +59,7 @@ fn message_from_row(row: &sqlx::postgres::PgRow) -> Result<Message, sqlx::Error>
     use sqlx::Row;
     let mentions: String = row.try_get("mentions")?;
     Ok(Message {
+        history_generation: row.try_get("history_generation")?,
         id: row.try_get("id")?,
         channel_id: row.try_get("channel_id")?,
         created_seq: row.try_get("seq")?,
@@ -91,7 +93,9 @@ fn message_from_row(row: &sqlx::postgres::PgRow) -> Result<Message, sqlx::Error>
     responses((status = 200, description = "Page of Channel Messages in ascending sequence order with directional has_more", body = MessagePage),
         (status = 400, description = "Malformed Organization id, invalid Channel id, sequence cursors, or page limit; after_seq and before_seq cannot be combined", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; the response does not reveal whether the Channel exists", body = ErrorBody),
+        (status = 503, description = "Committed watermark admission unavailable", body = ErrorBody, headers(("Retry-After" = u64, description = "Retry seconds"))),
         (status = 500, description = "Database failure while resolving the session, checking Channel visibility, or listing Messages", body = ErrorBody)))]
 pub async fn list_messages(
     State(state): State<AppState>,
@@ -103,6 +107,14 @@ pub async fn list_messages(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization_id = auth.identity.organization.organization_id;
+    require_visible_scoped(
+        &state.pool,
+        organization_id,
+        (auth.identity.member.id, auth.membership_revision),
+        channel_id,
+    )
+    .await?;
+    topics::watermark(&state, organization_id, channel_id).await?;
     crate::database::organization_read_only(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
         match channels::is_visible(
             &mut *tx,
@@ -118,17 +130,18 @@ pub async fn list_messages(
         }
         #[cfg(test)]
         tests::membership::pause_history(channel_id).await;
+        let (history_generation, w) = history::page(tx, organization_id, channel_id, query.history_generation, query.as_of_seq).await?;
         let ascending = query.after_seq.is_some();
         let sql = if ascending {
             "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-             FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 \
+             FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
              ORDER BY seq ASC LIMIT $4"
         } else {
             "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
              FROM messages WHERE organization_id = $1 AND channel_id = $2 \
-               AND seq <= $3 ORDER BY seq DESC LIMIT $4"
+               AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4"
         };
         let cursor = if ascending {
             query.after_seq.unwrap_or(0)
@@ -142,6 +155,7 @@ pub async fn list_messages(
             .bind(channel_id)
             .bind(cursor)
             .bind(i64::from(limit) + 1)
+            .bind(w)
             .try_map(|row| message_from_row(&row))
             .fetch_all(&mut *tx)
             .await?;
@@ -152,7 +166,7 @@ pub async fn list_messages(
         }
         Ok((
             [(header::CACHE_CONTROL, "no-store")],
-            Json(MessagePage { messages, has_more }),
+            Json(MessagePage { history_generation, as_of_seq: w, messages, has_more }),
         )
             .into_response())
     })
@@ -173,7 +187,7 @@ pub async fn list_messages(
         (status = 400, description = "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed; accessible DMs reject non-null Topic intent with dm_topics_not_allowed", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; reply_parent_not_found for an unknown, uncommitted or foreign Organization/Channel parent", body = ErrorBody),
-        (status = 409, description = "Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed", body = ErrorBody),
+        (status = 409, description = "history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed", body = ErrorBody),
         (status = 413, description = "Message send request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Sending a Message requires an application/json content type", body = ErrorBody),
         (status = 429, description = "send_rate_limited: the per-(Organization, Member) send limit (burst 10, 1 per second) is exhausted; checked after Channel authorization and before admission; nothing was charged, queued or persisted; retry after the delay with the same request and client_message_id", body = ErrorBody,
@@ -312,6 +326,14 @@ async fn committed(
         organization_id,
         async |tx: &mut sqlx::PgConnection| {
             require_visible(&mut *tx, organization_id, sender, channel_id).await?;
+            history::validate(
+                tx,
+                organization_id,
+                channel_id,
+                input.history_generation,
+                None,
+            )
+            .await?;
             match receipt(&mut *tx, organization_id, sender.0, channel_id, input).await? {
                 None => Ok(None),
                 Some((message, true)) => Ok(Some(message)),
@@ -355,6 +377,7 @@ impl ValidateListMessages for ListMessagesQuery {
     fn validate(&self) -> Result<u16, MessageError> {
         let limit = self.limit.unwrap_or(50);
         if (self.after_seq.is_some() && self.before_seq.is_some())
+            || self.as_of_seq.is_some_and(|seq| seq < 0)
             || self.after_seq.is_some_and(|seq| seq < 0)
             || self.before_seq.is_some_and(|seq| seq < 1)
             || !(1..=200).contains(&limit)
@@ -377,6 +400,8 @@ pub enum MessageError {
     ReplyParentNotFound,
     ReplyChainNotFound,
     OrganizationUnavailable,
+    HistoryGenerationChanged,
+    SnapshotExpired,
     Conflict,
     AdmissionRejected,
     ProjectionAdmissionRejected,
@@ -402,6 +427,8 @@ impl MessageError {
             Self::ReplyParentNotFound => Self::ReplyParentNotFound,
             Self::ReplyChainNotFound => Self::ReplyChainNotFound,
             Self::OrganizationUnavailable => Self::OrganizationUnavailable,
+            Self::HistoryGenerationChanged => Self::HistoryGenerationChanged,
+            Self::SnapshotExpired => Self::SnapshotExpired,
             Self::Conflict => Self::Conflict,
             Self::AdmissionRejected => Self::AdmissionRejected,
             Self::ProjectionAdmissionRejected => Self::ProjectionAdmissionRejected,
@@ -432,6 +459,8 @@ impl From<sqlx::Error> for MessageError {
 impl IntoResponse for MessageError {
     fn into_response(self) -> Response {
         let (status, error) = match self {
+            Self::HistoryGenerationChanged => (StatusCode::CONFLICT, "history_generation_changed"),
+            Self::SnapshotExpired => (StatusCode::CONFLICT, "snapshot_expired"),
             Self::InvalidInput => (StatusCode::BAD_REQUEST, "invalid input"),
             Self::DmTopicsNotAllowed => (StatusCode::BAD_REQUEST, "dm_topics_not_allowed"),
             Self::DmPeerDeactivated => (StatusCode::CONFLICT, "dm_peer_deactivated"),
@@ -619,6 +648,14 @@ async fn persist_admitted(
 ) -> Result<Message, MessageError> {
     let mut tx = commit::Transaction::begin(pool, permit, "BEGIN", Some(organization_id)).await?;
     require_visible(tx.connection()?, organization_id, sender, channel_id).await?;
+    let history_generation = history::validate(
+        tx.connection()?,
+        organization_id,
+        channel_id,
+        input.history_generation,
+        None,
+    )
+    .await?;
     let member = sender;
     let sender = sender.0;
     if existing(
@@ -710,9 +747,9 @@ async fn persist_admitted(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
          RETURNING id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions",
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions, $11::uuid AS history_generation",
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
-        .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).try_map(|row| message_from_row(&row))
+        .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).bind(history_generation).try_map(|row| message_from_row(&row))
         .fetch_optional(tx.connection()?).await?;
     if let Some(mut message) = message {
         log::create(tx.connection()?, organization_id, &message).await?;

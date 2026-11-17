@@ -67,7 +67,7 @@ export function sweepPartials(directory: string): void {
 }
 
 export type RunLock = <T>(work: () => Promise<T>) => Promise<T>
-// Used by local fakes; production uses the shared bucket lock.
+// Used by local checker fakes; production checker uses a Durable Object lease.
 export function memoryRunLock(): RunLock {
   let busy = false
   return async work => {

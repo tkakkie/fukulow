@@ -17,15 +17,15 @@ it('pages the root and siblings from root and descendant anchors without cursor 
     const loading = c.replies.loadMore('A')
     await flush()
     c.event(reply(2)); c.event(reply(3, 'id2')); c.event(recordOther(4)); c.event(reply(5, 'unloaded-parent'))
-    read.resolve(ok({ root_id: 'id1', messages: [reply(5, 'unloaded-parent'), reply(7)], has_more: true }))
+    read.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(5, 'unloaded-parent'), reply(7)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(5, 'unloaded-parent'), reply(7)], has_more: true }))
     await loading
-    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', anchor.id, { after_seq: 3 })
+    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', anchor.id, {as_of_seq: 3, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 3 })
     expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual([1, 2, 3, 5, 7])
     expect(c.sync.get().channels.A).toMatchObject({ cursor: 5, advancing: [], wait: undefined })
     expect(c.sync.get().channels.A.messages.map(m => m.created_seq)).toEqual([1, 2, 3, 4, 5])
-    c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [reply(9)], has_more: false }))
+    c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(9)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(9)], has_more: false }))
     await c.replies.loadMore('A')
-    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', anchor.id, { after_seq: 7 })
+    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', anchor.id, {as_of_seq: 3, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 7 })
     await c.replies.loadMore('A'); expect(c.listReplyChain).toHaveBeenCalledTimes(3)
     expect(c.replies.get('A').hasMore).toBe(false)
     await c.sync.close()
@@ -39,7 +39,7 @@ it('seeks a different same-chain anchor in one page without skipping requested h
   c.listReplyChain.mockImplementation(async (_channel?: unknown, _anchor?: unknown, query?: { after_seq?: number }) => {
     const after = query?.after_seq ?? 0
     queries.push(after)
-    return ok({ root_id: 'id1', has_more: after + 50 < 450,
+    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1))).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: after + 50 < 450,
       messages: Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1)) })
   })
   await c.replies.open('A', root())
@@ -61,23 +61,23 @@ it('live append during an initial page never skips unpaged siblings', async () =
   c.listReplyChain.mockReturnValueOnce(read.promise)
   const opening = c.replies.open('A', root()); await flush()
   c.event(reply(2)); c.event(recordOther(3)); c.event(reply(4, 'unloaded-parent'))
-  read.resolve(ok({ root_id: 'id1', messages: [root(), reply(2)], has_more: true })); await opening
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [reply(4, 'id2')], has_more: false }))
+  read.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), reply(2)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [root(), reply(2)], has_more: true })); await opening
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(4, 'id2')]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(4, 'id2')], has_more: false }))
   await c.replies.loadMore('A')
-  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id1', { after_seq: 2 })
+  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id1', {as_of_seq: 2, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 2 })
   expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual([1, 2, 4])
   await c.sync.close()
 })
 
 it('ACK page and echo overlap settle only matching own sends and keep canonical copies', async () => {
   const c = replyClient(); await c.boot()
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [root()], has_more: true }))
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root()]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [root()], has_more: true }))
   await c.replies.open('A', root())
   const send = deferred<Result<Message>>()
   c.sendMessage.mockReturnValueOnce(send.promise)
   const sending = c.replies.send('A', 'local'); await flush()
   const canonical = { ...reply(2), sender: 'me', client_message_id: 'send1', body: 'canonical' }
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [canonical], has_more: true }))
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([canonical]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [canonical], has_more: true }))
   await c.replies.loadMore('A')
   expect(c.sync.get().channels.A.pending).toEqual([])
   expect(c.sync.get().channels.A.cursor).toBe(1)
@@ -94,7 +94,7 @@ it('same-Channel non-chain records cannot settle a pending Reply', async () => {
   await c.replies.send('A', 'hello')
   const settle = vi.spyOn(c.source, 'settleHistory')
   const unrelated = { ...recordOther(5), sender: 'me', client_message_id: 'send1' }
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [reply(4), unrelated], has_more: true }))
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(4), unrelated]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(4), unrelated], has_more: true }))
   await c.replies.loadMore('A')
   expect(c.sync.get().channels.A.pending).toMatchObject([{ clientMessageId: 'send1', state: 'unknown' }])
   expect(c.replies.get('A').pending).toHaveLength(1)
@@ -107,11 +107,11 @@ it('foreign and non-chain high-seq records cannot skip real chain Messages in co
   for (const unrelated of [{ ...reply(999), channel_id: 'B' }, recordOther(999),
     { ...reply(999), reply_root_id: 'another-root' }]) {
     const c = replyClient(); await c.boot(); await c.replies.open('A', root())
-    c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [reply(4), unrelated], has_more: true }))
+    c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(4), unrelated]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(4), unrelated], has_more: true }))
     await c.replies.loadMore('A')
-    c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [reply(5)], has_more: false }))
+    c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(5)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(5)], has_more: false }))
     await c.replies.loadMore('A')
-    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id1', { after_seq: 4 })
+    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id1', {as_of_seq: 3, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 4 })
     expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual([1, 3, 4, 5])
     expect(c.replies.get('A').hasMore).toBe(false)
     await c.sync.close()
@@ -121,7 +121,7 @@ it('foreign and non-chain high-seq records cannot skip real chain Messages in co
 it('chain pages without filtered forward progress stop continuation even with has_more', async () => {
   for (const messages of [[], [recordOther(999)], [{ ...reply(999), channel_id: 'B' }], [reply(3)]]) {
     const c = replyClient(); await c.boot(); await c.replies.open('A', root())
-    c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages, has_more: true }))
+    c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages, has_more: true }))
     await c.replies.loadMore('A')
     expect(c.replies.get('A')).toMatchObject({ loading: false, hasMore: false, messages: [root(), reply(3)] })
     await c.replies.loadMore('A')
@@ -139,8 +139,8 @@ it('retry preserves client id body and reply target after timeout from another a
   expect(c.replies.get('A').pending[0]).toMatchObject({ state: 'unknown', reply_to: 'id3' })
   await c.replies.open('A', root('T')); await c.replies.retry('A', 'send1')
   expect(c.sendMessage.mock.calls.map(call => call[1])).toEqual([
-    { client_message_id: 'send1', body: 'hello', reply_to: 'id3' },
-    { client_message_id: 'send1', body: 'hello', reply_to: 'id3' },
+    { history_generation: '00000000-0000-4000-8000-000000000515', client_message_id: 'send1', body: 'hello', reply_to: 'id3' },
+    { history_generation: '00000000-0000-4000-8000-000000000515', client_message_id: 'send1', body: 'hello', reply_to: 'id3' },
   ])
   send.resolve({ ok: false, kind: 'network' }); await flush()
   expect(c.sync.get().channels.A.pending).toEqual([])
@@ -152,7 +152,7 @@ it('retry preserves client id body and reply target after timeout from another a
 it('a Topic Message opens through the same controller and sends without Topic intent', async () => {
   const c = topicClient(); await c.boot(); await c.topics.loadTopic('A', 'T')
   const anchor = c.topics.get('A').topic('T').messages[0]
-  const listReplyChain = vi.fn(async () => ok({ root_id: anchor.id, messages: [anchor], has_more: false }))
+  const listReplyChain = vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor]).at(-1)?.created_seq ?? 0,  root_id: anchor.id, messages: [anchor], has_more: false }))
   const composed = createReplySync({ selfId: 'me', repliesApi: { listReplyChain } }, c.sync)
   await composed.replies.open('A', anchor)
   expect(composed.replies.get('A').topicId).toBe('T')
@@ -227,12 +227,12 @@ it('new records skip rescanning retained Channel Messages and preserve unaffecte
 it('wrong root_id pages fail without merging settling sends or changing continuation', async () => {
   const c = replyClient(); await c.boot(); await c.replies.open('A', root())
   const settle = vi.spyOn(c.source, 'settleHistory')
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'another-root', messages: [reply(9)], has_more: false }))
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(9)]).at(-1)?.created_seq ?? 0,  root_id: 'another-root', messages: [reply(9)], has_more: false }))
   await c.replies.loadMore('A')
   expect(c.replies.get('A')).toMatchObject({ error: true, loading: false, hasMore: true, messages: [root(), reply(3)] })
   expect(settle).not.toHaveBeenCalled()
   await c.replies.loadMore('A')
-  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id1', { after_seq: 3 })
+  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id1', {as_of_seq: 3, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 3 })
   await c.sync.close()
 })
 
@@ -270,13 +270,13 @@ it('Reply controller replacement clears chains before sync teardown and cancels 
   expect(c.sync.get().running).toBe(true)
   expect(c.replies.get('A')).toMatchObject({ rootId: null, anchor: null, messages: [], loading: false })
   await opening
-  read.resolve(ok({ root_id: 'id1', messages: [reply(9)], has_more: false })); await flush()
+  read.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(9)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(9)], has_more: false })); await flush()
   expect(c.replies.get('A').messages).toEqual([])
   await c.sync.close()
 })
 
 it('explicit retry of the same chain fences a timed-out page while the new read is pending', async () => {
-  await assertExpiredReadIsFenced(ok({ root_id: 'id1', messages: [reply(99)], has_more: false }))
+  await assertExpiredReadIsFenced(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(99)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(99)], has_more: false }))
 })
 
 it('explicit retry of the same chain fences a timed-out 404 while the new read is pending', async () => {
@@ -296,7 +296,7 @@ async function assertExpiredReadIsFenced(response: Result<ReplyChainPage>) {
   expect(c.replies.get('A')).toMatchObject({ loading: true, error: false, hasMore: true, messages: [root()] })
   expect(settle).not.toHaveBeenCalled()
   expect(c.sync.get().channels.A.state).toBe('ready')
-  fresh.resolve(ok({ root_id: 'id1', messages: [root(), reply(2)], has_more: false })); await retrying
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), reply(2)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [root(), reply(2)], has_more: false })); await retrying
   expect(c.replies.get('A')).toMatchObject({ loading: false, error: false, messages: [root(), reply(2)] })
   await c.sync.close()
 }
@@ -315,14 +315,14 @@ it('organization_unavailable is C10 and never C9 even when the C10 handler is de
 })
 
 it('superseded reads cannot apply pages or late C9 denials to another chain', async () => {
-  for (const response of [ok({ root_id: 'id1', messages: [reply(9)], has_more: false }),
+  for (const response of [ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(9)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(9)], has_more: false }),
     { ok: false, kind: 'http', status: 403 } as const]) {
     const c = replyClient(); await c.boot()
     const old = deferred<Result<ReplyChainPage>>()
     c.listReplyChain.mockReturnValueOnce(old.promise)
     const first = c.replies.open('A', root()); await flush()
     const anchor = recordOther(10)
-    c.listReplyChain.mockResolvedValueOnce(ok({ root_id: anchor.id, messages: [anchor], has_more: false }))
+    c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor]).at(-1)?.created_seq ?? 0,  root_id: anchor.id, messages: [anchor], has_more: false }))
     await c.replies.open('A', anchor)
     old.resolve(response); await first
     expect(c.replies.get('A').anchor?.id).toBe(anchor.id)
@@ -333,7 +333,7 @@ it('superseded reads cannot apply pages or late C9 denials to another chain', as
 })
 
 it('session replacement fences pages settlement C9 C10 and late 401 before sync resets', async () => {
-  for (const response of [ok({ root_id: 'id1', messages: [reply(2)], has_more: false }),
+  for (const response of [ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(2)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(2)], has_more: false }),
     { ok: false, kind: 'http', status: 403 } as const,
     { ok: false, kind: 'http', status: 404, error: 'organization_unavailable' } as const,
     { ok: false, kind: 'http', status: 401 } as const]) {
@@ -373,8 +373,8 @@ it('clamp clears the chain and fences old pages while pending Reply intent survi
   const loading = c.replies.loadMore('A'); await flush()
   c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(1000)
   c.handlers.at(-1)!.onReady()
-  c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush()
-  read.resolve(ok({ root_id: 'id1', messages: [reply(9)], has_more: false })); await loading
+  c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush()
+  read.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(9)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(9)], has_more: false })); await loading
   expect(c.replies.get('A').messages).toEqual([])
   expect(c.sync.get().channels.A.pending[0]).toMatchObject({ state: 'unknown', reply_to: 'id1' })
   expect(c.sendMessage).toHaveBeenCalledTimes(1)
@@ -383,18 +383,20 @@ it('clamp clears the chain and fences old pages while pending Reply intent survi
 
 it('Reply pages do not settle another sender or Channel and definite refusals never retry', async () => {
   const c = replyClient(); await c.boot()
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [root()], has_more: true }))
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root()]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [root()], has_more: true }))
   await c.replies.open('A', root())
   c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
   await c.replies.send('A', 'hello')
   const canonical = { ...reply(2), sender: 'me', client_message_id: 'send1' }
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([
+    { ...canonical, sender: 'someone-else' }, { ...canonical, channel_id: 'B', created_seq: 4, version: 4, deleted: false, id: 'foreign' },
+  ]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [
     { ...canonical, sender: 'someone-else' }, { ...canonical, channel_id: 'B', created_seq: 4, version: 4, deleted: false, id: 'foreign' },
   ], has_more: true }))
   await c.replies.loadMore('A')
   expect(c.sync.get().channels.A.pending[0].state).toBe('unknown')
   expect(c.replies.get('A').messages.some(m => m.id === 'foreign')).toBe(false)
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [{ ...canonical, created_seq: 5, version: 5, deleted: false, id: 'id5' }], has_more: false }))
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...canonical, created_seq: 5, version: 5, deleted: false, id: 'id5' }]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [{ ...canonical, created_seq: 5, version: 5, deleted: false, id: 'id5' }], has_more: false }))
   await c.replies.loadMore('A')
   expect(c.sync.get().channels.A.pending).toEqual([])
   await c.sync.close()
@@ -410,7 +412,7 @@ it('Reply pages do not settle another sender or Channel and definite refusals ne
 
 it('timed-out or unwatched reads cannot restore pages or cause late C9 after a fresh selection', async () => {
   for (const invalidate of ['timeout', 'unwatch', 'dismiss']) {
-    for (const response of [ok({ root_id: 'id1', messages: [reply(99)], has_more: false }),
+    for (const response of [ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(99)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(99)], has_more: false }),
       { ok: false, kind: 'http', status: 404 } as const]) {
       const c = replyClient(10); await c.boot()
       const read = deferred<Result<ReplyChainPage>>()
@@ -443,10 +445,10 @@ it('same-session C10 after a timed-out read terminates only its Organization', a
 
 it('identifies a live Reply by reply_root_id when its parent is outside all loaded windows', async () => {
   const c = replyClient()
-  c.listMessages.mockResolvedValueOnce(ok({ messages: [{ ...root(), created_seq: 10, version: 10, deleted: false, id: 'id10' }], has_more: true }))
+  c.listMessages.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...root(), created_seq: 10, version: 10, deleted: false, id: 'id10' }]).at(-1)?.created_seq ?? 0,  messages: [{ ...root(), created_seq: 10, version: 10, deleted: false, id: 'id10' }], has_more: true }))
   await c.sync.start(); c.handlers[0].onReady(); await c.sync.watch('A')
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: 'id1', messages: [root()], has_more: false }))
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 10 })
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root()]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [root()], has_more: false }))
   await c.replies.open('A', root())
   c.event(reply(11, 'id2'))
   expect(c.replies.get('A').messages.map(m => m.id)).toEqual(['id1', 'id11'])

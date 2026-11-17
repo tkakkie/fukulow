@@ -418,6 +418,7 @@ async fn measure_reconnect_flood_subscribe_load(pool: PgPool) {
                 connections += 1;
                 while started.elapsed() < seconds {
                     let subscribe = ClientMessage::Subscribe {
+                        history_generation: None,
                         channel_id: channel,
                         after_seq: 0,
                     };
@@ -452,6 +453,7 @@ async fn measure_reconnect_flood_subscribe_load(pool: PgPool) {
                 channel_id: channel,
             };
             let subscribe = ClientMessage::Subscribe {
+                history_generation: None,
                 channel_id: channel,
                 after_seq: 0,
             };

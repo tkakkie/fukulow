@@ -12,7 +12,7 @@ it('opens only anchors from the adapter Channel and preserves both chains on a m
   const a = repliesAdapter(c.replies, 'A'), b = repliesAdapter(c.replies, 'B')
   await a.open(root())
   const bRoot = { ...root(), channel_id: 'B' }
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: bRoot.id, messages: [bRoot], has_more: false }))
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([bRoot]).at(-1)?.created_seq ?? 0,  root_id: bRoot.id, messages: [bRoot], has_more: false }))
   await b.open(bRoot)
   const beforeA = a.state, beforeB = b.state
   const requests = c.listReplyChain.mock.calls.length
@@ -114,7 +114,7 @@ it('channel.reply(replyRootId) manages per-chain drafts, hasUnsavedChanges, subm
   )
   expect(retryablePending).toBeDefined()
   await rc.retry(retryablePending!.clientMessageId)
-  expect(c.sendMessage).toHaveBeenLastCalledWith('A', {
+  expect(c.sendMessage).toHaveBeenLastCalledWith('A', { history_generation: '00000000-0000-4000-8000-000000000515',
     client_message_id: retryablePending!.clientMessageId,
     body: 'コールド子孫への返信',
     reply_to: 'cold-descendant-id',

@@ -15,6 +15,7 @@ mod admission;
 pub(super) mod authors;
 mod channel_log;
 mod dms_pool;
+pub(super) mod history;
 mod mentions;
 mod receipts;
 mod text_input;
@@ -167,7 +168,12 @@ async fn list(app: &Router, token: &str, channel_id: Uuid, query: &str) -> Value
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    body(response).await
+    let mut page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    page.as_object_mut().unwrap().remove("history_generation");
+    assert!(page["as_of_seq"].is_i64());
+    page.as_object_mut().unwrap().remove("as_of_seq");
+    page
 }
 
 async fn assert_error(response: Response, status: StatusCode) {
@@ -206,6 +212,8 @@ async fn messages_require_authentication_without_database_access() {
 #[test]
 fn message_query_validation_matches_contract() {
     let query = |after_seq, before_seq, limit| ListMessagesQuery {
+        as_of_seq: None,
+        history_generation: None,
         after_seq,
         before_seq,
         limit,
@@ -291,6 +299,7 @@ async fn message_body_validation_matches_contract() {
         "🦉".repeat(4001),
     ] {
         let input = SendMessageRequest {
+            history_generation: None,
             reply_to: None,
             topic_name: None,
             client_message_id: Uuid::new_v4(),
@@ -308,6 +317,7 @@ async fn message_body_validation_matches_contract() {
         "e\u{301}".repeat(2000),
     ] {
         let input = SendMessageRequest {
+            history_generation: None,
             reply_to: None,
             topic_name: None,
             client_message_id: Uuid::new_v4(),
@@ -788,6 +798,14 @@ async fn message_pages_are_bounded_exclusive_ascending_and_directional(pool: PgP
          SELECT $1, md5('id-' || n::text)::uuid, $2, n, $3, md5('client-' || n::text)::uuid, n::text \
          FROM generate_series(1, 205) n",
     ).bind(organization_id).bind(channel_id).bind(sender).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channel_message_sequences (organization_id,channel_id,seq) VALUES ($1,$2,205)",
+    )
+    .bind(organization_id)
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     for (query, expected, more) in [
         ("", (156..=205).collect::<Vec<_>>(), true),
         ("?limit=200", (6..=205).collect(), true),

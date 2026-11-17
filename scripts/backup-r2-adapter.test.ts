@@ -9,12 +9,12 @@ import { join } from 'node:path'
 import { test, type TestContext } from 'node:test'
 import { FakeBucket } from './backup-r2-fake.ts'
 import { day, inventory, sha256, type ObjectInfo } from './backup-r2-model.ts'
-import { listObjects, runLockKey } from './backup-r2-list.ts'
-import { bucketRunLock, curlRunner, dailyBackup, objectTransport, runBackup, type Request, type Response, type Runner } from './backup-r2.ts'
+import { listObjects } from './backup-r2-list.ts'
+import { curlRunner, dailyBackup, objectTransport, runBackup, type Request, type Response, type Runner } from './backup-r2.ts'
 import { accountUsage, analyticsClient } from './backup-r2-usage.ts'
 import { fileStateStore } from './backup-r2-state.ts'
 import { checkBackups, runChecker } from './backup-r2-checker.ts'
-import { memoryRunLock, type RunLock } from './backup-safety.ts'
+import { memoryRunLock } from './backup-safety.ts'
 
 const now = Date.UTC(2026, 10, 2)
 const response = (body: string, status = 200): Response => ({ status, body: Buffer.from(body), headers: {} })
@@ -25,25 +25,6 @@ function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'backup-adapter-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   return root
-}
-function sharedRunner() {
-  const objects = new Map<string, Buffer>(), calls: Request[] = []
-  const run: Runner = async r => {
-    calls.push(r)
-    if (r.method === 'PUT') {
-      if (r.headers['if-none-match'] === '*' && objects.has(r.key)) return response('', 412)
-      objects.set(r.key, r.body!); return { ...response(''), headers: { etag: sha256(r.body!) } }
-    }
-    if (r.method === 'GET') {
-      const body = objects.get(r.key)
-      if (!body) return response('', 404)
-      const etag = sha256(body)
-      return { ...response(body.toString(), r.headers['if-match'] === etag ? 200 : 412), headers: { etag } }
-    }
-    if (r.method === 'DELETE') { objects.delete(r.key); return response('', 204) }
-    throw new Error('Unexpected request')
-  }
-  return { run, objects, calls }
 }
 function options() {
   const events: string[] = [], bucket = new FakeBucket(() => now)
@@ -109,7 +90,6 @@ test('listing rejects malformed XML unsafe entities invalid metadata and truncat
     await assert.rejects(listObjects(async () => response(body)))
   }
   await assert.rejects(listObjects(async () => response(page([])), 0))
-  assert.deepEqual(await listObjects(async () => response(page([item(runLockKey)]))), [])
 })
 
 test('a failed pagination page aborts the checker before any pruning and emits only a fixed failure event', async () => {
@@ -267,49 +247,7 @@ test('persistent alerts rearm after recovery and alive advances on the next UTC 
   assert.equal(o.events.filter(e => e.includes('checker-alive')).length, 2)
 })
 
-test('shared conditional lock refuses overlapping backup checker and stale locks', async t => {
-  const root = fixture(t), shared = sharedRunner(), lock = bucketRunLock(shared.run), o = options()
-  let enter!: () => void, finish!: () => void
-  const entered = new Promise<void>(r => { enter = r }), waiting = new Promise<void>(r => { finish = r })
-  const active = lock(async () => { enter(); await waiting })
-  await entered
-  await assert.rejects(runBackup({ directory: root, recipient: 'test', bucket: o.bucket, now: () => now, notify: o.notify, lock: bucketRunLock(shared.run), dump: () => assert.fail('must not dump') }), /Backup failed/)
-  await assert.rejects(runChecker({ ...o, store: fileStateStore(join(root, 'state')), lock: bucketRunLock(shared.run) }), /Checker failed/)
-  assert.deepEqual(o.bucket.calls, [])
-  finish(); await active
-  assert.equal(shared.objects.size, 0)
-  shared.objects.set(runLockKey, Buffer.from('stale'))
-  await assert.rejects(bucketRunLock(shared.run)(async () => assert.fail('must not take over')), /busy/)
-  assert.ok(shared.objects.has(runLockKey))
-  assert.equal(shared.calls.filter(r => r.method === 'DELETE').length, 1)
-})
-
-test('lock is released after work failure but uncertain acquisition never releases another owner', async () => {
-  const shared = sharedRunner(), lock = bucketRunLock(shared.run)
-  await assert.rejects(lock(async () => { throw new Error('work failed') }), /work failed/)
-  assert.equal(shared.objects.size, 0)
-  let deletes = 0
-  const uncertain: Runner = async r => { if (r.method === 'DELETE') deletes++; throw new Error('PRIVATE_SENTINEL') }
-  await assert.rejects(bucketRunLock(uncertain)(async () => assert.fail('must not run')), { message: 'stage=lock category=operation' })
-  assert.equal(deletes, 0)
-  await assert.rejects(bucketRunLock(async r => r.method === 'PUT' ? response('') : response('', 503))(async () => {}), /stage=lock category=operation/)
-})
-
-test('daily backup holds the global lock through recheck dump upload and cleanup', async t => {
-  const root = fixture(t), shared = sharedRunner(), o = options(), source = join(root, 'source')
-  writeFileSync(source, 'dump')
-  const head = o.bucket.head.bind(o.bucket)
-  o.bucket.head = async key => { assert.ok(shared.objects.has(runLockKey)); return head(key) }
-  await dailyBackup({ directory: root, recipient: 'test', bucket: o.bucket, now: () => now, notify: o.notify, lock: bucketRunLock(shared.run),
-    dump: (_directory, capture) => { assert.ok(shared.objects.has(runLockKey)); capture(); return source },
-    encrypt: (_source, target) => writeFileSync(target, 'cipher') })
-  assert.equal(shared.objects.size, 0)
-  assert.deepEqual(readdirSync(root), ['source'])
-  assert.deepEqual(shared.calls.slice(-2).map(r => r.method), ['GET', 'DELETE'])
-  assert.equal(shared.calls.at(-2)?.headers['if-match'], sha256(shared.calls[0].body!))
-})
-
-test('curl encodes list tokens and never retries lock acquisition or deletion', async t => {
+test('curl encodes opaque list tokens without exposing the endpoint', async t => {
   const root = fixture(t), config = join(root, 'config')
   writeFileSync(config, '', { mode: 0o600 })
   const requests: { args: string[]; input: string }[] = []
@@ -320,12 +258,7 @@ test('curl encodes list tokens and never retries lock acquisition or deletion', 
   })
   await run({ method: 'GET', key: '', query: { 'list-type': '2', 'continuation-token': '+/=&' }, headers: {} })
   assert.ok(requests[0].input.includes('continuation-token=%2B%2F%3D%26'))
-  for (const method of ['PUT', 'DELETE'] as const) await run({ method, key: runLockKey, headers: {} })
-  for (const r of requests.slice(1)) {
-    assert.equal(r.args[r.args.indexOf('--retry') + 1], '0')
-    assert.ok(!r.args.includes('--retry-all-errors'))
-    assert.ok(!r.args.includes(requests[0].input))
-  }
+
 })
 
 const scopes = ['<Prefix>backups/</Prefix>', '<StartAfter>offset</StartAfter>', '<Delimiter>/</Delimiter>',
@@ -357,49 +290,11 @@ test('scope mismatches reject an otherwise prunable checker inventory without an
   }
 })
 
-for (const entry of ['backup', 'daily', 'checker'] as const) {
-  for (const failure of ['busy', 'uncertain', 'release'] as const) {
-    for (const notifierFails of [false, true]) {
-      test(`${entry} reports ${failure} lock failure with notifier failure=${notifierFails} without retries`, async t => {
-        const root = fixture(t), o = options(), shared = sharedRunner(), source = join(root, 'source')
-        writeFileSync(source, 'dump')
-        let work = 0
-        const calls: Request[] = []
-        const lock = bucketRunLock(async r => {
-          calls.push(r)
-          if (r.method === 'PUT' && failure === 'busy') return response('', 412)
-          if (r.method === 'PUT' && failure === 'uncertain') throw new Error('PRIVATE_SENTINEL')
-          if (r.method === 'DELETE' && failure === 'release') return response('', 503)
-          return shared.run(r)
-        })
-        const notify = async (event: string) => {
-          o.events.push(event)
-          if (notifierFails) throw new Error('PRIVATE_SENTINEL')
-        }
-        const backupOptions = { directory: root, recipient: 'test', bucket: o.bucket, now: o.now, notify, lock,
-          dump: (_directory: string, capture: () => void) => { work++; capture(); return source },
-          encrypt: (_source: string, target: string) => writeFileSync(target, 'cipher') }
-        const run = () => entry === 'checker' ? runChecker({ ...o, notify, lock,
-          store: { load: async () => { work++; return { state: { sentAlerts: [] } } }, save: async () => {} } })
-          : entry === 'daily' ? dailyBackup(backupOptions) : runBackup(backupOptions)
-        const event = entry === 'checker' ? 'checker-failed' : 'backup-failed'
-        await assert.rejects(run(), { message: entry === 'checker' ? 'Checker failed (diagnostics suppressed)' : 'Backup failed (diagnostics suppressed)' })
-        assert.equal(o.events.filter(e => e === event).length, 1)
-        assert.ok(!o.events.join().includes('PRIVATE_SENTINEL'))
-        assert.equal(calls.filter(r => r.method === 'PUT').length, 1)
-        assert.equal(calls.filter(r => r.method === 'DELETE').length, failure === 'release' ? 1 : 0)
-        assert.equal(work, failure === 'release' ? 1 : 0)
-        if (failure !== 'release') assert.deepEqual(o.bucket.calls, [])
-      })
-    }
-  }
-}
-
 for (const entry of ['backup', 'daily'] as const) {
   for (const failure of ['cleanup', 'local-release'] as const) {
     for (const notifierFails of [false, true]) {
-      test(`${entry} reports ${failure} failure with notifier failure=${notifierFails} and releases shared lock`, async t => {
-        const root = fixture(t), o = options(), shared = sharedRunner(), source = join(root, 'source')
+      test(`${entry} reports ${failure} failure with notifier failure=${notifierFails} with local locks`, async t => {
+        const root = fixture(t), o = options(), source = join(root, 'source')
         writeFileSync(source, 'dump')
         const remove = fsPromises.rm
         let cleanups = 0
@@ -410,7 +305,7 @@ for (const entry of ['backup', 'daily'] as const) {
           return remove(target, options)
         })
         syncBuiltinESMExports()
-        const backupOptions = { directory: root, recipient: 'test', bucket: o.bucket, now: o.now, lock: bucketRunLock(shared.run),
+        const backupOptions = { directory: root, recipient: 'test', bucket: o.bucket, now: o.now,
           notify: async (event: string) => { o.events.push(event); if (notifierFails) throw new Error('PRIVATE_SENTINEL') },
           dump: (_directory: string, capture: () => void) => { capture(); return source },
           encrypt: (_source: string, target: string) => {
@@ -425,17 +320,14 @@ for (const entry of ['backup', 'daily'] as const) {
         } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
         assert.equal(cleanups, failure === 'cleanup' ? 1 : 0)
         assert.equal(o.events.filter(e => e === 'backup-failed').length, 1)
-        assert.equal(shared.calls.filter(r => r.method === 'PUT').length, 1)
-        assert.equal(shared.calls.filter(r => r.method === 'DELETE').length, 1)
-        assert.equal(shared.objects.size, 0)
       })
     }
   }
 }
 
 for (const notifierFails of [false, true]) {
-  test(`checker reports local state cleanup failure with notifier failure=${notifierFails} and releases shared lock`, async t => {
-    const root = fixture(t), o = prunableOptions(), shared = sharedRunner(), path = join(root, 'state')
+  test(`checker reports local state cleanup failure with notifier failure=${notifierFails} with local locks`, async t => {
+    const root = fixture(t), o = prunableOptions(), path = join(root, 'state')
     await fileStateStore(path).save({ sentAlerts: [], aliveDate: '2026-11-02' })
     const remove = fsPromises.rm
     let cleanups = 0
@@ -445,80 +337,30 @@ for (const notifierFails of [false, true]) {
     })
     syncBuiltinESMExports()
     try {
-      await assert.rejects(runChecker({ ...o, lock: bucketRunLock(shared.run), store: fileStateStore(path),
+      await assert.rejects(runChecker({ ...o, lock: memoryRunLock(), store: fileStateStore(path),
         notify: async event => { o.events.push(event); if (notifierFails) throw new Error('PRIVATE_SENTINEL') } }),
       { message: 'Checker failed (diagnostics suppressed)' })
     } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
     assert.equal(cleanups, 1)
     assert.equal(o.events.filter(e => e === 'checker-failed').length, 1)
-    assert.equal(shared.calls.filter(r => r.method === 'DELETE').length, 1)
-    assert.equal(shared.objects.size, 0)
   })
 }
 
-test('release verifies the acquired version and owner token and never deletes a successor lock', async t => {
-  for (const mismatch of ['etag', 'token'] as const) {
-    const root = fixture(t), o = options(), shared = sharedRunner()
-    const run: Runner = async r => {
-      if (r.method === 'GET' && mismatch === 'token') {
-        // Even a provider ignoring the conditional must not bypass token checking.
-        return { ...response('successor'), headers: { etag: sha256(shared.calls[0].body!) } }
-      }
-      return shared.run(r)
-    }
-    const lock: RunLock = work => bucketRunLock(run)(async () => {
-      const result = await work()
-      shared.objects.set(runLockKey, Buffer.from('successor'))
-      return result
-    })
-    await assert.rejects(runChecker({ ...o, lock, store: fileStateStore(join(root, 'state')) }), { message: 'Checker failed (diagnostics suppressed)' })
-    assert.equal(shared.objects.get(runLockKey)?.toString(), 'successor')
-    assert.equal(shared.calls.filter(r => r.method === 'DELETE').length, 0)
-    assert.equal(o.events.filter(e => e === 'checker-failed').length, 1)
-  }
-})
-
-test('missing acquisition ETag or uncertain owner verification refuses lock deletion', async () => {
-  for (const failure of ['missing-etag', 'get-failed', 'get-uncertain'] as const) {
-    const shared = sharedRunner(), calls: Request[] = []
-    const lock = bucketRunLock(async r => {
-      calls.push(r)
-      if (r.method === 'GET') {
-        if (failure === 'get-failed') return response('', 503)
-        if (failure === 'get-uncertain') throw new Error('PRIVATE_SENTINEL')
-      }
-      const result = await shared.run(r)
-      return r.method === 'PUT' && failure === 'missing-etag' ? { ...result, headers: {} } : result
-    })
-    await assert.rejects(lock(async () => {}), { message: 'stage=lock category=operation' })
-    assert.ok(shared.objects.has(runLockKey))
-    assert.equal(calls.filter(r => r.method === 'PUT').length, 1)
-    assert.equal(calls.filter(r => r.method === 'GET').length, failure === 'missing-etag' ? 0 : 1)
-    assert.equal(calls.filter(r => r.method === 'DELETE').length, 0)
-  }
-})
-
-test('FIFO state is promptly refused without pruning and the checker lock is released', t => {
+test('FIFO state is promptly refused without pruning and the local checker lock is released', t => {
   const root = fixture(t), path = join(root, 'state'), o = prunableOptions()
   const fifo = spawnSync('mkfifo', ['-m', '600', path], { stdio: 'ignore' })
   assert.equal(fifo.status, 0)
   const script = `
     import { readFileSync } from 'node:fs';
     import { FakeBucket } from './scripts/backup-r2-fake.ts';
-    import { bucketRunLock } from './scripts/backup-r2.ts';
-    import { sha256 } from './scripts/backup-r2-model.ts';
+    import { memoryRunLock } from './scripts/backup-safety.ts';
     import { runChecker } from './scripts/backup-r2-checker.ts';
     import { fileStateStore } from './scripts/backup-r2-state.ts';
     const input = JSON.parse(readFileSync(0, 'utf8'));
     const bucket = new FakeBucket(() => input.now), events = [];
     for (const [key, value] of input.objects) bucket.objects.set(key, { ...value, body: Buffer.from(value.body, 'base64') });
     let released = 0, acquired = 0, error, owner;
-    const lock = bucketRunLock(async request => {
-      if (request.method === 'PUT') { acquired++; owner = request.body; return { status: 200, headers: { etag: sha256(owner) }, body: Buffer.alloc(0) } }
-      if (request.method === 'GET') return { status: request.headers['if-match'] === sha256(owner) ? 200 : 412, headers: { etag: sha256(owner) }, body: owner };
-      if (request.method === 'DELETE') { released++; owner = undefined; return { status: 204, headers: {}, body: Buffer.alloc(0) } }
-      throw new Error('Unexpected request');
-    });
+    const lock = async work => { acquired++; owner = true; try { return await memoryRunLock()(work) } finally { released++; owner = false } };
     try { await runChecker({ backups: bucket, images: { list: async () => [] }, now: () => input.now,
       usage: { read: async () => ({ classA: 0, classB: 0 }) }, store: fileStateStore(input.path),
       notify: async event => { events.push(event) }, lock });
@@ -538,4 +380,19 @@ test('FIFO state is promptly refused without pruning and the checker lock is rel
   assert.equal(actual.deletes, 0)
   assert.deepEqual(actual.events, ['state-corrupt', 'checker-failed'])
   assert.ok(statSync(path).isFIFO())
+})
+
+test('locked verification probes cannot freeze otherwise healthy pruning and remain in capacity totals', async () => {
+  const o = prunableOptions(), key = `backups/verification-${randomUUID()}/probe`
+  await o.bucket.put(key, Buffer.from('probe'))
+  const data = await inventory(o.bucket, now)
+  assert.deepEqual(data.malformed, [])
+  assert.ok(data.objects.some(object => object.key === key))
+  const result = await checkBackups({ ...o, state: {}, lock: memoryRunLock() })
+  assert.deepEqual(result.alerts, [])
+  assert.deepEqual(result.deleted, [o.candidate])
+  assert.ok(o.bucket.objects.has(key))
+  // Similar unreserved prefixes remain malformed; only UUID probe namespaces qualify.
+  await o.bucket.put('backups/verification-not-a-probe/archive.dump.age', Buffer.from('partial'))
+  assert.deepEqual((await inventory(o.bucket, now)).malformed, ['backups/verification-not-a-probe/'])
 })

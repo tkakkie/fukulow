@@ -152,8 +152,8 @@ async function signInAs(s: Stack, id: string) {
 /** Opens Channel A with one history Message and confirms the subscription on the newest session. */
 async function openChannelA(s: Stack, hasOlder = false) {
   const net = s.nets.at(-1)!
-  net.pages.A = ok({ messages: [record(100)], has_more: hasOlder })
-  net.lists[0].resolve(ok({ channels: [channel('A')] }))
+  net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: hasOlder })
+  net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
   await settle()
   net.subscribed('A', 100)
   await settle()
@@ -217,7 +217,7 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     await signInAs(s, 'm1')
     const net = await openChannelA(s)
     const a = () => s.auth.session!.sync.channel('A')
-    const first = await mount(() => ({ timeline: a().timeline, live: a().live, channels: s.auth.session!.channels.state }))
+    const first = await mount(() => ({ history_generation: '00000000-0000-4000-8000-000000000515', timeline: a().timeline, live: a().live, channels: s.auth.session!.channels.state }))
     expect(first.last).toMatchObject({ live: true, timeline: { messages: [record(100)] } })
 
     await first.unmount() // what leaving the Workspace does
@@ -376,14 +376,14 @@ describe('auth adapter: a new session never shows the old one', () => {
     expect(view.last).toMatchObject({ status: 'loading', messages: [], pending: [] })
     expect(s.auth.session!.sync.channel('A')).not.toBe(oldTimeline)
 
-    second.pages.A = ok({ messages: [record(500)], has_more: false })
-    second.lists[0].resolve(ok({ channels: [channel('A')] }))
+    second.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(500)]).at(-1)?.created_seq ?? 0,  messages: [record(500)], has_more: false })
+    second.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     second.subscribed('A', 500)
     // everything the old session still delivers
     first.sends[0].resolve(ok(sentBy('m1', 101, 'm1-c1', 'secret of m1')))
     first.socket.onEvent({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
-    first.lists[0].resolve(ok({ channels: [channel('A'), channel('old-only')] }))
+    first.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('old-only')] }))
     await settle()
     expect(view.last).toMatchObject({ status: 'ready', messages: [record(500)], pending: [] })
     expect(s.auth.session!.channels.state.channels.map((c) => c.id)).toEqual(['A'])
@@ -412,14 +412,14 @@ describe('auth adapter: a new session never shows the old one', () => {
 
     await signInAs(s, 'm2')
     const [first, second] = s.nets
-    second.lists[0].resolve(ok({ channels: [channel('mine')] }))
+    second.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('mine')] }))
     await settle()
     // The old session's answers arrive after the new session is up.
-    first.lists[0].resolve(ok({ channels: [channel('theirs')] }))
+    first.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('theirs')] }))
     first.creates[0].resolve(ok(channel('general')))
     expect(await creating).toEqual({ error: 'セッションが終了しました。' })
     await settle()
-    expect(s.auth.session!.channels.state).toMatchObject({ channels: [{ id: 'mine' }], selectedId: 'mine' })
+    expect(s.auth.session!.channels.state).toMatchObject({channels: [{ id: 'mine' }], selectedId: 'mine' })
     expect(old.channels.state.channels).toEqual([])
     expect(first.history).toEqual([])
     expect(second.history.map((h) => h.channel)).toEqual(['mine'])
@@ -436,11 +436,11 @@ describe('Organization selection fences data within one Account Session', () => 
     await settle()
     await s.auth.selectOrganization('other')
     const second = s.nets[1]
-    second.lists[0].resolve(ok({ channels: [channel('B')] }))
+    second.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('B')] }))
     await settle()
     first.sends[0].resolve(ok(sentBy('m1', 101, 'm1-c1', 'old Organization')))
     first.socket.onEvent({ type: 'message', kind: 'create', seq: (record(102)).created_seq, message: record(102) })
-    first.lists[1].resolve(ok({ channels: [channel('old-only')] }))
+    first.lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('old-only')] }))
     await oldList
     await settle()
     expect(first.socket.closed).toBe(true)
@@ -1058,7 +1058,7 @@ it('C10 Organization re-selection restores Topic state and its retained draft', 
   const original = s.auth.session!
   const topicMessage = { ...record(101), topic_id: 'T' }
   net.event({ type: 'message', kind: 'create', seq: (topicMessage).created_seq, message: topicMessage })
-  net.topicMessages['A:T'] = ok({ messages: [topicMessage], has_more: false })
+  net.topicMessages['A:T'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicMessage]).at(-1)?.created_seq ?? 0,  messages: [topicMessage], has_more: false })
   await original.topics('A').loadTopic('T')
   original.sync.channel('A').topic('T').setDraft('Topic draft survives C10')
   net.socket.onClose(4003); await settle()
@@ -1068,9 +1068,9 @@ it('C10 Organization re-selection restores Topic state and its retained draft', 
   await s.auth.selectOrganization('o')
   const recoveredNet = s.nets.at(-1)!
   const olderTopicMessage = { ...record(99), topic_id: 'T' }
-  recoveredNet.topicMessages['A:T'] = ok({ messages: [olderTopicMessage, topicMessage], has_more: false })
-  recoveredNet.pages.A = ok({ messages: [record(100), topicMessage], has_more: false })
-  recoveredNet.lists[0].resolve(ok({ channels: [channel('A')] }))
+  recoveredNet.topicMessages['A:T'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([olderTopicMessage, topicMessage]).at(-1)?.created_seq ?? 0,  messages: [olderTopicMessage, topicMessage], has_more: false })
+  recoveredNet.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100), topicMessage]).at(-1)?.created_seq ?? 0,  messages: [record(100), topicMessage], has_more: false })
+  recoveredNet.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
   await settle(); recoveredNet.subscribed('A', 101); await settle()
   const recovered = s.auth.session!
   await recovered.topics('A').loadTopic('T')
@@ -1130,7 +1130,7 @@ it('Guest Organization selection and reconnect reload Members and stop old selec
   await signInAs(s, 'guest')
   expect(list).toHaveBeenCalledTimes(1)
   const old = s.nets[0]
-  old.lists[0].resolve(ok({ channels: [channel('A')] })); await settle()
+  old.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await settle()
   expect(list).toHaveBeenCalledTimes(2)
   old.subscribed('A', 0); await settle()
   old.socket.onClose(1011); await settle()

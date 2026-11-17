@@ -37,9 +37,10 @@ pub(super) fn page_sql(page: &str, order: &str) -> String {
          FROM mention_page p JOIN message_mentions mm ON mm.organization_id=$1 AND mm.channel_id=p.channel_id AND mm.message_id=p.id \
          JOIN ({}) u ON u.organization_id=mm.organization_id AND u.id=mm.member_id \
          GROUP BY mm.message_id) \
-         SELECT p.*, COALESCE(ms.mentions,'[]'::jsonb)::text AS mentions \
+         SELECT p.*, ({}) AS history_generation, COALESCE(ms.mentions,'[]'::jsonb)::text AS mentions \
          FROM mention_page p LEFT JOIN mention_sets ms ON ms.message_id=p.id ORDER BY {order}",
-        crate::auth::members::RETAINED_IDENTITIES_SQL
+        crate::auth::members::RETAINED_IDENTITIES_SQL,
+        crate::auth::history::GENERATION_SQL
     )
 }
 

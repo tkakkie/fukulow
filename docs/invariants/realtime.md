@@ -4,6 +4,9 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 
 | Rule | Test |
 |---|---|
+| Stale-generation subscribe hides Guest-public, all DM nonparticipant Roles and foreign Channels; granted controls can subscribe | `server/src/realtime/tests/history.rs::stale_generation_subscribe_denials_cover_guest_dm_roles_and_foreign_organization` |
+| Handoff generation recheck preserves Channel/Organization loss after replay | `server/src/realtime/tests/history.rs::subscribe_handoff_generation_recheck_preserves_access_and_organization_loss` |
+| Old-generation subscribe preserves private denial, refuses authorized stale epochs, and fresh replay/handoff carries the rotated epoch | `server/src/realtime/tests/history.rs::generation_subscribe_denial_hides_private_channels_and_reconnect_uses_rotated_epoch` |
 | Create envelopes keep their log seq when replay hydrates newer Message state; REST and live/replay share created_seq, version and deleted fields | `server/src/realtime/tests.rs::create_envelope_keeps_log_position_when_replay_hydrates_a_newer_version` |
 | Replay closes with 1011 before acknowledging past a log position whose Message state is missing | `server/src/realtime/tests.rs::replay_missing_message_state_closes_without_hiding_log_position` |
 | Live Messages serialize once per fan-out, including shared gap recovery, independent of socket count; zero recipients may serialize zero times | `server/src/realtime/tests/shared_frame.rs::live_serialization_is_once_per_fanout_including_shared_gap_recovery` |
@@ -124,6 +127,6 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [messages](messages.md): `channel_log_reconciles_current_body_and_fails_closed_on_missing_state`
 
-- [replies](replies.md): `reply_counts_deny_other_organization`, `reply_counts_deny_private_nonmember`, `reply_counts_deny_guest_without_public_grant`, `reply_counts_deny_dm_nonparticipant`, `reply_counts_bound_anchors_and_descendants_by_watermark_before_data_snapshot`, `reply_counts_reauthorize_member_revision_and_grant_after_barrier_wait`, `reply_counts_wait_out_ambiguous_commit_and_preserve_rollback_baseline`
+- [replies](replies.md): `reply_counts_deny_other_organization`, `reply_counts_deny_private_nonmember`, `reply_counts_deny_guest_without_public_grant`, `reply_counts_deny_dm_nonparticipant`, `reply_counts_bound_anchors_and_descendants_by_watermark_in_data_snapshot`, `reply_counts_reauthorize_member_revision_and_grant_after_barrier_wait`, `reply_counts_wait_out_ambiguous_commit_and_preserve_rollback_baseline`
 
 - [messages](messages.md): `channel_event_pages_are_bounded_exclusive_and_hydrate_current_state`

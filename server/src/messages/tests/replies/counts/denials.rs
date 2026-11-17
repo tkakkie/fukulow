@@ -128,7 +128,10 @@ async fn denial(pool: PgPool, case: &str) {
             State(state.clone()),
             DeferredOrganizationAuth(Some(auth)),
             Ok(Path((org, channel))),
-            ApiJson(ReplyCountRequest { ids: ids.to_vec() }),
+            ApiJson(ReplyCountRequest {
+                history_generation: None,
+                ids: ids.to_vec(),
+            }),
         )
         .await
         .unwrap_err()

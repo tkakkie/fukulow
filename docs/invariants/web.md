@@ -72,3 +72,5 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [sync](sync.md): `mounts the shell while the core loads, starts the load first and fails only on a load error`, `a switch or sign-out while the core loads leaves at most the latest selection, opened once`, `notifies each input before its ordered effects and preserves repeated-stop global notifications`
 - [deployment](deployment.md): `wasm_and_glue_are_manifest_assets_with_immutable_cache_and_wasm_mime`
+
+- [sync](sync.md): `history reset fences pending hints and reboots the current target without cached anchors`

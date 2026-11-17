@@ -138,3 +138,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`
 
 - [auth](auth.md): `#304 recheck current Session/password under locks`, `#304 wrong current password is 403`
+
+- [messages](messages.md): `#515 uses Organization UUID epochs`

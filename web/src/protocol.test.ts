@@ -37,7 +37,7 @@ it('keeps duplicate Mention arrays stable and accepts a refreshed display name',
 function boot(seq = 100) {
   let state = initialState('me')
   const feed = (input: Input) => {
-    if (input.type === "history_result" && state.requests[input.request]?.type === "history" && (state.requests[input.request] as { page: string }).page === "after") input = { type: "events_result", request: input.request, page: { events: input.page.messages.map(message => ({ type: "message", seq: message.created_seq, kind: "create", message })), has_more: input.page.has_more } }
+    if (input.type === "history_result" && state.requests[input.request]?.type === "history" && (state.requests[input.request] as { page: string }).page === "after") input = { type: "events_result", request: input.request, page: { history_generation: '00000000-0000-4000-8000-000000000515', events: input.page.messages.map(message => ({ type: "message", seq: message.created_seq, kind: "create", message })), has_more: input.page.has_more } }
     const out = step(state, input)
     state = out.state
     return out.effects
@@ -46,8 +46,8 @@ function boot(seq = 100) {
   const connection = state.connection!
   feed({ type: 'connection_ready', connection })
   const latest = feed({ type: 'watch', channel: 'A' }).find(e => e.type === 'fetch_history')!
-  feed({ type: 'history_result', request: latest.id, page: { messages: [record(seq)], has_more: true } })
-  feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: seq } })
+  feed({ type: 'history_result', request: latest.id, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(seq)]).at(-1)?.created_seq ?? 0,  messages: [record(seq)], has_more: true } })
+  feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: seq } })
   const event = (seq: number) => feed({ type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: (record(seq)).created_seq, message: record(seq) } })
   return { feed, event, get: () => state, connection }
 }
@@ -69,7 +69,7 @@ it('429 waits without resending early, re-arms with a new delay and preserves th
     expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'c1' })).toEqual([])
     d.event(101)
     const retry = d.feed({ type: 'timer_elapsed', id: timer })
-    expect(retry).toEqual([{ type: 'send', id: expect.any(Number), channel: 'A', client_message_id: 'c1', body: original.body, ...target }])
+    expect(retry).toEqual([{ history_generation: '00000000-0000-4000-8000-000000000515', type: 'send', id: expect.any(Number), channel: 'A', client_message_id: 'c1', body: original.body, ...target }])
     const again = d.feed({ type: 'send_failed', request: id(retry, 'send'), status: 429, retryAfterMs: 4000 })
     expect(again).toEqual([{ type: 'wait', id: expect.any(Number), purpose: 'send_retry', channel: 'A', delayMs: 4000 }])
     expect(d.feed({ type: 'timer_elapsed', id: timer })).toEqual([])
@@ -94,7 +94,7 @@ it('throttled sends cancel waits on canonical settlement, discard, access loss a
     if (end === 'echo') effects = d.feed({ type: 'event', connection: d.connection, event: { type: 'message', kind: 'create', seq: (own).created_seq, message: own } })
     else if (end === 'history') {
       const history = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
-      effects = d.feed({ type: 'history_result', request: history, page: { messages: [own], has_more: false } })
+      effects = d.feed({ type: 'history_result', request: history, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([own]).at(-1)?.created_seq ?? 0,  messages: [own], has_more: false } })
     } else if (end === 'projection') effects = d.feed({ type: 'settle_history', channel: 'A', messages: [own] })
     else if (end === 'discard') effects = d.feed({ type: 'user_discard', channel: 'A', clientMessageId: 'c1' })
     else if (end === 'access') effects = d.feed({ type: 'channel_unavailable', channel: 'A' })
@@ -103,7 +103,7 @@ it('throttled sends cancel waits on canonical settlement, discard, access loss a
     else if (end === 'replacement') effects = d.feed({ type: 'session_replaced', selfId: 'other' })
     else {
       d.feed({ type: 'unwatch', channel: 'A' }); d.feed({ type: 'watch', channel: 'A' })
-      effects = d.feed({ type: 'event', connection: d.connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 60 } })
+      effects = d.feed({ type: 'event', connection: d.connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 60 } })
       expect(d.get().channels.A.pending[0]).toMatchObject({ clientMessageId: 'c1', state: 'unknown', retryWait: undefined })
     }
     expect(effects, end).toContainEqual({ type: 'cancel_timer', id: timer })
@@ -129,7 +129,7 @@ it('channel_unavailable fences history, refuses sends and retries, and recovers 
   expect(d.feed({ type: 'channel_unavailable', channel: 'A' })).toContainEqual({ type: 'unsubscribe', channel: 'A' })
   expect(d.get().channels.A.state).toBe('unavailable')
   expect(d.get().channels.A.pending[0].state).toBe('failed')
-  d.feed({ type: 'history_result', request: history, page: { messages: [record(99)], has_more: false } })
+  d.feed({ type: 'history_result', request: history, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(99)]).at(-1)?.created_seq ?? 0,  messages: [record(99)], has_more: false } })
   expect(d.get().channels.A.messages).toEqual([record(100)])
   expect(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'c2', body: 'refused' })).toEqual([])
   expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'c1' })).toEqual([])
@@ -138,10 +138,10 @@ it('channel_unavailable fences history, refuses sends and retries, and recovers 
   expect(d.feed({ type: 'connection_ready', connection })).toEqual([])
   expect(d.get().channels.A.state).toBe('unavailable')
   expect(d.feed({ type: 'watch', channel: 'A' })).toContainEqual(
-    expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }),
+    expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel: 'A', after_seq: 100 }),
   )
   expect(d.get().channels.A.state).toBe('loading')
-  d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 100 } })
+  d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 100 } })
   expect(d.get().channels.A.state).toBe('ready')
   expect(d.feed({ type: 'user_retry', channel: 'A', clientMessageId: 'c1' })).toEqual([])
 })
@@ -186,11 +186,11 @@ it('ack without an echo keeps the cursor and reconnect replay converges to one c
   const wait = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1006 }), 'wait')
   const connection = id(d.feed({ type: 'timer_elapsed', id: wait }), 'connect')
   expect(d.feed({ type: 'connection_ready', connection })).toContainEqual(
-    expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }),
+    expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel: 'A', after_seq: 100 }),
   )
   d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (message).created_seq, message } })
   d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (message).created_seq, message } })
-  d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 101 } })
+  d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 101 } })
   expect(d.get().channels.A).toMatchObject({ state: 'ready', cursor: 101, pending: [] })
   expect(d.get().channels.A.messages).toEqual([record(100), message])
 })
@@ -204,8 +204,8 @@ it('an ack buffered before bootstrap neither establishes nor extends the history
   const message = { ...record(101), sender: 'me', client_message_id: 'c1' }
   d.feed({ type: 'ack', respond_to: send, message })
   expect(d.get().channels.A).toMatchObject({ cursor: null, pending: [], messages: [message] })
-  expect(d.feed({ type: 'history_result', respond_to: latest, messages: [record(100)], has_more: true }))
-    .toContainEqual(expect.objectContaining({ type: 'subscribe', after_seq: 100 }))
+  expect(d.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: latest, messages: [record(100)], has_more: true }))
+    .toContainEqual(expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', after_seq: 100 }))
   expect(d.get().channels.A.cursor).toBe(100)
   expect(d.get().channels.A.messages).toEqual([record(100), message])
   d.feed({ type: 'message', kind: 'create', seq: (message).created_seq, channel: 'A', message })
@@ -234,10 +234,10 @@ it('a live predecessor before the ack leaves the cursor at the live seq, never p
   const wait = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1006 }), 'wait')
   const connection = id(d.feed({ type: 'timer_elapsed', id: wait }), 'connect')
   expect(d.feed({ type: 'connection_ready', connection })).toContainEqual(
-    expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 101 }),
+    expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel: 'A', after_seq: 101 }),
   )
   d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: ({ ...record(102), sender: 'me', client_message_id: 'c1' }).created_seq, message: { ...record(102), sender: 'me', client_message_id: 'c1' } } })
-  d.feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 102 } })
+  d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 102 } })
   expect(d.get().channels.A.cursor).toBe(102)
   expect(d.get().channels.A.messages.map(m => m.created_seq)).toEqual([100, 101, 102])
 })
@@ -251,7 +251,7 @@ it.each([101, 102])('a gap above ack seq %s is detected and filled from the unch
   expect(d.get().channels.A.cursor).toBe(100)
   const effects = d.feed({ type: 'timer_elapsed', id: d.get().channels.A.wait! })
   expect(effects).toContainEqual(expect.objectContaining({ type: 'fetch_history', page: 'after', seq: 100 }))
-  d.feed({ type: 'history_result', request: id(effects, 'fetch_history'), page: {
+  d.feed({ type: 'history_result', request: id(effects, 'fetch_history'), page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([101, 102, 103].map(seq => seq === ackSeq ? message : record(seq))).at(-1)?.created_seq ?? 0,
     messages: [101, 102, 103].map(seq => seq === ackSeq ? message : record(seq)), has_more: false,
   } })
   expect(d.get().channels.A).toMatchObject({ cursor: 103, pending: [], wait: undefined, fill: undefined })
@@ -263,13 +263,13 @@ it('directional has_more never lets an after page erase older pagination', () =>
   const d = boot()
   const timer = id(d.event(103), 'wait')
   const fill = id(d.feed({ type: 'timer_elapsed', id: timer }), 'fetch_history')
-  d.feed({ type: 'history_result', request: fill, page: { messages: [record(101), record(102), record(103)], has_more: false } })
+  d.feed({ type: 'history_result', request: fill, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(101), record(102), record(103)]).at(-1)?.created_seq ?? 0,  messages: [record(101), record(102), record(103)], has_more: false } })
   expect(d.get().channels.A.hasOlder).toBe(true)
   const older = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
-  d.feed({ type: 'history_result', request: older, page: { messages: [record(1)], has_more: false } })
+  d.feed({ type: 'history_result', request: older, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1)]).at(-1)?.created_seq ?? 0,  messages: [record(1)], has_more: false } })
   expect(d.get().channels.A.hasOlder).toBe(false)
   const refreshed = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
-  d.feed({ type: 'history_result', request: refreshed, page: { messages: [record(103)], has_more: true } })
+  d.feed({ type: 'history_result', request: refreshed, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(103)]).at(-1)?.created_seq ?? 0,  messages: [record(103)], has_more: true } })
   expect(d.get().channels.A.hasOlder).toBe(false)
   expect(d.get().channels.A.cursor).toBe(103)
 })
@@ -277,10 +277,10 @@ it('directional has_more never lets an after page erase older pagination', () =>
 it('before and nonadjacent latest records extend the window without becoming cursor evidence', () => {
   const d = boot()
   const older = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
-  d.feed({ type: 'history_result', request: older, page: { messages: [record(99)], has_more: false } })
+  d.feed({ type: 'history_result', request: older, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(99)]).at(-1)?.created_seq ?? 0,  messages: [record(99)], has_more: false } })
   expect(d.get().channels.A.cursor).toBe(100)
   const latest = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
-  d.feed({ type: 'history_result', request: latest, page: { messages: [record(103), record(104)], has_more: true } })
+  d.feed({ type: 'history_result', request: latest, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(103), record(104)]).at(-1)?.created_seq ?? 0,  messages: [record(103), record(104)], has_more: true } })
   expect(d.get().channels.A.cursor).toBe(100)
   d.event(101); d.event(102)
   expect(d.get().channels.A.cursor).toBe(102)
@@ -318,15 +318,15 @@ it.each([4008, 4029, 1001, 1011, 1006])('defers a pending fill backoff after clo
 
   const connection = id(d.feed({ type: 'timer_elapsed', id: id(closed, 'wait') }), 'connect')
   const ready = d.feed({ type: 'connection_ready', connection })
-  expect(ready).toContainEqual(expect.objectContaining({ type: 'subscribe', channel: 'A', after_seq: 100 }))
+  expect(ready).toContainEqual(expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', channel: 'A', after_seq: 100 }))
   expect(ready.some(e => e.type === 'fetch_history')).toBe(false)
   // Replay may arrive before its handoff confirmation; give it a chance to close the gap first.
   expect(d.event(104)).toEqual([])
   const resumed = d.feed({ type: 'event', connection,
-    event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 104 } })
+    event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 104 } })
   expect(resumed).toContainEqual(expect.objectContaining({ type: 'fetch_history', channel: 'A', page: 'after', seq: 100 }))
   d.feed({ type: 'history_result', request: id(resumed, 'fetch_history'),
-    page: { messages: [101, 102, 103, 104].map(seq => record(seq)), has_more: false } })
+    page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([101, 102, 103, 104].map(seq => record(seq))).at(-1)?.created_seq ?? 0,  messages: [101, 102, 103, 104].map(seq => record(seq)), has_more: false } })
   expect(d.get().channels.A).toMatchObject({ cursor: 104, fill: undefined, wait: undefined })
 })
 
@@ -340,7 +340,7 @@ it('rejects stale connection readiness, events, closes and subscription completi
     { type: 'connection_ready', connection: d.connection },
     { type: 'socket_closed', connection: d.connection, code: 4001 },
     { type: 'event', connection: d.connection, event: { type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) } },
-    { type: 'event', connection: next, subscription: -1, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } },
+    { type: 'event', connection: next, subscription: -1, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } },
   ] satisfies Input[]) expect(d.feed(input)).toEqual([])
   expect(d.get()).toEqual(snapshot)
 })
@@ -359,10 +359,10 @@ it('channel reset fences old latest, send completion, reorder timer and fill bac
   const reconnect = id(d.feed({ type: 'socket_closed', connection: d.connection, code: 1006 }), 'wait')
   const conn = id(d.feed({ type: 'timer_elapsed', id: reconnect }), 'connect')
   d.feed({ type: 'connection_ready', connection: conn })
-  d.feed({ type: 'event', connection: conn, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 60 } })
+  d.feed({ type: 'event', connection: conn, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 60 } })
   const snapshot = d.get()
   for (const input of [
-    { type: 'history_result', request: latest, page: { messages: [record(200)], has_more: false } },
+    { type: 'history_result', request: latest, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(200)]).at(-1)?.created_seq ?? 0,  messages: [record(200)], has_more: false } },
     { type: 'ack', request: sending, message: { ...record(101), sender: 'me', client_message_id: 'c1' } },
     { type: 'timer_elapsed', id: grace }, { type: 'timer_elapsed', id: backoff },
   ] satisfies Input[]) expect(d.feed(input)).toEqual([])
@@ -374,7 +374,7 @@ it('channel reset fences old latest, send completion, reorder timer and fill bac
 it('settled or superseded requests cannot overwrite a newer history request or retry', () => {
   const d = boot()
   const first = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
-  d.feed({ type: 'history_result', request: first, page: { messages: [], has_more: false } })
+  d.feed({ type: 'history_result', request: first, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } })
   const second = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
   expect(d.feed({ type: 'history_failed', request: first, status: 404 })).toEqual([])
   expect(d.get().channels.A.latest).toBe(second)
@@ -393,7 +393,7 @@ it.each(['channel_not_found', 'subscription_limit', 403, 404] as const)('termina
     : { type: 'event', connection: d.connection, event: { type: 'error', channel_id: 'A', code: refusal } })
   expect(effects.some(e => ['wait', 'fetch_history', 'subscribe'].includes(e.type))).toBe(false)
   expect(d.get().channels.A.state).toBe('unavailable')
-  expect(d.feed({ type: 'history_result', request: fill, page: { messages: [record(101), record(102)], has_more: false } })).toEqual([])
+  expect(d.feed({ type: 'history_result', request: fill, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(101), record(102)]).at(-1)?.created_seq ?? 0,  messages: [record(101), record(102)], has_more: false } })).toEqual([])
   expect(d.feed({ type: 'timer_elapsed', id: grace })).toEqual([])
   d.event(104)
   expect(d.get().channels.A.messages.map(m => m.created_seq)).toEqual([100, 103])
@@ -447,7 +447,7 @@ it('async channel_not_found terminates a confirmed generation until explicit res
   expect(d.event(101)).toEqual([])
   expect(d.feed({ type: 'load_older', channel: 'A' })).toEqual([])
   expect(d.feed({ type: 'watch', channel: 'A' })).toContainEqual(
-    expect.objectContaining({ type: 'subscribe', after_seq: 100 }))
+    expect.objectContaining({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribe', after_seq: 100 }))
   const current = d.get().channels.A.subscription!.id
   d.feed({ type: 'event', connection: d.connection, subscription,
     event: { type: 'error', channel_id: 'A', code: 'channel_not_found' } })
@@ -467,7 +467,7 @@ it('clamp preserves failed and unknown sends and invalidates only pre-clamp send
   d.feed({ type: 'watch', channel: 'A' })
   const subscription = d.get().channels.A.subscription!.id
   const effects = d.feed({ type: 'event', connection: d.connection, subscription,
-    event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 60 } })
+    event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 60 } })
   expect(effects).toContainEqual({ type: 'unsubscribe', channel: 'A' })
   expect(d.get().channels.A.pending.map(p => [p.clientMessageId, p.state]))
     .toEqual([['failed', 'failed'], ['unknown', 'unknown'], ['old', 'unknown']])
@@ -479,10 +479,10 @@ it('clamp preserves failed and unknown sends and invalidates only pre-clamp send
     { type: 'ack', request: old, message: { ...record(101), sender: 'me', client_message_id: 'old' } },
     { type: 'send_failed', request: old, status: 403 },
     { type: 'event', connection: d.connection, subscription,
-      event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } },
+      event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } },
   ] satisfies Input[]) expect(d.feed(input)).toEqual([])
   expect(live(d.get())).toEqual(live(snapshot))
-  d.feed({ type: 'history_result', request: id(effects, 'fetch_history'), page: { messages: [record(60)], has_more: true } })
+  d.feed({ type: 'history_result', request: id(effects, 'fetch_history'), page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(60)]).at(-1)?.created_seq ?? 0,  messages: [record(60)], has_more: true } })
   expect(d.get().channels.A.pending.find(p => p.clientMessageId === 'new')).toMatchObject({ state: 'sending', request: valid })
   expect(d.get().channels.A.pending.find(p => p.clientMessageId === 'unknown')).toMatchObject({ state: 'sending', request: retry })
   d.feed({ type: 'ack', request: valid, message: { ...record(61), sender: 'me', client_message_id: 'new', body: 'server' } })
@@ -506,10 +506,10 @@ it('watch clamp unwatch releases every server slot before the replacement bootst
       return effects
     }
     const latest = id(apply({ type: 'watch', channel }), 'fetch_history')
-    apply({ type: 'history_result', request: latest, page: { messages: [record(100, channel)], has_more: false } })
+    apply({ type: 'history_result', request: latest, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100, channel)]).at(-1)?.created_seq ?? 0,  messages: [record(100, channel)], has_more: false } })
     expect(active.size).toBe(2)
     apply({ type: 'event', connection: d.connection, subscription: d.get().channels[channel].subscription!.id,
-      event: { type: 'subscribed', channel_id: channel, caught_up_seq: 0 } })
+      event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 0 } })
     apply({ type: 'unwatch', channel })
     expect(active).toEqual(new Set(['A']))
     expect(d.get().channels[channel]).toMatchObject({ watched: false, cursor: null, subscription: undefined })
@@ -519,7 +519,7 @@ it('watch clamp unwatch releases every server slot before the replacement bootst
 it('one Channel update shares untouched Channels and unrelated message and pending arrays', () => {
   const d = boot()
   const history = id(d.feed({ type: 'watch', channel: 'B' }), 'fetch_history')
-  d.feed({ type: 'history_result', request: history, page: { messages: [record(1, 'B')], has_more: false } })
+  d.feed({ type: 'history_result', request: history, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'B')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'B')], has_more: false } })
   d.feed({ type: 'user_send', channel: 'B', clientMessageId: 'b', body: 'b' })
   const before = d.get()
   // An unrelated window/pending queue must not even be traversed, regardless of its size.
@@ -552,7 +552,7 @@ it('unchanged protocol input keeps state identity and duplicate merge never copi
     { type: 'user_retry', channel: 'A', clientMessageId: 'absent' },
     { type: 'event', connection: d.connection, event: { type: 'message', kind: 'create', seq: ({ ...record(100) }).created_seq, message: { ...record(100) } } },
     { type: 'event', connection: d.connection, subscription: before.channels.A.subscription!.id,
-      event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 100 } },
+      event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 100 } },
     { type: 'history_failed', request: -1, status: 404 },
     { type: 'send_failed', request: -1, status: 401 },
     { type: 'timer_elapsed', id: -1 },
@@ -571,7 +571,7 @@ it('incremental merge handles unordered duplicates and history pages with canoni
   const old = d.get().channels.A.messages[0]
   const older = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
   const canonical = { ...record(99), version: 200, sender: 'me', client_message_id: 'match', body: 'canonical' }
-  d.feed({ type: 'history_result', request: older, page: {
+  d.feed({ type: 'history_result', request: older, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(99), record(97), record(98), canonical, { ...record(96), client_message_id: 'other' }]).at(-1)?.created_seq ?? 0,
     messages: [record(99), record(97), record(98), canonical, { ...record(96), client_message_id: 'other' }], has_more: false,
   } })
   expect(d.get().channels.A.messages).toEqual([{ ...record(96), client_message_id: 'other' }, record(97), record(98), canonical, old])
@@ -582,7 +582,7 @@ it('incremental merge handles unordered duplicates and history pages with canoni
   // Refresh overlaps existing records and contains out-of-order versions: the highest state version wins.
   const latest = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
   const changed = { ...record(100), version: 201, body: 'server replacement' }
-  d.feed({ type: 'history_result', request: latest, page: {
+  d.feed({ type: 'history_result', request: latest, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(103), record(100), record(102), changed, record(101), record(103)]).at(-1)?.created_seq ?? 0,
     messages: [record(103), record(100), record(102), changed, record(101), record(103)], has_more: false,
   } })
   expect(d.get().channels.A.messages.map(m => m.created_seq)).toEqual([96, 97, 98, 99, 100, 101, 102, 103])
@@ -600,7 +600,7 @@ it('incremental merge matches a full-window reference across deterministic overl
     records.push({ ...records[3], version: 201 + batch * 2, body: 'highest version wins' }, { ...records[5] })
     const request = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
     for (const message of records) { const old = expected.get(message.created_seq); if (!old || message.version > old.version) expected.set(message.created_seq, message) }
-    d.feed({ type: 'history_result', request, page: { messages: records, has_more: false } })
+    d.feed({ type: 'history_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (records).at(-1)?.created_seq ?? 0,  messages: records, has_more: false } })
     expect(d.get().channels.A.messages).toEqual([...expected.values()].sort((a, b) => a.created_seq - b.created_seq))
     expect(d.get().channels.A.cursor).toBe(100)
   }
@@ -622,7 +622,7 @@ it.each(['send', 'history'] as const)('a late 401 from a stale %s request in the
     d.feed({ type: 'watch', channel: 'A' })
     const subscription = d.get().channels.A.subscription!.id
     d.feed({ type: 'event', connection: d.connection, subscription,
-      event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } })
+      event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } })
   } else d.feed({ type: 'unwatch', channel: 'A' })
   expect(Object.values(d.get().requests).some(r => r.stale)).toBe(true)
   expect(d.feed(late)).toEqual([{ type: 'close' }, { type: 'sign_in' }])
@@ -646,8 +646,8 @@ it('step reports only added, modified and removed Channel IDs in changedChannels
   const added = step(d.get(), { type: 'watch', channel: 'B' })
   expect(added.changedChannels).toEqual(new Set(['B']))
   const bHistory = id(added.effects, 'fetch_history')
-  let state = step(added.state, { type: 'history_result', request: bHistory, page: { messages: [record(1, 'B')], has_more: false } }).state
-  state = step(state, { type: 'event', connection: d.connection, event: { type: 'subscribed', channel_id: 'B', caught_up_seq: 1 } }).state
+  let state = step(added.state, { type: 'history_result', request: bHistory, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'B')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'B')], has_more: false } }).state
+  state = step(state, { type: 'event', connection: d.connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'B', caught_up_seq: 1 } }).state
 
   const noop = step(state, { type: 'event', connection: d.connection, event: { type: 'message', kind: 'create', seq: ({ ...record(100) }).created_seq, message: { ...record(100) } } })
   expect(noop.changedChannels).toEqual(new Set())
@@ -697,12 +697,12 @@ it('bounds mutation version evidence, fences retired reads and keeps tombstones 
   expect(Object.keys(c.versions)).toHaveLength(1500)
   expect(c.versionEpoch).toBeGreaterThan(stale)
   const before = c.messages
-  d.feed({ type: 'history_result', request: stale, page: { messages: [record(1)], has_more: false } })
+  d.feed({ type: 'history_result', request: stale, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1)]).at(-1)?.created_seq ?? 0,  messages: [record(1)], has_more: false } })
   d.event(1)
   expect(d.get().channels.A.messages).toBe(before)
   expect(d.get().channels.A.cursor).toBe(100)
   const fresh = d.get().channels.A.latest!
-  d.feed({ type: 'history_result', request: fresh, page: {
+  d.feed({ type: 'history_result', request: fresh, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...record(1), version: 20_000, deleted: true }]).at(-1)?.created_seq ?? 0,
     messages: [{ ...record(1), version: 20_000, deleted: true }], has_more: false,
   } })
   const tombstone = d.get().channels.A.messages.find(m => m.id === 'id1')!
@@ -743,7 +743,7 @@ it('event pages emit one final accepted state per Message identity', () => {
   const d = boot()
   d.event(103)
   const request = id(d.feed({ type: 'timer_elapsed', id: d.get().channels.A.wait! }), 'fetch_history')
-  const result = step(d.get(), { type: 'events_result', request, page: { has_more: false, events: [
+  const result = step(d.get(), { type: 'events_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: false, events: [
     { type: 'message', seq: 101, kind: 'edit', message: { ...record(1), version: 101, body: 'edited' } },
     { type: 'message', seq: 102, kind: 'delete', message: { ...record(1), version: 102, deleted: true } },
   ] } })
@@ -757,7 +757,7 @@ it('creation-ordered after history never proves event contiguity', () => {
   const d = boot()
   d.event(102)
   const request = id(d.feed({ type: 'timer_elapsed', id: d.get().channels.A.wait! }), 'fetch_history')
-  const result = step(d.get(), { type: 'history_result', request, page: { messages: [record(101), record(102)], has_more: false } })
+  const result = step(d.get(), { type: 'history_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(101), record(102)]).at(-1)?.created_seq ?? 0,  messages: [record(101), record(102)], has_more: false } })
   expect(result.state.channels.A.cursor).toBe(100)
   expect(result.state.channels.A.messages).toContainEqual(record(101))
 })
@@ -774,7 +774,7 @@ it('retired identity fences coalesce exactly and overflow schedules an authorita
   expect(d.get().channels.A.messages).toEqual([])
   expect(d.get().channels.A.cursor).toBe(100)
   const fresh = id(overflow, 'fetch_history')
-  d.feed({ type: 'history_result', request: fresh, page: { messages: [record(2)], has_more: false } })
+  d.feed({ type: 'history_result', request: fresh, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(2)]).at(-1)?.created_seq ?? 0,  messages: [record(2)], has_more: false } })
   expect(d.get().channels.A.messages).toContainEqual(record(2))
 })
 
@@ -785,8 +785,8 @@ it('retiring odd creations 1 through 801 never silently loses create 2', () => {
   const connection = state.connection!
   feed({ type: 'connection_ready', connection })
   const first = id(feed({ type: 'watch', channel: 'A' }), 'fetch_history')
-  feed({ type: 'history_result', request: first, page: { messages: [], has_more: false } })
-  feed({ type: 'event', connection, event: { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } })
+  feed({ type: 'history_result', request: first, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } })
+  feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 } })
   const retired = Array.from({ length: 401 }, (_, i) => 2 * i + 1)
   const retained = Array.from({ length: 1500 }, (_, i) => 1000 + i)
   const effects = feed({ type: 'settle_history', channel: 'A', messages: [...retired, ...retained].map((seq, i) => ({ ...record(seq), version: 10_000 + i })) })
@@ -801,9 +801,9 @@ it('retiring odd creations 1 through 801 never silently loses create 2', () => {
   const reretirement = feed({ type: 'settle_history', channel: 'A', messages: [{ ...record(3000), version: 20_000 }] })
   recovery = id(reretirement, 'fetch_history')
   expect(recovery).not.toBe(superseded)
-  feed({ type: 'history_result', request: superseded, page: { messages: [record(2)], has_more: false } })
+  feed({ type: 'history_result', request: superseded, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(2)]).at(-1)?.created_seq ?? 0,  messages: [record(2)], has_more: false } })
   expect(state.channels.A.messages).toEqual([])
-  feed({ type: 'history_result', request: recovery, page: { messages: [record(1), record(2)], has_more: false } })
+  feed({ type: 'history_result', request: recovery, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1), record(2)]).at(-1)?.created_seq ?? 0,  messages: [record(1), record(2)], has_more: false } })
   expect(state.channels.A.messages).toContainEqual(record(2))
   expect(state.channels.A.cursor).toBe(2)
   expect(state.channels.A.retiredThrough).toBeUndefined()
@@ -828,13 +828,13 @@ it('a rejected mutation fences an already in-flight latest snapshot and requires
   expect(fresh).not.toBe(stale)
   expect(d.get().requests[stale]).toMatchObject({ stale: true })
   const before = d.get().channels.A.messages
-  d.feed({ type: 'history_result', request: stale, page: {
+  d.feed({ type: 'history_result', request: stale, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...record(19_000), version: 19_500 }, record(22_002)]).at(-1)?.created_seq ?? 0,
     messages: [{ ...record(19_000), version: 19_500 }, record(22_002)], has_more: false,
   } })
   expect(d.get().channels.A.messages).toBe(before)
   expect(d.get().channels.A.latest).toBe(fresh)
   expect(d.get().channels.A.cursor).toBe(22_001)
-  d.feed({ type: 'history_result', request: fresh, page: {
+  d.feed({ type: 'history_result', request: fresh, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...record(19_000), version: 22_001, deleted: true }]).at(-1)?.created_seq ?? 0,
     messages: [{ ...record(19_000), version: 22_001, deleted: true }], has_more: false,
   } })
   expect(d.get().channels.A.latest).toBeUndefined()
@@ -851,7 +851,7 @@ it('an authoritative latest snapshot releases covered overflow fences for late o
     const recovery = id(d.feed({ type: 'settle_history', channel: 'A', messages:
       [...retired, ...retained].map((seq, i) => ({ ...record(seq), version: 10_000 + i })) }), 'fetch_history')
     expect(d.get().channels.A.retiredThrough).toBe(801)
-    d.feed({ type: 'history_result', request: recovery, page: { messages: [record(600), record(802)], has_more } })
+    d.feed({ type: 'history_result', request: recovery, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(600), record(802)]).at(-1)?.created_seq ?? 0,  messages: [record(600), record(802)], has_more } })
     expect(d.get().channels.A.retiredThrough).toBe(has_more ? 599 : undefined)
     const own = { ...record(700), sender: 'me', client_message_id: 'late', body: 'late' }
     const effects = d.feed({ type: 'ack', request: send, message: own })
@@ -869,7 +869,7 @@ it('an authoritative latest snapshot releases covered overflow fences for late o
 it('a held identity accepts version 9 after its version 5 evidence retires', () => {
   const d = boot()
   const latest = id(d.feed({ type: 'refresh', channel: 'A' }), 'fetch_history')
-  d.feed({ type: 'history_result', request: latest, page: { messages: [{ ...record(1), version: 5 }], has_more: false } })
+  d.feed({ type: 'history_result', request: latest, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([{ ...record(1), version: 5 }]).at(-1)?.created_seq ?? 0,  messages: [{ ...record(1), version: 5 }], has_more: false } })
   d.feed({ type: 'settle_history', channel: 'A', messages: Array.from({ length: 1500 }, (_, i) => ({ ...record(1000 + i), version: 10_000 + i })) })
   expect(d.get().channels.A.versions.id1).toBeUndefined()
   expect(d.get().channels.A.messages.find(m => m.id === 'id1')?.version).toBe(5)
@@ -886,7 +886,7 @@ it('drops a Create envelope whose seq differs from its created_seq', () => {
   const page = boot()
   page.event(103)
   const request = id(page.feed({ type: 'timer_elapsed', id: page.get().channels.A.wait! }), 'fetch_history')
-  const result = step(page.get(), { type: 'events_result', request, page: { has_more: false, events: [
+  const result = step(page.get(), { type: 'events_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: false, events: [
     { type: 'message', seq: 101, kind: 'create', message: record(102) },
     { type: 'message', seq: 102, kind: 'create', message: record(102) },
   ] } })

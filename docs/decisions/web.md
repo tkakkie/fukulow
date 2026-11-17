@@ -14,7 +14,7 @@ Web client. Writing rules and the other parts: [index](../decisions.md).
 - #301 rebuilds the identity Map on Member list fetch; no push/polling. Unknown authors batch at 100; omissions/failures retry only on list fetch, Channel selection or reconnect. Deactivated names keep the accessible `（無効）` hint. `members.load()` is #315's refetch hook.
 - #300 Sign-in, sign-out and Invite acceptance share a cookie-mutation guard with setup and atomic Account transitions. Reads use generation fences, allowing sign-out and retry while stalled. Reason: ignored Set-Cookie still mutates cookies; reads must not retain busy.
 - #300 Invite session 401 offers explicit sign-out, keeping the Invite in memory. Only 204/401 restores the form; the user resubmits. Network/5xx keeps an error and never accepts. Reason: recover stale cookies without silent anonymous downgrade; existing Accounts keep sign-in.
-- #91/#94 real-time sync contract: OpenAPI types cannot express delivery/reconnect, so it lives once in `docs/spec/realtime.md` (server guarantees with tests; client rules as target). C8 excludes restored history past the old cursor; a history-generation id is deferred.
+- #91/#94 real-time behavior lives in spec/realtime.md because OpenAPI covers types. #515 C8 uses Organization epochs to detect restores beyond old cursors; operator rotation before traffic is mandatory.
 - Web sync is layered (components, adapter, controller, pure protocol, API/transport) so ordering and dedup are testable without Svelte or I/O; only message sync has a protocol (#91/#94). No CI layer check yet (needs a negative test).
 - Capabilities (`{allowed, reason?}`) come from authorize: Organization invite/manage-Roles/create-Channels, Channel add-Members (#144). Server requests re-check independently; #149 owns Channel management endpoints.
 - #120: an async `channel_not_found` carries no subscription generation; if it could belong to a retired or a pending subscription, the controller reconnects with backoff. Cost: one resubscribe of all Channels; other clients must do the same.
@@ -51,7 +51,7 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [auth](auth.md): `#197 app-wide CSP allows external same-origin`, `#197 Vite manifest outputs alone get`
 - [auth](auth.md): `#401: app and both proxies send`
 - [auth](auth.md): `#300 sign-out 401 expires current`
-- [messages](messages.md): `#138: opt-in Topic composition bootstraps sync`, `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`, `#140 keeps one opt-in chain per`, `#140 composes over sync (or Topic`
+- [messages](messages.md): `#138/#515 Topic composition passes`, `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`, `#140 keeps one opt-in chain per`, `#140 composes over sync (or Topic`
 - [realtime](realtime.md): `#148 fixtures for behaviour not implemented`, `#161: queue-cap rejection and 30 s`, `A dropped connection or response timeout`
 
 - [messages](messages.md): `#311 PATCH /api/v1/orgs/{org}/channels/{id}/members/{member_id}`, `#311 Manager PATCH uses`
@@ -59,3 +59,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [auth](auth.md): `#304 recheck current Session/password under locks`, `#304 wrong current password is 403`
 
 - [auth](auth.md): `#303 management follows`
+
+- [messages](messages.md): `#515 uses Organization UUID epochs`

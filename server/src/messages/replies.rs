@@ -5,6 +5,9 @@ pub(crate) mod counts;
 #[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct ReplyChainQuery {
+    pub history_generation: Option<Uuid>,
+    #[param(minimum = 0)]
+    pub as_of_seq: Option<i64>,
     /// Exclusive forward continuation; omitted/0 starts with the root.
     #[param(minimum = 0, default = 0)]
     #[schema(minimum = 0)]
@@ -16,6 +19,8 @@ pub struct ReplyChainQuery {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReplyChainPage {
+    pub history_generation: Uuid,
+    pub as_of_seq: i64,
     pub root_id: Uuid,
     /// Root and all descendants, ascending by seq. Projection only: never moves the sync cursor.
     pub messages: Vec<Message>,
@@ -71,6 +76,7 @@ pub(super) const PAGE_SQL: &str = "SELECT * FROM (\
     responses((status = 200, description = "Root and all descendants in ascending seq; exclusive continuation with exact has_more; cursor-neutral", body = ReplyChainPage),
         (status = 400, description = "Malformed Organization id, Channel id, Message id or after_seq, negative after_seq, or limit outside 1..=200", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found for authorization; reply_chain_not_found for unknown or foreign Organization/Channel anchor", body = ErrorBody),
         (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
             headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
@@ -85,7 +91,7 @@ pub async fn reply_chain(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.limit.unwrap_or(50);
     let after = query.after_seq.unwrap_or(0);
-    if after < 0 || !(1..=200).contains(&limit) {
+    if query.as_of_seq.is_some_and(|w| w < 0) || after < 0 || !(1..=200).contains(&limit) {
         return Err(MessageError::InvalidInput);
     }
     let auth = auth.ok_or(MessageError::OrganizationUnavailable)?;
@@ -93,12 +99,20 @@ pub async fn reply_chain(
     let member = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization, member, channel).await?;
     tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        let w = topics::watermark(&state, organization, channel).await?;
+        topics::watermark(&state, organization, channel).await?;
         crate::database::organization_read_only(
             &state.pool,
             organization,
             async |tx: &mut sqlx::PgConnection| {
                 require_visible(&mut *tx, organization, member, channel).await?;
+                let (history_generation, w) = history::page(
+                    tx,
+                    organization,
+                    channel,
+                    query.history_generation,
+                    query.as_of_seq,
+                )
+                .await?;
                 let root_id: Uuid = sqlx::query_scalar(
                     "SELECT COALESCE(reply_root_id,id) FROM messages \
          WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND seq<=$4",
@@ -125,6 +139,8 @@ pub async fn reply_chain(
                 Ok((
                     [(header::CACHE_CONTROL, "no-store")],
                     Json(ReplyChainPage {
+                        history_generation,
+                        as_of_seq: w,
                         root_id,
                         messages,
                         has_more,

@@ -13,7 +13,7 @@ it('transports generated controls and events without owning reconnection policy'
   expect(socket.send).toHaveBeenCalledWith('{"type":"subscribe","channel_id":"a","after_seq":100}')
   for (const data of [null, 'bad json', '{"x":1}']) socket.onmessage?.({ data })
   expect(handlers.onEvent).not.toHaveBeenCalled()
-  const event = { type: 'subscribed', channel_id: 'a', caught_up_seq: 100 }
+  const event = { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'a', caught_up_seq: 100 }
   socket.onmessage?.({ data: JSON.stringify(event) })
   expect(handlers.onEvent).toHaveBeenCalledWith(event)
   socket.onclose?.({ code: 4008 })
@@ -36,8 +36,8 @@ it('ignores malformed payloads for every forwarded event without throwing or clo
     { type: 'message' }, { type: 'message', kind: 'create', seq: 101, message: null }, { type: 'message', kind: 'create', seq: 101, message: [] },
     { type: 'message', kind: 'create', seq: 101, message: 'message' },
     { type: 'subscribed' }, { type: 'subscribed', channel_id: 'A' },
-    { type: 'subscribed', channel_id: 1, caught_up_seq: 100 },
-    ...['100', null, -1, 1.5, Infinity].map(caught_up_seq => ({ type: 'subscribed', channel_id: 'A', caught_up_seq })),
+    { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 1, caught_up_seq: 100 },
+    ...['100', null, -1, 1.5, Infinity].map(caught_up_seq => ({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq })),
     { type: 'error' }, { type: 'error', code: 404 }, { type: 'error', code: 'channel_not_found', channel_id: {} },
   ]
   for (const field of Object.keys(message)) {
@@ -59,7 +59,7 @@ it('ignores malformed payloads for every forwarded event without throwing or clo
   expect(socket.close).not.toHaveBeenCalled()
   for (const event of [
     { type: 'message', kind: 'create', seq: (message).created_seq, message },
-    { type: 'subscribed', channel_id: 'A', caught_up_seq: 0 },
+    { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 },
     { type: 'error', code: 'invalid_control' },
     { type: 'error', code: 'invalid_control', channel_id: null },
     { type: 'error', code: 'channel_not_found', channel_id: 'A' },

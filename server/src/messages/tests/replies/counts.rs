@@ -39,7 +39,10 @@ async fn page(app: &Router, token: &str, channel: Uuid, ids: &[Uuid]) -> Value {
     let response = query(app, token, channel, ids).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    body(response).await
+    let mut page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    page.as_object_mut().unwrap().remove("history_generation");
+    page
 }
 
 fn entry(message: Uuid, root: Uuid, count: i64) -> Value {
