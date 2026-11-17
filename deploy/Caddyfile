@@ -25,8 +25,7 @@ http://{$FUKULOW_DOMAIN:localhost} {
 	import browser_headers
 	@api path /api /api/*
 	header @api >Cache-Control "no-store"
-	@static not path /api /api/*
-	encode @static zstd gzip
+	# The app negotiates precompressed Brotli; preserve identity responses too.
 	@hsts {
 		protocol https
 		not host localhost 127.0.0.1 [::1]
