@@ -282,10 +282,10 @@ async function partDRun(arm: Arm, round: number): Promise<RunD> {
       env: { ...timelineEnv(process.env, smoke ? tiny.topics : undefined), DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${port}/postgres` }, timeoutMs: 30 * 60_000 });
     writeFileSync(`${dir}/cargo.log`, (r.stdout + r.stderr).replaceAll(password, '<redacted>'));
     const rows = parseTimeline(r.stderr + r.stdout);
-    if (r.code !== 0 && !rows.length) throw new Error('Part D test failed before reporting');
-    // A missed gate panics after reporting: that is a FAIL from the rows, not an INVALID run.
-    const result: RunD = { part: 'D', round, arm, commit: full[arm], complete: rows.length === 4, smoke, topics: timelineTopics(r.stderr + r.stdout), rows };
-    save(`${dir}/result.json`, { ...result, exitCode: r.code });
+    // Test failures (including zero-row correctness panics) are results, never infrastructure reruns.
+    if (r.code !== 0) failed = true;
+    const result: RunD = { part: 'D', round, arm, commit: full[arm], complete: rows.length === 4, smoke, topics: timelineTopics(r.stderr + r.stdout), rows, exitCode: r.code };
+    save(`${dir}/result.json`, result);
     return result;
   } finally { try { docker('rm', '-f', name); } catch { cleanupErrors.push(`${id}: PostgreSQL cleanup failed`); } }
 }

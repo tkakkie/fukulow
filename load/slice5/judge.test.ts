@@ -231,3 +231,44 @@ test('Part B validates warmup, measured, drain and reader outcomes without trust
   const missing: Record<string, Record<string, Counts>> = lanes(); delete missing.send.after;
   assert.ok(Number.isNaN(closedLoopNonSuccess(missing)));
 });
+
+test('Part A: A round 1 429s plus A round 2 sampler gap remains FAIL (B3)', () => {
+  for (const sameRun of [false, true]) {
+    const runs = setA();
+    const first = runs.find(r => r.arm === 'A' && r.round === 1)!.steps[2];
+    first.send.accepted--; first.send.rejected429++;
+    runs.find(r => r.arm === 'A' && r.round === (sameRun ? 1 : 2))!.steps[2].evidence.maxSampleGapMs = 2600;
+    const v = judgePartA(runs, 'hot-17');
+    assert.equal(v.status, 'FAIL');
+    assert.equal((v.detail as { steps: { status: string }[] }).steps[2].status, 'FAIL');
+  }
+});
+test('Part A: sampler gap alone remains INVALID in either arm', () => {
+  for (const arm of ['A', 'B'] as const) {
+    const runs = setA(); runs.find(r => r.arm === arm)!.steps[2].evidence.maxSampleGapMs = 2600;
+    assert.equal(judgePartA(runs, 'hot-17').status, 'INVALID');
+  }
+});
+test('Part A: B sampler gap with A definite failure remains INVALID', () => {
+  const runs = setA(); runs.find(r => r.arm === 'B')!.steps[2].evidence.maxSampleGapMs = 2600;
+  const a = runs.find(r => r.arm === 'A')!.steps[2]; a.send.accepted--; a.send.rejected429++;
+  assert.equal(judgePartA(runs, 'hot-17').status, 'INVALID');
+});
+test('Part A: definite B failure remains REPORT ONLY despite gaps in either arm', () => {
+  for (const arm of ['A', 'B'] as const) {
+    const runs = setA(), b = runs.find(r => r.arm === 'B')!.steps[2];
+    b.send.accepted--; b.send.rejected429++;
+    runs.find(r => r.arm === arm && r.round === 2)!.steps[2].evidence.maxSampleGapMs = 2600;
+    const v = judgePartA(runs, 'hot-17');
+    assert.equal(v.status, 'PASS');
+    assert.equal((v.detail as { steps: { status: string }[] }).steps[2].status, 'REPORT ONLY');
+    assert.equal((v.detail as { highestCommonSustainableRate: number }).highestCommonSustainableRate, 500);
+  }
+});
+test('Part D test failures remain FAIL with zero, partial or complete rows, even with missing rounds', () => {
+  for (const n of [0, 2, 4]) {
+    const runs = setD(); runs[0].exitCode = 101; runs[0].rows = runs[0].rows.slice(0, n); runs[0].complete = n === 4;
+    assert.equal(judgePartD(runs)[0].status, 'FAIL');
+    assert.equal(judgePartD(runs.slice(0, 1))[0].status, 'FAIL');
+  }
+});

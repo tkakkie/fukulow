@@ -18,7 +18,7 @@ export type RunB = RunIdentity & { part: 'B'; acceptedPerSecond: number; measure
 export type RunC = RunIdentity & { part: 'C'; p95: number | null; requests: number; invalidPages: number; readerErrors: number; outsideSender: number; r2?: { status: string; invalid?: number; errors?: number; p95?: number | null };
   sender: Counts; senderRate: number; senderSeconds: number; evidence: Evidence };
 export type TimelineRow = { key: string; p95: number; n: number };
-export type RunD = { part: 'D'; round: number; arm: Arm; commit: string; complete: boolean; smoke: boolean; topics: number; rows: TimelineRow[] };
+export type RunD = { part: 'D'; round: number; arm: Arm; commit: string; complete: boolean; smoke: boolean; topics: number; rows: TimelineRow[]; exitCode?: number };
 export type Metric = { name: string; status: Status; reason?: string; medianB?: number; medianA?: number; ratio?: number;
   pairRatios?: number[]; spreadB?: number; spreadA?: number };
 export type Verdict = { part: string; cell: string; status: Status; reasons: string[]; metrics: Metric[]; detail?: unknown };
@@ -57,17 +57,25 @@ export function stepIncomplete(step: StepA): string[] {
   if (!countsComplete(step.reader)) reasons.push('incomplete second-Organization reader outcomes');
   return reasons;
 }
-export function sustainable(step: StepA): string[] {
-  const reasons = stepIncomplete(step), s = step.send, reader = step.reader;
-  if (s.droppedIterations) reasons.push('dropped iterations');
-  if (s.attempted < step.rate * step.seconds * validity.minimumOfferedFraction || s.attempted > step.rate * step.seconds + 1) reasons.push('offered load not generated');
-  if (s.accepted !== s.attempted) reasons.push('errors');
+function stepFailures(step: StepA): string[] {
+  const reasons: string[] = [], s = step.send, reader = step.reader;
+  // Incomplete counts cannot establish a failure; independent complete lanes can.
+  if (countsComplete(s)) {
+    if (s.droppedIterations) reasons.push('dropped iterations');
+    if (s.attempted < step.rate * step.seconds * validity.minimumOfferedFraction || s.attempted > step.rate * step.seconds + 1) reasons.push('offered load not generated');
+    if (s.accepted !== s.attempted) reasons.push('errors');
+  }
   const readerOffered = 2 * (step.seconds + partA.drainSeconds);
-  if (reader.droppedIterations || reader.accepted !== reader.attempted || reader.attempted < readerOffered * validity.minimumOfferedFraction || reader.attempted > readerOffered + 1)
+  if (countsComplete(reader) && (reader.droppedIterations || reader.accepted !== reader.attempted || reader.attempted < readerOffered * validity.minimumOfferedFraction || reader.attempted > readerOffered + 1))
     reasons.push('second-Organization reader not sustained');
   // The identical-retry lane is explicitly report-only.
   return reasons;
 }
+export function sustainable(step: StepA): string[] {
+  return [...stepIncomplete(step), ...stepFailures(step)];
+}
+const stepOutcome = (step: StepA) => stepFailures(step).length ? 'definitely-unsustained'
+  : stepIncomplete(step).length ? 'unknown' : 'sustained';
 export function walInvalid(wal: Wal): string[] {
   const reasons: string[] = [];
   if (!finite(wal.lsnBytes) || wal.lsnBytes <= 0) reasons.push('missing LSN delta');
@@ -106,9 +114,11 @@ export function judgePartA(runs: RunA[], cell: string): Verdict {
   const at = (r: RunA, rate: number) => step(r, rate)[0];
   // B sustains a step in every round but A misses it in any round: FAIL (no rerun to pass).
   const steps = partA.rates.map(rate => {
-    const bOk = b.every(r => !sustainable(at(r, rate)).length), aOk = a.every(r => !sustainable(at(r, rate)).length);
-    const incomplete = [...b, ...a].some(r => stepIncomplete(at(r, rate)).length);
-    const status: Status | 'COMMON' = incomplete ? 'INVALID' : !bOk ? 'REPORT ONLY' : aOk ? 'COMMON' : 'FAIL';
+    const bOutcomes = b.map(r => stepOutcome(at(r, rate))), aOutcomes = a.map(r => stepOutcome(at(r, rate)));
+    const status: Status | 'COMMON' = bOutcomes.includes('definitely-unsustained') ? 'REPORT ONLY'
+      : bOutcomes.includes('unknown') ? 'INVALID'
+      : aOutcomes.includes('definitely-unsustained') ? 'FAIL'
+      : aOutcomes.includes('unknown') ? 'INVALID' : 'COMMON';
     return { rate, status, b: b.map(r => sustainable(at(r, rate))), a: a.map(r => sustainable(at(r, rate))) };
   });
   const failed = steps.filter(s => s.status === 'FAIL').map(s => s.rate);
@@ -203,6 +213,9 @@ export function judgePartC(runs: RunC[], cell: string): Verdict {
 
 // Part D keeps the existing absolute target: A's median p95 <=100 ms per PAGE row, both arms' spread <=10%.
 export function judgePartD(runs: RunD[]): Verdict[] {
+  const failed = runs.filter(r => r.exitCode !== undefined && r.exitCode !== 0);
+  if (failed.length) return [{ part: 'D', cell: 'timeline', status: 'FAIL',
+    reasons: failed.map(r => `${r.arm}${r.round}: Part D test failed (exit ${r.exitCode})`), metrics: [] }];
   const pick = (arm: Arm) => rounds.map((_, i) => runs.filter(r => r.arm === arm && r.round === i + 1));
   const [bs, as] = [pick('B'), pick('A')];
   if ([...bs, ...as].some(r => r.length !== 1) || runs.length !== 2 * rounds.length)
