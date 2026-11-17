@@ -163,15 +163,23 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     assert.equal(mismatch.stdout, '')
     sql('UPDATE _sqlx_migrations SET version = version - 1 WHERE version = (SELECT max(version) FROM _sqlx_migrations)')
     const history = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
-    // origin/main may already include the coordinated slice-3 wire migration.
-    // Earlier images gain created_seq/version/deleted and default empty Mentions.
-    const { seq, ...unchanged } = message
-    const createdSeq = message.created_seq ?? seq
+    // A Message sent by a pre-#515 image gains the default empty accepted Mention set (#152)
+    // and is served in the #515 wire shape: seq becomes created_seq, version starts at it.
+    // An older image already serving that shape (main since #532) is returned unchanged.
+    // Either way the upgraded server adds the Organization history_generation (#515 slice 4).
+    let upgraded = message
+    if ('seq' in message) {
+      const { seq, ...unchanged } = message
+      upgraded = { mentions: [], ...unchanged, created_seq: seq, version: seq, deleted: false }
+    } else {
+      assert.ok(Number.isInteger(message.created_seq) && message.version === message.created_seq,
+        'old image Message has neither the pre-#515 nor the #515 wire shape')
+    }
+    const createdSeq = upgraded.created_seq
     assert.ok(Number.isSafeInteger(createdSeq) && createdSeq > 0)
     const historyGeneration = sql(`SELECT history_generation FROM organizations WHERE organization_id='${organization}'`)
     assert.match(historyGeneration, /^[0-9a-f-]{36}$/)
-    const upgraded = { mentions: [], ...unchanged, history_generation: historyGeneration,
-      created_seq: createdSeq, version: message.version ?? createdSeq, deleted: message.deleted ?? false }
+    upgraded = { ...upgraded, history_generation: historyGeneration }
     assert.deepEqual(history.messages, [upgraded])
     assert.equal(history.history_generation, historyGeneration)
     assert.equal(history.as_of_seq, createdSeq)
