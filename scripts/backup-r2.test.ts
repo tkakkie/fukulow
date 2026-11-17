@@ -52,6 +52,7 @@ test('verified predicate rejects partial malformed unmarked and future generatio
     if (mutation === 'checksum') b.objects.get(good + 'archive.dump.age')!.body = Buffer.alloc(100, 2)
     assert.equal((await inventory(b, epoch)).verified.length, 0, mutation)
     await assert.rejects(recheckNewest(b, epoch), /No verified/)
+    for (const object of b.objects.values()) object.uploaded = epoch - 6 * 3_600_000
     assert.ok((await checker(b).run()).alerts.includes('malformed-generations'))
   }
 })
@@ -76,7 +77,7 @@ test('mismatched HEAD or truncated GET abandons generation and retries new suffi
     const prefix = await publish({ bucket: objectTransport(fake.runner('backups')), ciphertext: Buffer.from('encrypted-test-data'), manifest: manifest(), now: () => epoch, attempt: () => String(++attempt) })
     assert.match(prefix, /-2\/$/)
     assert.equal((await inventory(fake.buckets.backups, epoch)).verified.length, 1)
-    assert.ok((await inventory(fake.buckets.backups, epoch)).malformed.length)
+    assert.ok((await inventory(fake.buckets.backups, epoch)).inProgress.length)
   }
 })
 
@@ -202,7 +203,7 @@ test('dump encryption upload and verification failures alert without exposing di
     await seed(bucket, epoch - day)
     if (stage === 'upload') bucket.put = async () => { throw new Error('sensitive diagnostics') }
     if (stage === 'verify') bucket.get = async () => Buffer.from('wrong')
-    await assert.rejects(runBackup({ lock: memoryRunLock(), directory: root, recipient: 'test-public-recipient', bucket, now: () => epoch,
+    await assert.rejects(runBackup({ directory: root, recipient: 'test-public-recipient', bucket, now: () => epoch,
       notify: async e => { events.push(e) }, dump: (_directory, capture) => { if (stage === 'dump') throw new Error('sensitive diagnostics'); capture(); return source },
       encrypt: (_s, target) => { if (stage === 'encrypt') throw new Error('sensitive diagnostics'); writeFileSync(target, 'ciphertext') },
     }), { message: 'Backup failed (diagnostics suppressed)' })
@@ -237,7 +238,7 @@ test('age throwaway key roundtrip rejects wrong key and tampering', async t => {
   const source = join(root, 'source'); writeFileSync(source, 'dump')
   const fake = await fakeS3(() => epoch); t.after(fake.close)
   const bucket = { ...objectTransport(fake.runner('backups')), list: () => fake.buckets.backups.list(), delete: (key: string) => fake.buckets.backups.delete(key) }
-  await runBackup({ lock: memoryRunLock(), directory: root, recipient, bucket, now: () => epoch, notify: async () => assert.fail('unexpected alert'), dump: (_directory, capture) => { capture(); return source } })
+  await runBackup({ directory: root, recipient, bucket, now: () => epoch, notify: async () => assert.fail('unexpected alert'), dump: (_directory, capture) => { capture(); return source } })
   const newest = await recheckNewest(bucket, epoch), downloaded = join(root, 'downloaded')
   writeFileSync(downloaded, await bucket.get(newest.prefix + 'archive.dump.age'))
   const restored = spawnSync('age', ['-d', '-i', key, downloaded])
@@ -268,7 +269,7 @@ test('normal mock flow preserves local dump and daily recheck hashes newest ciph
   const source = join(root, 'source'); writeFileSync(source, 'dump')
   const bucket = new FakeBucket(() => epoch), events: string[] = []
   await seed(bucket, epoch - day)
-  const prefix = await dailyBackup({ lock: memoryRunLock(), directory: root, recipient: 'test-public-recipient', bucket,
+  const prefix = await dailyBackup({ directory: root, recipient: 'test-public-recipient', bucket,
     now: () => epoch, notify: async event => { events.push(event) }, dump: (_directory, capture) => { capture(); return source },
     encrypt: (_source, target) => writeFileSync(target, 'mock encrypted data') })
   assert.equal(events.length, 0)
@@ -277,7 +278,7 @@ test('normal mock flow preserves local dump and daily recheck hashes newest ciph
   const get = bucket.get.bind(bucket)
   bucket.get = async key => key.endsWith('archive.dump.age') ? Buffer.alloc(19, 3) : get(key)
   await assert.rejects(recheckNewest(bucket, epoch), /Daily integrity check failed/)
-  await assert.rejects(runBackup({ lock: memoryRunLock(), directory: root, recipient: '', bucket, now: () => epoch,
+  await assert.rejects(runBackup({ directory: root, recipient: '', bucket, now: () => epoch,
     notify: async event => { events.push(event) }, dump: () => assert.fail('dump must not run without recipient') }))
   assert.deepEqual(events, ['backup-failed'])
 })

@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.backup.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo",
+    "types": []
+  },
+  "include": ["../workers/backup-checker/**/*.ts"]
+}

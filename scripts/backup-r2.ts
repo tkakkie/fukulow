@@ -7,8 +7,8 @@ import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { backup } from './backup.ts'
 import { checksum, sha256, verifiedGeneration, type BackupBucket, type Manifest, parseManifest } from './backup-r2-model.ts'
-import { listObjects, runLockKey } from './backup-r2-list.ts'
-import { acquireLocalLock, assertLocalLock, privateDirectory, SafeFailure, sweepPartials, type RunLock } from './backup-safety.ts'
+import { listObjects } from './backup-r2-list.ts'
+import { acquireLocalLock, assertLocalLock, privateDirectory, sweepPartials } from './backup-safety.ts'
 
 export interface Request { method: 'PUT' | 'HEAD' | 'GET' | 'DELETE'; key: string; headers: Record<string, string>; query?: Record<string, string>; body?: Buffer; digestOnly?: boolean }
 export interface Response { status: number; headers: Record<string, string>; body: Buffer; digest?: { sha256: string; size: number } }
@@ -25,7 +25,7 @@ export function objectTransport(run: Runner): BackupBucket & UploadBucket {
     },
     async put(key, body) {
       const hex = sha256(body)
-      const response = await run({ method: 'PUT', key, body, headers: { 'x-amz-content-sha256': hex, 'x-amz-checksum-sha256': checksum(hex) } })
+      const response = await run({ method: 'PUT', key, body: Buffer.isBuffer(body) ? body : Buffer.from(body), headers: { 'x-amz-content-sha256': hex, 'x-amz-checksum-sha256': checksum(hex) } })
       if (response.status < 200 || response.status >= 300) throw new Error('Upload failed')
     },
     async head(key) {
@@ -75,11 +75,7 @@ export async function curlRunner(configFile: string, baseUrl: string, execute = 
     const directory = await mkdtemp(join(tmpdir(), 'backup-curl-'))
     try {
       const headersFile = join(directory, 'headers'), bodyFile = join(directory, 'body')
-      // --retry handles transient HTTP statuses without --fail; other HTTP responses
-      // must reach objectTransport (notably missing objects and locked PUT retries).
-      // Retrying lock deletion could delete a successor's lock after a lost response.
-      const retries = request.key === runLockKey ? ['--retry', '0'] : ['--retry', '3', '--retry-all-errors']
-      const args = ['--disable', '--config', path, '--aws-sigv4', 'aws:amz:auto:s3', '--silent', ...retries, '--max-time', '120', '--retry-max-time', '480', '--dump-header', headersFile, '--output', bodyFile, '--request', request.method]
+      const args = ['--disable', '--config', path, '--aws-sigv4', 'aws:amz:auto:s3', '--silent', '--retry', '3', '--retry-all-errors', '--max-time', '120', '--retry-max-time', '480', '--dump-header', headersFile, '--output', bodyFile, '--request', request.method]
       if (request.method === 'HEAD') args.push('--head')
       for (const [key, value] of Object.entries(request.headers)) args.push('--header', `${key}: ${value}`)
       // URL is supplied via stdin config, so private endpoints never enter argv.
@@ -139,11 +135,11 @@ export async function fileDigest(path: string) {
 }
 export async function runBackup(options: {
   directory: string; recipient: string; bucket: UploadBucket
-  lock: RunLock; localLock?: () => void
+  localLock?: () => void
   now: () => number; notify: (event: string) => Promise<void>
   dump?: (directory: string, capture: () => void) => string; encrypt?: (source: string, target: string, recipient: string) => void
 }) {
-  try { return await options.lock(() => runBackupLocked(options)) }
+  try { return await runBackupLocked(options) }
   catch {
     try { await options.notify('backup-failed') } catch { /* Keep notification diagnostics private. */ }
     throw new Error('Backup failed (diagnostics suppressed)')
@@ -196,44 +192,18 @@ export async function recheckNewest(bucket: BackupBucket & UploadBucket, now: nu
 export const backupSchedule = { dailyUTC: '*-*-* 02:15:00 UTC', checkerCron: '0 * * * *', persistent: true } as const
 export async function dailyBackup(options: Parameters<typeof runBackup>[0] & { bucket: BackupBucket }) {
   try {
-    return await options.lock(async () => {
+    const directory = privateDirectory(options.directory)
+    const release = options.localLock ?? acquireLocalLock(directory)
+    assertLocalLock(directory, release)
+    try {
       try { await recheckNewest(options.bucket, options.now()) } catch {
         try { await options.notify('daily-readback-failed') } catch { /* Still take the next backup if notification is unavailable. */ }
       }
-      return runBackupLocked(options)
-    })
+      return await runBackupLocked({ ...options, localLock: release })
+    } finally { if (!options.localLock) release() }
   } catch {
     try { await options.notify('backup-failed') } catch { /* Keep notification diagnostics private. */ }
     throw new Error('Backup failed (diagnostics suppressed)')
-  }
-}
-
-// Every host uses this same key, outside the retention-locked prefixes. An
-// ambiguous PUT/DELETE or crash leaves a lock: no timeout can safely fence a
-// suspended pruner. Manual recovery first stops all writers and checks ownership.
-export function bucketRunLock(run: Runner): RunLock {
-  return async work => {
-    const body = Buffer.from(randomUUID()), hex = sha256(body)
-    let response: Response
-    try {
-      response = await run({ method: 'PUT', key: runLockKey, body, headers: {
-        'if-none-match': '*', 'x-amz-content-sha256': hex, 'x-amz-checksum-sha256': checksum(hex),
-      } })
-    } catch { throw new SafeFailure('lock', 'operation') }
-    if (response.status < 200 || response.status >= 300) throw new SafeFailure('lock', response.status === 412 || response.status === 409 ? 'busy' : 'operation')
-    try { return await work() } finally {
-      try {
-        // Conditional DELETE is not assumed portable. Check the acquired version
-        // and token immediately before deleting; recovery must still quiesce all
-        // owners because this GET/DELETE pair cannot fence a concurrent recovery.
-        const etag = response.headers.etag
-        if (!etag || /[\r\n]/.test(etag)) throw new Error('Missing lock version')
-        const current = await run({ method: 'GET', key: runLockKey, headers: { 'if-match': etag } })
-        if (current.status !== 200 || current.headers.etag !== etag || !current.body.equals(body)) throw new Error('Lock owner changed')
-        const release = await run({ method: 'DELETE', key: runLockKey, headers: {} })
-        if (release.status !== 204 && release.status !== 200) throw new Error('Release failed')
-      } catch { throw new SafeFailure('lock', 'operation') }
-    }
   }
 }
 
