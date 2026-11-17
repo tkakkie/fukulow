@@ -115,7 +115,7 @@ impl Connection<'_> {
             watch.refresh(&self.state.pool).await.map_err(|error| {
                 tracing::info_span!(target: "fukulow", "database", operation = "websocket_refresh")
                     .in_scope(|| crate::observability::database_failure(&error));
-                self.close_cause = "database";
+                self.close_cause = crate::observability::database_close_cause(&error);
                 1011u16
             })?;
         }
@@ -238,7 +238,7 @@ impl Connection<'_> {
             .map_err(|error| {
                 tracing::info_span!(target: "fukulow", "database", operation = "websocket_latest_seq")
                     .in_scope(|| crate::observability::database_failure(&error));
-                self.close_cause = "database";
+                self.close_cause = crate::observability::database_close_cause(&error);
                 1011u16
             })?;
         if !self.refresh(socket, channel).await? {
@@ -277,7 +277,7 @@ impl Connection<'_> {
                 Err(MessageError::Database(error)) => {
                     tracing::info_span!(target: "fukulow", "database", operation = "websocket_replay")
                         .in_scope(|| crate::observability::database_failure(&error));
-                    return Err(self.internal("database"));
+                    return Err(self.internal(crate::observability::database_close_cause(&error)));
                 }
                 Err(_) => return Err(self.internal("replay_error")),
             };
@@ -345,7 +345,9 @@ impl Connection<'_> {
                             target: "fukulow", "database", operation = "websocket_authorize"
                         )
                         .in_scope(|| crate::observability::database_failure(&error));
-                        return Err(self.internal("database"));
+                        return Err(
+                            self.internal(crate::observability::database_close_cause(&error))
+                        );
                     }
                     Err(_) => return Err(self.internal("authorize_error")),
                 }
@@ -367,7 +369,7 @@ impl Connection<'_> {
                             target: "fukulow", "database", operation = "websocket_subscribe"
                         )
                         .in_scope(|| crate::observability::database_failure(&error));
-                        self.close_cause = "database";
+                        self.close_cause = crate::observability::database_close_cause(&error);
                         1011u16
                     })?;
                 let Some(watch) = watch else {
@@ -404,7 +406,7 @@ impl Connection<'_> {
                         .map_err(|error| {
                             tracing::info_span!(target: "fukulow", "database", operation = "websocket_subscribed_seq")
                                 .in_scope(|| crate::observability::database_failure(&error));
-                            self.close_cause = "database";
+                            self.close_cause = crate::observability::database_close_cause(&error);
                             1011u16
                         })?;
                     if !self.protected(socket, channel_id).await? {

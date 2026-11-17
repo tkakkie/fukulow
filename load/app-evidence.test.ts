@@ -20,6 +20,7 @@ test('aggregates pool deltas, failure kinds, close codes with times and socket r
     line(4200, { event: 'websocket_closed', code: '1011', cause: 'notification' }), line(4300, { event: 'websocket_disconnected' }),
     line(5900, { event: 'websocket_closed', code: '1011', cause: 'connection' }),
     line(5950, { event: 'websocket_closed', code: '1011', cause: 'access_recheck' }),
+    line(5955, { event: 'websocket_closed', code: '1011', cause: 'admission_watermark_channel' }),
     line(5960, { event: 'subscription_recheck_failed', scope: 'scoped', kind: 'timeout' }, undefined, 'WARN'),
     line(4400, { event: 'http_completed' }, { status: 503, route: '/api/v1/x' }),
     line(9900, { event: 'websocket_closed', code: '1011', cause: 'notification' }), // after the window
@@ -31,9 +32,11 @@ test('aggregates pool deltas, failure kinds, close codes with times and socket r
   assert.deepEqual({ ...evidence.pool, deltas: undefined }, { samples: 8, maxInUse: 20, minIdle: 0, maxWaiting: 40, deltas: undefined, acquireWaitsOver1s: 3 });
   assert.equal(evidence.pool?.deltas.acquire_timeout, 3);
   assert.equal(evidence.databaseFailures.pool_timeout, 1);
-  assert.deepEqual(evidence.closes['1011'], { count: 3, firstMs: 3200, lastMs: 4950, perSecond: [[3, 1], [4, 2]] });
-  assert.deepEqual(evidence.causes1011, { shutdown: 0, session: 0, overflow: 0, notification: 1, connection: 1, peer: 0,
-    access_recheck: 1, database: 0, replay_error: 0, replay_empty: 0, authorize_error: 0 });
+  assert.deepEqual(evidence.closes['1011'], { count: 4, firstMs: 3200, lastMs: 4955, perSecond: [[3, 1], [4, 3]] });
+  // Every known cause is reported, zero or not; only the sites seen here are non-zero.
+  assert.deepEqual(Object.entries(evidence.causes1011).filter(([, n]) => n),
+    [['notification', 1], ['connection', 1], ['access_recheck', 1], ['admission_watermark_channel', 1]]);
+  assert.equal(Object.keys(evidence.causes1011).length, 24);
   assert.deepEqual(evidence.recheckFailures, { 'all:error': 0, 'all:timeout': 0, 'all:deadline': 0, 'scoped:error': 0, 'scoped:timeout': 1 });
   assert.deepEqual(evidence.otherWarnings, {});
   assert.deepEqual(evidence.sockets, { opened: 5, disconnected: 1, peakConcurrent: 6, peakOpenedPerSecond: 5, openedPerSecond: 13 });

@@ -73,6 +73,8 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         .connect_with((*pool.connect_options()).clone())
         .await
         .unwrap();
+    let output = crate::observability::tests::Capture::default();
+    let _capture = tracing::subscriber::set_default(output.subscriber());
     let f = fixture(&app_pool).await;
     let other_channel = channel(&pool, f.organization, f.member, false).await;
     let other_org = organization(&pool).await;
@@ -219,6 +221,16 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
         "fault phase must finish within 8s since FIRST admission, before any 10s waiter deadline: {:?}",
         first_admission.elapsed()
     );
+    // #469: every storm 1011 names the rejected admission, not a database failure.
+    let causes: Vec<_> = output
+        .events()
+        .into_iter()
+        .filter(|event| {
+            event["fields"]["event"] == "websocket_closed" && event["fields"]["code"] == "1011"
+        })
+        .map(|event| event["fields"]["cause"].clone())
+        .collect();
+    assert_eq!(causes, vec![json!("admission_watermark_channel"); 64 * 3]);
     assert_eq!(lock_waiters(&pool, pid).await, 4);
     assert!(
         sending.try_join_next().is_none(),

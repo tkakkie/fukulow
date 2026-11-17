@@ -248,6 +248,46 @@ fn database_errors_never_format_sensitive_details_or_sources() {
     );
 }
 
+#[test]
+fn database_close_cause_names_the_rejected_admission() {
+    let rejection =
+        |kind| sqlx::Error::Io(io::Error::new(io::ErrorKind::WouldBlock, Rejected(kind)));
+    let causes: Vec<_> = Admission::ALL
+        .into_iter()
+        .map(|kind| database_close_cause(&rejection(kind)))
+        .collect();
+    let expected: Vec<_> = Admission::ALL
+        .into_iter()
+        .map(|kind| format!("admission_{}", kind.name()))
+        .collect();
+    assert_eq!(causes, expected);
+    for (error, cause) in [
+        (
+            sqlx::Error::Io(io::ErrorKind::WouldBlock.into()),
+            "admission",
+        ),
+        (
+            sqlx::Error::Io(io::Error::new(io::ErrorKind::WouldBlock, "untyped")),
+            "admission",
+        ),
+        (
+            sqlx::Error::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                Rejected(Admission::Socket),
+            )),
+            "database",
+        ),
+        (sqlx::Error::PoolTimedOut, "database"),
+        (sqlx::Error::PoolClosed, "database"),
+        (
+            sqlx::Error::Database(Box::new(SensitiveDatabaseError)),
+            "database",
+        ),
+    ] {
+        assert_eq!(database_close_cause(&error), cause);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn aggregates_have_fixed_cardinality_and_admission_flood_is_silent() {
     let output = Capture::default();

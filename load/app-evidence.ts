@@ -8,8 +8,14 @@ const failureKinds = ['pool_timeout', 'pool_closed', 'deadline', 'io', 'database
 const closeCodes = ['1001', '1011', '4001', '4003', '4008', '4029', 'other', 'peer_or_transport'] as const;
 // realtime.rs close sites: a fixed label that tells the 1011 paths apart (live notification failure vs others).
 // `connection` is split by site (#469); a bare `connection` is an unlabeled site such as event serialization.
+// A database-backed site rejected by admission names the admission (observability::Admission::close_cause);
+// a bare `admission` is an untyped rejection, `database` a real database failure.
+const admissions = ['send_channel_queue', 'send_global_queue', 'send_channel', 'send_global', 'watermark_channel',
+  'watermark_global', 'notification_channel', 'notification_global', 'notification_organization',
+  'notification_execution', 'socket', 'password'] as const;
 const closeCauses = ['shutdown', 'session', 'overflow', 'notification', 'connection', 'peer',
-  'access_recheck', 'database', 'replay_error', 'replay_empty', 'authorize_error'] as const;
+  'access_recheck', 'database', 'replay_error', 'replay_empty', 'authorize_error', 'admission',
+  ...admissions.map(kind => `admission_${kind}` as const)] as const;
 // Subscription recheck pass failures by `scope:kind` (one event per pass, not per socket).
 const recheckFailures = ['all:error', 'all:timeout', 'all:deadline', 'scoped:error', 'scoped:timeout'] as const;
 const sampleSlackMs = 2000;

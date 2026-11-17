@@ -478,10 +478,9 @@ impl Delivery {
             .clone()
             .try_acquire_owned()
             .map_err(|_| {
-                crate::observability::admission(
+                crate::observability::rejected(
                     crate::observability::Admission::NotificationExecution,
-                );
-                sqlx::Error::Io(std::io::ErrorKind::WouldBlock.into())
+                )
             })?;
         let after = cursor
             .get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(message.seq) - 1);
