@@ -54,6 +54,8 @@ async fn silence_rejects_unexpected_message_after_keepalive() {
 pub(super) struct Backpressure {
     stream: tokio::io::DuplexStream,
     pub(super) writes: usize,
+    failed_writes: usize,
+    pub(super) blocked: bool,
 }
 impl tokio::io::AsyncRead for Backpressure {
     fn poll_read(
@@ -71,11 +73,18 @@ impl tokio::io::AsyncWrite for Backpressure {
         bytes: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         self.writes += 1;
+        if self.blocked {
+            return std::task::Poll::Pending;
+        }
         if !self.writes.is_multiple_of(3) {
             cx.waker().wake_by_ref();
             return std::task::Poll::Pending;
         }
-        std::pin::Pin::new(&mut self.stream).poll_write(cx, bytes)
+        let result = std::pin::Pin::new(&mut self.stream).poll_write(cx, bytes);
+        if matches!(result, std::task::Poll::Ready(Err(_))) {
+            self.failed_writes += 1;
+        }
+        result
     }
     fn poll_flush(
         mut self: std::pin::Pin<&mut Self>,
@@ -104,6 +113,8 @@ pub(super) async fn buffered_pair(
             Backpressure {
                 stream: client,
                 writes: 0,
+                failed_writes: 0,
+                blocked: false,
             },
             bytes,
             Role::Client,
@@ -112,6 +123,35 @@ pub(super) async fn buffered_pair(
         .await,
         WebSocketStream::from_raw_socket(peer, Role::Server, None).await,
     )
+}
+
+#[tokio::test]
+async fn delivery_read_skips_flush_after_failed_pong_and_another_ping() {
+    let (mut client, peer) =
+        buffered_pair(vec![0x89, 1, 1, 0x8a, 1, 3, 0x89, 1, 2, 0x81, 1, b'x']).await;
+    drop(peer);
+    client.get_mut().writes = 2; // The first Pong write fails immediately.
+    assert_eq!(
+        crate::websocket_test_support::websocket_delivery_next(&mut client, None)
+            .await
+            .unwrap()
+            .unwrap(),
+        tungstenite::Message::text("x")
+    );
+    // Reads may try a nonblocking automatic write, but must not drive another
+    // explicit flush through backpressure to a second BrokenPipe.
+    assert_eq!(client.get_mut().failed_writes, 1);
+    // The intervening Pong must not retry the failed flush either. Only the
+    // second Ping's automatic write adds one Pending poll after the failure.
+    assert_eq!(client.get_mut().writes, 4);
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "expected delivery silence, got Ok(Some(Ok(Text(")]
+async fn silence_rejects_buffered_message_while_pong_write_is_blocked() {
+    let (mut client, _peer) = buffered_pair(vec![0x89, 1, 1, 0x81, 1, b'x']).await;
+    client.get_mut().blocked = true;
+    silent(&mut client).await;
 }
 
 #[tokio::test]

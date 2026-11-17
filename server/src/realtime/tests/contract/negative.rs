@@ -106,7 +106,15 @@ async fn contract_silence_answers_ping_and_requires_nonce_pong() {
             );
         };
         let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::join!(assertions::silence(&mut client, channel, 0), peer_exchange)
+            tokio::join!(
+                async {
+                    let result = assertions::silence(&mut client, channel, 0).await;
+                    // Delivery reads may return while automatic Pong output is blocked.
+                    client.flush().await.unwrap();
+                    result
+                },
+                peer_exchange
+            )
         })
         .await
         .unwrap();

@@ -405,7 +405,10 @@ async fn denied(client: &mut Client, channel: Uuid) {
         json!({"type":"error", "channel_id":channel, "code":"channel_not_found"})
     );
 }
-async fn silent(client: &mut Client) {
+async fn silent<S>(client: &mut WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let result =
         tokio::time::timeout(Duration::from_millis(100), delivery_next(client, None)).await;
     assert!(result.is_err(), "expected delivery silence, got {result:?}");
