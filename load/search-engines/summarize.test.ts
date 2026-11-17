@@ -45,7 +45,7 @@ for (const mode of ['success','smoke-success','smoke-refused','smoke-mixed','tam
 
 test('judgement: 500 ms p95 in every round, index use, completeness and denials; missing evidence never passes',()=>{
   const query = (id: string, value: string) => ({id,raw:` ${value}`,value,scalars:[...value].length});
-  const queries = [query('ja2-rare','麒麟'),query('ja3-rare','abcd'),query('ja1-frequent','開'),query('mixed','a麒b1')];
+  const queries = [query('ja2-rare','麒麟'),query('ja3-rare','特殊照合'),query('ja1-frequent','開'),query('mixed','照合z9')];
   const names = denialCases.map(c=>c.name);
   const checks = denialCases.flatMap(c=>[false,true].map(forced=>({case:c.name,forced,found:c.expect.map(probe),expected:c.expect.map(probe)})));
   const definer = {cases:names,results:['none','trgm','bigm','pgroonga'].map(engine=>({engine,cases:names.length*2,checks}))};
@@ -104,6 +104,8 @@ test('judgement: 500 ms p95 in every round, index use, completeness and denials;
   // Tampered raw text or scalar counts are not the frozen query list.
   assert.equal(by(judge(runs(10),queries.map(q=>q.id==='ja3-rare'?{...q,scalars:0}:q),definer,ids),'bigm').index,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),queries.map(q=>q.id==='ja3-rare'?{...q,raw:'x'}:q),definer,ids),'bigm').latency,'NOT EVALUATED');
+  // A rare query whose value was shrunk (consistent scalars) differs from the frozen count.
+  assert.equal(by(judge(runs(10),queries.map(q=>q.id==='ja3-rare'?{...q,value:'a',scalars:1}:q),definer,ids),'trgm').index,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),queries,withChecks(()=>undefined as never),ids),'trgm').denials,'NOT EVALUATED');
   assert.equal(by(judge(runs(10),queries,{cases:names,results:definer.results.map(({checks,...r})=>r)},ids),'trgm').denials,'NOT EVALUATED');
   // Three rows from duplicated rounds, or an empty sample, are not three rounds of evidence.

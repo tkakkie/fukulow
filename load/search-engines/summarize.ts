@@ -20,8 +20,9 @@ export const criteria = {p95LimitMs:500,
   completeness:'round 1 completeness report equal to the reference scan (6 actors, owner index, direct access path, page order)',
   denials:'every definer denial case with its positive control passed, unforced and forced, on every engine',
   minimumLength:{trgm:3,bigm:2,pgroonga:2} as Record<string,number>,
-  // Queries matching only the sparse i%997 rows (explicit, not by name).
-  rareQueries:['ja1-rare','ja2-rare','ja3-rare','ascii1-rare','ascii2-rare','ascii-rare','mixed']};
+  // Queries matching only the sparse i%997 rows (explicit, not by name), with their normalized scalar
+  // counts frozen here (from the smoke run's normalization), so an artifact cannot shrink them.
+  rareQueries:{'ja1-rare':1,'ja2-rare':2,'ja3-rare':4,'ascii1-rare':1,'ascii2-rare':2,'ascii-rare':3,'mixed':4} as Record<string,number>};
 type Check = {case:string,forced:boolean,found:string[],expected:string[]};
 type Query = {id:string,raw:string,value:string,scalars:number};
 // Parsed artifacts are untrusted: a non-array or a non-object element is missing evidence, never a crash.
@@ -43,7 +44,8 @@ function frozenQueries(queries: unknown, expectedQueries: [string,string][]) {
   const list = objects<Query>(queries);
   const valid = Array.isArray(queries) && expectedQueries.length>0 && list.length===queries.length && list.length===expectedQueries.length
     && list.every((q,i)=>q.id===expectedQueries[i]![0] && q.raw===expectedQueries[i]![1] && typeof q.value==='string'
-      && Number.isInteger(q.scalars) && q.scalars>0 && q.scalars===[...q.value].length);
+      && Number.isInteger(q.scalars) && q.scalars>0 && q.scalars===[...q.value].length
+      && (!(q.id in criteria.rareQueries) || q.scalars===criteria.rareQueries[q.id]));
   return valid ? list : undefined;
 }
 export function judge(runs: JudgedRun[], rawQueries: unknown, definer: unknown, expectedQueries: [string,string][]) {
@@ -61,7 +63,7 @@ export function judge(runs: JudgedRun[], rawQueries: unknown, definer: unknown, 
     const slow = group.flatMap(r=>objects<Latency>(r.latencies).filter(l=>typeof l.p95==='number' && l.p95>criteria.p95LimitMs)
       .map(l=>`round ${r.round} ${l.query} ${l.p95.toFixed(1)} ms`));
     const plans = Array.isArray(first?.plans) ? objects<Plan>(first.plans) : undefined;
-    const required = (queries ?? []).filter(q=>criteria.rareQueries.includes(q.id) && q.scalars>=criteria.minimumLength[engine]!).map(q=>q.id);
+    const required = (queries ?? []).filter(q=>q.id in criteria.rareQueries && criteria.rareQueries[q.id]!>=criteria.minimumLength[engine]!).map(q=>q.id);
     const planFor = (id: string) => plans?.find(p=>p.query===id);
     const index: Status = !plans || !ids.length || !required.length
       || ids.some(id=>typeof planFor(id)?.searchIndex!=='boolean' || typeof planFor(id)?.seqScanMessages!=='boolean') ? 'NOT EVALUATED'
