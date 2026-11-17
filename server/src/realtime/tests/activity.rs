@@ -1924,7 +1924,7 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
                 if self.started.load(Ordering::SeqCst) {
                     tokio::time::timeout(Duration::from_secs(5), self.gate.entered.acquire())
                         .await
-                        .unwrap()
+                        .expect("a publisher started before the recheck never reached the gate")
                         .unwrap()
                         .forget();
                 }
