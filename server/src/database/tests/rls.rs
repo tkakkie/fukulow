@@ -4,13 +4,14 @@ use crate::database;
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-const TABLES: [&str; 11] = [
+const TABLES: [&str; 12] = [
     "organizations",
     "users",
     "channels",
     "channel_members",
     "channel_message_sequences",
     "messages",
+    "channel_log",
     "message_mentions",
     "topics",
     "channel_read_positions",
@@ -50,6 +51,7 @@ async fn tenant(admin: &PgPool) -> Tenant {
         "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $4, 1)",
         "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) VALUES ($1, $4, $5, 'topic', 1, 1, 1)",
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id) VALUES ($1, gen_random_uuid(), $4, 1, $3, gen_random_uuid(), 'hello', $5)",
+        "INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id) SELECT $1,$4,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO channel_read_positions (organization_id, channel_id, member_id, membership_revision, initial_seq, read_seq) SELECT $1, $4, $3, membership_revision, 0, 0 FROM users WHERE organization_id = $1 AND id = $3 ON CONFLICT DO NOTHING",
         "INSERT INTO topic_read_positions (organization_id, channel_id, member_id, topic_id, read_seq) VALUES ($1, $4, $3, $5, 0) ON CONFLICT DO NOTHING",
@@ -163,6 +165,9 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
             Some(expected),
             "{table}: UPDATE move: {moved}"
         );
+        if table == "channel_log" {
+            continue; // UPDATE/DELETE are privilege-denied even within the tenant.
+        }
         database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
             for sql in [
                 format!("UPDATE {table} SET organization_id = organization_id WHERE organization_id = $1"),
@@ -199,8 +204,12 @@ async fn rls_without_context_reads_nothing_and_writes_nothing(pool: PgPool) {
             format!("UPDATE {table} SET organization_id = organization_id"),
             format!("DELETE FROM {table}"),
         ] {
-            let affected = sqlx::query(&sql).execute(&mut *connection).await.unwrap();
-            assert_eq!(affected.rows_affected(), 0, "{table}: {sql}");
+            let result = sqlx::query(&sql).execute(&mut *connection).await;
+            if *table == "channel_log" {
+                assert_eq!(sqlstate(&result.unwrap_err()).as_deref(), Some("42501"));
+            } else {
+                assert_eq!(result.unwrap().rows_affected(), 0, "{table}: {sql}");
+            }
         }
     }
     drop(connection);

@@ -36,3 +36,12 @@ BEGIN
         GRANT SELECT ON public._sqlx_migrations TO fukulow_app;
     END IF;
 END $$;
+
+-- Reapply after broad grants and after restore; Channel positions are append-only.
+DO $$
+BEGIN
+    IF to_regclass('public.channel_log') IS NOT NULL THEN
+        REVOKE ALL ON public.channel_log FROM fukulow_app;
+        GRANT SELECT, INSERT ON public.channel_log TO fukulow_app;
+    END IF;
+END $$;

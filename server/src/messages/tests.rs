@@ -13,6 +13,7 @@ use tower::ServiceExt;
 
 mod admission;
 pub(super) mod authors;
+mod channel_log;
 mod dms_pool;
 mod mentions;
 mod text_input;
@@ -112,6 +113,12 @@ async fn fixture(pool: &PgPool) -> (Router, Uuid, Uuid, Uuid, String) {
 
 fn input(client_message_id: Uuid, text: &str) -> Value {
     json!({"client_message_id": client_message_id, "body": text})
+}
+
+// Direct state fixtures used by replay also need their committed Create positions.
+async fn seed_channel_log(pool: &PgPool) {
+    sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages ON CONFLICT DO NOTHING")
+        .execute(pool).await.unwrap();
 }
 
 async fn apply_migrations_after(pool: &PgPool, boundary: &str) {
@@ -754,6 +761,9 @@ async fn failed_send_after_sequence_allocation_leaves_no_gap(pool: PgPool) {
         let allocated: Option<i64> = sqlx::query_scalar("SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2")
             .bind(organization_id).bind(channel_id).fetch_optional(&pool).await.unwrap();
         assert_eq!(allocated, if expected == 1 { None } else { Some(1) });
+        let logged: Vec<i64> = sqlx::query_scalar("SELECT event_seq FROM channel_log WHERE organization_id=$1 AND channel_id=$2 ORDER BY event_seq")
+            .bind(organization_id).bind(channel_id).fetch_all(&pool).await.unwrap();
+        assert_eq!(logged, (1..expected).collect::<Vec<_>>());
         assert_eq!(
             sent(&app, &token, channel_id, input(Uuid::new_v4(), "success")).await["seq"],
             expected
