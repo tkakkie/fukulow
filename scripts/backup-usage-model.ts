@@ -16,12 +16,14 @@ export function validUsageCache(value: unknown): value is UsageCache {
   return Object.entries(cache.days).every(([date, usage]) => date.startsWith(cache.month + '-') && /^\d{4}-\d\d-\d\d$/.test(date) &&
     Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date && validUsage(usage) && Object.keys(usage).sort().join() === 'classA,classB')
 }
-const classA = new Set(['ListBuckets', 'ListObjects', 'ListObjectsV2', 'ListMultipartUploads', 'ListParts', 'PutBucket', 'PutBucketCors', 'PutBucketLifecycleConfiguration', 'PutObject', 'CopyObject', 'CompleteMultipartUpload', 'CreateMultipartUpload', 'UploadPart', 'UploadPartCopy'])
-const classB = new Set(['HeadBucket', 'HeadObject', 'GetBucketCors', 'GetBucketLifecycleConfiguration', 'GetBucketLocation', 'GetObject', 'UsageSummary'])
-const free = new Set(['DeleteObject', 'DeleteObjects', 'DeleteBucket', 'AbortMultipartUpload'])
+// Class B and free lists follow the provider pricing page. Any other action,
+// including ones the page does not classify, counts as Class A (the smaller
+// allowance), so usage is over-counted rather than unknown or zero (#316).
+const classB = new Set(['HeadBucket', 'HeadObject', 'GetBucketCors', 'GetBucketEncryption', 'GetBucketLifecycleConfiguration', 'GetBucketLocation', 'GetObject', 'UsageSummary'])
+const free = new Set(['DeleteObject', 'DeleteBucket', 'AbortMultipartUpload'])
 const query = `query Operations($account: String!, $start: Time!, $end: Time!) {
   viewer { accounts(filter: {accountTag: $account}) {
-    r2OperationsAdaptiveGroups(limit: 1000, groupBy: [actionType], filter: {datetime_geq: $start, datetime_lt: $end}) {
+    r2OperationsAdaptiveGroups(limit: 1000, filter: {datetime_geq: $start, datetime_lt: $end}) {
       dimensions { actionType } sum { requests }
     }
   } }
@@ -61,9 +63,8 @@ export function accountUsage(client: AnalyticsClient, account: string): UsageCli
           const action = group.dimensions?.actionType, count = group.sum?.requests
           if (!action || seen.has(action) || !Number.isSafeInteger(count) || Number(count) < 0) throw new Error('Invalid usage')
           seen.add(action)
-          if (classA.has(action)) classATotal += Number(count)
-          else if (classB.has(action)) classBTotal += Number(count)
-          else if (!free.has(action)) throw new Error('Unknown operation')
+          if (classB.has(action)) classBTotal += Number(count)
+          else if (!free.has(action)) classATotal += Number(count)
         }
         if (!Number.isSafeInteger(classATotal) || !Number.isSafeInteger(classBTotal)) throw new Error('Unknown usage')
         const usage = { classA: classATotal, classB: classBTotal }

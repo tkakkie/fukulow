@@ -365,7 +365,8 @@ test('fetch analytics uses the shared account-wide parser and unknown usage free
     assert.equal((init?.headers as Record<string, string>).authorization, 'Bearer test-only')
     const body = JSON.parse(String(init?.body))
     assert.ok(!body.query.includes('bucket'))
-    assert.match(body.query, /groupBy: \[actionType\]/)
+    assert.ok(!body.query.includes('groupBy'))
+    assert.match(body.query, /dimensions \{ actionType \}/)
     return Response.json({ data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: [
       { dimensions: { actionType: 'PutObject' }, sum: { requests: 2 } },
       { dimensions: { actionType: 'GetObject' }, sum: { requests: 3 } },
