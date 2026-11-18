@@ -34,7 +34,7 @@ const settings = {
   // Smoke uses 2 so its few sockets still exercise more than one invited Account.
   SOCKETS_PER_ACCOUNT: smoke ? '2' : '32', SOCKETS_PER_SESSION: smoke ? '2' : '32',
   CONNECT_BATCH: '100', CONNECT_INTERVAL_MS: '100', READY_TIMEOUT_SECONDS: '120', DRAIN_TIMEOUT_SECONDS: '30',
-  REQUEST_TIMEOUT_SECONDS: '45', PUBLISHERS: '1', PUBLISH_INTERVAL_MS: smoke ? '200' : '20',
+  REQUEST_TIMEOUT_SECONDS: '45', PUBLISHERS: '1', PUBLISH_MEMBERS: '1', PUBLISH_INTERVAL_MS: smoke ? '200' : '20',
   DURATION_SECONDS: smoke ? '3' : '60', LOAD_RECONNECT: '0', LOAD_RECONNECT_STORM: '0',
   LOAD_CONNECTIONS_ONLY: '0', LOAD_FIRST_PAINT: '0', LOAD_SCRIPT: 'load/scenario.ts',
   FIRST_PAINT_RUNS: smoke ? '1' : '10', FIRST_PAINT_WARMUP: smoke ? '1' : '12',
