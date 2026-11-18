@@ -38,7 +38,7 @@ const MODULES: [&str; 8] = [
     "database",
     "shutdown",
 ];
-const ALLOWED_EDGES: [(&str, &str); 14] = [
+const ALLOWED_EDGES: [(&str, &str); 15] = [
     ("realtime", "messages"),
     ("realtime", "channels"),
     ("realtime", "auth"),
@@ -51,6 +51,7 @@ const ALLOWED_EDGES: [(&str, &str); 14] = [
     ("auth", "database"),
     ("channels", "database"),
     ("messages", "database"),
+    ("realtime", "database"),
     ("messages", "shutdown"),
     ("realtime", "shutdown"),
 ];

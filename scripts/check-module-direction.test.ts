@@ -37,7 +37,7 @@ test('module direction uses compiler resolution in production and tests', async 
       'channels->auth', 'channels->database',
       'fukulow_client_core->fukulow_api',
       'messages->auth', 'messages->channels', 'messages->database', 'messages->fukulow_api', 'messages->shutdown',
-      'realtime->auth', 'realtime->channels', 'realtime->fukulow_api', 'realtime->messages', 'realtime->shutdown',
+      'realtime->auth', 'realtime->channels', 'realtime->database', 'realtime->fukulow_api', 'realtime->messages', 'realtime->shutdown',
     ])
   })
 
@@ -45,7 +45,8 @@ test('module direction uses compiler resolution in production and tests', async 
     ['messages', 'database', 0],
     ['database', 'auth', 1],
     ['shutdown', 'messages', 1],
-    ['realtime', 'database', 1],
+    ['realtime', 'database', 0],
+    ['channels', 'shutdown', 1],
   ] as const) {
     await t.test(`production leaf edge ${from} -> ${to} ${status === 0 ? 'passes' : 'fails'}`, () => {
       const source = `pub mod ${to} { pub struct Item; }
