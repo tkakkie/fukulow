@@ -253,12 +253,12 @@ export function createSync(options: SyncOptions) {
   }
 
   function dispatch(input: Input): Promise<void> {
-    if (input.type === 'event' && input.event.type === 'message') rememberIdentityResponse(input.event.message)
+    if (input.type === 'event' && input.event.type === 'message' && 'message' in input.event) rememberIdentityResponse(input.event.message)
     else if (input.type === 'ack') rememberIdentityResponse(input.message)
     else if (input.type === 'history_result' || input.type === 'events_result') rememberIdentityResponse(input.page)
     else if (input.type === 'settle_history') rememberIdentityResponse(input.messages)
-    const incoming = input.type === 'event' && input.event.type === 'message' ? [input.event.message]
-      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' ? [e.message] : []) : []
+    const incoming = input.type === 'event' && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
+      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : []) : []
     if (incoming.some(message => newerMentionResponse(state.channels[message.channel_id]?.messages ?? [], message)))
       input = { ...input, refreshMentionNames: true }
     const previous = state

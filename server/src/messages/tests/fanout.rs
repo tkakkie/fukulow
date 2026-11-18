@@ -87,10 +87,18 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
             let early = delivery.notification(org, channel_id, 1);
             delivery
                 .notification(org, channel_id, 51)
-                .spawn(pool.clone(), (page_one_target).message);
+                .spawn(pool.clone(), page_one_target);
             delivery.flush().await;
             for seq in 1..=51 {
-                assert_eq!(revoked_queue.events.try_recv().unwrap().created_seq, seq);
+                assert_eq!(
+                    revoked_queue
+                        .events
+                        .try_recv()
+                        .unwrap()
+                        .message()
+                        .created_seq,
+                    seq
+                );
             }
             // Each shared recovery is now at most one page. Gate the next recovery
             // between page 1 (1..50) and page 2 (52..101), then change live visibility.
@@ -98,10 +106,10 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
                 .await
                 .unwrap()
                 .remove(0);
-            let gate = delivery::pause_publication(page_two_target.client_message_id);
+            let gate = delivery::pause_publication(page_two_target.message().client_message_id);
             delivery
                 .notification(org, channel_id, 102)
-                .spawn(pool.clone(), (page_two_target).message);
+                .spawn(pool.clone(), page_two_target);
             tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.acquire())
                 .await
                 .unwrap()
@@ -128,15 +136,15 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
                 .remove(0);
             delivery
                 .notification(org, channel_id, 121)
-                .spawn(pool.clone(), (last).message);
+                .spawn(pool.clone(), last);
             delivery.flush().await;
             let mut canonical = Vec::new();
             for (queue, allowed) in &mut queues {
                 if *allowed {
                     for seq in 1..=121 {
                         let message = queue.events.try_recv().unwrap();
-                        assert_eq!(message.created_seq, seq);
-                        assert_eq!(message.topic_id, topic);
+                        assert_eq!(message.message().created_seq, seq);
+                        assert_eq!(message.message().topic_id, topic);
                         assert_eq!(message.channel_id, channel_id);
                         if canonical.len() < 121 {
                             canonical.push(message);
@@ -156,7 +164,7 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
             assert!(revoked_queue.events.try_recv().is_err());
             assert!(!*revoked_queue.overflow.borrow());
             assert!(!revoked_queue.notification_failed.is_failed());
-            early.spawn(pool.clone(), (first).message);
+            early.spawn(pool.clone(), first);
             delivery.flush().await;
             for (queue, _) in &mut queues {
                 assert!(queue.events.try_recv().is_err());
@@ -190,11 +198,11 @@ async fn shared_gap_recovery_accepts_one_page_and_latches_above_the_bound(pool: 
             .remove(0);
         delivery
             .notification(org, channel, gap + 1)
-            .spawn(pool.clone(), (last).message);
+            .spawn(pool.clone(), last);
         delivery.flush().await;
         if gap == REPLAY_PAGE_SIZE {
             for seq in 1..=gap + 1 {
-                assert_eq!(queue.events.try_recv().unwrap().created_seq, seq);
+                assert_eq!(queue.events.try_recv().unwrap().message().created_seq, seq);
             }
             assert!(!queue.notification_failed.is_failed());
         } else {
@@ -210,9 +218,12 @@ async fn shared_gap_recovery_accepts_one_page_and_latches_above_the_bound(pool: 
             .remove(0);
         delivery
             .notification(org, channel, gap + 2)
-            .spawn(pool.clone(), (next).message);
+            .spawn(pool.clone(), next);
         delivery.flush().await;
-        assert_eq!(after.events.try_recv().unwrap().created_seq, gap + 2);
+        assert_eq!(
+            after.events.try_recv().unwrap().message().created_seq,
+            gap + 2
+        );
         assert!(after.events.try_recv().is_err());
         assert!(!after.notification_failed.is_failed());
         assert!(!*after.overflow.borrow());
@@ -240,7 +251,7 @@ async fn shared_gap_authorization_failure_sets_overflow_and_advances_cursor(pool
         .unwrap();
     delivery
         .notification(org, channel, 3)
-        .spawn(pool.clone(), (target).message);
+        .spawn(pool.clone(), target);
     delivery.flush().await;
     assert!(*queue.overflow.borrow());
     assert!(!queue.notification_failed.is_failed());
@@ -257,10 +268,13 @@ async fn shared_gap_authorization_failure_sets_overflow_and_advances_cursor(pool
         .remove(0);
     delivery
         .notification(org, channel, 4)
-        .spawn(pool.clone(), (next).message);
+        .spawn(pool.clone(), next);
     delivery.flush().await;
     // A retained lagging cursor would enqueue the missing prefix again here.
-    assert_eq!(recovered.events.try_recv().unwrap().created_seq, 4);
+    assert_eq!(
+        recovered.events.try_recv().unwrap().message().created_seq,
+        4
+    );
     assert!(recovered.events.try_recv().is_err());
     assert!(!*recovered.overflow.borrow());
     assert!(!recovered.notification_failed.is_failed());
@@ -291,7 +305,7 @@ async fn shared_gap_query_failure_latches_only_affected_channel_for_replay(pool:
         .unwrap();
     delivery
         .notification(org, channel, 3)
-        .spawn(pool.clone(), (last).message);
+        .spawn(pool.clone(), last);
     delivery.flush().await;
     assert!(affected.notification_failed.is_failed());
     assert!(!*affected.overflow.borrow());
@@ -307,7 +321,7 @@ async fn shared_gap_query_failure_latches_only_affected_channel_for_replay(pool:
             .await
             .unwrap()
             .iter()
-            .map(|message| message.created_seq)
+            .map(|message| message.message().created_seq)
             .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );

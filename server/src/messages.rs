@@ -29,6 +29,8 @@ pub(crate) mod log;
 pub(crate) use log::ChannelEvent;
 pub use log::list_channel_events;
 mod mentions;
+pub(crate) mod move_topic;
+pub use move_topic::move_chain;
 pub mod receipts;
 pub use fukulow_api::{ListMessagesQuery, Mention, Message, MessagePage, SendMessageRequest};
 pub use limiter::SendLimit;
@@ -57,27 +59,33 @@ pub use unread::{
 
 fn message_from_row(row: &sqlx::postgres::PgRow) -> Result<Message, sqlx::Error> {
     use sqlx::Row;
-    let mentions: String = row.try_get("mentions")?;
+    let deleted: bool = row.try_get("deleted")?;
+    let (body, mentions) = if deleted {
+        (None, None)
+    } else {
+        let mentions: String = row.try_get("mentions")?;
+        let mentions =
+            serde_json::from_str(&mentions).map_err(|error| sqlx::Error::ColumnDecode {
+                index: "mentions".into(),
+                source: Box::new(error),
+            })?;
+        (Some(row.try_get("body")?), Some(mentions))
+    };
     Ok(Message {
         history_generation: row.try_get("history_generation")?,
         id: row.try_get("id")?,
         channel_id: row.try_get("channel_id")?,
         created_seq: row.try_get("seq")?,
         version: row.try_get("version")?,
-        deleted: false,
+        deleted,
         client_message_id: row.try_get("client_message_id")?,
         sender: row.try_get("sender")?,
-        body: Some(row.try_get("body")?),
+        body,
         created_at: row.try_get("created_at")?,
         topic_id: row.try_get("topic_id")?,
         reply_to: row.try_get("reply_to")?,
         reply_root_id: row.try_get("reply_root_id")?,
-        mentions: Some(serde_json::from_str(&mentions).map_err(|error| {
-            sqlx::Error::ColumnDecode {
-                index: "mentions".into(),
-                source: Box::new(error),
-            }
-        })?),
+        mentions,
     })
 }
 
@@ -133,12 +141,12 @@ pub async fn list_messages(
         let (history_generation, w) = history::page(tx, organization_id, channel_id, query.history_generation, query.as_of_seq).await?;
         let ascending = query.after_seq.is_some();
         let sql = if ascending {
-            "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+            "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
              FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
              ORDER BY seq ASC LIMIT $4"
         } else {
-            "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+            "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
              FROM messages WHERE organization_id = $1 AND channel_id = $2 \
                AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4"
@@ -356,12 +364,10 @@ impl ValidateSendMessage for SendMessageRequest {
         if self.body.contains('\0')
             || self.body.trim().is_empty()
             || self.body.chars().count() > 4000
-            || self.topic_name.as_ref().is_some_and(|name| {
-                name.is_empty()
-                    || name.contains('\0')
-                    || name.trim() != name
-                    || name.chars().count() > 60
-            })
+            || self
+                .topic_name
+                .as_ref()
+                .is_some_and(|name| !topics::valid_name(name))
         {
             return Err(MessageError::InvalidInput);
         }
@@ -402,6 +408,10 @@ pub enum MessageError {
     OrganizationUnavailable,
     HistoryGenerationChanged,
     SnapshotExpired,
+    MoveNotAllowed,
+    VersionConflict,
+    OperationConflict,
+    ChainTooLarge,
     Conflict,
     AdmissionRejected,
     ProjectionAdmissionRejected,
@@ -429,6 +439,10 @@ impl MessageError {
             Self::OrganizationUnavailable => Self::OrganizationUnavailable,
             Self::HistoryGenerationChanged => Self::HistoryGenerationChanged,
             Self::SnapshotExpired => Self::SnapshotExpired,
+            Self::MoveNotAllowed => Self::MoveNotAllowed,
+            Self::VersionConflict => Self::VersionConflict,
+            Self::OperationConflict => Self::OperationConflict,
+            Self::ChainTooLarge => Self::ChainTooLarge,
             Self::Conflict => Self::Conflict,
             Self::AdmissionRejected => Self::AdmissionRejected,
             Self::ProjectionAdmissionRejected => Self::ProjectionAdmissionRejected,
@@ -461,6 +475,10 @@ impl IntoResponse for MessageError {
         let (status, error) = match self {
             Self::HistoryGenerationChanged => (StatusCode::CONFLICT, "history_generation_changed"),
             Self::SnapshotExpired => (StatusCode::CONFLICT, "snapshot_expired"),
+            Self::MoveNotAllowed => (StatusCode::FORBIDDEN, "move_not_allowed"),
+            Self::VersionConflict => (StatusCode::CONFLICT, "version_conflict"),
+            Self::OperationConflict => (StatusCode::CONFLICT, "operation_conflict"),
+            Self::ChainTooLarge => (StatusCode::CONFLICT, "chain_too_large"),
             Self::InvalidInput => (StatusCode::BAD_REQUEST, "invalid input"),
             Self::DmTopicsNotAllowed => (StatusCode::BAD_REQUEST, "dm_topics_not_allowed"),
             Self::DmPeerDeactivated => (StatusCode::CONFLICT, "dm_peer_deactivated"),
@@ -570,7 +588,7 @@ async fn receipt<'e, E: sqlx::PgExecutor<'e>>(
 ) -> Result<Option<(Message, bool)>, sqlx::Error> {
     use sqlx::Row;
     sqlx::query(&mentions::page_sql(
-        "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+        "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, \
          send_digest = fukulow_send_digest($4, $5, lower($6 COLLATE \"C\"), $7) AS same_intent \
          FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
@@ -595,7 +613,7 @@ async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     client_message_id: Uuid,
 ) -> Result<Option<Message>, sqlx::Error> {
     sqlx::query(&mentions::page_sql(
-        "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+        "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
          FROM messages WHERE organization_id = $1 AND sender = $2 AND client_message_id = $3",
         "p.seq",
@@ -713,40 +731,44 @@ async fn persist_admitted(
     tests::removal::pause(input.client_message_id).await;
     // Read before waiting for the Channel barrier: an uncommitted parent is absent,
     // never a foreign-key wait or an implicitly accepted optimistic client id.
-    let parent = replies::parent(
+    replies::parent_location(
         tx.connection()?,
         organization_id,
         channel_id,
         input.reply_to,
     )
     .await?;
+    #[cfg(test)]
+    tests::history::pause(input.client_message_id, "reply_parent").await;
     // Bound every subsequent lock wait, including the counter and idempotency key.
     commit::lock(tx.connection()?, organization_id, channel_id, false).await?;
-    // Row locking serializes only sends in this channel. Both allocation and insertion
-    // roll back together, including a concurrent duplicate that loses the unique-key race.
-    let seq: i64 = sqlx::query_scalar(
-        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $2, 1) \
-         ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = channel_message_sequences.seq + 1 \
-         RETURNING seq",
-    ).bind(organization_id).bind(channel_id).fetch_one(tx.connection()?).await?;
-    let topic_id = if let Some(parent) = &parent {
-        parent.topic_id
+    // A committed parent may have moved while this Reply waited for the writer.
+    let parent = replies::parent_location(
+        tx.connection()?,
+        organization_id,
+        channel_id,
+        input.reply_to,
+    )
+    .await?;
+    let seq = log::allocate(tx.connection()?, organization_id, channel_id).await?;
+    let topic_id = if let Some((topic, _)) = parent {
+        topic
     } else {
         topics::join(
             tx.connection()?,
             organization_id,
             channel_id,
-            seq,
+            Some(seq),
             input.topic_name.as_deref(),
         )
         .await?
     };
-    let reply_root_id = parent.as_ref().map(|p| p.reply_root_id.unwrap_or(p.id));
+    let reply_root_id = parent.map(|(_, root)| root);
     let message = sqlx::query(
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
-         RETURNING id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+         RETURNING id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions, $11::uuid AS history_generation",
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
         .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).bind(history_generation).try_map(|row| message_from_row(&row))

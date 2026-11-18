@@ -1105,7 +1105,7 @@ async fn publication_waits_for_commit_even_when_http_request_is_cancelled(pool: 
     let history = messages::replay_page(&pool, f.organization, f.channel, 0, 1)
         .await
         .unwrap();
-    assert_eq!(history[0].id, committed.id);
+    assert_eq!(history[0].message().id, committed.message().id);
 }
 
 #[fukulow_test::test]
@@ -1235,6 +1235,7 @@ pub(super) mod access_loss;
 
 mod account_security;
 mod mentions;
+mod move_topic;
 mod observability;
 mod round_trips;
 mod shared_frame;

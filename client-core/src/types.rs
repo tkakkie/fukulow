@@ -103,6 +103,8 @@ pub struct ChannelView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_seq: Option<i64>,
     pub mutation_seq: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub move_seq: Option<i64>,
     pub messages: Rc<Vec<Rc<Message>>>,
     pub versions: Rc<std::collections::BTreeMap<Uuid, (i64, bool, i64)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,6 +145,7 @@ impl Default for ChannelView {
             cursor: None,
             snapshot_seq: None,
             mutation_seq: 0,
+            move_seq: None,
             messages: Rc::default(),
             versions: Rc::default(),
             retired_through: None,
@@ -173,6 +176,7 @@ impl ChannelView {
             && self.cursor == other.cursor
             && self.snapshot_seq == other.snapshot_seq
             && self.mutation_seq == other.mutation_seq
+            && self.move_seq == other.move_seq
             && Rc::ptr_eq(&self.messages, &other.messages)
             && Rc::ptr_eq(&self.versions, &other.versions)
             && Rc::ptr_eq(&self.retired_versions, &other.retired_versions)

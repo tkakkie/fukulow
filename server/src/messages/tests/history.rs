@@ -11,6 +11,24 @@ struct Gate {
 type GateKey = (Uuid, &'static str);
 static GATES: LazyLock<Mutex<HashMap<GateKey, Arc<Gate>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(super) fn pause_reply_parent(
+    key: Uuid,
+) -> (impl std::future::Future<Output = ()>, impl FnOnce()) {
+    let gate = Arc::new(Gate {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+    });
+    GATES
+        .lock()
+        .unwrap()
+        .insert((key, "reply_parent"), gate.clone());
+    let entered = gate.clone();
+    (
+        async move { entered.entered.acquire().await.unwrap().forget() },
+        move || gate.release.add_permits(1),
+    )
+}
+
 pub(crate) async fn pause(channel: Uuid, phase: &'static str) {
     let gate = GATES.lock().unwrap().remove(&(channel, phase));
     if let Some(gate) = gate {

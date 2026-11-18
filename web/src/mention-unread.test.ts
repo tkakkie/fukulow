@@ -3,6 +3,7 @@ import type { ChannelList, Message, Result, TopicSummaryResponse } from './api'
 import { chooseBaseline, chooseChannelBaseline, scopeCount } from './unread-counts'
 import { deferred, flush, msg, ok, row, summary, unreadClient } from './unread-test-helpers'
 import { retentionClient } from './unread-retention-test-helpers'
+import { moveEvent } from './protocol-test-helpers'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -82,6 +83,31 @@ it('Mention reconnect refetches another device positions by max and rejects old 
   c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush()
   c.event(mentioned(4)); c.event(mentioned(2, 'T')); await flush()
   expect(c.unread.get('A')).toMatchObject({ mentionUnreadCount: 0, main: { position: 4, mentionUnreadCount: 0 }, topics: { T: { position: 4, mentionUnreadCount: 0 } } })
+  await c.sync.close()
+})
+it('Move refetches Unread and Mention unread at a covering watermark and preserves read positions', async () => {
+  const c = client()
+  const destination = { ...summary('T', 2, 2, 0), message_count: 1, latest_message: mentioned(2, 'T') }
+  c.summaries.set('T', destination)
+  c.rows[0] = row({ unread_count: 2, mention_unread_count: 2, main_mention_unread_count: 1 })
+  await c.boot(); await c.enter('T')
+  expect(c.unread.get('A')).toMatchObject({ unreadCount: 2, mentionUnreadCount: 2, topics: { T: { position: 2 } } })
+
+  const event = { ...moveEvent(4, 'id1'), destination_topic_id: 'T' }
+  const history_generation = event.history_generation
+  const stale = deferred<Result<ChannelList>>(), fresh = deferred<Result<ChannelList>>()
+  c.unreadApi.listChannels.mockReturnValueOnce(stale.promise).mockReturnValueOnce(fresh.promise)
+  const pending = c.unread.refresh(); await flush()
+  const topic = { ...destination, first_seq: 1, message_count: 2 }
+  c.unreadApi.getTopicSummary.mockResolvedValue(ok({ history_generation, as_of_seq: 4, topic }))
+  c.topicsApi.listTimeline.mockResolvedValue(ok({ history_generation, as_of_seq: 4, has_more: false, items: [{ kind: 'topic', topic }] }))
+  c.topicsApi.listTopicMessages.mockResolvedValue(ok({ history_generation, as_of_seq: 4, has_more: false, messages: [{ ...mentioned(1, 'T'), version: 4 }, mentioned(2, 'T')] }))
+  c.handlers[0].onEvent(event)
+  expect(c.unread.get('A')).toMatchObject({ unreadCount: null, mentionUnreadCount: null })
+  stale.resolve(ok({ history_generation, channels: c.rows })); await pending; await flush()
+  expect(c.unread.get('A')).toMatchObject({ unreadCount: null, mentionUnreadCount: null })
+  fresh.resolve(ok({ history_generation, channels: [row({ as_of_seq: 4, main_unread_count: 0, unread_count: 1, mention_unread_count: 1 })] })); await flush()
+  expect(c.unread.get('A')).toMatchObject({ unreadCount: 1, mentionUnreadCount: 1, main: { position: 0, unreadCount: 0, mentionUnreadCount: 0 }, topics: { T: { position: 2, unreadCount: 0, mentionUnreadCount: 0 } } })
   await c.sync.close()
 })
 it.each(['regrant', 'Session', 'Organization'])('Mention late REST and frames cannot restore counts after %s fencing', async boundary => {

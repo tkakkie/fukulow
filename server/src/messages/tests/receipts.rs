@@ -275,6 +275,7 @@ async fn operation_receipts_answer_same_intent_conflict_otherwise_and_expire_aft
     let outcome = Outcome {
         version: 4,
         deleted: false,
+        event_seq: None,
     };
     assert_eq!(resolve(&app_pool, org, op).await, Resolution::New);
     assert!(record(&app_pool, org, op, outcome).await);
@@ -290,7 +291,8 @@ async fn operation_receipts_answer_same_intent_conflict_otherwise_and_expire_aft
             op,
             Outcome {
                 version: 9,
-                deleted: true
+                deleted: true,
+                event_seq: None,
             }
         )
         .await
@@ -344,6 +346,7 @@ async fn operation_receipts_answer_same_intent_conflict_otherwise_and_expire_aft
     let replaced = Outcome {
         version: 11,
         deleted: true,
+        event_seq: None,
     };
     assert!(
         record(
@@ -385,6 +388,7 @@ async fn operation_receipts_are_invisible_and_unwritable_across_organizations(po
     let outcome = Outcome {
         version: 2,
         deleted: false,
+        event_seq: None,
     };
     assert!(record(&app_pool, org, op, outcome).await);
     // Another Organization's context sees nothing under the same key.
@@ -457,4 +461,33 @@ async fn send_receipt_normalizes_only_ascii_topic_case_like_topics(pool: PgPool)
         StatusCode::CONFLICT,
     )
     .await;
+}
+
+#[fukulow_test::test]
+async fn operation_receipt_purge_is_scoped_and_retains_unexpired_outcomes(pool: PgPool) {
+    let (_, org, actor, channel, _) = fixture(&pool).await;
+    let (_, other, peer, other_channel, _) = fixture(&pool).await;
+    let app_pool = crate::test_app_pool(pool.clone()).await;
+    let outcome = Outcome {
+        version: 1,
+        deleted: false,
+        event_seq: Some(1),
+    };
+    let expired = operation(actor, channel, Uuid::new_v4());
+    let current = operation(actor, channel, Uuid::new_v4());
+    let foreign = operation(peer, other_channel, Uuid::new_v4());
+    for (scope, op) in [(org, expired), (org, current), (other, foreign)] {
+        assert!(record(&app_pool, scope, op, outcome).await);
+    }
+    sqlx::query("UPDATE operation_receipts SET created_at=now()-interval '8 days'
+                 WHERE (organization_id=$1 AND operation_id=$2) OR (organization_id=$3 AND operation_id=$4)")
+        .bind(org).bind(expired.operation_id).bind(other).bind(foreign.operation_id)
+        .execute(&pool).await.unwrap();
+    assert_eq!(receipts::purge(&app_pool, org).await.unwrap(), 1);
+    assert_eq!(receipts::purge(&app_pool, org).await.unwrap(), 0);
+    assert_eq!(
+        resolve(&app_pool, org, current).await,
+        Resolution::Committed(outcome)
+    );
+    assert_eq!(receipts::purge(&app_pool, other).await.unwrap(), 1);
 }

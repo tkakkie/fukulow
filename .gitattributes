@@ -14,6 +14,7 @@
 /load/search-engines/manifest-v1.json text eol=lf
 /load/search-engines/manifest-v2.json text eol=lf
 /load/search-engines/manifest-v3.json text eol=lf
+/load/search-engines/manifest-v4.json text eol=lf
 /load/search-engines/manifest.ts text eol=lf
 /load/search-engines/pgroonga.sql text eol=lf
 /load/search-engines/quality/dataset.ts text eol=lf
@@ -59,3 +60,4 @@
 /server/migrations/202611170515_channel_log.sql text eol=lf
 /server/migrations/202611180515_message_receipts.sql text eol=lf
 /server/migrations/202611190515_history_generation.sql text eol=lf
+/server/migrations/202611200141_move_to_topic.sql text eol=lf

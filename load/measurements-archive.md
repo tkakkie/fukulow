@@ -1209,3 +1209,21 @@ All Custom/Generic/Auto B plans use `messages_topic_seq` through Bitmap Index Sc
 Limits: warm-cache focused SQL probe, one Channel and fixed Topic count, no concurrent writer, own Messages or Mentions in the timing fixture. At U=2,500 retained min–max ms were Custom B/A 111.070–210.330 / 63.415–108.338, Generic 167.418–285.885 / 117.301–184.807, Auto 105.967–207.109 / 56.368–158.937. Shared-host variance prevents a production latency/capacity claim. The optimization removes read-prefix work; exact counts still grow with unread backlog. The upper-bound Filter remains a separate limitation, harmless to this fixture's scan bound because there are no Messages beyond the committed counter.
 
 Verification coverage: `unread_main_timeline_and_topics_are_independent_monotonic_and_exclude_own_sends` covers independent positions, monotonic/clamped marks and own sends; `mention_counts_dedup_own_independent_positions_marks_and_no_backfill` covers Mention counts and own-Message exclusion in both scopes; `unread_list_baseline_and_counts_share_snapshot_across_message_commit` checks Unread/Mention counts, counter and positions across concurrent later commits. `unread_new_member_and_regrant_start_at_new_grants_committed_seq` covers fallback initial positions for new Topics. Their assertions are unchanged. The always-on `unread_topic_counts_read_only_unread_topic_ranges` now bounds Message work to 25 (not the full 50-Message Topic), uses actual PREPARE/EXECUTE in Custom/Generic/Auto, and checks that main `4fa2ba0`'s query reads the full 50-Message Topic and fails that bound in all three modes. It also retains the `BEFORE` full-history negative control against the same 25 bound. Conclusion: restore the lower Index Cond by carrying the bound in the existing materialized candidate row; retain all policies and count semantics.
+
+## Light k6 reproduction (#351)
+
+The recorded 11.39 s run was on macOS; CI runs the same step on Linux with a prebuilt image (`--no-build`). At `b156fba`, start the Caddy Compose profile with a fresh database and the default send limiter (burst 10, refill 1/s). Use the `docker` job's public test fixtures and the exact command and environment from its “Light k6 run (10 seconds; hard limit 55 seconds)” step. [CI workflow at b156fba](https://github.com/tkakkie/fukulow/blob/b156fba/.github/workflows/ci.yml#L237)
+
+```sh
+export POSTGRES_PASSWORD=ci-compose-only POSTGRES_APP_PASSWORD=ci-compose-app-only
+export FUKULOW_SETUP_TOKEN=ci-setup-test-only
+docker compose --profile caddy up -d --build --wait
+test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
+LOAD_BOOTSTRAP=1 LOAD_EMAIL=load@example.test LOAD_PASSWORD=ci-load-test-only-password \
+  LOAD_SETUP_TOKEN=ci-setup-test-only K6_INSECURE_SKIP_TLS_VERIFY=true PUBLISH_MEMBERS=8 \
+  timeout 55s make load LOAD_CONTAINER_NAME=fukulow-ci-load BASE_URL=https://localhost
+```
+
+Use a fresh Organization for each multi-Member run. Reusing a persistent `LOAD_ORGANIZATION_ID` adds Members on every run, even though teardown revokes their Account Sessions.
+
+In new `LOAD_SETUP_COMPLETE` and `LOAD_RATE` records, `sessions` counts all provisioned Account Sessions, including publisher-only sessions. `socketSessions` counts the sessions assigned to sockets.

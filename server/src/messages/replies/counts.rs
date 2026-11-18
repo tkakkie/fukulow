@@ -39,7 +39,7 @@ pub(crate) const COUNTS_SQL: &str = "WITH anchors AS MATERIALIZED (\
     ), totals AS MATERIALIZED (\
     SELECT roots.root_id, c.reply_count FROM (SELECT DISTINCT root_id FROM anchors) roots \
     CROSS JOIN LATERAL (SELECT count(*) AS reply_count FROM messages \
-        WHERE organization_id=$1 AND channel_id=$2 AND reply_root_id=roots.root_id AND seq<=$4) c\
+        WHERE organization_id=$1 AND channel_id=$2 AND reply_root_id=roots.root_id AND seq<=$4 AND NOT deleted) c\
     ) SELECT a.message_id,a.root_id,t.reply_count FROM anchors a \
     JOIN totals t USING (root_id) ORDER BY a.message_id";
 
