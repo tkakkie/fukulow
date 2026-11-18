@@ -239,7 +239,7 @@ pub async fn accept_invite(
         let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE organization_id=$1 AND account_id=$2")
             .bind(org).bind(account_id).fetch_optional(&mut *tx).await?;
         let notice = if let Some(id) = existing {
-            state.session_changes.capture_activity(tx, org, id, None).await?
+            state.session_changes.capture_activity(tx, org, id, activity::ChangeScope::Membership).await?
         } else { None };
         let (id,name,role) = sqlx::query_as::<_,(Uuid,String,Role)>("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization_id,account_id) DO UPDATE SET deactivated_at=NULL,name=EXCLUDED.name,role=EXCLUDED.role WHERE users.deactivated_at IS NOT NULL RETURNING id,name,role")
             .bind(org).bind(Uuid::new_v4()).bind(account_id).bind(name).bind(role).fetch_optional(&mut *tx).await.map_err(members::member_write_error)?
