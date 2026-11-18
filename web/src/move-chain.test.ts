@@ -88,6 +88,52 @@ it('retries an unknown Move with the original key and version and shares concurr
   await c.sync.close()
 })
 
+it('submitting the same Move after a timeout and a fresh chain read reuses the original POST', async () => {
+  vi.useFakeTimers()
+  const c = await client()
+  const late = deferred<Result<MoveChainResponse>>()
+  c.transport.mockReturnValueOnce(late.promise)
+  const pending = c.move('A', anchor.id, { topicName: 'Release' })
+  await vi.advanceTimersByTimeAsync(20)
+  await expect(pending).resolves.toMatchObject({ kind: 'unknown' })
+
+  c.replies.dismiss('A')
+  c.listReplyChain.mockResolvedValueOnce(chainPage(30))
+  await c.replies.open('A', root())
+  expect(c.replies.get('A').chainVersion).toBe(30)
+  await expect(c.move('A', root().id, { topicName: 'release' })).resolves.toMatchObject({ kind: 'moved' })
+  const original = ['A', anchor.id, { history_generation, operation_id: 'operation-1', expected_version: 20, topic_name: 'Release' }]
+  expect(c.transport.mock.calls).toEqual([original, original])
+  expect(c.newId).toHaveBeenCalledTimes(1)
+  await c.sync.close()
+})
+
+it('reports a committed receipt when the Reply chain is dismissed during the POST', async () => {
+  const c = await client()
+  const answer = deferred<Result<MoveChainResponse>>()
+  c.transport.mockReturnValueOnce(answer.promise)
+  const pending = c.move('A', anchor.id, { topicId: 'T' })
+  await flush()
+  expect(c.transport).toHaveBeenCalledTimes(1)
+  c.replies.dismiss('A')
+  answer.resolve(ok(receipt()))
+  await expect(pending).resolves.toEqual({ kind: 'moved', receipt: receipt() })
+  await c.sync.close()
+})
+
+it('reports an unknown outcome when the Reply chain is dismissed during a failed POST', async () => {
+  const c = await client()
+  const answer = deferred<Result<MoveChainResponse>>()
+  c.transport.mockReturnValueOnce(answer.promise)
+  const pending = c.move('A', anchor.id, { topicId: 'T' })
+  await flush()
+  expect(c.transport).toHaveBeenCalledTimes(1)
+  c.replies.dismiss('A')
+  answer.resolve({ ok: false, kind: 'network' })
+  await expect(pending).resolves.toMatchObject({ kind: 'unknown' })
+  await c.sync.close()
+})
+
 it('a timed-out or thrown Move can retry with the same request until the chain is dismissed', async () => {
   vi.useFakeTimers()
   const c = await client()
@@ -101,7 +147,7 @@ it('a timed-out or thrown Move can retry with the same request until the chain i
   if (second.kind !== 'unknown') throw new Error('expected network error')
   c.replies.dismiss('A')
   late.resolve(ok(receipt())); await flush()
-  await expect(second.retry()).resolves.toEqual({ kind: 'superseded' })
+  await expect(second.retry()).resolves.toMatchObject({ kind: 'unknown' })
   expect(c.transport.mock.calls).toHaveLength(2)
   expect(c.transport.mock.calls[1]).toEqual(c.transport.mock.calls[0])
   await c.sync.close()
@@ -113,7 +159,7 @@ it('Move conflicts refresh the full-chain baseline before a new operation', asyn
     const c = await client()
     c.transport.mockResolvedValueOnce(http(409, error))
     c.listReplyChain.mockResolvedValueOnce(chainPage(30))
-    await expect(c.move('A', anchor.id, { topicId: 'T' })).resolves.toEqual({ kind: 'conflict', error })
+    await expect(c.move('A', anchor.id, { topicId: 'T' })).resolves.toEqual({ kind: 'conflict', error, refreshed: true })
     expect(c.listReplyChain).toHaveBeenLastCalledWith('A', anchor.id, { history_generation, as_of_seq: undefined, after_seq: 0 })
     expect(c.replies.get('A')).toMatchObject({ chainVersion: 30, topicId: null })
     expect(c.sync.get().channels.A.cursor).toBe(1)
@@ -121,6 +167,22 @@ it('Move conflicts refresh the full-chain baseline before a new operation', asyn
     expect(c.transport).toHaveBeenLastCalledWith('A', anchor.id, expect.objectContaining({ operation_id: 'operation-2', expected_version: 30 }))
     await c.sync.close()
   }
+})
+
+it('reports a failed chain read after a Move version conflict and allows reading again', async () => {
+  const c = await client()
+  c.transport.mockResolvedValueOnce(http(409, 'version_conflict'))
+  c.listReplyChain.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  await expect(c.move('A', anchor.id, { topicId: 'T' })).resolves.toEqual({
+    kind: 'conflict', error: 'version_conflict', refreshed: false,
+  })
+  expect(c.listReplyChain).toHaveBeenCalledTimes(2)
+  expect(c.replies.get('A')).toMatchObject({ chainVersion: undefined, error: true })
+  c.listReplyChain.mockResolvedValueOnce(chainPage(30))
+  await c.replies.loadMore('A')
+  expect(c.replies.get('A')).toMatchObject({ chainVersion: 30, error: false })
+  expect(c.transport).toHaveBeenCalledTimes(1)
+  await c.sync.close()
 })
 
 it('maps Move refusals without changing projections', async () => {

@@ -6,52 +6,70 @@ export type MoveDestination = { topicId: string; topicName?: never } | { topicNa
 export type MoveResult =
   | { kind: 'moved'; receipt: MoveChainResponse }
   | { kind: 'unknown'; retry: () => Promise<MoveResult>; retryAfterMs?: number }
-  | { kind: 'conflict'; error: 'version_conflict' | 'operation_conflict' }
+  | { kind: 'conflict'; error: 'version_conflict' | 'operation_conflict'; refreshed: boolean }
   | { kind: 'too_large' | 'denied' | 'not_found' | 'snapshot_expired' | 'history_generation_changed' | 'baseline_unavailable' | 'superseded' }
   | { kind: 'failed'; status: number; error?: string }
 
 export type MoveChainApi = (channel: string, anchor: string, body: MoveChainRequest) => Promise<Result<MoveChainResponse>>
+type MoveTarget = NonNullable<ReturnType<Replies['moveTarget']>>
 
 export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'observeHistoryGeneration'>,
-  replies: Pick<Replies, 'moveBaseline'>, options: { api: MoveChainApi; newId?: () => string; requestTimeoutMs?: number }) {
+  replies: Pick<Replies, 'moveTarget'>, options: { api: MoveChainApi; newId?: () => string; requestTimeoutMs?: number }) {
   const newId = options.newId ?? (() => crypto.randomUUID())
-  return async function moveChain(channel: string, anchor: string, destination: MoveDestination): Promise<MoveResult> {
-    const baseline = replies.moveBaseline(channel, anchor)
-    if (!baseline) return { kind: 'baseline_unavailable' }
-    const { isCurrent, refresh } = baseline
+  const unresolved = new Map<string, (target: MoveTarget) => Promise<MoveResult>>()
+  return function moveChain(channel: string, anchor: string, destination: MoveDestination): Promise<MoveResult> {
+    const target = replies.moveTarget(channel, anchor)
+    if (!target) return Promise.resolve({ kind: 'baseline_unavailable' })
+    const { topicId, topicName } = destination
+    // The receipt matches names case-insensitively for ASCII and binds the original anchor.
+    const key = JSON.stringify([channel, target.rootId, topicId, topicName?.replace(/[A-Z]/g, c => c.toLowerCase())])
+    const existing = unresolved.get(key)
+    if (existing) return existing(target)
+    const { baseline } = target
+    if (!baseline) return Promise.resolve({ kind: 'baseline_unavailable' })
     const body: MoveChainRequest = {
       operation_id: newId(), expected_version: baseline.chain_version, history_generation: baseline.history_generation,
-      ...(destination.topicId !== undefined ? { topic_id: destination.topicId } : { topic_name: destination.topicName }),
+      ...(topicId !== undefined ? { topic_id: topicId } : { topic_name: topicName }),
     }
     let pending: Promise<MoveResult> | undefined
     let terminal: MoveResult | undefined
+    let dispatched = false
 
-    function attempt(): Promise<MoveResult> {
+    function attempt(target: MoveTarget): Promise<MoveResult> {
       if (terminal) return Promise.resolve(terminal)
       if (pending) return pending
-      if (!isCurrent()) return Promise.resolve({ kind: 'superseded' })
-      pending = run().then(result => {
+      pending = run(target).then(result => {
         pending = undefined
-        if (result.kind !== 'unknown') terminal = result
+        if (result.kind !== 'unknown') {
+          terminal = result
+          unresolved.delete(key)
+        }
         return result
       })
       return pending
     }
 
-    async function run(): Promise<MoveResult> {
+    function unknown(target: MoveTarget, retryAfterMs?: number): MoveResult {
+      return { kind: 'unknown', retry: () => attempt(target), retryAfterMs }
+    }
+
+    async function run(target: MoveTarget): Promise<MoveResult> {
       let timer: ReturnType<typeof setTimeout> | undefined
-      const operation = Promise.resolve().then((): ReturnType<MoveChainApi> | Result<MoveChainResponse> =>
-        isCurrent() ? options.api(channel, anchor, body) : { ok: false, kind: 'network' })
-        .catch((): Result<MoveChainResponse> => ({ ok: false, kind: 'network' }))
+      const operation = Promise.resolve().then(() => {
+        if (!target.isCurrent()) return
+        dispatched = true
+        return options.api(channel, anchor, body)
+      }).catch((): Result<MoveChainResponse> => ({ ok: false, kind: 'network' }))
       const result = await Promise.race([operation, new Promise<Result<MoveChainResponse>>(resolve => {
         timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
       })]).finally(() => clearTimeout(timer))
+      if (!result) return dispatched ? unknown(target) : { kind: 'superseded' }
       if (result.ok) {
-        if (!isCurrent() || !sync.observeHistoryGeneration(result.data.history_generation)) return { kind: 'superseded' }
+        if (target.isCurrent()) sync.observeHistoryGeneration(result.data.history_generation)
         return { kind: 'moved', receipt: result.data }
       }
       if (result.kind === 'network' || result.status === 408 || result.status >= 500) {
-        return isCurrent() ? { kind: 'unknown', retry: attempt, retryAfterMs: result.retryAfterMs } : { kind: 'superseded' }
+        return unknown(target, result.retryAfterMs)
       }
       if (result.status === 404) return { kind: 'not_found' }
       if (result.status === 403) return { kind: 'denied' }
@@ -59,17 +77,17 @@ export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'obser
         switch (result.error) {
           case 'version_conflict':
           case 'operation_conflict':
-            await refresh()
-            return { kind: 'conflict', error: result.error }
+            return { kind: 'conflict', error: result.error, refreshed: await target.refresh() }
           case 'chain_too_large': return { kind: 'too_large' }
           case 'snapshot_expired': return { kind: 'snapshot_expired' }
           case 'history_generation_changed':
-            if (isCurrent()) sync.observeHistoryGeneration()
+            if (target.isCurrent()) sync.observeHistoryGeneration()
             return { kind: 'history_generation_changed' }
         }
       }
       return { kind: 'failed', status: result.status, error: result.error }
     }
-    return attempt()
+    unresolved.set(key, attempt)
+    return attempt(target)
   }
 }

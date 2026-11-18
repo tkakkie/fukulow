@@ -144,8 +144,8 @@ it('refetches an open Reply chain on Move and fences its older page', async () =
   await c.sync.close()
 })
 
-it('a Move refetches a distant descendant around its anchor and rejects a below-W retry page', async () => {
-  const c = replyClient(), anchor = reply(75)
+it('a Move keeps the open chain invalidated until a covering descendant page arrives', async () => {
+  const c = replyClient(), anchor = reply(75, 'id1', 'source')
   await c.sync.start(); c.handlers[0].onReady()
   c.listMessages.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 80, messages: [anchor], has_more: true }))
   await c.sync.watch('A')
@@ -153,17 +153,22 @@ it('a Move refetches a distant descendant around its anchor and rejects a below-
   const old = { ...replyPage({ history_generation: generation, as_of_seq: 80, root_id: 'id1', messages: [anchor], has_more: false }), chain_version: 80 }
   c.listReplyChain.mockResolvedValueOnce(ok(old))
   await c.replies.open('A', anchor)
+  expect(c.replies.get('A')).toMatchObject({ anchor, topicId: 'source', moveInvalidated: false })
   const refreshed = deferred<Result<ReplyChainPage>>()
   c.listReplyChain.mockResolvedValueOnce(ok(old)).mockReturnValueOnce(refreshed.promise)
   c.handlers[0].onEvent(moveEvent(81)); await flush()
-  expect(c.replies.get('A')).toMatchObject({ anchor: null, chainVersion: undefined, messages: [] })
+  expect(c.replies.get('A')).toMatchObject({
+    anchor: null, anchorId: anchor.id, rootId: 'id1', topicId: null, moveInvalidated: true, chainVersion: undefined, messages: [],
+  })
   expect(c.listReplyChain.mock.calls.slice(-2)).toEqual([
     ['A', anchor.id, { history_generation: generation, as_of_seq: undefined, after_seq: 50 }],
     ['A', anchor.id, { history_generation: generation, as_of_seq: undefined, after_seq: 50 }],
   ])
   const moved = { ...anchor, topic_id: 'destination', version: 81 }
   refreshed.resolve(ok({ ...old, as_of_seq: 81, chain_version: 81, messages: [moved] })); await flush()
-  expect(c.replies.get('A')).toMatchObject({ anchor: moved, chainVersion: 81, messages: [moved], hasOlder: true })
+  expect(c.replies.get('A')).toMatchObject({
+    anchor: moved, topicId: 'destination', moveInvalidated: false, chainVersion: 81, messages: [moved], hasOlder: true,
+  })
   await c.sync.close()
 })
 

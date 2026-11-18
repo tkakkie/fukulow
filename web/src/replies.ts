@@ -22,7 +22,7 @@ const chain = (anchor: Message, openedThrough: number) => ({ anchor, anchorCurre
   after: beforeAnchor(anchor),
   hasMore: true, hasOlder: Boolean(anchor.reply_root_id && anchor.created_seq > ANCHOR_CONTEXT),
   following: true, hasNewer: false, newerCount: 0,
-  restart: false,
+  restart: false, moveInvalidated: false,
   restartAfter: 0,
   liveFloor: 0,
   liveSequences: [] as Parameters<typeof rememberSequence>[0],
@@ -92,7 +92,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
           (before?.cursor != null && after.cursor === null) || previous.historyEpoch !== next.historyEpoch) { release(w); chains.delete(id); changed.add(id) }
         else if (after.moveEpoch !== undefined && before?.moveEpoch !== after.moveEpoch) {
           const epoch = after.moveEpoch
-          invalidate(w, beforeAnchor(w.anchor))
+          invalidateForMove(w)
           changed.add(id)
           queueMicrotask(() => {
             if (current(id, w) && w.restart && sync.get().channels[id]?.moveEpoch === epoch) void loadMore(id)
@@ -122,6 +122,10 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     w.messages.clear(); w.asOfSeq = undefined; w.moveBaseline = undefined; w.hasMore = true
     w.anchorCurrent = false; w.hasOlder = after > 0; w.hasNewer = false; w.newerCount = 0
     inFlight.delete(w)
+  }
+  function invalidateForMove(w: Chain) {
+    invalidate(w, beforeAnchor(w.anchor))
+    w.moveInvalidated = true
   }
 
   async function readMore(channel: string, restarted = false) {
@@ -180,7 +184,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         const messages = result.data.messages.filter(m => m.channel_id === channel && belongs(w, m))
         if (w.restart) {
           w.messages.clear(); w.after = requestedAfter; w.hasOlder = requestedAfter > 0; w.hasNewer = false; w.newerCount = 0
-          w.liveSequences = []; w.liveFloor = 0; w.following = true; w.restart = false
+          w.liveSequences = []; w.liveFloor = 0; w.following = true; w.restart = false; w.moveInvalidated = false
         }
         for (const m of messages) {
           const current = canonical(channel, w.messages.get(m.id), m)
@@ -238,7 +242,8 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     const c = closed ? undefined : sync.get().channels[channel]
     const topicMessage = w?.messages.values().next().value ?? (w?.anchorCurrent ? w.anchor : undefined)
     const topicId = topicMessage?.topic_id ?? null
-    return { anchor: w?.anchorCurrent ? w.anchor : null, rootId: w?.rootId ?? null, topicId,
+    return { anchor: w?.anchorCurrent ? w.anchor : null, anchorId: w?.anchor.id ?? null, rootId: w?.rootId ?? null, topicId,
+      moveInvalidated: w?.moveInvalidated ?? false,
       chainVersion: w?.restart ? undefined : w?.moveBaseline?.chain_version,
       messages: w ? [...w.messages.values()].sort((a, b) => a.created_seq - b.created_seq) : [],
       pending: w ? pending(w, c) : [],
@@ -268,7 +273,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         return
       }
       const w = chain(anchor, sync.get().channels[channel]?.cursor ?? 0)
-      if (anchor.version < (sync.get().channels[channel]?.moveSeq ?? 0)) invalidate(w, beforeAnchor(anchor))
+      if (anchor.version < (sync.get().channels[channel]?.moveSeq ?? 0)) invalidateForMove(w)
       const changed = new Set([...chains.keys(), channel])
       for (const old of chains.values()) release(old)
       chains.clear(); snapshots.clear()
@@ -276,14 +281,15 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       await loadMore(channel)
     },
     loadMore,
-    moveBaseline(channel: string, anchor: string) {
+    moveTarget(channel: string, anchor: string) {
       const w = chains.get(channel)
-      if (!w || !w.moveBaseline || w.restart || !current(channel, w) ||
+      if (!w || !current(channel, w) ||
         (anchor !== w.anchor.id && anchor !== w.rootId && !w.messages.has(anchor))) return undefined
-      return { ...w.moveBaseline, isCurrent: () => current(channel, w), refresh: async () => {
-        if (!current(channel, w)) return
+      return { rootId: w.rootId, baseline: w.restart ? undefined : w.moveBaseline, isCurrent: () => current(channel, w), refresh: async () => {
+        if (!current(channel, w)) return false
         invalidate(w, beforeAnchor(w.anchor))
         await loadMore(channel)
+        return current(channel, w) && !w.restart && !w.error && w.moveBaseline !== undefined
       } }
     },
     setPinned(channel: string, pinned: boolean) { const w = chains.get(channel); if (w) w.following = pinned },

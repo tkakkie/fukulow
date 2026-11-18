@@ -7505,7 +7505,7 @@ it('ReplyPanel トピックに移動 disables submit until chainVersion is ready
 
     // 1. Existing Topic destination -> check each failure outcome and Japanese message
     const failureCases: Array<[ Awaited<ReturnType<typeof replies.move>>, string ]> = [
-      [{ kind: 'conflict', error: 'version_conflict' }, '返信のつながりが更新されました。最新の状態を読み込みましたので、もう一度お試しください。'],
+      [{ kind: 'conflict', error: 'version_conflict', refreshed: true }, '返信のつながりが更新されました。最新の状態を読み込みましたので、もう一度お試しください。'],
       [{ kind: 'too_large' }, 'メッセージが1,000件を超える返信のつながりは移動できません。'],
       [{ kind: 'denied' }, 'この返信のつながりをトピックに移動する権限がありません。'],
       [{ kind: 'not_found' }, '移動対象の返信のつながりまたは移動先のトピックが見つかりません。'],
