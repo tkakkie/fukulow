@@ -2,7 +2,7 @@
 //   --build : daytime only; builds both release images and Part D test binaries into --work.
 //   --night 1|2 : the overnight measurement (night 1 = Part A, night 2 = Parts B, C, D).
 //   --smoke : tiny settings through the same code; never evidence.
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, cpus, hostname, platform, release, tmpdir, totalmem } from 'node:os';
@@ -10,7 +10,8 @@ import { resolve } from 'node:path';
 import { outsideCheckout } from '../proxy-target.ts';
 import { commits, dbSettings, fixture, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
 import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
-import { judgePartA, judgePartB, judgePartC, judgePartD, classifyPartDFailure, closedLoopNonSuccess, parseTimeline, timelineTopics, vacuumCost, type Counts, type PostgresState, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
+import { judgePartA, judgePartB, judgePartC, classifyPartDFailure, closedLoopNonSuccess, parseTimeline, scanPartDPostgresLog, timelineTopics, vacuumCost, type Counts, type PostgresState, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
+import { readResults, scorePartDFiles } from './report.ts';
 import { command, dbCommand, docker, seed, send, sampler, sleep, snapshot, startStack, timed, walDump, walWindow, type Seeded, type Stack } from './stack.ts';
 
 const usage = 'node load/slice5/run.ts --work /abs/work (--build | --night 1|2 --out /abs/new/dir) [--smoke] [--parts A,B,C,D]';
@@ -332,11 +333,16 @@ async function partDRun(arm: Arm, round: number, rerun: boolean): Promise<RunD> 
 
   try {
     result.postgres = partDPostgresState(name);
+    // Docker forwards PostgreSQL's stdout and stderr separately.
+    const pgLog = spawnSync('docker', ['logs', name], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    result.postgresLogMarkers = scanPartDPostgresLog(pgLog.status === 0 && !pgLog.error ? `${pgLog.stdout}\n${pgLog.stderr}` : null);
+    result.failure?.evidence.push(...result.postgresLogMarkers);
     let log: string | undefined;
     if (cargo) {
       log = `${cargo.stderr}\n${cargo.stdout}`.replaceAll(password, '<redacted>');
       result.exitCode = cargo.code;
-      result.failure = classifyPartDFailure({ exitCode: cargo.code, signal: cargo.signal, timedOut: cargo.timedOut, nightDeadline: cargo.nightDeadline }, log, result.postgres);
+      result.failure = classifyPartDFailure({ exitCode: cargo.code, signal: cargo.signal, timedOut: cargo.timedOut, nightDeadline: cargo.nightDeadline },
+        log, result.postgres, result.postgresLogMarkers);
       result.topics = timelineTopics(log);
       result.rows = parseTimeline(log);
       result.complete = result.rows.length === 4;
@@ -421,12 +427,13 @@ try {
   clearTimeout(deadline);
   rmSync(scratch, { recursive: true, force: true });
   const runs = <T>(p: string) => results.filter(r => r.part === p) as T[];
+  const scoredD = parts.includes('D') ? scorePartDFiles(output, readResults(output), plan.rounds) : undefined;
   const verdicts = [
     ...plan.cellsA.map(c => judgePartA(runs<RunA>('A'), c.name)), ...plan.cellsA.map(c => vacuumCost(runs<RunA>('A'), c.name)),
     ...plan.cellsB.map(c => judgePartB(runs<RunB>('B'), c)), ...partC.cells.map(c => judgePartC(runs<RunC>('C'), c)),
-    ...(parts.includes('D') ? judgePartD(runs<RunD>('D')) : []),
+    ...(scoredD?.verdicts ?? []),
   ].filter(v => parts.includes((v as { part?: string }).part ?? 'A'));
-  failed ||= runs<RunD>('D').some(r => r.failure);
+  failed ||= scoredD?.failed ?? false;
   const saveSummary = () => save(`${output}/summary.json`, { scope, night, smoke, failed, interrupted, faults, cleanupErrors, verdicts, finished: new Date().toISOString() });
   if (parts.includes('D')) writePartDArtifact('summary.json', saveSummary);
   else saveSummary();

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { scope } from './config.ts';
 import { parseTimeline, type RunD, type RunC, type RunB, type Counts } from './judge.ts';
 import { channelLogSQL, prefillSQL, watchedRelationsSQL } from './fixture.ts';
-import { mergeProblems, render, verdicts } from './report.ts';
+import { load, mergeProblems, render, verdicts } from './report.ts';
 
 const org = '11111111-1111-4111-8111-111111111111', ch = ['22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333'];
 test('prefill SQL rejects non-UUID input and mismatched plans', () => {
@@ -44,14 +45,81 @@ const timelineRuns = (): RunD[] => [1,2,3].flatMap(round => (['B','A'] as const)
     'TOPIC_PAGE boundary=Some(190000) n=400 p50_ms=1 p95_ms=10 max_ms=20\n' +
     'TOPIC_SEND boundary=None n=20 p50_ms=1 p95_ms=10 max_ms=20\n' +
     'TOPIC_SEND boundary=Some(190000) n=20 p50_ms=1 p95_ms=10 max_ms=20\n') })));
-test('summary.failed downgrades actual PASS cells and preserves FAIL', () => {
-  const n1 = night('1'), n2 = night('2'); n2.results = timelineRuns();
+
+function nightFiles(t: import('node:test').TestContext, aggregate = timelineRuns()) {
+  const dir = mkdtempSync(`${tmpdir()}/slice5-report-test-`);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const n = night('2');
+  for (const [file, value] of Object.entries({ metadata: n.metadata, summary: n.summary, results: aggregate }))
+    writeFileSync(`${dir}/${file}.json`, JSON.stringify(value));
+  const writeRound = (run: RunD, id = `D-${run.round}-${run.arm}`) => {
+    const path = `${dir}/runs/${id}`;
+    mkdirSync(path, { recursive: true });
+    writeFileSync(`${path}/result.json`, JSON.stringify(run));
+  };
+  for (const run of timelineRuns()) writeRound(run);
+  return { dir, writeRound };
+}
+
+const failedRound = (run: RunD, cause: 'assertion' | 'infrastructure'): RunD => ({
+  ...run, complete: false, topics: NaN, rows: [], exitCode: 101,
+  failure: { cause, exitCode: 101, signal: null, timedOut: false,
+    evidence: [cause === 'assertion' ? 'feasibility gate missed' : 'PostgreSQL OOMKilled'] },
+});
+
+test('Part D report preserves the last A assertion when results.json is stale', t => {
+  const runs = timelineRuns();
+  const { dir, writeRound } = nightFiles(t, runs.slice(0, -1));
+  writeRound(failedRound(runs.at(-1)!, 'assertion'));
+  const report = render(night('1'), load(dir));
+  assert.match(report, /\| D \| timeline \| FAIL \| A3: assertion/);
+  assert.match(report, /results\.json disagrees with Part D round files/);
+});
+
+for (const damage of ['missing', 'corrupt', 'wrong arm', 'wrong round', 'duplicate'] as const) {
+  test(`Part D report rejects a ${damage} round file even with a passing aggregate`, t => {
+    const { dir, writeRound } = nightFiles(t);
+    const result = `${dir}/runs/D-3-A/result.json`, last = timelineRuns().at(-1)!;
+    if (damage === 'missing') rmSync(result);
+    if (damage === 'corrupt') writeFileSync(result, '{');
+    if (damage === 'wrong arm') writeRound({ ...last, arm: 'B' }, 'D-3-A');
+    if (damage === 'wrong round') writeRound({ ...last, round: 2 }, 'D-3-A');
+    if (damage === 'duplicate') writeRound(last, 'D-03-A');
+    const list = verdicts(night('1'), load(dir)).verdicts.filter(v => v.part === 'D');
+    assert.deepEqual(list.map(v => v.status), ['INVALID']);
+    assert.ok(list[0].reasons.some(reason => reason.includes(damage === 'duplicate' ? 'D-03-A' : 'D-3-A/result.json')));
+  });
+}
+
+test('Part D report uses a rerun only to replace confirmed infrastructure', t => {
+  const runs = timelineRuns(), last = runs.at(-1)!;
+  const { dir, writeRound } = nightFiles(t, runs.slice(0, -1));
+  const score = () => verdicts(night('1'), load(dir)).verdicts.filter(v => v.part === 'D');
+  writeRound(failedRound(last, 'infrastructure'));
+  writeRound(last, 'D-3-A-rerun');
+  assert.deepEqual(score().map(v => v.status), ['PASS', 'PASS', 'REPORT ONLY', 'REPORT ONLY']);
+  writeRound(failedRound(last, 'assertion'));
+  assert.equal(score()[0].status, 'FAIL');
+  writeRound(last);
+  writeRound(failedRound(last, 'assertion'), 'D-3-A-rerun');
+  assert.equal(score()[0].status, 'FAIL');
+});
+test('summary.failed downgrades actual PASS cells and preserves FAIL', t => {
+  const { dir, writeRound } = nightFiles(t);
+  const n1 = night('1'), n2 = load(dir);
   assert.ok(verdicts(n1,n2).verdicts.some(v => v.part === 'D' && v.status === 'PASS'));
   n2.summary.failed = true;
   assert.deepEqual(mergeProblems(n1,n2), ['night 2: runner failed']);
   assert.ok(verdicts(n1,n2).verdicts.filter(v => v.part === 'D' && v.cell.startsWith('PAGE')).every(v => v.status === 'INVALID'));
-  for (const r of n2.results as RunD[]) if (r.arm === 'A') r.rows[0].p95 = 101;
-  assert.ok(verdicts(n1,n2).verdicts.some(v => v.status === 'FAIL'));
+  const runs = timelineRuns();
+  for (const r of runs) if (r.arm === 'A') {
+    r.rows[0].p95 = 101;
+    writeRound(r);
+  }
+  writeFileSync(`${dir}/results.json`, JSON.stringify(runs));
+  const failed = load(dir);
+  failed.summary.failed = true;
+  assert.ok(verdicts(n1,failed).verdicts.some(v => v.status === 'FAIL'));
 });
 test('R2 invalid and error counts appear in the report, including missing evidence', () => {
   const n2 = night('2');

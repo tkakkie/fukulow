@@ -1,16 +1,112 @@
 // Merges night 1 and night 2 into one #515 slice 5 report. Usage:
 //   node load/slice5/report.ts --night1 /abs/dir --night2 /abs/dir > report.md
-import { readFileSync } from 'node:fs';
-import { partA, partB, partC, scope, thresholds } from './config.ts';
+import { readdirSync, readFileSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
+import { partA, partB, partC, rounds, scope, thresholds, type Arm } from './config.ts';
 import { judgePartA, judgePartB, judgePartC, judgePartD, vacuumCost, worst, type Metric, type RunA, type RunB, type RunC, type RunD, type Status, type Verdict } from './judge.ts';
 
 type Night = { metadata: { night: string; smoke: boolean; parts: string[]; node: string; scope: string; commits: Record<string, string>; images: Record<string, string>; settingsHash: string; k6Id: string;
   machine: unknown; docker: unknown; harnessCommit: string; harnessHashes: Record<string, string>; dirty: string; started: string };
   summary: { failed: boolean; interrupted: string; faults: string[]; cleanupErrors: string[]; finished: string };
-  results: (RunA | RunB | RunC | RunD)[] };
+  results: (RunA | RunB | RunC | RunD)[]; partD?: ReturnType<typeof scorePartDFiles> };
+const read = (dir: string, file: string) => JSON.parse(readFileSync(`${dir}/${file}`, 'utf8'));
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+export function readResults(dir: string): Night['results'] | null {
+  try {
+    const results = read(dir, 'results.json');
+    if (Array.isArray(results) && results.every(isRecord)) return results as Night['results'];
+  } catch { /* Part D can still be scored from its round files. */ }
+  return null;
+}
+
+function validFailure(value: unknown): value is NonNullable<RunD['failure']> {
+  return isRecord(value) && typeof value.cause === 'string'
+    && ['assertion', 'infrastructure', 'timeout', 'unknown'].includes(value.cause)
+    && (value.exitCode === null || Number.isInteger(value.exitCode))
+    && (value.signal === null || typeof value.signal === 'string')
+    && typeof value.timedOut === 'boolean' && (value.nightDeadline === undefined || typeof value.nightDeadline === 'boolean')
+    && Array.isArray(value.evidence) && value.evidence.every(marker => typeof marker === 'string');
+}
+
+export function scorePartDFiles(dir: string, aggregate: Night['results'] | null,
+  schedule: readonly (readonly Arm[])[] = rounds) {
+  const runs: RunD[] = [], errors: string[] = [];
+  const expected = schedule.flatMap((pair, index) => pair.map(arm => ({ id: `D-${index + 1}-${arm}`, arm, round: index + 1 })));
+  let names: string[] = [];
+  try { names = readdirSync(`${dir}/runs`).filter(name => name.startsWith('D-')).sort(); }
+  catch { errors.push('Part D runs directory unavailable'); }
+  const allowed = new Set(expected.flatMap(({ id }) => [id, `${id}-rerun`]));
+  const readRound = (id: string, arm: Arm, round: number): RunD | undefined => {
+    const path = `runs/${id}/result.json`;
+    let value: unknown;
+    try { value = read(dir, path); }
+    catch {
+      errors.push(`${path}: missing, unreadable or corrupt`);
+      return;
+    }
+    if (!isRecord(value) || value.part !== 'D' || value.arm !== arm || value.round !== round) {
+      errors.push(`${path}: inconsistent Part D round identity`);
+      return;
+    }
+    const failure = validFailure(value.failure) ? value.failure : null;
+    if (typeof value.commit !== 'string' || typeof value.complete !== 'boolean' || typeof value.smoke !== 'boolean'
+      || !(typeof value.topics === 'number' || value.topics === null)
+      || !Array.isArray(value.rows) || !value.rows.every(row => isRecord(row) &&
+        typeof row.key === 'string' && typeof row.p95 === 'number' && typeof row.n === 'number')
+      || (value.exitCode != null && !Number.isInteger(value.exitCode)) || (value.failure != null && !failure)) {
+      errors.push(`${path}: corrupt Part D round data`);
+      if (arm !== 'A' || failure?.cause !== 'assertion') return;
+    }
+    return value as RunD;
+  };
+
+  let reruns = 0;
+  for (const { id, arm, round } of expected) {
+    const initial = readRound(id, arm, round);
+    if (!names.includes(`${id}-rerun`)) {
+      if (initial) runs.push(initial);
+      continue;
+    }
+    reruns++;
+    const rerun = readRound(`${id}-rerun`, arm, round);
+    if (initial?.failure?.cause !== 'infrastructure') {
+      errors.push(`${id}-rerun: rerun without confirmed infrastructure`);
+      if (rerun?.failure?.cause === 'assertion' && arm === 'A') runs.push(rerun);
+      if (initial) runs.push(initial);
+    } else {
+      runs.push(rerun ?? initial);
+    }
+  }
+  if (reruns > 1) errors.push('multiple Part D reruns');
+  for (const name of names) {
+    if (allowed.has(name)) continue;
+    errors.push(`unexpected Part D run directory ${name}`);
+    const match = /^D-(\d+)-A(?:-rerun)?$/.exec(name);
+    const round = Number(match?.[1]);
+    if (expected.some(slot => slot.arm === 'A' && slot.round === round)) {
+      const duplicate = readRound(name, 'A', round);
+      if (duplicate?.failure?.cause === 'assertion') runs.push(duplicate);
+    }
+  }
+  const aggregateRuns = aggregate?.filter(r => r.part === 'D');
+  const discrepancy = !aggregateRuns ? 'results.json unavailable for Part D comparison'
+    : aggregateRuns.length !== runs.length || runs.some(run =>
+      !isDeepStrictEqual(aggregateRuns.filter(r => r.round === run.round && r.arm === run.arm), [run]))
+      ? 'results.json disagrees with Part D round files' : undefined;
+  return {
+    failed: errors.length > 0 || runs.some(run => !!run.failure),
+    verdicts: judgePartD(runs, errors).map(v => discrepancy ? { ...v, reasons: [...v.reasons, discrepancy] } : v),
+  };
+}
+
 export function load(dir: string): Night {
-  const read = (f: string) => JSON.parse(readFileSync(`${dir}/${f}`, 'utf8'));
-  return { metadata: read('metadata.json'), summary: read('summary.json'), results: read('results.json') };
+  const metadata: Night['metadata'] = read(dir, 'metadata.json');
+  const summary: Night['summary'] = read(dir, 'summary.json');
+  if (!metadata.parts.includes('D')) return { metadata, summary, results: read(dir, 'results.json') };
+  const results = readResults(dir);
+  return { metadata, summary, results: results ?? [], partD: scorePartDFiles(dir, results, metadata.smoke ? [rounds[0]] : rounds) };
 }
 
 // Both nights must share commits, images, settings and the k6 image, and finish cleanly; otherwise nothing passes.
@@ -35,7 +131,7 @@ export function verdicts(n1: Night, n2: Night): { problems: string[]; verdicts: 
   const problems = mergeProblems(n1, n2), all = [...n1.results, ...n2.results];
   const runs = <T>(p: string) => all.filter(r => r.part === p) as T[];
   let list = [...partA.cells.map(c => judgePartA(runs<RunA>('A'), c.name)), ...partB.cells.map(c => judgePartB(runs<RunB>('B'), c)),
-    ...partC.cells.map(c => judgePartC(runs<RunC>('C'), c)), ...judgePartD(runs<RunD>('D'))];
+    ...partC.cells.map(c => judgePartC(runs<RunC>('C'), c)), ...(n2.partD?.verdicts ?? judgePartD([]))];
   // A run-level problem turns every PASS into INVALID; FAIL and INVESTIGATE stay visible.
   if (problems.length) list = list.map(v => v.status === 'PASS' ? { ...v, status: 'INVALID' as Status, reasons: [...v.reasons, ...problems] } : v);
   return { problems, verdicts: list, overall: worst(list.map(v => v.status).filter(s => s !== 'REPORT ONLY')) };

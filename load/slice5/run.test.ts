@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
+import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { nights, partD, timelineEnv, type Arm } from './config.ts';
 import { classifyPartDFailure, judgePartD, parseTimeline, timelineTopics, type RunD, type Verdict } from './judge.ts';
+import * as judge from './judge.ts';
+import * as report from './report.ts';
 
 // Execute the runner's actual helpers with I/O replaced. Importing run.ts would execute its CLI.
 const source = readFileSync(new URL('./run.ts', import.meta.url), 'utf8');
@@ -22,7 +25,8 @@ const boundary = source.slice(source.indexOf('function partDPostgresState('), so
 const scoring = source.slice(source.indexOf('  for (const part of parts)'));
 const execute = new Function('deps', 'runs', `
   const { mkdirSync, readFileSync, docker, sleep, run, writeFileSync, save,
-    randomUUID, parseTimeline, timelineTopics, timelineEnv, classifyPartDFailure, partD, judgePartD } = deps;
+    randomUUID, parseTimeline, timelineTopics, timelineEnv, classifyPartDFailure, partD, judgePartD, spawnSync,
+    scanPartDPostgresLog, readResults, scorePartDFiles } = deps;
   const process = { env: {}, exit: code => { exitCode = code; } };
   const console = { log: () => {}, error: () => {} };
   const output = '/unused', project = 'unit-test', smoke = false, tiny = {}, full = { B: 'b975ffa', A: 'f7fe08a' };
@@ -97,6 +101,73 @@ test('classification requires a target-test panic, failed libtest summary and ev
 
 const panicWith = (message: string) => cargo({ ...assertion, stderr: assertionLog.replace(`assertion failed: ${password}`, message) });
 const connectionReset = panicWith('called `Result::unwrap()` on an `Err` value: Io(Os { message: "Connection reset by peer" })');
+const http500 = panicWith("assertion `left == right` failed\n  left: 500\n right: 200");
+const gateMiss = panicWith('feasibility gate missed: stop; do not add a limit');
+
+test('target HTTP 5xx panic with running PostgreSQL is unknown even with no crash markers', async () => {
+  for (const failed of [http500, panicWith('StatusCode(503)'), panicWith('500 Internal Server Error')]) {
+    const { results, starts, nightSummary } = await exercise([['A', 1]], [failed]);
+    assert.equal(results[0].failure?.cause, 'unknown');
+    assert.ok(results[0].failure.evidence.includes('HTTP 5xx status'));
+    assert.equal(starts, 1);
+    assert.match(nightSummary.verdicts[0].reasons[0], /unknown.*investigate/);
+  }
+});
+
+test('PostgreSQL crash evidence makes a 5xx or ordinary target panic unknown while PostgreSQL runs', async () => {
+  for (const failed of [http500, assertion]) {
+    const { results, starts } = await exercise([['A', 1]], [failed],
+      { postgresLog: 'LOG: server process (PID 12) was terminated by signal 9' });
+    assert.equal(results[0].failure?.cause, 'unknown');
+    assert.ok(results[0].failure.evidence.includes('terminated by signal'));
+    assert.equal(starts, 1);
+  }
+});
+
+test('explicit gate miss and FAILED beat a later PostgreSQL OOM', async () => {
+  const failure = classifyPartDFailure(exit, `${gateMiss.stderr}\n${summary}`, { ...alive, Running: false, OOMKilled: true });
+  assert.equal(failure?.cause, 'assertion');
+  for (const marker of ['feasibility gate missed', 'PostgreSQL OOMKilled', 'PostgreSQL stopped'])
+    assert.ok(failure.evidence.includes(marker));
+  const { results, starts, nightSummary } = await exercise([['A', 1]], [gateMiss],
+    { inspect: '[false,true,137,null]', postgresLog: 'LOG: redo starts at 0/123' });
+  assert.equal(starts, 1);
+  assert.ok(results[0].failure?.evidence.includes('redo starts at'));
+  assert.equal(nightSummary.verdicts[0].status, 'FAIL');
+});
+
+test('explicit gate miss and FAILED beat unknown PostgreSQL state', () => {
+  const failure = classifyPartDFailure(exit, `${gateMiss.stderr}\n${summary}`);
+  assert.equal(failure?.cause, 'assertion');
+  assert.ok(failure.evidence.includes('feasibility gate missed'));
+  assert.ok(failure.evidence.includes('PostgreSQL state unknown'));
+  assert.equal(classifyPartDFailure(exit, gateMiss.stderr)?.cause, 'unknown');
+  assert.equal(classifyPartDFailure(exit, `${gateMiss.stderr} (other)\n${summary}`)?.cause, 'unknown');
+});
+
+test('explicit gate miss and FAILED beat timeout, night deadline and process/binary signals', () => {
+  const termination = { exitCode: null, signal: 'SIGTERM', timedOut: true, nightDeadline: true } as const;
+  const log = `${gateMiss.stderr}\n${summary}\nerror: process didn't exit successfully: target (signal: 9, SIGKILL)`;
+  const failure = classifyPartDFailure(termination, log);
+  assert.equal(failure?.cause, 'assertion');
+  for (const marker of ['feasibility gate missed', 'runner timeout fired', 'night-deadline',
+    'process terminated by signal', 'test binary terminated by signal 9'])
+    assert.ok(failure.evidence.includes(marker));
+});
+
+test('PostgreSQL log collection records the allowlisted markers only, and reports an unavailable read', async () => {
+  const markers = ['terminated by signal', 'terminating any other active server processes',
+    'database system was interrupted', 'redo starts at', 'No space left on device', 'out of memory',
+    'could not fork', 'the database system is in recovery mode'];
+  const postgresLog = [...markers, markers[0], 'database system is ready to accept connections']
+    .map(marker => `LOG: ${marker.toUpperCase()} ${password}`).join('\n');
+  const { results, logs } = await exercise([['A', 1]], [assertion], { postgresLog });
+  assert.deepEqual(results[0].failure?.evidence.slice(-markers.length), markers);
+  assert.doesNotMatch(JSON.stringify({ results, logs }), /test-only-password|LOG:|ready to accept/);
+  const unavailable = await exercise([['A', 1]], [assertion], { postgresLog: new Error(password) });
+  assert.ok(unavailable.results[0].failure?.evidence.includes('PostgreSQL log unavailable'));
+  assert.doesNotMatch(JSON.stringify(unavailable.results), /test-only-password/);
+});
 
 test('explicit database, IO and pool panic markers exclude assertions with live PostgreSQL', () => {
   for (const message of ['Database(PgDatabaseError { message: "could not write" })', 'Io(Custom { kind: Other })',
@@ -127,18 +198,32 @@ test('an exit code alone gives unknown with a missing summary marker', () => {
 });
 
 type Summary = { failed: boolean; cleanupErrors: string[]; verdicts: Verdict[] };
-type Options = { dbUnavailable?: boolean; inspect?: string | Error; halfCreated?: boolean; failWrites?: string[] };
+type Options = { dbUnavailable?: boolean; inspect?: string | Error; postgresLog?: string | Error; halfCreated?: boolean;
+  failWrites?: string[]; failLastAggregate?: boolean };
 
 async function exercise(runs: [Arm, number][], outputs: Cargo[], options: Options = {}) {
+  const dir = mkdtempSync(`${tmpdir()}/slice5-run-test-`);
+  const onDisk = (path: string) => path.replace('/unused', dir);
   const saved = new Map<string, RunD>(), logs: string[] = [], containerCalls: string[] = [], writes: string[] = [];
   let nightSummary: Summary | undefined, containerPresent = false;
-  let invocations = 0, starts = 0;
+  let invocations = 0, starts = 0, aggregateWrites = 0;
   const write = (path: string) => {
     writes.push(path);
-    if (options.failWrites?.some(suffix => path.endsWith(suffix))) throw new Error('test artifact write failed');
+    if (options.failWrites?.some(suffix => path.endsWith(suffix)) ||
+      (path.endsWith('/results.json') && ++aggregateWrites === runs.length && options.failLastAggregate))
+      throw new Error('test artifact write failed');
   };
   const execution = await execute({
-    mkdirSync: write, readFileSync: () => 'image: postgres:18.6',
+    mkdirSync: (path: string) => { write(path); mkdirSync(onDisk(path), { recursive: true }); },
+    readFileSync: () => 'image: postgres:18.6',
+    spawnSync: (file: string, args: string[]) => {
+      assert.equal(file, 'docker');
+      assert.deepEqual(args, ['logs', args[1]]);
+      assert.equal(containerPresent, true);
+      if (options.postgresLog instanceof Error) return { status: 1, stdout: '', stderr: options.postgresLog.message };
+      const lines = (options.postgresLog ?? '').split('\n');
+      return { status: 0, stdout: lines.slice(0, 1).join('\n'), stderr: lines.slice(1).join('\n') };
+    },
     docker: (command: string, ...args: string[]) => {
       if (['run', 'inspect', 'rm'].includes(command)) containerCalls.push(command);
       if (command === 'run') {
@@ -165,11 +250,23 @@ async function exercise(runs: [Arm, number][], outputs: Cargo[], options: Option
     writeFileSync: (path: string, log: string) => { write(path); logs.push(log); },
     save: (path: string, value: RunD | Summary) => {
       write(path);
+      writeFileSync(onDisk(path), JSON.stringify(value));
       if (path.endsWith('/result.json')) saved.set(path, value as RunD);
       if (path.endsWith('/summary.json')) nightSummary = value as Summary;
     },
+    readResults: (path: string) => report.readResults(onDisk(path)),
+    scorePartDFiles: (...[path, aggregate, schedule]: Parameters<typeof report.scorePartDFiles>) =>
+      report.scorePartDFiles(onDisk(path), aggregate, schedule),
     randomUUID: () => password, parseTimeline, timelineTopics, timelineEnv, classifyPartDFailure, partD, judgePartD,
-  }, runs);
+    scanPartDPostgresLog: judge.scanPartDPostgresLog,
+  }, runs).then(result => {
+    if (!options.failLastAggregate) return { ...result, mergedReport: '' };
+    writeFileSync(`${dir}/metadata.json`, JSON.stringify({ night: '2', parts: ['B', 'C', 'D'], smoke: false }));
+    const n2 = report.load(dir);
+    const n1 = { ...n2, metadata: { ...n2.metadata, night: '1', parts: ['A'] }, results: [] };
+    assert.equal(n2.results.length, runs.length - 1);
+    return { ...result, mergedReport: report.render(n1, n2) };
+  }).finally(() => rmSync(dir, { recursive: true, force: true }));
   assert.equal(invocations, outputs.length);
   assert.equal(containerPresent, false);
   assert.ok(nightSummary);
@@ -312,15 +409,26 @@ test('result.json is saved before a failing cargo.log write and the A FAIL still
   assert.deepEqual(nightSummary.cleanupErrors, ['D-1-A/cargo.log: artifact write failed']);
 });
 
-test('Part D directory, result and aggregate write errors preserve scoring and subsequent runs', async () => {
+test('Part D directory, result and aggregate write errors make a missing round INVALID and preserve subsequent runs', async () => {
   const { results, starts, nightSummary } = await exercise([['A', 1], ['B', 1]], [assertion, success],
     { failWrites: ['D-1-A', 'D-1-A/result.json', '/results.json'] });
   assert.equal(starts, 2);
   assert.equal(results.length, 2);
-  assert.equal(nightSummary.verdicts[0].status, 'FAIL');
+  assert.equal(nightSummary.verdicts[0].status, 'INVALID');
+  assert.match(nightSummary.verdicts[0].reasons[0], /D-1-A\/result\.json/);
   for (const marker of ['D-1-A/', 'D-1-A/result.json', 'results.json']) {
     assert.ok(nightSummary.cleanupErrors.includes(`${marker}: artifact write failed`));
   }
+});
+
+test('last results.json write failure leaves a stale aggregate but A3 FAIL survives in the report and summary', async () => {
+  const { mergedReport, nightSummary } = await exercise([['B', 1], ['A', 1], ['A', 2], ['B', 2], ['B', 3], ['A', 3]],
+    [success, success, success, success, success, gateMiss], { failLastAggregate: true });
+  assert.match(mergedReport, /\| D \| timeline \| FAIL \| A3: assertion/);
+  assert.match(mergedReport, /results\.json disagrees with Part D round files/);
+  assert.equal(nightSummary.verdicts[0].status, 'FAIL');
+  assert.ok(nightSummary.verdicts[0].reasons.includes('results.json disagrees with Part D round files'));
+  assert.ok(nightSummary.cleanupErrors.includes('results.json: artifact write failed'));
 });
 
 test('compile failure uses the one infrastructure rerun across all Part D rounds', async () => {

@@ -1,6 +1,7 @@
 // Pure judgement for the approved #515 slice 5 pre-registration. Only PASS is a
 // pass: INVALID, NOT EVALUATED, REPORT ONLY and INVESTIGATE never are.
 import { stripVTControlCharacters } from 'node:util';
+import { STATUS_CODES } from 'node:http';
 import { commits, partA, partB, partC, partD, rounds, thresholds, validity, type Arm } from './config.ts';
 
 export type Status = 'PASS' | 'FAIL' | 'INVALID' | 'NOT EVALUATED' | 'REPORT ONLY' | 'INVESTIGATE';
@@ -22,8 +23,8 @@ export type TimelineRow = { key: string; p95: number; n: number };
 type ProcessExit = { exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; nightDeadline?: boolean };
 type FailureD = ProcessExit & { cause: 'assertion' | 'infrastructure' | 'timeout' | 'unknown'; evidence: string[] };
 export type PostgresState = { Running: boolean; OOMKilled: boolean; ExitCode: number; Health: string | null };
-export type RunD = { part: 'D'; round: number; arm: Arm; commit: string; complete: boolean; smoke: boolean; topics: number; rows: TimelineRow[];
-  exitCode?: number | null; failure?: FailureD | null; postgres?: PostgresState | null };
+export type RunD = { part: 'D'; round: number; arm: Arm; commit: string; complete: boolean; smoke: boolean; topics: number | null; rows: TimelineRow[];
+  exitCode?: number | null; failure?: FailureD | null; postgres?: PostgresState | null; postgresLogMarkers?: string[] };
 export type Metric = { name: string; status: Status; reason?: string; medianB?: number; medianA?: number; ratio?: number;
   pairRatios?: number[]; spreadB?: number; spreadA?: number };
 export type Verdict = { part: string; cell: string; status: Status; reasons: string[]; metrics: Metric[]; detail?: unknown };
@@ -216,18 +217,36 @@ export function judgePartC(runs: RunC[], cell: string): Verdict {
   return { part: 'C', cell, status: metric.status, reasons: [], metrics: [metric] };
 }
 
-export function classifyPartDFailure(exit: ProcessExit, output: string, postgres: PostgresState | null = null): FailureD | null {
+const postgresFailureMarkers = ['terminated by signal', 'terminating any other active server processes',
+  'database system was interrupted', 'redo starts at', 'No space left on device', 'out of memory',
+  'could not fork', 'the database system is in recovery mode'] as const;
+const postgresLogUnavailable = 'PostgreSQL log unavailable';
+
+export function scanPartDPostgresLog(output: string | null): string[] {
+  if (output === null) return [postgresLogUnavailable];
+  const log = output.toLowerCase();
+  return postgresFailureMarkers.filter(marker => log.includes(marker.toLowerCase()));
+}
+
+export function classifyPartDFailure(exit: ProcessExit, output: string, postgres: PostgresState | null = null,
+  postgresLogMarkers: string[] = []): FailureD | null {
   // Record marker names only. Cargo and libtest can include connection details in their output.
   const log = stripVTControlCharacters(output);
   const testRun = /^[ \t]*Running unittests\s/m.test(log) ? 'Running unittests'
     : /^running [1-9]\d* tests?\b/m.test(log) ? 'running tests' : undefined;
   const testSummary = /^test result: /m.test(log);
   const failedSummary = /^test result: FAILED\b/m.test(log);
+  const gateMiss = /^[ \t]*feasibility gate missed: stop; do not add a limit[ \t]*\r?$/m.test(log);
   const panicHeader = new RegExp(`^thread '(?:\\w+::)*${partD.target}'(?: \\(\\d+\\))? panicked at [^\\n]*\\n?`, 'm');
   const panic = panicHeader.exec(log);
   const message = panic
-    ? log.slice(panic.index + panic[0].length).split(/^(?:thread '|note:|stack backtrace:|running \d+ tests?\b|test |error:)/m, 1)[0].trim()
+    ? [/:\d+:\d+:[ \t]*(.*)/.exec(panic[0])?.[1],
+      log.slice(panic.index + panic[0].length).split(/^(?:thread '|note:|stack backtrace:|running \d+ tests?\b|test |error:)/m, 1)[0]].join('\n').trim()
     : '';
+  const http5xx = /\b(?:(?:left|right)\s*:\s*|status(?:[ _-]?code)?(?:\s*[:=(]\s*|\s+)|HTTP(?:\/\d+(?:\.\d+)?)?\s+)5\d{2}\b/i.test(message)
+    || [...message.matchAll(/\b(5\d{2})[ \t]+([^\r\n]+)/g)].some(([, code, reason]) =>
+      !!STATUS_CODES[code] && reason.toLowerCase().startsWith(STATUS_CODES[code]!.toLowerCase()));
+  const postgresCrash = postgresLogMarkers.some(marker => marker !== postgresLogUnavailable);
   const dbError = [
     /\b(?:Database|Io|Protocol|Tls)\s*\(|\b(?:PoolTimedOut|PoolClosed|WorkerCrashed)\b/i,
     /\b(?:connection (?:reset|refused|closed|is closed|aborted|timed out)|server closed the connection)\b/i,
@@ -240,15 +259,18 @@ export function classifyPartDFailure(exit: ProcessExit, output: string, postgres
     exit.signal && 'process terminated by signal', binarySignal && `test binary terminated by signal ${binarySignal}`,
     testRun, panic && 'target test panicked at', failedSummary && 'test result: FAILED',
     !testSummary && 'missing libtest summary', dbError && 'database/IO/pool panic',
+    http5xx && 'HTTP 5xx status', gateMiss && 'feasibility gate missed',
     !postgres && 'PostgreSQL state unknown', postgres?.OOMKilled && 'PostgreSQL OOMKilled',
-    postgres?.Running === false && 'PostgreSQL stopped',
+    postgres?.Running === false && 'PostgreSQL stopped', ...postgresLogMarkers,
   ].filter((marker): marker is string => typeof marker === 'string');
   const failure = (cause: FailureD['cause']): FailureD => ({ ...exit, cause, evidence });
-  if (testRun && panic && message && failedSummary && !dbError && postgres?.Running && !postgres.OOMKilled)
+  if (gateMiss && failedSummary) return failure('assertion');
+  if (testRun && panic && message && failedSummary && !dbError && !http5xx && !postgresCrash && postgres?.Running && !postgres.OOMKilled)
     return failure('assertion');
   if (exit.timedOut || exit.nightDeadline) return failure('timeout');
   if (panic && postgres && (!postgres.Running || postgres.OOMKilled)) return failure('infrastructure');
   if (exit.signal || binarySignal) return failure('unknown');
+  if (panic && (http5xx || postgresCrash)) return failure('unknown');
   if (exit.exitCode === 0) return null;
   if (!testRun && !testSummary && !panic) {
     const buildErrors = [/^error\[E\d+\]:/m.test(log) && 'compiler error[E…]',
@@ -263,7 +285,7 @@ export function classifyPartDFailure(exit: ProcessExit, output: string, postgres
 }
 
 // Part D keeps the existing absolute target: A's median p95 <=100 ms per PAGE row, both arms' spread <=10%.
-export function judgePartD(runs: RunD[]): Verdict[] {
+export function judgePartD(runs: RunD[], artifactErrors: string[] = []): Verdict[] {
   const reasonsByFailure = runs.flatMap(r => {
     const failure = r.failure ?? (r.exitCode === undefined || r.exitCode === 0 ? null
       : classifyPartDFailure({ exitCode: r.exitCode, signal: null, timedOut: false }, ''));
@@ -273,8 +295,9 @@ export function judgePartD(runs: RunD[]): Verdict[] {
     const termination = signal ? `, signal ${signal}` : exitCode === null ? '' : `, exit ${exitCode}`;
     return [{ assertion: r.arm === 'A' && cause === 'assertion', reason: `${r.arm}${r.round}: ${cause}${note}${termination}${evidence.length ? ` (${evidence.join(', ')})` : ''}` }];
   });
-  if (reasonsByFailure.length) return [{ part: 'D', cell: 'timeline',
-    status: reasonsByFailure.some(r => r.assertion) ? 'FAIL' : 'INVALID', reasons: reasonsByFailure.map(r => r.reason), metrics: [] }];
+  if (reasonsByFailure.length || artifactErrors.length) return [{ part: 'D', cell: 'timeline',
+    status: reasonsByFailure.some(r => r.assertion) ? 'FAIL' : 'INVALID',
+    reasons: [...reasonsByFailure.map(r => r.reason), ...artifactErrors], metrics: [] }];
   const pick = (arm: Arm) => rounds.map((_, i) => runs.filter(r => r.arm === arm && r.round === i + 1));
   const [bs, as] = [pick('B'), pick('A')];
   if ([...bs, ...as].some(r => r.length !== 1) || runs.length !== 2 * rounds.length)
