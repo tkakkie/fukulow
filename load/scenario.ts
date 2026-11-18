@@ -19,6 +19,7 @@ const channels = positiveInteger(__ENV.CHANNELS, 1);
 const subscribers = positiveInteger(__ENV.SUBSCRIBERS, 5);
 // Sends per batch, formerly in-flight workers; offered sends/s = publishers * 1000 / interval.
 const publishers = positiveInteger(__ENV.PUBLISHERS, 2);
+const publishMembers = positiveInteger(__ENV.PUBLISH_MEMBERS, 1);
 const publishChannels = positiveInteger(__ENV.PUBLISH_CHANNELS, channels);
 if (publishChannels > channels) fail('PUBLISH_CHANNELS exceeds CHANNELS');
 const duration = positiveInteger(__ENV.DURATION_SECONDS, 10);
@@ -29,7 +30,9 @@ const socketsPerSession = positiveInteger(__ENV.SOCKETS_PER_SESSION, 1);
 // 0 (default) keeps the pre-#196 single-Account baselines; otherwise one Account per this many sockets.
 const socketsPerAccount = __ENV.SOCKETS_PER_ACCOUNT ? positiveInteger(__ENV.SOCKETS_PER_ACCOUNT, 1) : 0;
 // Each Account Session (or invited Account: invite, accept, sign-in, access check) gets 10 s.
-const sessionsToProvision = Math.max(1, Math.ceil(channels * subscribers / socketsPerSession));
+const socketSessions = Math.ceil(channels * subscribers / socketsPerSession);
+const accounts = Math.max(socketsPerAccount ? socketSessions : 1, publishMembers);
+const sessionsToProvision = socketsPerAccount ? accounts : socketSessions + publishMembers - 1;
 const legacy = __ENV.LOAD_LEGACY === '1';
 const allowRejections = __ENV.LOAD_ALLOW_REJECTIONS === '1';
 const connectionsOnly = __ENV.LOAD_CONNECTIONS_ONLY === '1';
@@ -60,6 +63,7 @@ const published = new Counter('published_messages');
 const delivered = new Counter('delivered_messages');
 const attempted = new Counter('attempted_sends');
 const rejected = new Counter('rejected_sends');
+const rateLimited = new Counter('rate_limited_sends');
 const retryAfter = new Trend('retry_after_seconds');
 const invalidRetryAfter = new Counter('invalid_retry_after');
 const closed = new Counter('socket_closes');
@@ -100,9 +104,9 @@ export const options: Options = {
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function setup(): Setup {
-  const data = seed({ channels, subscribers, socketsPerSession, socketsPerAccount, visibility, legacy });
+  const data = seed({ channels, subscribers, socketsPerSession, socketsPerAccount, publishMembers, visibility, legacy });
   // A k6 exit 99 is a capacity result only after provisioning succeeded (load/proxy-results.ts).
-  console.log('LOAD_SETUP_COMPLETE ' + JSON.stringify({ sessions: data.tokens.length, accounts: socketsPerAccount ? data.tokens.length : 1 }));
+  console.log('LOAD_SETUP_COMPLETE ' + JSON.stringify({ sessions: data.tokens.length, accounts, publishMembers }));
   return data;
 }
 
@@ -130,6 +134,7 @@ export default async function (data: Setup): Promise<void> {
   const firstClose: number[] = [];
   attempted.add(0);
   rejected.add(0);
+  rateLimited.add(0);
   invalidRetryAfter.add(0);
   closed.add(0);
   reconnected.add(0);
@@ -225,6 +230,7 @@ export default async function (data: Setup): Promise<void> {
     attempted.add(1);
     const channel = index % publishChannels;
     const channelId = data.channelIds[channel];
+    const token = data.publisherTokens[index % data.publisherTokens.length];
     const body: SendMessageRequest = { client_message_id: uuid(), body: 'Load test message' };
     deliveries.start(body.client_message_id, Date.now(), subscribers);
     publishes.add(++activePublishes);
@@ -232,7 +238,7 @@ export default async function (data: Setup): Promise<void> {
     const started = Date.now();
     try {
       const response = await http.asyncRequest('POST', `${baseUrl}${organizationPath(data.organizationId, legacy)}/channels/${channelId}/messages`,
-        JSON.stringify(body), params('publish', data.token));
+        JSON.stringify(body), params('publish', token));
       publishResponseTime.add(Date.now() - started, { channel: String(channel) });
       if (response.status === 503 && allowRejections) {
         rejectedResponseTime.add(Date.now() - started);
@@ -243,6 +249,10 @@ export default async function (data: Setup): Promise<void> {
         else retryAfter.add(Number(retry));
         deliveries.cancel(body.client_message_id);
         return;
+      }
+      if (response.status === 429) {
+        rateLimited.add(1);
+        deliveries.cancel(body.client_message_id);
       }
       requireStatus(response, 201, 'send_message');
       const message = response.json() as Message;
@@ -297,7 +307,7 @@ export default async function (data: Setup): Promise<void> {
       accepted, refusals, acceptedSendRate: accepted / (Math.max(result.elapsedMs, sendCompletedAt - result.startedAt) / 1000),
       legacy, allowRejections, reconnect, connectBatch, connectInterval, requestTimeout,
       configuredSendRate: publishers * 1000 / interval, peakConnections, peakPublishes,
-      channels, publishChannels, subscribers, publishers, duration, interval, socketsPerSession, socketsPerAccount, sessions: data.tokens.length, accounts: socketsPerAccount ? data.tokens.length : 1, visibility,
+      channels, publishChannels, subscribers, publishers, publishMembers, duration, interval, socketsPerSession, socketsPerAccount, sessions: data.tokens.length, accounts, visibility,
       readyTimeout, drainTimeout }));
     const drainDeadline = Date.now() + drainTimeout * 1000;
     while (!failed && deliveries.missing > 0 && Date.now() < drainDeadline) await pause(10);
@@ -311,7 +321,7 @@ export default async function (data: Setup): Promise<void> {
   } finally {
     console.log('LOAD_PROGRESS ' + JSON.stringify({ offered, accepted, refusals, activeConnections, peakConnections,
       peakPublishes, perChannel, firstOfferedAt, lastOfferedAt, sendStartedAt, sendCompletedAt, missing: deliveries.missing,
-      channels, subscribers, publishers, duration, interval, socketsPerSession, connectBatch, connectInterval,
+      channels, subscribers, publishers, publishMembers, duration, interval, socketsPerSession, connectBatch, connectInterval,
       readyTimeout, drainTimeout, legacy, allowRejections, reconnect, requestTimeout }));
     closing = true;
     for (const socket of sockets) socket.close();
