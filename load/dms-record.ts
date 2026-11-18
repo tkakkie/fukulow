@@ -79,7 +79,7 @@ try {
         '-v', `${resolve('.')}:/work:ro`, '-v', `${output}/seed.json:/seed.json:ro`, '-v', `${output}/shard-${i}:/output`,
         '-e', 'BASE_URL=http://app:8080', '-e', `DM_SOCKETS=${count/4}`, '-e', `DM_OFFSET=${i*2500}`, '-e', `DM_SHARD=${i}`, '-e', `DM_SECONDS=${seconds}`, '-e', `DM_RATE=${process.env.DM_RATE || '500'}`, '-e', `DM_SEND_START=${process.env.DM_SEND_START || '40'}`, '-e', `DM_OPEN_RATE=${process.env.DM_OPEN_RATE || '5'}`, '-e', `DM_BROWSE_RATE=${process.env.DM_BROWSE_RATE || '25'}`,
         '-e', `DM_CONNECT_INTERVAL_MS=${process.env.DM_CONNECT_INTERVAL_MS || '500'}`,
-        'grafana/k6:1.8.2', 'run', '--out', 'json=/output/metrics.json', '/work/load/dms.ts'];
+        'grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276', 'run', '--out', 'json=/output/metrics.json', '/work/load/dms.ts'];
       const child = spawn('docker', args, { env }); children.push(child);
       let log = ''; child.stdout.on('data', b => { log += String(b); }); child.stderr.on('data', b => { log += String(b); });
       child.on('error', reject); child.on('close', code => { failed ||= code !== 0; writeFileSync(`${output}/shard-${i}/run.log`, log); writeFileSync(`${output}/shard-${i}/exit.json`, JSON.stringify({ code })); console.log(`Shard ${i} exit ${code}`); resolveRun(); });

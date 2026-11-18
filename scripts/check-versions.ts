@@ -31,6 +31,7 @@ export function checkVersions(files: {
   rust: string, node: string, webNode: string, loadNode: string, dockerfile: string,
   playwright: string, webLock: string, e2e: string,
   compose: string, acme: string, core: string, wasmBuild: string, ci: string,
+  makefile: string, dmsRecord: string,
 }): void {
   const rust = files.rust.match(/^channel = "([^"]+)"$/m)?.[1]
   const targets = files.rust.match(/^targets = \[([^\]]*)\]$/m)?.[1]
@@ -59,6 +60,13 @@ export function checkVersions(files: {
   const playwrightImage = images[0][1]
   assert.equal(playwrightImage.split('@')[0], `mcr.microsoft.com/playwright:v${files.playwright}-noble`, 'Playwright image must agree with package.json and use Noble')
   assert.match(playwrightImage, /^[^@]+@sha256:[a-f0-9]{64}$/, 'Playwright image digest must be sha256 with 64 hex digits')
+  const k6Images = [...files.makefile.matchAll(/^K6_IMAGE\s*:=\s*(\S+)[ \t]*$/gm)]
+  const dmsImages = [...files.dmsRecord.matchAll(/'(grafana\/k6:[^']+)'/g)]
+  assert.equal(k6Images.length, 1, 'Makefile must set exactly one K6_IMAGE')
+  assert.equal(dmsImages.length, 1, 'load/dms-record.ts must contain exactly one k6 image pin')
+  const k6Image = k6Images[0][1]
+  assert.match(k6Image, /^grafana\/k6:\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/, 'K6_IMAGE must pin exact tag and digest')
+  assert.equal(dmsImages[0][1], k6Image, 'load/dms-record.ts k6 image must match K6_IMAGE (tag and digest)')
   const bindgen = files.core.match(/wasm-bindgen = \{ version = "=(\d+\.\d+\.\d+)"/)?.[1]
   assert.ok(bindgen, 'wasm-bindgen must pin an exact version')
   // The image compiles the CLI with --locked; workflows install the checksum-pinned prebuilt release.
@@ -91,6 +99,7 @@ if (import.meta.main) {
     loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
     playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
     webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
+    makefile: read('Makefile'), dmsRecord: read('load/dms-record.ts'),
     compose: read('compose.yml'), acme: read('scripts/compose-acme.ts'), core: read('client-core/Cargo.toml'), wasmBuild: read('scripts/build-wasm.ts'), ci: read('.github/workflows/ci.yml') })
   checkInventory(JSON.parse(read('versions.json')).entries, read)
 }
