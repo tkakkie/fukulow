@@ -1,22 +1,18 @@
 # Decisions: load
 
-Load testing and measurement rules. Writing rules and the other parts: [index](../decisions.md).
+Load testing and measurement rules. [Index and writing rules](../decisions.md)
 
 ## Load testing and measurement
-- #20 load scaffold: `npm --prefix load ci && npm --prefix load run check && npm --prefix load test`; `make load` signs in to a disposable test Organization (`LOAD_EMAIL`, `LOAD_PASSWORD`; `LOAD_BOOTSTRAP=1` only for an empty DB). CI runs 5 sockets for 10 s.
-- #57 PR A: a fixed offered rate replaces response-paced sends: `PUBLISHERS` sends every `PUBLISH_INTERVAL_MS`; a missed deadline fails the run instead of reducing or bursting traffic. Missing deliveries, gaps and unexpected closes fail; no reconnect masking.
-- Compare before/after only with `make load-record` (isolated Compose project, dedicated PostgreSQL with pg_stat_statements, own cleanup, never the shared test DB), e.g. `CHANNELS=1 SUBSCRIBERS=20 PUBLISHERS=2 PUBLISH_INTERVAL_MS=100 DURATION_SECONDS=30` (#57).
-- Report SQL per offered send as top-level queries, all statements and statements incl. nested FK checks; pg_stat_database is supporting evidence only. Keep raw artifacts outside Git; reuse identical conditions for comparisons (#57).
-- #178 before/after: 6 -> 8 top-level queries per send is #146 Membership/revision authorization, not a hardening regression. The 10,000-socket HTTP p95 drop spans #134-#173 and #146, so it is not attributable to one change.
-- #178 harness: `make load-record` with `LOAD_DIRECT_NETWORK=1` (port-forwarding failed at 9,990 sockets), `LOAD_SERVER_SOURCE` for the worktree, `LOAD_LEGACY=1` only for pre-#146 builds; short windows are rejected. Never attach the raw artifact directory publicly (server logs, source patch).
-- Measurements so far are modest single-host runs: none establishes the 10k-connection target, a capacity or a latency guarantee. Heavy run: `CHANNELS=1 SUBSCRIBERS=10000 ... make load` with `nofile` 65536; one generator loop can saturate (#20).
+- #20 `make load` uses a disposable Organization with `LOAD_EMAIL`/`LOAD_PASSWORD`. `LOAD_BOOTSTRAP=1` requires an empty DB. CI smoke is five sockets for 10 s. For a 10k run use `CHANNELS=1 SUBSCRIBERS=10000` and set `nofile` to 65536. One generator loop can saturate. Modest single-host runs establish neither the 10k target nor capacity/latency guarantees.
+- #57 Offer a fixed rate (`PUBLISHERS` every `PUBLISH_INTERVAL_MS`), independent of response pace. Missed deadlines, missing deliveries, gaps or unexpected closes fail without bursts, slowing down or reconnect masking.
+- #57 Compare identical conditions only with `make load-record`: isolated Compose project, dedicated PostgreSQL with pg_stat_statements and own cleanup. Never use the shared test DB. Per offered send report top-level queries, all statements, and statements including nested FK checks. pg_stat_database only supports the count. Keep raw logs/source patches out of Git and public artifacts.
+- #178 Port forwarding failed at 9,990 sockets. Use `LOAD_DIRECT_NETWORK=1`. `LOAD_SERVER_SOURCE` selects the worktree. Use `LOAD_LEGACY=1` only for pre-#146. Short windows fail. [Load harness methods](../../load/measurements-archive.md#load-harness-methods-20-57)
 
-- #151 adopts DM performance acceptance (2026-11-14): 10,000 connections, 2,000 sends/s and spec/dms.md latency/DB/memory budgets. Reason: validate combined O5/write load; include hot bursts, notice loss, bootstrap, bounded backlog/drain and storage/WAL/lock/backup/restore cost.
+- #151 adopts DM performance acceptance at 10,000 connections and 2,000 sends/s with [latency/DB/memory budgets](../spec/dms.md). Mixed O5/write load must include hot bursts, notice loss, bootstrap, bounded backlog/drain and storage/WAL/lock/backup/restore costs.
 
-- #151: keep main at exactly 100 DMs/Member; measure held200 separately under full mixed load. Samples sum over ten Organizations; judge each Organization too. Reason: preserve fixture comparability and prevent aggregate tails from hiding an Organization failure.
-- #151 (2026-11-15): each mixed-load Organization needs ≥1,000 samples/class/attempt; first-page/deep browsing is judged only on a separate browsing Organization at full load. Reason: per-Organization tails stay visible, and the 100-DM fixture cannot supply deep continuations.
+- #151 Keep main fixture exactly 100 DMs/Member, with held200 separate at full mixed load for comparability. Sum samples across ten Organizations and judge each with ≥1,000 samples/class/attempt so aggregates cannot hide tails. Judge first-page/deep browse only on a separate browsing Organization at full load because the main fixture cannot supply deep continuations.
 
-- #151 absolute budgets are judged on hourly-rented Linux servers after the first deploy (#431); the developer Mac is only for same-machine comparisons (#426, #153, #196). Reason: on a Mac the generator shares the CPU and a VM is added (2026-11-15).
+- #151 Judge absolute budgets on hourly-rented Linux servers after first deploy (#431). Developer Mac comparisons must be same-machine only (#426/#153/#196) because generator CPU is shared and there is a VM.
 
 ## Entries in other parts
 
@@ -24,6 +20,6 @@ Entries that also govern this area, listed by the start of the entry in that par
 
 - [process](process.md): `#401: deployment/load app and migrate use`
 - [process](process.md): `k6 bumps are manual (Dependabot does`
-- [process](process.md): `#442 (maintainer, 2026-11-15): feature work`, `#442: large-scale measurement runs once`, `#442: measurement aims to find bottlenecks`, `#442: add no new files under`, `#442 (maintainer, 2026-11-16): the milestone cadence`
+- [process](process.md): `#442 Feature work comes first`, `#442 Once per milestone`
 - [messages](messages.md): `#160 Mutation thresholds are fixed`, `#160 The INVALID 2026-11-16`
 - [realtime](realtime.md): `#212 follows up handshake admission, listen`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`

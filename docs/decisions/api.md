@@ -1,46 +1,22 @@
 # Decisions: api
 
-API contract and generated types. Writing rules and the other parts: [index](../decisions.md).
+API contract and generated types. [Index and writing rules](../decisions.md)
 
 ## API contract
-- #301 POST /orgs/{org}/message-authors takes {ids}, returns {identities:[{id,name,deactivated}]}. Limit 100 before deduplication; excess is 400 ErrorBody. Omitted ids stay unresolved so foreign, unknown and unreadable authors are indistinguishable.
-- `make api` exports the contract without a database; `openapi-typescript` is pinned in an isolated npm environment because its TypeScript 5 peer conflicts with the SPA's TypeScript 6.
-- #23 published REST and `ClientMessage`/`ServerEvent` types before runtime work. Message pages: `after_seq` XOR `before_seq` (neither = latest), limit 50 default / 200 max, always ascending seq; `has_more` follows the queried direction.
-- `ListMessagesQuery` keeps every field optional in the shared schema; the limit default (50) lives only on REST query metadata so generated TypeScript accepts an omitted limit. Both keep min 1 / max 200.
-- WebSocket messages are serde-tagged `oneOf` with discriminator `type`, registered as schema roots; utoipa variants are lifted into named components for discriminator references. WebSocket auth never uses a query-string token.
-- Request bodies are capped at 16 KiB; only the Message send route allows 32 KiB (a 4,000-scalar body is up to ~24 KB JSON-escaped) (#17). Extraction errors map to `ErrorBody`: 400 invalid, 415 content type, 413 size.
-- WebSocket runtime promoted the existing serde_json to a production dependency; test-only tokio-tungstenite and futures-util reuse locked packages to exercise real upgrade/frame/close; no new locked packages (#18).
+- #301 Cap `POST /api/v1/orgs/{org}/message-authors` at 100 IDs before dedup (400 `ErrorBody` above). Leave omissions unresolved so foreign, unknown and unreadable authors stay indistinguishable.
+- `make api` exports without a database. Isolate pinned `openapi-typescript` because its TypeScript 5 peer conflicts with the SPA’s TypeScript 6.
+- #23 Message pages accept at most one of `after_seq`/`before_seq` (else latest), ascend by seq and set `has_more` in query direction. REST and shared schema both use 1..=200. REST metadata alone defaults to 50 so shared `ListMessagesQuery` fields stay optional.
+- #23 Register serde-tagged WS `oneOf` roots. Name utoipa variants for `type` discriminator refs. Never authenticate WS by query string.
+- #17 Cap bodies at 16 KiB, Message sends at 32 KiB (4,000 scalars escape to ~24 KB). `ErrorBody` maps invalid/content type/size to 400/415/413.
+- #18 Real upgrade/frame/close tests reuse locked tokio-tungstenite and futures-util as test-only deps. Runtime uses existing serde_json.
 
-- #151 opaque DM cursors use ring AES-256-GCM with a domain-separated setup-token key and random nonce. Reason: authenticate scopes and conceal discovery positions without custom crypto; ring was already lockfile-pinned through TLS.
+- #151 Use ring (already lockfile-pinned through TLS) for AES-256-GCM with domain-separated setup-token key and random nonce to authenticate scope and hide DM discovery positions without custom crypto.
 
 ## Entries in other parts
 
-Entries that also govern this area, listed by the start of the entry in that part.
+Related entries by prefix.
 
-- [messages](messages.md): `#152 proposes exact`, `#152 Mention counts share`
-- [realtime](realtime.md): `#152 Mention counts inherit`
-
-- [process](process.md): `#198 B: pinned tracing/subscriber`
-
-- [messages](messages.md): `#160 Event position and Message`, `#160 Required before any mutation`
-- [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
-- [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`
-- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM list responses`, `#151 DM list base limits`
-
-- [auth](auth.md): `#299 shared raw-text validation`
-- [messages](messages.md): `#299 Channel names are`, `#299 migration validates`
-
-- [messages](messages.md): `#204 sections belong`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
-- [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section display intersects`
-
-- [auth](auth.md): `#305 Owner may deactivate another active Member`, `#305 owns the deactivation transaction`
-
-- [process](process.md): `#195: shutdown also returns 503 for`
-
-- [messages](messages.md): `#311 PATCH /api/v1/orgs/{org}/channels/{id}/members/{member_id}`, `#311 Manager PATCH uses`
-
-- [auth](auth.md): `#304 PUT /api/v1/me/password takes`, `#304 wrong current password is 403`
-
-- [auth](auth.md): `#303 management follows`, `#303 retains random UUID cursor anchors`
-
-- [messages](messages.md): `#515 uses Organization UUID epochs`
+- [messages](messages.md): `#152 proposes exact`, `#152 Mention counts share`, `#160 Event position and Message`, `#160 Required before any mutation`, `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`, `#299 Channel names are`, `#299 migration validates`, `#204 sections belong`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`, `#311 PATCH /api/v1/orgs/{org}/channels/{id}/members/{member_id}`, `#311 Manager PATCH uses`, `#515 uses Organization UUID epochs`
+- [realtime](realtime.md): `#152 Mention counts inherit`, `#151 dm_list_changed targets`, `#151 DM list responses`, `#151 DM list base limits`, `#204 sections_changed goes only`, `#204 section display intersects`
+- [process](process.md): `#198 B: pinned tracing/subscriber`, `#195: shutdown also returns 503 for`
+- [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#299 shared raw-text validation`, `#305 Owner may deactivate another active Member`, `#305 owns the deactivation transaction`, `#304 PUT /api/v1/me/password takes`, `#304 wrong current password is 403`, `#303 management follows`, `#303 retains random UUID cursor anchors`
