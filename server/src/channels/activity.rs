@@ -177,6 +177,7 @@ struct InFlight {
 #[derive(Default)]
 struct Buffer {
     epoch: u64,
+    transition_epoch: u64,
     directory_epoch: u64,
     pending: VecDeque<Pending>,
     reset: bool,
@@ -364,12 +365,18 @@ impl Activity {
             .collect()
     }
     pub(crate) fn retire(&self, organization: Uuid, member: Uuid) {
+        self.retire_inner(organization, member, false);
+    }
+    fn retire_inner(&self, organization: Uuid, member: Uuid, transition: bool) {
         for (entry, _) in self
             .snapshot(organization)
             .into_iter()
             .filter(|(e, _)| e.member.0 == member)
         {
             let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if transition {
+                b.transition_epoch = b.transition_epoch.wrapping_add(1);
+            }
             b.epoch = b.epoch.wrapping_add(1);
             b.pending.clear();
             b.proofs.clear();
@@ -498,6 +505,16 @@ impl Activity {
             })
             .collect();
         let entries: Vec<_> = captured.iter().map(|(e, _)| e.clone()).collect();
+        #[cfg(test)]
+        if matches!(notice, Notice::ChannelMembersChanged { .. }) {
+            test_pause(
+                organization,
+                channel.unwrap_or(Uuid::nil()),
+                "members_query",
+                None,
+            )
+            .await;
+        }
         #[cfg(test)]
         test_pause(organization, channel.unwrap_or(Uuid::nil()), "query", None).await;
         #[cfg(test)]
@@ -919,6 +936,7 @@ struct TargetChange {
     before: TargetState,
     registrations: HashMap<Uuid, u64>,
     dm_peers: Vec<(Uuid, Uuid, bool)>,
+    retired: bool,
 }
 impl auth::activity::ActivityChanges for Activity {
     fn channel(
@@ -965,7 +983,10 @@ impl auth::activity::ActivityChanges for Activity {
                 .snapshot(organization)
                 .into_iter()
                 .filter(|(entry, _)| entry.member.0 == target)
-                .map(|(entry, epoch)| (entry.id, epoch))
+                .map(|(entry, _)| {
+                    let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                    (entry.id, b.transition_epoch)
+                })
                 .collect();
             Ok(Box::new(TargetChange {
                 activity: self.clone(),
@@ -974,6 +995,7 @@ impl auth::activity::ActivityChanges for Activity {
                 before: target_state(tx, organization, target).await?,
                 registrations,
                 dm_peers: dms::peer_changes(tx, organization, target).await?,
+                retired: false,
             }) as Box<dyn auth::activity::ActivityChange>)
         })
     }
@@ -984,12 +1006,20 @@ impl auth::activity::ActivityChanges for Activity {
     }
 }
 impl auth::activity::ActivityChange for TargetChange {
-    fn committed(mut self: Box<Self>, pool: sqlx::PgPool) {
+    fn retire(&mut self) {
+        if self.retired {
+            return;
+        }
+        self.retired = true;
         // Retire old work synchronously with observed transition, before starting another snapshot.
-        self.activity.retire(self.organization, self.target);
+        self.activity
+            .retire_inner(self.organization, self.target, true);
         self.activity.directory_epochs = Some(Arc::new(
             self.activity.advance_directory_epochs(self.organization),
         ));
+    }
+    fn committed(mut self: Box<Self>, pool: sqlx::PgPool) {
+        self.retire();
         self.activity.epochs = Some(Arc::new(
             self.activity
                 .snapshot(self.organization)
@@ -1003,6 +1033,14 @@ impl auth::activity::ActivityChange for TargetChange {
         tokio::spawn(async move {
             let _slot = slot;
             let work = async {
+                #[cfg(test)]
+                test_pause(
+                    self.organization,
+                    Uuid::nil(),
+                    "target_state",
+                    Some(self.target),
+                )
+                .await;
                 let after = crate::database::organization_read_only(
                     &pool,
                     self.organization,
@@ -1148,11 +1186,14 @@ impl Activity {
         let captured: Vec<_> = self
             .snapshot(organization)
             .into_iter()
-            .filter(|(e, epoch)| {
+            .filter(|(e, _)| {
                 e.member.0 == target
-                    && registrations
-                        .get(&e.id)
-                        .is_some_and(|before| *epoch == before.wrapping_add(1))
+                    && registrations.get(&e.id).is_some_and(|before| {
+                        // Subscription loss can retire ordinary work again. Only
+                        // this mutation may advance its captured transition token.
+                        let b = e.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                        b.transition_epoch == before.wrapping_add(1)
+                    })
             })
             .collect();
         #[cfg(test)]
@@ -1323,12 +1364,11 @@ impl Drop for BatchLease {
 
 #[cfg(test)]
 pub(crate) struct TestGate {
-    member: Option<Uuid>,
     pub entered: Semaphore,
     pub release: Semaphore,
 }
 #[cfg(test)]
-type TestGates = Mutex<HashMap<(Uuid, Uuid, &'static str), Arc<TestGate>>>;
+type TestGates = Mutex<HashMap<(Uuid, Uuid, &'static str, Option<Uuid>), Arc<TestGate>>>;
 #[cfg(test)]
 static TEST_GATES: std::sync::LazyLock<TestGates> = std::sync::LazyLock::new(Mutex::default);
 #[cfg(test)]
@@ -1343,29 +1383,23 @@ pub(crate) fn pause_member(
     member: Option<Uuid>,
 ) -> Arc<TestGate> {
     let gate = Arc::new(TestGate {
-        member,
         entered: Semaphore::new(0),
         release: Semaphore::new(0),
     });
     TEST_GATES
         .lock()
         .unwrap()
-        .insert((organization, channel, phase), gate.clone());
+        .insert((organization, channel, phase, member), gate.clone());
     gate
 }
 #[cfg(test)]
 async fn test_pause(organization: Uuid, channel: Uuid, phase: &'static str, member: Option<Uuid>) {
     let gate = {
         let mut gates = TEST_GATES.lock().unwrap();
-        let key = (organization, channel, phase);
-        if gates
-            .get(&key)
-            .is_some_and(|gate| gate.member.is_none() || gate.member == member)
-        {
-            gates.remove(&key)
-        } else {
-            None
-        }
+        // Independent socket gates must not replace each other at the same boundary.
+        gates
+            .remove(&(organization, channel, phase, member))
+            .or_else(|| gates.remove(&(organization, channel, phase, None)))
     };
     if let Some(gate) = gate {
         gate.entered.add_permits(1);
