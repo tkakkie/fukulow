@@ -3,7 +3,10 @@ use super::{
     *,
 };
 use crate::auth::admission_tests::without_time_advance;
-use sqlx::{Connection, PgConnection};
+use sqlx::{
+    Connection, PgConnection,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use std::{
     future::{Future, poll_fn},
     net::SocketAddr,
@@ -94,19 +97,16 @@ fn connections_in_use(pool: &PgPool) -> usize {
     (pool.size() as usize).saturating_sub(pool.num_idle())
 }
 
-async fn sample_pool_peak(
-    pool: &PgPool,
-    request: impl Future<Output = Response>,
-) -> (Response, usize) {
+async fn sample_pool_peak<F: Future>(pool: &PgPool, future: F) -> (F::Output, usize) {
     let mut peak = connections_in_use(pool);
-    let mut request = std::pin::pin!(request);
-    let response = poll_fn(|cx| {
-        let result = request.as_mut().poll(cx);
+    let mut future = std::pin::pin!(future);
+    let output = poll_fn(|cx| {
+        let result = future.as_mut().poll(cx);
         peak = peak.max(connections_in_use(pool));
         result
     })
     .await;
-    (response, peak)
+    (output, peak)
 }
 
 async fn throttle_error(response: Response) {
@@ -187,7 +187,19 @@ async fn full_email_budget_rejects_sign_ins_before_db_and_password_change_before
     tokio::time::resume();
 }
 
-async fn owner_waits_for_wrong_passwords(pool: PgPool, change_password: bool) {
+async fn owner_waits_for_wrong_passwords(
+    pool_options: PgPoolOptions,
+    connect_options: PgConnectOptions,
+    change_password: bool,
+) {
+    const IN_FLIGHT_ATTEMPTS: u8 = 3;
+    let bound = usize::from(IN_FLIGHT_ATTEMPTS) + 1 + 1; // Owner operation and slack.
+    // Leave room for the pool to exceed B3 so its cap cannot mask a regression.
+    let pool = pool_options
+        .max_connections(6)
+        .connect_with(connect_options)
+        .await
+        .unwrap();
     let f = fixture(&pool).await;
     let workers = Box::leak(Box::new(PasswordWorkers::new()));
     let app = app_with_workers(f.state.clone(), workers);
@@ -196,52 +208,65 @@ async fn owner_waits_for_wrong_passwords(pool: PgPool, change_password: bool) {
         .unwrap();
 
     tokio::time::pause();
+    let expected = if change_password { (2, 1) } else { (3, 0) };
     without_time_advance(async {
-        let wrong = WrongPasswords::start(&app, workers, 3).await;
-        wait_for_backends(&mut observer, (2, 0)).await;
-        let owner = tokio::spawn({
-            let app = app.clone();
-            let token = f.current.clone();
-            let pool = f.state.pool.clone();
-            async move {
-                sample_pool_peak(&pool, async {
+        // The watchdog keeps polling the sampler during the detached password change.
+        let (response, peak) = sample_pool_peak(&f.state.pool, async {
+            let wrong = WrongPasswords::start(&app, workers, IN_FLIGHT_ATTEMPTS).await;
+            wait_for_backends(&mut observer, (2, 0)).await;
+            let owner = tokio::spawn({
+                let app = app.clone();
+                let token = f.current.clone();
+                async move {
                     if change_password {
                         owner_changes_password(&app, &token).await
                     } else {
                         owner_sign_in(&app, PASSWORD).await
                     }
-                })
-                .await
-            }
-        });
-        let expected = if change_password { (2, 1) } else { (3, 0) };
-        wait_for_backends(&mut observer, expected).await;
-        assert_eq!(connections_in_use(&f.state.pool), 4);
-        assert!(!owner.is_finished());
+                }
+            });
+            wait_for_backends(&mut observer, expected).await;
+            assert_eq!(connections_in_use(&f.state.pool), 4);
+            assert!(!owner.is_finished());
 
-        wrong.finish().await;
+            wrong.finish().await;
+            owner.await.unwrap()
+        })
+        .await;
+        let pool_max = f.state.pool.options().get_max_connections() as usize;
+        assert!(peak <= bound, "sampled pool peak {peak} exceeds B3 bound {bound}");
+        assert!(peak < pool_max, "sampled pool peak {peak} reached pool maximum {pool_max}");
+        let expected_peak = if change_password { 5 } else { 4 };
+        assert_eq!(peak, expected_peak, "sampled pool peak");
+
         let (status, password) = if change_password {
             (StatusCode::NO_CONTENT, NEW_PASSWORD)
         } else {
             (StatusCode::OK, PASSWORD)
         };
-        let (response, peak) = owner.await.unwrap();
         assert_eq!(response.status(), status);
-        eprintln!("Owner admitted: Account waiters {expected:?} (sign-in, password change), 4 held connections, sampled owner pool peak {peak}");
+        eprintln!("Owner admitted: Account waiters {expected:?} (sign-in, password change), 4 held connections, sampled pool peak {peak} (B3 bound {bound}, pool maximum {pool_max})");
         assert_eq!(f.state.sign_in_throttle.pending_counts(), (0, 0));
         assert_eq!(account_waiters(&mut observer).await, (0, 0));
         assert_eq!(owner_sign_in(&app, password).await.status(), StatusCode::OK);
     })
     .await;
     tokio::time::resume();
+    pool.close().await;
 }
 
 #[fukulow_test::test]
-async fn admitted_owner_sign_in_waits_behind_wrong_passwords(pool: PgPool) {
-    owner_waits_for_wrong_passwords(pool, false).await;
+async fn admitted_owner_sign_in_waits_behind_wrong_passwords(
+    pool_options: PgPoolOptions,
+    connect_options: PgConnectOptions,
+) {
+    owner_waits_for_wrong_passwords(pool_options, connect_options, false).await;
 }
 
 #[fukulow_test::test]
-async fn admitted_owner_password_change_waits_behind_wrong_passwords(pool: PgPool) {
-    owner_waits_for_wrong_passwords(pool, true).await;
+async fn admitted_owner_password_change_waits_behind_wrong_passwords(
+    pool_options: PgPoolOptions,
+    connect_options: PgConnectOptions,
+) {
+    owner_waits_for_wrong_passwords(pool_options, connect_options, true).await;
 }
