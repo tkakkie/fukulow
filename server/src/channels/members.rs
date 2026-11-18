@@ -273,7 +273,7 @@ async fn mutate_inner(
             resource,
         )?;
         let (member, revision) = target_member?;
-        let notice = state.session_changes.capture_activity(tx, org, target, Some(channel)).await?;
+        let notice = state.session_changes.capture_activity(tx, org, target, auth::activity::ChangeScope::Channel(channel)).await?;
         let changed = if let Mutation::Manager(value) = mutation {
             if member.role == Role::Guest {
                 return Err(ApiError(

@@ -3,6 +3,7 @@ import { createActivity, createActivityTarget, type ActivityTarget } from './act
 import { createNavigationTargets } from './navigation-targets'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
+import type { MemberListAccess } from './members'
 import { createChannels, type ChannelsApi } from './channels'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
 import { repliesApi, type RepliesApi } from './replies'
@@ -25,6 +26,7 @@ export type SessionOptions = {
   repliesApi?: RepliesApi
   unreadApi?: UnreadApi
   dmsApi?: DmsApi
+  initialRole?: api.Role
   onIdentity?: (identity: api.Identity) => void
   onIdentityInvalidated?: () => void
   sync?: Partial<SyncOptions>
@@ -188,10 +190,25 @@ export function createSession(options: SessionOptions) {
     dms?.close()
     void sync.unavailable()
   }
+  let listAccess: MemberListAccess = options.initialRole ?? 'guest'
+  const memberListAccess = () => listAccess
   const capabilities = createActivityTarget({
     load: signal => observe(api.getOrganizationMe(organizationId, undefined, signal)),
-    accept: identity => options.onIdentity?.(identity),
-    hide: () => options.onIdentityInvalidated?.(),
+    accept: identity => {
+      listAccess = identity.member.role
+      // Resume held lists after revalidation. A confirmed Guest starts with no rows.
+      activity.invalidateMemberLists()
+      options.onIdentity?.(identity)
+    },
+    hide: () => {
+      if (listAccess !== null) listAccess = listAccess === 'guest' ? null : 'revalidating'
+      options.onIdentityInvalidated?.()
+    },
+    error: () => {
+      if (listAccess === null) return
+      listAccess = null
+      activity.invalidateMemberLists()
+    },
     terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.error === 'organization_unavailable'),
   })
   activity.hold('capabilities', capabilities)
@@ -232,13 +249,14 @@ export function createSession(options: SessionOptions) {
   void channels.load()
   return {
     sync, topics, replies, replyCounts, unread, channels, dms, navigationTargets,
+    memberListAccess,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
       memberControllers.get(channel)?.close()
       const controller = createChannelMembers(organizationId, channel, r => {
         if (!r.ok && r.kind === 'http' && r.status === 401) notifyEnded()
         else if (!closed && api.isOrganizationUnavailable(r)) terminate()
-      }, api, () => { void sync.channelUnavailable(channel) }, () => channels.load())
+      }, api, () => { void sync.channelUnavailable(channel) }, () => channels.load(), memberListAccess)
       memberControllers.set(channel, controller)
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable'
       memberAvailability.set(channel, lost)

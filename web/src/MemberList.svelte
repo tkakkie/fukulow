@@ -25,11 +25,19 @@
   } = $props()
 
   let email = $state('')
-  let deactivating = $state<Member | null>(null)
+  let deactivatingId = $state<string | null>(null)
   let summary = $state<HTMLElement | null>(null)
   let role = $state<Role>('member')
   const s = $derived(model.state)
   const capabilities = $derived(identity.organization.capabilities)
+  const deactivating = $derived(s.members.find(member => member.id === deactivatingId && canDeactivate(member)))
+
+  function canDeactivate(member: Member) {
+    return capabilities.can_deactivate_members.allowed && member.id !== identity.member.id &&
+      (identity.member.role === 'owner' || member.role !== 'owner')
+  }
+
+  $effect(() => { if (deactivatingId !== null && !deactivating) deactivatingId = null })
 </script>
 
 <details class="member-list" ontoggle={event => { if (event.currentTarget.open) { onopen?.(); if (capabilities.can_invite.allowed) void model.invites.load() } }}>
@@ -39,7 +47,8 @@
       <p class="member-list__meta">読み込み中…</p>
     {/if}
     {#if s.error}
-      <StatusBanner tone="danger" role="alert" message={s.error} />
+      <StatusBanner tone="danger" role="alert" message={s.error}
+        actionLabel={s.retryable ? '再試行' : undefined} onaction={s.retryable ? () => void model.retry() : undefined} />
     {/if}
     <ul class="member-list__items">
       {#each s.members as member (member.id)}
@@ -68,8 +77,8 @@
               </select>
             </label>
           {/if}
-          {#if capabilities.can_deactivate_members.allowed && member.id !== identity.member.id && (identity.member.role === 'owner' || member.role !== 'owner')}
-            <Button disabled={s.busy} onclick={() => deactivating = member}>{member.name}を無効化</Button>
+          {#if canDeactivate(member)}
+            <Button disabled={s.busy} onclick={() => deactivatingId = member.id}>{member.name}を無効化</Button>
           {/if}
         </li>
       {/each}
@@ -108,10 +117,10 @@
   </div>
 </details>
 
-<Dialog open={deactivating !== null} title="メンバーを無効化しますか？"
+<Dialog open={deactivating !== undefined} title="メンバーを無効化しますか？"
   description={`${deactivating?.name ?? ''}はこの組織を利用できなくなります。過去のメッセージは残ります。`}
-  confirmLabel="無効化する" returnFocusFallback={summary} oncancel={() => deactivating = null}
-  onconfirm={() => { const target = deactivating; deactivating = null; if (target) void model.deactivate(target.id).then(ok => { if (ok) { onchanged(target.id); summary?.focus() } }) }} />
+  confirmLabel="無効化する" returnFocusFallback={summary} oncancel={() => deactivatingId = null}
+  onconfirm={() => { const target = deactivating; deactivatingId = null; if (target) void model.deactivate(target.id).then(ok => { if (ok) { onchanged(target.id); summary?.focus() } }) }} />
 
 <style>
   .member-list {

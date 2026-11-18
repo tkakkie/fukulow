@@ -37,6 +37,7 @@ it('refreshes Members on Channel list additions removals access loss and reconne
   const stop = watchMemberAccess(session.channels, session.sync, refresh)
   net.socket.onReady(); await settle()
   expect(refresh).toHaveBeenCalledTimes(1)
+  expect(refresh).toHaveBeenLastCalledWith('refresh')
   net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await settle()
   expect(refresh).toHaveBeenCalledTimes(2)
   net.subscribed('A', 0); await settle()
@@ -48,15 +49,19 @@ it('refreshes Members on Channel list additions removals access loss and reconne
   const added = session.channels.load()
   net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('B')] })); await added
   expect(refresh).toHaveBeenCalledTimes(1)
+  expect(refresh).toHaveBeenLastCalledWith('refresh')
   const removed = session.channels.load()
   net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await removed
   expect(refresh).toHaveBeenCalledTimes(2)
+  expect(refresh).toHaveBeenLastCalledWith('access')
   net.event({ type: 'channel_access_lost', channel_id: 'A' }); await settle()
   expect(refresh).toHaveBeenCalledTimes(3)
+  expect(refresh).toHaveBeenLastCalledWith('access')
   net.socket.onClose(1011); await settle()
   await vi.advanceTimersByTimeAsync(2_000); await settle()
   net.socket.onReady(); await settle()
   expect(refresh).toHaveBeenCalledTimes(4)
+  expect(refresh).toHaveBeenLastCalledWith('refresh')
   stop()
   const after = session.channels.load()
   net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] })); await after

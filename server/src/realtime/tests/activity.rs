@@ -1881,13 +1881,13 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
             tx: &'a mut sqlx::PgConnection,
             organization: Uuid,
             target: Uuid,
-            channel: Option<Uuid>,
+            scope: ChangeScope,
         ) -> Capture<'a> {
             Box::pin(async move {
                 Ok(Box::new(OrderedChange {
                     inner: self
                         .activity
-                        .capture(tx, organization, target, channel)
+                        .capture(tx, organization, target, scope)
                         .await?,
                     started: self.started.clone(),
                 }) as Box<dyn ActivityChange>)
@@ -2189,7 +2189,9 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
 
 #[fukulow_test::test]
 async fn socket_registered_after_access_removal_receives_no_old_revocation(pool: PgPool) {
-    use crate::auth::activity::{ActivityChange, ActivityChanges, Capture, ChannelChange};
+    use crate::auth::activity::{
+        ActivityChange, ActivityChanges, Capture, ChangeScope, ChannelChange,
+    };
     struct DelayedChanges {
         activity: crate::channels::activity::Activity,
         entered: std::sync::Arc<tokio::sync::Semaphore>,
@@ -2209,13 +2211,13 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
             tx: &'a mut sqlx::PgConnection,
             organization: Uuid,
             target: Uuid,
-            channel: Option<Uuid>,
+            scope: ChangeScope,
         ) -> Capture<'a> {
             Box::pin(async move {
                 Ok(Box::new(DelayedChange {
                     change: self
                         .activity
-                        .capture(tx, organization, target, channel)
+                        .capture(tx, organization, target, scope)
                         .await?,
                     entered: self.entered.clone(),
                     release: self.release.clone(),

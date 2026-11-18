@@ -505,7 +505,7 @@ impl Connection<'_> {
                 biased;
                 _ = Self::access_changed(&mut self.access) => { self.retire_lost(socket).await?; continue; },
                 Some(notice) = activity.next() => {
-                    if let Some(result) = notice.handoff(|event| Self::event(socket, event.into())).await { result?; }
+                    if let Some(result) = notice.handoff(&self.state.pool, |event| Self::event(socket, event.into())).await { result?; }
                     continue;
                 },
                 frame = socket.recv() => frame,

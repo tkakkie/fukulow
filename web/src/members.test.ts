@@ -96,7 +96,7 @@ describe('Members controller', () => {
     await Promise.resolve()
     expect(listMembers).toHaveBeenCalledTimes(3)
     expect(lookupAuthors).not.toHaveBeenCalled()
-    expect(c.get().members).toEqual([member])
+    expect(c.get().members).toEqual([])
     expect(c.authors.get().get(member.id)?.name).toBe(member.name)
     finishes[2]({ ok: false, kind: 'http', status: 401 }); await late
     expect(ended).toHaveBeenCalledOnce()
@@ -313,6 +313,46 @@ it('held Member loads coalesce with reconciliation, replace author Maps and reje
     expect(c.authors.get()).not.toBe(initial)
     expect(c.authors.get().has(member.id)).toBe(false)
   } finally { activity.close(); c.close(); vi.useRealTimers() }
+})
+
+it('retains or withholds Member directory rows by viewer Role while rejecting stale refetches', async () => {
+  vi.useFakeTimers()
+  try {
+    for (const reason of ['periodic', 'reconcile', 'access'] as const) {
+      for (const guest of [false, true]) {
+        const self: Member = { id: 'self', name: '本人', role: guest ? 'guest' : 'member' }
+        const initial = [self, member]
+        const refreshed = [self]
+        const displayed = guest ? [] : initial
+        const context = `${reason}, guest=${guest}`
+        let resolveStale!: (result: Result<MemberList>) => void
+        const listMembers = vi.fn()
+          .mockResolvedValueOnce(ok({ members: initial }))
+          .mockImplementationOnce(() => new Promise(resolve => { resolveStale = resolve }))
+          .mockResolvedValueOnce({ ok: false, kind: 'http', status: 503, retryAfterMs: 1000 })
+          .mockResolvedValueOnce(ok({ members: refreshed }))
+        const c = createMembers(org, vi.fn(), vi.fn(), {
+          listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+        }, () => self.role)
+        c.activityTarget.held()
+        try {
+          await c.load()
+          expect(c.get().members).toEqual(initial)
+          const stale = c.load()
+          c.activityTarget.invalidate(reason)
+          expect(c.get(), context).toMatchObject({ members: displayed, loading: guest })
+          resolveStale(ok({ members: [self, { ...member, name: '古い名前' }] }))
+          await stale
+          expect(c.get().members, context).toEqual(displayed)
+          await vi.advanceTimersByTimeAsync(200)
+          expect(c.get(), context).toMatchObject({ members: [], loading: false, retryable: true })
+          expect(c.get().error, context).not.toBe('')
+          await vi.advanceTimersByTimeAsync(1000)
+          expect(c.get(), context).toMatchObject({ members: refreshed, loading: false, error: '' })
+        } finally { c.close() }
+      }
+    }
+  } finally { vi.useRealTimers() }
 })
 
 it('held Member loads retain Membership loss and late 401 authority across invalidation and shutdown', async () => {
