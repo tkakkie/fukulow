@@ -15,7 +15,7 @@ Run `MEASURE_TOPICS=10000 cargo test --release -p fukulow-server --lib measure_t
 
 ## Graceful shutdown and reconnect (#195)
 
-2026-11-11 JST (#195, PR #207). The pinned 10,000-socket repeat recovered subscriptions in 3,410 ms (Docker restart 461 ms). Three probes with 2,048 queued or in-flight sends drained in 777.360 / 813.652 / 804.816 ms. Evidence for [60 s drain and 75 s Compose grace](decisions/realtime.md#real-time-delivery) and [full jitter](decisions/web.md#web-client).
+2026-11-11 JST, PR #207 (before the send limiter, one publishing Member). The pinned 10,000-socket repeat resubscribed in 3,410 ms (461 ms Docker restart). Three 2,048-send probes drained in 777.360 / 813.652 / 804.816 ms. Evidence for [60 s drain and 75 s Compose grace](decisions/realtime.md#real-time-delivery) and [full jitter](decisions/web.md#web-client).
 
 Run `LOAD_RECONNECT_STORM=1 LOAD_DIRECT_NETWORK=1 CHANNELS=1 SUBSCRIBERS=10000 SOCKETS_PER_SESSION=500 CONNECT_BATCH=100 CONNECT_INTERVAL_MS=100 PUBLISHERS=1 DURATION_SECONDS=3 PUBLISH_INTERVAL_MS=500 READY_TIMEOUT_SECONDS=120 DRAIN_TIMEOUT_SECONDS=30 make load-record` (`load/record.ts`) and `cargo test --release -p fukulow-server --lib measure_sigterm_under_concurrent_sends -- --ignored --nocapture` with isolated PostgreSQL 18.6. Storm publishes after recovery. Native Mac drain releases COMMIT gates immediately and excludes deployed teardown. [Reconnect record](../load/measurements-archive.md#graceful-shutdown-and-reconnect-storm-195-2026-11-11-jst) · [Drain record](../load/measurements-archive.md#195-round-1-concurrent-send-sigterm-drain-2026-11-11-jst)
 
@@ -39,7 +39,7 @@ Run `MEASURE_UNREAD=before npm --prefix web test -- src/unread-memory.test.ts --
 
 ## RLS before and after (#314 step 5)
 
-2026-11-13 JST (#343). One-time [RLS performance exception](decisions/auth.md#auth-accounts-and-tenancy): eight-client history p95 0.335 → 0.389 ms (+16.1%) and replay +6.3% across eight runs per side. Modest send throughput and HTTP p95 changed 0.0%. #357 tracks a stable-host API rerun.
+2026-11-13 JST, #343 (before the send limiter, one publishing Member). One-time [RLS performance exception](decisions/auth.md#auth-accounts-and-tenancy): eight-client history p95 0.335 → 0.389 ms (+16.1%) and replay +6.3% across eight runs per side. Modest send throughput and HTTP p95 changed 0.0%. #357 tracks a stable-host API rerun.
 
 Compare `6dcadb7` and `a999a35` using `load/hot-plans/seed.sql` and `HOTPLANS_CONTAINER="$DB" LATENCY_CTX=1 LATENCY_CLIENTS=8 LATENCY_SECONDS=30 node load/hot-latency.ts`; sends use `make load-record`. Shared-host drift and explicit pgbench context transactions limit attribution. Supplemental runner was external. [Method](../load/measurements-archive.md#rls-beforeafter-314-step-5-2026-11-13-jst) · [Confirmation](../load/measurements-archive.md#mitigation-candidates-314-step-5) · [Decision](../load/measurements-archive.md#maintainer-decision-exception-to-the-10-criterion-314-step-5-2026-11-13)
 
@@ -57,7 +57,7 @@ From `server/` with local PostgreSQL and `ulimit -n 100000`, run `MEASURE_READ_B
 
 ## Light k6 run (#351)
 
-2026-11-18 JST, Caddy Compose on macOS. `PUBLISH_MEMBERS=8 make load` with the CI bootstrap settings passed in 11.39 s (55 s cap), with 80 sends, 400 deliveries and zero 429s at burst 10 and refill 1/s. Earlier light CI used one publishing Member, burst 10,000 and refill 1,000/s.
+2026-11-18 JST, `b156fba`, Caddy Compose on macOS. Eight publishing Members, 11.39 s (55 s cap), 80 sends, 400 deliveries, zero 429s at burst 10 and refill 1/s. From `5fa245f` until `b156fba`, light CI used one publishing Member, burst 10,000 and refill 1,000/s. [CI reproduction](../load/measurements-archive.md#light-k6-reproduction-351)
 
 ## Sustained write throughput (#309)
 
