@@ -106,6 +106,9 @@ async fn mention_counts_dedup_own_independent_positions_marks_and_no_backfill(po
     assert_eq!(other["channels"][0]["mention_unread_count"], 2);
     let other_topic = projection(&fresh, &other_viewer, channel, &format!("topics/{t}")).await;
     assert_eq!(other_topic["topic"]["mention_unread_count"], 1);
+    assert_eq!(other["channels"][0]["main_unread_count"], 3);
+    assert_eq!(other["channels"][0]["unread_count"], 6);
+    assert_eq!(other_topic["topic"]["unread_count"], 3);
     // Simulate a pre-Mention Message carrying the exact historical token.
     let historical = sent(
         &app,
