@@ -1247,3 +1247,9 @@ A one-request probe (`GET /api/v1/health`) from the same network mode reported H
 | 6 | 2.4.0 | 0 | 16.00 | 16.00 | 15.25 | 10.4 s | 21 s |
 
 Every run: 80 attempted and published sends, 400 deliveries, `load_errors` 0, `missing_deliveries` 0, `rejected_sends` 0, `rate_limited_sends` 0, `http_req_failed` rate 0, checks 202 passed / 0 failed, `socket_reconnects` 0, five `socket_closes{code:1000}` and no other close codes, no failed thresholds, and no watchdog cap reached. The two versions produced the same counts and the same outcome. Three runs per arm on a shared Mac cannot separate the latency differences from noise; no performance conclusion is drawn. The 2.4.0 runs start a separate 2.x baseline; do not compare them with 1.x latency records.
+
+## Superseded light k6 summary (#351, moved 2026-11-19)
+
+Moved verbatim from `docs/measurements.md` when the 2.x baseline replaced it (only the link target is adjusted for this file):
+
+2026-11-18 JST, `b156fba`, Caddy Compose on macOS. Eight publishing Members, 11.39 s (55 s cap), 80 sends, 400 deliveries, zero 429s at burst 10 and refill 1/s. From `5fa245f` until `b156fba`, light CI used one publishing Member, burst 10,000 and refill 1,000/s. [CI reproduction](#light-k6-reproduction-351)
