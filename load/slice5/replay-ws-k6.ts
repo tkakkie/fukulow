@@ -6,6 +6,7 @@ import { SharedArray } from 'k6/data';
 import { Counter, Trend } from 'k6/metrics';
 import type { Options } from 'k6/options';
 import { WebSocket } from 'k6/websockets';
+import { consecutivePositions } from '../events.ts';
 
 const data = JSON.parse(open('/fixture/data.json')) as { organization: string; channel: string; generation: string | null };
 const tokens = new SharedArray<string>('members', () => JSON.parse(open('/fixture/tokens.json')));
@@ -42,7 +43,7 @@ export default function () {
       latency.add(Date.now() - sent); replays.add(1); done = true; clearTimeout(timer);
       // Every position from the cursor through caught_up_seq, consecutive, at least the gap.
       const through = e.caught_up_seq ?? -1, expected = through - after;
-      if (expected < gap || seen.length < expected || seen.slice(0, expected).some((s, i) => s !== after + 1 + i)) invalid.add(1);
+      if (expected < gap || !consecutivePositions(seen, after, through)) invalid.add(1);
       socket.close();
     }
   });
