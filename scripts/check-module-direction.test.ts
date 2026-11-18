@@ -257,6 +257,8 @@ pub fn make() -> Item { Item { count: 1 } }
   const denied: Record<string, string> = {
     'direct import': 'use crate::messages::Message;',
     'grouped import': 'use crate::{auth::Identity, messages::{Message as Alias}};',
+    'empty import group': 'use crate::messages::{};',
+    'nested empty import group': 'use crate::{messages::{}};',
     'code path': 'fn f() { let _ = crate::messages::Message; }',
     'super path': 'mod inner { fn f(_: super::super::messages::Message) {} }',
     'module alias': 'use crate::messages as bridge; fn f(_: bridge::Message) {}',
@@ -573,8 +575,13 @@ mod lib { use crate::realtime; }
 
   await t.test('block-local macro aliases shadow root module names', () => {
     const source = fixture(`
+mod local {
+    pub mod messages { pub(crate) use super::super::lower_empty; }
+}
 fn f() { use crate::channels as messages; messages::lower_empty!(); }
 fn g() { extern crate self as local; local::channels::lower_empty!(); }
+fn h() { use self::{local::messages::{self}}; messages::lower_empty!(); }
+fn i() { use self::{local::*}; messages::lower_empty!(); }
 `)
     const baseline = compile(source, false)
     assert.equal(baseline.status, 0, baseline.stderr)

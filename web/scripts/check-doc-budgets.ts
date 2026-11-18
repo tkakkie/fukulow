@@ -5,7 +5,7 @@ import { join, relative, sep } from 'node:path'
 // Initial budgets round each file's size plus 10% headroom up to the next KiB.
 const BUDGETS_KIB = new Map<string, number>([
   ['AGENTS.md', 10],
-  ['docs/decisions.md', 2],
+  ['docs/decisions.md', 1],
   ['docs/decisions/api.md', 3],
   ['docs/decisions/auth.md', 11],
   ['docs/decisions/load.md', 4],
@@ -31,8 +31,8 @@ const BUDGETS_KIB = new Map<string, number>([
   ['docs/spec/dms.md', 60],
   ['docs/spec/realtime.md', 74],
   ['docs/spec/sections.md', 21],
-  ['docs/ui.md', 25],
-  ['docs/workflow.md', 33],
+  ['docs/ui.md', 24],
+  ['docs/workflow.md', 28],
 ])
 
 export function checkDocBudgets(root: string, budgets: ReadonlyMap<string, number> = BUDGETS_KIB): string[] {
