@@ -6,7 +6,7 @@ import { resolve, relative, isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { workload, type Config } from './signin-workload.ts';
-import { resourceSample, summarize, type Sample } from './signin-summary.ts';
+import { judgePartA, poolAcquireTimeoutInLog, resourceSample, summarize, type Sample } from './signin-summary.ts';
 import type { NativeSessionResponse, SetupRequest } from '../web/src/api-schema.d.ts';
 const exec = promisify(execFile);
 function integer(key: string, fallback: number, max = 1_000_000) {
@@ -62,6 +62,7 @@ const samplingErrors: string[] = [];
 let timer: ReturnType<typeof setInterval> | undefined;
 let sampling: Promise<void> | undefined;
 let result: Awaited<ReturnType<typeof workload>> | undefined;
+let judgment: ReturnType<typeof judgePartA> | undefined;
 let failed = false;
 let phase = 'source';
 let serverCommit: string | null = null;
@@ -148,7 +149,13 @@ try {
   await delay(idleMs,undefined,{signal:controller.signal});
   await sample(true);
   if (controller.signal.aborted || !postIdleSample || samplingErrors.length) throw new Error('Incomplete idle measurement');
-  console.log('SIGNIN_SUMMARY '+JSON.stringify(summarize(result.attempts,samples,postIdleSample)));
+  const summary = summarize(result.attempts,samples,postIdleSample);
+  const poolAcquireTimeout = await exec('docker',['logs',app],
+    {env,maxBuffer:32*1024*1024}).then(({stdout,stderr}) => poolAcquireTimeoutInLog(stdout+'\n'+stderr), () => null);
+  // This image build uses the server default. A supplied image may bake in a different maximum.
+  judgment = judgePartA(summary, process.env.LOAD_APP_IMAGE ? null : 20, poolAcquireTimeout);
+  console.log('SIGNIN_SUMMARY '+JSON.stringify(summary));
+  console.log('SIGNIN_JUDGMENT '+JSON.stringify(judgment));
 } catch {
   // Child-process errors can include environment/SQL. Never serialize raw errors.
   failed=true;
@@ -156,8 +163,6 @@ try {
 } finally {
   if (timer) clearInterval(timer);
   await sampling;
-  writeFileSync(`${output}/results.json`,JSON.stringify({complete:!failed,phase,config,...result,samples,postIdleSample,samplingErrors,
-    summary:summarize(result?.attempts ?? [],samples,postIdleSample)},null,2));
   try { docker(...compose,'down','--volumes'); } catch { cleanupErrors.push('Compose cleanup failed'); }
   if (!process.env.LOAD_APP_IMAGE) {
     try { if (docker('image','ls','-q',env.LOAD_APP_IMAGE)) docker('image','rm',env.LOAD_APP_IMAGE); }
@@ -165,6 +170,8 @@ try {
   }
   rmSync(scratch,{recursive:true,force:true});
   process.off('SIGINT',interrupt); process.off('SIGTERM',interrupt);
+  writeFileSync(`${output}/results.json`,JSON.stringify({complete:!failed,phase,config,...result,samples,postIdleSample,samplingErrors,
+    summary:summarize(result?.attempts ?? [],samples,postIdleSample),judgment},null,2));
   console.log(`Results: ${output}`);
 }
 if (cleanupErrors.length) console.error(cleanupErrors.join('; '));

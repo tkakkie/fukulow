@@ -48,3 +48,43 @@ export function summarize(attempts: readonly Attempt[], samples: readonly Sample
       threads: metric(samples.map(s => s.threads)), dbConnectionsInUse: metric(samples.map(s => s.connections)),
       dbActiveConnections: metric(samples.map(s => s.active)) }, postIdleSample };
 }
+
+export type Judgment = 'pass' | 'fail' | 'ambiguous';
+
+export function judgePartA(summary: ReturnType<typeof summarize>, poolMaximum: number | null,
+  poolAcquireTimeout: boolean | null) {
+  const reads = summary.byKind.organization_b;
+  const correct = summary.byKind.correct;
+  const peak = summary.resources.dbConnectionsInUse.peak;
+  const badStatus = Object.keys(summary.signin.statusCounts).some(status => ![200, 401, 429, 503].includes(Number(status)));
+  const checks: Record<'A1' | 'A2' | 'A3' | 'A4', Judgment> = {
+    A1: reads.successRate === null || reads.latencyMs.p95 === null ? 'ambiguous'
+      : reads.successRate === 1 && reads.latencyMs.p95 <= 12.8 ? 'pass' : 'fail',
+    A2: badStatus || poolAcquireTimeout === true ? 'fail'
+      : summary.signin.total === 0 || poolAcquireTimeout === null ? 'ambiguous' : 'pass',
+    A3: peak === null || poolMaximum === null ? 'ambiguous' : peak < poolMaximum ? 'pass' : 'fail',
+    A4: correct.successRate === null ? 'ambiguous' : correct.successRate >= .75 &&
+      correct.successLatencyMs.p95 !== null && correct.successLatencyMs.p95 <= 306 ? 'pass' : 'fail',
+  };
+  return { passed: Object.values(checks).every(check => check === 'pass'), checks, poolMaximum, poolAcquireTimeout };
+}
+
+export function poolAcquireTimeoutInLog(log: string): boolean | null {
+  let observed = false;
+  let incomplete = false;
+  for (const line of log.split('\n')) {
+    if (line.includes('database operation failed: pool timed out while waiting for an open connection')) return true;
+    if (!line.trim()) continue;
+    observed = true;
+    if (!line.startsWith('{')) continue;
+    try {
+      const row = JSON.parse(line);
+      const fields = row?.fields;
+      if (row?.target === 'fukulow' && (
+        (fields?.event === 'database_failure' && fields.kind === 'pool_timeout') ||
+        (fields?.event === 'pool_stats' && fields.version === 1 && fields.acquire_timeout > 0)
+      )) return true;
+    } catch { incomplete = true; }
+  }
+  return observed && !incomplete ? false : null;
+}
