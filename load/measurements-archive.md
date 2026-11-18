@@ -1253,3 +1253,67 @@ Every run: 80 attempted and published sends, 400 deliveries, `load_errors` 0, `m
 Moved verbatim from `docs/measurements.md` when the 2.x baseline replaced it (only the link target is adjusted for this file):
 
 2026-11-18 JST, `b156fba`, Caddy Compose on macOS. Eight publishing Members, 11.39 s (55 s cap), 80 sends, 400 deliveries, zero 429s at burst 10 and refill 1/s. From `5fa245f` until `b156fba`, light CI used one publishing Member, burst 10,000 and refill 1,000/s. [CI reproduction](#light-k6-reproduction-351)
+
+## Revocation hold retry bursts (#592, 2026-11-19 JST, Mac)
+
+Harness `6a9bfa9` (`load/revocation-burst.ts`, judgment in `load/revocation-burst-judgment.ts`). Server: unmodified release build of the PR #588 implementation; backoff 250 ms, 500 ms, 1 s, 2 s, 4 s per registration, no jitter. Fresh disposable PostgreSQL 18.6 per run, reached through a test relay. Host: Apple Silicon, 10 CPUs, 32 GiB; load average 7.8 just before the run, mostly the Docker VM. Mac-relative evidence only.
+
+Scenario and criteria were pre-registered on #592 before the formal runs. Sizes 256, 1,024 and 4,096 connections (one WebSocket per Member). 128 Members each lose access to one private Channel, 64 concurrent removals, and the 64 at even indexes get it back right after. The fault starts 0.3 s before an expected 30 s fallback recheck pass and recovers 3.5 s after it, so it lasts about 3.8 s. Kinds: `recheck` (only the revocation recheck statement fails, gated at the relay) and `outage` (the relay drops every database connection and refuses new ones). 3 repeats per size and kind, interleaved: 18 runs. One `control` run per size with no fault checks the harness only and is not part of the verdict.
+
+Holds start only when a handoff recheck or the fallback pass fails for a revocation in flight or queued, so concurrent holds are bounded by in-flight activity publications (40 global permits), not by connection count. The 4,096-hold worst case is not reachable through these paths and was not measured.
+
+Results, verbatim from the formal results comment on #592:
+
+**Pre-registered verdict: 256 PASS, 1024 FAIL, 4096 FAIL.** Each failing size has a single failing run, both of kind `outage`, both with the same one reason: "a revocation was delivered while the failure was active". Every other criterion passed in all 18 runs. There were no failed database probes, no pool acquire timeouts, and no wrong, early, repeated or post-restore notices. Every HTTP probe in the recovery window succeeded within its bound.
+
+### The two failures are boundary arrivals
+| Run | Removal committed | Notice arrived at the client | 
+|---|---|---|
+| outage 1024 r3 | 250 ms before the fault started | 0.0 ms after the fault started |
+| outage 4096 r2 | 153 ms before the fault started | 2.0 ms after the fault started |
+
+Both Members' removals committed well before the relay cut the database connections. The server had already authorized and sent the notice. It arrived 0–2 ms after the harness stamped the fault start. No notice arrived later inside any fault window. The criterion uses client arrival time with no allowance for messages already in flight, so it counts these. My reading is that this is a harness boundary artifact, not a server defect. The pre-registered rule still says FAIL, and I am not changing it.
+
+### What the backoff did
+- **Holds were rare and all fenced.** There were 0 holds at 256 and in every `outage` run, 1–4 per `recheck` run at 1024, and 0 at 4096. Every hold ended as `fenced`: no delivered-after-hold, timeout or retries retirements, and no hold refusals. The synchronized retry burst the Issue worried about never formed. This matches the pre-registered finding that holds are bounded by in-flight publications (at most 40), not by connection count.
+- **Recheck query rate.** The peak sliding 1 s rate during the fault was about 290/s at 256, about 1,000/s at 1024, and about 1,600–1,700/s at 4096. In the recovery window it was 0 except in the 4096 `recheck` runs (497, 453 and 40/s). There the 128 removals took 3.2–3.9 s to finish, longer than the 3.8 s fault window, so late removals ran their first recheck after recovery. These are first rechecks, not hold retries (holds = 0).
+- **Database during and after.** Direct `SELECT 1` probe p99 was at most 14.4 ms during the fault and at most 25.7 ms in recovery (4096 `recheck` r2). Pool acquire timeouts were 0. The most waiters at once was 46–58, and only during `recheck` faults.
+- **Memory.** RSS grew by 0–18 MiB at 256, 44–53 MiB at 1024 and 102–236 MiB at 4096. Most of that is the connections and the removal burst. The holds were at most 4, so this run says nothing new about the documented 8 MiB per 4,096 holds bound.
+- **Lost notices.** Notices dropped without a revocation (allowed by O5) were 23–51 at 256, 52–83 at 1024 and 47–51 at 4096. The losses come from the 40-permit activity capacity, as in the smoke runs.
+
+Controls (harness check only, no fault): all three are flagged by the same arrival rule, because the nominal window is checked with no fault applied. The 4096 control also had HTTP p99 172 ms in the nominal window, while the removal burst was still running (19 notices after nominal recovery). The controls are not part of the verdict.
+
+<details><summary>All 18 runs</summary>
+
+| Kind | Size | Run | Pass | Holds (fenced) | Recheck QPS peak, fault | Recheck QPS peak, recovery | DB probe p99 fault / recovery (ms) | HTTP p99 recovery (ms) | Pool timeouts | Max pool waiting | Removal spread (ms) | RSS delta (MiB) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| recheck | 256 | 1 | yes | 0 (0) | 293 | 0 | 2.3 / 3.4 | 7.6 | 0 | 46 | 659 | 18 |
+| outage | 256 | 1 | yes | 0 (0) | 0 | 0 | 2.4 / 2.6 | 14.9 | 0 | 0 | 655 | 17 |
+| outage | 256 | 2 | yes | 0 (0) | 0 | 0 | 3.9 / 2.7 | 7.9 | 0 | 1 | 654 | 0 |
+| recheck | 256 | 2 | yes | 0 (0) | 279 | 0 | 2.3 / 2.7 | 7.0 | 0 | 46 | 667 | 17 |
+| recheck | 256 | 3 | yes | 0 (0) | 314 | 0 | 2.5 / 5.2 | 7.2 | 0 | 46 | 667 | -2 |
+| outage | 256 | 3 | yes | 0 (0) | 0 | 0 | 2.5 / 3.8 | 6.8 | 0 | 0 | 653 | -1 |
+| recheck | 1024 | 1 | yes | 3 (3) | 1038 | 0 | 2.5 / 2.4 | 6.5 | 0 | 47 | 1256 | 52 |
+| outage | 1024 | 1 | yes | 0 (0) | 0 | 0 | 8.4 / 3.2 | 9.1 | 0 | 1 | 695 | 46 |
+| outage | 1024 | 2 | yes | 0 (0) | 0 | 0 | 2.6 / 2.4 | 6.8 | 0 | 0 | 692 | 44 |
+| recheck | 1024 | 2 | yes | 4 (4) | 985 | 0 | 2.7 / 4.2 | 7.2 | 0 | 47 | 1205 | 48 |
+| recheck | 1024 | 3 | yes | 1 (1) | 1006 | 0 | 4.4 / 3.8 | 8.3 | 0 | 46 | 1257 | 53 |
+| outage | 1024 | 3 | **no** | 0 (0) | 0 | 0 | 8.3 / 2.6 | 7.1 | 0 | 0 | 673 | 45 |
+| recheck | 4096 | 1 | yes | 0 (0) | 1710 | 497 | 7.4 / 14.1 | 53.7 | 0 | 57 | 3735 | 234 |
+| outage | 4096 | 1 | yes | 0 (0) | 0 | 0 | 5.5 / 2.4 | 10.0 | 0 | 1 | 680 | 102 |
+| outage | 4096 | 2 | **no** | 0 (0) | 0 | 0 | 3.5 / 5.3 | 9.1 | 0 | 0 | 692 | 104 |
+| recheck | 4096 | 2 | yes | 0 (0) | 1711 | 453 | 11.4 / 25.7 | 82.6 | 0 | 56 | 3923 | 236 |
+| recheck | 4096 | 3 | yes | 0 (0) | 1577 | 40 | 14.4 / 2.8 | 9.7 | 0 | 58 | 3223 | 181 |
+| outage | 4096 | 3 | yes | 0 (0) | 0 | 0 | 9.9 / 2.6 | 11.0 | 0 | 0 | 731 | 119 |
+
+</details>
+
+### Verdict (maintainer decision, 2026-11-19)
+
+- **Pre-registered result, unchanged:** 256 PASS, 1024 FAIL, 4096 FAIL. The only failures are `outage` 1024 r3 and `outage` 4096 r2, both for "a revocation was delivered while the failure was active".
+- **Maintainer decision:** both failures count as PASS. They are boundary arrivals: the server had authorized and sent the notices before the fault began, and they arrived 0.0 ms and 2.0 ms after the harness stamped the fault start. The criterion used client arrival time and allowed nothing for notices already in flight.
+- **Backoff:** acceptable within the paths and load observed here. At most 4 holds existed at once and no synchronized retry burst formed, so this record does not show that the backoff is safe under high hold counts.
+- **Jitter:** not needed now. No hold retries occurred, so no load came from the backoff.
+- **Follow-up:** #622 changes the arrival criterion to the server send time for future runs. This record and its thresholds stay unchanged.
+
+Limits: one Mac, client arrival timestamps, fault windows of about 3.8 s, at most 4 concurrent holds, and no measurement of the 8 MiB / 4,096-hold memory bound. Reproduce with `ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir` (add `--sizes`, `--kinds` or `--repeats` for a subset) from a release build. Raw run directories are outside Git.

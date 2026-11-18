@@ -143,25 +143,25 @@ At `4fa2ba0^`, run `cargo test --locked -p fukulow-server --lib simultaneous_nor
 
 Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Runner and raw artifacts were not retained. Regression check: `cargo test --locked -p fukulow-server --lib unread_topic_counts_read_only_unread_topic_ranges`. Warm SQL, one Channel, no writers or Mentions. Cost grows with unread backlog. [Full record](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst)
 
+## Revocation hold retry bursts (#592)
+
+2026-11-19 JST, `6a9bfa9`, PR #588 as is. 256/1,024/4,096 sockets, 128 removals, ~3.8 s recheck-only or whole-DB fault, 3 runs each. Pre-registered: 256 PASS, 1,024/4,096 FAIL, one `outage` run each (a pre-fault notice arrived 0–2 ms in); maintainer: both PASS. ≤ 4 holds, all fenced; no retry burst or pool timeout. Backoff acceptable for these paths and load, unproven for many holds; no jitter now. Arrival rule: #622.
+
+Run `node load/revocation-burst.ts --out <new dir>`. [Record and limits](../load/measurements-archive.md#revocation-hold-retry-bursts-592-2026-11-19-jst-mac)
+
 ## Archived only
 
 - [Load harness methods](../load/measurements-archive.md#load-harness-methods-20-57) — procedures for `make load` and `load/record.ts`. [Load decisions](decisions/load.md#load-testing-and-measurement)
 - [Earlier reconnect runs](../load/measurements-archive.md#graceful-shutdown-and-reconnect-storm-195-2026-11-11-jst) — superseded by the pinned repeat.
 - [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
-- [Search preliminary engine comparison](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) — superseded by frozen-manifest runs.
-- [Search preliminary quality comparison](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) — frozen rerun reproduced the scores.
+- Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs, which reproduced the scores.
 - [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
 - [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
 - [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
 - [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
-- [Channel log smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) — functional smoke only.
-- [Channel log full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) — INVALID for the comparison gate.
+- Channel log [smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) (functional only) and [full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) (INVALID for the comparison gate).
 - [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending. Send workloads use one publishing Member and burst/refill raised to 1,000,000. See `load/proxy-compare.ts`.
 - [Earlier wasm first display](../load/measurements-archive.md#first-display-345-conditions-re-measured-at-d2fc5ea-45-runscell-across-9-interleaved-rounds-median-of-round-p50--p95-ms) — superseded by the startup fix.
 - [Pool before and after PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac) — superseded by the post-PR #511 comparison.
 - [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17) — superseded by HTTP and SQL evidence.
-- [Reply count HTTP run 1](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, closed-loop and below the rate floor.
-- [Reply count HTTP run 2](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — superseded, closed-loop and noncompliant with #57.
-- [Reply count initial open-loop pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED after missed deadlines.
-- [Reply count final pilot](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — pilot only.
-- [Reply count HTTP run 3](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, missed deadline.
+- [Reply count HTTP runs 1–3 and pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — runs 1 and 3 and the initial pilots NOT EVALUATED, run 2 superseded, final pilot only.
