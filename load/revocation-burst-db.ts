@@ -79,9 +79,9 @@ export function seedMembers(db: Database, organization: string, count: number): 
 export class Session {
   private child: ChildProcessWithoutNullStreams;
   private buffer = '';
-  private waiters = new Map<string, () => void>();
-  constructor(db: Database) {
-    this.child = spawn('docker', ['exec', '-i', db.name, 'psql', '-X', '-q', '-U', 'fukulow', '-d', 'fukulow', '-At'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  private waiters = new Map<string, (ok: boolean) => void>();
+  constructor(db: Database, spawnSession: (file: string, args: string[], options: { stdio: ['pipe', 'pipe', 'pipe'] }) => ChildProcessWithoutNullStreams = spawn) {
+    this.child = spawnSession('docker', ['exec', '-i', db.name, 'psql', '-X', '-q', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1', '-At', '-f', '-'], { stdio: ['pipe', 'pipe', 'pipe'] });
     this.child.stdout.setEncoding('utf8');
     this.child.stdout.on('data', (chunk: string) => {
       this.buffer += chunk;
@@ -89,23 +89,29 @@ export class Session {
       while ((newline = this.buffer.indexOf('\n')) >= 0) {
         const line = this.buffer.slice(0, newline); this.buffer = this.buffer.slice(newline + 1);
         const waiter = this.waiters.get(line);
-        if (waiter) { this.waiters.delete(line); waiter(); }
+        if (waiter) { this.waiters.delete(line); waiter(true); }
       }
     });
     this.child.stderr.resume();
-    this.child.stdin.on('error', () => { this.closed = true; });
-    this.child.on('exit', () => { this.closed = true; });
+    this.child.stdin.on('error', () => this.markClosed());
+    this.child.on('error', () => this.markClosed());
+    this.child.on('close', () => this.markClosed());
   }
   private closed = false;
+  private markClosed() {
+    this.closed = true;
+    for (const waiter of this.waiters.values()) waiter(false);
+    this.waiters.clear();
+  }
   /** Runs `statement` (no output), then echoes a unique tag; resolves when the tag returns. */
   run(statement: string, timeoutMs = 10_000): Promise<boolean> {
     const tag = `fk592-${randomUUID()}`;
     if (this.closed) return Promise.resolve(false);
     return new Promise(resolve => {
       const timer = setTimeout(() => { this.waiters.delete(tag); resolve(false); }, timeoutMs);
-      this.waiters.set(tag, () => { clearTimeout(timer); resolve(true); });
+      this.waiters.set(tag, ok => { clearTimeout(timer); resolve(ok); });
       this.child.stdin.write(`${statement}\nSELECT '${tag}';\n`);
     });
   }
-  close() { this.closed = true; this.child.stdin.end(); this.child.kill(); }
+  close() { this.markClosed(); this.child.stdin.end(); this.child.kill(); }
 }

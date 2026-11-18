@@ -125,9 +125,9 @@ export class Relay {
     client.on('data', (chunk: Buffer) => fromClient.push(chunk, (type, body, raw) => {
       if (type === 0x50) { // Parse
         const parsed = rewriteParse(body);
-        if (parsed.recheck) { recheckNames.add(parsed.name); batchRecheck = true; }
+        if (parsed.recheck) recheckNames.add(parsed.name);
         else recheckNames.delete(parsed.name);
-        if (parsed.fallback) { fallbackNames.add(parsed.name); batchFallback = true; }
+        if (parsed.fallback) fallbackNames.add(parsed.name);
         else fallbackNames.delete(parsed.name);
         upstream.write(parsed.recheck ? frame(type, parsed.body) : raw);
         return;

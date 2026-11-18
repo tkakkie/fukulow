@@ -18,7 +18,8 @@ export type Statement = { at: number; ms: number; recheck: boolean; fallback: bo
 export type Probe = { at: number; ms: number; ok: boolean; status?: number };
 export type PoolSample = { at: number; fields: Record<string, number> };
 // A tracked Member's removal and optional restore; times are completion times of successful requests.
-export type Member = { removeStartedAt?: number; removedAt?: number; restoredAt?: number; revoked: number[]; resets: number[]; close?: { at: number; code: number } };
+export type Member = { channelId: string; removeStartedAt?: number; removedAt?: number; restoredAt?: number; resets: number[]; close?: { at: number; code: number } };
+export type Revocation = { socketIndex: number; channelId: string | null; at: number };
 export type Run = {
   kind: Kind; size: number; repeat: number;
   // pass: expected start of the fallback recheck pass the fault is aligned to.
@@ -29,7 +30,7 @@ export type Run = {
   dbProbe: Probe[]; httpProbe: Probe[]; pool: PoolSample[];
   rss: { at: number; kb: number }[];
   metrics: Record<string, number> | undefined;
-  members: Member[];
+  members: Member[]; revocations: Revocation[];
   serverCloses: number; // sockets of any Member closed by the server during the run
 };
 
@@ -59,7 +60,9 @@ const WAIT_EDGES_US = [100, 500, 1000, 5000, 10000, 25000, 50000, 100000, 500000
 export function poolWindow(samples: PoolSample[], from: number, to: number) {
   const before = [...samples].reverse().find(s => s.at <= from) ?? samples[0];
   const after = samples.find(s => s.at >= to) ?? samples.at(-1);
-  if (!before || !after || before === after) return { p95Ms: NaN, p99Ms: NaN, timeouts: NaN, acquisitions: 0, maxWaiting: NaN };
+  if (!before || !after || before.at >= after.at) return null;
+  const timeouts = after.fields.acquire_timeout - before.fields.acquire_timeout;
+  if (!Number.isFinite(timeouts) || timeouts < 0) return null;
   const delta = (key: string) => (after.fields[key] ?? 0) - (before.fields[key] ?? 0);
   const keys = [...WAIT_EDGES_US.map(e => `wait_le_${e}_us`), 'wait_count'];
   const cumulative = keys.map(delta);
@@ -70,12 +73,14 @@ export function poolWindow(samples: PoolSample[], from: number, to: number) {
     return index < WAIT_EDGES_US.length ? WAIT_EDGES_US[index] / 1000 : Infinity;
   };
   const waiting = samples.filter(s => s.at >= from && s.at <= to).map(s => s.fields.waiting ?? 0);
-  return { p95Ms: edge(95), p99Ms: edge(99), timeouts: delta('acquire_timeout'), acquisitions: total, maxWaiting: waiting.length ? Math.max(...waiting) : 0 };
+  return { p95Ms: edge(95), p99Ms: edge(99), timeouts, acquisitions: total, maxWaiting: waiting.length ? Math.max(...waiting) : 0 };
 }
 
 const latency = (statements: Statement[]) => ({ count: statements.length, p95Ms: percentile(statements.map(s => s.ms), 95), p99Ms: percentile(statements.map(s => s.ms), 99) });
 
-export function summarize(run: Run) {
+type MemberNotices = Member & { revoked: number[] };
+
+function summarize(run: Run, members: MemberNotices[]) {
   const { fault, mutationsDone, recovery, end } = run.times;
   const windowEnd = recovery + THRESHOLDS.recoveryWindowSeconds * 1000;
   // Baseline: the quiet 10 s before the removal burst starts.
@@ -95,8 +100,8 @@ export function summarize(run: Run) {
   // is no longer valid can also end uncounted, so the residual is reported, not required to be zero.
   const ended = ['revocation_retired_timeout', 'revocation_retired_retries', 'revocation_retired_fenced'].reduce((sum, key) => sum + (m[key] ?? 0), 0);
   const refusedHolds = (m.revocation_retired_registration_cap ?? 0) + (m.revocation_retired_global_cap ?? 0);
-  const afterRecovery = run.members.reduce((sum, member) => sum + member.revoked.filter(at => at >= recovery).length, 0);
-  const removedMembers = run.members.filter(member => member.removedAt !== undefined);
+  const afterRecovery = members.reduce((sum, member) => sum + member.revoked.filter(at => at >= recovery).length, 0);
+  const removedMembers = members.filter(member => member.removedAt !== undefined);
   const lost = removedMembers.filter(member => member.restoredAt === undefined);
   return {
     removalSpreadMs: sortedRemovals.length ? sortedRemovals.at(-1)! - sortedRemovals[0] : NaN,
@@ -140,22 +145,30 @@ export function summarize(run: Run) {
 export function judge(run: Run) {
   const reasons: string[] = [];
   const { fault, recovery } = run.times;
-  const s = summarize(run);
+  const members: MemberNotices[] = run.members.map(member => ({ ...member, revoked: [] }));
+  let unexpected = false;
+  for (const notice of run.revocations) {
+    const member = members[notice.socketIndex];
+    if (member && member.channelId === notice.channelId) member.revoked.push(notice.at);
+    else unexpected = true;
+  }
+  if (unexpected) reasons.push('a revocation reached a socket or Channel outside the successful removal set');
+  const s = summarize(run, members);
   const m = run.metrics;
   // Notice correctness: never wrong, early or repeated; losses are allowed (REST reconciliation, spec O5).
   if (!m) reasons.push('no metrics event after the holds resolved');
   if (run.mutationFailures && run.kind !== 'outage') reasons.push(`${run.mutationFailures} removal/restore requests failed`);
-  if (run.members.some(member => member.revoked.some(at => at >= fault && at < recovery))) reasons.push('a revocation was delivered while the failure was active');
-  if (run.members.some(member => member.revoked.some(at => member.removedAt === undefined || at < member.removeStartedAt!))) reasons.push('a revocation reached a Member without a successful removal or before it');
-  if (run.members.some(member => member.restoredAt !== undefined && member.revoked.some(at => at >= member.restoredAt!))) reasons.push('a restored registration received a revocation');
-  if (run.members.some(member => member.revoked.length > 1)) reasons.push('duplicate revocation');
+  if (members.some(member => member.revoked.some(at => at >= fault && at < recovery))) reasons.push('a revocation was delivered while the failure was active');
+  if (members.some(member => member.revoked.some(at => member.removedAt === undefined || at < member.removeStartedAt!))) reasons.push('a revocation reached a Member without a successful removal or before it');
+  if (members.some(member => member.restoredAt !== undefined && member.revoked.some(at => at >= member.restoredAt!))) reasons.push('a restored registration received a revocation');
+  if (members.some(member => member.revoked.length > 1)) reasons.push('duplicate revocation');
   if (m) {
     if (m.revocation_delivered_after_hold > s.notices.receivedAfterRecovery) reasons.push(`delivered_after_hold ${m.revocation_delivered_after_hold} > client revocations after recovery ${s.notices.receivedAfterRecovery}`);
     if (s.counters.hold_residual < 0) reasons.push(`held ${m.revocation_held} < delivered ${m.revocation_delivered_after_hold} + ended ${s.counters.hold_endings}`);
   }
   // Recovery.
   const drainLimit = recovery + THRESHOLDS.drainSeconds * 1000;
-  if (run.members.some(member => member.revoked.some(at => at > drainLimit))) reasons.push('a revocation arrived after the drain limit');
+  if (members.some(member => member.revoked.some(at => at > drainLimit))) reasons.push('a revocation arrived after the drain limit');
   const db = s.dbProbe;
   const dbLimit = Math.max(THRESHOLDS.dbProbeP99Factor * db.baseline.p99Ms, THRESHOLDS.dbProbeP99FloorMs);
   if (!(db.recovery.count > 0)) reasons.push('no database probe in the recovery window');
@@ -171,7 +184,8 @@ export function judge(run: Run) {
     if (after.some(p => !p.ok)) reasons.push(`${after.filter(p => !p.ok).length} HTTP probe failures after the first recovery success`);
     if (p99 > httpLimit) reasons.push(`HTTP probe p99 ${p99.toFixed(2)} ms > ${httpLimit.toFixed(2)} ms`);
   }
-  if (s.pool.recovery.timeouts) reasons.push(`${s.pool.recovery.timeouts} pool acquire timeouts after recovery`);
+  if (!s.pool.recovery) reasons.push('pool acquire timeouts unavailable in the recovery window');
+  else if (s.pool.recovery.timeouts) reasons.push(`${s.pool.recovery.timeouts} pool acquire timeouts after recovery`);
   if (!(s.httpProbe.baseline.count > 0) || !(db.baseline.count > 0)) reasons.push('missing baseline probes');
   return { pass: reasons.length === 0, reasons, summary: s };
 }

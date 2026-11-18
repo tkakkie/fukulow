@@ -10,9 +10,10 @@ import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
 import { Relay } from './revocation-burst-relay.ts';
+import { startRssSampler } from './revocation-burst-rss.ts';
 import { installGate, removeDatabase, seedMembers, Session, sql, startDatabase, waitReady, type Database } from './revocation-burst-db.ts';
-import { judge, verdictBySize, KINDS, SIZES, THRESHOLDS, type Kind, type Member, type PoolSample, type Probe, type Run } from './revocation-burst-judgment.ts';
-import type { Channel, CreateChannelRequest, NativeSessionResponse, SetupRequest } from '../web/src/api-schema.d.ts';
+import { judge, verdictBySize, KINDS, SIZES, THRESHOLDS, type Kind, type Member, type PoolSample, type Probe, type Revocation, type Run } from './revocation-burst-judgment.ts';
+import type { Channel, CreateChannelRequest, NativeSessionResponse, ServerEvent, SetupRequest } from '../web/src/api-schema.d.ts';
 
 const run = promisify(execFile);
 const checkout = resolve(import.meta.dirname, '..');
@@ -49,9 +50,10 @@ mkdirSync(output, { recursive: true });
 const now = () => performance.now();
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-let active: { server?: ChildProcess; relay?: Relay; db?: Database; sessions?: Session[]; sockets?: WebSocket[]; stopProbes?: () => void } = {};
+let active: { server?: ChildProcess; relay?: Relay; db?: Database; sessions?: Session[]; sockets?: WebSocket[]; stopProbes?: () => void; stopSampling?: () => void } = {};
 let interrupted = false;
 const cleanup = async () => {
+  active.stopSampling?.();
   active.sockets?.forEach(s => { try { s.close(); } catch { /* closing */ } });
   active.stopProbes?.();
   active.sessions?.forEach(s => s.close());
@@ -96,8 +98,11 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
     } catch { /* non-JSON line */ }
   });
   const rss: { at: number; kb: number }[] = [];
-  let sampling = true;
-  void (async () => { while (sampling) { try { const { stdout } = await run('ps', ['-o', 'rss=', '-p', String(server.pid)]); rss.push({ at: now(), kb: Number(stdout.trim()) }); } catch { /* exited */ } await sleep(500); } })();
+  const sampler = startRssSampler(server, async signal => {
+    const { stdout } = await run('ps', ['-o', 'rss=', '-p', String(server.pid)], { signal });
+    return Number(stdout.trim());
+  }, rss);
+  active.stopSampling = sampler.stop;
   const base = `http://127.0.0.1:${appPort}`;
   for (let i = 0; ; i++) { try { if ((await fetch(`${base}/api/v1/setup`)).status === 200) break; } catch { /* starting */ } if (i > 100) throw new Error('server did not start'); await sleep(200); }
   const request = async (method: string, path: string, token: string, body?: unknown) => {
@@ -125,18 +130,18 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
   });
   if (seedFailures) throw new Error(`${seedFailures} seed requests failed`);
   // One registration per Member; only the first `tracked` Members lose access.
-  const members: Member[] = Array.from({ length: tracked }, () => ({ revoked: [], resets: [] }));
+  const members: Member[] = channels.map(channelId => ({ channelId, resets: [] }));
+  const revocations: Revocation[] = [];
   let ready = 0, stopping = false, serverCloses = 0;
   const sockets: WebSocket[] = []; active.sockets = sockets;
   for (let i = 0; i < size; i++) {
     const socket = new WebSocket(`${base.replace(/^http/, 'ws')}/api/v1/orgs/${org}/ws`, { headers: { Authorization: `Bearer ${seeded.members[i].token}` } } as unknown as string[]);
     sockets.push(socket);
     socket.onmessage = event => {
-      const notice = JSON.parse(String(event.data)) as { type: string; channel_id?: string };
+      const notice = JSON.parse(String(event.data)) as ServerEvent;
       if (notice.type === 'activity_ready') ready++;
-      else if (i >= tracked) return;
-      else if (notice.type === 'channel_access_revoked' && notice.channel_id === channels[i]) members[i].revoked.push(now());
-      else if (notice.type === 'activity_reset') members[i].resets.push(now());
+      else if (notice.type === 'channel_access_revoked') revocations.push({ socketIndex: i, channelId: notice.channel_id ?? null, at: now() });
+      else if (notice.type === 'activity_reset' && i < tracked) members[i].resets.push(now());
     };
     socket.onclose = event => {
       if (stopping) return;
@@ -198,11 +203,12 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
   const end = now();
   probing = false; await Promise.all(probes);
   stopping = true;
-  sampling = false;
+  sampler.stop();
+  await sampler.done;
   const result: Run = {
     kind: kind as Kind, size, repeat, times: { pass, burst, fault, mutationsDone, recovery, end }, removals, mutationFailures,
     statements: relay.statements, connections: relay.connections, refused: relay.refused,
-    dbProbe, httpProbe, pool: poolSamples, rss, metrics: metrics.filter(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)[0]?.fields, members, serverCloses,
+    dbProbe, httpProbe, pool: poolSamples, rss, metrics: metrics.filter(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)[0]?.fields, members, revocations, serverCloses,
   };
   // Liveness check of the database after the run, outside the relay.
   sql(db, 'SELECT 1;');
