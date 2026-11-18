@@ -103,7 +103,7 @@ impl Activity {
                     Pending {
                         notice,
                         channel: Some(channel),
-                        epoch,
+                        epoch: Epoch::Notice(epoch),
                         directory_epoch: None,
                         proof: Some(proof.clone()),
                         valid: authorization.valid.clone(),
