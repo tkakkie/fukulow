@@ -72,6 +72,23 @@ test('an incomplete, interrupted or uncleaned run never yields a verdict',()=>{
   assert.ok(judgeAll(all,false).every(j=>j.status==='NOT EVALUATED'));
 });
 const mixedRuns=()=>runs().map(r=>({...r,scenario:'mixed' as const,steps:[{...row(),reads:lane(500),signin:lane(20)}]}));
+test('healthy mixed 250/s diagnostic shortfall stays INVALID and never passes judgement',()=>{
+  for (const arm of ['B','A'] as const) for (const attempted of [14601,14635,14625]) {
+    const r=mixedRuns();
+    assert.equal(judge(r,'mixed',250).status,'PASS');
+    const step=r.find(run=>run.arm===arm)!.steps[0];
+    step.send.attempted=step.send.accepted=attempted;
+    step.send.droppedIterations=15001-attempted;
+    // All generated requests succeeded, and offers exceed 95%; drops alone
+    // must invalidate before latency or success-rate gates can grant PASS.
+    assert.deepEqual(validity(step),['send: target load not generated']);
+    const judgement=judge(r,'mixed',250);
+    assert.equal(judgement.status,'NOT EVALUATED');
+    assert.equal(judgement.pairs[0].status,'NOT EVALUATED');
+    assert.match(judgement.pairs[0].reason!,/send: target load not generated/);
+    assert.equal(judgeAll(r,true).find(j=>j.scenario==='mixed'&&j.rate===250)!.status,'NOT EVALUATED');
+  }
+});
 test('mixed reads and sign-ins are judged like sends; their loss never passes',()=>{
   assert.equal(judge(mixedRuns(),'mixed',250).status,'PASS');
   for(const name of ['reads','signin'] as const) {

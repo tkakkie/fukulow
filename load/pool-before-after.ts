@@ -5,6 +5,7 @@ import { tmpdir, cpus, totalmem, platform, arch, release, hostname } from 'node:
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
+import { allowanceSeconds, generatorConfig } from './pool-before-after-config.ts';
 import { plan, pairs, settings, scenarios, scope, timeoutNote, judgeAll, validity, type Run, type Scenario, type Arm, type Counts } from './pool-before-after-summary.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const exec=promisify(execFile);
@@ -41,12 +42,13 @@ const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVA
   judgement:judgeAll(runs,complete&&!smoke),cleanupErrors});
 let failed=false;
 try {
-  const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-summary.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
+  const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-config.ts','load/pool-before-after-summary.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
   save(`${output}/metadata.json`,{scope,timeoutNote,commits,settings,smoke,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
     memberArithmetic:'4000 Members; max 2000 sends/s / 4000 = 0.5 sends/s/Member; round robin returns every 2 s; default bucket burst 10, refill 1/s unchanged.',
     poolTimeouts:'Both: SQLx PoolTimedOut -> ApiError::from -> HTTP 500, ErrorBody.error="internal error"; stderr database operation failed: pool timed out while waiting for an open connection. Logs have no request ID, include background/late failures: per-request counts NOT EVALUATED. No server patches.',
     workload:'THROUGHPUT_SCENARIO=many equivalent: 200 public Channels, index % 200; Member index % 4000; no subscribers. Open arrival k6, each send step 60 s, 11 s drains; reader 2/s continuous including drains. Success latency includes drain, successful requests only.',
-    generator:'k6 send preallocated/max VUs 100/2000; reads 50/1000; sign-in and reader 10/100. Any drops invalidate; offered fraction >=95% (existing delivery tolerance).',
+    generator:{allowanceSeconds,note:'preAllocatedVUs = min(maxVUs, max(previous floor: send 100, reads 50, others 10, ceil(rate * allowanceSeconds))); 3 s rounds up healthy-arm startup send p99 2.48–2.73 s at 250/s (steady-state p95 16–47 ms). Existing caps unchanged; runtime growth remains possible below caps. No warm-up. Any drops invalidate; offered fraction >=95% (existing delivery tolerance).',
+      send:generatorConfig(smoke,false).scenarios,mixed:generatorConfig(smoke,true).scenarios},
     sampling:'1 s /proc/1/stat CPU ticks (100 Hz, 100%=one core), /proc/1/status RSS; pg_stat_activity app-role client connections including idle and active separately; sampler excluded. Gaps >2.5 s or sampling errors invalidate.',
     node:process.version,machine:{platform:platform(),arch:arch(),release:release(),hostname:hostname(),cpus:cpus(),memory:totalmem()},
     docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),

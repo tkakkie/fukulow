@@ -6,6 +6,7 @@ import type { Options } from 'k6/options';
 import type { SendMessageRequest, SignInRequest } from '../web/src/api-schema.d.ts';
 import { uuid } from './seed.ts';
 import { plan, settings, scope, timeoutNote, type Counts } from './pool-before-after-summary.ts';
+import { generatorConfig } from './pool-before-after-config.ts';
 const fixture=JSON.parse(open('/fixture/data.json')) as {organization:string;otherOrganization:string;reader:string;channels:string[];password:string};
 const tokens=new SharedArray<string>('members',()=>JSON.parse(open('/fixture/tokens.json')));
 const steps=plan(__ENV.POOL_SMOKE==='1');
@@ -13,19 +14,9 @@ const mixed=__ENV.POOL_SCENARIO==='mixed';
 const countNames=['attempted','accepted','rejected429','rejected503','otherErrors','clientTimeouts','transportErrors'] as const;
 const counts=Object.fromEntries(countNames.map(n=>[n,new Counter(`pool_${n}`)]));
 const latency=new Trend('pool_success_ms',true);
-const lanes=steps.flatMap(step=>[
-  {name:`${step.name}_send`,rate:step.rate,seconds:step.seconds,start:step.startSeconds,exec:'send'},
-  ...(mixed?[
-    {name:`${step.name}_reads`,rate:settings.readRate,seconds:step.seconds,start:step.startSeconds,exec:'reads'},
-    {name:`${step.name}_signin`,rate:settings.signinRate,seconds:step.seconds,start:step.startSeconds,exec:'signin'},
-  ]:[]),
-]);
-const duration=steps.at(-1)!.startSeconds+steps.at(-1)!.seconds+11;
-lanes.push({name:'reader',rate:2,seconds:duration,start:0,exec:'reader'});
+const {lanes,duration,scenarios}=generatorConfig(__ENV.POOL_SMOKE==='1',mixed);
 export const options:Options={
-  scenarios:Object.fromEntries(lanes.map(l=>[l.name,{executor:'constant-arrival-rate',rate:l.rate,timeUnit:'1s',duration:`${l.seconds}s`,
-    startTime:`${l.start}s`,exec:l.exec,preAllocatedVUs:l.exec==='send'?100:l.exec==='reads'?50:10,
-    maxVUs:l.exec==='send'?2000:l.exec==='reads'?1000:100,gracefulStop:'11s'}])),
+  scenarios,
   summaryTrendStats:['p(95)','p(99)'],systemTags:['scenario','status','name'],
   thresholds:Object.fromEntries(lanes.flatMap(l=>[...countNames.map(n=>[`pool_${n}{scenario:${l.name}}`,['count>=0']]),
     [`dropped_iterations{scenario:${l.name}}`,['count>=0']], [`pool_success_ms{scenario:${l.name}}`,['max>=0']]])),
