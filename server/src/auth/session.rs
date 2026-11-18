@@ -97,6 +97,7 @@ impl SessionChanges {
         connection: &mut sqlx::PgConnection,
         organization: Uuid,
         target: Uuid,
+        channel: Option<Uuid>,
     ) -> Result<Option<Box<dyn super::activity::ActivityChange>>, sqlx::Error> {
         let hook = self
             .activity
@@ -105,7 +106,7 @@ impl SessionChanges {
             .clone();
         match hook {
             Some(hook) => hook
-                .capture(connection, organization, target)
+                .capture(connection, organization, target, channel)
                 .await
                 .map(Some),
             None => Ok(None),

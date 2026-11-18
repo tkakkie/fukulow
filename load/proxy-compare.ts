@@ -107,19 +107,27 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
   runs.push(entry);
   console.log(`Proxy comparison: scenario ${scenario}, ${proxy}, ${warmup ? 'discarded warm-up' : 'measured'}; ${directory}`);
   let metrics: Record<string, Metric>;
-  const stepped = async (sizes: number[], step: (size: number) => Record<string, string>, validate?: (r: RunResult) => string | undefined) => {
+  const stepped = async (sizes: number[], step: (size: number) => Record<string, string>, validate?: (r: RunResult) => string | undefined,
+    attributeCeiling = false) => {
     const results: RunResult[] = [];
     for (const size of sizes) {
       const result = await record(`${directory}/step-${size}`, proxy, step(size));
       results.push(result);
       if (result.exitCode !== 0 || validate?.(result)) break;
     }
-    const metric = stepMetric(proxy, results, sizes, validate);
+    const metric = stepMetric(proxy, results, sizes, validate, attributeCeiling);
     if (metric.observation.error) Object.assign(entry, { error: metric.observation.error });
     return { metric, results };
   };
   if (scenario === 1) {
-    const { metric } = await stepped(stepSizes, sockets => ({ SUBSCRIBERS: String(sockets), LOAD_CONNECTIONS_ONLY: '1' }));
+    const { metric, results } = await stepped(stepSizes, sockets => ({ SUBSCRIBERS: String(sockets), LOAD_CONNECTIONS_ONLY: '1' }), undefined, true);
+    // #469: app-side evidence per connection step; aggregates only (load/app-evidence.ts).
+    Object.assign(entry, { ceiling: metric.observation.ceiling, steps: results.map((result, i) => ({ sockets: stepSizes[i],
+      exitCode: result.exitCode, generatorExitCode: result.generatorExitCode, measurementError: result.measurementError,
+      clientCloses: Object.fromEntries(Object.entries(result.summary?.metrics ?? {}).flatMap(([name, metric]) => {
+        const code = name.match(/^socket_closes\{code:(\d+)\}$/)?.[1];
+        return code ? [[code, metric.values.count]] : [];
+      })), appEvidence: result.appEvidence })) });
     metrics = { connections: metric };
   } else if (scenario === 2) {
     const { metric, results } = await stepped(sendRates, rate =>
@@ -128,7 +136,7 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
       offeredSendRate: result.rate?.offeredSendRate, measurementError: result.measurementError,
       ...Object.fromEntries(['published_messages', 'delivered_messages', 'missing_deliveries'].map(name =>
         [name, result.summary?.metrics?.[name]?.values.count])),
-      deliveryLatency: result.summary?.metrics?.delivery_latency?.values })) });
+      deliveryLatency: result.summary?.metrics?.delivery_latency?.values, appEvidence: result.appEvidence })) });
     // Proxy resources come from the highest passing step (the first step when none passed).
     const passed = results.filter((result, i) => sendRates[i] <= metric.observation.value && result.exitCode === 0);
     const resources = metricsFor(proxy, 2, passed.at(-1) ?? results[0] ?? { exitCode: 1, measurementError: 'no throughput step ran' });

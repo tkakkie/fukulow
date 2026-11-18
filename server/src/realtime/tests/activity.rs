@@ -1881,10 +1881,14 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
             tx: &'a mut sqlx::PgConnection,
             organization: Uuid,
             target: Uuid,
+            channel: Option<Uuid>,
         ) -> Capture<'a> {
             Box::pin(async move {
                 Ok(Box::new(OrderedChange {
-                    inner: self.activity.capture(tx, organization, target).await?,
+                    inner: self
+                        .activity
+                        .capture(tx, organization, target, channel)
+                        .await?,
                     started: self.started.clone(),
                 }) as Box<dyn ActivityChange>)
             })
@@ -2205,10 +2209,14 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
             tx: &'a mut sqlx::PgConnection,
             organization: Uuid,
             target: Uuid,
+            channel: Option<Uuid>,
         ) -> Capture<'a> {
             Box::pin(async move {
                 Ok(Box::new(DelayedChange {
-                    change: self.activity.capture(tx, organization, target).await?,
+                    change: self
+                        .activity
+                        .capture(tx, organization, target, channel)
+                        .await?,
                     entered: self.entered.clone(),
                     release: self.release.clone(),
                 }) as Box<dyn ActivityChange>)
@@ -2362,3 +2370,4 @@ async fn failed_directory_publication_never_resets_invisible_guests(pool: PgPool
 }
 
 mod dms;
+mod revocations;
