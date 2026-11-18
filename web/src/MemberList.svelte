@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { Identity, Member, Role } from './api'
-  import { roles, roleNames } from './members'
+  import type { Identity, Role } from './api'
+  import { canDeactivateMember, roles, roleNames } from './members'
   import type { membersAdapter } from './members.svelte'
   import OutstandingInvites from './OutstandingInvites.svelte'
   import Button from './ui/Button.svelte'
@@ -30,12 +30,7 @@
   let role = $state<Role>('member')
   const s = $derived(model.state)
   const capabilities = $derived(identity.organization.capabilities)
-  const deactivating = $derived(s.members.find(member => member.id === deactivatingId && canDeactivate(member)))
-
-  function canDeactivate(member: Member) {
-    return capabilities.can_deactivate_members.allowed && member.id !== identity.member.id &&
-      (identity.member.role === 'owner' || member.role !== 'owner')
-  }
+  const deactivating = $derived(s.members.find(member => member.id === deactivatingId && canDeactivateMember(identity, member)))
 
   $effect(() => { if (deactivatingId !== null && !deactivating) deactivatingId = null })
 </script>
@@ -77,7 +72,7 @@
               </select>
             </label>
           {/if}
-          {#if canDeactivate(member)}
+          {#if canDeactivateMember(identity, member)}
             <Button disabled={s.busy} onclick={() => deactivatingId = member.id}>{member.name}を無効化</Button>
           {/if}
         </li>
