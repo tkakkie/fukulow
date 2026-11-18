@@ -106,6 +106,7 @@ const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export function setup(): Setup {
   const data = seed({ channels, subscribers, socketsPerSession, socketsPerAccount, publishMembers, visibility, legacy });
   // A k6 exit 99 is a capacity result only after provisioning succeeded (load/proxy-results.ts).
+  // sessions: all provisioned Account Sessions; socketSessions: those assigned to sockets (#604).
   console.log('LOAD_SETUP_COMPLETE ' + JSON.stringify({ sessions: data.tokens.length, socketSessions, accounts, publishMembers }));
   return data;
 }

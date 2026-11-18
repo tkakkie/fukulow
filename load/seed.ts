@@ -63,6 +63,7 @@ export function seed(config: SeedConfig): Setup {
   const tokens = [token];
   const layout = sessionLayout(channels * subscribers, socketsPerSession, socketsPerAccount, publishMembers);
   try {
+    // Each multi-Member run adds Members; use a fresh Organization (load/measurements-archive.md, #604).
     const organizationId = legacy ? legacyOrganization(identity) : (__ENV.LOAD_ORGANIZATION_ID || identity.organizations[0]?.organization_id);
     if (!organizationId || (!legacy && !identity.organizations.some((organization) => organization.organization_id === organizationId))) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
     for (let i = 1; i < layout.ownerSessions; i++) {

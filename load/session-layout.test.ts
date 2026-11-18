@@ -36,7 +36,7 @@ test('one session per socket Account also serves its publishing Member', () => {
   }
 });
 
-test('counts match the pre-extraction formulas in every mode', () => {
+test('counts and token indexes match the pre-extraction formulas in every mode', () => {
   for (const sockets of [1, 5, 7, 40]) for (const perSession of [1, 2, 5]) for (const perAccount of [0, perSession])
     for (const publishMembers of [1, 2, 8]) {
       const before = Math.ceil(sockets / perSession);
@@ -44,5 +44,9 @@ test('counts match the pre-extraction formulas in every mode', () => {
       const layout = sessionLayout(sockets, perSession, perAccount, publishMembers);
       assert.deepEqual([layout.socketSessions, layout.accounts, layout.sessionsToProvision],
         [before, accounts, perAccount ? accounts : before + publishMembers - 1]);
+      const socketIds = Array.from({ length: sockets }, (_, i) => i);
+      assert.deepEqual(socketIds.map(layout.socketTokenIndex), socketIds.map(i => Math.floor(i / perSession)));
+      const members = Array.from({ length: publishMembers }, (_, i) => i);
+      assert.deepEqual(members.map(layout.publisherTokenIndex), members.map(i => i === 0 ? 0 : perAccount ? i : before + i - 1));
     }
 });

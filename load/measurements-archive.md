@@ -1212,7 +1212,7 @@ Verification coverage: `unread_main_timeline_and_topics_are_independent_monotoni
 
 ## Light k6 reproduction (#351)
 
-On Linux at `b156fba`, start the Caddy Compose profile with a fresh database and the default send limiter (burst 10, refill 1/s). Use the `docker` job's public test fixtures and the exact command and environment from its “Light k6 run (10 seconds; hard limit 55 seconds)” step. [CI workflow](../.github/workflows/ci.yml#L237)
+The recorded 11.39 s run was on macOS; CI runs the same step on Linux with a prebuilt image (`--no-build`). At `b156fba`, start the Caddy Compose profile with a fresh database and the default send limiter (burst 10, refill 1/s). Use the `docker` job's public test fixtures and the exact command and environment from its “Light k6 run (10 seconds; hard limit 55 seconds)” step. [CI workflow at b156fba](https://github.com/tkakkie/fukulow/blob/b156fba/.github/workflows/ci.yml#L237)
 
 ```sh
 export POSTGRES_PASSWORD=ci-compose-only POSTGRES_APP_PASSWORD=ci-compose-app-only
