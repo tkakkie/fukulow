@@ -131,7 +131,7 @@ Implemented (#515 slice 1): `channel_log` exists with Create entries only; each 
 
 #### Measurement status
 
-The choice rests on the Mac-relative #160 records in `docs/measurements.md`: settled write WAL, and replay/migration values from an INVALID run used as reference only. No performance pass is claimed. Unevaluated ranges (1000/s and maximum steps, ten of twelve write scenarios, DB-side latency, settled replay, condition 5 costs, RLS/Unread/Mention/WebSocket paths: #515; per-chain Move positions: #141; Edit/Delete: #287) are verified on the implementing Issues against thresholds fixed before measurement; absolute budgets follow #431.
+The choice rests on the [Mac-relative #160 records](../measurements.md#channel-log-design-evidence-160): settled write WAL, and replay/migration values from an INVALID run used as reference only. No performance pass is claimed. Unevaluated ranges (1000/s and maximum steps, ten of twelve write scenarios, DB-side latency, settled replay, condition 5 costs, RLS/Unread/Mention/WebSocket paths: #515; per-chain Move positions: #141; Edit/Delete: #287) are verified on the implementing Issues against thresholds fixed before measurement; absolute budgets follow #431.
 
 **Existing formal budgets remain binding:** [DM Performance acceptance](dms.md#performance-acceptance-adopted-2026-11-14) (#151/#307) with its linked bounds and <=10% non-DM regression limit, #137's 50-item recent/deep timeline p95 <=100 ms at four readers, S/C/P correctness and #308 evidence limits. New mutation latency, replay-regression, WAL/storage and migration-outage thresholds need maintainer agreement; the earlier comment's 10%/2x suggestions are not adopted budgets. No pass is claimed here.
 

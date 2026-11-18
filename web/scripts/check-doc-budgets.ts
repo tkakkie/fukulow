@@ -24,7 +24,7 @@ const BUDGETS_KIB = new Map<string, number>([
   ['docs/invariants/topics.md', 17],
   ['docs/invariants/unread.md', 22],
   ['docs/invariants/web.md', 29],
-  ['docs/measurements.md', 254],
+  ['docs/measurements.md', 22],
   ['docs/spec.md', 4],
   ['docs/spec/accounts.md', 26],
   ['docs/spec/deployment.md', 72],
