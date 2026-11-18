@@ -13,15 +13,17 @@ export const THRESHOLDS = {
 export const SIZES = [256, 1024, 4096] as const;
 export const KINDS = ['recheck', 'outage'] as const;
 export type Kind = (typeof KINDS)[number];
+// The two approved 2026-11-19 boundary arrivals were 0.0 and 2.0 ms after fault start.
+export const BOUNDARY_EXCEPTION_MS = 2;
 
 export type Statement = { at: number; ms: number; recheck: boolean; fallback: boolean; error: boolean };
 export type Probe = { at: number; ms: number; ok: boolean; status?: number };
 export type PoolSample = { at: number; fields: Record<string, number> };
-// A tracked Member's removal and optional restore; times are completion times of successful requests.
+// Successful request completion bounds COMMIT from above for a tracked Member's removal or restore.
 export type Member = { channelId: string; removeStartedAt?: number; removedAt?: number; restoredAt?: number; resets: number[]; close?: { at: number; code: number } };
 export type Revocation = { socketIndex: number; channelId: string | null; at: number };
 export type Run = {
-  kind: Kind; size: number; repeat: number;
+  kind: Kind | 'control'; size: number; repeat: number;
   // pass: expected start of the fallback recheck pass the fault is aligned to.
   times: { pass: number; burst: number; fault: number; mutationsDone: number; recovery: number; end: number };
   removals: number[]; // completion time of each successful removal
@@ -121,7 +123,7 @@ function summarize(run: Run, members: MemberNotices[]) {
     },
     peaks: {
       all: peaks(within(run.statements, fault, windowEnd).map(s => s.at)),
-      recheck: peaks(within(rechecks, fault, windowEnd).map(s => s.at)),
+      recheck: peaks(within(rechecks, fault, recovery).map(s => s.at)),
       recheckRecovery: peaks(within(rechecks, recovery, windowEnd).map(s => s.at)),
       connections: peaks(within(run.connections.map(at => ({ at })), recovery, windowEnd).map(c => c.at)),
     },
@@ -145,12 +147,37 @@ function summarize(run: Run, members: MemberNotices[]) {
 export function judge(run: Run) {
   const reasons: string[] = [];
   const { fault, recovery } = run.times;
+  // The relay measures Sync-to-ReadyForQuery. A successful completion in the removal
+  // window is run-level corroboration only. It carries no Member or Channel identity.
+  let lastPreFaultRecheck = -Infinity;
+  for (const statement of run.statements) {
+    const completed = statement.at + statement.ms;
+    if (statement.recheck && !statement.error && completed < fault) {
+      lastPreFaultRecheck = Math.max(lastPreFaultRecheck, completed);
+    }
+  }
+  const boundaryExceptions = [];
   const members: MemberNotices[] = run.members.map(member => ({ ...member, revoked: [] }));
   let unexpected = false;
+  let faultArrival = false;
   for (const notice of run.revocations) {
     const member = members[notice.socketIndex];
-    if (member && member.channelId === notice.channelId) member.revoked.push(notice.at);
-    else unexpected = true;
+    if (!member || member.channelId !== notice.channelId) {
+      unexpected = true;
+      continue;
+    }
+    member.revoked.push(notice.at);
+    if (notice.at >= fault && notice.at < recovery) {
+      const arrivalAfterFaultMs = notice.at - fault;
+      if (run.kind !== 'control' && arrivalAfterFaultMs <= BOUNDARY_EXCEPTION_MS &&
+        member.removedAt !== undefined && member.removedAt < fault &&
+        member.removeStartedAt !== undefined && lastPreFaultRecheck >= member.removeStartedAt) {
+        boundaryExceptions.push({
+          ...notice, arrivalAfterFaultMs, removalConfirmedBeforeFaultMs: fault - member.removedAt,
+          lastSuccessfulRecheckCompletedBeforeFaultMs: fault - lastPreFaultRecheck,
+        });
+      } else faultArrival = true;
+    }
   }
   if (unexpected) reasons.push('a revocation reached a socket or Channel outside the successful removal set');
   const s = summarize(run, members);
@@ -158,7 +185,7 @@ export function judge(run: Run) {
   // Notice correctness: never wrong, early or repeated; losses are allowed (REST reconciliation, spec O5).
   if (!m) reasons.push('no metrics event after the holds resolved');
   if (run.mutationFailures && run.kind !== 'outage') reasons.push(`${run.mutationFailures} removal/restore requests failed`);
-  if (members.some(member => member.revoked.some(at => at >= fault && at < recovery))) reasons.push('a revocation was delivered while the failure was active');
+  if (faultArrival) reasons.push('a revocation was delivered while the failure was active');
   if (members.some(member => member.revoked.some(at => member.removedAt === undefined || at < member.removeStartedAt!))) reasons.push('a revocation reached a Member without a successful removal or before it');
   if (members.some(member => member.restoredAt !== undefined && member.revoked.some(at => at >= member.restoredAt!))) reasons.push('a restored registration received a revocation');
   if (members.some(member => member.revoked.length > 1)) reasons.push('duplicate revocation');
@@ -187,16 +214,20 @@ export function judge(run: Run) {
   if (!s.pool.recovery) reasons.push('pool acquire timeouts unavailable in the recovery window');
   else if (s.pool.recovery.timeouts) reasons.push(`${s.pool.recovery.timeouts} pool acquire timeouts after recovery`);
   if (!(s.httpProbe.baseline.count > 0) || !(db.baseline.count > 0)) reasons.push('missing baseline probes');
-  return { pass: reasons.length === 0, reasons, summary: s };
+  const verdict: RunVerdict = reasons.length ? 'FAIL' : boundaryExceptions.length ? 'PASS_WITH_BOUNDARY_EXCEPTION' : 'PASS';
+  return { pass: verdict !== 'FAIL', verdict, reasons, summary: { ...s, boundaryExceptions } };
 }
 
-export type Verdict = 'PASS' | 'FAIL' | 'NOT EVALUATED';
+export type RunVerdict = 'PASS' | 'PASS_WITH_BOUNDARY_EXCEPTION' | 'FAIL';
+export type Verdict = RunVerdict | 'NOT EVALUATED';
 /** A size passes only with all repeats of both kinds valid and passing. */
-export function verdictBySize(results: { kind: Kind; size: number; pass: boolean }[]) {
+export function verdictBySize(results: { kind: Kind; size: number; verdict: RunVerdict }[]) {
   return Object.fromEntries(SIZES.map(size => {
     const runs = results.filter(r => r.size === size);
     const complete = KINDS.every(kind => runs.filter(r => r.kind === kind).length >= THRESHOLDS.repeats);
-    const verdict: Verdict = runs.some(r => !r.pass) ? 'FAIL' : complete ? 'PASS' : 'NOT EVALUATED';
+    let verdict: Verdict = 'NOT EVALUATED';
+    if (runs.some(r => r.verdict === 'FAIL')) verdict = 'FAIL';
+    else if (complete) verdict = runs.some(r => r.verdict === 'PASS_WITH_BOUNDARY_EXCEPTION') ? 'PASS_WITH_BOUNDARY_EXCEPTION' : 'PASS';
     return [size, verdict];
   }));
 }

@@ -12,7 +12,7 @@ import { outsideCheckout } from './proxy-target.ts';
 import { Relay } from './revocation-burst-relay.ts';
 import { startRssSampler } from './revocation-burst-rss.ts';
 import { installGate, removeDatabase, seedMembers, Session, sql, startDatabase, waitReady, type Database } from './revocation-burst-db.ts';
-import { judge, verdictBySize, KINDS, SIZES, THRESHOLDS, type Kind, type Member, type PoolSample, type Probe, type Revocation, type Run } from './revocation-burst-judgment.ts';
+import { judge, verdictBySize, BOUNDARY_EXCEPTION_MS, KINDS, SIZES, THRESHOLDS, type Kind, type Member, type PoolSample, type Probe, type Revocation, type Run, type RunVerdict } from './revocation-burst-judgment.ts';
 import type { Channel, CreateChannelRequest, NativeSessionResponse, ServerEvent, SetupRequest } from '../web/src/api-schema.d.ts';
 
 const run = promisify(execFile);
@@ -206,7 +206,7 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
   sampler.stop();
   await sampler.done;
   const result: Run = {
-    kind: kind as Kind, size, repeat, times: { pass, burst, fault, mutationsDone, recovery, end }, removals, mutationFailures,
+    kind, size, repeat, times: { pass, burst, fault, mutationsDone, recovery, end }, removals, mutationFailures,
     statements: relay.statements, connections: relay.connections, refused: relay.refused,
     dbProbe, httpProbe, pool: poolSamples, rss, metrics: metrics.filter(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)[0]?.fields, members, revocations, serverCloses,
   };
@@ -218,8 +218,8 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
   return result;
 }
 
-const results: { kind: Kind | 'control'; size: number; repeat: number; pass: boolean; reasons: string[]; summary: unknown }[] = [];
-const environment = { node: process.version, platform: platform(), arch: arch(), release: release(), cpus: cpus().length, memoryBytes: totalmem(), smoke, fallbackIntervalMs: FALLBACK_INTERVAL_MS, burstLeadMs: BURST_LEAD_MS, faultLeadMs: FAULT_LEAD_MS, recoveryAfterPassMs: RECOVERY_AFTER_PASS_MS, removals: REMOVALS, mutationConcurrency: MUTATION_CONCURRENCY, thresholds: THRESHOLDS,
+const results: { kind: Kind | 'control'; size: number; repeat: number; pass: boolean; verdict: RunVerdict; reasons: string[]; summary: unknown }[] = [];
+const environment = { node: process.version, platform: platform(), arch: arch(), release: release(), cpus: cpus().length, memoryBytes: totalmem(), smoke, fallbackIntervalMs: FALLBACK_INTERVAL_MS, burstLeadMs: BURST_LEAD_MS, faultLeadMs: FAULT_LEAD_MS, recoveryAfterPassMs: RECOVERY_AFTER_PASS_MS, removals: REMOVALS, mutationConcurrency: MUTATION_CONCURRENCY, thresholds: THRESHOLDS, boundaryExceptionMs: BOUNDARY_EXCEPTION_MS,
   commit: (await run('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim() };
 writeFileSync(resolve(output, 'environment.json'), JSON.stringify(environment, null, 2));
 try {
@@ -229,11 +229,11 @@ try {
     console.log(`#592 ${kind} size=${size} repeat=${repeat}`);
     try {
       const measured = await measure(kind, size, repeat);
-      const verdict = judge(measured);
-      results.push({ kind, size, repeat, pass: verdict.pass, reasons: verdict.reasons, summary: verdict.summary });
-      console.log(JSON.stringify({ kind, size, repeat, pass: verdict.pass, reasons: verdict.reasons }));
+      const { pass, verdict, reasons, summary } = judge(measured);
+      results.push({ kind, size, repeat, pass, verdict, reasons, summary });
+      console.log(JSON.stringify({ kind, size, repeat, pass, verdict, reasons }));
     } catch (error) {
-      results.push({ kind, size, repeat, pass: false, reasons: [`invalid run: ${(error as Error).message}`], summary: undefined });
+      results.push({ kind, size, repeat, pass: false, verdict: 'FAIL', reasons: [`invalid run: ${(error as Error).message}`], summary: undefined });
       console.log(`invalid run: ${(error as Error).message}`);
       await cleanup();
     }

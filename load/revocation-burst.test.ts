@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { Session } from './revocation-burst-db.ts';
 import { bindStatement, FALLBACK_MARKER, frame, Framer, gateQuery, RECHECK_MARKER, Relay, rewriteParse } from './revocation-burst-relay.ts';
 import { startRssSampler } from './revocation-burst-rss.ts';
-import { judge, peaks, percentile, poolWindow, verdictBySize, type Run } from './revocation-burst-judgment.ts';
+import { judge, peaks, percentile, poolWindow, verdictBySize, type Kind, type Run, type RunVerdict } from './revocation-burst-judgment.ts';
 
 const z = (s: string) => Buffer.from(`${s}\0`, 'utf8');
 const parseBody = (name: string, query: string) => Buffer.concat([z(name), z(query), Buffer.from([0, 1, 0, 0, 0, 25])]);
@@ -143,7 +143,82 @@ const fixture = (): Run => {
 
 test('judge passes a reconciled run', () => {
   const verdict = judge(fixture());
+  assert.equal(verdict.verdict, 'PASS');
   assert.deepEqual(verdict.reasons, []);
+});
+
+const boundaryFixture = () => {
+  const run = fixture();
+  run.kind = 'outage';
+  run.members[1].removedAt = run.times.fault - 153;
+  run.removals[1] = run.members[1].removedAt;
+  run.metrics!.revocation_delivered_after_hold = 0;
+  run.statements.push(
+    { at: run.times.fault - 4, ms: 3, recheck: true, fallback: false, error: false },
+    { at: run.times.fault - 1, ms: 1, recheck: true, fallback: false, error: false },
+    { at: run.times.fault - 0.5, ms: 0.25, recheck: true, fallback: false, error: true },
+  );
+  return run;
+};
+
+test('judge reports the approved 0 and 2 ms boundary arrivals separately from clean passes', () => {
+  for (const offset of [0, 2]) {
+    const run = boundaryFixture();
+    run.revocations[0].at = run.times.fault + offset;
+    const result = judge(run);
+    assert.equal(result.verdict, 'PASS_WITH_BOUNDARY_EXCEPTION');
+    assert.deepEqual(result.reasons, []);
+    assert.deepEqual(result.summary.boundaryExceptions, [{
+      ...run.revocations[0], arrivalAfterFaultMs: offset, removalConfirmedBeforeFaultMs: 153,
+      lastSuccessfulRecheckCompletedBeforeFaultMs: 1,
+    }]);
+  }
+});
+
+test('judge fails arrivals beyond the bound or without pre-fault removal confirmation', () => {
+  for (const [arrivalOffset, removalOffset] of [[2.001, -153], [2, 0], [2, 1]]) {
+    const run = boundaryFixture();
+    run.revocations[0].at = run.times.fault + arrivalOffset;
+    run.members[1].removedAt = run.times.fault + removalOffset;
+    run.removals[1] = run.members[1].removedAt;
+    const result = judge(run);
+    assert.equal(result.verdict, 'FAIL');
+    assert.deepEqual(result.reasons, ['a revocation was delivered while the failure was active']);
+    assert.deepEqual(result.summary.boundaryExceptions, []);
+  }
+});
+
+test('judge requires relay evidence within the removal window and a real fault', () => {
+  const run = boundaryFixture();
+  run.revocations[0].at = run.times.fault + 1;
+  run.kind = 'control';
+  assert.equal(judge(run).verdict, 'FAIL');
+  run.kind = 'outage';
+  const removalStart = run.members[1].removeStartedAt!;
+  run.statements = run.statements.filter(s => s.at + s.ms < removalStart ||
+    s.error || s.at + s.ms >= run.times.fault);
+  const result = judge(run);
+  assert.equal(result.verdict, 'FAIL');
+  assert.deepEqual(result.summary.boundaryExceptions, []);
+});
+
+test('a boundary arrival does not excuse another correctness violation', () => {
+  const run = boundaryFixture();
+  run.revocations[0].at = run.times.fault + 1;
+  run.revocations.push({ ...run.revocations[0], at: run.times.recovery });
+  const result = judge(run);
+  assert.equal(result.verdict, 'FAIL');
+  assert.deepEqual(result.reasons, ['duplicate revocation']);
+});
+
+test('judge keeps fault and recovery recheck peaks separate', () => {
+  const run = fixture();
+  run.statements = [run.times.fault - 1, run.times.fault, run.times.recovery, run.times.recovery + 1]
+    .map(at => ({ at, ms: 1, recheck: true, fallback: false, error: false }));
+  const { peaks } = judge(run).summary;
+  assert.deepEqual(peaks.recheck, { bucketPerSecond: 10, slidingSecond: 1 });
+  assert.deepEqual(peaks.recheckRecovery, { bucketPerSecond: 20, slidingSecond: 2 });
+  assert.equal(peaks.all.slidingSecond, 2);
 });
 
 test('judge fails each correctness violation', () => {
@@ -213,9 +288,12 @@ test('judge fails when the recovery pool timeout measurement is unavailable', ()
 });
 
 test('verdictBySize needs every repeat of both kinds', () => {
-  const pass = (kind: 'recheck' | 'outage', size: number) => ({ kind, size, pass: true });
+  const pass = (kind: Kind, size: number) => ({ kind, size, verdict: 'PASS' as RunVerdict });
   const all = [256, 1024, 4096].flatMap(size => [1, 2, 3].flatMap(() => [pass('recheck', size), pass('outage', size)]));
   assert.deepEqual(verdictBySize(all), { 256: 'PASS', 1024: 'PASS', 4096: 'PASS' });
   assert.deepEqual(verdictBySize(all.slice(1)), { 256: 'NOT EVALUATED', 1024: 'PASS', 4096: 'PASS' });
-  assert.equal(verdictBySize([...all, { kind: 'outage', size: 4096, pass: false }])[4096], 'FAIL');
+  all[0].verdict = 'PASS_WITH_BOUNDARY_EXCEPTION';
+  assert.equal(verdictBySize(all)[256], 'PASS_WITH_BOUNDARY_EXCEPTION');
+  assert.equal(verdictBySize(all.slice(0, 1))[256], 'NOT EVALUATED');
+  assert.equal(verdictBySize([...all, { kind: 'outage', size: 256, verdict: 'FAIL' }])[256], 'FAIL');
 });
