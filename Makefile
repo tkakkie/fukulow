@@ -31,7 +31,7 @@ load:
 		-e LOAD_LEGACY -e LOAD_ALLOW_REJECTIONS -e LOAD_RECONNECT -e LOAD_RECONNECT_STORM -e CONNECT_BATCH \
 		-e CONNECT_INTERVAL_MS -e REQUEST_TIMEOUT_SECONDS -e PUBLISH_CHANNELS \
 		-e THROUGHPUT_SCENARIO -e THROUGHPUT_RATES -e THROUGHPUT_STEP_SECONDS -e THROUGHPUT_MEMBERS \
-		-e THROUGHPUT_VUS -e THROUGHPUT_MAX_VUS $(call shell_quote,$(K6_IMAGE)) run $(call shell_quote,$(LOAD_SCRIPT))
+		-e THROUGHPUT_VUS -e THROUGHPUT_MAX_VUS -e THROUGHPUT_BODIES $(call shell_quote,$(K6_IMAGE)) run $(call shell_quote,$(LOAD_SCRIPT))
 
 # Isolated Docker baseline with resource/SQL snapshots; artifacts default to /private/tmp.
 load-record:

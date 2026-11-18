@@ -78,6 +78,12 @@ Run `node load/invite-scan.ts` (Node, Docker, sqlx CLI, Rust). Warm shared Mac, 
 
 Run `node load/search-engines/run.ts`, then `node load/search-engines/quality/run.ts` at the frozen manifest. The [selection gate](decisions/process.md#rules-ci-and-ai-process) stays open for P2 security, DMs and deploy/restore. [Full record](../load/measurements-archive.md#search-engine-comparison-p2-definer-at-1m-153-2026-11-18-jst-mac)
 
+## PGroonga Message-send write cost (#153 M1)
+
+Method only; no formal result yet. A adds the PGroonga index to B (same app image from `main`, manifest v2 PostgreSQL recipe, stored `normalized_body`, WAL resource manager and crash-safe settings, 50,000-body prefix from seed 153202611). The #309 `many` and `hot` workloads run three pairs each (B/A, A/B, B/A) at seven 60 s rates from 50 to 4000/s, straight to the app, with the send limiter raised to 1000000 burst and refill. Fixed #153 criteria apply to the rates B sustains in all pairs, invalid evidence first; the p95 test uses the median paired ratio A / B and the median paired signed difference A − B (signed since the maintainer decision of 2026-11-18, before any formal run) through 1000/s. Outside the #431 budget.
+
+Run overnight on an otherwise idle Mac with Node 26.13.1: `node load/search-m1.ts --out /absolute/new/artifact-directory` (`--smoke`: B, `many`, 50/s for 10 s, never judged); regenerate with `node load/search-m1-report.ts /absolute/new/artifact-directory`.
+
 ## Channel log design evidence (#160)
 
 2026-11-17 JST (PR #499). Settled Mac WAL at 250 ops/s, baseline/events-ids/log-ids: 5,190/5,197/5,434 B/op for create-1-17 and 42,511/42,703/43,051 B/op for mixed90-200-4000. Run `node load/log-compare/run.ts --diagnose --out /private/tmp/i160-diagnose --settle-fixture`. Two workloads at 50/250 ops/s, host-to-psql transport included.
