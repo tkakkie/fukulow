@@ -694,9 +694,6 @@ fn enqueue(entry: &Entry, mut pending: Pending) {
             || identity_changed
             || (b.proofs.len() == 256 && !b.proofs.contains_key(&channel))
         {
-            if conflict && channel.is_none() {
-                b.revocations.retire_member();
-            }
             b.retire_notices();
             return;
         }
@@ -873,15 +870,19 @@ impl NoticeFrame {
                 current.then(|| std::future::Future::poll(future.as_mut(), cx))
             ))
         };
-        let first = match std::future::poll_fn(&mut first_poll).await {
-            Ok(first) => first?,
-            Err(check) => {
-                self.recheck_revocation(pool?, check).await;
-                // Another Role change can supersede the snapshot during the read.
-                match std::future::poll_fn(first_poll).await {
-                    Ok(first) => first?,
-                    Err(_) => return None,
+        let mut deadline = None;
+        let mut rechecks = 0;
+        let first = loop {
+            match std::future::poll_fn(&mut first_poll).await {
+                Ok(first) => break first?,
+                Err(check) if rechecks < 2 => {
+                    let deadline = *deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + Duration::from_secs(5)
+                    });
+                    self.recheck_revocation(pool?, check, deadline).await?;
+                    rechecks += 1;
                 }
+                Err(_) => return None,
             }
         };
         Some(match first {
@@ -889,21 +890,33 @@ impl NoticeFrame {
             std::task::Poll::Pending => future.await,
         })
     }
-    async fn recheck_revocation(&self, pool: &sqlx::PgPool, check: Check) {
+    async fn recheck_revocation(
+        &self,
+        pool: &sqlx::PgPool,
+        check: Check,
+        deadline: tokio::time::Instant,
+    ) -> Option<()> {
         let selected = [
             (self.entry.clone(), None),
             (self.entry.clone(), Some(check.channel)),
         ];
-        let proofs = tokio::time::timeout(Duration::from_secs(5), authorize_batch(pool, &selected))
-            .await
-            .ok()
-            .and_then(Result::ok);
+        let proofs = tokio::time::timeout_at(deadline, async {
+            #[cfg(test)]
+            test_pause(
+                self.entry.organization,
+                check.channel,
+                "handoff_recheck",
+                Some(self.entry.member.0),
+            )
+            .await;
+            authorize_batch(pool, &selected).await
+        })
+        .await
+        .ok()?
+        .ok()?;
         let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-        b.apply_revocation(
-            check,
-            proofs.as_ref().and_then(|rows| rows[0].as_ref()),
-            proofs.as_ref().map(|rows| rows[1].is_some()),
-        );
+        b.apply_revocation(check, proofs[0].as_ref(), Some(proofs[1].is_some()));
+        Some(())
     }
 }
 async fn authorize_notices(
@@ -1399,7 +1412,7 @@ impl NoticeRecheck {
                 return;
             }
         }
-        if self.channel.is_none() {
+        if self.channel.is_none() && current.is_none() {
             b.revocations.retire_member();
         }
         b.retire_notices();
@@ -1580,8 +1593,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn only_identity_proof_conflict_fences_a_dequeued_revocation() {
-        let mut delivered = Vec::new();
+    async fn only_role_conflict_requires_fresh_dequeued_revocation_proof() {
+        let mut rechecks = Vec::new();
         for (channel_proof, at_cap, only_revocation_proof) in [
             (true, false, false),
             (true, true, false),
@@ -1625,8 +1638,17 @@ mod tests {
                 role: Role::Guest,
                 grant: None,
             };
-            if only_revocation_proof {
+            if !channel_proof && !at_cap {
                 conflicting.proof = Some(existing);
+                if !only_revocation_proof {
+                    entry.buffer.lock().unwrap().proofs.insert(
+                        None,
+                        Proof {
+                            role: Role::Member,
+                            grant: None,
+                        },
+                    );
+                }
             } else {
                 let mut b = entry.buffer.lock().unwrap();
                 if at_cap {
@@ -1637,15 +1659,17 @@ mod tests {
                 }
             }
             enqueue(&entry, conflicting);
-            let polled = frame.poll_handoff(None, |_| async {}).await.is_some();
-            delivered.push(polled);
+            let Epoch::Revocation(capture) = &frame.epoch else {
+                panic!("expected a revocation");
+            };
+            rechecks.push(capture.check().unwrap().needs_recheck);
             let b = entry.buffer.lock().unwrap();
             assert_eq!(b.epoch, 1, "ordinary notices must retire in every case");
             assert!(b.proofs.is_empty());
         }
         assert_eq!(
-            delivered,
-            [true, true, true, false, false],
+            rechecks,
+            [false, false, false, true, true],
             "Channel mismatch, Channel cap, identity cap, identity cache mismatch, revocation identity mismatch"
         );
     }

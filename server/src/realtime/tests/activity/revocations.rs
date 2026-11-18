@@ -86,6 +86,21 @@ impl Case {
             channel_id: self.revoked,
         }
     }
+    fn pause_revocation(&self, phase: &'static str) -> Arc<TestGate> {
+        pause_member(self.f.organization, self.revoked, phase, Some(self.target))
+    }
+    async fn publish_channel_list(&self) {
+        self.delivery()
+            .publish(
+                &self.f.state.pool,
+                self.f.organization,
+                Notice::ChannelListChanged,
+                Some(self.target),
+                None,
+            )
+            .await
+            .unwrap();
+    }
     async fn remove_grant(&self) {
         self.request(
             "DELETE",
@@ -303,22 +318,39 @@ async fn channel_revocation_survives_only_unrelated_transitions(pool: PgPool) {
     .await;
 }
 
-struct HoldMemberRecheck {
+enum MemberRecheck {
+    Run,
+    Hold(Arc<TestGate>),
+    Skip,
+}
+struct TestRechecks {
     access: AccessChanges,
     member: (Uuid, Uuid),
-    gate: Arc<TestGate>,
+    member_recheck: MemberRecheck,
+    skip_channel: Option<Uuid>,
 }
-impl SubscriptionRecheck for HoldMemberRecheck {
+impl SubscriptionRecheck for TestRechecks {
     fn check<'a>(
         &'a self,
         pool: &'a PgPool,
         scope: SubscriptionScope,
     ) -> Pin<Box<dyn Future<Output = Result<(), sqlx::Error>> + Send + 'a>> {
         Box::pin(async move {
+            if matches!(scope, SubscriptionScope::Channel(org, channel)
+                if org == self.member.0 && self.skip_channel == Some(channel))
+            {
+                return Ok(());
+            }
             if matches!(scope, SubscriptionScope::Member(org, member) if (org, member) == self.member)
             {
-                self.gate.entered.add_permits(1);
-                self.gate.release.acquire().await.unwrap().forget();
+                match &self.member_recheck {
+                    MemberRecheck::Run => {}
+                    MemberRecheck::Hold(gate) => {
+                        gate.entered.add_permits(1);
+                        gate.release.acquire().await.unwrap().forget();
+                    }
+                    MemberRecheck::Skip => return Ok(()),
+                }
             }
             self.access.check(pool, scope).await
         })
@@ -333,16 +365,28 @@ impl Case {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
         });
+        self.set_rechecks(MemberRecheck::Hold(gate.clone()), None);
+        gate
+    }
+
+    fn set_rechecks(&self, member_recheck: MemberRecheck, skip_channel: Option<Uuid>) {
         self.f
             .state
             .session_changes
-            .set_subscription_recheck(Arc::new(HoldMemberRecheck {
+            .set_subscription_recheck(Arc::new(TestRechecks {
                 access: self.f.state.message_delivery.channel_access.clone(),
                 member: (self.f.organization, self.target),
-                gate: gate.clone(),
+                member_recheck,
+                skip_channel,
             }));
-        gate
     }
+}
+
+async fn closed_pool(pool: &PgPool) -> PgPool {
+    let closed = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy_with(pool.connect_options().as_ref().clone());
+    closed.close().await;
+    closed
 }
 
 #[fukulow_test::test]
@@ -381,9 +425,7 @@ async fn first_handoff_rechecks_a_role_superseded_revocation(pool: PgPool) {
         let ((), actual) = tokio::join!(case.set_role("guest"), async {
             wait(&gate).await;
             if fail_recheck {
-                let closed = sqlx::postgres::PgPoolOptions::new()
-                    .connect_lazy_with(case.f.state.pool.connect_options().as_ref().clone());
-                closed.close().await;
+                let closed = closed_pool(&case.f.state.pool).await;
                 case.delivery()
                     .check(
                         &closed,
@@ -403,60 +445,294 @@ async fn first_handoff_rechecks_a_role_superseded_revocation(pool: PgPool) {
 
 #[fukulow_test::test]
 async fn role_recheck_rejects_a_racing_regrant(pool: PgPool) {
-    let case = Case::new(&pool, false, Later::Regrant).await;
-    case.remove_grant().await;
-    case.delivery().drained().await;
-    let frame = case.take_revocation();
+    let mut writes = Vec::new();
+    for restored in [false, true] {
+        let case = Case::new(&pool, false, Later::Regrant).await;
+        case.remove_grant().await;
+        case.delivery().drained().await;
+        let frame = case.take_revocation();
 
-    let role = case.hold_member_recheck();
-    let regrant = case.hold_retirement(Some(case.revoked));
-    let ((), ()) = tokio::join!(case.set_role("guest"), async {
-        wait(&role).await;
-        case.grant(case.revoked).await;
-        wait(&regrant).await;
-        role.release.add_permits(1);
-    });
-    case.delivery().drained().await;
-    let mut polled = false;
-    let sent = frame
-        .handoff(&case.f.state.pool, |_| async { polled = true })
-        .await;
-    regrant.release.add_permits(1);
-    wait(&regrant).await;
-    case.delivery().drained().await;
-    assert_eq!(sent, None);
-    assert!(!polled, "recheck let a re-granted Channel's write start");
+        let role = case.hold_member_recheck();
+        let ((), ()) = tokio::join!(case.set_role("guest"), async {
+            wait(&role).await;
+            if restored {
+                // Commit the grant without retirement, subscription recheck or publication.
+                grant(&pool, &case.f, case.revoked, case.target).await;
+            }
+            role.release.add_permits(1);
+        });
+        case.delivery().drained().await;
+        if let Some(event) = frame
+            .handoff(&case.f.state.pool, |event| async { event })
+            .await
+        {
+            assert_eq!(event, case.revoked());
+            writes.push(restored);
+        }
+    }
+    assert_eq!(
+        writes,
+        [false],
+        "only the no-grant control may start a write"
+    );
 }
 
 #[fukulow_test::test]
 async fn role_recheck_keeps_the_original_channel_sequence(pool: PgPool) {
+    let mut writes = Vec::new();
+    for retire_before_handoff in [false, true] {
+        let case = Case::new(&pool, false, Later::Role).await;
+        case.remove_grant().await;
+        case.delivery().drained().await;
+        let old = case.take_revocation();
+
+        case.set_rechecks(MemberRecheck::Run, Some(case.revoked));
+        let regrant = case.hold_retirement(Some(case.revoked));
+        case.grant(case.revoked).await;
+        wait(&regrant).await;
+        let removal = case.hold_retirement(Some(case.revoked));
+        case.remove_grant().await;
+        wait(&removal).await;
+        case.set_role("guest").await;
+        case.delivery().drained().await;
+
+        // The grant's sequence is after the first removal and before both the
+        // second removal and the Role that just verified the original frame.
+        if retire_before_handoff {
+            regrant.release.add_permits(1);
+            wait(&regrant).await;
+        }
+        if old
+            .handoff(&case.f.state.pool, |event| async { event })
+            .await
+            == Some(case.revoked())
+        {
+            writes.push(retire_before_handoff);
+        }
+        if !retire_before_handoff {
+            regrant.release.add_permits(1);
+            wait(&regrant).await;
+        }
+        removal.release.add_permits(1);
+        wait(&removal).await;
+        case.delivery().drained().await;
+        assert_eq!(
+            case.received_revocations(None).await,
+            1,
+            "the second removal"
+        );
+    }
+    assert_eq!(
+        writes,
+        [false],
+        "the delayed grant must fence only the first removal"
+    );
+}
+
+#[fukulow_test::test]
+async fn older_role_snapshot_fences_observed_regrant_before_handoff(pool: PgPool) {
+    let mut writes = Vec::new();
+    for restored in [false, true] {
+        let case = Case::new(&pool, false, Later::Role).await;
+        case.remove_grant().await;
+        case.delivery().drained().await;
+        let frame = case.take_revocation();
+
+        let gate = case.pause_revocation("fallback_snapshot");
+        let ((), ()) = tokio::join!(
+            case.delivery().check(
+                &case.f.state.pool,
+                SubscriptionScope::Channel(case.f.organization, case.revoked)
+            ),
+            async {
+                wait(&gate).await;
+                case.set_role("guest").await;
+                case.delivery().drained().await;
+                // The Role recheck verified absence. Only the older fallback
+                // observes the grant before handoff.
+                if restored {
+                    grant(&pool, &case.f, case.revoked, case.target).await;
+                }
+                gate.release.add_permits(1);
+            }
+        );
+        if let Some(event) = frame
+            .handoff(&case.f.state.pool, |event| async { event })
+            .await
+        {
+            assert_eq!(event, case.revoked());
+            writes.push(restored);
+        }
+    }
+    assert_eq!(
+        writes,
+        [false],
+        "the older query observed the grant before handoff"
+    );
+}
+
+#[fukulow_test::test]
+async fn role_commit_seen_before_retirement_requires_fresh_private_proof(pool: PgPool) {
+    role_commit_requires_fresh_private_proof(&pool, RoleObserver::Publish).await;
+}
+
+#[fukulow_test::test]
+async fn role_commit_seen_by_fallback_requires_fresh_private_proof(pool: PgPool) {
+    role_commit_requires_fresh_private_proof(&pool, RoleObserver::Fallback).await;
+}
+
+#[fukulow_test::test]
+async fn role_commit_seen_by_removal_query_requires_fresh_private_proof(pool: PgPool) {
+    role_commit_requires_fresh_private_proof(&pool, RoleObserver::RemovalQuery).await;
+}
+
+enum RoleObserver {
+    Publish,
+    Fallback,
+    RemovalQuery,
+}
+async fn role_commit_requires_fresh_private_proof(pool: &PgPool, observer: RoleObserver) {
+    let case = Case::new(pool, false, Later::Role).await;
+    let removal_query =
+        matches!(observer, RoleObserver::RemovalQuery).then(|| case.pause_revocation("revoked"));
+    case.remove_grant().await;
+    if let Some(gate) = &removal_query {
+        wait(gate).await;
+    } else {
+        case.delivery().drained().await;
+    }
+
+    case.set_rechecks(MemberRecheck::Skip, None);
+    let retirement = case.hold_retirement(None);
+    case.set_role("guest").await;
+    wait(&retirement).await;
+    match observer {
+        RoleObserver::Publish => case.publish_channel_list().await,
+        RoleObserver::Fallback => {
+            case.delivery()
+                .check(&case.f.state.pool, SubscriptionScope::All)
+                .await;
+        }
+        RoleObserver::RemovalQuery => removal_query.unwrap().release.add_permits(1),
+    }
+    case.delivery().drained().await;
+    let frame = case.take_revocation();
+    let query = case.pause_revocation("handoff_recheck");
+    let mut handoff = std::pin::pin!(frame.handoff(&case.f.state.pool, |event| async { event }));
+    tokio::select! {
+        biased;
+        sent = &mut handoff => panic!("completed before fresh proof: {sent:?}"),
+        () = wait(&query) => {}
+    }
+    query.release.add_permits(1);
+    assert_eq!(handoff.await, Some(case.revoked()));
+
+    retirement.release.add_permits(1);
+    wait(&retirement).await;
+    case.delivery().drained().await;
+    assert_eq!(case.received_revocations(None).await, 0);
+}
+
+#[fukulow_test::test]
+async fn handoff_rechecks_again_when_a_second_role_change_overtakes_it(pool: PgPool) {
     let case = Case::new(&pool, false, Later::Role).await;
     case.remove_grant().await;
     case.delivery().drained().await;
-    let old = case.take_revocation();
+    let frame = case.take_revocation();
 
-    let gate = case.hold_member_recheck();
+    let member = case.hold_member_recheck();
+    let first = case.pause_revocation("handoff_recheck");
     let ((), ()) = tokio::join!(case.set_role("guest"), async {
-        wait(&gate).await;
-        // Only the newer removal has a fast signal. By the time the Role
-        // recheck reads access, the intervening grant is already gone.
-        grant(&pool, &case.f, case.revoked, case.target).await;
-        case.remove_grant().await;
-        gate.release.add_permits(1);
+        wait(&member).await;
+        let mut handoff =
+            std::pin::pin!(frame.handoff(&case.f.state.pool, |event| async { event }));
+        tokio::select! {
+            biased;
+            sent = &mut handoff => panic!("completed before the first proof: {sent:?}"),
+            () = wait(&first) => {}
+        }
+        let ((), ()) = tokio::join!(case.set_role("member"), async {
+            wait(&member).await;
+            let latest = case.pause_revocation("handoff_recheck");
+            first.release.add_permits(1);
+            tokio::select! {
+                biased;
+                sent = &mut handoff => panic!("completed before the latest proof: {sent:?}"),
+                () = wait(&latest) => {}
+            }
+            latest.release.add_permits(1);
+            assert_eq!(handoff.as_mut().await, Some(case.revoked()));
+            member.release.add_permits(2);
+        });
     });
     case.delivery().drained().await;
-    let sent = old
-        .handoff(&case.f.state.pool, |event| async { event })
-        .await;
-    assert_eq!(
-        sent, None,
-        "the later Channel lifetime fenced the old revocation"
-    );
     assert_eq!(
         case.received_revocations(None).await,
-        1,
-        "the new Channel loss"
+        0,
+        "exactly one private revocation"
     );
+}
+
+#[fukulow_test::test]
+async fn failed_handoff_recheck_discards_only_the_held_private_revocation(pool: PgPool) {
+    for verify_public_first in [false, true] {
+        let case = Case::new(&pool, false, Later::Role).await;
+        case.remove_grant().await;
+        case.delivery().drained().await;
+        let frame = case.take_revocation();
+        let public = Notice::ChannelAccessRevoked {
+            channel_id: case.f.channel,
+        };
+        if verify_public_first {
+            case.set_rechecks(MemberRecheck::Skip, None);
+            case.set_role("guest").await;
+            case.delivery().drained().await;
+            assert!(case.registration.buffered(&public));
+        }
+
+        let gate = case.hold_member_recheck();
+        let ((), ()) = tokio::join!(case.set_role("guest"), async {
+            wait(&gate).await;
+            case.publish_channel_list().await;
+            assert!(case.registration.buffered(&Notice::ChannelListChanged));
+            let closed = closed_pool(&case.f.state.pool).await;
+            let query = case.pause_revocation("handoff_recheck");
+            let mut handoff = std::pin::pin!(frame.handoff(&closed, |_| async {
+                panic!("a failed handoff recheck polled the private revocation write")
+            }));
+            tokio::select! {
+                biased;
+                sent = &mut handoff => panic!("completed before querying the closed pool: {sent:?}"),
+                () = wait(&query) => {}
+            }
+            query.release.add_permits(1);
+            assert_eq!(handoff.await, None::<()>);
+            assert!(
+                case.registration.buffered(&Notice::ChannelListChanged),
+                "handoff failure discarded an independent ordinary notice"
+            );
+            if verify_public_first {
+                assert!(
+                    case.registration.buffered(&public),
+                    "handoff failure fenced a verified public revocation"
+                );
+            }
+            gate.release.add_permits(1);
+        });
+        case.delivery().drained().await;
+        let mut received = Vec::new();
+        while let Some(frame) = case.next() {
+            let sent = frame
+                .handoff(&case.f.state.pool, |event| async { event })
+                .await;
+            assert_ne!(sent, Some(Notice::ActivityReset));
+            received.extend(sent);
+        }
+        assert_eq!(
+            received.iter().filter(|notice| **notice == public).count(),
+            1
+        );
+    }
 }
 
 #[fukulow_test::test]
@@ -521,7 +797,8 @@ async fn unrelated_channel_retirement_keeps_revocation_identity_proof(pool: PgPo
         case.delivery().drained_except(1).await;
         if lose_identity_proof {
             // Bypass the mutation hook so only the recheck can fence this frame.
-            role(&pool, &case.f, case.target, "guest").await;
+            sqlx::query("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2")
+                .bind(case.f.organization).bind(case.target).execute(&pool).await.unwrap();
             case.delivery()
                 .check(
                     &case.f.state.pool,
@@ -533,7 +810,7 @@ async fn unrelated_channel_retirement_keeps_revocation_identity_proof(pool: PgPo
         gate.release.add_permits(1);
         case.delivery().drained().await;
     }
-    assert_eq!(received, [1, 0], "live identity then changed identity");
+    assert_eq!(received, [1, 0], "live identity then lost Membership");
 }
 
 #[fukulow_test::test]

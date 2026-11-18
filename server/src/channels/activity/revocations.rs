@@ -34,7 +34,9 @@ struct NoticeProof {
     channel: Uuid,
     public: bool,
     role: Role,
-    verified: Option<u64>,
+    generation: u64,
+    revision: u64,
+    verified: bool,
 }
 
 pub(super) struct Capture {
@@ -50,6 +52,7 @@ pub(super) struct Check {
     id: u64,
     sequence: u64,
     generation: u64,
+    revision: u64,
     pub(super) channel: Uuid,
     expected_role: Option<Role>,
     pub(super) needs_recheck: bool,
@@ -70,15 +73,16 @@ impl Tracking {
             return None;
         };
         let generation = self.role.max(sequence);
+        let current = proof.generation == generation;
         self.retained(sequence, proof.channel, proof.public)
             .then_some(Check {
                 id,
                 sequence,
                 generation,
+                revision: proof.revision,
                 channel: proof.channel,
-                expected_role: (proof.verified.unwrap_or(sequence) == generation)
-                    .then_some(proof.role),
-                needs_recheck: proof.verified != Some(generation),
+                expected_role: current.then_some(proof.role),
+                needs_recheck: !current || !proof.verified,
             })
     }
 
@@ -139,11 +143,13 @@ impl Revocations {
     }
 
     pub(super) fn observe_identity(&self, role: Role) -> bool {
-        self.checks()
-            .into_iter()
-            .filter(|check| check.expected_role.is_some_and(|expected| expected != role))
-            .max_by_key(|check| check.generation)
-            .is_some_and(|check| self.apply(check, Some(role), None))
+        let mut changed = false;
+        for check in self.checks() {
+            if check.expected_role.is_some_and(|expected| expected != role) {
+                changed |= self.apply(check, Some(role), None);
+            }
+        }
+        changed
     }
 
     pub(super) fn checks(&self) -> Vec<Check> {
@@ -167,26 +173,48 @@ impl Revocations {
         let Some(current) = state.check(check.id) else {
             return false;
         };
+        if access == Some(true) {
+            // Restored access ends the original Channel lifetime even if a
+            // later Role check already proved absence for a different snapshot.
+            state.retire_channel(check.channel, check.sequence + 1);
+            return check.generation == current.generation && check.revision == current.revision;
+        }
         if check.generation != current.generation {
             return false;
         }
-        // A DB observation fences the work it checked, including that capture.
-        // A newer capture can represent a mutation still in progress at the read.
-        if role.is_none_or(|role| check.expected_role.is_some_and(|expected| expected != role)) {
+        let Some(role) = role else {
+            // Fence the checked work, including that capture. A newer capture
+            // can represent a mutation still in progress at the read.
             state.retire_member(check.generation + 1);
-        } else if access == Some(true) {
-            // Keep any newer, already captured removal of this Channel eligible.
-            state.retire_channel(check.channel, check.sequence + 1);
-        } else {
-            if let Some((_, Scope::Notice(proof))) = state.live.get_mut(&check.id)
-                && let (Some(role), Some(false)) = (role, access)
-            {
-                proof.role = role;
-                proof.verified = Some(check.generation);
-            }
+            return true;
+        };
+        if check.revision != current.revision {
             return false;
         }
-        true
+        let Some((_, Scope::Notice(proof))) = state.live.get_mut(&check.id) else {
+            return false;
+        };
+        if current
+            .expected_role
+            .is_some_and(|expected| expected != role)
+        {
+            if proof.public {
+                state.live.remove(&check.id);
+            } else {
+                // COMMIT can be visible before Role retirement. Require a new
+                // snapshot and invalidate reads started before this observation.
+                proof.role = role;
+                proof.revision += 1;
+                proof.verified = false;
+            }
+            return true;
+        }
+        if access == Some(false) {
+            proof.role = role;
+            proof.generation = check.generation;
+            proof.verified = true;
+        }
+        false
     }
 
     #[cfg(test)]
@@ -254,7 +282,9 @@ impl Capture {
                     channel,
                     public,
                     role,
-                    verified: None,
+                    generation: self.sequence,
+                    revision: 0,
+                    verified: false,
                 }),
                 Some(self.sequence),
             ))
