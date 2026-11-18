@@ -727,6 +727,30 @@ No evaluation was run for this change; verification uses small local fake-proces
 - **Completeness and failures.** 224/224 equal to the reference sequential `strpos` scan per engine (round 1) and after dump/restore; 0 failed transactions in all pgbench runs; statement_timeout 10 s verified. #198 drill, #316 restore and upgrades NOT EVALUATED.
 - **Quality.** Identical to the 2026-11-15 quality record: literal modes micro P/R/F1 0.809/0.528/0.639; pgroonga-split-query 0.830 F1 (recall 0.847).
 - **Limits.** No DMs in the frozen dataset, so the DM part of the gate is NOT EVALUATED; plans and completeness from round 1 only; one shared Mac/VM. Whether this Mac run is the formal judgement (Issue body) or Linux remains (record above) is a maintainer decision. Raw artifacts outside Git.
+## Search engine comparison, P2 definer at 1M (#153, 2026-11-18 JST, Mac)
+
+**Measured performance subset only: PGroonga with P2 passes latency, index use, completeness and denial checks on this dataset; pg_trgm and pg_bigm miss latency. The DM part (no DMs in the dataset), P2's security evaluation and deploy/restore evidence are not covered, so the implementation gate is not cleared. No adoption: P2 relies on `BYPASSRLS` and stays held (maintainer, 2026-11-18).** One formal run of frozen manifest v2 `9b649cf9…` at `main` `df13a2c` (#510 P2 `SECURITY DEFINER` search path, #518 denial cases and pre-registered judgement), 2026-11-18 02:00–02:40 JST, `node load/search-engines/run.ts` then `quality/run.ts`. Apple M5 / 10 CPUs, Docker 29.9.3 with a 10-CPU / 19.5 GiB VM, Node 26.13.1, PostgreSQL 18.6-1.pgdg13+2, pg_trgm 1.6, pg_bigm 1.2, PGroonga 4.1.0. Fresh image `sha256:972aec5f…`. Run status `valid: true`, cleanup verified, exit 0, no retry. Gate unchanged: 1,000,000 Messages, 5 concurrent searches, 3 rounds × 28 query classes × 300 samples, p95 ≤ 500 ms per class (median of rounds), search-index use, completeness equal to the reference scan, permission denials.
+
+| Engine | Overall | Classes over 500 ms | Worst class p95 ms | Index use (classes) | Completeness | Denials |
+|---|---|---:|---:|---:|---|---|
+| pg_trgm (P2) | FAIL | 6 / 28 | 2568.7 (`literal-backslash`) | 14 | PASS | PASS |
+| pg_bigm (P2) | FAIL | 3 / 28 | 1154.9 (`ja1-rare`) | 18 | PASS | PASS |
+| PGroonga (P2) | **PASS** | 0 / 28 | 309.9 (`space2`; worst round 315.0, worst p99 314.2) | 20 | PASS | PASS |
+
+Write and build cost (median of 3; recorded, not part of the gate):
+
+| Variant | Index build s | Relation growth MiB | Write TPS (Δ vs control) | Write p95 ms | WAL B/insert |
+|---|---:|---:|---:|---:|---:|
+| Control | — | 0 | 4515 | 1.785 | 9564 |
+| pg_trgm GIN | 18.5 | 225.7 | 4158 (−6.9%) | 1.988 | 10523 |
+| pg_bigm GIN | 17.4 | 195.6 | 4123 (−8.5%) | 1.937 | 10544 |
+| PGroonga | 21.6 | 1168.0 (DB growth) | 2505 (−44.5%) | 3.430 | 10029 |
+
+- **Against the v1 record above:** P2 restores search-index use for all three engines (v1 app-role plans: 0 of 28). The write micro-benchmark changed with the schema (#526 adds a BEFORE INSERT trigger on `messages`), so its TPS deltas are not an improvement or regression comparison with v1 (PGroonga −23.5% there).
+- **Quality** (same run, evaluation only): best micro F1 PGroonga `split-query` 0.830 and `kana-query` 0.829; the three literal variants 0.639. Unchanged from the 2026-11-15 quality record.
+- **Limits.** Developer-Mac comparison, not a formal #431 budget. No DMs in the frozen dataset. The write figures are a pgbench insert micro-benchmark, not the send path (#153 M1 measures that). Security of P2 (Member binding, cross-Organization leakage, timing, restore privileges) is not evaluated here (#153 E1). Raw artifacts outside Git.
+- **Re-run policy (maintainer, 2026-11-18):** this result stands without another run until an input changes (schema, engine or image version, queries, normalization or the gate).
+
 ## DM Q4 concurrent offered-work evidence (#151, 2026-11-15)
 
 Procedure clarification, superseding whole-core totals/cardinality as Q4 concurrency evidence; no formal measurement was performed. Retain fixed 60-second buckets aligned to the common core, with exact boundaries, connection intervals, actual offered sends and opens separately by resolve/create/renew, and browsing offers separately by first/deep. Each of the ten Organizations must maintain 1,000 connections and offer 200 sends/s plus 2 opens/s (half resolve, quarter create, quarter renew); the separate browsing Organization offers 100 reads/s (half first, half deep). Every bucket overlapping the browsing sample window must qualify; the runner conservatively checks the entire fixed core, which supplies those samples. Historical artifacts without this evidence are NOT EVALUATED with an explicit reason.
