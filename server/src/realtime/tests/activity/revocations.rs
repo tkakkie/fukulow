@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     auth::{
         SubscriptionRecheck, SubscriptionScope,
-        activity::{ActivityChange, ActivityChanges, Capture, ChannelChange},
+        activity::{ActivityChange, ActivityChanges, Capture, ChangeScope, ChannelChange},
     },
     channels::{
         AccessChanges,
@@ -34,6 +34,7 @@ const STAGES: [Stage; 5] = [
 enum Later {
     OtherGrant,
     OtherManager,
+    OtherMember,
     Regrant,
     Role,
     Deactivate,
@@ -115,7 +116,7 @@ impl Case {
         )
         .await;
     }
-    async fn later(&self, later: Later, whole_set: bool) {
+    async fn later(&self, pool: &PgPool, later: Later, whole_set: bool) {
         match later {
             Later::OtherGrant => self.grant(self.other).await,
             Later::OtherManager => {
@@ -126,6 +127,16 @@ impl Case {
                     StatusCode::NO_CONTENT,
                 )
                 .await
+            }
+            Later::OtherMember => {
+                let (other, _) = member(pool, self.f.organization).await;
+                self.request(
+                    "POST",
+                    &format!("/api/v1/channels/{}/members", self.revoked),
+                    json!({"member_id":other}),
+                    StatusCode::NO_CONTENT,
+                )
+                .await;
             }
             Later::Regrant => self.grant(self.revoked).await,
             Later::Role => {
@@ -166,8 +177,11 @@ impl Case {
         let mut count = 0;
         let mut frame = held.or_else(|| self.next());
         while let Some(next) = frame {
-            count +=
-                usize::from(next.handoff(|event| async { event }).await == Some(self.revoked()));
+            count += usize::from(
+                next.handoff(&self.f.state.pool, |event| async { event })
+                    .await
+                    == Some(self.revoked()),
+            );
             frame = self.next();
         }
         count
@@ -201,7 +215,7 @@ async fn transition_matrix(pool: &PgPool, whole_set: bool, changes: &[Later]) {
             // until the Role revocation reaches the selected stage.
             let old_manager = if whole_set && matches!(later, Later::OtherManager) {
                 let retirement = case.hold_retirement(Some(case.other));
-                case.later(later, false).await;
+                case.later(pool, later, false).await;
                 wait(&retirement).await;
                 Some(retirement)
             } else {
@@ -230,6 +244,9 @@ async fn transition_matrix(pool: &PgPool, whole_set: bool, changes: &[Later]) {
                 manager.release.add_permits(1);
                 wait(&manager).await;
                 None
+            } else if matches!(later, Later::OtherMember) {
+                case.later(pool, later, whole_set).await;
+                None
             } else {
                 let gate = pause_member(
                     case.f.organization,
@@ -237,7 +254,7 @@ async fn transition_matrix(pool: &PgPool, whole_set: bool, changes: &[Later]) {
                     "target_state",
                     Some(case.target),
                 );
-                case.later(later, whole_set).await;
+                case.later(pool, later, whole_set).await;
                 wait(&gate).await;
                 Some(gate)
             };
@@ -252,7 +269,12 @@ async fn transition_matrix(pool: &PgPool, whole_set: bool, changes: &[Later]) {
                 later_gate.release.add_permits(1);
                 case.delivery().drained().await;
             }
-            let expected = usize::from(matches!(later, Later::OtherGrant | Later::OtherManager));
+            let expected = usize::from(
+                matches!(
+                    later,
+                    Later::OtherGrant | Later::OtherManager | Later::OtherMember
+                ) || (!whole_set && matches!(later, Later::Role)),
+            );
             if actual != expected {
                 failures.push((stage, later, actual, expected));
             }
@@ -272,6 +294,7 @@ async fn channel_revocation_survives_only_unrelated_transitions(pool: PgPool) {
         &[
             Later::OtherGrant,
             Later::OtherManager,
+            Later::OtherMember,
             Later::Regrant,
             Later::Role,
             Later::Deactivate,
@@ -304,24 +327,30 @@ impl SubscriptionRecheck for HoldMemberRecheck {
         self.access.failed(scope);
     }
 }
+impl Case {
+    fn hold_member_recheck(&self) -> Arc<TestGate> {
+        let gate = Arc::new(TestGate {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        self.f
+            .state
+            .session_changes
+            .set_subscription_recheck(Arc::new(HoldMemberRecheck {
+                access: self.f.state.message_delivery.channel_access.clone(),
+                member: (self.f.organization, self.target),
+                gate: gate.clone(),
+            }));
+        gate
+    }
+}
 
 #[fukulow_test::test]
 async fn role_revocations_survive_a_later_grant_during_recheck(pool: PgPool) {
     let case = Case::new(&pool, true, Later::OtherGrant).await;
     let token = session::another_session(&pool, case.f.organization, case.target).await;
     let mut socket = connect(&case.f, &token).await;
-    let gate = Arc::new(TestGate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    case.f
-        .state
-        .session_changes
-        .set_subscription_recheck(Arc::new(HoldMemberRecheck {
-            access: case.f.state.message_delivery.channel_access.clone(),
-            member: (case.f.organization, case.target),
-            gate: gate.clone(),
-        }));
+    let gate = case.hold_member_recheck();
     let ((), ()) = tokio::join!(case.set_role("guest"), async {
         wait(&gate).await;
         case.grant(case.other).await;
@@ -337,6 +366,123 @@ async fn role_revocations_survive_a_later_grant_during_recheck(pool: PgPool) {
             .count(),
         1,
         "the Role change lost its revocation during its Member recheck"
+    );
+}
+
+#[fukulow_test::test]
+async fn first_handoff_rechecks_a_role_superseded_revocation(pool: PgPool) {
+    let mut received = Vec::new();
+    for fail_recheck in [false, true] {
+        let case = Case::new(&pool, false, Later::Role).await;
+        case.remove_grant().await;
+        case.delivery().drained().await;
+        let frame = case.take_revocation();
+        let gate = case.hold_member_recheck();
+        let ((), actual) = tokio::join!(case.set_role("guest"), async {
+            wait(&gate).await;
+            if fail_recheck {
+                let closed = sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy_with(case.f.state.pool.connect_options().as_ref().clone());
+                closed.close().await;
+                case.delivery()
+                    .check(
+                        &closed,
+                        SubscriptionScope::Member(case.f.organization, case.target),
+                    )
+                    .await;
+            }
+            let received = case.received_revocations(Some(frame)).await;
+            gate.release.add_permits(1);
+            received
+        });
+        received.push(actual);
+        case.delivery().drained().await;
+    }
+    assert_eq!(received, [1, 0], "first handoff, then failed fallback");
+}
+
+#[fukulow_test::test]
+async fn role_recheck_rejects_a_racing_regrant(pool: PgPool) {
+    let case = Case::new(&pool, false, Later::Regrant).await;
+    case.remove_grant().await;
+    case.delivery().drained().await;
+    let frame = case.take_revocation();
+
+    let role = case.hold_member_recheck();
+    let regrant = case.hold_retirement(Some(case.revoked));
+    let ((), ()) = tokio::join!(case.set_role("guest"), async {
+        wait(&role).await;
+        case.grant(case.revoked).await;
+        wait(&regrant).await;
+        role.release.add_permits(1);
+    });
+    case.delivery().drained().await;
+    let mut polled = false;
+    let sent = frame
+        .handoff(&case.f.state.pool, |_| async { polled = true })
+        .await;
+    regrant.release.add_permits(1);
+    wait(&regrant).await;
+    case.delivery().drained().await;
+    assert_eq!(sent, None);
+    assert!(!polled, "recheck let a re-granted Channel's write start");
+}
+
+#[fukulow_test::test]
+async fn role_recheck_keeps_the_original_channel_sequence(pool: PgPool) {
+    let case = Case::new(&pool, false, Later::Role).await;
+    case.remove_grant().await;
+    case.delivery().drained().await;
+    let old = case.take_revocation();
+
+    let gate = case.hold_member_recheck();
+    let ((), ()) = tokio::join!(case.set_role("guest"), async {
+        wait(&gate).await;
+        // Only the newer removal has a fast signal. By the time the Role
+        // recheck reads access, the intervening grant is already gone.
+        grant(&pool, &case.f, case.revoked, case.target).await;
+        case.remove_grant().await;
+        gate.release.add_permits(1);
+    });
+    case.delivery().drained().await;
+    let sent = old
+        .handoff(&case.f.state.pool, |event| async { event })
+        .await;
+    assert_eq!(
+        sent, None,
+        "the later Channel lifetime fenced the old revocation"
+    );
+    assert_eq!(
+        case.received_revocations(None).await,
+        1,
+        "the new Channel loss"
+    );
+}
+
+#[fukulow_test::test]
+async fn role_visibility_gain_retires_an_older_revocation_through_later_loss(pool: PgPool) {
+    let case = Case::new(&pool, true, Later::Role).await;
+    case.set_role("guest").await;
+    case.delivery().drained().await;
+    let old = case.take_revocation();
+
+    let gate = case.hold_member_recheck();
+    let ((), ()) = tokio::join!(case.set_role("member"), async {
+        wait(&gate).await;
+        let ((), ()) = tokio::join!(case.set_role("guest"), async {
+            wait(&gate).await;
+            gate.release.add_permits(2);
+        });
+    });
+    case.delivery().drained().await;
+    let sent = old
+        .handoff(&case.f.state.pool, |event| async { event })
+        .await;
+    assert_eq!(sent, None, "the intervening Role made the Channel visible");
+    assert_eq!(
+        case.received_revocations(None).await,
+        1,
+        "the new Role loss"
     );
 }
 
@@ -440,7 +586,9 @@ async fn fallback_regrant_fences_a_dequeued_revocation_before_first_poll(pool: P
         .await;
 
     let mut polled = false;
-    let sent = frame.handoff(|_| async { polled = true }).await;
+    let sent = frame
+        .handoff(&case.f.state.pool, |_| async { polled = true })
+        .await;
     assert!(
         !polled,
         "fallback allowed the old revocation's first write poll"
@@ -540,13 +688,17 @@ impl ActivityChanges for HoldRetirement {
         tx: &'a mut sqlx::PgConnection,
         organization: Uuid,
         target: Uuid,
-        channel: Option<Uuid>,
+        scope: ChangeScope,
     ) -> Capture<'a> {
         Box::pin(async move {
             let change = self
                 .activity
-                .capture(tx, organization, target, channel)
+                .capture(tx, organization, target, scope)
                 .await?;
+            let channel = match scope {
+                ChangeScope::Channel(channel) => Some(channel),
+                _ => None,
+            };
             if channel == self.scope
                 && let Some(gate) = self.gate.lock().unwrap().take()
             {

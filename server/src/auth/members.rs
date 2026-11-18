@@ -1,4 +1,7 @@
-use super::{activity::ActivityChange, *};
+use super::{
+    activity::{ActivityChange, ChangeScope},
+    *,
+};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct MemberList {
@@ -210,7 +213,7 @@ pub async fn change_role<G: RoleChangeGuard + Send + 'static>(
         }
         guard.check(&mut *tx, org, id, input.role).await?;
         let previous: Role = sqlx::query_scalar("SELECT role FROM users WHERE organization_id=$1 AND id=$2").bind(org).bind(id).fetch_one(&mut *tx).await?;
-        let notice = if previous != input.role { state.session_changes.capture_activity(tx, org, id, None).await? } else { None };
+        let notice = if previous != input.role { state.session_changes.capture_activity(tx, org, id, ChangeScope::Role).await? } else { None };
         let row = sqlx::query_as::<_,(Uuid,String,Role)>("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING id,name,role")
             .bind(org).bind(id).bind(input.role).fetch_optional(&mut *tx).await.map_err(member_write_error)?
             .ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
@@ -355,7 +358,7 @@ async fn deactivate_transaction<G: RoleChangeGuard>(
             }
         }
         guard.check_deactivation(tx, org, id).await?;
-        let notice = state.session_changes.capture_activity(tx, org, id, None).await?;
+        let notice = state.session_changes.capture_activity(tx, org, id, ChangeScope::Membership).await?;
         // Route ids are Member ids. Resolve the Account only in this scoped UPDATE.
         let result = sqlx::query_as("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING account_id,membership_revision")
             .bind(org).bind(id).fetch_one(tx).await.map_err(member_write_error)?;

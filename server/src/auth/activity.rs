@@ -13,6 +13,12 @@ pub enum ChannelChange {
         channel: Uuid,
     },
 }
+#[derive(Clone, Copy)]
+pub enum ChangeScope {
+    Channel(Uuid),
+    Role,
+    Membership,
+}
 pub trait ActivityChanges: Send + Sync {
     fn channel(&self, pool: sqlx::PgPool, organization: Uuid, change: ChannelChange);
     fn capture<'a>(
@@ -20,7 +26,7 @@ pub trait ActivityChanges: Send + Sync {
         connection: &'a mut sqlx::PgConnection,
         organization: Uuid,
         target: Uuid,
-        channel: Option<Uuid>,
+        scope: ChangeScope,
     ) -> Capture<'a>;
     fn directory(&self, pool: sqlx::PgPool, organization: Uuid, target: Uuid);
 }
