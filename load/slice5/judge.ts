@@ -52,6 +52,7 @@ export function compare(name: string, b: number[], a: number[], ok: (ratio: numb
 const countsComplete = (c: Counts) => [c.attempted, c.accepted, c.rejected429, c.rejected503, c.otherErrors, c.clientTimeouts,
   c.transportErrors, c.droppedIterations].every(n => Number.isInteger(n) && n >= 0) &&
   c.attempted === c.accepted + c.rejected429 + c.rejected503 + c.otherErrors + c.clientTimeouts + c.transportErrors;
+const readerCountsComplete = (c: Counts) => countsComplete(c) && (c.attempted > 0 || c.droppedIterations > 0);
 export const evidenceComplete = (e: Evidence) => Number.isInteger(e.samples) && e.samples > 0 && e.samplingErrors === 0 &&
   finite(e.maxSampleGapMs) && e.maxSampleGapMs >= 0 && e.maxSampleGapMs <= validity.maxSampleGapMs;
 
@@ -60,7 +61,7 @@ export function stepIncomplete(step: StepA): string[] {
   if (!countsComplete(step.send)) reasons.push('incomplete outcomes');
   if (step.send.accepted && !(finite(step.send.p95) && step.send.p95 >= 0)) reasons.push('missing latency');
   if (!evidenceComplete(step.evidence)) reasons.push('incomplete 1 s resource evidence');
-  if (!countsComplete(step.reader)) reasons.push('incomplete second-Organization reader outcomes');
+  if (!readerCountsComplete(step.reader)) reasons.push('incomplete second-Organization reader outcomes');
   return reasons;
 }
 function stepFailures(step: StepA): string[] {
@@ -72,7 +73,7 @@ function stepFailures(step: StepA): string[] {
     if (s.accepted !== s.attempted) reasons.push('errors');
   }
   const readerOffered = 2 * (step.seconds + partA.drainSeconds);
-  if (countsComplete(reader) && (reader.droppedIterations || reader.accepted !== reader.attempted || reader.attempted < readerOffered * validity.minimumOfferedFraction || reader.attempted > readerOffered + 1))
+  if (readerCountsComplete(reader) && (reader.droppedIterations || reader.accepted !== reader.attempted || reader.attempted < readerOffered * validity.minimumOfferedFraction || reader.attempted > readerOffered + 1))
     reasons.push('second-Organization reader not sustained');
   // The identical-retry lane is explicitly report-only.
   return reasons;

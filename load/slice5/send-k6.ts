@@ -22,7 +22,7 @@ const lanes = mode === 'open'
   ? { send: { executor: 'constant-arrival-rate', rate, timeUnit: '1s', duration: `${seconds}s`, preAllocatedVUs: 100, maxVUs: 2000, gracefulStop: `${drain}s`, exec: 'send' },
     ...(retryRate ? { retry: { executor: 'constant-arrival-rate', rate: retryRate, timeUnit: '1s', duration: `${seconds}s`, preAllocatedVUs: 10, maxVUs: 100, gracefulStop: `${drain}s`, exec: 'retry' } } : {}) }
   : { send: { executor: 'constant-vus', vus, duration: `${warmup + seconds}s`, gracefulStop: `${drain}s`, exec: 'send' } };
-// #196 B shape: the second-Organization reader runs at 2/s through the whole invocation (report-only).
+// #196 B shape: the second-Organization reader runs at 2/s through the send and drain windows; its outcomes feed the Part A and B gates.
 Object.assign(lanes, { reader: { executor: 'constant-arrival-rate', rate: 2, timeUnit: '1s', duration: `${warmup + seconds + drain}s`, preAllocatedVUs: 2, maxVUs: 20, gracefulStop: '11s', exec: 'reader' } });
 const windows = mode === 'open' ? ['all'] : ['warmup', 'measured', 'after'];
 export const options: Options = {
