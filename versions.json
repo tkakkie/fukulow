@@ -1,7 +1,7 @@
 {
   "note": "Version inventory (#512). scripts/check-versions.ts checks each version against its file; .github/workflows/version-check.yml reports newer releases and support ends weekly. Rules: docs/workflow.md section 8.",
   "entries": [
-    { "component": "Rust", "version": "1.99.1", "file": "rust-toolchain.toml", "pattern": "^channel = \"([^\"]+)\"$",
+    { "component": "Rust", "version": "1.100.0", "file": "rust-toolchain.toml", "pattern": "^channel = \"([^\"]+)\"$",
       "support": "latest only", "endoflife": "rust", "updates": "weekly-check", "class": "toolchain", "latest": { "endoflife": "rust" } },
     { "component": "Node.js", "version": "26.13.1", "file": ".node-version", "pattern": "^(\\S+)$",
       "support": "2029-04-30", "endoflife": "nodejs", "updates": "weekly-check", "class": "toolchain", "latest": { "endoflife": "nodejs", "lts": true } },
