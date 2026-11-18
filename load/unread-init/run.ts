@@ -26,7 +26,7 @@
  * SQLx is passed --no-dotenv. No secrets or environment files are loaded.
  * SIGINT/SIGTERM stop at the next safe boundary; finally removes only our own
  * container and anonymous volume. On hard kill: docker rm -fv <printed name>.
- * PILOT is not performance evidence and must not enter docs/measurements.md.
+ * PILOT is not performance evidence and must not enter docs/measurements.md or load/measurements-archive.md.
  */
 import { mkdirSync,mkdtempSync,readFileSync,writeFileSync,readdirSync,realpathSync } from 'node:fs';
 import { resolve,sep } from 'node:path';

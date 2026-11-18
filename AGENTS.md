@@ -1,7 +1,7 @@
 # fukulow
 
 Business chat app (Zulip-like: channels, topics, reply chains), built mostly by AI. Goals: high concurrency, fast display; product quality.
-Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (current method, latest baselines, evidence for current decisions), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13). Each doc's header says how to write it.
+Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (latest baselines, reproduction and limits), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13). Each doc's header says how to write it.
 Document only what code, tests and `openapi.json` cannot tell. Give each fact one home and update it in place by replacing or merging.
 CI enforces per-file byte budgets for docs and `AGENTS.md`. See `docs/workflow.md` §13 for writing and budget rules.
 
