@@ -28,15 +28,17 @@ use rustc_span::{
 };
 use std::{collections::HashSet, process::ExitCode};
 
-const MODULES: [&str; 6] = [
+const MODULES: [&str; 8] = [
     "auth",
     "channels",
     "messages",
     "realtime",
     "fukulow_api",
     "fukulow_client_core",
+    "database",
+    "shutdown",
 ];
-const ALLOWED_EDGES: [(&str, &str); 9] = [
+const ALLOWED_EDGES: [(&str, &str); 14] = [
     ("realtime", "messages"),
     ("realtime", "channels"),
     ("realtime", "auth"),
@@ -46,6 +48,11 @@ const ALLOWED_EDGES: [(&str, &str); 9] = [
     ("messages", "fukulow_api"),
     ("realtime", "fukulow_api"),
     ("fukulow_client_core", "fukulow_api"),
+    ("auth", "database"),
+    ("channels", "database"),
+    ("messages", "database"),
+    ("messages", "shutdown"),
+    ("realtime", "shutdown"),
 ];
 
 fn configured_edges() -> Result<Vec<(String, String)>, String> {
