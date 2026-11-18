@@ -3,11 +3,11 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
-- #301 author lookup caps input at 100, dedupes and omits unreadable authors. A shared non-locking history snapshot covers access, authorship and retained identities to prevent directory expansion and authorization races.
-- #149 usable managers add/remove and every Role can leave its own grant. Serialize private removal checks per Channel to preserve the last usable grant and any last manager (409).
-- #231/#305 Role demotion or deactivation that loses a private Channel's last usable manager fails atomically with 409 `last_channel_manager` and no Channel details. Auth injects the #149 guard to preserve module direction. Unmanaged Channels are allowed.
-- #292/#311: a private Channel's creator gets a grant-lifetime manager right independent of Role. A usable grant with the right or Owner/Admin Role enables a Member's Channel to add Members while requiring Owner/Admin access. Guests cannot hold the right or add Members under least privilege (#294).
-- #292/#311 The right lives only with its grant. Removal, leave or Guest demotion ends it and renewal, re-grant or reactivation never restores it (#146, #149). No creator was recorded, so #292 backfills no guessed rights. Unmanaged Channels remain allowed.
+- #301 author lookup caps input at 100 ids, dedupes and omits unreadable authors. A shared non-locking history snapshot covers access, authorship and retained identities to prevent directory expansion and authorization races.
+- #149 usable managers add/remove and every Role can leave its own grant. Serialize private removal and its checks per Channel to preserve the last usable grant and any last manager (409).
+- #231/#305 Role demotion or deactivation that loses a private Channel's last usable manager fails atomically with 409 `last_channel_manager` and no Channel details. Reuse #149's locks and check via the guard injected into auth to preserve module direction.
+- #292/#311: a private Channel's creator gets a manager right for the grant's lifetime, independent of Role. A usable manager holds a usable grant and either the right or the Owner/Admin Role. A Member can manage the private Channel they create and add Members. Owner/Admin gains no implicit access. Guests cannot hold the right or add Members under least privilege (#294).
+- #292/#311 The right lives only with its grant. Removal, leave or a change to Guest ends it. Renewal, re-grant or reactivation never restores it (#146, #149). Because creator identity was unrecorded, #292 skips backfill to avoid granting rights nobody chose. Private Channels without a usable manager remain allowed (#149).
 - #292/#311 last_channel_manager counts both usable manager paths in authorize, SQL rechecks and Capabilities, protecting managed Channels on revoke, removal, leave and Role changes (#149/#231) or deactivation (#305/#237).
 - #311 PATCH /api/v1/orgs/{org}/channels/{id}/members/{member_id} and `can_manage_managers` gate right changes. Reauthorize and validate the target even for no-ops, so stale UI state grants no authority.
 - #311 Manager PATCH uses 400 `channel_manager_private_only`/`channel_manager_guest`, 404 `member_not_found`/`channel_grant_not_found`, 409 `last_channel_manager`. Uniform 404 `channel not found` hides inaccessible Channels, including reads/sends (#17).
@@ -18,7 +18,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #149 API writes lock Organization → Channels by ascending id → Members → grants → #142/shared #135. Sends recheck Member/revision/private grant after BEGIN and hold Member SHARE/grant through COMMIT before exclusive #135, blocking intervening deactivation (#146). Mark-read releases its watermark barrier before Member/grant/position locks.
 - #231 Private creation locks Organization NO KEY UPDATE then creator Member (same #146 shared lock through COMMIT) before new rows to stabilize the Channel set. Creator grant is atomic and scoped. Lists batch visibility/Unread in one no-store snapshot (#22/#142).
 - #51 Unique Channel names span both visibilities in one Organization with `lower(name COLLATE "C")`. Existing duplicates abort migration for operator correction. Accept that creation's 409 exposes a private name to an Organization Member, without Members or Messages.
-- #299 Channel names are 1..=128 Unicode scalars and NUL-free (400 before write) for usable names within btree limits (#63). Rust, DB CHECK and OpenAPI enforce length.
+- #299 Channel names are 1..=128 Unicode scalars and NUL-free (400 before a write transaction) for usable names within btree limits (#63). Rust, DB CHECK and OpenAPI enforce length.
 - #299 migration validates rows before replacing the CHECK. Violations abort without rename/truncate/delete. Stop Channel writes, correct rows from `SELECT organization_id, id, name FROM channels WHERE char_length(name) NOT BETWEEN 1 AND 128` and re-run until empty. Accept ACCESS EXCLUSIVE (blocks reads too) during plain CHECK validation at current scale (#63).
 - #72 Reject surrounding `str::trim()` whitespace (400) to avoid look-alikes and preserve the submitted name. Use API validation because PostgreSQL whitespace differs (#77).
 - #17 Update a Messages-owned Channel counter inside the insert transaction. PostgreSQL sequences consume numbers on rollback. Accept hot-Channel serialization for gapless allocation.
@@ -33,7 +33,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #204 moves, reorders and deletes serialize per Member; complete reorders use last-committing-writer-wins. Keep Organization -> sorted Channels -> Members -> grants lock order. Reason: atomic orders and delete races must not introduce a deadlock.
 
 ## Topics, Replies and Unread (planned, spec P1-P8)
-- #148 First Message or Move creates a Topic to avoid empty Topics. Its main line derives from latest activity. Paging uses fixed W-relative positions. #137 measures feasibility and escalates a miss. Latent cost is not a contract.
+- #148 First Message or Move creates a Topic to avoid empty Topics. Its main line derives from latest activity. Paging uses fixed W-relative positions. #137 measures feasibility and stops for a maintainer decision on a miss. Paging cost remains a measured gate.
 - #148 The W-relative baseline plus unique live Messages above W keeps replay/older pages from double-counting or dropping counts. Live-only Topics need a summary for a count.
 - #142 Messages owns separate Channel/Topic read positions. The badge sums their counts (#148). Migration/grant triggers initialize existing scopes at committed seq, remove revoked rows and let later Topics inherit the grant baseline. First-fetch initialization would lose sends between grant and fetch.
 - #142 Serialize access per Organization (seed 142) so concurrent Member/Channel creation cannot miss positions. New visibility takes shared #135 through COMMIT. Mark-read rechecks access after W before locking Member/position. Revocation deletes positions and denies waiting updates. Only new access initializes. Continuous Channel/Topic access survives redundant grants and non-Guest Role changes (#144).
@@ -42,12 +42,12 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #142 Missing positions suppress only that Channel's Unread at committed seq (Topic W), log list inconsistency, persist nothing and keep mark-read 404. A zero position marks old history unread and a list-wide 500 hides unaffected Channels.
 - #142 Accept serialized set-based work O(active Members + their Topics) on public Channel insert and O(visible Channels + Topics) on Member activation, with shared #135 until COMMIT. Remeasure larger Organizations.
 - #142 Backfill blocks sends and Member/grant writes under SHARE ROW EXCLUSIVE. Work scales with visible Member×Channel pairs plus Topics. A 5 s startup lock wait cap does not bound the write outage after acquisition.
-- #160 Organization-scoped `channel_log` alone carries Create/Edit/Move/Delete positions, keeping S1, cursors and gap fill simple without replay cost tracking mutation churn. Replay proves coverage and hydrates current Messages/tombstones instead of as-it-was bodies, avoiding a past-body archive and deleted-body resurrection.
+- #160 Organization-scoped `channel_log` alone carries Create/Edit/Move/Delete positions, using one append-only sequence to simplify S1, cursors and gap fill without replay cost tracking mutation churn. Replay proves coverage and hydrates current Messages/tombstones instead of as-it-was bodies, avoiding a past-body archive and deleted-body resurrection.
 - #160 Event position and Message state version are separate. Version is the last affecting event position. Higher versions alone replace state, so replay/reorder/stale ACKs or pages converge. Delete is a terminal tombstone.
 - #160 Past-body retention/erasure across edits, deletes, receipts and backups remains an open privacy/legal decision. Until then archive no past bodies and reveal no deleted content via replay, snapshots, search or counts. Tombstones prevent resurrection.
-- #515 A creation-time SHA-256 digest retained with the Message keeps retry identity stable across edits without keeping plaintext in the receipt while retention remains open.
+- #515 A creation-time SHA-256 digest of the original send intent, retained for the Message lifetime, keeps retry identity stable across edits without keeping plaintext in the receipt while retention remains open.
 - #515 Expire operation receipts after 7 days to bound storage. Later retries are new requests and stale `expected_version` prevents re-execution.
-- #141 One release renames Message.seq to created_seq and adds version/deleted and event seq/kind without aliases. Nothing is deployed yet, the binary embeds web and Kotlin starts with the new shape.
+- #141 One release renames Message.seq to created_seq and adds version/deleted and event seq/kind without aliases or a compatibility path. Nothing is deployed yet, the binary embeds web and Kotlin starts with the new shape.
 - #515 uses Organization UUID epochs, explicit as_of_seq bootstrap and a Channel mutation floor to detect restore even beyond old cursors and expire unreconstructable pages. Owner-only rotation prevents ordinary traffic rotating epochs.
 - #160 Required before any mutation ships are history_generation, snapshot_expired, an explicit bootstrap cursor and idempotent sends/mutations via receipts and expected_version. Mutable history invalidates fixed-W pages, cursors and blind retries.
 - #160 Mutation thresholds are fixed before #141/#287 measurements to prevent result fitting. Do not relax budgets. Unevaluated work never passes. Formal evaluation follows #431.
@@ -56,7 +56,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #151 POST /dms opens or renews the pair and GET lists authorized peer identity and Unread/Mention baselines. Exclude DMs from ordinary Channel lists/sections because they have no name or Topic navigation.
 - #151 new sends hold peer eligibility through COMMIT (409 `dm_peer_deactivated` or `dm_peer_access_lapsed`). Authorized canonical retries resolve first so sending never renews access or undoes an accepted send.
 - #151 DMs reject Topic intent and all grant/member APIs and management Capabilities. Exclude them from RoleChangeGuard and last-manager/grant counts so fixed participation confers no management and never blocks Role changes.
-- #151 Reclaim only discovery revisions below the committed Member revision (never reset). SKIP LOCKED on one old counter, then delete ≤1,000 rows and its empty counter. Avoid Member/grant locks to preserve writer order and usable feeds.
+- #151 Reclaim only discovery revisions below the committed Member revision (never reset). SKIP LOCKED on one old counter, then delete ≤1,000 index rows and its counter once empty. Avoid Member/grant locks to preserve writer order and usable feeds.
 - Mention unread is a separate displayed count on the existing Channel/Topic position (#148/#152), counting one accepted Mention per Message and excluding own Messages.
 - #142/#143 client baseline selection (larger as_of_seq, then read_seq, then smaller counts, within one access generation) needs no server change. Reason: positions only advance within a generation, so counts at equal as_of_seq never rise with read progress.
 
@@ -66,8 +66,8 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #152 Check current same-Organization active target access inside send (private Owner/Admin and public Guests need grants). Denied tokens expose no identity and create no count/Notification. DM B3 still governs peer-send refusals.
 - #152 Commit Message and accepted Mention ids together and resolve authorized retries before target checks. Later access must neither rewrite an accepted send nor accept earlier rejected tokens.
 - #152 Hold sorted sender/target Member locks before grants through COMMIT, maintaining #142/#135 and #151 discovery order to serialize loss without Member-after-grant deadlocks (M2).
-- #152 Use scoped Message/Member FKs, unique Message/Member and member/Channel/Message indexes in Messages (M5) for atomic deduplication, batched unread ranges and tenant isolation.
-- #152 Mention counts share Channel main/aggregate, Topic and DM Unread scopes and snapshots so mark/loss clears both without a second position or double-counting projections (M3).
+- #152 Use Organization-scoped Message/Member FKs, unique Message/Member and member/Channel/Message indexes in Messages (M5) for atomic deduplication, batched unread ranges and tenant isolation.
+- #152 Mention counts share Channel main/aggregate, Topic and DM Unread scopes and snapshots so mark/loss clears both without a second position or double-counting Reply/Topic projections (M3).
 
 ## Topics (#137, #138)
 - #137 Messages owns Topic rows and atomic sends. Composite FKs bind nullable Message Topics to Organization and Channel. #139 adds an append-only migration.
@@ -78,7 +78,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #137 Keep write-only Topic last_seq/message_count for #142/#143. Use Message aggregates for W-relative summaries because current cache values cannot reconstruct old W.
 
 ## Replies (#139, #140)
-- #139 Replies share send admission/barrier/transaction/publication and inherit committed parent's Topic and stable root. Scoped FKs and self-parent CHECK protect references, and committed immutable parents prevent cycles. Application writers/repairs must keep each Reply on its parent's root (or the parent itself), with null reply_root_id on roots. FKs alone cannot enforce this (#141).
+- #139 Replies share send admission/barrier/transaction/publication and inherit committed parent's Topic and stable root. Scoped FKs and self-parent CHECK protect references, and committed immutable parents prevent cycles. Application writers/repairs must keep each Reply on its parent's root (or the parent itself), with null reply_root_id on roots and the committed parent id stored on each Reply. FKs alone cannot enforce this (#141).
 - #139 Compare reply_to before parent lookup. Inherited Topic is not intent. Canonical retries and changed-parent conflicts reveal no parent existence.
 - #139 Chain reads union indexed root lookup and bounded reply_root_id/seq without recursion or a depth cap. Include the null-root Message. Resolve ambiguous COMMIT before a fresh authorization/data snapshot. Follow P6/#160 for fixed-W paging.
 - #139 DeferredOrganizationAuth rejects Session/database errors before reading a send body and defers only Organization unavailability to validation, preserving 400-before-404, 401 and admission authorization.
