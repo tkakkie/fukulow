@@ -12,17 +12,16 @@
 //   - Rust: #[test] / #[tokio::test] / #[sqlx::test] / #[fukulow_test::test] in server/**/*.rs. Not run: #[ignore] and
 //     #[ignore = "..."]. Any #[cfg(...)] other than exactly cfg(test), and cfg_attr, on the test fn is
 //     treated as "cannot be verified" and refused, also when it sits on an enclosing inline `mod`.
-//     NOT detected: cfg on an enclosing file, runtime early returns, --features / env dependent behaviour.
-//     Reconciled with `cargo test --locked -- --list` (CLI only), per test binary (src/lib.rs, src/main.rs, tests/<x>.rs: one cargo
-//     run each, stdout only). A reference must (1) sit in a file that is really part of the module tree and (2) appear in
-//     the list of that binary under the exact name `<module path>::<inline mods>::name`.
+//     NOT detected statically: cfg on an enclosing file, runtime early returns, feature- or env-dependent behaviour.
+//     Reconciled with `cargo nextest list` (CLI only). A reference must (1) sit in a file that is really part of the
+//     module tree and (2) appear as runnable in its test binary under the exact name `<module path>::<inline mods>::name`.
 //     (1) is a small declaration scan, not a Rust parser: `mod x;` is resolved from server/src/lib.rs and main.rs
 //     through x.rs / x/mod.rs (module directory rules, inline mods included). FAILS CLOSED, refusing the reference, when
 //     a file is not reached by any declaration, is reached twice or through a non-test #[cfg] on a `mod`, or when the
 //     tree cannot be trusted (#[path], include!, macro_rules!, unbalanced braces). So an unreferenced
 //     server/src/unused_guard.rs is refused even if lib.rs has an inline `mod unused_guard` with a test of the same name.
 //     Other server/tests/** paths (e.g. tests/helpers/mod.rs) and server/src/bin/** cannot be mapped and are refused.
-//     Without cargo, the CLI fails. CI runs it in server-tests shard 1 after `cargo nextest run --locked` (already compiled).
+//     Without cargo or nextest, the CLI fails. The list uses the same build flags as server-tests to reuse its artifacts.
 //     The vitest "real docs" test uses the static scan only (the web job does not build server tests).
 //   - Vitest: web/**/*.{test,spec}.ts outside web/e2e (mirrors `test.exclude` in web/vite.config.ts).
 //     Not run: .skip, .todo, .fixme, xit/xtest/xdescribe, and any test inside such a describe.
@@ -300,7 +299,7 @@ export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
 export type TestStatus =
   | {
       runs: true
-      /** Rust only: every (binary, full listed name) that must appear in `cargo test -- --list` for this reference. */
+      /** Rust only: every (binary, full listed name) that must appear in `cargo nextest list` for this reference. */
       expect?: { binary: string; name: string }[]
       /** Rust only: why the reference cannot be tied to a listed test (fails closed in the reconciliation). */
       refuse?: string
@@ -380,7 +379,7 @@ function buildModuleTree(files: Map<string, RustFile>): ModuleTree {
   return tree
 }
 
-/** Where `cargo test -- --list` must show a Rust test defined in `file` (with enclosing inline mods); refuses when unsure. */
+/** Maps a Rust test in `file` to its nextest name and binary. Refuses ambiguous mappings. */
 function rustPlacement(file: string, t: RustTest, files: Map<string, RustFile>, tree: ModuleTree): TestStatus {
   const f = files.get(file)
   const refuse = (why: string): TestStatus => ({ runs: true, refuse: why })
@@ -666,18 +665,8 @@ export function collectKnownTests(root: string): Known {
   return known
 }
 
-/** One test printed by `cargo test -- --list`: the test binary it came from and its full module path + name. */
+/** One runnable test from `cargo nextest list`, identified by its binary and full test name. */
 export type ListedTest = { binary: string; name: string }
-
-/** Parses the stdout of ONE test binary's `-- --list` run ("name: test" lines); `binary` is the one that was run. */
-export function parseTestList(stdout: string, binary: string): ListedTest[] {
-  const out: ListedTest[] = []
-  for (const raw of stdout.split('\n')) {
-    const t = /^(\S+): test$/.exec(raw.replace(/\r$/, ''))
-    if (t) out.push({ binary, name: t[1] })
-  }
-  return out
-}
 
 /** Downgrades Rust tests whose module-tree position is unsure or whose exact listed name is missing from its binary. */
 export function reconcileWithCargoList(known: Known, listed: ListedTest[]): Known {
@@ -691,39 +680,49 @@ export function reconcileWithCargoList(known: Known, listed: ListedTest[]): Know
     else if (missing.length > 0)
       out.set(ref, {
         runs: false,
-        reason: `is not in \`cargo test -- --list\` of ${missing.map((e) => `${e.binary} as \`${e.name}\``).join(', ')} (cfg-excluded or not compiled)`,
+        reason: `is not runnable in \`cargo nextest list\` for ${missing.map((e) => `${e.binary} as \`${e.name}\``).join(', ')} (cfg-excluded, not compiled, or skipped)`,
       })
   }
   return out
 }
 
-/**
- * Lists the tests of each server test binary with its own `cargo test --locked -p <pkg> <target> -- --list` run, stdout only
- * (the "Running <binary>" headers are on stderr, so one run per binary is the unambiguous way to attribute names).
- * Throws (never skips) if cargo is unavailable or any run fails.
- */
+type NextestSuite = {
+  'package-name': string
+  'binary-name': string
+  kind: string
+  status: string
+  testcases: Record<string, { kind: string; 'filter-match': { status: string } }>
+}
+
+/** Lists runnable server tests across all CI shards. Throws if cargo or nextest is unavailable. */
 export function cargoList(root: string): ListedTest[] {
   const pkg = /^name\s*=\s*"([^"]+)"/m.exec(readFileSync(join(root, 'server/Cargo.toml'), 'utf8'))?.[1]
-  if (!pkg) throw new Error('server/Cargo.toml: package name not found; cannot run `cargo test -- --list`')
-  const targets: { binary: string; args: string[] }[] = []
-  if (existsSync(join(root, 'server/src/lib.rs'))) targets.push({ binary: 'src/lib.rs', args: ['--lib'] })
-  if (existsSync(join(root, 'server/src/main.rs'))) targets.push({ binary: 'src/main.rs', args: ['--bin', pkg] })
-  if (existsSync(join(root, 'server/tests')))
-    for (const f of readdirSync(join(root, 'server/tests')).sort())
-      if (f.endsWith('.rs') && statSync(join(root, 'server/tests', f)).isFile()) targets.push({ binary: `tests/${f}`, args: ['--test', f.slice(0, -3)] })
+  if (!pkg) throw new Error('Cannot map the nextest list without a package name in server/Cargo.toml')
+  // Match the workspace package selection, features and Cargo profile of server-tests in ci.yml.
+  const args = ['nextest', 'list', '--locked', '--features', 'fukulow-client-core/wasm', '--message-format', 'json']
+  const r = spawnSync('cargo', args, {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 64 << 20,
+    env: { ...process.env, CARGO_TERM_COLOR: 'never' },
+  })
+  if (r.error || r.status !== 0)
+    throw new Error(`\`cargo ${args.join(' ')}\` failed (cargo is required, with nextest):\n${r.error ?? ''}${r.stderr ?? ''}`)
+
+  const { 'rust-suites': suites } = JSON.parse(r.stdout) as { 'rust-suites': Record<string, NextestSuite> }
   const listed: ListedTest[] = []
-  for (const t of targets) {
-    const r = spawnSync('cargo', ['test', '--locked', '-p', pkg, ...t.args, '--', '--list'], {
-      cwd: root,
-      encoding: 'utf8',
-      maxBuffer: 64 << 20,
-      env: { ...process.env, CARGO_TERM_COLOR: 'never' },
-    })
-    if (r.error || r.status !== 0)
-      throw new Error(`\`cargo test --locked ${t.args.join(' ')} -- --list\` failed (cargo is required; this check does not skip):\n${r.error ?? ''}${r.stderr ?? ''}`)
-    listed.push(...parseTestList(r.stdout, t.binary))
+  for (const suite of Object.values(suites)) {
+    if (suite['package-name'] !== pkg || suite.status !== 'listed') continue
+    let binary: string
+    if (suite.kind === 'lib') binary = 'src/lib.rs'
+    else if (suite.kind === 'bin' && suite['binary-name'] === pkg) binary = 'src/main.rs'
+    else if (suite.kind === 'test') binary = `tests/${suite['binary-name']}.rs`
+    else continue
+
+    for (const [name, testcase] of Object.entries(suite.testcases))
+      if (testcase.kind === 'test' && testcase['filter-match'].status === 'matches') listed.push({ binary, name })
   }
-  if (listed.length === 0) throw new Error('`cargo test -- --list` printed no tests; cannot reconcile')
+  if (listed.length === 0) throw new Error('`cargo nextest list` printed no runnable server tests')
   return listed
 }
 

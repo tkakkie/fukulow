@@ -1,7 +1,7 @@
 // Regression tests for executable invariant references, Rule text/IDs and distinct cross-part row resolution.
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { checkDecisionDocs, checkDecisions, checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
+import { checkDecisionDocs, checkDecisions, checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -269,7 +269,7 @@ describe('split invariants', () => {
     const { root, put } = fixture()
     put('docs/invariants/b.md', table('second', 'server/tests/a.rs::other_test'))
     expect(checkInvariants(root, [{ binary: 'tests/a.rs', name: 'ok_test' }])).toEqual([
-      'docs/invariants/b.md: line 3: `server/tests/a.rs::other_test` does not count: is not in `cargo test -- --list` of tests/a.rs as `other_test` (cfg-excluded or not compiled) (rule: second)',
+      'docs/invariants/b.md: line 3: `server/tests/a.rs::other_test` does not count: is not runnable in `cargo nextest list` for tests/a.rs as `other_test` (cfg-excluded, not compiled, or skipped) (rule: second)',
     ])
   })
 
@@ -596,7 +596,7 @@ mod gated;
   })
 })
 
-describe('reconciliation with the cargo test list', () => {
+describe('reconciliation with the nextest list', () => {
   const makeRoot = (files: Record<string, string>) => {
     const root = mkdtempSync(join(tmpdir(), 'inv-list-'))
     mkdirSync(join(root, 'web'))
@@ -639,11 +639,6 @@ describe('reconciliation with the cargo test list', () => {
   ]
   const check = checker(root, listed)
 
-  it('parses one binary stdout and ignores everything else', () => {
-    const out = ['', 'a::real: test', 'b: benchmark', 'noise', '2 tests, 0 benchmarks'].join('\r\n')
-    expect(parseTestList(out, 'src/lib.rs')).toEqual([{ binary: 'src/lib.rs', name: 'a::real' }])
-  })
-
   it('passes real tests: integration binary, nested module files, mod.rs, inline mods (positive)', () => {
     expect(check('server/tests/auth.rs::real')).toEqual([])
     expect(check('server/src/channels/tests/names.rs::real')).toEqual([])
@@ -680,7 +675,7 @@ describe('reconciliation with the cargo test list', () => {
     })
     const onlyChild = checker(r, [lib('a::b::real')])
     expect(onlyChild('server/src/a/b.rs::real')).toEqual([])
-    expect(onlyChild('server/src/a.rs::real')[0]).toContain('cargo test -- --list')
+    expect(onlyChild('server/src/a.rs::real')[0]).toContain('cargo nextest list')
     const wrongBinary = checker(r, [{ binary: 'src/main.rs', name: 'a::real' }, lib('a::b::real')])
     expect(wrongBinary('server/src/a.rs::real')[0]).toContain('src/lib.rs')
   })
@@ -724,16 +719,37 @@ describe('reconciliation with the cargo test list', () => {
     expect(checker(r, [main('tests::real')])('server/src/lib.rs::real')[0]).toContain('src/lib.rs')
   })
 
-  it('uses locked Cargo arguments and parses stdout only, never stderr (negative)', () => {
+  it('uses the CI build flags and lists only runnable server tests from stdout', () => {
     const bin = mkdtempSync(join(tmpdir(), 'inv-fakecargo-'))
-    writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nprintf "%s\\n" "$@" > cargo-args\necho "real: test"\necho "from_stderr: test" >&2\n', { mode: 0o755 })
-    const r = makeRoot({ 'server/Cargo.toml': '[package]\nname = "x"\n', 'server/src/lib.rs': '' })
+    const test = { kind: 'test', 'filter-match': { status: 'matches' } }
+    const suite = { 'package-name': 'x', 'binary-name': 'x', status: 'listed', testcases: { real: test } }
+    const output = JSON.stringify({ 'rust-suites': {
+      x: { ...suite, kind: 'lib', testcases: {
+        'a::real': test,
+        ignored: { kind: 'test', 'filter-match': { status: 'mismatch', reason: 'ignored' } },
+        filtered: { kind: 'test', 'filter-match': { status: 'mismatch', reason: 'default-filter' } },
+        benchmark: { ...test, kind: 'benchmark' },
+      } },
+      'x::bin/x': { ...suite, kind: 'bin' },
+      'x::sample': { ...suite, kind: 'test', 'binary-name': 'sample' },
+      other: { ...suite, kind: 'lib', 'package-name': 'other' },
+    } })
+    writeFileSync(join(bin, 'cargo'), `#!/bin/sh
+printf '%s\\n' "$@" > cargo-args
+printf '%s\\n' '${output}'
+echo 'unexpected stderr' >&2
+`, { mode: 0o755 })
+    const r = makeRoot({ 'server/Cargo.toml': '[package]\nname = "x"\n' })
     const saved = process.env.PATH
     process.env.PATH = `${bin}:${saved}`
     try {
-      expect(cargoList(r)).toEqual([{ binary: 'src/lib.rs', name: 'real' }])
+      expect(cargoList(r)).toEqual([
+        { binary: 'src/lib.rs', name: 'a::real' },
+        { binary: 'src/main.rs', name: 'real' },
+        { binary: 'tests/sample.rs', name: 'real' },
+      ])
       expect(readFileSync(join(r, 'cargo-args'), 'utf8').trim().split('\n')).toEqual([
-        'test', '--locked', '-p', 'x', '--lib', '--', '--list',
+        'nextest', 'list', '--locked', '--features', 'fukulow-client-core/wasm', '--message-format', 'json',
       ])
     } finally {
       process.env.PATH = saved
