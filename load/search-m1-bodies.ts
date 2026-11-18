@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { isAbsolute, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { epoch, generate, seed } from './search-engines/seed.ts';
 
 export const manifestPath = 'load/search-engines/manifest-v2.json';
+// Manifest paths are repository-relative; resolve them from this file so tests run from any directory (CI uses load/).
+export const repoPath = (path: string) => isAbsolute(path) ? path : resolve(import.meta.dirname, '..', path);
 export const sha256 = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
-export const fileSha256 = (path: string) => sha256(readFileSync(path));
+export const fileSha256 = (path: string) => sha256(readFileSync(repoPath(path)));
 
 export function overlayHashes(sourceHashes: { path: string; sha256: string }[]) {
   return Object.fromEntries(['schema.sql', 'pgroonga.sql'].map(name => {
@@ -19,7 +22,7 @@ export function overlayHashes(sourceHashes: { path: string; sha256: string }[]) 
 }
 
 export function frozenManifest() {
-  const { sha256: hash, frozen } = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+  const { sha256: hash, frozen } = JSON.parse(readFileSync(repoPath(manifestPath), 'utf8')) as {
     sha256: string;
     frozen: {
       node: string;

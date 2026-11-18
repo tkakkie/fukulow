@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { fileSha256, frozenManifest, sha256 } from './search-m1-bodies.ts';
+import { fileSha256, frozenManifest, repoPath, sha256 } from './search-m1-bodies.ts';
 
 const runner = readFileSync(new URL('./search-m1.ts', import.meta.url), 'utf8');
 
@@ -22,7 +22,7 @@ test('Astra 7: arm checks use manifest hashes even when an overlay changes durin
   const { frozen } = frozenManifest();
   for (const [path, hash] of Object.entries(overlayHashes(frozen.sourceHashes))) {
     assert.equal(fileSha256(path), hash);
-    assert.notEqual(sha256(readFileSync(path, 'utf8') + '\n-- changed during the build\n'), hash);
+    assert.notEqual(sha256(readFileSync(repoPath(path), 'utf8') + '\n-- changed during the build\n'), hash);
   }
 });
 
