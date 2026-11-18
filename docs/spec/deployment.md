@@ -60,7 +60,7 @@ services:
       - "127.0.0.1:443:443"
 ```
 
-Use Compose ≥2.24.4 and `!override`. A plain `ports:` list appends base mappings, leaving public 80/443. Pass both files to every Compose and switch command or recreation can republish those ports. Publish loopback 443 only. Closed ports require an approved nginx renewal window. Check the rendered ports before and the actual bindings after each change.
+Use Compose ≥2.24.4 and `!override`. A plain `ports:` list appends base mappings, leaving public 80/443. Pass both files to every Compose and switch command or recreation can republish those ports. Publish loopback 443 only. Closed ports require an approved nginx renewal window. Run the whole check block on the VPS before and after each change.
 
 ```sh
 # Before switching: both proxies must render loopback-only ports.
