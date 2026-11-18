@@ -1,5 +1,5 @@
-// Enforce per-file byte budgets for AGENTS.md and every Markdown file under docs/.
-import { existsSync, readdirSync, statSync } from 'node:fs'
+// Enforce per-file byte budgets for AGENTS.md and every file under docs/ (any extension; symlinks are refused).
+import { existsSync, lstatSync, readdirSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
 // Initial budgets round each file's size plus 10% headroom up to the next KiB.
@@ -40,7 +40,7 @@ export function checkDocBudgets(root: string, budgets: ReadonlyMap<string, numbe
   const files = ['AGENTS.md']
   if (existsSync(docs)) {
     for (const entry of readdirSync(docs, { recursive: true, withFileTypes: true })) {
-      if (entry.isDirectory() || !entry.name.endsWith('.md')) continue
+      if (entry.isDirectory()) continue
       files.push(relative(root, join(entry.parentPath, entry.name)).split(sep).join('/'))
     }
   }
@@ -48,9 +48,13 @@ export function checkDocBudgets(root: string, budgets: ReadonlyMap<string, numbe
   const errors: string[] = []
   const found = new Set<string>()
   for (const file of files.sort()) {
-    const stat = statSync(join(root, file), { throwIfNoEntry: false })
-    if (!stat?.isFile()) continue
+    const stat = lstatSync(join(root, file), { throwIfNoEntry: false })
+    if (!stat) continue
     found.add(file)
+    if (!stat.isFile()) {
+      errors.push(`${file}: not a regular file (symlink or special file). Docs must be plain files (docs/workflow.md §13).`)
+      continue
+    }
     const budget = budgets.get(file)
     if (budget === undefined) {
       errors.push(`${file}: ${stat.size} bytes, no budget. Add a per-file budget (docs/workflow.md §13).`)

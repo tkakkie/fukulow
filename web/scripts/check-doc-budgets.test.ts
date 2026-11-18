@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -17,10 +17,26 @@ describe('per-file documentation budgets', () => {
 
   afterEach(() => rmSync(root, { recursive: true, force: true }))
 
-  it('accepts a file at its byte limit and only counts Markdown under docs and AGENTS.md', () => {
+  it('accepts a file at its byte limit and ignores files outside docs other than AGENTS.md', () => {
     writeFileSync(join(root, 'README.md'), '# Readme\n')
-    writeFileSync(join(root, 'docs/notes.txt'), 'Notes\n')
     expect(checkDocBudgets(root, budgets)).toEqual([])
+  })
+
+  it('rejects an unbudgeted non-Markdown file or extension variant under docs', () => {
+    writeFileSync(join(root, 'docs/notes.txt'), 'Notes\n')
+    writeFileSync(join(root, 'docs/spec/extra.MD'), 'x')
+    expect(checkDocBudgets(root, budgets)).toEqual([
+      'docs/notes.txt: 6 bytes, no budget. Add a per-file budget (docs/workflow.md §13).',
+      'docs/spec/extra.MD: 1 bytes, no budget. Add a per-file budget (docs/workflow.md §13).',
+    ])
+  })
+
+  it('rejects a symlink under docs even when it has a budget', () => {
+    rmSync(join(root, 'docs/spec/area.md'))
+    symlinkSync(join(root, 'AGENTS.md'), join(root, 'docs/spec/area.md'))
+    expect(checkDocBudgets(root, budgets)).toEqual([
+      'docs/spec/area.md: not a regular file (symlink or special file). Docs must be plain files (docs/workflow.md §13).',
+    ])
   })
 
   it('rejects a file one byte over budget even when its character count fits', () => {
