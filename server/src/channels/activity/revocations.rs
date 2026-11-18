@@ -51,8 +51,8 @@ pub(super) struct Capture {
 pub(super) struct Check {
     id: u64,
     sequence: u64,
-    generation: u64,
-    revision: u64,
+    pub(super) generation: u64,
+    pub(super) revision: u64,
     pub(super) channel: Uuid,
     expected_role: Option<Role>,
     pub(super) needs_recheck: bool,
@@ -179,16 +179,13 @@ impl Revocations {
             state.retire_channel(check.channel, check.sequence + 1);
             return check.generation == current.generation && check.revision == current.revision;
         }
-        if check.generation != current.generation {
-            return false;
-        }
         let Some(role) = role else {
-            // Fence the checked work, including that capture. A newer capture
-            // can represent a mutation still in progress at the read.
+            // Identity loss is irreversible for this entry. Fence the checked
+            // work across Role generations, preserving later captures.
             state.retire_member(check.generation + 1);
             return true;
         };
-        if check.revision != current.revision {
+        if check.generation != current.generation || check.revision != current.revision {
             return false;
         }
         let Some((_, Scope::Notice(proof))) = state.live.get_mut(&check.id) else {

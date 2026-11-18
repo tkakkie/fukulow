@@ -43,6 +43,7 @@ enum Later {
 struct Case {
     f: Fixture,
     target: Uuid,
+    token: String,
     registration: Registration,
     revoked: Uuid,
     other: Uuid,
@@ -73,6 +74,7 @@ impl Case {
         Self {
             f,
             target,
+            token,
             registration,
             revoked,
             other,
@@ -88,6 +90,14 @@ impl Case {
     }
     fn pause_revocation(&self, phase: &'static str) -> Arc<TestGate> {
         pause_member(self.f.organization, self.revoked, phase, Some(self.target))
+    }
+    fn pause_role_publisher(&self) -> Arc<TestGate> {
+        pause_member(
+            self.f.organization,
+            Uuid::nil(),
+            "target_state",
+            Some(self.target),
+        )
     }
     async fn publish_channel_list(&self) {
         self.delivery()
@@ -445,7 +455,6 @@ async fn first_handoff_rechecks_a_role_superseded_revocation(pool: PgPool) {
 
 #[fukulow_test::test]
 async fn role_recheck_rejects_a_racing_regrant(pool: PgPool) {
-    let mut writes = Vec::new();
     for restored in [false, true] {
         let case = Case::new(&pool, false, Later::Regrant).await;
         case.remove_grant().await;
@@ -453,6 +462,7 @@ async fn role_recheck_rejects_a_racing_regrant(pool: PgPool) {
         let frame = case.take_revocation();
 
         let role = case.hold_member_recheck();
+        let publisher = case.pause_role_publisher();
         let ((), ()) = tokio::join!(case.set_role("guest"), async {
             wait(&role).await;
             if restored {
@@ -461,20 +471,21 @@ async fn role_recheck_rejects_a_racing_regrant(pool: PgPool) {
             }
             role.release.add_permits(1);
         });
+        wait(&publisher).await;
+        let closed = closed_pool(&case.f.state.pool).await;
+        // A handoff query would make this poll pending, even with a closed pool.
+        case.pause_revocation("handoff_recheck");
+        let sent = frame
+            .handoff(&closed, |event| async { event })
+            .now_or_never();
+        publisher.release.add_permits(1);
         case.delivery().drained().await;
-        if let Some(event) = frame
-            .handoff(&case.f.state.pool, |event| async { event })
-            .await
-        {
-            assert_eq!(event, case.revoked());
-            writes.push(restored);
-        }
+        assert_eq!(
+            sent,
+            Some((!restored).then(|| case.revoked())),
+            "the Role recheck alone must decide first handoff (restored={restored})"
+        );
     }
-    assert_eq!(
-        writes,
-        [false],
-        "only the no-grant control may start a write"
-    );
 }
 
 #[fukulow_test::test]
@@ -569,6 +580,72 @@ async fn older_role_snapshot_fences_observed_regrant_before_handoff(pool: PgPool
         [false],
         "the older query observed the grant before handoff"
     );
+}
+
+#[fukulow_test::test]
+async fn older_role_snapshot_fences_observed_membership_loss_before_handoff(pool: PgPool) {
+    for inactive in [false, true] {
+        let case = Case::new(&pool, false, Later::Role).await;
+        case.remove_grant().await;
+        case.delivery().drained().await;
+        let frame = case.take_revocation();
+
+        let gate = case.pause_revocation("fallback_snapshot");
+        let ((), ()) = tokio::join!(
+            case.delivery().check(
+                &case.f.state.pool,
+                SubscriptionScope::Channel(case.f.organization, case.revoked)
+            ),
+            async {
+                wait(&gate).await;
+                case.set_role("admin").await;
+                case.delivery().drained().await;
+                if inactive {
+                    // Only the older fallback observes the loss before handoff.
+                    sqlx::query("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2")
+                        .bind(case.f.organization).bind(case.target).execute(&pool).await.unwrap();
+                }
+                gate.release.add_permits(1);
+            }
+        );
+        let sent = frame
+            .handoff(&case.f.state.pool, |event| async { event })
+            .await;
+        assert_eq!(
+            sent,
+            (!inactive).then(|| case.revoked()),
+            "inactive={inactive}"
+        );
+    }
+}
+
+#[fukulow_test::test]
+async fn revocation_query_does_not_buffer_after_session_loss_across_roles(pool: PgPool) {
+    for ended in [false, true] {
+        let case = Case::new(&pool, false, Later::Role).await;
+        let query = case.pause_revocation("revoked");
+        case.remove_grant().await;
+        wait(&query).await;
+
+        case.set_rechecks(MemberRecheck::Skip, None);
+        let publisher = case.pause_role_publisher();
+        case.set_role("admin").await;
+        wait(&publisher).await;
+        if ended {
+            // End the Session in SQL so the revocation query alone observes it.
+            sqlx::query("DELETE FROM account_sessions WHERE token_hash=$1")
+                .bind(Sha256::digest(case.token.as_bytes()).to_vec())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        query.release.add_permits(1);
+        case.delivery().drained_except(1).await;
+        let buffered = case.registration.buffered(&case.revoked());
+        publisher.release.add_permits(1);
+        case.delivery().drained().await;
+        assert_eq!(buffered, !ended, "ended={ended}");
+    }
 }
 
 #[fukulow_test::test]
@@ -671,6 +748,102 @@ async fn handoff_rechecks_again_when_a_second_role_change_overtakes_it(pool: PgP
         0,
         "exactly one private revocation"
     );
+}
+
+#[fukulow_test::test]
+async fn handoff_rechecks_through_role_observation_and_two_retirements(pool: PgPool) {
+    let case = Case::new(&pool, false, Later::Role).await;
+    case.remove_grant().await;
+    case.delivery().drained().await;
+    let frame = case.take_revocation();
+
+    case.set_rechecks(MemberRecheck::Skip, None);
+    let retirement = case.hold_retirement(None);
+    case.set_role("guest").await;
+    wait(&retirement).await;
+    case.publish_channel_list().await;
+
+    let before_retirement = case.pause_revocation("handoff_recheck");
+    let mut handoff = std::pin::pin!(frame.handoff(&case.f.state.pool, |event| async { event }));
+    tokio::select! {
+        biased;
+        sent = &mut handoff => panic!("completed before checking the observed Role: {sent:?}"),
+        () = wait(&before_retirement) => {}
+    }
+
+    retirement.release.add_permits(1);
+    wait(&retirement).await;
+    case.delivery().drained().await;
+    let after_retirement = case.pause_revocation("handoff_recheck");
+    before_retirement.release.add_permits(1);
+    tokio::select! {
+        biased;
+        sent = &mut handoff => panic!("completed before checking the retired Role: {sent:?}"),
+        () = wait(&after_retirement) => {}
+    }
+
+    let member = case.hold_member_recheck();
+    let ((), ()) = tokio::join!(case.set_role("member"), async {
+        wait(&member).await;
+        let latest = case.pause_revocation("handoff_recheck");
+        after_retirement.release.add_permits(1);
+        tokio::select! {
+            biased;
+            sent = &mut handoff => panic!("completed before checking the second Role: {sent:?}"),
+            () = wait(&latest) => {}
+        }
+        latest.release.add_permits(1);
+        assert_eq!(handoff.as_mut().await, Some(case.revoked()));
+        member.release.add_permits(1);
+    });
+    case.delivery().drained().await;
+    assert_eq!(
+        case.received_revocations(None).await,
+        0,
+        "exactly one private revocation"
+    );
+}
+
+#[fukulow_test::test]
+async fn failed_fallback_retires_verified_revocations_and_ordinary_notices(pool: PgPool) {
+    let case = Case::new(&pool, false, Later::Role).await;
+    case.remove_grant().await;
+    case.delivery().drained().await;
+    let private = case.take_revocation();
+    case.set_role("guest").await;
+    case.delivery().drained().await;
+    let public = Notice::ChannelAccessRevoked {
+        channel_id: case.f.channel,
+    };
+    assert!(case.registration.buffered(&public));
+    case.delivery().retire(case.f.organization, case.target);
+
+    let closed = closed_pool(&case.f.state.pool).await;
+    let gate = case.pause_revocation("fallback_snapshot");
+    let ((), ()) = tokio::join!(
+        case.delivery().check(
+            &closed,
+            SubscriptionScope::Channel(case.f.organization, case.revoked)
+        ),
+        async {
+            wait(&gate).await;
+            // The fallback captured only revocation checks. It must also
+            // retire ordinary notices buffered after that snapshot.
+            case.publish_channel_list().await;
+            assert!(case.registration.buffered(&Notice::ChannelListChanged));
+            gate.release.add_permits(1);
+        }
+    );
+    assert_eq!(
+        private
+            .handoff(&case.f.state.pool, |event| async { event })
+            .await,
+        None,
+        "the verified private revocation was still eligible"
+    );
+    assert!(!case.registration.buffered(&public));
+    assert!(!case.registration.buffered(&Notice::ChannelListChanged));
+    assert!(case.next().is_none());
 }
 
 #[fukulow_test::test]

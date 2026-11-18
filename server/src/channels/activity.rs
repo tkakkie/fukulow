@@ -9,7 +9,10 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Notify, Semaphore};
+use tokio::{
+    sync::{Notify, Semaphore},
+    time::Instant,
+};
 mod dms;
 mod revocations;
 pub(crate) use dms::DmPublication;
@@ -847,7 +850,7 @@ impl NoticeFrame {
             };
             write(event).await
         });
-        let mut first_poll = |cx: &mut std::task::Context<'_>| {
+        let mut first_poll = |cx: &mut std::task::Context<'_>, deadline: Option<Instant>| {
             let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             if !(self.valid.valid() || self.recovery.as_ref().is_some_and(|r| r.valid()))
                 || self
@@ -856,33 +859,36 @@ impl NoticeFrame {
             {
                 return std::task::Poll::Ready(Ok(None));
             }
-            let current = match &self.epoch {
-                Epoch::Notice(epoch) => b.epoch == *epoch,
+            let retained = match &self.epoch {
+                Epoch::Notice(epoch) => Ok(b.epoch == *epoch),
                 Epoch::Revocation(capture) => match capture.check() {
-                    Some(check) if check.needs_recheck => {
-                        return std::task::Poll::Ready(Err(check));
-                    }
-                    Some(_) => true,
-                    None => false,
+                    Some(check) if check.needs_recheck => Err(check),
+                    check => Ok(check.is_some()),
                 },
             };
-            std::task::Poll::Ready(Ok(
-                current.then(|| std::future::Future::poll(future.as_mut(), cx))
-            ))
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return std::task::Poll::Ready(Ok(None));
+            }
+            std::task::Poll::Ready(
+                retained
+                    .map(|current| current.then(|| std::future::Future::poll(future.as_mut(), cx))),
+            )
         };
         let mut deadline = None;
-        let mut rechecks = 0;
+        let mut last_checked = None;
         let first = loop {
-            match std::future::poll_fn(&mut first_poll).await {
+            match std::future::poll_fn(|cx| first_poll(cx, deadline)).await {
                 Ok(first) => break first?,
-                Err(check) if rechecks < 2 => {
-                    let deadline = *deadline.get_or_insert_with(|| {
-                        tokio::time::Instant::now() + Duration::from_secs(5)
-                    });
+                Err(check) => {
+                    let checked = (check.generation, check.revision);
+                    if last_checked.is_some_and(|last| checked <= last) {
+                        return None;
+                    }
+                    last_checked = Some(checked);
+                    let deadline =
+                        *deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(5));
                     self.recheck_revocation(pool?, check, deadline).await?;
-                    rechecks += 1;
                 }
-                Err(_) => return None,
             }
         };
         Some(match first {
@@ -894,7 +900,7 @@ impl NoticeFrame {
         &self,
         pool: &sqlx::PgPool,
         check: Check,
-        deadline: tokio::time::Instant,
+        deadline: Instant,
     ) -> Option<()> {
         let selected = [
             (self.entry.clone(), None),
@@ -1349,6 +1355,9 @@ impl Activity {
             {
                 let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
                 b.apply_revocation(check, identity.as_ref(), Some(access.is_some()));
+            }
+            if identity.is_none() {
+                continue;
             }
             enqueue(
                 &entry,
