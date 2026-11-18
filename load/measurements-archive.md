@@ -1,6 +1,6 @@
 # Measurement archive
 
-History only, outside the normal reading path. Records are verbatim and append-only. See the [current summary](../docs/measurements.md). Issue #560 moved these records from `docs/measurements.md` at commit `15384d6`.
+History only, outside the normal reading path. Records are verbatim and append-only. See the [current summary](../docs/measurements.md). Issue #560 moved these records from `docs/measurements.md` at commit `15384d6`. Relative links below keep their original `docs/` base and are not rewritten: read `workflow.md` as `../docs/workflow.md` and `spec/...` as `../docs/spec/...`.
 
 # Measurements
 
