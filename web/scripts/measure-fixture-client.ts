@@ -1,11 +1,11 @@
 // Fixture client for the #466 measurement harness: replays contract/realtime/client
-// scenarios on the pure TS protocol so their inputs can be recorded as traces.
+// scenarios on the wasm core so their inputs can be recorded as traces.
 // Kept outside measure-wasm-core.ts (which runs on import) so a test can prove every
 // fixture input type is handled (#545).
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { components } from '../src/api-schema.d.ts'
-import { initialState, step, type Input, type State } from '../src/protocol.ts'
+import type { Input, State } from '../src/protocol-types.ts'
 import { defaultDir, type ClientScenario, type Effect as FixtureEffect, type Observed, type ResolvedInput } from './realtime-fixtures.ts'
 
 type Message = components['schemas']['Message']
@@ -26,7 +26,7 @@ const observe = (state: State): Observed => ({
   }])),
 })
 
-export function makeProtocolClient(onInput: (input: Input) => void) {
+export function makeProtocolClient(onInput: (input: Input) => void, { initialState, step }: Pick<typeof import('../src/protocol-driver.ts'), 'initialState' | 'step'>) {
   let state = initialState('me')
   return {
     get: () => state, observe: () => observe(state),

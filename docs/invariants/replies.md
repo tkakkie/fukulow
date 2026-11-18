@@ -79,8 +79,8 @@ Reply chains, server and web, incl. their real-time delivery tests. Writing rule
 | Unchanged Reply totals keep identity and notifications quiet; reconciliation scans only changed Channels and tracks changed root sets | `web/src/reply-counts.test.ts::unchanged counts keep identity and do not notify while unrelated Channels avoid projection scans` |
 | New top-level creates and accepted ACKs above the cursor seed zero without a POST; covered replay cannot seed | `web/src/reply-counts.test.ts::top level create and ACK seed zero counts without a count POST and later Replies reconcile exactly`, `web/src/reply-counts.test.ts::covered root replay cannot seed zero over history-only Replies while a count snapshot is pending` |
 | Open Reply panel roots take priority over loaded projection roots in count batches | `web/src/reply-counts.test.ts::an open panel root takes priority over more than one batch of projected roots` |
-| Root seeds keep newer authority and unique Reply suffixes in both cores | `web/src/reply-count-core.test.ts::new root seeds preserve newer baselines and reconcile only the unique Reply suffix` |
-| Both cores allocate and expose root tickets in lexical order independent of tracking insertion order | `web/src/reply-count-core.test.ts::root ticket ordering and generations are lexical regardless of tracking insertion order` |
+| Root seeds keep newer authority and unique Reply suffixes in the Rust core | `web/src/reply-count-core.test.ts::new root seeds preserve newer baselines and reconcile only the unique Reply suffix` |
+| The Rust core allocates and exposes root tickets in lexical order independent of tracking insertion order | `web/src/reply-count-core.test.ts::root ticket ordering and generations are lexical regardless of tracking insertion order` |
 
 ## Rows in other parts
 

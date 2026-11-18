@@ -6,8 +6,8 @@ Web client. Writing rules and the other parts: [index](../decisions.md).
 - #409 Revision 2 keeps Reply totals in a separate Rust projection, tracking any chain member. A 400-record evidence cap checkpoints floors and root generations before refetch. Reason: paging, duplicate replay and stale snapshots must not change authority; protocol state stays out of Svelte.
 - #409 count reads wait for a cursor and confirmed subscription; recovery preserves Retry-After and backoff. Reason: history-only Replies must be covered and gap recovery must not defeat server throttling.
 - #409 expiry and omission retries are bounded per root, independent of neighbouring successes. Invalid root tickets do not abort the batch. Reason: one root must neither loop forever nor discard useful counts for other roots.
-- #409 new top-level creates above the cursor seed zero at created_seq; panel roots lead count batches. Changed Channels alone reconcile; unchanged root sets and totals retain their JS identities. Reason: avoid needless POSTs, wasm calls and rendering while preserving both cores' ordering.
-- #465: wasm is the default; SYNC_CORE=ts builds the one-sprint rollback (#467 removes it). Vite rejects mixed bundles. Shell mounts during core load; sync starts after it (#466); failure shows an error. One dispatch notifies before ordered effects. #466 on this head and maintainer review gate merge.
+- #409 new top-level creates above the cursor seed zero at created_seq; panel roots lead count batches. Changed Channels alone reconcile; unchanged root sets and totals retain their JS identities. Reason: avoid needless POSTs, wasm calls and rendering while preserving core ordering.
+- #465/#467: Rust/wasm is the sole sync core; recorded fixture and seeded contracts preserve the former TS oracle. Vite requires wasm and glue together. The shell mounts during core load; sync starts after it; load failure shows an error. One dispatch notifies before ordered effects.
 - #465: JSON deltas retain unchanged JS Channel/array identities, reuse retained Message indices and intern body text once per step. Bounded request/timer reads leave State in Rust. A matched format probe favored JSON (PR evidence); #466 acceptance remains separate.
 - #465: manifest-listed wasm and glue chunks receive immutable caching; wasm MIME is application/wasm. CSP adds only wasm-unsafe-eval, allowing compilation without general unsafe-eval. Both proxy browser suites verify it.
 - #308 bounds Topic/Reply/cursor evidence at 400 ranges and Unread at 1,100 records/presented seqs, 400 Topic scopes and one visit marker. Checkpoints refetch existing baselines; insufficient counts stay unresolved and forgotten gaps refill, avoiding per-arrival memory growth.
@@ -51,7 +51,7 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [messages](messages.md): `#204 sections belong`, `#204 access loss hides`
 - [realtime](realtime.md): `#204 sections_changed goes only`, `#204 section notices share`, `#204 section display intersects`
 
-- [process](process.md): `#467 interim (#467 deletes it`, `Web boundary check (#48, #60): Workers/SharedWorkers`, `Web storage is forbidden everywhere. A`, `Hand-written API types are review-enforced, not`
+- [process](process.md): `Web boundary check (#48, #60): Workers/SharedWorkers`, `Web storage is forbidden everywhere. A`, `Hand-written API types are review-enforced, not`
 - [auth](auth.md): `#197 app-wide CSP allows external same-origin`, `#197 Vite manifest outputs alone get`
 - [auth](auth.md): `#401: app and both proxies send`
 - [auth](auth.md): `#300 sign-out 401 expires current`

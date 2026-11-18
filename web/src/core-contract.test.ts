@@ -1,33 +1,23 @@
+import { readFileSync } from 'node:fs'
 import { expect, it } from 'vitest'
-import { createCore as wasmCore } from './core-wasm'
-import { createCore as tsCore } from './core-ts'
+import { createCore } from './core-wasm'
 import type { Input } from './protocol-types'
 
-it('the build switch preserves the bounded sync contract and never changes API values', () => {
-  const self = '00000000-0000-0000-0000-000000000001'
-  const channel = '00000000-0000-0000-0000-000000000002'
-  const wasm = wasmCore(self), ts = tsCore(self)
+it('the wasm bridge preserves the recorded bounded sync contract and API values', () => {
+  const contract = JSON.parse(readFileSync(new URL('../../contract/realtime/core-boundary.json', import.meta.url), 'utf8')) as {
+    self: string; initial: unknown; steps: { input: Input; expected: unknown }[]
+  }
+  const core = createCore(contract.self)
   const plain = (value: unknown) => JSON.parse(JSON.stringify(value))
-  const inputs: Input[] = [
-    { type: 'session_start', selfId: self }, { type: 'connection_ready', connection: 1 },
-    { type: 'watch', channel },
-    { type: 'history_result', request: 3, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } },
-    { type: 'user_send', channel, clientMessageId: self, body: '本文\n👋', topic_name: 'Topic' },
-    { type: 'channel_unavailable', channel }, { type: 'organization_unavailable' },
-    { type: 'stop' }, { type: 'stop' },
-  ]
-  expect(plain(wasm.get())).toEqual(plain(ts.get()))
-  for (const input of inputs) {
-    const a = wasm.step(input), b = ts.step(input)
-    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort())
-    expect({ ...a, changedChannels: [...a.changedChannels], records: [...a.records] })
-      .toEqual({ ...b, changedChannels: [...b.changedChannels], records: [...b.records] })
-    expect(plain(wasm.get())).toEqual(plain(ts.get()))
-    expect(Object.keys(wasm.get()).sort()).toEqual(Object.keys(ts.get()).sort())
-    expect('requests' in wasm.get() || 'timers' in wasm.get()).toBe(false)
-    for (let token = 1; token < 10; token++) {
-      expect(plain(wasm.request(token) ?? null)).toEqual(plain(ts.request(token) ?? null))
-      expect(plain(wasm.timer(token) ?? null)).toEqual(plain(ts.timer(token) ?? null))
-    }
+  const snapshot = () => ({ view: core.get(),
+    requests: Object.fromEntries(Array.from({ length: 9 }, (_, i) => i + 1).flatMap(id => { const r = core.request(id); return r ? [[id, r]] : [] })),
+    timers: Object.fromEntries(Array.from({ length: 9 }, (_, i) => i + 1).flatMap(id => { const t = core.timer(id); return t ? [[id, t]] : [] })),
+  })
+  expect(plain(snapshot())).toEqual(contract.initial)
+  for (const { input, expected } of contract.steps) {
+    const result = core.step(input)
+    expect(Object.keys(result).sort()).toEqual(['changedChannels', 'effects', 'records', 'stateChanged'])
+    expect(plain({ ...snapshot(), result: { ...result, changedChannels: [...result.changedChannels], records: [...result.records] } })).toEqual(expected)
+    expect('requests' in core.get() || 'timers' in core.get()).toBe(false)
   }
 })
