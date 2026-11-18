@@ -8,7 +8,8 @@ import type {
   Channel, ClientMessage, Message, ServerEvent, SendMessageRequest,
 } from '../web/src/api-schema.d.ts';
 import { Deliveries, positiveInteger } from './delivery.ts';
-import { schedule, sessionIndex } from './scheduler.ts';
+import { schedule } from './scheduler.ts';
+import { sessionLayout } from './session-layout.ts';
 import { summaryForReport } from './summary.ts';
 import { organizationPath } from './compat.ts';
 import { isActivityNotice } from './events.ts';
@@ -29,10 +30,8 @@ const drainTimeout = positiveInteger(__ENV.DRAIN_TIMEOUT_SECONDS, 5);
 const socketsPerSession = positiveInteger(__ENV.SOCKETS_PER_SESSION, 1);
 // 0 (default) keeps the pre-#196 single-Account baselines; otherwise one Account per this many sockets.
 const socketsPerAccount = __ENV.SOCKETS_PER_ACCOUNT ? positiveInteger(__ENV.SOCKETS_PER_ACCOUNT, 1) : 0;
-// Each Account Session (or invited Account: invite, accept, sign-in, access check) gets 10 s.
-const socketSessions = Math.ceil(channels * subscribers / socketsPerSession);
-const accounts = Math.max(socketsPerAccount ? socketSessions : 1, publishMembers);
-const sessionsToProvision = socketsPerAccount ? accounts : socketSessions + publishMembers - 1;
+const { socketSessions, accounts, sessionsToProvision, socketTokenIndex } =
+  sessionLayout(channels * subscribers, socketsPerSession, socketsPerAccount, publishMembers);
 const legacy = __ENV.LOAD_LEGACY === '1';
 const allowRejections = __ENV.LOAD_ALLOW_REJECTIONS === '1';
 const connectionsOnly = __ENV.LOAD_CONNECTIONS_ONLY === '1';
@@ -85,6 +84,7 @@ export const options: Options = {
   thresholds: {
     checks: ['rate==1'],
     ...(allowRejections ? {} : { http_req_failed: ['rate==0'] }),
+    rate_limited_sends: ['count==0'],
     invalid_retry_after: ['count==0'],
     load_errors: ['count==0'],
     missing_deliveries: ['count==0'],
@@ -106,7 +106,8 @@ const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export function setup(): Setup {
   const data = seed({ channels, subscribers, socketsPerSession, socketsPerAccount, publishMembers, visibility, legacy });
   // A k6 exit 99 is a capacity result only after provisioning succeeded (load/proxy-results.ts).
-  console.log('LOAD_SETUP_COMPLETE ' + JSON.stringify({ sessions: data.tokens.length, accounts, publishMembers }));
+  // sessions: all provisioned Account Sessions; socketSessions: those assigned to sockets (#604).
+  console.log('LOAD_SETUP_COMPLETE ' + JSON.stringify({ sessions: data.tokens.length, socketSessions, accounts, publishMembers }));
   return data;
 }
 
@@ -153,7 +154,7 @@ export default async function (data: Setup): Promise<void> {
   function connect(channelId: string, channel: number, socketIndex: number, afterSeq = 0): void {
     const tags = { channel: String(channel) };
     const socket = new WebSocket(`${baseUrl.replace(/^http/, 'ws')}${organizationPath(data.organizationId, legacy)}/ws`, null,
-      { headers: { Authorization: `Bearer ${data.tokens[sessionIndex(socketIndex, socketsPerSession)]}` }, tags: { name: 'subscribe' } });
+      { headers: { Authorization: `Bearer ${data.tokens[socketTokenIndex(socketIndex)]}` }, tags: { name: 'subscribe' } });
     sockets[socketIndex] = socket;
     let opened = false;
     let subscribed = false;
@@ -308,7 +309,8 @@ export default async function (data: Setup): Promise<void> {
       accepted, refusals, acceptedSendRate: accepted / (Math.max(result.elapsedMs, sendCompletedAt - result.startedAt) / 1000),
       legacy, allowRejections, reconnect, connectBatch, connectInterval, requestTimeout,
       configuredSendRate: publishers * 1000 / interval, peakConnections, peakPublishes,
-      channels, publishChannels, subscribers, publishers, publishMembers, duration, interval, socketsPerSession, socketsPerAccount, sessions: data.tokens.length, accounts, visibility,
+      channels, publishChannels, subscribers, publishers, publishMembers, duration, interval, socketsPerSession, socketsPerAccount,
+      sessions: data.tokens.length, socketSessions, accounts, visibility,
       readyTimeout, drainTimeout }));
     const drainDeadline = Date.now() + drainTimeout * 1000;
     while (!failed && deliveries.missing > 0 && Date.now() < drainDeadline) await pause(10);
