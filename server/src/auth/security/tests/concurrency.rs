@@ -1,27 +1,56 @@
 use super::*;
 use std::time::Duration;
 
+pub(super) async fn account_waiters<'e>(executor: impl sqlx::PgExecutor<'e>) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE query LIKE 'SELECT id, password_hash FROM accounts%'),
+                count(*) FILTER (WHERE query LIKE 'SELECT password_hash FROM accounts%')
+         FROM pg_stat_activity WHERE datname = current_database()
+         AND wait_event_type = 'Lock' AND wait_event IN ('tuple', 'transactionid')
+         AND query LIKE '%FOR UPDATE'",
+    )
+    .fetch_one(executor)
+    .await
+    .unwrap()
+}
+
 async fn waiting_for_account(pool: &PgPool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT password_hash FROM accounts%FOR UPDATE')")
-                .fetch_one(pool).await.unwrap();
-            if waiting { break; }
+            if account_waiters(pool).await.1 > 0 {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+pub(super) fn gate_password_check(
+    workers: &PasswordWorkers,
+) -> (
+    std::sync::mpsc::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let (entered, running) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    *workers.on_start.lock().unwrap() = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        // Dropping the sender on a test failure also unblocks the worker.
+        assert_ne!(
+            gate.recv_timeout(Duration::from_secs(30)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+    }));
+    (release, running)
 }
 
 async fn sign_in_overlap(pool: PgPool, operation: usize, native: bool) {
     let f = fixture(&pool).await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
     let app = app_with_workers(f.state.clone(), workers);
-    let (entered, running) = tokio::sync::oneshot::channel();
-    let (release, gate) = std::sync::mpsc::channel();
-    *workers.on_start.lock().unwrap() = Some(Box::new(move || {
-        entered.send(()).unwrap();
-        gate.recv_timeout(Duration::from_secs(30)).unwrap();
-    }));
+    let (release, running) = gate_password_check(workers);
     let sign_in = {
         let app = app.clone();
         tokio::spawn(async move {
@@ -243,12 +272,7 @@ async fn security_operations_serialize_and_reject_a_revoked_current_session(pool
     let f = fixture(&pool).await;
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
     let app = app_with_workers(f.state.clone(), workers);
-    let (entered, running) = tokio::sync::oneshot::channel();
-    let (release, gate) = std::sync::mpsc::channel();
-    *workers.on_start.lock().unwrap() = Some(Box::new(move || {
-        entered.send(()).unwrap();
-        gate.recv_timeout(Duration::from_secs(30)).unwrap();
-    }));
+    let (release, running) = gate_password_check(workers);
     let first = {
         let app = app.clone();
         let token = f.current.clone();
