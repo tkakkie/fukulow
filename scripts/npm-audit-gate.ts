@@ -4,13 +4,7 @@ export type Exception = {
   id: string, package: string, expires: string, issue: string, reason: string,
 }
 
-export const exceptions: readonly Exception[] = [{
-  id: 'GHSA-fc5q-39xc-vjpf',
-  package: 'picomatch',
-  expires: '2026-12-18',
-  issue: '#565',
-  reason: 'Build/test tooling only, not in the shipped bundle, no patched version.',
-}]
+export const exceptions: readonly Exception[] = []
 
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
