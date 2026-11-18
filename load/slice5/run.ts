@@ -159,7 +159,8 @@ async function partARun(arm: Arm, round: number, cell: typeof partA.cells[number
     const retry = [];
     for (let i = 0; i < partA.retryTargets; i++) {
       const target = { member: i, channel: seeded.channels[0], client_message_id: randomUUID(), body };
-      await send(stack, seeded, i, target.channel, target); retry.push(target);
+      // SendMessageRequest rejects unknown fields, so send only the request body.
+      await send(stack, seeded, i, target.channel, { client_message_id: target.client_message_id, body: target.body }); retry.push(target);
     }
     save(`${privateDir}/data.json`, { organization: seeded.organization, otherOrganization: seeded.otherOrganization, reader: seeded.reader,
       channels: cell.channels === 1 ? [seeded.channels[0]] : seeded.channels, body, retry });

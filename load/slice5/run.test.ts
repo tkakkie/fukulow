@@ -509,3 +509,17 @@ test('a half-created container is inspected and removed before the rerun reuses 
   assert.equal(nightSummary.failed, false);
   assert.deepEqual(nightSummary.cleanupErrors, []);
 });
+
+test('runner sends only SendMessageRequest fields (unknown fields are a 400)', () => {
+  const source = readFileSync(new URL('./run.ts', import.meta.url), 'utf8');
+  const schema = JSON.parse(readFileSync(new URL('../../openapi.json', import.meta.url), 'utf8')).components.schemas.SendMessageRequest;
+  assert.equal(schema.additionalProperties, false);
+  const calls = [...source.matchAll(/\bawait send\(stack, [^;]*;/g)].map(m => m[0]);
+  assert.ok(calls.length > 0);
+  for (const call of calls) {
+    const literal = /, \{([^{}]*)\}\);/.exec(call);
+    assert.ok(literal, `send() body must be an object literal: ${call}`);
+    const keys = literal[1].split(',').map(part => part.split(':')[0]!.trim()).filter(Boolean);
+    for (const key of keys) assert.ok(key in schema.properties, `unknown SendMessageRequest field ${key}: ${call}`);
+  }
+});
