@@ -265,10 +265,19 @@ test('Part A: definite B failure remains REPORT ONLY despite gaps in either arm'
     assert.equal((v.detail as { highestCommonSustainableRate: number }).highestCommonSustainableRate, 500);
   }
 });
-test('Part D test failures remain FAIL with zero, partial or complete rows, even with missing rounds', () => {
+test('Part D A assertions remain FAIL with zero, partial or complete rows, even with missing rounds', () => {
   for (const n of [0, 2, 4]) {
-    const runs = setD(); runs[0].exitCode = 101; runs[0].rows = runs[0].rows.slice(0, n); runs[0].complete = n === 4;
+    const runs = setD(), a = runs[1];
+    a.failure = { cause: 'assertion', exitCode: 101, signal: null, timedOut: false, evidence: ['target test panicked at'] };
+    a.rows = a.rows.slice(0, n); a.complete = n === 4;
     assert.equal(judgePartD(runs)[0].status, 'FAIL');
-    assert.equal(judgePartD(runs.slice(0, 1))[0].status, 'FAIL');
+    assert.equal(judgePartD([a])[0].status, 'FAIL');
   }
+});
+test('Part D artifacts with only a nonzero exit are INVALID and require investigation', () => {
+  const runs = setD();
+  runs[1].exitCode = 101;
+  const verdict = judgePartD(runs)[0];
+  assert.equal(verdict.status, 'INVALID');
+  assert.match(verdict.reasons[0], /A1: unknown.*investigate.*101/);
 });

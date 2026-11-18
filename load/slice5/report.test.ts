@@ -72,7 +72,6 @@ test('runner uses drain resource evidence and isolated replay stacks', () => {
   assert.match(run,/for \(const cellName of partC.cells\) \{[\s\S]*?const cell = await withStack/);
   assert.match(run,/reader: counts\(r.result.reader\?\.all\)/);
   assert.match(run,/timelineEnv\(process.env, smoke \? tiny.topics : undefined\)/);
-  assert.match(run,/topics: timelineTopics\(r.stderr \+ r.stdout\)/);
   assert.match(run,/const nonSuccess = closedLoopNonSuccess\(r.result\)/);
   const send = readFileSync(new URL('./send-k6.ts',import.meta.url),'utf8');
   assert.match(send,/export function reader\(\) \{\s+initialize\('reader'\)/);

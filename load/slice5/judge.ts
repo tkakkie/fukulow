@@ -1,6 +1,7 @@
 // Pure judgement for the approved #515 slice 5 pre-registration. Only PASS is a
 // pass: INVALID, NOT EVALUATED, REPORT ONLY and INVESTIGATE never are.
-import { commits, partA, partB, partC, rounds, thresholds, validity, type Arm } from './config.ts';
+import { stripVTControlCharacters } from 'node:util';
+import { commits, partA, partB, partC, partD, rounds, thresholds, validity, type Arm } from './config.ts';
 
 export type Status = 'PASS' | 'FAIL' | 'INVALID' | 'NOT EVALUATED' | 'REPORT ONLY' | 'INVESTIGATE';
 export type Counts = { attempted: number; accepted: number; rejected429: number; rejected503: number; otherErrors: number;
@@ -18,7 +19,10 @@ export type RunB = RunIdentity & { part: 'B'; acceptedPerSecond: number; measure
 export type RunC = RunIdentity & { part: 'C'; p95: number | null; requests: number; invalidPages: number; readerErrors: number; outsideSender: number; r2?: { status: string; invalid?: number; errors?: number; p95?: number | null };
   sender: Counts; senderRate: number; senderSeconds: number; evidence: Evidence };
 export type TimelineRow = { key: string; p95: number; n: number };
-export type RunD = { part: 'D'; round: number; arm: Arm; commit: string; complete: boolean; smoke: boolean; topics: number; rows: TimelineRow[]; exitCode?: number };
+type ProcessExit = { exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean };
+type FailureD = ProcessExit & { cause: 'assertion' | 'infrastructure' | 'timeout' | 'unknown'; evidence: string[] };
+export type RunD = { part: 'D'; round: number; arm: Arm; commit: string; complete: boolean; smoke: boolean; topics: number; rows: TimelineRow[];
+  exitCode?: number | null; failure?: FailureD | null };
 export type Metric = { name: string; status: Status; reason?: string; medianB?: number; medianA?: number; ratio?: number;
   pairRatios?: number[]; spreadB?: number; spreadA?: number };
 export type Verdict = { part: string; cell: string; status: Status; reasons: string[]; metrics: Metric[]; detail?: unknown };
@@ -211,11 +215,41 @@ export function judgePartC(runs: RunC[], cell: string): Verdict {
   return { part: 'C', cell, status: metric.status, reasons: [], metrics: [metric] };
 }
 
+export function classifyPartDFailure(exit: ProcessExit, output: string): FailureD | null {
+  if (exit.timedOut) return { ...exit, cause: 'timeout', evidence: ['runner timeout fired'] };
+  if (exit.signal) return { ...exit, cause: 'unknown', evidence: ['process terminated by signal'] };
+  if (exit.exitCode === 0) return null;
+
+  // Record marker names only. Cargo and libtest can include connection details in their output.
+  const log = stripVTControlCharacters(output);
+  const testRun = /^[ \t]*Running unittests\s/m.test(log) ? 'Running unittests'
+    : /^running \d+ tests?\b/m.test(log) ? 'running tests' : undefined;
+  const testSummary = /^test result: /m.test(log);
+  const panic = new RegExp(`^thread '(?:\\w+::)*${partD.target}'(?: \\(\\d+\\))? panicked at `, 'm');
+  if (testRun && panic.test(log) && /^test result: FAILED\b/m.test(log))
+    return { ...exit, cause: 'assertion', evidence: [testRun, 'target test panicked at', 'test result: FAILED'] };
+  if (!testRun && !testSummary) {
+    const evidence = [/^error\[E\d+\]:/m.test(log) && 'compiler error[E…]',
+      /^error: could not compile\b/m.test(log) && 'could not compile',
+      /^error: failed to run custom build command\b/m.test(log) && 'failed to run custom build command'].filter(e => e !== false);
+    if (evidence.length) return { ...exit, cause: 'infrastructure', evidence };
+  }
+  return { ...exit, cause: 'unknown', evidence: [] };
+}
+
 // Part D keeps the existing absolute target: A's median p95 <=100 ms per PAGE row, both arms' spread <=10%.
 export function judgePartD(runs: RunD[]): Verdict[] {
-  const failed = runs.filter(r => r.exitCode !== undefined && r.exitCode !== 0);
-  if (failed.length) return [{ part: 'D', cell: 'timeline', status: 'FAIL',
-    reasons: failed.map(r => `${r.arm}${r.round}: Part D test failed (exit ${r.exitCode})`), metrics: [] }];
+  const reasonsByFailure = runs.flatMap(r => {
+    const failure = r.failure ?? (r.exitCode === undefined || r.exitCode === 0 ? null
+      : classifyPartDFailure({ exitCode: r.exitCode, signal: null, timedOut: false }, ''));
+    if (!failure) return [];
+    const { cause, exitCode, signal, evidence } = failure;
+    const note = cause === 'timeout' || cause === 'unknown' ? ' (investigate)' : cause === 'assertion' && r.arm === 'B' ? ' (no baseline)' : '';
+    const termination = signal ? `, signal ${signal}` : exitCode === null ? '' : `, exit ${exitCode}`;
+    return [{ assertion: r.arm === 'A' && cause === 'assertion', reason: `${r.arm}${r.round}: ${cause}${note}${termination}${evidence.length ? ` (${evidence.join(', ')})` : ''}` }];
+  });
+  if (reasonsByFailure.length) return [{ part: 'D', cell: 'timeline',
+    status: reasonsByFailure.some(r => r.assertion) ? 'FAIL' : 'INVALID', reasons: reasonsByFailure.map(r => r.reason), metrics: [] }];
   const pick = (arm: Arm) => rounds.map((_, i) => runs.filter(r => r.arm === arm && r.round === i + 1));
   const [bs, as] = [pick('B'), pick('A')];
   if ([...bs, ...as].some(r => r.length !== 1) || runs.length !== 2 * rounds.length)

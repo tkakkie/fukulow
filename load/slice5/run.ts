@@ -10,7 +10,7 @@ import { resolve } from 'node:path';
 import { outsideCheckout } from '../proxy-target.ts';
 import { commits, dbSettings, fixture, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
 import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
-import { judgePartA, judgePartB, judgePartC, judgePartD, closedLoopNonSuccess, parseTimeline, timelineTopics, vacuumCost, type Counts, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
+import { judgePartA, judgePartB, judgePartC, judgePartD, classifyPartDFailure, closedLoopNonSuccess, parseTimeline, timelineTopics, vacuumCost, type Counts, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 import { command, dbCommand, docker, seed, send, sampler, sleep, snapshot, startStack, timed, walDump, walWindow, type Seeded, type Stack } from './stack.ts';
 
 const usage = 'node load/slice5/run.ts --work /abs/work (--build | --night 1|2 --out /abs/new/dir) [--smoke] [--parts A,B,C,D]';
@@ -31,14 +31,20 @@ const stop = (why: string) => { interrupted ||= why; child?.kill('SIGTERM'); if 
 process.on('SIGINT', () => stop('interrupted')); process.on('SIGTERM', () => stop('interrupted'));
 const check = () => { if (interrupted) throw new Error(interrupted); };
 function run(file: string, argv: string[], o: { env?: NodeJS.ProcessEnv; cwd?: string; name?: string; timeoutMs: number }) {
-  return new Promise<{ code: number; stdout: string; stderr: string }>((done, reject) => {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; timedOut: boolean; stdout: string; stderr: string }>((done, reject) => {
     check();
-    child = spawn(file, argv, { env: o.env ?? process.env, cwd: o.cwd, stdio: ['ignore', 'pipe', 'pipe'] }); childName = o.name;
-    let stdout = '', stderr = '';
-    child.stdout!.on('data', (c: Buffer) => { stdout += c; }); child.stderr!.on('data', (c: Buffer) => { stderr += c; });
-    const timer = setTimeout(() => child?.kill('SIGTERM'), o.timeoutMs);
-    child.on('error', reject);
-    child.on('close', code => { clearTimeout(timer); child = undefined; childName = undefined; done({ code: code ?? 1, stdout, stderr }); });
+    const proc = spawn(file, argv, { env: o.env ?? process.env, cwd: o.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = proc; childName = o.name;
+    let stdout = '', stderr = '', timedOut = false;
+    proc.stdout.on('data', (c: Buffer) => { stdout += c; }); proc.stderr.on('data', (c: Buffer) => { stderr += c; });
+    const timer = setTimeout(() => { timedOut = true; proc.kill('SIGTERM'); }, o.timeoutMs);
+    proc.on('error', error => { if (proc.pid === undefined) reject(error); });
+    proc.on('exit', () => clearTimeout(timer));
+    proc.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (child === proc) { child = undefined; childName = undefined; }
+      done({ code, signal, timedOut, stdout, stderr });
+    });
   });
 }
 
@@ -55,10 +61,10 @@ if (build) {
     console.log(`slice5: building ${arm} ${full[arm]}`);
     const image = await run('docker', ['build', '--label', `org.opencontainers.image.revision=${full[arm]}`, '-t', tag(arm), source(arm)], { timeoutMs: 3600_000 });
     writeFileSync(`${work}/build-${arm}.log`, image.stdout + image.stderr);
-    if (image.code) throw new Error(`image build failed for ${arm}`);
+    if (image.code !== 0) throw new Error(`image build failed for ${arm}`);
     const test = await run('cargo', ['test', '--locked', '--release', '-p', 'fukulow-server', '--lib', '--no-run'], { cwd: source(arm), timeoutMs: 3600_000 });
     writeFileSync(`${work}/cargo-${arm}.log`, test.stdout + test.stderr);
-    if (test.code) throw new Error(`Part D test build failed for ${arm}`);
+    if (test.code !== 0) throw new Error(`Part D test build failed for ${arm}`);
   }
   console.log(`slice5: built ${tag('B')} and ${tag('A')}`);
   process.exit(0);
@@ -131,7 +137,7 @@ async function generator(stack: Stack, privateDir: string, script: string, env: 
     '-e', 'BASE_URL=http://app:8080', ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]), k6, 'run', '--quiet', script], { env: stack.env, name, timeoutMs });
   const line = r.stdout.split('\n').find(l => l.startsWith('SLICE5_RESULT '));
   const start = Number(/SLICE5_START (\d+)/.exec(r.stdout + r.stderr)?.[1]);
-  return { code: r.code, log: r.stderr, result: line ? JSON.parse(line.slice(14)) : undefined, start };
+  return { code: r.code ?? 1, log: r.stderr, result: line ? JSON.parse(line.slice(14)) : undefined, start };
 }
 const counts = (row: Record<string, number | null> | undefined): Counts => ({ attempted: row?.attempted ?? -1, accepted: row?.accepted ?? -1,
   rejected429: row?.rejected429 ?? -1, rejected503: row?.rejected503 ?? -1, otherErrors: row?.otherErrors ?? -1, clientTimeouts: row?.clientTimeouts ?? -1,
@@ -266,43 +272,81 @@ async function partCRun(arm: Arm, round: number): Promise<RunC[]> {
   return out;
 }
 
-async function partDRun(arm: Arm, round: number): Promise<RunD> {
-  const id = `D-${round}-${arm}`, dir = `${output}/runs/${id}`; mkdirSync(dir, { recursive: true });
-  const pg = /image: (postgres:[^\s]+)/.exec(readFileSync(`${source(arm)}/load/compose.yml`, 'utf8'))?.[1];
-  if (!pg) throw new Error('missing pinned PostgreSQL');
+async function partDRun(arm: Arm, round: number, rerun: boolean): Promise<RunD> {
+  const id = `D-${round}-${arm}${rerun ? '-rerun' : ''}`, dir = `${output}/runs/${id}`;
+  mkdirSync(dir, { recursive: true });
   const name = `${project}-d-${round}-${arm}`.toLowerCase(), password = randomUUID();
-  docker('run', '-d', '--rm', '--name', name, '-p', '127.0.0.1::5432', '-e', `POSTGRES_PASSWORD=${password}`, '--tmpfs', '/var/lib/postgresql', pg, ...dbCommand().slice(1));
+  const result: RunD = { part: 'D', round, arm, commit: full[arm], complete: false, smoke, topics: NaN, rows: [], exitCode: null, failure: null };
+  let started = false;
   try {
-    // TCP readiness twice in a row: the image's init-phase server answers on the socket only.
-    let ready = 0;
-    for (let i = 0; i < 90 && ready < 2; i++) { ready = docker('exec', name, 'sh', '-c', 'pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && echo ok || echo no') === 'ok' ? ready + 1 : 0; await sleep(1000); }
-    if (ready < 2) throw new Error('PostgreSQL not ready');
-    const port = docker('port', name, '5432/tcp').split(':').at(-1);
-    const r = await run('cargo', ['test', '--locked', '--release', '-p', 'fukulow-server', '--lib', partD.target, '--', '--ignored', '--nocapture'], { cwd: source(arm),
-      env: { ...timelineEnv(process.env, smoke ? tiny.topics : undefined), DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${port}/postgres` }, timeoutMs: 30 * 60_000 });
-    writeFileSync(`${dir}/cargo.log`, (r.stdout + r.stderr).replaceAll(password, '<redacted>'));
-    const rows = parseTimeline(r.stderr + r.stdout);
-    // Test failures (including zero-row correctness panics) are results, never infrastructure reruns.
-    if (r.code !== 0) failed = true;
-    const result: RunD = { part: 'D', round, arm, commit: full[arm], complete: rows.length === 4, smoke, topics: timelineTopics(r.stderr + r.stdout), rows, exitCode: r.code };
+    let stage = 'PostgreSQL image lookup';
+    let cargo: Awaited<ReturnType<typeof run>> | undefined;
+    try {
+      const pg = /image: (postgres:[^\s]+)/.exec(readFileSync(`${source(arm)}/load/compose.yml`, 'utf8'))?.[1];
+      if (!pg) throw new Error('missing pinned PostgreSQL');
+      stage = 'PostgreSQL docker run';
+      docker('run', '-d', '--rm', '--name', name, '-p', '127.0.0.1::5432', '-e', `POSTGRES_PASSWORD=${password}`, '--tmpfs', '/var/lib/postgresql', pg, ...dbCommand().slice(1));
+      started = true;
+      // TCP readiness twice in a row: the image's init-phase server answers on the socket only.
+      stage = 'PostgreSQL readiness';
+      let ready = 0;
+      for (let i = 0; i < 90 && ready < 2; i++) { ready = docker('exec', name, 'sh', '-c', 'pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && echo ok || echo no') === 'ok' ? ready + 1 : 0; await sleep(1000); }
+      if (ready < 2) throw new Error('PostgreSQL not ready');
+      stage = 'PostgreSQL port lookup';
+      const port = docker('port', name, '5432/tcp').split(':').at(-1);
+      stage = 'Cargo launch';
+      cargo = await run('cargo', ['test', '--locked', '--release', '-p', 'fukulow-server', '--lib', partD.target, '--', '--ignored', '--nocapture'], { cwd: source(arm),
+        env: { ...timelineEnv(process.env, smoke ? tiny.topics : undefined), DATABASE_URL: `postgres://postgres:${password}@127.0.0.1:${port}/postgres` }, timeoutMs: 30 * 60_000 });
+    } catch {
+      result.failure = { cause: interrupted ? 'unknown' : 'infrastructure', exitCode: null, signal: null, timedOut: false,
+        evidence: [interrupted ? interrupted : `${stage} failed`] };
+    }
+    if (cargo) {
+      const log = `${cargo.stderr}\n${cargo.stdout}`.replaceAll(password, '<redacted>');
+      result.exitCode = cargo.code;
+      result.failure = classifyPartDFailure({ exitCode: cargo.code, signal: cargo.signal, timedOut: cargo.timedOut }, log);
+      result.topics = timelineTopics(log);
+      result.rows = parseTimeline(log);
+      result.complete = result.rows.length === 4;
+      writeFileSync(`${dir}/cargo.log`, log);
+    }
     save(`${dir}/result.json`, result);
     return result;
-  } finally { try { docker('rm', '-f', name); } catch { cleanupErrors.push(`${id}: PostgreSQL cleanup failed`); } }
-}
-
-// At most one rerun per part, and only for an infrastructure fault (a thrown run, never a result).
-const rerunUsed = new Set<string>();
-async function attempt<T>(part: string, id: string, f: () => Promise<T>): Promise<T | undefined> {
-  for (;;) {
-    try { check(); return await f(); } catch (error) {
-      // UUIDs (passwords, tokens) and hex secrets never reach artifacts.
-      const reason = (error instanceof Error ? error.message.split('\n')[0].slice(0, 200) : 'unknown')
-        .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>').replace(/[0-9a-f]{32,}/gi, '<hex>');
-      faults.push(`${id}: ${reason}`); console.error(`slice5: ${id} failed (${reason})`);
-      if (interrupted || rerunUsed.has(part)) return undefined;
-      rerunUsed.add(part); faults.push(`${id}: rerun (the part's single infrastructure rerun)`);
+  } finally {
+    if (started) {
+      try { docker('rm', '-f', name); } catch { cleanupErrors.push(`${id}: PostgreSQL cleanup failed`); }
     }
   }
+}
+
+// Part D reports classified faults. Parts A–C retain their thrown-run retry policy.
+const rerunUsed = new Set<string>();
+async function attempt<T>(part: string, id: string, f: (rerun: boolean) => Promise<T>, infrastructure?: (result: T) => string | undefined): Promise<T | undefined> {
+  let rerun = false;
+  for (;;) {
+    let result: T | undefined, reason: string;
+    try {
+      check();
+      result = await f(rerun);
+      const fault = infrastructure?.(result);
+      if (!fault) return result;
+      reason = fault;
+    } catch (error) {
+      if (infrastructure && !interrupted) throw error;
+      // UUIDs (passwords, tokens) and hex secrets never reach artifacts.
+      reason = (error instanceof Error ? error.message.split('\n')[0].slice(0, 200) : 'unknown')
+        .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>').replace(/[0-9a-f]{32,}/gi, '<hex>');
+    }
+    faults.push(`${id}: ${reason}`); console.error(`slice5: ${id} failed (${reason})`);
+    if (interrupted || rerunUsed.has(part)) return result;
+    rerunUsed.add(part); faults.push(`${id}: rerun (the part's single infrastructure rerun)`);
+    rerun = true;
+  }
+}
+
+function attemptPartD(arm: Arm, round: number) {
+  return attempt('D', `D-${round}-${arm}`, rerun => partDRun(arm, round, rerun),
+    r => r.failure?.cause === 'infrastructure' ? `infrastructure (${r.failure.evidence.join(', ')})` : undefined);
 }
 
 let failed = false;
@@ -327,7 +371,7 @@ try {
       if (part === 'A') for (const cell of plan.cellsA) { const r = await attempt('A', `A-${cell.name}-${round}-${arm}`, () => partARun(arm, round, cell)); if (r) results.push(r); }
       if (part === 'B') for (const cell of plan.cellsB) { const r = await attempt('B', `B-${cell}-${round}-${arm}`, () => partBRun(arm, round, cell)); if (r) results.push(r); }
       if (part === 'C') { const r = await attempt('C', `C-${round}-${arm}`, () => partCRun(arm, round)); if (r) results.push(...r); }
-      if (part === 'D') { const r = await attempt('D', `D-${round}-${arm}`, () => partDRun(arm, round)); if (r) results.push(r); }
+      if (part === 'D') { const r = await attemptPartD(arm, round); if (r) results.push(r); }
       save(`${output}/results.json`, results);
     }
   }
@@ -347,5 +391,5 @@ try {
   save(`${output}/summary.json`, { scope, night, smoke, failed, interrupted, faults, cleanupErrors, verdicts, finished: new Date().toISOString() });
   console.log(`slice5: artifacts ${output}`);
   // Exit explicitly: a leaked timer must never hold the overnight waiter.
-  process.exit(failed || interrupted || cleanupErrors.length ? 1 : 0);
+  process.exit(failed || interrupted || cleanupErrors.length || runs<RunD>('D').some(r => r.failure) ? 1 : 0);
 }
