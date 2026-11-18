@@ -5,9 +5,9 @@ API contract and generated types. [Index and writing rules](../decisions.md)
 ## API contract
 - #301 Cap `POST /api/v1/orgs/{org}/message-authors` at 100 IDs before dedup (400 `ErrorBody` above). Leave omissions unresolved so foreign, unknown and unreadable authors stay indistinguishable.
 - `make api` exports without a database. Isolate pinned `openapi-typescript` because its TypeScript 5 peer conflicts with the SPA’s TypeScript 6.
-- #23 Message pages accept at most one of `after_seq`/`before_seq` (else latest), ascend by seq and set `has_more` in query direction. REST and shared schema both use 1..=200. REST metadata alone defaults to 50 so shared `ListMessagesQuery` fields stay optional.
+- #23 With neither `after_seq` nor `before_seq`, return the latest page. With both, return 400. Pages ascend by seq and set `has_more` in the query direction. REST and shared schema both use 1..=200. REST metadata alone defaults to 50 so generated TypeScript accepts omitted limits. Every shared `ListMessagesQuery` field stays optional.
 - #23 Register serde-tagged WS `oneOf` roots. Name utoipa variants for `type` discriminator refs. Never authenticate WS by query string.
-- #17 Cap bodies at 16 KiB, Message sends at 32 KiB (4,000 scalars escape to ~24 KB). `ErrorBody` maps invalid/content type/size to 400/415/413.
+- #17 Cap bodies at 16 KiB. Only the Message send route allows 32 KiB (4,000 scalars escape to ~24 KB). `ErrorBody` maps invalid/content type/size to 400/415/413.
 - #18 Real upgrade/frame/close tests reuse locked tokio-tungstenite and futures-util as test-only deps. Runtime uses existing serde_json.
 
 - #151 Use ring (already lockfile-pinned through TLS) for AES-256-GCM with domain-separated setup-token key and random nonce to authenticate scope and hide DM discovery positions without custom crypto.
