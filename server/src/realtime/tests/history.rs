@@ -216,7 +216,11 @@ async fn generation_subscribe_denial_hides_private_channels_and_reconnect_uses_r
     // The duplicate must finish its check under the old generation before rotation; otherwise it
     // correctly unsubscribes with history_generation_changed (#553). The socket loop handles controls
     // inline, so the Pong follows it, and any non-notice reply to the no-op duplicate fails here.
-    super::activity::collect(&f.state.message_delivery.channel_access.activity, &mut socket).await;
+    super::activity::collect(
+        &f.state.message_delivery.channel_access.activity,
+        &mut socket,
+    )
+    .await;
     crate::auth::history::rotate(&pool, Some(f.organization))
         .await
         .unwrap();
