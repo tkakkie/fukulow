@@ -307,11 +307,14 @@ async fn mutate_inner(
         Ok::<_, ApiError>((changed, notice))
     }).await?;
     if changed {
-        if let Some(notice) = notice { notice.committed(state.pool.clone()); }
-        state.session_changes.channel_changed(state.pool.clone(), org, auth::activity::ChannelChange::Members { channel });
+        let mut notice = notice;
+        if let Some(notice) = notice.as_mut() { notice.retire(); }
         if !matches!(mutation, Mutation::Manager(_)) {
             state.session_changes.recheck_subscriptions(&state.pool, auth::SubscriptionScope::Channel(org, channel)).await;
         }
+        // The mutation's recheck must not fence its fresh, still-unproved notice queries.
+        if let Some(notice) = notice { notice.committed(state.pool.clone()); }
+        state.session_changes.channel_changed(state.pool.clone(), org, auth::activity::ChannelChange::Members { channel });
     }
     Ok::<_, ApiError>(())
     }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
