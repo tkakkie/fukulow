@@ -19,10 +19,11 @@ export type RunB = RunIdentity & { part: 'B'; acceptedPerSecond: number; measure
 export type RunC = RunIdentity & { part: 'C'; p95: number | null; requests: number; invalidPages: number; readerErrors: number; outsideSender: number; r2?: { status: string; invalid?: number; errors?: number; p95?: number | null };
   sender: Counts; senderRate: number; senderSeconds: number; evidence: Evidence };
 export type TimelineRow = { key: string; p95: number; n: number };
-type ProcessExit = { exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean };
+type ProcessExit = { exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; nightDeadline?: boolean };
 type FailureD = ProcessExit & { cause: 'assertion' | 'infrastructure' | 'timeout' | 'unknown'; evidence: string[] };
+export type PostgresState = { Running: boolean; OOMKilled: boolean; ExitCode: number; Health: string | null };
 export type RunD = { part: 'D'; round: number; arm: Arm; commit: string; complete: boolean; smoke: boolean; topics: number; rows: TimelineRow[];
-  exitCode?: number | null; failure?: FailureD | null };
+  exitCode?: number | null; failure?: FailureD | null; postgres?: PostgresState | null };
 export type Metric = { name: string; status: Status; reason?: string; medianB?: number; medianA?: number; ratio?: number;
   pairRatios?: number[]; spreadB?: number; spreadA?: number };
 export type Verdict = { part: string; cell: string; status: Status; reasons: string[]; metrics: Metric[]; detail?: unknown };
@@ -215,26 +216,50 @@ export function judgePartC(runs: RunC[], cell: string): Verdict {
   return { part: 'C', cell, status: metric.status, reasons: [], metrics: [metric] };
 }
 
-export function classifyPartDFailure(exit: ProcessExit, output: string): FailureD | null {
-  if (exit.timedOut) return { ...exit, cause: 'timeout', evidence: ['runner timeout fired'] };
-  if (exit.signal) return { ...exit, cause: 'unknown', evidence: ['process terminated by signal'] };
-  if (exit.exitCode === 0) return null;
-
+export function classifyPartDFailure(exit: ProcessExit, output: string, postgres: PostgresState | null = null): FailureD | null {
   // Record marker names only. Cargo and libtest can include connection details in their output.
   const log = stripVTControlCharacters(output);
   const testRun = /^[ \t]*Running unittests\s/m.test(log) ? 'Running unittests'
-    : /^running \d+ tests?\b/m.test(log) ? 'running tests' : undefined;
+    : /^running [1-9]\d* tests?\b/m.test(log) ? 'running tests' : undefined;
   const testSummary = /^test result: /m.test(log);
-  const panic = new RegExp(`^thread '(?:\\w+::)*${partD.target}'(?: \\(\\d+\\))? panicked at `, 'm');
-  if (testRun && panic.test(log) && /^test result: FAILED\b/m.test(log))
-    return { ...exit, cause: 'assertion', evidence: [testRun, 'target test panicked at', 'test result: FAILED'] };
-  if (!testRun && !testSummary) {
-    const evidence = [/^error\[E\d+\]:/m.test(log) && 'compiler error[E…]',
+  const failedSummary = /^test result: FAILED\b/m.test(log);
+  const panicHeader = new RegExp(`^thread '(?:\\w+::)*${partD.target}'(?: \\(\\d+\\))? panicked at [^\\n]*\\n?`, 'm');
+  const panic = panicHeader.exec(log);
+  const message = panic
+    ? log.slice(panic.index + panic[0].length).split(/^(?:thread '|note:|stack backtrace:|running \d+ tests?\b|test |error:)/m, 1)[0].trim()
+    : '';
+  const dbError = [
+    /\b(?:Database|Io|Protocol|Tls)\s*\(|\b(?:PoolTimedOut|PoolClosed|WorkerCrashed)\b/i,
+    /\b(?:connection (?:reset|refused|closed|is closed|aborted|timed out)|server closed the connection)\b/i,
+    /\b(?:broken pipe|unexpected (?:eof|end of file)|no space left on device|(?:i\/o|io) error)\b/i,
+    /\b(?:error communicating with database|pool (?:timed out|closed|is closed)|timed out while waiting for an open connection)\b/i,
+  ].some(marker => marker.test(message));
+  const binarySignal = /^[ \t]*(?:error: )?process didn't exit successfully: [^\n]*\(signal: (\d+)(?:, [^\n]*)?\)/m.exec(log)?.[1];
+  const evidence = [
+    exit.timedOut && 'runner timeout fired', exit.nightDeadline && 'night-deadline',
+    exit.signal && 'process terminated by signal', binarySignal && `test binary terminated by signal ${binarySignal}`,
+    testRun, panic && 'target test panicked at', failedSummary && 'test result: FAILED',
+    !testSummary && 'missing libtest summary', dbError && 'database/IO/pool panic',
+    !postgres && 'PostgreSQL state unknown', postgres?.OOMKilled && 'PostgreSQL OOMKilled',
+    postgres?.Running === false && 'PostgreSQL stopped',
+  ].filter((marker): marker is string => typeof marker === 'string');
+  const failure = (cause: FailureD['cause']): FailureD => ({ ...exit, cause, evidence });
+  if (testRun && panic && message && failedSummary && !dbError && postgres?.Running && !postgres.OOMKilled)
+    return failure('assertion');
+  if (exit.timedOut || exit.nightDeadline) return failure('timeout');
+  if (panic && postgres && (!postgres.Running || postgres.OOMKilled)) return failure('infrastructure');
+  if (exit.signal || binarySignal) return failure('unknown');
+  if (exit.exitCode === 0) return null;
+  if (!testRun && !testSummary && !panic) {
+    const buildErrors = [/^error\[E\d+\]:/m.test(log) && 'compiler error[E…]',
       /^error: could not compile\b/m.test(log) && 'could not compile',
       /^error: failed to run custom build command\b/m.test(log) && 'failed to run custom build command'].filter(e => e !== false);
-    if (evidence.length) return { ...exit, cause: 'infrastructure', evidence };
+    if (buildErrors.length) {
+      evidence.push(...buildErrors);
+      return failure('infrastructure');
+    }
   }
-  return { ...exit, cause: 'unknown', evidence: [] };
+  return failure('unknown');
 }
 
 // Part D keeps the existing absolute target: A's median p95 <=100 ms per PAGE row, both arms' spread <=10%.

@@ -44,10 +44,11 @@ const timelineRuns = (): RunD[] => [1,2,3].flatMap(round => (['B','A'] as const)
     'TOPIC_PAGE boundary=Some(190000) n=400 p50_ms=1 p95_ms=10 max_ms=20\n' +
     'TOPIC_SEND boundary=None n=20 p50_ms=1 p95_ms=10 max_ms=20\n' +
     'TOPIC_SEND boundary=Some(190000) n=20 p50_ms=1 p95_ms=10 max_ms=20\n') })));
-test('run-level problems downgrade actual PASS cells and preserve FAIL', () => {
+test('summary.failed downgrades actual PASS cells and preserves FAIL', () => {
   const n1 = night('1'), n2 = night('2'); n2.results = timelineRuns();
   assert.ok(verdicts(n1,n2).verdicts.some(v => v.part === 'D' && v.status === 'PASS'));
-  n2.metadata.dirty = 'changed';
+  n2.summary.failed = true;
+  assert.deepEqual(mergeProblems(n1,n2), ['night 2: runner failed']);
   assert.ok(verdicts(n1,n2).verdicts.filter(v => v.part === 'D' && v.cell.startsWith('PAGE')).every(v => v.status === 'INVALID'));
   for (const r of n2.results as RunD[]) if (r.arm === 'A') r.rows[0].p95 = 101;
   assert.ok(verdicts(n1,n2).verdicts.some(v => v.status === 'FAIL'));
