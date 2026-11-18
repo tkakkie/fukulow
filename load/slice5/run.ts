@@ -68,6 +68,8 @@ if (build) {
     const image = await run('docker', ['build', '--label', `org.opencontainers.image.revision=${full[arm]}`, '-t', tag(arm), source(arm)], { timeoutMs: 3600_000 });
     writeFileSync(`${work}/build-${arm}.log`, image.stdout + image.stderr);
     if (image.code !== 0) throw new Error(`image build failed for ${arm}`);
+    // rust-embed needs web/dist to exist; Part D runs one DB test, so an empty one suffices (as in CI lint).
+    mkdirSync(`${source(arm)}/web/dist`, { recursive: true });
     const test = await run('cargo', ['test', '--locked', '--release', '-p', 'fukulow-server', '--lib', '--no-run'], { cwd: source(arm), timeoutMs: 3600_000 });
     writeFileSync(`${work}/cargo-${arm}.log`, test.stdout + test.stderr);
     if (test.code !== 0) throw new Error(`Part D test build failed for ${arm}`);
