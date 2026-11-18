@@ -19,7 +19,6 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - #401: deployment/load app and migrate use read-only roots, drop ALL capabilities and forbid new privileges. Embedded assets/SQL and DB-only persistence need no writable mount; fresh and populated-upgrade checks guard this.
 - #194 C: no init wrapper or STOPSIGNAL override: the server spawns no child processes to reap, and #195 registers SIGTERM/SIGINT before serving and drains work. Exec-form CMD keeps the binary as PID 1; SIGTERM is already Docker's default.
 - #465: Rust owns shared native/web sync State; wasm-bindgen exposes deltas and bounded accessors. OpenAPI remains generated and diff-checked for every client; sharing policy avoids a separate KMP implementation.
-- #467 interim (#467 deletes it with the TS rollback): sync protocol behaviour/spec changes update Rust and `web/src/protocol.ts` in one PR; differential and contract tests prove equivalence. Rust-only changes without observable behaviour change need no TS edit. No permanent dual implementation.
 - `organization_id` on every table from day one. Reason: multi-organization later without retrofit.
 - Public repo. Reason: free CI minutes.
 - #194 B: one-shot `migrate` holds owner credentials; app waits for success and only validates migration versions/checksums/state. Owner credentials stay out of app. PostgreSQL 18 persists under `/var/lib/postgresql`.
@@ -68,12 +67,16 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - #296 WAL archiving and PITR are future requirements: the first deploy (#285) is dogfooding. Any new external service or paid storage needs maintainer approval of its setup and cost before implementation.
 - #297 A: toolchains (rust-toolchain.toml, .node-version/engines) and images stay exact; libraries are pinned by committed lockfiles, manifests may use ranges (not Playwright, exact for its image), and resolved versions change only in reviewed PRs. Reason: lockfiles give reproducibility without churn.
 
+- #316 (2026-11-17 maintainer): retain image originals for download. Cost responses reduce optimised variants or regenerable data, strengthen backup compression, then seek paid-usage approval or a provider move; never delete originals or reduce backup retention.
 - #316 round 5 uses age-encrypted R2 backups and curl SigV4 with PUT/HEAD/full GET verification; marker last excludes partial uploads. Dedicated backup/image buckets separate credentials. Mock implementation only; production, payment and notification setup remain on hold.
 - #316 keeps 30 verified backups plus latest drilled copy by guarded count pruning, no lifecycle. Locks: backups 35 days, drilled copies 40 days. Stale or insufficient inventory freezes deletion, preserving recovery through outages.
-- #316 conditional locks serialize runs without expiry. Release checks ETag and owner token via conditional GET; its DELETE race still requires quiescing writers for recovery. Lifecycle failures notify safely. Provider conditional DELETE and production wiring stay deferred.
-- #316 paginated inventory and account analytics fail closed on incomplete evidence. Checker state uses private atomic fsync/rename persistence; alerts deduplicate after delivery. Missing/corrupt state freezes pruning; notification/persistence crashes may duplicate delivery.
+- #316 (maintainer, 2026-11-17): one SQLite DO serializes checker jobs with a stored run-ID lease, live busy guard and fenced actions/state. VPS uses its local lock only. Unfinished prefixes get six hours from newest upload, then alert/freeze; free tiers only, activation deferred.
+- #316 paginated inventory and account analytics fail closed on incomplete evidence. Checker state uses DO transactions or private atomic fsync/rename; alerts deduplicate after delivery. Missing/corrupt state freezes pruning; notification/persistence crashes may duplicate delivery.
 - #316 archive publication fsyncs the destination directory after rename; failed confirmation retains archives but reports failure. Fixed stage/error categories keep diagnostics private. An exclusive local lock permits sweeping only owned generated partial directories.
 - #316 checker runs independently of the VPS, reports daily alive/shared capacity and alerts on stale capture, malformed data, overdue drills and implausible size. Channel/platform failure still needs weekly manual inspection; #285 remains blocked.
+- #316 (2026-11-17): deployment `.env` is 0640 with group `fukulow-backup`, so the backup service can run Compose `pg_dump`. Its Docker group membership is already host-root-equivalent, so the group read adds little risk.
+- #316 (maintainer, 2026-11-18): R2 actions the pricing page does not classify count as Class A. Reason: the dashboard emits unlisted actions; failing closed would keep a month `operations-unknown` with pruning frozen. Class A over-counts and never reports zero.
+- #316 (maintainer, 2026-11-18): the restore drill from R2 runs on the maintainer's machine, not the VPS. Reason: the read-only token and age identity stay off the VPS, so a VPS compromise cannot decrypt backups; the VPS gates are the full cycle and the forced-failure alert.
 - #442 (maintainer, 2026-11-15): feature work comes first until fukulow is usable as a chat app. Reason: measuring and tuning before the product works spends time and credits on code that may change.
 - #442: large-scale measurement runs once per milestone, not per feature; the small CI `make load` smoke stays the per-change regression check. Reason: heavy runs are slow and costly, and one per milestone still catches regressions.
 - #442: measurement aims to find bottlenecks, not exact capacity numbers. Reason: a bottleneck can be fixed and remeasured; a precise capacity figure from a Mac or one run would be false precision.
@@ -85,7 +88,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 
 Entries that also govern this area, listed by the start of the entry in that part.
 
-- [realtime](realtime.md): `#196 B app pool`, `#196 B keeps`, `#196 B headroom is shared`, `#196 B sets session-level`, `#196 B leaves RLS`, `#196 B migrations disable`
+- [realtime](realtime.md): `#196 B app pool`, `#196 B keeps`, `#196 B headroom is shared`, `#196 B sets session-level`, `#196 B startup parameters`, `#196 B leaves RLS`, `#196 B migrations disable`
 
 - [auth](auth.md): `#197 FUKULOW_COOKIE_SECURE describes the public HTTPS`, `#197 HSTS max-age=31536000 lives at TLS`, `#197 Vite manifest outputs alone get`, `#194: forwarded IPs require a trusted`, `#194: require a nonblank FUKULOW_SETUP_TOKEN in`, `#194: Compose separates proxy/app edge from`
 - [auth](auth.md): `#401: app and both proxies send`

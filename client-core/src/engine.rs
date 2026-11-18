@@ -113,6 +113,78 @@ impl<'a> Step<'a> {
             self.out.effects.push(Effect::SignIn);
         }
     }
+    pub fn expire_window(&mut self, id: Uuid, retry: bool) {
+        for request in self.core.requests.values_mut() {
+            if matches!(request, Request::History { channel, page: Page::Latest | Page::Before, .. } if *channel == id)
+            {
+                request.invalidate();
+            }
+        }
+        let c = self.channel(id);
+        c.messages = Rc::default();
+        c.has_older = false;
+        c.snapshot_seq = None;
+        c.latest = None;
+        c.older = None;
+        c.history_error = !retry;
+        if retry {
+            self.history(id, Page::Latest, None);
+        }
+    }
+    pub fn accept_generation(&mut self, generation: Uuid) -> bool {
+        if self
+            .core
+            .session
+            .history_generation
+            .is_some_and(|old| old != generation)
+        {
+            self.reset_history(Some(generation));
+            return false;
+        }
+        self.core.session.history_generation = Some(generation);
+        true
+    }
+    pub fn reset_history(&mut self, generation: Option<Uuid>) {
+        let reconnect = self.core.session.reconnect_wait.take();
+        self.cancel(reconnect);
+        self.core.session.history_generation = generation;
+        self.core.session.history_epoch += 1;
+        for id in self.ids() {
+            let old = self.channel(id).clone();
+            if old.subscription.is_some() && self.core.session.connected {
+                self.out.effects.push(Effect::Unsubscribe { channel: id });
+            }
+            self.invalidate(id, true);
+            let mut pending = (*old.pending).clone();
+            for p in &mut pending {
+                self.cancel(p.retry_wait);
+                p.retry_wait = None;
+                if matches!(p.state, PendingState::Sending | PendingState::Throttled) {
+                    p.state = PendingState::Unknown;
+                }
+            }
+            *self.channel(id) = ChannelView {
+                watched: old.watched,
+                pending: Rc::new(pending),
+                state: if old.state == Availability::Unavailable {
+                    Availability::Unavailable
+                } else {
+                    Availability::Loading
+                },
+                ..ChannelView::default()
+            };
+        }
+        // A fresh socket fences frames from retired subscriptions without discarding HTTP
+        // completions: their same-session late 401 still has authority.
+        self.core.session.connected = false;
+        self.connect();
+        for id in self.ids() {
+            let c = self.channel(id);
+            if c.watched && c.state != Availability::Unavailable {
+                self.history(id, Page::Latest, None);
+            }
+        }
+    }
     pub fn subscribe(&mut self, id: Uuid) {
         let connected = self.core.session.connected;
         let c = self.channel(id);
@@ -135,6 +207,7 @@ impl<'a> Step<'a> {
             watermark: after,
         }));
         self.out.effects.push(Effect::Subscribe {
+            history_generation: self.core.session.history_generation,
             id: n,
             channel: id,
             after_seq: after,
@@ -161,6 +234,7 @@ impl<'a> Step<'a> {
         self.core.requests.insert(
             n,
             Request::History {
+                mutation_seq: self.core.channel(id).map_or(0, |c| c.mutation_seq),
                 channel: id,
                 page,
                 seq,
@@ -169,6 +243,12 @@ impl<'a> Step<'a> {
         );
         self.metadata_changed = true;
         self.out.effects.push(Effect::FetchHistory {
+            history_generation: self.core.session.history_generation,
+            as_of_seq: if page == Page::Before {
+                self.core.channel(id).and_then(|c| c.snapshot_seq)
+            } else {
+                None
+            },
             id: n,
             channel: id,
             page,
@@ -247,6 +327,7 @@ impl<'a> Step<'a> {
         );
         self.metadata_changed = true;
         self.out.effects.push(Effect::Send {
+            history_generation: self.core.session.history_generation,
             id: n,
             channel: id,
             client_message_id: p.client_message_id,
@@ -312,6 +393,13 @@ impl<'a> Step<'a> {
             } else {
                 0
             };
+            if self
+                .core
+                .channel(id)
+                .is_some_and(|c| c.versions.len() > limit)
+            {
+                self.cap_versions(id, limit);
+            }
             if self
                 .core
                 .channel(id)

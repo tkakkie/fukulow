@@ -549,6 +549,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "history_generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -584,6 +593,16 @@
           },
           "404": {
             "description": "Non-Member, unknown Organization or deactivated Member: organization_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch",
             "content": {
               "application/json": {
                 "schema": {
@@ -759,6 +778,164 @@
           },
           "503": {
             "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/channels/{id}/events": {
+      "get": {
+        "tags": [
+          "crate::messages::log"
+        ],
+        "summary": "Read event positions for C3 gap recovery. Auth extraction and query validation\nprecede Channel visibility, exactly as on the history GET.",
+        "operationId": "list_channel_events",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "history_generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "description": "Exclusive event position; 0 starts at the beginning.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, default 50, maximum 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ascending Channel event envelopes after the exclusive event cursor, with current-state replay hydration and directional has_more",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed Organization or Channel id, missing or negative event cursor, or page limit outside 1 through 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable for an unavailable Organization; otherwise Channel is unknown or inaccessible, without disclosing its existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure, missing log coverage, unsupported event kind, or Message state that cannot be hydrated; no positions are acknowledged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Committed watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1382,9 +1559,28 @@
             }
           },
           {
+            "name": "history_generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "as_of_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
             "name": "after_seq",
             "in": "query",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -1395,7 +1591,7 @@
           {
             "name": "before_seq",
             "in": "query",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -1458,6 +1654,16 @@
               }
             }
           },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Database failure while resolving the session, checking Channel visibility, or listing Messages",
             "content": {
@@ -1469,7 +1675,7 @@
             }
           },
           "503": {
-            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "description": "Committed watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1584,7 +1790,7 @@
             }
           },
           "409": {
-            "description": "Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed",
+            "description": "history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1719,6 +1925,25 @@
             }
           },
           {
+            "name": "history_generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "as_of_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
             "name": "after_seq",
             "in": "query",
             "description": "Exclusive forward continuation; omitted/0 starts with the root.",
@@ -1776,6 +2001,16 @@
           },
           "404": {
             "description": "organization_unavailable or channel not found for authorization; reply_chain_not_found for unknown or foreign Organization/Channel anchor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page",
             "content": {
               "application/json": {
                 "schema": {
@@ -1908,6 +2143,16 @@
               }
             }
           },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "413": {
             "description": "Request body exceeds size limit",
             "content": {
@@ -1975,6 +2220,162 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/channels/{id}/reply-counts": {
+      "post": {
+        "tags": [
+          "crate::messages::replies::counts"
+        ],
+        "operationId": "reply_counts",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Channel id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyCountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Exact chain counts at as_of_seq; unknown or foreign ids omitted; no-store, no side effects, cursor-neutral",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplyCountPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed ids or body, or input length outside 1..=100 before deduplication; validated before Organization/Channel authorization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found; authorization denials precede watermark admission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Expected application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure or commit barrier timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Projection watermark admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/channels/{id}/timeline": {
       "get": {
         "tags": [
@@ -1996,6 +2397,15 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "history_generation",
+            "in": "query",
+            "required": false,
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -2069,6 +2479,16 @@
           },
           "404": {
             "description": "organization_unavailable or channel not found; private and unknown Channels are identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page",
             "content": {
               "application/json": {
                 "schema": {
@@ -2151,6 +2571,15 @@
             }
           },
           {
+            "name": "history_generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "as_of_seq",
             "in": "query",
             "description": "Omit on the initial page to choose W under the commit barrier; future W is invalid.",
@@ -2218,6 +2647,16 @@
           },
           "404": {
             "description": "organization_unavailable or channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page",
             "content": {
               "application/json": {
                 "schema": {
@@ -2307,6 +2746,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "history_generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -2342,6 +2790,16 @@
           },
           "404": {
             "description": "organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page",
             "content": {
               "application/json": {
                 "schema": {
@@ -2433,9 +2891,28 @@
             }
           },
           {
+            "name": "history_generation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "as_of_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
             "name": "after_seq",
             "in": "query",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -2446,7 +2923,7 @@
           {
             "name": "before_seq",
             "in": "query",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -2501,6 +2978,16 @@
           },
           "404": {
             "description": "organization_unavailable, channel not found or topic_not_found; foreign and unknown Topics are identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page",
             "content": {
               "application/json": {
                 "schema": {
@@ -2642,6 +3129,16 @@
               }
             }
           },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "413": {
             "description": "Request body exceeds size limit",
             "content": {
@@ -2726,6 +3223,16 @@
             }
           },
           {
+            "name": "history_generation",
+            "in": "query",
+            "description": "Organization history epoch",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "cursor",
             "in": "query",
             "description": "Creation-order continuation, exclusive",
@@ -2781,6 +3288,16 @@
           },
           "404": {
             "description": "organization_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "history_generation_changed for a stale Organization epoch",
             "content": {
               "application/json": {
                 "schema": {
@@ -5188,9 +5705,43 @@
           }
         }
       },
+      "ChannelEventKind": {
+        "type": "string",
+        "enum": [
+          "create",
+          "edit",
+          "move",
+          "delete"
+        ]
+      },
+      "ChannelEventPage": {
+        "type": "object",
+        "description": "Bounded ascending Channel log page, with the same envelopes as WebSocket replay.",
+        "required": [
+          "history_generation",
+          "events",
+          "has_more"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServerEvent"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "ChannelList": {
         "type": "object",
         "required": [
+          "history_generation",
           "channels"
         ],
         "properties": {
@@ -5199,6 +5750,10 @@
             "items": {
               "$ref": "#/components/schemas/UnreadChannel"
             }
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -5357,6 +5912,7 @@
       "Dm": {
         "type": "object",
         "required": [
+          "history_generation",
           "id",
           "kind",
           "peer",
@@ -5375,6 +5931,10 @@
           },
           "capabilities": {
             "$ref": "#/components/schemas/ChannelCapabilities"
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           },
           "id": {
             "type": "string",
@@ -5459,6 +6019,7 @@
       "DmList": {
         "type": "object",
         "required": [
+          "history_generation",
           "dms",
           "next_cursor"
         ],
@@ -5468,6 +6029,10 @@
             "items": {
               "$ref": "#/components/schemas/Dm"
             }
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           },
           "next_cursor": {
             "type": [
@@ -5620,8 +6185,15 @@
               "null"
             ],
             "format": "int64",
-            "description": "Return seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
+            "description": "Return created_seq > after_seq; 0 starts at the beginning. Cannot combine with before_seq.",
             "minimum": 0
+          },
+          "as_of_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           },
           "before_seq": {
             "type": [
@@ -5629,8 +6201,15 @@
               "null"
             ],
             "format": "int64",
-            "description": "Return seq < before_seq. Cannot combine with after_seq.",
+            "description": "Return created_seq < before_seq. Cannot combine with after_seq.",
             "minimum": 1
+          },
+          "history_generation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "limit": {
             "type": [
@@ -5666,6 +6245,13 @@
             "description": "Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.",
             "minimum": 1
           },
+          "history_generation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "limit": {
             "type": [
               "integer",
@@ -5683,6 +6269,13 @@
           "read_seq"
         ],
         "properties": {
+          "history_generation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "read_seq": {
             "type": "integer",
             "format": "int64",
@@ -5760,17 +6353,18 @@
       "Message": {
         "type": "object",
         "required": [
+          "history_generation",
           "id",
           "channel_id",
-          "seq",
+          "created_seq",
+          "version",
+          "deleted",
           "client_message_id",
           "sender",
-          "body",
           "created_at",
           "topic_id",
           "reply_to",
-          "reply_root_id",
-          "mentions"
+          "reply_root_id"
         ],
         "properties": {
           "body": {
@@ -5787,6 +6381,19 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "created_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Immutable creation position in the Channel log.",
+            "minimum": 1
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           },
           "id": {
             "type": "string",
@@ -5820,18 +6427,18 @@
             "format": "uuid",
             "description": "Member id of the sender."
           },
-          "seq": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Per-channel sequence, starting at 1.",
-            "minimum": 1
-          },
           "topic_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last Channel event position affecting this state.",
+            "minimum": 1
           }
         }
       },
@@ -5839,12 +6446,22 @@
         "type": "object",
         "description": "Live and replayed messages have exactly the same canonical shape.",
         "required": [
+          "seq",
+          "kind",
           "message",
           "type"
         ],
         "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ChannelEventKind"
+          },
           "message": {
             "$ref": "#/components/schemas/Message"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
           },
           "type": {
             "type": "string",
@@ -5857,20 +6474,32 @@
       "MessagePage": {
         "type": "object",
         "required": [
+          "history_generation",
+          "as_of_seq",
           "messages",
           "has_more"
         ],
         "properties": {
+          "as_of_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Trusted committed event watermark; usable as the initial bootstrap cursor.",
+            "minimum": 0
+          },
           "has_more": {
             "type": "boolean",
-            "description": "More messages exist in the queried direction (older for latest/before_seq,\nnewer for after_seq). Continue after_seq with the last seq or before_seq\nwith the first seq; continue the latest page toward older messages with before_seq."
+            "description": "More messages exist in the queried direction (older for latest/before_seq,\nnewer for after_seq). Continue after_seq with the last created_seq or before_seq\nwith the first created_seq; continue the latest page toward older messages with before_seq."
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           },
           "messages": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Message"
             },
-            "description": "Always ascending seq (newest last), including latest and before_seq pages."
+            "description": "Always ascending created_seq (newest last), including latest and before_seq pages."
           }
         }
       },
@@ -5994,9 +6623,14 @@
       "ReadPosition": {
         "type": "object",
         "required": [
+          "history_generation",
           "read_seq"
         ],
         "properties": {
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
+          },
           "read_seq": {
             "type": "integer",
             "format": "int64"
@@ -6039,14 +6673,24 @@
       "ReplyChainPage": {
         "type": "object",
         "required": [
+          "history_generation",
+          "as_of_seq",
           "root_id",
           "messages",
           "has_more"
         ],
         "properties": {
+          "as_of_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
           "has_more": {
             "type": "boolean",
             "description": "More matching Messages follow; continue after the last returned seq."
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           },
           "messages": {
             "type": "array",
@@ -6073,6 +6717,20 @@
             "description": "Exclusive forward continuation; omitted/0 starts with the root.",
             "minimum": 0
           },
+          "as_of_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "history_generation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "limit": {
             "type": [
               "integer",
@@ -6083,6 +6741,83 @@
             "minimum": 1
           }
         }
+      },
+      "ReplyCount": {
+        "type": "object",
+        "required": [
+          "message_id",
+          "root_id",
+          "reply_count"
+        ],
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reply_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Exact number of live Replies in the entire chain, excluding the root.",
+            "minimum": 0
+          },
+          "root_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ReplyCountPage": {
+        "type": "object",
+        "required": [
+          "history_generation",
+          "as_of_seq",
+          "counts"
+        ],
+        "properties": {
+          "as_of_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Committed Channel watermark W. Both anchors and Replies are bounded by W.\nThis baseline is a projection and never advances a sync cursor or read position.",
+            "minimum": 0
+          },
+          "counts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplyCount"
+            },
+            "description": "One entry per distinct requested id visible in this Channel at W, sorted by id.\nUnknown and foreign ids are omitted without distinction."
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ReplyCountRequest": {
+        "type": "object",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "history_generation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Root or descendant ids. Limit applies before duplicate ids are merged.",
+            "maxItems": 100,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
       },
       "RevokeOtherSessionsRequest": {
         "type": "object",
@@ -6123,6 +6858,13 @@
           },
           "client_message_id": {
             "type": "string",
+            "format": "uuid"
+          },
+          "history_generation": {
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
           },
           "reply_to": {
@@ -6190,7 +6932,7 @@
             "$ref": "#/components/schemas/ErrorEvent"
           }
         ],
-        "description": "Server -> client events. Clients dedupe messages by (channel_id, seq).",
+        "description": "Server -> client events. Event positions and Message state versions are independent.",
         "discriminator": {
           "propertyName": "type",
           "mapping": {
@@ -6307,11 +7049,18 @@
           "after_seq": {
             "type": "integer",
             "format": "int64",
-            "description": "Replay committed messages with seq > after_seq; 0 starts at the beginning.",
+            "description": "Replay committed Channel events with seq > after_seq; 0 starts at the beginning.",
             "minimum": 0
           },
           "channel_id": {
             "type": "string",
+            "format": "uuid"
+          },
+          "history_generation": {
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
           },
           "type": {
@@ -6326,6 +7075,7 @@
         "type": "object",
         "description": "Sent after committed replay and queued live events have been handed off.",
         "required": [
+          "history_generation",
           "channel_id",
           "caught_up_seq",
           "type"
@@ -6338,6 +7088,10 @@
             "minimum": 0
           },
           "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "history_generation": {
             "type": "string",
             "format": "uuid"
           },
@@ -6387,6 +7141,7 @@
       "TimelinePage": {
         "type": "object",
         "required": [
+          "history_generation",
           "as_of_seq",
           "items",
           "has_more"
@@ -6398,6 +7153,10 @@
           },
           "has_more": {
             "type": "boolean"
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           },
           "items": {
             "type": "array",
@@ -6429,6 +7188,7 @@
       "TopicPage": {
         "type": "object",
         "required": [
+          "history_generation",
           "as_of_seq",
           "topics",
           "has_more"
@@ -6440,6 +7200,10 @@
           },
           "has_more": {
             "type": "boolean"
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           },
           "topics": {
             "type": "array",
@@ -6508,6 +7272,7 @@
       "TopicSummaryResponse": {
         "type": "object",
         "required": [
+          "history_generation",
           "as_of_seq",
           "topic"
         ],
@@ -6515,6 +7280,10 @@
           "as_of_seq": {
             "type": "integer",
             "format": "int64"
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
           },
           "topic": {
             "$ref": "#/components/schemas/TopicSummary"
@@ -6529,6 +7298,7 @@
           {
             "type": "object",
             "required": [
+              "history_generation",
               "as_of_seq",
               "read_seq",
               "main_unread_count",
@@ -6541,6 +7311,10 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "Latest committed Channel seq in the positions/counts snapshot; 0 if empty."
+              },
+              "history_generation": {
+                "type": "string",
+                "format": "uuid"
               },
               "main_mention_unread_count": {
                 "type": "integer",

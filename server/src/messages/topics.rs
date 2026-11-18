@@ -31,6 +31,7 @@ pub enum TimelineItem {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TimelinePage {
+    pub history_generation: Uuid,
     pub as_of_seq: i64,
     /// Ascending W-relative positions, newest last. Continue older with the first position.
     pub items: Vec<TimelineItem>,
@@ -39,6 +40,7 @@ pub struct TimelinePage {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TopicPage {
+    pub history_generation: Uuid,
     pub as_of_seq: i64,
     pub topics: Vec<TopicSummary>,
     pub has_more: bool,
@@ -46,6 +48,7 @@ pub struct TopicPage {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TopicSummaryResponse {
+    pub history_generation: Uuid,
     pub as_of_seq: i64,
     pub topic: TopicSummary,
 }
@@ -54,6 +57,7 @@ pub struct TopicSummaryResponse {
 #[derive(Debug, Serialize, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
 pub struct ListProjectionQuery {
+    pub history_generation: Option<Uuid>,
     /// Omit on the initial page to choose W under the commit barrier; future W is invalid.
     #[param(minimum = 0)]
     #[schema(minimum = 0)]
@@ -78,24 +82,6 @@ impl ListProjectionQuery {
             return Err(MessageError::InvalidInput);
         }
         Ok(limit)
-    }
-}
-
-pub(super) async fn name_key<'e, E: sqlx::PgExecutor<'e>>(
-    executor: E,
-    organization: Uuid,
-    topic: Option<Uuid>,
-) -> Result<Option<String>, sqlx::Error> {
-    match topic {
-        None => Ok(None),
-        Some(topic) => {
-            sqlx::query_scalar("SELECT name_key FROM topics WHERE organization_id = $1 AND id = $2")
-                .bind(organization)
-                .bind(topic)
-                .fetch_one(executor)
-                .await
-                .map(Some)
-        }
     }
 }
 
@@ -145,6 +131,7 @@ pub(super) async fn record(
     responses((status = 200, description = "Ascending Topic Messages; exclusive after_seq XOR before_seq, default 50/max 200, directional has_more; never advances the sync cursor", body = MessagePage),
         (status = 400, description = "Invalid Organization id, Channel id, Topic id, conflicting cursors or limit", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable, channel not found or topic_not_found; foreign and unknown Topics are identical", body = ErrorBody),
         (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
             headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
@@ -166,7 +153,7 @@ pub async fn topic_history(
         channel,
     )
     .await?;
-    let w = watermark(&state, organization, channel).await?;
+    watermark(&state, organization, channel).await?;
     crate::database::organization_read_only(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
         require_visible(
             &mut *tx,
@@ -176,6 +163,7 @@ pub async fn topic_history(
         )
         .await?;
         reject_dm_topics(tx,organization,channel).await?;
+        let (history_generation, w) = history::page(tx, organization, channel, query.history_generation, query.as_of_seq).await?;
         let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
             .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
         if !exists {
@@ -192,7 +180,7 @@ pub async fn topic_history(
             )
         };
         let sql = format!(
-            "SELECT id, channel_id, seq, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+            "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
             FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
             ORDER BY seq {order} LIMIT $5"
@@ -215,7 +203,7 @@ pub async fn topic_history(
         }
         Ok((
             [(header::CACHE_CONTROL, "no-store")],
-            Json(MessagePage { messages, has_more }),
+            Json(MessagePage { history_generation, as_of_seq: w, messages, has_more }),
         )
             .into_response())
     })
@@ -228,11 +216,14 @@ pub(super) async fn watermark(
     organization: Uuid,
     channel: Uuid,
 ) -> Result<i64, MessageError> {
-    state.message_delivery.latest_seq(&state.pool, organization, channel).await.map_err(|error| {
+    let w = state.message_delivery.latest_seq(&state.pool, organization, channel).await.map_err(|error| {
         if matches!(&error, sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock) {
             MessageError::ProjectionAdmissionRejected
         } else {
             MessageError::Database(error)
         }
-    })
+    })?;
+    #[cfg(test)]
+    tests::history::pause(channel, "barrier").await;
+    Ok(w)
 }

@@ -110,7 +110,13 @@ async fn list(app: &Router, token: &str) -> Value {
     let response = request(app, "GET", "/api/v1/channels", token, Value::Null).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    body(response).await
+    let mut page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    page.as_object_mut().unwrap().remove("history_generation");
+    for row in page["channels"].as_array_mut().unwrap() {
+        row.as_object_mut().unwrap().remove("history_generation");
+    }
+    page
 }
 
 fn unread_channel(channel: &Value) -> Value {
@@ -291,7 +297,13 @@ async fn channels_cannot_access_or_forge_another_organization(pool: PgPool) {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body(response).await, expected);
+        let mut actual = body(response).await;
+        assert!(Uuid::parse_str(actual["history_generation"].as_str().unwrap()).is_ok());
+        actual.as_object_mut().unwrap().remove("history_generation");
+        for row in actual["channels"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("history_generation");
+        }
+        assert_eq!(actual, expected);
         let response = request(
             &app,
             "POST",
@@ -617,7 +629,7 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -632,7 +644,10 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
         format!("Bearer {token}").parse().unwrap(),
     );
     let (mut socket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
-    let ready = socket.next().await.unwrap().unwrap();
+    let ready = crate::websocket_test_support::websocket_delivery_next(&mut socket, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(ready.to_text().unwrap()).unwrap()["type"],
         "activity_ready"
@@ -644,11 +659,14 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
             ))
             .await
             .unwrap();
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::websocket_test_support::websocket_delivery_next(&mut socket, None),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
         let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
         assert_eq!(event["type"], expected);
         assert_eq!(event["channel_id"], channel_id.to_string());
@@ -678,11 +696,14 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
         ))
         .await
         .unwrap();
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let event = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::websocket_test_support::websocket_delivery_next(&mut socket, None),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
     let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
     assert_eq!(event["type"], "subscribed");
     assert_eq!(event["channel_id"], private_id.to_string());

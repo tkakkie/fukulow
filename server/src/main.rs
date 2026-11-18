@@ -30,7 +30,16 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             let pool = migration_pool().await?;
             return fukulow_server::database::roles(&pool, &password).await;
         }
-        _ => return Err("Usage: fukulow-server [probe | migrate [roles]]".into()),
+        [command, target] if command == "rotate-history-generation" => {
+            let organization = if target == "--all" { None } else { Some(uuid::Uuid::parse_str(target).map_err(|_| "Expected an Organization UUID or --all")?) };
+            let pool = migration_pool().await?;
+            fukulow_server::auth::history::rotate(&pool, organization).await.map_err(|error| {
+                fukulow_server::observability::database_failure(&error);
+                "History generation rotation failed (diagnostics suppressed)"
+            })?;
+            return Ok(());
+        }
+        _ => return Err("Usage: fukulow-server [probe | migrate [roles] | rotate-history-generation <organization UUID | --all>]".into()),
     }
     let setup_token = match std::env::var("FUKULOW_SETUP_TOKEN") {
         Ok(token) if token.trim().is_empty() || token.trim() == "setup-token-local-test-only" => {
@@ -64,7 +73,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             .as_deref(),
     )?;
     let pool = fukulow_server::database::PoolConfig::from_env()?
-        .options()
         .connect(&database_url)
         .await
         .map_err(|error| {
@@ -79,6 +87,8 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|_| "Listener bind failed (diagnostics suppressed)")?;
+    // Before serving; kept after the bind so the #151 baseline patch context is unchanged.
+    fukulow_server::database::PoolConfig::validate_session(&pool).await?;
     tracing::info!(target: "fukulow", event = "server_listening");
     let signal = fukulow_server::signal()?;
     let shutdown = fukulow_server::shutdown::Shutdown::default();

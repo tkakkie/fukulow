@@ -9,7 +9,7 @@ describe('channels', () => {
   it('does not duplicate a created Channel discovered by a notice before its POST response', async () => {
     const activity = createActivity({ watched: () => false })
     let resolve!: (value: ReturnType<typeof ok<ReturnType<typeof ch>>>) => void
-    const c = createChannels({ listChannels: async () => ok({ channels: [ch('new')] }),
+    const c = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('new')] }),
       createChannel: () => new Promise(r => { resolve = r }) }, undefined, activity)
     try {
       const created = c.create({ name: 'new', visibility: 'public' })
@@ -21,12 +21,12 @@ describe('channels', () => {
     } finally { c.close(); activity.close() }
   })
   it('loads and selects the first channel', async () => {
-    const c = createChannels({ listChannels: async () => ok({ channels: [ch('a'), ch('b')] }), createChannel: vi.fn() })
+    const c = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a'), ch('b')] }), createChannel: vi.fn() })
     await c.load()
     expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'a' })
   })
   it('keeps the selection on reload and ignores unknown ids', async () => {
-    const c = createChannels({ listChannels: async () => ok({ channels: [ch('a'), ch('b')] }), createChannel: vi.fn() })
+    const c = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a'), ch('b')] }), createChannel: vi.fn() })
     await c.load()
     c.select('b')
     c.select('zzz')
@@ -34,7 +34,7 @@ describe('channels', () => {
     expect(c.get().selectedId).toBe('b')
   })
   it('empty instance: no selection', async () => {
-    const c = createChannels({ listChannels: async () => ok({ channels: [] }), createChannel: vi.fn() })
+    const c = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }), createChannel: vi.fn() })
     await c.load()
     expect(c.get()).toMatchObject({ status: 'ready', selectedId: null })
   })
@@ -45,7 +45,7 @@ describe('channels', () => {
   })
   it('create adds and selects the channel', async () => {
     const createChannel = vi.fn(async (b) => ok(ch('n', b.name)))
-    const c = createChannels({ listChannels: async () => ok({ channels: [ch('a')] }), createChannel })
+    const c = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a')] }), createChannel })
     await c.load()
     const r = await c.create({ name: 'general', visibility: 'public' })
     expect(createChannel).toHaveBeenCalledWith({ name: 'general', visibility: 'public' })
@@ -60,7 +60,7 @@ describe('channels', () => {
   for (const name of names) {
     it(`create sends ${JSON.stringify(name)} unchanged (the server validates)`, async () => {
       const createChannel = vi.fn(async (b) => ok(ch('n', b.name)))
-      const c = createChannels({ listChannels: async () => ok({ channels: [] }), createChannel })
+      const c = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }), createChannel })
       await c.create({ name, visibility: 'public' })
       expect(createChannel).toHaveBeenCalledTimes(1)
       expect(createChannel.mock.calls[0][0]).toEqual({ name, visibility: 'public' })
@@ -70,7 +70,7 @@ describe('channels', () => {
     const createChannel = vi.fn(async (b: { name: string }) =>
       b.name === b.name.trim() ? ok(ch('n', b.name)) : ({ ok: false, kind: 'http', status: 400 } as const),
     )
-    const c = createChannels({ listChannels: async () => ok({ channels: [] }), createChannel })
+    const c = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }), createChannel })
     await c.load()
     const bad = await c.create({ name: ' general', visibility: 'public' })
     expect(bad).toEqual({ error: 'チャンネル名の前後に空白を入れず、128文字以内にしてください。' })
@@ -82,7 +82,7 @@ describe('channels', () => {
   })
   it('create failure returns a Japanese error and changes nothing', async () => {
     const c = createChannels({
-      listChannels: async () => ok({ channels: [] }),
+      listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }),
       createChannel: async () => ({ ok: false, kind: 'http', status: 409 }),
     })
     await c.load()
@@ -90,64 +90,64 @@ describe('channels', () => {
     expect(c.get().channels).toEqual([])
   })
   it('a stale load response does not drop a channel created meanwhile', async () => {
-    let release!: (r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void
+    let release!: (r: ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>) => void
     const listChannels = vi.fn().mockReturnValue(new Promise((r) => (release = r)))
     const c = createChannels({ listChannels, createChannel: async (b) => ok(ch('n', b.name)) })
     const loading = c.load()
     await c.create({ name: 'n', visibility: 'public' })
-    release(ok({ channels: [ch('a')] })) // list read before the create committed
+    release(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a')] })) // list read before the create committed
     await loading
     expect(c.get().channels.map((x) => x.id)).toContain('n')
     expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'n' })
   })
   it('create during the initial load keeps pre-existing channels, once each', async () => {
-    let release!: (r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void
+    let release!: (r: ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>) => void
     const listChannels = vi.fn().mockReturnValue(new Promise((r) => (release = r)))
     const c = createChannels({ listChannels, createChannel: async (b) => ok(ch('n', b.name)) })
     const loading = c.load()
     await c.create({ name: 'n', visibility: 'public' })
-    release(ok({ channels: [ch('a'), ch('b'), ch('n')] }))
+    release(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a'), ch('b'), ch('n')] }))
     await loading
     expect(c.get().channels.map((x) => x.id)).toEqual(['a', 'b', 'n'])
     expect(c.get().selectedId).toBe('n')
     // a normal later load still replaces the list
-    listChannels.mockResolvedValue(ok({ channels: [ch('z')] }))
+    listChannels.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('z')] }))
     await c.load()
     expect(c.get().channels.map((x) => x.id)).toEqual(['z'])
   })
   it('stale load without the new channel merges it in', async () => {
-    let release!: (r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void
+    let release!: (r: ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>) => void
     const listChannels = vi.fn().mockReturnValue(new Promise((r) => (release = r)))
     const c = createChannels({ listChannels, createChannel: async (b) => ok(ch('n', b.name)) })
     const loading = c.load()
     await c.create({ name: 'n', visibility: 'public' })
-    release(ok({ channels: [ch('a'), ch('b')] }))
+    release(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a'), ch('b')] }))
     await loading
     expect(c.get().channels.map((x) => x.id)).toEqual(['a', 'b', 'n'])
   })
   it('two overlapping loads where the first resolves last keep the second capabilities', async () => {
-    const resolvers: ((r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void)[] = []
-    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>>((r) => resolvers.push(r)))
+    const resolvers: ((r: ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>) => void)[] = []
+    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>>((r) => resolvers.push(r)))
     const c = createChannels({ listChannels, createChannel: vi.fn() })
     const first = c.load()
     const second = c.load()
     const stale = ch('a')
     const fresh = { ...ch('a'), capabilities: { ...stale.capabilities, can_manage_managers: { allowed: true } } }
-    resolvers[1](ok({ channels: [fresh] }))
+    resolvers[1](ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [fresh] }))
     await second
     expect(c.get().channels[0]?.capabilities.can_manage_managers.allowed).toBe(true)
-    resolvers[0](ok({ channels: [stale] }))
+    resolvers[0](ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [stale] }))
     await first
     expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'a' })
     expect(c.get().channels[0]?.capabilities.can_manage_managers.allowed).toBe(true)
   })
   it('a superseded load that fails does not set error over a newer success', async () => {
-    const resolvers: ((r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>> | { ok: false; kind: 'network' }) => void)[] = []
-    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>> | { ok: false; kind: 'network' }>((r) => resolvers.push(r)))
+    const resolvers: ((r: ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>> | { ok: false; kind: 'network' }) => void)[] = []
+    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>> | { ok: false; kind: 'network' }>((r) => resolvers.push(r)))
     const c = createChannels({ listChannels, createChannel: vi.fn() })
     const first = c.load()
     const second = c.load()
-    resolvers[1](ok({ channels: [ch('a')] }))
+    resolvers[1](ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a')] }))
     await second
     expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'a' })
     resolvers[0]({ ok: false, kind: 'network' })
@@ -156,15 +156,15 @@ describe('channels', () => {
     expect(c.get().channels.map((x) => x.id)).toEqual(['a'])
   })
   it('create-race merge still holds for the latest load when an earlier load is superseded', async () => {
-    const resolvers: ((r: ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>) => void)[] = []
-    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>>((r) => resolvers.push(r)))
+    const resolvers: ((r: ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>) => void)[] = []
+    const listChannels = vi.fn(() => new Promise<ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>>((r) => resolvers.push(r)))
     const c = createChannels({ listChannels, createChannel: async (b) => ok(ch('n', b.name)) })
     const first = c.load()
     const second = c.load()
     await c.create({ name: 'n', visibility: 'public' })
-    resolvers[0](ok({ channels: [ch('old')] }))
+    resolvers[0](ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('old')] }))
     await first
-    resolvers[1](ok({ channels: [ch('a')] }))
+    resolvers[1](ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a')] }))
     await second
     expect(c.get().channels.map((x) => x.id)).toEqual(['a', 'n'])
     expect(c.get()).toMatchObject({ status: 'ready', selectedId: 'n' })
@@ -176,16 +176,16 @@ describe('channels', () => {
       return { promise, resolve }
     }
     it('drops a list that finishes after close and notifies nobody', async () => {
-      const list = held<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>>()
+      const list = held<ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>>()
       const c = createChannels({ listChannels: () => list.promise, createChannel: vi.fn() })
       const listener = vi.fn()
       c.subscribe(listener)
       const loading = c.load()
       listener.mockClear()
       c.close()
-      list.resolve(ok({ channels: [ch('old')] }))
+      list.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('old')] }))
       await loading
-      expect(c.get()).toMatchObject({ status: 'loading', channels: [], selectedId: null })
+      expect(c.get()).toMatchObject({status: 'loading', channels: [], selectedId: null })
       expect(listener).not.toHaveBeenCalled()
     })
     it('drops a failed list too', async () => {
@@ -199,7 +199,7 @@ describe('channels', () => {
     })
     it('a create that finishes after close reports an error and does not add or select the Channel', async () => {
       const created = held<ReturnType<typeof ok<ReturnType<typeof ch>>>>()
-      const c = createChannels({ listChannels: async () => ok({ channels: [ch('a')] }), createChannel: () => created.promise })
+      const c = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('a')] }), createChannel: () => created.promise })
       await c.load()
       const creating = c.create({ name: 'n', visibility: 'public' })
       c.close()
@@ -209,13 +209,13 @@ describe('channels', () => {
       expect(c.get().selectedId).toBe('a')
     })
     it('a new list is not affected by the closed one', async () => {
-      const old = held<ReturnType<typeof ok<{ channels: ReturnType<typeof ch>[] }>>>()
+      const old = held<ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>>()
       const first = createChannels({ listChannels: () => old.promise, createChannel: vi.fn() })
       const loading = first.load()
       first.close()
-      const second = createChannels({ listChannels: async () => ok({ channels: [ch('new')] }), createChannel: vi.fn() })
+      const second = createChannels({ listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('new')] }), createChannel: vi.fn() })
       await second.load()
-      old.resolve(ok({ channels: [ch('old')] }))
+      old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [ch('old')] }))
       await loading
       expect(second.get().channels.map((x) => x.id)).toEqual(['new'])
     })

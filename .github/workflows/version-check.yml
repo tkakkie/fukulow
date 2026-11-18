@@ -1,0 +1,32 @@
+name: version-check
+on:
+  schedule:
+    - cron: "23 0 * * 1" # weekly, Monday (UTC)
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency: { group: version-check }
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version }
+      - name: Build the report (upstream failures are listed in it)
+        env: { GITHUB_TOKEN: "${{ github.token }}" }
+        run: node scripts/version-report.ts > "$RUNNER_TEMP/version-check.md"
+      - name: Create or update the single Version check Issue
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          found=$(gh issue list --state all --limit 100 --search '"Version check" in:title' --json number,title,state \
+            -q 'map(select(.title == "Version check")) | sort_by(.number) | .[0] // empty | "\(.number) \(.state)"')
+          if [ -z "$found" ]; then
+            gh issue create --title "Version check" --milestone Backlog --body-file "$RUNNER_TEMP/version-check.md"
+          else
+            number=${found%% *}
+            gh issue edit "$number" --body-file "$RUNNER_TEMP/version-check.md"
+            if [ "${found#* }" = CLOSED ]; then gh issue reopen "$number"; fi
+          fi

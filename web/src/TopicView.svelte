@@ -13,7 +13,7 @@
     discardAndFocusComposer,
     focusTarget,
   } from './focus-management'
-  import { countRepliesByMessageId, type RepliesAdapter } from './replies.svelte'
+  import { type RepliesAdapter } from './replies.svelte'
   import { foldTopicName, type ChannelSync } from './sync.svelte'
   import {
     applyTimelineScrollAction,
@@ -118,9 +118,7 @@
       ? (scrolledFirstUnreadId ?? entry.firstUnread?.id ?? null)
       : null,
   )
-  const replyCounts = $derived(
-    countRepliesByMessageId([s.messages, view.messages, rState?.messages ?? []]),
-  )
+  const replyCounts = $derived(replies?.counts ?? {})
   const channelUnavailable = $derived(s.status === 'unavailable' || tState.unavailable)
   const topicUnavailable = $derived(
     !organizationUnavailable && !channelUnavailable && (topicStatus === 'unavailable' || view.notFound),
@@ -568,7 +566,7 @@
         bind:this={rowWindow}
         items={view.messages}
         rowId={(m) => m.id}
-        confirmedSeq={(m) => m.seq}
+        confirmedSeq={(m) => m.created_seq}
         pendingItems={pending}
         pendingId={(p) => p.clientMessageId}
         pendingStatus={(p) => p.status}
@@ -589,11 +587,11 @@
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
-                body={m.body}
+                body={m.body ?? ''}
                 mentions={m.mentions}
                 {resolveMentionName}
                 {selfId}
-                replyCount={replyCounts.get(m.id) ?? 0}
+                replyCount={replyCounts[m.reply_root_id ?? m.id] ?? null}
                 focusable
                 rovingTabindex={rovingRowId === m.id ? 0 : -1}
                 onopenreplies={onopenreplies && !targetUnavailable

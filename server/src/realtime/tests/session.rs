@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) async fn fallback_close(socket: &mut Client, code: u16) {
-    let frame = tokio::time::timeout(Duration::from_secs(3), message_next(socket))
+    let frame = tokio::time::timeout(Duration::from_secs(3), delivery_next(socket, None))
         .await
         .unwrap()
         .unwrap()
@@ -134,7 +134,6 @@ async fn fallback_database_failure_closes_with_internal_error(pool: PgPool) {
     let f = fixture(&pool).await;
     let isolated_pool = crate::database::PoolConfig::configured(Some("3"), None)
         .unwrap()
-        .options()
         .connect_with(f.state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();
@@ -522,6 +521,7 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
     control(
         &mut idle,
         ClientMessage::Subscribe {
+            history_generation: None,
             channel_id: Uuid::new_v4(),
             after_seq: 0,
         },
@@ -612,4 +612,28 @@ async fn deactivation_self_denials_preserve_all_session_sockets(pool: PgPool) {
         assert_eq!(event(&mut a).await["message"], canonical);
         assert_eq!(event(&mut b).await["message"], canonical);
     }
+}
+
+#[tokio::test]
+async fn fallback_close_answers_keepalive_and_preserves_close_code() {
+    let (mut client, mut peer) = super::keepalive::socket_pair().await;
+    peer.send(tungstenite::Message::Ping(vec![1].into()))
+        .await
+        .unwrap();
+    peer.send(tungstenite::Message::Pong(vec![2].into()))
+        .await
+        .unwrap();
+    peer.send(tungstenite::Message::Close(Some(
+        tungstenite::protocol::CloseFrame {
+            code: tungstenite::protocol::frame::coding::CloseCode::Library(4003),
+            reason: "membership lost".into(),
+        },
+    )))
+    .await
+    .unwrap();
+    fallback_close(&mut client, 4003).await;
+    assert_eq!(
+        peer.next().await.unwrap().unwrap(),
+        tungstenite::Message::Pong(vec![1].into())
+    );
 }

@@ -11,8 +11,8 @@ it('4003 is terminal for only its Organization, fails pending sends and starts n
     await client.feed({ type: 'session_start' })
     await client.feed({ type: 'connection_ready' })
     const request = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
-    await client.feed({ type: 'history_result', respond_to: request, messages: [record(100)], has_more: false })
-    await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+    await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: request, messages: [record(100)], has_more: false })
+    await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
     await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'pending', body: 'unsent' })
   }
   await a.feed({ type: 'socket_closed', code: 4003 })

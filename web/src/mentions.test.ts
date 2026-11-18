@@ -48,10 +48,10 @@ it('Mention value-equal canonical refresh supersedes an older directory rename w
   const message = { ...msg(4), body: token(id), mentions: [{ member_id: id, name: 'Original' }] }
   c.event(message); await flush()
   authors.replaceMembers([member(id, 'Renamed')])
-  const held = () => c.sync.get().channels.A.messages.find(m => m.seq === 4)!
+  const held = () => c.sync.get().channels.A.messages.find(m => m.created_seq === 4)!
   expect(mentionText(held().body, held().mentions, authors.mentionName)).toBe('@Renamed')
   c.event({ ...message, mentions: [{ member_id: id, name: 'Original' }] }); await flush()
   expect(mentionText(held().body, held().mentions, authors.mentionName)).toBe('@Original')
-  expect(held().mentions.map(m => m.member_id)).toEqual([id])
+  expect(held().mentions!.map(m => m.member_id)).toEqual([id])
   authors.close(); await c.sync.close()
 })

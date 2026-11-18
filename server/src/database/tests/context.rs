@@ -346,6 +346,8 @@ pub(crate) async fn context_policies(admin: &PgPool) {
         "channel_members",
         "channel_message_sequences",
         "messages",
+        "channel_log",
+        "operation_receipts",
         "topics",
         "channel_read_positions",
         "topic_read_positions",

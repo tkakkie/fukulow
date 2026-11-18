@@ -4,6 +4,7 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 
 | Rule | Test |
 |---|---|
+| Mutations below a count baseline invalidate it and refetch through the mutation version; unresolved counts stay hidden | `web/src/unread.test.ts::refetches baseline W100 for Message90 mutations v101` |
 | Overflow recovery coalesces with pending Channel-list and per-Topic reads/backoff; sufficient completed baselines need no follow-up | `web/src/unread-retention.test.ts::coalesces overflow recovery through in-flight reads and backoff until the completed baselines suffice` |
 | Long visits bound Unread metadata even with stalled refreshes; the first-Unread marker survives eviction | `web/src/message-window-review.test.ts::bounds a long active Unread visit including stalled refreshes while preserving its first-Unread marker` |
 | Checkpointed Unread counts refresh; evicted unread prefixes must be refetched and presented before marking | `web/src/message-window-review.test.ts::refreshes bounded Unread counts and refetches the evicted first-Unread prefix before marking it` |
@@ -49,6 +50,9 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 | Evicted Mention evidence stays bounded and counts unresolved until refreshed; retained Unread evidence contains no names or bodies | `web/src/mention-unread.test.ts::Mention eviction stays unresolved until sufficient baselines and retains no names or bodies` |
 
 | Exact main Unread and Mention counts use a covering Message range after VACUUM; the range excludes own sends without Message heap fetches | `server/src/messages/tests/unread/measurement.rs::main_unread_count_uses_covering_range_without_message_heap` |
+| Topic count plans under RLS skip fully read Topics and read prefixes; only unread Message ranges are scanned in Custom, Generic and Auto modes | `server/src/messages/tests/unread/measurement.rs::unread_topic_counts_read_only_unread_topic_ranges` |
+
+| Later versions replace the same Message's Unread Mention evidence; tombstones stop contributing | `web/src/mention-unread.test.ts::Unread replaces Mention evidence by version for edits and tombstones of the same Message` |
 
 ## Rows in other parts
 
@@ -76,3 +80,9 @@ Rows that also govern this area, listed by a test name unique to the row in that
 - [messages](messages.md): `dm_mentions_participant_roles_replies_mark_read_and_renewal_share_batched_counts`, `dm_mention_lapsed_peer_refuses_new_send_but_canonical_retry_keeps_set`
 - [web](web.md): `DM Mention counts converge across live duplicate replay reconnect marks and access loss`, `Unread-only DM responses cannot cover Mention invalidations and retry through the shared schedule`, `DM access loss hides both retained baseline badges until a renewed controller baseline arrives`
 - [realtime](realtime.md): `dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_baselines`
+
+- [sync](sync.md): `a plain create below a retired mutation version floor still enters Unread`
+
+- [sync](sync.md): `Organization generation resets every Channel and preserves send intent and late 401 in the wasm core`
+
+- [sync](sync.md): `Organization history reset restarts DM discovery and browsing with fresh lower baselines`

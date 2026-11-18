@@ -280,7 +280,7 @@ async fn denied_dm_mutations_and_canonical_retries_publish_no_message_with_parti
         silent(&mut b).await;
     }
     let guest = send(&f, &pt, c, Uuid::new_v4(), "positive Guest").await;
-    assert_eq!(guest["seq"], 2);
+    assert_eq!(guest["created_seq"], 2);
     assert_eq!(event(&mut a).await["message"], guest);
     assert_eq!(event(&mut b).await["message"], guest);
 }
@@ -517,7 +517,7 @@ async fn dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_b
         .await;
         assert_eq!(body(r).await["dms"][0]["mention_unread_count"], 3);
         if phase == "frame" {
-            assert_eq!(event(&mut socket).await["message"]["seq"], 1);
+            assert_eq!(event(&mut socket).await["message"]["created_seq"], 1);
         }
         let r = request(
             &f.app,
@@ -554,7 +554,7 @@ async fn dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_b
         subscribe(&mut control, c, 0).await;
         for seq in 1..=3 {
             let m = event(&mut control).await;
-            assert_eq!(m["message"]["seq"], seq);
+            assert_eq!(m["message"]["created_seq"], seq);
             assert_eq!(
                 m["message"]["mentions"],
                 json!([{"member_id":peer,"name":"Member"}])

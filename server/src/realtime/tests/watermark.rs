@@ -194,7 +194,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
                         Some(json!({"client_message_id": Uuid::new_v4(), "body": "headroom"})),
                     )
                     .await;
-                    assert_eq!(sent["seq"], seq);
+                    assert_eq!(sent["created_seq"], seq);
                     let page = http_json(f.server.address, token, channel, None).await;
                     assert_eq!(page["messages"].as_array().unwrap().len(), seq as usize);
                     assert_eq!(page["messages"][seq as usize - 1], sent);
@@ -234,14 +234,14 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     tx.commit().await.unwrap();
     let canonical = admitted_retry.await.unwrap();
     assert_eq!(canonical["client_message_id"], json!(key));
-    assert_eq!(canonical["seq"], 1);
+    assert_eq!(canonical["created_seq"], 1);
     let mut seqs = std::collections::BTreeSet::from([1]);
     while let Some(result) = sending.join_next().await {
         let message = result.unwrap();
         if message["client_message_id"] == json!(key) {
             assert_eq!(message, canonical);
         } else {
-            assert!(seqs.insert(message["seq"].as_i64().unwrap()));
+            assert!(seqs.insert(message["created_seq"].as_i64().unwrap()));
         }
     }
     assert_eq!(
@@ -260,7 +260,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
                 subscribed = true;
             } else {
                 seq += 1;
-                assert_eq!(value["message"]["seq"], seq);
+                assert_eq!(value["message"]["created_seq"], seq);
                 if seq == 1 {
                     assert_eq!(value["message"], canonical);
                 }
@@ -271,7 +271,7 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
     subscribe(&mut recovered, f.channel, 0).await;
     for seq in 1..=STORM_SEQS {
         let value = event(&mut recovered).await;
-        assert_eq!(value["message"]["seq"], seq);
+        assert_eq!(value["message"]["created_seq"], seq);
         if seq == 1 {
             assert_eq!(value["message"], canonical);
         }
@@ -280,62 +280,158 @@ async fn unresolved_commit_reconnect_storm_leaves_pool_headroom_for_other_organi
 }
 
 #[fukulow_test::test]
-async fn simultaneous_normal_subscriptions_have_no_internal_error_closes(pool: PgPool) {
+async fn simultaneous_admitted_subscriptions_receive_canonical_live_messages(pool: PgPool) {
+    tokio::time::pause();
+    let test = async {
+        let app_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(20)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let f = fixture(&app_pool).await;
+        f.state
+            .message_delivery
+            .hold_watermark_admission_timeouts(&f.state.pool);
+        let mut channels = vec![f.channel];
+        for _ in 0..31 {
+            channels.push(channel(&pool, f.organization, f.member, false).await);
+        }
+        const SOCKETS: usize = 512;
+        let barrier = Arc::new(tokio::sync::Barrier::new(SOCKETS + 1));
+        // Bound TCP handshakes to avoid testing the OS listen backlog; all
+        // 512 authenticated sockets issue their subscriptions together below.
+        // Semaphore acquisition and connect_at have no independent read deadline.
+        let handshakes = Arc::new(Semaphore::new(32));
+        let mut clients = tokio::task::JoinSet::new();
+        for index in 0..SOCKETS {
+            let address = f.server.address;
+            let token = f.token.clone();
+            // Half concentrate on four popular Channels; half spread across all 32.
+            // Admission still takes four Channel slots and eight global slots, but
+            // its timeout is held so a slow runner cannot turn this into overload.
+            let channel = if index < SOCKETS / 2 {
+                channels[index % 4]
+            } else {
+                channels[index % channels.len()]
+            };
+            let barrier = barrier.clone();
+            let handshakes = handshakes.clone();
+            clients.spawn(async move {
+                let permit = handshakes.acquire().await.unwrap();
+                let mut socket = connect_at(address, &token).await;
+                drop(permit);
+                barrier.wait().await;
+                subscribe(&mut socket, channel, 0).await;
+                ready(&mut socket, channel, 0).await;
+                (channel, socket)
+            });
+        }
+        barrier.wait().await;
+        let mut connected = Vec::new();
+        while let Some(result) = clients.join_next().await {
+            connected.push(result.unwrap());
+        }
+        assert_eq!(connected.len(), SOCKETS);
+        let mut canonical = HashMap::new();
+        for channel in channels {
+            canonical.insert(channel, post(&f, channel).await);
+        }
+        for (channel, socket) in &mut connected {
+            assert_eq!(event(socket).await["message"], canonical[channel]);
+        }
+    };
+    // Holding only admission expiry is insufficient: the 10 s watermark work
+    // deadline includes the queue, so a correct slow queue could still get 1011.
+    // Freeze notification, helper read, work, pool/session/write and heartbeat
+    // timers: this checks delivery after admission, not wall-clock capacity.
+    // Tokio's clock.rs documents that spawn_blocking inhibits auto-advance;
+    // the runtime can park during TCP/DB I/O without a self-waking busy loop.
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let watchdog = tokio::task::spawn_blocking(move || {
+        let _ = stopped.recv_timeout(Duration::from_secs(300));
+    });
+    tokio::select! {
+        () = test => {},
+        _ = watchdog => panic!("test stalled"),
+    }
+    // This sender also drops on panic, releasing the blocking thread immediately.
+    drop(stop);
+    tokio::time::resume();
+}
+
+#[fukulow_test::test]
+async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
     let app_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect_with((*pool.connect_options()).clone())
         .await
         .unwrap();
     let f = fixture(&app_pool).await;
-    let mut channels = vec![f.channel];
-    for _ in 0..31 {
-        channels.push(channel(&pool, f.organization, f.member, false).await);
-    }
-    let barrier = Arc::new(tokio::sync::Barrier::new(513));
-    // Bound TCP handshakes to avoid testing the OS listen backlog; all 512
-    // authenticated sockets issue their subscriptions together below.
-    let handshakes = Arc::new(Semaphore::new(32));
-    let mut clients = tokio::task::JoinSet::new();
-    for index in 0..512 {
-        let address = f.server.address;
-        let token = f.token.clone();
-        // Four popular Channels exercise repeated cap handoffs with more scheduling
-        // margin than 264 reads serialized four at a time under the 1s deadline.
-        let channel = if index < 256 {
-            channels[index % 4]
-        } else {
-            channels[index % channels.len()]
-        };
-        let barrier = barrier.clone();
-        let handshakes = handshakes.clone();
-        clients.spawn(async move {
-            let permit = handshakes.acquire().await.unwrap();
-            let mut socket = connect_at(address, &token).await;
-            drop(permit);
-            barrier.wait().await;
-            subscribe(&mut socket, channel, 0).await;
-            ready(&mut socket, channel, 0).await;
-            (channel, socket)
-        });
-    }
-    tokio::time::timeout(Duration::from_secs(10), barrier.wait())
-        .await
-        .unwrap();
-    let mut connected = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(result) = clients.join_next().await {
-            connected.push(result.unwrap());
+    let other_channel = channel(&pool, f.organization, f.member, false).await;
+    for (confirmation, global) in [(false, false), (false, true), (true, false), (true, true)] {
+        // One fixture-scoped ordered record connects the caller entries to the
+        // exact admission stage; no other connection subscribes during this case.
+        f.state
+            .message_delivery
+            .take_watermark_events(&f.state.pool);
+        let target = channel(&pool, f.organization, f.member, false).await;
+        let mut socket = f.server.connect(&f.token).await;
+        let gate = confirmation.then(|| pause(target));
+        if let Some(gate) = &gate {
+            subscribe(&mut socket, target, 0).await;
+            entered(gate).await;
         }
-    })
-    .await
-    .expect("all 512 simultaneous subscriptions must be accepted without 1011");
-    assert_eq!(connected.len(), 512);
-    let mut canonical = HashMap::new();
-    for channel in channels {
-        canonical.insert(channel, post(&f, channel).await);
-    }
-    for (channel, socket) in &mut connected {
-        assert_eq!(event(socket).await["message"], canonical[channel]);
+        let mut held = Vec::new();
+        for index in 0..if global { 8 } else { 4 } {
+            let channel = if !global {
+                target
+            } else if index >= 4 {
+                other_channel
+            } else {
+                f.channel
+            };
+            held.push(
+                f.state
+                    .message_delivery
+                    .hold_watermark_permit(&f.state.pool, f.organization, channel)
+                    .await,
+            );
+        }
+        // No SQL or COMMIT is blocked: only admission can reject this socket.
+        // Keep every permit until after Close, so host speed cannot release it.
+        if let Some(gate) = gate {
+            gate.release.add_permits(1);
+        } else {
+            subscribe(&mut socket, target, 0).await;
+        }
+        closed(&mut socket, 1011).await;
+        let mut expected = vec![(f.organization, target, "initial")];
+        if confirmation {
+            expected.push((f.organization, target, "confirmation"));
+        }
+        expected.push((
+            f.organization,
+            target,
+            if global {
+                "global_rejection"
+            } else {
+                "channel_rejection"
+            },
+        ));
+        assert_eq!(
+            f.state
+                .message_delivery
+                .take_watermark_events(&f.state.pool),
+            expected,
+            "confirmation={confirmation}, global={global}",
+        );
+        drop(held);
+
+        let mut accepted = f.server.connect(&f.token).await;
+        subscribe(&mut accepted, target, 0).await;
+        ready(&mut accepted, target, 0).await;
+        let canonical = post(&f, target).await;
+        assert_eq!(event(&mut accepted).await["message"], canonical);
     }
 }
 
@@ -437,7 +533,7 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
                     )
                     .await;
                     let seq = probes + 1;
-                    assert_eq!(sent["seq"], seq);
+                    assert_eq!(sent["created_seq"], seq);
                     let page = http_json(address, &foreign_token, foreign_channel, None).await;
                     assert_eq!(page["messages"][seq as usize - 1], sent);
                     let mut socket = connect_at(address, &foreign_token).await;
@@ -534,7 +630,7 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
             Some(json!({"client_message_id": key, "body": "held commit"})),
         )
         .await;
-        assert_eq!(canonical["seq"], 1);
+        assert_eq!(canonical["created_seq"], 1);
         assert_eq!(
             http_json(
                 address,
@@ -552,7 +648,7 @@ async fn repeated_send_transaction_timeouts_clear_residue_and_preserve_other_org
             Some(json!({"client_message_id": Uuid::new_v4(), "body": "next"})),
         )
         .await;
-        assert_eq!(next["seq"], 2);
+        assert_eq!(next["created_seq"], 2);
         let mut recovered = connect_at(address, &f.token).await;
         subscribe(&mut recovered, channel, 0).await;
         assert_eq!(event(&mut recovered).await["message"], canonical);
@@ -648,7 +744,7 @@ async fn sixteen_concurrent_sends_leave_reserved_capacity_for_new_subscription(p
     .expect("sends must leave reserved watermark capacity");
     let mut completed = 0;
     while let Some(result) = sends.join_next().await {
-        assert_eq!(result.unwrap()["seq"], 1);
+        assert_eq!(result.unwrap()["created_seq"], 1);
         completed += 1;
     }
     assert_eq!(completed, 16);

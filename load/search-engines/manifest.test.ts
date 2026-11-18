@@ -1,24 +1,68 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings, appSessionSettings, runKind } from './manifest.ts';
+import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings, appSessionSettings, runKind, manifestFile } from './manifest.ts';
 import { boundedCommand } from './bench.ts';
 
 const frozen = snapshot();
 const document = {sha256:hash(JSON.stringify(frozen)),frozen};
-test('checked-in manifest matches the evaluation inputs',()=>{
-  assert.equal(verifyManifest(JSON.parse(readFileSync(new URL('./manifest-v1.json',import.meta.url),'utf8'))),document.sha256);
+const recorded = (version: number) => JSON.parse(readFileSync(new URL(`./manifest-v${version}.json`,import.meta.url),'utf8'));
+test('checked-in current manifest matches the evaluation inputs',()=>{
+  assert.equal(manifestFile,'load/search-engines/manifest-v3.json');
+  assert.equal(verifyManifest(recorded(3)),document.sha256);
 });
-test('LF attributes cover exactly the frozen inputs and manifest',()=>{
+test('manifest v2 stays as recorded for the #153 1M run',()=>{
+  const v2 = recorded(2);
+  assert.equal(v2.sha256,'9b649cf9773b4926d28e2ef30d57fe74175d449c5d85bf9b560ee4694234e272');
+  assert.equal(hash(JSON.stringify(v2.frozen)),v2.sha256);
+});
+test('v3 changes only the version and sourceHashes; every condition equals v2',()=>{
+  const strip = ({version,sourceHashes,...rest}: Record<string,unknown>) => rest;
+  // Recorded v3, not the live snapshot: the guarantee must not depend on the local Node version.
+  const v2 = recorded(2).frozen, v3 = recorded(3).frozen;
+  assert.deepEqual(strip(v3),strip(v2));
+  assert.equal(v3.version,3);
+  const before = new Map(v2.sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  const changed = v3.sourceHashes.filter((s: {path:string;sha256:string})=>before.get(s.path)!==s.sha256).map((s: {path:string})=>s.path);
+  // Reviewed: the slice-4 migration, its column grants, its LF attribute line and the version pointer itself.
+  assert.deepEqual(changed,['.gitattributes','deploy/db-grants.sql','load/search-engines/manifest.ts','server/migrations/202611190515_history_generation.sql']);
+  assert.ok(v2.sourceHashes.every((s: {path:string})=>v3.sourceHashes.some((t: {path:string})=>t.path===s.path)));
+});
+test('manifest v1 stays as recorded for the 2026-11-17 results',()=>{
+  const v1 = recorded(1);
+  assert.equal(v1.sha256,'b4e3f0835d7e315f65f96c79086b4d5c9fb2ca9c651d9e3fd694c0fde11cd356');
+  assert.equal(hash(JSON.stringify(v1.frozen)),v1.sha256);
+});
+test('v2 changes only the query path and sources; performance conditions equal v1',()=>{
+  const v2 = recorded(2).frozen;
+  const strip = ({version,date,sourceHashes,queryPath,...rest}: Record<string,unknown>) => rest;
+  assert.deepEqual(strip(v2),strip(recorded(1).frozen));
+  assert.deepEqual([v2.version,v2.date],[2,'2026-11-17']);
+  assert.ok(v2.sourceHashes.some((s: {path:string})=>s.path==='load/search-engines/definer.sql'));
+});
+test('queryPath carries no planner or executor setting beyond the query-path need',()=>{
+  assert.deepEqual(Object.keys(frozen.queryPath.functionSettings).sort(),['plan_cache_mode','search_path']);
+  // Every key is reviewed: a new field (e.g. settings:{jit:'off'}) fails here.
+  const keys = (value: unknown, prefix = ''): string[] => value && typeof value==='object'
+    ? Object.entries(value).flatMap(([k,v])=>[prefix+k,...keys(v,prefix+k+'.')]) : [];
+  assert.deepEqual(keys(frozen.queryPath).sort(),['caller','completeness','emptyQuery','function','functionSettings',
+    'functionSettings.plan_cache_mode','functionSettings.search_path','kind','organization','owner','pageSize','planCacheReason',
+    'plans','plans.app','plans.body','plans.direct','plans.owner','plans.ownerV1','source']);
+  const names = Object.keys(settings).concat(['jit','work_mem','statement_timeout','random_page_cost']);
+  for (const value of Object.values(frozen.queryPath).filter(v=>typeof v==='string') as string[])
+    for (const name of names) assert.doesNotMatch(value,new RegExp(`\\b${name}\\s*=`),`${name} in queryPath`);
+});
+test('LF attributes cover exactly the frozen inputs and manifests',()=>{
   const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
     .split('\n').filter(line=>line && !line.startsWith('#'));
-  assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),'load/search-engines/manifest-v1.json']
+  assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),
+    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json']
     .sort().map(path=>`/${path} text eol=lf`));
 });
 test('manifest content tampering is refused',()=>{
   assert.throws(()=>verifyManifest({...document,sha256:'changed'}),/content hash mismatch/);
 });
-for (const field of ['generator','sourceHashes','quality','performance','timing','image','sessionPolicy','settings','shmBytes','smoke'] as const) {
+for (const field of ['generator','sourceHashes','quality','performance','timing','image','sessionPolicy','settings','shmBytes','smoke','queryPath'] as const) {
   test(`changed ${field} is refused before a run`,()=>{
     const actual = structuredClone(frozen);
     Object.assign(actual,{[field]:'changed'});
@@ -118,6 +162,15 @@ test('runtime GUC verification loads PGroonga and reads typed values in the same
     return JSON.stringify(settings);
   },()=>Object.entries(packages).map(p=>p.join('|')).join('\n'),'test');
   assert.equal(initialized,true);
+});
+test('a planner override passes only when fixed in that role\'s session settings',()=>{
+  // Shape of the pending #196 role default (jit=off): listing it in the frozen
+  // app settings both requires the value and excludes it from the override count.
+  const fixed = {...appSessionSettings,jit:'off'};
+  const sql = (text: string)=>text.includes('count(*)') ? (text.includes("'jit'") ? '0' : '1')
+    : JSON.stringify(text.includes("'jit'") ? fixed : appSessionSettings);
+  verifySession(sql,'app',fixed);
+  assert.throws(()=>verifySession(sql,'app'),/planner defaults mismatch/);
 });
 test('app sessions require 10s statement_timeout; owner setup keeps no SQL timeout',()=>{
   assert.equal(appSessionSettings.statement_timeout,'10000');

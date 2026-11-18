@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url'
+import { precompress } from './scripts/precompress.ts'
 import { checkCoreBundle } from './scripts/core-bundle.ts'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { defineConfig } from 'vitest/config'
@@ -6,19 +7,23 @@ import { defineConfig } from 'vitest/config'
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const test = mode === 'test'
-  const implementation = process.env.SYNC_CORE ?? 'wasm'
-  if (!['wasm', 'ts'].includes(implementation)) throw new Error('SYNC_CORE must be wasm or ts')
   return {
     build: { manifest: true, assetsInlineLimit: 0, rollupOptions: { output: {
       manualChunks: id => id.endsWith('/wasm/fukulow_client_core.js') ? 'sync-wasm' : undefined,
     } } },
     resolve: { alias: [
-      { find: '#sync-core', replacement: fileURLToPath(new URL('./src/core-' + implementation + '.ts', import.meta.url)) },
+      { find: '#sync-core', replacement: fileURLToPath(new URL('./src/core-wasm.ts', import.meta.url)) },
       ...(test ? [{ find: /^\.\/core-values$/, replacement: fileURLToPath(new URL('./scripts/core-test-values.ts', import.meta.url)) }] : []),
     ] },
     plugins: [
+      { name: 'precompressed-brotli', apply: 'build',
+        async writeBundle(options) {
+          if (!options.dir) throw new Error('Brotli assets require an output directory')
+          await precompress(options.dir)
+        },
+      },
       { name: 'single-sync-implementation', generateBundle(_options, bundle) {
-        checkCoreBundle(implementation, Object.values(bundle).flatMap(chunk => chunk.type === 'chunk' ? Object.keys(chunk.modules) : []),
+        checkCoreBundle(Object.values(bundle).flatMap(chunk => chunk.type === 'chunk' ? Object.keys(chunk.modules) : []),
           Object.values(bundle).filter(chunk => chunk.type === 'asset').map(asset => asset.fileName))
       } },
       svelte({

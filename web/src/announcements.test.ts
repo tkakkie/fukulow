@@ -11,7 +11,7 @@ import {
 
 const msg = (seq: number, sender: string, body: string): AnnounceableMessage => ({
   id: `m-${seq}`,
-  seq,
+  created_seq: seq,
   sender,
   body,
 })
@@ -822,4 +822,16 @@ it('DM navigation announces the peer name once without a Channel prefix or badge
   controller.onViewChanged({ viewId: 'dm-A', kind: 'dm', name: '相手の名前' })
   expect(announce).toHaveBeenCalledExactlyOnceWith('相手の名前')
   controller.destroy()
+})
+
+it('discards a deferred body when its current Message state is a tombstone', () => {
+  const input = { type: 'timeline_updated' as const, viewId: 'c1', status: 'ready' as const, live: true,
+    selfId: 'me', nowMs: 0, isSenderPending: () => true }
+  let state = stepAnnouncements(initialAnnouncementState(), { ...input, messages: [] }).state
+  state = stepAnnouncements(state, { ...input, nowMs: 1, messages: [msg(1, 'other', 'removed content')] }).state
+  expect(state.deferredMessages).toHaveLength(1)
+  const result = stepAnnouncements(state, { ...input, nowMs: 2, isSenderPending: () => false,
+    messages: [{ ...msg(1, 'other', 'removed content'), body: undefined }] })
+  expect(result.state.deferredMessages).toEqual([])
+  expect(result.announcement).toBeNull()
 })

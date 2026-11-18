@@ -4,7 +4,6 @@ import { createServer as createSecureServer, type ServerOptions } from 'node:htt
 import { networkInterfaces } from 'node:os'
 import { day, checksum, sha256, type BackupBucket, type ObjectInfo } from './backup-r2-model.ts'
 import type { Request, Response, Runner } from './backup-r2.ts'
-import { runLockKey } from './backup-r2-list.ts'
 
 export type Fault = 'lost-response' | 'truncated' | 'bad-checksum' | '5xx'
 export class FakeBucket implements BackupBucket {
@@ -12,7 +11,7 @@ export class FakeBucket implements BackupBucket {
   calls: string[] = []
   now: () => number
   constructor(now: () => number) { this.now = now }
-  async list() { this.calls.push('LIST'); return [...this.objects.keys()].filter(key => key !== runLockKey).map(key => this.info(key)!) }
+  async list() { this.calls.push('LIST'); return [...this.objects.keys()].map(key => this.info(key)!) }
   info(key: string): ObjectInfo | null {
     const o = this.objects.get(key)
     return o ? { key, size: o.body.length, checksum: checksum(sha256(o.body)), uploaded: o.uploaded } : null
@@ -26,7 +25,7 @@ export class FakeBucket implements BackupBucket {
   }
   locked(key: string) {
     const o = this.objects.get(key)
-    return o && key !== runLockKey && this.now() - o.uploaded < (key.startsWith('restore-verified/') ? 40 : 35) * day
+    return o && !key.startsWith('verification/') && this.now() - o.uploaded < (key.startsWith('restore-verified/') ? 40 : 35) * day
   }
   async put(key: string, body: Buffer) {
     if (this.locked(key)) throw new Error('Locked')
@@ -52,6 +51,7 @@ export async function fakeS3(now: () => number, tls?: ServerOptions) {
     accesses.push(`${role}:${bucketName}:${req.method}`)
     if (!['backups', 'images'].includes(bucketName) || role !== bucketName) { res.writeHead(403).end(); return }
     const bucket = buckets[bucketName as keyof typeof buckets], key = parts.join('/')
+    if (String(req.headers.authorization ?? '').includes('verification-invalid')) { res.writeHead(403).end(); return }
     const injected = faults.find(f => f.method === req.method && f.remaining > 0)
     if (injected) injected.remaining--
     if (injected?.fault === '5xx') { res.writeHead(503).end(); return }
@@ -64,25 +64,28 @@ export async function fakeS3(now: () => number, tls?: ServerOptions) {
         if (req.headers['if-none-match'] === '*' && bucket.objects.has(key)) { res.writeHead(412).end(); return }
         await bucket.put(key, body)
         if (injected?.fault === 'lost-response') { req.socket.destroy(); return }
-        res.writeHead(200).end()
+        res.writeHead(200, { etag: sha256(body) }).end()
       } else if (req.method === 'DELETE') {
+        if (req.headers['if-match'] && req.headers['if-match'] !== sha256(bucket.objects.get(key)?.body ?? '')) { res.writeHead(412).end(); return }
         await bucket.delete(key); res.writeHead(204).end()
       } else if (!key && req.method === 'GET') {
         if (parameters.get('list-type') !== '2') { res.writeHead(400).end(); return }
-        const all = [...bucket.objects.keys()].sort(), token = parameters.get('continuation-token')
+        const prefix = parameters.get('prefix') ?? ''
+        const all = [...bucket.objects.keys()].filter(key => key.startsWith(prefix)).sort(), token = parameters.get('continuation-token')
         const start = token ? all.indexOf(token) + 1 : 0
         if (token && start === 0) { res.writeHead(400).end(); return }
-        const page = all.slice(start, start + 2), truncated = start + page.length < all.length
+        const page = all.slice(start, start + Math.min(2, Number(parameters.get('max-keys') ?? 2))), truncated = start + page.length < all.length
         const escape = (s: string) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
-        res.end(`<ListBucketResult><KeyCount>${page.length}</KeyCount><IsTruncated>${truncated}</IsTruncated>${truncated ? `<NextContinuationToken>${escape(page.at(-1)!)}</NextContinuationToken>` : ''}${page.map(key => {
+        res.end(`<ListBucketResult>${prefix ? `<Prefix>${escape(prefix)}</Prefix>` : ''}<KeyCount>${page.length}</KeyCount><IsTruncated>${truncated}</IsTruncated>${truncated ? `<NextContinuationToken>${escape(page.at(-1)!)}</NextContinuationToken>` : ''}${page.map(key => {
           const info = bucket.info(key)!
           return `<Contents><Key>${escape(key)}</Key><Size>${info.size}</Size><LastModified>${new Date(info.uploaded).toISOString()}</LastModified></Contents>`
         }).join('')}</ListBucketResult>`)
       } else {
         const info = await bucket.head(key)
         if (!info) { res.writeHead(404).end(); return }
+        if (req.headers['if-match'] && req.headers['if-match'] !== sha256(bucket.objects.get(key)!.body)) { res.writeHead(412).end(); return }
         if (req.method === 'HEAD' && req.headers['x-amz-checksum-mode'] !== 'ENABLED') { res.writeHead(400).end(); return }
-        const headers = { 'content-length': info.size, 'x-amz-checksum-sha256': injected?.fault === 'bad-checksum' ? checksum(sha256('wrong')) : info.checksum,
+        const headers = { etag: sha256(bucket.objects.get(key)!.body), 'content-length': info.size, 'x-amz-checksum-sha256': injected?.fault === 'bad-checksum' ? checksum(sha256('wrong')) : info.checksum,
           'last-modified': new Date(info.uploaded).toUTCString() }
         res.writeHead(200, headers)
         if (req.method === 'HEAD') res.end()

@@ -15,7 +15,7 @@ function start(net: FakeNetwork, selfId = 'me') {
   return { session, sync: syncAdapter(session.sync) }
 }
 async function loadChannels(net: FakeNetwork) {
-  net.lists.at(-1)!.resolve(ok({ channels: [channel('A'), channel('B')] }))
+  net.lists.at(-1)!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('B')] }))
   await settle()
 }
 /** Counts the controller listeners the adapter holds on Channel `id`. */
@@ -34,7 +34,7 @@ function countListeners(session: ReturnType<typeof createSession>, id: string) {
 describe('sync adapter', () => {
   it('exposes throttled sends reactively through retry, repeated 429, canonical ACK and discard', async () => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     await loadChannels(net)
     net.subscribed('A', 100)
@@ -76,7 +76,7 @@ describe('sync adapter', () => {
 
   it('shows controller state changes: history, live confirmation, stream, pending and ack', async () => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     const a = sync.channel('A')
     const view = await mount(() => ({ timeline: a.timeline, live: a.live }))
@@ -89,9 +89,9 @@ describe('sync adapter', () => {
     await settle()
     expect(view.last.live).toBe(true)
 
-    net.event({ type: 'message', message: record(101) })
+    net.event({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
     await settle()
-    expect(view.last.timeline.messages.map(m => m.seq)).toEqual([100, 101])
+    expect(view.last.timeline.messages.map(m => m.created_seq)).toEqual([100, 101])
 
     void a.send('hello')
     await settle()
@@ -99,14 +99,14 @@ describe('sync adapter', () => {
     net.sends[0].resolve(ok(sentBy('me', 102, 'me-c1', 'hello')))
     await settle()
     expect(view.last.timeline).toMatchObject({ pending: [] })
-    expect(view.last.timeline.messages.map(m => m.seq)).toEqual([100, 101, 102])
+    expect(view.last.timeline.messages.map(m => m.created_seq)).toEqual([100, 101, 102])
     await view.unmount()
     session.close()
   })
 
   it('shows failed and retryable pending entries, and forwards retry and discard', async () => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     const a = sync.channel('A')
     const view = await mount(() => a.timeline)
@@ -134,7 +134,7 @@ describe('sync adapter', () => {
 
   it('releases its listener with the last observer, without closing the controller or dropping sync state', async () => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     const listeners = countListeners(session, 'A')
     const a = sync.channel('A')
@@ -151,7 +151,7 @@ describe('sync adapter', () => {
     expect(listeners.active).toBe(0)
 
     const runs = first.values.length + second.values.length
-    net.event({ type: 'message', message: record(101) })
+    net.event({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
     await settle()
     expect(first.values.length + second.values.length).toBe(runs) // nobody is notified
     expect(net.socket.closed).toBe(false)
@@ -163,7 +163,7 @@ describe('sync adapter', () => {
 
   it('remount shows the updates made while nothing observed, without refetching or resubscribing', async () => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     const a = sync.channel('A')
     const first = await mount(() => ({ timeline: a.timeline, live: a.live }))
@@ -172,7 +172,7 @@ describe('sync adapter', () => {
     await settle()
     await first.unmount()
 
-    net.event({ type: 'message', message: record(101) })
+    net.event({ type: 'message', kind: 'create', seq: (record(101)).created_seq, message: record(101) })
     void a.send('while away')
     await settle()
     const requests = net.history.length
@@ -180,11 +180,11 @@ describe('sync adapter', () => {
 
     const again = await mount(() => ({ timeline: a.timeline, live: a.live }))
     expect(again.last.live).toBe(true)
-    expect(again.last.timeline.messages.map(m => m.seq)).toEqual([100, 101])
+    expect(again.last.timeline.messages.map(m => m.created_seq)).toEqual([100, 101])
     expect(again.last.timeline.pending).toMatchObject([{ body: 'while away' }])
-    net.event({ type: 'message', message: record(102) })
+    net.event({ type: 'message', kind: 'create', seq: (record(102)).created_seq, message: record(102) })
     await settle()
-    expect(again.last.timeline.messages.map(m => m.seq)).toEqual([100, 101, 102]) // and it keeps updating
+    expect(again.last.timeline.messages.map(m => m.created_seq)).toEqual([100, 101, 102]) // and it keeps updating
     expect(net.history).toHaveLength(requests)
     expect(net.subscribeCount('A')).toBe(subscribes)
     expect(net.sockets).toHaveLength(1)
@@ -194,7 +194,7 @@ describe('sync adapter', () => {
 
   it('shows a replaced session as empty and ignores everything the old session still delivers', async () => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     const a = sync.channel('A')
     const view = await mount(() => a.timeline)
@@ -208,7 +208,7 @@ describe('sync adapter', () => {
     void session.sync.replaceSession('other')
     await settle()
     expect(view.last).toMatchObject({ status: 'loading', messages: [], pending: [] })
-    old.onEvent({ type: 'message', message: record(999) })
+    old.onEvent({ type: 'message', kind: 'create', seq: (record(999)).created_seq, message: record(999) })
     old.onReady()
     net.sends[0].resolve(ok(sentBy('me', 101, 'me-c1', 'mine'))) // the old session's late ack
     await settle()
@@ -221,7 +221,7 @@ describe('sync adapter', () => {
 describe('sync adapter and the unavailable state (C9)', () => {
   const unavailable = async (refusal: 'event' | 'history') => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     const a = sync.channel('A')
     const view = await mount(() => a.timeline)
@@ -256,7 +256,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
   it('an explicit retry loads the Channel again, and selecting it again watches it again', async () => {
     const { net, session, a, view } = await unavailable('history')
     const history = net.history.length
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     void a.loadLatest() // the retry button
     await settle()
     expect(net.history).toHaveLength(history + 1)
@@ -277,7 +277,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
 
   it('distinguishes unavailable from load error, keeps messages and drafts visible, and disables Composer submit when unavailable', async () => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: true })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: true })
     const { session, sync } = start(net)
     const a = sync.channel('A')
     const view = await mount(() => a.timeline)
@@ -347,7 +347,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
     expect(sendParamType!.getText(sf)).toContain('SendMessageRequest')
 
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     await loadChannels(net)
     net.subscribed('A', 100)
@@ -356,7 +356,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
     const a = sync.channel('A')
     void a.send('hello topic', { topic_name: 'Release' })
     await settle()
-    expect(net.sends[0]?.body).toEqual({
+    expect(net.sends[0]?.body).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515',
       client_message_id: 'me-c1',
       body: 'hello topic',
       topic_name: 'Release',
@@ -368,7 +368,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
 
   it('typing in Channel, Topic, or Reply composers notifies only the composer subscription without changing timeline reference; sending still works', async () => {
     const net = fakeNetwork()
-    net.pages.A = ok({ messages: [record(100)], has_more: false })
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: false })
     const { session, sync } = start(net)
     await loadChannels(net)
     net.subscribed('A', 100)
@@ -433,7 +433,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
     await settle()
     expect(composerView.last).toEqual({ draft: '', topicDraft: '', composerError: null })
     expect(timelineView.last.pending).toMatchObject([{ body: 'キー入力1', topicName: '新トピック', status: 'sending' }])
-    expect(net.sends[0]?.body).toEqual({
+    expect(net.sends[0]?.body).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515',
       client_message_id: 'me-c1',
       body: 'キー入力1',
       topic_name: '新トピック',
@@ -442,7 +442,7 @@ describe('sync adapter and the unavailable state (C9)', () => {
     expect(await submitPromise).toBe(true)
     await settle()
     expect(timelineView.last.pending).toEqual([])
-    expect(timelineView.last.messages.map(m => m.seq)).toEqual([100, 101])
+    expect(timelineView.last.messages.map(m => m.created_seq)).toEqual([100, 101])
 
     unsubTimeline()
     await timelineView.unmount()

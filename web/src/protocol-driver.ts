@@ -1,7 +1,7 @@
 // Test-only functional facade: replay branches by inputs, never importing State into wasm.
 import { createCore } from '#sync-core'
-import type { Input, State, SyncCore } from './protocol-types'
-export * from './protocol-types'
+import type { Input, State, SyncCore } from './protocol-types.js'
+export * from './protocol-types.js'
 type Owner = { core: SyncCore; inputs: Input[]; current: State; tokens: Set<number> }
 const owners = new WeakMap<State, Owner>()
 export function initialState(selfId = ''): State {

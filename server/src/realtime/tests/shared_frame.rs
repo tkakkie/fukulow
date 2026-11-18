@@ -66,24 +66,27 @@ async fn live_serialization_is_once_per_fanout_including_shared_gap_recovery(poo
 fn measure_live_frame_serialization_and_sharing() {
     use std::{hint::black_box, time::Instant};
     let message = messages::Message {
+        history_generation: uuid::Uuid::nil(),
         id: Uuid::new_v4(),
         channel_id: Uuid::new_v4(),
-        seq: 2,
+        created_seq: 2,
+        version: 2,
+        deleted: false,
         client_message_id: Uuid::new_v4(),
         sender: Uuid::new_v4(),
-        body: "日本語 \"quoted\"\\\n".repeat(64),
+        body: Some("日本語 \"quoted\"\\\n".repeat(64)),
         created_at: "2026-11-15T00:00:00Z".into(),
         topic_id: Some(Uuid::new_v4()),
         reply_to: Some(Uuid::new_v4()),
         reply_root_id: Some(Uuid::new_v4()),
-        mentions: vec![messages::Mention {
+        mentions: Some(vec![messages::Mention {
             member_id: Uuid::new_v4(),
             name: "Current name".into(),
-        }],
+        }]),
     };
     eprintln!(
         "body_bytes={} frame_bytes={}",
-        message.body.len(),
+        message.body.as_ref().unwrap().len(),
         messages::LiveMessage::new(message.clone())
             .unwrap()
             .frame
@@ -110,6 +113,8 @@ fn measure_live_frame_serialization_and_sharing() {
                         for _ in 0..recipients {
                             let queued = black_box(live.clone());
                             let event = ServerEvent::Message {
+                                seq: 2,
+                                kind: fukulow_api::ChannelEventKind::Create,
                                 message: (*queued).clone(),
                             };
                             let json = serde_json::to_string(&event).unwrap();
@@ -171,7 +176,7 @@ async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed
     let ack: messages::Message =
         serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap();
     entered_publication(&gate).await;
-    assert_eq!(ack.mentions[0].name, "Member");
+    assert_eq!(ack.mentions.as_ref().unwrap()[0].name, "Member");
     sqlx::query("UPDATE users SET name=$1 WHERE organization_id=$2 AND id=$3")
         .bind("現在の名前 \"quoted\"\\\n")
         .bind(f.organization)
@@ -195,16 +200,21 @@ async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed
         Some(serde_json::from_value(root["id"].clone()).unwrap())
     );
     assert_eq!(enriched.reply_root_id, enriched.reply_to);
-    assert_eq!(enriched.mentions[0].member_id, f.member);
-    assert_eq!(enriched.mentions[0].name, "現在の名前 \"quoted\"\\\n");
+    assert_eq!(enriched.mentions.as_ref().unwrap()[0].member_id, f.member);
+    assert_eq!(
+        enriched.mentions.as_ref().unwrap()[0].name,
+        "現在の名前 \"quoted\"\\\n"
+    );
     // Exact old per-connection expression, on the same delivery_snapshot Message.
     let old = serde_json::to_string(&ServerEvent::Message {
-        message: (**enriched).clone(),
+        seq: enriched.seq,
+        kind: enriched.kind,
+        message: enriched.message.clone(),
     })
     .unwrap();
     assert_eq!(enriched.frame.as_bytes(), old.as_bytes());
     for socket in &mut sockets {
-        let tungstenite::Message::Text(raw) = frame(socket).await else {
+        let tungstenite::Message::Text(raw) = delivery_frame(socket).await else {
             panic!("expected live text frame");
         };
         assert_eq!(raw.as_bytes(), old.as_bytes());

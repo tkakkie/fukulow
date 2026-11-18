@@ -12,8 +12,8 @@ async function longChain() {
   const c = replyClient()
   c.listReplyChain.mockImplementation(async (_channel?: unknown, _anchor?: unknown, query?: { after_seq?: number }) => {
     const after = query?.after_seq ?? 0
-    const messages = records.filter(m => m.seq > after).slice(0, 50)
-    return ok({ root_id: 'id1', messages, has_more: messages.at(-1)!.seq < 10_001 })
+    const messages = records.filter(m => m.created_seq > after).slice(0, 50)
+    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages, has_more: messages.at(-1)!.created_seq < 10_001 })
   })
   await c.boot()
   return c
@@ -41,7 +41,7 @@ it('cached anchors preserve the continuation and live evidence with zero reads i
   c.event(reply(10_001))
   expect(c.replies.get('A').newerCount).toBe(before.newerCount)
   await c.replies.loadMore('A')
-  expect(c.listReplyChain).toHaveBeenCalledExactlyOnceWith('A', 'id1', { after_seq: 50 })
+  expect(c.listReplyChain).toHaveBeenCalledExactlyOnceWith('A', 'id1', {as_of_seq: 50, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 50 })
   expect(c.sync.get().channels.A).toBe(syncBefore)
   await c.sync.close()
 })
@@ -53,9 +53,9 @@ it('uncached and fresh descendant anchors take one contextual read in a 10000-Re
     const before = c.sync.get().channels.A
     c.listReplyChain.mockClear()
     await c.replies.open('A', reply(9000))
-    expect(c.listReplyChain).toHaveBeenCalledExactlyOnceWith('A', 'id9000', { after_seq: 8975 })
+    expect(c.listReplyChain).toHaveBeenCalledExactlyOnceWith('A', 'id9000', { history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 8975 })
     expect(c.replies.get('A')).toMatchObject({ anchor: reply(9000), hasOlder: true, hasMore: true })
-    expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(8976, 50))
+    expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(8976, 50))
     expect(c.sync.get().channels.A).toBe(before)
     await c.sync.close()
   }
@@ -86,11 +86,11 @@ it('cached navigation preserves an in-flight page and its continuation', async (
   await c.replies.open('A', reply(20))
   expect(c.listReplyChain).toHaveBeenCalledTimes(calls)
   expect(c.replies.get('A')).toMatchObject({ loading: true, anchor: reply(20) })
-  held.resolve(ok({ root_id: 'id1', messages: records.slice(50, 100), has_more: true }))
+  held.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (records.slice(50, 100)).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: records.slice(50, 100), has_more: true }))
   await loading
-  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(1, 100))
+  expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(1, 100))
   await c.replies.loadMore('A')
-  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id20', { after_seq: 100 })
+  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id20', {as_of_seq: 50, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 100 })
   await c.sync.close()
 })
 
@@ -112,12 +112,12 @@ it('unsettled and failed Replies stay visible retryable and discardable through 
   expect(c.listReplyChain).toHaveBeenCalledTimes(0)
   expect(c.replies.get('A').pending).toEqual(pending)
   await c.replies.open('A', reply(9000))
-  expect(c.listReplyChain).toHaveBeenCalledExactlyOnceWith('A', 'id9000', { after_seq: 8975 })
+  expect(c.listReplyChain).toHaveBeenCalledExactlyOnceWith('A', 'id9000', { history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 8975 })
   expect(c.replies.get('A').pending).toEqual(pending)
   expect(c.replies.get('A').messages.some(m => m.id === 'id20')).toBe(false)
   c.sendMessage.mockResolvedValue({ ok: false, kind: 'network' })
   await c.replies.retry('A', 'send2')
-  expect(c.sendMessage).toHaveBeenLastCalledWith('A', { client_message_id: 'send2', body: 'unknown', reply_to: 'id20' })
+  expect(c.sendMessage).toHaveBeenLastCalledWith('A', { history_generation: '00000000-0000-4000-8000-000000000515', client_message_id: 'send2', body: 'unknown', reply_to: 'id20' })
   // In-flight sends become retryable/discardable when their outcome is unknown (C6).
   await vi.advanceTimersByTimeAsync(30_000); await sending
   expect(c.replies.get('A').pending[0].state).toBe('unknown')
@@ -137,21 +137,21 @@ it('older and newer pages remain contiguous and bounded after a far jump despite
   for (let page = 0; page < 5; page++) {
     const after = 9025 + page * 50
     await c.replies.loadMore('A')
-    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id9000', { after_seq: after })
+    expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id9000', {as_of_seq: 9025, history_generation: '00000000-0000-4000-8000-000000000515', after_seq: after })
     const count = Math.min(100 + page * 50, 200)
-    expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(after + 51 - count, count))
+    expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(after + 51 - count, count))
   }
   await c.replies.loadOlder('A')
-  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id9000', { after_seq: 0 })
-  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(1, 50))
+  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id9000', { history_generation: '00000000-0000-4000-8000-000000000515', after_seq: 0 })
+  expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(1, 50))
   expect(c.replies.get('A').hasOlder).toBe(false)
   for (let page = 1; page < 4; page++) await c.replies.loadMore('A')
-  expect(c.replies.get('A').messages.map(m => m.seq)).toEqual(seqs(1, 200))
+  expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(1, 200))
   await c.sync.close()
 })
 
 it('uncached jumps fence superseded same-chain pages and C9 without losing late 401 or C10', async () => {
-  for (const response of [ok({ root_id: 'id1', messages: [reply(2)], has_more: false }),
+  for (const response of [ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(2)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(2)], has_more: false }),
     { ok: false, kind: 'http', status: 403 } as const,
     { ok: false, kind: 'http', status: 401 } as const,
     { ok: false, kind: 'http', status: 404, error: 'organization_unavailable' } as const]) {

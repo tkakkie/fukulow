@@ -39,7 +39,7 @@ it('forwards view presentation visibility refresh and exit intents with fixed vi
 it.each(['Topics', 'Topics and Replies'] as const)('%s composition clears Unread synchronously before replacement and close sync notifications', async composition => {
   const base = unreadClient(); await base.boot()
   const reply = composition === 'Topics and Replies' ? createReplySync({ selfId: 'me', repliesApi: {
-    listReplyChain: async () => ok({ root_id: msg(1).id, messages: [msg(1)], has_more: false }),
+    listReplyChain: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(1)]).at(-1)?.created_seq ?? 0,  root_id: msg(1).id, messages: [msg(1)], has_more: false }),
   } }, base.sync) : undefined
   const source = reply?.sync ?? base.sync
   const seen: { position: number | null; unreadCount: number | null; entry: unknown; topicCount: number }[] = []
@@ -80,8 +80,8 @@ it('notifies only the changed Channel and leaves other Channels reference-equal;
   await c.sync.watch('B')
   await c.sync.watch('C')
   await flush()
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'B', caught_up_seq: 3 })
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'C', caught_up_seq: 3 })
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'B', caught_up_seq: 3 })
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'C', caught_up_seq: 3 })
   await settle()
 
   const adapterA = unreadAdapter(c.unread, 'A')
@@ -127,8 +127,8 @@ it('notifies only the changed Channel and leaves other Channels reference-equal;
   // Multi-Channel refresh where A and B change while C stays identical notifies exactly A and B.
   const callsABefore = listenerA.mock.calls.length
   const snapA1 = adapterA.state
-  c.rows[0] = row({ id: 'A', name: 'A', as_of_seq: 10, read_seq: 1, main_unread_count: 5, unread_count: 7 })
-  c.rows[1] = row({ id: 'B', name: 'B', as_of_seq: 10, read_seq: 0, main_unread_count: 4, unread_count: 4 })
+  c.rows[0] = row({ history_generation: '00000000-0000-4000-8000-000000000515', id: 'A', name: 'A', as_of_seq: 10, read_seq: 1, main_unread_count: 5, unread_count: 7 })
+  c.rows[1] = row({ history_generation: '00000000-0000-4000-8000-000000000515', id: 'B', name: 'B', as_of_seq: 10, read_seq: 0, main_unread_count: 4, unread_count: 4 })
   await c.unread.refresh()
   await settle()
   expect(listenerA.mock.calls.length).toBeGreaterThan(callsABefore)

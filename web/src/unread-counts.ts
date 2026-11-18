@@ -4,7 +4,7 @@ export type UnreadScope = { channel: string; topicId: string | null }
 export type ScopeBaseline = { asOfSeq: number; readSeq: number; count: number; mentionCount: number }
 /** Coverage proves every matching projection row in (after, through] is loaded. */
 export type Coverage = { after: number; through: number }
-export type UnreadRecord = Pick<Message, 'id' | 'seq' | 'channel_id' | 'topic_id' | 'sender'> & { mentions: readonly Pick<Message['mentions'][number], 'member_id'>[] }
+export type UnreadRecord = Pick<Message, 'id' | 'created_seq' | 'channel_id' | 'topic_id' | 'sender'> & Partial<Pick<Message, 'version' | 'deleted'>> & { mentions?: readonly Pick<NonNullable<Message['mentions']>[number], 'member_id'>[] | null }
 export const inScope = (m: Pick<Message, 'channel_id' | 'topic_id'>, scope: UnreadScope) => m.channel_id === scope.channel && m.topic_id === scope.topicId
 export type AggregateBaseline = Pick<UnreadChannel, 'id' | 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count' | 'main_mention_unread_count' | 'mention_unread_count'>
 export const mainBaseline = (c: AggregateBaseline): ScopeBaseline => ({ asOfSeq: c.as_of_seq, readSeq: c.read_seq, count: c.main_unread_count, mentionCount: c.main_mention_unread_count })
@@ -23,14 +23,16 @@ export function chooseChannelBaseline<T extends AggregateBaseline>(old: T | unde
     main_mention_unread_count: Math.min(old.main_mention_unread_count, next.main_mention_unread_count) }
   return old
 }
-export function scopeCount(b: ScopeBaseline, position: number, records: Iterable<UnreadRecord>, scope: UnreadScope, self: string, mention = false): number {
+export function scopeCount(b: ScopeBaseline, position: number, records: Iterable<UnreadRecord>, scope: UnreadScope, self: string, mention = false): number | null {
   let count = mention ? b.mentionCount : b.count
   const seen = new Set<number>()
   for (const m of records) {
-    if (!inScope(m, scope) || m.sender === self || (mention && !m.mentions.some(target => target.member_id === self)) || seen.has(m.seq)) continue
-    seen.add(m.seq)
-    if (m.seq > b.readSeq && m.seq <= Math.min(position, b.asOfSeq)) count--
-    if (m.seq > Math.max(position, b.asOfSeq)) count++
+    if (inScope(m, scope) && m.sender !== self && m.created_seq <= b.asOfSeq &&
+      (m.deleted || (m.version ?? m.created_seq) > m.created_seq) && (m.version ?? 0) > b.asOfSeq) return null
+    if (m.deleted || !inScope(m, scope) || m.sender === self || (mention && !(m.mentions ?? []).some(target => target.member_id === self)) || seen.has(m.created_seq)) continue
+    seen.add(m.created_seq)
+    if (m.created_seq > b.readSeq && m.created_seq <= Math.min(position, b.asOfSeq)) count--
+    if (m.created_seq > Math.max(position, b.asOfSeq)) count++
   }
   return Math.max(0, count)
 }
@@ -50,20 +52,20 @@ export function coveredThrough(position: number, coverage: Coverage[]): number {
 export function sequenceToSubmit(position: number, records: Iterable<UnreadRecord>, coverage: Coverage[], presented: ReadonlySet<number>, scope: UnreadScope, self: string): number {
   const through = coveredThrough(position, coverage)
   let result = position
-  for (const m of [...records].filter(m => inScope(m, scope) && m.seq > position && m.seq <= through).sort((a, b) => a.seq - b.seq)) {
-    if (m.sender === self) continue
-    if (!presented.has(m.seq)) break
-    result = m.seq
+  for (const m of [...records].filter(m => inScope(m, scope) && m.created_seq > position && m.created_seq <= through).sort((a, b) => a.created_seq - b.created_seq)) {
+    if (m.deleted || m.sender === self) continue
+    if (!presented.has(m.created_seq)) break
+    result = m.created_seq
   }
   return result
 }
 /** Consecutive unfiltered server records prove coverage, including history/replay, never presentation. */
 export function recordCoverage(records: Message[]): Coverage[] {
   const ranges: Coverage[] = []
-  for (const m of [...records].sort((a, b) => a.seq - b.seq)) {
+  for (const m of [...records].sort((a, b) => a.created_seq - b.created_seq)) {
     const last = ranges.at(-1)
-    if (last && m.seq <= last.through + 1) last.through = Math.max(last.through, m.seq)
-    else ranges.push({ after: m.seq - 1, through: m.seq })
+    if (last && m.created_seq <= last.through + 1) last.through = Math.max(last.through, m.created_seq)
+    else ranges.push({ after: m.created_seq - 1, through: m.created_seq })
   }
   return ranges
 }

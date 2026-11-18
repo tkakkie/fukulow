@@ -42,7 +42,7 @@ async fn send_queue_cap_returns_503_and_same_key_retry_is_idempotent(pool: PgPoo
     );
     drop(queued);
     let canonical = sent(&app, &token, channel, input(key, "retry after saturation")).await;
-    assert_eq!(canonical["seq"], 1);
+    assert_eq!(canonical["created_seq"], 1);
     assert_eq!(
         sent(&app, &token, channel, input(key, "retry after saturation")).await,
         canonical
@@ -129,7 +129,7 @@ async fn saturated_send_queue_preserves_organization_and_private_channel_denials
             channel_id,
             input(Uuid::new_v4(), "allowed")
         )
-        .await["seq"],
+        .await["created_seq"],
         1
     );
 }
@@ -156,6 +156,7 @@ async fn send_admission_expiry_returns_503_without_persisting_and_releases_slot(
         (sender, 0),
         channel,
         SendMessageRequest {
+            history_generation: None,
             reply_to: None,
             topic_name: None,
             client_message_id: key,
@@ -194,6 +195,7 @@ async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
         (sender, 0),
         channel,
         SendMessageRequest {
+            history_generation: None,
             reply_to: None,
             topic_name: None,
             client_message_id: Uuid::new_v4(),
@@ -217,7 +219,7 @@ async fn queued_send_gets_its_full_work_deadline_after_admission(pool: PgPool) {
     );
     drop(held);
     tokio::time::resume();
-    assert_eq!(sending.await.unwrap().seq, 1);
+    assert_eq!(sending.await.unwrap().created_seq, 1);
     assert_eq!(delivery.admission(&pool).queued_sends(), 0);
 }
 
@@ -243,6 +245,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
                 (sender, 0),
                 channel,
                 SendMessageRequest {
+                    history_generation: None,
                     reply_to: None,
                     topic_name: None,
                     client_message_id: Uuid::new_v4(),
@@ -279,6 +282,7 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
         (sender, 0),
         channel,
         SendMessageRequest {
+            history_generation: None,
             reply_to: None,
             topic_name: None,
             client_message_id: Uuid::new_v4(),
@@ -291,5 +295,5 @@ async fn send_deadline_includes_pool_acquisition_and_releases_admission(pool: Pg
     )
     .await
     .unwrap();
-    assert_eq!(message.seq, 1);
+    assert_eq!(message.created_seq, 1);
 }

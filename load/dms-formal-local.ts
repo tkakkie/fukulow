@@ -32,6 +32,25 @@ export async function localCopy(exec:Executor,source:string,destination:string,t
 }
 
 // Base images a Dockerfile pulls; a FROM naming an earlier stage (FROM rust-base AS wasm) is not an image.
+// Local mode serves two names (localhost, host.docker.internal). The production HTTP block
+// prefixes FUKULOW_DOMAIN with http:// and interpolates it into the redirect URL; both break for
+// a list (#426 pilot 2026-11-18: Caddy exits). Local mode names each HTTP address and redirects
+// to the requested host. Every anchor must match exactly once, so production drift fails closed.
+export const localNames=['localhost','host.docker.internal'];
+const siteBlock='\n{$FUKULOW_DOMAIN:localhost} {\n';
+const httpBlock='\nhttp://{$FUKULOW_DOMAIN:localhost} {\n';
+export const localRedirect='\t\tredir https://{$FUKULOW_DOMAIN:localhost}{uri} 308';
+function once(source:string,anchor:string,replacement:string,what:string) {
+  if(source.split(anchor).length!==2)throw new Error(`Caddyfile: expected exactly one ${what}`);
+  return source.replace(anchor,()=>replacement);
+}
+export function harnessCaddyfile(source:string,local:boolean) {
+  // Anchor on the HTTPS site block itself: an inner directive anchor (formerly @static, removed by #546) can vanish silently.
+  const tls=once(source,siteBlock,siteBlock+'\ttls internal\n','HTTPS site block');
+  if(!local)return tls;
+  const http=once(tls,httpBlock,`\n${localNames.map(n=>'http://'+n).join(', ')} {\n`,'HTTP site block');
+  return once(http,localRedirect,'\t\tredir https://{host}{uri} 308','FUKULOW_DOMAIN redirect');
+}
 export function dockerfileBases(dockerfile:string) {
   const stages=new Set<string>(),bases:string[]=[];
   for(const [,from,alias] of dockerfile.matchAll(/^[ \t]*FROM[ \t]+(?:--\S+[ \t]+)*(\S+)(?:[ \t]+AS[ \t]+(\S+))?/gim)){if(!stages.has(from!.toLowerCase()))bases.push(from!);if(alias)stages.add(alias.toLowerCase());}

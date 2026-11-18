@@ -1,3 +1,4 @@
+import type { Message } from './api'
 import { LOADING_TIMEOUT_MS } from './announcements'
 
 /** Distance from the bottom within which the timeline counts as pinned (`docs/ui.md` §8). */
@@ -45,7 +46,7 @@ export type TimelineScrollInput =
       visitId?: symbol | null
       displayed?: boolean
       status: 'loading' | 'ready' | 'unavailable' | 'error'
-      messages: readonly { id: string; seq: number; sender: string }[]
+      messages: readonly Pick<Message, 'id' | 'created_seq' | 'sender'>[]
       pendingIds: readonly string[]
       selfId: string
       firstUnreadMessageId?: string | null
@@ -144,9 +145,9 @@ export function stepTimelineScroll(
       }
     }
     case 'sync': {
-      const minSeq = input.messages[0]?.seq ?? null
-      const maxSeq = input.messages.at(-1)?.seq ?? null
-      const messageSeqs = input.messages.map((m) => m.seq)
+      const minSeq = input.messages[0]?.created_seq ?? null
+      const maxSeq = input.messages.at(-1)?.created_seq ?? null
+      const messageSeqs = input.messages.map((m) => m.created_seq)
       const hasContent = input.messages.length > 0 || input.pendingIds.length > 0
       const targetUnreadId = input.firstUnreadMessageId ?? null
       const hasTargetUnread =
@@ -254,13 +255,13 @@ export function stepTimelineScroll(
       const seenSeqs = seqsUnchanged ? prev.seenSeqs : new Set(messageSeqs)
       const pendingIds = pendingUnchanged ? prev.pendingIds : new Set(input.pendingIds)
       const newPendingAdded = !pendingUnchanged && input.pendingIds.some((id) => !prev.pendingIds.has(id))
-      const addedMessages = seqsUnchanged ? [] : input.messages.filter((m) => !prev.seenSeqs.has(m.seq))
-      const insertedAboveTail = addedMessages.filter((m) => prev.maxSeq !== null && m.seq < prev.maxSeq)
+      const addedMessages = seqsUnchanged ? [] : input.messages.filter((m) => !prev.seenSeqs.has(m.created_seq))
+      const insertedAboveTail = addedMessages.filter((m) => prev.maxSeq !== null && m.created_seq < prev.maxSeq)
       const removedAboveTail =
         !seqsUnchanged &&
         prev.maxSeq !== null &&
         [...prev.seenSeqs].some((seq) => seq < prev.maxSeq! && !seenSeqs.has(seq))
-      const appendedAtTail = addedMessages.filter((m) => prev.maxSeq === null || m.seq > prev.maxSeq)
+      const appendedAtTail = addedMessages.filter((m) => prev.maxSeq === null || m.created_seq > prev.maxSeq)
       const ownSendAtTail =
         newPendingAdded || (appendedAtTail.length > 0 && appendedAtTail.every((m) => m.sender === input.selfId))
 

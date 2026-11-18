@@ -231,7 +231,6 @@ async fn fixture_with_configured_pool(pool: &PgPool, size: &str) -> Fixture {
     let restricted = crate::test_app_pool(pool.clone()).await;
     let configured = crate::database::PoolConfig::configured(Some(size), None)
         .unwrap()
-        .options()
         .connect_with(restricted.connect_options().as_ref().clone())
         .await
         .unwrap();
@@ -298,6 +297,7 @@ async fn subscribe(client: &mut Client, channel: Uuid, after: i64) {
     control(
         client,
         ClientMessage::Subscribe {
+            history_generation: None,
             channel_id: channel,
             after_seq: after,
         },
@@ -341,9 +341,37 @@ async fn frame(client: &mut Client) -> tungstenite::Message {
         .unwrap()
         .unwrap()
 }
-async fn event(client: &mut Client) -> Value {
+async fn delivery_next<S>(
+    client: &mut WebSocketStream<S>,
+    expected_pong: Option<&[u8]>,
+) -> Option<Result<tungstenite::Message, tungstenite::Error>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
-        match frame(client).await {
+        let result =
+            crate::websocket_test_support::websocket_delivery_next(client, expected_pong).await?;
+        if result.as_ref().is_ok_and(is_notice) {
+            continue;
+        }
+        return Some(result);
+    }
+}
+async fn delivery_frame(client: &mut Client) -> tungstenite::Message {
+    tokio::time::timeout(Duration::from_secs(5), delivery_next(client, None))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+}
+async fn event(client: &mut Client) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), read_event(client))
+        .await
+        .unwrap()
+}
+async fn read_event(client: &mut Client) -> Value {
+    loop {
+        match message_next(client).await.unwrap().unwrap() {
             tungstenite::Message::Ping(_) => client.flush().await.unwrap(),
             tungstenite::Message::Text(text) => {
                 return serde_json::from_str(&text).unwrap_or_else(|error| {
@@ -360,8 +388,14 @@ async fn event(client: &mut Client) -> Value {
     }
 }
 async fn ready(client: &mut Client, channel: Uuid, seq: i64) {
+    let mut subscribed = event(client).await;
+    assert!(Uuid::parse_str(subscribed["history_generation"].as_str().unwrap()).is_ok());
+    subscribed
+        .as_object_mut()
+        .unwrap()
+        .remove("history_generation");
     assert_eq!(
-        event(client).await,
+        subscribed,
         json!({"type":"subscribed", "channel_id":channel, "caught_up_seq":seq})
     );
 }
@@ -371,15 +405,25 @@ async fn denied(client: &mut Client, channel: Uuid) {
         json!({"type":"error", "channel_id":channel, "code":"channel_not_found"})
     );
 }
-async fn silent(client: &mut Client) {
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), message_next(client))
-            .await
-            .is_err()
-    );
+async fn silent<S>(client: &mut WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let result =
+        tokio::time::timeout(Duration::from_millis(100), delivery_next(client, None)).await;
+    assert!(result.is_err(), "expected delivery silence, got {result:?}");
 }
 async fn closed(client: &mut Client, code: u16) {
-    let frame = frame(client).await;
+    let frame = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match frame(client).await {
+                tungstenite::Message::Ping(_) => client.flush().await.unwrap(),
+                frame => break frame,
+            }
+        }
+    })
+    .await
+    .unwrap();
     let tungstenite::Message::Close(Some(close)) = &frame else {
         panic!("expected Close(code={code}), got {frame:?}");
     };
@@ -577,7 +621,7 @@ async fn live_delivery_denies_other_organization_and_private_nonmember_with_posi
     let secret = post(&f, private).await;
     assert_eq!(
         event(&mut authorized).await,
-        json!({"type":"message","message":secret})
+        json!({"type":"message","seq":secret["created_seq"],"kind":"create","message":secret})
     );
     let public = post(&f, f.channel).await;
     assert_eq!(event(&mut nonmember).await["message"], public);
@@ -648,6 +692,26 @@ async fn replay_denies_other_organization_and_private_nonmember_with_positive_co
 }
 
 #[fukulow_test::test]
+async fn replay_missing_message_state_closes_without_hiding_log_position(pool: PgPool) {
+    let f = fixture(&pool).await;
+    post(&f, f.channel).await;
+    post(&f, f.channel).await;
+    sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=1")
+        .bind(f.organization)
+        .bind(f.channel)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut socket = f.server.connect(&f.token).await;
+    subscribe(&mut socket, f.channel, 0).await;
+    closed(&mut socket, 1011).await;
+    let mut recovered = f.server.connect(&f.token).await;
+    subscribe(&mut recovered, f.channel, 1).await;
+    assert_eq!(event(&mut recovered).await["message"]["created_seq"], 2);
+    ready(&mut recovered, f.channel, 2).await;
+}
+
+#[fukulow_test::test]
 async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_without_gaps(
     pool: PgPool,
 ) {
@@ -672,12 +736,12 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
         let value = event(&mut socket).await;
         assert_eq!(value["type"], "message");
         assert_eq!(value["message"]["channel_id"], json!(f.channel));
-        assert_eq!(value["message"]["seq"], seq);
+        assert_eq!(value["message"]["created_seq"], seq);
     }
     ready(&mut socket, f.channel, 125).await;
     subscribe(&mut socket, second, 4).await;
     for seq in 5..=9 {
-        assert_eq!(event(&mut socket).await["message"]["seq"], seq);
+        assert_eq!(event(&mut socket).await["message"]["created_seq"], seq);
     }
     ready(&mut socket, second, 9).await;
     drop(socket);
@@ -688,7 +752,7 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
         subscribe(&mut reconnect, channel, last).await;
         let replay = event(&mut reconnect).await;
         assert_eq!(replay["message"]["channel_id"], json!(channel));
-        assert_eq!(replay["message"]["seq"], next);
+        assert_eq!(replay["message"]["created_seq"], next);
         ready(&mut reconnect, channel, next).await;
     }
     silent(&mut reconnect).await;
@@ -749,7 +813,7 @@ async fn overflow_closes_socket_and_reconnect_replays_every_committed_message(po
     let mut reconnect = f.server.connect(&f.token).await;
     subscribe(&mut reconnect, f.channel, 0).await;
     for seq in 1..=258 {
-        assert_eq!(event(&mut reconnect).await["message"]["seq"], seq);
+        assert_eq!(event(&mut reconnect).await["message"]["created_seq"], seq);
     }
     ready(&mut reconnect, f.channel, 258).await;
 }
@@ -828,7 +892,9 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
         for _ in 0..admitted {
             held.push(f.state.pool.acquire().await.unwrap());
         }
-        sqlx::query("UPDATE account_sessions SET expires_at = clock_timestamp() + interval '2 seconds' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)").bind(f.organization).execute(&pool).await.unwrap();
+        // Keep the normal Session lifetime during setup. Block the fallback so
+        // only the sockets' cached database-expiry timers can close them.
+        let fallback = f.state.session_changes.pause_fallback();
         let mut idle = f.server.connect(&f.token).await;
         subscribe(&mut idle, f.channel, 0).await;
         ready(&mut idle, f.channel, 0).await;
@@ -836,8 +902,18 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
         let gate = pause(f.channel);
         subscribe(&mut replay, f.channel, 0).await;
         entered(&gate).await;
+        fallback.entered().await;
+        let remaining: f64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))::float8 FROM account_sessions WHERE token_hash = $1")
+            .bind(Sha256::digest(f.token.as_bytes()).to_vec())
+            .fetch_one(&pool).await.unwrap();
+        assert!(remaining > 0.0);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs_f64(remaining + 1.0)).await;
+        // Resume before TCP I/O so paused-time auto-advance cannot race it.
+        tokio::time::resume();
         closed(&mut idle, CLOSE_SESSION_ENDED).await;
         closed(&mut replay, CLOSE_SESSION_ENDED).await;
+        fallback.release();
         drop(held);
         f.state.pool.close().await;
     }
@@ -848,7 +924,6 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
     let f = fixture(&pool).await;
     let exhausted = crate::database::PoolConfig::configured(Some("3"), Some("2000"))
         .unwrap()
-        .options()
         .connect_with(f.state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();
@@ -937,7 +1012,7 @@ async fn concurrent_message_delivery_is_in_channel_sequence_order(pool: PgPool) 
         });
     }
     for seq in 1..=32 {
-        assert_eq!(event(&mut socket).await["message"]["seq"], seq);
+        assert_eq!(event(&mut socket).await["message"]["created_seq"], seq);
     }
     while let Some(result) = tasks.join_next().await {
         result.unwrap();
@@ -1064,11 +1139,11 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
         .unwrap()
         .forget();
     let second = post(&f, f.channel).await;
-    assert_eq!(second["seq"], 2);
+    assert_eq!(second["created_seq"], 2);
     // seq 2 publishes first; fan-out recovers the prefix once for all subscribers.
     for socket in &mut sockets {
         let one = event(socket).await;
-        assert_eq!(one["message"]["seq"], 1);
+        assert_eq!(one["message"]["created_seq"], 1);
         assert_eq!(one["message"]["client_message_id"], json!(key));
         assert_eq!(event(socket).await["message"], second);
     }
@@ -1095,8 +1170,11 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
 
 mod commit;
 mod contract;
+mod history;
+mod keepalive;
 mod lifecycle;
 mod limits;
+mod load_fixture;
 mod notification;
 mod session;
 mod watermark;
@@ -1162,3 +1240,46 @@ mod round_trips;
 mod shared_frame;
 
 mod activity;
+
+#[fukulow_test::test]
+async fn create_envelope_keeps_log_position_when_replay_hydrates_a_newer_version(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let mut live = f.server.connect(&f.token).await;
+    subscribe(&mut live, f.channel, 0).await;
+    ready(&mut live, f.channel, 0).await;
+    let original = post(&f, f.channel).await;
+    let received = event(&mut live).await;
+    assert_eq!(
+        received,
+        json!({"type":"message","seq":1,"kind":"create","message":original})
+    );
+    assert_eq!(original["created_seq"], 1);
+    assert_eq!(original["version"], 1);
+    assert_eq!(original["deleted"], false);
+    assert!(original.get("seq").is_none());
+    live.close(None).await.unwrap();
+    // Stand in for a future mutation; this test exercises hydration, not a mutation writer.
+    sqlx::query("UPDATE messages SET version=7, body='current state' WHERE organization_id=$1 AND channel_id=$2")
+        .bind(f.organization).bind(f.channel).execute(&pool).await.unwrap();
+    let mut replay = f.server.connect(&f.token).await;
+    subscribe(&mut replay, f.channel, 0).await;
+    let hydrated = event(&mut replay).await;
+    assert_eq!(hydrated["seq"], 1);
+    assert_eq!(hydrated["kind"], "create");
+    assert_eq!(hydrated["message"]["created_seq"], 1);
+    assert_eq!(hydrated["message"]["version"], 7);
+    assert_eq!(hydrated["message"]["body"], "current state");
+    ready(&mut replay, f.channel, 1).await;
+    let response = request(
+        &f.app,
+        "GET",
+        &format!("/api/v1/channels/{}/messages", f.channel),
+        &f.token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+    assert_eq!(history["messages"][0], hydrated["message"]);
+}

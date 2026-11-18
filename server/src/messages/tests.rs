@@ -13,8 +13,11 @@ use tower::ServiceExt;
 
 mod admission;
 pub(super) mod authors;
+mod channel_log;
 mod dms_pool;
+pub(super) mod history;
 mod mentions;
+mod receipts;
 mod text_input;
 pub(super) mod unread;
 
@@ -114,6 +117,12 @@ fn input(client_message_id: Uuid, text: &str) -> Value {
     json!({"client_message_id": client_message_id, "body": text})
 }
 
+// Direct state fixtures used by replay also need their committed Create positions.
+async fn seed_channel_log(pool: &PgPool) {
+    sqlx::query("INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages ON CONFLICT DO NOTHING")
+        .execute(pool).await.unwrap();
+}
+
 async fn apply_migrations_after(pool: &PgPool, boundary: &str) {
     let mut paths =
         std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
@@ -159,7 +168,12 @@ async fn list(app: &Router, token: &str, channel_id: Uuid, query: &str) -> Value
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    body(response).await
+    let mut page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    page.as_object_mut().unwrap().remove("history_generation");
+    assert!(page["as_of_seq"].is_i64());
+    page.as_object_mut().unwrap().remove("as_of_seq");
+    page
 }
 
 async fn assert_error(response: Response, status: StatusCode) {
@@ -198,6 +212,8 @@ async fn messages_require_authentication_without_database_access() {
 #[test]
 fn message_query_validation_matches_contract() {
     let query = |after_seq, before_seq, limit| ListMessagesQuery {
+        as_of_seq: None,
+        history_generation: None,
         after_seq,
         before_seq,
         limit,
@@ -283,6 +299,7 @@ async fn message_body_validation_matches_contract() {
         "🦉".repeat(4001),
     ] {
         let input = SendMessageRequest {
+            history_generation: None,
             reply_to: None,
             topic_name: None,
             client_message_id: Uuid::new_v4(),
@@ -300,6 +317,7 @@ async fn message_body_validation_matches_contract() {
         "e\u{301}".repeat(2000),
     ] {
         let input = SendMessageRequest {
+            history_generation: None,
             reply_to: None,
             topic_name: None,
             client_message_id: Uuid::new_v4(),
@@ -362,7 +380,7 @@ async fn message_at_body_limit_preserves_whitespace_and_idempotent_retries(pool:
     assert_eq!(text.chars().count(), 4000);
     let first = sent(&app, &token, channel_id, input(key, &text)).await;
     assert_eq!(first["body"], text);
-    assert_eq!(first["seq"], 1);
+    assert_eq!(first["created_seq"], 1);
     assert_eq!(
         sent(&app, &token, channel_id, input(key, &text)).await,
         first
@@ -391,7 +409,7 @@ async fn message_at_body_limit_preserves_whitespace_and_idempotent_retries(pool:
     .unwrap();
     assert_eq!(seq, 1);
     assert_eq!(
-        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["seq"],
+        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["created_seq"],
         2
     );
 }
@@ -495,8 +513,8 @@ async fn equal_ids_in_two_organizations_do_not_collide(pool: PgPool) {
         sent(&app, &second_token, channel_id, input(client_id, "second")).await,
         b
     );
-    assert_eq!(a["seq"], 1);
-    assert_eq!(b["seq"], 1);
+    assert_eq!(a["created_seq"], 1);
+    assert_eq!(b["created_seq"], 1);
     assert_eq!(
         list(&app, &first_token, channel_id, "?after_seq=0").await["messages"],
         json!([a])
@@ -553,11 +571,11 @@ async fn committed_send_retry_returns_canonical_message_without_sequence_allocat
     assert_eq!(retry["client_message_id"], json!(key));
     assert_eq!(retry["sender"], json!(sender));
     assert_eq!(retry["channel_id"], json!(channel_id));
-    assert_eq!(retry["seq"], 1);
+    assert_eq!(retry["created_seq"], 1);
     assert!(retry["topic_id"].is_null());
     assert!(retry["created_at"].as_str().unwrap().ends_with('Z'));
     let next = sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await;
-    assert_eq!(next["seq"], 2);
+    assert_eq!(next["created_seq"], 2);
     assert_eq!(
         list(&app, &token, channel_id, "").await["messages"],
         json!([retry, next])
@@ -589,12 +607,12 @@ async fn reused_client_id_conflicts_on_different_body_or_channel(pool: PgPool) {
             other_channel,
             input(Uuid::new_v4(), "other channel")
         )
-        .await["seq"],
+        .await["created_seq"],
         1
     );
     let other = member(&pool, organization_id, Uuid::new_v4()).await;
     assert_eq!(
-        sent(&app, &other, channel_id, input(key, "independent sender")).await["seq"],
+        sent(&app, &other, channel_id, input(key, "independent sender")).await["created_seq"],
         2
     );
 }
@@ -652,7 +670,7 @@ async fn concurrent_duplicate_sends_create_one_message_and_consume_one_sequence(
         1
     );
     assert_eq!(
-        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["seq"],
+        sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["created_seq"],
         2
     );
 }
@@ -683,7 +701,7 @@ async fn concurrent_cross_channel_duplicate_conflicts_without_sequence_gap(pool:
             .unwrap()
             .len();
         assert_eq!(
-            sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["seq"],
+            sent(&app, &token, channel_id, input(Uuid::new_v4(), "next")).await["created_seq"],
             count + 1
         );
     }
@@ -704,7 +722,7 @@ async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: Pg
     for response in concurrent_sends(&app, &token, &vec![channel_id; count], false).await {
         assert_eq!(response.status(), StatusCode::CREATED);
         let message = body(response).await;
-        seqs.push(message["seq"].as_i64().unwrap());
+        seqs.push(message["created_seq"].as_i64().unwrap());
         assert!(keys.insert(message["client_message_id"].as_str().unwrap().to_owned()));
     }
     seqs.sort_unstable();
@@ -724,7 +742,7 @@ async fn concurrent_sends_allocate_unique_consecutive_channel_sequences(pool: Pg
             .as_array()
             .unwrap()
             .iter()
-            .map(|m| m["seq"].as_i64().unwrap())
+            .map(|m| m["created_seq"].as_i64().unwrap())
             .collect::<Vec<_>>(),
         seqs
     );
@@ -754,13 +772,16 @@ async fn failed_send_after_sequence_allocation_leaves_no_gap(pool: PgPool) {
         let allocated: Option<i64> = sqlx::query_scalar("SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2")
             .bind(organization_id).bind(channel_id).fetch_optional(&pool).await.unwrap();
         assert_eq!(allocated, if expected == 1 { None } else { Some(1) });
+        let logged: Vec<i64> = sqlx::query_scalar("SELECT event_seq FROM channel_log WHERE organization_id=$1 AND channel_id=$2 ORDER BY event_seq")
+            .bind(organization_id).bind(channel_id).fetch_all(&pool).await.unwrap();
+        assert_eq!(logged, (1..expected).collect::<Vec<_>>());
         assert_eq!(
-            sent(&app, &token, channel_id, input(Uuid::new_v4(), "success")).await["seq"],
+            sent(&app, &token, channel_id, input(Uuid::new_v4(), "success")).await["created_seq"],
             expected
         );
     }
     assert_eq!(
-        sent(&app, &token, channel_id, input(key, "retry after rollback")).await["seq"],
+        sent(&app, &token, channel_id, input(key, "retry after rollback")).await["created_seq"],
         3
     );
 }
@@ -777,6 +798,14 @@ async fn message_pages_are_bounded_exclusive_ascending_and_directional(pool: PgP
          SELECT $1, md5('id-' || n::text)::uuid, $2, n, $3, md5('client-' || n::text)::uuid, n::text \
          FROM generate_series(1, 205) n",
     ).bind(organization_id).bind(channel_id).bind(sender).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channel_message_sequences (organization_id,channel_id,seq) VALUES ($1,$2,205)",
+    )
+    .bind(organization_id)
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     for (query, expected, more) in [
         ("", (156..=205).collect::<Vec<_>>(), true),
         ("?limit=200", (6..=205).collect(), true),
@@ -795,7 +824,7 @@ async fn message_pages_are_bounded_exclusive_ascending_and_directional(pool: PgP
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|m| m["seq"].as_i64().unwrap())
+                .map(|m| m["created_seq"].as_i64().unwrap())
                 .collect::<Vec<_>>(),
             expected,
             "{query}"
@@ -930,7 +959,7 @@ mod fanout;
 
 mod topics;
 
-mod replies;
+pub(super) mod replies;
 
 pub(super) mod removal;
 

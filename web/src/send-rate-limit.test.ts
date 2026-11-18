@@ -9,26 +9,26 @@ async function ready(client: ReturnType<typeof controllerClient>) {
   await client.feed({ type: 'session_start' })
   await client.feed({ type: 'connection_ready' })
   const history = (await client.feed({ type: 'watch', channel: 'A' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
-  await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: history, messages: [record(100)], has_more: true })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
 }
 
 it('429 retries the full request after each header delay without an early send', async () => {
   for (const target of [{}, { topic_name: 'Release' }, { reply_to: 'parent' }]) {
     const message = { ...record(101), sender: 'me', client_message_id: 'c1', body: '  original\nbody  ' }
     const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ messages: [record(100)], has_more: true })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(100)]).at(-1)?.created_seq ?? 0,  messages: [record(100)], has_more: true })))
       .mockResolvedValueOnce(new Response('{"error":"send_rate_limited"}', { status: 429, headers: { 'Retry-After': '2' } }))
       .mockResolvedValueOnce(new Response('{"error":"send_rate_limited"}', { status: 429, headers: { 'Retry-After': '4' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify(message), { status: 201 }))
-    const client = controllerClient({ newId: () => 'c1', api: {
+    const client = controllerClient({ newId: () => 'c1', api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
       listMessages: (channel, query) => api.listMessages('o', channel, query, fetcher),
       sendMessage: (channel, body) => api.sendMessage('o', channel, body, fetcher),
     } })
     await client.sync.start()
     await client.feed({ type: 'connection_ready' })
     await client.sync.watch('A')
-    await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 100 })
+    await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 100 })
     const timeline = client.sync.getTimeline('A')
     await timeline.send(message.body, target)
     expect(timeline.get().pending[0]).toMatchObject({ status: 'throttled', body: message.body })
@@ -45,7 +45,7 @@ it('429 retries the full request after each header delay without an early send',
     expect(fetcher).toHaveBeenCalledTimes(4)
     for (const [url, init] of fetcher.mock.calls.slice(1)) {
       expect(url).toBe('/api/v1/orgs/o/channels/A/messages')
-      expect(JSON.parse(init!.body as string)).toEqual({ client_message_id: 'c1', body: message.body, ...target })
+      expect(JSON.parse(init!.body as string)).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515', client_message_id: 'c1', body: message.body, ...target })
     }
     expect(timeline.get().pending).toEqual([])
     expect(timeline.get().messages).toContainEqual(message)
@@ -79,12 +79,12 @@ it('controller cancels throttled retry on settlement, discard, denial, lifecycle
     const wait = effects.find(e => e.type === 'wait')!
     const own = { ...record(99), sender: 'me', client_message_id: 'c1' }
     const t = client.sync.getTimeline('A')
-    if (end === 'echo') await client.feed({ type: 'message', channel: 'A', message: own })
+    if (end === 'echo') await client.feed({ type: 'message', kind: 'create', seq: (own).created_seq, channel: 'A', message: own })
     else if (end === 'projection') await client.sync.settleHistory('A', [own])
     else if (end === 'latest' || end === 'older' || end === 'history 403' || end === 'history 404') {
       const history = (await client.feed({ type: end === 'older' ? 'load_older' : 'refresh', channel: 'A' }))
         .find(e => e.type === 'fetch_history')!
-      if (end === 'latest' || end === 'older') await client.feed({ type: 'history_result', respond_to: history, messages: [own], has_more: false })
+      if (end === 'latest' || end === 'older') await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([own]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: history, messages: [own], has_more: false })
       else await client.feed({ type: 'history_failed', respond_to: history, status: end === 'history 403' ? 403 : 404 })
     } else if (end === 'discard') t.discard('c1')
     else if (end === 'channel loss') await client.feed({ type: 'channel_access_lost', channel: 'A' })
@@ -97,10 +97,10 @@ it('controller cancels throttled retry on settlement, discard, denial, lifecycle
       await client.feed({ type: 'history_failed', respond_to: history, status: 401 })
     } else {
       await client.sync.unwatch('A'); await client.sync.watch('A')
-      const clamped = await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
+      const clamped = await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 60 })
       expect(t.get().pending[0]).toMatchObject({ clientMessageId: 'c1', status: 'failed', retryable: true })
       const bootstrap = clamped.find(e => e.type === 'fetch_history')!
-      await client.feed({ type: 'history_result', respond_to: bootstrap, messages: [record(60)], has_more: false })
+      await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(60)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: bootstrap, messages: [record(60)], has_more: false })
     }
     await flush()
     expect((client.sync.get().channels.A?.pending ?? []).flatMap(p => p.retryWait === undefined ? [] : [client.sync.timer(p.retryWait)])).toEqual([])
@@ -126,7 +126,7 @@ it('clamp fences old 429 while new bootstrap sends may wait and retry', async ()
   const old = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'old' })).find(e => e.type === 'send')!
   await client.sync.unwatch('A')
   await client.sync.watch('A')
-  const clamped = await client.feed({ type: 'subscribed', channel: 'A', caught_up_seq: 60 })
+  const clamped = await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'A', caught_up_seq: 60 })
   expect(client.sync.get().channels.A.pending[0].state).toBe('unknown')
   const fresh = (await client.feed({ type: 'user_send', channel: 'A', client_message_id: 'new', body: 'new body' }))
     .find(e => e.type === 'send')!
@@ -141,7 +141,7 @@ it('clamp fences old 429 while new bootstrap sends may wait and retry', async ()
   const retry = client.allEffects.filter(e => e.type === 'send').at(-1)!
   expect(retry).toMatchObject({ client_message_id: 'new', body: 'new body' })
   await client.feed({ type: 'ack', respond_to: retry, message: { ...record(61), sender: 'me', client_message_id: 'new' } })
-  await client.feed({ type: 'history_result', respond_to: clamped.find(e => e.type === 'fetch_history'), messages: [record(60)], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(60)]).at(-1)?.created_seq ?? 0,  type: 'history_result', respond_to: clamped.find(e => e.type === 'fetch_history'), messages: [record(60)], has_more: false })
   expect(client.sync.get().channels.A.pending).toMatchObject([{ clientMessageId: 'old', state: 'unknown' }])
   await client.sync.close()
   expect(vi.getTimerCount()).toBe(0)
@@ -151,8 +151,8 @@ it('controller keeps other Channel waits active on C9 and ignores late 429 after
   const client = controllerClient()
   await ready(client)
   const history = (await client.feed({ type: 'watch', channel: 'B' })).find(e => e.type === 'fetch_history')!
-  await client.feed({ type: 'history_result', respond_to: history, messages: [], has_more: false })
-  await client.feed({ type: 'subscribed', channel: 'B', caught_up_seq: 0 })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  type: 'history_result', respond_to: history, messages: [], has_more: false })
+  await client.feed({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel: 'B', caught_up_seq: 0 })
   for (const channel of ['A', 'B']) {
     const send = (await client.feed({ type: 'user_send', channel, client_message_id: channel })).find(e => e.type === 'send')!
     await client.feed({ type: 'send_failed', respond_to: send, status: 429, retry_after_ms: 2000 })

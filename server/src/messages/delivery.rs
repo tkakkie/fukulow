@@ -100,30 +100,44 @@ impl Sender {
 #[derive(serde::Serialize)]
 #[serde(transparent)]
 pub(crate) struct LiveMessage {
-    message: Message,
+    event: super::ChannelEvent,
     #[serde(skip)]
     pub frame: Utf8Bytes,
 }
 
 impl std::ops::Deref for LiveMessage {
-    type Target = Message;
+    type Target = super::ChannelEvent;
 
-    fn deref(&self) -> &Message {
-        &self.message
+    fn deref(&self) -> &super::ChannelEvent {
+        &self.event
     }
 }
 
 impl LiveMessage {
+    #[cfg(test)]
     pub(crate) fn new(message: Message) -> Result<Self, serde_json::Error> {
+        Self::from_event(super::ChannelEvent::create(message))
+    }
+
+    pub(crate) fn from_event(event: super::ChannelEvent) -> Result<Self, serde_json::Error> {
         // Messages cannot depend on realtime. Keep this borrowed wire envelope
         // byte-compatible with ServerEvent::Message (guarded by the raw-frame test).
         #[derive(serde::Serialize)]
         #[serde(tag = "type", rename_all = "snake_case")]
         enum Event<'a> {
-            Message { message: &'a Message },
+            Message {
+                seq: i64,
+                kind: fukulow_api::ChannelEventKind,
+                message: &'a Message,
+            },
         }
-        let frame = serde_json::to_string(&Event::Message { message: &message })?.into();
-        Ok(Self { message, frame })
+        let frame = serde_json::to_string(&Event::Message {
+            seq: event.seq,
+            kind: event.kind,
+            message: &event.message,
+        })?
+        .into();
+        Ok(Self { event, frame })
     }
 }
 
@@ -147,6 +161,8 @@ pub struct Delivery {
     pub(crate) message_serializations: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    #[cfg(test)]
+    held_notification_timeouts: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 impl Delivery {
@@ -177,6 +193,8 @@ impl Default for Delivery {
             message_serializations: Default::default(),
             #[cfg(test)]
             tasks: Default::default(),
+            #[cfg(test)]
+            held_notification_timeouts: Default::default(),
         }
     }
 }
@@ -226,6 +244,13 @@ impl Notification {
         };
         let deadline = tokio::time::Instant::now() + NOTIFICATION_TIMEOUT;
         #[cfg(test)]
+        let hold_timeout = self
+            .delivery
+            .held_notification_timeouts
+            .lock()
+            .unwrap()
+            .contains(&self.key.0);
+        #[cfg(test)]
         let delivery = self.delivery.clone();
         #[cfg(test)]
         let gate = PUBLICATION_GATES
@@ -237,13 +262,20 @@ impl Notification {
         let task = tokio::spawn(async move {
             let _work = work;
             let _slots = (channel_slot, organization_slot);
-            self.completed = tokio::time::timeout_at(
+            let publication = tokio::time::timeout_at(
                 deadline,
                 self.delivery
                     .publish(&pool, self.key.0, &message, &self.channel.fanout),
-            )
-            .await
-            .is_ok_and(|result| {
+            );
+            #[cfg(test)]
+            let publication = async {
+                if hold_timeout {
+                    Ok(publication.into_inner().await)
+                } else {
+                    publication.await
+                }
+            };
+            self.completed = publication.await.is_ok_and(|result| {
                 if let Err(error) = &result {
                     crate::observability::database_failure(error);
                 }
@@ -286,6 +318,19 @@ pub(crate) struct LiveQueue {
 impl Delivery {
     pub async fn drained(&self) {
         self.work.drained().await;
+    }
+
+    // Cursor holds alone cannot stabilize reservations: their 10 s deadline also
+    // covers cursor waiting. Configure before spawning; already spawned tasks keep
+    // their setting until completion, even if the test later restores deadlines.
+    #[cfg(test)]
+    pub(crate) fn hold_notification_timeouts(&self, organization: Uuid, hold: bool) {
+        let mut held = self.held_notification_timeouts.lock().unwrap();
+        if hold {
+            held.insert(organization);
+        } else {
+            held.remove(&organization);
+        }
     }
 
     #[cfg(test)]
@@ -367,6 +412,44 @@ impl Delivery {
     pub(super) fn admission(&self, pool: &sqlx::PgPool) -> &Arc<Admission> {
         self.admission
             .get_or_init(|| Admission::new(pool.options().get_max_connections()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_watermark_caller(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        channel: Uuid,
+        caller: &'static str,
+    ) {
+        self.admission(pool)
+            .record_watermark_event(organization, channel, caller);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_watermark_events(
+        &self,
+        pool: &sqlx::PgPool,
+    ) -> Vec<(Uuid, Uuid, &'static str)> {
+        self.admission(pool).take_watermark_events()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_watermark_admission_timeouts(&self, pool: &sqlx::PgPool) {
+        self.admission(pool).hold_watermark_timeouts();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_watermark_permit(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        channel: Uuid,
+    ) -> impl Drop {
+        self.admission(pool)
+            .acquire(organization, channel, false)
+            .await
+            .unwrap()
     }
 
     pub(crate) async fn latest_seq(
@@ -483,30 +566,36 @@ impl Delivery {
                 );
                 sqlx::Error::Io(std::io::ErrorKind::WouldBlock.into())
             })?;
-        let after = cursor
-            .get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(message.seq) - 1);
-        if message.seq <= *after {
+        let after = cursor.get_or_insert_with(|| {
+            channel
+                .first_seq
+                .get()
+                .copied()
+                .unwrap_or(message.created_seq)
+                - 1
+        });
+        if message.created_seq <= *after {
             return Ok(());
         }
         // REPLAY_PAGE_SIZE (50) is the effective bound today; the queue-capacity cap only
         // matters if the page size is ever raised above LIVE_QUEUE_CAPACITY.
-        let gap = message.seq - *after - 1;
+        let gap = message.created_seq - *after - 1;
         if gap > super::REPLAY_PAGE_SIZE || gap > LIVE_QUEUE_CAPACITY as i64 {
             // Latch before skipping: current subscribers reconnect; later subscribers
             // register before taking their committed replay watermark.
             self.failures.signal((organization, message.channel_id));
-            *after = message.seq;
+            *after = message.created_seq;
             return Ok(());
         }
         // Recover a committed gap once per Channel, never once per subscriber.
         // Each bounded page rechecks current Member revisions and private grants.
-        while *after < message.seq - 1 {
+        while *after < message.created_seq - 1 {
             let page = super::replay_page(
                 pool,
                 organization,
                 message.channel_id,
                 *after,
-                message.seq - 1,
+                message.created_seq - 1,
             )
             .await?;
             if page.is_empty() {
@@ -514,14 +603,19 @@ impl Delivery {
             }
             let last = page
                 .last()
-                .map(|message| message.seq)
+                .map(|event| event.seq)
                 .ok_or(sqlx::Error::RowNotFound)?;
             self.fan_out(pool, organization, channel, &page).await;
             *after = last;
         }
-        self.fan_out(pool, organization, channel, std::slice::from_ref(message))
-            .await;
-        *after = message.seq;
+        self.fan_out(
+            pool,
+            organization,
+            channel,
+            &[super::ChannelEvent::create(message.clone())],
+        )
+        .await;
+        *after = message.created_seq;
         Ok(())
     }
 
@@ -530,7 +624,7 @@ impl Delivery {
         pool: &sqlx::PgPool,
         organization: Uuid,
         channel: &ChannelFanout,
-        messages: &[Message],
+        messages: &[super::ChannelEvent],
     ) {
         // Only this Channel's lock covers the O(subscribers) snapshot.
         let recipients: Vec<_> = channel
@@ -584,7 +678,7 @@ impl Delivery {
             #[cfg(test)]
             self.message_serializations
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let Ok(message) = LiveMessage::new(message) else {
+            let Ok(message) = LiveMessage::from_event(message) else {
                 self.failures.signal(key);
                 return;
             };
@@ -671,17 +765,20 @@ mod tests {
 
     fn committed_message(channel: Uuid) -> Message {
         Message {
+            history_generation: uuid::Uuid::nil(),
             id: Uuid::new_v4(),
             channel_id: channel,
-            seq: 1,
+            created_seq: 1,
+            version: 1,
+            deleted: false,
             client_message_id: Uuid::new_v4(),
             sender: Uuid::new_v4(),
-            body: "committed".into(),
+            body: Some("committed".into()),
             created_at: "now".into(),
             topic_id: None,
             reply_to: None,
             reply_root_id: None,
-            mentions: Vec::new(),
+            mentions: Some(Vec::new()),
         }
     }
 
@@ -882,6 +979,91 @@ mod tests {
         assert_eq!(delivery.notification_reservations(), (0, 0));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn organization_cap_snapshot_and_later_send_require_held_notification_timeouts() {
+        for hold_timeout in [false, true] {
+            let delivery = Delivery::default();
+            let organization = Uuid::new_v4();
+            delivery.hold_notification_timeouts(organization, hold_timeout);
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+                .unwrap();
+            let mut hot = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+            let hot_channel = Uuid::new_v4();
+            hot.subscribe(hot_channel);
+            let mut cold = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
+            let cold_channel = Uuid::new_v4();
+            cold.subscribe(cold_channel);
+            // Spawn synchronously on a paused current-thread runtime: all reservations
+            // exist before any deadline can fire, just as they do before HTTP 201.
+            let mut gates = Vec::new();
+            for index in 0..MAX_ORGANIZATION_NOTIFICATIONS {
+                let channel = if index == 0 {
+                    hot_channel
+                } else {
+                    Uuid::new_v4()
+                };
+                let message = committed_message(channel);
+                gates.push(pause_publication(message.client_message_id));
+                delivery
+                    .notification(organization, channel, 1)
+                    .spawn(pool.clone(), message);
+            }
+            assert_eq!(
+                delivery.notification_reservations(),
+                (MAX_ORGANIZATION_NOTIFICATIONS, 1)
+            );
+            let mut tasks = std::mem::take(&mut *delivery.tasks.lock().unwrap());
+            tokio::time::advance(NOTIFICATION_TIMEOUT).await;
+            // Every task first polls its blocked publication at/after the deadline.
+            // On this current-thread runtime the entered permit cannot be observed
+            // until that poll (including the timeout check) has returned.
+            for gate in gates {
+                gate.entered.acquire().await.unwrap().forget();
+            }
+            if hold_timeout {
+                assert_eq!(
+                    delivery.notification_reservations(),
+                    (MAX_ORGANIZATION_NOTIFICATIONS, 1)
+                );
+                assert!(!hot.notification_failed.is_failed());
+            } else {
+                for task in tasks.drain(..) {
+                    // Await actual timeout completion, rather than a racing snapshot.
+                    task.await.unwrap();
+                }
+                assert_eq!(delivery.notification_reservations(), (0, 0));
+                assert!(hot.notification_failed.is_failed());
+            }
+            let message = committed_message(cold_channel);
+            let key = message.client_message_id;
+            let gate = pause_publication(key);
+            delivery
+                .notification(organization, cold_channel, 1)
+                .spawn(pool.clone(), message);
+            if hold_timeout {
+                // Cap rejection signals 1011/replay on this Channel too.
+                assert!(cold.notification_failed.is_failed());
+            } else {
+                gate.entered.acquire().await.unwrap().forget();
+                // The stale 512 snapshot cannot require a close: this send was
+                // admitted, and expired hot Channels cannot fail the cold Channel.
+                assert!(!cold.notification_failed.is_failed());
+                assert_eq!(delivery.notification_reservations(), (1, 1));
+            }
+            if let Some(task) = gate.task.lock().unwrap().as_ref() {
+                task.abort();
+            }
+            for task in tasks {
+                task.abort();
+                let _ = task.await;
+            }
+            delivery.flush().await;
+            PUBLICATION_GATES.lock().unwrap().remove(&key);
+            assert_eq!(delivery.notification_reservations(), (0, 0));
+        }
+    }
+
     #[test]
     fn organization_reservations_reclaim_concurrent_last_exits_and_replacements() {
         let delivery = Delivery::default();
@@ -1067,17 +1249,20 @@ mod tests {
         delivery.notification(organization, channel, 1).spawn(
             pool,
             Message {
+                history_generation: uuid::Uuid::nil(),
                 id: Uuid::new_v4(),
                 channel_id: channel,
-                seq: 1,
+                created_seq: 1,
+                version: 1,
+                deleted: false,
                 client_message_id: key,
                 sender: Uuid::new_v4(),
-                body: "committed".into(),
+                body: Some("committed".into()),
                 created_at: "now".into(),
                 topic_id: None,
                 reply_to: None,
                 reply_root_id: None,
-                mentions: Vec::new(),
+                mentions: Some(Vec::new()),
             },
         );
         gate.entered.acquire().await.unwrap().forget();
@@ -1132,17 +1317,20 @@ mod tests {
         delivery.notification(organization, channel, 1).spawn(
             pool,
             Message {
+                history_generation: uuid::Uuid::nil(),
                 id: Uuid::new_v4(),
                 channel_id: channel,
-                seq: 1,
+                created_seq: 1,
+                version: 1,
+                deleted: false,
                 client_message_id: Uuid::new_v4(),
                 sender: Uuid::new_v4(),
-                body: "committed".into(),
+                body: Some("committed".into()),
                 created_at: "now".into(),
                 topic_id: None,
                 reply_to: None,
                 reply_root_id: None,
-                mentions: Vec::new(),
+                mentions: Some(Vec::new()),
             },
         );
         // The current-thread runtime cannot poll the spawned future until we yield.

@@ -46,6 +46,10 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #307 O5 adopts periodic REST reconciliation of held targets (provisional 30 s, first run spread over the period); mutation-triggered failure resets require proven recipients. Reason: repeats cover loss/delayed COMMITs; empty resets disclose timing. No persistence/per-mutation outcome fences now.
 - #307 unknown COMMIT is not rollback, and a fetch before outcome resolution cannot finish recovery. Reason: Channel-list snapshots lack #135's barrier; a delayed COMMIT can follow a successful fetch without another mutation.
 - #307 publication epochs fence queries, enqueue and first handoff; observed loss retires the epoch and re-grant creates another. Reason: buffer purging or current access alone cannot reject a paused old publisher.
+- #396 joins paused test publishers, drains each permission transition and buffers sockets with a proved control in every phase. Reason: #422 fixed unproved queries discarding unrelated authorized work; completion and stale-publication rejection need separate evidence.
+- #396/#543 grant, Role and deactivation mutations retire epochs, recheck, then publish; retirement is idempotent. Reason: a recheck can fence its own fresh unproved query, losing notices. Deactivation follows for uniformity; its target-only recheck fences no other recipient.
+- #396 revocations use a target-transition counter captured before mutation; subscription rechecks retire notice epochs independently. Reason: subscribed targets need both A3 revocation and S4 loss, while a later re-grant must invalidate the old transition.
+- #396 notice tests join direct publishers and drain Activity's counted publishers before nonce Ping/Pong. Gate release, HTTP completion and Message Delivery drain alone do not finish activity publication; Pong orders only work already ready in the biased socket loop.
 - #307 batches freeze seq before authorization and preserve each recipient's other-sender activity. Reason: later commits need a fresh snapshot; a sender's own Message must not supersede someone else's invalidation.
 - #307 target coverage is independent: a Topic position never proves aggregate freshness. Dirty REST targets retry transient failures with capped backoff and fenced timers. Reason: delayed read notices and failed fetches must converge without another mutation.
 - #307 clients coalesce refetches (one in flight, one queued, short debounce, jittered reset). Reason: bursts cost one request per target per round trip; retries retain dirty state and cannot bypass backoff.
@@ -72,10 +76,13 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #307 auth exposes injected mutation hooks implemented by channels; all held REST targets share one refetch controller. Reason: preserve the module DAG and apply identical retry, debounce and generation fences without dependencies.
 
 ## Admission and timeouts
-- #196 B app pool: FUKULOW_DB_MAX_CONNECTIONS=20 (3..=100), FUKULOW_DB_ACQUIRE_TIMEOUT_MS=1000 (1..=5000); invalid values fail. Cap 100 matches PostgreSQL's usual default, bounding SQLx queue/per-connection memory; 10k sockets share DB slots. Budget DB capacity for operator connections.
+- #196 B app pool: FUKULOW_DB_MAX_CONNECTIONS=20 (3..=100), FUKULOW_DB_ACQUIRE_TIMEOUT_MS=5000 (1..=5000); invalid values fail. Cap 100 matches PostgreSQL's usual default, bounding SQLx queue/per-connection memory; 10k sockets share DB slots. Budget DB capacity for operator connections.
+- #196 B (maintainer, 2026-11-17): Part B FAIL; acquire timeout back to 5 s (#388 had 1 s), below the 10 s work deadline. With 1 s, unadmitted Channel-list reads, sign-ins, session checks and other-Organization reads failed with PoolTimedOut (500) under overload where the base waited and succeeded.
 - #196 B keeps #156/#158's min(16, P-ceil(P/5)) budget: send ceil(B/2), watermark floor(B/2). P=3 gives 1+1 and 1 spare; P=20 gives 8+8 and 4 spare; above 20 budgets stay 8+8. Reject P=1/2: no watermark slot. Raising P above 20 does not raise admitted concurrency.
 - #196 B headroom is shared by session checks, auth, history and other reads, not reserved for sessions. Unadmitted query floods can still starve checks: their 5 s deadline closes 1011, never 4001/4003. No per-Organization fairness claim; #190/#199 remain separate limits.
-- #196 B sets session-level statement_timeout=10s on every new app connection, bounding ordinary queries and lock waits. #158 barrier transaction_timeout=8s stays below statement/lock timeouts (10s) and the app work deadline (10s); #135's fresh-snapshot barrier is unchanged.
+- #196 B sets session-level statement_timeout=10s (and jit=off) as app pool startup parameters, bounding ordinary queries and lock waits. #158's 8 s barrier stays below 10 s statement/lock timeouts; 5 s acquire + 8 s barrier can hit the 10 s work deadline (unknown outcome, same-key retry; #135).
+- #196 B startup parameters (maintainer, 2026-11-17): statement_timeout/jit moved from the after_connect hook (one round trip per new connection) to startup parameters, not role settings, keeping db-roles.sql, the frozen #153 manifest and the before/after base arm unchanged.
+- #196 B startup order (maintainer, 2026-11-17): bind -> session-settings check -> serve. Reason: keeps #426's reviewed baseline patch applying; a failed check still exits before HTTP serving. The port LISTENs before the check, so readiness never uses a TCP connect alone.
 - #196 B leaves RLS Account/Organization settings transaction-local; the session statement timeout survives COMMIT/ROLLBACK. Cleanup keeps its tighter local 1 s timeout. A statement/COMMIT timeout remains an unknown outcome under #135, not proof of rollback.
 - #196 B migrations disable statement_timeout and transaction_timeout on their discarded connection, retaining lock_timeout=5s. DDL may outlast ordinary queries; success, failure and cancellation must never return these migration-only settings to the app pool.
 - #88/#194 B bounds one-shot migration lock waits with session-local `lock_timeout = 5s`, including SQLx's advisory lock. Reason: queued exclusive DDL can stall later reads/writes; fail before listening instead of waiting. No automatic retry.
@@ -117,6 +124,7 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [load](load.md): `#151 adopts DM performance acceptance`
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 new sends hold`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`, `#151 peer eligibility belongs`
+- [messages](messages.md): `#160 An independent, Organization-scoped`, `#160 Replay uses current-state`, `#160 Event position and Message`, `#160 Required before any mutation`
 - [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
 
 - [auth](auth.md): `#305 owns the deactivation transaction`
@@ -130,3 +138,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`
 
 - [auth](auth.md): `#304 recheck current Session/password under locks`, `#304 wrong current password is 403`
+
+- [messages](messages.md): `#515 uses Organization UUID epochs`

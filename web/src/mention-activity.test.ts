@@ -9,22 +9,22 @@ afterEach(() => vi.useRealTimers())
 function client() {
   let socket!: RealtimeHandlers
   let count = 0, position = 0, watermark = 3
-  const listChannels = vi.fn(async (): Promise<Result<ChannelList>> => ok({ channels: [row(), row({ id: 'B', name: 'B', as_of_seq: watermark, read_seq: position,
+  const listChannels = vi.fn(async (): Promise<Result<ChannelList>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row(), row({ history_generation: '00000000-0000-4000-8000-000000000515', id: 'B', name: 'B', as_of_seq: watermark, read_seq: position,
     unread_count: count, main_unread_count: count, mention_unread_count: count, main_mention_unread_count: count })] }))
   const session = createSession({ selfId: 'me', onEnded() {},
-    unreadApi: { listChannels, getTopicSummary: async () => ok({ as_of_seq: 3, topic: summary() }), markRead: async (_scope, body) => ok(body) },
-    topicsApi: { getTopicSummary: async () => ok({ as_of_seq: 3, topic: summary() }),
-      listTimeline: async () => ok({ as_of_seq: 3, has_more: false, items: [] }),
-      listTopics: async () => ok({ as_of_seq: 3, has_more: false, topics: [] }),
-      listTopicMessages: async () => ok({ messages: [], has_more: false }),
+    unreadApi: { listChannels, getTopicSummary: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: summary() }), markRead: async (_scope, body) => ok({ ...body, history_generation: '00000000-0000-4000-8000-000000000515' }) },
+    topicsApi: { getTopicSummary: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: summary() }),
+      listTimeline: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, items: [] }),
+      listTopics: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, topics: [] }),
+      listTopicMessages: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }),
     },
     sync: { random: () => 0.5, connect(h) { socket = h; return { send() {}, close() {} } },
-      api: { listMessages: async () => ok({ messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }), sendMessage: async () => ({ ok: false, kind: 'network' }) },
     },
   })
   return { session, listChannels, get socket() { return socket },
     committed(n: number, read = 0, w = 4) { count = n; position = read; watermark = w },
-    async boot() { socket.onReady(); await flush(); socket.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 3 }); await flush() },
+    async boot() { socket.onReady(); await flush(); socket.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 3 }); await flush() },
   }
 }
 it('Mention notices only refetch both fields coalesce duplicates and keep Topic coverage independent from aggregate', async () => {
@@ -70,7 +70,7 @@ it('Mention unwatched access loss removes both badges immediately and old list w
   c.socket.onEvent({ type: 'channel_access_revoked', channel_id: 'B' })
   expect(c.session.unread.get('B')).toMatchObject({ unreadCount: null, mentionUnreadCount: null })
   c.socket.onEvent({ type: 'channel_access_gained', channel_id: 'B' }); c.committed(0, 10, 10)
-  late.resolve(ok({ channels: [row(), row({ id: 'B', as_of_seq: 20, unread_count: 20, mention_unread_count: 20 })] })); await pending
+  late.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row(), row({ id: 'B', as_of_seq: 20, unread_count: 20, mention_unread_count: 20 })] })); await pending
   expect(c.session.unread.get('B').mentionUnreadCount).toBeNull()
   await vi.advanceTimersByTimeAsync(200)
   expect(c.session.unread.get('B')).toMatchObject({ asOfSeq: 10, unreadCount: 0, mentionUnreadCount: 0 })
@@ -79,9 +79,9 @@ it('Mention unwatched access loss removes both badges immediately and old list w
 it('Mention activity coverage never accepts an Unread-only response or suppresses its retry', async () => {
   const c = client(); await c.boot()
   c.committed(2)
-  const incomplete = row({ id: 'B', as_of_seq: 50, read_seq: 50, unread_count: 0, main_unread_count: 0 })
+  const incomplete = row({ history_generation: '00000000-0000-4000-8000-000000000515', id: 'B', as_of_seq: 50, read_seq: 50, unread_count: 0, main_unread_count: 0 })
   Reflect.deleteProperty(incomplete, 'mention_unread_count')
-  c.listChannels.mockResolvedValueOnce(ok({ channels: [row(), incomplete] }))
+  c.listChannels.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row(), incomplete] }))
   c.socket.onEvent({ type: 'channel_activity', channel_id: 'B', seq: 4 }); await vi.advanceTimersByTimeAsync(200)
   expect(c.session.unread.get('B')).toMatchObject({ asOfSeq: 3, mentionUnreadCount: 0 })
   const calls = c.listChannels.mock.calls.length

@@ -23,7 +23,7 @@ export function checkServerEvent(event: ServerEvent): string {
     case 'message': {
       const message: Message = event.message
       const topic: string | null = message.topic_id
-      return `${message.channel_id}:${message.seq}:${message.client_message_id}:${topic}`
+      return `${message.channel_id}:${message.created_seq}:${message.client_message_id}:${topic}`
     }
     case 'subscribed':
       return `${event.channel_id}:${event.caught_up_seq}`

@@ -18,7 +18,13 @@ async fn get(app: &Router, token: &str, channel: Uuid, suffix: &str) -> Value {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    body(response).await
+    let mut page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    page.as_object_mut().unwrap().remove("history_generation");
+    if page["messages"].is_array() {
+        page.as_object_mut().unwrap().remove("as_of_seq");
+    }
+    page
 }
 
 pub(super) mod atomicity;

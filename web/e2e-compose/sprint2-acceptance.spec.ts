@@ -296,7 +296,7 @@ test('Main-timeline paging (P2, P5)', async ({ browser, baseURL }) => {
     expect(initialTimelineResp.ok()).toBe(true)
     const initialTimelinePage = (await secretSafe(() => initialTimelineResp.json())) as TimelinePage
     const initialWatermark = initialTimelinePage.as_of_seq
-    expect(initialWatermark).toBe(lastSeededMsg!.seq)
+    expect(initialWatermark).toBe(lastSeededMsg!.created_seq)
 
     await expect(ownerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(peerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
@@ -493,7 +493,8 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
 
     // Peer replies to a descendant (grandchildA1) through the panel Composer; verify it inherits the same Topic and root, and appears live in Owner's panel.
     await revealVirtualRow(peerPanel.locator('.reply-panel__scroll'), 4)
-    await peerPanel.locator(`[data-message-id="${grandchildA1.id}"]`).getByRole('button', { name: '返信', exact: true }).click()
+    // #409: every chain member shows the root's authoritative total (51 seeded Replies + the owner's).
+    await peerPanel.locator(`[data-message-id="${grandchildA1.id}"]`).getByRole('button', { name: '返信 52件›', exact: true }).click()
     const peerReplyBody = `ピア子孫返信-${suffix}`
     const peerPostPromise = peerPage.waitForResponse(
       (res) => new URL(res.url()).pathname.endsWith(`/channels/${channel.id}/messages`) && res.request().method() === 'POST',
@@ -635,7 +636,7 @@ test('Reconnect and reload (C1-C4, P1)', async ({ browser, baseURL }) => {
     expect(mainReplayIdx).toBeGreaterThan(topicReplayIdx)
     expect(subscribedIdx).toBeGreaterThan(mainReplayIdx)
     const subscribedEvent = replacementReceived[subscribedIdx] as Extract<ServerEvent, { type: 'subscribed' }>
-    expect(subscribedEvent.caught_up_seq).toBeGreaterThanOrEqual(duringDropMainMsg.seq)
+    expect(subscribedEvent.caught_up_seq).toBeGreaterThanOrEqual(duringDropMainMsg.created_seq)
 
     // After reconnect, canonical Messages appear with no duplicate rendering and no false gap fill.
     const ownerMainRows = ownerPage.locator('#main-content .ui-message-row')
@@ -808,7 +809,7 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     const intersectingMain: Message[] = []
     const offscreenBelowMain: Message[] = []
     for (const m of mainMessages) {
-      const row = scrollContainer.locator(`[data-message-id="${m.id}"][data-confirmed-seq="${m.seq}"]`)
+      const row = scrollContainer.locator(`[data-message-id="${m.id}"][data-confirmed-seq="${m.created_seq}"]`)
       // Unmounted rows are outside the viewport. At first-Unread entry every
       // Message after the visible prefix (mounted or virtual) must remain unread.
       if (await row.count() === 0) {
@@ -826,9 +827,9 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     expect(intersectingMain.length).toBeGreaterThan(0)
     expect(offscreenBelowMain.length).toBeGreaterThan(0)
     expect(intersectingMain.length + offscreenBelowMain.length).toBe(mainMessages.length)
-    expect(intersectingMain[0].seq).toBe(mainMessages[0].seq)
-    const expectedFirstReadSeq = intersectingMain.at(-1)!.seq
-    expect(offscreenBelowMain[0].seq).toBeGreaterThan(expectedFirstReadSeq)
+    expect(intersectingMain[0].created_seq).toBe(mainMessages[0].created_seq)
+    const expectedFirstReadSeq = intersectingMain.at(-1)!.created_seq
+    expect(offscreenBelowMain[0].created_seq).toBeGreaterThan(expectedFirstReadSeq)
     const expectedRemainingUnreadBeforeScroll = offscreenBelowMain.length + 2
 
     // Restore tab visibility to 'visible': only the presented on-screen main-timeline Messages advance the position;
@@ -887,18 +888,18 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
           return false
         }
         const body = (await secretSafe(() => res.json())) as { read_seq: number }
-        return body.read_seq === hiddenLiveMsg.seq
+        return body.read_seq === hiddenLiveMsg.created_seq
       },
     )
     for (const [index, message] of mainMessages.entries()) {
       const row = await revealVirtualRow(scrollContainer, index < 14 ? index + 1 : 16)
       await expect(row).toHaveAttribute('data-message-id', message.id)
-      await expect(row).toContainText(message.body)
+      await expect(row).toContainText(message.body!)
     }
     const scrollBottomMarkRes = await scrollBottomMarkPromise
     expect(scrollBottomMarkRes.ok()).toBe(true)
     const channelPosBeforeOwnSend = ((await secretSafe(() => scrollBottomMarkRes.json())) as { read_seq: number }).read_seq
-    expect(channelPosBeforeOwnSend).toBe(hiddenLiveMsg.seq)
+    expect(channelPosBeforeOwnSend).toBe(hiddenLiveMsg.created_seq)
 
     // Main timeline Unread is now 0; only the 2 hidden Topic Messages (Topic root + Reply) stay Unread.
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 2件')
@@ -925,9 +926,9 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     const ownSendRes = await ownSendResPromise
     expect(ownSendRes.status()).toBe(201)
     const ownMainMsg = (await secretSafe(() => ownSendRes.json())) as Message
-    expect(ownMainMsg.seq).toBeGreaterThan(channelPosBeforeOwnSend)
+    expect(ownMainMsg.created_seq).toBeGreaterThan(channelPosBeforeOwnSend)
     await expect(
-      guestPage.locator(`#main-content [data-message-id="${ownMainMsg.id}"][data-confirmed-seq="${ownMainMsg.seq}"]`),
+      guestPage.locator(`#main-content [data-message-id="${ownMainMsg.id}"][data-confirmed-seq="${ownMainMsg.created_seq}"]`),
     ).toBeVisible()
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 2件')
 
@@ -941,7 +942,7 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     const topicsListAfterOwnSendRes = await topicsListAfterOwnSendPromise
     expect(topicsListAfterOwnSendRes.ok()).toBe(true)
     const topicsListAfterOwnSend = (await secretSafe(() => topicsListAfterOwnSendRes.json())) as TopicPage
-    expect(topicsListAfterOwnSend.as_of_seq).toBe(ownMainMsg.seq)
+    expect(topicsListAfterOwnSend.as_of_seq).toBe(ownMainMsg.created_seq)
     const topicSummaryAfterOwnSend = topicsListAfterOwnSend.topics.find((t) => t.id === topicMsg.topic_id)
     expect(topicSummaryAfterOwnSend?.read_seq).toBe(topicPosBeforeOwnSend)
     expect(topicSummaryAfterOwnSend?.unread_count).toBe(2)
@@ -978,14 +979,14 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     const topicMarkReadRes = await topicMarkReadPromise
     expect(topicMarkReadRes.ok()).toBe(true)
     const topicMarkReadBody = (await secretSafe(() => topicMarkReadRes.json())) as { read_seq: number }
-    expect(topicMarkReadBody.read_seq).toBe(topicReplyMsg.seq)
+    expect(topicMarkReadBody.read_seq).toBe(topicReplyMsg.created_seq)
     expect(topicMarkReadBody.read_seq).toBeGreaterThan(topicPosBeforeOwnSend)
 
     const channelsRefreshRes = await channelsRefreshAfterTopicMarkPromise
     expect(channelsRefreshRes.ok()).toBe(true)
     const channelsRefreshBody = (await secretSafe(() => channelsRefreshRes.json())) as ChannelList
     const targetAfterTopicOpen = channelsRefreshBody.channels.find((c) => c.id === targetChannel.id)
-    expect(targetAfterTopicOpen?.as_of_seq).toBe(ownMainMsg.seq)
+    expect(targetAfterTopicOpen?.as_of_seq).toBe(ownMainMsg.created_seq)
     // Neither the own send (seq 18) nor Topic presentation (seq 16) advanced the Channel read position (seq 17).
     expect(targetAfterTopicOpen?.read_seq).toBe(channelPosBeforeOwnSend)
     expect(targetAfterTopicOpen?.main_unread_count).toBe(0)
@@ -1016,15 +1017,15 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     expect(reconnectTopicSummaryRes.ok()).toBe(true)
     const reconnectChannelsBody = (await secretSafe(() => reconnectChannelsRes.json())) as ChannelList
     const targetOnReconnect = reconnectChannelsBody.channels.find((c) => c.id === targetChannel.id)
-    expect(targetOnReconnect?.as_of_seq).toBe(ownMainMsg.seq)
+    expect(targetOnReconnect?.as_of_seq).toBe(ownMainMsg.created_seq)
     expect(targetOnReconnect?.read_seq).toBe(channelPosBeforeOwnSend)
     expect(targetOnReconnect?.main_unread_count).toBe(0)
     expect(targetOnReconnect?.unread_count).toBe(0)
 
     const reconnectTopicBody = (await secretSafe(() => reconnectTopicSummaryRes.json())) as TopicSummaryResponse
-    expect(reconnectTopicBody.as_of_seq).toBe(ownMainMsg.seq)
+    expect(reconnectTopicBody.as_of_seq).toBe(ownMainMsg.created_seq)
     expect(reconnectTopicBody.topic.id).toBe(topicMsg.topic_id)
-    expect(reconnectTopicBody.topic.read_seq).toBe(topicReplyMsg.seq)
+    expect(reconnectTopicBody.topic.read_seq).toBe(topicReplyMsg.created_seq)
     expect(reconnectTopicBody.topic.unread_count).toBe(0)
 
     await expect(guestPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')

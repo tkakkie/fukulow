@@ -24,8 +24,8 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 38 operations document shutdown, including author lookup, Account security actions and Invite listing/revocation.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 268;
+// All 40 operations document shutdown, including Reply counts, author lookup, Account security and Invite management.
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 294;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -81,7 +81,7 @@ fn mention_contract_requires_one_shared_set_and_nonnegative_counts() {
     for document in [committed, generated] {
         let schemas = &document["components"]["schemas"];
         assert!(
-            schemas["Message"]["required"]
+            !schemas["Message"]["required"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("mentions"))
@@ -218,14 +218,15 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                     assert!(description.contains("persistence has not started"));
                 } else if (path.contains("/timeline")
                     || path.contains("/topics")
-                    || path.ends_with("/chain"))
+                    || path.ends_with("/chain")
+                    || path.ends_with("/reply-counts"))
                     && !path.ends_with("/read")
                 {
                     assert!(description.contains("Projection watermark admission unavailable"));
                 }
             }
         }
-        assert_eq!(operations, 38);
+        assert_eq!(operations, 40);
     }
 }
 
@@ -264,7 +265,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 38);
+    assert_eq!(requests.len(), 40);
     requests.extend(
         [
             "/",
@@ -734,6 +735,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         &[
             (
                 ClientMessage::Subscribe {
+                    history_generation: None,
                     channel_id,
                     after_seq: 0,
                 },
@@ -743,17 +745,20 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         ],
     );
     let message = Message {
+        history_generation: uuid::Uuid::nil(),
         id: Uuid::from_u128(2),
         channel_id,
-        seq: 1,
+        created_seq: 1,
+        version: 1,
+        deleted: false,
         client_message_id: Uuid::from_u128(3),
         sender: Uuid::from_u128(4),
-        body: "hello".into(),
+        body: Some("hello".into()),
         created_at: "2026-11-09T00:00:00Z".into(),
         topic_id: None,
         reply_to: None,
         reply_root_id: None,
-        mentions: Vec::new(),
+        mentions: Some(Vec::new()),
     };
     assert_eq!(
         serde_json::to_value(&message).unwrap()["topic_id"],
@@ -791,13 +796,21 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
                 "channel_members_changed",
             ),
             (ServerEvent::MembersChanged, "members_changed"),
-            (ServerEvent::Message { message }, "message"),
+            (
+                ServerEvent::Message {
+                    seq: message.created_seq,
+                    kind: fukulow_api::ChannelEventKind::Create,
+                    message,
+                },
+                "message",
+            ),
             (
                 ServerEvent::ChannelAccessLost { channel_id },
                 "channel_access_lost",
             ),
             (
                 ServerEvent::Subscribed {
+                    history_generation: uuid::Uuid::nil(),
                     channel_id,
                     caught_up_seq: 1,
                 },
@@ -1027,7 +1040,10 @@ fn unread_openapi_exposes_positions_counts_and_scoped_monotonic_updates() {
         schemas["MarkReadRequest"]["properties"]["read_seq"]["minimum"],
         0
     );
-    assert_eq!(schemas["ReadPosition"]["required"], json!(["read_seq"]));
+    assert_eq!(
+        schemas["ReadPosition"]["required"],
+        json!(["history_generation", "read_seq"])
+    );
     let channel = &schemas["UnreadChannel"]["allOf"][1];
     for field in ["as_of_seq", "read_seq", "main_unread_count", "unread_count"] {
         assert!(
@@ -1452,5 +1468,98 @@ fn dm_contract_has_fixed_kind_strict_open_and_separate_discovery_identities() {
             s["DmListChanged"]["properties"].as_object().unwrap().len(),
             1
         );
+    }
+}
+
+#[test]
+fn reply_count_contract_has_bounded_post_baseline_and_uniform_errors() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &document["components"]["schemas"];
+    let operation = &document["paths"]["/api/v1/orgs/{org}/channels/{id}/reply-counts"]["post"];
+    assert_eq!(operation["security"], json!([{"cookie":[]},{"bearer":[]}]));
+    assert_eq!(
+        operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ReplyCountRequest"
+    );
+    let ids = &schemas["ReplyCountRequest"]["properties"]["ids"];
+    assert_eq!(ids["minItems"], 1);
+    assert_eq!(ids["maxItems"], 100);
+    assert_eq!(ids["items"]["format"], "uuid");
+    assert_eq!(
+        schemas["ReplyCountPage"]["properties"]["as_of_seq"]["minimum"],
+        0
+    );
+    assert_eq!(
+        schemas["ReplyCount"]["properties"]["reply_count"]["format"],
+        "int64"
+    );
+    assert_eq!(
+        schemas["ReplyCount"]["properties"]["reply_count"]["minimum"],
+        0
+    );
+    for (schema, fields) in [
+        ("ReplyCountPage", vec!["as_of_seq", "counts"]),
+        ("ReplyCount", vec!["message_id", "root_id", "reply_count"]),
+    ] {
+        for field in fields {
+            assert!(
+                schemas[schema]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field))
+            );
+        }
+    }
+    assert_eq!(
+        operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/ReplyCountPage"
+    );
+    for status in ["400", "401", "404", "413", "415", "500", "503"] {
+        assert_eq!(
+            operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorBody"
+        );
+    }
+    assert!(operation["responses"]["503"]["headers"]["Retry-After"].is_object());
+}
+
+#[test]
+fn message_state_wire_has_creation_version_and_body_free_tombstones() {
+    let schema = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let message_schema = &schema["components"]["schemas"]["Message"];
+    let required = message_schema["required"].as_array().unwrap();
+    for field in ["created_seq", "version", "deleted"] {
+        assert!(required.contains(&json!(field)));
+    }
+    assert!(message_schema["properties"].get("seq").is_none());
+    for field in ["body", "mentions"] {
+        assert!(!required.contains(&json!(field)));
+    }
+    let mut message: Message = serde_json::from_value(json!({
+        "history_generation":Uuid::nil(), "id":Uuid::from_u128(1), "channel_id":Uuid::from_u128(2),
+        "client_message_id":Uuid::from_u128(3), "sender":Uuid::from_u128(4),
+        "created_seq":1, "version":1, "deleted":false, "body":"original", "mentions":[],
+        "created_at":"2026-11-17T00:00:00Z", "topic_id":null, "reply_to":null, "reply_root_id":null
+    }))
+    .unwrap();
+    let live = serde_json::to_value(&message).unwrap();
+    assert_eq!(live["body"], "original");
+    assert_eq!(live["mentions"], json!([]));
+    message.version = 7;
+    message.deleted = true;
+    message.body = None;
+    message.mentions = None;
+    let tombstone = serde_json::to_value(ServerEvent::Message {
+        seq: 1,
+        kind: fukulow_api::ChannelEventKind::Create,
+        message,
+    })
+    .unwrap();
+    assert_eq!(tombstone["seq"], 1);
+    assert_eq!(tombstone["message"]["created_seq"], 1);
+    assert_eq!(tombstone["message"]["version"], 7);
+    assert_eq!(tombstone["message"]["deleted"], true);
+    for field in ["body", "mentions", "excerpt", "seq"] {
+        assert!(tombstone["message"].get(field).is_none());
     }
 }

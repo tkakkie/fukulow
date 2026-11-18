@@ -1,6 +1,7 @@
 //! Deterministic Message sync policy. The owner supplies all I/O results and timer ticks.
 mod engine;
 mod merge;
+pub mod reply_counts;
 mod responses;
 mod transitions;
 mod types;
@@ -23,6 +24,8 @@ impl Core {
     pub fn new(self_id: Uuid) -> Self {
         Self {
             session: SessionView {
+                history_generation: None,
+                history_epoch: 0,
                 self_id,
                 organization: Organization::Available,
                 session: Session::SignedIn,

@@ -9,6 +9,7 @@ import { acmeFixture, certificate, challengeResponses, checkCertificateLifecycle
 import { fileURLToPath } from 'node:url'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+import { checkAssetCompression } from './asset-compression.ts'
 
 const cwd = fileURLToPath(new URL('..', import.meta.url))
 const project = process.env.CHECK_COMPOSE_PROJECT || `fukulow-security-${randomUUID().slice(0, 8)}`
@@ -190,9 +191,13 @@ async function check(profile: string) {
       assert.match(headers, /cache-control: public, max-age=31536000, immutable/i)
       if (path.endsWith('.wasm')) assert.match(headers, /content-type: application\/wasm/i)
     }
-    const assetHeaders = curl(['-sk', '-D', '-', '-o', '/dev/null', '-H', 'Accept-Encoding: gzip', url + asset])
-    assert.match(assetHeaders, /cache-control: public, max-age=31536000, immutable/i)
-    assert.match(assetHeaders, /content-encoding: gzip/i, `${profile} static compression`)
+    const compression = checkAssetCompression((path, encoding) => {
+      const headers = join(directory, 'asset-headers')
+      const body = execFileSync('curl', [...resolveHost, '-skS', '--max-time', '15', '-D', headers,
+        ...(encoding === undefined ? [] : ['-H', `Accept-Encoding: ${encoding}`]), url + path])
+      return { headers: readFileSync(headers, 'utf8'), body }
+    })
+    console.log(`PASS ${profile}: Brotli/identity negotiation, exact decoded bytes, MIME/cache and Vary for every discovered bundle asset ${JSON.stringify(compression)}`)
     run(['exec', app, 'fukulow-server', 'probe'])
     const [state] = JSON.parse(run(['inspect', app]))
     for (const container of [app, proxy('ps', '-aq', 'migrate')]) {
@@ -224,7 +229,8 @@ async function check(profile: string) {
     if (process.env.CHECK_COMPOSE_ACCEPTANCE === '1') {
       execFileSync('npm', ['--prefix', 'web', 'run', 'e2e:compose'], { cwd, stdio: 'inherit',
         env: { ...process.env, E2E_BASE_URL: `https://${testDomain}:${tlsPort()}`,
-          E2E_TEST_DOMAIN: testDomain, E2E_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN } })
+          E2E_TEST_DOMAIN: testDomain, E2E_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN,
+          E2E_ROTATE_NETWORK: `${project}_backend`, E2E_ROTATE_IMAGE: image } })
     } else assert.equal(request('/api/v1/setup', { ...setup, setup_token: env.FUKULOW_SETUP_TOKEN }).status, 201)
     assert.equal(request('/api/v1/session', owner).status, 200)
     const native = request('/api/v1/native/session', owner)

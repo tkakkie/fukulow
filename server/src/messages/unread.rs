@@ -3,6 +3,7 @@ use sqlx::Row;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UnreadChannel {
+    pub history_generation: Uuid,
     #[serde(flatten)]
     pub channel: channels::Channel,
     /// Latest committed Channel seq in the positions/counts snapshot; 0 if empty.
@@ -21,12 +22,14 @@ pub struct UnreadChannel {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ChannelList {
+    pub history_generation: Uuid,
     pub channels: Vec<UnreadChannel>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MarkReadRequest {
+    pub history_generation: Option<Uuid>,
     /// Monotonic max, clamped to the latest committed Channel seq. Sending never marks read.
     #[schema(minimum = 0)]
     pub read_seq: i64,
@@ -34,19 +37,25 @@ pub struct MarkReadRequest {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReadPosition {
+    pub history_generation: Uuid,
     pub read_seq: i64,
 }
 
-// Each aggregate is a parameterized index range from the persisted position.
+// Join each unread scope to the Member's Channel Mention set once. OFFSET 0
+// keeps Mention scans independent of individual Messages and Topics, including
+// in generic plans; the Topic range fence preserves parameterized seq scans.
+// Unread Messages use parameterized index ranges from persisted positions.
 // Fully read Topics never touch Messages; a missing position suppresses only
 // that Channel's Unread at its snapshot's committed counter, without persisting.
 // The counter and Messages commit atomically, so this snapshot's counts are
 // exactly bounded by its counter, including own and already-read Messages.
 // Materialize the Member's unread Topic candidates once, rather than rescan
-// every Topic under RLS per Channel. The per-Channel range calculation stays below.
+// every Topic under RLS per Channel. Carry the lower bound as a column: PostgreSQL
+// does not recognise COALESCE as leakproof, so it stays out of RLS index quals.
 pub(super) const LIST_COUNTS_SQL: &str = r#"
 WITH unread_topics AS MATERIALIZED (
-    SELECT t.organization_id, t.channel_id, t.id, t.last_seq
+    SELECT t.organization_id, t.channel_id, t.id, t.last_seq,
+        COALESCE(tr.read_seq, p.initial_seq) AS read_seq
     FROM topics t
     JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $2
         AND p.membership_revision = $3 AND p.channel_id = t.channel_id
@@ -67,27 +76,35 @@ LEFT JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $
     AND p.membership_revision = $3 AND p.channel_id = c.channel_id
 LEFT JOIN channel_message_sequences s ON s.organization_id = $1 AND s.channel_id = c.channel_id
 CROSS JOIN LATERAL (
-    SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count FROM messages m
-    LEFT JOIN message_mentions mm ON mm.organization_id=$1 AND mm.member_id=$2
-        AND mm.channel_id=m.channel_id AND mm.message_id=m.id
+    SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count
+    FROM messages m
+    LEFT JOIN (
+        SELECT message_id FROM message_mentions
+        WHERE organization_id = $1 AND member_id = $2 AND channel_id = c.channel_id
+        OFFSET 0
+    ) mm ON mm.message_id = m.id
     WHERE p.channel_id IS NOT NULL AND m.organization_id = $1 AND m.channel_id = c.channel_id
         AND m.topic_id IS NULL AND m.seq > p.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
 ) main
 CROSS JOIN LATERAL (
-    SELECT COALESCE(sum(unread.unread_count), 0)::bigint AS unread_count,
-        COALESCE(sum(unread.mention_unread_count), 0)::bigint AS mention_unread_count
-    FROM unread_topics t
-    LEFT JOIN topic_read_positions tr ON tr.organization_id = $1 AND tr.channel_id = c.channel_id
-        AND tr.member_id = $2 AND tr.topic_id = t.id
-    CROSS JOIN LATERAL (
-        SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count FROM messages m
-        LEFT JOIN message_mentions mm ON mm.organization_id=$1 AND mm.member_id=$2
-            AND mm.channel_id=m.channel_id AND mm.message_id=m.id
-        WHERE m.organization_id = $1 AND m.channel_id = c.channel_id AND m.topic_id = t.id
-            AND m.seq > COALESCE(tr.read_seq, p.initial_seq) AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
+    SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count
+    FROM (
+        SELECT m.id FROM unread_topics t
+        CROSS JOIN LATERAL (
+            SELECT m.id FROM messages m
+            WHERE m.organization_id = $1 AND m.channel_id = c.channel_id AND m.topic_id = t.id
+                AND m.seq > t.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
+            OFFSET 0
+        ) m
+        WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
+            AND t.last_seq > t.read_seq
+        OFFSET 0
     ) unread
-    WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
-        AND t.last_seq > COALESCE(tr.read_seq, p.initial_seq)
+    LEFT JOIN (
+        SELECT message_id FROM message_mentions
+        WHERE organization_id = $1 AND member_id = $2 AND channel_id = c.channel_id
+        OFFSET 0
+    ) mm ON mm.message_id = unread.id
 ) topic
 "#;
 
@@ -95,17 +112,21 @@ CROSS JOIN LATERAL (
 ///
 /// Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels",
-    params(("org" = Uuid, Path, description = "Organization id")),
+    params(("org" = Uuid, Path, description = "Organization id"), fukulow_api::HistoryQuery),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Visible Channels with current Member positions and Unread counts; refetch on reconnect", body = ChannelList),
         (status = 400, description = "Malformed Organization id", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch", body = crate::auth::ErrorBody),
         (status = 404, description = "Non-Member, unknown Organization or deactivated Member: organization_unavailable", body = ErrorBody),
         (status = 500, description = "Database failure while listing visible Channels and Unread", body = ErrorBody)))]
 pub async fn list_channels(
     State(state): State<AppState>,
     auth: Auth,
+    query: Result<Query<fukulow_api::HistoryQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
+    let Query(query) =
+        query.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid input", None))?;
     crate::database::organization_read_only(
         &state.pool,
         auth.identity.organization.organization_id,
@@ -113,6 +134,12 @@ pub async fn list_channels(
             let channels = channels::visible_list(&mut *tx, &auth).await?;
             #[cfg(test)]
             tests::unread::baseline::pause_list(auth.identity.member.id).await;
+            let history_generation = crate::auth::history::validate(
+                tx,
+                auth.identity.organization.organization_id,
+                query.history_generation,
+            )
+            .await?;
             let ids = channels.iter().map(|c| c.id).collect::<Vec<_>>();
             // Two batched queries in one authorization/data snapshot, independent of the
             // number of Channels or Topics. No Message or position outside ids is read.
@@ -152,6 +179,7 @@ pub async fn list_channels(
                 ) = counts.remove(&channel.id).ok_or(sqlx::Error::RowNotFound)?;
                 result.push(UnreadChannel {
                     channel,
+                    history_generation,
                     as_of_seq,
                     read_seq,
                     main_unread_count,
@@ -162,7 +190,10 @@ pub async fn list_channels(
             }
             Ok((
                 [(header::CACHE_CONTROL, "no-store")],
-                Json(ChannelList { channels: result }),
+                Json(ChannelList {
+                    history_generation,
+                    channels: result,
+                }),
             )
                 .into_response())
         },
@@ -176,6 +207,7 @@ pub async fn list_channels(
     responses((status = 200, description = "Monotonic Channel position for Messages without Topic only", body = ReadPosition),
         (status = 400, description = "Invalid ids, negative read_seq or malformed JSON; Topic read in an accessible DM refuses dm_topics_not_allowed", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found", body = ErrorBody),
         (status = 413, description = "Request body exceeds size limit", body = ErrorBody),
         (status = 415, description = "Requires application/json", body = ErrorBody),
@@ -198,6 +230,7 @@ pub async fn mark_channel_read(
     responses((status = 200, description = "Monotonic position for this Topic only", body = ReadPosition),
         (status = 400, description = "Invalid ids, negative read_seq or malformed JSON", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical", body = ErrorBody),
         (status = 413, description = "Request body exceeds size limit", body = ErrorBody),
         (status = 415, description = "Requires application/json", body = ErrorBody),
@@ -247,8 +280,8 @@ async fn mark_inner(
     }
     let w = topics::watermark(state, organization, channel).await?;
     let state = state.clone();
-    let read_seq = tokio::spawn(async move {
-    let (read_seq, changed) = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
+    let (read_seq, history_generation) = tokio::spawn(async move {
+    let (read_seq, changed, history_generation) = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
         sqlx::query("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *tx)
             .await?;
@@ -257,6 +290,7 @@ async fn mark_inner(
             Some(false) => return Err(MessageError::NotFound),
             Some(true) => {}
         }
+        let history_generation = history::validate(tx, organization, channel, input.history_generation, None).await?;
         #[cfg(test)]
         tests::removal::pause(member.0).await;
         // Serialize positions with revocation's cascading delete/reset. If access
@@ -283,14 +317,17 @@ async fn mark_inner(
             sqlx::query_scalar("UPDATE channel_read_positions SET read_seq=GREATEST(read_seq,$4) WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 RETURNING read_seq")
                 .bind(organization).bind(channel).bind(member.0).bind(requested).fetch_one(&mut *tx).await?
         };
-        Ok::<_, MessageError>((read_seq, read_seq > previous))
+        Ok::<_, MessageError>((read_seq, read_seq > previous, history_generation))
     }).await?;
     if changed { state.message_delivery.channel_access.activity.spawn(state.pool.clone(), organization, channels::activity::Notice::ReadPositionChanged { channel_id: channel, topic_id: topic, read_seq }, Some(member.0)); }
-    Ok::<_, MessageError>(read_seq)
+    Ok::<_, MessageError>((read_seq, history_generation))
     }).await.map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(ReadPosition { read_seq }),
+        Json(ReadPosition {
+            read_seq,
+            history_generation,
+        }),
     )
         .into_response())
 }

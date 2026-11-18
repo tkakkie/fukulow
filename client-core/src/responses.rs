@@ -2,11 +2,16 @@ use crate::{engine::Step, merge::Source, *};
 use fukulow_api::MessagePage;
 use std::rc::Rc;
 
+pub(crate) enum HistoryPage {
+    Messages(MessagePage),
+    Events(fukulow_api::ChannelEventPage),
+}
+
 impl Step<'_> {
     pub(super) fn history_response(
         &mut self,
         request: Token,
-        result: Result<MessagePage, Failure>,
+        result: Result<HistoryPage, Failure>,
     ) {
         if !matches!(
             self.core.requests.get(&request),
@@ -17,6 +22,7 @@ impl Step<'_> {
         let Some(Request::History {
             channel: id,
             page,
+            mutation_seq,
             stale,
             ..
         }) = self.core.requests.remove(&request)
@@ -27,6 +33,29 @@ impl Step<'_> {
         if stale {
             if matches!(result, Err(Failure::Status(401))) {
                 self.stop(true);
+            }
+            return;
+        }
+        let generation = match &result {
+            Ok(HistoryPage::Messages(p)) => Some(p.history_generation),
+            Ok(HistoryPage::Events(p)) => Some(p.history_generation),
+            _ => None,
+        };
+        if generation.is_some_and(|g| !self.accept_generation(g)) {
+            return;
+        }
+        if let Ok(HistoryPage::Messages(result)) = &result
+            && mutation_seq < self.channel(id).mutation_seq
+            && result.as_of_seq < self.channel(id).mutation_seq
+        {
+            let retry = page != Page::Latest || mutation_seq < self.channel(id).mutation_seq;
+            let c = self.channel(id);
+            c.snapshot_seq = None;
+            c.latest = None;
+            c.older = None;
+            c.history_error = !retry;
+            if retry {
+                self.history(id, Page::Latest, None);
             }
             return;
         }
@@ -51,23 +80,51 @@ impl Step<'_> {
                     c.history_error = true;
                 }
             }
-            Ok(result) => {
+            Ok(HistoryPage::Events(result)) => {
+                if page != Page::After {
+                    return;
+                }
+                let before = c.cursor;
+                for event in result.events {
+                    if let fukulow_api::ServerEvent::Message { seq, kind, message } = event
+                        && message.channel_id == id
+                        && Self::envelope_consistent(kind, seq, &message)
+                    {
+                        self.merge_event(id, vec![message], Source::Events, Some(seq));
+                    }
+                }
+                let c = self.channel(id);
+                if c.cursor == before && Self::gap(c) {
+                    let attempt = c.fill_attempt;
+                    c.fill_attempt += 1;
+                    let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
+                    self.channel(id).wait = Some(n);
+                } else {
+                    c.fill_attempt = 0;
+                    self.reconcile(id, true);
+                }
+            }
+            Ok(HistoryPage::Messages(result)) => {
                 let before = c.cursor;
                 let bootstrap = c.cursor.is_none() && page == Page::Latest;
                 if bootstrap {
-                    c.cursor = Some(result.messages.last().map_or(0, |m| m.seq));
+                    c.cursor = Some(result.as_of_seq);
                     c.stream_base = c.cursor;
                 }
-                let first = result.messages.first().map(|m| m.seq);
-                self.merge(
-                    id,
-                    result.messages,
-                    if page == Page::After {
-                        Source::Stream
-                    } else {
-                        Source::Window
-                    },
-                );
+                c.snapshot_seq = Some(result.as_of_seq);
+                let first = result.messages.first().map(|m| m.created_seq);
+                if page == Page::Latest {
+                    // Release only the creation range covered by this authoritative page.
+                    if !result.has_more {
+                        c.retired_through = None;
+                    } else if let Some(first) = first {
+                        c.retired_through = c
+                            .retired_through
+                            .map(|through| through.min(first - 1))
+                            .filter(|through| *through > 0);
+                    }
+                }
+                self.merge(id, result.messages, Source::Window);
                 let c = self.channel(id);
                 if page != Page::After
                     && (page == Page::Before
@@ -75,7 +132,7 @@ impl Step<'_> {
                         || c.messages.is_empty()
                         || first
                             .zip(c.messages.first())
-                            .is_some_and(|(a, b)| a <= b.seq))
+                            .is_some_and(|(a, b)| a <= b.created_seq))
                 {
                     c.has_older = result.has_more;
                 }
@@ -123,9 +180,17 @@ impl Step<'_> {
             }
             return;
         }
+        if matches!(&result, Err((Failure::Status(409), _, Some(error))) if error == "history_generation_changed")
+        {
+            self.reset_history(None);
+            return;
+        }
         self.channel(id);
         match result {
             Ok(message) => {
+                if !self.accept_generation(message.history_generation) {
+                    return;
+                }
                 self.merge(id, vec![message], Source::Ack);
                 self.reconcile(id, false);
             }

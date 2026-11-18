@@ -27,7 +27,7 @@ export type DmInput =
   | { type: 'opened'; generation: number; dm: Dm; renewed?: boolean }
   | { type: 'peer_refusal'; id: string; error: 'dm_peer_deactivated' | 'dm_peer_access_lapsed' }
   | { type: 'access'; id: string; revoked: boolean }
-  | { type: 'pause' | 'resume' | 'close' }
+  | { type: 'pause' | 'resume' | 'close' | 'history_reset' }
   | { type: 'wake'; now: number }
   | { type: 'result'; request: DmRequest; data: DmChanges | DmList }
   | { type: 'failure'; request: DmRequest; retryAt: number; terminal: boolean }
@@ -91,6 +91,9 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
     effects.push({ type: 'drop', id })
   }
   switch (input.type) {
+    case 'history_reset':
+      return { state: { ...dmListState(), selected: s.selected, generation: s.generation + 1,
+        serial: s.serial, paused: true }, effects: s.rows.map(row => ({ type: 'drop', id: row.identity.id })) }
     case 'demand':
       if (input.boundary) {
         s.generation++

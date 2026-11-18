@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::AppState;
 
 pub mod authorization;
+pub mod history;
 pub use authorization::{Action, Actor, Capability, OrganizationCapabilities, Resource, authorize};
 #[cfg(test)]
 mod admission_tests;

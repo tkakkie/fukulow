@@ -16,7 +16,7 @@ it('reactively shows projection and stream changes and forwards Topic history an
   const view = await mount(() => ({ topics: adapter.state.topics, messages: adapter.state.topic('T').messages }))
   expect(view.last.topics[0].messageCount).toBe(3)
   await adapter.loadTopic('T'); c.event(11, 'T'); await settle()
-  expect(view.last.messages.map(m => m.seq)).toEqual([5, 10, 11])
+  expect(view.last.messages.map(m => m.created_seq)).toEqual([5, 10, 11])
   expect(view.last.topics[0]).toMatchObject({ position: 11, messageCount: 4 })
   await adapter.loadSummary('T'); await settle()
   expect(view.last.topics[0]).toMatchObject({ position: 12, messageCount: 4 })
@@ -84,7 +84,7 @@ it('notifies only the changed Channel and keeps unaffected Channel snapshots ref
   const c = topicClient()
   await c.boot()
   await c.sync.watch('B')
-  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'B', caught_up_seq: 10 })
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'B', caught_up_seq: 10 })
   await settle()
 
   const adapterA = topicsAdapter(c.topics, 'A')
@@ -164,11 +164,11 @@ it('runs all contract/realtime/client/topic-projections.json scenarios through t
       if (ch) {
         ch.main_timeline = view.last.lines.map(l =>
           l.kind === 'message'
-            ? { seq: l.message.seq }
+            ? { created_seq: l.message.created_seq }
             : { topic: l.topicId, position: l.position, message_count: l.messageCount },
         )
         if (ch.topics?.T) {
-          ch.topics.T = { visible: view.last.topicT.map(m => m.seq) }
+          ch.topics.T = { visible: view.last.topicT.map(m => m.created_seq) }
         }
       }
       return observation

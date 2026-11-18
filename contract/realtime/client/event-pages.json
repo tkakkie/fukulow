@@ -1,0 +1,162 @@
+{
+  "kind": "client",
+  "scenarios": [
+    {
+      "id": "gap-fill-recovers-a-non-create-event-position",
+      "title": "C3 fills missing Edit 101 before held Create 102 using event positions",
+      "covers": [
+        "C1",
+        "C2",
+        "C3"
+      ],
+      "steps": [
+        {
+          "input": {
+            "type": "session_start"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "connect",
+                "as": "connection"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "connection_ready"
+          }
+        },
+        {
+          "input": {
+            "type": "watch",
+            "channel": "A"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "latest",
+                "as": "latest"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "history_result",
+            "respond_to": "latest",
+            "messages": [
+              {
+                "created_seq": 100
+              }
+            ],
+            "has_more": true
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "subscribe",
+                "channel": "A",
+                "after_seq": 100,
+                "as": "subscription"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "subscribed",
+            "channel": "A",
+            "caught_up_seq": 100,
+            "respond_to": "subscription"
+          }
+        },
+        {
+          "input": {
+            "type": "message",
+            "channel": "A",
+            "seq": 102,
+            "kind": "create",
+            "message": {
+              "created_seq": 102
+            }
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "wait",
+                "purpose": "reorder_grace",
+                "channel": "A",
+                "as": "grace"
+              }
+            ]
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "cursor": 100
+              }
+            }
+          }
+        },
+        {
+          "input": {
+            "type": "timer_elapsed",
+            "respond_to": "grace"
+          },
+          "effects": {
+            "required": [
+              {
+                "type": "fetch_history",
+                "channel": "A",
+                "page": "after",
+                "seq": 100,
+                "as": "fill"
+              }
+            ]
+          }
+        },
+        {
+          "input": {
+            "type": "events_result",
+            "respond_to": "fill",
+            "events": [
+              {
+                "seq": 101,
+                "kind": "edit",
+                "message": {
+                  "created_seq": 100,
+                  "version": 101,
+                  "body": "edited"
+                }
+              }
+            ],
+            "has_more": false
+          },
+          "observe": {
+            "channels": {
+              "A": {
+                "cursor": 102,
+                "visible": [
+                  100,
+                  102
+                ],
+                "records": [
+                  {
+                    "created_seq": 100,
+                    "version": 101,
+                    "deleted": false,
+                    "body": "edited"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

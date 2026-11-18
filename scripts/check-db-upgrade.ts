@@ -63,11 +63,12 @@ async function request(url: string, path: string, data?: unknown, token?: string
   return response.json()
 }
 
+// #515 backfills Message state/receipts and Organization epochs (checked below).
 const snapshot = () => JSON.parse(sql(`SELECT json_build_object(
-  'organizations', (SELECT json_agg(t ORDER BY organization_id) FROM organizations t),
+  'organizations', (SELECT json_agg(to_jsonb(t) - 'history_generation' ORDER BY organization_id) FROM organizations t),
   'accounts', (SELECT json_agg(t ORDER BY id) FROM accounts t),
   'members', (SELECT json_agg(t ORDER BY organization_id, id) FROM users t),
-  'messages', (SELECT json_agg(t ORDER BY organization_id, id) FROM messages t),
+  'messages', (SELECT json_agg(to_jsonb(t) - 'version' - 'send_digest' ORDER BY organization_id, id) FROM messages t),
   'sessions', (SELECT json_agg(t ORDER BY token_hash) FROM account_sessions t))`))
 
 async function check() {
@@ -150,6 +151,7 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     }
     dc('exec', '-T', 'app', 'fukulow-server', 'probe')
     assert.deepEqual(snapshot(), before)
+    assert.equal(sql("SELECT count(*) FROM messages WHERE version = seq AND octet_length(send_digest) = 32"), '1')
     await request(url, `/orgs/${organization}/me`, undefined, session.token)
     // An older/newer binary must fail before listening, even with the same row count.
     sql('UPDATE _sqlx_migrations SET version = version + 1 WHERE version = (SELECT max(version) FROM _sqlx_migrations)')
@@ -161,8 +163,27 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     assert.equal(mismatch.stdout, '')
     sql('UPDATE _sqlx_migrations SET version = version - 1 WHERE version = (SELECT max(version) FROM _sqlx_migrations)')
     const history = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
-    // A Message sent by the older image gains the default empty accepted Mention set (#152).
-    assert.deepEqual(history.messages, [{ mentions: [], ...message }])
+    // A Message sent by a pre-#515 image gains the default empty accepted Mention set (#152)
+    // and is served in the #515 wire shape: seq becomes created_seq, version starts at it.
+    // An older image already serving that shape (main since #532) is returned unchanged.
+    // Either way the upgraded server adds the Organization history_generation (#515 slice 4).
+    let upgraded = message
+    if ('seq' in message) {
+      const { seq, ...unchanged } = message
+      upgraded = { mentions: [], ...unchanged, created_seq: seq, version: seq, deleted: false }
+    } else {
+      assert.ok(Number.isInteger(message.created_seq) && message.version === message.created_seq,
+        'old image Message has neither the pre-#515 nor the #515 wire shape')
+    }
+    const createdSeq = upgraded.created_seq
+    assert.ok(Number.isSafeInteger(createdSeq) && createdSeq > 0)
+    const historyGeneration = sql(`SELECT history_generation FROM organizations WHERE organization_id='${organization}'`)
+    assert.match(historyGeneration, /^[0-9a-f-]{36}$/)
+    upgraded = { ...upgraded, history_generation: historyGeneration }
+    assert.deepEqual(history.messages, [upgraded])
+    assert.equal(history.history_generation, historyGeneration)
+    assert.equal(history.as_of_seq, createdSeq)
+    assert.equal(sql('SELECT count(*) FROM channel_message_sequences WHERE mutation_seq<>0'), '0')
     await request(url, '/session', owner)
     dc('restart', 'app')
     url = await health(current)
@@ -171,7 +192,7 @@ ${hasMigrate ? `  migrate:\n    image: ${oldImage}\n` : ''}volumes:
     const upgradedMessage = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`,
       { body: 'Sent after read-only upgrade and restart', client_message_id: randomUUID() }, session.token, 201)
     const upgradedHistory = await request(url, `/orgs/${organization}/channels/${channel.id}/messages`, undefined, session.token)
-    assert.deepEqual(upgradedHistory.messages, [{ mentions: [], ...message }, upgradedMessage])
+    assert.deepEqual(upgradedHistory.messages, [upgraded, upgradedMessage])
     assert.equal(run(['diff', dc('ps', '-q', 'app')]), '')
     for (const statement of [
       'ALTER TABLE users DISABLE TRIGGER protect_member_identity',

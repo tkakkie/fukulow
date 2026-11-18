@@ -38,7 +38,7 @@
     retryable?: boolean
     targetUnavailable?: boolean
     failedReason?: string
-    replyCount?: number
+    replyCount?: number | null
     focusable?: boolean
     rovingTabindex?: 0 | -1
     rowRef?: HTMLElement | null
@@ -89,7 +89,7 @@
 <article
   bind:this={rowRef}
   class="ui-message-row"
-  class:ui-message-row--mentioned={mentioned || (!pendingStatus && mentions.some(target => target.member_id === selfId))}
+  class:ui-message-row--mentioned={mentioned || (!pendingStatus && (mentions ?? []).some(target => target.member_id === selfId))}
   class:ui-message-row--sending={pendingStatus === 'sending'}
   class:ui-message-row--failed={pendingStatus === 'failed'}
   tabindex="-1"
@@ -159,7 +159,7 @@
         bind:buttonRef={replyBtnRef}
         onclick={() => onopenreplies(replyBtnRef)}
       >
-        {replyCount > 0 ? `返信 ${replyCount}件›` : '返信'}
+        {replyCount !== null && replyCount > 0 ? `返信 ${replyCount}件›` : '返信'}
       </Button>
     </footer>
   {/if}

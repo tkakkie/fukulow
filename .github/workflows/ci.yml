@@ -33,11 +33,8 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with: { tool: wasm-bindgen@0.2.130 }
       - run: npm --prefix web ci
-      # Before any wasm build: the TS rollback must not need the wasm toolchain or web/wasm.
-      - run: SYNC_CORE=ts npm --prefix web run build -- --outDir ../target/web-ts --emptyOutDir
       - run: npm --prefix web run check
       - run: npm --prefix web test
-      - run: SYNC_CORE=ts npm --prefix web test
       - run: npm --prefix web run build
   # Linting needs no DB or real SPA: an empty web/dist satisfies rust-embed for clippy, so lint runs alongside `web`.
   lint:

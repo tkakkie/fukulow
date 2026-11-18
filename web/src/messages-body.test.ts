@@ -41,7 +41,7 @@ describe('message body validation', () => {
   it('keeps draft text and skips HTTP when Composer validation fails, then clears on valid submit', async () => {
     const sendMessage = vi.fn<TimelineApi['sendMessage']>().mockImplementation(async (_channel, req) => ({
       ok: true,
-      data: {
+      data: { history_generation: '00000000-0000-4000-8000-000000000515',
         mentions: [],
         topic_id: null,
         reply_to: null,
@@ -50,7 +50,7 @@ describe('message body validation', () => {
         channel_id: 'A',
         sender: 'me',
         client_message_id: req.client_message_id,
-        seq: 1,
+        created_seq: 1, version: 1, deleted: false,
         body: req.body,
         created_at: '2026-01-01T00:00:00Z',
       },
@@ -59,7 +59,7 @@ describe('message body validation', () => {
       selfId: 'me',
       newId: () => 'c1',
       connect: () => ({ send() {}, close() {} }),
-      api: { listMessages: vi.fn(), sendMessage },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: vi.fn(), sendMessage },
     })
     await sync.start()
     const a = sync.getTimeline('A')
@@ -89,7 +89,7 @@ describe('message body validation', () => {
     expect(await a.submit()).toBe(true)
     expect(a.composer.get().draft).toBe('')
     expect(a.composer.get().composerError).toBeNull()
-    expect(sendMessage).toHaveBeenCalledWith('A', { client_message_id: 'c1', body: exact })
+    expect(sendMessage).toHaveBeenCalledWith('A', {client_message_id: 'c1', body: exact })
     await sync.close()
   })
 })
@@ -179,7 +179,7 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
       drafts,
       newId: () => `cid-${++idSeq}`,
       connect: () => ({ send() {}, close() {} }),
-      api: { listMessages: vi.fn(), sendMessage },
+      api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: vi.fn(), sendMessage },
     })
     await sync.start()
     const a = sync.getTimeline('A')
@@ -199,8 +199,7 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
     a.setTopicDraft('日報')
     sendMessage.mockResolvedValueOnce({ ok: false, kind: 'http', status: 400, error: 'invalid_input' })
     expect(await a.submit()).toBe(true)
-    expect(sendMessage).toHaveBeenLastCalledWith('A', {
-      client_message_id: 'cid-1',
+    expect(sendMessage).toHaveBeenLastCalledWith('A', {client_message_id: 'cid-1',
       body: '最初の投稿',
       topic_name: '日報',
     })
@@ -223,13 +222,13 @@ describe('Topic name validation and Topic Composer sends/drafts', () => {
     ])
     resolveTopicSend({
       ok: true,
-      data: {
+      data: { history_generation: '00000000-0000-4000-8000-000000000515',
         mentions: [],
         id: 'm-2',
         channel_id: 'A',
         sender: 'me',
         client_message_id: 'cid-2',
-        seq: 2,
+        created_seq: 2, version: 2, deleted: false,
         body: 'トピック別下書き',
         topic_id: 'topic-1',
         reply_to: null,

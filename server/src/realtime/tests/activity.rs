@@ -29,8 +29,10 @@ pub(super) async fn collect(
     delivery: &crate::channels::activity::Activity,
     socket: &mut Client,
 ) -> Vec<Value> {
+    // All counted publishers must finish; callers separately join direct publish futures.
     delivery.drained().await;
     let nonce = Uuid::new_v4().as_bytes().to_vec();
+    // With publishers done and gates released, run's biased activity-before-recv polls put Pong after the buffer.
     socket
         .send(tungstenite::Message::Ping(nonce.clone().into()))
         .await
@@ -190,6 +192,138 @@ async fn other_organization_socket_of_same_account_receives_nothing(pool: PgPool
         vec![activity(f.channel, 1)]
     );
     assert!(notices(&f, &mut denied).await.is_empty());
+}
+#[fukulow_test::test]
+async fn delete_grant_reports_revocation_with_and_without_an_active_subscription(pool: PgPool) {
+    use crate::auth::{SubscriptionRecheck, SubscriptionScope};
+    use crate::channels::activity::{TestGate, pause_member};
+
+    struct RecheckBeforePublication {
+        access: crate::channels::AccessChanges,
+        // Not an array: the module-direction driver ICEs on array lengths in local items.
+        gates: Vec<Arc<TestGate>>,
+    }
+    impl SubscriptionRecheck for RecheckBeforePublication {
+        fn check<'a>(
+            &'a self,
+            pool: &'a PgPool,
+            scope: SubscriptionScope,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let result = self.access.check(pool, scope).await;
+                for gate in &self.gates {
+                    gate.release.add_permits(1);
+                }
+                result
+            })
+        }
+        fn failed(&self, scope: SubscriptionScope) {
+            self.access.failed(scope);
+        }
+    }
+
+    async fn frames(f: &Fixture, socket: &mut Client) -> Vec<Value> {
+        f.state
+            .message_delivery
+            .channel_access
+            .activity
+            .drained()
+            .await;
+        let nonce = Uuid::new_v4().as_bytes().to_vec();
+        // Both observed access loss and the drained notice buffer precede recv/Pong.
+        socket
+            .send(tungstenite::Message::Ping(nonce.clone().into()))
+            .await
+            .unwrap();
+        let mut result = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+            {
+                tungstenite::Message::Pong(bytes) if bytes.as_ref() == nonce => return result,
+                tungstenite::Message::Ping(_) => socket.flush().await.unwrap(),
+                tungstenite::Message::Text(text) => {
+                    result.push(serde_json::from_str(&text).unwrap())
+                }
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+    }
+
+    let mut cases = Vec::new();
+    for subscribed in [true, false] {
+        let f = fixture(&pool).await;
+        owner(&pool, &f).await;
+        let (target, token) = member(&pool, f.organization).await;
+        let private = channel(&pool, f.organization, f.member, true).await;
+        grant(&pool, &f, private, target).await;
+        let mut socket = connect(&f, &token).await;
+        if subscribed {
+            subscribe(&mut socket, private, 0).await;
+            let reply = raw_event(&mut socket).await;
+            assert_eq!(reply["type"], "subscribed");
+            assert_eq!(reply["channel_id"], json!(private));
+            assert_eq!(reply["caught_up_seq"], 0);
+        }
+        // Main starts the publisher first; this gate forces its after-state query
+        // to follow the completed recheck under either mutation ordering.
+        let gate = pause_member(f.organization, Uuid::nil(), "target_state", Some(target));
+        // Keep main's concurrent member-list publisher before Authorization::new,
+        // so it cannot contribute an unrelated unproved query to the recheck.
+        let member_gate = pause_member(f.organization, private, "snapshot", None);
+        // Hold the target's list handoff so its two directory publications
+        // coalesce before collection, independent of socket scheduling.
+        let handoff = pause_member(f.organization, Uuid::nil(), "handoff", Some(target));
+        f.state
+            .session_changes
+            .set_subscription_recheck(Arc::new(RecheckBeforePublication {
+                access: f.state.message_delivery.channel_access.clone(),
+                gates: vec![gate.clone(), member_gate],
+            }));
+        let response = request(
+            &f.app,
+            "DELETE",
+            &format!("/api/v1/channels/{private}/members/{target}"),
+            &f.token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        f.state
+            .message_delivery
+            .channel_access
+            .activity
+            .drained()
+            .await;
+        handoff.release.add_permits(1);
+        let received = frames(&f, &mut socket).await;
+        eprintln!("subscribed={subscribed}: {received:?}");
+        let mut expected = vec![
+            json!({"type":"channel_access_revoked","channel_id":private}),
+            json!({"type":"channel_list_changed"}),
+            json!({"type":"members_changed"}),
+        ];
+        if subscribed {
+            expected.push(json!({"type":"channel_access_lost","channel_id":private}));
+        }
+        // A7 promises no ordering between the two event streams or different keys.
+        let mut received = received;
+        received.sort_by_key(Value::to_string);
+        expected.sort_by_key(Value::to_string);
+        cases.push((subscribed, received, expected));
+    }
+    for (subscribed, received, expected) in cases {
+        assert_eq!(received, expected, "subscribed={subscribed}");
+    }
 }
 #[fukulow_test::test]
 async fn revoked_grant_receives_revocation_then_no_activity(pool: PgPool) {
@@ -451,6 +585,8 @@ async fn topic_mark_read_notifies_with_topic_id_and_channel_mark_read_with_null(
 
 #[fukulow_test::test]
 async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool: PgPool) {
+    use crate::channels::activity::{Notice, pause, pause_member};
+
     for phase in ["snapshot", "query", "authorized", "handoff"] {
         let f = fixture(&pool).await;
         owner(&pool, &f).await;
@@ -459,9 +595,41 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
         let private = channel(&pool, f.organization, f.member, true).await;
         grant(&pool, &f, private, target).await;
         grant(&pool, &f, private, control).await;
+        let delivery = &f.state.message_delivery.channel_access.activity;
+        post(&f, private).await;
+        // Finish the automatic publication before registering sockets for the controlled replay below.
+        delivery.drained().await;
+        let denied_dequeue = (phase != "handoff")
+            .then(|| pause_member(f.organization, Uuid::nil(), "dequeue", Some(target)));
+        let allowed_dequeue = pause_member(f.organization, Uuid::nil(), "dequeue", Some(control));
         let mut denied = connect(&f, &token).await;
         let mut allowed = connect(&f, &other).await;
-        let gate = crate::channels::activity::pause_member(
+        for dequeue in denied_dequeue.iter().chain([&allowed_dequeue]) {
+            // Hold dequeue before publication so transition notices and control activity stay buffered.
+            tokio::time::timeout(Duration::from_secs(5), dequeue.entered.acquire())
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
+        }
+        // Join these publishers separately: drained() can then finish the permission-change
+        // tasks while the old publication stays paused outside the spawn capacity semaphore.
+        let publish = |notice, target| {
+            let publisher = delivery.clone();
+            let pool = f.state.pool.clone();
+            let organization = f.organization;
+            tokio::spawn(async move {
+                publisher
+                    .publish(&pool, organization, notice, target, None)
+                    .await
+                    .unwrap();
+            })
+        };
+        let old_activity = || Notice::ChannelActivity {
+            channel_id: private,
+            seq: 1,
+        };
+        let gate = pause_member(
             f.organization,
             private,
             phase,
@@ -471,7 +639,8 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
                 None
             },
         );
-        post(&f, private).await;
+        let publication = publish(old_activity(), None);
+        // The selected boundary has captured old work before either permission transition.
         tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
             .await
             .unwrap()
@@ -480,24 +649,29 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
         // A concurrent member-list publisher must not let its unproved query
         // retire the control's independently authorized activity work.
         let unproved = if matches!(phase, "snapshot" | "authorized") {
-            let unproved = crate::channels::activity::pause(f.organization, private, "query");
-            f.state.message_delivery.channel_access.activity.spawn(
-                f.state.pool.clone(),
-                f.organization,
-                crate::channels::activity::Notice::ChannelMembersChanged {
+            let unproved = pause(f.organization, private, "query");
+            let publication = publish(
+                Notice::ChannelMembersChanged {
                     channel_id: private,
                 },
                 None,
             );
+            // The recheck must encounter this unproved query alongside the old activity work.
             tokio::time::timeout(Duration::from_secs(5), unproved.entered.acquire())
                 .await
                 .unwrap()
                 .unwrap()
                 .forget();
-            Some(unproved)
+            Some((unproved, publication))
         } else {
             None
         };
+        if phase == "query" {
+            // The recheck may fence an unproved query even with unchanged access. Establish
+            // independent authorized control work and keep it buffered through both transitions.
+            // Joining proves this control contribution is authorized and enqueued before the recheck.
+            publish(old_activity(), Some(control)).await.unwrap();
+        }
         let remove = request(
             &f.app,
             "DELETE",
@@ -507,6 +681,8 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
         )
         .await;
         assert_eq!(remove.status(), StatusCode::NO_CONTENT);
+        // The old publishers are separately joined; this waits for all detached revoke notices.
+        delivery.drained().await;
         let add = request(
             &f.app,
             "POST",
@@ -516,33 +692,49 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
         )
         .await;
         assert_eq!(add.status(), StatusCode::NO_CONTENT);
-        if let Some(unproved) = unproved {
+        // Finish every fresh transition publisher before resuming or collecting old work.
+        delivery.drained().await;
+        if let Some((unproved, publication)) = unproved {
             unproved.release.add_permits(1);
+            // Joining proves the unrelated paused publisher has completed, not merely been released.
+            tokio::time::timeout(Duration::from_secs(5), publication)
+                .await
+                .unwrap()
+                .unwrap();
         }
         gate.release.add_permits(1);
+        // Joining completes enqueue; in handoff the released gate is ready before the collection Ping.
+        tokio::time::timeout(Duration::from_secs(5), publication)
+            .await
+            .unwrap()
+            .unwrap();
+        if let Some(dequeue) = denied_dequeue {
+            dequeue.release.add_permits(1);
+        }
+        allowed_dequeue.release.add_permits(1);
         let before = notices(&f, &mut denied).await;
         assert!(
-            !before.contains(&activity(private, 1)),
+            !before.iter().any(|notice| matches!(
+                notice["type"].as_str(),
+                Some("channel_activity" | "activity_reset" | "channel_access_revoked")
+            )),
             "phase={phase}: {before:?}"
         );
         let control = notices(&f, &mut allowed).await;
-        // A fallback during the unproved query may conservatively discard the control's work too.
-        if phase != "query" {
-            assert!(
-                control.contains(&activity(private, 1)),
-                "phase={phase}: {control:?}"
-            );
-        }
-        post(&f, private).await;
         assert!(
-            notices(&f, &mut denied)
-                .await
-                .contains(&activity(private, 2))
+            control.contains(&activity(private, 1)),
+            "phase={phase}: {control:?}"
         );
-        assert!(
-            notices(&f, &mut allowed)
-                .await
-                .contains(&activity(private, 2))
+        post(&f, private).await;
+        assert_eq!(
+            notices(&f, &mut denied).await,
+            vec![activity(private, 2)],
+            "phase={phase}: fresh target activity"
+        );
+        assert_eq!(
+            notices(&f, &mut allowed).await,
+            vec![activity(private, 2)],
+            "phase={phase}: fresh control activity"
         );
     }
 }
@@ -1666,6 +1858,261 @@ async fn guest_directory_loss_discards_older_authorized_notice_but_keeps_fresh_p
     );
 }
 
+fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
+    use crate::auth::{SubscriptionRecheck, SubscriptionScope, activity::*};
+    use crate::channels::activity::{Activity, TestGate, pause};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct OrderedChanges {
+        activity: Activity,
+        started: Arc<AtomicBool>,
+    }
+    impl ActivityChanges for OrderedChanges {
+        fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
+            assert!(matches!(change, ChannelChange::Members { .. }));
+            self.started.store(true, Ordering::SeqCst);
+            self.activity.channel(pool, organization, change);
+        }
+        fn capture<'a>(
+            &'a self,
+            tx: &'a mut sqlx::PgConnection,
+            organization: Uuid,
+            target: Uuid,
+        ) -> Capture<'a> {
+            Box::pin(async move {
+                Ok(Box::new(OrderedChange {
+                    inner: self.activity.capture(tx, organization, target).await?,
+                    started: self.started.clone(),
+                }) as Box<dyn ActivityChange>)
+            })
+        }
+        fn directory(&self, pool: PgPool, organization: Uuid, target: Uuid) {
+            self.activity.directory(pool, organization, target);
+        }
+    }
+    struct OrderedChange {
+        inner: Box<dyn ActivityChange>,
+        started: Arc<AtomicBool>,
+    }
+    impl ActivityChange for OrderedChange {
+        fn retire(&mut self) {
+            self.inner.retire();
+        }
+        fn committed(self: Box<Self>, pool: PgPool) {
+            self.started.store(true, Ordering::SeqCst);
+            self.inner.committed(pool);
+        }
+    }
+    struct OrderedRecheck {
+        access: crate::channels::AccessChanges,
+        started: Arc<AtomicBool>,
+        gate: Arc<TestGate>,
+    }
+    impl SubscriptionRecheck for OrderedRecheck {
+        fn check<'a>(
+            &'a self,
+            pool: &'a PgPool,
+            scope: SubscriptionScope,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                // Force a publisher started before this recheck to expose its unproved
+                // query. A publisher started afterwards passes the already released gate.
+                if self.started.load(Ordering::SeqCst) {
+                    tokio::time::timeout(Duration::from_secs(5), self.gate.entered.acquire())
+                        .await
+                        .expect("a publisher started before the recheck never reached the gate")
+                        .unwrap()
+                        .forget();
+                }
+                let result = self.access.check(pool, scope).await;
+                assert!(result.is_ok(), "mutation recheck failed: {result:?}");
+                self.gate.release.add_permits(1);
+                result
+            })
+        }
+        fn failed(&self, scope: SubscriptionScope) {
+            self.access.failed(scope);
+        }
+    }
+
+    let started = Arc::new(AtomicBool::new(false));
+    let gate = pause(f.organization, channel, phase);
+    f.state
+        .session_changes
+        .set_activity(Arc::new(OrderedChanges {
+            activity: f.state.message_delivery.channel_access.activity.clone(),
+            started: started.clone(),
+        }));
+    f.state
+        .session_changes
+        .set_subscription_recheck(Arc::new(OrderedRecheck {
+            access: f.state.message_delivery.channel_access.clone(),
+            started,
+            gate,
+        }));
+}
+
+#[fukulow_test::test]
+async fn role_change_keeps_target_gain_after_its_own_recheck(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, token) = member(&pool, f.organization).await;
+    role(&pool, &f, target, "guest").await;
+    let (guest, guest_token) = member(&pool, f.organization).await;
+    role(&pool, &f, guest, "guest").await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    let mut own = connect(&f, &token).await;
+    let mut denied = connect(&f, &guest_token).await;
+    let mut control = connect(&f, &f.token).await;
+    order_permission_change(&f, f.channel, "query");
+    let response = request(
+        &f.app,
+        "PATCH",
+        &format!("/api/v1/orgs/{}/members/{target}/role", f.organization),
+        &f.token,
+        json!({"role":"member"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let own = notices(&f, &mut own).await;
+    let control = notices(&f, &mut control).await;
+    let denied = notices(&f, &mut denied).await;
+    assert!(
+        own.contains(&json!({"type":"channel_access_gained","channel_id":f.channel})),
+        "target={own:?}, control={control:?}, ungranted Guest={denied:?}"
+    );
+    assert!(control.contains(&json!({"type":"members_changed"})));
+    assert!(denied.is_empty(), "ungranted Guest={denied:?}");
+    assert!(
+        !own.iter()
+            .any(|notice| notice["channel_id"] == json!(private)),
+        "private non-member={own:?}"
+    );
+}
+
+#[fukulow_test::test]
+async fn role_change_keeps_member_notice_after_its_own_recheck(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, token) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, private, target).await;
+    let (_, outside_token) = member(&pool, f.organization).await;
+    let (guest, guest_token) = member(&pool, f.organization).await;
+    role(&pool, &f, guest, "guest").await;
+    let mut own = connect(&f, &token).await;
+    let mut control = connect(&f, &f.token).await;
+    let mut outside = connect(&f, &outside_token).await;
+    let mut denied = connect(&f, &guest_token).await;
+    order_permission_change(&f, private, "members_query");
+    let response = request(
+        &f.app,
+        "PATCH",
+        &format!("/api/v1/orgs/{}/members/{target}/role", f.organization),
+        &f.token,
+        json!({"role":"admin"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let own = notices(&f, &mut own).await;
+    let control = notices(&f, &mut control).await;
+    let outside = notices(&f, &mut outside).await;
+    let denied = notices(&f, &mut denied).await;
+    let changed = json!({"type":"channel_members_changed","channel_id":private});
+    assert!(
+        own.contains(&changed),
+        "target={own:?}, control={control:?}, private non-member={outside:?}"
+    );
+    assert!(control.contains(&changed), "control={control:?}");
+    assert_eq!(outside, vec![json!({"type":"members_changed"})]);
+    assert!(denied.is_empty(), "ungranted Guest={denied:?}");
+}
+
+#[fukulow_test::test]
+async fn permission_change_keeps_member_notice_after_its_own_recheck(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, _) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    grant(&pool, &f, private, target).await;
+    let delivery = &f.state.message_delivery.channel_access.activity;
+    delivery.drained().await;
+    let mut control = connect(&f, &f.token).await;
+    let (_, outside_token) = member(&pool, f.organization).await;
+    let mut denied = connect(&f, &outside_token).await;
+    let mut transitions = Vec::new();
+    for remove in [true, false] {
+        order_permission_change(&f, private, "members_query");
+        let (method, path, body) = if remove {
+            (
+                "DELETE",
+                format!("/api/v1/channels/{private}/members/{target}"),
+                Value::Null,
+            )
+        } else {
+            (
+                "POST",
+                format!("/api/v1/channels/{private}/members"),
+                json!({"member_id":target}),
+            )
+        };
+        let response = request(&f.app, method, &path, &f.token, body).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        transitions.push((
+            method,
+            notices(&f, &mut control).await,
+            notices(&f, &mut denied).await,
+        ));
+    }
+    // Finish both transitions even in the negative check, proving that both legitimate
+    // invalidations can be lost without saturation, coalescing or an unfinished publisher.
+    for (method, received, denied) in &transitions {
+        assert!(
+            received.contains(&json!({"type":"channel_members_changed","channel_id":private})),
+            "method={method}: transitions={transitions:?}"
+        );
+        assert!(
+            !denied.contains(&json!({"type":"channel_members_changed","channel_id":private})),
+            "method={method}: private non-member notices={denied:?}"
+        );
+    }
+}
+
+#[fukulow_test::test]
+async fn permission_change_keeps_target_gain_after_its_own_recheck(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (target, token) = member(&pool, f.organization).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    let mut own = connect(&f, &token).await;
+    let mut control = connect(&f, &f.token).await;
+    let (_, outside_token) = member(&pool, f.organization).await;
+    let mut denied = connect(&f, &outside_token).await;
+    order_permission_change(&f, private, "query");
+    let response = request(
+        &f.app,
+        "POST",
+        &format!("/api/v1/channels/{private}/members"),
+        &f.token,
+        json!({"member_id":target}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let own = notices(&f, &mut own).await;
+    let control = notices(&f, &mut control).await;
+    let denied = notices(&f, &mut denied).await;
+    assert!(
+        own.contains(&json!({"type":"channel_access_gained","channel_id":private})),
+        "target={own:?}, control={control:?}, private non-member={denied:?}"
+    );
+    assert!(control.contains(&json!({"type":"channel_members_changed","channel_id":private})));
+    assert_eq!(denied, vec![json!({"type":"members_changed"})]);
+}
+
 #[fukulow_test::test]
 async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool: PgPool) {
     for phase in ["snapshot", "revoked", "handoff"] {
@@ -1725,10 +2172,11 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
             changed.contains(&json!({"type":"channel_access_gained","channel_id":private})),
             "{phase}: {changed:?}"
         );
+        let control_notices = notices(&f, &mut control).await;
         assert!(
-            notices(&f, &mut control)
-                .await
-                .contains(&json!({"type":"channel_members_changed","channel_id":private}))
+            control_notices
+                .contains(&json!({"type":"channel_members_changed","channel_id":private})),
+            "phase={phase}: control notices={control_notices:?}"
         );
         post(&f, private).await;
         assert_eq!(notices(&f, &mut own).await, vec![activity(private, 1)]);
@@ -1771,6 +2219,9 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
         }
     }
     impl ActivityChange for DelayedChange {
+        fn retire(&mut self) {
+            self.change.retire();
+        }
         fn committed(self: Box<Self>, pool: PgPool) {
             tokio::spawn(async move {
                 self.entered.add_permits(1);

@@ -7,8 +7,8 @@ it('notifies each input before its ordered effects and preserves repeated-stop g
   const sync = createSync({ selfId: 'me', connect: () => {
     log.push('connect')
     return { send: () => {}, close: () => { log.push('close') } }
-  }, api: {
-    listMessages: async () => { log.push('history'); return { ok: true, data: { messages: [], has_more: false } } },
+  }, api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+    listMessages: async () => { log.push('history'); return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } } },
     sendMessage: async () => ({ ok: false, kind: 'network' }),
   } })
   const a = sync.getTimeline('A'), b = sync.getTimeline('B')

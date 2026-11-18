@@ -21,7 +21,10 @@ async fn mark(app: &Router, token: &str, channel: Uuid, topic: Option<&str>, seq
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    body(response).await
+    let mut page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    page.as_object_mut().unwrap().remove("history_generation");
+    page
 }
 
 async fn post(app: &Router, token: &str, channel: Uuid, topic: Option<&str>) -> Value {
@@ -323,6 +326,7 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
 mod access;
 mod concurrency;
 mod context;
+mod count_plans;
 mod denials;
 mod measurement;
 mod policy;

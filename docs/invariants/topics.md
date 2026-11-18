@@ -40,6 +40,8 @@ Topics, server and web, incl. their real-time delivery tests. Writing rules and 
 
 ## Rows in other parts
 
+- [sync](sync.md): `#message-state-versions`
+
 - [channels](channels.md): `only_current_pair_participants_read_write_retry_and_discover`, `guests_cannot_open_but_participate_and_every_management_and_topic_route_denies`, `reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread`, `existing_channels_grants_messages_and_unread_survive_dm_migration`
 - [messages](messages.md): `send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions`, `default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime`
 - [realtime](realtime.md): `dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_denied`, `dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does_not_restore_access`, `dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_recovers_first_message`
@@ -60,3 +62,7 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [messages](messages.md): `mention_shared_surfaces_keep_sets_and_follow_non_author_rename`, `mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic`
 - [unread](unread.md): `mention_counts_dedup_own_independent_positions_marks_and_no_backfill`
+
+- [sync](sync.md): `an unpinned main window updates retained identities without inserting out-of-window mutations`, `a Topic latest read started after retirement cannot resurrect a subsequently retired tombstone`
+
+- [messages](messages.md): `fixed_windows_expire_atomically_but_creations_keep_old_watermarks`, `page_watermarks_share_the_mutation_snapshot_after_the_commit_barrier`

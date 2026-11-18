@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { countRepliesByMessageId, repliesAdapter } from './replies.svelte'
+import { repliesAdapter } from './replies.svelte'
 import { syncAdapter } from './sync.svelte'
 import { ok, reply, replyClient, root } from './reply-test-helpers'
 import { mount, settle } from './adapter-test-helpers.svelte'
@@ -12,7 +12,7 @@ it('opens only anchors from the adapter Channel and preserves both chains on a m
   const a = repliesAdapter(c.replies, 'A'), b = repliesAdapter(c.replies, 'B')
   await a.open(root())
   const bRoot = { ...root(), channel_id: 'B' }
-  c.listReplyChain.mockResolvedValueOnce(ok({ root_id: bRoot.id, messages: [bRoot], has_more: false }))
+  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([bRoot]).at(-1)?.created_seq ?? 0,  root_id: bRoot.id, messages: [bRoot], has_more: false }))
   await b.open(bRoot)
   const beforeA = a.state, beforeB = b.state
   const requests = c.listReplyChain.mock.calls.length
@@ -39,7 +39,7 @@ it('memoizes chain adapter snapshots while observed and unobserved and forwards 
   expect(active).toBe(1)
   expect(one.last).toBe(initial)
   c.event(reply(2)); await settle()
-  expect(one.last.messages.map(m => m.seq)).toEqual([1, 2, 3])
+  expect(one.last.messages.map(m => m.created_seq)).toEqual([1, 2, 3])
   expect(one.last).toBe(adapter.state)
   expect(one.last).not.toBe(initial)
   await adapter.send('hello')
@@ -68,15 +68,6 @@ it('composition close and replacement clear observed chains and fence adapter re
   expect(view.last.messages).toEqual([])
   await adapter.open(root()); expect(adapter.state.messages).toEqual([])
   await view.unmount(); expect(vi.getTimerCount()).toBe(0)
-})
-
-it('countRepliesByMessageId deduplicates messages across sources and counts by reply_root_id and reply_to', () => {
-  const m1 = root()
-  const r2 = reply(2, 'id1')
-  const r3 = reply(3, 'id2')
-  const counts = countRepliesByMessageId([[m1, r2], [m1, r2, r3]])
-  expect(counts.get('id1')).toBe(2)
-  expect(counts.get('id2')).toBe(1)
 })
 
 it('channel.reply(replyRootId) manages per-chain drafts, hasUnsavedChanges, submit, detached refusal restore and restore()', async () => {
@@ -114,7 +105,7 @@ it('channel.reply(replyRootId) manages per-chain drafts, hasUnsavedChanges, subm
   )
   expect(retryablePending).toBeDefined()
   await rc.retry(retryablePending!.clientMessageId)
-  expect(c.sendMessage).toHaveBeenLastCalledWith('A', {
+  expect(c.sendMessage).toHaveBeenLastCalledWith('A', { history_generation: '00000000-0000-4000-8000-000000000515',
     client_message_id: retryablePending!.clientMessageId,
     body: 'コールド子孫への返信',
     reply_to: 'cold-descendant-id',

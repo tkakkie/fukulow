@@ -1,3 +1,5 @@
+import type { Message } from './api'
+
 /** Maximum characters (Unicode scalar values) of a Message body announced in the polite status region (`docs/ui.md` §6). */
 export const LIVE_MESSAGE_PREVIEW_MAX = 80
 
@@ -10,15 +12,8 @@ export const RECONNECT_ANNOUNCE_DELAY_MS = 2_000
 /** Loading timeout (ms) after which a still-loading state shows the retryable error (`docs/ui.md` §5). */
 export const LOADING_TIMEOUT_MS = 10_000
 
-export type AnnounceableMessage = {
-  id: string
-  seq: number
-  sender: string
-  body: string
-  topic_id?: string | null
-  reply_to?: string | null
-  reply_root_id?: string | null
-}
+export type AnnounceableMessage = Pick<Message, 'id' | 'created_seq' | 'sender' | 'body'> &
+  Partial<Pick<Message, 'topic_id' | 'reply_to' | 'reply_root_id'>>
 
 export type AnnouncementState = {
   viewId: string
@@ -114,14 +109,14 @@ function sameSeqs(set: ReadonlySet<number>, list: readonly number[]): boolean {
 }
 
 /** Truncates a Message body to at most `maxScalars` Unicode scalar values with collapsed whitespace (`docs/ui.md` §6). */
-export function formatMessagePreview(body: string, maxScalars = LIVE_MESSAGE_PREVIEW_MAX): string {
-  const normalized = body.replace(/\s+/g, ' ').trim()
+export function formatMessagePreview(body: string | null | undefined, maxScalars = LIVE_MESSAGE_PREVIEW_MAX): string {
+  const normalized = (body ?? '').replace(/\s+/g, ' ').trim()
   const scalars = [...normalized]
   return scalars.slice(0, maxScalars).join('')
 }
 
 /** Formats a single live Message announcement (`田中 美咲: 本文の先頭 80 文字`, `docs/ui.md` §6). */
-export function formatLiveMessageAnnouncement(senderName: string, body: string): string {
+export function formatLiveMessageAnnouncement(senderName: string, body: string | null | undefined): string {
   const name = senderName.trim() || 'メンバー'
   return `${name}: ${formatMessagePreview(body)}`
 }
@@ -205,9 +200,9 @@ export function stepAnnouncements(
     }
 
     case 'timeline_updated': {
-      const minSeq = input.messages[0]?.seq ?? null
-      const maxSeq = input.messages.at(-1)?.seq ?? null
-      const seqList = input.messages.map((m) => m.seq)
+      const minSeq = input.messages[0]?.created_seq ?? null
+      const maxSeq = input.messages.at(-1)?.created_seq ?? null
+      const seqList = input.messages.map((m) => m.created_seq)
 
       if (input.viewId !== prev.viewId || !prev.initialized) {
         const initialized = input.status === 'ready' || input.messages.length > 0
@@ -281,14 +276,14 @@ export function stepAnnouncements(
       }
 
       const seenSeqs = seqsUnchanged ? prev.seenSeqs : new Set(seqList)
-      const added = seqsUnchanged ? [] : input.messages.filter((m) => !prev.seenSeqs.has(m.seq))
-      const addedAtTail = added.filter((m) => prev.maxSeq === null || m.seq > prev.maxSeq)
-      const addedBelowTail = added.filter((m) => prev.maxSeq !== null && m.seq <= prev.maxSeq)
+      const added = seqsUnchanged ? [] : input.messages.filter((m) => !prev.seenSeqs.has(m.created_seq))
+      const addedAtTail = added.filter((m) => prev.maxSeq === null || m.created_seq > prev.maxSeq)
+      const addedBelowTail = added.filter((m) => prev.maxSeq !== null && m.created_seq <= prev.maxSeq)
 
       const isContiguousTail =
         addedAtTail.length > 0 &&
         addedAtTail.every((m, idx) =>
-          idx === 0 ? prev.maxSeq === null || m.seq === prev.maxSeq + 1 : m.seq === addedAtTail[idx - 1].seq + 1,
+          idx === 0 ? prev.maxSeq === null || m.created_seq === prev.maxSeq + 1 : m.created_seq === addedAtTail[idx - 1].created_seq + 1,
         )
 
       // Per spec S3, replay finishes before `subscribed` (`live`), and pages/fills either insert below `maxSeq` or jump non-contiguously.
@@ -302,8 +297,8 @@ export function stepAnnouncements(
       const newLiveFromOthers = isLiveTailDelivery
         ? addedAtTail.filter(
             (m) =>
-              m.sender !== input.selfId &&
-              !prev.announcedSeqs.has(m.seq) &&
+              m.body != null && m.sender !== input.selfId &&
+              !prev.announcedSeqs.has(m.created_seq) &&
               ((input.replyChainIds !== undefined &&
                 (input.replyChainIds.has(m.id) ||
                   (m.reply_to != null && input.replyChainIds.has(m.reply_to)) ||
@@ -317,7 +312,9 @@ export function stepAnnouncements(
 
       // Preserve arrival order: only the ready prefix enters the normal coalescing
       // window. Known senders wait only when an earlier live Message is pending.
-      const queued = [...prev.deferredMessages, ...newLiveFromOthers]
+      const current = new Map(input.messages.map(m => [m.id, m]))
+      const deferred = prev.deferredMessages.map(m => current.get(m.id) ?? m).filter(m => m.body != null)
+      const queued = [...deferred, ...newLiveFromOthers]
       const pendingIndex = queued.findIndex(m => input.isSenderPending?.(m.sender))
       const liveFromOthers = pendingIndex < 0 ? queued : queued.slice(0, pendingIndex)
       const deferredMessages = pendingIndex < 0 ? [] : queued.slice(pendingIndex)
@@ -326,8 +323,8 @@ export function stepAnnouncements(
       if (!seqsUnchanged || prev.deferredMessages.length > 0) {
         const nextAnnounced = new Set(prev.announcedSeqs)
         for (const s of seenSeqs) nextAnnounced.add(s)
-        for (const m of liveFromOthers) nextAnnounced.add(m.seq)
-        for (const m of deferredMessages) nextAnnounced.delete(m.seq)
+        for (const m of liveFromOthers) nextAnnounced.add(m.created_seq)
+        for (const m of deferredMessages) nextAnnounced.delete(m.created_seq)
         announcedSeqs = nextAnnounced
       }
 

@@ -15,10 +15,10 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - #197 app-wide CSP allows external same-origin scripts/styles and explicit ws(s)://Host, plus nosniff, strict-origin-when-cross-origin and frame-ancestors none on errors too. Validated Host preserves proxy ports; forwarded headers cannot widen CSP.
 - #197 HSTS max-age=31536000 lives at TLS termination in both profiles (#469), without includeSubDomains/preload. nginx derives it from $https; Caddy skips localhost/loopback to avoid breaking other dev ports. HTTP challenge responses and redirects never send HSTS.
 - #401: app and both proxies send COOP same-origin and empty Permissions-Policy feature allowlists, including errors. No current web API needs an exception. App covers optional direct access; proxies cover own errors. Maintainer browser acceptance gates deployment; regressions need a decision.
-- #197 Vite manifest outputs alone get one-year immutable caching; HTML, SPA fallback and unhashed files revalidate. API keeps no-store. Both proxies exclude /api and /api/* from compression to avoid compressing secrets; Caddy uses zstd/gzip, nginx gzip for HTML/CSS/JS/SVG.
+- #197 Vite manifest outputs alone get one-year immutable caching; HTML, SPA fallback and unhashed files revalidate. API keeps no-store and is never compressed. #486 replaces proxy compression with build-time Brotli negotiation in the asset handler to reduce transfer bytes.
 - #196 keeps four shared Argon2 workers (~76 MiB hashing memory), adds 32 waiting slots and a 1 s admission deadline: small bursts queue without unbounded retained requests. Setup and Invite hashing share the bound; running work retains its permit after HTTP cancellation.
 - #196 Argon2 admission uses 503 ErrorBody `password admission unavailable` and jittered Retry-After 1-5 s, matching operation-specific admission errors. Known/unknown emails share admission; rejection spends no failure budget or session token entropy.
-- #340 runtime image sets glibc `MALLOC_MMAP_THRESHOLD_=131072`: freed 19 MiB Argon2 blocks return to the OS (flood RSS peak 660 -> 90 MiB, idle 14 MiB) with no write throughput or p95/p99 regression. glibc-only: re-measure when the base image or libc changes.
+- #340 runtime image sets glibc `MALLOC_MMAP_THRESHOLD_=131072`: freed 19 MiB Argon2 blocks return to the OS (RSS peak 660 -> 90 MiB, idle 14 MiB), no throughput/p95/p99 regression on bookworm. glibc-only: re-measure on libc change. Trixie, glibc 2.41 (#513): RSS holds; throughput, p95/p99 unverified.
 - #196 sign-in validates, reserves IP/email budgets, then admits before Account lookup, passing one permit to verification. 429 precedes 503; rejected admission touches no DB. Permits cover lookup plus hashing; overload can mask DB errors and slow lookups reduce hashing utilization.
 - Account Session cleanup is opportunistic: one global 1,000-row expired batch per permitted minute, single flight, 2 s deadline / 1 s statement timeout; no scheduler (#146, replacing the #53/#73 per-Organization design).
 - #146 migration refuses duplicate lower(email) across Organizations and reports all of them; it never merges Accounts or compares password hashes. Old sessions are dropped; users sign in again (no compatibility path).
@@ -113,3 +113,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [web](web.md): `Capabilities ({allowed, reason?}) come from authorize:`
 
 - [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`, `#311 The private-Channel trigger locks its Channel row`
+
+- [messages](messages.md): `#515 uses Organization UUID epochs`

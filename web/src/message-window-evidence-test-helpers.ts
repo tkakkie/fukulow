@@ -48,40 +48,40 @@ export async function evidenceClient() {
   c.records[1] = { ...c.records[1], topic_id: 'U' }
   let readSeq = 0
   const reads = { main: 0, history: 0, reply: 0, summary: 0, unread: 0, mark: 0 }
-  const summary = (topic: string, w = c.records.at(-1)!.seq): TopicSummary => {
-    const rows = c.records.filter(m => m.topic_id === topic && m.seq <= w)
-    return { mention_unread_count: 0, id: topic, name: topic, first_seq: rows[0].seq, last_seq: rows.at(-1)!.seq,
+  const summary = (topic: string, w = c.records.at(-1)!.created_seq): TopicSummary => {
+    const rows = c.records.filter(m => m.topic_id === topic && m.created_seq <= w)
+    return { mention_unread_count: 0, id: topic, name: topic, first_seq: rows[0].created_seq, last_seq: rows.at(-1)!.created_seq,
       latest_message: rows.at(-1)!, message_count: rows.length, read_seq: topic === 'T' ? readSeq : 0,
-      unread_count: rows.filter(m => m.seq > (topic === 'T' ? readSeq : 0)).length }
+      unread_count: rows.filter(m => m.created_seq > (topic === 'T' ? readSeq : 0)).length }
   }
   c.options.listTimeline = async (_channel, query = {}) => {
     reads.main++
-    const w = query.as_of_seq ?? c.records.at(-1)!.seq
-    return ok({ as_of_seq: w, has_more: false, items: ['T', 'U'].map(t => summary(t, w))
+    const w = query.as_of_seq ?? c.records.at(-1)!.created_seq
+    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: w, has_more: false, items: ['T', 'U'].map(t => summary(t, w))
       .filter(t => t.last_seq < (query.before_position ?? Infinity)).sort((a, b) => a.last_seq - b.last_seq)
       .map(topic => ({ kind: 'topic', topic })) })
   }
   c.options.getTopicSummary = async (_channel, topic) => {
-    reads.summary++; return ok({ as_of_seq: c.records.at(-1)!.seq, topic: summary(topic) })
+    reads.summary++; return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: c.records.at(-1)!.created_seq, topic: summary(topic) })
   }
   c.options.listTopicMessages = async (_channel, topic, query = {}) => {
     reads.history++
-    const rows = c.records.filter(m => m.topic_id === topic && m.seq < (query.before_seq ?? Infinity))
-    return ok({ messages: rows.slice(-50), has_more: rows.length > 50 })
+    const rows = c.records.filter(m => m.topic_id === topic && m.created_seq < (query.before_seq ?? Infinity))
+    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (rows.slice(-50)).at(-1)?.created_seq ?? 0,  messages: rows.slice(-50), has_more: rows.length > 50 })
   }
   const unread = createUnread(c.sync, { topics: c.topics, api: {
     async listChannels() {
       reads.unread++
-      return ok({ channels: [row({ as_of_seq: c.records.at(-1)!.seq,
-        read_seq: 0, main_unread_count: 0, unread_count: c.records.length - c.records.filter(m => m.topic_id === 'T' && m.seq <= readSeq).length })] })
+      return ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: c.records.at(-1)!.created_seq,
+        read_seq: 0, main_unread_count: 0, unread_count: c.records.length - c.records.filter(m => m.topic_id === 'T' && m.created_seq <= readSeq).length })] })
     },
     getTopicSummary: c.options.getTopicSummary,
-    async markRead(scope, body) { reads.mark++; if (scope.topicId === 'T') readSeq = Math.max(readSeq, body.read_seq); return ok(body) },
+    async markRead(scope, body) { reads.mark++; if (scope.topicId === 'T') readSeq = Math.max(readSeq, body.read_seq); return ok({ ...body, history_generation: '00000000-0000-4000-8000-000000000515' }) },
   } })
   const replies = createReplies(c.sync, { api: { async listReplyChain(_channel, _anchor, query = {}) {
     reads.reply++
-    const rows = c.records.filter(m => (m.id === 'id1' || m.reply_root_id === 'id1') && m.seq > (query.after_seq ?? 0))
-    return ok({ root_id: 'id1', messages: rows.slice(0, 50), has_more: rows.length > 50 })
+    const rows = c.records.filter(m => (m.id === 'id1' || m.reply_root_id === 'id1') && m.created_seq > (query.after_seq ?? 0))
+    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (rows.slice(0, 50)).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: rows.slice(0, 50), has_more: rows.length > 50 })
   } } })
   await c.boot(); await c.topics.loadTopic('A', 'T'); await replies.open('A', c.records[0])
   unread.visibility(true); const visit = (await unread.enter({ channel: 'A', topicId: 'T' }))!

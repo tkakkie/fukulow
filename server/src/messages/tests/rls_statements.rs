@@ -120,13 +120,22 @@ async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: 
                     (true, None, true),
                     "{mode}: access_rows"
                 );
-                let bodies =
-                    |page: Vec<Message>| page.into_iter().map(|m| m.body).collect::<Vec<_>>();
+                let bodies = |page: Vec<messages::ChannelEvent>| {
+                    page.into_iter()
+                        .map(|m| m.message.body.unwrap())
+                        .collect::<Vec<_>>()
+                };
                 assert_eq!(
                     bodies(
-                        messages::replay_page(&single, organization_id, channel_id, 0, 20)
-                            .await
-                            .unwrap()
+                        messages::replay_page(
+                            &single,
+                            organization_id,
+                            channel_id,
+                            10 * index as i64,
+                            20
+                        )
+                        .await
+                        .unwrap()
                     ),
                     expected,
                     "{mode}: replay_page"
@@ -138,7 +147,7 @@ async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: 
                             organization_id,
                             member,
                             channel_id,
-                            0,
+                            10 * index as i64,
                             20
                         )
                         .await

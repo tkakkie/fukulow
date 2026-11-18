@@ -99,7 +99,7 @@ async fn reply_ambiguous_commit_reconnect_recovers_without_a_later_send(pool: Pg
     assert_eq!(event(&mut reconnect).await["message"], canonical);
     ready(&mut reconnect, f.channel, 2).await;
     assert_eq!(canonical["reply_root_id"], root["id"]);
-    assert_eq!(canonical["seq"], 2);
+    assert_eq!(canonical["created_seq"], 2);
     f.state.message_delivery.flush().await;
     silent(&mut reconnect).await;
 }

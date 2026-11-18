@@ -37,7 +37,7 @@ page AS MATERIALIZED (
     ORDER BY last_seq DESC LIMIT $7
 )
 SELECT access.visible, w.as_of_seq, p.first_seq, p.last_seq,
-    p.message_count, p.read_seq, p.unread_count, mc.mention_unread_count, t.name, m.id, m.channel_id, m.seq, m.client_message_id,
+    p.message_count, p.read_seq, p.unread_count, mc.mention_unread_count, t.name, m.id, m.channel_id, m.seq, m.version, m.client_message_id,
     m.sender, m.body, m.topic_id, m.reply_to_id AS reply_to, m.reply_root_id,
     to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
 FROM access CROSS JOIN w LEFT JOIN page p ON true
@@ -58,6 +58,7 @@ ORDER BY p.last_seq DESC
 }
 
 struct Projection {
+    history_generation: Uuid,
     w: i64,
     items: Vec<TimelineItem>,
     has_more: bool,
@@ -85,18 +86,28 @@ async fn read(
         reject_dm_topics_scoped(state, auth, channel).await?;
     }
     tokio::time::timeout(admission::WORK_TIMEOUT, async {
-        let w = super::watermark(state, organization, channel).await?;
-        if query.as_of_seq.is_some_and(|requested| requested > w) {
-            return Err(MessageError::InvalidInput);
-        }
-        let w = query.as_of_seq.unwrap_or(w);
-        // The barrier and its permit are released. Immutable seq <= W is complete;
-        // this fresh statement snapshots authorization and projection data together.
-        let rows = crate::database::organization_read_only(
+        super::watermark(state, organization, channel).await?;
+        // Admission resolves prior ambiguous commits; W is selected in the page snapshot.
+        let (history_generation, rows) = crate::database::organization_read_only(
             &state.pool,
             organization,
             async |tx: &mut sqlx::PgConnection| {
-                sqlx::query(&page_sql())
+                require_visible(
+                    &mut *tx,
+                    organization,
+                    (auth.identity.member.id, auth.membership_revision),
+                    channel,
+                )
+                .await?;
+                let (history_generation, w) = history::page(
+                    tx,
+                    organization,
+                    channel,
+                    query.history_generation,
+                    query.as_of_seq,
+                )
+                .await?;
+                let rows = sqlx::query(&page_sql())
                     // Repeated reads otherwise select a much slower generic plan (#326).
                     .persistent(false)
                     .bind(organization)
@@ -109,7 +120,8 @@ async fn read(
                     .bind(topics_only)
                     .bind(topic)
                     .fetch_all(tx)
-                    .await
+                    .await?;
+                Ok::<_, MessageError>((history_generation, rows))
             },
         )
         .await?;
@@ -146,7 +158,12 @@ async fn read(
         let has_more = items.len() > usize::from(limit);
         items.truncate(usize::from(limit));
         items.reverse();
-        Ok(Projection { w, items, has_more })
+        Ok(Projection {
+            history_generation,
+            w,
+            items,
+            has_more,
+        })
     })
     .await
     .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
@@ -159,6 +176,7 @@ async fn read(
     responses((status = 200, description = "Ascending W-relative positions; initial page fixes W, exclusive older continuation uses as_of_seq and before_position; cursor-neutral", body = TimelinePage),
         (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found; private and unknown Channels are identical", body = ErrorBody),
         (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
             headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
@@ -175,6 +193,7 @@ pub async fn list_timeline(
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(TimelinePage {
+            history_generation: p.history_generation,
             as_of_seq: p.w,
             items: p.items,
             has_more: p.has_more,
@@ -190,6 +209,7 @@ pub async fn list_timeline(
     responses((status = 200, description = "W-relative Topic summaries; default 50/max 200, ascending positions and exclusive older continuation; cursor-neutral", body = TopicPage),
         (status = 400, description = "Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found", body = ErrorBody),
         (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
             headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
@@ -214,6 +234,7 @@ pub async fn list_topics(
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(TopicPage {
+            history_generation: p.history_generation,
             as_of_seq: p.w,
             topics,
             has_more: p.has_more,
@@ -224,11 +245,12 @@ pub async fn list_topics(
 
 /// Current bounded baseline for a Topic first encountered through live delivery.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}",
-    params(("org" = Uuid, Path), ("id" = Uuid, Path), ("topic_id" = Uuid, Path)),
+    params(("org" = Uuid, Path), ("id" = Uuid, Path), ("topic_id" = Uuid, Path), fukulow_api::HistoryQuery),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "One absolute Topic baseline as of a barrier-protected W; cursor-neutral", body = TopicSummaryResponse),
         (status = 400, description = "Invalid Organization id, Channel id or Topic id", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
+        (status = 409, description = "history_generation_changed for a stale Organization epoch; snapshot_expired for a fixed watermark below the Channel mutation floor; no partial page", body = crate::auth::ErrorBody),
         (status = 404, description = "organization_unavailable, channel not found or topic_not_found; unknown and foreign Topics are identical", body = ErrorBody),
         (status = 503, description = "Projection watermark admission unavailable; Retry-After gives retry seconds", body = ErrorBody,
             headers(("Retry-After" = inline(crate::auth::RetryAfterSeconds), description = "Jittered retry delay in seconds (1 through 5)"))),
@@ -237,13 +259,16 @@ pub async fn topic_summary(
     State(state): State<AppState>,
     auth: Auth,
     path: Result<Path<(Uuid, Uuid, Uuid)>, PathRejection>,
+    query: Result<Query<fukulow_api::HistoryQuery>, QueryRejection>,
 ) -> Result<Response, MessageError> {
     let Path((_, channel, topic)) = path.map_err(|_| MessageError::InvalidInput)?;
+    let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let p = read(
         &state,
         &auth,
         channel,
         ListProjectionQuery {
+            history_generation: query.history_generation,
             as_of_seq: None,
             before_position: None,
             limit: Some(1),
@@ -258,6 +283,7 @@ pub async fn topic_summary(
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(TopicSummaryResponse {
+            history_generation: p.history_generation,
             as_of_seq: p.w,
             topic,
         }),

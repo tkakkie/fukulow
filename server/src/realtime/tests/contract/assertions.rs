@@ -32,8 +32,11 @@ pub(super) enum Assertion {
     Read,
 }
 
-async fn read(client: &mut Client) -> Result<tungstenite::Message, Assertion> {
-    match tokio::time::timeout(Duration::from_secs(5), message_next(client)).await {
+async fn read<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: &mut WebSocketStream<S>,
+    expected_pong: Option<&[u8]>,
+) -> Result<tungstenite::Message, Assertion> {
+    match tokio::time::timeout(Duration::from_secs(5), delivery_next(client, expected_pong)).await {
         Ok(Some(Ok(frame))) => Ok(frame),
         other => {
             eprintln!("contract read failed: {other:?}");
@@ -42,16 +45,24 @@ async fn read(client: &mut Client) -> Result<tungstenite::Message, Assertion> {
     }
 }
 
-pub(super) async fn json(
-    client: &mut Client,
-    expected: Value,
+pub(super) async fn json<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: &mut WebSocketStream<S>,
+    mut expected: Value,
     assertion: Assertion,
 ) -> Result<(), Assertion> {
-    let frame = read(client).await?;
+    let frame = read(client, None).await?;
     let actual = match &frame {
         tungstenite::Message::Text(text) => serde_json::from_str::<Value>(text).ok(),
         _ => None,
     };
+    if expected["type"] == "subscribed" {
+        let generation = actual
+            .as_ref()
+            .and_then(|v| v["history_generation"].as_str())
+            .ok_or(assertion)?;
+        Uuid::parse_str(generation).map_err(|_| assertion)?;
+        expected["history_generation"] = json!(generation);
+    }
     if actual.as_ref() != Some(&expected) {
         eprintln!("{assertion:?}: expected {expected}, got {frame:?}");
         return Err(assertion);
@@ -59,8 +70,11 @@ pub(super) async fn json(
     Ok(())
 }
 
-pub(super) async fn closed(client: &mut Client, code: u16) -> Result<(), Assertion> {
-    let frame = read(client).await?;
+pub(super) async fn closed<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: &mut WebSocketStream<S>,
+    code: u16,
+) -> Result<(), Assertion> {
+    let frame = read(client, None).await?;
     if !matches!(&frame, tungstenite::Message::Close(Some(close)) if u16::from(close.code) == code)
     {
         eprintln!("expected close {code}, got {frame:?}");
@@ -69,14 +83,14 @@ pub(super) async fn closed(client: &mut Client, code: u16) -> Result<(), Asserti
     Ok(())
 }
 
-pub(super) async fn silence(
-    client: &mut Client,
+pub(super) async fn silence<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    client: &mut WebSocketStream<S>,
     channel: Uuid,
     caught_up_seq: i64,
 ) -> Result<(), Assertion> {
     // Reject an already readable event/close before writing on a possibly closed
     // socket. Absence here proves nothing; only the drain barrier below does.
-    if let Some(frame) = message_next(client).now_or_never() {
+    if let Some(frame) = delivery_next(client, None).now_or_never() {
         eprintln!("unexpected traffic before silence barrier: {frame:?}");
         return match frame {
             Some(Ok(_)) => Err(Assertion::Silence),
@@ -106,7 +120,8 @@ pub(super) async fn silence(
         Assertion::Silence,
     )
     .await?;
-    let frame = read(client).await?;
+    // Keep the nonce Pong observable: ordinary delivery reads discard Pongs.
+    let frame = read(client, Some(&nonce)).await?;
     if frame != tungstenite::Message::Pong(nonce.into()) {
         eprintln!("expected barrier pong, got {frame:?}");
         return Err(Assertion::Silence);
@@ -132,6 +147,7 @@ pub(super) async fn barrier_controls(
     control(
         client,
         ClientMessage::Subscribe {
+            history_generation: None,
             channel_id: channel,
             after_seq: caught_up_seq,
         },

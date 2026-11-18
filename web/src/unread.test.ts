@@ -18,7 +18,7 @@ it('batched Topic snapshots equal independent scope counts with read progress ow
   await c.topics.loadTopic('A', 'T'); await c.topics.loadTopic('A', 'U')
   const live = [msg(4, 'T'), msg(5, 'U'), msg(6, 'V', 'me'), msg(7, 'T'), msg(8, 'U'), msg(9), msg(10, 'T', 'me'), msg(11, 'U')]
   for (const m of [...live, live[0], live[3], live[7]]) c.event(m)
-  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 6, has_more: false,
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, has_more: false,
     topics: [summary('T', 4, 2, 1), summary('U', 5, 3, 1), summary('V', 6, 0, 0)] }))
   await c.topics.loadList('A'); await c.present([4, 7], 'T')
   const snapshot = c.unread.get('A'), records = [...c.history, ...live, live[0], live[3], live[7]]
@@ -64,9 +64,9 @@ it('serializes Channel-list refreshes across reconnect with only one queued fetc
   c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250)
   c.handlers.at(-1)!.onReady(); await flush()
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
-  old.resolve(ok({ channels: [row({ as_of_seq: 4 })] })); await pending; await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 4 })] })); await pending; await flush()
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
-  next.resolve(ok({ channels: [row({ as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 })] })); await flush()
+  next.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 })] })); await flush()
   expect(c.unread.get('A')).toMatchObject({ asOfSeq: 4, unreadCount: 0, main: { position: 4, unreadCount: 0 } })
   await vi.advanceTimersByTimeAsync(1000)
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
@@ -100,7 +100,7 @@ it.each(['in flight', 'scheduled'])('recovers a Channel list below the bootstrap
   expect(c.unread.get('A')).toMatchObject({ unreadCount: null, main: { unreadCount: null, error: false } })
   c.rows[0] = row({ as_of_seq: 4 })
   c.unread.leave(id); await flush()
-  stale.resolve(ok({ channels: [row({ as_of_seq: 2, unread_count: 9, main_unread_count: 9 })] })); await flush()
+  stale.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 2, unread_count: 9, main_unread_count: 9 })] })); await flush()
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
   expect(c.unread.get('A')).toMatchObject({ asOfSeq: 4, unreadCount: 3, main: { unreadCount: 1, error: false } })
   await vi.advanceTimersByTimeAsync(30_000)
@@ -122,21 +122,21 @@ it('recovers a failed Channel list after leaving fences its scheduled retry', as
   await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
 it.each([
-  { rule: 'larger as_of_seq', fresh: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }),
-    stale: row({ as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2 }) },
-  { rule: 'larger read_seq at equal as_of_seq', fresh: row({ as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 }),
-    stale: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }) },
-  { rule: 'smaller main counts at equal as_of_seq and read_seq', fresh: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 1 }),
-    stale: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }) },
-  { rule: 'smaller Topic counts at equal as_of_seq and read_seq', fresh: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 1 }),
-    stale: row({ as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 3 }) },
+  { rule: 'larger as_of_seq', fresh: row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }),
+    stale: row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2 }) },
+  { rule: 'larger read_seq at equal as_of_seq', fresh: row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 }),
+    stale: row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }) },
+  { rule: 'smaller main counts at equal as_of_seq and read_seq', fresh: row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 1 }),
+    stale: row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 1, main_unread_count: 3, unread_count: 3 }) },
+  { rule: 'smaller Topic counts at equal as_of_seq and read_seq', fresh: row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 1 }),
+    stale: row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 1, main_unread_count: 1, unread_count: 3 }) },
 ])('selects $rule through production refresh in both serial freshness orders', async ({ fresh, stale }) => {
   // These are later-issued stale snapshots, not overlapping requests completing in reverse order.
   for (const responses of [[fresh, stale], [stale, fresh]]) {
     const c = unreadClient(); await c.boot(); c.event(msg(5)); await flush()
     const n = c.unreadApi.listChannels.mock.calls.length
     for (const response of responses) {
-      c.unreadApi.listChannels.mockResolvedValueOnce(ok({ channels: [response] })); await c.unread.refresh()
+      c.unreadApi.listChannels.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [response] })); await c.unread.refresh()
     }
     expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
     expect(c.unread.get('A')).toMatchObject({ asOfSeq: fresh.as_of_seq, unreadCount: fresh.unread_count + 1,
@@ -158,10 +158,10 @@ it('fences a timed-out Channel list when its older response arrives after the re
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
   await vi.advanceTimersByTimeAsync(1)
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
-  retry.resolve(ok({ channels: [row({ as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 })] })); await flush()
+  retry.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 0 })] })); await flush()
   const fresh = c.unread.get('A')
   expect(fresh).toMatchObject({ asOfSeq: 4, unreadCount: 1, main: { position: 4, unreadCount: 1 } })
-  old.resolve(ok({ channels: [row({ as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2 })] })); await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, read_seq: 0, main_unread_count: 2, unread_count: 2 })] })); await flush()
   expect(c.unread.get('A')).toEqual(fresh)
   await vi.advanceTimersByTimeAsync(1000)
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
@@ -186,7 +186,7 @@ it('leaves live-only Topics unresolved until their W-relative summary is loaded'
   expect(c.unread.get('A').topics.New).toBeUndefined()
   expect(c.unread.get('A').unreadCount).toBe(4)
   c.summaries.set('New', summary('New', 4, 0, 1))
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 4, topic: summary('New', 4, 0, 1) }))
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('New', 4, 0, 1) }))
   await c.topics.loadSummary('A', 'New'); await flush()
   expect(c.unread.get('A').topics.New.unreadCount).toBe(1)
   expect(c.unreadApi.markRead).not.toHaveBeenCalled()
@@ -198,15 +198,15 @@ it('recovers a Topic baseline below the bootstrap base after leaving fences its 
   const old = deferred<Result<TopicSummaryResponse>>(), fresh = deferred<Result<TopicSummaryResponse>>()
   c.unreadApi.getTopicSummary.mockClear()
   c.unreadApi.getTopicSummary.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise)
-  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ as_of_seq: 2, has_more: false, topics: [summary('V', 2)] }))
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, has_more: false, topics: [summary('V', 2)] }))
   await c.topics.loadList('A'); await flush()
   expect(c.unread.get('A').topics.V).toMatchObject({ position: 0, unreadCount: null, error: false })
   expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(1)
   c.unread.leave(id); await flush()
   expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(2)
-  old.resolve(ok({ as_of_seq: 3, topic: summary('V', 3, 0, 2) })); await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: summary('V', 3, 0, 2) })); await flush()
   expect(c.unread.get('A').topics.V.unreadCount).toBeNull()
-  fresh.resolve(ok({ as_of_seq: 3, topic: summary('V', 3, 0, 1) })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: summary('V', 3, 0, 1) })); await flush()
   expect(c.unread.get('A').topics.V).toMatchObject({ position: 0, unreadCount: 1, error: false })
   await vi.advanceTimersByTimeAsync(30_000)
   expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(2)
@@ -218,8 +218,8 @@ it('retries a first Topic summary below the trusted bootstrap base until a curre
   expect(c.unread.get('A').topics.T).toBeUndefined()
   c.unreadApi.getTopicSummary.mockClear()
   const fresh = deferred<Result<TopicSummaryResponse>>()
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 2, topic: summary('T', 2) }))
-    .mockResolvedValueOnce(ok({ as_of_seq: 2, topic: summary('T', 2) })).mockReturnValueOnce(fresh.promise)
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, topic: summary('T', 2) }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, topic: summary('T', 2) })).mockReturnValueOnce(fresh.promise)
   await c.enter('T')
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
   expect(c.unread.get('A').entry?.boundary).toBeNull()
@@ -235,7 +235,7 @@ it('retries a first Topic summary below the trusted bootstrap base until a curre
   expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(3)
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
   expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  fresh.resolve(ok({ as_of_seq: 3, topic: summary('T', 2) })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: summary('T', 2) })); await flush()
   expect(c.unread.get('A').topics.T).toMatchObject({ position: 0, unreadCount: 1, error: false, stopped: false })
   expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1 })
   await vi.advanceTimersByTimeAsync(1000)
@@ -255,12 +255,12 @@ it.each([null, 'T'])('replays confirmed presentations buffered before the %s bas
   c.unread.presented(id, [1, 2, 3, 4, 99]); await flush()
   expect(c.unreadApi.markRead).not.toHaveBeenCalled()
   const position = topicId === null ? 1 : 2
-  if (topicId === null) baseline.resolve(ok({ channels: [row({ as_of_seq: 4, read_seq: position, main_unread_count: 1 })] }))
-  else topic.resolve(ok({ as_of_seq: 4, topic: summary(topicId, 4, position, 1) }))
+  if (topicId === null) baseline.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: position, main_unread_count: 1 })] }))
+  else topic.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary(topicId, 4, position, 1) }))
   await flush()
   expect(c.unread.get('A').entry).toMatchObject({ boundary: position, unreadAtEntry: 1 })
-  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith({ channel: 'A', topicId }, { read_seq: 4 })
-  mark.resolve(ok({ read_seq: 4 })); await flush()
+  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith({ channel: 'A', topicId }, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 4 })
+  mark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 4 })); await flush()
   const scope = topicId === null ? c.unread.get('A').main : c.unread.get('A').topics[topicId]
   expect(scope).toMatchObject({ position: 4, unreadCount: 0 })
   expect(c.unread.get('A').entry?.boundary).toBe(position)
@@ -278,18 +278,18 @@ it.each(['visibility', 'navigation', 'unwatch', 'C9', 'Account replacement', 'Or
   if (reason === 'C9') await c.sync.channelUnavailable('A')
   if (reason === 'Account replacement') await c.sync.replaceSession('next')
   if (reason === 'Organization switch') await c.sync.close()
-  fresh.resolve(ok({ as_of_seq: 3, topic: summary('T', 2) })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: summary('T', 2) })); await flush()
   await vi.advanceTimersByTimeAsync(500)
   expect(c.unreadApi.markRead).not.toHaveBeenCalled()
   if (reason === 'visibility') {
     c.unread.presented(id, [2]); await flush()
-    expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith({ channel: 'A', topicId: 'T' }, { read_seq: 2 })
+    expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith({ channel: 'A', topicId: 'T' }, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 2 })
   }
   await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
 it('collects Topic-list baselines outside the loaded main timeline without marking or entering them', async () => {
   const c = unreadClient()
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 3, has_more: true,
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: true,
     items: [{ kind: 'topic', topic: summary('U', 3) }] }))
   await c.boot()
   expect(c.unread.get('A').topics.T).toBeUndefined()
@@ -303,7 +303,7 @@ it('collects Topic-list baselines outside the loaded main timeline without marki
 })
 it('marks only presented main rows and keeps hidden Topic Messages Unread', async () => {
   const c = unreadClient(); await c.boot(); await c.present([1, 2, 3])
-  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { read_seq: 1 })
+  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })
   expect(c.unread.get('A').main.unreadCount).toBe(0)
   expect(c.unread.get('A').topics.T.unreadCount).toBe(1)
   expect(c.unread.get('A').unreadCount).toBe(2)
@@ -317,7 +317,7 @@ it.each(['hidden', 'background', 'replay', 'prefetch', 'gap fill', 'off-screen o
   else { c.event(msg(4)); await c.topics.loadMain('A'); await c.topics.loadTopic('A', 'T') }
   await flush(); expect(c.unreadApi.markRead).not.toHaveBeenCalled()
   c.unread.visibility(true); c.unread.presented(id, [1]); await flush()
-  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { read_seq: 1 })
+  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })
   await c.sync.close()
 })
 it('own confirmed sends neither count nor advance and skipped unseen rows are never marked', async () => {
@@ -326,7 +326,7 @@ it('own confirmed sends neither count nor advance and skipped unseen rows are ne
   expect(c.unread.get('A').unreadCount).toBe(4)
   c.unread.presented(id, [4, 5]); await flush(); expect(c.unreadApi.markRead).not.toHaveBeenCalled()
   c.unread.presented(id, [1]); await flush()
-  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { read_seq: 5 })
+  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 5 })
   expect(c.unread.get('A').unreadCount).toBe(2)
   await c.sync.close()
 })
@@ -335,8 +335,8 @@ it('coalesces duplicate intents and queues only the highest update per scope', a
   const d = deferred<Result<ReadPosition>>(); c.unreadApi.markRead.mockReturnValueOnce(d.promise)
   const id = await c.present([1]); c.unread.presented(id, [1]); c.event(msg(4)); c.unread.presented(id, [4]); c.event(msg(5)); c.unread.presented(id, [5]); await flush()
   expect(c.unreadApi.markRead).toHaveBeenCalledTimes(1)
-  d.resolve(ok({ read_seq: 1 })); await flush()
-  expect(c.unreadApi.markRead.mock.calls.map(call => call[1])).toEqual([{ read_seq: 1 }, { read_seq: 5 }])
+  d.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(call => call[1])).toEqual([{ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 }, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 5 }])
   expect(c.unread.get('A').main.position).toBe(5)
   await c.sync.close()
 })
@@ -355,7 +355,7 @@ it('times out and fences reversed mark responses while merging positions by max'
   const id = await c.present([1]); c.event(msg(4)); c.unread.presented(id, [4])
   await vi.advanceTimersByTimeAsync(1500); await flush()
   expect(c.unread.get('A').main.position).toBe(4)
-  old.resolve(ok({ read_seq: 1 })); await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })); await flush()
   expect(c.unread.get('A').main.position).toBe(4)
   await c.sync.close()
 })
@@ -363,10 +363,10 @@ it('merges a delayed successful mark by max after a fresh REST baseline advances
   const c = unreadClient(); await c.boot()
   const mark = deferred<Result<ReadPosition>>(); c.unreadApi.markRead.mockReturnValueOnce(mark.promise)
   await c.present([1])
-  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { read_seq: 1 })
-  c.rows[0] = row({ as_of_seq: 10, read_seq: 10, main_unread_count: 0, unread_count: 2 })
+  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith(main, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })
+  c.rows[0] = row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, read_seq: 10, main_unread_count: 0, unread_count: 2 })
   await c.unread.refresh(); expect(c.unread.get('A').main.position).toBe(10)
-  mark.resolve(ok({ read_seq: 1 })); await flush()
+  mark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })); await flush()
   expect(c.unread.get('A').main.position).toBe(10)
   expect(c.unread.get('A').main.unreadCount).toBe(0)
   await c.sync.close()
@@ -376,44 +376,44 @@ it('queues a fresh Topic summary behind reconnect and stays unresolved until its
   const mark = deferred<Result<ReadPosition>>(), old = deferred<Result<TopicSummaryResponse>>(), fresh = deferred<Result<TopicSummaryResponse>>()
   c.unreadApi.markRead.mockReturnValueOnce(mark.promise)
   await c.present([2], 'T')
-  c.unreadApi.getTopicSummary.mockReturnValueOnce(old.promise).mockResolvedValueOnce(ok({ as_of_seq: 3, topic: summary('U', 3) }))
+  c.unreadApi.getTopicSummary.mockReturnValueOnce(old.promise).mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: summary('U', 3) }))
     .mockReturnValueOnce(fresh.promise)
   c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush()
   const n = c.unreadApi.getTopicSummary.mock.calls.length
-  mark.resolve(ok({ read_seq: 20 })); await flush()
+  mark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 20 })); await flush()
   expect(c.unread.get('A').topics.T).toMatchObject({ position: 20, unreadCount: null })
   expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(n)
   const observed: (number | null)[] = []
   const release = c.unread.subscribe(() => { observed.push(c.unread.get('A').topics.T.unreadCount) })
-  old.resolve(ok({ as_of_seq: 20, topic: summary('T', 20, 1, 18) })); await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, topic: summary('T', 20, 1, 18) })); await flush()
   expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(n + 1)
   expect(c.unreadApi.getTopicSummary).toHaveBeenLastCalledWith('A', 'T')
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
-  fresh.resolve(ok({ as_of_seq: 20, topic: summary('T', 20, 2, 18) })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, topic: summary('T', 20, 2, 18) })); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
   expect(observed.every(count => count === null)).toBe(true)
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ as_of_seq: 20, topic: summary('T', 20, 20, 0) }))
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, topic: summary('T', 20, 20, 0) }))
   await vi.advanceTimersByTimeAsync(500); await flush()
   expect(c.unread.get('A').topics.T).toMatchObject({ position: 20, unreadCount: 0, error: false })
   release(); await c.sync.close()
 })
 it('accepts a server clamp without repeated subtraction and stays zero after a fresh baseline', async () => {
   const c = unreadClient(); await c.boot(); c.event(msg(4))
-  c.unreadApi.markRead.mockResolvedValueOnce(ok({ read_seq: 1 }))
+  c.unreadApi.markRead.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 }))
   const id = await c.present([1, 4]); expect(c.unread.get('A').main.position).toBe(1)
   expect(c.unread.get('A').main.unreadCount).toBe(1)
   c.unread.presented(id, [4]); await flush()
   expect(c.unread.get('A').main.unreadCount).toBe(0)
-  c.rows[0] = row({ as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 2 }); await c.unread.refresh()
+  c.rows[0] = row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, read_seq: 4, main_unread_count: 0, unread_count: 2 }); await c.unread.refresh()
   expect(c.unread.get('A').main.unreadCount).toBe(0)
   await c.sync.close()
 })
 it('requires a fresh baseline for a persisted position beyond the submitted loaded prefix', async () => {
   const c = unreadClient(); await c.boot()
   const d = deferred<Result<ChannelList>>(); c.unreadApi.listChannels.mockReturnValueOnce(d.promise)
-  c.unreadApi.markRead.mockResolvedValueOnce(ok({ read_seq: 20 }))
+  c.unreadApi.markRead.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 20 }))
   await c.present([1]); expect(c.unread.get('A').main.unreadCount).toBeNull()
-  d.resolve(ok({ channels: [row({ as_of_seq: 20, read_seq: 20, main_unread_count: 0, unread_count: 2 })] })); await flush()
+  d.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 20, read_seq: 20, main_unread_count: 0, unread_count: 2 })] })); await flush()
   expect(c.unread.get('A').main.position).toBe(20); expect(c.unread.get('A').main.unreadCount).toBe(0)
   await c.sync.close()
 })
@@ -434,7 +434,7 @@ it.each([400, 403, 404])('never retries definite mark %s and preserves other tar
   expect(c.unread.get('A').main.position).toBe(0); expect(c.sync.get().channels.A.state).toBe('ready'); expect(c.unread.get('B').stopped).toBe(false)
   const b = (await c.unread.enter({ channel: 'B', topicId: null }))!
   c.unread.presented(b, [1]); await flush()
-  expect(c.unreadApi.markRead).toHaveBeenLastCalledWith({ channel: 'B', topicId: null }, { read_seq: 1 })
+  expect(c.unreadApi.markRead).toHaveBeenLastCalledWith({ channel: 'B', topicId: null }, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })
   await c.present([2], 'T'); expect(c.unreadApi.markRead).toHaveBeenCalledTimes(3)
   await c.sync.close()
 })
@@ -451,7 +451,7 @@ it('Topic-only mark refetches the aggregate without changing main or guessing it
   await c.present([2], 'T')
   expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
   expect(c.unread.get('A').main.position).toBe(0); expect(c.unread.get('A').unreadCount).toBe(1)
-  d.resolve(ok({ channels: [row({ main_unread_count: 0, unread_count: 0 })] })); await flush()
+  d.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ main_unread_count: 0, unread_count: 0 })] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(0); expect(c.unread.get('A').main.unreadCount).toBe(0)
   await c.sync.close()
 })
@@ -460,7 +460,7 @@ it('reading some Topics drops only their counts and reapplies each live Topic su
   const d = deferred<Result<ChannelList>>(); c.unreadApi.listChannels.mockReturnValueOnce(d.promise)
   await c.present([2], 'T'); c.event(msg(4, 'T')); c.event(msg(5, 'U')); c.event(msg(5, 'U')); await flush()
   expect(c.unread.get('A').unreadCount).toBe(5)
-  d.resolve(ok({ channels: [row({ as_of_seq: 4, unread_count: 3 })] })); await flush()
+  d.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 4, unread_count: 3 })] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(4)
   expect(c.unread.get('A').topics.T.unreadCount).toBe(1)
   expect(c.unread.get('A').topics.U.unreadCount).toBe(2)
@@ -475,11 +475,11 @@ it('coalesces pre-confirmation refetches and rejects stale and lower-W aggregate
   void c.unread.refresh(); await flush(); await c.present([2], 'T')
   void c.unread.refresh(); void c.unread.refresh(); await flush()
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(before + 1)
-  old.resolve(ok({ channels: [row({ as_of_seq: 4, unread_count: 4 })] })); await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 4, unread_count: 4 })] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(3)
   expect(c.unread.get('A').asOfSeq).toBe(3)
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(before + 2)
-  fresh.resolve(ok({ channels: [row({ as_of_seq: 4, unread_count: 3 })] })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 4, unread_count: 3 })] })); await flush()
   c.rows[0] = row({ as_of_seq: 2, unread_count: 3 }); await c.unread.refresh()
   expect(c.unread.get('A').unreadCount).toBe(3)
   await c.sync.close()
@@ -488,7 +488,7 @@ it('keeps the last REST counts on unwatch and ignores subsequent live updates an
   const c = unreadClient(); await c.boot(); c.event(msg(4)); expect(c.unread.get('A').unreadCount).toBe(4)
   const d = deferred<Result<ChannelList>>(); c.unreadApi.listChannels.mockReturnValueOnce(d.promise); void c.unread.refresh(); await flush()
   const n = c.unreadApi.listChannels.mock.calls.length
-  await c.sync.unwatch('A'); c.event(msg(5)); d.resolve(ok({ channels: [row({ unread_count: 20 })] })); await flush()
+  await c.sync.unwatch('A'); c.event(msg(5)); d.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ unread_count: 20 })] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(3); expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n)
   await c.sync.close()
 })
@@ -522,11 +522,11 @@ it.each(['navigation', 'unwatch', 'access loss and re-grant', 'C8 reset', 'Organ
   if (reason === 'unwatch') await c.sync.unwatch('A')
   if (reason === 'access loss and re-grant') { await c.sync.channelUnavailable('A'); await c.sync.watch('A'); await flush() }
   if (reason === 'C8 reset') { c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(500); c.handlers.at(-1)!.onReady(); await flush()
-    c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush() }
+    c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush() }
   if (reason === 'Organization switch') await c.sync.close()
   if (reason === 'Account replacement') await c.sync.replaceSession('new')
   const snapshot = c.unread.get('A'), n = c.unreadApi.markRead.mock.calls.length
-  mark.resolve(ok({ read_seq: 99 })); list.resolve(ok({ channels: [row({ as_of_seq: 99, read_seq: 99, unread_count: 99 })] })); await flush()
+  mark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 99 })); list.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 99, read_seq: 99, unread_count: 99 })] })); await flush()
   await vi.advanceTimersByTimeAsync(2000); await flush()
   expect(c.unread.get('A').main.position).not.toBe(99); expect(c.unread.get('A').unreadCount).not.toBe(99)
   expect(c.unreadApi.markRead).toHaveBeenCalledTimes(n)
@@ -539,7 +539,7 @@ it.each(['navigation', 'unwatch', 'C9', 'C8', 'Organization switch', 'Account re
   if (reason === 'unwatch') await c.sync.unwatch('A')
   if (reason === 'C9') await c.sync.channelUnavailable('A')
   if (reason === 'C8') { c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush()
-    c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush() }
+    c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush() }
   if (reason === 'Organization switch') await c.sync.close()
   if (reason === 'Account replacement') await c.sync.replaceSession('new')
   await vi.advanceTimersByTimeAsync(2000); expect(c.unreadApi.markRead).toHaveBeenCalledTimes(1)
@@ -551,7 +551,7 @@ it.each(['navigation', 'unwatch', 'C9', 'C8', 'Organization switch', 'Account re
   if (reason === 'navigation') c.unread.leave()
   if (reason === 'unwatch') await c.sync.unwatch('A')
   if (reason === 'C9') await c.sync.channelUnavailable('A')
-  if (reason === 'C8') { c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush(); c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush() }
+  if (reason === 'C8') { c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(250); c.handlers.at(-1)!.onReady(); await flush(); c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush() }
   if (reason === 'Organization switch') await c.sync.close()
   if (reason === 'Account replacement') await c.sync.replaceSession('new')
   d.resolve(http(401)); await flush()
@@ -570,7 +570,7 @@ it('organization_unavailable and 4003 stop only their Organization while 4001 en
 })
 it('retains a visit boundary while positions advance and takes a new boundary on the next entry', async () => {
   const c = unreadClient(); await c.boot(); const id = await c.enter()
-  expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { seq: 1 }, needsOlder: false })
+  expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { created_seq: 1 }, needsOlder: false })
   c.unread.presented(id, [1]); await flush(); await c.unread.refresh()
   expect(c.unread.get('A').entry?.boundary).toBe(0); expect(c.unread.get('A').main.position).toBe(1)
   // The stale list is below the confirmed position; the next visit waits for recovery.
@@ -582,7 +582,7 @@ it('retains a visit boundary while positions advance and takes a new boundary on
 })
 it('requires older projection coverage for first Unread and never marks across a window gap', async () => {
   const c = unreadClient()
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ as_of_seq: 3, has_more: true, items: [{ kind: 'message', message: msg(3) }] }))
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: true, items: [{ kind: 'message', message: msg(3) }] }))
   await c.boot(); const id = await c.enter()
   expect(c.unread.get('A').entry?.needsOlder).toBe(true)
   c.unread.presented(id, [3]); await flush(); expect(c.unreadApi.markRead).not.toHaveBeenCalled()
@@ -608,10 +608,10 @@ it('several Topic confirmations queue one Organization refetch issued after the 
   await c.present([2], 'T'); await c.present([3], 'U')
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
   expect(c.unread.get('A').unreadCount).toBe(3)
-  old.resolve(ok({ channels: [row({ unread_count: 2 })] })); await flush()
+  old.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ unread_count: 2 })] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(3)
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 2)
-  fresh.resolve(ok({ channels: [row({ unread_count: 1 })] })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ unread_count: 1 })] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(1)
   expect(c.unread.get('A').topics.T.unreadCount).toBe(0); expect(c.unread.get('A').topics.U.unreadCount).toBe(0)
   await c.sync.close()
@@ -621,19 +621,19 @@ it('holds the old aggregate live suffix through Topic confirmation until a post-
   const mark = deferred<Result<ReadPosition>>(), list = deferred<Result<ChannelList>>()
   c.unreadApi.markRead.mockReturnValueOnce(mark.promise); c.unreadApi.listChannels.mockReturnValueOnce(list.promise)
   await c.present([2, 4], 'T'); expect(c.unread.get('A').unreadCount).toBe(5)
-  mark.resolve(ok({ read_seq: 4 })); await flush()
+  mark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 4 })); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBe(0); expect(c.unread.get('A').unreadCount).toBe(5)
   c.event(msg(6, 'T')); expect(c.unread.get('A').unreadCount).toBe(6)
-  list.resolve(ok({ channels: [row({ as_of_seq: 5, unread_count: 3 })] })); await flush()
+  list.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 5, unread_count: 3 })] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(4)
   await c.sync.close()
 })
 it('C8 resets positions and counts and automatically bootstraps the restored history generation', async () => {
   const c = unreadClient(); await c.boot(); await c.present([1])
-  c.rows[0] = row({ as_of_seq: 0, read_seq: 0, main_unread_count: 0, unread_count: 0 })
-  c.topicsApi.listTimeline.mockResolvedValue(ok({ as_of_seq: 0, has_more: false, items: [] }))
+  c.rows[0] = row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, read_seq: 0, main_unread_count: 0, unread_count: 0 })
+  c.topicsApi.listTimeline.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, has_more: false, items: [] }))
   c.handlers[0].onClose(1006); await vi.advanceTimersByTimeAsync(500); c.handlers.at(-1)!.onReady(); await flush()
-  c.handlers.at(-1)!.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush()
+  c.handlers.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 0 }); await flush()
   expect(c.unread.get('A').main.position).toBe(0); expect(c.unread.get('A').unreadCount).toBe(0)
   c.event(msg(1)); expect(c.unread.get('A').main.unreadCount).toBe(1)
   await c.present([1]); expect(c.unreadApi.markRead).toHaveBeenCalledTimes(2)
@@ -644,10 +644,10 @@ it('re-grant replaces old Topic positions with a fresh access baseline automatic
   await c.sync.channelUnavailable('A')
   const fresh = deferred<Result<TopicSummaryResponse>>()
   c.unreadApi.getTopicSummary.mockReturnValue(fresh.promise)
-  c.rows[0] = row({ as_of_seq: 10, read_seq: 10, main_unread_count: 0, unread_count: 0 })
+  c.rows[0] = row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, read_seq: 10, main_unread_count: 0, unread_count: 0 })
   await c.sync.watch('A'); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
-  fresh.resolve(ok({ as_of_seq: 10, topic: summary('T', 10, 10, 0) })); await flush()
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: summary('T', 10, 10, 0) })); await flush()
   expect(c.unread.get('A').topics.T.position).toBe(10); expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
   await c.sync.close()
 })
@@ -777,8 +777,8 @@ it('a failed Topic count stays unresolved during live events until its retry suc
   const fresh = deferred<Result<TopicSummaryResponse>>(); c.unreadApi.getTopicSummary.mockReturnValueOnce(fresh.promise)
   const id = await c.enter('T'); c.unread.presented(id, [2, 4]); await flush()
   expect(c.unread.get('A').topics.T.unreadCount).toBeNull(); expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  fresh.resolve(ok({ as_of_seq: 4, topic: summary('T', 4, 0, 2) })); await flush()
-  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith({ channel: 'A', topicId: 'T' }, { read_seq: 4 })
+  fresh.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, 0, 2) })); await flush()
+  expect(c.unreadApi.markRead).toHaveBeenCalledExactlyOnceWith({ channel: 'A', topicId: 'T' }, { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 4 })
   expect(c.unread.get('A').topics.T).toMatchObject({ position: 4, unreadCount: 0 })
   await c.sync.close()
 })
@@ -828,11 +828,11 @@ it('refetches counts after bootstrap covers history newer than the initial Chann
   expect(c.unread.get('A').unreadCount).toBe(1)
   const n = c.unreadApi.listChannels.mock.calls.length
   c.unreadApi.listChannels.mockReturnValueOnce(counts.promise)
-  projection.resolve(ok({ as_of_seq: 3, has_more: false, items: [{ kind: 'message', message: msg(1) },
+  projection.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, items: [{ kind: 'message', message: msg(1) },
     { kind: 'topic', topic: summary('T', 2) }, { kind: 'topic', topic: summary('U', 3) }] })); await flush()
   expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(n + 1)
   expect(c.unread.get('A').unreadCount).toBeNull()
-  counts.resolve(ok({ channels: [row()] })); await flush()
+  counts.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row()] })); await flush()
   expect(c.unread.get('A').unreadCount).toBe(3)
   await c.sync.close()
 })
@@ -841,7 +841,7 @@ it('an authoritative regrant baseline updates the badge without reviving a C9 Ch
   const c = unreadClient(); await c.boot()
   await c.sync.channelUnavailable('A')
   c.unread.activityAccess('A')
-  c.unread.activitySnapshot([row({ as_of_seq: 8, read_seq: 7, unread_count: 1, main_unread_count: 1 })])
+  c.unread.activitySnapshot([row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 8, read_seq: 7, unread_count: 1, main_unread_count: 1 })])
   expect(c.unread.get('A').unreadCount).toBe(1)
   expect(c.sync.get().channels.A.state).toBe('unavailable')
   await c.sync.close()
@@ -849,11 +849,42 @@ it('an authoritative regrant baseline updates the badge without reviving a C9 Ch
 
 it('periodic access reconciliation replaces unwatched baselines even when the new W and read position are lower', async () => {
   const c = unreadClient(); await c.boot(); await c.sync.unwatch('A')
-  c.unread.activitySnapshot([row({ as_of_seq: 100, read_seq: 90, main_unread_count: 2, unread_count: 5 })])
+  c.unread.activitySnapshot([row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 100, read_seq: 90, main_unread_count: 2, unread_count: 5 })])
   const generation = c.unread.get('A').generation
   c.unread.activityReconcile()
-  c.unread.activitySnapshot([row({ as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0 })])
+  c.unread.activitySnapshot([row({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, read_seq: 2, main_unread_count: 0, unread_count: 0 })])
   expect(c.unread.get('A')).toMatchObject({ asOfSeq: 2, unreadCount: 0 })
   expect(c.unread.get('A').generation).not.toBe(generation)
   await c.sync.close()
+})
+
+it('refetches baseline W100 for Message90 mutations v101', async () => {
+  for (const change of ['delete', 'remove mention', 'add mention'] as const) {
+    const c = unreadClient()
+    const mentions = change === 'add mention' ? [] : [{ member_id: 'me', name: 'Me' }]
+    await c.boot()
+    c.event({ ...msg(90), mentions }); await flush()
+    c.rows[0] = row({ as_of_seq: 100, main_unread_count: 1, unread_count: 1,
+      main_mention_unread_count: mentions.length, mention_unread_count: mentions.length })
+    await c.unread.refresh()
+    expect(c.unread.get('A').main.mentionUnreadCount).toBe(mentions.length)
+    const pending = deferred<Result<ChannelList>>()
+    c.unreadApi.listChannels.mockReturnValueOnce(pending.promise)
+    const calls = c.unreadApi.listChannels.mock.calls.length
+    const message = { ...msg(90), version: 101, deleted: change === 'delete',
+      mentions: change === 'add mention' ? [{ member_id: 'me', name: 'Me' }] : [] }
+    c.handlers.at(-1)!.onEvent({ type: 'message', seq: 101, kind: change === 'delete' ? 'delete' : 'edit', message })
+    await flush()
+    expect(c.unreadApi.listChannels).toHaveBeenCalledTimes(calls + 1)
+    expect(c.unread.get('A').main.unreadCount).toBeNull()
+    expect(c.unread.get('A').main.mentionUnreadCount).toBeNull()
+    expect(scopeCount({ asOfSeq: 100, readSeq: 0, count: 1, mentionCount: mentions.length }, 0, [message], main, 'me')).toBeNull()
+    pending.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 101, unread_count: change === 'delete' ? 0 : 1,
+      main_unread_count: change === 'delete' ? 0 : 1, mention_unread_count: change === 'add mention' ? 1 : 0,
+      main_mention_unread_count: change === 'add mention' ? 1 : 0 })] }))
+    await flush()
+    expect(c.unread.get('A').main.unreadCount).toBe(change === 'delete' ? 0 : 1)
+    expect(c.unread.get('A').main.mentionUnreadCount).toBe(change === 'add mention' ? 1 : 0)
+    await c.sync.close()
+  }
 })

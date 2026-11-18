@@ -1,6 +1,6 @@
 // Test-only identity bridge, also used by the wasm tests in #465.
 import { createHash } from 'node:crypto'
-import type { Input } from '../src/protocol.ts'
+import type { Input } from '../src/protocol-types.ts'
 
 export function fixtureUuid(symbol: string): string {
   if (/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(symbol)) return symbol.toLowerCase()

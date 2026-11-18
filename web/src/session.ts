@@ -6,6 +6,7 @@ import { createChannelMembers } from './channel-members'
 import { createChannels, type ChannelsApi } from './channels'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
 import { repliesApi, type RepliesApi } from './replies'
+import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
 import type { SyncOptions } from './sync'
 import { createTopicSync } from './topic-sync'
@@ -20,6 +21,7 @@ export type SessionOptions = {
   onEnded: () => void
   channelsApi?: ChannelsApi
   topicsApi?: TopicsApi
+  replyCountsApi?: ReplyCountsApi
   repliesApi?: RepliesApi
   unreadApi?: UnreadApi
   dmsApi?: DmsApi
@@ -36,10 +38,17 @@ export function createSession(options: SessionOptions) {
   const notifyEnded = () => { if (!ended) { ended = true; options.onEnded() } }
   let unavailable = false
   let dms: Dms | undefined
+  let history: ReturnType<typeof createTopicSync>['sync'] | undefined
   const observe = async <T>(promise: Promise<api.Result<T>>): Promise<api.Result<T>> => {
+    const epoch = history?.get().historyEpoch
     const result = await promise
     if (!result.ok && result.kind === 'http' && result.status === 401) notifyEnded()
     else if (!closed && api.isOrganizationUnavailable(result)) terminate()
+    if (!closed && history && (epoch === undefined || epoch === history.get().historyEpoch)) {
+      const generation = result.ok && result.data && typeof result.data === 'object' && 'history_generation' in result.data ? result.data.history_generation : undefined
+      if (typeof generation === 'string' && !history.observeHistoryGeneration(generation)) return { ok: false, kind: 'network' }
+      if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { history.observeHistoryGeneration(); return { ok: false, kind: 'network' } }
+    } else if (result.ok && epoch !== undefined && epoch !== history?.get().historyEpoch) return { ok: false, kind: 'network' }
     return result
   }
   const activity = createActivity({
@@ -61,19 +70,21 @@ export function createSession(options: SessionOptions) {
     random: options.sync?.random,
   })
   const source = options.channelsApi ?? {
-    listChannels: signal => api.listChannels(organizationId, undefined, signal),
+    listChannels: signal => api.listChannels(organizationId, undefined, signal, { history_generation: history?.get().historyGeneration }),
     createChannel: body => api.createChannel(organizationId, body),
   }
   const timeline = options.sync?.api ?? {
+    listChannelEvents: (channel, query) => api.listChannelEvents(organizationId, channel, query),
     listMessages: (channel, query) => api.listMessages(organizationId, channel, query),
     sendMessage: (channel, body) => api.sendMessage(organizationId, channel, body),
   } satisfies NonNullable<SyncOptions['api']>
-  const topicSource = options.topicsApi ?? topicsApi(organizationId)
+  const topicSource = options.topicsApi ?? topicsApi(organizationId, () => history?.get().historyGeneration)
   const replySource = options.repliesApi ?? repliesApi(organizationId)
-  const unreadSource = options.unreadApi ?? unreadApi(organizationId)
+  const unreadSource = options.unreadApi ?? unreadApi(organizationId, () => history?.get().historyGeneration)
   const topicComposition = createTopicSync({ ...options.sync, activity, selfId: options.selfId, organizationId,
     isDm: id => dms?.get().rows.some(row => row.identity.id === id) ?? false,
-    api: { listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
+    api: { listChannelEvents: (channel, query) => observe(timeline.listChannelEvents(channel, query)),
+      listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
       sendMessage: async (channel, body) => {
         const result = await observe(timeline.sendMessage(channel, body))
         if (!closed && !unavailable) dms?.peerRefusal(channel, result)
@@ -88,6 +99,7 @@ export function createSession(options: SessionOptions) {
     checkMembership: options.sync?.checkMembership ?? (() => observe(api.getOrganizationMe(organizationId))),
     onSessionEnded: notifyEnded,
   })
+  history = topicComposition.sync
   const replyComposition = createReplySync(
     {
       ...options.sync,
@@ -119,6 +131,10 @@ export function createSession(options: SessionOptions) {
     },
     { sync: replyComposition.sync, topics },
   )
+  const replyCounts = createReplyCounts(sync, { replies, topics }, {
+    api: (channel, body, signal) => observe(options.replyCountsApi ? options.replyCountsApi(channel, body, signal) : api.getReplyCounts(organizationId, channel, body, signal)),
+    onSessionEnded: notifyEnded, requestTimeoutMs: options.sync?.requestTimeoutMs, random: options.sync?.random,
+  })
   const navigationTargets = createNavigationTargets({
     topic: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
     reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
@@ -147,7 +163,7 @@ export function createSession(options: SessionOptions) {
   )
   const dmSource = options.dmsApi ?? dmsApi(organizationId)
   dms = createDms({ api: {
-    list: (query, signal) => observe(dmSource.list(query, signal)),
+    list: (query, signal) => observe(dmSource.list({ history_generation: history?.get().historyGeneration, ...query }, signal)),
     changes: (query, signal) => observe(dmSource.changes(query, signal)),
     open: (body, signal) => observe(dmSource.open(body, signal)),
   }, activity, watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
@@ -179,7 +195,13 @@ export function createSession(options: SessionOptions) {
     terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.error === 'organization_unavailable'),
   })
   activity.hold('capabilities', capabilities)
+  let historyEpoch = sync.get().historyEpoch
   const stopSync = sync.subscribe(() => {
+    if (historyEpoch !== sync.get().historyEpoch) {
+      historyEpoch = sync.get().historyEpoch
+      dms?.resetHistory()
+      navigationTargets.resetHistory()
+    }
     if (!sync.get().connected) activity.disconnected()
     if (sync.get().organization === 'unavailable') terminate()
   })
@@ -209,7 +231,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, topics, replies, unread, channels, dms, navigationTargets,
+    sync, topics, replies, replyCounts, unread, channels, dms, navigationTargets,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
       memberControllers.get(channel)?.close()
@@ -231,7 +253,7 @@ export function createSession(options: SessionOptions) {
     close() {
       closed = true
       stopActivity(); activity.close(); capabilities.close()
-      navigationTargets.close()
+      navigationTargets.close(); replyCounts.close()
       stopFollowing(); stopSync(); stopMemberAccess()
       memberControllers.forEach(c => c.close()); memberControllers.clear()
       channels.close()

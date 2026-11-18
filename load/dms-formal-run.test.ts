@@ -81,6 +81,18 @@ test('preflight failure aborts before build, seeding or timing and cleans all ho
   assert.equal(events[0],'register:SIGINT');
   assert.equal(JSON.parse(readFileSync(`${config.output}/status.json`,'utf8')).phase,'failed');
 });
+test('remote IPv4 app HostName is rejected before uploading the harness',async t=>{
+  const {config,runtime,events}=stub(t,false),original=runtime.exec;
+  runtime.exec=async command=>command.args.includes('-G')?{code:0,stdout:'hostname 192.0.2.10\n'}:original(command);
+  await assert.rejects(run(config,runtime),/Remote app SSH HostName must be a DNS hostname:.*TLS SNI.*strict_sni_host/);
+  assert.ok(!events.some(event=>event.includes('mkdir ')||event.includes('scp')||event.includes('-czf')));
+});
+test('remote DNS app HostName and IPv4 DB HostName pass address preflight',async t=>{
+  const {config,runtime,events}=stub(t,false),original=runtime.exec;
+  runtime.exec=async command=>command.args.includes('-G')?{code:0,stdout:`hostname ${command.args.at(-1)===config.app?'app.example.invalid':'192.0.2.20'}\n`}:original(command);
+  await assert.rejects(run(config,runtime),/ssh failed \(exit 1\)/);
+  assert.ok(events.some(event=>event.includes("'preflight'")));
+});
 for(const signal of ['SIGINT','SIGTERM'] as const) test(`cleanup registered before creation and invoked once on ${signal}`,async t=>{
   const {config,runtime,events}=stub(t,true);
   const originalOn=runtime.on;runtime.on=(s,f)=>originalOn(s,s==='SIGINT'?()=>{if(signal==='SIGINT')f();else runtimeSignal();}:f);

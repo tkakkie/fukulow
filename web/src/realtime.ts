@@ -30,14 +30,15 @@ const isSequence = (value: unknown, minimum: number): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= minimum
 
 function isMessage(value: unknown): value is Message {
-  return isObject(value) && typeof value.channel_id === 'string' && isSequence(value.seq, 1) &&
+  return isObject(value) && typeof value.history_generation === 'string' && !('seq' in value) && typeof value.channel_id === 'string' && isSequence(value.created_seq, 1) && isSequence(value.version, 1) && value.version >= value.created_seq && typeof value.deleted === 'boolean' &&
     typeof value.id === 'string' && typeof value.sender === 'string' &&
-    typeof value.client_message_id === 'string' && typeof value.body === 'string' &&
+    typeof value.client_message_id === 'string' &&
     typeof value.created_at === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') &&
     (value.reply_to === null || typeof value.reply_to === 'string') &&
     (value.reply_root_id === null || typeof value.reply_root_id === 'string') &&
-    Array.isArray(value.mentions) && value.mentions.every(mention =>
-      isObject(mention) && typeof mention.member_id === 'string' && typeof mention.name === 'string')
+    (value.deleted ? !('body' in value) && !('mentions' in value) && !('excerpt' in value) :
+      typeof value.body === 'string' && Array.isArray(value.mentions) && value.mentions.every(mention =>
+        isObject(mention) && typeof mention.member_id === 'string' && typeof mention.name === 'string'))
 }
 
 function isServerEvent(value: unknown): value is ServerEvent {
@@ -49,9 +50,9 @@ function isServerEvent(value: unknown): value is ServerEvent {
     case 'read_position_changed': return typeof value.channel_id === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') && isSequence(value.read_seq, 0) && Object.keys(value).every(k => ['type', 'channel_id', 'topic_id', 'read_seq'].includes(k))
     case 'channel_access_gained': case 'channel_access_revoked': case 'channel_members_changed':
       return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
-    case 'message': return isMessage(value.message)
+    case 'message': return isSequence(value.seq, 1) && value.kind === 'create' && isMessage(value.message) && value.message.created_seq === value.seq
     case 'channel_access_lost': return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
-    case 'subscribed': return typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)
+    case 'subscribed': return typeof value.history_generation === 'string' && typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)
     case 'error': return typeof value.code === 'string' &&
       (value.channel_id === undefined || value.channel_id === null || typeof value.channel_id === 'string')
     default: return false

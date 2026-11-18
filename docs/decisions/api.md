@@ -22,6 +22,7 @@ Entries that also govern this area, listed by the start of the entry in that par
 
 - [process](process.md): `#198 B: pinned tracing/subscriber`
 
+- [messages](messages.md): `#160 Event position and Message`, `#160 Required before any mutation`
 - [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
 - [auth](auth.md): `#151 DM access needs`, `#151 explicit non-Guest open`
 - [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM list responses`, `#151 DM list base limits`
@@ -41,3 +42,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [auth](auth.md): `#304 PUT /api/v1/me/password takes`, `#304 wrong current password is 403`
 
 - [auth](auth.md): `#303 management follows`, `#303 retains random UUID cursor anchors`
+
+- [messages](messages.md): `#515 uses Organization UUID epochs`

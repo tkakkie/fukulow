@@ -98,12 +98,12 @@ export async function sockets() {
       if (!('data' in event)) return;
       const notice = JSON.parse(String(event.data)) as ServerEvent;
       if (notice.type === 'message') {
-        if (notice.message.seq <= lastSeq) { duplicates.add(1); return; }
-        if (notice.message.seq !== lastSeq+1) errors.add(1, { shape: 'sequence_gap' });
-        lastSeq = notice.message.seq;
+        if (notice.seq <= lastSeq) { duplicates.add(1); return; }
+        if (notice.seq !== lastSeq+1) errors.add(1, { shape: 'sequence_gap' });
+        lastSeq = notice.seq;
         if (notice.message.sender !== member.id) {
           let data: { sent?: number; phase?: string };
-          try { data = JSON.parse(notice.message.body) as typeof data; }
+          try { data = JSON.parse(notice.message.body ?? '') as typeof data; }
           catch { return; } // Seed/history bodies have no generator timestamp.
           if (data.sent && data.phase === 'mixed') { receipt.add(Date.now() - data.sent, receiptTags(data.sent)); receivedPeer.add(1, receiptTags(data.sent)); }
         }
@@ -227,7 +227,7 @@ export function send() {
     // never log credentials or Message bodies. Capture stdout outside Git.
     console.log('DM_SEND ' + JSON.stringify({ organization: seed.organization, member: member.id, channel: member.channel,
       client_message_id: body.client_message_id, started, completed: Date.now(), status: response.status,
-      id: message?.id, seq: message?.seq, bodyBytes: body.body.length }));
+      id: message?.id, seq: message?.created_seq, bodyBytes: body.body.length }));
   }
 }
 export async function browse() {

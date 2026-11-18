@@ -12,12 +12,16 @@ mod read_only;
 mod rls;
 mod statement;
 
+// Carries the app session settings; migrations must override them and never
+// leak their own settings back.
 async fn startup_pool(pool: &PgPool) -> PgPool {
     super::PoolConfig::configured(None, None)
         .unwrap()
         .options()
         .max_connections(1)
-        .connect_with(pool.connect_options().as_ref().clone())
+        .connect_with(super::pool::session(
+            pool.connect_options().as_ref().clone(),
+        ))
         .await
         .unwrap()
 }

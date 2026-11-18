@@ -71,14 +71,15 @@ export function fakeNetwork() {
   const topicLists: Record<string, Result<TopicPage>> = {}
   const topicSummaries: Record<string, Result<TopicSummaryResponse>> = {}
   const topicMessages: Record<string, Result<MessagePage>> = {}
+  const replyCountPages: Record<string, import('./api').ReplyCountPage> = {}
   const replyChains: Record<string, Result<ReplyChainPage>> = {}
   const replyHistory: { channel: string; anchor: string; query?: { after_seq?: number; limit?: number } }[] = []
   const sends: ({ channel: string; body: SendMessageRequest } & Deferred<Result<Message>>)[] = []
-  const lists: Deferred<Result<{ channels: Channel[] }>>[] = []
+  const lists: Deferred<Result<{ history_generation: string;  channels: Channel[] }>>[] = []
   const creates: ({ name: string } & Deferred<Result<Channel>>)[] = []
   const caughtUp: Record<string, number> = {}
   const unreadChannels: Record<string, UnreadChannel> = {}
-  let unreadListResult: Result<{ channels: UnreadChannel[] }> | null = null
+  let unreadListResult: Result<{ history_generation: string;  channels: UnreadChannel[] }> | null = null
   const markReads: { scope: UnreadScope; body: MarkReadRequest }[] = []
   const markReadResults: Record<string, Result<ReadPosition>> = {}
   const pendingMarkReads: ({ scope: UnreadScope; body: MarkReadRequest } & Deferred<Result<ReadPosition>>)[] = []
@@ -96,19 +97,19 @@ export function fakeNetwork() {
           mention_unread_count: 0,
           id: m.topic_id,
           name: prev?.name ?? m.topic_id,
-          first_seq: prev?.first_seq ?? m.seq,
-          last_seq: m.seq,
+          first_seq: prev?.first_seq ?? m.created_seq,
+          last_seq: m.created_seq,
           message_count: (prev?.message_count ?? 0) + 1,
           latest_message: m,
-          read_seq: m.seq,
+          read_seq: m.created_seq,
           unread_count: 0,
         })
       }
     }
     for (const topic of byTopic.values()) items.push({ kind: 'topic', topic })
-    items.sort((a, b) => (a.kind === 'message' ? a.message.seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.seq : b.topic.last_seq))
-    return {
-      as_of_seq: Math.max(channelId ? (caughtUp[channelId] ?? 0) : 0, page.messages.at(-1)?.seq ?? 0),
+    items.sort((a, b) => (a.kind === 'message' ? a.message.created_seq : a.topic.last_seq) - (b.kind === 'message' ? b.message.created_seq : b.topic.last_seq))
+    return { history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: Math.max(channelId ? (caughtUp[channelId] ?? 0) : 0, page.messages.at(-1)?.created_seq ?? 0),
       has_more: page.has_more,
       items,
     }
@@ -119,9 +120,9 @@ export function fakeNetwork() {
     const maxSeq = Math.max(
       caughtUp[id] ?? 0,
       tl?.ok ? tl.data.as_of_seq : 0,
-      page?.ok ? (page.data.messages.at(-1)?.seq ?? 0) : 0,
+      page?.ok ? (page.data.messages.at(-1)?.created_seq ?? 0) : 0,
     )
-    return {
+    return { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       id,
       kind: 'channel',
@@ -139,10 +140,10 @@ export function fakeNetwork() {
       main_unread_count: 0,
     }
   }
-  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'unreadApi' | 'sync'> => ({
+  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'replyCountsApi' | 'unreadApi' | 'sync'> => ({
     channelsApi: {
       listChannels() {
-        const d = deferred<Result<{ channels: Channel[] }>>()
+        const d = deferred<Result<{ history_generation: string;  channels: Channel[] }>>()
         lists.push(d)
         return d.promise
       },
@@ -156,17 +157,17 @@ export function fakeNetwork() {
       async listTimeline(channel, query) {
         history.push({ channel, query: query?.before_position !== undefined ? { before_seq: query.before_position } : undefined })
         if (timelines[channel]) return timelines[channel]
-        const page = pages[channel] ?? { ok: true, data: { messages: [], has_more: false } }
+        const page = pages[channel] ?? { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } }
         return page.ok ? { ok: true, data: toTimelinePage(page.data, channel) } : page
       },
       async listTopics(channel) {
         if (topicLists[channel]) return topicLists[channel]
         const page = pages[channel]
         if (page && !page.ok) return page
-        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false }, channel)
+        const tl = toTimelinePage(page?.data ?? { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }, channel)
         return {
           ok: true,
-          data: {
+          data: { history_generation: '00000000-0000-4000-8000-000000000515',
             as_of_seq: tl.as_of_seq,
             has_more: false,
             topics: tl.items.flatMap(i => (i.kind === 'topic' ? [i.topic] : [])),
@@ -178,9 +179,9 @@ export function fakeNetwork() {
         if (custom) return custom
         const page = pages[channel]
         if (page && !page.ok) return page
-        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false }, channel)
+        const tl = toTimelinePage(page?.data ?? { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }, channel)
         const found = tl.items.find(i => i.kind === 'topic' && i.topic.id === topic)
-        if (found?.kind === 'topic') return { ok: true, data: { as_of_seq: tl.as_of_seq, topic: found.topic } }
+        if (found?.kind === 'topic') return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: tl.as_of_seq, topic: found.topic } }
         return { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
       },
       async listTopicMessages(channel, topic) {
@@ -190,13 +191,18 @@ export function fakeNetwork() {
         if (page && !page.ok) return page
         return {
           ok: true,
-          data: {
+          data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ((page?.data.messages ?? []).filter(m => m.topic_id === topic)).at(-1)?.created_seq ?? 0,
             messages: (page?.data.messages ?? []).filter(m => m.topic_id === topic),
             has_more: false,
           },
         }
       },
     },
+    replyCountsApi: async (channel, body) => ok(replyCountPages[channel] ?? {
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: caughtUp[channel] ?? 0,
+      counts: body.ids.map(id => ({ message_id: id, root_id: id, reply_count: 0 })),
+    }),
     repliesApi: {
       async listReplyChain(channel, anchor, query) {
         replyHistory.push({ channel, anchor, query })
@@ -215,10 +221,10 @@ export function fakeNetwork() {
         for (const m of all) {
           if (m.id === root.id || m.reply_root_id === root.id || (m.reply_to !== null && chainIds.has(m.reply_to))) {
             chainIds.add(m.id)
-            if (query?.after_seq === undefined || m.seq > query.after_seq) messages.push(m)
+            if (query?.after_seq === undefined || m.created_seq > query.after_seq) messages.push(m)
           }
         }
-        return { ok: true, data: { root_id: root.id, messages, has_more: false } }
+        return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  root_id: root.id, messages, has_more: false } }
       },
     },
     unreadApi: {
@@ -231,7 +237,7 @@ export function fakeNetwork() {
           ...Object.keys(caughtUp),
         ])
         const rows = [...idsSet].map(id => unreadChannels[id] ?? defaultUnreadChannel(id))
-        return { ok: true, data: { channels: rows } }
+        return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', channels: rows } }
       },
       markRead(scope, body) {
         markReads.push({ scope, body })
@@ -256,25 +262,30 @@ export function fakeNetwork() {
             }
           }
         }
-        return Promise.resolve({ ok: true, data: { read_seq: body.read_seq } })
+        return Promise.resolve({ ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', read_seq: body.read_seq } })
       },
       async getTopicSummary(channel, topic) {
         const custom = topicSummaries[`${channel}:${topic}`]
         if (custom) return custom
         const page = pages[channel]
         if (page && !page.ok) return page
-        const tl = toTimelinePage(page?.data ?? { messages: [], has_more: false }, channel)
+        const tl = toTimelinePage(page?.data ?? { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }, channel)
         const found = tl.items.find(i => i.kind === 'topic' && i.topic.id === topic)
-        if (found?.kind === 'topic') return { ok: true, data: { as_of_seq: tl.as_of_seq, topic: found.topic } }
+        if (found?.kind === 'topic') return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: tl.as_of_seq, topic: found.topic } }
         return { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
       },
     },
     sync: {
       newId: () => `${selfId}-c${++ids}`,
       api: {
+        async listChannelEvents(channel, query) {
+          history.push({ channel, query })
+          const page = pages[channel]
+          return !page || page.ok ? { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', events: (page?.data.messages ?? []).map(message => ({ type: 'message', seq: message.created_seq, kind: 'create', message })), has_more: page?.data.has_more ?? false } } : page
+        },
         async listMessages(channel, query) {
           history.push({ channel, query })
-          return pages[channel] ?? { ok: true, data: { messages: [], has_more: false } }
+          return pages[channel] ?? { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } }
         },
         sendMessage(channel, body) {
           const d = deferred<Result<Message>>()
@@ -297,7 +308,7 @@ export function fakeNetwork() {
     topicLists,
     topicSummaries,
     topicMessages,
-    replyChains,
+    replyChains, replyCountPages,
     replyHistory,
     sends,
     lists,
@@ -306,7 +317,7 @@ export function fakeNetwork() {
     get unreadListResult() {
       return unreadListResult
     },
-    set unreadListResult(v: Result<{ channels: UnreadChannel[] }> | null) {
+    set unreadListResult(v: Result<{ history_generation: string;  channels: UnreadChannel[] }> | null) {
       unreadListResult = v
     },
     markReads,
@@ -323,7 +334,7 @@ export function fakeNetwork() {
     event: (e: ServerEvent) => sockets.at(-1)!.onEvent(e),
     subscribed: (channel: string, caught_up_seq: number) => {
       caughtUp[channel] = Math.max(caughtUp[channel] ?? 0, caught_up_seq)
-      sockets.at(-1)!.onEvent({ type: 'subscribed', channel_id: channel, caught_up_seq })
+      sockets.at(-1)!.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq })
     },
     subscribeCount: (channel: string) =>
       sockets.flatMap(s => s.sent).filter(m => m.type === 'subscribe' && m.channel_id === channel).length,

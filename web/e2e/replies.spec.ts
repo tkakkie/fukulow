@@ -26,14 +26,15 @@ test.beforeEach(async ({ page }) => {
 test('same-chain navigation preserves cached scroll and list identity and reveals uncached anchors in one read', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   const root = await sendApiMessage(page.request, { body: '長い返信の起点' })
+  const history_generation = root.history_generation
   const messages: Message[] = [root, ...Array.from({ length: 10_000 }, (_, i) => ({
-    ...root, id: crypto.randomUUID(), seq: i + 2, client_message_id: crypto.randomUUID(),
+    ...root, id: crypto.randomUUID(), created_seq: i + 2, version: i + 2, deleted: false, client_message_id: crypto.randomUUID(),
     reply_to: root.id, reply_root_id: root.id,
     body: `返信 ${i + 2}${i % 7 === 0 ? '\n高さの異なる本文'.repeat(4) : ''}`,
   }))]
   const base = `/api/v1/orgs/${orgId}/channels/${channelId}`
   const far = messages[8999]!
-  const timeline: components['schemas']['TimelinePage'] = {
+  const timeline: components['schemas']['TimelinePage'] = { history_generation,
     as_of_seq: 10_001, has_more: false,
     items: [root, far, messages.at(-1)!].map(message => ({ kind: 'message', message })),
   }
@@ -42,7 +43,7 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
   await page.routeWebSocket(`**/api/v1/orgs/${orgId}/ws`, ws => {
     ws.onMessage(data => {
       const message = JSON.parse(String(data)) as components['schemas']['ClientMessage']
-      if (message.type === 'subscribe') ws.send(JSON.stringify({
+      if (message.type === 'subscribe') ws.send(JSON.stringify({ history_generation,
         type: 'subscribed', channel_id: message.channel_id, caught_up_seq: 10_001,
       } satisfies components['schemas']['Subscribed']))
     })
@@ -53,9 +54,9 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
     const url = new URL(route.request().url())
     const after = Number(url.searchParams.get('after_seq') ?? 0)
     reads.push({ anchor: url.pathname.split('/').at(-2)!, after })
-    const pageMessages = messages.filter(m => m.seq > after).slice(0, Number(url.searchParams.get('limit') ?? 50))
-    const data: components['schemas']['ReplyChainPage'] = {
-      root_id: root.id, messages: pageMessages, has_more: pageMessages.at(-1)!.seq < 10_001,
+    const pageMessages = messages.filter(m => m.created_seq > after).slice(0, Number(url.searchParams.get('limit') ?? 50))
+    const data: components['schemas']['ReplyChainPage'] = { history_generation, as_of_seq: (pageMessages).at(-1)?.created_seq ?? 0,
+      root_id: root.id, messages: pageMessages, has_more: pageMessages.at(-1)!.created_seq < 10_001,
     }
     if (after === 150 && heldRead) await heldRead
     return route.fulfill({ json: data })
@@ -370,7 +371,7 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     const panelTopicReplyItem = panel.locator(`[data-message-id="${topicReply.id}"]`)
     await expect(panelTopicRootItem).toHaveClass(/reply-panel__item--root/)
     await expect(panelTopicRootItem.getByRole('button', { name: '返信 50件›', exact: true })).toBeVisible()
-    const nestedReplyBtn = panelTopicReplyItem.getByRole('button', { name: '返信', exact: true })
+    const nestedReplyBtn = panelTopicReplyItem.getByRole('button', { name: '返信 50件›', exact: true })
     await expect(nestedReplyBtn).toBeVisible()
     await nestedReplyBtn.click()
     await expect(page).toHaveURL(

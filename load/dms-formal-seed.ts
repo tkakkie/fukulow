@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { outsideCheckout } from './dms-workload.ts';
+import { createLog } from './channel-log.ts';
 import { fixturePairs, heldCohorts, type MixedScenario } from './dms-formal-scenarios.ts';
 if (process.env.DM_FORMAL_SEED !== '1') throw new Error('Set DM_FORMAL_SEED=1 only on the dedicated disposable DB host (50M Messages)');
 const output = resolve(process.env.DM_FORMAL_OUT || '');
@@ -52,9 +53,11 @@ INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_i
 INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${org}',id,${history} FROM channels WHERE organization_id='${org}' AND id=ANY(ARRAY[${pairs.map(([a,b])=>"'"+channelId(a,b)+"'::uuid").join(',')}]);`);
   for (let start = 0; start < pairs.length; start += 250) {
     const ids = pairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
-    sql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);`);
+    sql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
+${createLog(org, ids)}`);
   }
-  sql(`INSERT INTO channel_message_sequences VALUES('${org}','${ordinary}',1); INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${ordinary}','${topic}','Topic',1,1,1); INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES('${org}',gen_random_uuid(),'${ordinary}',1,'${members[0].id}',gen_random_uuid(),'seed','${topic}');`);
+  sql(`INSERT INTO channel_message_sequences VALUES('${org}','${ordinary}',1); INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${ordinary}','${topic}','Topic',1,1,1); INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES('${org}',gen_random_uuid(),'${ordinary}',1,'${members[0].id}',gen_random_uuid(),'seed','${topic}');
+${createLog(org, [ordinary])}`);
   writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals, supplementalEmptyPairs:extraPairs.length, scenario, heldAssignment:heldCohorts(scenario as MixedScenario), fixture:{pairs:pairs.length+extraPairs.length,historicalPairs:pairs.length,messages:pairs.length*history} }), { mode: 0o600 });
   console.log(`${smoke ? 'SMOKE ONLY' : 'Formal'} scenario=${scenario} Organization ${o}: 1,000 Members (100 Guests), 1,100 Sessions, ${pairs.length+extraPairs.length} DMs (${extraPairs.length} supplemental empty pairs), ${50000*history} Messages; current revision 1, ${2*(pairs.length+extraPairs.length)-10000} usable + 10,000 old-revision grants, read_seq 0, alternating senders, zero Mentions; 10,000 prepared renewals`);
 }

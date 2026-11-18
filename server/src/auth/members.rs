@@ -1,4 +1,4 @@
-use super::*;
+use super::{activity::ActivityChange, *};
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct MemberList {
@@ -191,7 +191,7 @@ pub async fn change_role<G: RoleChangeGuard + Send + 'static>(
     let task_state = state.clone();
     let row = tokio::spawn(async move {
     let state = task_state;
-    let (row, notice) = crate::database::organization(&state.pool, auth.identity.organization.organization_id, async |tx: &mut sqlx::PgConnection| {
+    let (row, mut notice) = crate::database::organization(&state.pool, auth.identity.organization.organization_id, async |tx: &mut sqlx::PgConnection| {
         lock_organization(&mut *tx, org).await?;
         let guard = G::lock(&mut *tx, org, id).await?;
         current_actor(&mut *tx, &auth, Action::ChangeRole).await?;
@@ -216,11 +216,12 @@ pub async fn change_role<G: RoleChangeGuard + Send + 'static>(
             .ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
         Ok::<_, ApiError>((row, notice))
     }).await?;
-    if let Some(notice) = notice { notice.committed(state.pool.clone()); }
+    if let Some(notice) = notice.as_mut() { notice.retire(); }
     state
         .session_changes
         .recheck_subscriptions(&state.pool, SubscriptionScope::Member(org, id))
         .await;
+    if let Some(notice) = notice { notice.committed(state.pool.clone()); }
     Ok::<_, ApiError>(row)
     }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
     Ok((
@@ -306,7 +307,11 @@ pub async fn deactivate<G: RoleChangeGuard + Send + 'static>(
     let Path((org, id)) = path.map_err(|_| ApiError::bad_request())?;
     // Own COMMIT and signaling together, even if the HTTP future is cancelled.
     tokio::spawn(async move {
-        let (account, revision) = deactivate_transaction::<G>(&state, &auth, org, id).await?;
+        let ((account, revision), mut notice) =
+            deactivate_transaction::<G>(&state, &auth, org, id).await?;
+        if let Some(notice) = notice.as_mut() {
+            notice.retire();
+        }
         state
             .session_changes
             .membership_revoked(org, account, revision);
@@ -314,6 +319,9 @@ pub async fn deactivate<G: RoleChangeGuard + Send + 'static>(
             .session_changes
             .recheck_subscriptions(&state.pool, SubscriptionScope::Member(org, id))
             .await;
+        if let Some(notice) = notice {
+            notice.committed(state.pool.clone());
+        }
         Ok::<_, ApiError>(())
     })
     .await
@@ -330,8 +338,8 @@ async fn deactivate_transaction<G: RoleChangeGuard>(
     auth: &Auth,
     org: Uuid,
     id: Uuid,
-) -> Result<(Uuid, i64), ApiError> {
-    let (result, notice) = crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
+) -> Result<((Uuid, i64), Option<Box<dyn ActivityChange>>), ApiError> {
+    crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
         lock_organization(tx, org).await?;
         let guard = G::lock(tx, org, id).await?;
         let actor = current_actor(tx, auth, Action::DeactivateMember).await?;
@@ -352,11 +360,7 @@ async fn deactivate_transaction<G: RoleChangeGuard>(
         let result = sqlx::query_as("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL RETURNING account_id,membership_revision")
             .bind(org).bind(id).fetch_one(tx).await.map_err(member_write_error)?;
         Ok::<_, ApiError>((result, notice))
-    }).await?;
-    if let Some(notice) = notice {
-        notice.committed(state.pool.clone());
-    }
-    Ok(result)
+    }).await
 }
 
 // Retained identity/eligibility snapshots for fixed-participant resources. The

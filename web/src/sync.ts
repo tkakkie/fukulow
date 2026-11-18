@@ -6,9 +6,11 @@ import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { createCore } from '#sync-core'
+import type { SyncCore } from './protocol-types'
 import type { ChannelState, Effect, Input } from './protocol-types'
 
 export type TimelineApi = {
+  listChannelEvents(channel: string, query: api.ListChannelEventsQuery): Promise<Result<api.ChannelEventPage>>
   listMessages(channel: string, query?: ListMessagesQuery): Promise<Result<MessagePage>>
   sendMessage(channel: string, body: SendMessageRequest): Promise<Result<Message>>
 }
@@ -98,6 +100,7 @@ const emptyTopicExtra: TopicComposerState = { draft: '', composerError: null }
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
   const transport = options.api ?? {
+    listChannelEvents: (channel: string, query: api.ListChannelEventsQuery) => api.listChannelEvents(options.organizationId ?? '', channel, query),
     listMessages: (channel: string, query?: ListMessagesQuery) => api.listMessages(options.organizationId ?? '', channel, query),
     sendMessage: (channel: string, body: SendMessageRequest) => api.sendMessage(options.organizationId ?? '', channel, body),
   }
@@ -113,6 +116,7 @@ export function createSync(options: SyncOptions) {
   const timers = new Map<number, unknown>()
   const requests = new Map<number, () => void>()
   const noticeListeners = new Set<(notice: ActivityNotice) => void>()
+  const inputListeners = new Set<(input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void>()
   const listeners = new Set<(changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const composerListeners = new Map<string, Set<() => void>>()
@@ -251,10 +255,10 @@ export function createSync(options: SyncOptions) {
   function dispatch(input: Input): Promise<void> {
     if (input.type === 'event' && input.event.type === 'message') rememberIdentityResponse(input.event.message)
     else if (input.type === 'ack') rememberIdentityResponse(input.message)
-    else if (input.type === 'history_result') rememberIdentityResponse(input.page)
+    else if (input.type === 'history_result' || input.type === 'events_result') rememberIdentityResponse(input.page)
     else if (input.type === 'settle_history') rememberIdentityResponse(input.messages)
     const incoming = input.type === 'event' && input.event.type === 'message' ? [input.event.message]
-      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : []
+      : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' ? [e.message] : []) : []
     if (incoming.some(message => newerMentionResponse(state.channels[message.channel_id]?.messages ?? [], message)))
       input = { ...input, refreshMentionNames: true }
     const previous = state
@@ -356,6 +360,7 @@ export function createSync(options: SyncOptions) {
     for (const key of changedReplyComposers) {
       replyComposerListeners.get(key)?.forEach(l => l())
     }
+    inputListeners.forEach(listener => listener(input, result, previous))
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
 
@@ -452,23 +457,29 @@ export function createSync(options: SyncOptions) {
             socket.subscriptions.set(effect.channel, pending)
           }
           socket?.transport.send(effect.type === 'subscribe'
-            ? { type: 'subscribe', channel_id: effect.channel, after_seq: effect.after_seq }
+            ? { type: 'subscribe', channel_id: effect.channel, after_seq: effect.after_seq, history_generation: effect.history_generation }
             : { type: 'unsubscribe', channel_id: effect.channel })
         } catch {
           if (state.connection !== null) void dispatch({ type: 'socket_closed', connection: state.connection, code: 1006 })
         }
         break
       case 'fetch_history': {
-        const query = effect.page === 'after' ? { after_seq: effect.seq } : { before_seq: effect.seq }
+        if (effect.page === 'after') {
+          const result = await request(effect.id, () => transport.listChannelEvents(effect.channel, { after_seq: effect.seq!, history_generation: effect.history_generation }))
+          await dispatch(result.ok ? { type: 'events_result', request: effect.id, page: result.data }
+            : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network', error: result.kind === 'http' ? result.error : undefined })
+          break
+        }
+        const query = { before_seq: effect.seq, as_of_seq: effect.as_of_seq, history_generation: effect.history_generation }
         const result = await request(effect.id, () => effect.page === 'latest'
-          ? transport.listMessages(effect.channel) : transport.listMessages(effect.channel, query))
+          ? transport.listMessages(effect.channel, { history_generation: effect.history_generation }) : transport.listMessages(effect.channel, query))
         await dispatch(result.ok ? { type: 'history_result', request: effect.id, page: result.data }
-          : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network' })
+          : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network', error: result.kind === 'http' ? result.error : undefined })
         break
       }
       case 'send': {
         const result = await request(effect.id, () => transport.sendMessage(effect.channel,
-          { client_message_id: effect.client_message_id, body: effect.body,
+          { history_generation: effect.history_generation, client_message_id: effect.client_message_id, body: effect.body,
             ...(effect.reply_to ? { reply_to: effect.reply_to } : {}),
             ...(effect.topic_name ? { topic_name: effect.topic_name } : {}) }).then(result => {
           const draft = submitted.get(effect.client_message_id)
@@ -811,6 +822,7 @@ export function createSync(options: SyncOptions) {
   }
 
   return {
+    onInput(listener: (input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void) { inputListeners.add(listener); return () => { inputListeners.delete(listener) } },
     onActivity(listener: (notice: ActivityNotice) => void) { noticeListeners.add(listener); return () => { noticeListeners.delete(listener) } },
     get: () => state,
     request: (id: number) => core.request(id),
@@ -823,6 +835,11 @@ export function createSync(options: SyncOptions) {
     unwatch: (channel: string) => dispatch({ type: 'unwatch', channel }),
     close: () => dispatch({ type: 'stop' }),
     unavailable: () => dispatch({ type: 'organization_unavailable' }),
+    observeHistoryGeneration(generation?: string) {
+      const before = state.historyEpoch
+      void dispatch({ type: 'history_generation', generation })
+      return before === state.historyEpoch
+    },
     settleHistory: (channel: string, messages: Message[]) => dispatch({ type: 'settle_history', channel, messages }),
     hasUnsavedChanges(): boolean {
       if (options.drafts?.hasDrafts()) return true

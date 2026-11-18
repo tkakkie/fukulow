@@ -2,6 +2,7 @@ use super::*;
 use std::time::Duration;
 
 mod atomicity;
+pub(crate) mod counts;
 mod denials;
 mod measurement;
 mod paging;
@@ -30,7 +31,12 @@ async fn page(app: &Router, token: &str, channel: Uuid, anchor: Uuid, query: &st
     let response = chain(app, token, channel, anchor, query).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    body(response).await
+    let mut page = body(response).await;
+    assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
+    page.as_object_mut().unwrap().remove("history_generation");
+    assert!(page["as_of_seq"].is_i64());
+    page.as_object_mut().unwrap().remove("as_of_seq");
+    page
 }
 
 async fn counts(pool: &PgPool, org: Uuid, channel: Uuid) -> (i64, i64, i64) {

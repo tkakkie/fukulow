@@ -193,7 +193,7 @@ async fn observed_loss_discards_queued_live_and_fetched_replay_before_and_during
             }
             entered(&g).await;
             if phase == "frame" {
-                assert_eq!(event(&mut socket).await["message"]["seq"], 1);
+                assert_eq!(event(&mut socket).await["message"]["created_seq"], 1);
             }
             loss(&f, &pool, reader, c, case == "role").await;
             g.release.add_permits(1);
@@ -205,7 +205,7 @@ async fn observed_loss_discards_queued_live_and_fetched_replay_before_and_during
             silent(&mut socket).await;
             subscribe(&mut socket, c, 0).await;
             for i in 1..=3 {
-                assert_eq!(event(&mut socket).await["message"]["seq"], i);
+                assert_eq!(event(&mut socket).await["message"]["created_seq"], i);
             }
             ready(&mut socket, c, 3).await;
         }
@@ -254,11 +254,12 @@ async fn fallback_detects_dropped_signal_remove_regrant_lifetime_and_fails_close
             .await
             .unwrap();
         if regrant {
-            let frame = tokio::time::timeout(Duration::from_secs(2), message_next(&mut socket))
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            let frame =
+                tokio::time::timeout(Duration::from_secs(2), delivery_next(&mut socket, None))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
             assert!(
                 matches!(frame,tungstenite::Message::Close(Some(close)) if u16::from(close.code)==1011)
             );
@@ -310,7 +311,7 @@ async fn ungranted_guest_cannot_join_existing_public_topic_but_explicit_grant_pe
     let joined: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
     assert_eq!(joined["topic_id"], root["topic_id"]);
-    assert_eq!(joined["seq"], 2);
+    assert_eq!(joined["created_seq"], 2);
     assert_eq!(event(&mut observer).await["message"], joined);
     f.state.message_delivery.flush().await;
     silent(&mut observer).await;
@@ -556,7 +557,7 @@ async fn denied_management_and_ungranted_guest_subscriptions_emit_no_protected_o
     silent(&mut guest).await;
     grant(&pool, f.organization, f.channel, reader).await;
     subscribe(&mut guest, f.channel, 0).await;
-    assert_eq!(event(&mut guest).await["message"]["seq"], 1);
+    assert_eq!(event(&mut guest).await["message"]["created_seq"], 1);
     ready(&mut guest, f.channel, 1).await;
     let mut owner = f.server.connect(&f.token).await;
     subscribe(&mut owner, f.channel, 1).await;
@@ -669,7 +670,7 @@ async fn continuous_public_role_changes_adopt_grant_lifetimes_and_membership_los
         .session_changes
         .recheck_subscriptions(&pool, crate::auth::SubscriptionScope::All)
         .await;
-    let frame = message_next(&mut socket).await.unwrap().unwrap();
+    let frame = delivery_next(&mut socket, None).await.unwrap().unwrap();
     assert!(
         matches!(frame,tungstenite::Message::Close(Some(close)) if u16::from(close.code)==4003)
     );

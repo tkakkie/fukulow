@@ -89,13 +89,13 @@ it.skipIf(!process.env.MEASURE_WINDOW)('measures interleaved Topic evidence and 
       count()
       if (seq % 1000 === 2) {
         // Keep the same visit open; presenting only the recent rows must not skip its unseen prefix.
-        present(c.topics.get('A').topic('T').messages.map(m => m.seq))
+        present(c.topics.get('A').topic('T').messages.map(m => m.created_seq))
         await flush(); count()
       }
       if ((seq - 2) % 25_000 === 0) samples.push({ arrivals: seq - 2, ...count() })
     }
     await c.unread.refresh(); await flush()
-    expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { seq: 1 }, needsOlder: false })
+    expect(c.unread.get('A').entry).toMatchObject({ boundary: 0, unreadAtEntry: 1, firstUnread: { created_seq: 1 }, needsOlder: false })
     expect(c.unread.get('A').topics.T.unreadCount).toBe(50_001)
     expect(c.reads.mark).toBe(0)
     // Refetch back to the first Unread, then present it: missing metadata never permits a skipped prefix.

@@ -6,7 +6,7 @@ import type { Channel, Result } from './api'
 
 /** A Channel list controller whose HTTP calls are answered by the test. */
 function setup() {
-  const lists: Deferred<Result<{ channels: Channel[] }>>[] = []
+  const lists: Deferred<Result<{ history_generation: string;  channels: Channel[] }>>[] = []
   const creates: ({ name: string } & Deferred<Result<Channel>>)[] = []
   const controller = createChannels({
     listChannels: () => new Promise((resolve) => lists.push({ resolve })),
@@ -27,10 +27,10 @@ describe('channels adapter', () => {
   it('shows list loading, selection and creation as they happen', async () => {
     const { adapter, lists, creates } = setup()
     const view = await mount(() => adapter.state)
-    expect(view.last).toMatchObject({ status: 'loading', channels: [], selectedId: null })
+    expect(view.last).toMatchObject({status: 'loading', channels: [], selectedId: null })
 
     void adapter.load()
-    lists[0].resolve(ok({ channels: [channel('a'), channel('b')] }))
+    lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('a'), channel('b')] }))
     await settle()
     expect(view.last).toMatchObject({ status: 'ready', selectedId: 'a' })
 
@@ -56,7 +56,7 @@ describe('channels adapter', () => {
     expect(view.last.status).toBe('error')
     expect(lists).toHaveLength(1) // no automatic reload
     void adapter.load()
-    lists[1].resolve(ok({ channels: [channel('a')] }))
+    lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('a')] }))
     await settle()
     expect(view.last).toMatchObject({ status: 'ready', selectedId: 'a' })
     await view.unmount()
@@ -65,7 +65,7 @@ describe('channels adapter', () => {
   it('returns the created Channel even when URL synchronization restores the previous selection', async () => {
     const { adapter, lists, creates } = setup()
     void adapter.load()
-    lists[0].resolve(ok({ channels: [channel('previous')] }))
+    lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('previous')] }))
     await settle()
     // Workspace keeps controller selection aligned with the URL until navigation completes.
     const view = await mount(() => {
@@ -110,14 +110,14 @@ describe('channels adapter', () => {
     const { adapter, lists, count } = setup()
     const first = await mount(() => adapter.state)
     void adapter.load()
-    lists[0].resolve(ok({ channels: [channel('a')] }))
+    lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('a')] }))
     await settle()
     await first.unmount()
     expect(count.active).toBe(0)
 
     adapter.select('a')
     void adapter.load()
-    lists[1].resolve(ok({ channels: [channel('a'), channel('b')] }))
+    lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('a'), channel('b')] }))
     await settle()
     const again = await mount(() => adapter.state)
     expect(again.last.channels.map((c) => c.id)).toEqual(['a', 'b'])
@@ -129,12 +129,12 @@ describe('channels adapter', () => {
     const { controller, adapter, lists, creates } = setup()
     const view = await mount(() => adapter.state)
     void adapter.load()
-    lists[0].resolve(ok({ channels: [channel('a')] }))
+    lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('a')] }))
     await settle()
     void adapter.load()
     const created = adapter.create('late', 'public')
     controller.close()
-    lists[1].resolve(ok({ channels: [channel('old')] }))
+    lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('old')] }))
     creates[0].resolve(ok(channel('late')))
     expect(await created).toEqual({ error: 'セッションが終了しました。' })
     await settle()

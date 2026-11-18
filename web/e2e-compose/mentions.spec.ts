@@ -41,7 +41,7 @@ test('two Members autocomplete accepted Mentions and converge Channel Topic and 
     await expect(peer.page.locator('#main-content .ui-message-row--mentioned')).toHaveCount(2)
     await expect(row.locator('.ui-badge--mention')).toHaveCount(0)
     await expect(row.locator('.ui-badge--unread')).toHaveCount(0)
-    await peer.page.locator('#main-content .ui-message-row').filter({ hasText: `Reply ${suffix}` }).getByRole('button', { name: '返信', exact: true }).click()
+    await peer.page.locator('#main-content .ui-message-row').filter({ hasText: `Reply ${suffix}` }).getByRole('button', { name: '返信 1件›', exact: true }).click()
     await expect(peer.page.locator('#panel-content .ui-message-row--mentioned')).toHaveCount(2)
     await expect(peer.page.locator('#panel-content .body').filter({ hasText: `Reply ${suffix}` })).toHaveText(`@${peer.name} Reply ${suffix}`)
   } finally {

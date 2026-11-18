@@ -1,6 +1,7 @@
+import { execFileSync } from 'node:child_process'
 import { expect, test, type Page, type WebSocket as ObservedWebSocket } from '@playwright/test'
 import type { components, ServerEvent } from '../src/api-schema.d.ts'
-import { owner, secretSafe, type SetupStatus } from './helpers.ts'
+import { owner, secretSafe, ensureOwnerAndSignIn, createChannelApi, type SetupStatus } from './helpers.ts'
 
 type Message = components['schemas']['Message']
 
@@ -46,7 +47,14 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   const echoes: Message[] = []
   a.on('websocket', socket => socket.on('framereceived', ({ payload }) => {
     const event = JSON.parse(String(payload)) as ServerEvent
-    if (event.type === 'message') echoes.push(event.message)
+    if (event.type === 'message') {
+      expect(event.kind).toBe('create')
+      expect(event.seq).toBe(event.message.created_seq)
+      expect(event.message.version).toBeGreaterThanOrEqual(event.message.created_seq)
+      expect(event.message.deleted).toBe(false)
+      expect(event.message).not.toHaveProperty('seq')
+      echoes.push(event.message)
+    }
   }))
 
   // A: fresh or already set-up instance -> setup or sign-in -> channel through the product UI.
@@ -71,9 +79,13 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   const files = await a.locator('script[src], link[rel="stylesheet"]').evaluateAll(elements => elements.map(element => element.getAttribute('src') ?? element.getAttribute('href')!))
   expect(files.length).toBeGreaterThan(0)
   for (const path of files) {
-    const response = await secretSafe(() => a.request.get(path, { headers: { 'Accept-Encoding': 'gzip' } }))
+    const response = await secretSafe(() => a.request.get(path, { headers: { 'Accept-Encoding': 'br' } }))
     expect(response.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
-    expect(response.headers()['content-encoding']).toBe('gzip')
+    expect(response.headers()['content-encoding']).toBe('br')
+    expect(response.headers()['vary']).toContain('Accept-Encoding')
+    const identity = await secretSafe(() => a.request.get(path, { headers: { 'Accept-Encoding': 'br;q=0, gzip' } }))
+    expect(identity.headers()['content-encoding']).toBeUndefined()
+    expect(identity.headers()['cache-control']).toBe('public, max-age=31536000, immutable')
   }
   const wasmAssets = await a.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name).filter(name => name.endsWith('.wasm') || /sync-wasm-.*\.js$/.test(name)))
   expect(wasmAssets.filter(name => name.endsWith('.wasm'))).toHaveLength(1)
@@ -142,6 +154,27 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   await expect(a.locator('li[data-status]')).toHaveCount(0)
   await expect(a.locator('.body', { hasText: text })).toHaveCount(1) // Both echo and ack have completed.
   expect(historyAfterPost).toEqual([])
+  // A fresh authenticated socket resumes the log and receives the identical Message state.
+  const replay = await a.evaluate(async ({ url, channel }) => new Promise<ServerEvent[]>((resolve, reject) => {
+    const ws = new WebSocket(url), events: ServerEvent[] = []
+    const timeout = setTimeout(() => { ws.close(); reject(new Error('Replay handoff timed out')) }, 10_000)
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', channel_id: channel, after_seq: 0 }))
+    ws.onerror = () => { clearTimeout(timeout); ws.close(); reject(new Error('Replay socket failed')) }
+    ws.onmessage = ({ data }) => {
+      const event = JSON.parse(String(data)) as ServerEvent
+      if (event.type === 'message') events.push(event)
+      if (event.type === 'subscribed' && event.channel_id === channel) {
+        clearTimeout(timeout); ws.close(); resolve(events)
+      }
+    }
+  }), { url: sockets.at(-1)!.url(), channel: canonical.channel_id })
+  expect(replay).toEqual([{ type: 'message', seq: canonical.created_seq, kind: 'create', message: canonical }])
+  const orgs = await secretSafe(() => a.request.get('/api/v1/me'))
+  const organization = (await orgs.json()).organizations[0].organization_id as string
+  const eventPage = await secretSafe(() => a.request.get(`/api/v1/orgs/${organization}/channels/${canonical.channel_id}/events?after_seq=0&limit=1`))
+  expect(eventPage.status()).toBe(200)
+  expect(eventPage.headers()['cache-control']).toBe('no-store')
+  expect(await eventPage.json()).toEqual({ history_generation: canonical.history_generation, events: replay, has_more: false })
   await Promise.all(signIns)
   expect(signIns).toHaveLength(2)
   await a.getByRole('button', { name: 'ログアウト' }).click()
@@ -152,4 +185,68 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   expect(cspErrors).toEqual([])
   await a.context().close()
   await b.context().close()
+})
+
+test('history generation rotation reboots connected sync and settles a pending send exactly once', async ({ page }) => {
+  const network = process.env.E2E_ROTATE_NETWORK
+  const image = process.env.E2E_ROTATE_IMAGE
+  expect(network).toMatch(/^fukulow-(?:security|e2e)-[a-z0-9_-]+_backend$/)
+  expect(image).toBeTruthy()
+  const subscriptions: Extract<ServerEvent, { type: 'subscribed' }>[] = []
+  page.on('websocket', socket => socket.on('framereceived', frame => {
+    try {
+      const event = JSON.parse(String(frame.payload)) as ServerEvent
+      if (event.type === 'subscribed') subscriptions.push(event)
+    } catch { /* Ignore non-JSON frames. */ }
+  }))
+  await page.addInitScript(() => {
+    const sockets: WebSocket[] = []
+    const Original = window.WebSocket
+    const state = window as unknown as { generationHeldKey?: string; reconnectForGeneration(): void }
+    state.reconnectForGeneration = () => sockets.forEach(socket => socket.close())
+    window.WebSocket = class extends Original {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols); sockets.push(this)
+        this.addEventListener('message', event => {
+          const value = JSON.parse(String(event.data)) as { type?: string; message?: { client_message_id?: string } }
+          if (value.type === 'message' && value.message?.client_message_id === state.generationHeldKey) event.stopImmediatePropagation()
+        })
+      }
+    }
+  })
+  const organization = await ensureOwnerAndSignIn(page)
+  const channel = await createChannelApi(page.request, organization, `generation-${crypto.randomUUID().slice(0, 8)}`)
+  await page.getByRole('button', { name: `# ${channel.name}`, exact: true }).click()
+  await expect.poll(() => subscriptions.filter(s => s.channel_id === channel.id).length).toBeGreaterThan(0)
+  const oldGeneration = subscriptions.find(s => s.channel_id === channel.id)!.history_generation
+  const body = `pending-restore-${crypto.randomUUID()}`
+  let key = ''
+  let writes = 0
+  await page.route(`**/channels/${channel.id}/messages`, async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    writes++
+    const input = route.request().postDataJSON() as components['schemas']['SendMessageRequest']
+    key = input.client_message_id
+    await page.evaluate(key => { (window as unknown as { generationHeldKey: string }).generationHeldKey = key }, key)
+    const committed = await route.fetch()
+    expect(committed.status()).toBe(201)
+    await route.abort('failed')
+  })
+  await page.locator('#main-content textarea').fill(body)
+  await page.getByRole('button', { name: '送信', exact: true }).click()
+  await expect(page.getByRole('button', { name: '再送する', exact: true })).toBeVisible()
+  // Owner connection is isolated to this disposable Compose network. Runtime credentials cannot rotate.
+  await secretSafe(async () => execFileSync('docker', ['run', '--rm', '--read-only', '--cap-drop=ALL',
+    '--security-opt=no-new-privileges:true', '--network', network!,
+    '-e', 'DATABASE_URL=postgres://fukulow:compose-e2e-db-test-only@db:5432/fukulow', image!,
+    'fukulow-server', 'rotate-history-generation', organization], { stdio: 'pipe', timeout: 30_000 }))
+  await page.evaluate(() => (window as unknown as { reconnectForGeneration(): void }).reconnectForGeneration())
+  await expect.poll(() => subscriptions.some(s => s.channel_id === channel.id && s.history_generation !== oldGeneration)).toBe(true)
+  await expect(page.getByRole('button', { name: '再送する', exact: true })).toHaveCount(0)
+  await expect(page.locator('#main-content [data-message-id]').filter({ hasText: body })).toHaveCount(1)
+  const response = await secretSafe(() => page.request.get(`/api/v1/orgs/${organization}/channels/${channel.id}/messages`))
+  const history = await secretSafe(() => response.json()) as components['schemas']['MessagePage']
+  expect(history.messages.filter(m => m.client_message_id === key)).toHaveLength(1)
+  expect(history.history_generation).not.toBe(oldGeneration)
+  expect(writes).toBe(1)
 })

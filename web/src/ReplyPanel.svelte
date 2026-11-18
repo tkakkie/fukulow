@@ -13,7 +13,7 @@
     discardAndFocusComposer,
     focusTarget,
   } from './focus-management'
-  import { countRepliesByMessageId, type RepliesAdapter } from './replies.svelte'
+  import { type RepliesAdapter } from './replies.svelte'
   import type { ChannelSync } from './sync.svelte'
   import {
     applyTimelineScrollAction,
@@ -149,12 +149,10 @@
   // The active navigation anchor is retained separately from the bounded history.
   const visibleMessages = $derived(
     isCurrentAnchor && rState.anchor?.id === anchorMessageId && !historyMessages.some(m => m.id === anchorMessageId)
-      ? [...historyMessages, rState.anchor].sort((a, b) => a.seq - b.seq)
+      ? [...historyMessages, rState.anchor].sort((a, b) => a.created_seq - b.created_seq)
       : historyMessages,
   )
-  const replyCounts = $derived(
-    countRepliesByMessageId([s.messages, rState.messages, visibleMessages]),
-  )
+  const replyCounts = $derived(replies.counts ?? {})
   const chainMessageIds = $derived(
     new Set([anchorMessageId, effectiveRootId, ...visibleMessages.map((m) => m.id)]),
   )
@@ -440,11 +438,11 @@
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
-                body={m.body}
+                body={m.body ?? ''}
                 mentions={m.mentions}
                 {resolveMentionName}
                 {selfId}
-                replyCount={replyCounts.get(m.id) ?? 0}
+                replyCount={replyCounts[m.reply_root_id ?? m.id] ?? null}
                 focusable
                 rovingTabindex={rovingRowId === m.id ? 0 : -1}
                 onopenreplies={onopenreplies && !targetUnavailable

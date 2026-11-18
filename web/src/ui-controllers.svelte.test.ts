@@ -104,8 +104,8 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
 
     try {
       // 1. Resolve Channel list and initial history
-      net.pages.general = ok({ messages: [record(1, 'general')], has_more: false })
-      net.lists[0].resolve(ok({ channels: [channel('general', 'general')] }))
+      net.pages.general = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'general')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'general')], has_more: false })
+      net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('general', 'general')] }))
       await settle()
       net.subscribed('general', 1)
       await settle()
@@ -131,7 +131,7 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
       // 3. Receive a live Message from another member -> 1 run, announces with resolved sender name
       const announceRunsBeforeLive = announceEffectRuns
       net.event({
-        type: 'message',
+        type: 'message', kind: 'create', seq: ({ ...record(3, 'general'), sender: 'alice', body: 'ようこそ' }).created_seq,
         message: { ...record(3, 'general'), sender: 'alice', body: 'ようこそ' },
       })
       await settle()
@@ -154,7 +154,7 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     const stop = $effect.root(() => {
       let scrollState = $state(initialTimelineScrollState('c1'))
       let announceState = $state(initialAnnouncementState())
-      const messages = [{ id: 'm1', seq: 1, sender: 'alice', body: 'hi' }]
+      const messages = [{ id: 'm1', created_seq: 1, sender: 'alice', body: 'hi' }]
 
       $effect(() => {
         scrollRuns++
@@ -222,7 +222,7 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
       openMembers: undefined,
       openSession(selfId, onEnded, organizationId) {
         const session = createSession({ selfId, onEnded, organizationId, ...net.options(selfId) })
-        return {
+        return { history_generation: '00000000-0000-4000-8000-000000000515',
           channels: channelsAdapter(session.channels),
           sync: syncAdapter(session.sync),
           topics: (id) => topicsAdapter(session.topics, id),
@@ -233,8 +233,8 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
 
     await auth.load()
     net.socket.onReady()
-    net.pages.general = ok({ messages: [record(1, 'general')], has_more: false })
-    net.lists[0].resolve(ok({ channels: [channel('general', 'general')] }))
+    net.pages.general = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'general')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'general')], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('general', 'general')] }))
     await settle()
     net.subscribed('general', 1)
     await settle()
@@ -361,5 +361,5 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
 })
 
 function msgFor(seq: number, sender: string, body: string) {
-  return { id: `m-${seq}`, seq, sender, body }
+  return { id: `m-${seq}`, created_seq: seq, sender, body }
 }
