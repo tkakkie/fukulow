@@ -1,5 +1,7 @@
 import { sleep } from 'k6';
 import execution from 'k6/execution';
+import { sha256 } from 'k6/crypto';
+import { SharedArray } from 'k6/data';
 import http from 'k6/http';
 import { Counter, Trend } from 'k6/metrics';
 import type { Options } from 'k6/options';
@@ -21,6 +23,16 @@ const steps = throughputPlan(__ENV.THROUGHPUT_RATES, __ENV.THROUGHPUT_STEP_SECON
 const preAllocatedVUs = positiveInteger(__ENV.THROUGHPUT_VUS, 100);
 const maxVUs = positiveInteger(__ENV.THROUGHPUT_MAX_VUS, 2000);
 if (maxVUs < preAllocatedVUs) throw new Error('THROUGHPUT_MAX_VUS must be at least THROUGHPUT_VUS');
+const bodyPath = __ENV.THROUGHPUT_BODIES;
+const bodies = bodyPath === undefined ? undefined : new SharedArray('throughput bodies', () => {
+  const source = open(bodyPath);
+  const values: unknown = JSON.parse(source);
+  if (!Array.isArray(values) || !values.length || values.some(value => typeof value !== 'string')) {
+    throw new Error('THROUGHPUT_BODIES must contain a nonempty JSON array of strings');
+  }
+  return [sha256(source, 'hex'), ...values] as string[];
+});
+const sendTags = 'name:throughput_send';
 
 const attempted = new Counter('throughput_attempted');
 const accepted = new Counter('throughput_accepted');
@@ -41,10 +53,22 @@ export const options: Options = {
     preAllocatedVUs, maxVUs, gracefulStop: `${timeout + 1}s` }])),
   setupTimeout: `${channels * 5 + members * 20 + 30}s`, teardownTimeout: `${members * 5 + 15}s`,
   summaryTrendStats: ['min', 'med', 'max', 'p(95)', 'p(99)'],
-  systemTags: ['status', 'method', 'name', 'scenario', 'expected_response'],
+  systemTags: ['status', 'method', 'name', 'scenario', 'expected_response', ...(bodies ? ['error_code' as const] : [])],
   thresholds: {
     checks: ['rate==1'], throughput_other: ['count==0'],
     throughput_invalid_retry_after: ['count==0'],
+    ...(bodies ? {
+      [`http_req_duration{${sendTags}}`]: ['max>=0'],
+      ...Object.fromEntries(steps.flatMap(step => {
+        const tags = `${sendTags},scenario:${step.name}`;
+        return [
+          [`http_req_duration{${tags}}`, ['max>=0']],
+          [`http_reqs{${tags}}`, ['count>=0']],
+          [`http_reqs{${tags},status:0}`, ['count>=0']],
+          [`http_reqs{${tags},status:0,error_code:1050}`, ['count>=0']],
+        ];
+      })),
+    } : {}),
     ...Object.fromEntries(steps.flatMap(step => [
       ...counters.map(metric => [`${metric}{scenario:${step.name}}`, ['count>=0']]),
       ...['throughput_accepted_ms', 'throughput_completion_offset_ms', 'throughput_retry_after']
@@ -81,10 +105,13 @@ export function setup(): Setup {
 export default function(data: Setup): void {
   const step = steps.find(step => step.name === execution.scenario.name)!;
   const index = execution.scenario.iterationInTest;
+  if (bodies && step === steps[0] && index === 0) console.log(`LOAD_THROUGHPUT_START ${execution.scenario.startTime}`);
   const selection = selectSender(index, data.tokens.length, data.channelIds.length);
   const token = data.tokens[selection.member];
   const channel = data.channelIds[selection.channel];
-  const body: SendMessageRequest = { client_message_id: uuid(), body: 'Load test message' };
+  const body: SendMessageRequest = {
+    client_message_id: uuid(), body: bodies ? bodies[1 + index % (bodies.length - 1)] : 'Load test message',
+  };
   attempted.add(1);
   const started = Date.now();
   const response = http.post(`${baseUrl}${organizationPath(data.organizationId, false)}/channels/${channel}/messages`,
@@ -111,6 +138,6 @@ export function teardown(data: Setup): void {
 
 export function handleSummary(data: unknown): Record<string, string> {
   const report = { mode, channels, members, preAllocatedVUs, maxVUs, requestTimeoutSeconds: timeout,
-    subscribers: 0, ...throughputReport(data, steps) };
+    subscribers: 0, ...throughputReport(data, steps), ...(bodies && { bodySha256: bodies[0] }) };
   return { stdout: 'LOAD_THROUGHPUT ' + JSON.stringify(report) + '\nLOAD_SUMMARY ' + JSON.stringify(summaryForReport(data)) + '\n' };
 }

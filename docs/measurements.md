@@ -460,6 +460,14 @@ Limits: one run per mode on a shared single host, with the generator competing f
 
 - Image default MALLOC_MMAP_THRESHOLD_=131072 (#340, 2026-11-13): moved to #340 (closed; the decision states the RSS and throughput result).
 
+## PGroonga Message-send write cost (#153 M1)
+
+Run overnight on an otherwise idle Mac from the repository root with Node 26.13.1. Use `node load/search-m1.ts --out /absolute/new/artifact-directory` as the single foreground waiter, and regenerate the judgement with `node load/search-m1-report.ts /absolute/new/artifact-directory`. Adding `--smoke` runs only B, `many`, 50 sends/s for 10 s and excludes the run from judgement.
+
+Each arm-run starts a fresh database with the same app image built from local `main` and the manifest v2 PostgreSQL recipe. Both arms use the stored `normalized_body` column, PGroonga WAL resource manager and crash-safe settings, and the same hashed 50,000-body prefix from seed 153202611 (scalar p50/p95 155/676). A adds the PGroonga index. The send limiter is raised for this Mac-relative comparison (burst and refill both 1000000). The #309 workload runs `many` and `hot` as three pairs each in B/A, A/B, B/A order, with seven 60 s rates from 50 to 4000/s, 20 VUs, max 100, and a 3 s timeout. HTTP goes directly to the app, without TLS, proxy or WebSocket fan-out. This comparison is outside the #431 budget.
+
+The report applies the fixed #153 criteria to the rates B sustains in all three pairs, with invalid evidence checked before material impact. The p95 test uses the median paired ratio and median paired absolute difference through 1000/s. Recorded-only evidence includes accepted/s within the send windows, p50/p99, PostgreSQL WAL bytes per accepted send, sampled app/DB CPU peaks (100% per core), and DB size growth. SQL snapshots bracket the windows and their drains.
+
 ## Direct messages preliminary single-host measurement (#151, 2026-11-14 JST, not acceptance)
 
 **Not an acceptance result. Formal acceptance measurement is NOT DONE.** The maintainer authorized a preliminary Mac measurement on 2026-11-14; the adopted budgets in `spec/dms.md` remain unchanged. This run found and corrected query-plan, statement-count and JIT costs, but the combined workload still overloads this environment. Good isolated latencies do not establish the acceptance gate.
