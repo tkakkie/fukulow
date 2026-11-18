@@ -94,7 +94,10 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let shutdown = fukulow_server::shutdown::Shutdown::default();
     let reclamation = tokio::spawn(fukulow_server::channels::dms::reclamation::run(
         pool.clone(),
-        shutdown.clone(),
+        {
+            let shutdown = shutdown.clone();
+            async move { shutdown.cancelled().await }
+        },
     ));
     let metrics = tokio::spawn(fukulow_server::observability::report_periodically());
     let completed = fukulow_server::serve(

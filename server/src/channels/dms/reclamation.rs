@@ -1,5 +1,5 @@
 use sqlx::{PgConnection, PgPool};
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 use uuid::Uuid;
 
 const INTERVAL: Duration = Duration::from_secs(60);
@@ -66,22 +66,23 @@ pub(super) async fn reclaim(tx: &mut PgConnection, org: Uuid) -> Result<(u64, u6
 }
 
 /// Single-flight periodic work, independent of traffic; each tick visits one Organization.
-pub async fn run(pool: PgPool, shutdown: crate::shutdown::Shutdown) {
-    run_with_interval(pool, shutdown, INTERVAL).await;
+pub async fn run(pool: PgPool, cancelled: impl Future<Output = ()> + Send) {
+    run_with_interval(pool, cancelled, INTERVAL).await;
 }
 
 pub(super) async fn run_with_interval(
     pool: PgPool,
-    shutdown: crate::shutdown::Shutdown,
+    cancelled: impl Future<Output = ()> + Send,
     interval: Duration,
 ) {
+    tokio::pin!(cancelled);
     let mut timer = tokio::time::interval(interval);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut after = None;
     loop {
         tokio::select! {
             biased;
-            _ = shutdown.cancelled() => return,
+            _ = &mut cancelled => return,
             _ = timer.tick() => {}
         }
         let work = async {
@@ -101,7 +102,7 @@ pub(super) async fn run_with_interval(
         };
         tokio::select! {
             biased;
-            _ = shutdown.cancelled() => return,
+            _ = &mut cancelled => return,
             result = tokio::time::timeout(DEADLINE, work) => {
                 if !matches!(result, Ok(Ok(()))) {
                     eprintln!("event=database_failure operation=dm_discovery_reclamation");
