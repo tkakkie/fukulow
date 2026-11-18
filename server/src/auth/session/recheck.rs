@@ -107,21 +107,12 @@ async fn run(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let failure = match check.as_ref() {
-            None => None,
-            Some(check) => {
-                match tokio::time::timeout_at(bound, check.check(&pool, SubscriptionScope::All))
-                    .await
-                {
-                    Ok(Ok(())) if Instant::now() < bound => None,
-                    Ok(Ok(())) => Some("deadline"),
-                    Ok(Err(_)) => Some("error"),
-                    Err(_) => Some("timeout"),
-                }
-            }
-        };
-        if let (Some(check), Some(kind)) = (check, failure) {
-            crate::observability::subscription_recheck_failed("all", kind);
+        if let Some(check) = check
+            && (!matches!(
+                tokio::time::timeout_at(bound, check.check(&pool, SubscriptionScope::All)).await,
+                Ok(Ok(()))
+            ) || Instant::now() >= bound)
+        {
             check.failed(SubscriptionScope::All);
             for signal in sessions
                 .lock()

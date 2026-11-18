@@ -33,15 +33,9 @@ pub(super) struct Connection<'a> {
     pub cursors: HashMap<Uuid, i64>,
     pub access: HashMap<Uuid, crate::channels::AccessWatch>,
     pub permit: super::limits::Permit,
-    /// Fixed label of the site that returned 1011; "connection" when unlabeled (#469).
-    pub close_cause: &'static str,
 }
 
 impl Connection<'_> {
-    fn internal(&mut self, cause: &'static str) -> u16 {
-        self.close_cause = cause;
-        1011
-    }
     async fn protected_event(
         &mut self,
         socket: &mut WebSocket,
@@ -104,7 +98,7 @@ impl Connection<'_> {
                 Ok(false)
             }
             Some(3) => Err(super::CLOSE_ORGANIZATION_UNAVAILABLE),
-            Some(_) => Err(self.internal("access_recheck")),
+            Some(_) => Err(1011),
             None => Ok(false),
         }
     }
@@ -115,7 +109,6 @@ impl Connection<'_> {
             watch.refresh(&self.state.pool).await.map_err(|error| {
                 tracing::info_span!(target: "fukulow", "database", operation = "websocket_refresh")
                     .in_scope(|| crate::observability::database_failure(&error));
-                self.close_cause = crate::observability::database_close_cause(&error);
                 1011u16
             })?;
         }
@@ -238,7 +231,6 @@ impl Connection<'_> {
             .map_err(|error| {
                 tracing::info_span!(target: "fukulow", "database", operation = "websocket_latest_seq")
                     .in_scope(|| crate::observability::database_failure(&error));
-                self.close_cause = crate::observability::database_close_cause(&error);
                 1011u16
             })?;
         if !self.refresh(socket, channel).await? {
@@ -277,12 +269,12 @@ impl Connection<'_> {
                 Err(MessageError::Database(error)) => {
                     tracing::info_span!(target: "fukulow", "database", operation = "websocket_replay")
                         .in_scope(|| crate::observability::database_failure(&error));
-                    return Err(self.internal(crate::observability::database_close_cause(&error)));
+                    return Err(1011);
                 }
-                Err(_) => return Err(self.internal("replay_error")),
+                Err(_) => return Err(1011),
             };
             if page.is_empty() {
-                return Err(self.internal("replay_empty"));
+                return Err(1011);
             }
             #[cfg(test)]
             super::tests::access_loss::pause(channel, "page", after).await;
@@ -345,11 +337,9 @@ impl Connection<'_> {
                             target: "fukulow", "database", operation = "websocket_authorize"
                         )
                         .in_scope(|| crate::observability::database_failure(&error));
-                        return Err(
-                            self.internal(crate::observability::database_close_cause(&error))
-                        );
+                        return Err(1011);
                     }
-                    Err(_) => return Err(self.internal("authorize_error")),
+                    Err(_) => return Err(1011),
                 }
                 #[cfg(test)]
                 super::tests::access_loss::pause(channel_id, "access_subscribe", 0).await;
@@ -369,7 +359,6 @@ impl Connection<'_> {
                             target: "fukulow", "database", operation = "websocket_subscribe"
                         )
                         .in_scope(|| crate::observability::database_failure(&error));
-                        self.close_cause = crate::observability::database_close_cause(&error);
                         1011u16
                     })?;
                 let Some(watch) = watch else {
@@ -406,7 +395,6 @@ impl Connection<'_> {
                         .map_err(|error| {
                             tracing::info_span!(target: "fukulow", "database", operation = "websocket_subscribed_seq")
                                 .in_scope(|| crate::observability::database_failure(&error));
-                            self.close_cause = crate::observability::database_close_cause(&error);
                             1011u16
                         })?;
                     if !self.protected(socket, channel_id).await? {

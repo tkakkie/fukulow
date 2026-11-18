@@ -43,13 +43,12 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                                         cursors: HashMap::new(),
                                         access: HashMap::new(),
                                         permit,
-                                        close_cause: "connection",
                                     };
                                     let code = connection
                                         .run(&mut socket, connection::Lifecycle::default())
                                         .await
                                         .unwrap_err();
-                                    close(&mut socket, code, "connection").await;
+                                    close(&mut socket, code).await;
                                     finished.send(code).await.unwrap();
                                 }
                                 .with_subscriber(capture.subscriber())

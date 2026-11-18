@@ -123,7 +123,7 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
     const { metric, results } = await stepped(stepSizes, sockets => ({ SUBSCRIBERS: String(sockets), LOAD_CONNECTIONS_ONLY: '1' }), undefined, true);
     // #469: app-side evidence per connection step; aggregates only (load/app-evidence.ts).
     Object.assign(entry, { ceiling: metric.observation.ceiling, steps: results.map((result, i) => ({ sockets: stepSizes[i],
-      exitCode: result.exitCode, generatorExitCode: result.generatorExitCode, measurementError: result.measurementError, generatorError: result.generatorError,
+      exitCode: result.exitCode, generatorExitCode: result.generatorExitCode, measurementError: result.measurementError,
       clientCloses: Object.fromEntries(Object.entries(result.summary?.metrics ?? {}).flatMap(([name, metric]) => {
         const code = name.match(/^socket_closes\{code:(\d+)\}$/)?.[1];
         return code ? [[code, metric.values.count]] : [];
@@ -148,8 +148,7 @@ async function run(scenario: number, proxy: Proxy, warmup: boolean) {
       : scenario === 5 ? { LOAD_FIRST_PAINT: '1' } : {};
     const result = await record(directory, proxy, extra);
     metrics = metricsFor(proxy, scenario, result);
-    if (result.exitCode !== 0) Object.assign(entry, { error: result.measurementError || 'runner failed', generatorError: result.generatorError,
-      appEvidence: result.appEvidence, proxyEvidence: result.proxyEvidence });
+    if (result.exitCode !== 0) Object.assign(entry, { error: result.measurementError || 'runner failed' });
     // A missing report must be visible even if the cell list itself is absent.
     if (!Object.keys(metrics).length) metrics.missing = { kind: 'latency', observation: {
       proxy, value: NaN, tls: result.tls ?? [], generatorCpu: null, error: 'missing scenario metrics' } };

@@ -8,8 +8,6 @@ export type RunResult = {
   /** load/app-evidence.ts aggregates for the generator window (proxy runs only). */
   appEvidence?: AppEvidence;
   proxyEvidence?: ProxyEvidence;
-  /** First generator error, allowlisted (load/generator.ts allowlistedReason). */
-  generatorError?: { reason: string; atMs: number };
   cpuPeakPercent?: Record<string, number | null>;
   summary?: { metrics?: Record<string, { values: Record<string, number> }>; summaries?: {
     pathLabel: string; network: string; cache: string; timelineVisibleMs: { p50: number; p95: number }
@@ -77,9 +75,6 @@ export function ceilingCause(result: RunResult, requestedSockets: number): Pick<
     // peer_or_transport is the client's own close; every other bucket, 1001 included, is a server-sent close.
     ...Object.entries(evidence.closes).filter(([code, close]) => code !== 'peer_or_transport' && close.count)
       .map(([code, close]) => `app sent ${close.count} closes with ${code}`),
-    // Which close site sent the 1011s: a live notification failure, a Session failure or a connection error.
-    ...Object.entries(evidence.causes1011 ?? {}).filter(([, n]) => n).map(([cause, n]) => `app 1011 from ${cause}: ${n}`),
-    ...Object.entries(evidence.recheckFailures ?? {}).filter(([, n]) => n).map(([key, n]) => `subscription recheck failed ${key}: ${n}`),
     ...Object.entries(evidence.databaseFailures).filter(([, n]) => n).map(([kind, n]) => `database_failure ${kind}: ${n}`),
     ...(['acquire_timeout', 'acquire_closed', 'acquire_io', 'acquire_database', 'acquire_other'] as const)
       .filter(key => evidence.pool?.deltas[key]).map(key => `pool ${key}: ${evidence.pool!.deltas[key]}`),
@@ -89,8 +84,8 @@ export function ceilingCause(result: RunResult, requestedSockets: number): Pick<
     ...Object.entries(evidence.otherWarnings).map(([event, n]) => `app ${event}: ${n}`),
   ];
   if (client1011! > app1011) return { cause: 'unknown', reasons: [`client saw ${client1011} closes with 1011, app sent ${app1011}`, ...signals] };
-  if (client1011! > 0) return { cause: 'app', reasons: [...signals, ...(signals.some(signal => /database_failure|pool |app 1011 from /.test(signal)) ? []
-    : ['no database_failure, pool failure or 1011 close site in the window: the app-side cause is not identified'])] };
+  if (client1011! > 0) return { cause: 'app', reasons: [...signals, ...(signals.some(signal => /database_failure|pool /.test(signal)) ? []
+    : ['no database_failure or pool failure in the window: the app-side cause is not identified'])] };
   if (signals.length) return { cause: 'unknown', reasons: ['app-side failures present, but no client 1011 ties them to the failure', ...signals] };
   // Absence of app events alone is not proxy evidence (an app limit can leave none): the proxy is named only
   // when the proxy itself logged errors in the window while the app logged no failure or rejection.

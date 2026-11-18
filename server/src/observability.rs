@@ -80,7 +80,7 @@ fn method(method: &axum::http::Method) -> &'static str {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) enum Admission {
     SendChannelQueue,
     SendGlobalQueue,
@@ -126,35 +126,7 @@ impl Admission {
             Self::Password => "password",
         }
     }
-    /// 1011 close cause when a database-backed WebSocket site was rejected here (#469).
-    fn close_cause(self) -> &'static str {
-        match self {
-            Self::SendChannelQueue => "admission_send_channel_queue",
-            Self::SendGlobalQueue => "admission_send_global_queue",
-            Self::SendChannel => "admission_send_channel",
-            Self::SendGlobal => "admission_send_global",
-            Self::WatermarkChannel => "admission_watermark_channel",
-            Self::WatermarkGlobal => "admission_watermark_global",
-            Self::NotificationChannel => "admission_notification_channel",
-            Self::NotificationGlobal => "admission_notification_global",
-            Self::NotificationOrganization => "admission_notification_organization",
-            Self::NotificationExecution => "admission_notification_execution",
-            Self::Socket => "admission_socket",
-            Self::Password => "admission_password",
-        }
-    }
 }
-
-/// Typed payload of an admission rejection's `WouldBlock`, so a close site can
-/// name the rejected admission without parsing an error message.
-#[derive(Debug)]
-struct Rejected(Admission);
-impl std::fmt::Display for Rejected {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("admission rejected")
-    }
-}
-impl std::error::Error for Rejected {}
 
 struct Metrics {
     active: AtomicU64,
@@ -195,27 +167,6 @@ impl Metrics {
 
 pub(crate) fn admission(kind: Admission) {
     METRICS.reject(kind);
-}
-
-/// Counts the rejection and returns the error its database-backed caller propagates.
-pub(crate) fn rejected(kind: Admission) -> sqlx::Error {
-    METRICS.reject(kind);
-    sqlx::Error::Io(std::io::Error::new(
-        std::io::ErrorKind::WouldBlock,
-        Rejected(kind),
-    ))
-}
-
-/// Fixed 1011 cause for a failed database-backed WebSocket step: the rejected
-/// admission (`admission` if untyped), else `database` (#469).
-pub(crate) fn database_close_cause(error: &sqlx::Error) -> &'static str {
-    match error {
-        sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock => error
-            .get_ref()
-            .and_then(|inner| inner.downcast_ref::<Rejected>())
-            .map_or("admission", |rejected| rejected.0.close_cause()),
-        _ => "database",
-    }
 }
 
 #[cfg(test)]
@@ -271,23 +222,16 @@ fn close_bucket(code: Option<u16>) -> (usize, &'static str) {
         None => (7, "peer_or_transport"),
     }
 }
-/// `cause` is a fixed label from the closing call site, never data.
-pub(crate) fn socket_closed(code: Option<u16>, cause: &'static str) {
-    METRICS.closed(code, cause);
+pub(crate) fn socket_closed(code: Option<u16>) {
+    METRICS.closed(code);
 }
 
 impl Metrics {
-    fn closed(&self, code: Option<u16>, cause: &'static str) {
+    fn closed(&self, code: Option<u16>) {
         let (bucket, code) = close_bucket(code);
         self.closes[bucket].fetch_add(1, Relaxed);
-        tracing::info!(target: TARGET, event = "websocket_closed", code, cause);
+        tracing::info!(target: TARGET, event = "websocket_closed", code);
     }
-}
-
-/// One event per failed Subscription recheck pass (not per socket); every
-/// subscription in scope is then closed with 1011 `access_recheck` (#469).
-pub(crate) fn subscription_recheck_failed(scope: &'static str, kind: &'static str) {
-    tracing::warn!(target: TARGET, event = "subscription_recheck_failed", scope, kind);
 }
 
 // Error Display/Debug/source, DB details and SQLSTATE are deliberately never logged.

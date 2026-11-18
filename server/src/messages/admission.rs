@@ -1,4 +1,4 @@
-use crate::observability::{Admission as Rejection, admission, rejected};
+use crate::observability::{Admission as Rejection, admission};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -188,7 +188,13 @@ async fn acquire(
 ) -> Result<OwnedSemaphorePermit, sqlx::Error> {
     match tokio::time::timeout_at(deadline, semaphore.clone().acquire_owned()).await {
         Ok(Ok(permit)) => Ok(permit),
-        _ => Err(rejected(rejection)),
+        _ => {
+            admission(rejection);
+            Err(sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "message work admission rejected",
+            )))
+        }
     }
 }
 

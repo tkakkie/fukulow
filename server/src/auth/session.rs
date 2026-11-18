@@ -155,13 +155,12 @@ impl SessionChanges {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if let Some(check) = check {
-            let kind = match tokio::time::timeout(CHECK_TIMEOUT, check.check(pool, scope)).await {
-                Ok(Ok(())) => return,
-                Ok(Err(_)) => "error",
-                Err(_) => "timeout",
-            };
-            crate::observability::subscription_recheck_failed("scoped", kind);
+        if let Some(check) = check
+            && !matches!(
+                tokio::time::timeout(CHECK_TIMEOUT, check.check(pool, scope)).await,
+                Ok(Ok(()))
+            )
+        {
             check.failed(scope);
         }
     }

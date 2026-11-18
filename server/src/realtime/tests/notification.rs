@@ -158,9 +158,6 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
 
 #[fukulow_test::test]
 async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturation(pool: PgPool) {
-    // sqlx::test runs on one thread, so the server's socket tasks log into this capture.
-    let output = crate::observability::tests::Capture::default();
-    let _capture = tracing::subscriber::set_default(output.subscriber());
     let f = fixture(&pool).await;
     let cold = channel(&pool, f.organization, f.member, false).await;
     let mut hot_socket = f.server.connect(&f.token).await;
@@ -209,19 +206,6 @@ async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturat
     // Excess hot work still fails closed, without closing the cold sockets.
     post(&f, f.channel).await;
     closed(&mut hot_socket, 1011).await;
-    // #469: a notification failure is told apart from other 1011 paths by a fixed cause.
-    let closes: Vec<_> = output
-        .events()
-        .into_iter()
-        .filter(|event| event["fields"]["event"] == "websocket_closed")
-        .map(|event| event["fields"].clone())
-        .collect();
-    assert_eq!(
-        closes,
-        [json!({"event":"websocket_closed", "code":"1011", "cause":"notification"})],
-        "{}",
-        output.text()
-    );
     let own = post(&f, cold).await;
     for socket in &mut cold_sockets {
         assert_eq!(event(socket).await["message"], own);

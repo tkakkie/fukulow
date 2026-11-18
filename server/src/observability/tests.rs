@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tower::ServiceExt;
-use tracing::{instrument::WithSubscriber, subscriber::NoSubscriber};
+use tracing::instrument::WithSubscriber;
 
 #[derive(Clone, Default)]
 pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -33,14 +33,6 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
 }
 impl Capture {
     pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-        // With at most one registered dispatcher, tracing-core caches a callsite's
-        // interest from the default of whichever thread hits it first: a parallel
-        // test without a capture caches `never` and this capture sees nothing.
-        // Two live idle dispatchers keep the registry on the shared, locked path.
-        static IDLE: std::sync::OnceLock<[tracing::Dispatch; 2]> = std::sync::OnceLock::new();
-        IDLE.get_or_init(|| {
-            std::array::from_fn(|_| tracing::Dispatch::new(NoSubscriber::default()))
-        });
         subscriber(self.clone())
     }
     pub(crate) fn text(&self) -> String {
@@ -137,7 +129,7 @@ async fn request_spans_redact_secrets_and_use_templates_and_generated_ids() {
         // Extension methods are arbitrary input and must not become log fields.
         let _ = app.oneshot(Request::builder().method("secret-method").uri("/objects/secret-path")
             .body(Body::empty()).unwrap()).await.unwrap();
-    }.with_subscriber(output.subscriber()).await;
+    }.with_subscriber(subscriber(output.clone())).await;
     assert!(!output.text().contains("secret-"), "{}", output.text());
     let events = output.events();
     let requests: Vec<_> = events
@@ -207,7 +199,7 @@ impl sqlx::error::DatabaseError for SensitiveDatabaseError {
 #[test]
 fn database_errors_never_format_sensitive_details_or_sources() {
     let output = Capture::default();
-    tracing::subscriber::with_default(output.subscriber(), || {
+    tracing::subscriber::with_default(subscriber(output.clone()), || {
         for error in [
             sqlx::Error::Database(Box::new(SensitiveDatabaseError)),
             sqlx::Error::Configuration(Box::new(io::Error::other("secret-configuration"))),
@@ -248,46 +240,6 @@ fn database_errors_never_format_sensitive_details_or_sources() {
     );
 }
 
-#[test]
-fn database_close_cause_names_the_rejected_admission() {
-    let rejection =
-        |kind| sqlx::Error::Io(io::Error::new(io::ErrorKind::WouldBlock, Rejected(kind)));
-    let causes: Vec<_> = Admission::ALL
-        .into_iter()
-        .map(|kind| database_close_cause(&rejection(kind)))
-        .collect();
-    let expected: Vec<_> = Admission::ALL
-        .into_iter()
-        .map(|kind| format!("admission_{}", kind.name()))
-        .collect();
-    assert_eq!(causes, expected);
-    for (error, cause) in [
-        (
-            sqlx::Error::Io(io::ErrorKind::WouldBlock.into()),
-            "admission",
-        ),
-        (
-            sqlx::Error::Io(io::Error::new(io::ErrorKind::WouldBlock, "untyped")),
-            "admission",
-        ),
-        (
-            sqlx::Error::Io(io::Error::new(
-                io::ErrorKind::TimedOut,
-                Rejected(Admission::Socket),
-            )),
-            "database",
-        ),
-        (sqlx::Error::PoolTimedOut, "database"),
-        (sqlx::Error::PoolClosed, "database"),
-        (
-            sqlx::Error::Database(Box::new(SensitiveDatabaseError)),
-            "database",
-        ),
-    ] {
-        assert_eq!(database_close_cause(&error), cause);
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn aggregates_have_fixed_cardinality_and_admission_flood_is_silent() {
     let output = Capture::default();
@@ -320,7 +272,7 @@ async fn aggregates_have_fixed_cardinality_and_admission_flood_is_silent() {
         let fields = events[0]["fields"].as_object().unwrap();
         assert_eq!(fields.len(), 12);
         assert!(fields.keys().all(|key| ["event", "interval_seconds", "active_websockets", "close_1001", "close_1011", "close_4001", "close_4003", "close_4008", "close_4029", "close_other", "peer_or_transport_end", "admission_rejections"].contains(&key.as_str())));
-    }.with_subscriber(output.subscriber()).await;
+    }.with_subscriber(subscriber(output.clone())).await;
 }
 
 #[tokio::test]
@@ -345,7 +297,7 @@ async fn active_socket_guard_releases_on_cancellation_and_normal_exit() {
 #[test]
 fn socket_close_counters_and_lifecycle_logs_use_only_fixed_codes() {
     let output = Capture::default();
-    tracing::subscriber::with_default(output.subscriber(), || {
+    tracing::subscriber::with_default(subscriber(output.clone()), || {
         let metrics = Metrics::new();
         let guard = metrics.socket();
         metrics.report();
@@ -359,7 +311,7 @@ fn socket_close_counters_and_lifecycle_logs_use_only_fixed_codes() {
             Some(4999),
             None,
         ] {
-            metrics.closed(code, "connection");
+            metrics.closed(code);
         }
         assert_eq!(
             metrics
@@ -377,12 +329,6 @@ fn socket_close_counters_and_lifecycle_logs_use_only_fixed_codes() {
     assert_eq!(events[1]["fields"]["active_websockets"], 1);
     assert_eq!(events.last().unwrap()["fields"]["active_websockets"], 0);
     assert!(!output.text().contains("4999"));
-    assert!(
-        events
-            .iter()
-            .filter(|e| e["fields"]["event"] == "websocket_closed")
-            .all(|e| e["fields"]["cause"] == "connection")
-    );
     let codes: Vec<_> = events
         .iter()
         .filter_map(|e| e["fields"]["code"].as_str())
