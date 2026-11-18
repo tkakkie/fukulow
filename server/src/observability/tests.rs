@@ -14,6 +14,38 @@ use std::{
 use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
 
+#[test]
+fn revocation_hold_metrics_report_every_outcome() {
+    use RevocationMetric::*;
+    let output = Capture::default();
+    tracing::subscriber::with_default(output.subscriber(), || {
+        let metrics = Metrics::new();
+        let counters = [
+            (Held, "revocation_held"),
+            (Delivered, "revocation_delivered_after_hold"),
+            (RegistrationCap, "revocation_retired_registration_cap"),
+            (GlobalCap, "revocation_retired_global_cap"),
+            (Timeout, "revocation_retired_timeout"),
+            (Retries, "revocation_retired_retries"),
+            (Fenced, "revocation_retired_fenced"),
+            (RecheckError, "revocation_recheck_errors"),
+        ];
+        for (index, (metric, _)) in counters.iter().enumerate() {
+            for _ in 0..=index {
+                metrics.revocations.count(*metric);
+            }
+        }
+        metrics.report();
+        let events = output.events();
+        assert_eq!(events.len(), 1);
+        let fields = &events[0]["fields"];
+        assert_eq!(fields["event"], "metrics");
+        for (index, (_, field)) in counters.iter().enumerate() {
+            assert_eq!(fields[*field], index + 1, "{field}");
+        }
+    });
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
 impl Write for Capture {
@@ -270,8 +302,15 @@ async fn aggregates_have_fixed_cardinality_and_admission_flood_is_silent() {
             assert_eq!(event["span"], serde_json::json!({"name":"aggregates"}));
         }
         let fields = events[0]["fields"].as_object().unwrap();
-        assert_eq!(fields.len(), 12);
-        assert!(fields.keys().all(|key| ["event", "interval_seconds", "active_websockets", "close_1001", "close_1011", "close_4001", "close_4003", "close_4008", "close_4029", "close_other", "peer_or_transport_end", "admission_rejections"].contains(&key.as_str())));
+        assert_eq!(fields.len(), 20);
+        assert!(fields.keys().all(|key| [
+            "event", "interval_seconds", "active_websockets", "close_1001", "close_1011",
+            "close_4001", "close_4003", "close_4008", "close_4029", "close_other",
+            "peer_or_transport_end", "admission_rejections", "revocation_held",
+            "revocation_delivered_after_hold", "revocation_retired_registration_cap",
+            "revocation_retired_global_cap", "revocation_retired_timeout", "revocation_retired_retries",
+            "revocation_retired_fenced", "revocation_recheck_errors",
+        ].contains(&key.as_str())));
     }.with_subscriber(subscriber(output.clone())).await;
 }
 

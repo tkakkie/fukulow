@@ -14,8 +14,10 @@ use tokio::{
     time::Instant,
 };
 mod dms;
+mod holds;
 mod revocations;
 pub(crate) use dms::DmPublication;
+use holds::Holds;
 use revocations::{Capture, Check, Revocations};
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -197,6 +199,7 @@ struct InFlight {
 struct Buffer {
     epoch: u64,
     revocations: Revocations,
+    holds: Holds,
     directory_epoch: u64,
     pending: VecDeque<Pending>,
     reset: bool,
@@ -210,6 +213,7 @@ enum Retirement<'a> {
 }
 impl Buffer {
     fn retire_notices(&mut self) {
+        self.holds.prune(&self.revocations, Instant::now());
         self.epoch = self.epoch.wrapping_add(1);
         let mut pending = std::mem::take(&mut self.pending);
         pending.retain(|p| p.epoch.retained(self));
@@ -220,6 +224,19 @@ impl Buffer {
     }
 
     fn apply_revocation(&mut self, check: Check, identity: Option<&Proof>, access: Option<bool>) {
+        // A fallback or publication can still fence a hold. Only its scheduled
+        // handoff recheck can supply authority to deliver it.
+        let access =
+            access.filter(|&accessible| accessible || self.holds.deadline(check.id).is_none());
+        self.apply_revocation_proof(check, identity, access);
+    }
+
+    fn apply_revocation_proof(
+        &mut self,
+        check: Check,
+        identity: Option<&Proof>,
+        access: Option<bool>,
+    ) {
         if self
             .revocations
             .apply(check, identity.map(|proof| proof.role), access)
@@ -363,6 +380,11 @@ impl Drop for Registration {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&self.id);
         }
+        let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let Buffer {
+            holds, revocations, ..
+        } = &mut *b;
+        holds.close(revocations);
     }
 }
 impl Activity {
@@ -745,6 +767,13 @@ fn enqueue(entry: &Entry, mut pending: Pending) {
 }
 impl Registration {
     #[cfg(test)]
+    pub(crate) fn isolate_revocation_metrics(
+        &self,
+    ) -> Arc<crate::observability::RevocationMetrics> {
+        self.entry.buffer.lock().unwrap().holds.isolate_metrics()
+    }
+
+    #[cfg(test)]
     pub(crate) fn buffered(&self, notice: &Notice) -> bool {
         let b = self.entry.buffer.lock().unwrap();
         b.pending.iter().any(|pending| &pending.notice == notice)
@@ -766,13 +795,18 @@ impl Registration {
                 Some(self.entry.member.0),
             )
             .await;
-            let pending = {
-                self.entry
-                    .buffer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .pending
-                    .pop_front()
+            let (pending, wake_at) = {
+                let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                let now = Instant::now();
+                let Buffer {
+                    holds, revocations, ..
+                } = &mut *b;
+                holds.prune(revocations, now);
+                let (retry, wake_at) = holds.due(now);
+                if let Some(retry) = retry {
+                    return Some(NoticeFrame::new(&self.entry, retry, true));
+                }
+                (b.pending.pop_front(), wake_at)
             };
             if let Some(pending) = pending {
                 #[cfg(test)]
@@ -798,23 +832,22 @@ impl Registration {
                     }
                     continue;
                 }
-                let event = if b.reset || !pending.valid.valid() {
+                let mut pending = pending;
+                if b.reset || !pending.valid.valid() {
                     b.reset = false;
                     b.pending.clear();
-                    Notice::ActivityReset
-                } else {
-                    pending.notice
-                };
-                return Some(NoticeFrame {
-                    entry: self.entry.clone(),
-                    epoch: pending.epoch,
-                    directory_epoch: pending.directory_epoch,
-                    event,
-                    valid: pending.valid,
-                    recovery: pending.recovery,
-                });
+                    pending.notice = Notice::ActivityReset;
+                }
+                return Some(NoticeFrame::new(&self.entry, pending, false));
             }
-            notified.await;
+            if let Some(wake_at) = wake_at {
+                tokio::select! {
+                    () = notified => {},
+                    () = tokio::time::sleep_until(wake_at) => {},
+                }
+            } else {
+                notified.await;
+            }
         }
     }
 }
@@ -825,8 +858,39 @@ pub(crate) struct NoticeFrame {
     pub event: Notice,
     valid: Arc<QueryToken>,
     recovery: Option<Arc<Recovery>>,
+    retry: bool,
 }
+
+enum RecheckFailure {
+    Database,
+    Deadline,
+}
+
 impl NoticeFrame {
+    fn new(entry: &Arc<Entry>, pending: Pending, retry: bool) -> Self {
+        Self {
+            entry: entry.clone(),
+            epoch: pending.epoch,
+            directory_epoch: pending.directory_epoch,
+            event: pending.notice,
+            valid: pending.valid,
+            recovery: pending.recovery,
+            retry,
+        }
+    }
+
+    fn parked(&self) -> Pending {
+        Pending {
+            notice: self.event.clone(),
+            channel: None,
+            epoch: self.epoch.clone(),
+            directory_epoch: self.directory_epoch,
+            proof: None,
+            valid: self.valid.clone(),
+            recovery: self.recovery.clone(),
+        }
+    }
+
     pub(crate) async fn handoff<F: std::future::Future>(
         &self,
         pool: &sqlx::PgPool,
@@ -851,7 +915,7 @@ impl NoticeFrame {
             write(event).await
         });
         let mut first_poll = |cx: &mut std::task::Context<'_>, deadline: Option<Instant>| {
-            let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             if !(self.valid.valid() || self.recovery.as_ref().is_some_and(|r| r.valid()))
                 || self
                     .directory_epoch
@@ -859,39 +923,99 @@ impl NoticeFrame {
             {
                 return std::task::Poll::Ready(Ok(None));
             }
-            let retained = match &self.epoch {
-                Epoch::Notice(epoch) => Ok(b.epoch == *epoch),
-                Epoch::Revocation(capture) => match capture.check() {
-                    Some(check) if check.needs_recheck => Err(check),
-                    check => Ok(check.is_some()),
-                },
-            };
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return std::task::Poll::Ready(Ok(None));
             }
-            std::task::Poll::Ready(
-                retained
-                    .map(|current| current.then(|| std::future::Future::poll(future.as_mut(), cx))),
-            )
+            match &self.epoch {
+                Epoch::Notice(epoch) if b.epoch != *epoch => {
+                    return std::task::Poll::Ready(Ok(None));
+                }
+                Epoch::Notice(_) => {}
+                Epoch::Revocation(capture) => {
+                    let Buffer {
+                        holds, revocations, ..
+                    } = &mut *b;
+                    holds.prune(revocations, Instant::now());
+                    let Some(check) = capture.check() else {
+                        return std::task::Poll::Ready(Ok(None));
+                    };
+                    let hold_deadline = holds.deadline(check.id);
+                    if self.retry {
+                        if hold_deadline.is_none() {
+                            return std::task::Poll::Ready(Ok(None));
+                        }
+                    } else if hold_deadline.is_some() {
+                        return std::task::Poll::Ready(Ok(None));
+                    }
+                    if check.needs_recheck {
+                        return std::task::Poll::Ready(Err((check, hold_deadline)));
+                    }
+                    holds.complete(
+                        check.id,
+                        self.valid.valid()
+                            && matches!(self.event, Notice::ChannelAccessRevoked { .. }),
+                    );
+                    revocations.finish(check.id);
+                }
+            }
+            std::task::Poll::Ready(Ok(Some(std::future::Future::poll(future.as_mut(), cx))))
         };
         let mut deadline = None;
         let mut last_checked = None;
         let first = loop {
             match std::future::poll_fn(|cx| first_poll(cx, deadline)).await {
-                Ok(first) => break first?,
-                Err(check) => {
+                Ok(first) => break first,
+                Err((check, hold_deadline)) => {
                     let checked = (check.generation, check.revision);
-                    if last_checked.is_some_and(|last| checked <= last) {
-                        return None;
+                    if last_checked.is_some_and(|last| self.retry || checked <= last) {
+                        break None;
                     }
                     last_checked = Some(checked);
-                    let deadline =
-                        *deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(5));
-                    self.recheck_revocation(pool?, check, deadline).await?;
+                    let deadline = *deadline.get_or_insert_with(|| {
+                        let limit = Instant::now() + Duration::from_secs(5);
+                        hold_deadline.map_or(limit, |expires| expires.min(limit))
+                    });
+                    let Some(pool) = pool else { break None };
+                    match self.recheck_revocation(pool, check, deadline).await {
+                        Ok(()) => {}
+                        Err(RecheckFailure::Deadline) => break None,
+                        Err(RecheckFailure::Database) => {
+                            if self.retry {
+                                let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                                b.holds.recheck_error();
+                            } else {
+                                let (mut b, now) = holds::lock_for_admission(&self.entry);
+                                let Buffer {
+                                    holds, revocations, ..
+                                } = &mut *b;
+                                holds.recheck_error();
+                                holds.start(&self.entry, revocations, check.id, now);
+                            }
+                            break None;
+                        }
+                    }
                 }
             }
         };
-        Some(match first {
+        if first.is_none()
+            && let Epoch::Revocation(capture) = &self.epoch
+        {
+            let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let Buffer {
+                holds, revocations, ..
+            } = &mut *b;
+            let now = Instant::now();
+            holds.prune(revocations, now);
+            if let Some(check) = capture.check() {
+                if self.retry {
+                    holds.retry_failed(revocations, check.id, self.parked(), now);
+                } else {
+                    // Fallback can admit a hold while the initial query is in flight.
+                    holds.park(check.id, || self.parked());
+                }
+            }
+        }
+        Some(match first? {
             std::task::Poll::Ready(value) => value,
             std::task::Poll::Pending => future.await,
         })
@@ -901,7 +1025,7 @@ impl NoticeFrame {
         pool: &sqlx::PgPool,
         check: Check,
         deadline: Instant,
-    ) -> Option<()> {
+    ) -> Result<(), RecheckFailure> {
         let selected = [
             (self.entry.clone(), None),
             (self.entry.clone(), Some(check.channel)),
@@ -918,11 +1042,15 @@ impl NoticeFrame {
             authorize_batch(pool, &selected).await
         })
         .await
-        .ok()?
-        .ok()?;
+        .map_err(|_| RecheckFailure::Deadline)?
+        .map_err(|_| RecheckFailure::Database)?;
         let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-        b.apply_revocation(check, proofs[0].as_ref(), Some(proofs[1].is_some()));
-        Some(())
+        if self.retry {
+            b.apply_revocation_proof(check, proofs[0].as_ref(), Some(proofs[1].is_some()));
+        } else {
+            b.apply_revocation(check, proofs[0].as_ref(), Some(proofs[1].is_some()));
+        }
+        Ok(())
     }
 }
 async fn authorize_notices(
@@ -1449,6 +1577,7 @@ impl Activity {
             .cloned()
             .collect();
         let mut organizations = std::collections::BTreeMap::<_, Vec<_>>::new();
+        let mut revocation_cutoffs = HashMap::new();
         for entry in entries {
             let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             let rows = organizations.entry(entry.organization).or_default();
@@ -1474,9 +1603,12 @@ impl Activity {
                     }),
                 )
             }));
+            let checks = b.revocations.checks();
+            if let Some(last) = checks.last() {
+                revocation_cutoffs.insert(entry.id, last.id);
+            }
             rows.extend(
-                b.revocations
-                    .checks()
+                checks
                     .into_iter()
                     .map(|check| (entry.clone(), Recheck::Revocation(check))),
             );
@@ -1518,9 +1650,49 @@ impl Activity {
                     )
                     .await;
                 }
-                let result = authorize_batch(pool, &selected).await;
-                let proof =
-                    |index: usize| result.as_ref().ok().and_then(|rows| rows[index].as_ref());
+                let Ok(proofs) = authorize_batch(pool, &selected).await else {
+                    if let Some((entry, _)) = chunk.first() {
+                        entry
+                            .buffer
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .holds
+                            .recheck_error();
+                    }
+                    let mut seen = HashSet::new();
+                    for (entry, row) in chunk {
+                        let mut b = if let Some(&cutoff) = revocation_cutoffs.get(&entry.id)
+                            && seen.insert(entry.id)
+                        {
+                            let (mut b, now) = holds::lock_for_admission(entry);
+                            let Buffer {
+                                holds, revocations, ..
+                            } = &mut *b;
+                            let mut checks = revocations
+                                .checks()
+                                .into_iter()
+                                .take_while(|check| check.id <= cutoff)
+                                .peekable();
+                            if checks.peek().is_some() {
+                                for check in checks {
+                                    holds.start(entry, revocations, check.id, now);
+                                }
+                                b.retire_notices();
+                                entry.wake.notify_one();
+                            }
+                            b
+                        } else {
+                            entry.buffer.lock().unwrap_or_else(|e| e.into_inner())
+                        };
+                        if let Recheck::Notice(notice) = row
+                            && b.epoch == notice.epoch
+                        {
+                            b.retire_notices();
+                        }
+                    }
+                    continue;
+                };
+                let proof = |index: usize| proofs[index].as_ref();
                 for ((entry, row), (index, access)) in chunk.iter().zip(offsets) {
                     let current = proof(index);
                     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
@@ -1932,6 +2104,7 @@ mod tests {
             event: Notice::MembersChanged,
             valid: Arc::new(QueryToken::new()),
             recovery: None,
+            retry: false,
         };
         entry.buffer.lock().unwrap().epoch = 2;
         let polled = std::sync::atomic::AtomicBool::new(false);
