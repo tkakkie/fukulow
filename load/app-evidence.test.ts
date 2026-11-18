@@ -90,3 +90,14 @@ test('proxy evidence keeps only level counts in the window', () => {
   assert.deepEqual(proxyEvidence(caddy, 'caddy', t0 + 1000, t0 + 5000).errorLines, 1);
   assert.equal(proxyEvidence('', 'caddy', t0, t0 + 1, 'docker logs exited 1').complete, false);
 });
+
+test('an nginx error in the start second is not attributed to the run', () => {
+  const log = '2026/11/17 00:00:01 [error] 7#7: *1 upstream timed out';
+  const late = proxyEvidence(log, 'nginx', t0 + 1800, t0 + 5000);
+  assert.deepEqual([late.complete, late.errorLines], [false, 0]);
+  assert.match(late.reasons.join(), /start second/);
+  assert.deepEqual(proxyEvidence(log, 'nginx', t0 + 1000, t0 + 5000).errorLines, 1); // exact start: inside the window
+  assert.equal(proxyEvidence('2026/11/17 00:00:01 [warn] 7#7: x', 'nginx', t0 + 1800, t0 + 5000).complete, true);
+  const caddy = JSON.stringify({ level: 'error', ts: (t0 + 1200) / 1000, msg: 'x' });
+  assert.deepEqual(proxyEvidence(caddy, 'caddy', t0 + 1800, t0 + 5000), { complete: true, reasons: [], levels: {}, errorLines: 0 });
+});

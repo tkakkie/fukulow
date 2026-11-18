@@ -136,7 +136,9 @@ export type ProxyEvidence = { complete: boolean; reasons: string[]; levels: Reco
 export function proxyEvidence(log: string, proxy: 'caddy' | 'nginx', startedAt: number, endedAt: number, readError?: string): ProxyEvidence {
   const reasons: string[] = readError ? [readError] : [];
   const levels: Record<string, number> = {};
-  const first = Math.floor(startedAt / 1000) * 1000;
+  // nginx times are whole seconds: an entry in the start second may precede the run. An error-level entry there
+  // cannot be placed, so it makes the evidence incomplete (cause unknown) instead of naming the proxy.
+  const first = proxy === 'nginx' ? Math.floor(startedAt / 1000) * 1000 : startedAt;
   for (const line of log.split('\n')) {
     if (!line.trim()) continue;
     let at: number, level: string | undefined;
@@ -150,6 +152,9 @@ export function proxyEvidence(log: string, proxy: 'caddy' | 'nginx', startedAt: 
     }
     if (!Number.isFinite(at) || !level || !/^[a-z]{1,8}$/.test(level)) { reasons.push('unparseable proxy log entry'); continue; }
     if (at < first || at > endedAt) continue;
+    if (at < startedAt && (errorLevels[proxy] as readonly string[]).includes(level)) {
+      reasons.push('proxy error in the start second cannot be placed in the window'); continue;
+    }
     levels[level] = (levels[level] ?? 0) + 1;
   }
   const errorLines = (errorLevels[proxy] as readonly string[]).reduce((sum, level) => sum + (levels[level] ?? 0), 0);
