@@ -6,7 +6,7 @@ use axum::{
 };
 use std::{
     sync::{
-        LazyLock,
+        Arc, LazyLock,
         atomic::{AtomicU64, Ordering::Relaxed},
     },
     time::{Duration, Instant},
@@ -133,7 +133,43 @@ struct Metrics {
     // Fixed boxed slices avoid the module-direction driver's ICE on struct array lengths.
     closes: Box<[AtomicU64]>,
     admissions: Box<[AtomicU64]>,
+    revocations: Arc<RevocationMetrics>,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) enum RevocationMetric {
+    Held,
+    Delivered,
+    RegistrationCap,
+    GlobalCap,
+    Timeout,
+    Retries,
+    Fenced,
+    RecheckError,
+}
+
+pub(crate) struct RevocationMetrics(Box<[AtomicU64]>);
+
+impl Default for RevocationMetrics {
+    fn default() -> Self {
+        Self(Box::new([const { AtomicU64::new(0) }; 8]))
+    }
+}
+
+impl RevocationMetrics {
+    pub(crate) fn count(&self, kind: RevocationMetric) {
+        self.0[kind as usize].fetch_add(1, Relaxed);
+    }
+
+    pub(crate) fn load(&self, kind: RevocationMetric) -> u64 {
+        self.0[kind as usize].load(Relaxed)
+    }
+}
+
+pub(crate) fn revocation_metrics() -> Arc<RevocationMetrics> {
+    METRICS.revocations.clone()
+}
+
 impl Metrics {
     fn reject(&self, kind: Admission) {
         self.admissions[kind as usize].fetch_add(1, Relaxed);
@@ -143,19 +179,30 @@ impl Metrics {
             active: AtomicU64::new(0),
             closes: Box::new([const { AtomicU64::new(0) }; 8]),
             admissions: Box::new([const { AtomicU64::new(0) }; Admission::ALL.len()]),
+            revocations: Arc::default(),
         }
     }
     fn report(&self) {
         // JSON includes the current span even on root events; isolate aggregates.
         let span = tracing::info_span!(target: TARGET, parent: None, "aggregates");
         let _entered = span.enter();
+        let revocations = |kind| self.revocations.load(kind);
+        use RevocationMetric::*;
         tracing::info!(target: TARGET, parent: None, event = "metrics", interval_seconds = INTERVAL.as_secs(),
             active_websockets = self.active.load(Relaxed),
             close_1001 = self.closes[0].load(Relaxed), close_1011 = self.closes[1].load(Relaxed),
             close_4001 = self.closes[2].load(Relaxed), close_4003 = self.closes[3].load(Relaxed),
             close_4008 = self.closes[4].load(Relaxed), close_4029 = self.closes[5].load(Relaxed),
             close_other = self.closes[6].load(Relaxed), peer_or_transport_end = self.closes[7].load(Relaxed),
-            admission_rejections = self.admissions.iter().map(|counter| counter.load(Relaxed)).sum::<u64>());
+            admission_rejections = self.admissions.iter().map(|counter| counter.load(Relaxed)).sum::<u64>(),
+            revocation_held = revocations(Held),
+            revocation_delivered_after_hold = revocations(Delivered),
+            revocation_retired_registration_cap = revocations(RegistrationCap),
+            revocation_retired_global_cap = revocations(GlobalCap),
+            revocation_retired_timeout = revocations(Timeout),
+            revocation_retired_retries = revocations(Retries),
+            revocation_retired_fenced = revocations(Fenced),
+            revocation_recheck_errors = revocations(RecheckError));
         for kind in Admission::ALL {
             let count = self.admissions[kind as usize].load(Relaxed);
             if count > 0 {

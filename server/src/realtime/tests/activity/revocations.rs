@@ -9,6 +9,7 @@ use crate::{
         activity::{Activity, Notice, NoticeFrame, Registration, TestGate, pause_member},
         tests::extract_auth,
     },
+    observability::RevocationMetric,
 };
 use futures_util::FutureExt;
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -425,32 +426,19 @@ async fn role_revocations_survive_a_later_grant_during_recheck(pool: PgPool) {
 
 #[fukulow_test::test]
 async fn first_handoff_rechecks_a_role_superseded_revocation(pool: PgPool) {
-    let mut received = Vec::new();
-    for fail_recheck in [false, true] {
-        let case = Case::new(&pool, false, Later::Role).await;
-        case.remove_grant().await;
-        case.delivery().drained().await;
-        let frame = case.take_revocation();
-        let gate = case.hold_member_recheck();
-        let ((), actual) = tokio::join!(case.set_role("guest"), async {
-            wait(&gate).await;
-            if fail_recheck {
-                let closed = closed_pool(&case.f.state.pool).await;
-                case.delivery()
-                    .check(
-                        &closed,
-                        SubscriptionScope::Member(case.f.organization, case.target),
-                    )
-                    .await;
-            }
-            let received = case.received_revocations(Some(frame)).await;
-            gate.release.add_permits(1);
-            received
-        });
-        received.push(actual);
-        case.delivery().drained().await;
-    }
-    assert_eq!(received, [1, 0], "first handoff, then failed fallback");
+    let case = Case::new(&pool, false, Later::Role).await;
+    case.remove_grant().await;
+    case.delivery().drained().await;
+    let frame = case.take_revocation();
+    let gate = case.hold_member_recheck();
+    let ((), received) = tokio::join!(case.set_role("guest"), async {
+        wait(&gate).await;
+        let received = case.received_revocations(Some(frame)).await;
+        gate.release.add_permits(1);
+        received
+    });
+    case.delivery().drained().await;
+    assert_eq!(received, 1);
 }
 
 #[fukulow_test::test]
@@ -805,8 +793,9 @@ async fn handoff_rechecks_through_role_observation_and_two_retirements(pool: PgP
 }
 
 #[fukulow_test::test]
-async fn failed_fallback_retires_verified_revocations_and_ordinary_notices(pool: PgPool) {
+async fn fallback_failure_holds_revocations(pool: PgPool) {
     let case = Case::new(&pool, false, Later::Role).await;
+    let metrics = case.registration.isolate_revocation_metrics();
     case.remove_grant().await;
     case.delivery().drained().await;
     let private = case.take_revocation();
@@ -831,25 +820,66 @@ async fn failed_fallback_retires_verified_revocations_and_ordinary_notices(pool:
             // retire ordinary notices buffered after that snapshot.
             case.publish_channel_list().await;
             assert!(case.registration.buffered(&Notice::ChannelListChanged));
+            tokio::time::pause();
             gate.release.add_permits(1);
         }
     );
     assert_eq!(
         private
+            .handoff(&case.f.state.pool, |_| async {
+                panic!("fallback error polled the dequeued private write")
+            })
+            .await,
+        None::<()>
+    );
+    assert!(!case.registration.buffered(&Notice::ChannelListChanged));
+    let queued = case
+        .next()
+        .expect("fallback discarded the buffered public revocation");
+    assert_eq!(queued.event, public);
+    assert_eq!(
+        queued
+            .handoff(&case.f.state.pool, |_| async {
+                panic!("fallback error polled the buffered public write")
+            })
+            .await,
+        None::<()>
+    );
+    assert!(case.next().is_none());
+    assert_eq!(metrics.load(RevocationMetric::Held), 2);
+    assert_eq!(metrics.load(RevocationMetric::RecheckError), 1);
+    tokio::time::advance(Duration::from_millis(250)).await;
+    tokio::time::resume();
+
+    let retry = case
+        .next()
+        .expect("fallback discarded the dequeued private revocation");
+    assert_eq!(retry.event, case.revoked());
+    let query = case.pause_revocation("handoff_recheck");
+    let (sent, ()) = tokio::join!(
+        retry.handoff(&case.f.state.pool, |event| async { event }),
+        async {
+            wait(&query).await;
+            query.release.add_permits(1);
+        }
+    );
+    assert_eq!(sent, Some(case.revoked()));
+    let retry = case.next().expect("public revocation was not retried");
+    assert_eq!(
+        retry
             .handoff(&case.f.state.pool, |event| async { event })
             .await,
-        None,
-        "the verified private revocation was still eligible"
+        Some(public)
     );
-    assert!(!case.registration.buffered(&public));
-    assert!(!case.registration.buffered(&Notice::ChannelListChanged));
     assert!(case.next().is_none());
+    assert_eq!(metrics.load(RevocationMetric::Delivered), 2);
 }
 
 #[fukulow_test::test]
-async fn failed_handoff_recheck_discards_only_the_held_private_revocation(pool: PgPool) {
+async fn handoff_failure_holds_only_its_frame(pool: PgPool) {
     for verify_public_first in [false, true] {
         let case = Case::new(&pool, false, Later::Role).await;
+        let metrics = case.registration.isolate_revocation_metrics();
         case.remove_grant().await;
         case.delivery().drained().await;
         let frame = case.take_revocation();
@@ -890,6 +920,22 @@ async fn failed_handoff_recheck_discards_only_the_held_private_revocation(pool: 
                     "handoff failure fenced a verified public revocation"
                 );
             }
+            assert_eq!(metrics.load(RevocationMetric::Held), 1);
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_millis(250)).await;
+            tokio::time::resume();
+            let retry = case.next().expect("handoff error discarded its frame");
+            assert_eq!(retry.event, case.revoked());
+            let query = case.pause_revocation("handoff_recheck");
+            let (sent, ()) = tokio::join!(
+                retry.handoff(&case.f.state.pool, |event| async { event }),
+                async {
+                    wait(&query).await;
+                    query.release.add_permits(1);
+                }
+            );
+            assert_eq!(sent, Some(case.revoked()));
+            assert_eq!(metrics.load(RevocationMetric::Delivered), 1);
             gate.release.add_permits(1);
         });
         case.delivery().drained().await;
@@ -905,7 +951,54 @@ async fn failed_handoff_recheck_discards_only_the_held_private_revocation(pool: 
             received.iter().filter(|notice| **notice == public).count(),
             1
         );
+        assert!(!received.contains(&case.revoked()));
+        assert!(case.next().is_none());
     }
+}
+
+#[fukulow_test::test]
+async fn restored_access_fences_held_revocation(pool: PgPool) {
+    let case = Case::new(&pool, false, Later::Regrant).await;
+    let metrics = case.registration.isolate_revocation_metrics();
+    case.remove_grant().await;
+    case.delivery().drained().await;
+    let frame = case.take_revocation();
+    case.set_rechecks(MemberRecheck::Skip, None);
+    case.set_role("guest").await;
+    case.delivery().drained().await;
+    let closed = closed_pool(&case.f.state.pool).await;
+    tokio::time::pause();
+    assert_eq!(
+        frame
+            .handoff(&closed, |_| async {
+                panic!("a failed recheck polled the write")
+            })
+            .await,
+        None::<()>
+    );
+    // Drain the independent Role notices before advancing to the retry.
+    while let Some(frame) = case.next() {
+        assert_ne!(frame.event, case.revoked());
+    }
+    tokio::time::advance(Duration::from_millis(250)).await;
+    tokio::time::resume();
+    let retry = case.next().expect("the hold did not reach its retry");
+    let query = case.pause_revocation("handoff_recheck");
+    let (sent, ()) = tokio::join!(
+        retry.handoff(&case.f.state.pool, |_| async {
+            panic!("a retry with restored access polled the write")
+        }),
+        async {
+            wait(&query).await;
+            // Restore access without the normal retirement and publication hooks.
+            grant(&pool, &case.f, case.revoked, case.target).await;
+            query.release.add_permits(1);
+        }
+    );
+    assert_eq!(sent, None::<()>);
+    assert!(case.next().is_none());
+    assert_eq!(metrics.load(RevocationMetric::Fenced), 1);
+    assert_eq!(metrics.load(RevocationMetric::Delivered), 0);
 }
 
 #[fukulow_test::test]
