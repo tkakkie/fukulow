@@ -1,11 +1,11 @@
 # Invariants
 
-Writing: a Rule cell states what must hold, scope and exceptions included, in at most 160 characters.
+State critical guarantees, cross-cutting rules and denial requirements whose full scope the code, tests and `openapi.json` cannot tell. A Rule cell includes its scope and exceptions. Keep one home per fact and replace or merge updates. [Writing rules](workflow.md#13-splitting-a-doc)
 
 Rules that must always hold. Each one lists the test that guards it as `path::test_name`; the test must run in CI. Add the test with the code.
 E2E rows require a final pass in the CI Playwright report (a pass after retry counts); static checks remain defence in depth. E2E names use the file and leaf title, as in the static check; multiple report entries with that identity are refused.
 
-Rows live in parts under `docs/invariants/`, one part per area; each row is in exactly one part, and every other part it touches lists it under "Rows in other parts". Read the parts your change touches (a cross-area change: every related part). A new row goes in the part of its main area; each other area it governs lists it there by a test name that matches only that row, or, when none does, by a `{#id}` (lowercase words and hyphens) added at the start of its Rule cell; an ID is not counted in the Rule limit and is used only where needed.
+Rows live in parts under `docs/invariants/`, one part per area. A new row goes in the part for its main area. Read every part your change touches. "Rows in other parts" sections are optional and checked when present. Cite a test name unique to the row in its part, or add a `{#id}` (lowercase words and hyphens) at the start of the Rule cell if no test name is unique. Use IDs only for rows referenced by ID.
 
 - [auth](invariants/auth.md): Accounts, sign-in, sessions, roles, permissions, Organization scoping (server)
 - [channels](invariants/channels.md): Channels, membership, Capabilities (server and member UI)
