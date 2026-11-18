@@ -19,16 +19,17 @@ export type Resources = {
   acceptedPerSecond: number; walBytesPerSend: number | null; appCpuPeakPercent: number;
   dbCpuPeakPercent: number; dbSizeGrowthBytes: number;
 };
-export type Step = Counts & { rate: number; seconds: number; sendMs: Latency; resources?: Resources };
+type Evidence = Counts & { sendMs: Latency; sendSamples: number; resources?: Resources; resourcesMissing?: string };
+export type Step = Evidence & { rate: number; seconds: number };
 export type StackIdentity = {
   commit: string; appImage: string; migrateImage: string; dbImage: string;
   limiter: typeof limiter; dbSettings: Record<string, string>; overlay: { storedBody: boolean; pgroongaIndex: boolean };
 };
 export type Identity = StackIdentity & { bodySha256: string; bodySeed: number; k6Image: string; workload: ReturnType<typeof workload> };
 export type Run = {
-  scenario: Scenario; pair: number; arm: Arm; identity?: Identity; finalStack?: StackIdentity;
+  scenario: Scenario; pair: number; arm: Arm; sequence: number; identity?: Identity; finalStack?: StackIdentity;
   cleanupVerified: boolean; errors: string[]; steps: Step[];
-  totals?: Counts & { sendMs: Latency; resources?: Resources };
+  totals?: Evidence;
 };
 export type Metadata = {
   smoke: boolean; expected: Omit<Identity, 'workload'>;
@@ -48,8 +49,9 @@ const appShortfall = 'app-side shortfall';
 const generatorInvalid = 'generator-side shortfall INVALID';
 const runInvalid = 'INVALID run';
 
-function completeCounts(counts: Counts & { sendMs: Latency }) {
+function completeCounts(counts: Evidence) {
   if (!countKeys.every(key => Number.isSafeInteger(counts[key]) && counts[key] >= 0) ||
+      counts.sendSamples !== counts.offered ||
       counts.offered !== outcomeKeys.reduce((sum, key) => sum + counts[key], 0)) return false;
   const { p50, p95, p99 } = counts.sendMs ?? {};
   if (counts.offered === 0) return p50 === null && p95 === null && p99 === null;
@@ -64,31 +66,31 @@ export function classify(step: Step, validRun: boolean) {
   return sustained;
 }
 
-function completeResources(resources: Resources | undefined, counts: Counts) {
-  return !!resources && Number.isFinite(resources.acceptedPerSecond) && resources.acceptedPerSecond >= 0 &&
-    (counts.accepted === 0 ? resources.walBytesPerSend === null :
-      Number.isFinite(resources.walBytesPerSend) && resources.walBytesPerSend! >= 0) &&
-    Number.isFinite(resources.appCpuPeakPercent) && resources.appCpuPeakPercent >= 0 &&
-    Number.isFinite(resources.dbCpuPeakPercent) && resources.dbCpuPeakPercent >= 0 &&
-    Number.isSafeInteger(resources.dbSizeGrowthBytes);
-}
+const dbSettingKeys = ['shared_preload_libraries', 'pg_stat_statements.track', 'pgroonga.enable_wal_resource_manager',
+  'pgroonga.enable_crash_safe', 'pgroonga.enable_wal', 'fsync', 'wal_level', 'synchronous_commit'];
+const nonempty = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
 
 export function runProblems(run: Run, metadata: Metadata, bodyHash: string | null, imageCleanupVerified: boolean) {
   const problems = [...run.errors];
   const expectedWorkload = workload(run.scenario, metadata.smoke);
   const expected = { ...metadata.expected, overlay: { storedBody: true, pgroongaIndex: run.arm === 'A' } };
   const { bodySha256, bodySeed, k6Image, ...expectedStack } = expected;
-  if (!bodyHash || bodyHash !== bodySha256 || !isDeepStrictEqual(expected.limiter, limiter) ||
+  if (![expected.commit, expected.appImage, expected.migrateImage, expected.dbImage, k6Image, bodySha256].every(nonempty) ||
+      !Number.isSafeInteger(bodySeed) || bodySeed <= 0 ||
+      Object.keys(expected.dbSettings ?? {}).length !== dbSettingKeys.length ||
+      !dbSettingKeys.every(key => nonempty(expected.dbSettings[key])) ||
+      !isDeepStrictEqual(metadata.expected?.overlay, { storedBody: true, pgroongaIndex: false }) ||
+      bodyHash !== bodySha256 || !isDeepStrictEqual(expected.limiter, limiter) ||
       !isDeepStrictEqual(run.identity, { ...expected, workload: expectedWorkload }) || !isDeepStrictEqual(run.finalStack, expectedStack)) {
     problems.push('Run identity mismatch');
   }
-  if (!run.cleanupVerified || !imageCleanupVerified) problems.push('Cleanup unverified');
+  if (run.cleanupVerified !== true || imageCleanupVerified !== true) problems.push('Cleanup unverified');
   const totals = run.totals;
-  if (!totals || !completeCounts(totals) || !completeResources(totals.resources, totals) ||
+  if (!totals || !completeCounts(totals) ||
       !countKeys.every(key => totals[key] === run.steps.reduce((sum, step) => sum + step[key], 0)) ||
       run.steps.length !== expectedWorkload.rates.length ||
       run.steps.some((step, index) => step.rate !== expectedWorkload.rates[index] ||
-        step.seconds !== expectedWorkload.seconds || !completeCounts(step) || !completeResources(step.resources, step))) {
+        step.seconds !== expectedWorkload.seconds || !completeCounts(step))) {
     problems.push('Incomplete step or arm-run evidence');
   }
   return problems;
@@ -139,8 +141,18 @@ function judgeScenario(scenario: Scenario, runs: ClassifiedRun[], smoke: boolean
 }
 
 export function report(metadata: Metadata, batch: Batch, bodyHash: string | null) {
+  const activeScenarios = metadata.smoke ? ['many'] as const : scenarios;
+  const expectedOrder = (metadata.smoke ? [['B']] as const : orders).flatMap((arms, index) =>
+    arms.map(arm => ({ pair: index + 1, arm })));
+  const invalidOrder = new Set(activeScenarios.filter(scenario => {
+    const ordered = batch.runs.filter(run => run.scenario === scenario).sort((a, b) => a.sequence - b.sequence);
+    return ordered.length !== expectedOrder.length || ordered.some(({ sequence, pair, arm }, index) =>
+      !Number.isSafeInteger(sequence) || sequence <= (ordered[index - 1]?.sequence ?? 0) ||
+      pair !== expectedOrder[index].pair || arm !== expectedOrder[index].arm);
+  }));
   const runs = batch.runs.map((run): ClassifiedRun => {
     const problems = runProblems(run, metadata, bodyHash, batch.imageCleanupVerified);
+    if (invalidOrder.has(run.scenario)) problems.push('Arm-run sequence does not match the approved pair order');
     const { rates, seconds } = workload(run.scenario, metadata.smoke);
     return { ...run, problems, steps: rates.map(rate => {
       const step = run.steps.find(step => step.rate === rate);
@@ -148,7 +160,7 @@ export function report(metadata: Metadata, batch: Batch, bodyHash: string | null
     }) };
   });
   return { smoke: metadata.smoke, limiterNote, limiter, errors: batch.errors,
-    scenarios: (metadata.smoke ? ['many'] as const : scenarios).map(scenario =>
+    scenarios: activeScenarios.map(scenario =>
       judgeScenario(scenario, runs.filter(run => run.scenario === scenario), metadata.smoke)) };
 }
 

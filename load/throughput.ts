@@ -52,12 +52,13 @@ export const options: Options = {
     rate: step.rate, timeUnit: '1s', duration: `${step.seconds}s`, startTime: `${step.startSeconds}s`,
     preAllocatedVUs, maxVUs, gracefulStop: `${timeout + 1}s` }])),
   setupTimeout: `${channels * 5 + members * 20 + 30}s`, teardownTimeout: `${members * 5 + 15}s`,
-  summaryTrendStats: ['min', 'med', 'max', 'p(95)', 'p(99)'],
+  summaryTrendStats: ['min', 'med', 'max', 'p(95)', 'p(99)', ...(bodies ? ['count'] : [])],
   systemTags: ['status', 'method', 'name', 'scenario', 'expected_response', ...(bodies ? ['error_code' as const] : [])],
   thresholds: {
     checks: ['rate==1'], throughput_other: ['count==0'],
     throughput_invalid_retry_after: ['count==0'],
     ...(bodies ? {
+      dropped_iterations: ['count>=0'],
       [`http_req_duration{${sendTags}}`]: ['max>=0'],
       ...Object.fromEntries(steps.flatMap(step => {
         const tags = `${sendTags},scenario:${step.name}`;
@@ -105,7 +106,7 @@ export function setup(): Setup {
 export default function(data: Setup): void {
   const step = steps.find(step => step.name === execution.scenario.name)!;
   const index = execution.scenario.iterationInTest;
-  if (bodies && step === steps[0] && index === 0) console.log(`LOAD_THROUGHPUT_START ${execution.scenario.startTime}`);
+  if (bodies && step === steps[0] && index === 0) console.log('LOAD_THROUGHPUT_START');
   const selection = selectSender(index, data.tokens.length, data.channelIds.length);
   const token = data.tokens[selection.member];
   const channel = data.channelIds[selection.channel];

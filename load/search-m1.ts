@@ -8,8 +8,8 @@ import { createInterface } from 'node:readline';
 import { finished } from 'node:stream/promises';
 import { parseArgs, promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
-import { fileSha256, frozenManifest, manifestPath, writeBodies } from './search-m1-bodies.ts';
-import { collect, type Snapshot, type CpuSample } from './search-m1-results.ts';
+import { fileSha256, frozenManifest, manifestPath, overlayHashes, sha256, writeBodies } from './search-m1-bodies.ts';
+import { collect, type Boundary, type CpuSample } from './search-m1-results.ts';
 import {
   limiter, limiterNote, orders, scenarios, workload, writeReport,
   type Arm, type Batch, type Metadata, type Run, type Scenario, type StackIdentity,
@@ -61,6 +61,8 @@ const dbSettings = {
 const expectedDbSettings = { ...dbSettings, fsync: frozen.settings.fsync, wal_level: frozen.settings.wal_level,
   synchronous_commit: frozen.settings.synchronous_commit };
 const sqlSettings = Object.keys(expectedDbSettings).map(name => `'${name}'`).join(',');
+const pgroongaIndexDefinition = "CREATE INDEX search_body ON public.messages USING pgroonga (normalized_body) " +
+  `WITH (normalizers='', tokenizer='TokenNgram("unify_alphabet", false, "unify_symbol", false, "unify_digit", false)')`;
 
 async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Metadata['expected'],
   harnessHashes: Record<string, string>) {
@@ -93,12 +95,19 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
     '-f', resolve('load/compose.yml'), '-f', override, ...args], env);
   const sql = (query: string) => dc('exec', '-T', 'db', 'psql', '-X', '-v', 'ON_ERROR_STOP=1', '-U', 'fukulow', '-d', 'fukulow', '-qAtc', query);
   const generator = `${project}-generator`;
-  const ownership = `label=com.docker.compose.project=${project}`;
-  const run: Run = { scenario, pair, arm, errors: [], cleanupVerified: false, steps: [] };
+  const ownership = `com.docker.compose.project=${project}`;
+  const ownershipFilter = `label=${ownership}`;
+  const run: Run = { scenario, pair, arm, sequence: batch.runs.length + 1, errors: [], cleanupVerified: false, steps: [] };
   const verifyHarness = () => {
     for (const [path, hash] of Object.entries(harnessHashes)) assert.equal(fileSha256(path), hash, `Harness changed: ${path}`);
   };
-  const boundaries: (Snapshot | undefined)[] = [];
+  const readOverlay = (name: string) => {
+    const path = `${engines}/${name}`;
+    const bytes = readFileSync(path);
+    assert.equal(sha256(bytes), harnessHashes[path], `Harness changed: ${path}`);
+    return bytes.toString('utf8');
+  };
+  const boundaries: Boundary[] = [];
   const samples: CpuSample[] = [];
   let startMs: number | undefined;
   const snapshots: Promise<void>[] = [];
@@ -109,21 +118,22 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
     const startedMs = Date.now();
     snapshots.push(sql("SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(), '0/0'), pg_database_size(current_database())")
       .then(row => {
+        assert.match(row, /^\d+\|\d+$/, 'Expected WAL bytes and DB size');
         const [walBytes, dbBytes] = row.split('|').map(Number);
         boundaries[index] = { startedMs, completedMs: Date.now(), walBytes, dbBytes };
-      }).catch(error => { run.errors.push(message(error)); }));
+      }).catch(error => { boundaries[index] = { missing: `snapshot ${index} failed: ${message(error)}` }; }));
   };
   try {
     verifyHarness();
     await dc('up', '-d', '--no-build', '--pull', 'never', '--wait');
     check();
     const [app, db, migrate] = await Promise.all([dc('ps', '-q', 'app'), dc('ps', '-q', 'db'), dc('ps', '-aq', 'migrate')]);
-    const schema = readFileSync(`${engines}/schema.sql`, 'utf8');
+    const schema = readOverlay('schema.sql');
     // The common overlay is the stored column and its normalization dependencies.
     const column = schema.slice(schema.indexOf('CREATE COLLATION'), schema.indexOf('-- Identical'));
     assert.match(column, /GENERATED ALWAYS AS \(search_normalize\(body\)\) STORED;/);
     await sql(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements; CREATE EXTENSION pgroonga; ${column}
-      ${arm === 'A' ? readFileSync(`${engines}/pgroonga.sql`, 'utf8') : ''}
+      ${arm === 'A' ? readOverlay('pgroonga.sql') : ''}
       DO $$ BEGIN PERFORM pgroonga_command('status'); END $$;`);
     const inspect = (id: string, field: string) => docker('inspect', '--format', field, id);
     const inspectStack = async (): Promise<StackIdentity> => {
@@ -137,10 +147,13 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
             'storedBody', EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'public.messages'::regclass AND attname = 'normalized_body' AND attgenerated = 's'),
             'pgroongaIndex', EXISTS (SELECT FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am am ON am.oid = c.relam
               WHERE i.indrelid = 'public.messages'::regclass AND c.relname = 'search_body' AND am.amname = 'pgroonga' AND i.indisvalid),
+            'indexDefinition', (SELECT pg_get_indexdef(indexrelid) FROM pg_index
+              WHERE indrelid = 'public.messages'::regclass AND indexrelid = to_regclass('public.search_body')),
             'extension', (SELECT extversion FROM pg_extension WHERE extname = 'pgroonga'));`),
       ]);
       const actual = JSON.parse(settings);
       assert.equal(actual.extension, frozen.image.extensions.pgroonga);
+      assert.equal(actual.indexDefinition, arm === 'A' ? pgroongaIndexDefinition : null, 'PGroonga index definition mismatch');
       return { commit, appImage, dbImage, migrateImage,
         limiter: { LOAD_SEND_BURST: burst, LOAD_SEND_REFILL_PER_SECOND: refill }, dbSettings: actual.dbSettings,
         overlay: { storedBody: actual.storedBody, pgroongaIndex: actual.pgroongaIndex } };
@@ -159,7 +172,7 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
         const appCpu = cpu(app);
         const dbCpu = cpu(db);
         if (Number.isFinite(appCpu) && Number.isFinite(dbCpu)) samples.push({ at: Date.now(), appCpu, dbCpu });
-      }).catch(() => { /* Invalid if a required window has no CPU evidence. */ })
+      }).catch(() => { /* Missing CPU evidence is recorded by the collector. */ })
         .finally(() => { sampling = undefined; });
     };
     sampler = setInterval(sample, 1000);
@@ -181,10 +194,13 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
     const lines = createInterface({ input: generatorProcess.stderr });
     lines.on('line', line => {
       if (line === 'LOAD_MEASUREMENT_START') capture(0);
-      if (line === 'LOAD_MEASUREMENT_END') capture(rates.length);
-      const match = /^LOAD_THROUGHPUT_START (\d+)$/.exec(line);
-      if (!match || startMs !== undefined) return;
-      startMs = Number(match[1]);
+      if (line === 'LOAD_MEASUREMENT_END') {
+        for (const timer of timers) clearTimeout(timer);
+        capture(rates.length);
+      }
+      if (line !== 'LOAD_THROUGHPUT_START' || startMs !== undefined) return;
+      // Use the host clock for both timers and snapshot acceptance.
+      startMs = Date.now();
       // Sample after the 3 s request timeout and before the next scenario starts.
       for (let index = 1; index < rates.length; index++) {
         const at = startMs + (index * (seconds + requestTimeoutSeconds + 1) - .5) * 1000;
@@ -203,14 +219,12 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
       assert.ok(code === 0 || code === 99, `k6 exited ${code}`);
       await Promise.all(snapshots);
       // Keep the raw snapshots and CPU samples alongside the k6 summary.
-      assert.ok(startMs !== undefined, 'Missing k6 scenario start');
       const result = collect(readFileSync(`${dir}/k6-summary.log`, 'utf8'), conditions, startMs, boundaries, samples);
       run.steps = result.steps;
       run.totals = result.totals;
       run.identity = { ...stack, workload: result.workload, k6Image, bodySeed, bodySha256: result.bodySha256 };
       run.finalStack = await inspectStack();
       assert.equal(fileSha256(bodyPath), bodySha256, 'Body file changed during the run');
-      verifyHarness();
     } finally {
       clearTimeout(timeout);
       child = undefined;
@@ -218,6 +232,7 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
   } catch (error) {
     run.errors.push(message(error));
   } finally {
+    try { verifyHarness(); } catch (error) { run.errors.push(message(error)); }
     for (const timer of timers) clearTimeout(timer);
     clearInterval(sampler);
     await Promise.all(snapshots);
@@ -227,13 +242,13 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
       try { await action(); } catch (error) { cleanupErrors.push(`Cleanup: ${message(error)}`); }
     };
     await cleanup(async () => {
-      const owned = await docker('container', 'ls', '-aq', '--filter', ownership, '--filter', `name=^/${generator}$`);
+      const owned = await docker('container', 'ls', '-aq', '--filter', ownershipFilter, '--filter', `name=^/${generator}$`);
       if (owned) await docker('rm', '-f', owned);
     });
     await cleanup(() => dc('down', '--volumes'));
     for (const kind of ['container', 'network', 'volume']) {
       await cleanup(async () => {
-        assert.equal(await docker(kind, 'ls', kind === 'container' ? '-aq' : '-q', '--filter', ownership),
+        assert.equal(await docker(kind, 'ls', kind === 'container' ? '-aq' : '-q', '--filter', ownershipFilter),
           '', `Owned ${kind} remains for ${project}`);
       });
     }
@@ -280,12 +295,14 @@ try {
   const dbImage = await imageId(dbTag);
   const harnessFiles = ['Makefile', 'load/compose.yml', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/summary.ts',
     'load/seed.ts', 'load/compat.ts', 'load/delivery.ts', 'load/sessions.ts', 'load/scheduler.ts', 'load/proxy-target.ts',
-    'load/search-m1.ts', 'load/search-m1-bodies.ts', 'load/search-m1-report.ts', 'load/search-m1-results.ts', 'load/search-m1-report.test.ts',
+    'load/search-m1.ts', 'load/search-m1-bodies.ts', 'load/search-m1-report.ts', 'load/search-m1-results.ts',
+    'load/search-m1-report.test.ts', 'load/search-m1-runner.test.ts',
     'deploy/init-db-roles.sh', 'deploy/db-roles.sql', 'deploy/db-role-settings.sql', 'deploy/db-grants.sql',
-    manifestPath, ...['Dockerfile', 'seed.ts', 'schema.sql', 'pgroonga.sql'].map(name => `${engines}/${name}`)];
+    manifestPath, ...['Dockerfile', 'seed.ts'].map(name => `${engines}/${name}`)];
   metadata = { smoke, expected: { commit, appImage, migrateImage: appImage, dbImage, k6Image, limiter, dbSettings: expectedDbSettings,
     overlay: { storedBody: true, pgroongaIndex: false }, bodySha256: bodies.sha256, bodySeed: bodies.seed } };
-  const harnessHashes = Object.fromEntries(harnessFiles.map(path => [path, fileSha256(path)]));
+  const harnessHashes = { ...Object.fromEntries(harnessFiles.map(path => [path, fileSha256(path)])),
+    ...overlayHashes(frozen.sourceHashes) };
   save(`${output}/metadata.json`, { ...metadata, machine, node: process.version, manifestHash, bodies, k6, limiterNote, harnessHashes });
   if (smoke) await runArm('many', 1, 'B', metadata.expected, harnessHashes);
   else for (const scenario of scenarios) {

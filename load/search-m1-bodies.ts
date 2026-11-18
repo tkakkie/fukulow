@@ -9,6 +9,15 @@ export const manifestPath = 'load/search-engines/manifest-v2.json';
 export const sha256 = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 export const fileSha256 = (path: string) => sha256(readFileSync(path));
 
+export function overlayHashes(sourceHashes: { path: string; sha256: string }[]) {
+  return Object.fromEntries(['schema.sql', 'pgroonga.sql'].map(name => {
+    const path = `load/search-engines/${name}`;
+    const hash = sourceHashes.find(entry => entry.path === path)?.sha256;
+    assert.ok(hash && /^[a-f0-9]{64}$/.test(hash), `Missing manifest v2 overlay hash: ${path}`);
+    return [path, hash];
+  }));
+}
+
 export function frozenManifest() {
   const { sha256: hash, frozen } = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
     sha256: string;
