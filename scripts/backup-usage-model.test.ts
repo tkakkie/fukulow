@@ -77,7 +77,7 @@ test('empty closed days count as zero only before the month first usage', async 
   await assert.rejects(leading.read(now, state), /unavailable/)
   assert.deepEqual(state.usageCache!.days, { '2026-11-01': { classA: 0, classB: 0 }, '2026-11-02': { classA: 0, classB: 0 }, '2026-11-03': { classA: 2, classB: 3 } })
   assert.deepEqual(await leading.read(now, state), { classA: 6, classB: 9 })
-  await assert.rejects(client(start => start !== '2026-11-02T00:00:00.000Z').read(now, {}), /unavailable/)
+  await assert.rejects(client(start => start !== '2026-11-02T00:00:00.000Z').read(Date.UTC(2026, 10, 4, 12), {}), /unavailable/)
   await assert.rejects(client(start => start !== '2026-11-04T00:00:00.000Z').read(now, { usageCache: { month: '2026-11', days: {
     '2026-11-01': { classA: 0, classB: 0 }, '2026-11-02': { classA: 0, classB: 0 }, '2026-11-03': { classA: 2, classB: 3 } } } }), /unavailable/)
   const lag = Date.UTC(2026, 10, 2, 6) - 1
