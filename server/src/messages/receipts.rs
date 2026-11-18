@@ -1,8 +1,7 @@
 //! Edit/Move/Delete operation receipts (#515 slice 2). The mutation endpoints
 //! (#287, #141) resolve a receipt after reauthorization and before checking
-//! `expected_version`, and record it in the mutation's transaction. Expired
-//! rows are only ignored here; a bounded purge must land with the first writer
-//! so receipts are not kept beyond their approved lifetime.
+//! `expected_version`, and record it in the mutation's transaction.
+//! Resolution ignores expired receipts even before the bounded purge reaches them.
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
@@ -49,6 +48,7 @@ pub struct Operation {
 pub struct Outcome {
     pub version: i64,
     pub deleted: bool,
+    pub event_seq: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,7 +71,7 @@ pub async fn resolve(
 ) -> Result<Resolution, sqlx::Error> {
     let row = sqlx::query(&format!(
         "SELECT kind = $5 AND channel_id = $6 AND target_id = $7 AND intent_digest = $8 AS same, \
-         outcome_version, outcome_deleted FROM operation_receipts \
+         outcome_version, outcome_deleted, outcome_event_seq FROM operation_receipts \
          WHERE organization_id = $1 AND actor = $2 AND operation_id = $3 AND {WITHIN_LIFETIME}"
     ))
     .bind(organization)
@@ -93,6 +93,7 @@ pub async fn resolve(
     Ok(Resolution::Committed(Outcome {
         version: row.try_get("outcome_version")?,
         deleted: row.try_get("outcome_deleted")?,
+        event_seq: row.try_get("outcome_event_seq")?,
     }))
 }
 
@@ -110,12 +111,12 @@ pub async fn record(
 ) -> Result<bool, sqlx::Error> {
     let recorded = sqlx::query(
         "INSERT INTO operation_receipts AS r (organization_id, actor, operation_id, \
-         kind, channel_id, target_id, intent_digest, outcome_version, outcome_deleted) \
-         VALUES ($1, $2, $3, $5, $6, $7, $8, $9, $10) \
+         kind, channel_id, target_id, intent_digest, outcome_version, outcome_deleted, outcome_event_seq) \
+         VALUES ($1, $2, $3, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (organization_id, actor, operation_id) DO UPDATE \
          SET kind = EXCLUDED.kind, channel_id = EXCLUDED.channel_id, target_id = EXCLUDED.target_id, \
          intent_digest = EXCLUDED.intent_digest, outcome_version = EXCLUDED.outcome_version, \
-         outcome_deleted = EXCLUDED.outcome_deleted, created_at = now() \
+         outcome_deleted = EXCLUDED.outcome_deleted, outcome_event_seq = EXCLUDED.outcome_event_seq, created_at = now() \
          WHERE r.created_at <= now() - $4::interval",
     )
     .bind(organization)
@@ -128,8 +129,61 @@ pub async fn record(
     .bind(operation.intent.as_slice())
     .bind(outcome.version)
     .bind(outcome.deleted)
+    .bind(outcome.event_seq)
     .execute(tx)
     .await?
     .rows_affected();
     Ok(recorded == 1)
+}
+
+pub(super) async fn purge(pool: &sqlx::PgPool, organization: Uuid) -> Result<u64, sqlx::Error> {
+    crate::database::organization(pool, organization, async |tx: &mut PgConnection| {
+        let deleted = sqlx::query(
+            "WITH expired AS MATERIALIZED (\
+                SELECT actor, operation_id FROM operation_receipts \
+                WHERE organization_id=$1 AND created_at <= now() - $2::interval \
+                ORDER BY created_at, actor, operation_id LIMIT 1000 FOR UPDATE SKIP LOCKED) \
+             DELETE FROM operation_receipts r USING expired e \
+             WHERE r.organization_id=$1 AND r.actor=e.actor AND r.operation_id=e.operation_id",
+        )
+        .bind(organization)
+        .bind(LIFETIME)
+        .execute(tx)
+        .await?;
+        Ok(deleted.rows_affected())
+    })
+    .await
+}
+
+/// Each tick gives one Organization an expiry batch, including idle Organizations.
+pub async fn purge_periodically(pool: sqlx::PgPool, shutdown: crate::shutdown::Shutdown) {
+    use std::time::Duration;
+    let mut ticks = tokio::time::interval(Duration::from_secs(1));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut after = None;
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            _ = ticks.tick() => {}
+        }
+        let work = async {
+            if let Some(organization) =
+                crate::auth::members::next_maintenance_organization(&pool, after).await?
+            {
+                after = Some(organization);
+                purge(&pool, organization).await?;
+            }
+            Ok::<_, sqlx::Error>(())
+        };
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            result = tokio::time::timeout(Duration::from_secs(2), work) => {
+                if !matches!(result, Ok(Ok(()))) {
+                    tracing::warn!(target: "fukulow", event = "database_failure", operation = "operation_receipts_expiry");
+                }
+            }
+        }
+    }
 }

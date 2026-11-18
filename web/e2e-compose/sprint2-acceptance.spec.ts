@@ -624,10 +624,10 @@ test('Reconnect and reload (C1-C4, P1)', async ({ browser, baseURL }) => {
       ),
     ).toBe(true)
     const topicReplayIdx = replacementReceived.findIndex(
-      (e) => e.type === 'message' && e.message.id === duringDropTopicMsg.id,
+      (e) => e.type === 'message' && 'message' in e && e.message.id === duringDropTopicMsg.id,
     )
     const mainReplayIdx = replacementReceived.findIndex(
-      (e) => e.type === 'message' && e.message.id === duringDropMainMsg.id,
+      (e) => e.type === 'message' && 'message' in e && e.message.id === duringDropMainMsg.id,
     )
     const subscribedIdx = replacementReceived.findIndex(
       (e) => e.type === 'subscribed' && e.channel_id === channel.id,

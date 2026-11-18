@@ -22,45 +22,62 @@ pub struct ReplyChainPage {
     pub history_generation: Uuid,
     pub as_of_seq: i64,
     pub root_id: Uuid,
+    /// Highest version among all chain Messages at this watermark, across all pages.
+    #[schema(minimum = 1)]
+    pub chain_version: i64,
     /// Root and all descendants, ascending by seq. Projection only: never moves the sync cursor.
     pub messages: Vec<Message>,
     /// More matching Messages follow; continue after the last returned seq.
     pub has_more: bool,
 }
 
-pub(super) async fn parent(
+pub(super) async fn parent_location(
     connection: &mut sqlx::PgConnection,
     organization: Uuid,
     channel: Uuid,
     id: Option<Uuid>,
-) -> Result<Option<Message>, MessageError> {
+) -> Result<Option<(Option<Uuid>, Uuid)>, MessageError> {
     let Some(id) = id else { return Ok(None) };
-    sqlx::query(&mentions::page_sql(
-        "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, \
-         reply_to_id AS reply_to, reply_root_id, \
-         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-         FROM messages WHERE organization_id=$1 AND channel_id=$2 AND id=$3",
-        "p.seq",
-    ))
+    sqlx::query_as(
+        "SELECT topic_id, COALESCE(reply_root_id, id) FROM messages \
+         WHERE organization_id=$1 AND channel_id=$2 AND id=$3",
+    )
     .bind(organization)
     .bind(channel)
     .bind(id)
-    .try_map(|row| message_from_row(&row))
     .fetch_optional(connection)
     .await?
     .map(Some)
     .ok_or(MessageError::ReplyParentNotFound)
 }
 
+// The fixed-W reader already checked W >= the mutation floor. A version
+// above W therefore belongs to a Message created after W.
+pub(super) async fn chain_version(
+    tx: &mut sqlx::PgConnection,
+    organization: Uuid,
+    channel: Uuid,
+    root: Uuid,
+    w: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT GREATEST(\
+            (SELECT version FROM messages WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND seq<=$4), \
+            (SELECT version FROM messages WHERE organization_id=$1 AND channel_id=$2 AND reply_root_id=$3 \
+             AND version<=$4 ORDER BY version DESC LIMIT 1))",
+    )
+    .bind(organization).bind(channel).bind(root).bind(w).fetch_one(tx).await
+}
+
 // Separate index branches avoid scanning unrelated Channel Messages or traversing
 // ancestors. Each branch yields at most limit+1 rows, including the null-root row.
 pub(super) const PAGE_SQL: &str = "SELECT * FROM (\
-    (SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, \
+    (SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, \
       reply_to_id AS reply_to, reply_root_id, \
       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
      FROM messages WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND seq>$4 AND seq<=$6) \
     UNION ALL \
-    (SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, \
+    (SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, \
       reply_to_id AS reply_to, reply_root_id, \
       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
      FROM messages WHERE organization_id=$1 AND channel_id=$2 AND reply_root_id=$3 \
@@ -124,6 +141,7 @@ pub async fn reply_chain(
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or(MessageError::ReplyChainNotFound)?;
+                let chain_version = chain_version(tx, organization, channel, root_id, w).await?;
                 let mut messages = sqlx::query(&mentions::page_sql(PAGE_SQL, "p.seq"))
                     .bind(organization)
                     .bind(channel)
@@ -142,6 +160,7 @@ pub async fn reply_chain(
                         history_generation,
                         as_of_seq: w,
                         root_id,
+                        chain_version,
                         messages,
                         has_more,
                     }),

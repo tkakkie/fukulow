@@ -353,6 +353,75 @@ pub(crate) async fn is_visible_for_write(
     ))
 }
 
+pub(crate) enum MoveAccess {
+    OrganizationUnavailable,
+    ChannelUnavailable,
+    Visible(Actor, Resource),
+}
+
+/// The same Channel -> Member -> grant order used to authorize new sends.
+pub(crate) async fn lock_move_access(
+    tx: &mut sqlx::PgConnection,
+    organization: Uuid,
+    member: (Uuid, i64),
+    channel: Uuid,
+) -> Result<MoveAccess, sqlx::Error> {
+    let public = sqlx::query_scalar::<_, Option<bool>>(
+        "SELECT visibility='public' FROM channels WHERE organization_id=$1 AND id=$2 \
+         AND (kind='channel' OR $3 IN(lower_member_id,higher_member_id)) FOR SHARE",
+    )
+    .bind(organization)
+    .bind(channel)
+    .bind(member.0)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let sql = format!("SELECT role FROM ({}) u", auth::current_member_sql(true));
+    let role: Option<Role> = sqlx::query_scalar(&sql)
+        .bind(organization)
+        .bind(member.0)
+        .bind(member.1)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(role) = role else {
+        return Ok(MoveAccess::OrganizationUnavailable);
+    };
+    let Some(public) = public else {
+        return Ok(MoveAccess::ChannelUnavailable);
+    };
+    let resource = match public {
+        Some(public) => Resource::Channel {
+            organization,
+            public,
+        },
+        None => Resource::Dm { organization },
+    };
+    let manager = if public == Some(true) && role != Role::Guest {
+        None
+    } else {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT manager FROM channel_members WHERE organization_id=$1 AND channel_id=$2 \
+             AND member_id=$3 AND membership_revision=$4 FOR SHARE",
+        )
+        .bind(organization)
+        .bind(channel)
+        .bind(member.0)
+        .bind(member.1)
+        .fetch_optional(tx)
+        .await?
+    };
+    let actor = Actor::Member {
+        organization,
+        role,
+        channel_member: manager.is_some(),
+        channel_manager: manager.unwrap_or(false),
+    };
+    Ok(if authorize(actor, Action::ReadChannel, resource).allowed {
+        MoveAccess::Visible(actor, resource)
+    } else {
+        MoveAccess::ChannelUnavailable
+    })
+}
+
 // All Member locks precede every grant lock. The Channel lock holds visibility
 // stable and is taken before Members, matching access-changing transactions.
 pub(crate) async fn authorize_send_targets(

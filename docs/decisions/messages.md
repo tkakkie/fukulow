@@ -42,7 +42,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #204 moves, reorders and deletes serialize per Member; complete reorders use last-committing-writer-wins. Keep Organization -> sorted Channels -> Members -> grants lock order. Reason: atomic orders and delete races must not introduce a deadlock.
 
 ## Topics, Replies and Unread (planned, spec P1-P8)
-- A Topic is created by its first Message (or a Move to a new Topic); empty Topics do not exist. The main-timeline Topic line is a derived display that moves with the Topic's latest activity (maintainer, 2026-11-10, #148).
+- A Topic begins with its first Message or a Move. The main-timeline Topic line follows the highest surviving creation position so a Move preserves the age of older Messages (#148, #141).
 - Main-timeline paging correctness (`position_W`, W as page anchor) is fixed in the spec; its cost is a measured feasibility gate in #137 that stops and asks on a miss, not a guarantee (maintainer, 2026-11-11, #148).
 - Topic counts are an as-of-W baseline plus deduplicated live Messages with `seq` > W; a Topic seen only live has no count until a summary fetch. Reason: replay below W or late older pages must neither double-count nor drop the baseline (#148).
 - Unread keeps a Channel position (Messages without Topic) and per-Topic positions; badge = sum. Initial position = latest committed `seq` when the Member gains access; older history is not unread (maintainer, 2026-11-11, #148, #142).
@@ -73,6 +73,10 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Mention unread is a separate displayed count derived from existing Channel/Topic read positions, with no separate read state (#148, #152); repeated Mentions of one Member in a Message count once and own Messages never count.
 - #142/#143 client baseline selection (larger as_of_seq, then read_seq, then smaller counts, within one access generation) needs no server change. Reason: positions only advance within a generation, so counts at equal as_of_seq never rise with read progress.
 
+- [#141](https://github.com/tkakkie/fukulow/issues/141) gives ordinary Members Move rights over chains they authored in full, with broader rights for usable management. This preserves ownership across Replies and prevents Organization Role from widening private access.
+- [#141](https://github.com/tkakkie/fukulow/issues/141) uses one position per chain and preserves emptied Topic identity/read positions. Per-Message positions would multiply replay and write cost, and removing the Topic would reset Unread on revival.
+- [#141](https://github.com/tkakkie/fukulow/issues/141) records a same-Topic receipt without a position. The key remains bound to the original request even if the chain moves later. Canonical retries return the original outcome alongside the current chain version and Topic.
+
 ## Mentions (#152, specification for approval)
 
 - #152 proposes exact `@{member:<lower-case UUID>}` tokens and shared Message.mentions [{member_id,name}]. Persist only accepted ids; current names follow renames. Reason: rejected tokens must stay literal after later grants. Exact syntax/identity disclosure needs approval (spec M1/M6).
@@ -96,7 +100,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Chain reads union an indexed root lookup and limited reply_root_id/seq range, including the null-root Message without recursion. Resolve ambiguous COMMIT, then authorize/read a fresh snapshot; no cross-page W or depth cap.
 - DeferredOrganizationAuth rejects Session/database errors before reading a send body but carries Organization loss to input validation. This implements #139's 400-before-404 precedence without weakening 401 or admission authorization.
 - #139 accepts deploy-time locks/scans for plain indexes and validated FKs/CHECKs on messages at current scale, like #63; migration lock timeout bounds waiting, not scan time. The chain index excludes non-Replies to reduce write/storage cost.
-- reply_root_id consistency is application-enforced: each Reply stores its parent's root (or the parent if it is a root), whose reply_root_id is null. Future chain-moving writers (#141) and repairs must preserve this; scoped FKs alone do not.
+- reply_root_id consistency is application-enforced: each Reply stores its parent's root (or the parent if it is a root), whose reply_root_id is null. Move (#141) checks stored chain membership before rewriting it because the scoped FKs do not enforce the root invariant.
 - #138/#515 Topic composition passes the initial timeline's explicit generation/W to sync, independently of its visible records; later projection pages stay outside contiguity. Reason: event positions need not be Message creations.
 - #140 keeps one opt-in chain per Channel, merged by Message id and stable reply_root_id. Page continuation uses only the last page seq; live appends cannot skip unpaged siblings or enter sync cursor/gap evidence.
 - #140 composes over sync (or Topic sync) and sends confirmed-parent Replies through its existing pending/retry path. Preserve reply_to with the id/body so retries cannot change intent; projection reads settle C5 with session/read fencing before teardown.

@@ -60,7 +60,10 @@ async fn reply_admission_and_commit_rollback_preserve_seq_topic_count_and_public
     assert_eq!(sent(&app, &token, channel, intent).await, canonical);
     assert_eq!(counts(&pool, org, channel).await, (2, 2, 2));
     delivery.flush().await;
-    assert_eq!(queue.events.try_recv().unwrap().id, id(&canonical));
+    assert_eq!(
+        queue.events.try_recv().unwrap().message().id,
+        id(&canonical)
+    );
     assert!(queue.events.try_recv().is_err());
 }
 

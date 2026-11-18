@@ -2,7 +2,7 @@ use utoipa::{
     Modify, OpenApi,
     openapi::{
         RefOr,
-        schema::{Discriminator, Ref, Schema},
+        schema::{AllOfBuilder, Discriminator, OneOfBuilder, Ref, Schema},
         security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme},
     },
 };
@@ -11,7 +11,7 @@ use utoipa::{
 #[openapi(
     paths(crate::messages::dms::open, crate::messages::dms::list, crate::channels::dms::discovery::changes, crate::health, crate::ready, crate::auth::setup_status, crate::auth::setup, crate::auth::sign_in, crate::auth::native_sign_in, crate::auth::sign_out, crate::auth::security::change_password, crate::auth::security::revoke_others, crate::auth::me, crate::auth::organization_me, crate::auth::members::list_members, crate::auth::members::change_role, crate::auth::members::deactivate, crate::auth::invites::management::list_invites, crate::auth::invites::management::revoke_invite, crate::auth::invites::create_invite, crate::auth::invites::accept_invite,
         crate::messages::unread::list_channels, crate::messages::unread::mark_channel_read, crate::messages::unread::mark_topic_read, crate::channels::create_channel, crate::channels::members::list, crate::channels::members::add, crate::channels::members::remove, crate::channels::members::change_manager,
-        crate::messages::authors::lookup_authors, crate::messages::log::list_channel_events, crate::messages::list_messages, crate::messages::send_message, crate::messages::replies::reply_chain, crate::messages::replies::counts::reply_counts, crate::messages::topics::projection::list_timeline, crate::messages::topics::projection::list_topics, crate::messages::topics::projection::topic_summary, crate::messages::topics::topic_history, crate::realtime::upgrade),
+        crate::messages::authors::lookup_authors, crate::messages::log::list_channel_events, crate::messages::list_messages, crate::messages::send_message, crate::messages::move_topic::move_chain, crate::messages::replies::reply_chain, crate::messages::replies::counts::reply_counts, crate::messages::topics::projection::list_timeline, crate::messages::topics::projection::list_topics, crate::messages::topics::projection::topic_summary, crate::messages::topics::topic_history, crate::realtime::upgrade),
     components(schemas(crate::channels::dms::OpenDmRequest, crate::channels::dms::DmPeer, crate::channels::dms::DmKind, crate::channels::dms::OrdinaryChannelKind, crate::channels::dms::DmDiscovery, crate::channels::dms::discovery::DmChanges, crate::messages::dms::Dm, crate::messages::dms::DmList, crate::auth::invites::management::InvitePage, crate::auth::invites::management::OutstandingInvite, crate::auth::security::ChangePasswordRequest, crate::auth::security::RevokeOtherSessionsRequest, crate::auth::Capability, crate::auth::OrganizationCapabilities, crate::auth::members::MemberList, crate::auth::members::ChangeRoleRequest, crate::auth::invites::CreateInviteRequest, crate::auth::invites::InviteResponse, crate::auth::invites::AcceptInviteRequest, crate::auth::Account, crate::auth::AccountIdentity, crate::auth::SetupStatus, crate::auth::SetupRequest, crate::auth::SignInRequest, crate::auth::Identity, crate::auth::Organization, crate::auth::Member, crate::auth::Role, crate::auth::SessionResponse, crate::auth::NativeSessionResponse, crate::auth::ErrorBody,
         crate::channels::members::AddChannelMemberRequest, crate::channels::members::ChangeChannelManagerRequest, crate::channels::members::ChannelMember, crate::channels::members::ChannelMemberList, crate::channels::Channel, crate::channels::ChannelCapabilities, crate::channels::ChannelVisibility, crate::channels::CreateChannelRequest, crate::messages::ChannelList, crate::messages::UnreadChannel, crate::messages::MarkReadRequest, crate::messages::ReadPosition,
         crate::auth::members::DisplayIdentity, crate::messages::authors::AuthorLookupRequest, crate::messages::authors::AuthorIdentities, crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage, crate::messages::ReplyChainPage, crate::messages::ReplyChainQuery, crate::messages::ReplyCountRequest, crate::messages::ReplyCount, crate::messages::ReplyCountPage, crate::messages::ListProjectionQuery, crate::messages::TimelineItem, crate::messages::TimelinePage, crate::messages::TopicPage, crate::messages::TopicSummary, crate::messages::TopicSummaryResponse,
@@ -133,6 +133,35 @@ impl Modify for WebSocketDiscriminators {
             let Some(RefOr::T(Schema::OneOf(mut schema))) = components.schemas.remove(root) else {
                 panic!("{root} must be a oneOf");
             };
+            if root == "ServerEvent" {
+                if schema.items.pop().is_none() {
+                    panic!("ServerEvent must contain the Move envelope");
+                }
+                let Some(message) = schema
+                    .items
+                    .iter_mut()
+                    .zip(variants)
+                    .find_map(|(item, (tag, _))| (*tag == "message").then_some(item))
+                else {
+                    panic!("ServerEvent must contain the Message envelope");
+                };
+                components
+                    .schemas
+                    .insert("MessageStateEvent".into(), message.clone());
+                // Utoipa tags the untagged serde fallback with its Rust variant
+                // name. Reference the actual body-free envelope directly.
+                *message = Schema::AllOf(
+                    AllOfBuilder::new()
+                        .item(Schema::OneOf(
+                            OneOfBuilder::new()
+                                .item(Ref::from_schema_name("MessageStateEvent"))
+                                .item(Ref::from_schema_name("MessageMoveEvent"))
+                                .build(),
+                        ))
+                        .build(),
+                )
+                .into();
+            }
             assert_eq!(schema.items.len(), variants.len());
             let mut discriminator = Discriminator::new(property);
             for (item, (tag, name)) in schema.items.iter_mut().zip(variants) {

@@ -4,6 +4,7 @@ Topics, server and web, incl. their real-time delivery tests. Writing rules and 
 
 | Rule | Test |
 |---|---|
+| Move empties and revives Topic lines by nondeleted creation activity, retaining identity and read positions. Main-timeline Messages join the destination line | `server/src/realtime/tests/move_topic.rs::move_live_gap_and_subscribe_replay_converge_topics_chain_unread_and_mentions`, `server/src/messages/tests/move_topic.rs::move_from_main_to_new_topic_uses_access_baseline_and_creation_positions` |
 | Stale summary successes retain bounded exponential retries until a retained baseline restores count authority | `web/src/topics.test.ts::bounds repeated stale successful summaries after arrivals checkpoint their evidence` |
 | Evicting an active Topic summary resolves safely without repeated reads or changing main history or the sync cursor | `web/src/topics.test.ts::handles a successful active-Topic summary evicted by 400 newer main Messages`, `web/src/timeline.svelte.test.ts::TopicView handles an active summary evicted by 400 newer main Messages without rejection or a render loop` |
 | Topic-list-only baselines never establish main-page coverage or skip unfetched main Messages | `web/src/message-window-review.test.ts::Topic-list history cannot establish the main continuation or skip unfetched Messages` |

@@ -5,7 +5,7 @@ import { createTopicSync } from './topic-sync'
 import { createReplies } from './replies'
 import type { RealtimeHandlers } from './realtime'
 import { record } from './protocol-test-helpers'
-import { ok, summary } from './topic-test-helpers'
+import { replyPage, ok, summary } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 
 export function windowClient(size = 1000, activity?: Activity) {
@@ -36,8 +36,8 @@ export function windowClient(size = 1000, activity?: Activity) {
   const replies = createReplies(sync, { api: { async listReplyChain(_channel, _anchor, query = {}) {
     replyQueries.push(query.after_seq ?? 0)
     const rows = records.filter(m => m.created_seq > (query.after_seq ?? 0))
-    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (rows.slice(0, 50).map(m => m.created_seq === 1 ? m : { ...m, reply_to: 'id1', reply_root_id: 'id1' })).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: rows.length > 50,
-      messages: rows.slice(0, 50).map(m => m.created_seq === 1 ? m : { ...m, reply_to: 'id1', reply_root_id: 'id1' }) })
+    return ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (rows.slice(0, 50).map(m => m.created_seq === 1 ? m : { ...m, reply_to: 'id1', reply_root_id: 'id1' })).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: rows.length > 50,
+      messages: rows.slice(0, 50).map(m => m.created_seq === 1 ? m : { ...m, reply_to: 'id1', reply_root_id: 'id1' }) }))
   } } })
   return { sync, topics, replies, records, options, mainQueries, topicQueries, replyQueries,
     async boot() { await sync.start(); socket!.onReady(); await sync.watch('A')

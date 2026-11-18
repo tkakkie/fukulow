@@ -15,7 +15,7 @@ Channel manager/チャンネル管理者 names the private Channel grant right (
 - A DM is a Channel of kind `dm` for one immutable pair of Members; it has no name, visibility or Topics. Public/private Channels have kind `channel`. The [DM contract](spec/dms.md) specifies access, renewal and discovery; the Topic rules below apply only to kind `channel`.
 - A channel's timeline shows messages that have no topic (topic = null).
 - Reply: a message may reply to another message. Replies form a chain, shown together in a right-side panel.
-- A reply chain can be moved to a topic under the channel. A topic is created by its first message (or by a Move to a new topic); empty topics do not exist.
+- A reply chain can be moved to a topic under the channel. A Topic begins with its first Message or a Move. Empty Topics retain their identity and read positions and stay out of Topic lists.
 - Messages inside a topic are shown only in the topic. The main timeline shows one summary line per topic, at the topic's latest activity (a derived display).
 - No threads. No calls (use external OSS if ever needed).
 

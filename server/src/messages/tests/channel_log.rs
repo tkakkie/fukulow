@@ -99,12 +99,18 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
         .await
         .unwrap();
     assert_eq!(
-        page.iter().map(|m| m.created_seq).collect::<Vec<_>>(),
+        page.iter()
+            .map(|m| m.message().created_seq)
+            .collect::<Vec<_>>(),
         [1, 2, 3]
     );
-    assert_eq!(page[1].body.as_deref(), Some("current"));
+    assert_eq!(page[1].message().body.as_deref(), Some("current"));
     assert_eq!(
-        (page[1].seq, page[1].created_seq, page[1].version),
+        (
+            page[1].seq,
+            page[1].message().created_seq,
+            page[1].message().version
+        ),
         (2, 2, 3)
     );
     sqlx::query("DELETE FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq=2")
@@ -130,7 +136,7 @@ async fn channel_log_reconciles_current_body_and_fails_closed_on_missing_state(p
     early.complete();
     delivery
         .notification(org, channel, 3)
-        .spawn(app_pool, (page[2].clone()).message);
+        .spawn(app_pool, page[2].clone());
     delivery.flush().await;
     assert!(queue.notification_failed.is_failed());
     assert!(queue.events.try_recv().is_err());

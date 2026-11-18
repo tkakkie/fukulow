@@ -2,34 +2,124 @@ use super::{Message, MessageError, REPLAY_PAGE_SIZE, mentions, message_from_row}
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
+use fukulow_api::{ChannelEventKind, MessageMoveEvent, ServerEvent};
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(transparent)]
 pub(crate) struct ChannelEvent {
     #[serde(skip)]
     pub seq: i64,
     #[serde(skip)]
-    pub kind: fukulow_api::ChannelEventKind,
-    pub message: Message,
+    pub channel_id: Uuid,
+    pub(super) payload: Payload,
 }
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(super) enum Payload {
+    Create(Message),
+    Move(MessageMoveEvent),
+}
+
 impl ChannelEvent {
     pub fn create(message: Message) -> Self {
         Self {
             seq: message.created_seq,
-            kind: fukulow_api::ChannelEventKind::Create,
-            message,
+            channel_id: message.channel_id,
+            payload: Payload::Create(message),
         }
     }
-}
-impl std::ops::Deref for ChannelEvent {
-    type Target = Message;
-    fn deref(&self) -> &Message {
-        &self.message
+
+    pub(super) fn moved(event: MessageMoveEvent) -> Self {
+        Self {
+            seq: event.seq,
+            channel_id: event.channel_id,
+            payload: Payload::Move(event),
+        }
+    }
+
+    pub(crate) fn into_wire(self) -> ServerEvent {
+        match self.payload {
+            Payload::Create(message) => ServerEvent::Message {
+                seq: self.seq,
+                kind: ChannelEventKind::Create,
+                message,
+            },
+            Payload::Move(event) => ServerEvent::Move(event),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn message(&self) -> &Message {
+        let Payload::Create(message) = &self.payload else {
+            panic!("expected a Create event");
+        };
+        message
     }
 }
-impl std::ops::DerefMut for ChannelEvent {
-    fn deref_mut(&mut self) -> &mut Message {
-        &mut self.message
+
+impl From<Message> for ChannelEvent {
+    fn from(value: Message) -> Self {
+        Self::create(value)
     }
+}
+
+pub(super) async fn allocate(
+    tx: &mut PgConnection,
+    organization: Uuid,
+    channel: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $2, 1) \
+         ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = channel_message_sequences.seq + 1 \
+         RETURNING seq",
+    ).bind(organization).bind(channel).fetch_one(tx).await
+}
+
+// The exclusive Channel barrier makes this candidate stable until the Move
+// commits. Claim the operation key before writing the counter.
+pub(super) async fn next_move_position(
+    tx: &mut PgConnection,
+    organization: Uuid,
+    channel: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT seq + 1 FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2",
+    )
+    .bind(organization)
+    .bind(channel)
+    .fetch_one(tx)
+    .await
+}
+
+pub(super) async fn record_move(
+    tx: &mut PgConnection,
+    organization: Uuid,
+    actor: Uuid,
+    event: &MessageMoveEvent,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO channel_log (organization_id, channel_id, event_seq, kind, message_id, sender, operation_id, source_topic_id, destination_topic_id) \
+         VALUES ($1, $2, $3, 'move', $4, $5, $6, $7, $8)",
+    )
+    .bind(organization).bind(event.channel_id).bind(event.seq)
+    .bind(event.root_id).bind(actor).bind(event.operation_id)
+    .bind(event.source_topic_id).bind(event.destination_topic_id)
+    .execute(&mut *tx).await?;
+    let advanced = sqlx::query(
+        "UPDATE channel_message_sequences SET seq=$3, mutation_seq=$3 \
+         WHERE organization_id=$1 AND channel_id=$2 AND seq=$3-1",
+    )
+    .bind(organization)
+    .bind(event.channel_id)
+    .bind(event.seq)
+    .execute(tx)
+    .await?
+    .rows_affected();
+    if advanced != 1 {
+        return Err(sqlx::Error::RowNotFound);
+    }
+    Ok(())
 }
 
 pub(super) async fn create(
@@ -59,15 +149,16 @@ fn page_sql(channel: usize, authorized: bool) -> String {
     let access = if authorized { "AND access.visible" } else { "" };
     format!(
         r#"WITH log_page AS MATERIALIZED (
-            SELECT organization_id, channel_id, event_seq, kind, message_id FROM channel_log
+            SELECT organization_id, channel_id, event_seq, kind, message_id, source_topic_id, destination_topic_id, operation_id FROM channel_log
             WHERE organization_id=$1 AND channel_id=${channel} AND event_seq>${after} AND event_seq<=${through} {access}
             ORDER BY event_seq LIMIT ${limit}
         )
-        SELECT l.event_seq,l.kind,m.id,m.channel_id,m.seq,m.version,m.client_message_id,m.sender,m.body,m.topic_id,
+        SELECT l.event_seq,l.kind,l.message_id,l.source_topic_id,l.destination_topic_id,l.operation_id,
+            l.channel_id AS log_channel_id,m.id,m.channel_id,m.seq,m.version,m.deleted,m.client_message_id,m.sender,m.body,m.topic_id,
             m.reply_to_id AS reply_to,m.reply_root_id,
             to_char(m.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
         FROM log_page l LEFT JOIN messages m
-            ON m.organization_id=l.organization_id AND m.channel_id=l.channel_id AND m.id=l.message_id
+            ON m.organization_id=l.organization_id AND m.channel_id=l.channel_id AND m.id=l.message_id AND l.kind='create'
         ORDER BY l.event_seq"#
     )
 }
@@ -82,17 +173,28 @@ fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<ChannelEvent>, sqlx::
             }
             return Err(sqlx::Error::RowNotFound);
         };
-        if after.checked_add(1) != Some(position)
-            || row.try_get::<&str, _>("kind")? != "create"
-            || row.try_get::<Option<i64>, _>("seq")? != Some(position)
-        {
+        if after.checked_add(1) != Some(position) {
             return Err(sqlx::Error::RowNotFound);
         }
-        messages.push(ChannelEvent {
-            seq: position,
-            kind: fukulow_api::ChannelEventKind::Create,
-            message: message_from_row(&row)?,
-        });
+        let event = match row.try_get::<&str, _>("kind")? {
+            "create" if row.try_get::<Option<i64>, _>("seq")? == Some(position) => {
+                ChannelEvent::create(message_from_row(&row)?)
+            }
+            "move" => ChannelEvent::moved(MessageMoveEvent {
+                event_type: fukulow_api::MessageEventType::Message,
+                kind: fukulow_api::MoveEventKind::Move,
+                history_generation: row.try_get("history_generation")?,
+                channel_id: row.try_get("log_channel_id")?,
+                seq: position,
+                version: position,
+                root_id: row.try_get("message_id")?,
+                source_topic_id: row.try_get("source_topic_id")?,
+                destination_topic_id: row.try_get("destination_topic_id")?,
+                operation_id: row.try_get("operation_id")?,
+            }),
+            _ => return Err(sqlx::Error::RowNotFound),
+        };
+        messages.push(event);
         after = position;
     }
     Ok(messages)
@@ -245,14 +347,7 @@ pub async fn list_channel_events(
     .await?;
     let has_more = events.len() > usize::from(limit);
     events.truncate(usize::from(limit));
-    let events = events
-        .into_iter()
-        .map(|event| fukulow_api::ServerEvent::Message {
-            seq: event.seq,
-            kind: event.kind,
-            message: event.message,
-        })
-        .collect();
+    let events = events.into_iter().map(ChannelEvent::into_wire).collect();
     Ok((
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         axum::Json(fukulow_api::ChannelEventPage {

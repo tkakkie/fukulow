@@ -192,24 +192,30 @@ async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed
         &queues[1].events.try_recv().unwrap()
     ));
     assert_eq!(
-        enriched.topic_id,
+        enriched.message().topic_id,
         Some(serde_json::from_value(root["topic_id"].clone()).unwrap())
     );
     assert_eq!(
-        enriched.reply_to,
+        enriched.message().reply_to,
         Some(serde_json::from_value(root["id"].clone()).unwrap())
     );
-    assert_eq!(enriched.reply_root_id, enriched.reply_to);
-    assert_eq!(enriched.mentions.as_ref().unwrap()[0].member_id, f.member);
     assert_eq!(
-        enriched.mentions.as_ref().unwrap()[0].name,
+        enriched.message().reply_root_id,
+        enriched.message().reply_to
+    );
+    assert_eq!(
+        enriched.message().mentions.as_ref().unwrap()[0].member_id,
+        f.member
+    );
+    assert_eq!(
+        enriched.message().mentions.as_ref().unwrap()[0].name,
         "現在の名前 \"quoted\"\\\n"
     );
     // Exact old per-connection expression, on the same delivery_snapshot Message.
     let old = serde_json::to_string(&ServerEvent::Message {
         seq: enriched.seq,
-        kind: enriched.kind,
-        message: enriched.message.clone(),
+        kind: fukulow_api::ChannelEventKind::Create,
+        message: enriched.message().clone(),
     })
     .unwrap();
     assert_eq!(enriched.frame.as_bytes(), old.as_bytes());

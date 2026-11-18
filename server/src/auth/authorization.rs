@@ -26,6 +26,7 @@ pub enum Action {
     ChangeRole,
     DeactivateMember,
     ReadChannel,
+    MoveChain { owns_chain: bool },
     AddChannelMembers,
     RemoveChannelMembers,
     ManageChannelManagers,
@@ -115,6 +116,9 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
                     || (!public && channel_member && channel_manager && role != Role::Guest));
             match action {
                 Action::ReadChannel => visible,
+                Action::MoveChain { owns_chain } => {
+                    manages || (visible && role == Role::Member && owns_chain)
+                }
                 Action::AddChannelMembers | Action::RemoveChannelMembers => manages,
                 Action::ManageChannelManagers => !public && manages,
                 Action::LeaveChannel => visible,

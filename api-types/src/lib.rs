@@ -159,6 +159,38 @@ pub enum ChannelEventKind {
     Delete,
 }
 
+/// The body-free invalidation for a committed whole-chain Move.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MessageMoveEvent {
+    #[serde(rename = "type")]
+    pub event_type: MessageEventType,
+    pub kind: MoveEventKind,
+    pub history_generation: Uuid,
+    pub channel_id: Uuid,
+    #[schema(minimum = 1)]
+    pub seq: i64,
+    #[schema(minimum = 1)]
+    pub version: i64,
+    pub root_id: Uuid,
+    #[schema(required = true)]
+    pub source_topic_id: Option<Uuid>,
+    pub destination_topic_id: Uuid,
+    pub operation_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageEventType {
+    Message,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveEventKind {
+    Move,
+}
+
 /// Server -> client events. Event positions and Message state versions are independent.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -214,4 +246,6 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<Uuid>,
     },
+    #[serde(untagged)]
+    Move(MessageMoveEvent),
 }

@@ -1,11 +1,16 @@
 import { vi } from 'vitest'
 import type { Activity } from './activity'
-import type { Message, Result, SendMessageRequest, TimelinePage, TopicSummary, TopicSummaryResponse, ListChannelEventsQuery } from './api'
+import type { Message, ReplyChainPage, Result, SendMessageRequest, TimelinePage, TopicSummary, TopicSummaryResponse, ListChannelEventsQuery } from './api'
 import type { RealtimeHandlers } from './realtime'
 import { createTopicSync } from './topic-sync'
 import { record } from './protocol-test-helpers'
 import { flush } from './sync-test-helpers'
 
+// These fixtures supply only the Messages represented in the mock page.
+export const replyPage = (page: Omit<ReplyChainPage, 'chain_version'>): ReplyChainPage => ({
+  ...page,
+  chain_version: page.messages.reduce((version, message) => Math.max(version, message.version), 1),
+})
 export const ok = <T>(data: T): Result<T> => ({ ok: true, data })
 export const deferred = <T>() => {
   let resolve!: (value: T) => void

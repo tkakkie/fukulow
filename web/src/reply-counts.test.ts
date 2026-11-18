@@ -1,3 +1,4 @@
+import { replyPage } from './topic-test-helpers'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Message, ReplyCountPage, Result } from './api'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
@@ -187,7 +188,7 @@ it('a cold child without a loaded root requests the root total through the same 
   const c = await client()
   const child = { ...reply(7), id: 'isolated-child', reply_root_id: 'isolated-root' }
   c.read.mockImplementationOnce(async (_channel, body) => ok({ history_generation: generation, as_of_seq: 20, counts: body.ids.map(id => ({ message_id: id, root_id: id, reply_count: 777 })) }))
-  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 20, root_id: 'isolated-root', messages: [child], has_more: false }))
+  c.listReplyChain.mockResolvedValueOnce(ok(replyPage({ history_generation: generation, as_of_seq: 20, root_id: 'isolated-root', messages: [child], has_more: false })))
   await c.replies.open('A', child); await flush()
   expect(c.read).toHaveBeenLastCalledWith('A', { history_generation: generation, ids: ['isolated-root'] }, expect.any(AbortSignal))
   expect(c.counts.get('A')['isolated-root']).toBe(777)
@@ -554,7 +555,7 @@ it('an open panel root takes priority over more than one batch of projected root
   c.read.mockReturnValueOnce(held.promise)
   c.project(Array.from({ length: 205 }, (_, i) => ({ ...root(), id: `a${i}` }))); await flush()
   const child = { ...reply(7), reply_root_id: 'z-panel' }
-  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 7, root_id: 'z-panel', messages: [child], has_more: false }))
+  c.listReplyChain.mockResolvedValueOnce(ok(replyPage({ history_generation: generation, as_of_seq: 7, root_id: 'z-panel', messages: [child], has_more: false })))
   await c.replies.open('A', child); await flush()
   c.read.mockImplementation(async (_channel, body) => ok({ history_generation: generation, as_of_seq: 7, counts: body.ids.map(id => ({ message_id: id, root_id: id, reply_count: 8 })) }))
   const ids = c.read.mock.calls.at(-1)![1].ids

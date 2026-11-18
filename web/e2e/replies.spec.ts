@@ -56,7 +56,7 @@ test('same-chain navigation preserves cached scroll and list identity and reveal
     reads.push({ anchor: url.pathname.split('/').at(-2)!, after })
     const pageMessages = messages.filter(m => m.created_seq > after).slice(0, Number(url.searchParams.get('limit') ?? 50))
     const data: components['schemas']['ReplyChainPage'] = { history_generation, as_of_seq: (pageMessages).at(-1)?.created_seq ?? 0,
-      root_id: root.id, messages: pageMessages, has_more: pageMessages.at(-1)!.created_seq < 10_001,
+      root_id: root.id, chain_version: messages.at(-1)!.version, messages: pageMessages, has_more: pageMessages.at(-1)!.created_seq < 10_001,
     }
     if (after === 150 && heldRead) await heldRead
     return route.fulfill({ json: data })

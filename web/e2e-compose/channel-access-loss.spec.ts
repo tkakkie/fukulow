@@ -76,12 +76,12 @@ function observeOrgSocket(page: Page) {
         receivedEvents.push({
           type: event.type,
           channel_id:
-            event.type === 'message'
+            event.type === 'message' && 'message' in event
               ? event.message.channel_id
               : 'channel_id' in event
                 ? event.channel_id
                 : undefined,
-          message_id: event.type === 'message' ? event.message.id : undefined,
+          message_id: event.type === 'message' && 'message' in event ? event.message.id : undefined,
         })
       } catch {
         // ignore non-json frames

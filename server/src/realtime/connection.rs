@@ -48,7 +48,7 @@ impl Connection<'_> {
         match watch
             .handoff(async {
                 #[cfg(test)]
-                if matches!(event, ServerEvent::Message { .. }) {
+                if matches!(event, ServerEvent::Message { .. } | ServerEvent::Move(_)) {
                     self.state
                         .message_delivery
                         .message_serializations
@@ -294,15 +294,7 @@ impl Connection<'_> {
                 }
                 after = message.seq;
                 if !self
-                    .protected_event(
-                        socket,
-                        channel,
-                        ServerEvent::Message {
-                            seq: message.seq,
-                            kind: message.kind,
-                            message: message.message,
-                        },
-                    )
+                    .protected_event(socket, channel, message.into_wire())
                     .await?
                 {
                     return Ok(());

@@ -163,13 +163,13 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
     // An ACK can install a body before its stream echo. Count raw current-stream envelopes,
     // not only changed bodies; Rust deduplicates the evidence independently of body retention.
     const fillChannel = input.type === 'events_result' ? Object.keys(before.channels).find(id => before.channels[id].fill === input.request) : undefined
-    const events = input.type === 'event' && input.connection === before.connection && before.connected && input.event.type === 'message' &&
+    const events = input.type === 'event' && input.connection === before.connection && before.connected && input.event.type === 'message' && 'message' in input.event &&
       before.channels[input.event.message.channel_id]?.subscription ? [input.event]
-      : input.type === 'events_result' && fillChannel ? input.page.events.filter(e => e.type === 'message' && e.message.channel_id === fillChannel)
+      : input.type === 'events_result' && fillChannel ? input.page.events.filter(e => e.type === 'message' && 'message' in e && e.message.channel_id === fillChannel)
       : input.type === 'ack' && result.records.get(input.message.channel_id)?.some(m => m.id === input.message.id)
         ? [{ type: 'message' as const, kind: 'create' as const, seq: input.message.created_seq, message: input.message }] : []
     for (const event of before.historyEpoch === after.historyEpoch ? events : []) {
-      if (event.type !== 'message') continue
+      if (event.type !== 'message' || !('message' in event)) continue
       const m = event.message, c = channels.get(m.channel_id)
       if (!c || (event.kind === 'create' && event.seq !== m.created_seq)) continue
       const root = m.reply_root_id ?? m.id, cursor = before.channels[m.channel_id]?.cursor

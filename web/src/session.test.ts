@@ -1,3 +1,4 @@
+import { replyPage } from './topic-test-helpers'
 import { describe, expect, it, vi } from 'vitest'
 import { createSession } from './session'
 import { createMembers } from './members'
@@ -563,11 +564,11 @@ it('composes replies and topics over a single sync instance and fences replaceSe
     expect(net.sockets).toHaveLength(1)
     const anchor = record(100, 'A')
     net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor]).at(-1)?.created_seq ?? 0,  messages: [anchor], has_more: false })
-    net.replyChains['A:id100'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }]).at(-1)?.created_seq ?? 0,
+    net.replyChains['A:id100'] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }]).at(-1)?.created_seq ?? 0,
       root_id: 'id100',
       messages: [anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }],
       has_more: false,
-    })
+    }))
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 100)
@@ -624,11 +625,11 @@ it('composes unread, replies and topics over a single sync instance and fences r
       unread_count: 1,
       main_unread_count: 1,
     }
-    net.replyChains['A:id100'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }]).at(-1)?.created_seq ?? 0,
+    net.replyChains['A:id100'] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }]).at(-1)?.created_seq ?? 0,
       root_id: 'id100',
       messages: [anchor, { ...record(101, 'A'), reply_to: 'id100', reply_root_id: 'id100' }],
       has_more: false,
-    })
+    }))
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
     await settle()
     net.subscribed('A', 100)

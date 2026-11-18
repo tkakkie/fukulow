@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { msg, ok, page, summary, topicClient } from './topic-test-helpers'
+import { replyPage, msg, ok, page, summary, topicClient } from './topic-test-helpers'
 import { reply, replyClient, root } from './reply-test-helpers'
 const generation = '00000000-0000-4000-8000-000000000515'
 const expired = { ok: false as const, kind: 'http' as const, status: 409, error: 'snapshot_expired' }
@@ -68,10 +68,10 @@ it('Topic-list expiry discards list-only baselines and preserves main paging', a
 })
 it('Reply expiry restarts just its chain and never loops on repeated fresh expiry', async () => {
   const c = replyClient(); await c.boot()
-  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 10, root_id: 'id1', messages: [root(), reply(3)], has_more: true }))
+  c.listReplyChain.mockResolvedValueOnce(ok(replyPage({ history_generation: generation, as_of_seq: 10, root_id: 'id1', messages: [root(), reply(3)], has_more: true })))
   await c.replies.open('A', root())
   const core = c.sync.get().channels.A, reads = c.listMessages.mock.calls.length
-  c.listReplyChain.mockResolvedValueOnce(expired).mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 20, root_id: 'id1', messages: [root(), reply(15)], has_more: true }))
+  c.listReplyChain.mockResolvedValueOnce(expired).mockResolvedValueOnce(ok(replyPage({ history_generation: generation, as_of_seq: 20, root_id: 'id1', messages: [root(), reply(15)], has_more: true })))
   await c.replies.loadMore('A')
   expect(c.listReplyChain.mock.calls.slice(-2)).toEqual([
     ['A', 'id1', { history_generation: generation, as_of_seq: 10, after_seq: 3 }],
