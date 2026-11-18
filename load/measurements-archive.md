@@ -1262,7 +1262,7 @@ Scenario and criteria were pre-registered on #592 before the formal runs. Sizes 
 
 Holds start only when a handoff recheck or the fallback pass fails for a revocation in flight or queued, so concurrent holds are bounded by in-flight activity publications (40 global permits), not by connection count. The 4,096-hold worst case is not reachable through these paths and was not measured.
 
-Results, verbatim from the formal results comment on #592:
+Results, verbatim from the formal results comment on #592. Corrections from the raw `summary.json` (the quoted text is left as posted): notices lost without a revocation at 4096 were 47–54, not 47–51; RSS at 256 changed by -2 to +18 MiB, not 0–18 MiB.
 
 **Pre-registered verdict: 256 PASS, 1024 FAIL, 4096 FAIL.** Each failing size has a single failing run, both of kind `outage`, both with the same one reason: "a revocation was delivered while the failure was active". Every other criterion passed in all 18 runs. There were no failed database probes, no pool acquire timeouts, and no wrong, early, repeated or post-restore notices. Every HTTP probe in the recovery window succeeded within its bound.
 
@@ -1311,7 +1311,7 @@ Controls (harness check only, no fault): all three are flagged by the same arriv
 ### Verdict (maintainer decision, 2026-11-19)
 
 - **Pre-registered result, unchanged:** 256 PASS, 1024 FAIL, 4096 FAIL. The only failures are `outage` 1024 r3 and `outage` 4096 r2, both for "a revocation was delivered while the failure was active".
-- **Maintainer decision:** both failures count as PASS. They are boundary arrivals: the server had authorized and sent the notices before the fault began, and they arrived 0.0 ms and 2.0 ms after the harness stamped the fault start. The criterion used client arrival time and allowed nothing for notices already in flight.
+- **Maintainer decision:** both failures count as PASS. They are boundary arrivals: the notices were authorized before the fault began (the last recheck statements completed about 1–3 ms before it), and they arrived 0.0 ms and 2.0 ms after the harness stamped the fault start. The criterion used client arrival time and allowed nothing for notices already in flight.
 - **Backoff:** acceptable within the paths and load observed here. At most 4 holds existed at once and no synchronized retry burst formed, so this record does not show that the backoff is safe under high hold counts.
 - **Jitter:** not needed now. No hold retries occurred, so no load came from the backoff.
 - **Follow-up:** #622 changes the arrival criterion to the server send time for future runs. This record and its thresholds stay unchanged.

@@ -145,7 +145,7 @@ Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSO
 
 ## Revocation hold retry bursts (#592)
 
-2026-11-19 JST, `6a9bfa9`, PR #588 as is. 256/1,024/4,096 sockets, 128 removals, ~3.8 s recheck-only or whole-DB fault, 3 runs each. Pre-registered: 256 PASS, 1,024/4,096 FAIL, one `outage` run each (a pre-fault notice arrived 0–2 ms in); maintainer: both PASS. ≤ 4 holds, all fenced; no retry burst or pool timeout. Backoff acceptable for these paths and load, unproven for many holds; no jitter now. Arrival rule: #622.
+2026-11-19 JST, `6a9bfa9`, PR #588 as is. 256/1,024/4,096 sockets, 128 removals, ~3.8 s recheck-only/whole-DB fault, 3 runs each. Pre-registered: 256 PASS, 1,024/4,096 FAIL, one `outage` run each (pre-fault notice arrived 0–2 ms in); maintainer: both PASS. ≤ 4 holds, all fenced; no retry burst or pool timeout. Backoff acceptable for these paths and load, unproven for many holds; no jitter now. Arrival rule: #622.
 
 Run `node load/revocation-burst.ts --out <new dir>`. [Record and limits](../load/measurements-archive.md#revocation-hold-retry-bursts-592-2026-11-19-jst-mac)
 
@@ -154,7 +154,7 @@ Run `node load/revocation-burst.ts --out <new dir>`. [Record and limits](../load
 - [Load harness methods](../load/measurements-archive.md#load-harness-methods-20-57) — procedures for `make load` and `load/record.ts`. [Load decisions](decisions/load.md#load-testing-and-measurement)
 - [Earlier reconnect runs](../load/measurements-archive.md#graceful-shutdown-and-reconnect-storm-195-2026-11-11-jst) — superseded by the pinned repeat.
 - [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
-- Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs, which reproduced the scores.
+- Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs (quality scores reproduced).
 - [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
 - [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
 - [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
