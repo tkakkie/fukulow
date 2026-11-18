@@ -402,3 +402,90 @@ test('keyboard path: open Unread Channel, enter Unread Topic via real key presse
     await bobContext.close()
   }
 })
+
+test('read progress advances through IntersectionObserver alone after native scrolling stops', async ({
+  page,
+  browser,
+}) => {
+  const org = await signInOwner(page.request)
+  const channel = await createChannel(page.request, org, `unread-observer-${crypto.randomUUID().slice(0, 8)}`)
+  const peer = await createSecondMemberRequest(page.request, browser, org)
+  try {
+    const first = await postMessage(peer.request, org, channel.id, '最初の未読 1')
+    const second = await postMessage(
+      peer.request,
+      org,
+      channel.id,
+      Array.from({ length: 60 }, (_, i) => `長い未読本文 ${i + 1}`).join('\n'),
+    )
+    const third = await postMessage(peer.request, org, channel.id, '停止後にマウントされる未読 3')
+    const fourth = await postMessage(peer.request, org, channel.id, '停止後にマウントされる未読 4')
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(`/o/${org}/c/${channel.id}`)
+    const main = page.locator('#main-content')
+    const scroll = main.locator('.timeline-scroll')
+
+    await expect(main.locator(`[data-message-id="${first.id}"] [data-read-marker="true"]`)).toBeInViewport()
+    await expect(main.locator(`[data-message-id="${second.id}"]`)).toBeVisible()
+    await expect(main.locator(`[data-message-id="${third.id}"]`)).toHaveCount(0)
+    await expect(main.locator(`[data-message-id="${fourth.id}"]`)).toHaveCount(0)
+
+    await expect.poll(async () => {
+      const response = await page.request.get(`/api/v1/orgs/${org}/channels`)
+      const data = (await response.json()) as components['schemas']['ChannelList']
+      return data.channels.find((c) => c.id === channel.id)?.read_seq
+    }).toBe(2)
+
+    await scroll.evaluate((el) => {
+      const win = window as unknown as {
+        __scrollCount: number
+        __mountedAtScroll: number
+      }
+      win.__scrollCount = 0
+      win.__mountedAtScroll = 0
+      el.addEventListener(
+        'scroll',
+        () => {
+          win.__scrollCount++
+          win.__mountedAtScroll = el.querySelectorAll('[data-confirmed-seq="3"], [data-confirmed-seq="4"]').length
+        },
+        { capture: true, passive: true },
+      )
+    })
+
+    await scroll.hover()
+    await page.mouse.wheel(0, 1400)
+
+    await expect
+      .poll(() =>
+        scroll.evaluate((el) => {
+          const win = window as unknown as { __scrollCount: number }
+          return win.__scrollCount > 0 && el.scrollTop > 1000
+        }),
+      )
+      .toBe(true)
+
+    const stopState = await scroll.evaluate(() => {
+      const win = window as unknown as { __scrollCount: number; __mountedAtScroll: number }
+      return { count: win.__scrollCount, mountedAtScroll: win.__mountedAtScroll }
+    })
+    expect(stopState.count).toBeGreaterThan(0)
+    expect(stopState.mountedAtScroll).toBe(0)
+
+    await expect(main.locator(`[data-message-id="${third.id}"]`)).toBeInViewport()
+    await expect(main.locator(`[data-message-id="${fourth.id}"]`)).toBeInViewport()
+
+    await expect.poll(async () => {
+      const response = await page.request.get(`/api/v1/orgs/${org}/channels`)
+      const data = (await response.json()) as components['schemas']['ChannelList']
+      return data.channels.find((c) => c.id === channel.id)?.read_seq
+    }).toBe(4)
+
+    const afterCount = await page.evaluate(() => (window as unknown as { __scrollCount: number }).__scrollCount)
+    expect(afterCount).toBe(stopState.count)
+  } finally {
+    await peer.close()
+  }
+})
+
