@@ -68,8 +68,9 @@ export function seed(config: SeedConfig): Setup {
     if (!organizationId || (!legacy && !identity.organizations.some((organization) => organization.organization_id === organizationId))) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
     for (let i = 1; i < layout.ownerSessions; i++) {
       const session = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
+      const signedIn = session.status === 200 ? session.json() as NativeSessionResponse : undefined;
+      if (signedIn) tokens.push(signedIn.token);
       requireStatus(session, 200, 'sign_in');
-      tokens.push((session.json() as NativeSessionResponse).token);
     }
     if (layout.accounts > 1) {
       const run = uuid().slice(0, 8);

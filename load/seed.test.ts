@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 
 export const check = <T>(value: T, checks: Record<string, (value: T) => boolean>) =>
   Object.values(checks).every(predicate => predicate(value));
@@ -9,16 +9,19 @@ export const randomBytes = (length: number) => new ArrayBuffer(length);
 
 const signedOut: string[] = [];
 let signIns = 0;
-const response = (status: number, body?: unknown) => ({ status, json: () => body });
+const response = (status: number, body?: unknown, proto = 'HTTP/1.1') => ({
+  status, json: () => body, proto, tls_version: 'tls1.3', tls_cipher_suite: 'TLS_AES_128_GCM_SHA256',
+});
 export default {
   get: () => response(200),
   post: (_url: string, _body: string, params: { tags: { operation: string } }) => {
     switch (params.tags.operation) {
       case 'invite': return response(201, { token: 'invite' });
       case 'accept_invite': return response(200);
-      case 'sign_in': return ++signIns === 1
-        ? response(200, { token: 'owner', identity: { organizations: [{ organization_id: 'org' }] } })
-        : response(200, { token: 'member', identity: { organizations: [] } });
+      case 'sign_in':
+        if (++signIns === 1) return response(200, { token: 'owner', identity: { organizations: [{ organization_id: 'org' }] } });
+        if (__ENV.LOAD_PROXY) return response(200, { token: 'extra-owner' }, 'HTTP/2.0');
+        return response(200, { token: 'member', identity: { organizations: [] } });
       default: return assert.fail(`Unexpected operation ${params.tags.operation}`);
     }
   },
@@ -28,7 +31,9 @@ export default {
   },
 };
 
-test('setup revokes an invited Account Session when its membership check fails', async (t) => {
+function mockK6(t: TestContext) {
+  signedOut.length = 0;
+  signIns = 0;
   const hooks = registerHooks({
     resolve(specifier, context, nextResolve) {
       return ['k6', 'k6/crypto', 'k6/http'].includes(specifier)
@@ -39,8 +44,22 @@ test('setup revokes an invited Account Session when its membership check fails',
   t.after(() => hooks.deregister());
   Object.assign(globalThis, { __ENV: { LOAD_EMAIL: 'owner@example.test', LOAD_PASSWORD: 'fixture' } });
   t.after(() => { Reflect.deleteProperty(globalThis, '__ENV'); });
+}
+
+test('setup revokes an invited Account Session when its membership check fails', async (t) => {
+  mockK6(t);
   const { seed } = await import('./seed.ts');
   assert.throws(() => seed({ channels: 1, subscribers: 1, socketsPerSession: 1, publishMembers: 2,
     visibility: 'public', legacy: false }), { message: 'Invited Account lacks the Organization membership' });
   assert.deepEqual(signedOut, ['Bearer owner', 'Bearer member']);
+});
+
+test('setup revokes an extra Owner Account Session when its proxy transport check fails', async (t) => {
+  mockK6(t);
+  __ENV.LOAD_PROXY = '1';
+  t.mock.method(console, 'log', () => {});
+  const { seed } = await import('./seed.ts');
+  assert.throws(() => seed({ channels: 1, subscribers: 2, socketsPerSession: 1,
+    visibility: 'public', legacy: false }), { message: /^Proxy measurement requires HTTP\/1\.1/ });
+  assert.deepEqual(signedOut, ['Bearer owner', 'Bearer extra-owner']);
 });
