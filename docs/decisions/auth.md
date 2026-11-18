@@ -18,7 +18,7 @@
 - #146 opportunistic cleanup keeps global Sessions off a per-Organization job (#53/#73) or scheduler. Tight deadlines limit interference.
 - #196 idle eviction avoids global lockout. Churn/eviction and restart reset failures. Fixed windows allow twice the budget at boundaries. Email limits distributed guesses but allow one-window targeted lockout. The other map and Argon2 bound work without durable Account protection.
 - #194: forwarded IPs require a trusted peer and configured header. Rightmost selection trusts only the append hop. [Deployment](../spec/deployment.md#proxy-and-sign-in-limits)
-- #194: require a nonblank FUKULOW_SETUP_TOKEN in every mode to prevent pre-Owner claims. Generic extraction reveals no token/bootstrap state before constant-time verification. Public status lets web choose setup or sign-in. Check global existence before hashing and recheck under the Organization table lock for races.
+- #194: require a nonblank FUKULOW_SETUP_TOKEN in every mode to prevent pre-Owner claims. Keep extraction before constant-time token verification and document/test its generic errors instead of rewriting the handler, since those errors reveal neither token nor bootstrap state. Public status lets web choose setup or sign-in. After token and input validation, check global existence without a lock before hashing and recheck under the Organization table lock for races.
 - #194: Compose separates proxy/app edge from app/DB backend. Derive addresses together and trust the fixed proxy IP only because gateway/subnet trust includes the host path.
 - CI probes health through Caddy HTTPS and nginx HTTPS with Pebble (#469). Main/manual adds WSS, renewal and cert reuse. Public-domain checks are manual.
 - #144 centralizes deny-by-default authority and SQL Role sets. Version the Organization lock row to abort stale REPEATABLE READ updates before using an old Owner count.
@@ -41,7 +41,7 @@
 
 - #304 PUT /api/v1/me/password takes the current password as does revoke-others. Keep the current Session so users can secure an Account without losing access.
 - #304 wrong current password is 403 current_password_incorrect because clients end their Session on 401.
-- #304 recheck current Session/password under locks. One admission covers verification/hash. Lock Account before sign-in verification so it cannot escape revocation. Detach atomic update/revocation and 4001 signals to survive cancellation.
+- #304 recheck current Session/password under locks. One admitted worker verifies and hashes the replacement, avoiding a second queue admission while holding the Account lock. Lock Account before sign-in verification so it cannot escape revocation. Detach the transaction and post-COMMIT signals so HTTP cancellation cannot lose 4001.
 
 ## Sessions and revocation
 
