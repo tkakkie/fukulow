@@ -30,16 +30,35 @@ test('module direction uses compiler resolution in production and tests', async 
     })
   }
 
-  await t.test('production edges retain domain order and the shared wire leaf', () => {
-    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime', 'fukulow_api', 'fukulow_client_core'])
-    assert.equal(edges.length, 9)
-    assert.equal(new Set(edges).size, 9)
-    for (let from = 0; from < names.length; from++) {
-      for (let to = 0; to < names.length; to++) {
-        assert.equal(allowed(names[from], names[to]), from === to || (from < 4 && to < 4 && to < from) || ((from >= 2 && from < 4 || from === 5) && to === 4))
-      }
-    }
+  await t.test('production table contains exactly the approved modules and direct edges', () => {
+    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime', 'fukulow_api', 'fukulow_client_core', 'database', 'shutdown'])
+    assert.deepEqual(edges.toSorted(), [
+      'auth->database',
+      'channels->auth', 'channels->database',
+      'fukulow_client_core->fukulow_api',
+      'messages->auth', 'messages->channels', 'messages->database', 'messages->fukulow_api', 'messages->shutdown',
+      'realtime->auth', 'realtime->channels', 'realtime->database', 'realtime->fukulow_api', 'realtime->messages', 'realtime->shutdown',
+    ])
   })
+
+  for (const [from, to, status] of [
+    ['messages', 'database', 0],
+    ['database', 'auth', 1],
+    ['shutdown', 'messages', 1],
+    ['realtime', 'database', 0],
+    ['channels', 'shutdown', 1],
+  ] as const) {
+    await t.test(`production leaf edge ${from} -> ${to} ${status === 0 ? 'passes' : 'fails'}`, () => {
+      const source = `pub mod ${to} { pub struct Item; }
+pub mod ${from} { fn f(_: crate::${to}::Item) {} }`
+      const baseline = compile(source, false)
+      assert.equal(baseline.status, 0, `invalid fixture: ${baseline.stderr}`)
+      const result = compile(source, true)
+      assert.equal(result.status, status, result.stderr)
+      if (status !== 0) assert.equal(result.stderr.split('\n')[0],
+        `error: module direction: ${from} must not reference ${to} (${to}::Item)`, result.stderr)
+    })
+  }
 
   for (const [name, fixtureEdges, message] of [
     ['two-node cycle', 'auth->channels,channels->auth', /cycle in allowed-edge table/],
