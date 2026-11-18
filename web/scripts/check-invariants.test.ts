@@ -1,7 +1,7 @@
 // Regression tests for executable invariant references, Rule text/IDs and distinct cross-part row resolution.
 import { describe, expect, it } from 'vitest'
 import { resolve } from 'node:path'
-import { checkDecisionDocs, checkDecisions, MAX_DECISION_LENGTH, checkInvariants, checkRows, parseInvariants, MAX_RULE_LENGTH, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
+import { checkDecisionDocs, checkDecisions, checkInvariants, checkRows, parseInvariants, rustTests, tsTests, collectKnownTests, parseTestList, reconcileWithCargoList, cargoList, scanModules, blankRustCommentsAndStrings, type ListedTest, type Known } from './check-invariants.ts'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -130,34 +130,11 @@ describe('docs/invariants.md parsing', () => {
 
   const ruleRow = (rule: string) => `| Rule | Test |\n|---|---|\n| ${rule} | \`a.rs::x\` |`
 
-  it('accepts a Rule cell of exactly the maximum length', () => {
-    expect(MAX_RULE_LENGTH).toBe(160)
-    const { rows, errors } = parseInvariants(ruleRow('a'.repeat(160)))
-    expect(errors).toEqual([])
-    expect(rows).toHaveLength(1)
-  })
-
-  it('fails a Rule cell one character over the maximum, naming the line (negative)', () => {
-    const { errors } = parseInvariants(ruleRow('a'.repeat(161)))
-    expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('line 3')
-    expect(errors[0]).toContain('161 characters (max 160)')
-  })
-
-  it('counts Unicode code points, backticks and markup included, not bytes or UTF-16 units', () => {
-    const fits = '`x` ' + '組'.repeat(155) + '𠮷'
-    expect([...fits].length).toBe(160)
-    expect(fits.length).toBeGreaterThan(160)
-    expect(parseInvariants(ruleRow(fits)).errors).toEqual([])
-    expect(parseInvariants(ruleRow(fits + '`')).errors[0]).toContain('161 characters')
-  })
-
-  it('excludes a valid ID tag from the 160-code-point Rule limit and Rule text', () => {
-    const rule = '𠮷'.repeat(160)
+  it('separates a valid ID tag from Rule text', () => {
+    const rule = 'A critical guarantee'
     const { rows, errors } = parseInvariants(ruleRow('{#row-123} ' + rule))
     expect(errors).toEqual([])
     expect(rows[0]).toMatchObject({ id: 'row-123', rule })
-    expect(parseInvariants(ruleRow('{#row-123} ' + rule + 'x')).errors[0]).toContain('161 characters (max 160)')
   })
 
   it.each(['{#Bad_ID} text', '{#} text', '{#valid}text', '{#valid}', '{#-bad} text', '{#bad--id} text', '{#bad-} text', '{#unclosed text', '{#valid}\ttext'])(
@@ -246,9 +223,13 @@ describe('split invariants', () => {
     return { root, put }
   }
 
-  it('accepts 160 code points in the second part and valid cross-references', () => {
+  it('accepts parts without a Rows in other parts section', () => {
+    expect(checkInvariants(fixture().root)).toEqual([])
+  })
+
+  it('accepts valid cross-references', () => {
     const { root, put } = fixture()
-    put('docs/invariants/b.md', table('𠮷'.repeat(160)) + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.\n\n- [a](a.md): `ok_test`\n')
+    put('docs/invariants/b.md', table('second') + '\n## Rows in other parts\n\nRows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.\n\n- [a](a.md): `ok_test`\n')
     expect(checkInvariants(root)).toEqual([])
   })
 
@@ -269,8 +250,6 @@ describe('split invariants', () => {
       'docs/invariants.md: line 3: tables belong in parts, not the index'],
     ['empty part', (put) => put('docs/invariants/b.md', '# Empty\n'),
       'docs/invariants/b.md: line 1: no rows found'],
-    ['161 code points in second part', (put) => put('docs/invariants/b.md', table('𠮷'.repeat(161))),
-      `docs/invariants/b.md: line 3: Rule cell is 161 characters (max 160): ${'𠮷'.repeat(40)}`],
     ['missing test in second part', (put) => put('docs/invariants/b.md', table('second', 'server/tests/a.rs::missing')),
       'docs/invariants/b.md: line 3: `server/tests/a.rs::missing` is not a test definition at that path (rule: second)'],
     ['skipped test in second part', (put) => put('docs/invariants/b.md', table('second', 'web/x.test.ts::skipped')),
@@ -426,32 +405,11 @@ describe('the real docs/invariants.md', () => {
   })
 })
 
-describe('checkDecisions', () => {
-  const doc = (entry: string) => `# Decisions\n\nIntro line that is not an entry.\n\n## Section\n- ${entry}\n`
-
-  it('accepts an entry of exactly MAX_DECISION_LENGTH code points', () => {
-    expect(MAX_DECISION_LENGTH).toBe(300)
-    expect(checkDecisions(doc('a'.repeat(300)))).toEqual([])
-  })
-
-  it('rejects one code point more and names the line', () => {
-    const errors = checkDecisions(doc('a'.repeat(301)))
-    expect(errors).toHaveLength(1)
-    expect(errors[0]).toMatch(/^line 6: decision entry is 301 characters \(max 300\)/)
-  })
-
-  it('counts code points, not bytes or UTF-16 units', () => {
-    expect(checkDecisions(doc('`x` ' + '決'.repeat(295) + '😀'))).toEqual([])
-    expect(checkDecisions(doc('`x` ' + '決'.repeat(296) + '😀'))).toHaveLength(1)
-  })
-
-  it('ignores headings, blank lines, prose and tables', () => {
-    const long = 'a'.repeat(400)
-    expect(checkDecisions(`# ${long}\n\n${long}\n\n| ${long} |\n`)).toEqual([])
-  })
-})
-
 describe('checkDecisions continuation lines', () => {
+  it('ignores headings, blank lines, prose and tables outside entries', () => {
+    expect(checkDecisions('# Decisions\n\nIntro prose.\n\n| Column |\n')).toEqual([])
+  })
+
   it('refuses an indented or lazy continuation of an entry, keeps intro prose and headings', () => {
     const md = '# Decisions\n\nIntro prose.\n\n## A\nSection note.\n\n- one\n  indented more\n- two\nlazy more\n\n  after blank\n## B\n- three\n'
     expect(checkDecisions(md)).toEqual([
@@ -477,23 +435,13 @@ describe('checkInvariants also checks the decisions index and parts', () => {
     return root
   }
 
-  it('passes a 300-code-point entry', () => {
-    expect(checkInvariants(fixture(`# Decisions\n\n- ${'a'.repeat(300)}\n`))).toEqual([])
-  })
-
-  it('returns a 301-code-point entry as an error with its line and length', () => {
-    const errors = checkInvariants(fixture(`# Decisions\n\n- ${'a'.repeat(301)}\n`))
-    expect(errors).toHaveLength(1)
-    expect(errors[0]).toMatch(/^docs\/decisions\/a\.md: line 3: decision entry is 301 characters \(max 300\)/)
-  })
-
   it('keeps reporting invariants reference errors unchanged alongside decision errors', () => {
-    const root = fixture(`- ${'a'.repeat(301)}\n`)
+    const root = fixture('- Decision\nlazy continuation\n')
     writeFileSync(join(root, 'docs/invariants/a.md'), '| Rule | Test |\n|---|---|\n| r | \`server/tests/a.rs::missing\` |\n')
     const errors = checkInvariants(root)
     expect(errors).toHaveLength(2)
     expect(errors[0]).toContain('not a test definition')
-    expect(errors[1]).toMatch(/^docs\/decisions\/a\.md: line 1: decision entry is 301/)
+    expect(errors[1]).toBe('docs/decisions/a.md: line 2: continuation of the entry on line 1; keep each decision on one line')
   })
 })
 
@@ -510,9 +458,13 @@ describe('split decisions', () => {
     return { root, put }
   }
 
-  it('accepts all parts, Unicode limits and multiple prefixes and bullets for the same part', () => {
+  it('accepts parts without an Entries in other parts section', () => {
+    expect(checkDecisionDocs(fixture().root)).toEqual([])
+  })
+
+  it('accepts multiple prefixes and bullets for the same part', () => {
     const { root, put } = fixture()
-    put('docs/decisions/b.md', '# B\n- ' + '𠮷'.repeat(300) + '\n\n## Entries in other parts\nOptional explanation.\n\n- [a](a.md): `First`, `Another`\n- [a](a.md): `First decision`\n')
+    put('docs/decisions/b.md', '# B\n- Second decision\n\n## Entries in other parts\nOptional explanation.\n\n- [a](a.md): `First`, `Another`\n- [a](a.md): `First decision`\n')
     expect(checkDecisionDocs(root)).toEqual([])
   })
 
@@ -541,15 +493,11 @@ describe('split decisions', () => {
     ['missing index target', (put) => put('docs/decisions.md', '- [a](decisions/a.md): A\n- [b](decisions/b.md): B\n- [c](decisions/c.md): C\n'), 'docs/decisions.md: line 3: unknown part: c.md'],
     ['duplicate index link', (put) => put('docs/decisions.md', '- [a](decisions/a.md): A\n- [b](decisions/b.md): B\n- [a](decisions/a.md): A again\n'), 'docs/decisions.md: line 3: part is linked more than once: a.md'],
     ['index entry', (put) => put('docs/decisions.md', '- [a](decisions/a.md): A\n- [b](decisions/b.md): B\n- Hidden decision\n'), 'docs/decisions.md: line 3: entries belong in parts, not the index'],
-    ['indented index entry', (put) => put('docs/decisions.md', '- [a](decisions/a.md): A\n- [b](decisions/b.md): B\n\n  - ' + 'x'.repeat(301) + '\n'), 'docs/decisions.md: line 4: indented line (a list continuation); keep each decision on one line'],
+    ['indented index entry', (put) => put('docs/decisions.md', '- [a](decisions/a.md): A\n- [b](decisions/b.md): B\n\n  - Hidden decision\n'), 'docs/decisions.md: line 4: indented line (a list continuation); keep each decision on one line'],
     ['index lazy continuation', (put) => put('docs/decisions.md', '- [a](decisions/a.md): A\n- [b](decisions/b.md): B\nlazy continuation\n'), 'docs/decisions.md: line 3: continuation of the entry on line 2; keep each decision on one line'],
     ['empty part', (put) => put('docs/decisions/b.md', '# B\nProse only.\n'), 'docs/decisions/b.md: line 1: no entries found'],
     ['duplicate across parts', (put) => put('docs/decisions/b.md', '# B\n- First decision\n'), 'docs/decisions/b.md: line 2: duplicate entry text (first at docs/decisions/a.md: line 2): First decision'],
     ['duplicate within part', (put) => put('docs/decisions/b.md', '# B\n- Second decision\n- Second decision\n'), 'docs/decisions/b.md: line 3: duplicate entry text (first at docs/decisions/b.md: line 2): Second decision'],
-    ['new part over limit', (put) => {
-      put('docs/decisions.md', '- [a](decisions/a.md): A\n- [b](decisions/b.md): B\n- [c](decisions/c.md): C\n')
-      put('docs/decisions/c.md', '# C\n- ' + '𠮷'.repeat(301) + '\n')
-    }, 'docs/decisions/c.md: line 2: decision entry is 301 characters (max 300): ' + '𠮷'.repeat(40)],
     ['lazy continuation', (put) => put('docs/decisions/b.md', '# B\n- Second decision\nlazy continuation\n'), 'docs/decisions/b.md: line 3: continuation of the entry on line 2; keep each decision on one line'],
     ['indented continuation', (put) => put('docs/decisions/b.md', '# B\n- Second decision\n  continuation\n'), 'docs/decisions/b.md: line 3: continuation of the entry on line 2; keep each decision on one line'],
     ['indented line', (put) => put('docs/decisions/b.md', '# B\n  indented\n- Second decision\n'), 'docs/decisions/b.md: line 2: indented line (a list continuation); keep each decision on one line'],
@@ -582,7 +530,6 @@ describe('split decisions', () => {
     ['missing separator space', '- [a](a.md): `First`,`Another`', 'expected an Entries in other parts bullet'],
     ['repeated prose', 'Another prose line.', 'expected an Entries in other parts bullet'],
     ['section after references', '## Later section', 'expected an Entries in other parts bullet'],
-    ['reference over limit', '- [a](a.md): `' + 'x'.repeat(300) + '`', 'decision entry is 313 characters (max 300)'],
   ])('rejects cross-reference %s (negative)', (_label, bullet, reason) => {
     const { root, put } = fixture()
     put('docs/decisions/a.md', '# A\n- First decision\n- Another decision\n- Shared one\n- Shared two\n\n## Entries in other parts\n- [b](b.md): `Second`\n')

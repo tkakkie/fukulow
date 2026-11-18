@@ -1,9 +1,10 @@
 // Checks the docs/invariants.md index and every docs/invariants/*.md part.
 // Verifies that every named test is a real test that CI actually runs.
-// Cross-part bullets resolve each token to one distinct row by a unique test name or #id.
+// If present, cross-part bullets resolve each token to one distinct row by a unique test name or #id.
 // Optional {#id} Rule prefixes are globally unique, must be referenced, and do not count as Rule text.
 // Also checks the required docs/decisions.md index and every docs/decisions/*.md part:
-// structure, unique entries, cross-reference prefixes and MAX_DECISION_LENGTH on every entry.
+// structure, unique single-line entries and cross-reference prefixes when present.
+// Per-file byte budgets are checked separately by check-doc-budgets.ts.
 // Run: node web/scripts/check-invariants.ts   (from the repository root)
 //
 // A reference is `path::test_name` (path relative to the repository root).
@@ -22,7 +23,7 @@
 //     server/src/unused_guard.rs is refused even if lib.rs has an inline `mod unused_guard` with a test of the same name.
 //     Other server/tests/** paths (e.g. tests/helpers/mod.rs) and server/src/bin/** cannot be mapped and are refused.
 //     Without cargo, the CLI fails. CI runs it in server-tests shard 1 after `cargo nextest run --locked` (already compiled).
-//     The vitest "real docs" test uses the static scan only (the web job has no Rust build).
+//     The vitest "real docs" test uses the static scan only (the web job does not build server tests).
 //   - Vitest: web/**/*.{test,spec}.ts outside web/e2e (mirrors `test.exclude` in web/vite.config.ts).
 //     Not run: .skip, .todo, .fixme, xit/xtest/xdescribe, and any test inside such a describe.
 //     NOT detected: runtime skips (test.skip(cond), skipIf/runIf, ctx.skip()), and .only: it silently
@@ -271,10 +272,7 @@ export function tsTests(src: string, fileName = 'x.ts', nodeTests = false, playw
 
 export type Row = { line: number; rule: string; id?: string; names: string[]; todo: boolean }
 
-/** Maximum Rule text length in Unicode code points, markup included except the optional {#id} prefix. */
-export const MAX_RULE_LENGTH = 160
-
-/** Parses a part table, separating a valid {#id} prefix from Rule text before measuring it. Reports malformed tags and rows. */
+/** Parses a part table, separating a valid {#id} prefix from Rule text. Reports malformed tags and rows. */
 export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
   const rows: Row[] = []
   const errors: string[] = []
@@ -290,9 +288,6 @@ export function parseInvariants(md: string): { rows: Row[]; errors: string[] } {
     const cell = cells[1] ?? ''
     const names = [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1])
     const todo = /\(todo\)/.test(cell)
-    const ruleLength = [...rule].length
-    if (cells.length === 2 && ruleLength > MAX_RULE_LENGTH)
-      errors.push(`line ${line}: Rule cell is ${ruleLength} characters (max ${MAX_RULE_LENGTH}): ${[...rule].slice(0, 40).join('')}`)
     if (cells.length !== 2) errors.push(`line ${line}: expected 2 columns (Rule | Test): ${cells[0]}`)
     else if (names.length === 0 && !todo) errors.push(`line ${line}: Test column names no test and is not (todo): ${cells[0]}`)
     else if (todo && cell !== '(todo)') errors.push(`line ${line}: (todo) must stand alone in the Test column, not mixed with references: ${cells[0]}`)
@@ -732,14 +727,9 @@ export function cargoList(root: string): ListedTest[] {
   return listed
 }
 
-/** Maximum decisions part entry length in Unicode code points, after the leading `- `. */
-export const MAX_DECISION_LENGTH = 300
-
 /**
- * Checks a decisions part: every `- ` entry (including cross-references) is at most MAX_DECISION_LENGTH code points, and an entry is one
- * physical line. A line right after an entry must be blank, a heading or another entry; anything else (an indented
- * or lazy continuation) is refused, as is any indented line, so a decision cannot be split to dodge the limit. Prose before the first entry
- * of a section (the file intro, section notes) is not an entry and is not checked.
+ * Checks that decision entries and cross-reference bullets each occupy one physical line.
+ * A line right after an entry must be blank, a heading or another entry. Indented and lazy continuations are refused.
  */
 export function checkDecisions(md: string): string[] {
   const errors: string[] = []
@@ -749,10 +739,6 @@ export function checkDecisions(md: string): string[] {
     if (idx > 0 && lines[idx - 1].startsWith('- ') && text.trim() !== '' && !text.startsWith('- ') && !text.startsWith('#'))
       errors.push(`line ${line}: continuation of the entry on line ${idx}; keep each decision on one line`)
     else if (/^\s+\S/.test(text)) errors.push(`line ${line}: indented line (a list continuation); keep each decision on one line`)
-    if (!text.startsWith('- ')) return
-    const entry = [...text.slice(2)]
-    if (entry.length > MAX_DECISION_LENGTH)
-      errors.push(`line ${line}: decision entry is ${entry.length} characters (max ${MAX_DECISION_LENGTH}): ${entry.slice(0, 40).join('')}`)
   })
   return errors
 }
@@ -963,5 +949,5 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
   const errors = checkInvariants(root, listed)
   for (const e of errors) console.error(e)
   if (errors.length > 0) process.exit(1)
-  console.log('invariants: index and parts checked; every named test exists and runs in CI; decisions: index, all parts, unique entries, cross-references and entry length/line limits checked')
+  console.log('invariants: index and parts checked, and every named test exists and runs in CI. Decisions: index, all parts, unique single-line entries and optional cross-references checked.')
 }

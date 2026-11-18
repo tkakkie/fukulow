@@ -1,6 +1,6 @@
 # Measurements
 
-Writing: keep only the current method per area, the latest baseline per area, and results that back a current decision or an open acceptance, with reproduction conditions and limits; no routine/debug logs, raw artifacts or duplicates. A superseded record moves verbatim to its originating Issue or PR as a comment and leaves one line here (area, date, `moved to #n`, reason); never delete a record without that pointer.
+Keep each area's current method, latest baseline and evidence for a current decision or open acceptance, including reproduction conditions and limits. Keep one home per result and replace or merge updates. When superseding a record, move it verbatim to a comment on the originating Issue or PR and replace it here with a pointer (area, date, `moved to #n`, reason). Omit routine and debug logs, raw artifacts and duplicates. [Writing rules](workflow.md#13-splitting-a-doc)
 
 Past measurement records: values, conditions, compared targets, methods, limits and commits. Evidence only: nothing here is a performance, capacity or latency guarantee of `docs/spec.md`. Current decisions drawn from these records live in `docs/decisions.md`.
 
