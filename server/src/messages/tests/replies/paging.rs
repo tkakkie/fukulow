@@ -21,7 +21,7 @@ async fn reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concu
     for anchor in &tree {
         assert_eq!(
             page(&app, &token, channel, id(anchor), "").await,
-            json!({"root_id":root["id"],"messages":tree,"has_more":false})
+            json!({"root_id":root["id"],"chain_version":tree.last().unwrap()["version"],"messages":tree,"has_more":false})
         );
         for limit in [1, 2, 3, 5, 6, 200] {
             let mut after = 0;
@@ -37,6 +37,7 @@ async fn reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concu
                 .await;
                 let rows = p["messages"].as_array().unwrap();
                 assert!(!rows.is_empty());
+                assert_eq!(p["chain_version"], tree.last().unwrap()["version"]);
                 seen.extend(rows.clone());
                 assert_eq!(p["has_more"], seen.len() < tree.len());
                 after = rows.last().unwrap()["created_seq"].as_i64().unwrap();
@@ -78,13 +79,13 @@ async fn reply_chain_pages_root_and_all_descendants_from_every_anchor_with_concu
                 &format!("?after_seq={boundary}")
             )
             .await,
-            json!({"root_id":root["id"],"messages":[],"has_more":false})
+            json!({"root_id":root["id"],"chain_version":after,"messages":[],"has_more":false})
         );
     }
     let lone = sent(&app, &token, channel, input(Uuid::new_v4(), "Lone root")).await;
     assert_eq!(
         page(&app, &token, channel, id(&lone), "?limit=1").await,
-        json!({"root_id":lone["id"],"messages":[lone],"has_more":false})
+        json!({"root_id":lone["id"],"chain_version":lone["version"],"messages":[lone],"has_more":false})
     );
 }
 

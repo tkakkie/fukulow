@@ -127,15 +127,18 @@ impl LiveMessage {
         enum Event<'a> {
             Message {
                 seq: i64,
-                kind: fukulow_api::ChannelEventKind,
+                kind: fukulow_api::MessageStateKind,
                 message: &'a Message,
             },
         }
-        let frame = serde_json::to_string(&Event::Message {
-            seq: event.seq,
-            kind: event.kind,
-            message: &event.message,
-        })?
+        let frame = match &event.payload {
+            super::log::Payload::Create(message) => serde_json::to_string(&Event::Message {
+                seq: event.seq,
+                kind: fukulow_api::MessageStateKind::Create,
+                message,
+            }),
+            super::log::Payload::Move(event) => serde_json::to_string(event),
+        }?
         .into();
         Ok(Self { event, frame })
     }
@@ -211,7 +214,8 @@ impl Notification {
         self.completed = true;
     }
 
-    pub(super) fn spawn(mut self, pool: sqlx::PgPool, message: Message) {
+    pub(super) fn spawn(mut self, pool: sqlx::PgPool, event: impl Into<super::ChannelEvent>) {
+        let event = event.into();
         let Ok(channel_slot) = self
             .channel
             .fanout
@@ -253,10 +257,15 @@ impl Notification {
         #[cfg(test)]
         let delivery = self.delivery.clone();
         #[cfg(test)]
+        let publication_key = match &event.payload {
+            super::log::Payload::Create(message) => message.client_message_id,
+            super::log::Payload::Move(event) => event.operation_id,
+        };
+        #[cfg(test)]
         let gate = PUBLICATION_GATES
             .lock()
             .unwrap()
-            .get(&message.client_message_id)
+            .get(&publication_key)
             .cloned();
         let work = self.delivery.work.enter();
         let task = tokio::spawn(async move {
@@ -265,7 +274,7 @@ impl Notification {
             let publication = tokio::time::timeout_at(
                 deadline,
                 self.delivery
-                    .publish(&pool, self.key.0, &message, &self.channel.fanout),
+                    .publish(&pool, self.key.0, event, &self.channel.fanout),
             );
             #[cfg(test)]
             let publication = async {
@@ -548,11 +557,15 @@ impl Delivery {
         &self,
         pool: &sqlx::PgPool,
         organization: Uuid,
-        message: &Message,
+        event: super::ChannelEvent,
         channel: &ChannelFanout,
     ) -> Result<(), sqlx::Error> {
         #[cfg(test)]
-        publication_gate(message.client_message_id).await;
+        publication_gate(match &event.payload {
+            super::log::Payload::Create(message) => message.client_message_id,
+            super::log::Payload::Move(event) => event.operation_id,
+        })
+        .await;
         let mut cursor = channel.published.lock().await;
         // Cursor waiters hold only their bounded reservations, so one slow Channel
         // cannot exhaust execution capacity needed by unrelated Channels.
@@ -566,38 +579,27 @@ impl Delivery {
                 );
                 sqlx::Error::Io(std::io::ErrorKind::WouldBlock.into())
             })?;
-        let after = cursor.get_or_insert_with(|| {
-            channel
-                .first_seq
-                .get()
-                .copied()
-                .unwrap_or(message.created_seq)
-                - 1
-        });
-        if message.created_seq <= *after {
+        let after =
+            cursor.get_or_insert_with(|| channel.first_seq.get().copied().unwrap_or(event.seq) - 1);
+        if event.seq <= *after {
             return Ok(());
         }
         // REPLAY_PAGE_SIZE (50) is the effective bound today; the queue-capacity cap only
         // matters if the page size is ever raised above LIVE_QUEUE_CAPACITY.
-        let gap = message.created_seq - *after - 1;
+        let gap = event.seq - *after - 1;
         if gap > super::REPLAY_PAGE_SIZE || gap > LIVE_QUEUE_CAPACITY as i64 {
             // Latch before skipping: current subscribers reconnect; later subscribers
             // register before taking their committed replay watermark.
-            self.failures.signal((organization, message.channel_id));
-            *after = message.created_seq;
+            self.failures.signal((organization, event.channel_id));
+            *after = event.seq;
             return Ok(());
         }
         // Recover a committed gap once per Channel, never once per subscriber.
         // Each bounded page rechecks current Member revisions and private grants.
-        while *after < message.created_seq - 1 {
-            let page = super::replay_page(
-                pool,
-                organization,
-                message.channel_id,
-                *after,
-                message.created_seq - 1,
-            )
-            .await?;
+        while *after < event.seq - 1 {
+            let page =
+                super::replay_page(pool, organization, event.channel_id, *after, event.seq - 1)
+                    .await?;
             if page.is_empty() {
                 return Err(sqlx::Error::RowNotFound);
             }
@@ -608,14 +610,9 @@ impl Delivery {
             self.fan_out(pool, organization, channel, &page).await;
             *after = last;
         }
-        self.fan_out(
-            pool,
-            organization,
-            channel,
-            &[super::ChannelEvent::create(message.clone())],
-        )
-        .await;
-        *after = message.created_seq;
+        let position = event.seq;
+        self.fan_out(pool, organization, channel, &[event]).await;
+        *after = position;
         Ok(())
     }
 

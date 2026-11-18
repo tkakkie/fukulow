@@ -113,7 +113,9 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
         if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
         clearTimeout(batch.timeout); c.batch = undefined
         update(c, { type: 'failed', tickets })
-        if (result.ok) {
+        if (result.ok && result.data.as_of_seq < (sync.get().channels[id]?.moveSeq ?? 0)) {
+          backoff(c)
+        } else if (result.ok) {
           const rows = new Map(result.data.counts.filter(row => row.root_id === row.message_id).map(row => [row.message_id, row]))
           for (const t of tickets) {
             if (!valid(c, t)) continue
@@ -156,20 +158,20 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       const expired = input.type === 'history_failed' && input.status === 409 && input.error === 'snapshot_expired' &&
         old && [old.latest, old.older, old.fill].includes(input.request)
       const reset = before.historyEpoch !== after.historyEpoch || expired || (before.connected && !after.connected) || (old && now && (
-        old.versionEpoch !== now.versionEpoch || (old.cursor !== null && now.cursor === null) ||
+        old.versionEpoch !== now.versionEpoch || old.moveSeq !== now.moveSeq || (old.cursor !== null && now.cursor === null) ||
         (old.fill === undefined && now.fill !== undefined) || (old.wait === undefined && now.wait !== undefined)))
       if (reset) recover(c)
     }
     // An ACK can install a body before its stream echo. Count raw current-stream envelopes,
     // not only changed bodies; Rust deduplicates the evidence independently of body retention.
     const fillChannel = input.type === 'events_result' ? Object.keys(before.channels).find(id => before.channels[id].fill === input.request) : undefined
-    const events = input.type === 'event' && input.connection === before.connection && before.connected && input.event.type === 'message' &&
+    const events = input.type === 'event' && input.connection === before.connection && before.connected && input.event.type === 'message' && 'message' in input.event &&
       before.channels[input.event.message.channel_id]?.subscription ? [input.event]
-      : input.type === 'events_result' && fillChannel ? input.page.events.filter(e => e.type === 'message' && e.message.channel_id === fillChannel)
+      : input.type === 'events_result' && fillChannel ? input.page.events.filter(e => e.type === 'message' && 'message' in e && e.message.channel_id === fillChannel)
       : input.type === 'ack' && result.records.get(input.message.channel_id)?.some(m => m.id === input.message.id)
         ? [{ type: 'message' as const, kind: 'create' as const, seq: input.message.created_seq, message: input.message }] : []
     for (const event of before.historyEpoch === after.historyEpoch ? events : []) {
-      if (event.type !== 'message') continue
+      if (event.type !== 'message' || !('message' in event)) continue
       const m = event.message, c = channels.get(m.channel_id)
       if (!c || (event.kind === 'create' && event.seq !== m.created_seq)) continue
       const root = m.reply_root_id ?? m.id, cursor = before.channels[m.channel_id]?.cursor

@@ -2066,6 +2066,181 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move": {
+      "post": {
+        "tags": [
+          "crate::messages::move_topic"
+        ],
+        "summary": "Move the entire Reply chain identified by a root or descendant Message.",
+        "operationId": "move_chain",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "description": "Root or descendant Message in this Reply chain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveChainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Committed Move, canonical retry, or same-Topic no-op",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MoveChainResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input, including a nonpositive expected_version or failure to supply exactly one valid Topic destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "move_not_allowed for a visible chain the caller may not Move",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Organization, Channel, Message or destination Topic unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict, operation_conflict, chain_too_large or history_generation_changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Move request body exceeds the size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Move requires an application/json content type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database or worker failure, including unknown COMMIT outcome; retry with the same operation_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Channel writer admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/channels/{id}/read": {
       "put": {
         "tags": [
@@ -5705,15 +5880,6 @@
           }
         }
       },
-      "ChannelEventKind": {
-        "type": "string",
-        "enum": [
-          "create",
-          "edit",
-          "move",
-          "delete"
-        ]
-      },
       "ChannelEventPage": {
         "type": "object",
         "description": "Bounded ascending Channel log page, with the same envelopes as WebSocket replay.",
@@ -6443,33 +6609,86 @@
         }
       },
       "MessageEvent": {
+        "allOf": [
+          {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MessageStateEvent"
+              },
+              {
+                "$ref": "#/components/schemas/MessageMoveEvent"
+              }
+            ]
+          }
+        ]
+      },
+      "MessageEventType": {
+        "type": "string",
+        "enum": [
+          "message"
+        ]
+      },
+      "MessageMoveEvent": {
         "type": "object",
-        "description": "Live and replayed messages have exactly the same canonical shape.",
+        "description": "The body-free invalidation for a committed whole-chain Move.",
         "required": [
-          "seq",
+          "type",
           "kind",
-          "message",
-          "type"
+          "history_generation",
+          "channel_id",
+          "seq",
+          "version",
+          "root_id",
+          "source_topic_id",
+          "destination_topic_id",
+          "operation_id"
         ],
         "properties": {
-          "kind": {
-            "$ref": "#/components/schemas/ChannelEventKind"
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
           },
-          "message": {
-            "$ref": "#/components/schemas/Message"
+          "destination_topic_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MoveEventKind"
+          },
+          "operation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "root_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "seq": {
             "type": "integer",
             "format": "int64",
             "minimum": 1
           },
+          "source_topic_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "type": {
-            "type": "string",
-            "enum": [
-              "message"
-            ]
+            "$ref": "#/components/schemas/MessageEventType"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
           }
-        }
+        },
+        "additionalProperties": false
       },
       "MessagePage": {
         "type": "object",
@@ -6502,6 +6721,177 @@
             "description": "Always ascending created_seq (newest last), including latest and before_seq pages."
           }
         }
+      },
+      "MessageStateEvent": {
+        "type": "object",
+        "description": "Live and replayed messages have exactly the same canonical shape.",
+        "required": [
+          "seq",
+          "kind",
+          "message",
+          "type"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/MessageStateKind"
+          },
+          "message": {
+            "$ref": "#/components/schemas/Message"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "message"
+            ]
+          }
+        }
+      },
+      "MessageStateKind": {
+        "type": "string",
+        "enum": [
+          "create",
+          "edit",
+          "delete"
+        ]
+      },
+      "MoveChainRequest": {
+        "allOf": [
+          {
+            "type": "object",
+            "required": [
+              "operation_id",
+              "expected_version"
+            ],
+            "properties": {
+              "expected_version": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 1
+              },
+              "history_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "operation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "topic_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid",
+                "description": "Supply exactly one of topic_id and topic_name."
+              },
+              "topic_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Joins an existing normalized name or creates a Topic in this Channel.",
+                "maxLength": 60,
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "topic_id"
+                ],
+                "properties": {
+                  "topic_id": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "topic_name"
+                ],
+                "properties": {
+                  "topic_name": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "MoveChainResponse": {
+        "type": "object",
+        "required": [
+          "history_generation",
+          "operation_id",
+          "root_id",
+          "destination_topic_id",
+          "operation_version",
+          "move_seq",
+          "chain_version",
+          "topic_id"
+        ],
+        "properties": {
+          "chain_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current chain version, including any intervening operations or Replies."
+          },
+          "destination_topic_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The destination of this operation, even after a subsequent Move."
+          },
+          "history_generation": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "move_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Event position of this operation; null for a same-Topic no-op."
+          },
+          "operation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "operation_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version written by the operation, or the accepted version for a no-op."
+          },
+          "root_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "topic_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Current Topic of the chain."
+          }
+        }
+      },
+      "MoveEventKind": {
+        "type": "string",
+        "enum": [
+          "move"
+        ]
       },
       "NativeSessionResponse": {
         "type": "object",
@@ -6676,6 +7066,7 @@
           "history_generation",
           "as_of_seq",
           "root_id",
+          "chain_version",
           "messages",
           "has_more"
         ],
@@ -6683,6 +7074,12 @@
           "as_of_seq": {
             "type": "integer",
             "format": "int64"
+          },
+          "chain_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Highest version among all chain Messages at this watermark, across all pages.",
+            "minimum": 1
           },
           "has_more": {
             "type": "boolean",

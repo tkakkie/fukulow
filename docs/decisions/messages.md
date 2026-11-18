@@ -33,7 +33,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #204 moves, reorders and deletes serialize per Member; complete reorders use last-committing-writer-wins. Keep Organization -> sorted Channels -> Members -> grants lock order. Reason: atomic orders and delete races must not introduce a deadlock.
 
 ## Topics, Replies and Unread (planned, spec P1-P8)
-- #148 First Message or Move creates a Topic to avoid empty Topics. Its main line derives from latest activity. Paging uses fixed W-relative positions. #137 measures feasibility and stops for a maintainer decision on a miss. Paging cost remains a measured gate.
+- #148 First Message or Move creates a Topic to avoid empty Topics. Its main line follows the highest surviving creation position, so a Move preserves older Messages' age (#141). Paging uses fixed W-relative positions. #137 measures feasibility and stops for a maintainer decision on a miss. Paging cost remains a measured gate.
 - #148 The W-relative baseline plus unique live Messages above W keeps replay/older pages from double-counting or dropping counts. Live-only Topics need a summary for a count.
 - #142 Messages owns separate Channel/Topic read positions. The badge sums their counts (#148). Migration/grant triggers initialize existing scopes at committed seq, remove revoked rows and let later Topics inherit the grant baseline. First-fetch initialization would lose sends between grant and fetch.
 - #142 Serialize access per Organization (seed 142) so concurrent Member/Channel creation cannot miss positions. New visibility takes shared #135 through COMMIT. Mark-read rechecks access after W before locking Member/position. Revocation deletes positions and denies waiting updates. Only new access initializes. Continuous Channel/Topic access survives redundant grants and non-Guest Role changes (#144).
@@ -60,6 +60,11 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Mention unread is a separate displayed count on the existing Channel/Topic position (#148/#152), counting one accepted Mention per Message and excluding own Messages.
 - #142/#143 client baseline selection (larger as_of_seq, then read_seq, then smaller counts, within one access generation) needs no server change. Reason: positions only advance within a generation, so counts at equal as_of_seq never rise with read progress.
 
+- [#141](https://github.com/tkakkie/fukulow/issues/141) gives ordinary Members Move rights over chains they authored in full, with broader rights for usable management. This preserves ownership across Replies and prevents Organization Role from widening private access.
+- [#141](https://github.com/tkakkie/fukulow/issues/141) uses one position per chain and preserves emptied Topic identity/read positions. Per-Message positions would multiply replay and write cost, and removing the Topic would reset Unread on revival.
+- [#141](https://github.com/tkakkie/fukulow/issues/141) records a same-Topic receipt without a position. The key remains bound to the original request even if the chain moves later. Canonical retries return the original outcome alongside the current chain version and Topic.
+- #141 rebuilds the main Unread index and adds `messages` indexes in the atomic migration. The nonconcurrent builds scan `messages` while migration locks can block reads and writes until COMMIT. The outage threshold remains open under [realtime decision 5](../spec/realtime.md#open-maintainer-decisions).
+
 ## Mentions (#152, specification for approval)
 
 - #152 proposes exact `@{member:<lower-case UUID>}` tokens. Persist accepted ids and resolve current names so rejected tokens stay literal after grants. Shared shape is in OpenAPI. Syntax/disclosure approval stays under M1/M6.
@@ -78,7 +83,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #137 Keep write-only Topic last_seq/message_count for #142/#143. Use Message aggregates for W-relative summaries because current cache values cannot reconstruct old W.
 
 ## Replies (#139, #140)
-- #139 Replies share send admission/barrier/transaction/publication and inherit committed parent's Topic and stable root. Scoped FKs and self-parent CHECK protect references, and committed immutable parents prevent cycles. Application writers/repairs must keep each Reply on its parent's root (or the parent itself), with null reply_root_id on roots and the committed parent id stored on each Reply. FKs alone cannot enforce this (#141).
+- #139 Replies share send admission/barrier/transaction/publication and inherit committed parent's Topic and stable root. Scoped FKs and self-parent CHECK protect references, and committed immutable parents prevent cycles. Application writers/repairs must keep each Reply on its parent's root (or the parent itself), with null reply_root_id on roots and the committed parent id stored on each Reply. FKs alone cannot enforce this, so Move (#141) checks stored chain membership before rewriting a chain.
 - #139 Compare reply_to before parent lookup. Inherited Topic is not intent. Canonical retries and changed-parent conflicts reveal no parent existence.
 - #139 Chain reads union indexed root lookup and bounded reply_root_id/seq without recursion or a depth cap. Include the null-root Message. Resolve ambiguous COMMIT before a fresh authorization/data snapshot. Follow P6/#160 for fixed-W paging.
 - #139 DeferredOrganizationAuth rejects Session/database errors before reading a send body and defers only Organization unavailability to validation, preserving 400-before-404, 401 and admission authorization.

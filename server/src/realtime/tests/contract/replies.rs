@@ -28,7 +28,22 @@ impl Runner {
                 .collect::<Vec<_>>();
             assert!(Uuid::parse_str(page["history_generation"].as_str().unwrap()).is_ok());
             assert!(page["as_of_seq"].is_i64());
-            let expected = json!({"history_generation":page["history_generation"],"as_of_seq":page["as_of_seq"],"root_id":self.posts[&spec.expect.root]["id"],"messages":records,"has_more":spec.expect.has_more});
+            let root = &self.posts[&spec.expect.root]["id"];
+            let w = page["as_of_seq"].as_i64().unwrap();
+            let version = self
+                .records
+                .iter()
+                .filter(|&((id, seq), message)| {
+                    *id == channel
+                        && *seq <= w
+                        && (&message["id"] == root || &message["reply_root_id"] == root)
+                })
+                .filter_map(|(_, message)| message["version"].as_i64())
+                .max();
+            let expected = json!({
+                "history_generation": page["history_generation"], "as_of_seq": w, "root_id": root,
+                "chain_version": version, "messages": records, "has_more": spec.expect.has_more
+            });
             if status != spec.expect.status || page != expected {
                 eprintln!(
                     "chain: expected status {} {expected}, got {status} {page}",

@@ -1,0 +1,975 @@
+{
+  "sha256": "3a2b9c4806e6fae405349a1a6bbaf07d367fb45dd3b1ecee08fcecf7f42f34e0",
+  "frozen": {
+    "version": 4,
+    "date": "2026-11-17",
+    "generator": {
+      "version": 1,
+      "seed": 153202611,
+      "clock": "2026-11-15T00:00:00.000Z"
+    },
+    "node": "26.13.1",
+    "sourceHashes": [
+      {
+        "path": ".gitattributes",
+        "sha256": "d296568b1c797f049d13fd07732639a24174f999714c548d4e39a9b1588a8be6"
+      },
+      {
+        "path": ".node-version",
+        "sha256": "5c293036fc0a61ad76e15d85f454c3c7cec157e181e035b69f95058a2c239144"
+      },
+      {
+        "path": "deploy/db-grants.sql",
+        "sha256": "a053a9163dcf4fbd35f103f23537437fe076278a19f3e39bff0ddedcb1d757bb"
+      },
+      {
+        "path": "deploy/db-role-settings.sql",
+        "sha256": "33cf155262132029911afb8a017953b68a16f65b8a055c0e861f7d9b66665b69"
+      },
+      {
+        "path": "deploy/db-roles.sql",
+        "sha256": "d9756a87c05282bc237333325cbfd4c669b754883fb3cb17206ccdac69e241c2"
+      },
+      {
+        "path": "load/package-lock.json",
+        "sha256": "0fe702c4d80fc33548b71b144f29f7d7945c73323245e66986e86b42eb51d20c"
+      },
+      {
+        "path": "load/search-engines/Dockerfile",
+        "sha256": "035259bdb2ee0bdbeb1ee2e956d7bdfc27482be4199047e34cce756c36ec2ca3"
+      },
+      {
+        "path": "load/search-engines/bench.ts",
+        "sha256": "b5a809a2efcb665e6a1c61a77c622fddbd9f2c62d56244e441bb9c32ef562514"
+      },
+      {
+        "path": "load/search-engines/bigm.sql",
+        "sha256": "966e24866866a4b76c2feb85a236cc1b655902ffd6c1671d063c2e502c8cbfe8"
+      },
+      {
+        "path": "load/search-engines/cleanup.ts",
+        "sha256": "9c45fa59ef0dd9bb41f3bb381992083ccee0dd987aaa380952d98312d09c2c0a"
+      },
+      {
+        "path": "load/search-engines/definer.sql",
+        "sha256": "996d2f421215ac33b8c542841701f706196c56199952081cade3be2e9f85d2c2"
+      },
+      {
+        "path": "load/search-engines/definer.ts",
+        "sha256": "ad4f2f8d6f4917d9a3bd06405243cc600d4d0c164bcee1a9c28bd2569799c641"
+      },
+      {
+        "path": "load/search-engines/manifest.ts",
+        "sha256": "ace7a5dec16e8b63efeafaa78d0c256c189609e44cf00ace4b9482c5502e2fc6"
+      },
+      {
+        "path": "load/search-engines/pgroonga.sql",
+        "sha256": "77247b66eb7179990b6d35ab13e185eec75663e7674c846cb5504fa02237a688"
+      },
+      {
+        "path": "load/search-engines/quality/dataset.ts",
+        "sha256": "ec16de2e782723af3dd4f11eef27dc59d1228fd83a9f0805b39b46bb500d8461"
+      },
+      {
+        "path": "load/search-engines/quality/metrics.ts",
+        "sha256": "2a868175bdd2c3917404fee82291427060a3ac614a4d72df275c274b2904f822"
+      },
+      {
+        "path": "load/search-engines/quality/modes.ts",
+        "sha256": "e17e0e1f70de1bf4f411c79ccb3e42f0eb7cbd96da6726dd2c9994d3bdfba885"
+      },
+      {
+        "path": "load/search-engines/quality/run.ts",
+        "sha256": "bd39cc8407ecee46ca271e4efed20026f228569689b0f23d236101db744a9c41"
+      },
+      {
+        "path": "load/search-engines/quality/summarize.ts",
+        "sha256": "faf8abf51c59d48f33b5da311b266a6b6414d9e7254b459fd94e8309c9b72e7a"
+      },
+      {
+        "path": "load/search-engines/queries.ts",
+        "sha256": "b32d69535d9a3298733f67e862ec8321dc355ceaca762e09d8b45e7709076508"
+      },
+      {
+        "path": "load/search-engines/run.ts",
+        "sha256": "0c36049701a47ca0022b2c7241af86f071eae260678851efa4954eb069e0313b"
+      },
+      {
+        "path": "load/search-engines/runtime.ts",
+        "sha256": "4039c956a3e1cb5c78232551fa3bf982120ea6d3086fab1272b3218acdb59d7e"
+      },
+      {
+        "path": "load/search-engines/schema.sql",
+        "sha256": "ead322707a434a5dcb35e703e5f376b707dde0eb0d932e0aa67da1ccac3b22fb"
+      },
+      {
+        "path": "load/search-engines/seed.ts",
+        "sha256": "bf23d30b595dbc2bfe3ebf533356f34c1019ceeac2da725373d57c5d2c6fec3f"
+      },
+      {
+        "path": "load/search-engines/summarize.ts",
+        "sha256": "b3c82fd9cf6fe4b6510466a50e12f20af968cf6cf03fee5c2703d380ce9f8e55"
+      },
+      {
+        "path": "load/search-engines/trgm.sql",
+        "sha256": "d68359574d6672358b1a1e48b03ea1324b0e98a1fdddb7b0c70b88514347c37e"
+      },
+      {
+        "path": "server/migrations/202611080001_auth.sql",
+        "sha256": "28349d93a7e94e0a8e134e80b37336091074fc92d119bb93991d8737389e6a73"
+      },
+      {
+        "path": "server/migrations/202611090001_channels.sql",
+        "sha256": "1a05e69d3d556c36edbe42ab8b462bb19a4fc9355b500c55c4a473f7d31d3a56"
+      },
+      {
+        "path": "server/migrations/202611090002_messages.sql",
+        "sha256": "870de83d557adb582238b3f45e1fa22641a217e029daf6504539b68adcc3cafd"
+      },
+      {
+        "path": "server/migrations/202611090003_channel_names.sql",
+        "sha256": "d41231a2dbe4e0631383e71300625b58cc428896bf3a4b9ddd5e1345a8806c48"
+      },
+      {
+        "path": "server/migrations/202611090004_channel_name_length.sql",
+        "sha256": "bf25e4b37d839d0d052d0aed5b910e629c6a761497186da33120c55992d691a1"
+      },
+      {
+        "path": "server/migrations/202611090053_session_cleanup.sql",
+        "sha256": "cda129a84cc6e93c43c87b432fb768413493ef5769becd0bbade1b8153e7091a"
+      },
+      {
+        "path": "server/migrations/202611090075_drop_sessions_expiry.sql",
+        "sha256": "0a1685d74150785f0b5bab65d484ce0ff1c1d4d00ef8248d7389ecc19f4930ed"
+      },
+      {
+        "path": "server/migrations/202611100146_account_members.sql",
+        "sha256": "43036c12a2212ef1d5552a8b86db6d156ea5b4236286a4ef42b7ab74dffd57c2"
+      },
+      {
+        "path": "server/migrations/202611100172_member_protection_indexes.sql",
+        "sha256": "7625730e4b699870e3cb99c256408e38c75a5b51d5bc6b23457bfe7baadc893f"
+      },
+      {
+        "path": "server/migrations/202611110001_topics.sql",
+        "sha256": "51704296fb3e071873f6fc82f03694fd841c3f71c45f9ca94231166ce3cd4468"
+      },
+      {
+        "path": "server/migrations/202611110197_revoke_exposed_sessions.sql",
+        "sha256": "72f714453259852d758f4dddffdd283371c83f5c3475f09b667d54ef260f1fc2"
+      },
+      {
+        "path": "server/migrations/202611110198_replies.sql",
+        "sha256": "e4ffde2b99967edc03d923a977a79cfddc52ac056dd6d53c9ed821eb21bc4066"
+      },
+      {
+        "path": "server/migrations/202611110199_unread.sql",
+        "sha256": "8f6641e7ba66bae72f75414c5282839db14afc1b75d867921e603eed4d2e33ec"
+      },
+      {
+        "path": "server/migrations/202611110200_invites.sql",
+        "sha256": "d4be53c94380f87dace96f77fcae5e4a842c81265bf3aa279a3bc6ead6b7cf97"
+      },
+      {
+        "path": "server/migrations/202611110201_unread_access.sql",
+        "sha256": "662db2a4d69347cf5c260b9c4428c5e52cd658a739153872df86efb528b004f1"
+      },
+      {
+        "path": "server/migrations/202611110202_channel_grant_lifetime.sql",
+        "sha256": "509fd99ea87ba451e7c07ae480e134871e363988f8040412227b0aec282c2021"
+      },
+      {
+        "path": "server/migrations/202611130311_channel_managers.sql",
+        "sha256": "090f1307fb3bc32065f0eaafc52f076aefdb01926dfa592819f228cee24e5abf"
+      },
+      {
+        "path": "server/migrations/202611130314_tenant_rls.sql",
+        "sha256": "990e06102bfe3dc7946829f4c3d90de9e4c2c6f28c5c200c8ca758898799cb4e"
+      },
+      {
+        "path": "server/migrations/202611140299_channel_name_nonempty.sql",
+        "sha256": "b2fa3bb58b9b609ad63e35dfb1ef515d9aeb63ad8dd5385179ae59f9d82415a6"
+      },
+      {
+        "path": "server/migrations/202611140300_message_mentions.sql",
+        "sha256": "59c3535e337da44449af9fa9398ad1283fc9c16f614c225c64a55d49564d7e26"
+      },
+      {
+        "path": "server/migrations/202611140303_invite_revocation.sql",
+        "sha256": "0a396b54103f51c84a28f6a523cac2158aeb195c2b2d92ff7173e8a852b7a611"
+      },
+      {
+        "path": "server/migrations/202611140370_direct_messages.sql",
+        "sha256": "5d1102622b4218b1dac31b1944f5a4c8b8a8f7de684ec01c3064c7a6e39ad9c9"
+      },
+      {
+        "path": "server/migrations/202611140386_dm_discovery_reclamation.sql",
+        "sha256": "f53bd27277ef9b3d2597e80fec3edd23b845042a0cde8d4183a34b8905b32933"
+      },
+      {
+        "path": "server/migrations/202611140387_main_unread_covering.sql",
+        "sha256": "ae0d76686b764b2dcef511b39bf9b95bebab844be0256b810e58a23a51206782"
+      },
+      {
+        "path": "server/migrations/202611140388_invite_expiry_scan.sql",
+        "sha256": "1960c4400b9a88e916a7b2096c81747648c86c543bf61bbeaed3f17737975779"
+      },
+      {
+        "path": "server/migrations/202611140389_member_directory_order.sql",
+        "sha256": "0c6c38b8fefd1309cf6f6ee55e41f402166487894bed1135e0715c0800a09512"
+      },
+      {
+        "path": "server/migrations/202611150390_mention_main_unread_covering.sql",
+        "sha256": "66bba5ea888ebebc7614059659a1c894f701d0c9220e4c319bdc1b6252109be0"
+      },
+      {
+        "path": "server/migrations/202611170225_public_channel_topic_positions.sql",
+        "sha256": "dfd0ee562b17ad14861ab34dfeeaab0d4f6200c8463f5f059cda513ee8dde19d"
+      },
+      {
+        "path": "server/migrations/202611170515_channel_log.sql",
+        "sha256": "8fcb2c959e81b10ee283db3a7da67b9fbbd36f124d0fff35c2ae5c631109d69c"
+      },
+      {
+        "path": "server/migrations/202611180515_message_receipts.sql",
+        "sha256": "6806e4032e519ff56c9e414528d81a5a62ed33a3edc3df326bb1e91f1bdab29b"
+      },
+      {
+        "path": "server/migrations/202611190515_history_generation.sql",
+        "sha256": "b429a7b093a5924e5ee1b31761cae97bd37f8a6031fb41f293dc30e3d505665c"
+      },
+      {
+        "path": "server/migrations/202611200141_move_to_topic.sql",
+        "sha256": "7011cba9d82bdf1ee5134bf29de390105da3ed5e85594aaad10f7c8a821f630c"
+      }
+    ],
+    "quality": {
+      "querySet": [
+        {
+          "id": "internal-ja",
+          "class": "partial",
+          "text": "配備",
+          "intent": "Find deployment work, including compounds",
+          "relevantKeys": [
+            "deploy",
+            "deploy2"
+          ]
+        },
+        {
+          "id": "internal-ascii",
+          "class": "partial",
+          "text": "BC",
+          "intent": "Find ABC account by its trailing identifier",
+          "relevantKeys": [
+            "abc",
+            "abc2",
+            "abc3"
+          ]
+        },
+        {
+          "id": "kyoto",
+          "class": "place",
+          "text": "京都",
+          "intent": "Find Kyoto branch work, exclude Tokyo",
+          "relevantKeys": [
+            "kyoto"
+          ]
+        },
+        {
+          "id": "meeting",
+          "class": "notation",
+          "text": "打ち合わせ",
+          "intent": "Find meeting agenda in any spelling",
+          "relevantKeys": [
+            "meeting",
+            "meeting2",
+            "meeting3",
+            "meeting4"
+          ]
+        },
+        {
+          "id": "meeting-kana",
+          "class": "notation",
+          "text": "うちあわせ",
+          "intent": "Find meeting agenda in any spelling",
+          "relevantKeys": [
+            "meeting",
+            "meeting2",
+            "meeting3",
+            "meeting4"
+          ]
+        },
+        {
+          "id": "estimate",
+          "class": "notation",
+          "text": "見積",
+          "intent": "Find estimate quantity task in any script",
+          "relevantKeys": [
+            "estimate",
+            "estimate2",
+            "estimate3"
+          ]
+        },
+        {
+          "id": "server-long",
+          "class": "notation",
+          "text": "サーバー",
+          "intent": "Find server relocation, with/without long vowel",
+          "relevantKeys": [
+            "server",
+            "server2",
+            "server3",
+            "server4"
+          ]
+        },
+        {
+          "id": "server-short",
+          "class": "notation",
+          "text": "サーバ",
+          "intent": "Find server relocation, with/without long vowel",
+          "relevantKeys": [
+            "server",
+            "server2",
+            "server3",
+            "server4"
+          ]
+        },
+        {
+          "id": "small",
+          "class": "smallKana",
+          "text": "キャッシュ",
+          "intent": "Find cache deletion despite large-kana spelling",
+          "relevantKeys": [
+            "small",
+            "small2"
+          ]
+        },
+        {
+          "id": "width-latin",
+          "class": "width",
+          "text": "ＡＢＣ",
+          "intent": "Find ABC account regardless of width/case",
+          "relevantKeys": [
+            "abc",
+            "abc2",
+            "abc3"
+          ]
+        },
+        {
+          "id": "width-kana",
+          "class": "width",
+          "text": "ｶﾀｶﾅ",
+          "intent": "Find katakana name tags regardless of script/width",
+          "relevantKeys": [
+            "kana",
+            "kana2",
+            "kana3"
+          ]
+        },
+        {
+          "id": "width-kana-full",
+          "class": "width",
+          "text": "カタカナ",
+          "intent": "Find katakana name tags regardless of script/width",
+          "relevantKeys": [
+            "kana",
+            "kana2",
+            "kana3"
+          ]
+        },
+        {
+          "id": "month",
+          "class": "mixed",
+          "text": "3月末",
+          "intent": "Find March-end collection, not invalid month 13",
+          "relevantKeys": [
+            "march",
+            "march2"
+          ]
+        },
+        {
+          "id": "month-full",
+          "class": "mixed",
+          "text": "３月末",
+          "intent": "Find March-end collection regardless of width",
+          "relevantKeys": [
+            "march",
+            "march2"
+          ]
+        },
+        {
+          "id": "version",
+          "class": "mixed",
+          "text": "v2.3",
+          "intent": "Find version 2.3 distribution, exclude 2.30",
+          "relevantKeys": [
+            "version",
+            "version2"
+          ]
+        },
+        {
+          "id": "integration",
+          "class": "mixed",
+          "text": "API連携",
+          "intent": "Find API integration quotes",
+          "relevantKeys": [
+            "api",
+            "api2",
+            "api3"
+          ]
+        },
+        {
+          "id": "fold",
+          "class": "case",
+          "text": "STRASSE",
+          "intent": "Find named Straße delivery",
+          "relevantKeys": [
+            "strasse",
+            "strasse2"
+          ]
+        },
+        {
+          "id": "nfc",
+          "class": "unicode",
+          "text": "CAFÉ",
+          "intent": "Find café training keys",
+          "relevantKeys": [
+            "cafe",
+            "cafe2"
+          ]
+        },
+        {
+          "id": "nfd",
+          "class": "unicode",
+          "text": "CAFÉ",
+          "intent": "Find café training keys",
+          "relevantKeys": [
+            "cafe",
+            "cafe2"
+          ]
+        },
+        {
+          "id": "kana-nfd",
+          "class": "unicode",
+          "text": "がく",
+          "intent": "Find expense column",
+          "relevantKeys": [
+            "ga",
+            "ga2"
+          ]
+        },
+        {
+          "id": "one",
+          "class": "short",
+          "text": "在",
+          "intent": "Find inventory task by one-character shorthand",
+          "relevantKeys": [
+            "stock"
+          ]
+        },
+        {
+          "id": "two",
+          "class": "short",
+          "text": "AI",
+          "intent": "Find AI workshop, exclude MAIL",
+          "relevantKeys": [
+            "ai"
+          ]
+        },
+        {
+          "id": "space",
+          "class": "whitespace",
+          "text": "　復元 手順",
+          "intent": "Find exact one-space wording, trimming edges",
+          "relevantKeys": [
+            "backup"
+          ]
+        },
+        {
+          "id": "two-spaces",
+          "class": "whitespace",
+          "text": "復元  手順",
+          "intent": "Find exact two-space wording",
+          "relevantKeys": [
+            "backup2"
+          ]
+        },
+        {
+          "id": "percent",
+          "class": "literal",
+          "text": "x%y",
+          "intent": "Find exact percent label",
+          "relevantKeys": [
+            "percent"
+          ]
+        },
+        {
+          "id": "underscore",
+          "class": "literal",
+          "text": "a_b",
+          "intent": "Find exact underscore label",
+          "relevantKeys": [
+            "underscore"
+          ]
+        },
+        {
+          "id": "backslash",
+          "class": "literal",
+          "text": "c\\d",
+          "intent": "Find exact backslash label",
+          "relevantKeys": [
+            "slash"
+          ]
+        },
+        {
+          "id": "typo",
+          "class": "typo",
+          "text": "バックアプ",
+          "intent": "Find backup duty despite omission",
+          "relevantKeys": [
+            "typo",
+            "typo2"
+          ]
+        },
+        {
+          "id": "and",
+          "class": "syntax",
+          "text": "請求 承認",
+          "intent": "Find billing AND approval",
+          "relevantKeys": [
+            "syntax1",
+            "syntax2"
+          ]
+        },
+        {
+          "id": "or",
+          "class": "syntax",
+          "text": "請求 OR 承認",
+          "intent": "Find billing OR approval, including pending quote approval",
+          "relevantKeys": [
+            "syntax1",
+            "syntax2",
+            "syntax3",
+            "syntax4",
+            "api2"
+          ]
+        },
+        {
+          "id": "not",
+          "class": "syntax",
+          "text": "請求 -保留",
+          "intent": "Find billing excluding on-hold",
+          "relevantKeys": [
+            "syntax1",
+            "syntax3"
+          ]
+        },
+        {
+          "id": "phrase",
+          "class": "syntax",
+          "text": "\"請求 承認\"",
+          "intent": "Find exact billing-approval phrase",
+          "relevantKeys": [
+            "syntax1"
+          ]
+        },
+        {
+          "id": "absent",
+          "class": "empty",
+          "text": "火星支店",
+          "intent": "Find nonexistent Mars branch",
+          "relevantKeys": []
+        }
+      ],
+      "relevancePolicy": {
+        "partial": "Relevant: intended compound contains the query internally; irrelevant: unrelated subjects.",
+        "place": "Relevant: Kyoto branch; irrelevant: Tokyo address despite the literal 京都 substring.",
+        "notation": "Relevant: the same meeting, estimate or server task across scripts/okurigana/long vowels; unrelated tasks are irrelevant.",
+        "smallKana": "Relevant: cache deletion including large-kana spelling; unrelated proper names are irrelevant.",
+        "width": "Relevant: identical business entity across width and script variants; unrelated entities are irrelevant.",
+        "mixed": "Relevant: exact version, integration task or month-end intent across case/width; longer version numbers, invalid months and different tasks are irrelevant.",
+        "case": "Relevant: identical named delivery across Unicode casefold forms; unrelated deliveries are irrelevant.",
+        "unicode": "Relevant: canonically equivalent accented/kana text; unrelated subjects are irrelevant.",
+        "short": "Relevant: AI workshop or inventory intent; internal substrings in MAIL or 存在 are irrelevant.",
+        "whitespace": "Relevant: the exact internal spacing in the requested wording; reordered words and other spacing are irrelevant.",
+        "literal": "Relevant: the exact label including punctuation; wildcard lookalikes are irrelevant.",
+        "typo": "Relevant: backup-duty task including a missing character; unrelated duties are irrelevant.",
+        "syntax": "Relevant: stated conjunction/disjunction/exclusion/phrase intent; other combinations are irrelevant.",
+        "empty": "Relevant: none; the requested entity does not exist in the corpus."
+      },
+      "modes": [
+        {
+          "id": "trgm-literal",
+          "engine": "trgm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_trgm_ops);",
+          "settings": "",
+          "ranked": false
+        },
+        {
+          "id": "bigm-literal",
+          "engine": "bigm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_bigm_ops);",
+          "settings": "",
+          "ranked": false
+        },
+        {
+          "id": "pgroonga-literal",
+          "engine": "pgroonga",
+          "ddl": "CREATE INDEX search_body ON messages USING pgroonga (normalized_body)\n    WITH (normalizers='', tokenizer='TokenNgram(\"unify_alphabet\", false, \"unify_symbol\", false, \"unify_digit\", false)');",
+          "settings": "",
+          "ranked": false
+        },
+        {
+          "id": "trgm-sim-0.1",
+          "engine": "trgm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_trgm_ops);",
+          "settings": "SET LOCAL pg_trgm.similarity_threshold=0.1;",
+          "ranked": true
+        },
+        {
+          "id": "trgm-sim-0.3",
+          "engine": "trgm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_trgm_ops);",
+          "settings": "SET LOCAL pg_trgm.similarity_threshold=0.3;",
+          "ranked": true
+        },
+        {
+          "id": "trgm-word-0.3",
+          "engine": "trgm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_trgm_ops);",
+          "settings": "SET LOCAL pg_trgm.word_similarity_threshold=0.3;",
+          "ranked": true
+        },
+        {
+          "id": "trgm-word-0.6",
+          "engine": "trgm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_trgm_ops);",
+          "settings": "SET LOCAL pg_trgm.word_similarity_threshold=0.6;",
+          "ranked": true
+        },
+        {
+          "id": "bigm-likequery",
+          "engine": "bigm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_bigm_ops);",
+          "settings": "",
+          "ranked": false
+        },
+        {
+          "id": "bigm-sim-0.1",
+          "engine": "bigm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_bigm_ops);",
+          "settings": "SET LOCAL pg_bigm.similarity_limit=0.1;",
+          "ranked": true
+        },
+        {
+          "id": "bigm-sim-0.3",
+          "engine": "bigm",
+          "ddl": "CREATE INDEX search_body ON messages USING gin (normalized_body gin_bigm_ops);",
+          "settings": "SET LOCAL pg_bigm.similarity_limit=0.3;",
+          "ranked": true
+        },
+        {
+          "id": "pgroonga-auto-term",
+          "engine": "pgroonga",
+          "ranked": true,
+          "settings": "",
+          "ddl": "CREATE INDEX search_body ON messages USING pgroonga (body) WITH (normalizers='NormalizerAuto', tokenizer='TokenBigram');"
+        },
+        {
+          "id": "pgroonga-auto-query",
+          "engine": "pgroonga",
+          "ranked": true,
+          "settings": "",
+          "ddl": "CREATE INDEX search_body ON messages USING pgroonga (body) WITH (normalizers='NormalizerAuto', tokenizer='TokenBigram');"
+        },
+        {
+          "id": "pgroonga-kana-term",
+          "engine": "pgroonga",
+          "ranked": true,
+          "settings": "",
+          "ddl": "CREATE INDEX search_body ON messages USING pgroonga (body) WITH (normalizers='NormalizerNFKC150(\"unify_kana\", true, \"unify_kana_case\", true)', tokenizer='TokenBigram');"
+        },
+        {
+          "id": "pgroonga-kana-query",
+          "engine": "pgroonga",
+          "ranked": true,
+          "settings": "",
+          "ddl": "CREATE INDEX search_body ON messages USING pgroonga (body) WITH (normalizers='NormalizerNFKC150(\"unify_kana\", true, \"unify_kana_case\", true)', tokenizer='TokenBigram');"
+        },
+        {
+          "id": "pgroonga-split-term",
+          "engine": "pgroonga",
+          "ranked": true,
+          "settings": "",
+          "ddl": "CREATE INDEX search_body ON messages USING pgroonga (body) WITH (normalizers='NormalizerNFKC150(\"unify_kana\", true, \"unify_kana_case\", true)', tokenizer='TokenNgram(\"unify_alphabet\", false, \"unify_symbol\", false, \"unify_digit\", false)');"
+        },
+        {
+          "id": "pgroonga-split-query",
+          "engine": "pgroonga",
+          "ranked": true,
+          "settings": "",
+          "ddl": "CREATE INDEX search_body ON messages USING pgroonga (body) WITH (normalizers='NormalizerNFKC150(\"unify_kana\", true, \"unify_kana_case\", true)', tokenizer='TokenNgram(\"unify_alphabet\", false, \"unify_symbol\", false, \"unify_digit\", false)');"
+        }
+      ],
+      "corpusHash": "51ac0a30831cd11e71740f3054418694dea67d24ed62c3712ac77f29f1b668e0",
+      "queryHash": "9a8350fb2a710f3f33c61eb07a69afbd258b9ec989696b4899aeba977933a9fc",
+      "relevanceHash": "d1ed651d04c1485238302e71611c7c8d9d727389997adbd84d148c5756b89359",
+      "visibleRows": 2457,
+      "totalRows": 2628,
+      "queries": 33,
+      "classes": 14,
+      "relevantPairs": 72
+    },
+    "performance": {
+      "querySet": [
+        [
+          "ja1-frequent",
+          "開"
+        ],
+        [
+          "ja1-rare",
+          "麒"
+        ],
+        [
+          "ja2-frequent",
+          "開発"
+        ],
+        [
+          "ja2-rare",
+          "麒麟"
+        ],
+        [
+          "ja3-frequent",
+          "確認し"
+        ],
+        [
+          "ja3-rare",
+          "特殊照合"
+        ],
+        [
+          "ascii1",
+          "a"
+        ],
+        [
+          "ascii2",
+          "ph"
+        ],
+        [
+          "ascii3",
+          "pha"
+        ],
+        [
+          "ascii1-rare",
+          "ø"
+        ],
+        [
+          "ascii2-rare",
+          "zx"
+        ],
+        [
+          "ascii-rare",
+          "QZX"
+        ],
+        [
+          "nfc",
+          "がぎ"
+        ],
+        [
+          "nfd",
+          "がぎ"
+        ],
+        [
+          "accent",
+          "CAFÉ"
+        ],
+        [
+          "casefold",
+          "STRASSE"
+        ],
+        [
+          "greek",
+          "ΣΊΣΥΦΟΣ"
+        ],
+        [
+          "mixed",
+          "照合z9"
+        ],
+        [
+          "space1",
+          "開発 API"
+        ],
+        [
+          "space2",
+          "開発  API"
+        ],
+        [
+          "literal-percent",
+          "x%y"
+        ],
+        [
+          "literal-underscore",
+          "a_b"
+        ],
+        [
+          "literal-backslash",
+          "c\\d"
+        ],
+        [
+          "trim",
+          "　開発 "
+        ],
+        [
+          "bom",
+          "﻿開発﻿"
+        ],
+        [
+          "width",
+          "ｶﾀｶﾅ"
+        ],
+        [
+          "fullwidth",
+          "ＡＢＣ"
+        ],
+        [
+          "scalar",
+          "🦉"
+        ]
+      ],
+      "rows": 1000000,
+      "restoreRows": 1000,
+      "queryHash": "235429d523255e8dd19ae5311165f2548c8133bf93934bd860d23dcdd273758b",
+      "queries": 28,
+      "clients": 5,
+      "transactions": 20,
+      "rounds": 3,
+      "warmupSweeps": 1,
+      "writeWarmTransactions": 10,
+      "writeTransactions": 200,
+      "order": [
+        [
+          "none",
+          "trgm",
+          "bigm",
+          "pgroonga"
+        ],
+        [
+          "bigm",
+          "pgroonga",
+          "none",
+          "trgm"
+        ],
+        [
+          "pgroonga",
+          "trgm",
+          "bigm",
+          "none"
+        ]
+      ]
+    },
+    "smoke": {
+      "label": "SMOKE / NON-EVALUATION",
+      "performance": {
+        "rows": 1000,
+        "clients": 1,
+        "transactions": 1,
+        "rounds": 1,
+        "writeWarmTransactions": 1,
+        "writeTransactions": 1
+      },
+      "quality": "full fixed 2628-row quality fixture"
+    },
+    "timing": {
+      "timeouts": {
+        "docker": 120000,
+        "build": 900000,
+        "psql": 900000,
+        "benchmark": 900000,
+        "cleanup": 10000
+      },
+      "startupAttempts": 60,
+      "startupPollMs": 500,
+      "rangeDays": 180,
+      "qualityTimed": false
+    },
+    "image": {
+      "historicalId": "sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77",
+      "base": "postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42",
+      "packages": {
+        "postgresql-18": "18.6-1.pgdg13+2",
+        "postgresql-client-18": "18.6-1.pgdg13+2",
+        "postgresql-server-dev-18": "18.6-1.pgdg13+2",
+        "postgresql-18-pgdg-pgroonga": "4.1.0-1",
+        "libgroonga0": "16.1.3-1"
+      },
+      "extensions": {
+        "pg_trgm": "1.6",
+        "pg_bigm": "1.2",
+        "pgroonga": "4.1.0"
+      },
+      "pgBigmRelease": "v1.2-20250903"
+    },
+    "settings": {
+      "shared_buffers": "16384",
+      "work_mem": "4096",
+      "maintenance_work_mem": "65536",
+      "effective_cache_size": "524288",
+      "random_page_cost": "4",
+      "max_connections": "100",
+      "max_worker_processes": "16",
+      "jit": "on",
+      "fsync": "on",
+      "synchronous_commit": "on",
+      "wal_level": "replica",
+      "max_wal_size": "1024",
+      "checkpoint_timeout": "300",
+      "server_encoding": "UTF8",
+      "shared_preload_libraries": "pgroonga_wal_resource_manager,pgroonga_crash_safer",
+      "pgroonga.enable_wal_resource_manager": "on",
+      "pgroonga.enable_crash_safe": "on"
+    },
+    "sessionPolicy": {
+      "planner": "Query Tuning settings must equal image boot_val",
+      "settings": {
+        "row_security": "on",
+        "default_transaction_read_only": "off",
+        "default_transaction_isolation": "read committed",
+        "client_encoding": "UTF8",
+        "standard_conforming_strings": "on",
+        "statement_timeout": "0"
+      },
+      "appSettings": {
+        "row_security": "on",
+        "default_transaction_read_only": "off",
+        "default_transaction_isolation": "read committed",
+        "client_encoding": "UTF8",
+        "standard_conforming_strings": "on",
+        "statement_timeout": "10000"
+      },
+      "pgbenchGuard": "effective 10s check before each transaction, included in latency"
+    },
+    "shmBytes": 1073741824,
+    "queryPath": {
+      "kind": "SECURITY DEFINER, LANGUAGE sql BEGIN ATOMIC",
+      "source": "load/search-engines/definer.sql",
+      "function": "public.fukulow_search_messages(uuid,text,boolean)",
+      "owner": "fukulow_search (NOLOGIN BYPASSRLS; column SELECT on messages, channels, users, channel_members)",
+      "caller": "fukulow_app only (EXECUTE revoked from PUBLIC); RLS stays enabled on every table",
+      "organization": "fukulow_current_org() only; NULL or empty returns no rows",
+      "emptyQuery": "returns no rows",
+      "functionSettings": {
+        "search_path": "pg_catalog, pg_temp",
+        "plan_cache_mode": "force_custom_plan"
+      },
+      "planCacheReason": "a cached generic plan keeps the query a parameter, so the LIKE pattern would not fold to a constant as in the v1 literal query",
+      "pageSize": 20,
+      "completeness": "non-page form as fukulow_app equals the sequential app-role strpos reference",
+      "plans": {
+        "app": "EXPLAIN ANALYZE of the call as fukulow_app",
+        "body": "auto_explain nested statement of the same call; run fails unless logged",
+        "owner": "direct query as owner with app-run settings",
+        "ownerV1": "v1-form direct query as owner with enable_seqscan=off",
+        "direct": "access-path probe with enable_seqscan=off"
+      }
+    }
+  }
+}

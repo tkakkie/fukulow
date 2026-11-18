@@ -99,6 +99,10 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             async move { shutdown.cancelled().await }
         },
     ));
+    let receipt_expiry = tokio::spawn(fukulow_server::messages::receipts::purge_periodically(
+        pool.clone(),
+        shutdown.clone(),
+    ));
     let metrics = tokio::spawn(fukulow_server::observability::report_periodically());
     let completed = fukulow_server::serve(
         listener,
@@ -118,6 +122,8 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         fukulow_server::DRAIN_TIMEOUT,
     )
     .await?;
+    receipt_expiry.abort();
+    let _ = receipt_expiry.await;
     reclamation.abort();
     let _ = reclamation.await;
     metrics.abort();

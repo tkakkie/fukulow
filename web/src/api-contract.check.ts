@@ -21,6 +21,7 @@ export function checkClientMessage(message: ClientMessage): string {
 export function checkServerEvent(event: ServerEvent): string {
   switch (event.type) {
     case 'message': {
+      if (!('message' in event)) return `${event.channel_id}:${event.seq}:${event.root_id}`
       const message: Message = event.message
       const topic: string | null = message.topic_id
       return `${message.channel_id}:${message.created_seq}:${message.client_message_id}:${topic}`
