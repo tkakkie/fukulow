@@ -177,6 +177,8 @@ export function closedLoopNonSuccess(lanes: Record<string, Record<string, Counts
       errors += c.attempted - c.accepted;
     }
   }
+  // #567 N11: a second-Organization reader that never started is missing evidence, not a pass.
+  if (Object.values(lanes.reader).every(c => c.attempted === 0)) return NaN;
   return errors;
 }
 

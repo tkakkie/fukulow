@@ -147,6 +147,7 @@ test('Part A enforces offered bounds and the second-Organization reader, while r
     (s: StepA) => { s.reader.droppedIterations = 1; },
     (s: StepA) => { s.reader.accepted--; s.reader.otherErrors++; },
     (s: StepA) => { s.reader = { ...counts(0, null), droppedIterations: 142 }; },
+    (s: StepA) => { s.reader = counts(134); },
   ]) {
     const runs = setA(1, r => edit(r.steps[2]));
     assert.equal(judgePartA(runs, 'hot-17').status, 'FAIL');
@@ -233,6 +234,8 @@ test('Part B validates warmup, measured, drain and reader outcomes without trust
     const absent = lanes(); absent[lane][window].accepted = -1;
     assert.ok(Number.isNaN(closedLoopNonSuccess(absent)));
   }
+  const neverStarted = lanes(); neverStarted.reader = { warmup: counts(0), measured: counts(0), after: counts(0) };
+  assert.ok(Number.isNaN(closedLoopNonSuccess(neverStarted)));
   const unexpected: Record<string, Record<string, Counts>> = lanes(); unexpected.send.surprise = counts(0);
   assert.ok(Number.isNaN(closedLoopNonSuccess(unexpected)));
   const missing: Record<string, Record<string, Counts>> = lanes(); delete missing.send.after;
