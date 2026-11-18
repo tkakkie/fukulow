@@ -21,7 +21,7 @@ positions AS (
     FROM messages m CROSS JOIN w CROSS JOIN access
     LEFT JOIN channel_read_positions cr ON cr.organization_id = m.organization_id AND cr.channel_id = m.channel_id AND cr.member_id = $2 AND cr.membership_revision = $3
     LEFT JOIN topic_read_positions tr ON tr.organization_id = m.organization_id AND tr.channel_id = m.channel_id AND tr.topic_id = m.topic_id AND tr.member_id = $2 AND cr.channel_id IS NOT NULL
-    WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id IS NOT NULL
+    WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id IS NOT NULL AND NOT m.deleted
         AND m.seq <= w.as_of_seq AND access.visible AND ($9::uuid IS NULL OR m.topic_id = $9)
     GROUP BY m.topic_id, tr.read_seq, cr.initial_seq, w.as_of_seq
 ),
@@ -37,7 +37,7 @@ page AS MATERIALIZED (
     ORDER BY last_seq DESC LIMIT $7
 )
 SELECT access.visible, w.as_of_seq, p.first_seq, p.last_seq,
-    p.message_count, p.read_seq, p.unread_count, mc.mention_unread_count, t.name, m.id, m.channel_id, m.seq, m.version, m.client_message_id,
+    p.message_count, p.read_seq, p.unread_count, mc.mention_unread_count, t.name, m.id, m.channel_id, m.seq, m.version, m.deleted, m.client_message_id,
     m.sender, m.body, m.topic_id, m.reply_to_id AS reply_to, m.reply_root_id,
     to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
 FROM access CROSS JOIN w LEFT JOIN page p ON true
@@ -48,7 +48,7 @@ CROSS JOIN LATERAL (
     JOIN message_mentions mm ON mm.organization_id=$1 AND mm.member_id=$2
         AND mm.channel_id=$4 AND mm.message_id=unread.id
     WHERE unread.organization_id=$1 AND unread.channel_id=$4 AND unread.topic_id=p.topic_id
-        AND unread.seq>p.read_seq AND unread.seq<=w.as_of_seq AND unread.sender<>$2
+        AND unread.seq>p.read_seq AND unread.seq<=w.as_of_seq AND unread.sender<>$2 AND NOT unread.deleted
 ) mc
 ORDER BY p.last_seq DESC
 "#,

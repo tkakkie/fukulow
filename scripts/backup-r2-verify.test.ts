@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { verifyProvider } from './backup-r2-verify.ts'
+import { accountUsage } from './backup-usage-model.ts'
 import { fakeS3 } from './backup-r2-fake.ts'
 import { inventory } from './backup-r2-model.ts'
 import type { Runner } from './backup-r2.ts'
@@ -49,4 +50,19 @@ test('negative signature probe changes only signing secret on stdin and never ex
     writeFileSync(args[args.indexOf('--output') + 1], 'PRIVATE_SENTINEL')
   })
   assert.equal((await run({ method: 'GET', key: '', headers: {} })).status, 403)
+})
+
+test('analytics verification backfills the whole month on one in-memory state and fails without progress', async t => {
+  const fake = await fakeS3(Date.now); t.after(fake.close)
+  const run = fake.runner('backups'), wrongSignature: Runner = async () => ({ status: 403, headers: {}, body: Buffer.alloc(0) })
+  const payload = { data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: [{ dimensions: { actionType: 'PutObject' }, sum: { requests: 1 } }] }] } } }
+  let queries = 0
+  const usage = accountUsage({ async query() { queries++; return payload } }, 'test-only')
+  const lines: string[] = []
+  assert.ok(await verifyProvider({ run, wrongSignature, usage, now: () => Date.UTC(2026, 10, 30, 12), report: line => { lines.push(line) } }))
+  assert.ok(lines.includes('PASS analytics')); assert.ok(queries > 29)
+  lines.length = 0; queries = 0
+  const broken = accountUsage({ async query() { queries++; return { errors: [{}] } } }, 'test-only')
+  assert.equal(await verifyProvider({ run, wrongSignature, usage: broken, now: () => Date.UTC(2026, 10, 30, 12), report: line => { lines.push(line) } }), false)
+  assert.ok(lines.includes('FAIL analytics')); assert.equal(queries, 1)
 })

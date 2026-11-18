@@ -217,6 +217,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Move the entire Reply chain identified by a root or descendant Message. */
+        post: operations["move_chain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/channels/{id}/read": {
         parameters: {
             query?: never;
@@ -714,8 +731,6 @@ export interface components {
             can_manage_managers: components["schemas"]["Capability"];
             can_remove_members: components["schemas"]["Capability"];
         };
-        /** @enum {string} */
-        ChannelEventKind: "create" | "edit" | "move" | "delete";
         /** @description Bounded ascending Channel log page, with the same envelopes as WebSocket replay. */
         ChannelEventPage: {
             events: components["schemas"]["ServerEvent"][];
@@ -974,17 +989,35 @@ export interface components {
              */
             version: number;
         };
-        /** @description Live and replayed messages have exactly the same canonical shape. */
-        MessageEvent: {
-            kind: components["schemas"]["ChannelEventKind"];
-            message: components["schemas"]["Message"];
-            /** Format: int64 */
-            seq: number;
+        MessageEvent: (components["schemas"]["MessageStateEvent"] | components["schemas"]["MessageMoveEvent"]) & {
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
             type: "message";
+        };
+        /** @enum {string} */
+        MessageEventType: "message";
+        /** @description The body-free invalidation for a committed whole-chain Move. */
+        MessageMoveEvent: {
+            /** Format: uuid */
+            channel_id: string;
+            /** Format: uuid */
+            destination_topic_id: string;
+            /** Format: uuid */
+            history_generation: string;
+            kind: components["schemas"]["MoveEventKind"];
+            /** Format: uuid */
+            operation_id: string;
+            /** Format: uuid */
+            root_id: string;
+            /** Format: int64 */
+            seq: number;
+            /** Format: uuid */
+            source_topic_id: string | null;
+            type: components["schemas"]["MessageEventType"];
+            /** Format: int64 */
+            version: number;
         };
         MessagePage: {
             /**
@@ -1003,6 +1036,71 @@ export interface components {
             /** @description Always ascending created_seq (newest last), including latest and before_seq pages. */
             messages: components["schemas"]["Message"][];
         };
+        /** @description Live and replayed messages have exactly the same canonical shape. */
+        MessageStateEvent: {
+            kind: components["schemas"]["MessageStateKind"];
+            message: components["schemas"]["Message"];
+            /** Format: int64 */
+            seq: number;
+            /** @enum {string} */
+            type: "message";
+        };
+        /** @enum {string} */
+        MessageStateKind: "create" | "edit" | "delete";
+        MoveChainRequest: {
+            /** Format: int64 */
+            expected_version: number;
+            /** Format: uuid */
+            history_generation?: string | null;
+            /** Format: uuid */
+            operation_id: string;
+            /**
+             * Format: uuid
+             * @description Supply exactly one of topic_id and topic_name.
+             */
+            topic_id?: string | null;
+            /** @description Joins an existing normalized name or creates a Topic in this Channel. */
+            topic_name?: string | null;
+        } & ({
+            topic_id: string;
+        } | {
+            topic_name: string;
+        });
+        MoveChainResponse: {
+            /**
+             * Format: int64
+             * @description Current chain version, including any intervening operations or Replies.
+             */
+            chain_version: number;
+            /**
+             * Format: uuid
+             * @description The destination of this operation, even after a subsequent Move.
+             */
+            destination_topic_id: string;
+            /** Format: uuid */
+            history_generation: string;
+            /**
+             * Format: int64
+             * @description Event position of this operation; null for a same-Topic no-op.
+             */
+            move_seq: number | null;
+            /** Format: uuid */
+            operation_id: string;
+            /**
+             * Format: int64
+             * @description The version written by the operation, or the accepted version for a no-op.
+             */
+            operation_version: number;
+            /** Format: uuid */
+            root_id: string;
+            /**
+             * Format: uuid
+             * @description Current Topic of the chain.
+             */
+            topic_id: string;
+        };
+        /** @enum {string} */
+        MoveEventKind: "move";
         NativeSessionResponse: {
             /** Format: int32 */
             expires_in: number;
@@ -1063,6 +1161,11 @@ export interface components {
         ReplyChainPage: {
             /** Format: int64 */
             as_of_seq: number;
+            /**
+             * Format: int64
+             * @description Highest version among all chain Messages at this watermark, across all pages.
+             */
+            chain_version: number;
             /** @description More matching Messages follow; continue after the last returned seq. */
             has_more: boolean;
             /** Format: uuid */
@@ -1346,7 +1449,6 @@ export type ChannelAccessLost = components['schemas']['ChannelAccessLost'];
 export type ChannelAccessRevoked = components['schemas']['ChannelAccessRevoked'];
 export type ChannelActivity = components['schemas']['ChannelActivity'];
 export type ChannelCapabilities = components['schemas']['ChannelCapabilities'];
-export type ChannelEventKind = components['schemas']['ChannelEventKind'];
 export type ChannelEventPage = components['schemas']['ChannelEventPage'];
 export type ChannelList = components['schemas']['ChannelList'];
 export type ChannelListChanged = components['schemas']['ChannelListChanged'];
@@ -1379,7 +1481,14 @@ export type MembersChanged = components['schemas']['MembersChanged'];
 export type Mention = components['schemas']['Mention'];
 export type Message = components['schemas']['Message'];
 export type MessageEvent = components['schemas']['MessageEvent'];
+export type MessageEventType = components['schemas']['MessageEventType'];
+export type MessageMoveEvent = components['schemas']['MessageMoveEvent'];
 export type MessagePage = components['schemas']['MessagePage'];
+export type MessageStateEvent = components['schemas']['MessageStateEvent'];
+export type MessageStateKind = components['schemas']['MessageStateKind'];
+export type MoveChainRequest = components['schemas']['MoveChainRequest'];
+export type MoveChainResponse = components['schemas']['MoveChainResponse'];
+export type MoveEventKind = components['schemas']['MoveEventKind'];
 export type NativeSessionResponse = components['schemas']['NativeSessionResponse'];
 export type OpenDmRequest = components['schemas']['OpenDmRequest'];
 export type OrdinaryChannelKind = components['schemas']['OrdinaryChannelKind'];
@@ -2731,6 +2840,120 @@ export interface operations {
                 };
             };
             /** @description Projection watermark admission unavailable; Retry-After gives retry seconds; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    move_chain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+                /** @description Root or descendant Message in this Reply chain */
+                message_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveChainRequest"];
+            };
+        };
+        responses: {
+            /** @description Committed Move, canonical retry, or same-Topic no-op */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MoveChainResponse"];
+                };
+            };
+            /** @description Invalid input, including a nonpositive expected_version or failure to supply exactly one valid Topic destination */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description move_not_allowed for a visible chain the caller may not Move */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Organization, Channel, Message or destination Topic unavailable */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description version_conflict, operation_conflict, chain_too_large or history_generation_changed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Move request body exceeds the size limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Move requires an application/json content type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database or worker failure, including unknown COMMIT outcome; retry with the same operation_id */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Channel writer admission unavailable; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

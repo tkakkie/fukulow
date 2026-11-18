@@ -40,6 +40,13 @@ export function watchMemberAccess(
 
 export const roleNames: Record<Role, string> = { owner: 'オーナー', admin: '管理者', member: 'メンバー', guest: 'ゲスト' }
 export const roles = Object.keys(roleNames) as Role[]
+
+export function canDeactivateMember(identity: Identity, target: Member): boolean {
+  return identity.organization.capabilities.can_deactivate_members.allowed &&
+    target.id !== identity.member.id &&
+    (identity.member.role === 'owner' || target.role !== 'owner')
+}
+
 export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
   if (r.kind === 'network') return 'サーバーに接続できません。もう一度お試しください。'
   if (r.error === 'last_owner') return '最後のオーナーのロールは変更できません。'

@@ -1,9 +1,9 @@
 # Spec
 
-Write cross-client contracts, accepted limitations and approved behaviour the source of truth cannot yet describe. Mark approved, unimplemented behaviour as proposed and reduce it to its contract once implemented. Omit REST shapes and status tables, test name lists, implementation history and code constants. Keep one home per fact and replace or merge updates. [Writing rules](workflow.md#13-splitting-a-doc)
+Record cross-client contracts, accepted limits and approved behaviour that code, tests and `openapi.json` cannot yet describe. Mark approved, unimplemented behaviour as proposed. Once implemented, keep only its contract. Omit REST shapes, status tables, test name lists, implementation history and code constants. [One home per fact, replace or merge updates](workflow.md#13-splitting-a-doc).
 
 ## Terms (English in code/API, Japanese in UI)
-Account/アカウント, Organization/組織, Member/メンバー, Role (Owner/オーナー, Admin/管理者, Member/メンバー, Guest/ゲスト), Invite/招待,
+Account/アカウント, Organization/組織, Member/メンバー, Role (Owner/オーナー, Admin/管理者, Member/メンバー, Guest/ゲスト), Invite/招待, Deactivation/無効化,
 Channel/チャンネル (public/private or DM), Channel manager/チャンネル管理者, Topic/トピック, Message/メッセージ, Reply/返信, Reply chain/返信のつながり,
 Move to topic/トピックに移動, Direct message (DM)/ダイレクトメッセージ, Mention/メンション, Unread/未読,
 Reaction/リアクション, Attachment/添付ファイル, Search/検索, Notification/通知, Edit/編集, Delete/削除,
@@ -15,7 +15,7 @@ Channel manager/チャンネル管理者 names the private Channel grant right (
 - A DM is a Channel of kind `dm` for one immutable pair of Members; it has no name, visibility or Topics. Public/private Channels have kind `channel`. The [DM contract](spec/dms.md) specifies access, renewal and discovery; the Topic rules below apply only to kind `channel`.
 - A channel's timeline shows messages that have no topic (topic = null).
 - Reply: a message may reply to another message. Replies form a chain, shown together in a right-side panel.
-- A reply chain can be moved to a topic under the channel. A topic is created by its first message (or by a Move to a new topic); empty topics do not exist.
+- A reply chain can be moved to a topic under the channel. A Topic begins with its first Message or a Move. Empty Topics retain their identity and read positions and stay out of Topic lists.
 - Messages inside a topic are shown only in the topic. The main timeline shows one summary line per topic, at the topic's latest activity (a derived display).
 - No threads. No calls (use external OSS if ever needed).
 
@@ -27,8 +27,8 @@ Later: attachments, reactions, push notifications, bots/webhooks, OIDC.
 - [Accounts](spec/accounts.md): Accounts and Memberships; Password and Account Session security; Members, Roles and Invites; Channel membership and Channel managers; Setup.
 - [Deployment](spec/deployment.md): Proxy and sign-in limits; Database deployment and upgrade (#194 B); Deployment (#194 C); HTTP availability; Operations: backup and restore (#198 C).
 - [Realtime](spec/realtime.md): Real-time sync contract; Mention and Mention unread (#152, approved, not implemented); Organization activity notices (#307, implemented).
-- [Direct messages](spec/dms.md): DM kind, pair/grant lifetimes, REST, permissions, send eligibility, discovery and planned tests (#151, specification for approval).
-- [Sections](spec/sections.md): Personal sections, effective-access projection, ordering and concurrency; REST contract (decided, not implemented) and planned acceptance tests (#204).
+- [Direct messages](spec/dms.md): DM pair/grant lifetimes, permissions, send eligibility, durable discovery and acceptance gates (#151).
+- [Sections](spec/sections.md): Personal layout, effective access, ordering, concurrency and proposed REST contract (#204).
 
 ## Performance targets (first)
 One node: 10k concurrent connections, thousands of message writes/s. Measure with load tests before optimizing.

@@ -2373,3 +2373,56 @@ async fn failed_directory_publication_never_resets_invisible_guests(pool: PgPool
 
 mod dms;
 mod revocations;
+
+#[fukulow_test::test]
+async fn moves_share_one_pending_activity_batch_and_notify_the_mover(pool: PgPool) {
+    let f = fixture(&pool).await;
+    owner(&pool, &f).await;
+    let (_, sender) = member(&pool, f.organization).await;
+    let root = send(&f, &sender, f.channel, Uuid::new_v4(), "Move this").await;
+    let activity = &f.state.message_delivery.channel_access.activity;
+    activity.drained().await;
+    let mut mover = connect(&f, &f.token).await;
+    let mut reader = connect(&f, &sender).await;
+    let initial = activity.queries.load(std::sync::atomic::Ordering::SeqCst);
+    let pause = crate::channels::activity::pause(f.organization, f.channel, "query");
+    for expected_version in 1..=3 {
+        let response = request(
+            &f.app,
+            "POST",
+            &format!("/api/v1/channels/{}/messages/{}/move", f.channel, root["id"].as_str().unwrap()),
+            &f.token,
+            json!({"operation_id":Uuid::new_v4(),"expected_version":expected_version,"topic_name":format!("Topic {expected_version}")}),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        if expected_version == 1 {
+            tokio::time::timeout(Duration::from_secs(5), pause.entered.acquire())
+                .await
+                .unwrap()
+                .unwrap()
+                .forget();
+        }
+    }
+    activity.drained_except(1).await;
+    assert_eq!(
+        activity.queries.load(std::sync::atomic::Ordering::SeqCst),
+        initial
+    );
+    pause.release.add_permits(1);
+    for socket in [&mut mover, &mut reader] {
+        let events = notices(&f, socket).await;
+        assert_eq!(
+            events.last(),
+            Some(&json!({"type":"channel_activity","channel_id":f.channel,"seq":4}))
+        );
+        assert!(
+            events
+                .iter()
+                .all(|notice| notice["seq"] == 2 || notice["seq"] == 4)
+        );
+    }
+    assert_eq!(
+        activity.queries.load(std::sync::atomic::Ordering::SeqCst),
+        initial + 2
+    );
+}

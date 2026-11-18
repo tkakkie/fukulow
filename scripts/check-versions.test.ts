@@ -9,6 +9,7 @@ const files = { rust: read('rust-toolchain.toml'), node: read('.node-version'),
   loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
   playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
   webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
+  makefile: read('Makefile'), dmsRecord: read('load/dms-record.ts'),
   compose: read('compose.yml'), acme: read('scripts/compose-acme.ts'), core: read('client-core/Cargo.toml'), wasmBuild: read('scripts/build-wasm.ts'), ci: read('.github/workflows/ci.yml') }
 
 test('versions agree with tag-only and tag-plus-digest Docker bases', () => {
@@ -46,6 +47,16 @@ test('Playwright image requires a valid sha256 digest', () => {
     assert.throws(() => checkVersions({ ...files,
       e2e: files.e2e.replace(/mcr\.microsoft\.com\/playwright:\S+/, `mcr.microsoft.com/playwright:v${files.playwright}-noble${digest}`) }), /Playwright image digest must/)
   }
+})
+
+test('k6 pins must agree on tag and digest', () => {
+  assert.throws(() => checkVersions({ ...files,
+    dmsRecord: files.dmsRecord.replace(/grafana\/k6:\d+\.\d+\.\d+@/, 'grafana/k6:0.0.0@') }), /k6 image must match/)
+  assert.throws(() => checkVersions({ ...files,
+    dmsRecord: files.dmsRecord.replace(/@sha256:[a-f0-9]{64}/, `@sha256:${'0'.repeat(64)}`) }), /k6 image must match/)
+  assert.throws(() => checkVersions({ ...files,
+    makefile: files.makefile.replace(/@sha256:[a-f0-9]{64}/, ''),
+    dmsRecord: files.dmsRecord.replace(/@sha256:[a-f0-9]{64}/, '') }), /must pin exact tag and digest/)
 })
 
 test('Playwright manifest and installed lockfile versions cannot drift', () => {

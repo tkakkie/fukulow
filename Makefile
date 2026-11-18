@@ -3,7 +3,7 @@ api:
 	cargo run --locked --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
 
-K6_IMAGE := grafana/k6:1.8.2
+K6_IMAGE := grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276
 LOAD_DOCKER_NETWORK ?= host
 # Default Compose Caddy endpoint; set BASE_URL to the deployed FUKULOW_DOMAIN URL.
 BASE_URL ?= https://localhost
@@ -24,7 +24,7 @@ load:
 		--network $(call shell_quote,$(LOAD_DOCKER_NETWORK)) --ulimit $(call shell_quote,nofile=$(LOAD_NOFILE):$(LOAD_NOFILE)) \
 		-v $(call shell_quote,$(CURDIR):/work:ro) -w /work \
 		-e $(call shell_quote,BASE_URL=$(BASE_URL)) -e LOAD_EMAIL -e LOAD_PASSWORD -e LOAD_ORGANIZATION_ID \
-		-e LOAD_BOOTSTRAP -e LOAD_SETUP_TOKEN -e CHANNELS -e SUBSCRIBERS -e PUBLISHERS \
+		-e LOAD_BOOTSTRAP -e LOAD_SETUP_TOKEN -e CHANNELS -e SUBSCRIBERS -e PUBLISHERS -e PUBLISH_MEMBERS \
 		-e K6_INSECURE_SKIP_TLS_VERIFY -e GODEBUG -e LOAD_PROXY -e LOAD_CONNECTIONS_ONLY \
 		-e DURATION_SECONDS -e PUBLISH_INTERVAL_MS -e READY_TIMEOUT_SECONDS -e DRAIN_TIMEOUT_SECONDS \
 		-e CHANNEL_VISIBILITY -e SOCKETS_PER_SESSION -e SOCKETS_PER_ACCOUNT -e LOAD_MEASURE \

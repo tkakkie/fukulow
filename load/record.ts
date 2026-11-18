@@ -122,12 +122,12 @@ try {
   const metadata = {
     hostNode: process.version,
     harness: Object.fromEntries(['Makefile', 'Dockerfile', 'compose.yml', 'deploy/Caddyfile', 'deploy/nginx.conf', 'deploy/nginx-acme.sh', 'web/scripts/first-paint.ts', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
-      'load/seed.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/generator.ts', 'load/app-evidence.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
+      'load/seed.ts', 'load/session-layout.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/generator.ts', 'load/app-evidence.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
       [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),
     serverDirty: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'status', '--porcelain']),
-    configured: Object.fromEntries(['CHANNELS', 'PUBLISH_CHANNELS', 'SUBSCRIBERS', 'PUBLISHERS', 'DURATION_SECONDS', 'PUBLISH_INTERVAL_MS',
+    configured: Object.fromEntries(['CHANNELS', 'PUBLISH_CHANNELS', 'SUBSCRIBERS', 'PUBLISHERS', 'PUBLISH_MEMBERS', 'DURATION_SECONDS', 'PUBLISH_INTERVAL_MS',
       'SOCKETS_PER_SESSION', 'SOCKETS_PER_ACCOUNT', 'CONNECT_BATCH', 'CONNECT_INTERVAL_MS', 'READY_TIMEOUT_SECONDS', 'DRAIN_TIMEOUT_SECONDS',
       'LOAD_LEGACY', 'LOAD_ALLOW_REJECTIONS', 'LOAD_RECONNECT', 'LOAD_RECONNECT_STORM', 'REQUEST_TIMEOUT_SECONDS',
       'LOAD_CONNECTIONS_ONLY', 'LOAD_SEND_BURST', 'LOAD_SEND_REFILL_PER_SECOND', 'LOAD_SCRIPT', 'THROUGHPUT_SCENARIO', 'THROUGHPUT_RATES', 'THROUGHPUT_STEP_SECONDS', 'THROUGHPUT_MEMBERS', 'THROUGHPUT_VUS', 'THROUGHPUT_MAX_VUS'].map(key => [key, env[key as keyof typeof env] ?? null])),

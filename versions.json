@@ -1,7 +1,7 @@
 {
   "note": "Version inventory (#512). scripts/check-versions.ts checks each version against its file; .github/workflows/version-check.yml reports newer releases and support ends weekly. Rules: docs/workflow.md section 8.",
   "entries": [
-    { "component": "Rust", "version": "1.99.1", "file": "rust-toolchain.toml", "pattern": "^channel = \"([^\"]+)\"$",
+    { "component": "Rust", "version": "1.100.0", "file": "rust-toolchain.toml", "pattern": "^channel = \"([^\"]+)\"$",
       "support": "latest only", "endoflife": "rust", "updates": "weekly-check", "class": "toolchain", "latest": { "endoflife": "rust" } },
     { "component": "Node.js", "version": "26.13.1", "file": ".node-version", "pattern": "^(\\S+)$",
       "support": "2029-04-30", "endoflife": "nodejs", "updates": "weekly-check", "class": "toolchain", "latest": { "endoflife": "nodejs", "lts": true } },
@@ -13,7 +13,7 @@
       "support": "latest only", "endoflife": "caddy", "updates": "dependabot", "class": "patch-minor" },
     { "component": "nginx", "version": "1.31.8", "file": "compose.yml", "pattern": "image: nginx:([^@\\s]+)",
       "support": "latest only", "endoflife": "nginx", "updates": "dependabot", "class": "patch-minor" },
-    { "component": "k6", "version": "1.8.2", "file": "Makefile", "pattern": "^K6_IMAGE := grafana/k6:(\\S+)$",
+    { "component": "k6", "version": "2.4.0", "file": "Makefile", "pattern": "^K6_IMAGE := grafana/k6:([^@\\s]+)@sha256:[a-f0-9]{64}$",
       "support": "latest only", "updates": "weekly-check", "class": "patch-minor", "latest": { "github": "grafana/k6" } },
     { "component": "wasm-bindgen-cli", "version": "0.2.130", "file": "client-core/Cargo.toml", "pattern": "wasm-bindgen = \\{ version = \"=([^\"]+)\"",
       "support": "latest only", "updates": "weekly-check", "class": "patch-minor", "latest": { "github": "wasm-bindgen/wasm-bindgen" } },

@@ -4,7 +4,7 @@ import { row } from './unread-test-helpers'
 import { createReplies } from './replies'
 import { createUnread } from './unread'
 import { windowClient } from './message-window-test-helpers'
-import { ok } from './topic-test-helpers'
+import { replyPage, ok } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 
 /** Counts the actual production stores, including evidence which is absent from public display snapshots. */
@@ -81,7 +81,7 @@ export async function evidenceClient() {
   const replies = createReplies(c.sync, { api: { async listReplyChain(_channel, _anchor, query = {}) {
     reads.reply++
     const rows = c.records.filter(m => (m.id === 'id1' || m.reply_root_id === 'id1') && m.created_seq > (query.after_seq ?? 0))
-    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (rows.slice(0, 50)).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: rows.slice(0, 50), has_more: rows.length > 50 })
+    return ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (rows.slice(0, 50)).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: rows.slice(0, 50), has_more: rows.length > 50 }))
   } } })
   await c.boot(); await c.topics.loadTopic('A', 'T'); await replies.open('A', c.records[0])
   unread.visibility(true); const visit = (await unread.enter({ channel: 'A', topicId: 'T' }))!

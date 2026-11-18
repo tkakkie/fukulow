@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { checksum, sha256 } from './backup-r2-model.ts'
 import { listObjects } from './backup-r2-list.ts'
 import { curlRunner, executeCurl, readPrivateFile, type Runner } from './backup-r2.ts'
-import { accountUsage, analyticsClient, validUsage, type UsageClient } from './backup-r2-usage.ts'
+import { accountUsage, analyticsClient, validUsage, type UsageClient, type UsageState } from './backup-r2-usage.ts'
 
 // Mutate only the signing secret, retaining the configured access ID. The
 // supported private curl config uses: user = "access-id:signing-secret".
@@ -64,7 +64,7 @@ export async function verifyProvider(options: {
     const get = await run({ method: 'GET', key: locked, headers: {} })
     return refused(overwrite.status) && refused(deletion.status) && get.status === 200 && get.body.equals(body) ? 'PASS' : 'FAIL'
   })
-  if (options.usage) await check('analytics', async () => validUsage(await options.usage!.read((options.now ?? Date.now)())) ? 'PASS' : 'FAIL')
+  if (options.usage) await check('analytics', () => fullMonthUsage(options.usage!, (options.now ?? Date.now)()))
   // Only disposable unlocked probes are cleaned up. Locked probes remain until
   // the operator removes them after expiry; inventory counts their capacity.
   await check('probe-cleanup', async () => {
@@ -75,6 +75,17 @@ export async function verifyProvider(options: {
     return 'PASS'
   })
   return results.every(Boolean)
+}
+// The Worker backfills a few days per hourly run; verify has no persisted
+// cache, so it repeats reads on one in-memory state while the cache grows.
+async function fullMonthUsage(usage: UsageClient, now: number): Promise<'PASS' | 'FAIL'> {
+  const state: UsageState = {}
+  for (;;) {
+    const cached = Object.keys(state.usageCache?.days ?? {}).length
+    try { return validUsage(await usage.read(now, state)) ? 'PASS' : 'FAIL' } catch (error) {
+      if (Object.keys(state.usageCache?.days ?? {}).length === cached) throw error
+    }
+  }
 }
 if (import.meta.main) {
   try {

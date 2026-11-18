@@ -48,6 +48,7 @@ export function accountUsage(client: AnalyticsClient, account: string): UsageCli
       for (let from = start; from < today; from += 86_400_000) {
         if (!cache.days[new Date(from).toISOString().slice(0, 10)]) missing.push(from)
       }
+      const known: Record<string, OperationUsage> = {}
       const ranges = missing.slice(0, uncachedDaysPerRun)
       if (now > today) ranges.push(today)
       for (const from of ranges) {
@@ -57,7 +58,10 @@ export function accountUsage(client: AnalyticsClient, account: string): UsageCli
           errors?: unknown; data?: { viewer?: { accounts?: { r2OperationsAdaptiveGroups?: { dimensions?: { actionType?: string }; sum?: { requests?: number } }[] }[] } }
         }
         const accounts = response?.data?.viewer?.accounts, groups = accounts?.[0]?.r2OperationsAdaptiveGroups
-        if (response?.errors || accounts?.length !== 1 || !Array.isArray(groups) || !groups.length || groups.length >= 1000) throw new Error('Incomplete analytics')
+        if (response?.errors || accounts?.length !== 1 || !Array.isArray(groups) || groups.length >= 1000) throw new Error('Incomplete analytics')
+        // An empty day is zero only before the month's first usage: closed past
+        // the lag, with every earlier day known and zero (#316). Otherwise unknown.
+        if (!groups.length && !(now >= from + 86_400_000 + analyticsLag && leadingZero(cache, known, start, from))) throw new Error('Incomplete analytics')
         const seen = new Set<string>()
         for (const group of groups) {
           const action = group.dimensions?.actionType, count = group.sum?.requests
@@ -69,6 +73,7 @@ export function accountUsage(client: AnalyticsClient, account: string): UsageCli
         if (!Number.isSafeInteger(classATotal) || !Number.isSafeInteger(classBTotal)) throw new Error('Unknown usage')
         const usage = { classA: classATotal, classB: classBTotal }
         totals.push(usage)
+        known[new Date(from).toISOString().slice(0, 10)] = usage
         if (to === from + 86_400_000 && now >= to + analyticsLag) cache.days[new Date(from).toISOString().slice(0, 10)] = usage
       }
       if (missing.length > uncachedDaysPerRun || now === start) throw new Error('Incomplete month')
@@ -77,6 +82,13 @@ export function accountUsage(client: AnalyticsClient, account: string): UsageCli
       return result
     } catch { throw new Error('Account operation usage unavailable') }
   } }
+}
+function leadingZero(cache: UsageCache, known: Record<string, OperationUsage>, start: number, before: number) {
+  for (let from = start; from < before; from += 86_400_000) {
+    const date = new Date(from).toISOString().slice(0, 10), usage = cache.days[date] ?? known[date]
+    if (!usage || usage.classA || usage.classB) return false
+  }
+  return true
 }
 export function validUsage(value: unknown): value is OperationUsage {
   return !!value && typeof value === 'object' && 'classA' in value && 'classB' in value &&

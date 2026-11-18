@@ -64,7 +64,7 @@ async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_pu
         canonical
     );
     delivery.flush().await;
-    assert_eq!(queue.events.try_recv().unwrap().created_seq, 1);
+    assert_eq!(queue.events.try_recv().unwrap().message().created_seq, 1);
     assert!(queue.events.try_recv().is_err());
     // Deferred failure runs at COMMIT, after the summary was updated.
     sqlx::query("CREATE FUNCTION reject_topic_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
@@ -104,7 +104,7 @@ async fn topic_admission_and_commit_rollback_leave_no_topic_sequence_count_or_pu
     assert_eq!(counts(&pool, org, channel).await, (2, 3, 3));
     delivery.flush().await;
     for seq in 2..=3 {
-        assert_eq!(queue.events.try_recv().unwrap().created_seq, seq);
+        assert_eq!(queue.events.try_recv().unwrap().message().created_seq, seq);
     }
     assert!(queue.events.try_recv().is_err());
 }

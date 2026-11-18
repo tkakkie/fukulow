@@ -56,11 +56,51 @@ impl Step<'_> {
     /// A Create's envelope position is its creation position; a mismatched Create is
     /// dropped rather than moving the cursor past a different event.
     pub(crate) fn envelope_consistent(
-        kind: fukulow_api::ChannelEventKind,
+        kind: fukulow_api::MessageStateKind,
         seq: i64,
         message: &Message,
     ) -> bool {
-        !matches!(kind, fukulow_api::ChannelEventKind::Create) || message.created_seq == seq
+        !matches!(kind, fukulow_api::MessageStateKind::Create) || message.created_seq == seq
+    }
+    pub fn merge_move(&mut self, event: fukulow_api::MessageMoveEvent, source: Source) {
+        if event.seq < 1 || event.version != event.seq {
+            return;
+        }
+        let id = event.channel_id;
+        let c = self.channel(id);
+        let seen = c.cursor.is_some_and(|cursor| cursor >= event.seq)
+            || c.advancing
+                .iter()
+                .any(|range| range.start <= event.seq && event.seq <= range.end);
+        if !seen {
+            c.move_seq = c.move_seq.max(Some(event.seq));
+            c.mutation_seq = c.mutation_seq.max(event.seq);
+            c.snapshot_seq = None;
+            let current = |m: &Message| {
+                m.reply_root_id.unwrap_or(m.id) != event.root_id || m.version >= event.seq
+            };
+            if c.messages.iter().any(|m| !current(m)) {
+                let versions = Rc::make_mut(&mut c.versions);
+                for m in c.messages.iter().filter(|m| !current(m)) {
+                    versions
+                        .entry(m.id)
+                        .and_modify(|(version, _, _)| *version = (*version).max(event.seq))
+                        .or_insert((event.seq, m.deleted, m.created_seq));
+                }
+                Rc::make_mut(&mut c.messages).retain(|m| current(m));
+            }
+            for request in self.core.requests.values_mut() {
+                if matches!(request, Request::History { channel, page: Page::Before, stale: false, .. } if *channel == id)
+                {
+                    request.invalidate();
+                    self.metadata_changed = true;
+                }
+            }
+            self.channel(id).older = None;
+            self.history(id, Page::Latest, None);
+        }
+        // Move proves event coverage without settling a send or emitting Message state.
+        self.merge_event(id, Vec::new(), source, Some(event.seq));
     }
     pub fn merge(&mut self, id: Uuid, records: Vec<Message>, source: Source) {
         self.merge_event(id, records, source, None);

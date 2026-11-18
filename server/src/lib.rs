@@ -235,6 +235,10 @@ pub fn app(state: AppState) -> Router {
             get(messages::reply_chain),
         )
         .route(
+            "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move",
+            axum::routing::post(messages::move_chain),
+        )
+        .route(
             "/api/v1/orgs/{org}/channels/{id}/timeline",
             get(messages::list_timeline),
         )

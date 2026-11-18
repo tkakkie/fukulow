@@ -97,11 +97,12 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with: { tool: cargo-nextest@0.9.151 }
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
+      # Keep the build flags in sync with cargo nextest list in web/scripts/check-invariants.ts.
       - run: cargo nextest run --locked --features fukulow-client-core/wasm --no-fail-fast --partition count:${{ matrix.shard }}/3
       - if: matrix.shard == 1
         run: cargo test --locked --doc # nextest does not run doctests
       - if: matrix.shard == 1
-        run: node web/scripts/check-invariants.ts # reuses the test build of `cargo nextest run --locked` above (no extra cold build); fails if cargo is missing
+        run: node web/scripts/check-invariants.ts # Lists runnable tests across all shards using the same nextest build. Requires cargo and nextest.
   # Keeps the required `server` check: it passes only when every shard passed (failed, cancelled or skipped fails).
   server:
     needs: server-tests
@@ -233,10 +234,6 @@ jobs:
       - run: docker compose --profile caddy up -d --no-build --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only
-          # CI-only: the light k6 run sends from one Member (follow-up: many Members).
-          # Its numbers are not production-limit measurements.
-          FUKULOW_SEND_BURST: '10000'
-          FUKULOW_SEND_REFILL_PER_SECOND: '1000'
       - run: test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
       - name: Light k6 run (10 seconds; hard limit 55 seconds)
         env:
@@ -245,6 +242,7 @@ jobs:
           LOAD_PASSWORD: ci-load-test-only-password
           LOAD_SETUP_TOKEN: ci-setup-test-only
           K6_INSECURE_SKIP_TLS_VERIFY: 'true'
+          PUBLISH_MEMBERS: '8'
         run: timeout 55s make load LOAD_CONTAINER_NAME=fukulow-ci-load BASE_URL=https://localhost
       - name: Remove load container even after timeout
         if: always()

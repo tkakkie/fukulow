@@ -67,3 +67,22 @@ test('corrupt cached usage is refused instead of silently becoming trusted or ze
     assert.equal(decodeState({ version: 1, state: { sentAlerts: [], usageCache: cache } }).warning, 'state-corrupt')
   }
 })
+
+test('empty closed days count as zero only before the month first usage', async () => {
+  const empty = { data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: [] }] } } }
+  const client = (active: (start: string) => boolean) => accountUsage({ async query(request) {
+    return active(request.variables.start) ? payload : empty } }, 'test-only')
+  const state: UsageState = {}, now = Date.UTC(2026, 10, 5, 12)
+  const leading = client(start => start >= '2026-11-03')
+  await assert.rejects(leading.read(now, state), /unavailable/)
+  assert.deepEqual(state.usageCache!.days, { '2026-11-01': { classA: 0, classB: 0 }, '2026-11-02': { classA: 0, classB: 0 }, '2026-11-03': { classA: 2, classB: 3 } })
+  assert.deepEqual(await leading.read(now, state), { classA: 6, classB: 9 })
+  await assert.rejects(client(start => start !== '2026-11-02T00:00:00.000Z').read(Date.UTC(2026, 10, 4, 12), {}), /unavailable/)
+  await assert.rejects(client(start => start !== '2026-11-04T00:00:00.000Z').read(now, { usageCache: { month: '2026-11', days: {
+    '2026-11-01': { classA: 0, classB: 0 }, '2026-11-02': { classA: 0, classB: 0 }, '2026-11-03': { classA: 2, classB: 3 } } } }), /unavailable/)
+  const lag = Date.UTC(2026, 10, 2, 6) - 1
+  await assert.rejects(client(() => false).read(lag, {}), /unavailable/)
+  await assert.rejects(client(start => start < '2026-11-02').read(lag, {}), /unavailable/)
+  await assert.rejects(client(() => false).read(lag + 1, {}), /unavailable/)
+  assert.deepEqual(await client(start => start >= '2026-11-02').read(lag + 1, {}), { classA: 2, classB: 3 })
+})
