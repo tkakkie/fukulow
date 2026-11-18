@@ -107,4 +107,4 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [realtime](realtime.md): `stale_generation_subscribe_denials_cover_guest_dm_roles_and_foreign_organization`, `subscribe_handoff_generation_recheck_preserves_access_and_organization_loss`
 
-- [realtime](realtime.md): `channel_revocation_survives_only_unrelated_transitions`
+- [realtime](realtime.md): `channel_revocation_survives_only_unrelated_transitions`, `fallback_regrant_fences_a_dequeued_revocation_before_first_poll`, `rechecks_preserve_an_unproved_current_revocation`, `late_regrant_retirement_preserves_a_newer_revocation`

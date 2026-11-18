@@ -140,4 +140,4 @@ Rows that also govern this area, listed by a test name unique to the row in that
 
 - [realtime](realtime.md): `stale_generation_subscribe_denials_cover_guest_dm_roles_and_foreign_organization`, `subscribe_handoff_generation_recheck_preserves_access_and_organization_loss`
 
-- [realtime](realtime.md): `role_revocations_survive_a_later_grant_during_recheck`, `unrelated_channel_retirement_keeps_revocation_identity_proof`, `subscription_refresh_membership_loss_fences_a_dequeued_revocation`
+- [realtime](realtime.md): `role_revocations_survive_a_later_grant_during_recheck`, `unrelated_channel_retirement_keeps_revocation_identity_proof`, `subscription_refresh_membership_loss_fences_a_dequeued_revocation`, `only_identity_proof_conflict_fences_a_dequeued_revocation`, `role_and_channel_revocations_survive_older_retirements`

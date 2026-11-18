@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    auth::{SubscriptionRecheck, SubscriptionScope},
+    auth::{
+        SubscriptionRecheck, SubscriptionScope,
+        activity::{ActivityChange, ActivityChanges, Capture, ChannelChange},
+    },
     channels::{
         AccessChanges,
         activity::{Activity, Notice, NoticeFrame, Registration, TestGate, pause_member},
@@ -193,6 +196,17 @@ async fn transition_matrix(pool: &PgPool, whole_set: bool, changes: &[Later]) {
             let gate = phase.map(|phase| {
                 pause_member(case.f.organization, case.revoked, phase, Some(case.target))
             });
+            // A Guest cannot receive a manager right. Commit B's real manager
+            // change while the target is still a Member, then delay its retirement
+            // until the Role revocation reaches the selected stage.
+            let old_manager = if whole_set && matches!(later, Later::OtherManager) {
+                let retirement = case.hold_retirement(Some(case.other));
+                case.later(later, false).await;
+                wait(&retirement).await;
+                Some(retirement)
+            } else {
+                None
+            };
             if whole_set {
                 case.set_role("guest").await;
             } else {
@@ -212,21 +226,32 @@ async fn transition_matrix(pool: &PgPool, whole_set: bool, changes: &[Later]) {
                 }
             }
             // Hold the later publisher so an access gain cannot replace a stale revocation.
-            let later_gate = pause_member(
-                case.f.organization,
-                Uuid::nil(),
-                "target_state",
-                Some(case.target),
-            );
-            case.later(later, whole_set).await;
-            wait(&later_gate).await;
+            let later_gate = if let Some(manager) = old_manager {
+                manager.release.add_permits(1);
+                wait(&manager).await;
+                None
+            } else {
+                let gate = pause_member(
+                    case.f.organization,
+                    Uuid::nil(),
+                    "target_state",
+                    Some(case.target),
+                );
+                case.later(later, whole_set).await;
+                wait(&gate).await;
+                Some(gate)
+            };
             if let Some(gate) = &gate {
                 gate.release.add_permits(1);
             }
-            case.delivery().drained_except(1).await;
+            case.delivery()
+                .drained_except(u32::from(later_gate.is_some()))
+                .await;
             let actual = case.received_revocations(held).await;
-            later_gate.release.add_permits(1);
-            case.delivery().drained().await;
+            if let Some(later_gate) = &later_gate {
+                later_gate.release.add_permits(1);
+                case.delivery().drained().await;
+            }
             let expected = usize::from(matches!(later, Later::OtherGrant | Later::OtherManager));
             if actual != expected {
                 failures.push((stage, later, actual, expected));
@@ -322,6 +347,7 @@ async fn role_revocation_survives_only_unrelated_transitions(pool: PgPool) {
         true,
         &[
             Later::OtherGrant,
+            Later::OtherManager,
             Later::Regrant,
             Later::Role,
             Later::Deactivate,
@@ -398,4 +424,221 @@ async fn subscription_refresh_membership_loss_fences_a_dequeued_revocation(pool:
         received.push(case.received_revocations(Some(frame)).await);
     }
     assert_eq!(received, [1, 0], "current Membership then observed loss");
+}
+
+#[fukulow_test::test]
+async fn fallback_regrant_fences_a_dequeued_revocation_before_first_poll(pool: PgPool) {
+    let case = Case::new(&pool, false, Later::Regrant).await;
+    case.remove_grant().await;
+    case.delivery().drained().await;
+    let frame = case.take_revocation();
+
+    // Re-grant in PostgreSQL with no mutation hook or subscription recheck.
+    grant(&pool, &case.f, case.revoked, case.target).await;
+    case.delivery()
+        .check(&case.f.state.pool, SubscriptionScope::All)
+        .await;
+
+    let mut polled = false;
+    let sent = frame.handoff(|_| async { polled = true }).await;
+    assert!(
+        !polled,
+        "fallback allowed the old revocation's first write poll"
+    );
+    assert_eq!(sent, None);
+}
+
+#[fukulow_test::test]
+async fn rechecks_preserve_an_unproved_current_revocation(pool: PgPool) {
+    let mut received = Vec::new();
+    for periodic in [false, true] {
+        let case = Case::new(&pool, false, Later::OtherGrant).await;
+        let gate = pause_member(
+            case.f.organization,
+            case.revoked,
+            "revoked",
+            Some(case.target),
+        );
+        case.remove_grant().await;
+        wait(&gate).await;
+        if periodic {
+            case.delivery()
+                .check(&case.f.state.pool, SubscriptionScope::All)
+                .await;
+        } else {
+            let (other, _) = member(&pool, case.f.organization).await;
+            case.request(
+                "POST",
+                &format!("/api/v1/channels/{}/members", case.revoked),
+                json!({"member_id":other}),
+                StatusCode::NO_CONTENT,
+            )
+            .await;
+        }
+        gate.release.add_permits(1);
+        case.delivery().drained().await;
+        received.push(case.received_revocations(None).await);
+    }
+    assert_eq!(
+        received,
+        [1, 1],
+        "another Member's grant, then periodic recheck"
+    );
+}
+
+#[fukulow_test::test]
+async fn visibility_preserving_role_change_uses_one_capture_per_registration(pool: PgPool) {
+    let case = Case::new(&pool, true, Later::OtherGrant).await;
+    sqlx::query("INSERT INTO channels(organization_id,id,name,visibility) SELECT $1,gen_random_uuid(),'Channel '||n,'public' FROM generate_series(1,1024) n")
+        .bind(case.f.organization).execute(&pool).await.unwrap();
+    let token = session::another_session(&pool, case.f.organization, case.target).await;
+    let auth = extract_auth(case.f.state.clone(), &token).await;
+    let more: Vec<_> = (0..3).map(|_| case.delivery().register(&auth)).collect();
+    let registrations: Vec<_> = std::iter::once(&case.registration).chain(&more).collect();
+    let gate = pause_member(
+        case.f.organization,
+        Uuid::nil(),
+        "target_state",
+        Some(case.target),
+    );
+    case.set_role("admin").await;
+    wait(&gate).await;
+    let during: Vec<_> = registrations
+        .iter()
+        .map(|reg| reg.revocation_tracking())
+        .collect();
+    gate.release.add_permits(1);
+    case.delivery().drained().await;
+    let idle: Vec<_> = registrations
+        .iter()
+        .map(|reg| reg.revocation_tracking())
+        .collect();
+    assert_eq!(
+        during,
+        [(1, 0); 4],
+        "whole-set captures and Channel change entries during publication"
+    );
+    assert_eq!(
+        idle,
+        [(0, 0); 4],
+        "idle registrations kept revocation tracking"
+    );
+}
+
+struct HoldRetirement {
+    activity: Activity,
+    scope: Option<Uuid>,
+    gate: std::sync::Mutex<Option<Arc<TestGate>>>,
+}
+struct HeldRetirement {
+    change: Box<dyn ActivityChange>,
+    gate: Arc<TestGate>,
+}
+impl ActivityChanges for HoldRetirement {
+    fn capture<'a>(
+        &'a self,
+        tx: &'a mut sqlx::PgConnection,
+        organization: Uuid,
+        target: Uuid,
+        channel: Option<Uuid>,
+    ) -> Capture<'a> {
+        Box::pin(async move {
+            let change = self
+                .activity
+                .capture(tx, organization, target, channel)
+                .await?;
+            if channel == self.scope
+                && let Some(gate) = self.gate.lock().unwrap().take()
+            {
+                return Ok(Box::new(HeldRetirement { change, gate }) as Box<dyn ActivityChange>);
+            }
+            Ok(change)
+        })
+    }
+    fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
+        self.activity.channel(pool, organization, change);
+    }
+    fn directory(&self, pool: PgPool, organization: Uuid, target: Uuid) {
+        self.activity.directory(pool, organization, target);
+    }
+}
+impl ActivityChange for HeldRetirement {
+    fn retire(&mut self) {}
+
+    fn committed(self: Box<Self>, pool: PgPool) {
+        tokio::spawn(async move {
+            self.gate.entered.add_permits(1);
+            self.gate.release.acquire().await.unwrap().forget();
+            self.change.committed(pool);
+            self.gate.entered.add_permits(1);
+        });
+    }
+}
+impl Case {
+    fn hold_retirement(&self, channel: Option<Uuid>) -> Arc<TestGate> {
+        let gate = Arc::new(TestGate {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        self.f
+            .state
+            .session_changes
+            .set_activity(Arc::new(HoldRetirement {
+                activity: self.delivery().clone(),
+                scope: channel,
+                gate: std::sync::Mutex::new(Some(gate.clone())),
+            }));
+        gate
+    }
+
+    async fn finish_late_retirement(&self, gate: Arc<TestGate>) -> usize {
+        self.delivery().drained().await;
+        let frame = self.take_revocation();
+        gate.release.add_permits(1);
+        wait(&gate).await;
+        self.delivery().drained().await;
+        self.received_revocations(Some(frame)).await
+    }
+}
+
+#[fukulow_test::test]
+async fn role_and_channel_revocations_survive_older_retirements(pool: PgPool) {
+    let role_loss = Case::new(&pool, true, Later::OtherGrant).await;
+    // The old Channel removal leaves public access intact. The later Role
+    // change sees that public access and becomes the transition that removes it.
+    grant(&pool, &role_loss.f, role_loss.revoked, role_loss.target).await;
+    let old_channel = role_loss.hold_retirement(Some(role_loss.revoked));
+    role_loss.remove_grant().await;
+    wait(&old_channel).await;
+    role_loss.set_role("guest").await;
+    let role_revocation = role_loss.finish_late_retirement(old_channel).await;
+
+    let channel_loss = Case::new(&pool, false, Later::OtherGrant).await;
+    let old_role = channel_loss.hold_retirement(None);
+    channel_loss.set_role("admin").await;
+    wait(&old_role).await;
+    channel_loss.remove_grant().await;
+    let channel_revocation = channel_loss.finish_late_retirement(old_role).await;
+    assert_eq!(
+        [role_revocation, channel_revocation],
+        [1, 1],
+        "old Channel retirement, then old Role retirement"
+    );
+}
+
+#[fukulow_test::test]
+async fn late_regrant_retirement_preserves_a_newer_revocation(pool: PgPool) {
+    let case = Case::new(&pool, false, Later::Regrant).await;
+    case.remove_grant().await;
+    case.delivery().drained().await;
+    assert_eq!(case.received_revocations(None).await, 1);
+    let regrant = case.hold_retirement(Some(case.revoked));
+    case.grant(case.revoked).await;
+    wait(&regrant).await;
+    case.remove_grant().await;
+    assert_eq!(
+        case.finish_late_retirement(regrant).await,
+        1,
+        "late re-grant retirement dropped the later removal's revocation"
+    );
 }
