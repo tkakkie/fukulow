@@ -245,6 +245,44 @@ async fn unread_mentions_probe_work_is_bounded_by_mentions_not_unread(pool: PgPo
             }
         }
     }
+    // The final case leaves both seqs unread, with Mentions of the viewer.
+    // A tombstone must suppress its Mention even if the acceptance row remains.
+    let current_counts = async || {
+        crate::database::organization_read_only(&app, org, async |tx| {
+            let row = sqlx::query(LIST_COUNTS_SQL)
+                .bind(org)
+                .bind(viewer)
+                .bind(0_i64)
+                .bind([channel])
+                .fetch_one(tx)
+                .await?;
+            Ok::<_, sqlx::Error>(counts(&row))
+        })
+        .await
+        .unwrap()
+    };
+    let (as_of, read, missing, main, total, main_mentions, mentions) = current_counts().await;
+    let deleted = sqlx::query(
+        "UPDATE messages SET deleted=true WHERE organization_id=$1 AND channel_id=$2 AND seq IN (101,102)",
+    )
+    .bind(org)
+    .bind(channel)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(deleted.rows_affected(), 2);
+    assert_eq!(
+        current_counts().await,
+        (
+            as_of,
+            read,
+            missing,
+            main - 1,
+            total - 2,
+            main_mentions - 1,
+            mentions - 2
+        )
+    );
     app.close().await;
 }
 
