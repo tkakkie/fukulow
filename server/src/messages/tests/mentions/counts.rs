@@ -18,8 +18,11 @@ async fn mention_counts_dedup_own_independent_positions_marks_and_no_backfill(po
     let (app, org, _, channel, author) = fixture(&pool).await;
     let reader = Uuid::new_v4();
     let viewer = member(&pool, org, reader).await;
+    let other_reader = Uuid::new_v4();
+    let other_viewer = member(&pool, org, other_reader).await;
     let text = format!("{}{}", token(reader), token(reader));
-    let root = sent(&app, &author, channel, input(Uuid::new_v4(), &text)).await;
+    let shared = format!("{text}{}", token(other_reader));
+    let root = sent(&app, &author, channel, input(Uuid::new_v4(), &shared)).await;
     sent(
         &app,
         &author,
@@ -40,7 +43,7 @@ async fn mention_counts_dedup_own_independent_positions_marks_and_no_backfill(po
         &app,
         &author,
         channel,
-        json!({"client_message_id":Uuid::new_v4(),"body":text,"reply_to":topic["id"]}),
+        json!({"client_message_id":Uuid::new_v4(),"body":shared,"reply_to":topic["id"]}),
     )
     .await;
     sent(&app, &viewer, channel, input(Uuid::new_v4(), &text)).await;
@@ -67,6 +70,18 @@ async fn mention_counts_dedup_own_independent_positions_marks_and_no_backfill(po
     )
     .await;
     assert_eq!(counts(&app, &viewer).await, c);
+    mark(
+        &app,
+        &viewer,
+        channel,
+        None,
+        root["created_seq"].as_i64().unwrap(),
+    )
+    .await;
+    let c = counts(&app, &viewer).await;
+    assert_eq!(c["channels"][0]["main_mention_unread_count"], 1);
+    assert_eq!(c["channels"][0]["mention_unread_count"], 3);
+    assert_eq!(c["channels"][0]["unread_count"], 3);
     mark(&app, &viewer, channel, None, i64::MAX).await;
     let c = counts(&app, &viewer).await;
     assert_eq!(c["channels"][0]["main_mention_unread_count"], 0);
@@ -86,6 +101,11 @@ async fn mention_counts_dedup_own_independent_positions_marks_and_no_backfill(po
     let c = counts(&fresh, &viewer).await;
     assert_eq!(c["channels"][0]["mention_unread_count"], 0);
     assert_eq!(c["channels"][0]["unread_count"], 0);
+    let other = counts(&fresh, &other_viewer).await;
+    assert_eq!(other["channels"][0]["main_mention_unread_count"], 1);
+    assert_eq!(other["channels"][0]["mention_unread_count"], 2);
+    let other_topic = projection(&fresh, &other_viewer, channel, &format!("topics/{t}")).await;
+    assert_eq!(other_topic["topic"]["mention_unread_count"], 1);
     // Simulate a pre-Mention Message carrying the exact historical token.
     let historical = sent(
         &app,
