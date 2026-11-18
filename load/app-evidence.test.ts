@@ -84,7 +84,8 @@ test('proxy evidence keeps only level counts in the window', () => {
   const nginx = ['2026/11/17 00:00:00 [warn] 1#1: startup', '2026/11/17 00:00:02 [error] 7#7: *1 upstream timed out, request: "GET /api/v1/x"',
     '2026/11/17 00:00:03 [alert] 7#7: 1024 worker_connections are not enough', 'entrypoint text', '2026/11/17 00:00:09 [error] late'].join('\n');
   const n = proxyEvidence(nginx, 'nginx', t0 + 1000, t0 + 5000);
-  assert.deepEqual(n, { complete: true, reasons: [], levels: { error: 1, alert: 1 }, errorLines: 2 });
+  assert.deepEqual(n, { complete: true, reasons: [], levels: { error: 1, alert: 1 }, errorLines: 2,
+    capacityMarkers: { 'worker_connections exhausted': 1 } });
   assert.doesNotMatch(JSON.stringify(n), /api|upstream/);
   const caddy = [JSON.stringify({ level: 'info', ts: (t0 + 2000) / 1000, msg: 'x' }), JSON.stringify({ level: 'error', ts: (t0 + 3000) / 1000, msg: '/api/v1/y' })].join('\n');
   assert.deepEqual(proxyEvidence(caddy, 'caddy', t0 + 1000, t0 + 5000).errorLines, 1);
@@ -99,5 +100,22 @@ test('an nginx error in the start second is not attributed to the run', () => {
   assert.deepEqual(proxyEvidence(log, 'nginx', t0 + 1000, t0 + 5000).errorLines, 1); // exact start: inside the window
   assert.equal(proxyEvidence('2026/11/17 00:00:01 [warn] 7#7: x', 'nginx', t0 + 1800, t0 + 5000).complete, true);
   const caddy = JSON.stringify({ level: 'error', ts: (t0 + 1200) / 1000, msg: 'x' });
-  assert.deepEqual(proxyEvidence(caddy, 'caddy', t0 + 1800, t0 + 5000), { complete: true, reasons: [], levels: {}, errorLines: 0 });
+  assert.deepEqual(proxyEvidence(caddy, 'caddy', t0 + 1800, t0 + 5000), { complete: true, reasons: [], levels: {}, errorLines: 0, capacityMarkers: {} });
+});
+
+test('only error lines naming a proxy-internal limit become capacity markers', () => {
+  const nginx = ['2026/11/17 00:00:02 [error] 7#7: *1 upstream timed out (110: Connection timed out) while reading response header from upstream',
+    '2026/11/17 00:00:02 [error] 7#7: *2 connect() failed (111: Connection refused) while connecting to upstream',
+    '2026/11/17 00:00:02 [error] 7#7: *3 no live upstreams while connecting to upstream',
+    '2026/11/17 00:00:03 [warn] 7#7: 1024 worker_connections are not enough'].join('\n');
+  const upstreamOnly = proxyEvidence(nginx, 'nginx', t0 + 1000, t0 + 5000);
+  // Upstream failures can be app-side; a below-error-level capacity line is not counted either.
+  assert.deepEqual([upstreamOnly.errorLines, upstreamOnly.capacityMarkers], [3, {}]);
+  const files = proxyEvidence('2026/11/17 00:00:02 [crit] 7#7: accept4() failed (24: Too many open files)', 'nginx', t0 + 1000, t0 + 5000);
+  assert.deepEqual(files.capacityMarkers, { 'open file limit': 1 });
+  const caddy = [JSON.stringify({ level: 'error', ts: (t0 + 2000) / 1000, logger: 'http.handlers.reverse_proxy', msg: 'aborting with incomplete response', error: 'context deadline exceeded' }),
+    JSON.stringify({ level: 'error', ts: (t0 + 3000) / 1000, msg: 'accept tcp [::]:443: accept4: too many open files' })].join('\n');
+  const c = proxyEvidence(caddy, 'caddy', t0 + 1000, t0 + 5000);
+  assert.deepEqual([c.errorLines, c.capacityMarkers], [2, { 'open file limit': 1 }]);
+  assert.doesNotMatch(JSON.stringify(c), /accept4|443|deadline/);
 });

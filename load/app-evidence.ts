@@ -128,14 +128,23 @@ function poolEvidence(samples: Row[], startedAt: number, endedAt: number, reason
     maxWaiting: Math.max(...values('waiting')), deltas, acquireWaitsOver1s: deltas.wait_count - deltas.wait_le_1000000_us };
 }
 
-// Positive proxy-side evidence: counts of the proxy's own log lines at error level or above in the window.
-// Only level counts are kept, never the message (it can name paths or addresses). nginx logs to stderr at warn
-// and above (deploy/nginx.conf) with second-resolution UTC times; Caddy logs JSON with a `ts` epoch in seconds.
+// Proxy-side evidence: counts of the proxy's own log lines at error level or above in the window, and of the
+// error lines that name a proxy-internal capacity limit. Only counts and fixed marker names are kept, never the
+// message (it can name paths or addresses). nginx logs to stderr at warn and above (deploy/nginx.conf) with
+// second-resolution UTC times; Caddy logs JSON with a `ts` epoch in seconds.
 const errorLevels = { nginx: ['error', 'crit', 'alert', 'emerg'], caddy: ['error', 'panic', 'fatal'] } as const;
-export type ProxyEvidence = { complete: boolean; reasons: string[]; levels: Record<string, number>; errorLines: number };
+// #469: only these name a limit inside the proxy. Upstream errors (timeouts, refused or reset upstream
+// connections, no live upstreams) can come from the app and are deliberately not listed.
+export const proxyCapacityMarkers: readonly (readonly [string, RegExp])[] = [
+  ['worker_connections exhausted', /worker_connections are not enough/],
+  ['open file limit', /too many open files/i],
+];
+export type ProxyEvidence = { complete: boolean; reasons: string[]; levels: Record<string, number>; errorLines: number;
+  capacityMarkers: Record<string, number> };
 export function proxyEvidence(log: string, proxy: 'caddy' | 'nginx', startedAt: number, endedAt: number, readError?: string): ProxyEvidence {
   const reasons: string[] = readError ? [readError] : [];
   const levels: Record<string, number> = {};
+  const capacityMarkers: Record<string, number> = {};
   // nginx times are whole seconds: an entry in the start second may precede the run. An error-level entry there
   // cannot be placed, so it makes the evidence incomplete (cause unknown) instead of naming the proxy.
   const first = proxy === 'nginx' ? Math.floor(startedAt / 1000) * 1000 : startedAt;
@@ -156,7 +165,9 @@ export function proxyEvidence(log: string, proxy: 'caddy' | 'nginx', startedAt: 
       reasons.push('proxy error in the start second cannot be placed in the window'); continue;
     }
     levels[level] = (levels[level] ?? 0) + 1;
+    if (!(errorLevels[proxy] as readonly string[]).includes(level)) continue;
+    for (const [name, marker] of proxyCapacityMarkers) if (marker.test(line)) capacityMarkers[name] = (capacityMarkers[name] ?? 0) + 1;
   }
   const errorLines = (errorLevels[proxy] as readonly string[]).reduce((sum, level) => sum + (levels[level] ?? 0), 0);
-  return { complete: reasons.length === 0, reasons: [...new Set(reasons)], levels, errorLines };
+  return { complete: reasons.length === 0, reasons: [...new Set(reasons)], levels, errorLines, capacityMarkers };
 }

@@ -87,12 +87,16 @@ export function ceilingCause(result: RunResult, requestedSockets: number): Pick<
   if (client1011! > 0) return { cause: 'app', reasons: [...signals, ...(signals.some(signal => /database_failure|pool /.test(signal)) ? []
     : ['no database_failure or pool failure in the window: the app-side cause is not identified'])] };
   if (signals.length) return { cause: 'unknown', reasons: ['app-side failures present, but no client 1011 ties them to the failure', ...signals] };
-  // Absence of app events alone is not proxy evidence (an app limit can leave none): the proxy is named only
-  // when the proxy itself logged errors in the window while the app logged no failure or rejection.
+  // Absence of app events alone is not proxy evidence (an app limit can leave none), and neither is the log level:
+  // an upstream timeout is an error-level proxy line with an app-side cause. The proxy is named only when its own
+  // error lines in the window name a proxy-internal capacity limit while the app logged no failure or rejection.
   const opened = `app opened ${evidence.sockets.opened} of ${requestedSockets} requested sockets`;
   const proxy = result.proxyEvidence;
   if (!proxy?.complete) return { cause: 'unknown', reasons: ['no app-side failure, but proxy evidence is missing or incomplete', opened] };
-  if (proxy.errorLines > 0) return { cause: 'proxy', reasons: [`proxy logged ${proxy.errorLines} error-level lines with no app-side failure`, opened] };
+  const capacity = Object.entries(proxy.capacityMarkers ?? {}).filter(([, n]) => n > 0).map(([marker, n]) => `proxy ${marker}: ${n}`);
+  if (capacity.length) return { cause: 'proxy', reasons: [...capacity, 'no app-side failure', opened] };
+  if (proxy.errorLines > 0) return { cause: 'unknown',
+    reasons: [`proxy logged ${proxy.errorLines} error-level lines, none naming a proxy capacity limit`, opened] };
   return { cause: 'unknown', reasons: ['neither the app nor the proxy logged a failure', opened] };
 }
 
