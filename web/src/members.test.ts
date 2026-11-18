@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createMembers, createInviteAcceptance, takeInvite } from './members'
-import type { Identity, Member, MemberList, Result } from './api'
+import { canDeactivateMember, createMembers, createInviteAcceptance, roles, takeInvite } from './members'
+import type { Identity, Member, MemberList, Result, Role } from './api'
 import { signOut } from './auth'
 import { rememberIdentityResponse } from './identity-order'
 import { mentionText } from './mentions'
@@ -10,6 +10,29 @@ const identity: Identity = { member, organization: { organization_id: 'o', name:
 const ok = <T>(data: T): Result<T> => ({ ok: true, data })
 const token = 'a'.repeat(64)
 const org = '00000000-0000-0000-0000-000000000001'
+
+describe.each<{ actor: Role; capability: boolean; allowedTargets: Role[] }>([
+  { actor: 'owner', capability: true, allowedTargets: ['owner', 'admin', 'member', 'guest'] },
+  { actor: 'admin', capability: true, allowedTargets: ['admin', 'member', 'guest'] },
+  { actor: 'member', capability: false, allowedTargets: [] },
+  { actor: 'guest', capability: false, allowedTargets: [] },
+])('deactivation as $actor', ({ actor, capability, allowedTargets }) => {
+  const actorIdentity: Identity = {
+    member: { ...member, role: actor },
+    organization: {
+      ...identity.organization,
+      capabilities: { ...identity.organization.capabilities, can_deactivate_members: { allowed: capability } },
+    },
+  }
+
+  it.each(roles)('checks deactivation of another %s', (role) => {
+    expect(canDeactivateMember(actorIdentity, { ...member, id: 'other', role })).toBe(allowedTargets.includes(role))
+  })
+
+  it('denies self-deactivation', () => {
+    expect(canDeactivateMember(actorIdentity, actorIdentity.member)).toBe(false)
+  })
+})
 
 describe('Members controller', () => {
   it('preserves a newer Message Mention name through another Member Role change and deactivation', async () => {

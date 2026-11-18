@@ -3,7 +3,7 @@
 Record cross-client contracts, accepted limits and approved behaviour that code, tests and `openapi.json` cannot yet describe. Mark approved, unimplemented behaviour as proposed. Once implemented, keep only its contract. Omit REST shapes, status tables, test name lists, implementation history and code constants. [One home per fact, replace or merge updates](workflow.md#13-splitting-a-doc).
 
 ## Terms (English in code/API, Japanese in UI)
-Account/アカウント, Organization/組織, Member/メンバー, Role (Owner/オーナー, Admin/管理者, Member/メンバー, Guest/ゲスト), Invite/招待,
+Account/アカウント, Organization/組織, Member/メンバー, Role (Owner/オーナー, Admin/管理者, Member/メンバー, Guest/ゲスト), Invite/招待, Deactivation/無効化,
 Channel/チャンネル (public/private or DM), Channel manager/チャンネル管理者, Topic/トピック, Message/メッセージ, Reply/返信, Reply chain/返信のつながり,
 Move to topic/トピックに移動, Direct message (DM)/ダイレクトメッセージ, Mention/メンション, Unread/未読,
 Reaction/リアクション, Attachment/添付ファイル, Search/検索, Notification/通知, Edit/編集, Delete/削除,

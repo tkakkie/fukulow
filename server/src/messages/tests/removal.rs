@@ -353,3 +353,61 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
     .unwrap();
     assert_eq!(n, 1);
 }
+
+#[fukulow_test::test]
+async fn send_waiting_on_member_lock_is_rejected_after_deactivation(pool: PgPool) {
+    let (app, org, sender, channel, token) = fixture(&pool).await;
+    let mut deactivation = pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *deactivation)
+        .await
+        .unwrap();
+    // The raw UPDATE stands in for active_target's FOR NO KEY UPDATE on the target Member.
+    let deactivated =
+        sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
+            .bind(org)
+            .bind(sender)
+            .execute(&mut *deactivation)
+            .await
+            .unwrap();
+    assert_eq!(deactivated.rows_affected(), 1);
+
+    let sending = tokio::spawn(async move {
+        send(&app, &token, channel, input(Uuid::new_v4(), "Blocked send")).await
+    });
+    // The send reaches this lock only after authenticating and checking Channel access.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT FROM pg_stat_activity
+                 WHERE datname=current_database() AND wait_event_type='Lock'
+                 AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("send did not wait for the Member lock");
+
+    deactivation.commit().await.unwrap();
+
+    let response = sending.await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body(response).await,
+        json!({"error":"organization_unavailable"})
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE organization_id=$1")
+        .bind(org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
