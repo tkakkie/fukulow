@@ -7,7 +7,7 @@ import ChannelMembers from './ChannelMembers.svelte'
 import * as api from './api'
 
 afterEach(() => vi.useRealTimers())
-function fixture() {
+function fixture(memberListRole?: () => api.Role | null) {
   const deps = {
     listChannelMembers: vi.fn().mockResolvedValue({ ok: true, data: { members: [{ id: 'self', name: '本人', role: 'admin', manager: true }] } }),
     addChannelMember: vi.fn().mockResolvedValue({ ok: true, data: undefined }),
@@ -15,9 +15,41 @@ function fixture() {
     changeChannelManager: vi.fn().mockResolvedValue({ ok: true, data: undefined }),
   }
   const observed = vi.fn(), left = vi.fn(), refresh = vi.fn()
-  const controller = createChannelMembers('org', 'channel', observed, deps, left, refresh)
+  const controller = createChannelMembers('org', 'channel', observed, deps, left, refresh, memberListRole)
   return { deps, observed, left, refresh, controller }
 }
+it('retains or withholds Channel member rows by viewer Role while rejecting stale refetches', async () => {
+  vi.useFakeTimers()
+  for (const reason of ['periodic', 'reconcile', 'access'] as const) {
+    for (const guest of [false, true]) {
+      const { controller, deps } = fixture(() => guest ? 'guest' : 'admin')
+      const initial: api.ChannelMember[] = [{ id: 'self', name: '本人', role: guest ? 'guest' : 'admin', manager: false }]
+      const refreshed = [{ ...initial[0], name: '新しい名前' }]
+      const displayed = guest ? [] : initial
+      const context = `${reason}, guest=${guest}`
+      let resolveStale!: (result: api.Result<api.ChannelMemberList>) => void
+      deps.listChannelMembers
+        .mockResolvedValueOnce({ ok: true, data: { members: initial } })
+        .mockImplementationOnce(() => new Promise(resolve => { resolveStale = resolve }))
+        .mockResolvedValueOnce({ ok: false, kind: 'http', status: 503, retryAfterMs: 1000 })
+        .mockResolvedValueOnce({ ok: true, data: { members: refreshed } })
+      try {
+        await controller.load()
+        expect(controller.get().members).toEqual(initial)
+        const stale = controller.load()
+        controller.activityTarget.invalidate(reason)
+        expect(controller.get(), context).toMatchObject({ members: displayed, loading: guest })
+        resolveStale({ ok: true, data: { members: [{ ...initial[0], name: '古い名前' }] } })
+        await stale
+        expect(controller.get().members, context).toEqual(displayed)
+        await vi.advanceTimersByTimeAsync(200)
+        expect(controller.get(), context).toMatchObject({ members: [], loading: false, retryable: true })
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(controller.get(), context).toMatchObject({ members: refreshed, loading: false, error: '' })
+      } finally { controller.close() }
+    }
+  }
+})
 it('aborts a timed-out Channel member list before retrying', async () => {
   vi.useFakeTimers()
   const c = fixture()

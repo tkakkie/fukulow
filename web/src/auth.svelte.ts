@@ -7,13 +7,13 @@ import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
-import { getOrganizationMe, isOrganizationUnavailable, type Identity } from './api'
+import { getOrganizationMe, isOrganizationUnavailable, type Identity, type Role } from './api'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { initCore } from '#sync-core'
 import { dmsAdapter, type DmsAdapter } from './dms.svelte'
-import { createMembers, watchMemberAccess } from './members'
+import { createMembers, watchMemberAccess, type MemberListAccess } from './members'
 import { membersAdapter } from './members.svelte'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
@@ -21,7 +21,20 @@ import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 
 export type { AuthState } from './auth'
-export type SessionModel = { holdActivity?(key: string, target: ActivityTarget): unknown; dms?: DmsAdapter; navigationTargets?: ReturnType<typeof navigationTargetsAdapter>; channels: ChannelsAdapter; sync: SyncAdapter; topics(id: string): TopicsAdapter; replies?(id: string): RepliesAdapter; unread?(id: string): UnreadAdapter; channelMembers?(id: string): ReturnType<typeof createChannelMembers>; onMemberListRefresh?(listener: () => void): () => void; close(): void }
+export type SessionModel = {
+  holdActivity?(key: string, target: ActivityTarget): unknown
+  dms?: DmsAdapter
+  navigationTargets?: ReturnType<typeof navigationTargetsAdapter>
+  channels: ChannelsAdapter
+  sync: SyncAdapter
+  topics(id: string): TopicsAdapter
+  replies?(id: string): RepliesAdapter
+  unread?(id: string): UnreadAdapter
+  channelMembers?(id: string): ReturnType<typeof createChannelMembers>
+  memberListAccess?(): MemberListAccess
+  onMemberListRefresh?(listener: (reason: 'access' | 'refresh') => void): () => void
+  close(): void
+}
 export type AuthDeps = {
   restore: typeof restore
   signIn: typeof signIn
@@ -30,20 +43,21 @@ export type AuthDeps = {
   getOrganization: typeof getOrganizationMe
   /** Resolves once the sync core is ready; rejects if it never will (main.ts shows the startup error). */
   coreReady?: () => Promise<void>
-  openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void) => ReturnType<typeof membersAdapter>
+  openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
-  openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable)),
-  openSession(selfId, onEnded, organizationId, drafts, onIdentity) {
-    const session = createSession({ selfId, onEnded, organizationId, onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+  openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole) {
+    const session = createSession({ selfId, onEnded, organizationId, initialRole, onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
     return {
       holdActivity: session.holdActivity,
+      memberListAccess: session.memberListAccess,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
@@ -129,18 +143,21 @@ export function createAuth(deps: AuthDeps = defaults) {
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
-    })
+    }, result.data.member.role)
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       void session?.sync.markUnavailable()
-    }) ?? null
+    }, session.memberListAccess ?? (() => organization?.member.role ?? null)) ?? null
     if (members) session.holdActivity?.('members', members.activityTarget)
     stopMemberAvailability = session.sync.onUnavailable(() => members?.unavailable())
     if (session.sync.unavailable) members?.unavailable()
     void members?.load()
     const currentMembers = members
-    stopMemberRefresh = session.onMemberListRefresh?.(() => { void currentMembers?.load() })
+    stopMemberRefresh = session.onMemberListRefresh?.(reason => {
+      if (reason === 'access') currentMembers?.activityTarget.invalidate('access')
+      else void currentMembers?.load()
+    })
     changes++
   }
   async function show(next: AuthState) {

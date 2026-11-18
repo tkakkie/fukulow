@@ -6,6 +6,7 @@ export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, 
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
+  canLoad?(): boolean
   load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   hide?(): void
@@ -34,7 +35,7 @@ export function createActivityTarget<T>(options: {
   async function run() {
     if (closed || !dirty) return
     if (inFlight) { queued = true; return }
-    if (retry) return
+    if (retry || options.canLoad?.() === false) return
     inFlight = true; queued = false
     const own = generation
     const request = new AbortController()
@@ -107,10 +108,12 @@ export function createActivity(options: {
   let timer: ReturnType<typeof setTimeout> | undefined, generation = 0, closed = false
   const retire = (target: ActivityTarget | undefined) => { if (target?.suspend) target.suspend(); else target?.close() }
   const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200) => targets.get(key)?.invalidate(reason, delay)
-  const directories = (delay = 200) => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access', delay) }
+  const invalidateMemberLists = () => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access') }
   function all(delay: number, reason: Invalidation = 'reconcile') {
     options.reconcile?.()
-    for (const target of targets.values()) target.invalidate(reason, delay)
+    // Identity authority must be invalidated before the Member lists decide what to retain.
+    invalidate('capabilities', reason, delay)
+    for (const [key, target] of targets) if (key !== 'capabilities') target.invalidate(reason, delay)
   }
   function periodic(own: number, first: boolean) {
     timer = setTimeout(() => {
@@ -126,6 +129,7 @@ export function createActivity(options: {
   }
   return {
     hold(key: string, target: ActivityTarget) { target.held?.(); if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
+    invalidateMemberLists,
     notice(event: ActivityNotice) {
       if (closed) return
       switch (event.type) {
@@ -146,12 +150,12 @@ export function createActivity(options: {
           break
         case 'channel_access_revoked':
           options.revoke?.(event.channel_id); retire(targets.get(`channel-members:${event.channel_id}`)); targets.delete(`channel-members:${event.channel_id}`)
-          lists(event.channel_id, 'access'); directories(); break
-        case 'channel_access_gained': options.access?.(event.channel_id); lists(event.channel_id, 'access'); directories(); break
+          lists(event.channel_id, 'access'); invalidateMemberLists(); break
+        case 'channel_access_gained': options.access?.(event.channel_id); lists(event.channel_id, 'access'); invalidateMemberLists(); break
         case 'dm_list_changed': invalidate('dms', 'access'); break
         case 'channel_list_changed': invalidate('channels', 'access'); break
         case 'channel_members_changed': invalidate(`channel-members:${event.channel_id}`, 'access'); break
-        case 'members_changed': directories(); invalidate('capabilities', 'access'); break
+        case 'members_changed': invalidate('capabilities', 'access'); invalidateMemberLists(); break
       }
     },
     disconnected() { clearTimeout(timer); generation++; targets.forEach(target => target.disconnected?.()) },
