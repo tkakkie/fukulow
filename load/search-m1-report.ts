@@ -129,12 +129,13 @@ function judgeScenario(scenario: Scenario, runs: ClassifiedRun[], smoke: boolean
     const pairs = arms('A', rate).map((a, index) => {
       const aMs = a!.sendMs!.p95!;
       const bMs = arms('B', rate)[index]!.sendMs!.p95!;
-      return { aMs, bMs, ratio: bMs === 0 && aMs === 0 ? 1 : aMs / bMs, absoluteDifferenceMs: Math.abs(aMs - bMs) };
+      return { aMs, bMs, ratio: bMs === 0 && aMs === 0 ? 1 : aMs / bMs, differenceMs: aMs - bMs };
     });
     const medianRatio = median(pairs.map(pair => pair.ratio));
-    const medianAbsoluteDifferenceMs = median(pairs.map(pair => pair.absoluteDifferenceMs));
-    if (medianRatio > 1.25 && medianAbsoluteDifferenceMs > 5) reasons.push(`A send p95 exceeds both limits at ${rate}/s`);
-    return { rate, pairs, medianRatio, medianAbsoluteDifferenceMs };
+    // Signed A − B: an A that is faster than B is not a regression (#153 maintainer decision 2026-11-18).
+    const medianDifferenceMs = median(pairs.map(pair => pair.differenceMs));
+    if (medianRatio > 1.25 && medianDifferenceMs > 5) reasons.push(`A send p95 exceeds both limits at ${rate}/s`);
+    return { rate, pairs, medianRatio, medianDifferenceMs };
   });
   if (aHighest === null || aHighest < bHighest) reasons.push('A highest sustained rate is below B');
   return { ...base, latency, judgement: reasons.length ? 'Material impact' : 'No material impact', reasons };

@@ -138,7 +138,21 @@ test('criterion 2 uses paired p95 ratios and differences, with median over three
   assert.equal(result.judgement, 'Material impact');
   assert.ok('latency' in result);
   assert.equal(result.latency?.[0]?.medianRatio, 1.3125);
-  assert.equal(result.latency?.[0]?.medianAbsoluteDifferenceMs, 6.25);
+  assert.equal(result.latency?.[0]?.medianDifferenceMs, 6.25);
+});
+
+test('criterion 2 uses the signed A − B difference, so a faster A never counts', () => {
+  const f = fixture();
+  const pairs: [number, number][] = [[12, 6], [3, 10], [6, 3]];
+  pairs.forEach(([a, b], index) => {
+    f.at('A', index + 1, 50).sendMs = sendMs(a);
+    f.at('B', index + 1, 50).sendMs = sendMs(b);
+  });
+  const result = f.judge();
+  assert.ok('latency' in result);
+  assert.equal(result.latency?.[0]?.medianRatio, 2);
+  assert.equal(result.latency?.[0]?.medianDifferenceMs, 3);
+  assert.equal(result.judgement, 'No material impact');
 });
 
 test('criterion 2 applies through 1000/s and skips non-comparison rates', () => {
