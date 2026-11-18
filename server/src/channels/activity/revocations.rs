@@ -49,7 +49,7 @@ pub(super) struct Capture {
 
 #[derive(Clone, Copy)]
 pub(super) struct Check {
-    id: u64,
+    pub(super) id: u64,
     sequence: u64,
     pub(super) generation: u64,
     pub(super) revision: u64,
@@ -128,6 +128,28 @@ impl Tracking {
 }
 
 impl Revocations {
+    pub(super) fn check(&self, id: u64) -> Option<Check> {
+        let tracking = self.0.as_ref()?;
+        tracking.lock().unwrap_or_else(|e| e.into_inner()).check(id)
+    }
+
+    pub(super) fn invalidate(&self, id: u64) {
+        if let Some(tracking) = &self.0 {
+            let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, Scope::Notice(proof))) = state.live.get_mut(&id) {
+                proof.verified = false;
+                proof.revision += 1;
+            }
+        }
+    }
+
+    pub(super) fn finish(&self, id: u64) {
+        if let Some(tracking) = &self.0 {
+            let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+            state.remove(id);
+        }
+    }
+
     pub(super) fn capture(&mut self, scope: ChangeScope) -> Capture {
         let tracking = self.0.get_or_insert_with(Default::default);
         let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
@@ -298,17 +320,27 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         if let Some(tracking) = self.tracking.upgrade() {
-            let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
-            state.live.remove(&self.id);
-            if let Some(channel) = self.scope.channel() {
-                if state.channels.get(&channel).is_some_and(|min| {
-                    !Tracking::needs_change(&state.live, state.member, state.role, channel, *min)
-                }) {
-                    state.channels.remove(&channel);
-                }
-            } else {
-                state.prune();
+            tracking
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(self.id);
+        }
+    }
+}
+
+impl Tracking {
+    fn remove(&mut self, id: u64) {
+        let Some((_, scope)) = self.live.remove(&id) else {
+            return;
+        };
+        if let Some(channel) = scope.channel() {
+            if self.channels.get(&channel).is_some_and(|min| {
+                !Self::needs_change(&self.live, self.member, self.role, channel, *min)
+            }) {
+                self.channels.remove(&channel);
             }
+        } else {
+            self.prune();
         }
     }
 }
