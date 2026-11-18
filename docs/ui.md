@@ -1,19 +1,19 @@
 # UI rules
 
-Web UI rules beyond code and tests (#200): layout, navigation, tokens, components, states, accessibility, keyboard and copy. These rules supersede the maintainer's Layout A2 [mockups](https://claude.ai/artifact/DsU9pFNvLgGfBkimjCSZm5) (A2 to A2-4). Sync and send policy stay with `docs/spec/realtime.md` (C1–C10, P1–P8). For one home per fact and updates by replacement or merge, see [writing rules](workflow.md#13-splitting-a-doc).
+Write shared web UI rules beyond code and tests (#200), including layout, navigation, tokens, components, states, accessibility, keyboard and copy. The maintainer chose Layout A2 (boards A2 to A2-4). This doc takes precedence if it conflicts with the [mockups](https://claude.ai/artifact/DsU9pFNvLgGfBkimjCSZm5). For sync and send, this doc covers UI presentation only. Follow the behaviour in `docs/spec/realtime.md` (C1–C10, P1–P8). Keep one home per fact and update by replacement or merge. [Writing rules](workflow.md#13-splitting-a-doc)
 
 ## 1. Layout
 - Left to right (§4 tokens): **rail** (`--rail-width`: logo, navigation, presence, settings, self), rounded **チャンネル column** (`--channel-col-width`, `--navbox`), fluid rounded **main** card (minimum `--main-min-width` only at widths >= 960px), rounded **right panel** card (`--panel-width`, opens/closes).
 - Separate surfaces by tone, radius and `--region-gap`, never lines.
-- Each チャンネル is an accordion row. Open rows show recent and Unread トピック first (up to 5), then `すべてのトピック(n)›` to open the panel's トピック tab. Leave room for personal sections (#204).
-- Main shows one **view** (main timeline or トピック view). Its Composer posts to that view.
+- Each チャンネル in the column is an accordion row. Open rows show that チャンネル's recent and Unread トピック first (up to 5), then `すべてのトピック(n)›` to open the panel's トピック tab. Leave room for personal sections (#204).
+- Main shows one **view** (a チャンネル's main timeline or one トピック view). Its Composer is part of that view and posts to it.
 - The panel holds one **layer** (tabs トピック / 概要 / メンバー or a 返信のつながり).
-- Main and panel timelines scroll independently. The page never scrolls. Prevent text forcing width with `min-width: 0` on flex/grid children and `overflow-wrap: anywhere` in Message bodies.
+- Each timeline in main or the panel has its own scroll container. The page never scrolls. Prevent text forcing width with `min-width: 0` on flex/grid children and `overflow-wrap: anywhere` in Message bodies.
 
 ## 2. Navigation: トピック and 返信のつながり
-- Open a トピック view from the チャンネル column, a トピック summary line, the panel's トピック tab or the palette. It replaces the main timeline. Its header shows `# チャンネル ›` and a back button to the main timeline.
-- `返信 n件›` or the reply action opens a 返信のつながり over the current panel tab. Header `‹` appears only if a tab was open and returns to it. `×` closes the panel. No deeper stack.
-- URL: `/o/{organization_id}/c/{channel_id}`, optional `/t/{topic_id}` for トピック and `?panel=topics|overview|members|reply:{message_id}`. URLs only hint at navigation. API decides access (C9/C10). Unavailable targets show §5's state.
+- Open a トピック view from a トピック in the チャンネル column, a トピック summary line, the panel's トピック tab or the command palette. It replaces the main timeline. Its header shows `# チャンネル ›` and a back button to the main timeline.
+- A Message's `返信 n件›` or reply action opens its 返信のつながり in the right panel over the current tab. Header `‹` appears only if a tab was open and returns to it. `×` closes the panel. No deeper stack.
+- URL: `/o/{organization_id}/c/{channel_id}`, optional `/t/{topic_id}` for a トピック view and `?panel=topics|overview|members|reply:{message_id}`. URLs only hint at navigation. API decides access (C9/C10). Unavailable targets show §5's state.
 
 | Action | History | Main | Panel | Focus |
 |---|---|---|---|---|
@@ -28,18 +28,17 @@ Web UI rules beyond code and tests (#200): layout, navigation, tokens, component
 | Browser/OS Back | the browser pops | from the URL | from the URL | as for the matching row above |
 | Direct link or reload | one entry, no synthetic parents | from the URL | from the URL | Composer; in-app `‹` replaces with the parent level (panel -> view -> チャンネル list), so it never leaves the app |
 - Every view change is announced once through the page live region (§6): `# チャンネル名` or `トピック名`.
-See §3 for panel sizing and overlays.
 
 ## 3. Responsive
 | Width | Rail | チャンネル column | Main | Right panel |
 |---|---|---|---|---|
-| >= 1280px | shown | shown | shown | pushes main |
+| >= 1280px | shown | shown | shown | pushes main narrower |
 | 960-1279px | shown | shown | shown | overlays main from the right |
 | 600-959px | shown | drawer from rail's チャンネル button; closes on selection or `Esc` | shown | overlays, `min(var(--panel-narrow-max), 100%)` wide |
 | < 600px (phone) | bottom tab bar | its own screen | its own screen | its own full screen |
 
-- Overlays have no scrim. Main remains usable and scrollable.
-- Phone (A2-4): one screen at a time (チャンネル list -> view -> panel layer). Header `‹` goes up one level, replacing the entry if the previous entry is not that parent (§2). Browser/OS Back pops real history: up a level after in-app navigation, possibly out of app from a direct link. Show the bottom tab bar only at the list level.
+- When the right panel overlays main, use no scrim and keep main usable and scrollable.
+- Phone (A2-4): one screen at a time (チャンネル list -> view -> panel layer). Header `‹` always goes up one level, replacing the entry if the previous entry is not that parent (§2). Browser/OS Back pops real history: up a level after in-app navigation, possibly out of app from a direct link. Show the bottom tab bar only at the チャンネル list level.
 - At 320 CSS px, cards, dialogs and Composers fit with no horizontal scroll or clipped actions (WCAG 1.4.10). At 200% text zoom all actions remain reachable. Touch targets measure at least `--touch-target` on each axis (phone and other defaults in `web/src/app.css`).
 - Drafts: one per target (Organization, チャンネル, トピック or none, reply root or none) in an Account Session memory store outside per-Organization controllers. Organization switching, navigation, resizing and level changes keep drafts. Adapters only read and forward intents (#97).
 - Submit atomically moves draft text to the pending send and empties the Composer. Acknowledgements never touch drafts, so new text stays.
@@ -76,7 +75,7 @@ Values in `web/src/app.css` under `:root`, with dark overrides under `prefers-co
 ## 5. Components and states
 Compose screens from the shared components (one per kind) in `web/src/ui/`: Button (primary, secondary, quiet, icon), Input/Textarea, Chip, Badge (Unread count, @), ListRow (チャンネル, トピック), MessageRow, ReadMarker, TopicSummaryLine, Panel (back/close header, tabs), Dialog, StatusBanner, EmptyState, Skeleton. Give one-off styles a PR reason.
 
-- `Button` accepts optional `tabindex` (`0 | -1`) and `buttonRef` so composite widgets can exclude secondary pointer buttons from `Tab` while keeping a return-focus target.
+- `Button` accepts optional `tabindex` (`0 | -1`) and `buttonRef` so composite widgets can exclude secondary pointer buttons from `Tab` while keeping a programmatic return-focus target.
 - `MessageRow` accepts `focusable`, `rovingTabindex` (`0 | -1`), `onrowfocus`, `onrowkeydown`, `onopenreplies(opener)`. Each timeline gives exactly one confirmed row `rovingTabindex={0}` (active, otherwise latest, §9). `Tab` enters without clearing the Composer draft. Row `Enter`/`R` passes `rowRef` as opener; clicking the inline reply Button (`tabindex={-1}`) passes `buttonRef`.
 - `Timeline`, `TopicView` and `ReplyPanel` share `createTimelineScrollController`, `measureTimelineItems`, `handleTimelineContainerScroll` and `applyTimelineScrollAction` from `web/src/timeline-scroll.ts` for pinned tracking, anchoring, own-send scroll to bottom and `新着 n件 ↓` (§8).
 - Sender labels: see §10 for deactivated authors. Use `メンバー` for unknown authors.
@@ -89,7 +88,7 @@ Render states consistently everywhere (A2-2).
 | Empty | EmptyState: what is empty + what to do | Composer stays usable |
 | Error, retryable | message + `再試行` | network/5xx/1011; keeps what is already shown |
 | Error, not retryable | message + where to go | no retry button |
-| チャンネル unavailable (C9) | `このチャンネルは利用できません` + `チャンネル一覧へ` | Disable Composer. No retry loop; reselect to try again. Action shows the list (desktop column, tablet drawer, phone screen), then focuses its visible heading (`tabindex="-1"` if needed). Never focus a hidden element |
+| チャンネル unavailable (C9) | `このチャンネルは利用できません` + `チャンネル一覧へ` | Disable Composer. No retry loop. Reselect to try again. The action shows the チャンネル list (desktop column, tablet drawer, full screen on phone), then focuses its visible heading (`tabindex="-1"` if needed). Never focus a hidden element |
 | 組織 unavailable (C10) | `この組織は利用できません` + `メンバー資格を再確認` / `組織を切り替える`; no チャンネル retry/list action | Terminal until explicit re-selection. No automatic reconnect, resubscribe or send retry for this 組織. Keep loaded Messages and drafts visible until re-selection. Other 組織 unaffected. Say access was lost and pending Messages could not be confirmed, never that they were unsent |
 | Reconnecting | StatusBanner `再接続しています…` (visual only, announcement in §6) | Keep content and send behaviour. Show banner only after 2 s offline |
 | Sending | Message with `送信中…` in `--text2` | resolved by C5 |
@@ -105,7 +104,7 @@ Render states consistently everywhere (A2-2).
 | Invite sign-out failure | `ログアウトできませんでした。通信状況を確認して、もう一度お試しください。` | keeps Invite and the action; no acceptance request |
 
 ## 6. Accessibility baseline
-- WCAG 2.2 AA. Label rail/チャンネル column `nav` and panel `aside`, use `main` for main and one `h1` per view. Start with skip link `メッセージへ移動`.
+- WCAG 2.2 AA. Use labelled `nav` elements for the rail and チャンネル column, a labelled `aside` for the panel, and `main` for main. Use one `h1` per view. Put the skip link `メッセージへ移動` first on the page.
 - Use labelled lists of `article` Messages without live roles. No `role="log"`. It expects end-only additions, while older pages, gap fills, reordering and トピック summary moves change earlier rows.
 - One polite `role="status"` per page is the sole live region for these events. Banners have no live role. Announce each live Message from someone else in the current view once after its 2 s window closes (`田中 美咲: 本文の先頭 80 文字`, or `新着メッセージ n件` for several in that window). The up-to-2 s delay for a single Message avoids duplicates.
 - While sender lookup is pending, hold that Message and later Messages in the view until the ready prefix can enter the 2 s window. Settled omission or failure uses `メンバー`. View change or teardown drops deferred Messages.
@@ -149,7 +148,7 @@ Keyboard first: every action has a keyboard path; frequent ones have shortcuts a
 - Individual commands beyond moving, panel and shortcut list come in follow-up Issues.
 
 ## 10. Japanese copy
-- Every Message view and announcement retains `名前（無効）` for deactivated authors (full-width parentheses, no space). Show the whole name and state as ordinary accessible text in the sender label. Never use colour alone.
+- Every Message view and announcement retains `名前（無効）` for deactivated authors (full-width parentheses, no space). Show the whole name and state as visible, ordinary accessible text in the sender label. Never use colour alone.
 - Polite plain tone (です・ます), short; no exclamation marks; no blame.
 - Errors: what happened + what to do, for example `メッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。` Never show raw codes, HTTP status or English error values.
 - Buttons are verbs: `送信`, `再試行`, `再送する`, `破棄`, `チャンネル一覧へ`.

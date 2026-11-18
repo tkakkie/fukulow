@@ -1,6 +1,6 @@
 # Decisions
 
-Record current decisions, rationale and rejected alternatives beyond code, tests and `openapi.json`. Link each one-line decision to its Issue or PR. [One home per fact, replace or merge updates](workflow.md#13-splitting-a-doc).
+Record current decisions, rationale and rejected alternatives that code, tests and `openapi.json` cannot explain. One line per decision. Link its Issue or PR for details. [One home per fact, replace or merge updates](workflow.md#13-splitting-a-doc).
 
 File in the main area's part under `docs/decisions/`, one part per area. Read all touched parts. Optional "Entries in other parts" are checked.
 

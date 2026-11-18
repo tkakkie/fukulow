@@ -1,6 +1,6 @@
 # Spec
 
-Record cross-client contracts, accepted limits and approved behaviour beyond code, tests and `openapi.json`. Mark approved, unimplemented behaviour as proposed. Keep only the contract once implemented. Omit REST shapes, status tables, test name lists, implementation history and code constants. [One home per fact, replace or merge updates](workflow.md#13-splitting-a-doc).
+Record cross-client contracts, accepted limits and approved behaviour that code, tests and `openapi.json` cannot yet describe. Mark approved, unimplemented behaviour as proposed. Once implemented, keep only its contract. Omit REST shapes, status tables, test name lists, implementation history and code constants. [One home per fact, replace or merge updates](workflow.md#13-splitting-a-doc).
 
 ## Terms (English in code/API, Japanese in UI)
 Account/アカウント, Organization/組織, Member/メンバー, Role (Owner/オーナー, Admin/管理者, Member/メンバー, Guest/ゲスト), Invite/招待,
