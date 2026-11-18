@@ -127,7 +127,7 @@ try {
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),
     serverDirty: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'status', '--porcelain']),
-    configured: Object.fromEntries(['CHANNELS', 'PUBLISH_CHANNELS', 'SUBSCRIBERS', 'PUBLISHERS', 'DURATION_SECONDS', 'PUBLISH_INTERVAL_MS',
+    configured: Object.fromEntries(['CHANNELS', 'PUBLISH_CHANNELS', 'SUBSCRIBERS', 'PUBLISHERS', 'PUBLISH_MEMBERS', 'DURATION_SECONDS', 'PUBLISH_INTERVAL_MS',
       'SOCKETS_PER_SESSION', 'SOCKETS_PER_ACCOUNT', 'CONNECT_BATCH', 'CONNECT_INTERVAL_MS', 'READY_TIMEOUT_SECONDS', 'DRAIN_TIMEOUT_SECONDS',
       'LOAD_LEGACY', 'LOAD_ALLOW_REJECTIONS', 'LOAD_RECONNECT', 'LOAD_RECONNECT_STORM', 'REQUEST_TIMEOUT_SECONDS',
       'LOAD_CONNECTIONS_ONLY', 'LOAD_SEND_BURST', 'LOAD_SEND_REFILL_PER_SECOND', 'LOAD_SCRIPT', 'THROUGHPUT_SCENARIO', 'THROUGHPUT_RATES', 'THROUGHPUT_STEP_SECONDS', 'THROUGHPUT_MEMBERS', 'THROUGHPUT_VUS', 'THROUGHPUT_MAX_VUS'].map(key => [key, env[key as keyof typeof env] ?? null])),
