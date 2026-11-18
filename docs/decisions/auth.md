@@ -1,119 +1,59 @@
 # Decisions: auth
 
-Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and the other parts: [index](../decisions.md).
+[Contract](../spec/accounts.md) · [Index](../decisions.md) · [Channels](messages.md#channels-and-messages) · [Delivery](realtime.md#real-time-delivery) · [Web](web.md#web-client)
 
 ## Auth, Accounts and tenancy
-- #300 sign-out 401 expires current and legacy cookies without revocation. Invite acceptance still rejects stale credentials: explicit cookie removal repairs the browser without silently downgrading authentication or attaching an existing Account by email.
-- #299 shared raw-text validation rejects NUL in emails, setup names and Channel names before operation DB/Argon2 work; sign-in before throttle. Existing authentication/setup-token gates keep 401 precedence. Reason: PostgreSQL text cannot store NUL; avoid 500 and throttle bypass.
-- #146 splits global Accounts and Account Sessions from Organization Members. Authority is the Account plus the Organization URL on each request. Documented global operations: setup existence, credential/session lookup, active-Organization listing, Session cleanup.
-- Non-Member, unknown Organization and deactivated Member return the same 404 `organization_unavailable` so Membership is not disclosed (#146).
-- #197 web POST /session returns only identity/expiry via HttpOnly cookie; native POST /native/session returns bearer JSON without cookies. Both share verification, issuance, throttle and DELETE /session revocation; only SHA-256 stored, 30-day expiry.
-- #197 endpoint choice is explicit, never a flag or User-Agent boundary. The split limits accidental web token exposure but cannot fully prevent XSS: injected same-origin code can act as the user or call native sign-in with captured credentials.
-- #197 HTTPS uses __Host-fukulow_session (Secure, HttpOnly, Strict, Path=/, no Domain); old fukulow_session is refused and expired on web sign-in/sign-out. Existing web users sign in again. Local HTTP alone keeps the old name (FUKULOW_COOKIE_SECURE=false).
-- #197 migration deletes all existing Account Sessions, following #146: old web JSON exposed bearer credentials, so cookie expiry is insufficient. Every web and native client must sign in once after deployment.
-- #197 FUKULOW_COOKIE_SECURE describes the public HTTPS serving path, including TLS proxies: it selects Secure cookies, CSP wss and default HTTPS cookie Origins. False is only for local HTTP; forwarded headers never select these policies.
-- #197 app-wide CSP allows external same-origin scripts/styles and explicit ws(s)://Host, plus nosniff, strict-origin-when-cross-origin and frame-ancestors none on errors too. Validated Host preserves proxy ports; forwarded headers cannot widen CSP.
-- #197 HSTS max-age=31536000 lives at TLS termination in both profiles (#469), without includeSubDomains/preload. nginx derives it from $https; Caddy skips localhost/loopback to avoid breaking other dev ports. HTTP challenge responses and redirects never send HSTS.
-- #401: app and both proxies send COOP same-origin and empty Permissions-Policy feature allowlists, including errors. No current web API needs an exception. App covers optional direct access; proxies cover own errors. Maintainer browser acceptance gates deployment; regressions need a decision.
-- #197 Vite manifest outputs alone get one-year immutable caching; HTML, SPA fallback and unhashed files revalidate. API keeps no-store and is never compressed. #486 replaces proxy compression with build-time Brotli negotiation in the asset handler to reduce transfer bytes.
-- #196 keeps four shared Argon2 workers (~76 MiB hashing memory), adds 32 waiting slots and a 1 s admission deadline: small bursts queue without unbounded retained requests. Setup and Invite hashing share the bound; running work retains its permit after HTTP cancellation.
-- #196 Argon2 admission uses 503 ErrorBody `password admission unavailable` and jittered Retry-After 1-5 s, matching operation-specific admission errors. Known/unknown emails share admission; rejection spends no failure budget or session token entropy.
-- #340 runtime image sets glibc `MALLOC_MMAP_THRESHOLD_=131072`: freed 19 MiB Argon2 blocks return to the OS (RSS peak 660 -> 90 MiB, idle 14 MiB), no throughput/p95/p99 regression on bookworm. glibc-only: re-measure on libc change. Trixie, glibc 2.41 (#513): RSS holds; throughput, p95/p99 unverified.
-- #196 sign-in validates, reserves IP/email budgets, then admits before Account lookup, passing one permit to verification. 429 precedes 503; rejected admission touches no DB. Permits cover lookup plus hashing; overload can mask DB errors and slow lookups reduce hashing utilization.
-- Account Session cleanup is opportunistic: one global 1,000-row expired batch per permitted minute, single flight, 2 s deadline / 1 s statement timeout; no scheduler (#146, replacing the #53/#73 per-Organization design).
-- #146 migration refuses duplicate lower(email) across Organizations and reports all of them; it never merges Accounts or compares password hashes. Old sessions are dropped; users sign in again (no compatibility path).
-- Deactivation is `users.deactivated_at` (NULL = active). Member rows are never deleted and their Organization/id/Account cannot change (DB triggers), preserving historical senders; UNIQUE (organization_id, account_id) (#146).
-- Reactivation never restores old private Channel permissions: grants capture `membership_revision`, access needs the current revision, and a trigger bumps it on every deactivation, even via direct SQL (#146). Re-grant goes through #149.
-- #151 DM access needs participation plus an active current-revision grant; Owner/Admin never bypass it. Only active non-Guests may open; create/renew needs an active same-Organization peer including Guest. Reason: participation grants neither creation nor third-party access.
-- #151 explicit non-Guest open resolves accessible DMs without renewal by default; renew:true requests peer renewal. Renewal replaces all lapsed grants atomically, preserving current grants. Reason: lost-response recovery must not change access; reactivation restores nothing (2026-11-14).
-- #151 peer eligibility belongs to new sends and create/renew, never shared history/mark-read visibility. Deactivation closes target sockets 4003 and leaves the active peer's read access intact. Reason: offboarding invalidates the target Membership, not the other participant's history.
-- Auth resolves the Account Session and optional active Member in one LEFT JOIN (no Session: 401; no Member: 404). Member SQL stays in `auth` as composable scoped fragments (#146 review).
-- Sign-in throttle, process-local 60 s windows: 20 failures per IPv4 or IPv6 /64 (IPv4-mapped shares IPv4), 5 per normalized email; in-flight attempts reserve capacity before Argon2; only failed credentials persist.
-- #196 each throttle map holds at most 10,000 keys: reclaim expired idle buckets first, then evict the oldest idle bucket so unknown-email churn cannot globally lock out Accounts. Never remove pending buckets; all-pending exhaustion remains 429 + Retry-After.
-- #196 idle eviction resets unexpired IP/email failure history: sustained >10,000-key churn can bypass that limit. Accept this process-local defense tradeoff for availability; the other map and bounded Argon2 admission still constrain work, but do not replace a durable per-Account limit.
-- #194: forwarded IPs require a trusted exact IP/CIDR peer and configured header. One field uses its rightmost IP; repeated fields or invalid rightmost IP use the socket peer. This preserves Caddy/nginx append semantics without trusting earlier hops.
-- Accepted throttle tradeoffs: the per-email budget lets anyone lock a known Account for up to one window (limits guesses across IPs); fixed windows allow up to twice the budget across a boundary; restarts reset limits.
-- #194: require a nonblank FUKULOW_SETUP_TOKEN in every mode and reject the former public example; ship an empty template. Cookie transport never exempts it. Constant-time digest compare and generic 401 gate setup. Never generate/log it, preventing public instance claims before the Owner arrives.
-- #194: Compose separates proxy/app edge from app/DB backend, publishes only proxies and trusts the fixed proxy IP. EDGE_PREFIX derives subnet, gateway and proxy IP together; gateway/subnet trust would permit host-path spoofing. No dependency added for CIDR masks.
-- Setup body extraction stays before token verification: extraction errors are generic and reveal neither the token nor bootstrap state; documented and tested instead of rewriting the handler.
-- Setup checks Organization existence without a lock before Argon2 work (after token and validation); the locked transactional check stays authoritative for concurrent bootstrap.
-- `GET /api/v1/setup` is public and read-only, returning only `setup_required` with `no-store`, sharing POST setup's single `SELECT EXISTS`, so the web can choose setup or sign-in.
-- CI probes health through Caddy HTTPS and nginx HTTPS with a local Pebble CA (#469); main/manual acceptance also proves WSS, renewal and persisted certificate reuse. Public-domain issuance/renewal remains manual.
-- Cookie WebSockets require one matching Origin: same Host over HTTPS (HTTP when cookie_secure=false) or `FUKULOW_WS_ALLOWED_ORIGINS`; forwarded headers never decide it. Origin is checked before Auth and Organization parsing; Bearer needs no Origin.
-- #144 uses one deny-by-default authorize function, including SQL role sets derived from it. Owner changes Roles/invites any Role; Admin invites non-Owners. Guests need explicit current grants even for public Channels; private grants remain required for every Role.
-- #303 lists range over unconsumed expiry, then sort live candidates; retain the final clock check and all anchors. Reason: expired history must not extend the Organization lock; replace the creation-order index to avoid generic-plan history scans. Evidence: [#303 baseline](../measurements.md#invite-list-expiry-range-303).
-- #303 management follows authorize(Invite(Role)), independent of issuer status. Filter before page fill to hide Owner-Role Invites from Admins; uniformly deny unavailable targets without email disclosure.
-- #303 retains random UUID cursor anchors per Invite and management Role, scoped by Organization. Keysets use creation time/id; consumed anchors stay valid, avoiding offset skips. Separate Role anchors prevent cross-Role reuse without keys or cursor storage tables.
-- #303 management rechecks Role/activity/revision under Organization -> Invite locks through COMMIT. Acceptance checks revoked_at inside its transaction, so the first operation wins atomically and issuer promotion cannot revive revocation.
-- #144 Invites bind email/Role for 7 days; SHA-256 of 256 random bits is stored. Existing Accounts authenticate; anonymous uniqueness conflicts require sign-in, never email attachment. Activation/consumption is atomic.
-- #144 Invites retain their same-Organization issuer. Acceptance re-checks active Membership and current Role under the Organization lock using the creation policy, so demotion/deactivation cannot be bypassed with a stored Invite.
-- #144 Owner transitions write-lock/version the Organization row; a DB trigger guards the last active Owner, including direct SQL. The MVCC write aborts stale REPEATABLE READ snapshots instead of trusting an old Owner count. #305 deactivation retains #146 identity/revisions.
-- #293 A (#314 step 4): RLS is defense in depth on every organization_id table for fukulow_app (NOBYPASSRLS). USING and WITH CHECK compare organization_id to transaction-local fukulow.organization_id; unset fails closed. SQL organization_id predicates and authorize stay.
-- #314 Organization access uses transaction-local authenticated/internal Organization context; Account identity uses verified Account context. SQL scopes and authorize stay. Fallback batches group by Organization.
-- #314 Setup existence and its post-lock recheck call the boolean-only SECURITY DEFINER fukulow_setup_required(), enabled with RLS: RLS hides other Organizations from the app role, so a direct EXISTS would always see none (#334).
-- #314 context helpers own BEGIN, bound local settings and cleanup before/after a closure; send BEGIN accepts optional Organization context. Owned guards discard unconfirmed cleanup, including cancellation before BEGIN's response; production send callers supply their Organization.
-- #314 single-statement hot reads use local context in a materialized CTE with a correlated, non-flattened LATERAL read: explicit BEGIN/set/COMMIT cost 3 extra round trips per read (subscription 13 vs 30 statements). Errors/cancellation discard; multi-statement snapshots stay explicit.
-- #314 single-statement scope: one-statement Organization reads only (Channel visibility, member_access, single-batch access_rows, replay pages) and the send COMMIT-barrier watermark, which then reads seq in a fresh snapshot. Writes and multi-statement reads use explicit transactions.
-- #314 definer EXECUTE is revoked from PUBLIC in the migration and granted to fukulow_app in db-grants.sql, which the roles step reapplies after pg_restore --no-acl resets function ACLs.
-- #314 single-statement risk: RLS safety depends on the materialized CTE running before the LATERAL read. Step 4 tests every use with production policies (custom/generic plans, Organization switch, reuse, unset, cancellation); any unguaranteed case reverts to an explicit transaction (#334).
-- #293 exceptions stay narrow, never BYPASSRLS: accounts/account_sessions have no RLS; /me uses a SELECT-only policy for the caller's own Members; setup uses a boolean-only SECURITY DEFINER function; fallback rechecks run one transaction per Organization.
-- #151 maintenance enumerates one Organization UUID with wraparound via a restricted SECURITY DEFINER function; no names/data. Reclamation visits one Organization/minute without client traffic, then uses local RLS context and bounded transactions; no global tenant read/delete permission is added.
-- #293 Owner jobs (migrations, pg_dump, restore drill) run as the superuser owner and bypass RLS by design; ENABLE without FORCE. RLS tests connect as a non-superuser role (AppState::for_test), because CI tests connect as postgres. Merge needs before/after hot-path measurements.
-- #294 A (#315): a Guest lists only themself and active Members with a usable grant on a Channel the Guest can access; other Roles keep the full list. Sender names come from #301's author lookup scoped to readable Messages, never by widening the list.
 
-- #305 Owner may deactivate another active Member; Admin only non-Owners; no self-deactivation. Authorize before target disclosure, then target-specific denial before last_owner/last_channel_manager. Reason: offboarding without self-lockout or existence leaks.
-- #305 owns the deactivation transaction and post-COMMIT revision signal in one detached task. Reason: HTTP cancellation must not lose notification; 4003 affects all Sessions of only that Membership, with the documented revocation boundary and 35 s fallback.
+- #146 global Accounts/Sessions share sign-in across independent Organization Roles. Uniform 404 hides Membership. Global exceptions cover setup existence, credential/Session lookup and cleanup, and own active Organizations. Auth owns Member SQL. Migration reports duplicate normalized emails and aborts without merging or comparing hashes.
+- #300 sign-out 401 expires current and legacy cookies for explicit Invite recovery without anonymous fallback.
+- #299 shared raw-text validation rejects NUL before DB/hash or sign-in throttle because PostgreSQL cannot store it.
+- #197 uses explicit cookie/bearer endpoints to keep web tokens out of JSON. No flag/User-Agent routing. Same-origin XSS can still act as the user or call native sign-in with captured credentials. Migration revoked old bearers because cookie expiry was insufficient.
+- #197 FUKULOW_COOKIE_SECURE describes the public HTTPS path, including behind proxies. It selects cookie/CSP wss/Origin policy. False is for local HTTP. Cookie WS requires one same-Host Origin including port or exact FUKULOW_WS_ALLOWED_ORIGINS match. Bearer needs no Origin. Forwarded headers cannot select policy.
+- #197 app-wide CSP allows external same-origin scripts/styles and ws(s) to validated Host including port. Forwarded headers cannot widen CSP. Frame denial, nosniff and strict-origin-when-cross-origin cover errors too.
+- #197 HSTS max-age=31536000 lives at TLS termination (#469). No subdomains/preload or HTTP challenge/redirect headers. Caddy skips localhost/loopback to protect other dev ports.
+- #401: app and both proxies send COOP and Permissions-Policy to cover direct access/proxy errors. Browser acceptance gates deployment and regressions require a decision. [Contract](../spec/deployment.md#deployment-194-c)
+- #197 Vite manifest outputs alone get immutable caching. #486 build-time Brotli negotiation replaces proxy compression to cut bytes. [Contract](../spec/deployment.md#deployment-194-c)
+- #196 bounds shared Argon2 workers and waiting (including setup/Invite hashing) for memory and bursts. Reserve IP/email then admit before lookup: one permit covers lookup/hash, hiding Account existence and avoiding DB load on refusal. Overload can mask DB errors and slow lookups reduce utilization.
+- #340 glibc mmap threshold frees Argon2 blocks. Re-measure on libc change. Trixie #513 verified RSS only.
+- #146 opportunistic cleanup keeps global Sessions off a per-Organization job (#53/#73) or scheduler. Tight deadlines limit interference.
+- #196 idle eviction avoids global lockout. Churn/eviction and restart reset failures. Fixed windows allow twice the budget at boundaries. Email limits distributed guesses but allow one-window targeted lockout. The other map and Argon2 bound work without durable Account protection.
+- #194: forwarded IPs require a trusted peer and configured header. Rightmost selection trusts only the append hop. [Deployment](../spec/deployment.md#proxy-and-sign-in-limits)
+- #194: require a nonblank FUKULOW_SETUP_TOKEN in every mode to prevent pre-Owner claims. Keep extraction before constant-time token verification and document/test its generic errors instead of rewriting the handler, since those errors reveal neither token nor bootstrap state. Public status lets web choose setup or sign-in. After token and input validation, check global existence without a lock before hashing and recheck under the Organization table lock for races.
+- #194: Compose separates proxy/app edge from app/DB backend. Derive addresses together and trust the fixed proxy IP only because gateway/subnet trust includes the host path.
+- CI probes health through Caddy HTTPS and nginx HTTPS with Pebble (#469). Main/manual adds WSS, renewal and cert reuse. Public-domain checks are manual.
+- #144 centralizes deny-by-default authority and SQL Role sets. Version the Organization lock row to abort stale REPEATABLE READ updates before using an old Owner count.
+- #303 lists range over unconsumed expiry, sort live rows and recheck the clock. Creation-order indexing prolonged locks by scanning expired history in generic plans. [Baseline](../measurements.md#invite-list-expiry-range-303)
+- #303 management follows invited-Role policy regardless of issuer. Pre-fill filtering and uniform 404s hide counts/email. Lock with acceptance to serialize irrevocable revocation.
+- #303 retains random UUID cursor anchors scoped by Organization/Invite/Role to prevent foreign reuse without keys/tables. Consumed anchors and keysets avoid offset skips.
+- #144 uses seven-day Invites and stores only SHA-256 of the 256-bit token. Authenticate Accounts instead of trusting email equality. Recheck issuer under Organization lock so old Invites cannot bypass lost authority.
+- #293/#314 RLS USING/WITH CHECK require transaction-local Organization as the app role, alongside SQL scope and authorize. Unset fails closed. Global credentials/Sessions, own-Member SELECT, boolean setup definer (#334) and owner jobs (ENABLE without FORCE) are narrow exceptions. Direct EXISTS would miss hidden Organizations. Verify as app role and compare hot paths.
+- #314 helpers own BEGIN/context/cleanup. Discard unconfirmed connections even before BEGIN acknowledgment. Reapply restricted definer EXECUTE after no-ACL restore. Writes and multi-read snapshots use transactions.
+- #314 single-statement hot reads use materialized context CTE before non-flattened LATERAL to save three round trips. This covers Channel visibility, member_access, single-batch access_rows, replay pages and the send barrier (fresh watermark snapshot). Revert any path to transactions unless isolation holds across plan modes, scope, reuse, unset and cancellation (#334).
+- #151 maintenance enumerates one Organization UUID per minute with wraparound. Bounded local-RLS reclamation needs no traffic or global tenant data access.
+- #151 DM access needs participation and current grant to preclude third-party access and Role bypass.
+- #151 explicit non-Guest open resolves already accessible DMs before peer eligibility for safe lost-response retries. The renewal branch replaces lapsed grants atomically and preserves current ones.
+- #151 peer eligibility belongs to new sends and create/renew, preserving active peer history/mark-read at offboarding.
+- #294 A (#315) limits Guest discovery to shared grantees and uses readable authors (#301) to resolve past names without widening access.
+- #305 Owner may deactivate another active Member and Admin only non-Owners. Authorize before disclosure and check target before guards to prevent leaks/self-lockout.
+- #305 owns the deactivation transaction and post-COMMIT signal in a detached task so cancellation cannot lose 4003.
 
 ## Password and other Sessions (#304)
-- #304 PUT /api/v1/me/password takes current_password/new_password; POST /api/v1/me/sessions/revoke-others takes current_password. Both return 204 and keep the current Session, so an Account can secure itself without losing its active client.
-- #304 wrong current password is 403 current_password_incorrect; 401 means only an invalid/expired/revoked Session on these endpoints. Reason: clients end their Session on 401. Invalid new length is 400 invalid_new_password, distinct from 429 too many sign-in attempts.
-- #304 both actions share sign-in IP/email failures and in-flight reservations before Argon2; only wrong passwords count. One admitted worker verifies and hashes the replacement, avoiding a second queue admission while retaining the Account lock.
-- #304 lock order: Account FOR UPDATE -> current Account Session -> other Sessions; web/native sign-in: Account FOR UPDATE -> new Session. Hold through COMMIT, verifying under the Account lock, so an authenticating sign-in cannot escape revocation.
-- #304 recheck current Session/password under locks, then atomically update password and delete other Sessions across Organizations. A detached task owns the transaction and post-COMMIT token signals, so cancellation cannot lose 4001; the observed-loss/in-flight-frame boundary stays.
+
+- #304 PUT /api/v1/me/password takes the current password as does revoke-others. Keep the current Session so users can secure an Account without losing access.
+- #304 wrong current password is 403 current_password_incorrect because clients end their Session on 401.
+- #304 recheck current Session/password under locks. One admitted worker verifies and hashes the replacement, avoiding a second queue admission while holding the Account lock. Lock Account before sign-in verification so it cannot escape revocation. Detach the transaction and post-COMMIT signals so HTTP cancellation cannot lose 4001.
 
 ## Sessions and revocation
-- #149 channel_access_lost carries only channel_id, keeps the socket open and retires the subscription. The same fallback worker checks captured grant lifetimes under its 35 s bound; failed/overdue passes fail closed. No retained notification state.
-- #149 observed loss fences queued/replay frames and subscribed at first socket poll under the status read guard. Only an already handed-off frame may finish; REST authorization/data snapshots established before COMMIT may finish without later Messages.
-- Two independent revocations: ending an Account Session signals its token hash in all Organizations (4001); Membership loss signals (organization_id, account_id) with its new revision (4003), leaving other Organizations alone (#146).
-- Revocation boundary: history/replay deny once revocation commits; live delivery starts no new protected frame after the check sees loss, but frames already in flight may arrive. Commit never retracts an in-flight frame (#146, #149).
-- Fallback worker: one process-local worker checks all distinct session keys every 30 s in 1,000-key batches under one 5 s deadline; a lost signal is detected within 35 s. Only a fully successful pass revokes; any failure closes the snapshot with 1011 (#57 PR C, #157).
-- No session-count cap on the fallback pass: 100,000 distinct sessions passed in ~0.25-0.33 s, well inside the 5 s deadline (#157, #146). De-duplication is by Organization/token hash, not socket count.
-- Classification precedence: known Account Session end (4001) wins over Membership loss (4003), which wins over database/worker failure (1011), including signals latched before socket admission (#146 Copilot).
-- Open sockets use the database expiry clock plus immediate revocation signals; a lagging revocation receiver fails closed with 4001 (#18).
-- The initial WebSocket session check is capped at 5 s (was the 30 s pool default); a DB error there closes with 1011, reserving 4001 for ended sessions (#57 PR C).
-- #157 supervises the worker: any unexpected exit latches unavailability, signals 1011 and refuses new WebSocket admission. A failed non-revoked registration gets a fresh watch sender; revoked epochs are never replaced.
-- #163: after an unexpected worker exit the process exits(1) after a fixed 2 s grace so Compose `restart: unless-stopped` restores service. Rejected: a healthcheck alone, because Compose does not restart unhealthy containers.
-- #163/#195: successful return after registry drop or explicit pool close is normal. Graceful shutdown closes the pool only after HTTP, sends, notifications and sockets drain, so fallback supervision does not exit(1); panic/cancel remains fatal even during teardown.
-- #163 exit cuts in-flight HTTP; outcomes may be unknown. Recovery is an idempotent retry with the same `client_message_id` plus #135 replay; no automatic HTTP retry and no Close-frame delivery promise.
-- #163 manual check: `node scripts/check-compose-restart.ts` verifies `restart: unless-stopped` after killing the real main process (host-PID helper when in-container SIGKILL is ignored); Rust tests cover the panic path.
 
-## Entries in other parts
-
-Entries that also govern this area, listed by the start of the entry in that part.
-
-- [messages](messages.md): `#152 proposes exact`, `#152 accepts only`, `#152 Message and message_mentions`, `#152 locks sorted`, `#152 proposes message_mentions`
-- [realtime](realtime.md): `#196 B headroom is shared`, `#196 B leaves RLS`, `#152 Mention counts inherit`
-
-- [process](process.md): `#198 B: pinned tracing/subscriber`
-- [realtime](realtime.md): `#198 B: admission sites only increment`
-
-- [load](load.md): `#151 adopts DM performance acceptance`
-- [messages](messages.md): `#151 DM is a Channel kind`, `#151 POST /dms opens`, `#151 new sends hold`, `#151 DMs reject Topic intent`
-- [messages](messages.md): `#151 reclaim only discovery revisions`
-- [realtime](realtime.md): `#151 dm_list_changed targets`, `#151 DM discovery reuses`, `#151 DM list responses`, `#151 DM list base limits`, `#151 B4 adopts`, `#151 coalesces discovery`
-- [messages](messages.md): `#204 sections belong`, `#204 access loss hides`, `#204 composite Organization/Member/section`, `#204 moves, reorders and deletes`
-- [realtime](realtime.md): `#204 sections_changed goes only`
-- [messages](messages.md): `#301 author lookup takes at most 100 input ids`
-- [web](web.md): `#300 Invite session 401 offers`, `#300 Sign-in, sign-out and Invite acceptance share`
-
-- [messages](messages.md): `#231/#305 reject Role demotion or deactivation with 409`, `#149 API mutations lock Organization, Channels`, `Sends re-check Member/revision/private grant after BEGIN`, `#142 Messages owns read positions. Migration/grant`, `#142 access triggers serialize per Organization`
-- [messages](messages.md): `#292/#311: a private`, `#292/#311 The right lives`, `#292/#311 last_channel_manager counts`
-- [messages](messages.md): `#142/#144 triggers mirror Channel visibility, including`, `#144 Role/grant changes reconcile positions under`, `DeferredOrganizationAuth rejects Session/database errors before reading`
-- [realtime](realtime.md): `Message persistence and sign-out finish regardless`, `#57 item 4: auth owns the`
-- [web](web.md): `Capabilities ({allowed, reason?}) come from authorize:`
-
-- [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`, `#311 The private-Channel trigger locks its Channel row`
-
-- [messages](messages.md): `#515 uses Organization UUID epochs`
-
-- [realtime](realtime.md): `#396/#551 revocations carry`
+- #149 channel_access_lost carries only channel_id, keeps the socket open and retires the subscription without retained notice state. [Fallback grant checks](../spec/realtime.md#real-time-sync-contract)
+- #149 observed loss fences queued/replay frames and subscribed at first poll under the status guard.
+- Two independent revocations: ending an Account Session signals token hash globally (4001). Membership loss signals Organization/Account plus revision (4003) (#146).
+- Revocation boundary: history/replay deny once revocation commits. Earlier snapshots may finish without later Messages. Live observation serializes with handoff. In-flight frames may finish (#146, #149).
+- #57 PR C/#157 bounded process-local fallback deduplicates Organization/token hash with no Session-count cap. Whole pass must succeed to apply revocations. Failure closes snapshot.
+- Classification precedence: known Account Session end (4001), Membership loss (4003), then DB/worker failure (1011), including admission latches (#146).
+- Open sockets use the database expiry clock and immediate signals. Lagging receivers fail closed 4001 (#18).
+- The initial WebSocket session check is capped at 5 s. DB failure is 1011 to distinguish ended Sessions (#57 PR C).
+- #157 supervises the worker: any unexpected exit latches unavailable, signals 1011 and refuses admission. Fresh SQL can recover failed unrevoked epochs.
+- #163: after an unexpected worker exit exit(1) after 2 s so Compose restarts it. Healthcheck alone cannot. HTTP outcome may be unknown. Recover via same client_message_id and #135 replay. No automatic retry or Close delivery guarantee.
+- #163/#195: successful return after registry drop or explicit pool close is normal. Drain HTTP/sends/notices/sockets first. Panic/cancel stays fatal.
+- #163 manual check: node scripts/check-compose-restart.ts verifies Compose restarts the actual main process.
