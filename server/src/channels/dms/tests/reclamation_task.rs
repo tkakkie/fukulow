@@ -1,6 +1,7 @@
 use super::super::reclamation::{batch, run_with_interval};
 use super::*;
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 async fn old_rows(f: &Fixture) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM dm_discovery WHERE organization_id=$1 AND member_id=$2 AND membership_revision=0")
@@ -115,10 +116,10 @@ async fn periodic_reclamation_needs_no_traffic_survives_errors_and_stops_on_shut
         a.org
     );
     sqlx::raw_sql(&ddl).execute(&a.pools.admin).await.unwrap();
-    let shutdown = crate::shutdown::Shutdown::default();
+    let (cancel, cancelled) = oneshot::channel();
     let task = tokio::spawn(run_with_interval(
         a.pools.app.clone(),
-        shutdown.clone(),
+        async move { cancelled.await.unwrap() },
         Duration::from_millis(200),
     ));
     wait_reclaimed(&b).await;
@@ -129,7 +130,7 @@ async fn periodic_reclamation_needs_no_traffic_survives_errors_and_stops_on_shut
         .await
         .unwrap();
     wait_reclaimed(&a).await;
-    shutdown.begin();
+    cancel.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(1), task)
         .await
         .unwrap()
@@ -138,7 +139,12 @@ async fn periodic_reclamation_needs_no_traffic_survives_errors_and_stops_on_shut
     b.reactivate(b.b).await;
     assert_eq!(b.open(&b.at, b.b, true).await.status(), StatusCode::OK);
     b.deactivate(b.b).await;
-    run_with_interval(b.pools.app.clone(), shutdown, Duration::from_millis(1)).await;
+    run_with_interval(
+        b.pools.app.clone(),
+        std::future::ready(()),
+        Duration::from_millis(1),
+    )
+    .await;
     let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM dm_discovery WHERE organization_id=$1 AND member_id=$2 AND membership_revision=1")
         .bind(b.org).bind(b.b).fetch_one(&b.pools.admin).await.unwrap();
     assert_eq!(remaining, 1);
@@ -150,10 +156,10 @@ async fn periodic_reclamation_runs_only_one_bounded_batch_per_tick(pool: PgPool)
     let f = Fixture::new(pool, "guest").await;
     paging::large_fixture(&f, 1_001).await;
     f.deactivate(f.a).await;
-    let shutdown = crate::shutdown::Shutdown::default();
+    let (cancel, cancelled) = oneshot::channel();
     let task = tokio::spawn(run_with_interval(
         f.pools.app.clone(),
-        shutdown.clone(),
+        async move { cancelled.await.unwrap() },
         Duration::from_secs(60),
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -177,7 +183,7 @@ async fn periodic_reclamation_runs_only_one_bounded_batch_per_tick(pool: PgPool)
     .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!task.is_finished());
-    shutdown.begin();
+    cancel.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(1), task)
         .await
         .unwrap()
