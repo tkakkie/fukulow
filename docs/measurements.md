@@ -59,6 +59,8 @@ From `server/` with local PostgreSQL and `ulimit -n 100000`, run `MEASURE_READ_B
 
 2026-11-18 JST, `b156fba`, Caddy Compose on macOS. Eight publishing Members, 11.39 s (55 s cap), 80 sends, 400 deliveries, zero 429s at burst 10 and refill 1/s. From `5fa245f` until `b156fba`, light CI used one publishing Member, burst 10,000 and refill 1,000/s. [CI reproduction](../load/measurements-archive.md#light-k6-reproduction-351)
 
+2026-11-19 JST, harness `223a948` (#597): k6 2.4.0 starts a separate 2.x baseline. Three interleaved runs each of 1.8.2 and 2.4.0 on the same Mac all passed with identical counts (80 sends, 400 deliveries, zero errors, 429s or missing deliveries) over HTTP/2. Delivery p95 was 16.00–16.05 ms on 1.8.2 and 16.00–17.05 ms on 2.4.0. [Comparison record](../load/measurements-archive.md#light-k6-run-k6-182-vs-240-597-2026-11-19-jst-mac)
+
 ## Sustained write throughput (#309)
 
 2026-11-13 JST, `6f95221` (before the send limiter). Four Members, 17-byte bodies, no subscribers. At 4,000 offered/s, 200 public Channels accepted 3,968/s at p95 21 ms and one hot Channel accepted 1,749/s at p95 68 ms. Evidence for the [write target](spec.md#performance-targets-first).
