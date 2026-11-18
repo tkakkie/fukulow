@@ -3,6 +3,7 @@
 Keep only the latest baseline per scenario, the decision or open acceptance it supports, the harness path and reproduction command, and known limits. Append superseded or new detailed records verbatim to `load/measurements-archive.md` and summarise the current evidence here. [Writing rules](workflow.md#13-splitting-a-doc)
 
 Measurements are evidence only and establish no performance, capacity or latency guarantee.
+Compare runs only at the same send-limit settings and publishing Member count.
 
 Raw logs, artifact directories and local paths are outside Git and may no longer exist. Checked 2026-11-18 on the maintainer's Mac (`/private/tmp` is volatile): gone for #137, #142, #151, #160 (except `i160-smoke-fix`), #195 send-drain logs, #196 B, #314 step 5 before-run, #469 smoke; still present for #153, #195 storms, #303, #314 step 5, #356, #409, #466, #486; Actions artifact `proxy-measure-43844208337-1` (#469) not yet expired. See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
 
@@ -54,11 +55,15 @@ Run `LOAD_PORT=18096 SIGNIN_CONCURRENCY=64 SIGNIN_RATE=500 SIGNIN_SECONDS=60 SIG
 
 From `server/` with local PostgreSQL and `ulimit -n 100000`, run `MEASURE_READ_BUFFER=8192 cargo test --release --lib realtime::tests::limits::measure_idle_socket_rss_by_read_buffer -- --ignored --exact --nocapture` and `MEASURE_SECONDS=30 MEASURE_FLOODERS=8 cargo test --release --lib realtime::tests::limits::measure_reconnect_flood_subscribe_load -- --ignored --exact --nocapture`. Loopback clients share the process and RSS. Cap confirmation is open in #431. [Full record](../load/measurements-archive.md#websocket-socket-caps-frame-budget-and-read-buffer-196-a-2026-11-13-jst)
 
+## Light k6 run (#351)
+
+2026-11-18 JST, Caddy Compose on macOS. `PUBLISH_MEMBERS=8 make load` with the CI bootstrap settings passed in 11.39 s (55 s cap), with 80 sends, 400 deliveries and zero 429s at burst 10 and refill 1/s. Earlier light CI used one publishing Member, burst 10,000 and refill 1,000/s.
+
 ## Sustained write throughput (#309)
 
-2026-11-13 JST, `6f95221`. Four Members, 17-byte bodies, no subscribers. At 4,000 offered/s, 200 public Channels accepted 3,968/s at p95 21 ms and one hot Channel accepted 1,749/s at p95 68 ms. Evidence for the [write target](spec.md#performance-targets-first).
+2026-11-13 JST, `6f95221` (before the send limiter). Four Members, 17-byte bodies, no subscribers. At 4,000 offered/s, 200 public Channels accepted 3,968/s at p95 21 ms and one hot Channel accepted 1,749/s at p95 68 ms. Evidence for the [write target](spec.md#performance-targets-first).
 
-Run `THROUGHPUT_SCENARIO=many THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput` (`load/throughput.ts`), then repeat with `THROUGHPUT_SCENARIO=hot`. One shared-host run per mode, no TLS/fan-out. k6 dropped iterations at the upper steps. [Full record](../load/measurements-archive.md#sustained-write-throughput-309-2026-11-13-jst)
+At `6f95221`, run `THROUGHPUT_SCENARIO=many THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput` (`load/throughput.ts`), then repeat with `THROUGHPUT_SCENARIO=hot`. One shared-host run per mode, no TLS/fan-out. k6 dropped iterations at the upper steps. [Full record](../load/measurements-archive.md#sustained-write-throughput-309-2026-11-13-jst)
 
 ## DM preliminary measurement (#151)
 
@@ -80,7 +85,7 @@ Run `node load/search-engines/run.ts`, then `node load/search-engines/quality/ru
 
 ## PGroonga Message-send write cost (#153 M1)
 
-Method only; no formal result yet. A adds the PGroonga index to B (same app image from `main`, manifest v2 PostgreSQL recipe, stored `normalized_body`, WAL resource manager and crash-safe settings, 50,000-body prefix from seed 153202611). The #309 `many` and `hot` workloads run three pairs each (B/A, A/B, B/A) at seven 60 s rates from 50 to 4000/s, straight to the app, with the send limiter raised to 1000000 burst and refill. Fixed #153 criteria apply to the rates B sustains in all pairs, invalid evidence first; the p95 test uses the median paired ratio A / B and the median paired signed difference A − B (signed since the maintainer decision of 2026-11-18, before any formal run) through 1000/s. Outside the #431 budget.
+Method only; no formal result yet. A adds the PGroonga index to B (same app image from `main`, manifest v2 PostgreSQL recipe, stored `normalized_body`, WAL resource manager and crash-safe settings, 50,000-body prefix from seed 153202611). The #309 `many` and `hot` workloads run three pairs each (B/A, A/B, B/A) at seven 60 s rates from 50 to 4000/s, straight to the app, with four publishing Members and the send limiter raised to 1000000 burst and refill. Fixed #153 criteria apply to the rates B sustains in all pairs, invalid evidence first; the p95 test uses the median paired ratio A / B and the median paired signed difference A − B (signed since the maintainer decision of 2026-11-18, before any formal run) through 1000/s. Outside the #431 budget.
 
 Run overnight on an otherwise idle Mac with Node 26.13.1: `node load/search-m1.ts --out /absolute/new/artifact-directory` (`--smoke`: B, `many`, 50/s for 10 s, never judged); regenerate with `node load/search-m1-report.ts /absolute/new/artifact-directory`.
 
@@ -116,7 +121,7 @@ Byte comparison used external `node /private/tmp/fk486-transfer.ts`. For candida
 
 ## Pool before and after PR #511 (#196 B)
 
-2026-11-17 JST, `956f91e` vs `fa1790b`. Three Mac pairs, 200 public Channels, 4,000 Members, 60 s steps, no subscribers. Send-only 250 and 500/s failed latency with 100% accepted. At 250/s pair 2 p95/p99 was 2.11/3.70 → 12.13/18.71 ms. Higher send steps and mixed steps were NOT EVALUATED. Follow-up to the [pool timeout decision](decisions/realtime.md#admission-and-timeouts). Cause investigation in #519.
+2026-11-17 JST, `956f91e` vs `fa1790b`. Three Mac pairs, 200 public Channels, 4,000 Members, burst 10 and refill 1/s, 60 s steps, no subscribers. Send-only 250 and 500/s failed latency with 100% accepted. At 250/s pair 2 p95/p99 was 2.11/3.70 → 12.13/18.71 ms. Higher send steps and mixed steps were NOT EVALUATED. Follow-up to the [pool timeout decision](decisions/realtime.md#admission-and-timeouts). Cause investigation in #519.
 
 Run `node load/pool-before-after.ts --out <dir>` at `ee36849` with the external two-edit patch. Whole diff, no per-request pool-timeout attribution. [Method](../load/measurements-archive.md#196-b-beforeafter-method) · [Full record](../load/measurements-archive.md#196-b-beforeafter-after-pr-511-results-2026-11-17-jst-mac)
 
@@ -151,7 +156,7 @@ Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSO
 - [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
 - [Channel log smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) — functional smoke only.
 - [Channel log full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) — INVALID for the comparison gate.
-- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending. See `load/proxy-compare.ts`.
+- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending. Send workloads use one publishing Member and burst/refill raised to 1,000,000. See `load/proxy-compare.ts`.
 - [Earlier wasm first display](../load/measurements-archive.md#first-display-345-conditions-re-measured-at-d2fc5ea-45-runscell-across-9-interleaved-rounds-median-of-round-p50--p95-ms) — superseded by the startup fix.
 - [Pool before and after PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac) — superseded by the post-PR #511 comparison.
 - [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17) — superseded by HTTP and SQL evidence.
