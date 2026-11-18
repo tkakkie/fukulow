@@ -221,6 +221,28 @@ const postgresFailureMarkers = ['terminated by signal', 'terminating any other a
   'database system was interrupted', 'redo starts at', 'No space left on device', 'out of memory',
   'could not fork', 'the database system is in recovery mode'] as const;
 const postgresLogUnavailable = 'PostgreSQL log unavailable';
+const buildFailureMarkers = [
+  [/^error\[E\d+\]:/m, 'compiler error[E…]'],
+  [/^error: could not compile\b/m, 'could not compile'],
+  [/^error: failed to run custom build command\b/m, 'failed to run custom build command'],
+] as const;
+const partDLaunchStages = ['PostgreSQL image lookup', 'PostgreSQL docker run', 'PostgreSQL readiness', 'PostgreSQL port lookup', 'Cargo launch'] as const;
+const partDTestMarkers = ['Running unittests', 'running tests', 'target test panicked at', 'test result: FAILED'] as const;
+const partDTimedOut = (failure: FailureD) => failure.timedOut || failure.nightDeadline ||
+  failure.evidence.includes('runner timeout fired') || failure.evidence.includes('night-deadline');
+
+export function confirmedPartDInfrastructure(run: RunD): boolean {
+  const failure = run.failure;
+  if (failure?.cause !== 'infrastructure' || partDTimedOut(failure)) return false;
+  const has = (marker: string) => failure.evidence.includes(marker);
+  const postgres = run.postgres;
+  if (postgres && (has('target test panicked at') || has('HTTP 5xx status')) &&
+    ((postgres.OOMKilled && has('PostgreSQL OOMKilled')) || (!postgres.Running && has('PostgreSQL stopped')))) return true;
+  if (failure.signal || partDTestMarkers.some(has) || has('HTTP 5xx status') ||
+    failure.evidence.some(marker => marker.startsWith('test binary terminated by signal '))) return false;
+  return failure.exitCode === null ? partDLaunchStages.some(stage => has(`${stage} failed`))
+    : failure.exitCode !== 0 && buildFailureMarkers.some(([, marker]) => has(marker));
+}
 
 export function scanPartDPostgresLog(output: string | null): string[] {
   if (output === null) return [postgresLogUnavailable];
@@ -236,16 +258,24 @@ export function classifyPartDFailure(exit: ProcessExit, output: string, postgres
     : /^running [1-9]\d* tests?\b/m.test(log) ? 'running tests' : undefined;
   const testSummary = /^test result: /m.test(log);
   const failedSummary = /^test result: FAILED\b/m.test(log);
-  const gateMiss = /^[ \t]*feasibility gate missed: stop; do not add a limit[ \t]*\r?$/m.test(log);
-  const panicHeader = new RegExp(`^thread '(?:\\w+::)*${partD.target}'(?: \\(\\d+\\))? panicked at [^\\n]*\\n?`, 'm');
-  const panic = panicHeader.exec(log);
-  const message = panic
-    ? [/:\d+:\d+:[ \t]*(.*)/.exec(panic[0])?.[1],
-      log.slice(panic.index + panic[0].length).split(/^(?:thread '|note:|stack backtrace:|running \d+ tests?\b|test |error:)/m, 1)[0]].join('\n').trim()
-    : '';
-  const http5xx = /\b(?:(?:left|right)\s*:\s*|status(?:[ _-]?code)?(?:\s*[:=(]\s*|\s+)|HTTP(?:\/\d+(?:\.\d+)?)?\s+)5\d{2}\b/i.test(message)
-    || [...message.matchAll(/\b(5\d{2})[ \t]+([^\r\n]+)/g)].some(([, code, reason]) =>
-      !!STATUS_CODES[code] && reason.toLowerCase().startsWith(STATUS_CODES[code]!.toLowerCase()));
+  const panics = [...log.matchAll(/^thread '([^'\r\n]*)'(?: \(\d+\))? panicked at [^\r\n]*\r?\n?/gm)]
+    .map(header => ({ name: header[1], inline: /:\d+:\d+:[ \t]*(.*)/.exec(header[0])?.[1] ?? '',
+      body: log.slice(header.index + header[0].length)
+        .split(/^(?:thread '|note:|stack backtrace:|running \d+ tests?\b|test |error:)/m, 1)[0] }));
+  const target = new RegExp(`^(?:\\w+::)*${partD.target}$`);
+  const panic = panics.find(p => target.test(p.name));
+  const message = panic ? `${panic.inline}\n${panic.body}`.trim() : '';
+  const gateMessage = /^[ \t]*feasibility gate missed: stop; do not add a limit[ \t]*\r?$/m;
+  const gateMiss = gateMessage.test(log) || panics.some(p => gateMessage.test(p.inline));
+  const http5xx = panics.some(({ inline, body }) => {
+    const text = `${inline}\n${body}`;
+    // Rust renders StatusCode as a bare number in assert_eq!. The HTTP helpers expect
+    // success codes, while the measurement's count and position assertions use other values.
+    return /^[ \t]*left:[ \t]*5\d{2}[ \t]*\r?\n[ \t]*right:[ \t]*(?:200|201|204)[ \t]*\r?$/m.test(text)
+      || /\b(?:status(?:[ _-]?code)?(?:\s*[:=(]\s*|\s+)|HTTP(?:\/\d+(?:\.\d+)?)?\s+)5\d{2}\b/i.test(text)
+      || [...text.matchAll(/\b(5\d{2})[ \t]+([^\r\n]+)/g)].some(([, code, reason]) =>
+        !!STATUS_CODES[code] && reason.toLowerCase().startsWith(STATUS_CODES[code]!.toLowerCase()));
+  });
   const postgresCrash = postgresLogMarkers.some(marker => marker !== postgresLogUnavailable);
   const dbError = [
     /\b(?:Database|Io|Protocol|Tls)\s*\(|\b(?:PoolTimedOut|PoolClosed|WorkerCrashed)\b/i,
@@ -268,14 +298,12 @@ export function classifyPartDFailure(exit: ProcessExit, output: string, postgres
   if (testRun && panic && message && failedSummary && !dbError && !http5xx && !postgresCrash && postgres?.Running && !postgres.OOMKilled)
     return failure('assertion');
   if (exit.timedOut || exit.nightDeadline) return failure('timeout');
-  if (panic && postgres && (!postgres.Running || postgres.OOMKilled)) return failure('infrastructure');
+  if ((panic || http5xx) && postgres && (!postgres.Running || postgres.OOMKilled)) return failure('infrastructure');
   if (exit.signal || binarySignal) return failure('unknown');
-  if (panic && (http5xx || postgresCrash)) return failure('unknown');
+  if (http5xx || (panic && postgresCrash)) return failure('unknown');
   if (exit.exitCode === 0) return null;
   if (!testRun && !testSummary && !panic) {
-    const buildErrors = [/^error\[E\d+\]:/m.test(log) && 'compiler error[E…]',
-      /^error: could not compile\b/m.test(log) && 'could not compile',
-      /^error: failed to run custom build command\b/m.test(log) && 'failed to run custom build command'].filter(e => e !== false);
+    const buildErrors = buildFailureMarkers.filter(([pattern]) => pattern.test(log)).map(([, marker]) => marker);
     if (buildErrors.length) {
       evidence.push(...buildErrors);
       return failure('infrastructure');
@@ -290,7 +318,10 @@ export function judgePartD(runs: RunD[], artifactErrors: string[] = []): Verdict
     const failure = r.failure ?? (r.exitCode === undefined || r.exitCode === 0 ? null
       : classifyPartDFailure({ exitCode: r.exitCode, signal: null, timedOut: false }, ''));
     if (!failure) return [];
-    const { cause, exitCode, signal, evidence } = failure;
+    const { exitCode, signal, evidence } = failure;
+    const cause = failure.cause === 'infrastructure' && !confirmedPartDInfrastructure(r)
+      ? partDTimedOut(failure) ? 'timeout' : 'unknown'
+      : failure.cause;
     const note = cause === 'timeout' || cause === 'unknown' ? ' (investigate)' : cause === 'assertion' && r.arm === 'B' ? ' (no baseline)' : '';
     const termination = signal ? `, signal ${signal}` : exitCode === null ? '' : `, exit ${exitCode}`;
     return [{ assertion: r.arm === 'A' && cause === 'assertion', reason: `${r.arm}${r.round}: ${cause}${note}${termination}${evidence.length ? ` (${evidence.join(', ')})` : ''}` }];

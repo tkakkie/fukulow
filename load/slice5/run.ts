@@ -10,7 +10,7 @@ import { resolve } from 'node:path';
 import { outsideCheckout } from '../proxy-target.ts';
 import { commits, dbSettings, fixture, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
 import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
-import { judgePartA, judgePartB, judgePartC, classifyPartDFailure, closedLoopNonSuccess, parseTimeline, scanPartDPostgresLog, timelineTopics, vacuumCost, type Counts, type PostgresState, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
+import { judgePartA, judgePartB, judgePartC, classifyPartDFailure, closedLoopNonSuccess, confirmedPartDInfrastructure, parseTimeline, scanPartDPostgresLog, timelineTopics, vacuumCost, type Counts, type PostgresState, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 import { readResults, scorePartDFiles } from './report.ts';
 import { command, dbCommand, docker, seed, send, sampler, sleep, snapshot, startStack, timed, walDump, walWindow, type Seeded, type Stack } from './stack.ts';
 
@@ -388,7 +388,7 @@ async function attempt<T>(part: string, id: string, f: (rerun: boolean) => Promi
 
 function attemptPartD(arm: Arm, round: number) {
   return attempt('D', `D-${round}-${arm}`, rerun => partDRun(arm, round, rerun),
-    r => r.failure?.cause === 'infrastructure' ? `infrastructure (${r.failure.evidence.join(', ')})` : undefined);
+    r => r.failure && confirmedPartDInfrastructure(r) ? `infrastructure (${r.failure.evidence.join(', ')})` : undefined);
 }
 
 let failed = false;

@@ -2,8 +2,8 @@
 //   node load/slice5/report.ts --night1 /abs/dir --night2 /abs/dir > report.md
 import { readdirSync, readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
-import { partA, partB, partC, rounds, scope, thresholds, type Arm } from './config.ts';
-import { judgePartA, judgePartB, judgePartC, judgePartD, vacuumCost, worst, type Metric, type RunA, type RunB, type RunC, type RunD, type Status, type Verdict } from './judge.ts';
+import { commits, partA, partB, partC, rounds, scope, thresholds, type Arm } from './config.ts';
+import { confirmedPartDInfrastructure, judgePartA, judgePartB, judgePartC, judgePartD, vacuumCost, worst, type Metric, type RunA, type RunB, type RunC, type RunD, type Status, type Verdict } from './judge.ts';
 
 type Night = { metadata: { night: string; smoke: boolean; parts: string[]; node: string; scope: string; commits: Record<string, string>; images: Record<string, string>; settingsHash: string; k6Id: string;
   machine: unknown; docker: unknown; harnessCommit: string; harnessHashes: Record<string, string>; dirty: string; started: string };
@@ -34,44 +34,63 @@ export function scorePartDFiles(dir: string, aggregate: Night['results'] | null,
   schedule: readonly (readonly Arm[])[] = rounds) {
   const runs: RunD[] = [], errors: string[] = [];
   const expected = schedule.flatMap((pair, index) => pair.map(arm => ({ id: `D-${index + 1}-${arm}`, arm, round: index + 1 })));
-  let names: string[] = [];
-  try { names = readdirSync(`${dir}/runs`).filter(name => name.startsWith('D-')).sort(); }
-  catch { errors.push('Part D runs directory unavailable'); }
   const allowed = new Set(expected.flatMap(({ id }) => [id, `${id}-rerun`]));
-  const readRound = (id: string, arm: Arm, round: number): RunD | undefined => {
+  // Each night uses a shared runs directory, including the B and C artifacts.
+  const otherCells = [...partA.cells.map(cell => `A-${cell.name}`), ...partB.cells.map(cell => `B-${cell}`), ...partC.cells.map(cell => `C-${cell}`)];
+  const otherRuns = new Set(expected.flatMap(({ arm, round }) => otherCells.map(cell => `${cell}-${round}-${arm}`)));
+  let names: string[] = [];
+  try {
+    names = readdirSync(`${dir}/runs`, { withFileTypes: true })
+      .filter(entry => entry.name.startsWith('D-') || (entry.isDirectory() && !otherRuns.has(entry.name)))
+      .map(entry => entry.name).sort();
+  }
+  catch { errors.push('Part D runs directory unavailable'); }
+  const readRound = (id: string, slot?: { arm: Arm; round: number }): RunD | undefined => {
     const path = `runs/${id}/result.json`;
     let value: unknown;
     try { value = read(dir, path); }
     catch {
-      errors.push(`${path}: missing, unreadable or corrupt`);
+      if (slot) errors.push(`${path}: missing, unreadable or corrupt`);
       return;
     }
-    if (!isRecord(value) || value.part !== 'D' || value.arm !== arm || value.round !== round) {
+    if (!slot && isRecord(value) && value.arm === 'A' &&
+      typeof value.round === 'number' && Number.isInteger(value.round) && value.round > 0) {
+      slot = { arm: 'A', round: value.round };
+    }
+    if (!slot) return;
+    if (!isRecord(value) || value.part !== 'D' || value.arm !== slot.arm || value.round !== slot.round) {
       errors.push(`${path}: inconsistent Part D round identity`);
       return;
     }
     const failure = validFailure(value.failure) ? value.failure : null;
-    if (typeof value.commit !== 'string' || typeof value.complete !== 'boolean' || typeof value.smoke !== 'boolean'
-      || !(typeof value.topics === 'number' || value.topics === null)
+    const pg = value.postgres;
+    if (typeof value.commit !== 'string' || !value.commit.startsWith(commits[slot.arm])
+      || typeof value.smoke !== 'boolean' || !(Number.isFinite(value.topics) || value.topics === null)
       || !Array.isArray(value.rows) || !value.rows.every(row => isRecord(row) &&
-        typeof row.key === 'string' && typeof row.p95 === 'number' && typeof row.n === 'number')
-      || (value.exitCode != null && !Number.isInteger(value.exitCode)) || (value.failure != null && !failure)) {
+        typeof row.key === 'string' && Number.isFinite(row.p95) && Number.isInteger(row.n))
+      || value.complete !== (value.rows.length === 4)
+      || !(Number.isInteger(value.exitCode) || (value.exitCode === null && failure))
+      || (failure ? failure.exitCode !== value.exitCode : value.failure !== null)
+      || !(pg === null || (isRecord(pg) && typeof pg.Running === 'boolean' && typeof pg.OOMKilled === 'boolean'
+        && Number.isInteger(pg.ExitCode) && (pg.Health === null || typeof pg.Health === 'string')))
+      || !Array.isArray(value.postgresLogMarkers) || !value.postgresLogMarkers.every(marker => typeof marker === 'string')) {
       errors.push(`${path}: corrupt Part D round data`);
-      if (arm !== 'A' || failure?.cause !== 'assertion') return;
+      if (slot.arm !== 'A' || failure?.cause !== 'assertion') return;
     }
     return value as RunD;
   };
 
   let reruns = 0;
-  for (const { id, arm, round } of expected) {
-    const initial = readRound(id, arm, round);
+  for (const slot of expected) {
+    const { id, arm } = slot;
+    const initial = readRound(id, slot);
     if (!names.includes(`${id}-rerun`)) {
       if (initial) runs.push(initial);
       continue;
     }
     reruns++;
-    const rerun = readRound(`${id}-rerun`, arm, round);
-    if (initial?.failure?.cause !== 'infrastructure') {
+    const rerun = readRound(`${id}-rerun`, slot);
+    if (!initial || !confirmedPartDInfrastructure(initial)) {
       errors.push(`${id}-rerun: rerun without confirmed infrastructure`);
       if (rerun?.failure?.cause === 'assertion' && arm === 'A') runs.push(rerun);
       if (initial) runs.push(initial);
@@ -83,12 +102,8 @@ export function scorePartDFiles(dir: string, aggregate: Night['results'] | null,
   for (const name of names) {
     if (allowed.has(name)) continue;
     errors.push(`unexpected Part D run directory ${name}`);
-    const match = /^D-(\d+)-A(?:-rerun)?$/.exec(name);
-    const round = Number(match?.[1]);
-    if (expected.some(slot => slot.arm === 'A' && slot.round === round)) {
-      const duplicate = readRound(name, 'A', round);
-      if (duplicate?.failure?.cause === 'assertion') runs.push(duplicate);
-    }
+    const duplicate = readRound(name);
+    if (duplicate?.failure?.cause === 'assertion') runs.push(duplicate);
   }
   const aggregateRuns = aggregate?.filter(r => r.part === 'D');
   const discrepancy = !aggregateRuns ? 'results.json unavailable for Part D comparison'

@@ -41,6 +41,7 @@ test('empty nights never pass', () => {
 
 const timelineRuns = (): RunD[] => [1,2,3].flatMap(round => (['B','A'] as const).map(arm => ({ part: 'D', round, arm,
   commit: arm === 'A' ? 'f7fe08a' : 'b975ffa', complete: true, smoke: false, topics: 10000,
+  exitCode: 0, failure: null, postgres: null, postgresLogMarkers: [],
   rows: parseTimeline('TOPIC_PAGE boundary=None n=400 p50_ms=1 p95_ms=10 max_ms=20\n' +
     'TOPIC_PAGE boundary=Some(190000) n=400 p50_ms=1 p95_ms=10 max_ms=20\n' +
     'TOPIC_SEND boundary=None n=20 p50_ms=1 p95_ms=10 max_ms=20\n' +
@@ -63,9 +64,50 @@ function nightFiles(t: import('node:test').TestContext, aggregate = timelineRuns
 
 const failedRound = (run: RunD, cause: 'assertion' | 'infrastructure'): RunD => ({
   ...run, complete: false, topics: NaN, rows: [], exitCode: 101,
+  postgres: { Running: false, OOMKilled: true, ExitCode: 137, Health: null },
   failure: { cause, exitCode: 101, signal: null, timedOut: false,
-    evidence: [cause === 'assertion' ? 'feasibility gate missed' : 'PostgreSQL OOMKilled'] },
+    evidence: [cause === 'assertion' ? 'feasibility gate missed' : 'target test panicked at',
+      'test result: FAILED', 'PostgreSQL OOMKilled', 'PostgreSQL stopped'] },
 });
+
+for (const field of ['exitCode', 'failure', 'postgres', 'postgresLogMarkers'] as const) {
+  test(`review 4: a passing round without ${field} is INVALID`, t => {
+    const { dir, writeRound } = nightFiles(t);
+    const last = timelineRuns().at(-1)!;
+    delete last[field];
+    writeRound(last);
+    const list = load(dir).partD!.verdicts;
+    assert.deepEqual(list.map(v => v.status), ['INVALID']);
+    assert.match(list[0].reasons[0], /D-3-A\/result\.json: corrupt/);
+  });
+}
+
+for (const timedOut of [true, false]) {
+  test(`review 5: a passing rerun cannot replace ${timedOut ? 'a mislabeled timeout' : 'unconfirmed infrastructure'}`, t => {
+    const last = timelineRuns().at(-1)!;
+    const { dir, writeRound } = nightFiles(t);
+    const initial = { ...failedRound(last, 'infrastructure'), postgres: null };
+    initial.failure!.timedOut = timedOut;
+    initial.failure!.evidence = timedOut ? ['runner timeout fired'] : ['terminated by signal'];
+    writeRound(initial);
+    writeRound(last, 'D-3-A-rerun');
+    const list = load(dir).partD!.verdicts;
+    assert.deepEqual(list.map(v => v.status), ['INVALID']);
+    assert.match(list[0].reasons[0], timedOut ? /A3: timeout \(investigate\)/ : /A3: unknown \(investigate\)/);
+    assert.ok(list[0].reasons.includes('D-3-A-rerun: rerun without confirmed infrastructure'));
+  });
+}
+
+for (const [name, round] of [['D-3-A-copy', 3], ['copied-round', 3], ['D-4-A', 4]] as const) {
+  test(`review 6: a confirmed A assertion in ${name} survives the directory error`, t => {
+    const { dir, writeRound } = nightFiles(t);
+    writeRound(failedRound({ ...timelineRuns().at(-1)!, round }, 'assertion'), name);
+    const list = load(dir).partD!.verdicts;
+    assert.deepEqual(list.map(v => v.status), ['FAIL']);
+    assert.ok(list[0].reasons[0].startsWith(`A${round}: assertion`));
+    assert.ok(list[0].reasons.includes(`unexpected Part D run directory ${name}`));
+  });
+}
 
 test('Part D report preserves the last A assertion when results.json is stale', t => {
   const runs = timelineRuns();
@@ -106,6 +148,8 @@ test('Part D report uses a rerun only to replace confirmed infrastructure', t =>
 });
 test('summary.failed downgrades actual PASS cells and preserves FAIL', t => {
   const { dir, writeRound } = nightFiles(t);
+  mkdirSync(`${dir}/runs/B-many-17-1-B`);
+  mkdirSync(`${dir}/runs/C-1M-recent-1-B`);
   const n1 = night('1'), n2 = load(dir);
   assert.ok(verdicts(n1,n2).verdicts.some(v => v.part === 'D' && v.status === 'PASS'));
   n2.summary.failed = true;

@@ -26,7 +26,7 @@ const scoring = source.slice(source.indexOf('  for (const part of parts)'));
 const execute = new Function('deps', 'runs', `
   const { mkdirSync, readFileSync, docker, sleep, run, writeFileSync, save,
     randomUUID, parseTimeline, timelineTopics, timelineEnv, classifyPartDFailure, partD, judgePartD, spawnSync,
-    scanPartDPostgresLog, readResults, scorePartDFiles } = deps;
+    confirmedPartDInfrastructure, scanPartDPostgresLog, readResults, scorePartDFiles } = deps;
   const process = { env: {}, exit: code => { exitCode = code; } };
   const console = { log: () => {}, error: () => {} };
   const output = '/unused', project = 'unit-test', smoke = false, tiny = {}, full = { B: 'b975ffa', A: 'f7fe08a' };
@@ -103,6 +103,42 @@ const panicWith = (message: string) => cargo({ ...assertion, stderr: assertionLo
 const connectionReset = panicWith('called `Result::unwrap()` on an `Err` value: Io(Os { message: "Connection reset by peer" })');
 const http500 = panicWith("assertion `left == right` failed\n  left: 500\n right: 200");
 const gateMiss = panicWith('feasibility gate missed: stop; do not add a limit');
+
+test('review 1: sender HTTP 500 makes the dependent target panic INVALID', async () => {
+  const sender = "thread 'tokio-runtime-worker' (235) panicked at server/src/messages/tests.rs:155:5:\n" +
+    "assertion `left == right` failed\n  left: 500\n right: 201";
+  const targetPanic = panicWith('called `Result::unwrap()` on an `Err` value: SendError { .. }');
+  const failed = cargo({ ...targetPanic, stderr: `${sender}\n${targetPanic.stderr}` });
+  const { results, starts, nightSummary } = await exercise([['A', 1]], [failed]);
+  assert.equal(results[0].failure?.cause, 'unknown');
+  assert.ok(results[0].failure.evidence.includes('HTTP 5xx status'));
+  assert.equal(starts, 1);
+  assert.equal(nightSummary.verdicts[0].status, 'INVALID');
+  assert.match(nightSummary.verdicts[0].reasons[0], /unknown.*investigate/);
+  assert.equal(classifyPartDFailure(exit, `${sender}\n${summary}`, alive)?.cause, 'unknown');
+  assert.equal(classifyPartDFailure(exit, `${sender}\n${summary}`, { ...alive, OOMKilled: true })?.cause, 'infrastructure');
+});
+
+test('review 2: a 503-item page is an ordinary count assertion and makes A FAIL', async () => {
+  const failed = panicWith("assertion `left == right` failed\n  left: 503\n right: 50");
+  const { results, starts, nightSummary } = await exercise([['A', 1]], [failed]);
+  assert.equal(results[0].failure?.cause, 'assertion');
+  assert.ok(!results[0].failure.evidence.includes('HTTP 5xx status'));
+  assert.equal(starts, 1);
+  assert.equal(nightSummary.verdicts[0].status, 'FAIL');
+});
+
+test('review 3: an inline gate miss with FAILED survives later infrastructure and termination markers', () => {
+  const inline = gateMiss.stderr.replace(':5:\n', ':5: ');
+  const postgres = { ...alive, Running: false, OOMKilled: true };
+  const log = `${inline}\n${summary}\nerror: process didn't exit successfully: target (signal: 9, SIGKILL)`;
+  for (const termination of [exit, { exitCode: null, signal: 'SIGTERM', timedOut: true, nightDeadline: true } as const]) {
+    const failure = classifyPartDFailure(termination, log, postgres, ['out of memory']);
+    assert.equal(failure?.cause, 'assertion');
+    assert.ok(failure.evidence.includes('feasibility gate missed'));
+  }
+  assert.equal(classifyPartDFailure(exit, inline, postgres)?.cause, 'infrastructure');
+});
 
 test('target HTTP 5xx panic with running PostgreSQL is unknown even with no crash markers', async () => {
   for (const failed of [http500, panicWith('StatusCode(503)'), panicWith('500 Internal Server Error')]) {
@@ -258,7 +294,7 @@ async function exercise(runs: [Arm, number][], outputs: Cargo[], options: Option
     scorePartDFiles: (...[path, aggregate, schedule]: Parameters<typeof report.scorePartDFiles>) =>
       report.scorePartDFiles(onDisk(path), aggregate, schedule),
     randomUUID: () => password, parseTimeline, timelineTopics, timelineEnv, classifyPartDFailure, partD, judgePartD,
-    scanPartDPostgresLog: judge.scanPartDPostgresLog,
+    confirmedPartDInfrastructure: judge.confirmedPartDInfrastructure, scanPartDPostgresLog: judge.scanPartDPostgresLog,
   }, runs).then(result => {
     if (!options.failLastAggregate) return { ...result, mergedReport: '' };
     writeFileSync(`${dir}/metadata.json`, JSON.stringify({ night: '2', parts: ['B', 'C', 'D'], smoke: false }));
