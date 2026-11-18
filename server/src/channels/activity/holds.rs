@@ -1,7 +1,9 @@
 use super::*;
 use crate::observability::{RevocationMetric, RevocationMetrics, revocation_metrics};
-use std::{collections::BTreeMap, sync::LazyLock};
-use tokio::sync::OwnedSemaphorePermit;
+use std::{
+    collections::BTreeMap,
+    sync::{LazyLock, MutexGuard},
+};
 
 const REGISTRATION_CAP: usize = 64;
 const GLOBAL_CAP: usize = 4096;
@@ -9,10 +11,95 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 const RETRIES: u32 = 5;
 const BACKOFF: Duration = Duration::from_millis(250);
 const MAX_BACKOFF: Duration = Duration::from_secs(4);
-static CAPACITY: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(GLOBAL_CAP)));
+static CAPACITY: LazyLock<Arc<Capacity>> = LazyLock::new(|| Arc::new(Capacity::new(GLOBAL_CAP)));
+
+type HoldKey = (Instant, Uuid, u64);
+
+struct Capacity {
+    limit: usize,
+    owners: Mutex<BTreeMap<HoldKey, Weak<Entry>>>,
+}
+
+impl Capacity {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            owners: Mutex::default(),
+        }
+    }
+
+    fn reserve(self: &Arc<Self>, entry: &Arc<Entry>, id: u64, expires: Instant) -> Option<Permit> {
+        let mut owners = self.owners.lock().unwrap_or_else(|e| e.into_inner());
+        if owners.len() >= self.limit {
+            return None;
+        }
+        let key = (expires, entry.id, id);
+        owners.insert(key, Arc::downgrade(entry));
+        Some(Permit {
+            capacity: self.clone(),
+            key,
+        })
+    }
+
+    fn expired(&self, now: Instant) -> Option<(HoldKey, Weak<Entry>)> {
+        let owners = self.owners.lock().unwrap_or_else(|e| e.into_inner());
+        let (&key, entry) = owners.first_key_value()?;
+        (key.0 <= now).then(|| (key, entry.clone()))
+    }
+
+    fn release(&self, key: HoldKey) {
+        self.owners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+    }
+
+    #[cfg(test)]
+    fn available_permits(&self) -> usize {
+        self.limit - self.owners.lock().unwrap().len()
+    }
+}
+
+struct Permit {
+    capacity: Arc<Capacity>,
+    key: HoldKey,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.capacity.release(self.key);
+    }
+}
+
+pub(super) fn lock_for_admission(entry: &Arc<Entry>) -> (MutexGuard<'_, Buffer>, Instant) {
+    loop {
+        let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let Buffer {
+            holds, revocations, ..
+        } = &mut *b;
+        holds.prune(revocations, now);
+        let Some((key, owner)) = holds.capacity.expired(now) else {
+            return (b, now);
+        };
+        let capacity = holds.capacity.clone();
+        // Replay can keep the owner from polling its buffer. Prune there before
+        // admitting more holds, without nesting buffer locks or holding the index lock.
+        drop(b);
+        if let Some(owner) = owner.upgrade() {
+            let mut b = owner.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let Buffer {
+                holds, revocations, ..
+            } = &mut *b;
+            holds.prune(revocations, now);
+        } else {
+            capacity.release(key);
+        }
+    }
+}
 
 struct Hold {
-    _permit: OwnedSemaphorePermit,
+    _permit: Permit,
     expires: Instant,
     retry_at: Instant,
     retries: u32,
@@ -21,7 +108,7 @@ struct Hold {
 
 pub(super) struct Holds {
     entries: BTreeMap<u64, Box<Hold>>,
-    capacity: Arc<Semaphore>,
+    capacity: Arc<Capacity>,
     metrics: Arc<RevocationMetrics>,
     closed: bool,
 }
@@ -44,7 +131,13 @@ impl Holds {
         self.metrics.clone()
     }
 
-    pub(super) fn start(&mut self, revocations: &Revocations, id: u64, now: Instant) {
+    pub(super) fn start(
+        &mut self,
+        entry: &Arc<Entry>,
+        revocations: &Revocations,
+        id: u64,
+        now: Instant,
+    ) {
         if self.closed || revocations.check(id).is_none() {
             return;
         }
@@ -55,7 +148,7 @@ impl Holds {
         }
         if self.entries.len() >= REGISTRATION_CAP {
             self.metrics.count(RevocationMetric::RegistrationCap);
-        } else if let Ok(permit) = self.capacity.clone().try_acquire_owned() {
+        } else if let Some(permit) = self.capacity.reserve(entry, id, now + TIMEOUT) {
             self.entries.insert(
                 id,
                 Box::new(Hold {
@@ -78,9 +171,9 @@ impl Holds {
         self.entries.get(&id).map(|hold| hold.expires)
     }
 
-    pub(super) fn park(&mut self, id: u64, pending: Pending) {
+    pub(super) fn park(&mut self, id: u64, pending: impl FnOnce() -> Pending) {
         if let Some(hold) = self.entries.get_mut(&id) {
-            hold.parked = Some(pending);
+            hold.parked = Some(pending());
         }
     }
 
@@ -120,8 +213,8 @@ impl Holds {
         }
     }
 
-    pub(super) fn delivered(&mut self, id: u64) {
-        if self.entries.remove(&id).is_some() {
+    pub(super) fn complete(&mut self, id: u64, delivered_revocation: bool) {
+        if self.entries.remove(&id).is_some() && delivered_revocation {
             self.metrics.count(RevocationMetric::Delivered);
         }
     }
@@ -164,7 +257,7 @@ mod tests {
     use super::*;
     use futures_util::FutureExt;
 
-    fn registration(capacity: Arc<Semaphore>) -> Registration {
+    fn registration(capacity: Arc<Capacity>) -> Registration {
         let entry = crate::channels::activity::tests::entry();
         {
             let mut b = entry.buffer.lock().unwrap();
@@ -188,7 +281,7 @@ mod tests {
     }
 
     fn fill(reg: &Registration, count: usize) -> Vec<Arc<Capture>> {
-        let mut b = reg.entry.buffer.lock().unwrap();
+        let (mut b, now) = lock_for_admission(&reg.entry);
         (0..count)
             .map(|_| {
                 let capture = add_revocation(&mut b);
@@ -196,7 +289,7 @@ mod tests {
                 let Buffer {
                     holds, revocations, ..
                 } = &mut *b;
-                holds.start(revocations, id, Instant::now());
+                holds.start(&reg.entry, revocations, id, now);
                 capture
             })
             .collect()
@@ -206,9 +299,23 @@ mod tests {
         reg.entry.buffer.lock().unwrap().holds.metrics.load(metric)
     }
 
+    fn revocation(capture: Arc<Capture>) -> Pending {
+        Pending {
+            notice: Notice::ChannelAccessRevoked {
+                channel_id: capture.check().unwrap().channel,
+            },
+            channel: None,
+            epoch: Epoch::Revocation(capture),
+            directory_epoch: None,
+            proof: None,
+            valid: Arc::new(QueryToken::new()),
+            recovery: None,
+        }
+    }
+
     #[test]
     fn registration_cap_retires_revocation() {
-        let capacity = Arc::new(Semaphore::new(GLOBAL_CAP));
+        let capacity = Arc::new(Capacity::new(GLOBAL_CAP));
         let reg = registration(capacity.clone());
         let captures = fill(&reg, REGISTRATION_CAP + 1);
         assert!(
@@ -232,7 +339,7 @@ mod tests {
 
     #[test]
     fn global_cap_retires_revocation() {
-        let capacity = Arc::new(Semaphore::new(GLOBAL_CAP));
+        let capacity = Arc::new(Capacity::new(GLOBAL_CAP));
         let registrations: Vec<_> = (0..GLOBAL_CAP.div_ceil(REGISTRATION_CAP))
             .map(|_| {
                 let count = capacity.available_permits().min(REGISTRATION_CAP);
@@ -256,9 +363,88 @@ mod tests {
         assert_eq!(metric(&extra, RevocationMetric::Held), 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn admission_reclaims_expired_hold_from_unpolled_registration() {
+        let capacity = Arc::new(Capacity::new(1));
+        let first = registration(capacity.clone());
+        let second = registration(capacity.clone());
+        let (_, expired) = failed_handoff(&first).await;
+        assert_eq!(capacity.available_permits(), 0);
+
+        tokio::time::advance(TIMEOUT + Duration::from_millis(1)).await;
+        let (_, admitted) = failed_handoff(&second).await;
+        assert_eq!(
+            metric(&second, RevocationMetric::Held),
+            1,
+            "second registration could not acquire the expired slot"
+        );
+        assert_eq!(metric(&second, RevocationMetric::GlobalCap), 0);
+        assert!(admitted.check().is_some());
+        assert!(expired.check().is_none());
+        assert_eq!(metric(&first, RevocationMetric::Timeout), 1);
+    }
+
+    #[fukulow_test::test]
+    async fn retried_overflow_reset_does_not_count_as_revocation_delivery(pool: sqlx::PgPool) {
+        let organization = crate::channels::tests::organization(&pool).await;
+        let token =
+            crate::channels::tests::member(&pool, organization, Uuid::new_v4(), "member").await;
+        let auth = crate::channels::tests::extract_auth(
+            crate::AppState::for_test(pool.clone()).await,
+            &token,
+        )
+        .await;
+        let activity = Activity::default();
+        let reg = activity.register(&auth);
+        let metrics = reg.isolate_revocation_metrics();
+        tokio::time::pause();
+        let capture = fill(&reg, 1).pop().unwrap();
+        let channel = Uuid::new_v4();
+        for _ in 0..256 {
+            enqueue(
+                &reg.entry,
+                crate::channels::activity::tests::pending(channel, Some(Uuid::new_v4())),
+            );
+        }
+        enqueue(&reg.entry, revocation(capture.clone()));
+        let reset = reg
+            .next()
+            .now_or_never()
+            .flatten()
+            .expect("overflow did not latch a reset");
+        assert_eq!(reset.event, Notice::ActivityReset);
+        assert_eq!(
+            reset
+                .handoff(&pool, |_| async {
+                    panic!("an unchecked hold polled the reset write")
+                })
+                .await,
+            None::<()>
+        );
+        tokio::time::advance(BACKOFF).await;
+        tokio::time::resume();
+
+        let retry = reg
+            .next()
+            .now_or_never()
+            .flatten()
+            .expect("overflow reset was not retried");
+        assert_eq!(
+            retry.handoff(&pool, |event| async { event }).await,
+            Some(Notice::ActivityReset)
+        );
+        assert!(capture.check().is_none());
+        assert_eq!(metrics.load(RevocationMetric::Held), 1);
+        assert_eq!(
+            metrics.load(RevocationMetric::Delivered),
+            0,
+            "reset counted as revocation delivery"
+        );
+    }
+
     #[test]
     fn fences_retire_holds() {
-        let capacity = Arc::new(Semaphore::new(3));
+        let capacity = Arc::new(Capacity::new(3));
         let reg = registration(capacity.clone());
         let private = fill(&reg, 2);
         let first = private[0].check().unwrap().channel;
@@ -270,7 +456,7 @@ mod tests {
             let Buffer {
                 holds, revocations, ..
             } = &mut *b;
-            holds.start(revocations, id, Instant::now());
+            holds.start(&reg.entry, revocations, id, Instant::now());
             assert_eq!(capacity.available_permits(), 0);
 
             b.revocations.capture(ChangeScope::Role).retire();
@@ -315,21 +501,7 @@ mod tests {
             let mut b = reg.entry.buffer.lock().unwrap();
             let capture = add_revocation(&mut b);
             b.revocations.capture(ChangeScope::Role).retire();
-            let frame = NoticeFrame::new(
-                &reg.entry,
-                Pending {
-                    notice: Notice::ChannelAccessRevoked {
-                        channel_id: capture.check().unwrap().channel,
-                    },
-                    channel: None,
-                    epoch: Epoch::Revocation(capture.clone()),
-                    directory_epoch: None,
-                    proof: None,
-                    valid: Arc::new(QueryToken::new()),
-                    recovery: None,
-                },
-                false,
-            );
+            let frame = NoticeFrame::new(&reg.entry, revocation(capture.clone()), false);
             (capture, frame)
         };
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -343,14 +515,13 @@ mod tests {
                 .await,
             None::<()>
         );
-        assert_eq!(metric(reg, RevocationMetric::Held), 1);
         assert_eq!(metric(reg, RevocationMetric::RecheckError), 1);
         (pool, capture)
     }
 
     #[tokio::test(start_paused = true)]
     async fn hold_timeout_retires_revocation() {
-        let reg = registration(Arc::new(Semaphore::new(1)));
+        let reg = registration(Arc::new(Capacity::new(1)));
         let (_, capture) = failed_handoff(&reg).await;
         tokio::time::advance(TIMEOUT).await;
         assert!(
@@ -364,7 +535,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn retry_limit_retires_revocation() {
-        let reg = registration(Arc::new(Semaphore::new(1)));
+        let reg = registration(Arc::new(Capacity::new(1)));
         let (pool, capture) = failed_handoff(&reg).await;
         for (attempt, millis) in [250, 500, 1000, 2000, 4000].into_iter().enumerate() {
             let mut next = std::pin::pin!(reg.next());

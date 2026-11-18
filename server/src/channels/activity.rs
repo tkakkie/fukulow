@@ -945,13 +945,16 @@ impl NoticeFrame {
                             return std::task::Poll::Ready(Ok(None));
                         }
                     } else if hold_deadline.is_some() {
-                        holds.park(check.id, self.parked());
                         return std::task::Poll::Ready(Ok(None));
                     }
                     if check.needs_recheck {
                         return std::task::Poll::Ready(Err((check, hold_deadline)));
                     }
-                    holds.delivered(check.id);
+                    holds.complete(
+                        check.id,
+                        self.valid.valid()
+                            && matches!(self.event, Notice::ChannelAccessRevoked { .. }),
+                    );
                     revocations.finish(check.id);
                 }
             }
@@ -972,19 +975,21 @@ impl NoticeFrame {
                         let limit = Instant::now() + Duration::from_secs(5);
                         hold_deadline.map_or(limit, |expires| expires.min(limit))
                     });
-                    match self.recheck_revocation(pool?, check, deadline).await {
+                    let Some(pool) = pool else { break None };
+                    match self.recheck_revocation(pool, check, deadline).await {
                         Ok(()) => {}
                         Err(RecheckFailure::Deadline) => break None,
                         Err(RecheckFailure::Database) => {
-                            let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-                            let Buffer {
-                                holds, revocations, ..
-                            } = &mut *b;
-                            holds.recheck_error();
-                            if !self.retry {
-                                holds.prune(revocations, Instant::now());
-                                holds.start(revocations, check.id, Instant::now());
-                                holds.park(check.id, self.parked());
+                            if self.retry {
+                                let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                                b.holds.recheck_error();
+                            } else {
+                                let (mut b, now) = holds::lock_for_admission(&self.entry);
+                                let Buffer {
+                                    holds, revocations, ..
+                                } = &mut *b;
+                                holds.recheck_error();
+                                holds.start(&self.entry, revocations, check.id, now);
                             }
                             break None;
                         }
@@ -992,8 +997,7 @@ impl NoticeFrame {
                 }
             }
         };
-        if self.retry
-            && first.is_none()
+        if first.is_none()
             && let Epoch::Revocation(capture) = &self.epoch
         {
             let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
@@ -1003,7 +1007,12 @@ impl NoticeFrame {
             let now = Instant::now();
             holds.prune(revocations, now);
             if let Some(check) = capture.check() {
-                holds.retry_failed(revocations, check.id, self.parked(), now);
+                if self.retry {
+                    holds.retry_failed(revocations, check.id, self.parked(), now);
+                } else {
+                    // Fallback can admit a hold while the initial query is in flight.
+                    holds.park(check.id, || self.parked());
+                }
             }
         }
         Some(match first? {
@@ -1652,15 +1661,13 @@ impl Activity {
                     }
                     let mut seen = HashSet::new();
                     for (entry, row) in chunk {
-                        let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-                        if seen.insert(entry.id)
-                            && let Some(&cutoff) = revocation_cutoffs.get(&entry.id)
+                        let mut b = if let Some(&cutoff) = revocation_cutoffs.get(&entry.id)
+                            && seen.insert(entry.id)
                         {
-                            let now = Instant::now();
+                            let (mut b, now) = holds::lock_for_admission(entry);
                             let Buffer {
                                 holds, revocations, ..
                             } = &mut *b;
-                            holds.prune(revocations, now);
                             let mut checks = revocations
                                 .checks()
                                 .into_iter()
@@ -1668,12 +1675,15 @@ impl Activity {
                                 .peekable();
                             if checks.peek().is_some() {
                                 for check in checks {
-                                    holds.start(revocations, check.id, now);
+                                    holds.start(entry, revocations, check.id, now);
                                 }
                                 b.retire_notices();
                                 entry.wake.notify_one();
                             }
-                        }
+                            b
+                        } else {
+                            entry.buffer.lock().unwrap_or_else(|e| e.into_inner())
+                        };
                         if let Recheck::Notice(notice) = row
                             && b.epoch == notice.epoch
                         {
