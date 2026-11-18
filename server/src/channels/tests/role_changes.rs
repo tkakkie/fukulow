@@ -68,6 +68,53 @@ impl auth::SubscriptionRecheck for ObservedAccess {
 }
 
 #[fukulow_test::test]
+async fn role_change_body_errors_follow_path_decoding_and_precede_member_uuid_parsing(
+    pool: PgPool,
+) {
+    let org = organization(&pool).await;
+    let token = member(&pool, org, Uuid::new_v4(), "owner").await;
+    let app = router(&pool).await;
+    for (content_type, input, status, error) in [
+        (
+            "application/json",
+            json!({"role":"x".repeat(16 * 1024)}),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large",
+        ),
+        (
+            "text/plain",
+            json!({"role":"member"}),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "expected application/json",
+        ),
+    ] {
+        for (id, status, error) in [
+            ("%6Eot-a-uuid", status, error),
+            ("%FF", StatusCode::BAD_REQUEST, "invalid input"),
+        ] {
+            let path = format!("/api/v1/orgs/{org}/members/{id}/role");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::patch(&path)
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, content_type)
+                        .body(Body::from(input.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{content_type} {path}");
+            assert_eq!(
+                body(response).await,
+                json!({"error":error}),
+                "{content_type} {path}"
+            );
+        }
+    }
+}
+
+#[fukulow_test::test]
 async fn last_owner_precedes_last_channel_manager_without_side_effects(pool: PgPool) {
     let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone());

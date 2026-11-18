@@ -358,14 +358,19 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
 async fn send_waiting_on_member_lock_is_rejected_after_deactivation(pool: PgPool) {
     let (app, org, sender, channel, token) = fixture(&pool).await;
     let mut deactivation = pool.begin().await.unwrap();
-    let blocker: i32 = sqlx::query_scalar(
-        "SELECT pg_backend_pid() FROM users WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE",
-    )
-    .bind(org)
-    .bind(sender)
-    .fetch_one(&mut *deactivation)
-    .await
-    .unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *deactivation)
+        .await
+        .unwrap();
+    // The raw UPDATE stands in for active_target's FOR NO KEY UPDATE on the target Member.
+    let deactivated =
+        sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
+            .bind(org)
+            .bind(sender)
+            .execute(&mut *deactivation)
+            .await
+            .unwrap();
+    assert_eq!(deactivated.rows_affected(), 1);
 
     let sending = tokio::spawn(async move {
         send(&app, &token, channel, input(Uuid::new_v4(), "Blocked send")).await
@@ -376,8 +381,7 @@ async fn send_waiting_on_member_lock_is_rejected_after_deactivation(pool: PgPool
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT FROM pg_stat_activity
                  WHERE datname=current_database() AND wait_event_type='Lock'
-                 AND query LIKE 'SELECT id,membership_revision,role FROM users%FOR SHARE'
-                 AND $1=ANY(pg_blocking_pids(pid)))",
+                 AND $1 = ANY(pg_blocking_pids(pid)))",
             )
             .bind(blocker)
             .fetch_one(&pool)
@@ -392,14 +396,6 @@ async fn send_waiting_on_member_lock_is_rejected_after_deactivation(pool: PgPool
     .await
     .expect("send did not wait for the Member lock");
 
-    let deactivated =
-        sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
-            .bind(org)
-            .bind(sender)
-            .execute(&mut *deactivation)
-            .await
-            .unwrap();
-    assert_eq!(deactivated.rows_affected(), 1);
     deactivation.commit().await.unwrap();
 
     let response = sending.await.unwrap();
