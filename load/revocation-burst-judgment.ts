@@ -215,7 +215,8 @@ export function judge(run: Run) {
   else if (s.pool.recovery.timeouts) reasons.push(`${s.pool.recovery.timeouts} pool acquire timeouts after recovery`);
   if (!(s.httpProbe.baseline.count > 0) || !(db.baseline.count > 0)) reasons.push('missing baseline probes');
   const verdict: RunVerdict = reasons.length ? 'FAIL' : boundaryExceptions.length ? 'PASS_WITH_BOUNDARY_EXCEPTION' : 'PASS';
-  return { pass: verdict !== 'FAIL', verdict, reasons, summary: { ...s, boundaryExceptions } };
+  // pass means a clean PASS; read verdict for the boundary exception.
+  return { pass: verdict === 'PASS', verdict, reasons, summary: { ...s, boundaryExceptions } };
 }
 
 export type RunVerdict = 'PASS' | 'PASS_WITH_BOUNDARY_EXCEPTION' | 'FAIL';

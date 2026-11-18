@@ -167,6 +167,7 @@ test('judge reports the approved 0 and 2 ms boundary arrivals separately from cl
     run.revocations[0].at = run.times.fault + offset;
     const result = judge(run);
     assert.equal(result.verdict, 'PASS_WITH_BOUNDARY_EXCEPTION');
+    assert.equal(result.pass, false);
     assert.deepEqual(result.reasons, []);
     assert.deepEqual(result.summary.boundaryExceptions, [{
       ...run.revocations[0], arrivalAfterFaultMs: offset, removalConfirmedBeforeFaultMs: 153,
@@ -192,7 +193,10 @@ test('judge requires relay evidence within the removal window and a real fault',
   const run = boundaryFixture();
   run.revocations[0].at = run.times.fault + 1;
   run.kind = 'control';
-  assert.equal(judge(run).verdict, 'FAIL');
+  const control = judge(run);
+  assert.equal(control.verdict, 'FAIL');
+  assert.deepEqual(control.reasons, ['a revocation was delivered while the failure was active']);
+  assert.deepEqual(control.summary.boundaryExceptions, []);
   run.kind = 'outage';
   const removalStart = run.members[1].removeStartedAt!;
   run.statements = run.statements.filter(s => s.at + s.ms < removalStart ||
@@ -209,6 +213,21 @@ test('a boundary arrival does not excuse another correctness violation', () => {
   const result = judge(run);
   assert.equal(result.verdict, 'FAIL');
   assert.deepEqual(result.reasons, ['duplicate revocation']);
+});
+
+test('a boundary arrival on a wrong Channel or a restored registration still fails', () => {
+  const wrong = boundaryFixture();
+  wrong.revocations[0] = { ...wrong.revocations[0], channelId: 'one', at: wrong.times.fault + 1 };
+  const wrongResult = judge(wrong);
+  assert.equal(wrongResult.verdict, 'FAIL');
+  assert.ok(wrongResult.reasons.includes('a revocation reached a socket or Channel outside the successful removal set'));
+  assert.deepEqual(wrongResult.summary.boundaryExceptions, []);
+  const restored = boundaryFixture();
+  restored.members[1].restoredAt = restored.times.fault - 50;
+  restored.revocations[0].at = restored.times.fault + 1;
+  const restoredResult = judge(restored);
+  assert.equal(restoredResult.verdict, 'FAIL');
+  assert.deepEqual(restoredResult.reasons, ['a restored registration received a revocation']);
 });
 
 test('judge keeps fault and recovery recheck peaks separate', () => {
