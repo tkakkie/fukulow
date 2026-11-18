@@ -20,5 +20,4 @@ jobs:
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version }
       # All dependencies: Svelte and other runtime code are in devDependencies but ship in the built bundle.
-      - run: npm --prefix web audit --audit-level=high
-      - run: npm --prefix load audit --audit-level=high
+      - run: node scripts/npm-audit-gate.ts web load
