@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -153,12 +153,38 @@ impl Drop for QueryToken {
         }
     }
 }
+#[derive(Clone)]
+enum Epoch {
+    Notice(u64),
+    Revocation {
+        member: u64,
+        channel: Uuid,
+        counter: Arc<AtomicU64>,
+        generation: u64,
+    },
+}
+impl Epoch {
+    fn current(&self, b: &Buffer) -> bool {
+        match self {
+            Self::Notice(epoch) => b.epoch == *epoch,
+            Self::Revocation {
+                member,
+                counter,
+                generation,
+                ..
+            } => b.member_epoch == *member && counter.load(Ordering::Relaxed) == *generation,
+        }
+    }
+    fn unrelated_to(&self, scope: auth::SubscriptionScope) -> bool {
+        matches!((self, scope), (Self::Revocation { channel, .. }, auth::SubscriptionScope::Channel(_, checked)) if *channel != checked)
+    }
+}
 #[cfg_attr(test, derive(Clone))]
 struct Pending {
     notice: Notice,
     // Payload-free DM invalidations still retain the causing access lifetime.
     channel: Option<Uuid>,
-    epoch: u64,
+    epoch: Epoch,
     directory_epoch: Option<u64>,
     proof: Option<Proof>,
     valid: Arc<QueryToken>,
@@ -170,6 +196,7 @@ impl Pending {
     }
 }
 struct InFlight {
+    epoch: Epoch,
     channel: Option<Uuid>,
     proof: Option<Proof>,
     valid: Arc<QueryToken>,
@@ -177,16 +204,71 @@ struct InFlight {
 #[derive(Default)]
 struct Buffer {
     epoch: u64,
-    transition_epoch: u64,
+    member_epoch: u64,
+    channel_epochs: HashMap<Uuid, Weak<AtomicU64>>,
     directory_epoch: u64,
     pending: VecDeque<Pending>,
     reset: bool,
     proofs: HashMap<Option<Uuid>, Proof>,
+    has_revocation_proof: bool,
     in_flight: HashMap<Uuid, InFlight>,
+}
+enum Retirement {
+    Notices,
+    Channel(Uuid),
+    Member,
+    MembershipLost(i64),
+}
+impl Buffer {
+    fn capture_revocations(
+        &mut self,
+        channels: impl Iterator<Item = Uuid>,
+        changed: Option<Uuid>,
+    ) -> HashMap<Uuid, Epoch> {
+        // Only live captures and notices own counters. Forget dropped work on the next capture.
+        self.channel_epochs
+            .retain(|_, counter| counter.strong_count() != 0);
+        channels
+            .map(|channel| {
+                let weak = self.channel_epochs.entry(channel).or_default();
+                let counter = weak.upgrade().unwrap_or_else(|| {
+                    let counter = Arc::new(AtomicU64::new(0));
+                    *weak = Arc::downgrade(&counter);
+                    counter
+                });
+                let epoch = Epoch::Revocation {
+                    member: self.member_epoch.wrapping_add(u64::from(changed.is_none())),
+                    channel,
+                    generation: counter
+                        .load(Ordering::Relaxed)
+                        .wrapping_add(u64::from(changed == Some(channel))),
+                    counter,
+                };
+                (channel, epoch)
+            })
+            .collect()
+    }
+    fn advance_member_epoch(&mut self) {
+        self.member_epoch = self.member_epoch.wrapping_add(1);
+        self.has_revocation_proof = false;
+    }
+    fn retire_notices(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        let mut pending = std::mem::take(&mut self.pending);
+        pending.retain(|p| p.epoch.current(self));
+        self.pending = pending;
+        let mut in_flight = std::mem::take(&mut self.in_flight);
+        in_flight.retain(|_, a| a.epoch.current(self));
+        self.in_flight = in_flight;
+        // A revocation already out of the buffer still needs its identity proof.
+        self.proofs
+            .retain(|channel, _| channel.is_none() && self.has_revocation_proof);
+        self.reset &= !self.pending.is_empty();
+    }
 }
 struct Authorization {
     entry: Arc<Entry>,
-    epoch: u64,
+    epoch: Epoch,
     directory_epoch: Option<u64>,
     id: Uuid,
     valid: Arc<QueryToken>,
@@ -199,16 +281,32 @@ impl Authorization {
         directory: bool,
         expected_directory_epoch: Option<u64>,
     ) -> Self {
+        Self::new_at(
+            entry,
+            Epoch::Notice(epoch),
+            channel,
+            directory,
+            expected_directory_epoch,
+        )
+    }
+    fn new_at(
+        entry: Arc<Entry>,
+        epoch: Epoch,
+        channel: Option<Uuid>,
+        directory: bool,
+        expected_directory_epoch: Option<u64>,
+    ) -> Self {
         let id = Uuid::new_v4();
         let valid = Arc::new(QueryToken::new());
         let directory_epoch = {
             let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             let directory_epoch =
                 directory.then_some(expected_directory_epoch.unwrap_or(b.directory_epoch));
-            if b.epoch == epoch {
+            if epoch.current(&b) {
                 b.in_flight.insert(
                     id,
                     InFlight {
+                        epoch: epoch.clone(),
                         channel,
                         proof: None,
                         valid: valid.clone(),
@@ -227,7 +325,7 @@ impl Authorization {
     }
     fn proved(&self, proof: &Option<Proof>) {
         let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-        if b.epoch == self.epoch
+        if self.epoch.current(&b)
             && (proof.as_ref().is_none_or(|proof| proof.role != Role::Guest)
                 || self
                     .directory_epoch
@@ -324,7 +422,16 @@ impl Drop for Registration {
 impl Activity {
     #[cfg(test)]
     pub(crate) async fn drained(&self) {
-        let _permits = self.capacity.clone().acquire_many_owned(40).await.unwrap();
+        self.drained_except(0).await;
+    }
+    #[cfg(test)]
+    pub(crate) async fn drained_except(&self, active: u32) {
+        let _permits = self
+            .capacity
+            .clone()
+            .acquire_many_owned(40 - active)
+            .await
+            .unwrap();
     }
     pub(crate) fn register(&self, auth: &Auth) -> Registration {
         let id = Uuid::new_v4();
@@ -365,23 +472,31 @@ impl Activity {
             .collect()
     }
     pub(crate) fn retire(&self, organization: Uuid, member: Uuid) {
-        self.retire_inner(organization, member, false);
+        self.retire_inner(organization, member, Retirement::Notices);
     }
-    fn retire_inner(&self, organization: Uuid, member: Uuid, transition: bool) {
+    pub(crate) fn retire_membership(&self, organization: Uuid, member: (Uuid, i64)) {
+        self.retire_inner(organization, member.0, Retirement::MembershipLost(member.1));
+    }
+    fn retire_inner(&self, organization: Uuid, member: Uuid, retirement: Retirement) {
         for (entry, _) in self
             .snapshot(organization)
             .into_iter()
             .filter(|(e, _)| e.member.0 == member)
         {
             let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            if transition {
-                b.transition_epoch = b.transition_epoch.wrapping_add(1);
+            match retirement {
+                Retirement::Channel(channel) => {
+                    if let Some(counter) = b.channel_epochs.get(&channel).and_then(Weak::upgrade) {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Retirement::Member => b.advance_member_epoch(),
+                Retirement::MembershipLost(revision) if entry.member.1 == revision => {
+                    b.advance_member_epoch();
+                }
+                Retirement::Notices | Retirement::MembershipLost(_) => {}
             }
-            b.epoch = b.epoch.wrapping_add(1);
-            b.pending.clear();
-            b.proofs.clear();
-            b.in_flight.clear();
-            b.reset = false;
+            b.retire_notices();
         }
     }
     fn advance_directory_epochs(&self, organization: Uuid) -> HashMap<Uuid, u64> {
@@ -576,7 +691,7 @@ impl Activity {
                 Pending {
                     notice: event,
                     channel,
-                    epoch: *epoch,
+                    epoch: Epoch::Notice(*epoch),
                     directory_epoch: (proof.role == Role::Guest)
                         .then_some(authorization.directory_epoch)
                         .flatten(),
@@ -618,7 +733,7 @@ impl Activity {
 fn enqueue(entry: &Entry, mut pending: Pending) {
     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
     if !pending.valid.valid()
-        || b.epoch != pending.epoch
+        || !pending.epoch.current(&b)
         || pending
             .directory_epoch
             .is_some_and(|epoch| b.directory_epoch != epoch)
@@ -629,22 +744,17 @@ fn enqueue(entry: &Entry, mut pending: Pending) {
     if b.pending.is_empty() {
         b.reset = false;
     }
-    let channel = if matches!(pending.notice, Notice::ChannelAccessRevoked { .. }) {
-        None
-    } else {
-        pending.channel
-    };
+    let channel = pending.channel;
+    let revocation = matches!(pending.epoch, Epoch::Revocation { .. });
     if let Some(proof) = &pending.proof {
         if b.proofs.get(&channel).is_some_and(|old| old != proof)
             || (b.proofs.len() == 256 && !b.proofs.contains_key(&channel))
         {
-            b.epoch = b.epoch.wrapping_add(1);
-            b.pending.clear();
-            b.proofs.clear();
-            b.in_flight.clear();
-            b.reset = false;
+            b.advance_member_epoch();
+            b.retire_notices();
             return;
         }
+        b.has_revocation_proof |= revocation;
         b.proofs.insert(channel, proof.clone());
     }
     if matches!(
@@ -689,6 +799,12 @@ fn enqueue(entry: &Entry, mut pending: Pending) {
     entry.wake.notify_one();
 }
 impl Registration {
+    #[cfg(test)]
+    pub(crate) fn buffered(&self, notice: &Notice) -> bool {
+        let b = self.entry.buffer.lock().unwrap();
+        b.pending.iter().any(|pending| &pending.notice == notice)
+    }
+
     pub(crate) async fn next(&self) -> Option<NoticeFrame> {
         loop {
             let notified = self.entry.wake.notified();
@@ -722,7 +838,7 @@ impl Registration {
                 .await;
                 let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
                 if !pending.recoverable()
-                    || b.epoch != pending.epoch
+                    || !pending.epoch.current(&b)
                     || pending
                         .directory_epoch
                         .is_some_and(|epoch| b.directory_epoch != epoch)
@@ -754,7 +870,7 @@ impl Registration {
 }
 pub(crate) struct NoticeFrame {
     entry: Arc<Entry>,
-    epoch: u64,
+    epoch: Epoch,
     directory_epoch: Option<u64>,
     pub event: Notice,
     valid: Arc<QueryToken>,
@@ -779,7 +895,7 @@ impl NoticeFrame {
             let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
             std::task::Poll::Ready(
                 if (self.valid.valid() || self.recovery.as_ref().is_some_and(|r| r.valid()))
-                    && b.epoch == self.epoch
+                    && self.epoch.current(&b)
                     && self
                         .directory_epoch
                         .is_none_or(|epoch| b.directory_epoch == epoch)
@@ -934,7 +1050,8 @@ struct TargetChange {
     organization: Uuid,
     target: Uuid,
     before: TargetState,
-    registrations: HashMap<Uuid, u64>,
+    registrations: HashMap<Uuid, HashMap<Uuid, Epoch>>,
+    channel: Option<Uuid>,
     dm_peers: Vec<(Uuid, Uuid, bool)>,
     retired: bool,
 }
@@ -977,23 +1094,37 @@ impl auth::activity::ActivityChanges for Activity {
         tx: &'a mut sqlx::PgConnection,
         organization: Uuid,
         target: Uuid,
+        channel: Option<Uuid>,
     ) -> auth::activity::Capture<'a> {
         Box::pin(async move {
-            let registrations = self
+            let entries = self
                 .snapshot(organization)
                 .into_iter()
                 .filter(|(entry, _)| entry.member.0 == target)
+                .collect::<Vec<_>>();
+            let before = target_state(tx, organization, target).await?;
+            let channels = match channel {
+                Some(channel) if before.visible.contains_key(&channel) => vec![channel],
+                Some(_) => Vec::new(),
+                None => before.visible.keys().copied().collect(),
+            };
+            let registrations = entries
+                .into_iter()
                 .map(|(entry, _)| {
-                    let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-                    (entry.id, b.transition_epoch)
+                    let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                    (
+                        entry.id,
+                        b.capture_revocations(channels.iter().copied(), channel),
+                    )
                 })
                 .collect();
             Ok(Box::new(TargetChange {
                 activity: self.clone(),
                 organization,
                 target,
-                before: target_state(tx, organization, target).await?,
+                before,
                 registrations,
+                channel,
                 dm_peers: dms::peer_changes(tx, organization, target).await?,
                 retired: false,
             }) as Box<dyn auth::activity::ActivityChange>)
@@ -1012,8 +1143,9 @@ impl auth::activity::ActivityChange for TargetChange {
         }
         self.retired = true;
         // Retire old work synchronously with observed transition, before starting another snapshot.
+        let retirement = self.channel.map_or(Retirement::Member, Retirement::Channel);
         self.activity
-            .retire_inner(self.organization, self.target, true);
+            .retire_inner(self.organization, self.target, retirement);
         self.activity.directory_epochs = Some(Arc::new(
             self.activity.advance_directory_epochs(self.organization),
         ));
@@ -1084,12 +1216,10 @@ impl auth::activity::ActivityChange for TargetChange {
                         .is_none_or(|(_, before)| before == revision)
                 });
                 if live_same_revision {
-                    for channel in self
-                        .before
-                        .visible
-                        .keys()
-                        .filter(|id| !after.visible.contains_key(id))
-                    {
+                    for channel in self.before.visible.keys().filter(|id| {
+                        self.channel.is_none_or(|changed| changed == **id)
+                            && !after.visible.contains_key(id)
+                    }) {
                         self.activity
                             .revoked(
                                 &pool,
@@ -1181,26 +1311,30 @@ impl Activity {
         organization: Uuid,
         target: Uuid,
         channel: Uuid,
-        registrations: &HashMap<Uuid, u64>,
+        registrations: &HashMap<Uuid, HashMap<Uuid, Epoch>>,
     ) -> Result<(), sqlx::Error> {
-        let captured: Vec<_> = self
-            .snapshot(organization)
-            .into_iter()
-            .filter(|(e, _)| {
-                e.member.0 == target
-                    && registrations.get(&e.id).is_some_and(|before| {
-                        // Subscription loss can retire ordinary work again. Only
-                        // this mutation may advance its captured transition token.
-                        let b = e.buffer.lock().unwrap_or_else(|e| e.into_inner());
-                        b.transition_epoch == before.wrapping_add(1)
-                    })
-            })
-            .collect();
+        #[cfg(test)]
+        test_pause(organization, channel, "revocation", Some(target)).await;
+        let captured: Vec<_> = {
+            let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            registrations
+                .iter()
+                .filter_map(|(id, channels)| {
+                    let epoch = channels.get(&channel)?;
+                    let entry = entries.get(id)?;
+                    if entry.organization != organization || entry.member.0 != target {
+                        return None;
+                    }
+                    let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                    epoch.current(&b).then(|| (entry.clone(), epoch))
+                })
+                .collect()
+        };
         #[cfg(test)]
         test_pause(organization, channel, "snapshot", Some(target)).await;
         let authorizations: Vec<_> = captured
             .iter()
-            .map(|(e, epoch)| Authorization::new(e.clone(), *epoch, None, false, None))
+            .map(|(e, epoch)| Authorization::new_at(e.clone(), (*epoch).clone(), None, false, None))
             .collect();
         let entries: Vec<_> = captured.iter().map(|(e, _)| e.clone()).collect();
         // The transaction snapshot proved prior access. Current live identity authorizes only this transition.
@@ -1210,6 +1344,8 @@ impl Activity {
         for (authorization, proof) in authorizations.iter().zip(&proofs) {
             authorization.proved(proof);
         }
+        #[cfg(test)]
+        test_pause(organization, channel, "revocation_authorized", Some(target)).await;
         for (((entry, epoch), authorization), proof) in
             captured.iter().zip(&authorizations).zip(proofs)
         {
@@ -1221,7 +1357,7 @@ impl Activity {
                             channel_id: channel,
                         },
                         channel: None,
-                        epoch: *epoch,
+                        epoch: (*epoch).clone(),
                         directory_epoch: None,
                         proof: Some(proof),
                         valid: authorization.valid.clone(),
@@ -1236,6 +1372,15 @@ impl Activity {
 
 impl Activity {
     pub(crate) async fn check(&self, pool: &sqlx::PgPool, scope: auth::SubscriptionScope) {
+        struct Recheck {
+            selected: (Arc<Entry>, Option<Uuid>),
+            epoch: u64,
+            member_epoch: u64,
+            revocation: bool,
+            unrelated: bool,
+            proof: Option<Proof>,
+            valid: Option<Arc<QueryToken>>,
+        }
         let entries: Vec<_> = self
             .entries
             .lock()
@@ -1253,10 +1398,18 @@ impl Activity {
         let mut organizations = std::collections::BTreeMap::<_, Vec<_>>::new();
         for entry in entries {
             let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            for (channel, proof, valid) in b
+            for (channel, proof, valid, revocation, unrelated) in b
                 .proofs
                 .iter()
-                .map(|(channel, proof)| (*channel, Some(proof.clone()), None))
+                .map(|(channel, proof)| {
+                    (
+                        *channel,
+                        Some(proof.clone()),
+                        None,
+                        channel.is_none() && b.has_revocation_proof,
+                        false,
+                    )
+                })
                 .chain(
                     b.in_flight
                         .values()
@@ -1266,24 +1419,29 @@ impl Activity {
                                 authorization.channel,
                                 authorization.proof.clone(),
                                 Some(authorization.valid.clone()),
+                                matches!(authorization.epoch, Epoch::Revocation { .. }),
+                                authorization.epoch.unrelated_to(scope),
                             )
                         }),
                 )
             {
-                organizations.entry(entry.organization).or_default().push((
-                    (entry.clone(), channel),
-                    b.epoch,
-                    proof,
-                    valid,
-                ));
+                organizations
+                    .entry(entry.organization)
+                    .or_default()
+                    .push(Recheck {
+                        selected: (entry.clone(), channel),
+                        epoch: b.epoch,
+                        member_epoch: b.member_epoch,
+                        revocation,
+                        unrelated,
+                        proof,
+                        valid,
+                    });
             }
         }
         for rows in organizations.values() {
             for chunk in rows.chunks(1000) {
-                let selected: Vec<_> = chunk
-                    .iter()
-                    .map(|(selected, _, _, _)| selected.clone())
-                    .collect();
+                let selected: Vec<_> = chunk.iter().map(|row| row.selected.clone()).collect();
                 #[cfg(test)]
                 for (entry, channel) in &selected {
                     test_pause(
@@ -1295,22 +1453,33 @@ impl Activity {
                     .await;
                 }
                 let result = authorize_batch(pool, &selected).await;
-                for (index, ((entry, channel), epoch, proof, valid)) in chunk.iter().enumerate() {
+                for (index, row) in chunk.iter().enumerate() {
+                    let (entry, channel) = &row.selected;
                     let current = result.as_ref().ok().and_then(|rows| rows[index].as_ref());
                     // An unproved snapshot cannot establish the in-flight grant's lifetime.
-                    if proof.as_ref().is_some_and(|proof| current == Some(proof)) {
+                    if row
+                        .proof
+                        .as_ref()
+                        .is_some_and(|proof| current == Some(proof))
+                    {
                         continue;
                     }
                     let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
-                    if b.epoch == *epoch {
+                    let member_current = b.member_epoch == row.member_epoch;
+                    if b.epoch == row.epoch || (row.revocation && member_current) {
                         // Unknown provenance fences only that query. A current grant
                         // proves no loss for independently authorized work on this socket.
                         // Keep the fence through enqueue and first handoff: the query
                         // may already have completed since this fallback's snapshot.
-                        if proof.is_none()
+                        if row.proof.is_none()
                             && current.is_some()
-                            && let Some(valid) = valid
+                            && let Some(valid) = &row.valid
                         {
+                            // A Channel recheck cannot retire another Channel's
+                            // unproved revocation while the target identity is live.
+                            if row.unrelated {
+                                continue;
+                            }
                             let changed = b
                                 .proofs
                                 .get(channel)
@@ -1327,17 +1496,17 @@ impl Activity {
                                 for authorization in b.in_flight.values().filter(|authorization| {
                                     authorization.channel == *channel
                                         && authorization.proof.is_none()
+                                        && !authorization.epoch.unrelated_to(scope)
                                 }) {
                                     authorization.valid.retire();
                                 }
                                 continue;
                             }
                         }
-                        b.epoch = b.epoch.wrapping_add(1);
-                        b.pending.clear();
-                        b.proofs.clear();
-                        b.in_flight.clear();
-                        b.reset = false;
+                        if member_current && (channel.is_none() || result.is_err()) {
+                            b.advance_member_epoch();
+                        }
+                        b.retire_notices();
                     }
                 }
             }
@@ -1409,6 +1578,24 @@ async fn test_pause(organization: Uuid, channel: Uuid, phase: &'static str, memb
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_epochs_forget_dropped_captures_and_keep_live_notices() {
+        let mut b = Buffer::default();
+        let live = Uuid::new_v4();
+        let capture = b.capture_revocations(std::iter::once(live), None);
+        b.advance_member_epoch();
+        assert!(capture[&live].current(&b));
+        for _ in 0..16 {
+            let transient = Uuid::new_v4();
+            drop(b.capture_revocations(std::iter::once(transient), Some(transient)));
+            assert_eq!(b.channel_epochs.len(), 2);
+            assert!(capture[&live].current(&b));
+        }
+        drop(capture);
+        b.capture_revocations(std::iter::empty(), None);
+        assert!(b.channel_epochs.is_empty());
+    }
     #[fukulow_test::test]
     async fn notice_batch_matches_join_and_bounds_session_lookups(pool: sqlx::PgPool) {
         let org = Uuid::new_v4();
@@ -1555,7 +1742,7 @@ mod tests {
                 read_seq: 10,
             },
             channel: Some(channel),
-            epoch: 0,
+            epoch: Epoch::Notice(0),
             directory_epoch: None,
             proof: Some(Proof {
                 role: Role::Member,
@@ -1653,7 +1840,7 @@ mod tests {
         let entry = entry();
         let frame = NoticeFrame {
             entry: entry.clone(),
-            epoch: 0,
+            epoch: Epoch::Notice(0),
             directory_epoch: None,
             event: Notice::MembersChanged,
             valid: Arc::new(QueryToken::new()),
@@ -1859,7 +2046,7 @@ mod tests {
             assert!(!polled.load(Ordering::Relaxed));
             // A new, independently authorized contribution still works.
             let mut fresh = pending(channel, None);
-            fresh.epoch = entry.buffer.lock().unwrap().epoch;
+            fresh.epoch = Epoch::Notice(entry.buffer.lock().unwrap().epoch);
             enqueue(&entry, fresh.clone());
             let fresh_frame = registration.next().await.unwrap();
             assert_eq!(

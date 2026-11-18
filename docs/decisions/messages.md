@@ -129,3 +129,5 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - [auth](auth.md): `#299 shared raw-text validation`
 
 - [web](web.md): `#308 bounds Topic/Reply/cursor evidence`, `#308 uses 400 main/300 Topic/200 Reply`, `#308 refetches older main pages`
+
+- [realtime](realtime.md): `#396/#551 revocations carry`

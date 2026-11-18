@@ -20,6 +20,7 @@ pub trait ActivityChanges: Send + Sync {
         connection: &'a mut sqlx::PgConnection,
         organization: Uuid,
         target: Uuid,
+        channel: Option<Uuid>,
     ) -> Capture<'a>;
     fn directory(&self, pool: sqlx::PgPool, organization: Uuid, target: Uuid);
 }
