@@ -1,4 +1,4 @@
-// Opt-in heap probe; see docs/measurements.md #272 for the exact command and limits.
+// Opt-in heap probe; see docs/measurements.md#web-unread-retained-records-272 for the exact command and limits.
 import { expect, it, vi } from 'vitest'
 import { retentionClient } from './unread-retention-test-helpers'
 import { msg } from './unread-test-helpers'

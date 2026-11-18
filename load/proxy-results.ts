@@ -1,9 +1,13 @@
-import type { Observation, Proxy, Tls } from './proxy-judgment.ts';
+import type { Ceiling, Observation, Proxy, Tls } from './proxy-judgment.ts';
+import type { AppEvidence, ProxyEvidence } from './app-evidence.ts';
 
 export type RunResult = {
   exitCode: number; generatorExitCode?: number; tls?: Tls[]; measurementError?: string;
   /** load/scenario.ts provisioned every Account and Channel (`LOAD_SETUP_COMPLETE`). */
   setupComplete?: { sessions: number; accounts: number };
+  /** load/app-evidence.ts aggregates for the generator window (proxy runs only). */
+  appEvidence?: AppEvidence;
+  proxyEvidence?: ProxyEvidence;
   cpuPeakPercent?: Record<string, number | null>;
   summary?: { metrics?: Record<string, { values: Record<string, number> }>; summaries?: {
     pathLabel: string; network: string; cache: string; timelineVisibleMs: { p50: number; p95: number }
@@ -57,23 +61,66 @@ export function offeredShortfall(result: RunResult): string | undefined {
   return offered < configured * 0.95 ? `generator offered ${offered.toFixed(1)}/s, below 95% of ${configured}/s` : undefined;
 }
 
+// #469: where a failed connection step's limit was. A 1011 the client saw is app-side only if the app itself
+// sent at least as many 1011 closes in the window; 'proxy' needs complete app evidence with no app-side failure.
+// Anything else, including missing evidence or app failures not tied to the client's failure, is 'unknown'.
+export function ceilingCause(result: RunResult, requestedSockets: number): Pick<Ceiling, 'cause' | 'reasons'> {
+  const evidence = result.appEvidence;
+  if (!evidence) return { cause: 'unknown', reasons: ['missing app evidence'] };
+  if (!evidence.complete) return { cause: 'unknown', reasons: evidence.reasons.map(reason => `incomplete app evidence: ${reason}`) };
+  const client1011 = result.summary?.metrics?.['socket_closes{code:1011}']?.values.count;
+  if (!Number.isSafeInteger(client1011)) return { cause: 'unknown', reasons: ['missing client close code counts'] };
+  const app1011 = evidence.closes['1011'].count;
+  const signals = [
+    // peer_or_transport is the client's own close; every other bucket, 1001 included, is a server-sent close.
+    ...Object.entries(evidence.closes).filter(([code, close]) => code !== 'peer_or_transport' && close.count)
+      .map(([code, close]) => `app sent ${close.count} closes with ${code}`),
+    ...Object.entries(evidence.databaseFailures).filter(([, n]) => n).map(([kind, n]) => `database_failure ${kind}: ${n}`),
+    ...(['acquire_timeout', 'acquire_closed', 'acquire_io', 'acquire_database', 'acquire_other'] as const)
+      .filter(key => evidence.pool?.deltas[key]).map(key => `pool ${key}: ${evidence.pool!.deltas[key]}`),
+    ...(evidence.pool?.acquireWaitsOver1s ? [`pool acquire waits over 1 s: ${evidence.pool.acquireWaitsOver1s}`] : []),
+    ...(evidence.http5xx ? [`app HTTP 5xx: ${evidence.http5xx}`] : []),
+    ...(evidence.panics ? [`app panics: ${evidence.panics}`] : []),
+    ...Object.entries(evidence.otherWarnings).map(([event, n]) => `app ${event}: ${n}`),
+  ];
+  if (client1011! > app1011) return { cause: 'unknown', reasons: [`client saw ${client1011} closes with 1011, app sent ${app1011}`, ...signals] };
+  if (client1011! > 0) return { cause: 'app', reasons: [...signals, ...(signals.some(signal => /database_failure|pool /.test(signal)) ? []
+    : ['no database_failure or pool failure in the window: the app-side cause is not identified'])] };
+  if (signals.length) return { cause: 'unknown', reasons: ['app-side failures present, but no client 1011 ties them to the failure', ...signals] };
+  // Absence of app events alone is not proxy evidence (an app limit can leave none), and neither is the log level:
+  // an upstream timeout is an error-level proxy line with an app-side cause. The proxy is named only when its own
+  // error lines in the window name a proxy-internal capacity limit while the app logged no failure or rejection.
+  const opened = `app opened ${evidence.sockets.opened} of ${requestedSockets} requested sockets`;
+  const proxy = result.proxyEvidence;
+  if (!proxy?.complete) return { cause: 'unknown', reasons: ['no app-side failure, but proxy evidence is missing or incomplete', opened] };
+  const capacity = Object.entries(proxy.capacityMarkers ?? {}).filter(([, n]) => n > 0).map(([marker, n]) => `proxy ${marker}: ${n}`);
+  if (capacity.length) return { cause: 'proxy', reasons: [...capacity, 'no app-side failure', opened] };
+  if (proxy.errorLines > 0) return { cause: 'unknown',
+    reasons: [`proxy logged ${proxy.errorLines} error-level lines, none naming a proxy capacity limit`, opened] };
+  return { cause: 'unknown', reasons: ['neither the app nor the proxy logged a failure', opened] };
+}
+
 // Highest passing step. Exit 99 (k6 thresholds, e.g. missing_deliveries) is capacity; anything else is a harness error.
-export function stepMetric(proxy: Proxy, results: RunResult[], steps: number[], validate: (result: RunResult) => string | undefined = () => undefined): Metric {
+export function stepMetric(proxy: Proxy, results: RunResult[], steps: number[], validate: (result: RunResult) => string | undefined = () => undefined,
+  attributeCeiling = false): Metric {
   const first = results[0];
   const signature = (result: RunResult) => JSON.stringify(result.tls?.map(({ protocol, cipher }) => ({ protocol, cipher })));
+  // A failed provisioning check also exits 99; only a run past setup can show a capacity limit.
+  const capacityFailure = (result: RunResult) => result.generatorExitCode === 99 && !!result.setupComplete && !!result.summary &&
+    !!result.resources?.length && !!result.measurementError?.startsWith('Error: Invalid measurement: generator exited with code 99; failed thresholds:');
   const errors = results.flatMap(result => {
-    // A failed provisioning check also exits 99; only a run past setup can show a capacity limit.
-    const capacityFailure = result.generatorExitCode === 99 && result.setupComplete && result.summary && result.resources?.length &&
-      result.measurementError?.startsWith('Error: Invalid measurement: generator exited with code 99; failed thresholds:');
     return [
       ...(!result.summary || !result.tls ? ['missing step evidence'] : []),
-      ...(result.exitCode !== 0 && !capacityFailure ? [result.measurementError || 'step harness failed'] : []),
+      ...(result.exitCode !== 0 && !capacityFailure(result) ? [result.measurementError || 'step harness failed'] : []),
       ...[validate(result)].filter((error): error is string => !!error),
       ...(signature(result) !== signature(first) ? ['TLS conditions changed between connection steps'] : []),
     ];
   });
   const passing = results.flatMap((result, i) => result.exitCode === 0 && !validate(result) ? [steps[i]] : []);
-  return { kind: 'step', observation: { proxy, value: Math.max(0, ...passing), tls: first?.tls ?? [],
+  const failed = results.findIndex(result => result.exitCode !== 0);
+  const ceiling = attributeCeiling && failed >= 0 && capacityFailure(results[failed])
+    ? { failedStep: steps[failed], ...ceilingCause(results[failed], steps[failed]) } : undefined;
+  return { kind: 'step', observation: { proxy, value: Math.max(0, ...passing), tls: first?.tls ?? [], ...(ceiling ? { ceiling } : {}),
     generatorCpu: results.some(r => r.cpuPeakPercent?.generator == null) ? null : Math.max(...results.map(r => r.cpuPeakPercent!.generator!)),
     error: errors.length ? errors.join('; ') : undefined } };
 }

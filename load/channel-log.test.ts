@@ -19,7 +19,7 @@ test('every replayable fixture that inserts Messages directly appends their Crea
   const seeding = files(root).filter(path => /\.(ts|sql)$/.test(path) && !path.endsWith('.test.ts'))
     .map(path => relative(root, path)).filter(path => /INSERT INTO messages\s*\(/i.test(readFileSync(join(root, path), 'utf8')));
   const replayable = seeding.filter(path => !noReplay.some(prefix => path.startsWith(prefix)));
-  assert.deepEqual(replayable.sort(), ['activity-seed.ts', 'dms-formal-seed.ts', 'dms-history.ts', 'dms-seed.ts']);
+  assert.deepEqual(replayable.sort(), ['activity-seed.ts', 'dms-formal-seed.ts', 'dms-history.ts', 'dms-seed.ts', 'slice5/fixture.ts']);
   for (const path of replayable) assert.match(readFileSync(join(root, path), 'utf8'), /createLog\(org, /, path);
 });
 

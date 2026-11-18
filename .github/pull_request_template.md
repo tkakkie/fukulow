@@ -13,6 +13,6 @@ Closes #
 - [ ]
 
 ## Risk
-<!-- auth / permissions / real-time / migrations touched? denial test added? docs/invariants/ part updated? -->
+<!-- Auth / permissions / real-time / migrations touched? Denial test added? Did a critical guarantee or denial requirement change? If so, did you update the relevant docs/invariants/ part? -->
 
 <!-- Last line: AI: <name> / model: <id> / effort: <level> -->

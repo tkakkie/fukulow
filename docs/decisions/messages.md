@@ -49,7 +49,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #142 Messages owns read positions. Migration/grant triggers capture the committed counter at access time, discard revoked positions and initialize existing Topics; later Topics inherit the grant baseline. Reason: first-fetch initialization loses Messages sent after a grant.
 - #142 access triggers serialize per Organization (seed 142) so Member/Channel creation cannot miss initialization. New grants hold shared #135 through COMMIT. Mark-read rechecks access after W, locks Member/position; revocation deletes positions, denying a waiting update.
 - #142/#144 triggers mirror Channel visibility, including Roles and current public/private grants on reactivation; changes to visibility must update both predicates. The position/visibility equivalence test guards this duplication without reversing module ownership.
-- #142 list counts range-scan messages_topic_seq from read positions, skipping fully read Topics by last_seq: O(Channels + Topics + unread-range Messages), independent of read history. Own Messages in those ranges are filtered; see measurements.md.
+- #142 list counts range-scan messages_topic_seq from read positions, skipping fully read Topics by last_seq: O(Channels + Topics + unread-range Messages), independent of read history. Own Messages in those ranges are filtered; see [#142 baseline](../measurements.md#channel-list-unread-ranges-142).
 - #142 missing positions suppress only that Channel's Unread at committed seq (Topic projections: W), with a list error log; reads persist nothing and mark-read stays 404. Zero would mark all history unread; a list-wide 500 would hide unaffected Channels.
 - #144 Role/grant changes reconcile positions under #142 serialization: only newly visible Channels initialize through #135; continuous access keeps Channel/Topic positions. This avoids resetting Unread on redundant grants or Owner/Admin/Member changes.
 - #142 access changes serialize per Organization: public Channel inserts are set-based O(active Members + their Topics); Member activation is O(visible Channels + Topics), retaining shared #135 locks until COMMIT. Accept at current scale; remeasure larger Organizations.
@@ -87,7 +87,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - Topic names: 1..=60 Unicode scalars; reject empty, NUL, whitespace-only or surrounding str::trim() whitespace (400), never trim. Per-Channel lower(name COLLATE "C") uniqueness folds ASCII only; keep the first display name. This differs from Channel rules.
 - Topic creation/join, Message, seq and summary commit together inside existing bounded send admission. Retry identity adds the Topic name_key (null without Topic); changed intent is 409. Lost-response retries need no server Topic UUID.
 - #137/#515 reads resolve #135 admission/barrier, release both, then select W with authorization, M and data in one fresh snapshot. Reason: mutable rows must not exceed server-selected W; client-fixed W below M expires. Refusal is 503 with Retry-After.
-- #137 paging gate met with mixed Messages and concurrent sends: release recent/deep p95 32.342/32.235 ms at 210k Channel Messages, four readers; send p95 11.249/6.345 ms. Keep prefix aggregation/index; proportional 100 ms crossing ~649k Messages needs remeasurement. Conditions: measurements.md.
+- #137 paging gate met with mixed Messages and concurrent sends: release recent/deep p95 32.342/32.235 ms at 210k Channel Messages, four readers; send p95 11.249/6.345 ms. Keep prefix aggregation/index; proportional 100 ms crossing ~649k Messages needs remeasurement. Conditions: [#137 baseline](../measurements.md#topic-projection-paging-137).
 - topics.last_seq/message_count are a write-only cache retained for #142/#143; immutable Message aggregates supply W-relative summaries, because current cached values cannot reconstruct an older W (#137).
 
 ## Replies (#139, #140)
@@ -129,3 +129,5 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - [auth](auth.md): `#299 shared raw-text validation`
 
 - [web](web.md): `#308 bounds Topic/Reply/cursor evidence`, `#308 uses 400 main/300 Topic/200 Reply`, `#308 refetches older main pages`
+
+- [realtime](realtime.md): `#396/#551 revocations carry`

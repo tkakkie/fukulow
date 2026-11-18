@@ -1,8 +1,10 @@
 export type Proxy = 'caddy' | 'nginx';
 export type Tls = { protocol: string; cipher: string; alpn: string };
+/** The failed step that ended a connection ladder and where its limit was (load/proxy-results.ts ceilingCause). */
+export type Ceiling = { failedStep: number; cause: 'proxy' | 'app' | 'unknown'; reasons: string[] };
 export type Observation = {
   proxy: Proxy; value: number; tls: Tls[]; generatorCpu: number | null;
-  error?: string;
+  error?: string; ceiling?: Ceiling;
 };
 export function distribution(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -36,8 +38,14 @@ export function judge(rows: Observation[], kind: 'latency' | 'step' | 'descripti
   });
   const values = (proxy: Proxy) => valid.filter(row => row.proxy === proxy).map(row => row.value);
   const c = values('caddy'), n = values('nginx');
-  if (c.length !== 5 || n.length !== 5) return { verdict: 'inconclusive', invalid, counts: { caddy: c.length, nginx: n.length } };
+  // #469: a ladder stopped by an app-side or unattributed limit measured the app, not the proxy. Its passed
+  // step is only a lower bound for the proxy, so the comparison is never decided by it (pass or fail).
+  const unattributed = valid.filter(row => row.ceiling && row.ceiling.cause !== 'proxy');
+  const lowerBounds = kind === 'step' && unattributed.length ? { reason: 'connection limit not attributed to the proxy; passed steps are lower bounds',
+    ceilings: unattributed.map(row => ({ proxy: row.proxy, passed: row.value, ...row.ceiling })) } : undefined;
+  if (c.length !== 5 || n.length !== 5) return { verdict: 'inconclusive', invalid, counts: { caddy: c.length, nginx: n.length }, ...(lowerBounds ? { lowerBounds } : {}) };
   const caddy = distribution(c), nginx = distribution(n);
+  if (lowerBounds) return { verdict: 'inconclusive', invalid, caddy, nginx, lowerBounds };
   // Detection is descriptive only: overlapping ranges mean "no difference detected",
   // which never by itself confirms non-inferiority.
   const difference = caddy.max < nginx.min || nginx.max < caddy.min ? 'difference' : 'no difference detected';

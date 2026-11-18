@@ -1,1213 +1,162 @@
 # Measurements
 
-Writing: keep only the current method per area, the latest baseline per area, and results that back a current decision or an open acceptance, with reproduction conditions and limits; no routine/debug logs, raw artifacts or duplicates. A superseded record moves verbatim to its originating Issue or PR as a comment and leaves one line here (area, date, `moved to #n`, reason); never delete a record without that pointer.
+Keep only the latest baseline per scenario, the decision or open acceptance it supports, the harness path and reproduction command, and known limits. Append superseded or new detailed records verbatim to `load/measurements-archive.md` and summarise the current evidence here. [Writing rules](workflow.md#13-splitting-a-doc)
 
-Past measurement records: values, conditions, compared targets, methods, limits and commits. Evidence only: nothing here is a performance, capacity or latency guarantee of `docs/spec.md`. Current decisions drawn from these records live in `docs/decisions.md`.
+Measurements are evidence only and establish no performance, capacity or latency guarantee.
 
-How to use: do not read this file whole. Search the Issue number or topic and read that section only, when doing performance work, load tests, regression investigation or comparing results. A `moved to #n` line means the full text is in that Issue or PR (searching `docs/measurements.md` history also works).
+Raw logs, artifact directories and local paths are outside Git and may no longer exist. Checked 2026-11-18 on the maintainer's Mac (`/private/tmp` is volatile): gone for #137, #142, #151, #160 (except `i160-smoke-fix`), #195 send-drain logs, #196 B, #314 step 5 before-run, #469 smoke; still present for #153, #195 storms, #303, #314 step 5, #356, #409, #466, #486; Actions artifact `proxy-measure-43844208337-1` (#469) not yet expired. See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
 
-Rules for new records: keep results that affect a design decision, performance comparisons and important regression investigations; no routine test logs or debug output. State the conditions needed to reproduce and the limits. Do not commit large raw logs or artifacts. Do not compare runs with different methods or environments as a simple improvement rate. When a new measurement supersedes an old one, move the old record out as above. One measurement is recorded once.
+## Topic projection paging (#137)
 
-Record text is copied verbatim from its source line(s) (values and conditions unchanged). Raw logs, artifact directories and `/private/tmp` paths named in records were kept outside Git; they are not in this repository and may no longer exist, so they cannot be restored from here.
+2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. The [prefix aggregation decision](decisions/messages.md#topics-137-138) calls for remeasurement at ~649k (a proportional projection).
 
-## Moved records (#442, 2026-11-15)
+Run `MEASURE_TOPICS=10000 cargo test --release -p fukulow-server --lib measure_topic_projection_pages -- --ignored --nocapture` against test PostgreSQL. Shared Mac, warm in-process HTTP, no TCP/proxy/TLS. [Full record](../load/measurements-archive.md#137-round-1-mixed-timeline-and-concurrent-send-remeasurement-2026-11-11)
 
-- Subscription context round trips (#314 step 3b, 2026-11-13): moved to #314 (intermediate step; the decision lists the statement counts).
-- Load baselines and before/after (#57, 2026-11-09/10): moved to #57 (historical before/after runs; method kept in "Load harness methods", conclusions in docs/decisions/load.md).
-- Ambiguous-COMMIT recovery barrier (#135, 2026-11-09): moved to #135 (closed; the barrier is a current decision and its cost is stated there).
-- Watermark and send admission (#147, #156, #158, #199, 2026-11-10/11): moved to #147 (closed; caps are current decisions in docs/decisions/realtime.md).
-- Session fallback pass (#157, #146, 2026-11-10): moved to #157 (closed; the no-cap decision states its numbers).
-- Restart policy (#163, 2026-11-10): moved to #163 (closed; checked by scripts/check-compose-restart.ts).
-- Notification-failure signalling (#136, 2026-11-10): moved to #136 (closed; superseded by later delivery changes).
-- Fan-out and reorder recovery (#57 item 4/6, #179, #190, 2026-11-10): moved to #57 (closed; reservation caps are current decisions).
-- Module-direction check cost (#80, #318, 2026-11-14): moved to #80 (closed; the decision states the measured cost).
-- Reply chain indexed paging (#139, 2026-11-11): moved to #139 (closed; the index and its limits are current decisions).
-- RLS baseline before tenant RLS (#314 step 2/4, 2026-11-12/13): moved to #314 (superseded by the fresh before/after comparison kept below).
-- Timeline statement persistence (#326, 2026-11-14): moved to #326 (closed; fixed and tested).
-- Bounded web message windows (#308, 2026-11-14): moved to #308 (closed; caps are current decisions in docs/decisions/web.md).
-- Organization activity REST reconciliation (#307 item 5, 2026-11-14): moved to #307 (closed; the debounce and jitter values are in docs/spec/realtime.md O3). Result that kept the 30 s period: 10,000 sockets, steady 967.57 REST requests/s, later periodic round trip p95 2 ms, no errors.
-- Web first-paint and timeline waterfall (#345, 2026-11-14): moved to #345 (closed; findings were turned into follow-up Issues).
-- Production-domain crate split Mac build reference (#378, 2026-11-15): moved to #378 (decided and deferred; the decision states the conclusion).
+## Graceful shutdown and reconnect (#195)
 
-## Load harness methods (#20, #57)
+2026-11-11 JST (#195, PR #207). The pinned 10,000-socket repeat recovered subscriptions in 3,410 ms (Docker restart 461 ms). Three probes with 2,048 queued or in-flight sends drained in 777.360 / 813.652 / 804.816 ms. Evidence for [60 s drain and 75 s Compose grace](decisions/realtime.md#real-time-delivery) and [full jitter](decisions/web.md#web-client).
 
-Commands, metric definitions and limits of the load harness. Current rules: `docs/decisions/load.md` "Load testing and measurement".
-
-### #20 heavy run command
-
-- Source: [`docs/decisions.md` at 5023c62, line 72](https://github.com/tkakkie/fukulow/blob/5023c62a132d4bb986f5e0d14b61d4b0ced31c3e/docs/decisions.md#L72); added in 2dbc996 (PR #71).
-- Issue: #20. Decision: `docs/decisions/load.md` "Load testing and measurement".
-
-#20 manual heavy run once per milestone: `CHANNELS=1 SUBSCRIBERS=10000 PUBLISHERS=1 PUBLISH_INTERVAL_MS=100 DURATION_SECONDS=300 READY_TIMEOUT_SECONDS=60 make load` (same credentials/base URL as light); total sockets = CHANNELS × SUBSCRIBERS, PUBLISHERS is sends per batch distributed across Channels (superseded by #57 from in-flight workers); offered rate = PUBLISHERS × 1000 / PUBLISH_INTERVAL_MS, so this example offers 10 sends/s to 10,000 sockets (100,000 deliveries/s), and CHANNEL_VISIBILITY defaults to public (private also supported). Linux defaults to host networking; macOS uses `LOAD_DOCKER_NETWORK=bridge BASE_URL=http://host.docker.internal:8080`. Use a disposable database and record the commit, settings, server/database/generator resources and k6 output for identical before/after #57 comparisons; a single generator event loop can itself saturate, so this is not proof of server capacity.
-
-### #20 metric definitions
-
-- Source: [`docs/decisions.md` at 5023c62, line 73](https://github.com/tkakkie/fukulow/blob/5023c62a132d4bb986f5e0d14b61d4b0ced31c3e/docs/decisions.md#L73); added in 2dbc996 (PR #71).
-- Issue: #20. Decision: `docs/decisions/load.md` "Load testing and measurement".
-
-#20 metrics: concurrent_connections counts open sockets, subscribers_per_channel counts acknowledged subscriptions tagged by Channel index, concurrent_publishes counts outstanding HTTP sends, delivery_latency measures send-start to each unique WebSocket receipt on the generator clock, and publish_http_response_time includes the complete async HTTP round trip (http_req_duration is also tagged by operation). All sockets must acknowledge before publishing; missing deliveries, sequence gaps, protocol/HTTP errors and unexpected closes fail the run, with no reconnect masking loss. DB queries per send require separate database/server instrumentation in #57; the scaffold cannot infer them from the public API.
-
-### #20 heavy-run limits
-
-- Source: [`docs/decisions.md` at 5023c62, line 76](https://github.com/tkakkie/fukulow/blob/5023c62a132d4bb986f5e0d14b61d4b0ced31c3e/docs/decisions.md#L76); added in 2dbc996 (PR #71).
-- Issue: #20. Decision: `docs/decisions/load.md` "Load testing and measurement".
-
-#20 heavy-run limits: `make load` sets container `nofile` to 65536 (`LOAD_NOFILE` overrides it); check host/server limits and generator CPU before interpreting 10,000-socket results. External `timeout` can leave Docker running: CI names and explicitly removes its load container; manual bounded runs should set a unique `LOAD_CONTAINER_NAME` and remove it afterward. The modest #57 PR A baseline is recorded below; no 10,000-socket baseline or before/after optimization comparison has been collected.
-
-### #57 `load-record` measurement command
-
-- Source: [`docs/decisions.md` at 5023c62, line 95](https://github.com/tkakkie/fukulow/blob/5023c62a132d4bb986f5e0d14b61d4b0ced31c3e/docs/decisions.md#L95); added in 08d6364 (PR #132).
-- Issue: #57. Decision: `docs/decisions/load.md` "Load testing and measurement".
-
-#57 measurement command (macOS/Docker, disposable data): `CHANNELS=1 SUBSCRIBERS=20 PUBLISHERS=2 PUBLISH_INTERVAL_MS=100 DURATION_SECONDS=30 READY_TIMEOUT_SECONDS=15 DRAIN_TIMEOUT_SECONDS=10 LOAD_RESULT_DIR="$LOAD_ARTIFACTS" make load-record` (set `LOAD_ARTIFACTS` to a separate external artifact directory for each run). The runner creates a unique Compose project/image and dedicated PostgreSQL container, publishes only app port 18057 (`LOAD_PORT` overrides), uses bridge/host.docker.internal, and removes its own generator and Compose containers, network, disposable volumes and uniquely tagged app image. Shared PostgreSQL/k6 base images and Docker build cache remain; no global prune is used. It never uses shared `fukulow-pg-test`. `make load` remains the smoke scenario; use `load-record` for every before/after comparison. No new package: PostgreSQL's bundled pg_stat_statements extension is enabled only in the measurement Compose configuration.
-
-### #57 artifacts and reporting method
-
-- Source: [`docs/decisions.md` at 5023c62, line 96](https://github.com/tkakkie/fukulow/blob/5023c62a132d4bb986f5e0d14b61d4b0ced31c3e/docs/decisions.md#L96); added in 08d6364 (PR #132).
-- Issue: #57. Decision: `docs/decisions/load.md` "Load testing and measurement".
-
-#57 artifacts: metadata.json records source commit/dirty state, image IDs, host/Docker resources and transport; results.json records configured values, offered count/actual scheduling duration, offered sends/s (offered count divided by elapsed scheduling time), peak connections/publishes, k6 latency distributions/checks, timestamped docker stats CPU/memory/I/O samples (roughly every 2 seconds), and pg_stat_database/pg_stat_statements snapshots. SQL snapshots bracket publishing/draining after all subscriptions and before teardown; a one-second boundary pause allows capture. `handleSummary` replaces k6's readable console summary with the machine-readable LOAD_SUMMARY line. Queries exclude instrumentation. Report delta calls per offered send separately for top-level queries (excluding BEGIN/COMMIT/ROLLBACK), all top-level statements, and statements including nested FK checks. Session checks/fan-out SQL in this window are intentionally included. Inspect per-query deltas; pg_stat_database counters can lag and are supporting resource evidence, not the query-count denominator. CPU means include the one-second pre-publishing pause and the delivery drain (resource sampling spans the generator run). docker stats CPU uses 100% per core, memory is sampled container usage, and sampled peaks can miss short spikes. Preserve raw artifacts and repeat with identical configuration, image/tool versions, clean DB, Docker allocation and competing workload; no capacity conclusion from this modest single-generator run.
-
-### #57 item 6 harness audit
-
-- Source: [`docs/decisions.md` at 2599d3b, line 183](https://github.com/tkakkie/fukulow/blob/2599d3b9c0e79f336b5726c6f6fbbc31e5db08da/docs/decisions.md#L183); added in 2599d3b (PR #178).
-- Issue: #57 item 6. Decision: `docs/decisions/load.md` "Load testing and measurement".
-
-#57 item 6 audit: #132 already supplied response-independent absolute-deadline scheduling, SOCKETS_PER_SESSION, actual offered rate/peak connections and Docker/SQL resource recording. Final measurement adds baseline route compatibility, accepted/rejected rates and HTTP latency, Retry-After, reconnect counters, process RSS and failed-attempt provenance. Two initial single-batch windows ended before their configured 5 s; retain/exclude those artifacts, recheck deadlines after timer wakes (regression-tested), reject short windows, and rerun those points. No server contract or new dependency was introduced; measurement Compose pins the existing PostgreSQL image to 18.6.
-
-## Topic projection paging feasibility (#137, 2026-11-11)
-
-Target chosen before measurement: full in-process HTTP timeline-page p95 <=100 ms at concurrency 4, 50 items, both recent and deep W-relative boundaries. Query: aggregate immutable Messages <=W by Topic (min/max/count), union plain Messages, apply the exclusive boundary and descending LIMIT 51, then join only selected latest payloads/names; return ascending. Index: `messages (organization_id, channel_id, topic_id, seq)` plus the existing unique Channel/seq index. It does not establish page-size-bounded query work.
-
-- Topic-only paging feasibility run (#137, 2026-11-11): moved to #137 (superseded by the round-1 mixed run kept below).
-
-### #137 round-1 mixed timeline and concurrent-send remeasurement (2026-11-11)
-
-This supersedes the preceding feasibility evidence for the current decision; the earlier Topic-only/VACUUM run remains historical. Same preselected <=100 ms timeline p95 target, four response-paced readers, 50 items, recent and deep W-relative pages. Production now fixes/validates W under the #135 barrier, releases the watermark slot and shared lock, then runs the immutable-prefix aggregate in a fresh authorization/data snapshot. No new read admission or history/candidate limits.
-
-Reproduce sequentially with DATABASE_URL pointing at the test PostgreSQL, and no concurrent builds/tests/load probes: `MEASURE_TOPICS=5000 cargo test --release -p fukulow-server --lib measure_topic_projection_pages -- --ignored --nocapture`, then the same command with `MEASURE_TOPICS=10000` (the default). Committed runner: `server/src/messages/tests/topics/measurement.rs`; round-1 changes on base 74c1e02. Native optimized Rust 1.99.0, current-thread Tokio, 20-connection application pool, fresh SQLx database per size, Apple M5/10 CPUs/32 GiB, macOS 27.0.1 arm64, Docker 29.9.3/PostgreSQL 18.6 over loopback port 55432. Desktop/agent/background work was not isolated.
-
-At T=5,000/10,000 Topics, seed 10 pre-W Messages per Topic plus 50,000/100,000 plain Messages, interleaved at odd/even seq, W=100,000/200,000. Every Topic moves once after W, so initial Channel size is 105,000/210,000 Messages. Run ANALYZE only; no forced VACUUM. Ten sequential warm-ups per boundary, then four readers ×100 requests (400 samples). Deep boundary is exclusive 95,000/190,000: 5,001/10,001 timeline positions consumed (about 100/200 pages). Responses verify W, all 50 exact mixed positions, and each Topic count=10 despite later activity.
-
-During each timed window a fifth worker sends real HTTP Topic Messages to the same Channel/Topic every 50 ms (20/s nominal, first tick immediate); each send awaits its response, missed ticks are skipped. Actual rates below show no material offered-rate loss in these windows. Timings cover in-process HTTP authentication, authorization, barrier, query, serialization/decoding; send timings include persistence/COMMIT/ACK, not WebSocket receipt. They exclude fixture setup, TCP/proxy/TLS. Nearest-rank percentiles: reads sample 380/400; sends ceil(0.95×N).
-
-| Initial Channel Messages | Boundary | Read N | Read p50 / p95 / max ms | Send N | Send p50 / p95 / max ms | Window s / sends per s |
-|---:|---|---:|---|---:|---|---|
-| 105,000 | Recent | 400 | 16.598 / 20.819 / 37.401 | 36 | 5.168 / 21.147 / 22.801 | 1.761 / 20.437 |
-| 105,000 | Deep, exclusive 95,000 | 400 | 17.961 / 23.995 / 28.950 | 38 | 5.293 / 8.173 / 9.011 | 1.878 / 20.229 |
-| 210,000 | Recent | 400 | 28.696 / 32.342 / 52.591 | 59 | 5.043 / 11.249 / 19.983 | 2.927 / 20.154 |
-| 210,000 | Deep, exclusive 190,000 | 400 | 28.619 / 32.235 / 38.311 | 59 | 4.776 / 6.345 / 8.638 | 2.924 / 20.177 |
-
-Both sizes/boundaries pass. The smaller Channel gained 74 Messages and the larger 118 over their two timed windows. A deliberately simple proportional projection from the larger point's worst read p95 crosses 100 ms at 210,000 ×100/32.342 ≈649,310 total Channel Messages (about 30,920 Topics, 618,390 pre-W mixed Messages at the same ratio). Treat ~649k as the planning stop-and-remeasure point; it is not a measured failure or safe capacity bound. Plan changes, heap visibility, cache pressure and contention can invalidate linear scaling; these single, short, warm-cache shared-host runs do not establish arbitrary-history, cold-cache or production performance. The smaller point is a scaling check, not a fitted capacity guarantee. No limits were added. Raw logs outside Git: `/private/tmp/topics-137-release-{5000,10000}.log`.
-
-## Graceful shutdown and reconnect storm (#195, 2026-11-11 JST)
-
-- Decision: retain 60 s overall drain / 75 s Compose grace; spread reconnect attempts with client full jitter. Source: c3f782b plus the #195 working-tree patch (production source and harness snapshots in artifacts). Docker release build, Rust 1.99.0, PostgreSQL 18.6, k6 1.8.2; Apple M5, 10 cores, 32 GiB, Docker Desktop 29.9.3 VM with 10 CPUs / 7.748 GiB. Pilot/initial runner Node 26.8.1; final runner and all image builds use pinned Node 26.13.0. Direct Docker-network HTTP, no TLS/proxy, one public Channel/Account/Member, fresh isolated DB, sequential runs. A small pilot validated the harness; both 10,000-socket runs had no concurrent test suite or publishing during restart.
-- Reproduce: `LOAD_RECONNECT_STORM=1 LOAD_DIRECT_NETWORK=1 CHANNELS=1 SUBSCRIBERS=10000 SOCKETS_PER_SESSION=500 CONNECT_BATCH=100 CONNECT_INTERVAL_MS=100 PUBLISHERS=1 DURATION_SECONDS=3 PUBLISH_INTERVAL_MS=500 READY_TIMEOUT_SECONDS=120 DRAIN_TIMEOUT_SECONDS=30 make load-record`. Twenty sessions share 500 sockets each; descriptors 65,536, request timeout 45 s. Once all sockets subscribe, the runner sends SIGTERM by restarting only its isolated app; the generator uses the web client's full-jitter function, resets on `subscribed`, and resumes each gap-free cursor. Six 17-byte sends follow full recovery, expecting 60,000 deliveries. The 20-socket pilot used one session, one connect batch, readiness/drain timeouts 90/15 s; other publishing settings match.
-
-| Sockets | All subscriptions recovered ms | Attempt count | Reconnect attempt ms min / median / p95 / p99 / max | First 1001 observed ms min–max | Docker restart command ms |
-|---|---:|---:|---|---|---:|
-| 20 pilot | 1,291 | 25 | 94 / 361 / 1,036.6 / 1,078.24 / 1,084 | 75–76 | 279 |
-| 10,000 initial | 7,362 | 13,392 | 83 / 587 / 3,977 / 4,454 / 7,354 | 64–314 | 535 |
-| 10,000 pinned repeat | 3,410 | 11,625 | 77 / 494 / 1,000 / 1,312.76 / 2,440 | 69–293 | 461 |
-
-- Times start at the generator's restart trigger, before host command dispatch. Attempt distributions include every retry, not just the random sleep or successful reconnect. Close observations include generator scheduling/network time; Docker command time includes stop and startup, not a server-only drain measurement. The initial 10,000-socket run received exactly 10,000 shutdown 1001 frames, then transient 2,179 abnormal 1006 and 1,213 internal 1011 closes while reconnecting; zero 4008, missing deliveries, sequence gaps, load errors or send rejections. All six sends and 60,000 deliveries succeeded in each 10,000-socket run. The pinned repeat observed 10,000 shutdown 1001 and 1,625 transient 1006, no 1011/4008 or missing deliveries. The pilot had five transient 1006 and no 1011, with 120/120 deliveries. Transient failures are visible rather than treated as proof of loss; the existing per-Channel watermark admission budget limits this popular-Channel storm.
-- Limits: one pilot and two 10,000-socket samples with different host runner Node versions, shared machine, k6 rather than a browser, small bodies, no traffic until subscriptions recover, no saturation of in-flight sends during this load run. No deterministic-backoff baseline or performance-improvement claim. SQL/resource snapshots span restart/replay plus publishing, so SQL/send ratios are not steady-state send costs. Controlled real-SIGTERM tests separately hold a pre-COMMIT send and detached notification, verify drain completion and short deadline expiry, then retry identical keys and replay without gaps. The 40 s admitted-send bound plus 10 s notification deadline leaves 10 s margin within 60 s; pre-admission authorization can exceed that work budget, so the overall deadline remains the unconditional escape hatch. Measurements support retaining provisional values, not a universal worst-case bound.
-- Artifacts outside Git: `/private/tmp/fukulow-195-storm-20`, `/private/tmp/fukulow-195-storm-10000` and `/private/tmp/fukulow-195-storm-final-10000` hold metadata, image IDs, reconnect/Close samples, k6 metrics, SQL/resource snapshots and server logs. The final run was repeated with pinned Node and a complete source patch including newly added files; its source snapshot is authoritative for reproduction. The runner removed its containers, network, volume and uniquely tagged image after each run.
-
-### #195 round 1 concurrent-send SIGTERM drain (2026-11-11 JST)
-
-- Decision evidence: retain provisional 60 s overall drain / 75 s Compose grace. Three release probes drained in **777.360 / 813.652 / 804.816 ms** (median 804.816 ms, observed maximum 813.652 ms). This adds an in-flight-send measurement to the idle restart evidence above; it is not a universal upper bound or a before/after performance comparison.
-- Source: 47673cd plus the PR #207 round-1 review fixes. Rust 1.99.0 native macOS arm64 release test binary, Apple M5 / 10 CPUs / 32 GiB; PostgreSQL 18.6 in a disposable Docker container, isolated random loopback port and fresh SQLx test database per run. Shared development host; no other validation suite from this worktree ran during the three timed probes. Direct loopback HTTP and Docker-published PostgreSQL, no TLS/proxy, production 20-connection application pool and admission/deadline settings.
-- Reproduce with DATABASE_URL pointing to an isolated PostgreSQL 18.6 administrator database: run `cargo test --release -p fukulow-server --lib measure_sigterm_under_concurrent_sends -- --ignored --nocapture` three times. The parent sends real SIGTERM only after the child reports readiness. Establish 2,048 HTTP connections before the burst to avoid the host listen-backlog limit; send 13-byte bodies across eight public Channels in one Organization/Account Session. Pause each Channel's first transaction before COMMIT and wait for the work counter to reach 2,048: eight in-flight transactions and 2,040 queued sends. Release all eight gates immediately when shutdown begins; no artificial wait is added to the measured drain.
-- Time starts when the real signal future resolves and ends when `serve` returns, including HTTP completion, detached persistence/notification and socket drain, and pool close; connection preparation, parent signal dispatch and replay verification are excluded. All three runs completed every HTTP request with 201, observed shutdown Close 1001 on the socket subscribed to all eight Channels, closed the pool and replayed all 2,048 canonical Messages in per-Channel sequence order with no duplicates or gaps.
-- Limits: a native release test harness using the production router/drain, not the deployed main-process exit/runtime teardown or Compose SIGKILL path; one small-body Organization burst and one socket, not 10,000 subscribers during publishing. Gates establish the backlog but release immediately on signal, so this does not exercise prolonged COMMIT/notification stalls, admission expiry, pre-admission authorization/pool contention or a slow database. The 60 s application escape hatch / 75 s supervisor grace have substantial headroom over these samples; their worst-case sufficiency remains provisional because pre-admission SQL can exceed the work budget. Raw run logs remain outside Git at `/private/tmp/fukulow-207-send-drain-{1,2,3}.log`.
+Run `LOAD_RECONNECT_STORM=1 LOAD_DIRECT_NETWORK=1 CHANNELS=1 SUBSCRIBERS=10000 SOCKETS_PER_SESSION=500 CONNECT_BATCH=100 CONNECT_INTERVAL_MS=100 PUBLISHERS=1 DURATION_SECONDS=3 PUBLISH_INTERVAL_MS=500 READY_TIMEOUT_SECONDS=120 DRAIN_TIMEOUT_SECONDS=30 make load-record` (`load/record.ts`) and `cargo test --release -p fukulow-server --lib measure_sigterm_under_concurrent_sends -- --ignored --nocapture` with isolated PostgreSQL 18.6. Storm publishes after recovery. Native Mac drain releases COMMIT gates immediately and excludes deployed teardown. [Reconnect record](../load/measurements-archive.md#graceful-shutdown-and-reconnect-storm-195-2026-11-11-jst) · [Drain record](../load/measurements-archive.md#195-round-1-concurrent-send-sigterm-drain-2026-11-11-jst)
 
 ## Backup restore drill (#198 C)
 
-Initial drill (2026-11-11 JST, #198 C): **1.82 seconds**, on Apple M5/arm64 macOS, Docker 29.9.3 with 10 CPUs / 8,319,438,848 bytes VM memory, Node 26.13.0, cached `postgres:18` = PostgreSQL 18.6 (`sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722`). A fresh, separately named Compose source had all 9 repository migrations, 2 Organizations, 1 Account, 2 Members with owner/guest Roles, 2 public/private Channels and grants, 2,000 synthetic Messages (seq 1–1,000 per Channel), and 3 Account Sessions. `node scripts/backup.ts` produced a 133,556-byte archive; `node scripts/restore-drill.ts` restored it with constraints, ended all Sessions and passed heap/index checks in a separate network-disabled tmpfs container, then removed it. This tiny synthetic dataset, cached image and memory-backed destination do not estimate VPS disk restore time or a full production outage. The source retained its original 2,000 Messages and 3 Sessions.
-
-## Channel-list Unread read-position ranges (#142 review B1, 2026-11-11)
-
-Compare the reviewed initial-seq aggregate with the production read-position query after merging main d1d5aaf. Reproduce using an isolated PostgreSQL 18.6: `DATABASE_URL=<throwaway database> cargo test --release -p fukulow-server --lib measure_unread_list_read_position_ranges -- --ignored --nocapture`; repeat with `MEASURE_HISTORY=5000` (default 50000). Committed probe: `server/src/messages/tests/unread/measurement.rs`, including the old SQL comparator; production: `server/src/messages/unread.rs::LIST_COUNTS_SQL`. No concurrent build, test suite, writer or load probe during either timed run. Native release Rust 1.99.0, Apple M5/10 CPUs/32 GiB, Darwin 27.0.0 arm64, Docker 29.9.3/PostgreSQL 18.6 over loopback port 55442, tmpfs database; desktop/background work was not isolated.
-
-Shape: one Organization, two Members, 20 public Channels, 10 Topics per Channel (200 total). Each Channel has 5,000 or 50,000 immutable Messages, half plain (even seq), half evenly distributed across Topics (odd seq); all sent by the other Member. Total history is 100,000 or 1,000,000 Messages. There are 40 Channel positions, 200 explicit viewer Topic positions and 20 counters. Viewer initial_seq remains 0. Both Channel and Topic read positions are set to history size (fully read), then history size minus 100 (2,000 unread total: 1,000 plain plus 1,000 Topic Messages). Topic last_seq/counts match the fixture. ANALYZE all five query tables, without forced VACUUM or planner settings. Existing `messages_topic_seq (organization_id, channel_id, topic_id, seq)` supplies both range scans; no additional index is needed.
-
-Each query/shape gets five sequential warm-ups then 50 response-paced samples on one SQLx connection pool, before then after; nearest-rank p95 is sample 48/50. Timings include pool acquisition, the count query over loopback and SQLx row decoding, excluding fixture setup, authentication, the separate visible-Channel query and HTTP/proxy/TLS. Every sample checks all 20 positions and exact plain/total counts. These are query timings, not endpoint latency or a concurrency capacity claim.
-
-| History rows | Unread rows | Before p50 / p95 ms | After p50 / p95 ms |
-|---:|---:|---:|---:|
-| 100,000 | 0 | 17.320 / 18.323 | 0.602 / 0.731 |
-| 100,000 | 2,000 | 17.358 / 18.053 | 0.987 / 1.065 |
-| 1,000,000 | 0 | 162.140 / 174.414 | 10.559 / 11.157 |
-| 1,000,000 | 2,000 | 204.778 / 255.727 | 13.773 / 14.202 |
-
-EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON), captured after each sample window: before at 1M rows uses a Message Seq Scan (1,000,000 actual rows) with joins and grouped counts even when fully read; execution 272.273 ms fully read / 312.079 ms with the tail. After uses lateral aggregates and parameterized `messages_topic_seq` Index Scans with organization/channel/topic equality and `seq > read position`. Fully read: main scan 20 loops ×0 rows; Topic Message scan never executes (0 loops), because last_seq rejects all 200 Topics. Tail: main scan 20×50 rows, Topic scan 200×5 rows, exactly 2,000 Message rows total; no history filtering. Explain execution 9.962 / 12.322 ms. The small 200-row Topics table uses sequential scans per Channel (20×200 candidates), with 10 matching Topics per Channel; this is separate from Message history work.
-
-Limits: at 1M rows the planner's conservative range estimates trigger JIT (69 functions, ~9.7/11.0 ms compilation in the two after plans), whereas the 100k after plans do not. Thus latency is not constant across history sizes despite eliminating reads of already-read Messages. This focused warm-cache comparison supports O(unread-range Messages + Channel/Topic lookup work), not arbitrary-history latency, cold-cache, many-Topic, simultaneous reconnect or production performance. Own Messages in unread ranges still require filtering. Raw plans/results remain outside Git at `/private/tmp/unread-142-measure-{5000,50000}.log`; older records above are unchanged.
-
-Reproduce with the dataset and cached image above: follow [deployment: Operations](spec/deployment.md#operations-backup-and-restore-198-c), run `node scripts/backup.ts /absolute/private/backup-directory` in the separately named source Compose project, then `node scripts/restore-drill.ts /absolute/private/backup-directory/fukulow-EXAMPLE.dump`.
-
-The measured drill time covers container startup, restore, ending Sessions and heap/index checks only. It excludes backup creation, download/image pull, incident detection, finding the right archive, permission reconciliation, database switch, app restart, client checks and human approval. Production dataset size, disk, CPU, contention and failure modes differ; measure a representative drill on the recovery hardware before estimating outage duration. No measured drill time is a guaranteed recovery deadline.
-
-## Web Unread retained records (#272, 2026-11-12 JST)
-
-Compare the same production Unread controller with retention disabled (`before`, only `needsUnreadRecord` replaced by always-true) and enabled (`after`). Probe: `web/src/unread-memory.test.ts`, skipped by default. From the repository root, run these separately, without concurrent tests/builds:
+2026-11-11 JST. Initial drill **1.82 seconds** with a cached PostgreSQL 18.6 image and network-disabled tmpfs on Apple M5. The 133,556-byte dump held 2 Organizations, 2,000 Messages and 3 Sessions. Evidence for the [backup and restore procedure](spec/deployment.md#operations-backup-and-restore-198-c).
 
-```bash
-MEASURE_UNREAD=before npm --prefix web test -- src/unread-memory.test.ts --execArgv=--expose-gc --reporter=verbose --disableConsoleIntercept
-MEASURE_UNREAD=after npm --prefix web test -- src/unread-memory.test.ts --execArgv=--expose-gc --reporter=verbose --disableConsoleIntercept
-```
+In a separate source Compose project, run `node scripts/backup.ts /absolute/private/backup-directory`, then `node scripts/restore-drill.ts /absolute/private/backup-directory/fukulow-EXAMPLE.dump` with the actual dump. Excludes production disk/outage steps. [Full record](../load/measurements-archive.md#backup-restore-drill-198-c)
 
-Conditions: main 706bb18 plus #272 working-tree changes, including PR #273 round-1 pruned-floor recovery and collect-order fixes. This rerun replaces the earlier measurement in this same unmerged PR. macOS 27.0.1 / Darwin 27.0.0 arm64, Apple M5, 10 CPUs, 32 GiB; Node v26.8.1 (local runtime, repository pin is 26.13.0), Vitest 5.1.0, default fork pool. One watched Channel, main plus Topics T/U, 100,000 distinct other-sender Messages. Bootstrap Message 1 is main; subsequent even seq are main, odd seq alternate T/U. Upstream sync retains only the current Message; projection history is empty with full coverage. Every 1,000 Messages, refetched Channel and Topic baselines advance all persisted positions to the current seq with zero counts. No visit, pending mark or HTTP retry is active. The real controller collects, merges baselines, prunes and computes snapshots; only upstream observations and HTTP results are deterministic doubles. Both modes assert zero aggregate Unread after each refresh. No per-Message mock call log or full history array is retained.
+## Channel-list Unread ranges (#142)
 
-Each process warms one controller first, takes its starting `process.memoryUsage().heapUsed`, then samples after every 25,000 Messages and all baseline refreshes. `global.gc()` runs before every heap sample (`gc:true` in both runs). Starting heaps: before 11,258,072 bytes; after 11,258,816 bytes. Recorded results:
+2026-11-11 (review B1, `d1d5aaf`). Across 20 public Channels and 200 Topics at 1,000,000 Messages, before/after SQL p95 was 174.414 → 11.157 ms fully read and 255.727 → 14.202 ms with 2,000 unread. Evidence for [skipping read ranges](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8). #356 below covers the later RLS bound.
 
-| Messages | Records before / after | Heap growth before / after (bytes) |
-| --- | --- | --- |
-| 25,000 | 25,000 / 0 | 5,864,072 / 338,392 |
-| 50,000 | 50,000 / 0 | 11,410,048 / 359,600 |
-| 75,000 | 75,000 / 0 | 17,864,808 / 381,352 |
-| 100,000 | 100,000 / 0 | 22,494,176 / 395,688 |
+With disposable PostgreSQL 18.6 in `DATABASE_URL`, run `cargo test --release -p fukulow-server --lib measure_unread_list_read_position_ranges -- --ignored --nocapture`. Warm sequential SQL, JIT at 1M, no HTTP or writers. [Full record](../load/measurements-archive.md#channel-list-unread-read-position-ranges-142-review-b1-2026-11-11)
 
-Peak retained records: 100,000 before, 1,000 after. At 100,000 Messages, absolute post-GC heaps were 33,752,248 / 11,654,504 bytes (growth 21.452 / 0.377 MiB). This supports retaining the active baseline/aggregate/visit windows rather than all collected session history.
+## Web Unread retained records (#272)
 
-Limits: one deterministic process run per mode; heap includes controller metadata, Topic baseline identity bookkeeping and the test runtime, so it is not a per-Message byte estimate or an allocation/latency benchmark. Upstream sync and Topic caches, browser rendering and network scheduling are excluded. Baselines refresh every 1,000 Messages here; missing/stale scope baselines, a held aggregate or a long visit intentionally retain wider windows. The bound depends on those windows, not a fixed record cap. Separate regression tests cover baseline subtraction after local reads, held Topic positions, unresolved and advancing visits, duplicate replay, and seeded equivalence with shared events and out-of-order/backward baselines (pruned counts may be null until a post-position refetch recovers). Shared contract fixtures are unchanged.
+2026-11-12 JST (PR #273 round 1). One watched Channel, two Topics, 100,000 Messages and baseline refresh every 1,000. Retention disabled/enabled gave 100,000/1,000 peak records and 22,494,176/395,688 bytes final heap growth. Evidence for pruning under the [client rules](spec/realtime.md#topic-reply-and-unread-projections-owners-137-topics-server-138-topics-web-139-replies-server-140-replies-web-142-unread).
 
-## RLS before/after (#314 step 5, 2026-11-13 JST)
+Run `MEASURE_UNREAD=before npm --prefix web test -- src/unread-memory.test.ts --execArgv=--expose-gc --reporter=verbose --disableConsoleIntercept`, then repeat with `MEASURE_UNREAD=after`. One deterministic Node run per mode. Stale baselines, held aggregates and long visits widen retention. [Full record](../load/measurements-archive.md#web-unread-retained-records-272-2026-11-12-jst)
 
-Purpose: isolate RLS enablement: B = a999a35^ (6dcadb7, context plumbing without policies), A = a999a35 (#343, RLS enabled). Fresh reruns replace the historical step 2 numbers as the comparison denominator; later context plumbing is present on both sides. Ran B/A/B/A/B/A in this session, 11:30–11:49 JST, with one fresh isolated PostgreSQL database per side/run for plans + latency and another fresh database for each end-to-end run. The detached B worktree was unchanged.
+## RLS before and after (#314 step 5)
 
-Conditions: Apple M5 / 10 CPUs / 32 GiB, macOS 27.0.1 arm64; Docker 29.9.3, VM 10 CPUs / 7.748 GiB; pinned PostgreSQL 18.6 image e3d24f69…, shared_buffers 128MB, work_mem 4MB, default JIT; k6 1.8.2 (00fdceba…); Rust 1.99.0 release images built separately from each source before timing, container Node 26.13.0, host orchestration Node 26.8.1. No competing cargo suite/build or load run was found before starting or during spot checks, so no wait was needed. Six pre-existing development PostgreSQL containers remained running, near idle; interactive desktop activity continued. No TLS/proxy, Docker bridge transport to the loopback-published app, no load warm-up. All app/pgbench/EXPLAIN connections used non-owner fukulow_app (NOBYPASSRLS).
+2026-11-13 JST (#343). One-time [RLS performance exception](decisions/auth.md#auth-accounts-and-tenancy): eight-client history p95 0.335 → 0.389 ms (+16.1%) and replay +6.3% across eight runs per side. Modest send throughput and HTTP p95 changed 0.0%. #357 tracks a stable-host API rerun.
 
-Reproduce (test-only database/password variables supplied via environment; never record their values):
+Compare `6dcadb7` and `a999a35` using `load/hot-plans/seed.sql` and `HOTPLANS_CONTAINER="$DB" LATENCY_CTX=1 LATENCY_CLIENTS=8 LATENCY_SECONDS=30 node load/hot-latency.ts`; sends use `make load-record`. Shared-host drift and explicit pgbench context transactions limit attribution. Supplemental runner was external. [Method](../load/measurements-archive.md#rls-beforeafter-314-step-5-2026-11-13-jst) · [Confirmation](../load/measurements-archive.md#mitigation-candidates-314-step-5) · [Decision](../load/measurements-archive.md#maintainer-decision-exception-to-the-10-criterion-314-step-5-2026-11-13)
 
-- Create B with `git worktree add --detach /private/tmp/fukulow-314-step5-before 6dcadb7`; use this worktree at a999a35 for A. Build a separate release Docker image from each source; run the same A measurement harness with `LOAD_SERVER_SOURCE` and `LOAD_APP_IMAGE` selecting that side. Before/after SQL harness files are identical. Exact runner and raw outputs: `/private/tmp/fukulow-314-step5/run.ts`, `before/run{1,2,3}/`, `after/run{1,2,3}/`; analysis and index-condition audit also stay there, outside Git.
-- Plans: pinned fresh PostgreSQL 18.6, `sqlx migrate run --source "$SIDE_TREE/server/migrations"`, that side's `deploy/db-roles.sql` and `deploy/db-grants.sql`, then the unchanged `load/hot-plans/seed.sql` as owner. Same step 2 dataset: Org A 10,000 Members, 50 Channels, hot Channel 100,000 Messages (70,000 in 2,000 Topics), other Channels 2,000 each; Org B 1,000 Members and 10 × 5,000 Messages; 406,800 Channel positions and 2,000 measured-Member Topic positions, last-100 cut-off. As app role: `psql -X -v org_context=1 [-v generic=1] -f load/hot-plans/plans.sql`, six fresh-session passes per mode per run. Default's first executions are Custom; its repeated `auto.*` sections test Auto. All writes roll back. Tables use medians of passes 2–6, then the median of the three run medians; buffers are execution-root shared hits + reads, excluding planning, reported Custom; Generic. † marks >10% **and** >0.05 ms Execution Time growth in at least one mode.
-- Latency: `HOTPLANS_CONTAINER="$DB" LATENCY_CTX=1 LATENCY_SECONDS=30 LATENCY_RESULT_DIR="$OUT/latency-reports" node load/hot-latency.ts`, prepared pgbench, 1 and 8 clients, three runs per side. Same historical harness: “History latest page” actually pages 51 Messages before a uniformly random cursor; Replay returns 50 after a random cursor. Each transaction uses BEGIN/local context/query/COMMIT. Each percentile and transactions/s is independently medianed across three runs; ranges are per-run p95.
-- Load: `CHANNELS=1 SUBSCRIBERS=20 PUBLISHERS=2 PUBLISH_INTERVAL_MS=100 DURATION_SECONDS=30 READY_TIMEOUT_SECONDS=15 DRAIN_TIMEOUT_SECONDS=10 LOAD_RESULT_DIR="$OUT/load" LOAD_SERVER_SOURCE="$SIDE_TREE" LOAD_APP_IMAGE="$SIDE_IMAGE" make load-record`. Three runs per side, identical step 2 offered load, fresh DB and app each time.
-
-| Query (Execution Time, ms) | Custom B → A (change) | Generic B → A (change) | Shared buffers C; G (B → A) |
-|---|---:|---:|---:|
-| `auth` | 0.029 → 0.037 (+27.6%) | 0.028 → 0.040 (+42.9%) | 6 → 6; 6 → 6 |
-| `vis` | 0.018 → 0.023 (+27.8%) | 0.019 → 0.022 (+15.8%) | 5 → 5; 5 → 5 |
-| `watermark.shared_lock` | 0.011 → 0.011 (+0.0%) | 0.012 → 0.013 (+8.3%) | 0 → 0; 0 → 0 |
-| `watermark` | 0.007 → 0.011 (+57.1%) | 0.007 → 0.010 (+42.9%) | 1 → 1; 1 → 1 |
-| `send.member_lock` | 0.018 → 0.021 (+16.7%) | 0.017 → 0.022 (+29.4%) | 4 → 4; 4 → 4 |
-| `send.channel_public` | 0.005 → 0.006 (+20.0%) | 0.005 → 0.007 (+40.0%) | 1 → 1; 1 → 1 |
-| `send.existing` | 0.020 → 0.013 (-35.0%) | 0.011 → 0.012 (+9.1%) | 3 → 3; 3 → 3 |
-| `send.reply_parent` | 0.036 → 0.039 (+8.3%) | 0.038 → 0.042 (+10.5%) | 4 → 4; 4 → 4 |
-| `send.channel_lock` | 0.005 → 0.005 (+0.0%) | 0.008 → 0.006 (-25.0%) | 0 → 0; 0 → 0 |
-| `send.next_seq` | 0.045 → 0.046 (+2.2%) | 0.047 → 0.047 (+0.0%) | 11 → 11; 11 → 11 |
-| `send.topic_join` | 0.042 → 0.038 (-9.5%) | 0.041 → 0.040 (-2.4%) | 17 → 17; 17 → 17 |
-| `send.topic_id` | 0.007 → 0.007 (+0.0%) | 0.009 → 0.008 (-11.1%) | 5 → 5; 5 → 5 |
-| `send.insert_message` | 0.201 → 0.181 (-10.0%) | 0.190 → 0.190 (+0.0%) | 30 → 30; 30 → 30 |
-| `send.topic_record` | 0.031 → 0.034 (+9.7%) | 0.031 → 0.039 (+25.8%) | 12 → 12; 12 → 12 |
-| `history.latest` | 0.035 → 0.039 (+11.4%) | 0.036 → 0.042 (+16.7%) | 8 → 8; 8 → 8 |
-| `history.before_old` | 0.033 → 0.039 (+18.2%) | 0.035 → 0.041 (+17.1%) | 6 → 6; 6 → 6 |
-| `timeline.latest` † | 36.760 → 41.628 (+13.2%) | 145.103 → 184.700 (+27.3%) | 5566 → 5566; 644704 → 644704 |
-| `timeline.topic` | 0.135 → 0.161 (+19.3%) | 7.104 → 7.404 (+4.2%) | 336 → 336; 12478 → 12478 |
-| `replay` | 0.052 → 0.056 (+7.7%) | 0.061 → 0.066 (+8.2%) | 10 → 10; 10 → 10 |
-| `fanout.member_access_1024` † | 0.992 → 1.422 (+43.3%) | 1.105 → 1.560 (+41.2%) | 2181 → 2181; 3119 → 3119 |
-| `fanout.access_rows_1024` † | 2.522 → 5.102 (+102.3%) | 2.679 → 2.746 (+2.5%) | 226 → 226; 9862 → 5819 |
-| `unread.visible_list` † | 0.636 → 1.512 (+137.7%) | 0.700 → 1.535 (+119.3%) | 74 → 74; 74 → 74 |
-| `unread.list_counts` | 20.512 → 22.418 (+9.3%) | 4.053 → 4.254 (+5.0%) | 3814 → 3864; 3814 → 3864 |
-| `read.position_lock` | 0.012 → 0.015 (+25.0%) | 0.011 → 0.013 (+18.2%) | 7 → 7; 7 → 7 |
-| `read.mark_channel` | 0.039 → 0.042 (+7.7%) | 0.036 → 0.038 (+5.6%) | 15 → 15; 15 → 15 |
-| `read.topic_exists` | 0.011 → 0.013 (+18.2%) | 0.012 → 0.014 (+16.7%) | 3 → 3; 3 → 3 |
-| `read.mark_topic` | 0.027 → 0.029 (+7.4%) | 0.026 → 0.029 (+11.5%) | 12 → 12; 12 → 12 |
-
-| Auto (default cache mode) | Execution Time B → A, ms | Shared buffers B → A |
-|---|---:|---:|
-| `auto.timeline` † | 142.723 → 184.177 (+29.0%) | 644699 → 644699 |
-| `auto.list_counts` | 3.828 → 4.034 (+5.4%) | 3814 → 3864 |
-
-| Latency script / clients | B p50 / p95 / p99 ms | A p50 / p95 / p99 ms | p95 change (B; A ranges) | Transactions/s B → A |
-|---|---:|---:|---:|---:|
-| history-1 | 0.155 / 0.174 / 0.185 | 0.163 / 0.178 / 0.189 | +2.3% (0.172–0.179; 0.174–0.184) | 6326.8 → 6074.4 (-4.0%) |
-| history-8 | 0.154 / 0.312 / 0.381 | 0.192 / 0.351 / 0.431 | +12.5% (0.306–0.358; 0.314–0.471) | 45324.1 → 38465.6 (-15.1%) |
-| replay-1 | 0.151 / 0.165 / 0.174 | 0.151 / 0.166 / 0.177 | +0.6% (0.163–0.168; 0.161–0.170) | 6568.7 → 6537.8 (-0.5%) |
-| replay-8 | 0.177 / 0.350 / 0.436 | 0.183 / 0.338 / 0.408 | -3.4% (0.291–0.383; 0.306–0.437) | 40492.2 → 40406.8 (-0.2%) |
-
-| Load side/run | Accepted sends / s | Deliveries / missing / errors | Delivery median / p95 / p99 ms | Send HTTP median / p95 / p99 ms | Queries/send | Peak CPU app / DB / generator % |
-|---|---:|---|---|---|---:|---|
-| B1 | 600 / 19.9993 | 12,000 / 0 / 0 | 8 / 12 / 15 | 7 / 10 / 13 | 11.010 | 5.97 / 8.85 / 8.98 |
-| A1 | 600 / 20.0000 | 12,000 / 0 / 0 | 8 / 14 / 16 | 7 / 12 / 14 | 11.010 | 5.83 / 13.12 / 8.82 |
-| B2 | 600 / 20.0000 | 12,000 / 0 / 0 | 8 / 11 / 13 | 6 / 10 / 11 | 11.010 | 5.99 / 9.63 / 7.74 |
-| A2 | 600 / 19.9993 | 12,000 / 0 / 0 | 8 / 12 / 14 | 7 / 10 / 12 | 11.010 | 6.03 / 13.19 / 8.49 |
-| B3 | 600 / 19.9993 | 12,000 / 0 / 0 | 8 / 11 / 13 | 7 / 9 / 11 | 11.010 | 5.68 / 11.02 / 7.34 |
-| A3 | 600 / 19.9993 | 12,000 / 0 / 0 | 8 / 12 / 14 | 7 / 10 / 12 | 11.010 | 6.01 / 11.64 / 7.95 |
-
-Load medians: accepted rate 19.9993 → 19.9993/s (0.0%); send HTTP median/p95/p99 7/10/11 → 7/10/12 ms (p95 0.0%); delivery 8/11/13 → 8/12/14 ms (p95 +9.1%). Every run accepted 600/600 sends, delivered 12,000/12,000, passed all 1,244 checks, and peaked at 20 sockets / 2 publishes. Harness-reported top-level queries/send stayed 11.010 (transaction control excluded). CPU peaks above sample the whole generator run, including provisioning/boundaries/drain; 100% is one core.
-
-Plan findings and analysis:
-
-- Index names, scan methods and conflict-arbiter indexes are retained on every query. Node shapes are **not** identical. Added Result/One-Time Filter gates change `vis`, `watermark`, `send.member_lock`, `send.channel_public`, `send.existing`, `send.reply_parent`, `send.topic_id`, `send.topic_record`, `history.latest`, `history.before_old`, `timeline.latest`, `timeline.topic`, `replay`, `fanout.member_access_1024`, `unread.visible_list`, `unread.list_counts`, `read.position_lock`, `read.mark_channel`, `read.topic_exists`, `auto.timeline` and `auto.list_counts`. AUTH additionally gains the Account-policy users_account_id subplan (not executed with the Organization policy already true); timeline reorders access/w CTE joins and, for custom single Topic, the position joins. `fanout.access_rows_1024` retains node topology but gains policy filters. The two advisory locks, sequence upsert, Topic join, Message INSERT and Topic-position upsert retain node topology (write policy checks do not appear as separate nodes). Shape/index-name findings were stable across all retained passes.
-- Policy expressions inline fukulow_current_org() as `NULLIF(current_setting('fukulow.organization_id', true), '')::uuid`. Single-Organization scans mostly get startup gates; users additionally has the Account-read OR predicate, evaluated per row. Generic/Auto timeline retains Incremental Sort + GroupAggregate over 70,000 Topic Messages, with 70,000 read-position and Topic-position probes each. Added Result gates evaluate context on those repeated probes: generic 145.103 → 184.700 ms (+27.3%), Auto 142.723 → 184.177 (+29.0%); buffer counts stay about 644,700. Custom timeline remains HashAggregate/bulk scans at 36.760 → 41.628 ms (+13.2%). This compounds the existing #326 generic-plan cost.
-- Custom `access_rows` still scans 11,000 users and 5,000 grants: per-row context/Account OR filters raise 2.522 → 5.102 ms (+102.3%). `member_access` retains its bounded users index access but filters 1,024 Members and adds Channel gates per candidate: +43.3% Custom / +41.2% Generic. Unread visible list still hashes/scans 5,000 grants; their policy filter accounts for most of its increase (0.636 → 1.512 ms, +137.7%; Generic +119.3%). These and timeline.latest/auto.timeline are every † query; no other median meets both thresholds.
-- Index bounds do change in two places. Generic `access_rows` adds Organization to channel_members_by_member's condition, reducing buffers 9,862 → 5,819. Conversely Unread Topic counts in Custom/Generic/Auto lose `seq > COALESCE(tr.read_seq, p.initial_seq)` from messages_topic_seq's Index Cond: it becomes a Filter (about 29 discarded rows per probe), raising that subscan's hits 46 → 96 and total hits 3,814 → 3,864. Index-name retention therefore does not establish identical index use. Custom counts also JIT-compiles 72 vs 69 functions; the measured total rises 9.3% (Generic 5.0%, Auto 5.4%). Other index conditions are unchanged except the added AUTH policy subplan and randomized idempotency keys.
-- History's unchanged sequence index/buffers (8) gains a startup policy gate: Custom 0.035 → 0.039 ms, Generic 0.036 → 0.042. This supports incremental SQL overhead, but cannot attribute the full eight-client p95 increase (0.312 → 0.351 ms) to one node: transaction/context round trips and shared VM scheduling also contribute. Replay uses the same indexed page and authorization gates; its median p95 changes +0.6% / −3.4% at 1 / 8 clients.
-
-Verdict: **report to the maintainer before merge**, because eight-client history p95 rises **12.5%**, exceeding #314's 10% criterion. One-client history is +2.3%; Replay stays below the criterion; offered-rate-bound accepted send throughput and send HTTP p95 are unchanged. First load pair alone had HTTP p95 10 → 12 ms (+20%), but the three-run medians are 10 → 10. The flagged hot-query costs and changed Unread index bound remain review points independently of the end-to-end send result.
-
-Candidate mitigations, not implemented: test scalar-subquery/InitPlan context predicates to evaluate settings once, and a policy form that avoids repeated Account/Organization OR evaluation; reduce repeated timeline position probes or select a custom timeline plan (#326), rather than globally forcing custom (Unread custom pays JIT). Explore explicit Organization/candidate bounds for batch scans. For Unread, investigate RLS security ordering and predicate leakproofness before changing the correlated bound/query shape; the existing index already has the seq key. The context functions are already STABLE; that does not make each nested-loop invocation free. Do not mark a function LEAKPROOF without proving its error/data behavior. Any hoisting or policy change must preserve fail-closed semantics and revalidate one-statement context-before-read ordering, reuse and cancellation under both plan modes; no production mitigation was made here.
-
-Limits: one shared desktop/VM and dataset, short warm-plan samples with EXPLAIN overhead, small end-to-end offered load, millisecond generator timing and sampled CPU peaks; no capacity claim. Eight-client p95 ranges overlap substantially, and performance drifts across runs (history B 0.306–0.358, A 0.314–0.471 ms; replay B 0.291–0.383, A 0.306–0.437); the history threshold breach is reported, not claimed to be a fully isolated causal estimate. pgbench measures explicit context transactions, not the server's single-statement adapter. The maintainer decision is recorded below ("Maintainer decision"); the extra pairs below ran on the same shared host, so a steadier isolated rerun is tracked in #357. Harness-only changes expose pgbench's actual transactions/s and optionally preserve its raw report; workload SQL, durations and plans are unchanged on both sides. `node --test load/*.test.ts` passed all 34 tests. All created containers/images and the detached worktree were removed; raw reports remain outside Git.
-
-### Mitigation candidates (#314 step 5)
-
-Follow-up on HEAD 56e0d21 (same machine, Docker allocation, pinned PostgreSQL 18.6 and seed as above). B/A schemas were extracted with `git show` from 6dcadb7/a999a35 into external scratch directories; no production file was changed. Confirmation ran five further interleaved B/A pairs, fresh container/database per side/run, unchanged prepared pgbench SQL, `LATENCY_CTX=1 LATENCY_CLIENTS=8 LATENCY_SECONDS=30`. One A setup failed before timing and was retried after a TCP-readiness check; the failed setup is excluded. Retained all completed timing runs. The original three plus five new runs give the following independently medianed percentiles; for eight values, median is the mean of the central two.
-
-| Script | B median p50/p95/p99 ms | B min–max p50; p95; p99 ms | A median p50/p95/p99 ms | A min–max p50; p95; p99 ms | p95 change |
-|---|---|---|---|---|---:|
-| history-8 | 0.1735/0.3350/0.4090 | 0.090–0.293; 0.292–0.688; 0.347–1.166 | 0.2095/0.3890/0.4850 | 0.094–0.289; 0.301–0.743; 0.348–1.267 | 16.1% |
-| replay-8 | 0.1925/0.3665/0.4510 | 0.084–0.262; 0.269–0.616; 0.324–0.948 | 0.2025/0.3895/0.4835 | 0.098–0.267; 0.283–0.668; 0.346–1.128 | 6.3% |
-
-History-8 still exceeds +10% on the requested pooled medians (**+16.1%**); Replay-8 is +6.3%. This does not establish a repeatable causal +16.1% RLS cost: the new-five medians alone are History 0.520→0.409 ms (−21.3%) and Replay 0.553→0.438 ms (−20.8%); median within-pair changes are +3.1%/+5.2%. All five new p95 pairs (ms), in order: History 0.292→0.301, 0.298→0.409, 0.520→0.743, 0.688→0.670, 0.626→0.369; Replay 0.269→0.283, 0.299→0.438, 0.553→0.668, 0.616→0.615, 0.584→0.342. Large shared-host drift, overlapping ranges and the last-pair setup retry limit attribution. Spot checks found no competing suite/build; the six pre-existing PostgreSQL containers stayed near idle; no thermal warning was recorded.
-
-Forms: **a** hoists every Organization policy predicate, both USING and WITH CHECK, and Account predicates (including the Organizations EXISTS) into scalar-subquery InitPlans. **b** adds `(SELECT fukulow_current_account()) IS NOT NULL AND ...` to both Account-read policies. **c** instead puts both Account-read expressions inside `CASE WHEN (SELECT fukulow_current_account()) IS NULL THEN false ELSE ... END`. These are policy-only changes, applied as owner after seeding; context functions, queries, indexes, grants and data are unchanged.
-
-Plans below are Execution Time ms, Custom/Generic; the last two rows are Auto. Each side/form uses six fresh-session `plans.sql` passes per mode with `org_context=1`, medians of passes 2–6; B/A were remeasured in confirmation run 4, not reused from the earlier three-run table. Candidate plans use run 1; latency uses three fresh databases per form, a/b interleaved, then c.
-
-| Query | B C/G | A C/G | a C/G | b C/G | c C/G |
-|---|---:|---:|---:|---:|---:|
-| `auth` | 0.029/0.026 | 0.041/0.042 | 0.057/0.053 | 0.061/0.061 | 0.071/0.079 |
-| `vis` | 0.021/0.022 | 0.021/0.021 | 0.020/0.021 | 0.020/0.020 | 0.022/0.024 |
-| `watermark.shared_lock` | 0.011/0.012 | 0.011/0.013 | 0.011/0.013 | 0.012/0.013 | 0.013/0.014 |
-| `watermark` | 0.007/0.008 | 0.009/0.009 | 0.010/0.010 | 0.011/0.011 | 0.012/0.012 |
-| `send.member_lock` | 0.018/0.017 | 0.021/0.023 | 0.022/0.023 | 0.022/0.022 | 0.024/0.026 |
-| `send.channel_public` | 0.005/0.005 | 0.007/0.006 | 0.006/0.007 | 0.007/0.007 | 0.008/0.008 |
-| `send.existing` | 0.010/0.010 | 0.011/0.011 | 0.010/0.012 | 0.011/0.011 | 0.014/0.017 |
-| `send.reply_parent` | 0.036/0.036 | 0.038/0.039 | 0.038/0.040 | 0.037/0.038 | 0.048/0.043 |
-| `send.channel_lock` | 0.005/0.008 | 0.005/0.005 | 0.004/0.006 | 0.005/0.005 | 0.005/0.007 |
-| `send.next_seq` | 0.043/0.047 | 0.048/0.048 | 0.045/0.057 | 0.044/0.053 | 0.054/0.065 |
-| `send.topic_join` | 0.038/0.037 | 0.036/0.036 | 0.037/0.040 | 0.038/0.039 | 0.044/0.041 |
-| `send.topic_id` | 0.007/0.008 | 0.006/0.009 | 0.006/0.008 | 0.006/0.009 | 0.008/0.009 |
-| `send.insert_message` | 0.173/0.182 | 0.181/0.192 | 0.182/0.194 | 0.176/0.189 | 0.203/0.207 |
-| `send.topic_record` | 0.026/0.029 | 0.036/0.035 | 0.031/0.033 | 0.031/0.036 | 0.039/0.041 |
-| `history.latest` | 0.031/0.034 | 0.034/0.036 | 0.036/0.040 | 0.037/0.039 | 0.046/0.050 |
-| `history.before_old` | 0.033/0.035 | 0.038/0.040 | 0.038/0.045 | 0.042/0.042 | 0.051/0.047 |
-| `timeline.latest` | 36.179/144.268 | 41.744/184.199 | 41.070/157.209 | 41.513/158.278 | 50.695/191.599 |
-| `timeline.topic` | 0.127/7.070 | 0.164/7.295 | 0.145/7.045 | 0.151/7.376 | 0.186/8.260 |
-| `replay` | 0.050/0.061 | 0.054/0.066 | 0.056/0.076 | 0.054/0.070 | 0.069/0.079 |
-| `fanout.member_access_1024` | 0.959/1.113 | 1.384/1.531 | 1.059/25.950 | 1.107/27.330 | 1.298/1.394 |
-| `fanout.access_rows_1024` | 2.499/2.628 | 4.929/2.625 | 2.526/2.243 | 2.542/2.310 | 3.007/2.789 |
-| `unread.visible_list` | 0.620/0.700 | 1.472/1.482 | 0.699/0.707 | 0.691/0.743 | 0.871/0.900 |
-| `unread.list_counts` | 20.380/4.012 | 22.087/4.187 | 21.723/4.136 | 22.163/4.155 | 26.335/5.099 |
-| `read.position_lock` | 0.012/0.012 | 0.015/0.012 | 0.016/0.013 | 0.016/0.013 | 0.018/0.016 |
-| `read.mark_channel` | 0.039/0.035 | 0.042/0.036 | 0.044/0.038 | 0.041/0.038 | 0.050/0.043 |
-| `read.topic_exists` | 0.011/0.011 | 0.012/0.013 | 0.012/0.014 | 0.012/0.015 | 0.015/0.015 |
-| `read.mark_topic` | 0.029/0.026 | 0.029/0.026 | 0.032/0.028 | 0.032/0.029 | 0.037/0.033 |
-| `auto.timeline` | 141.143 | 180.588 | 154.145 | 155.276 | 192.513 |
-| `auto.list_counts` | 3.799 | 4.013 | 4.008 | 3.973 | 4.982 |
-
-Latency p95 medians [run min–max], ms; B/A use all eight runs for 8 clients, original three for 1 client; every candidate uses three runs per cell. One-client controls were not rerun in this follow-up. Cells are descriptive comparisons, not isolated improvement estimates. Full p50/p95/p99 and transactions/s medians, ranges and individual runs are in external `summary.json`.
-
-| Script/clients | B | A | a | b | c |
-|---|---:|---:|---:|---:|---:|
-| history-1 | 0.1740 [0.172–0.179] | 0.1780 [0.174–0.184] | 0.1960 [0.178–0.204] | 0.1980 [0.182–0.201] | 0.1940 [0.189–0.195] |
-| history-8 | 0.3350 [0.292–0.688] | 0.3890 [0.301–0.743] | 0.5260 [0.327–0.542] | 0.5140 [0.437–0.552] | 0.5140 [0.509–0.527] |
-| replay-1 | 0.1650 [0.163–0.168] | 0.1660 [0.161–0.170] | 0.1840 [0.167–0.184] | 0.1790 [0.165–0.187] | 0.1780 [0.173–0.178] |
-| replay-8 | 0.3665 [0.269–0.616] | 0.3895 [0.283–0.668] | 0.4830 [0.347–0.516] | 0.4760 [0.461–0.532] | 0.4800 [0.474–0.517] |
-
-Candidate p95 change vs B / vs A, in the same row order:
-
-| Form | History-1 | History-8 | Replay-1 | Replay-8 |
-|---|---:|---:|---:|---:|
-| a | +12.6% / +10.1% | +57.0% / +35.2% | +11.5% / +10.8% | +31.8% / +24.0% |
-| b | +13.8% / +11.2% | +53.4% / +32.1% | +8.5% / +7.8% | +29.9% / +22.2% |
-| c | +11.5% / +9.0% | +53.4% / +32.1% | +7.9% / +7.2% | +31.0% / +23.2% |
-
-Recommendation: **none for production from this investigation**. a/b remove much of Custom access_rows and visible-list overhead, but introduce a large Generic fan-out regression: member_access 25.950/27.330 ms versus B 1.113 and A 1.531. Every retained Generic pass uses a Nested Loop with 523,776 discarded join pairs (users estimate 2, actual 1,024). c changes that to a Hash Join and 1.394 ms, but still estimates only 4 users; this is a fragile join-choice tipping point, not a demonstrated cardinality fix. Its Custom access_rows/visible-list costs are 3.007/0.871 versus A 4.929/1.472 ms, while Generic timeline is 191.599 versus B 144.268/A 184.199 and Custom counts 26.335 versus B 20.380/A 22.087. All queries in this later c batch are generally slower, so do not attribute the entire raw difference to CASE. The latency table does not demonstrate that any form clears History-8's +10% criterion under steady matched conditions. c is the best partial follow-up for fan-out, not a merge recommendation.
-
-Unread Topic counts: **none restores the sequence bound to Index Cond**. All five retained passes in Custom/Generic/Auto keep `seq > COALESCE(tr.read_seq, p.initial_seq)` as a Filter for A/a/b/c; B has it in Index Cond. No LEAKPROOF claim or query/index change was attempted. Scalar subqueries do execute settings through InitPlans, but their unknown parameter selectivity changes planning, and per-loop gates/InitPlan reads still have costs.
-
-Exact tested c SQL follows (investigation artifact, not a proposed production migration). a uses the same ten Organization policy replacements with plain Account equality/EXISTS; b adds the non-NULL AND guard; full literal scripts for all three remain in the external artifact directory.
-
-```sql
-BEGIN;
-DROP POLICY org_isolation ON organizations;
-CREATE POLICY org_isolation ON organizations FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON users;
-CREATE POLICY org_isolation ON users FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON channels;
-CREATE POLICY org_isolation ON channels FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON channel_members;
-CREATE POLICY org_isolation ON channel_members FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON channel_message_sequences;
-CREATE POLICY org_isolation ON channel_message_sequences FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON messages;
-CREATE POLICY org_isolation ON messages FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON topics;
-CREATE POLICY org_isolation ON topics FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON channel_read_positions;
-CREATE POLICY org_isolation ON channel_read_positions FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON topic_read_positions;
-CREATE POLICY org_isolation ON topic_read_positions FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY org_isolation ON invites;
-CREATE POLICY org_isolation ON invites FOR ALL USING (organization_id = (SELECT fukulow_current_org())) WITH CHECK (organization_id = (SELECT fukulow_current_org()));
-DROP POLICY account_read ON users;
-DROP POLICY account_read ON organizations;
-CREATE POLICY account_read ON users FOR SELECT USING (CASE WHEN (SELECT fukulow_current_account()) IS NULL THEN false ELSE account_id = (SELECT fukulow_current_account()) END);
-CREATE POLICY account_read ON organizations FOR SELECT USING (CASE WHEN (SELECT fukulow_current_account()) IS NULL THEN false ELSE EXISTS (SELECT 1 FROM users u WHERE u.organization_id = organizations.organization_id AND u.account_id = (SELECT fukulow_current_account())) END);
-COMMIT;
-```
-
-Semantics: every form passed the psql substitute for the requested Rust suites: 60 table×context×plan-mode cells (ten target tables, unset/Organization-only/Account-only, Custom/Generic), with expected SELECT visibility, INSERT-other denied (42501), UPDATE/DELETE-other affecting zero rows, context-free/Account-only writes denied, and Organization moves rejected (42501; users identity trigger P0001). Same-Organization other-Account Members stay hidden in Account context. Both-context SELECT union and Account-only write denial also passed. Prepared copies of the production materialized-CTE/correlated-LATERAL wrapper passed 80 alternating-Organization reads plus 80 unset follow-ups per plan mode/form on the same backend, with identical Member/Channel IDs in both Organizations. The semantic clone alone temporarily disabled Member triggers for fixture truncation and re-enabled them before seeding/checks; timing data was never changed. This is not execution of `server/src/database/tests/rls.rs` or `server/src/messages/tests/rls_statements.rs`: their SQLx fixtures recreate production policies. Full production-path assertions, cancellation/abort behavior, private-Channel authorization and Account-context performance remain unverified for these forms.
-
-Reproduction/raw evidence (outside Git): `/private/tmp/fukulow-314-step5/mitigation/` contains `run.ts`, `case-run.ts`, `candidate-{a,b,c}.sql`, `semantics.ts`, `analyze.ts`, `summary.json`, conditions, complete plan outputs and pgbench reports. Run `node run.ts` for confirmation/a/b, then `node case-run.ts` for c; completion markers skip retained runs, so use a new external root for an independent repeat. The scripts extract schemas, migrate, apply role/grant SQL, run the unchanged seed, apply candidate SQL, collect plans and invoke `load/hot-latency.ts` with 30 seconds and 1/8 clients for candidates; passwords are ephemeral environment values. Failed fixture/setup attempts remain separately named and are excluded from summaries. No end-to-end send-load rerun, production mitigation, new dependency or LEAKPROOF/IMMUTABLE annotation. All created containers/volumes were removed; no worktree or app image was created. Shared desktop/VM, one seed, short EXPLAIN samples, one plan set per form and sequential form groups limit generalization; the original single-statement adapter is not the explicit-transaction latency harness.
-
-### Maintainer decision: exception to the 10% criterion (#314 step 5, 2026-11-13)
-
-The maintainer accepted the current RLS policies with this regression as a **one-time, recorded exception** to #314's 10% criterion:
-- Accepted: History p95 at 8 clients 0.335 → 0.389 ms (+16.1%, about +0.05 ms per page; medians of 8 interleaved runs per side). Replay +6.3%; send throughput and send p95 0.0%.
-- The causal regression rate is not established: ranges are wide (before 0.292–0.688, after 0.301–0.743 ms) and the 5 extra pairs alone favoured RLS.
-- This does **not** relax the performance criterion for later changes. Small, shared-host, synthetic measurements here are not a production performance guarantee.
-- Current policies stay; candidates a/b/c are not adopted; no optimisation may weaken the security guarantees.
-- Follow-ups: fan-out `access_rows`/`member_access` (#354), Unread list/counts (#355), Unread Topic-count `seq` index bound (#356), History re-measurement on a stable host with realistic API-path load and query-level improvements (#357). The timeline Generic-plan cost, increased by RLS, stays tracked in #326.
-
-## Sign-in admission under a credential flood (#196 C, 2026-11-13 JST)
-
-Reproduce from the repository root, one run at a time, nothing else running (add `LOAD_MALLOC_MMAP_THRESHOLD=131072` for the allocator check):
-
-```bash
-LOAD_PORT=18096 SIGNIN_CONCURRENCY=64 SIGNIN_RATE=500 SIGNIN_SECONDS=60 SIGNIN_READ_RATE=2 SIGNIN_ACCOUNTS=1000 SIGNIN_IP_POOL=10000 SIGNIN_CORRECT_EVERY=10 SIGNIN_TIMEOUT_SECONDS=45 SERVER_REF=<commit> make load-signin
-```
-
-Conditions: Apple M5, 10 CPUs, 32 GiB, macOS 27 / Darwin 27.0.0; Docker 29.9.3 (10 CPUs, 7.7 GiB); Node v26.13.0; app and PostgreSQL from `load/compose.yml`, release image built per commit. 500 sign-ins/s for 60 s from at most 64 client requests in flight, over 10,000 client IPs: half wrong passwords for known Accounts, 40% unknown emails, every tenth a correct password; plus 2 Organization B reads/s. Credentials are random per run and never logged. Base = f11ba03 (merge base), pre-fix = 47280c5/1a563cf (admission after the Account lookup), fixed = 9677ca6 (admission before the lookup). Runs alternated base/branch.
-
-| Run | Sign-ins sent | Correct succeeded | 503 | Success p95 (ms) | App RSS peak (MiB) | DB connections in use, peak | App CPU mean |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| base, 3 runs | 24,325–26,264 | 100% | 0 | 240–286 | 735–869 | 5–6 | 346–382% |
-| pre-fix, 3 runs | 29,996–30,000 | 81–87% | 3,900–5,553 | 132–170 | 870–1,440 | 7–20 | 358–379% |
-| fixed | 30,000 | 85.2% | 4,297 | 153 | 660 | 5 | 373% |
-| fixed + mmap threshold | 29,991 | 83.7% | 4,353 | 143 | 90 | 5 | 356% |
-
-Organization B reads succeeded 120/120 in every run, p95 ≤ 6.4 ms. Rejected sign-ins (429/503) answered in about 1 ms at p50. Base sent fewer sign-ins because its slower responses hit the 64 in-flight cap, so base queueing is under-reported. Base returned some 429 for unknown emails (key cap); the branch evicts idle email buckets instead.
-
-Results:
-- The branch sheds overload uniformly with 503: 13–19% of correct sign-ins are rejected under this flood, in exchange for success p95 about half of base and no unbounded queue.
-- Admission before the lookup removes the DB lookup from a 503; the pre-fix runs reached 15–20 pool connections twice, the fixed run stayed at 5 (single run; one pre-fix run also stayed at 7).
-- RSS: base also reached 735–869 MiB, so the growth is not new in this PR. Idle RSS 12 s after drain was 376–472 MiB without the threshold and 14 MiB with it; peak dropped from 660 to 90 MiB at equal throughput and CPU. Freed 19 MiB Argon2 blocks retained by glibc malloc explain it, not live request state.
-
-Limits: one host, loopback, short 60 s runs, one to three runs per variant; DB connection peaks varied between runs. The client caps in-flight requests at 64, so it does not model an attacker with unbounded concurrency. The allocator setting was tested only as a run-time environment variable, not as an image default.
-
-## WebSocket socket caps, frame budget and read buffer (#196 A, 2026-11-13 JST)
-
-Reproduce in `server/` against a local PostgreSQL (`DATABASE_URL` set), `ulimit -n 100000`, nothing else heavy running:
-
-```bash
-MEASURE_READ_BUFFER=8192 cargo test --release --lib realtime::tests::limits::measure_idle_socket_rss_by_read_buffer -- --ignored --exact --nocapture
-MEASURE_SECONDS=30 MEASURE_FLOODERS=8 cargo test --release --lib realtime::tests::limits::measure_reconnect_flood_subscribe_load -- --ignored --exact --nocapture
-```
-
-Add `MEASURE_UNLIMITED=1` to the flood run for the no-limit variant. RSS and CPU time come from `ps -o rss=,time=` on the test process, sampled 5 s and 25 s after the ready line it prints.
-
-Conditions: Apple M5, 10 CPUs, 32 GiB, macOS 27 / Darwin 27.0.0; release test binary at this PR's head; PostgreSQL in Docker; server and loopback clients in one process. Another build/test job ran on the host during some runs.
-
-**Idle sockets.** 10,000 subscribed idle sockets, two rounds per variant:
-
-| Server read buffer | RSS (MiB), rounds 1 / 2 | CPU time over 20 s idle (s) |
-| --- | --- | --- |
-| 128 KiB (tungstenite default) | 2,693 / 2,693 | 0.64 / 0.69 |
-| 16 KiB | 1,595 / 1,595 | 0.60 / 0.62 |
-| 8 KiB (chosen) | 1,516 / 1,516 | 0.53 / 0.62 |
-| 4 KiB | 1,477 / 1,476 | 0.55 / 0.59 |
-
-The process also holds the 10,000 client sockets, so only differences are meaningful: 128 KiB -> 8 KiB saves about 1.15 GiB (1,177 MiB) (~120 KiB per socket); 8 KiB -> 4 KiB saves about 40 MiB.
-
-**Reconnect flood.** One Account, 8 sockets looping subscribe/unsubscribe as fast as possible and reconnecting at once on any close or refusal, for 30 s. Meanwhile a Member of another Organization re-subscribes every 500 ms (1 s deadline). App pool in use sampled every 5 ms. Three runs per variant:
-
-| Variant | Subscribes/s | Upgrades accepted | Upgrades refused (503) | Pool in use, peak | Other Organization ok / failed | Other p50 / p99 (ms) |
-| --- | --- | --- | --- | --- | --- | --- |
-| no limits | 299–306 | 8 | 0 | 5 | 58 / 0 | 24–25 / 31–40 |
-| budget, upgrade admitted when empty (first version) | 15.6–15.7 | 19,059–19,848 | 0 | 5 | 56 / 0 | 35–37 / 51–56 |
-| budget + refusal at upgrade when empty (chosen) | 12.1–13.8 | 247–457 | 74,611–91,552 | 5 | 23–28 / 0 | 26–37 / 35–43 |
-
-Results:
-- The budget cuts subscribe work (authorization query, two watermark transactions, replay) from ~300/s to ~13/s for a flooding Account.
-- Admitting an exhausted Account turned the flood into ~660 upgrades/s, each with a session check, and the other Organization's p50 rose. Refusing at upgrade removed those connections.
-- No other-Organization probe failed in any run. Its lower count with refusals is client-side: the flood and the probe share one test runtime.
-
-Limits: one host, loopback, short runs, server and clients in one process, so absolute RSS and the probe's timing include client cost. Each refused upgrade still runs one authentication query (~3,000/s here); handshake admission and accept pacing are #212. The per-Account (32) and global (12,000) caps were not load-tested beyond the cap tests; their values come from the 10,000-socket target and the RSS above. Not a fairness guarantee between Accounts.
-
-## Sustained write throughput (#309, 2026-11-13 JST)
-
-Reproduce from the repository root, one mode at a time, nothing else running:
-
-```bash
-THROUGHPUT_SCENARIO=many THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput
-THROUGHPUT_SCENARIO=hot THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput
-```
-
-Conditions: server and harness 6f95221 (clean). Apple M5, 10 CPUs, 32 GiB; Docker Desktop 29.9.3 VM with 10 CPUs and 7.748 GiB; k6 1.8.2 on the same host; HTTP without TLS or proxy; fresh database per mode. k6 constant-arrival-rate steps of 60 s each, 4 Members, no subscribers. `many` routes over 200 public Channels and `hot` sends to 1. Sends per second accepted inside each step's window:
-
-| Offered/s | many: accepted/s | many: p50/p95/p99 ms | hot: accepted/s | hot: p50/p95/p99 ms |
-| ---: | ---: | --- | ---: | --- |
-| 50 | 50 | 3 / 5 / 6 | 50 | 3 / 4 / 6 |
-| 100 | 100 | 2 / 4 / 5 | 100 | 2 / 4 / 5 |
-| 250 | 250 | 1 / 3 / 5 | 250 | 1 / 2 / 3 |
-| 500 | 500 | 1 / 2 / 3 | 500 | 1 / 2 / 3 |
-| 1,000 | 998* | 1 / 2 / 6 | 998* | 1 / 4 / 42 |
-| 2,000 | 1,996* | 1 / 4 / 8 | 1,788* | 54 / 64 / 75 |
-| 4,000 | 3,968* | 5 / 21 / 36 | 1,749* | 55 / 68 / 85 |
-
-\* k6 dropped iterations: `many` 145 / 225 / 1,881, `hot` 115 / 12,654 / 134,985. k6 drops an iteration when all 100 VUs are busy, so these steps did not run at their offered rate; dropped iterations alone cannot tell generator capacity from server response time. There were zero 429, 503, other errors and incomplete requests in any step. Both modes ran 8 top-level queries and 12 statements (including nested FK checks) per send. Peak sampled CPU, where 100% is one core: `many` app 165%, DB 254%, generator 137%; `hot` app 61%, DB 66%, generator 40%. Peak app RSS was 141 / 122 MiB.
-
-Result: across many Channels, one node sustained about 4,000 accepted sends/s with p95 21 ms. At 4,000/s the generator used 137% CPU on the shared host and server p95 stayed low, so the generator likely set that ceiling, but this run cannot prove it. So the `docs/spec.md` "thousands of writes/s per node" target holds for spread writes on this host. One hot Channel reached about 1,750 accepted sends/s under these conditions (at most 100 VUs): p50 jumps to about 55 ms while app and DB CPU stay low. The leading hypothesis is the one-send-at-a-time-per-Channel serialization (about 0.57 ms per send), a per-Channel limit rather than a node limit; this run does not isolate it.
-
-Limits: one run per mode on a shared single host, with the generator competing for the same CPUs. At most 100 VUs means at most 100 requests in flight, so open bursts larger than that (the #57 2,048-send burst that returned 87% 503) are not exercised here. 17-byte bodies, one Organization, no WebSocket fan-out load and no TLS. The server ceiling for `many` is unmeasured. Raw artifacts stay outside Git (`LOAD_RESULT_DIR`).
-
-- Image default MALLOC_MMAP_THRESHOLD_=131072 (#340, 2026-11-13): moved to #340 (closed; the decision states the RSS and throughput result).
+## Sign-in admission (#196 C)
+
+2026-11-13 JST. At 500 offered sign-ins/s for 60 s and 64 in flight at most, fixed `9677ca6` handled 30,000 sign-ins, returned 4,297 HTTP 503s and reached success p95 153 ms with 5 peak DB connections in use. Second-Organization reads were 120/120 per run at p95 ≤ 6.4 ms. Evidence for [admission before lookup](decisions/auth.md#auth-accounts-and-tenancy).
+
+Run `LOAD_PORT=18096 SIGNIN_CONCURRENCY=64 SIGNIN_RATE=500 SIGNIN_SECONDS=60 SIGNIN_READ_RATE=2 SIGNIN_ACCOUNTS=1000 SIGNIN_IP_POOL=10000 SIGNIN_CORRECT_EVERY=10 SIGNIN_TIMEOUT_SECONDS=45 SERVER_REF=9677ca6 make load-signin` (`load/signin.ts`). Shared Mac, loopback. The base hit the in-flight cap. [Full record](../load/measurements-archive.md#sign-in-admission-under-a-credential-flood-196-c-2026-11-13-jst)
+
+## WebSocket caps and read buffer (#196 A)
+
+2026-11-13 JST. For 10,000 idle subscribed sockets, 128 KiB versus 8 KiB gave RSS 2,693 / 2,693 versus 1,516 / 1,516 MiB. Eight reconnecting sockets for 30 s gave 12.1–13.8 subscribes/s with the budget and upgrade refusal versus 299–306 without limits. Evidence for [buffer size and refusal](decisions/realtime.md#admission-and-timeouts).
+
+From `server/` with local PostgreSQL and `ulimit -n 100000`, run `MEASURE_READ_BUFFER=8192 cargo test --release --lib realtime::tests::limits::measure_idle_socket_rss_by_read_buffer -- --ignored --exact --nocapture` and `MEASURE_SECONDS=30 MEASURE_FLOODERS=8 cargo test --release --lib realtime::tests::limits::measure_reconnect_flood_subscribe_load -- --ignored --exact --nocapture`. Loopback clients share the process and RSS. Cap confirmation is open in #431. [Full record](../load/measurements-archive.md#websocket-socket-caps-frame-budget-and-read-buffer-196-a-2026-11-13-jst)
+
+## Sustained write throughput (#309)
+
+2026-11-13 JST, `6f95221`. Four Members, 17-byte bodies, no subscribers. At 4,000 offered/s, 200 public Channels accepted 3,968/s at p95 21 ms and one hot Channel accepted 1,749/s at p95 68 ms. Evidence for the [write target](spec.md#performance-targets-first).
+
+Run `THROUGHPUT_SCENARIO=many THROUGHPUT_RATES=50,100,250,500,1000,2000,4000 THROUGHPUT_STEP_SECONDS=60 THROUGHPUT_VUS=20 THROUGHPUT_MAX_VUS=100 REQUEST_TIMEOUT_SECONDS=3 make load-throughput` (`load/throughput.ts`), then repeat with `THROUGHPUT_SCENARIO=hot`. One shared-host run per mode, no TLS/fan-out. k6 dropped iterations at the upper steps. [Full record](../load/measurements-archive.md#sustained-write-throughput-309-2026-11-13-jst)
+
+## DM preliminary measurement (#151)
+
+2026-11-14 JST. One Organization, 10,000 Members and 14,998 DMs on a shared Mac/VM. Quiet recovery drained 500/500 pending discoveries in 270.057 s over ten O5 runs. At 10,000 connections and 2,000 offered sends/s, at most 56.79% were accepted including drain. All sockets closed unexpectedly, with ACK p95/p99 of 814/1,045 ms.
+
+Mac probe: `node load/dms-record.ts` with `DM_SOCKETS=10000`. For [formal acceptance](spec/dms.md#performance-acceptance-adopted-2026-11-14), use `node load/dms-formal-run.ts /absolute/private/formal.env`. #431 needs isolated Linux, full fixtures and storage/restore. [Result](../load/measurements-archive.md#direct-messages-preliminary-single-host-measurement-151-2026-11-14-jst-not-acceptance) · [Exact command](../load/measurements-archive.md#reproduction-and-dedicated-hardware-procedure)
+
+## Invite list expiry range (#303)
+
+2026-11-14 JST. At 1M expired and 260 live Invites, Owner first-page p95 fell 135.79 → 2.00 ms and Invite-create burst p95 429.17 → 4.78 ms. At 100k all-live, first-page p95 rose 1.69 → 41.19 ms. Supports the [expiry range and live sort](decisions/auth.md#auth-accounts-and-tenancy).
+
+Run `node load/invite-scan.ts` (Node, Docker, sqlx CLI, Rust). Warm shared Mac, ordered variants, short bursts. [Full record](../load/measurements-archive.md#invite-list-expiry-range-and-organization-locking-303-2026-11-14-jst)
+
+## Search engine and quality comparison (#153)
+
+2026-11-18 JST, frozen v2 at `df13a2c` (#510, #518). At 1,000,000 Messages, 5 concurrent searches and 28 classes, P2 PGroonga passed the measured subset (worst class p95 309.9 ms). pg_trgm and pg_bigm missed latency at 2568.7 and 1154.9 ms. Quality micro F1 was 0.830 for split-query, 0.829 for kana-query and 0.639 for literal modes.
+
+Run `node load/search-engines/run.ts`, then `node load/search-engines/quality/run.ts` at the frozen manifest. The [selection gate](decisions/process.md#rules-ci-and-ai-process) stays open for P2 security, DMs and deploy/restore. [Full record](../load/measurements-archive.md#search-engine-comparison-p2-definer-at-1m-153-2026-11-18-jst-mac)
 
 ## PGroonga Message-send write cost (#153 M1)
 
-Run overnight on an otherwise idle Mac from the repository root with Node 26.13.1. Use `node load/search-m1.ts --out /absolute/new/artifact-directory` as the single foreground waiter, and regenerate the judgement with `node load/search-m1-report.ts /absolute/new/artifact-directory`. Adding `--smoke` runs only B, `many`, 50 sends/s for 10 s and excludes the run from judgement.
+Method only; no formal result yet. A adds the PGroonga index to B (same app image from `main`, manifest v2 PostgreSQL recipe, stored `normalized_body`, WAL resource manager and crash-safe settings, 50,000-body prefix from seed 153202611). The #309 `many` and `hot` workloads run three pairs each (B/A, A/B, B/A) at seven 60 s rates from 50 to 4000/s, straight to the app, with the send limiter raised to 1000000 burst and refill. Fixed #153 criteria apply to the rates B sustains in all pairs, invalid evidence first; the p95 test uses the median paired ratio A / B and the median paired signed difference A − B (signed since the maintainer decision of 2026-11-18, before any formal run) through 1000/s. Outside the #431 budget.
 
-Each arm-run starts a fresh database with the same app image built from local `main` and the manifest v2 PostgreSQL recipe. Both arms use the stored `normalized_body` column, PGroonga WAL resource manager and crash-safe settings, and the same hashed 50,000-body prefix from seed 153202611 (scalar p50/p95 155/676). A adds the PGroonga index. The send limiter is raised for this Mac-relative comparison (burst and refill both 1000000). The #309 workload runs `many` and `hot` as three pairs each in B/A, A/B, B/A order, with seven 60 s rates from 50 to 4000/s, 20 VUs, max 100, and a 3 s timeout. HTTP goes directly to the app, without TLS, proxy or WebSocket fan-out. This comparison is outside the #431 budget.
+Run overnight on an otherwise idle Mac with Node 26.13.1: `node load/search-m1.ts --out /absolute/new/artifact-directory` (`--smoke`: B, `many`, 50/s for 10 s, never judged); regenerate with `node load/search-m1-report.ts /absolute/new/artifact-directory`.
 
-The report applies the fixed #153 criteria to the rates B sustains in all three pairs, with invalid evidence checked before material impact. The p95 test uses the median paired ratio (A / B) and the median paired signed difference (A − B, so a faster A never counts) through 1000/s; the signed difference replaced the absolute one by maintainer decision on 2026-11-18, before any formal run. Recorded-only evidence includes accepted/s within the send windows, p50/p99, PostgreSQL WAL bytes per accepted send, sampled app/DB CPU peaks (100% per core), and DB size growth. SQL snapshots bracket the windows and their drains.
+## Channel log design evidence (#160)
 
-## Direct messages preliminary single-host measurement (#151, 2026-11-14 JST, not acceptance)
+2026-11-17 JST (PR #499). Settled Mac WAL at 250 ops/s, baseline/events-ids/log-ids: 5,190/5,197/5,434 B/op for create-1-17 and 42,511/42,703/43,051 B/op for mixed90-200-4000. Run `node load/log-compare/run.ts --diagnose --out /private/tmp/i160-diagnose --settle-fixture`. Two workloads at 50/250 ops/s, host-to-psql transport included.
 
-**Not an acceptance result. Formal acceptance measurement is NOT DONE.** The maintainer authorized a preliminary Mac measurement on 2026-11-14; the adopted budgets in `spec/dms.md` remain unchanged. This run found and corrected query-plan, statement-count and JIT costs, but the combined workload still overloads this environment. Good isolated latencies do not establish the acceptance gate.
+Reference for the [Channel log decision](spec/realtime.md#measurement-status), from the INVALID full run. A cold recent 50-entry deleted-range page at 1M positions used 235/34,126/209 shared buffers across baseline/events-ids/log-ids. At 1M Messages, log-ids cutover blocked for about 3.7 s (455 MiB WAL, +153 MiB storage). Command at `1662d5d`: `node load/log-compare/run.ts --full --out /private/tmp/i160-full --rates 50,250,1000 --seconds 30 --max-seconds 15 --clients 16 --rounds 3`. Timing spread exceeded the rule. [Settled WAL](../load/measurements-archive.md#160-log-comparison-wal-variance-diagnose-2026-11-17-jst) · [Replay and migration](../load/measurements-archive.md#160-log-comparison-replay-and-migration-reference-2026-11-17)
 
-- DM preliminary conditions, fixes, results and storage tables (#151, 2026-11-14): moved to #151 (not acceptance; absolute budgets move to #431; summary kept below).
+## Unread candidate bounds (#355)
 
-Summary of the moved Mac records (one Organization, 10,000 Members, 14,998 DMs, app, PostgreSQL 18.6 and generators sharing one Docker VM; no Caddy/TLS):
+2026-11-16 JST (PR #448). Against `1662d5d`, Auto execution fell 0.178 → 0.117 ms for visible list and 5.477 → 3.677 ms for counts. Evidence for [bounding the grant lookup and materializing Topic candidates](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
 
-- Isolated REST probes met the adopted p95/p99 budgets after the query-plan fixes (first/deep page, refresh and resolve about 2.2-2.3 ms p95, delta 1.21 ms; actual lapsed-grant renewal 3.46 ms p95). Quiet recovery drained 500/500 pending discoveries in 270.057 s (budget 332 s) over ten O5 runs.
-- Combined load did not pass. At 2,000 offered sends/s the final 10,000-connection run accepted at most 56.79% of offered sends (counted including drain, so an upper bound on accepted-in-window), with all 10,000 sockets unexpectedly closed, ACK p95/p99 814/1,045 ms and pool acquisition p95 168 ms; 5,000 and 2,000 attempts also failed. A first-page probe right after bulk-loading 500,000 Messages missed the budget (p95 248.64 ms) when every Message was unread.
-- Bottleneck investigation: the shared VM was about 94% busy with CPU-pressure stalls at 2,000 connections and no memory or I/O saturation. Directory sort and delta lookahead cost were implementation problems and are fixed; heavy notice, Unread and replay work still needs isolated Linux attribution.
-- Storage: logical coalescing held at D live rows, but no physical file plateau between 1M and 10M recipient changes; WAL was about 708-788 bytes per recipient change before Message and index WAL.
-- Not measured: separate capped Linux hosts, the ten-Organization 500,000 DM / 50M Message fixture, three full runs, one-second resource and lock-wait distributions. Acceptance is NOT DONE and moves to #431.
+Use `load/hot-plans/seed.sql` and `EXPLAIN (ANALYZE, BUFFERS)` on the before/after prepared SQL as `fukulow_app`, with JIT off in a read-only repeatable-read transaction. Warm shared Mac, overlapping medians, no accepted Mentions or sends. [Full record](../load/measurements-archive.md#unread-candidate-bounds-355-2026-11-16-jst)
 
-### Reproduction and dedicated-hardware procedure
+## Bounded fan-out candidates (#354)
 
-Preliminary runner (from repository root; output must be outside the checkout):
+2026-11-16 JST. Against `1662d5d`, forced Generic `access_rows` at 1,000 candidates fell 296.334 → 2.561 ms and `member_access` at 1,024 fell 84.613 → 1.981 ms, with more shared hits. Evidence for [bounding fan-out](decisions/realtime.md#real-time-delivery).
 
-```bash
-export PATH=/private/tmp/node-v26.13.0-darwin-arm64/bin:$PATH
-npm --prefix load ci
-npm --prefix load run check
-node --test load/*.test.ts
-docker build -t fukulow-151m:final .
-DM_INSTRUMENT_OUT=/private/tmp/dm-instrument DM_INSTRUMENT_IMAGE=fukulow-151m:instrumented-final node load/dms-instrument.ts
-LOAD_APP_IMAGE=fukulow-151m:instrumented-final LOAD_RESULT_DIR=/private/tmp/dm-run DM_SOCKETS=10000 DM_CONNECT_INTERVAL_MS=2000 DM_SEND_START=90 DM_SECONDS=95 DM_PROBE_SAMPLES=1000 DM_HISTORY=1 DM_STORAGE=1 DM_STORAGE_EVENTS=10000000 node load/dms-record.ts
-node load/dms-summary.ts /private/tmp/dm-run
-```
+Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-plans/seed.sql`. Warm Mac, no DMs or sends. Measured three five-pass rounds. Current harness takes 15 passes. [Full record](../load/measurements-archive.md#bounded-fan-out-candidates-354-2026-11-16-jst)
 
-Use new output directories each time. `DM_SKIP_LOAD=1` selects SQL/REST probes; `DM_RATE=0` selects socket/O5 without fixed arrivals; `DM_RECOVERY=1` adds the 30-second-start-spacing lost-notice window. `DM_HISTORY_SETTLED_ONLY=1` on `dms-history.ts` reuses an already seeded history fixture after explicit VACUUM and records a separate settled window; it must not be mixed into post-bulk percentiles. DB/app container ids, seed path, output and `BASE_URL` are passed by `dms-record.ts`. `private-state.json` is mode 0600 and contains ephemeral credentials plus exact Compose arguments for emergency cleanup. The runner uses an isolated `load/compose.yml` project, named generators and `down -v`; signal handling removes only its own containers. It now returns failure for nonzero generator exits, while retaining all failed attempts. Do not attach raw directories: they contain credentials, server logs and source snapshots. Retain summaries, metadata/source hashes, source copies, statements, EXPLAIN plans and resource samples externally, not in Git.
+## Rust/wasm sync core (#466)
 
-Formal execution requires all of the following; **the preliminary command above is not a formal runner**:
+2026-11-16 JST (PR #484). [Rust/wasm default](decisions/web.md#web-client) accepted with misses. At `d2fc5ea`, throttled cold `/` Timeline p95 2806.7 → 3260.3 ms and FCP p95 960.0 → 960.0 ms, 45 runs/cell in 9 rounds. At `117e75a`, sustained 100 msg/s p95 1.39 → 1.78 ms (queue 0), steady memory 11.34 → 14.88 MiB, five rounds.
 
-The SSH operator entry point is now `node load/dms-formal-run.ts /absolute/private/formal.env` (owned mode-0600 env and new external output directory). Use a separate env with `DM_FORMAL_MODE=smoke` for plumbing checks; all smoke artifacts are NON-ACCEPTANCE. The runner retains all attempts, the common minute-10–40 core and a separate four-minute sample extension at unchanged rates; deferred scenarios and missing evidence remain NOT EVALUATED.
+Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts` and `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm|ts|main-ts --out <dir> --round <n>` (one core per historical checkout). Mac, loopback, synthetic bodies, Node 26.8.1. [Full record](../load/measurements-archive.md#web-rustwasm-sync-core-evaluation-466-2026-11-16-jst)
 
-1. Provision three separate isolated Linux hosts, record CPU/RAM/SSD/filesystem/kernel and synchronize clocks: app capped at 8 vCPU / 4 GiB, PostgreSQL at 8 vCPU / 32 GiB with ≥500 GiB local SSD, generator ≥8 vCPU / 16 GiB. Measure ≤1 ms app↔DB/generator RTT. Load the exact production release image and pinned PostgreSQL/k6 images onto the hosts; retain digests and source SHA/patch. Run production Caddy HTTPS in front of the app. Use pool 32 / PG max 64, reserve ≥8 operational connections, RLS/restricted app role, production socket and 1/s/burst-10 send limits. Record proxy, allocator, kernel FD/source-port and Docker caps. On the DB host, use the existing Compose `db`/`migrate` services with a private writable disposable data volume; on the app host run only the app/proxy with `DATABASE_URL` pointing to that DB. Typical lifecycle: `docker compose --env-file <external-env> -p dm-formal -f load/compose.yml up -d --no-build db migrate`; app container flags `--cpus=8 --memory=4g -e FUKULOW_DB_MAX_CONNECTIONS=32`; DB override `cpus: 8`, `mem_limit: 32g`, `max_connections=64`. Do not reuse the Mac stack or a shared test database.
-2. Fresh database per scenario/run; fixture/sign-in outside timing. On the dedicated DB host run `DM_FORMAL_SEED=1 DM_DB_CONTAINER=<db-container> DM_FORMAL_OUT=<external-output>/formal node load/dms-formal-seed.ts`. This guarded builder provisions ten 1,000-Member Organizations, 500,000 distinct regular-graph pairs and 50M 1-KiB alternating-sender Messages, then VACUUM/ANALYZE. Exactly 100 historical DMs/Member, 10% Guests, two Sessions for 10%. Each Organization deliberately has 90,000 current-revision grants and 10,000 prepared old-revision peer grants for actual renewal; watched reciprocal pairs stay current. Current Member revision 1, baseline read_seq 0, zero Mentions; only usable grants enter the current discovery projection. A renewal initializes only the newly usable peer position at seq 100. Record actual per-Member degree/usable-grant/read/Mention/skew histograms before and after timing, not merely these intended totals. `DM_FORMAL_SMOKE=1` is explicitly a **non-acceptance** SQL smoke fixture (one Organization, one Message/DM); it must never be used for formal timing. A disposable SQL/HTTP/k6 smoke run verified the one-Organization/one-Message variant: positive Member/Guest lists, Guest open denial, lapsed-peer send denial, explicit renewal then successful send, and 100 sockets with history replay. The full-size builder was not executed on this Mac. **#151 maintainer decision (2026-11-15):** select `DM_FORMAL_SCENARIO=main` for exactly 100 DMs/Member without supplemental empty pairs. Separately select `held200`: the same 500,000 historical pairs/50M Messages plus 1M empty pairs, totaling 1.5M pairs/300 DMs per Member; 2.9M current and 100,000 old-revision grants across ten Organizations supply ≥200 current authorized rows for the held cohort. These totals exclude the separately recorded browsing Organization and preflight mutations.
-3. Transfer the ten mode-0600 seed files privately to the generator host. Start ten independent k6 processes/containers, one seed/Organization each, through HTTPS, one Member/Session per socket. The following per-Organization parameters give 1,000 sockets, 200 distinct senders at 200/s and two opens/s. Across ten generators that is 10,000 sockets, ≥2,000 senders, ≥1,000 pairs, 2,000 sends/s and 20 opens/s. Ramp sockets for five minutes; writes start at minute 5, warm for five minutes, measure minutes 10–40, then drain. Increase VUs/generator capacity until there are **zero** dropped iterations; never reduce offered rate in analysis.
+## Precompressed web assets (#486)
 
-```bash
-# Repeat for i=0..9, with disjoint output directories; keep all exit codes.
-docker run --rm --name dm-formal-org-$i --ulimit nofile=65536:65536 \
-  --sysctl 'net.ipv4.ip_local_port_range=1024 65535' \
-  -v "$CHECKOUT:/work:ro" -v "$OUT/formal/org-$i.json:/seed.json:ro" \
-  -v "$OUT/shard-$i:/output" -e BASE_URL=https://chat.example.test \
-  -e DM_SOCKETS=1000 -e DM_OFFSET=0 -e DM_SHARD=0 -e DM_SENDERS=200 \
-  -e DM_RATE=200 -e DM_OPEN_RATE=2 -e DM_BROWSE_RATE=0 -e DM_LEDGER=1 \
-  -e DM_CONNECT_INTERVAL_MS=30000 -e DM_SEND_START=300 -e DM_SECONDS=2105 \
-  grafana/k6:1.8.2 run --out json=/output/metrics.json /work/load/dms.ts
-```
+2026-11-17 JST, `41248ff` plus patch. Same release image’s wasm 131,573 → 103,813 bytes via Caddy and 159,174 → 103,813 via nginx. Evidence for [Brotli sidecars](decisions/auth.md#auth-accounts-and-tenancy).
 
-4. Provision the allowed 10,000-Member / 9,999-focal-DM scale fixture for deep browsing, using `dms-seed.ts` and `dms-probe.ts` to save a Session-bound cursor after 5,000 rows (the main 100-DM/Member fixture cannot supply that cursor). Explicitly record this extra Organization/fixture rather than mislabeling a shallow page. Add an independent browser-only generator on that seed: `DM_BROWSER_ONLY=1 DM_BROWSE_RATE=100 DM_SECONDS=2105`, timed alongside main writes, half first/half deep. Place it on the same dedicated generator host with sufficient headroom or another recorded generator host. Preflight all seed/renewal pools for the full window, verify 1-KiB bodies and per-Member offered intervals, and assert Guest permission-positive/denial paths. The normal preliminary seed has no prepared renewal pool; it cannot replace the formal seed for the timed renewal quarter.
-5. Run **three consecutive** 5+5+30-minute attempts per main scenario, no discarded attempts. Use raw timestamps to select the exact common minute-10–40 interval for each Organization and operation; `DM_SHARDS=10 DM_WINDOW_FROM=<epoch-ms> DM_WINDOW_TO=<epoch-ms> node load/dms-summary.ts <output>` supports a common window. Retain per-Organization/per-run results too. Extend if any main latency class has <10,000 samples: the prescribed 5 create + 5 renewal opens/s yield only 9,000 each in 30 minutes. Observe completed five-attempt DM rounds separately from partial/backoff work and do not count a short three-attempt round as evidence for that class. Provision 0/50/200 held-row and all five eligible-lane mixes explicitly; the preliminary small-degree sockets do not provide this for every Member. **#151 maintainer decision (2026-11-15):** run three consecutive fresh-database attempts for each of `main` and `held200`, each with O5 and the full 10,000 connections/2,000 sends/s mixed load and identical ramp/warm/measured timing; isolated held-200 work cannot pass. Main records only available held cohorts (runner: 0/50), without 200-held evidence. The ≥10,000/class/attempt minimum is summed over ten Organizations; retain the unchanged-rate extension and request additional measurement if it is insufficient. Also record and judge per-Organization counts and p95/p99. No per-Organization minimum was specified: conservatively require ≥10,000/class/Organization pending maintainer confirmation; fewer samples are NOT EVALUATED, requiring additional measurement. The four-minute extension alone cannot meet this conservative create/renew minimum.
-6. Separately repeat 1,000 Members × ten sockets and all 10,000 Members in one Organization. Run scale probes at 100/1,000/10,000 Members, focal degrees 10/100/N−1, histories 0/100/10,000, fully-read/100-tail/all-unread, retained rows 0/50/200 and Mention density 0 before #152 (then 0/10/100%). Keep ≥1,000 samples/extreme/cold shape, with cold DB/filesystem caches on the dedicated host in separate runs. Run the hot-DM 100/s serialization scenario with a recorded test-only limiter override and enough Sessions for its two Members; this does not validate production per-person rate. Repeat notice loss, delayed COMMIT, renewal, bootstrap, continuous-write and quiet 500/501/9,999-debt windows through the same five-attempt protocol, with actual starts ≤33 s and final responses ≤2 s. The supplied quiet recovery probe is a basis, not coverage of all these cases.
-7. Collect client full-response and peer-receipt p95/p99, samples/bytes/errors/dropped arrivals, offered/accepted-in-window/drained sends and Message ids/seqs. Save each generator’s stdout (DM_LEDGER=1 emits DM_SEND id/seq/outcome records without credentials or bodies), compare its client ids to durable rows, and reconstruct same-id/same-body drain retries from the recorded start timestamp/padding; assert no missing/duplicate durable Messages and exact counts. Collect server-only RSS, no-socket versus settled idle RSS/connection, first/last steady five-minute RSS, one-second app/DB CPU, pool acquisition/occupancy/timeouts, journal lock-wait distributions, WAL/IO/fsync/checkpoints/deadlocks. Repeat extracted production EXPLAIN custom/generic/auto plans for page/refresh/delta and aggregates; count top-level SQL separately from BEGIN/COMMIT/context and nested triggers/FKs. Exercise fully read ranges, 500k-entry count extremes and lookahead identity bounds. At 0/1M/10M recipient changes over fixed/growing D, record endpoint-sampled and continuously sampled peak/settled relation/index sizes, dead tuples, autovacuum/revision-reclamation lag, counter/upsert counts and WAL per event. Include backup/restore/reindex/vacuum time/bytes/CPU/IO, WAL replay and restored counter/row/permission consistency with Sessions ended, against an identical pre-DM fixture. None is inferred from logical O(D).
-8. Pass only if **every run** meets every adopted `spec/dms.md` budget: opens 150/300 ms; page/id/delta and ACK 100/250 ms; peer receipt 200/500 ms; completed five-attempt O5 work 1/2 s; 500 quiet pending ≤10 successful runs/332 s; operation SQL limits 16/8/16 and all bounded-plan/range rules; pool acquisition 10/50 ms, active p95 ≤24/peak ≤32, no timeout; app/DB average ≤6 cores and one-second p99 ≤8; app RSS ≤2 GiB, idle increment ≤128 KiB/connection and idle CPU ≤1 core, ≤5% steady RSS growth, bounded client state. Require ≥99% of 2,000 offered sends/s committed inside timing and every remaining offered request successful in drain, **zero** unexpected HTTP/429/503/timeout/close/gap/duplicate or generator failure. Same-hardware pre-DM ordinary endpoint p95/p99/CPU regression must be ≤10%. Any miss, including a plan/resource/generator failure, fails acceptance and returns to the maintainer; keep all thresholds unchanged. Remove disposable containers/networks/volumes after retaining external summaries and private raw evidence. **#151 maintainer decision (2026-11-15):** both `main` and `held200` must pass all three attempts; any Organization latency FAIL fails that budget even with an aggregate PASS. Any Organization needing additional measurement is NOT EVALUATED, never PASS. Every summary names its scenario; other required scenarios remain separately judged.
+Byte comparison used external `node /private/tmp/fk486-transfer.ts`. For candidate checks, `docker build -t fk486-app .`, then `CHECK_COMPOSE_PROJECT=fukulow-security-486 CHECK_COMPOSE_IMAGE=fk486-app CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts`. Static TLS, transfer only. [Full record](../load/measurements-archive.md#precompressed-web-asset-transfer-486-2026-11-17-jst)
 
-**#151 procedure item 7 addition (2026-11-15):** the formal runner retains app-container stderr JSON with a live reader across Docker rotation, bounded to 64 MiB per attempt. Capture failure/overflow or missing retention coverage disqualifies pool evidence. Select exact pool_stats v1 fields from the production image. Require application_after_connect and uncovered_paths=startup_connect,migration_commands. Subtract cumulative histograms/outcomes between a baseline ≤2 s before core start and an end ≤2 s after core end. Use the first inclusive bucket reaching ceil(q×count), with exact 10,000/50,000 us and occupancy 24 edges; peak is the maximum raw in_use inside core. Require increasing consecutive sequences, nondecreasing counters, positive acquisitions, occupancy deltas matching emitted samples, no wall/elapsed gap >2 s, wall/elapsed agreement within 100 ms and ≥99% expected 1 s samples. Missing/reset/gapped/malformed evidence is NOT EVALUATED, never a pass. Report timeout, cancellation and other error deltas; sampled occupancy does not measure peaks between ticks.
+## Pool before and after PR #511 (#196 B)
 
-**#151 procedure item 8 addition; Q3/Q4 supersession (2026-11-15):** preserve the historical provisional interpretation above; it is superseded by ≥1,000 samples/class/attempt for each of the ten mixed-load Organizations and ≥10,000 for their aggregate. Record each count and p95/p99; insufficiency or a miss flags additional measurement or cause investigation and blocks acceptance. First/deep (>5,000 rows) browsing instead uses the separate browsing Organization, ≥10,000 samples/class/attempt, inside the same fixed core with full 10,000 connections, 2,000 sends/s, opens and O5. Exclude first/deep from the ten-Organization rows; no deep continuation is inferred from 100 DMs. Missing full-load evidence, rates below target or an out-of-core browsing window is NOT EVALUATED. Three attempts per scenario and formal Linux conditions are unchanged.
+2026-11-17 JST, `956f91e` vs `fa1790b`. Three Mac pairs, 200 public Channels, 4,000 Members, 60 s steps, no subscribers. Send-only 250 and 500/s failed latency with 100% accepted. At 250/s pair 2 p95/p99 was 2.11/3.70 → 12.13/18.71 ms. Higher send steps and mixed steps were NOT EVALUATED. Follow-up to the [pool timeout decision](decisions/realtime.md#admission-and-timeouts). Cause investigation in #519.
 
-**#151 instrumentation-overhead procedure addition (2026-11-15):** pool-overhead is a recorded, deferred NOT EVALUATED scenario and blocks acceptance. The pre-#427 main commit (1aed680^) has no DM implementation and cannot supply an identical mixed-load baseline. Proposed alternative: a reviewed instrumentation-only revert patch on the formal DM SHA, retaining checkout behavior/deadlines/limits, compared with the production release image on the same formal hosts and restored fixture. Use three alternating pairs, each with 5 min ramp/5 min warm/5 min full-load core. Retain SHAs, patch/image digests, raw outcomes and ≥99% one-second resource coverage; report app mean CPU, each request-class p95/p99 and peak RSS baseline/candidate/deltas. Each regression must be ≤10%; missing/incompatible evidence is NOT EVALUATED. No such run has been performed. This shortened check does not replace full formal attempts.
+Run `node load/pool-before-after.ts --out <dir>` at `ee36849` with the external two-edit patch. Whole diff, no per-request pool-timeout attribution. [Method](../load/measurements-archive.md#196-b-beforeafter-method) · [Full record](../load/measurements-archive.md#196-b-beforeafter-after-pr-511-results-2026-11-17-jst-mac)
 
-- DM bounded bottleneck investigation on Mac (#151, 2026-11-14): moved to #151 (not acceptance; summary kept above).
+## Authoritative Reply count HTTP latency (#409)
 
-## Invite list expiry range and Organization locking (#303, 2026-11-14 JST)
+2026-11-18 JST, run 4 at `d3a9b28`. Open-loop HTTP with RLS, 16 requests per 100 ms, three repeats per shape with 10,000 successes each. Scheduled-start p95 was 27.508–28.282 ms for normal batches and 29.456–30.185 / 33.788–34.142 ms with 10,000/100,000-Reply chains. All met the [Reply count](spec/realtime.md#topic-reply-and-unread-projections-owners-137-topics-server-138-topics-web-139-replies-server-140-replies-web-142-unread) gate.
 
-Conditions: this Mac, Apple M5 / 10 CPUs / 32 GiB, macOS 27.0.1; Docker 29.9.3, VM 10 CPUs / 7.748 GiB; pinned repository PostgreSQL 18.6, shared_buffers 128 MiB, work_mem 4 MiB, effective_cache_size 4 GiB, max_connections 100, random_page_cost 4, jit/fsync/synchronous_commit on. Rust 1.99.0 release tests, Node 26.13.0, source 3b36d69 plus the expiry-range patch. Restricted non-owning NOBYPASSRLS app role; owner-only seeding/DDL. Local Docker DB transport, in-process Router for operation requests, no HTTP network/TLS/WebSockets.
+Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal4-409`. Warm loopback on shared Mac, no writes, subscribers or proxy/TLS. [Full record](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst)
 
-Dataset: measured Organization with 10k/100k/1M expired Invites preceding 260 live, five accepted and five revoked; every twentieth row Owner-Role. Another Organization initially holds 10k expired plus the same 270 mixed rows; its creation controls add 1,200 live rows over the run. VACUUM ANALYZE precedes each scale; ten warm-ups then 100 sequential samples per Role/page/variant; nearest-rank percentiles. List transaction timings include context, Organization/actor locks, lookups, fetch and commit/cleanup, excluding HTTP auth/JSON. Owner first-page ms (p50 / p95 / p99):
+## Watermark subscription admission (#478)
 
-| Expired | Creation-order index / clock-only predicate | Expiry index / stable bound plus clock check |
-|---:|---:|---:|
-| 10000 | 2.28 / 2.57 / 3.73 | 1.73 / 2.59 / 3.87 |
-| 100000 | 8.21 / 8.56 / 8.73 | 1.68 / 2.15 / 3.46 |
-| 1000000 | 100.41 / 135.79 / 147.55 | 1.68 / 2.00 / 2.58 |
+2026-11-17 JST (PR #531). All 4,617 reproduced closes in 31 valid matrix runs matched watermark admission rejection. Evidence for splitting delivery tests from capacity under the [admission policy](decisions/realtime.md#admission-and-timeouts).
 
-At 1M expired, Admin first-page p50/p95/p99 was 102.48/107.32/110.87 -> 1.67/1.89/2.00 ms; Owner expired-anchor continuation 38.07/43.95/47.15 -> 1.86/2.09/2.16 ms. EXPLAIN ANALYZE BUFFERS covers Owner/Admin first pages, live/expired cursor pages and both anchor lookups, including forced generic plans: before discards up to 1M expired rows, fixed uses an expiry index range and sorts live candidates. Opaque and id/time anchors remain indexed independently of lifecycle.
+At `4fa2ba0^`, run `cargo test --locked -p fukulow-server --lib simultaneous_normal_subscriptions_have_no_internal_error_closes`. Matrix used extra hooks on a shared Mac. Five excluded handshake timeouts. Manual harness in #530. [Full record](../load/measurements-archive.md#watermark-subscription-admission-investigation-478-2026-11-17-jst)
 
-Four concurrent Owner-list bursts per operation, 100 successful Router requests each, timer starting after the first list acquires its Organization/actor locks: at 1M expired, Invite-create idle 2.34/3.00/4.00 ms versus burst 212.92/429.17/448.61; fixed idle 2.20/2.51/3.12 versus burst 2.68/4.78/5.43. Accept/revoke/Role-change burst p99 fell from 472.25/427.51/407.15 to 6.17/4.51/6.93 ms. These share Organization NO KEY UPDATE; lists retain actor SHARE too. Sign-in has no direct Organization-row conflict, but burst p50 rose 13.22 -> 24.81 ms before (fixed 12.29 -> 12.05); resource contention can affect compatible operations. Public sends and other-Organization create controls were also measured, preserving production admission limits (one send per fresh Member).
+## Unread Topic-count index bound under RLS (#356)
 
-Tradeoff control, two other Organizations each with 1k expired + 270 mixed rows: 100k all-live Invites, first-page transaction p50/p95/p99 1.56/1.69/4.15 -> 39.77/41.19/41.58 ms. Dropping the creation-order index makes work depend on the live set; page size does not bound scan work. This supports fixing expired-history lock amplification here while documenting the live-sort cost; #223 remains storage cleanup and must preserve existing cursor anchors.
+2026-11-17 JST, `4fa2ba0` vs the materialized-bound rewrite. At 25 unread/Topic across 20 Topics, rows examined 50,500 → 500 in all modes and Generic median 32.470 → 1.419 ms. Evidence for restoring the lower Index Cond under the [Unread rules](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
 
-Reproduce both probes and optional #385-first migration test with INVITE_DM_MIGRATIONS=/path/to/codex-151/server/migrations node load/invite-scan.ts, using pinned Node; requires Docker, sqlx CLI and Rust. The script owns/removes its randomly named/ported DB container and anonymous volumes. INVITE_SAMPLES defaults to 100; INVITE_COUNTS to 10000,100000,1000000. Exact production after SQL, original before SQL, trimmed/full plans and distributions come from ignored Rust probes. Main raw artifacts: /var/folders/_0/jyg6ltzd6rd3k10yg_bp97x00000gn/T/fukulow-invite-scan-KnHEHt; live control: /private/tmp/invite-303-live.log. Limits: one warm/OS-cached shared-host run, ordered variants, 100-sample approximate tails, up to four lists per burst rather than sustained saturation; separate list/Router pools; no own concurrent builds during timing, other host activity uncontrolled. No VPS, disk-cold, production-capacity or fixed latency guarantee.
+Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Runner and raw artifacts were not retained. Regression check: `cargo test --locked -p fukulow-server --lib unread_topic_counts_read_only_unread_topic_ranges`. Warm SQL, one Channel, no writers or Mentions. Cost grows with unread backlog. [Full record](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst)
 
-## Search engine comparison (#153, 2026-11-15 JST, preliminary, Mac)
+## Archived only
 
-This is a **relative preliminary comparison on a Mac**. Production Linux performance is unverified; the formal **p95 <= 500 ms** judgement is on Linux later. No formal performance pass is declared. The target remains 1,000,000 Messages and 5 concurrent searches, with a 180-day search range.
-
-Reproduce from the repository root, with Docker running and Node **26.13.0** active: `node load/search-engines/run.ts`. It builds one measurement-only image, creates an isolated container with a random local password and no published ports, runs the comparison, writes artifacts outside Git, and removes its container/volume. `SEARCH_RESULT_DIR` optionally selects a fresh external output directory; its parent must exist, and an existing output directory is rejected before any artifacts are written. The recorded cohort uses `/private/tmp/fukulow-search-153-cohort/`; source is `21e1fa84` plus this harness. Raw pgbench logs/reports, SQL, full plans, seed/query metadata, small dumps, result JSON and source hashes stay there. Earlier incomplete setup/verification attempts are excluded.
-
-Conditions: Mac model identifier **Mac17,2**, Apple M5 / 10 CPUs / 32 GiB, macOS 27.0.1 arm64; Docker 29.9.3, VM 10 CPUs / 7.748 GiB. Node 26.13.0 orchestrates container-local PostgreSQL 18.6 pgbench over Unix sockets. No HTTP, TLS, proxy, API authorization round trips or WebSockets. No other load test, build or test suite runs during timing; desktop activity continues. Guest filesystem caches are retained, so this is not a cold-storage test.
-
-The common image starts from the repository's pinned `postgres:18.6@sha256:e3d24f69…`. PostgreSQL server/client/development headers remain **18.6-1.pgdg13+2**; pg_trgm is bundled; pg_bigm is built from official release tag **v1.2-20250903**, archive SHA-256 `4d4fb48161e3f9e99207851299379c83b3e5d1d3c1a07c35f6a3153d577b3142`; PGroonga **4.1.0-1** and libgroonga0 **16.1.3-1** come from the official Groonga APT repository. These are measurement-only dependencies, needed to compare Japanese/short-substring indexes; they do not approve a production dependency.
-
-Every condition uses shared_buffers 128MB, work_mem 4MB, maintenance_work_mem 64MB, effective_cache_size 4GB, random_page_cost 4, max_connections 100, max_worker_processes 16, container shared memory 1GB; JIT, fsync and synchronous_commit on; WAL level replica. PGroonga's WAL resource manager and primary crash-safer are preloaded for **all** variants, including the no-search-index control, with `pgroonga.enable_wal_resource_manager=on` and `pgroonga.enable_crash_safe=on`. The legacy `pgroonga.enable_wal` is not enabled. This includes PostgreSQL WAL costs for PGroonga rather than comparing its default no-WAL mode against durable GIN writes. Recorded settings/package versions are in metadata.json.
-
-Data: seed **153202611**, original synthetic business-chat phrases mixed with kana/kanji/ASCII and deterministic identifiers, not a copyrighted corpus. Exactly **1,000,000 Messages**, 3 Organizations (approximately 60/25/15%), 40 Channels per Organization (half public/private), a 20% hot-Channel bias, and 8 Topics per Channel. **755,926** Messages have Topics; **199,973** are Replies, inheriting their root's Topic. Body scalar-length p50/p95/p99 is **155/676/754**, with a long-message bucket around 1,800 characters. **100,001** Messages are older than 180 days; three records straddle the exact boundary by -1/0/+1 second. The frozen search clock is **2026-11-15 00:00:00 UTC**, with both lower/upper timestamp bounds. The measured migration schema has no DM kind/participation schema, so no DMs are generated.
-
-All existing migrations and app-role/grant SQL are applied. A measurement-only stored normalized_body column and common `(organization_id, channel_id, created_at DESC, id DESC)` B-tree support every variant. Only the search index differs: pg_trgm GIN, pg_bigm GIN or PGroonga. Each condition clones the same seeded base before installing/initializing PGroonga; live Groonga files are not copied through TEMPLATE. A serial `pgroonga_command('status')` runs before concurrent clients after restart. Copying initialized Groonga files in an excluded setup attempt caused an invalid-keys-table error; the runner avoids that lifecycle.
-
-Normalization is **NFC -> Unicode default case folding -> NFC**, using PostgreSQL 18's casefold with builtin PG_UNICODE_FAST, then deterministic C collation for substring comparison. Full case folding handles non-ASCII letters and expansions such as Straße/STRASSE; lower under C would not meet that requirement. Queries trim Unicode White_Space at their edges, matching Rust str::trim; internal whitespace and BOM remain. Scalar counts are taken after normalization. LIKE escapes `%`, `_` and `\` as literals. Every engine indexes that same stored form. PGroonga disables its additional normalizer and uses TokenNgram with unify_alphabet/unify_digit/unify_symbol false: its defaults would introduce different normalization and miss internal ASCII partial matches ([normalization/case folding](https://www.postgresql.org/docs/18/functions-string.html), [PGroonga index configuration](https://pgroonga.github.io/reference/create-index-using-pgroonga.html)).
-
-Method: engine order is control/trgm/bigm/PGroonga, then bigm/PGroonga/control/trgm, then PGroonga/trgm/bigm/control. Each gets a fresh clone, timed index build and DB restart. Only the three indexed variants get one identical complete query warm-up sweep and search samples; the control gets neither. For each indexed variant, each of 28 query classes then runs 5 clients × 20 prepared transactions: **100 samples/class/repetition**, including BEGIN, transaction-local set_config, query and COMMIT. Timed searches use non-owning NOSUPERUSER/NOBYPASSRLS fukulow_app with current Organization context; Account context remains unset, as in Organization helpers. Visibility is materialized from active Member Role/current-revision grants before per-Channel lateral reads; current non-Guests can read public Channels, private Channels and Guests require grants. The actor sees 24/40 Channels. Each Channel contributes at most its newest 20 hits, followed by global newest-first 20, ordered by created_at/id descending. Plans and completeness checks run after query timing, outside latency samples.
-
-For writes, all variants reserve the same hot Channel sequence and INSERT a Message with FK checks, normalization and COMMIT: 50 warm-up inserts, CHECKPOINT, then 5 writers × 200 committed inserts. Reported WAL is cluster LSN growth / 1,000 inserts, including full-page images after that checkpoint. This is an isolated insert/sequence workload, not complete send API throughput or sustained mixed read/write load. GIN uses default fastupdate/pending-list settings. Synthetic historical Message UUIDs are deterministic and ordered; new measured insert UUIDs are random, so write/index locality is workload-specific.
-
-Results: 12 completed conditions, 3 repetitions per variant, **25,200 timed searches** and **12,000 timed inserts**. The cohort ran **11:28–13:02 JST**. Each table reports the median of the three per-run values; brackets are min–max across repetitions, not confidence intervals. Each search percentile is independently medianed from 100 samples/run (300 samples/class/engine overall). p99 has limited tail precision. Aggregate statistics and all percentile ranges remain in summary.json; full per-run logs are under the round directories.
-
-| Variant | Search index MiB, median [range] | Build seconds, median [range] | SQL inserts/s, median [range] | Write p50 / p95 / p99 ms | Write p95 range ms | PostgreSQL WAL bytes/insert, median [range] |
-|---|---:|---:|---:|---:|---:|---:|
-| Control (no search index) | 0.000 [0.000–0.000] | — | 5507.4 [5475.3–5515.1] | 0.790 / 1.457 / 2.319 | 1.371–1.488 | 9352.5 [9334.3–9368.3] |
-| pg_trgm GIN | 224.016 [224.016–224.125] | 17.868 [17.791–17.883] | 4975.0 [4943.4–5001.5] | 0.877 / 1.601 / 2.722 | 1.601–1.637 | 10312.3 [10308.6–10317.0] |
-| pg_bigm GIN | 194.328 [194.234–194.344] | 17.105 [17.042–17.471] | 5074.4 [5041.9–5136.5] | 0.850 / 1.578 / 2.576 | 1.544–1.624 | 10325.5 [10325.3–10326.0] |
-| PGroonga | 1168.027 [1168.027–1168.027] | 20.631 [20.601–20.771] | 4194.8 [2787.9–4238.4] | 1.061 / 1.932 / 3.019 | 1.919–3.238 | 9814.2 [9806.7–9818.0] |
-
-GIN size is pg_relation_size(search_body). PGroonga returns zero there, so its size is **DB-directory apparent-size growth** (du -sb before/after index creation), including its external files and small catalog changes; it is not an allocated-block measurement. The control includes the same normalization column, production indexes and common Channel/date B-tree. Build time includes the CREATE INDEX client invocation, excluding extension installation and ANALYZE. Relative insert-throughput changes paired to the control in each round are **pg_trgm GIN -9.2% [-10.4–-9.1%]; pg_bigm GIN -7.3% [-8.5–-6.9%]; PGroonga -23.8% [-49.4–-22.6%]**. These short, non-adjacent pairs are not isolated causal estimates. WAL means PostgreSQL LSN bytes; PGroonga internal-file logging/I/O is not totalled by that counter.
-
-Query results below are **p50 / p95 / p99 ms [p95 min–max]** for the app role at five clients. Hit counts are the complete visible/recent result sets, not just the first page. ASCII length coverage is a/ph/pha, with rare zx/QZX; ø is an additional non-ASCII Latin case.
-
-| Query/input | Scalars after normalization | Visible hits | pg_trgm | pg_bigm | PGroonga |
-|---|---:|---:|---:|---:|---:|
-| 開 | 1 | 153,727 | 0.836 / 1.826 / 21.762 [1.610–1.855] | 0.833 / 1.727 / 21.758 [1.632–1.805] | 0.843 / 1.649 / 21.831 [1.608–1.735] |
-| 麒 | 1 | 344 | 1019.947 / 1032.340 / 1038.236 [1027.032–1048.194] | 1019.114 / 1046.712 / 1099.173 [1039.525–1058.099] | 1017.609 / 1043.473 / 1107.961 [1029.295–1045.610] |
-| 開発 | 2 | 153,727 | 993.844 / 1048.475 / 1065.774 [1027.884–1070.284] | 991.057 / 1016.233 / 1046.909 [1016.154–1024.235] | 993.372 / 1047.352 / 1101.343 [1033.640–1076.161] |
-| 麒麟 | 2 | 344 | 1032.322 / 1060.176 / 1094.535 [1052.507–1196.550] | 1025.140 / 1049.617 / 1082.612 [1037.762–1063.053] | 1028.701 / 1074.117 / 1107.967 [1050.968–1094.096] |
-| 確認し | 3 | 226,960 | 1001.717 / 1065.171 / 1088.458 [1019.562–1162.551] | 1008.735 / 1059.356 / 1093.752 [1040.662–1087.319] | 1001.693 / 1020.699 / 1072.578 [1012.325–1039.327] |
-| 特殊照合 | 4 | 344 | 1036.073 / 1084.677 / 1119.554 [1048.960–1248.146] | 1033.821 / 1054.309 / 1096.601 [1042.510–1055.756] | 1030.806 / 1057.512 / 1108.910 [1056.926–1107.981] |
-| a | 1 | 289,060 | 0.543 / 1.299 / 19.553 [1.061–1.310] | 0.541 / 1.097 / 19.274 [1.088–1.206] | 0.547 / 1.163 / 20.508 [1.134–11.282] |
-| ph | 2 | 156,414 | 0.852 / 1.783 / 19.093 [1.705–1.870] | 0.851 / 1.674 / 18.660 [1.650–1.745] | 0.862 / 1.805 / 19.077 [1.798–1.955] |
-| pha | 3 | 156,414 | 0.843 / 1.849 / 18.127 [1.765–2.215] | 0.838 / 1.918 / 18.646 [1.839–1.957] | 0.850 / 1.780 / 18.660 [1.779–1.782] |
-| ø (non-ASCII Latin) | 1 | 344 | 1018.425 / 1049.928 / 1070.995 [1028.887–1221.468] | 1015.519 / 1032.384 / 1032.632 [1027.541–1044.018] | 1017.635 / 1034.450 / 1046.780 [1030.102–1046.616] |
-| zx | 2 | 344 | 1019.123 / 1054.767 / 1103.086 [1034.559–1213.381] | 1019.577 / 1034.482 / 1112.860 [1030.731–1279.564] | 1018.356 / 1029.415 / 1043.703 [1027.532–1029.612] |
-| QZX | 3 | 344 | 1021.656 / 1056.596 / 1193.487 [1041.339–1198.004] | 1025.143 / 1056.272 / 1072.606 [1034.196–1160.122] | 1021.718 / 1031.088 / 1075.598 [1030.813–1047.324] |
-| がぎ (NFC) | 2 | 3,623 | 1199.871 / 1218.079 / 1245.796 [1214.313–1274.023] | 1205.191 / 1229.809 / 1256.027 [1219.846–1284.051] | 1198.860 / 1219.036 / 1240.418 [1211.035–1230.859] |
-| がぎ (NFD input) | 2 | 3,623 | 1205.283 / 1259.938 / 1273.448 [1259.574–1315.447] | 1201.266 / 1232.521 / 1290.476 [1221.043–1236.446] | 1199.428 / 1224.796 / 1248.474 [1221.777–1227.463] |
-| CAFÉ | 4 | 3,623 | 1005.202 / 1051.776 / 1058.939 [1027.431–1112.268] | 1007.116 / 1032.551 / 1061.243 [1021.835–1055.340] | 1007.051 / 1064.466 / 1068.350 [1053.029–1065.252] |
-| STRASSE | 7 | 3,623 | 1008.421 / 1057.927 / 1063.361 [1027.375–1120.030] | 1017.281 / 1072.647 / 1076.984 [1047.203–1074.693] | 1012.519 / 1029.607 / 1083.323 [1026.093–1056.243] |
-| ΣΊΣΥΦΟΣ | 7 | 3,623 | 997.577 / 1027.070 / 1053.553 [1015.326–1045.673] | 996.444 / 1014.650 / 1053.777 [1008.633–1018.598] | 997.324 / 1009.325 / 1052.000 [1006.708–1025.641] |
-| 照合z9 | 4 | 344 | 1016.309 / 1034.712 / 1079.134 [1033.434–1039.065] | 1014.856 / 1030.839 / 1066.878 [1030.304–1031.958] | 1014.295 / 1067.471 / 1088.087 [1064.321–1081.255] |
-| 開発 API (one space) | 6 | 1,704 | 1013.497 / 1026.905 / 1063.137 [1026.233–1069.768] | 1012.044 / 1062.786 / 1063.036 [1046.976–1076.296] | 1012.321 / 1030.900 / 1070.608 [1021.318–1033.082] |
-| 開発  API (two spaces) | 7 | 1,704 | 1013.355 / 1035.155 / 1071.713 [1031.960–1049.002] | 1015.405 / 1031.615 / 1059.686 [1030.207–1070.703] | 1010.473 / 1033.076 / 1068.177 [1020.225–1035.467] |
-| x%y | 3 | 1,704 | 380.457 / 390.663 / 402.226 [389.162–411.525] | 381.141 / 391.327 / 400.622 [385.157–399.542] | 380.344 / 390.950 / 400.737 [385.893–403.042] |
-| a_b | 3 | 1,704 | 381.910 / 393.911 / 402.836 [388.101–421.338] | 383.067 / 393.068 / 400.953 [386.587–397.698] | 381.142 / 393.843 / 449.837 [388.125–400.127] |
-| c\d | 3 | 1,704 | 379.916 / 386.937 / 400.291 [382.361–397.119] | 381.047 / 389.131 / 404.333 [388.308–389.595] | 382.054 / 390.272 / 400.438 [384.692–395.034] |
-| 開発 (edge White_Space) | 2 | 153,727 | 988.051 / 1055.119 / 1055.200 [1000.764–1068.759] | 986.367 / 1045.769 / 1057.517 [999.599–1052.236] | 983.746 / 999.484 / 1039.294 [992.647–1010.023] |
-| BOM + 開発 + BOM | 4 | 0 | 1008.254 / 1089.909 / 1150.414 [1023.372–1154.335] | 1007.022 / 1024.557 / 1052.393 [1013.084–1024.786] | 1003.263 / 1017.161 / 1053.562 [1016.622–1034.500] |
-| ｶﾀｶﾅ | 4 | 3,623 | 1019.673 / 1089.510 / 1156.101 [1040.483–1128.159] | 1007.203 / 1030.188 / 1055.282 [1018.539–1044.108] | 1005.500 / 1041.035 / 1064.281 [1031.631–1055.483] |
-| ＡＢＣ | 3 | 3,623 | 1010.200 / 1051.500 / 1071.154 [1036.171–1089.489] | 1006.628 / 1045.944 / 1047.279 [1024.414–1046.210] | 1011.773 / 1028.812 / 1057.850 [1019.268–1033.229] |
-| 🦉 | 1 | 344 | 1029.156 / 1053.478 / 1113.140 [1041.005–1103.272] | 1025.344 / 1035.118 / 1052.978 [1033.957–1046.358] | 1025.166 / 1040.020 / 1054.305 [1036.470–1061.367] |
-
-All engines have app-role cases above 500 ms on this Mac. Worst median p95 is **pg_trgm GIN 1259.938 ms [1259.574–1315.447]; pg_bigm GIN 1232.521 ms [1221.043–1236.446]; PGroonga 1224.796 ms [1221.777–1227.463]**, each for NFD がぎ (normalized to the same two-character query as NFC). Many per-query ranges overlap. The app plans do not use the search indexes, so these timings do not demonstrate an app-path full-text-index benefit.
-
-Completeness: **224/224 full result-set comparisons per engine** match, plus 28 ordered first-page comparisons per engine. The reference disables index, index-only and bitmap scans and joins one sequential Message scan to the visible Channels, using strpos(normalized_body, normalized_query)>0. The candidates use escaped LIKE. All six actors are checked: Owner with grants to only some private Channels (30 visible), Member (24), Guest with grants (8), Guest without grants (0), reactivated Member with stale private grants (20 public only), and deactivated Member (0). Cross-Organization context, unset context and Account-only context expose no Messages. Separate owner checks force index access so fallback scans cannot hide tokenizer misses. Full sorted ids are compared for scoped results; direct whole-corpus index checks compare count/ordered-id digest. No missed hits were found, including two-character Japanese and internal ASCII substrings. NFC/NFD inputs normalize identically; internal spaces, width distinctions and literal wildcard characters retain reference semantics.
-
-Representative EXPLAIN evidence is from repetition 1, outside latency samples. For **麒麟**, the app role returns **344** visible/recent hits overall; the first page has 20. All three app plans use the scoped Channel/date B-tree and a body LIKE **Filter**, not the search index. The rare two-character app EXPLAIN execution times are trgm **912.888 ms**, bigm **912.350 ms**, PGroonga **910.865 ms**. Example pg_bigm excerpt (predicate values abbreviated):
-
-```text
-Bitmap Heap Scan on messages m (... rows=14.33 loops=24)
-  Recheck Cond: organization_id=OrgA AND channel_id=v.id AND created_at in range
-  Filter: normalized_body ~~ '%麒麟%'
-  Heap Blocks: exact=289670 lossy=33383
-  -> Bitmap Index Scan on search_channel_recent
-       Index Cond: organization_id=OrgA AND channel_id=v.id AND created_at in range
-Execution Time: 912.350 ms
-```
-
-There is no full Messages sequential scan in that timed-query plan: the index bounds retain Organization, visible Channel and 180-day range. However, lossy bitmap pages recheck unrelated rows on those pages (8,048 rows removed by index recheck per loop on average). This is **not** evidence of zero work on other Channels' rows/pages. The requested healthy search-index plan under RLS was **not demonstrated**. Owner-only diagnostics can use search_body, while the app-role body predicate remains after RLS; PostgreSQL's security ordering restricts promotion of non-leakproof predicates ([RLS evaluation rules](https://www.postgresql.org/docs/18/ddl-rowsecurity.html)). This is the main unresolved query/RLS constraint, not a reason to bypass RLS.
-
-The following diagnostic removes visibility/range filtering and runs as the **owner**, forcing index access on the same million normalized bodies. It is one EXPLAIN execution per engine, **not five-client app latency**:
-
-| Direct owner lookup for 麒麟 | pg_trgm GIN | pg_bigm GIN | PGroonga |
-|---|---:|---:|---:|
-| Execution Time (ms) | 1464.646 | 2.479 | 3.995 |
-| Matching Messages | 1,003 | 1,003 | 1,003 |
-| Heap rows rechecked/retrieved | 1,000,000 | 1,003 | 1,003 |
-
-pg_trgm cannot extract a trigram from this two-character substring pattern: its forced GIN lookup degenerates into a full-index search, followed by rechecking **998,997** non-matches and returning all **1,003** correct hits. Lossy bitmap representation reports 390,494 rows at the bitmap index node; that is not the number of heap rows examined. The app planner instead uses scoped B-tree filtering. Thus two-character queries are **complete**, not silently empty, but lack selective trigram access. pg_bigm and the configured PGroonga have selective two-character access in the owner diagnostic; this potential is unavailable in the measured app/RLS query.
-
-Dump/restore: each variant gets a 1,000-Message database using the same migrations, fixture and engine index. The owner runs pg_dump -Fc, restores into a new database with pg_restore --exit-on-error --no-owner --no-acl, then reapplies deploy/db-grants.sql. Row count and ordered id/body digest are identical before/after (`1000 | 68271355798ed2122a55d62ef4738d65`); all restored visibility/RLS controls and 28 page comparisons also match. Extension SQL versions are pg_trgm **1.6**, pg_bigm **1.2**, PGroonga **4.1.0**.
-
-| Restored index | Restore wall time (ms) | Full result-set comparisons | Data digest |
-|---|---:|---:|---|
-| pg_trgm | 175.372 | 224/224 equal | equal |
-| pg_bigm | 165.009 | 224/224 equal | equal |
-| PGroonga | 196.395 | 224/224 equal | equal |
-
-Operating cost: pg_trgm ships with the pinned PostgreSQL image. pg_bigm adds a checksum-pinned source build and matching PostgreSQL headers; it uses PostgreSQL's GIN/WAL/backup machinery. PGroonga adds the official Groonga package repository, libgroonga and its package compatibility, external index files, WAL/recovery settings and background workers. Both extra engines require a custom database image and matching extension binaries before restore; these small SQL dump/restore drills succeeded on the common image, not on the unmodified official image. The measurement image retains build tools and is not a proposed optimized production image.
-
-For PostgreSQL major upgrades, install extension binaries for the target major and validate a restore/upgrade before rollout; a major-version upgrade was not executed here ([PostgreSQL upgrade requirements](https://www.postgresql.org/docs/18/pgupgrade.html)). For pg_bigm, rebuild against the target PostgreSQL and apply extension SQL updates when its extension version changes. PGroonga's compatible upgrades update the binary/extension; incompatible changes require recreating its indexes ([PGroonga upgrade path](https://pgroonga.github.io/upgrade/)). Its primary crash-safer is still documented as experimental; WAL resource-manager and primary recovery are separate configuration responsibilities ([WAL resource manager](https://pgroonga.github.io/reference/modules/pgroonga-wal-resource-manager.html), [primary crash-safer](https://pgroonga.github.io/reference/modules/pgroonga-crash-safer.html)). These costs are operational, not a measured hosting-price estimate. Standby/PITR and actual crash recovery were not tested. Any Unicode/case-folding change also requires refreshing stored normalized values and rebuilding indexes, followed by completeness checks, for every engine.
-
-Limits: one shared Mac/VM, one synthetic seed with a small phrase vocabulary, retained guest filesystem caches, no production Linux hardware or full API path. Prepared statements contain a constant pattern per class; generic-plan reuse across different terms, mixed query traffic, concurrent search/send load and sustained write maintenance were not measured. The fixed repeated-text insert payload and 1,000-insert windows do not establish amortized GIN pending-list cleanup, Groonga compaction or total physical write amplification. The first write repetition follows plans/completeness diagnostics; later ones follow query timing, with the same 50-insert warm-up and checkpoint, so cache/history differences may contribute to the write variance. Historical IDs/time placement and message-length/vocabulary distributions are synthetic. DMs could not be included because the measured schema has no DM implementation. No healthy full-text-index plan under the required app/RLS path was obtained; the scoped B-tree plans still have lossy page rechecks. Containers/volumes were removed after completion; the measurement image and external artifacts remain. Load TypeScript checks (including the new directory), all 35 existing load unit tests and git diff --check succeeded.
-
-Provisional recommendation: **pg_bigm GIN, with two-character queries enabled, for the next RLS-safe/Linux prototype**. Its selective two-character lookup, smaller measured index, PostgreSQL GIN backup/WAL model and higher measured insert throughput than PGroonga justify investigating that new dependency; pg_trgm remains complete for two-character queries but cannot selectively prune this substring pattern. This recommends the next candidate to test; it does not clear the implementation gate or approve a production dependency. Before implementation, investigate an RLS-compatible indexed query shape, reduce repeated per-Channel/lossy heap work, and measure work_mem/shared_buffers/JIT alternatives under the same visibility/denial checks. Then repeat on Linux with **1,000,000 Messages, 5 concurrent searches, the same 180-day semantics and p95 <= 500 ms**. The current Mac app-role path exceeds 500 ms across many classes. **Production Linux performance is unverified and no formal performance pass is declared.** No decisions entry was added.
-
-## Search quality comparison (#153, 2026-11-15 JST)
-
-Method fixed before execution: `load/search-engines/quality/{dataset,metrics,modes,run}.ts`. Original authored Japanese business-chat examples plus 2,400 deterministic background Messages; stable UUIDs and explicit gold ids encode intent, never engine output. Each label class has a relevance/irrelevance reason; all unlisted ids are irrelevant. Quality is evaluated against intent even when it intentionally exceeds today's literal semantics. The same query text and gold set apply to all modes, including explicit future query-syntax probes. Thresholds are exploratory fixed choices, not tuned on results or a held-out set.
-
-For each query, full visible/recent result sets give TP, FP and FN; precision=TP/(TP+FP), recall=TP/(TP+FN), F1=2PR/(P+R). Empty gold + empty results scores P/R/F1=1; exactly one empty scores all three 0. Micro sums TP/FP/FN before computing rates; macro averages query P/R/F1 independently (including empty-gold queries), within each class and overall. Classes are not equally weighted in overall macro. Missed-hit and false-positive lists contain complete Message ids per query in external JSON. Ranked modes additionally use binary nDCG@20: DCG=sum(relevant/log2(rank+1)), divided by ideal DCG for min(20, gold count); empty gold scores 1 for empty results, otherwise 0. Ties use ascending Message UUID. Unranked modes have no ranking metric. Metrics and hand-computed unit cases precede the run; no latency is measured.
-
-Reproduce with pinned Node 26.13.0 and Docker: `node load/search-engines/quality/run.ts`; `SEARCH_QUALITY_DIR` selects a fresh external directory (existing destinations refused); `SEARCH_SKIP_BUILD=1` reuses #416's common measurement image. Same migrations, stored NFC → Unicode default casefold → NFC form, Rust-compatible edge trim, escaped literal LIKE, Member visibility, 180-day bounds and non-owning NOSUPERUSER/NOBYPASSRLS app role as #416. One fresh database clone/index per mode; Groonga initialized only after cloning. Same-body controls outside the Organization, in an inaccessible private Channel and outside the date range are irrelevant; ungranted Guest and inactive Member must get no results for every mode/query. Container and anonymous volume cleanup applies on success, failure and SIGINT/SIGTERM. Exact DDL, per-query SQL, settings, source hashes, versions, complete results and scores are saved outside Git. This is an offline retrieval-quality comparison, not an API permission certification or a timing run.
-
-Mode SQL is defined in `quality/modes.ts` and saved verbatim for every query. Literal modes use each #416 index and `normalized_body LIKE <escaped %q%> ESCAPE E'\\'`; pg_bigm `likequery(q)` is a separate equivalent mode. Native GIN modes also use normalized_body: pg_trgm `%` at similarity_threshold 0.1/0.3, `q <% body` at word_similarity_threshold 0.3/0.6, ordered by similarity/word_similarity descending; pg_bigm `=%` at similarity_limit 0.1/0.3, ordered by bigm_similarity descending. These are whole-Message comparisons except word_similarity; no term dictionary or reranker is added. Native PGroonga modes index original body, using `body &@ (q,NULL,'search_body')::pgroonga_full_text_search_condition` or the same with `&@~`, ordered by `pgroonga_score(tableoid,ctid)` descending. Naming the index also selects its normalizer during fallback scans. Three configurations are crossed with both operators: **auto** = NormalizerAuto + TokenBigram; **kana** = `NormalizerNFKC150("unify_kana", true, "unify_kana_case", true)` + TokenBigram; **split** = that kana normalizer + `TokenNgram("unify_alphabet", false, "unify_symbol", false, "unify_digit", false)`. No synonyms, kanji readings or fuzzy-distance expansion are enabled. All modes use full result sets, UUID tie ordering and no display pagination; this does not change the product's newest-first contract.
-
-Recorded conditions: source `6280d222` plus this harness, Apple M5 macOS arm64, Node 26.13.0; reused #416 image `sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77`. PostgreSQL 18.6, pg_trgm 1.6, pg_bigm 1.2 (2025.09.03), PGroonga 4.1.0, Groonga 16.1.3. **2,628 rows**: 57 targeted examples + 2,400 background Messages visible in one public Channel, plus 171 same-body scope/range controls; **33 queries, 14 classes, 72 relevant query–Message pairs**. Frozen clock is 2026-11-15 00:00 UTC. Final artifacts: `/private/tmp/fukulow-search-quality-153-reviewed/`; earlier exploratory/failed attempts excluded. No timings or performance inference from this run.
-
-Overall values are **precision/recall/F1**, rounded to three decimals; nDCG is query macro. The three literal modes and bigm-likequery returned identical ids for every query. These intent scores do not signal literal-substring incompleteness.
-
-| Mode | Micro P/R/F1 | Macro P/R/F1 | nDCG@20 |
-|---|---|---|---:|
-| trgm-literal | 0.809/0.528/0.639 | 0.814/0.649/0.672 | — |
-| bigm-literal | 0.809/0.528/0.639 | 0.814/0.649/0.672 | — |
-| pgroonga-literal | 0.809/0.528/0.639 | 0.814/0.649/0.672 | — |
-| trgm-sim-0.1 | 0.792/0.528/0.633 | 0.720/0.588/0.587 | 0.624 |
-| trgm-sim-0.3 | 1.000/0.028/0.054 | 0.061/0.061/0.061 | 0.061 |
-| trgm-word-0.3 | 0.679/0.528/0.594 | 0.715/0.612/0.578 | 0.649 |
-| trgm-word-0.6 | 0.892/0.458/0.606 | 0.707/0.530/0.564 | 0.569 |
-| bigm-likequery | 0.809/0.528/0.639 | 0.814/0.649/0.672 | — |
-| bigm-sim-0.1 | 0.786/0.611/0.688 | 0.788/0.706/0.686 | 0.731 |
-| bigm-sim-0.3 | 1.000/0.028/0.054 | 0.061/0.061/0.061 | 0.061 |
-| pgroonga-auto-term | 0.846/0.611/0.710 | 0.794/0.710/0.712 | 0.729 |
-| pgroonga-auto-query | 0.839/0.722/0.776 | 0.844/0.785/0.773 | 0.801 |
-| pgroonga-kana-term | 0.862/0.694/0.769 | 0.794/0.768/0.753 | 0.773 |
-| pgroonga-kana-query | 0.853/0.806/0.829 | 0.844/0.843/0.813 | 0.845 |
-| pgroonga-split-term | 0.815/0.736/0.774 | 0.779/0.798/0.755 | 0.803 |
-| pgroonga-split-query | 0.813/0.847/0.830 | 0.829/0.874/0.815 | 0.876 |
-
-- Search quality per-class table and feature comparison (#153, 2026-11-15): moved to #153 (detail behind the kept overall table; D rows were not run).
-
-Notable misses/false positives (stable keys resolve to UUID/body in dataset.ts and dataset.json): literal `京都` returns **tokyo** (東京都); `AI` returns **aiNegative** (MAIL); `在` returns **stockNegative** (存在). `v2.3` also retrieves **versionNegative** (v2.30); `3月末` retrieves **marchNegative** (13月末) and misses **march2** (３月末). `打ち合わせ` misses **meeting2/3/4** (打合せ/うちあわせ/ウチアワセ); `サーバー` misses **server2/3/4**. `見積` intentionally asks for quantity preparation and retrieves four unrelated quote Messages. Literal NFC/NFD and full casefold cases are perfect, including Straße/STRASSE, but width/kana variants remain distinct. These are intent errors permitted by the current spec.
-
-Native tradeoffs: PGroonga auto fixes width, avoids MAIL/AI and v2.30 in these probes, but misses internal ASCII **BC** in ABC; split tokenization restores those hits and reintroduces MAIL, 13月末 and v2.30 noise. Kana normalization recovers script/small-kana variants, yet cannot infer kanji readings, okurigana equivalence or a removed long vowel: **meeting2**, **estimate2/3**, **server2** remain missed by the corresponding split-query searches. Native PGroonga misses **strasse** for STRASSE, and query syntax consumes the backslash in `c\d`; neither behavior may replace current-spec matching. The query modes satisfy AND/OR/NOT/quoted-phrase intent here but treat the exact-spacing probes as AND and return **backup2/3** for the one-space query. pg_bigm similarity 0.1 recovers the backup typo and large-kana cache spelling, while also confusing API連携/API連結 and collapsing spacing intent. At 0.3 both whole-Message similarity modes recall only 2/72 gold pairs; short-query similarity against an entire Message is length-sensitive. PGroonga scores are nonzero (1 or 2 here) but mostly tied; nDCG reflects deterministic UUID ordering within ties, not a learned relevance model. Literal and native GIN probe plans use sequential body filtering; all six native PGroonga probes use a search_body bitmap scan under RLS. These are small-data EXPLAIN plans without ANALYZE; they establish no latency advantage or current-spec indexed path.
-
-Spec versus future: today's Issue contract is trimmed NFC/default-casefold literal substring, internal whitespace/punctuation literal, visibility/range enforcement and newest-first results. All three literal modes cover that matching rule; bigm-likequery is equivalent. It does **not** support width/kana folding, readings/synonyms, typo expansion, token-boundary exclusions, relevance ordering or boolean/phrase query syntax. None is silently adopted here. Likely later needs are width-insensitive matching (PGroonga auto, or custom preprocessing for either GIN engine), kana/small-kana variants (PGroonga kana/split), spelling/kanji/okurigana variants (curated expansion for any engine; PGroonga provides a native helper), typo suggestions (GIN similarity or separately evaluated PGroonga fuzzy search), advanced expressions (PGroonga query or a custom SQL compiler), and relevance/snippets (PGroonga scores/helpers or custom GIN scoring/excerpts). Avoiding 京都/東京都 noise while retaining intended internal substrings requires a separate intent/word-boundary policy; no tested mode solves both universally.
-
-Limits: one small synthetic vocabulary, author-defined binary relevance and one intent per query; no human relevance study, held-out threshold tuning or graded ranking labels. Most background rows are easy negatives; the targeted 57 examples carry the difficult distinctions. Repeated queries within classes weight overall results. Query-syntax probes intentionally exceed literal semantics, so cross-mode aggregate F1 is not a drop-in compatibility test. All target Messages are short and in one visible Channel; no production distribution, Topics/Reply-chain diversity, DMs (absent from this schema), concurrency, pagination, revocation matrix or API behavior is certified. No Linux performance measurement, index access-path guarantee, maintenance, crash or replication drill or performance claim is made. Source hashes and exact SQL/settings in external artifacts bound reproducibility; label changes require a fresh run.
-
-Proposal for the maintainer: **pg_bigm GIN remains the proposed engine for the current-spec implementation**, with two-character queries retained subject to the unresolved RLS-safe/Linux performance gate. Quality is identical across current-spec engines; PGroonga's strongest native mode improves intent recall to 0.847 versus literal 0.528, but changes normalization, punctuation, token boundaries and ordering, and still misses notation variants. #416's Mac evidence favors pg_bigm's selective two-character owner lookup and smaller index/lower write overhead over PGroonga; its app/RLS path did not demonstrate search-index use, so those advantages are not a production speed claim. PGroonga is the stronger built-in future-feature candidate if the maintainer prioritizes width/kana/query syntax enough to accept its operational cost and the measured tradeoffs. This is a **proposal for the maintainer**, not a formal engine decision or implementation-gate pass: **Linux performance is still unverified**, and **changing current-spec semantics is a separate decision**.
-
-## Search evaluation freeze and lifecycle procedure (#153, 2026-11-15 JST)
-
-Follow-ups to the preliminary #416/#420 records: `load/search-engines/manifest-v1.json` freezes the next evaluation before execution. Its SHA-256 covers the versioned payload: generator version/seed and frozen clock; source hashes for the generators, harness, modes, metrics, migrations and role/grant SQL; corpus/query/relevance hashes, explicit query texts and relevant fixture keys with class policies; 2,457 visible quality Messages / 2,628 total rows, 33 queries, 14 classes and 72 relevant pairs; the 1,000,000-Message performance dataset, 28 queries, engine order, concurrency, repetitions, warm-ups and transaction counts; pinned base-image digest and PostgreSQL/extension package versions; PostgreSQL settings, shared memory, range and lifecycle deadlines. Source/query/label/condition changes require a reviewed new manifest version before another run; neither runner rewrites the manifest. Existing size/transaction overrides that differ from the freeze are refused. Node must match the frozen version. After startup, actual PostgreSQL, available extension versions, packages and selected settings must match before data loading or scoring/timing. `SEARCH_SKIP_BUILD=1` still performs these checks. Results and summaries record the manifest hash; the exact manifest is copied beside artifacts.
-
-Both entrypoints now run their synchronous SQL work under a signal-responsive supervisor. It owns a unique container and explicitly named data volume before creation is attempted, kills the worker/client process group on SIGINT/SIGTERM, and removes and verifies both resources after success, exceptions or deadlines. Docker calls are bounded at 120 seconds, builds/psql/pgbench at 900 seconds, and each cleanup/removal/verification call at 10 seconds. A psql deadline escapes startup retries immediately. Command failures omit raw command input/output. `run-status.json` records whether cleanup was verified and whether the run is valid; a failed cleanup or verification cannot produce a valid run. Retained external results are artifacts, not temporary scratch directories; SQL and pgbench scratch files inside the container disappear with its data volume. The reusable measurement image/build cache remain.
-
-No evaluation was run for this change; verification uses small local fake-process tests, including interrupted hung clients, manifest/runtime mismatches and failed cleanup verification. The freeze does not retroactively validate old results, provide bit-identical rebuilds of unpinned transitive build packages, control host/VM load or certify Linux performance. An unavailable Docker daemon, SIGKILL of the supervisor or host failure can prevent physical removal; failed or unverifiable cleanup is reported, never treated as valid. The current-spec semantics and every quality/performance threshold remain unchanged; pg_bigm and PGroonga adoption remain on hold.
-
-- Search freeze corrections and real-Docker smoke (#153, 2026-11-15): moved to #153 (correction history; the frozen state lives in manifest-v1.json).
-
-
-## Search engine comparison, frozen manifest v1 (#153, 2026-11-17 JST, Mac)
-
-**p95 target missed by every engine; no engine decision here.** Frozen manifest `19927163…` at source `65fc9b3`, `node load/search-engines/run.ts` 04:09–05:43 JST then `node load/search-engines/quality/run.ts` 05:43–05:45, alone after the other overnight runs. Apple M5 / 10 CPUs / 32 GiB, Docker 29.9.3 with a 10-CPU / 19.5 GiB VM (the 2026-11-15 cohort had 7.748 GiB, so the two are not an improvement comparison), Node 26.13.1, PostgreSQL 18.6-1.pgdg13+2, pg_trgm 1.6, pg_bigm 1.2, PGroonga 4.1.0 / libgroonga0 16.1.3-1. Fresh images: performance `sha256:25503d9e…`, quality `sha256:efc0bb7f…`. Both runs valid with cleanup verified; desktop activity continued. Data and queries as frozen (1,000,000 Messages, no DMs, 5 clients, 3 rounds, 28 query classes). Medians of three rounds:
-
-| Variant | Index MiB | Build s | Inserts/s (median paired Δ vs control) | Write p95 ms | WAL B/insert | Worst query p95 ms |
-|---|---:|---:|---:|---:|---:|---:|
-| Control | 0 | — | 5295 | 1.474 | 9586 | — |
-| pg_trgm GIN | 224.1 | 17.49 | 4962 (−6.3%) | 1.636 | 10538 | 1237.3 |
-| pg_bigm GIN | 194.4 | 17.22 | 4947 (−6.0%) | 1.605 | 10555 | 1227.9 |
-| PGroonga | 1168.0 (DB growth) | 20.72 | 4025 (−23.5%) | 1.998 | 10044 | 1254.2 |
-
-- **Latency.** For every engine 21 of 28 classes exceed p95 500 ms (mostly 1.0–1.25 s); only the single-scalar frequent Japanese and 1–3 character ASCII classes (~1–2 ms) and the three literal-wildcard classes (~390 ms) stay under.
-- **Index under RLS: not met.** App-role plans use `search_body` in 0 of 28 classes for every engine; they use `search_channel_recent` with heap recheck (for example 麒麟-class plan 920 ms). Owner diagnostics do use the search index (pg_trgm 14, pg_bigm 18, PGroonga 21 of 28 classes). No Seq Scan on Messages in app plans. Same finding as the 2026-11-15 record.
-- **Completeness and failures.** 224/224 equal to the reference sequential `strpos` scan per engine (round 1) and after dump/restore; 0 failed transactions in all pgbench runs; statement_timeout 10 s verified. #198 drill, #316 restore and upgrades NOT EVALUATED.
-- **Quality.** Identical to the 2026-11-15 quality record: literal modes micro P/R/F1 0.809/0.528/0.639; pgroonga-split-query 0.830 F1 (recall 0.847).
-- **Limits.** No DMs in the frozen dataset, so the DM part of the gate is NOT EVALUATED; plans and completeness from round 1 only; one shared Mac/VM. Whether this Mac run is the formal judgement (Issue body) or Linux remains (record above) is a maintainer decision. Raw artifacts outside Git.
-## Search engine comparison, P2 definer at 1M (#153, 2026-11-18 JST, Mac)
-
-**Measured performance subset only: PGroonga with P2 passes latency, index use, completeness and denial checks on this dataset; pg_trgm and pg_bigm miss latency. The DM part (no DMs in the dataset), P2's security evaluation and deploy/restore evidence are not covered, so the implementation gate is not cleared. No adoption: P2 relies on `BYPASSRLS` and stays held (maintainer, 2026-11-18).** One formal run of frozen manifest v2 `9b649cf9…` at `main` `df13a2c` (#510 P2 `SECURITY DEFINER` search path, #518 denial cases and pre-registered judgement), 2026-11-18 02:00–02:40 JST, `node load/search-engines/run.ts` then `quality/run.ts`. Apple M5 / 10 CPUs, Docker 29.9.3 with a 10-CPU / 19.5 GiB VM, Node 26.13.1, PostgreSQL 18.6-1.pgdg13+2, pg_trgm 1.6, pg_bigm 1.2, PGroonga 4.1.0. Fresh image `sha256:972aec5f…`. Run status `valid: true`, cleanup verified, exit 0, no retry. Gate unchanged: 1,000,000 Messages, 5 concurrent searches, 3 rounds × 28 query classes × 300 samples, p95 ≤ 500 ms per class (median of rounds), search-index use, completeness equal to the reference scan, permission denials.
-
-| Engine | Overall | Classes over 500 ms | Worst class p95 ms | Index use (classes) | Completeness | Denials |
-|---|---|---:|---:|---:|---|---|
-| pg_trgm (P2) | FAIL | 6 / 28 | 2568.7 (`literal-backslash`) | 14 | PASS | PASS |
-| pg_bigm (P2) | FAIL | 3 / 28 | 1154.9 (`ja1-rare`) | 18 | PASS | PASS |
-| PGroonga (P2) | **PASS** | 0 / 28 | 309.9 (`space2`; worst round 315.0, worst p99 314.2) | 20 | PASS | PASS |
-
-Write and build cost (median of 3; recorded, not part of the gate):
-
-| Variant | Index build s | Relation growth MiB | Write TPS (Δ vs control) | Write p95 ms | WAL B/insert |
-|---|---:|---:|---:|---:|---:|
-| Control | — | 0 | 4515 | 1.785 | 9564 |
-| pg_trgm GIN | 18.5 | 225.7 | 4158 (−6.9%) | 1.988 | 10523 |
-| pg_bigm GIN | 17.4 | 195.6 | 4123 (−8.5%) | 1.937 | 10544 |
-| PGroonga | 21.6 | 1168.0 (DB growth) | 2505 (−44.5%) | 3.430 | 10029 |
-
-- **Against the v1 record above:** P2 restores search-index use for all three engines (v1 app-role plans: 0 of 28). The write micro-benchmark changed with the schema (#526 adds a BEFORE INSERT trigger on `messages`), so its TPS deltas are not an improvement or regression comparison with v1 (PGroonga −23.5% there).
-- **Quality** (same run, evaluation only): best micro F1 PGroonga `split-query` 0.830 and `kana-query` 0.829; the three literal variants 0.639. Unchanged from the 2026-11-15 quality record.
-- **Limits.** Developer-Mac comparison, not a formal #431 budget. No DMs in the frozen dataset. The write figures are a pgbench insert micro-benchmark, not the send path (#153 M1 measures that). Security of P2 (Member binding, cross-Organization leakage, timing, restore privileges) is not evaluated here (#153 E1). Raw artifacts outside Git.
-- **Re-run policy (maintainer, 2026-11-18):** this result stands without another run until an input changes (schema, engine or image version, queries, normalization or the gate).
-
-## DM Q4 concurrent offered-work evidence (#151, 2026-11-15)
-
-Procedure clarification, superseding whole-core totals/cardinality as Q4 concurrency evidence; no formal measurement was performed. Retain fixed 60-second buckets aligned to the common core, with exact boundaries, connection intervals, actual offered sends and opens separately by resolve/create/renew, and browsing offers separately by first/deep. Each of the ten Organizations must maintain 1,000 connections and offer 200 sends/s plus 2 opens/s (half resolve, quarter create, quarter renew); the separate browsing Organization offers 100 reads/s (half first, half deep). Every bucket overlapping the browsing sample window must qualify; the runner conservatively checks the entire fixed core, which supplies those samples. Historical artifacts without this evidence are NOT EVALUATED with an explicit reason.
-
-Bucket coverage tolerance is 99%, applied independently to each offered component, rounding required counts upward; totals in other buckets cannot compensate. Open and browsing components also must be at most 101% of their target, rounding downward, so excess in one kind cannot mask a wrong mix. Thus a full bucket needs at least 11,880 sends per mixed-load Organization, exactly 60 resolve/30 create/30 renew offers (integer rounding), and 2,970–3,030 first plus 2,970–3,030 deep offers in the browsing Organization. This uses the existing 99% coverage convention to tolerate bucket-edge scheduling, without changing configured rates, latency budgets, whole-core send/open requirements or zero dropped-arrival/error rules.
-
-Retain every offered O5 round's Member, held cohort, start timestamp and five offered request lanes, associated with that start even if requests cross a bucket/core boundary. Require at least ceil(0.99 × 1,000 × bucket_seconds / 30) starts per Organization/bucket and every Member's applicable delta/coverage/browse/recovery/held mix in each recorded round. Require each Member's consecutive starts, including across bucket edges, to be no more than 33 seconds apart, with a start within 33 seconds of each bucket boundary. The 33-second bound comes from the adopted 30-second period with ±3-second jitter; checking individual gaps avoids demanding exactly two starts in each minute despite that jitter. Require five offers per round; completed-round latency and existing successful-lane evidence remain separate. Missing cadence/lanes, wrong mixes, light buckets or absent connection coverage make browsing NOT EVALUATED. This proves concurrency at minute resolution for sends/opens/browsing, not within-bucket pacing; O5 retains individual timestamps. Three attempts per main/held200 and dedicated formal Linux conditions remain unchanged.
-
-**#151 Q4 procedure correction (2026-11-15):** this supersedes the 99%/101% offered-work wording and aggregate 99% O5 floor above; neither is an adopted workload tolerance. Every whole-core offered component must reach its full rate × core-duration target: sends 200/s and resolve/create/renew 1/0.5/0.5 per second per mixed-load Organization, and first/deep browsing 50/s each, with whole-core first/deep totals differing by at most one (alternation remainder). Each bucket permits only an absolute one-offer deviation per component from rate × bucket duration: constant-arrival-rate spaces arrivals uniformly, opens repeat resolve/resolve/create/renew, and browsing alternates first/deep, so cutting a cycle at bucket boundaries can move one component offer. A bucket deficit must reconcile to the full whole-core target; sustained missing offers, including 2,970+2,970 or 2,970+3,030 browsing offers per minute, are NOT EVALUATED. O5 is judged solely from actual per-Member schedule evidence: all 1,000 Members cover the whole core with starts within 33 seconds of both core boundaries, consecutive gaps at most 33 seconds (adopted 30 s ±3 s jitter), and five offered lanes with the applicable held cohort in every round; no aggregate round-count percentage applies. Connection coverage, successful-lane evidence, completed-round latency, zero dropped-arrival/error rules, three attempts per scenario and formal Linux conditions remain unchanged. This is a procedure correction; no formal load or overhead measurement was performed.
-
-**#151 instrumentation-overhead adopted procedure (2026-11-15): NOT EVALUATED.** This records the maintainer's adopted decision and supersedes the earlier “proposed alternative” wording; it is not a measurement result. The baseline is the same formal DM SHA plus the reviewed `load/pool-overhead-baseline.patch`, never the pre-DM tree. Patch SHA-256: `6b3d2641bfedfb895a4c89df1e14da3f1026437788628164507ffc6cc099e0a7` (generated against `cac03983a1d5c67d0fb47eef9182588d740facbc`). Only production pool counters/histograms, wait bookkeeping and the per-second reporter/log are disabled or removed. Every application checkout still traverses `database::acquire`/`begin`; SQLx acquisition, transaction construction, deadlines, errors, pool options/limits and DM processing are unchanged. Test-only statistics remain available; no instrumentation test is removed. The exact path/hunk allowlist and applicability test must pass, and the actual baseline diff must be reviewed before any measurement. No production switch or server-tree edit is introduced by this harness work.
-
-Reproduce after review using the repository's pinned Node/Rust and the existing dedicated formal Linux app/DB/generator setup (same hardware, resource limits, release builds, Caddy HTTPS, RLS, pool 32/DB 64 and main fixture). Compute the patch digest with `shasum -a 256 load/pool-overhead-baseline.patch`, review `git apply --check` and the resulting diff on a detached checkout of the full formal SHA, then set `DM_FORMAL_REVIEWED_PATCH_SHA256` to that reviewed digest in the owned mode-0600 external runner config. Set `DM_FORMAL_SCENARIO=pool-overhead`, `DM_FORMAL_MODE=formal`, `DM_FORMAL_ATTEMPTS=3`, the full `DM_FORMAL_SHA`, the existing three SSH alias settings and a new external `DM_FORMAL_OUTPUT`. Execute `node load/dms-formal-run.ts /absolute/private/overhead.env` only when formal measurement is authorized. The runner builds candidate and baseline release images from that SHA, verifies exact instrumentation-only hunks before building the baseline, and records the SHA, patch digest, pinned and actual build toolchains, runtime toolchains and image digests. It restores the identical stopped-DB fixture snapshot before each of six arms, in B/C, C/B, B/C order. Each arm has 300 s ramp, 300 s warm-up and a separate 300 s judged core with the identical full main mixed load (10,000 connections, 2,000 sends/s, opens, O5 and concurrent first/deep browsing); it retains raw evidence and sample counts. `DM_SECONDS=605` supplies 600 s of arrivals starting after the 300 s ramp; sockets remain through drain. Shortened low-rate p99 populations are disclosed and do not replace the full formal latency sample gates.
-
-Judgment is fixed: report app mean CPU, peak server RSS and every request-class p95/p99, separately per arm and pair. For each metric, every pair's `100*(candidate/baseline-1)` and the arithmetic mean of its three pair regressions must each be <=10%; any miss is FAIL. Record baseline/candidate/regression min, max and absolute range, plus baseline percentage spread. Baseline `100*(max/min-1)>10%` makes that metric NOT EVALUATED for noise. Exactly 10% is allowed; finite positive baselines are required. Any missing/incomplete logs, <99% distinct one-second CPU/RSS coverage, missing candidate production pool_stats evidence, container restart/changed start time, errors/dropped arrivals, or differing hosts, resource limits, snapshot, generator configuration, offered work, toolchains, source SHA or image provenance makes the whole comparison NOT EVALUATED. The Q4 offered-work validator applies unchanged, including full component targets, one-offer bucket boundaries and per-Member O5 cadence. `overhead-comparison.json`, per-arm judgments and raw archives provide the comparison and reproduction evidence. Overall acceptance still requires this evidence and all other adopted gates. No remote execution or formal overhead measurement was performed here; no performance PASS is claimed.
-
-**#151 instrumentation-overhead patch digest correction (2026-11-15):** Empty unified-diff context lines in `load/pool-overhead-baseline.patch` now omit their space marker so the containing repository diff has no trailing whitespace. The current patch SHA-256 is `a803ace6b4b4930d1db76d9712332878137842dfe037ee58b8696d732172e744`, superseding the digest recorded above. Applied source content and instrumentation-only scope are unchanged; the exact path/hunk applicability test remains required. No formal overhead measurement was performed; status remains NOT EVALUATED.
-
-**Measurement environment change (maintainer, 2026-11-15):** no dedicated cloud environment is set up for formal pre-deploy acceptance. The #151 absolute budgets (10,000 connections, 2,000 sends/s, p95/p99, pool, CPU and memory), the reclamation/storage/VACUUM and backup/restore checks and the #196 cap confirmation move to #431: hourly-rented Linux servers after the first deploy, using the procedure above unchanged. Until then those budgets are NOT EVALUATED; the Mac preliminary results above remain reference only and are not a pass. Budgets, thresholds, attempt counts and sample minima are unchanged. The #426 instrumentation-overhead A/B (three alternating pairs, the approved 10% rules and validity conditions) runs on the developer Mac as a same-machine comparison instead of the formal Linux environment; its result is a relative comparison only.
-
-**#151 / #426 Mac relative instrumentation-overhead procedure (2026-11-15): NOT EVALUATED.** Procedure only; no comparison result is recorded. The maintainer's environment change above permits the developer Apple Silicon Mac with Docker Desktop for this relative A/B. All three roles share the Mac's CPU, memory and Docker Desktop Linux VM; the generator competes with the app and DB. This is labelled **MAC-RELATIVE**, never FORMAL acceptance, an absolute-budget pass or a capacity claim. The dedicated Linux `main`/`held200` procedure and its budgets remain unchanged; local mode refuses both scenario names even in smoke mode. A separate `smoke` scenario is non-acceptance only.
-
-Use the repository's pinned Node and cached pinned PostgreSQL, Caddy, k6 and Dockerfile base images. Local execution uses owned process groups, bounded commands/copies, the same deadline cleanup reserve, signal cleanup, isolated role directories, run-labelled containers/volumes and retained private raw archives. It clones the requested full SHA from the local checkout, uses Docker release images, HTTPS with a private Caddy CA, RLS, pool 32 and DB 64, and restores the same stopped-DB main fixture before every comparison arm. Local builds disable networking and image pulls; provision build dependencies/cache locally before execution. The runner retains base/toolchain/image digests and the harness digest. Shared base images/build cache and private scratch evidence remain after run-owned containers/networks/volumes are removed.
-
-Put `DM_FORMAL_TARGET=local`, `DM_FORMAL_SCENARIO=pool-overhead`, `DM_FORMAL_MODE=formal`, `DM_FORMAL_ATTEMPTS=3`, `DM_FORMAL_SHA=<full local source SHA>`, `DM_FORMAL_REVIEWED_PATCH_SHA256=<reviewed current patch digest>`, `DM_FORMAL_LOAD_SCALE=1/10` and a new external `DM_FORMAL_OUTPUT` in an owned mode-0600 external config. SSH aliases are unnecessary. The reviewed instrumentation-only patch gate is unchanged. Resource settings are optional `DM_FORMAL_APP_CPU`, `DM_FORMAL_APP_MEMORY`, `DM_FORMAL_DB_CPU`, `DM_FORMAL_DB_MEMORY`, `DM_FORMAL_GENERATOR_CPU`, `DM_FORMAL_GENERATOR_MEMORY`; defaults are app 2 CPUs/2g, DB 2 CPUs/4g and **each** of eleven generator containers 1 CPU/1g. Memory units are positive integer `m`/`g`. Requested limits and actual container limits are retained and must match across arms.
-
-The one canonical rational scale, in `(0,1]`, uniformly multiplies total connections, sockets per Organization, sender count, sends/s, opens/s (resolve/create/renew 1/2, 1/4, 1/4) and browsing/s (first/deep 1/2 each). All ten mixed-load Organizations remain. Socket cohorts preserve 10% Guests, half quiet/half watching, the 0/50 held split and four equal ordinary-target lanes; all sender/peer pairs remain connected. Thus sockets per Organization must be divisible by twenty and senders even: `1/50` is the smallest supported scale; `1/100` is refused rather than rounding away a mix. At `1/10`, record 100 sockets and 20 senders per Organization, 1,000 sockets total, 20 sends/s per Organization (200 total), 0.2 opens/s per Organization (2 total; resolve/create/renew 0.1/0.05/0.05 per Organization), and 10 browsing requests/s (5 first + 5 deep). k6 uses integral arrivals over an exact time unit for fractional rates. O5 remains 30 s with ±3 s jitter, five offered lanes and unchanged limiter defaults. Factor and every derived target are retained in metadata and arm conditions; any scale mismatch invalidates the comparison. Q4 still requires each scaled whole-core component target, exact rational arithmetic, only ±1 offer per bucket and full reconciliation, connection coverage and each selected Member's O5 cadence. No percentage workload tolerance is introduced.
-
-First reproduce a **candidate-only pilot**, separately from the comparison: add `DM_FORMAL_PILOT_SECONDS=30` and run `node load/dms-formal-run.ts /absolute/private/pilot.env --pilot`. Use a new output for each pilot. It uses 15 s ramp, 15 s warm-up and the configured 10–120 s diagnostic core; the pilot fixture retains ten Organizations and main pair cardinalities but only one historical Message per pair. `pilot.json` reports zero errors, zero dropped arrivals, complete evidence and `sustained`; incomplete evidence cannot establish zero outcomes. A locally prepared candidate may be reused via pilot-only `DM_FORMAL_PILOT_IMAGE=sha256:<immutable image id>`, requiring its source-revision label to equal the requested SHA. Pilot timing, fixture and outputs are never comparison evidence and cannot enter the six-arm judgment. Choose a sustainable scale from pilots; then remove all pilot settings and run `node load/dms-formal-run.ts /absolute/private/overhead.env` only when the comparison is authorized.
-
-The comparison still builds the baseline using only the reviewed instrumentation patch, uses B/C, C/B, B/C, the full main historical fixture and 300 s ramp + 300 s warm-up + 300 s judged core per arm. Every pair and the arithmetic mean must satisfy CPU, every request-class p95/p99 and RSS regressions ≤10% with exact integer comparisons. Baseline spread >10% makes that metric NOT EVALUATED. Missing/incomplete logs, insufficient one-second coverage, missing candidate pool_stats, restarts, errors, dropped arrivals or any differing condition invalidate the whole comparison. Pool_stats parsing and Q4 strictness are unchanged. Reduced populations are disclosed per class and do not satisfy formal sample minima. No full comparison or performance PASS is recorded by this procedure note.
-
-## #160 log comparison: smoke validation (2026-11-15)
-
-Functional validation only; no full comparison results or adoption conclusion exist. The DB-level harness compares the current counter/Message shape, thin `channel_events` (creations in `messages.seq`, changes on the same counter), and independent `channel_log` (all operations), with `ids` and immutable `snapshot` policies for both candidates. Every arm includes Organization-scoped keys, production Message/Topic/Reply indexes, `history_generation`, and original-send digest receipts. Current state replaces deleted bodies with tombstones; snapshot old-body retention is reported as a cost. Neither replay semantics nor deleted-body retention is adopted.
-
-Commands from the repository root: `node load/log-compare/run.ts --help`; short functional smoke: `node load/log-compare/run.ts --smoke --out /private/tmp/i160-smoke`; full isolated comparison: `node load/log-compare/run.ts --full --out /private/tmp/i160-full --rates 50,250,1000 --seconds 30 --max-seconds 15 --clients 16 --rounds 3`. `--diagnose --out /private/tmp/i160-diagnose` selects only create-1-17 and mixed90-200-4000 at 50/250 ops/s, three alternating rounds of all five arms (60 fixed-rate samples, 30 minutes scheduled work; allow roughly 1–2 hours with setup/I/O); it skips maximum, replay and migration. Optional `--settle-fixture` runs VACUUM (FREEZE, ANALYZE) on fixture tables before the sample checkpoint, is off by default and records a different condition; FPI-excluded WAL spread is diagnostic only and never affects gates. Full runs are expected to take roughly 6–12 hours plus machine-dependent seeding/I/O time; do not run them alongside another measurement. The script uses the pinned PostgreSQL image from `load/compose.yml`, bundled pgbench/psql, a uniquely named container/volume, no published ports, deterministic fixtures, and explicit cleanup. Artifacts stay outside Git and record source SHA/dirty patch/file hashes, machine/Docker resources, image ID/digest, PostgreSQL settings, seed, independent seeded fixed-rate schedules, operation outcomes, transaction logs and actual accepted work. No new dependency or production migration is used.
-
-Full conditions: 1 hot Channel and 200 Channels; 17-byte and maximum 4,000-scalar/16,000-byte bodies; creations with Replies/new Topics; 90/5/3/2 and 50/20/20/10 Create/Edit/Move/Delete, repeated edits and an eight-Message Reply-chain Move. Each fixed offered rate and unthrottled maximum step uses fresh identical seeds, at least three alternating rounds per arm. Fixed-rate work uses independently generated seeded Poisson deadlines and operation identities/mix, persistent psql client queues, and complete drain; scheduled = completed + failed + skipped + still-missing, and actual offers/mix must match the independent schedule and paired arms. Maximum steps remain completion-paced pgbench diagnostics, with no matched offered-load claim. Fixed latency includes host/psql transport; pgbench maximum latency excludes scheduling lag. An expected-effects ledger is written before state/log changes in the same transaction; successful operation identities are reconciled with driver completions, all replay-source positions (including creation_snapshots) and final state are checked against it. Every historical Delete is checked against later records and final state; full replay reduction carries state across pages. The oracle's WAL/storage and write costs are charged equally to every arm, so results are not comparable with earlier harness runs without it. Report transaction p50/p95/p99 and accepted ops/s, WAL and relation/index bytes per operation, and full raw plans/buffers/physical scan tuples for 50-entry recent/deep replay pages at 100k/1M logical positions across creation/mixed/deleted ranges. PG-cold pages restart PostgreSQL; filesystem/VM caches may remain warm (host-wide eviction would disturb other work). Backfill uses 1M baseline Messages and a blocking SHARE-lock cutover, with an observed concurrent candidate-aware writer lock wait; it does not establish an online migration strategy.
-
-Gates are reported only and never relaxed: zero missing/out-of-order positions, resurrected deleted bodies, or retry/rollback position consumption; accepted throughput at least 90% and p95 at most 110% of baseline at the highest valid common sustainable offered rate; creation WAL and total storage at most 2× baseline. Every offered rate is reported. Errors, dropped/skipped offered work, latency-limit overruns, mismatched conditions, insufficient rounds, or spread `(max-min)/median > 10%` invalidate the comparison. A short smoke establishes no performance conclusion. Output is **MAC-RELATIVE**; absolute budgets are **NOT EVALUATED (#431)**. This synthetic owner-role DB harness excludes authentication/RLS/Unread/Mentions, end-to-end WebSocket replay and client migration; baseline mixed replay cannot recover changes because the current design has no durable mutation positions.
-
-Condition 5 is **not validated**: history_generation use/rotation in replay/bootstrap, snapshot_expired and its projection-expiry watermark, an explicit bootstrap cursor, and mutation-operation idempotency (receipts, expected_version, conflicts/no-ops) are **not implemented**, and their DB costs are omitted. The retry-position probe covers original sends only. This DB-shape comparison cannot validate condition 5 or qualify adoption. Exploratory assumptions differ from the provisional design in docs/spec/realtime.md: incrementing per-Message versions rather than event-position versions; one position per Message in a Move (eight for the fixture chain) rather than one per chain operation; tombstone-inclusive Topic counts rather than nondeleted counts. Immutable snapshots retain historical bodies as an exploratory cost. No wire protocol, replay semantics or retention policy is decided here.
-
-Validation on Node v26.13.0: type check and all 61 tests passed. The corrected short real-DB smoke (`node load/log-compare/run.ts --smoke --out /private/tmp/i160-smoke-fix`) completed 60 fixed-rate arms, 60 maximum steps, 15 replay fixtures and four migrations. All 139 correctness summaries had zero missing/resurrected/retry positions; all fixed-rate schedules balanced and matched paired actual offers/mix. Fault injections detected a deleted creation snapshot at position 500 and a historical Delete followed by revival in all five arms. All four fixed-rate performance comparisons were INVALID from spread over 10%; replay/migration summaries were invalid from insufficient smoke repetitions. Combined summary validity includes correctness and, for maximum steps, work acceptance/errors as well as spread. The historical-body metric covers candidate replay archives; the benchmark oracle separately retains expected bodies and is included in whole-schema storage/WAL. No owned containers/volumes remained. Raw artifacts/log: /private/tmp/i160-smoke-fix{,.log}; an earlier bounded attempt stopped on an operation-string collation mismatch, corrected by canonicalizing both identity arrays in JavaScript and covered by a new negative test. No full comparison was run.
-
-## #160 log comparison: full run, INVALID (2026-11-16 JST)
-
-**No comparison result; no design conclusion.** The full command above ran once at `1662d5d` (Apple Silicon Mac, Docker Desktop, PostgreSQL 18.6, nothing else running), 01:35–09:57 JST: 540 fixed-rate arms, 180 maximum steps, 90 replay fixtures, 12 migrations, exit 0. Output is **MAC-RELATIVE**; absolute budgets **NOT EVALUATED (#431)**.
-
-- **Correctness.** All 540 fixed-rate correctness summaries had zero missing/out-of-order positions, resurrected bodies and retry positions.
-- **Fixed-rate gates: 0 of 36 groups valid** (12 scenarios × 50/250/1000 offered). Invalidation reasons: `walPerOp` spread over 10% (112 arm-groups of 180; overall median spread 26%, maximum 574%), p95 spread (23), heap per op (15), storage per op (7), dropped work or unsustainable load at 1000/s (3: mixed50-1-17, mixed50-1-4000, mixed90-1-4000), tps spread (1). No scenario has a valid common sustainable rate, so the 90%/110%/2× gates are not evaluated. The 14 regressions flagged inside invalid groups are not evidence.
-- **Other summaries.** Maximum-step spread valid 56 of 60 (invalid: baseline, events-ids, events-snapshot, log-snapshot in one scenario each); replay spread valid 3 of 30; migration spread valid for events-snapshot, log-ids, log-snapshot, invalid for events-ids (WAL 13%, blocking 13%).
-- **Suspected cause, not verified.** WAL per op differs up to several-fold between rounds of the same arm and rate (for example 14,190 vs 45,695 bytes), which fits checkpoint or full-page-write timing rather than the arm. A harness change that isolates this (for example a checkpoint before each sample) is needed before a rerun; until then a rerun is expected to be invalid the same way. Isolated in the diagnose record below.
-- **Limits.** One run; condition 5 and the spec differences in the smoke record still apply. Raw artifacts stay outside Git.
-
-## #160 log comparison: WAL variance diagnose (2026-11-17 JST)
-
-**Cause isolated; no comparison result, no design conclusion.** `node load/log-compare/run.ts --diagnose` ran at `13820c4` (PR #499) twice, without and with `--settle-fixture` (01:55–02:32, 02:32–03:08 JST), alone on the Apple M5 Mac, Docker 29.9.3, PostgreSQL 18.6 (`data_checksums=on`, `full_page_writes=on`, `wal_log_hints=off`), Node 26.13.1; 60 fixed-rate samples each (create-1-17 and mixed90-200-4000 at 50 and 250 ops/s, five arms, three rounds). Output is **MAC-RELATIVE**; absolute budgets **NOT EVALUATED (#431)**.
-
-- **Cause.** No checkpoint completed in any sample; three unsettled mixed90-200-4000 250/s snapshot samples started a requested checkpoint (`XLOG/CHECKPOINT_REDO`), one of them with 21.3 KB/op hint-bit FPIs (`mixed90-200-4000-250-2-log-snapshot`). Otherwise, unsettled, every high-WAL round coincides with in-window autovacuum or autoanalyze of the freshly seeded fixture tables, and the excess is `Heap2/VISIBLE` full-page images (for example create-1-17 50/s round 1: baseline `walPerOp` +31,472 B/op over log-ids, of which 31,102 B/op `Heap2/VISIBLE` FPI). Hint-bit FPIs are under 1 KB/op in the other 119 samples. Which arm gets a high round follows timing, not the arm. Unsettled fixed-rate groups valid: 0 of 4.
-- **Settled.** All four groups valid (`walPerOp` spread at most 2.2%, under 1% in 17 of 20 arm-groups) and the harness gates pass. Unsettled samples without in-window vacuum are 0–5.1% below the settled medians (within 2.5% in 15 of 17), so settling removes the pending fixture vacuum, not arm writes; in-window autovacuum still occurs. Whether settling hides an arm cost awaits maintainer review (#499).
-- **Correctness.** Zero missing, resurrected and retry positions, errors and drops in all 120 samples.
-- **Latency.** Settled p95 medians are 4.5–4.8 ms (create-1-17, spread 0.6–4.1%) and 17.2–17.7 ms (mixed90-200-4000, spread 0.02–0.34%), nearly equal across arms even where WAL differs 1.5× (unsettled create-1-17 50/s p95 spread 11–24%); it is measured on the host through `docker exec` psql, so it is a transport floor and DB-side differences are NOT EVALUATED.
-
-| Settled medians: WAL B/op | baseline | events-ids | events-snapshot | log-ids | log-snapshot |
-|---|---:|---:|---:|---:|---:|
-| create-1-17 50/s | 14,261 | 14,249 | 14,927 | 14,530 | 14,920 |
-| create-1-17 250/s | 5,190 | 5,197 | 5,835 | 5,434 | 5,854 |
-| mixed90-200-4000 50/s | 56,576 | 56,788 | 78,144 | 57,922 | 77,618 |
-| mixed90-200-4000 250/s | 42,511 | 42,703 | 63,466 | 43,051 | 61,708 |
-
-- **Limits.** Two of 12 scenarios; no 1000/s, maximum, replay or migration; one run per condition; condition 5 and the smoke-record spec differences still apply. Raw artifacts stay outside Git.
-
-## #160 log comparison: replay and migration reference (2026-11-17)
-
-**Reference only; not evidence of a performance pass.** These values come from the INVALID full run (2026-11-16, `1662d5d`) above. They were used, with the settled diagnose WAL, as design input for the #160 decision (maintainer, 2026-11-17: independent `channel_log`, current-state reconciliation). Output is **MAC-RELATIVE**; absolute budgets **NOT EVALUATED (#431)**.
-
-| 50-entry recent page, deleted range (mixed range within about 5%; median of 3; ms / shared buffers) | baseline | events-ids | log-ids |
-|---|---|---|---|
-| 100k positions, cold | 0.43 / 236 | 13 / 3,723 | 0.45 / 209 |
-| 1M positions, cold | 0.57 / 235 | 118 / 34,126 | 0.66 / 209 |
-| 1M positions, warm | 0.25 / 222 | 7.4 / 6,675 | 0.25 / 199 |
-
-- **Replay.** Buffer counts were identical in all three rounds at 1M positions; at 100k, one of three rounds per candidate arm differed on recent pages (cold: events-ids 3,706 vs 3,723, log-ids 299 vs 209; warm similar). Timing spread exceeds the 10% rule. The events-ids page merges `messages_organization_id_channel_id_seq_key` with `channel_events`. At 1M positions its index scan returned 45 rows but read 33,808 buffers, because Edit/Move/Delete churn left dead versions in the recent range. log-ids reads the append-only log, then does 45 primary-key lookups. Pages not in the table: creation-only pages are about equal; deep mutated pages read 9–52% more buffers than baseline in both candidate arms (24–52% at 1M), all under 1 ms. Settled (vacuumed) replay was not measured.
-- **Migration** (1M Messages, blocking SHARE-lock cutover, three rounds; WAL and storage within 0.1% for log-ids and the snapshot arms; events-ids spread 13%, invalid, see the full-run record):
-  - log-ids: about 3.7 s of writer blocking, 455 MiB WAL, +153 MiB storage (+16.1%).
-  - events-ids: about 40 ms.
-  - snapshot arms: about 6.3 s of writer blocking, 830–838 MiB WAL, +545 MiB.
-
-  This is not an online-migration claim.
-- **Unevaluated, handed to #515, #141, #287 and #431.** This covers:
-  - #515: 1000/s and maximum steps; 10 of 12 write scenarios; DB-side latency; settled replay; condition 5 costs; RLS, Unread, Mention and WebSocket paths;
-  - #141: per-chain Move positions;
-  - #287: Edit/Delete costs;
-  - #431: absolute budgets.
-
-  The list and its owners are in #515.
-
-## #426 Mac relative instrumentation overhead: attempts, NOT EVALUATED (2026-11-16 JST)
-
-**No comparison result.** Procedure as in the #151 / #426 Mac relative record above, at `1662d5d`, patch SHA-256 `a803ace6…e744`, scales tried largest first (1/10, 1/25, 1/50), 30 s pilots, then three B/C, C/B, B/C pairs at the largest sustained scale.
-
-- **Attempts 1–3 (01:34, 09:57, 10:14): infrastructure failure in build.** The runner script's `umask 077` made the cloned source mode 0600; the local offline build (`--network=none`) then missed the cached `npm ci` layer and failed to resolve the npm registry. A networked warm build before attempt 3 did not help, since the cache was present and only the file mode differed. Runner fault, not a harness or app result. Fixed by `umask 022` after creating the private output directory.
-- **Attempt 4 pilots (10:16–10:34).** 1/10 not sustained: 0 errors, 3 dropped arrivals, incomplete offered-work evidence, generator restarted or missing. 1/25 sustained.
-- **Attempt 4 comparison at 1/25 (10:34–11:12): infrastructure failure in seed.** Seeding, fixture checks and probes finished at 11:02; the fixture-histogram query then ended at the harness's 600 s `psql` timeout (exit 128) on the 10-Organization, 5,000,000-Messages-per-Organization fixture. No arm ran.
-- **Next.** A reviewed harness change for the seed-phase timeout on the Mac is needed before the comparison can run. CPU 10%, p95/p99, RSS, spread and missing-evidence rules are unchanged.
-- **Attempt 5 (2026-11-17 03:08 JST, `65fc9b3`): infrastructure failure in build after 4 s; no pilot ran.** The local base-image check passed (the harness inspects pins by digest). The offline legacy build (`--network=none`) missed the build cache from Step 3 of the new `wasm` stage and failed at Step 5 (`rustup target add wasm32-unknown-unknown`) with a DNS failure downloading `rust-std-1.99.1-wasm32-unknown-unknown`. The earlier 1/10 pilot at 00:36 the same night (`d1f58b6`) failed on the stage-alias base-image check fixed by #502. Environment/harness fault, not an app result; the comparison stays NOT EVALUATED until the offline build has a complete cache for every stage (or a reviewed harness change).
-
-## Unread candidate bounds (#355, 2026-11-16 JST)
-
-Adds Organization/Member/revision bounds to the visible list's manager-grant lookup and materializes unread Topic candidates once in the count statement. RLS policies, authorization, `access_rows_sql()`, `member_access`, indexes and the #356 Topic seq bound are unchanged. Baseline: production SQL at `1662d5d`. Full record (conditions, method, per-round medians, plan findings, validation): moved to #355 as a comment.
-
-Method: the actual `channels::visible_list` SQL and `messages::unread::LIST_COUNTS_SQL`, prepared as `fukulow_app` (NOBYPASSRLS, JIT off as in the app pool), each in `REPEATABLE READ READ ONLY` with transaction-local context, on `load/hot-plans/seed.sql` (Org A Member 2, 50 visible Channels, hot Channel 100,000 Messages). Forced Custom/Generic and Auto; three B/A A/B B/A rounds, median of 5 `EXPLAIN (ANALYZE, BUFFERS)` samples each; before/after rows matched exactly. Apple M5 Mac, Docker, PostgreSQL 18.6, shared host.
-
-| Query | Mode | Before → after ms | Change | Root shared hits | Key scan |
-|---|---|---:|---:|---|---|
-| visible list | Custom | 0.177 → 0.069 | −61.0% | 101 → 37 | manager grants filtered 5,000 → 10 |
-| visible list | Generic | 0.179 → 0.128 | −28.5% | 101 → 37 | same |
-| visible list | Auto | 0.178 → 0.117 | −34.3% | 101 → 37 | same |
-| counts | Custom | 5.115 → 3.486 | −31.8% | 3,707 → 502 | Topic tuples examined 100,000 → 2,000 |
-| counts | Generic | 4.539 → 3.271 | −27.9% | 3,707 → 550 | same |
-| counts | Auto | 5.477 → 3.677 | −32.9% | 3,707 → 550 | same |
-
-- **Evidence strength.** Round medians overlap, so the percentages are observed, not isolated causal estimates. The scan and buffer reductions are stable in every sample.
-- **Unchanged cost.** The Topic Message scan (`messages_topic_seq`, seq still in Filter) is unchanged; restoring that bound is #356.
-- **Limits.** One synthetic fixture with no accepted Mentions, warm plans, no concurrent send load or Linux run. Not a performance acceptance (#431).
-
-## Bounded fan-out candidates (#354, 2026-11-16 JST)
-
-Bounds Organization/Member candidate work in `access_rows` and one-statement `member_access`; RLS policies, permission predicates and context helpers are unchanged. Baseline: production SQL at `1662d5d`. Full record (conditions, per-node row/Index Cond audit, loaded-host rounds, rejected `member_access_in` point version): [#354 comment](https://github.com/tkakkie/fukulow/issues/354#issuecomment-6896824496).
-
-Method: `node load/hot-plans/fanout.ts <container> <database> <out>` exports the real Rust builders through the ignored `export_fanout_plan_sql` test and runs them as `fukulow_app` (NOBYPASSRLS) on `load/hot-plans/seed.sql` (11,000 Members, 5,000 grants, 248,000 Messages). `EXPLAIN (ANALYZE, BUFFERS)`, forced Custom/Generic plans. The table records B/A A/B B/A rounds: each arm discarded one warm-up pass and kept **5 measured passes**; each reported time is the median of the three arm medians (15 retained samples per side, not a pooled 15-sample median). Raw plans and summaries: `target/rls354/pair{5,6,7}-{before,after}/`, `target/rls354/final-comparison.json`. Apple M5 Mac, Docker, PostgreSQL 18.6; host load 6–9. The current harness records HEAD/dirty state and SQL hashes, discards one warm-up pass, and collects **15 measured passes per invocation**; the table has not been remeasured with that method.
-
-| Query / candidates | Custom ms before → after | Generic ms before → after | Shared hits Custom; Generic |
-|---|---:|---:|---:|
-| `access_rows`, single statement / 1,000 | 5.424 → 2.960 | 296.334 → 2.561 | 972 → 7,003; 845 → 5,004 |
-| `access_rows`, snapshot chunk / 1,000 | 5.283 → 3.000 | 2.932 → 2.518 | 229 → 7,000; 5,702 → 5,004 |
-| `access_rows`, snapshot tail / 24 | 0.178 → 0.192 | 0.183 → 0.237 | 124 → 124; 124 → 124 |
-| `member_access`, single statement / 1,024 | 2.305 → 1.995 | 84.613 → 1.981 | 2,308 → 5,160; 2,308 → 5,160 |
-| `member_access_in`, unchanged / 1,024 | 1.543 → 1.539 | 1.654 → 1.684 | 2,181 → 2,181; 3,119 → 3,119 |
-
-- **Removed work.** Generic plans no longer reject 499,500 Member and 5,000,000 grant join pairs (`access_rows`) or 1,047,552 pairs (`member_access`); Members and grants are now index-bounded per candidate.
-- **Tradeoff.** Point probes raise shared-buffer hits. The 24-row tail was already bounded.
-- **Limits.** Shared Mac, warm cache, no DMs in the timing fixture, no Linux or concurrent send-load run. The Generic pathology fix is clear; no stable Custom-latency improvement is claimed. Not a performance acceptance (#431).
-
-## Proxy comparison harness (#469 part 3) — results pending
-
-Method fixed by the approved #469 plan; this section records no comparison results. Dispatch `proxy-measure.yml` with `preset=full` and `scenarios=1,2,3,4,5,6`. Each scenario runs in its own GitHub-hosted `ubuntu-latest` job (one job cannot hold all scenarios within 6 h); both proxies run sequentially on that runner using one app image, PostgreSQL 18.6, and a fresh database per run (per step for connections). Each scenario discards one warm-up per proxy, then measures five runs each in alternating ABBA blocks: C N N C, N C C N, C N. The default proxy remains Caddy pending maintainer review.
-
-Harness fixes after full run 43844208337 (all inconclusive; approved on #469 2026-11-17): (A) sockets are spread over separate Accounts, never more than 32 per Account (#196 A `per_account`, unchanged): socket i belongs to Account ⌊i/32⌋, each Account has one Account Session, Account 0 is the Owner and the rest are invited Members of the same Organization; before measuring, every Account's Organization membership and read access to each Channel its sockets subscribe to are checked. 1,000/5,000/10,000 sockets use 32/157/313 Accounts; the same count and allocation apply to both proxies and are recorded per run in `summary.json` `conditions`. (B) every record run has a hard deadline (k6 setup + scenario + teardown limits plus 600 s for Compose; first display 1,800 s + 600 s); on expiry the run gets SIGTERM, SIGKILL for its whole process group after 180 s, then removal of its Compose project's containers, network and volumes and its named k6 container, and is recorded invalid with the reason; job limits are 90/240/355 min for smoke/preflight/full (smoke needs room for the fixed 2,580 s first-display bound), and a run whose budget plus grace would end later than the job limit minus 600 s is not started and is recorded invalid (`conditions[].skipped`), so a scenario whose runs exceed the job is inconclusive rather than cancelled midway. (C) `preset=preflight` runs one full-size discarded warm-up per proxy per scenario, stops at the first invalid run or a ladder whose first step fails, and is never counted among the five measured runs.
-
-Reproduce locally: `LOAD_APP_IMAGE=fukulow-469-app PROXY_PRESET=smoke PROXY_SCENARIOS=3,5 PROXY_RESULT_DIR=/private/tmp/fukulow-proxy-smoke node load/proxy-compare.ts`. Build that image from the checkout first, install the locked `load` and `web` packages and Playwright Chromium. `full` uses the fixed plan; `smoke` uses four sockets (two per Account), five sends/s for three seconds, two/four-connection steps, two/four sends/s delivered-send steps (two Channels × two subscribers) and one navigation per first-display cell. It retains the #345 dataset, viewport and throttle profile. Smoke defaults to one discarded warm-up and one measured run per proxy; `PROXY_RUNS` can increase smoke repetitions, `PROXY_CONNECTION_STEPS` can change smoke connection sizes. Smoke and non-Linux runs are validation only, never gate evidence. Select scenarios with `PROXY_SCENARIOS`; selecting 6 expands to 2–4.
-
-The measurement override guards every textual replacement of `deploy/Caddyfile` and `deploy/nginx.conf`; drift fails closed. Only ACME issuance is replaced by one shared ECDSA P-256 leaf/key from a disposable CA generated with OpenSSL outside the checkout. nginx retains its production entrypoint, module/package checks and unprivileged master. Routing, Host/SNI checks, headers, compression and timeouts remain as shipped. Both apps receive the same measurement-only send burst/refill of 1,000,000 so the production per-Member 1 send/s limiter does not cap the fixed offered loads; values are recorded. The generator joins the disposable network and uses the proxy's `fukulow.test` alias over HTTPS/WSS, with `K6_INSECURE_SKIP_TLS_VERIFY=true` recorded. `GODEBUG=http2client=0` holds k6 REST to HTTP/1.1; actual k6 responses assert HTTP/1.1, TLS 1.3 and AES-128-GCM and record the negotiated tuple. Each run probes both HTTP/1.1-only and h2-offering TLS clients from that network and records protocol, cipher and ALPN; Probes offer only TLS 1.3 / TLS_AES_128_GCM_SHA256 to hold client TLS conditions fixed; TLS 1.3 and matching ciphers are required. Browser h2 on Caddy and HTTP/1.1 on nginx remain the shipped difference. Chromium trusts the leaf SPKI; untimed first-display provisioning uses the private app port, while every timed navigation and its API/WebSocket traffic uses the selected TLS proxy.
-
-Scenarios: (1) highest fully subscribed connection step (1k, 2k, 4k, 6k, 8k, 10k), held 60 s without sends or unexpected closes; (2) highest passing delivered-send step at 50, 100, 200, 400, 800 offered sends/s (`load/scenario.ts`, interval 20 ms, 1/2/4/8/16 sends per batch), 30 s each, four Channels with 50 subscribed sockets each; a step passes only if every offered send is accepted and delivered to every subscriber of its Channel within a 15 s drain with no unexpected close, gap or HTTP failure, and the generator offered at least 95% of the step rate (below that, or without rate evidence, the run is invalid even when k6 exits 99); the first failing step ends the run, and per-step published/delivered/missing counts and delivery latency are retained (this replaces the #309 `many` HTTP-only throughput, which has no subscribers); (3) send-to-delivery and send HTTP p95/p99 at 1,000 sockets, 50 sends/s, 60 s; (4) #195 app restart and full-jitter recovery at 5,000 sockets, recording all-subscriptions-recovered ms; (5) #345 Timeline Visible p50/p95 for `/` and direct Channel URL, cold/warm cache, unthrottled/CDP-throttled, original dataset and 10 navigations per cell after 12 database-cache warm-ups; (6) sampled proxy CPU/memory mean/peak during 2–4. Resources span the generator lifetime including provisioning/drain/teardown; CPU is percent of one core and short peaks can be missed. k6 generator CPU is always recorded; peak at or above 90% invalidates scenarios 1–2. First-display generator CPU/RSS uses host `ps`, summing runner/browser descendants (lifetime-average CPU, recorded separately from Docker samples).
-
-Raw structured artifacts and machine-readable `summary.json` stay outside Git; output directories must be new or empty to prevent stale evidence. Summary reports each proxy's `(max-min)/median` spread before judgment. Detection is descriptive: disjoint five-run ranges are a “difference”, touching/overlapping ranges “no difference detected”, and neither alone decides the gate. Non-inferiority is confirmed run-for-run (criteria revised before measuring, approved by the maintainer on #469 2026-11-16): latency/first display pass only when both spreads are at most 5% and every nginx run is at most 1.05 × every Caddy run (nginx max ≤ 1.05 × Caddy min); connections/throughput pass only when every nginx run reaches at least every Caddy run's step (nginx min ≥ Caddy max), with no spread limit because steps are discrete. Fail requires every nginx run beyond the margin (nginx min > 1.05 × Caddy max, or nginx max < Caddy min); everything between, including latency spread above 5%, missing metrics, fewer than five valid runs or invalid TLS/generator-bound runs, is inconclusive and never passes. Reconnect time and proxy CPU/memory are recorded for reference only and never decide pass or fail. Every scenario 2 step, including one where k6 exits 99, must show an offered rate of at least 95% of the step rate; a lower or missing offered rate makes the run inconclusive, never a proxy capacity limit. Shared-runner noise and the co-located generator limit inference; these are modest comparison gates, not capacity claims. Actions uploads only allowlisted JSON metrics with three-day retention, never keys or container logs; disposable TLS files and stacks are removed.
-
-## Web Rust/wasm sync core evaluation (#466, 2026-11-16 JST)
-
-- Decision (maintainer on #466, 2026-11-16): PR #484 merge approved after the first-display re-measurement at `d2fc5ea`. Accepted, not met: throttled cold Timeline +0.45 s (first visit on a slow link; the blank-screen regression is fixed), improved in #486 (not a merge condition); the four unthrottled cells stay INCONCLUSIVE after 9 rounds (at most +21 ms), not counted as met. `step()`, sustained 100 msg/s, bulk receipt and steady memory are minor misses (not met), tracked in #487 (typed deltas), #488 (JS merge) and #489 (memory); wasm-opt #490 (tool not approved). Rust/wasm is the default. `SYNC_CORE=ts` is retained for one sprint (#467).
-- Compared builds: B = `main` (`4659869`, TS protocol), W = PR #484 (`117e75a`, `SYNC_CORE=wasm` default), R = PR #484 (`117e75a`, `SYNC_CORE=ts` rollback). Images `fukulow-466:{main,wasm,ts}` built once before timing. First display was re-measured with W and R at `d2fc5ea` (startup change only; the sync and memory rows below are `117e75a`, whose sync core code is unchanged).
-- Conditions: Apple M5 (`Mac17,2`), 10 CPUs, 32 GiB, macOS 27.0.1 arm64; Docker Desktop 29.9.3 (10 CPUs / 7.748 GiB VM), PostgreSQL 18.6, Caddy 2.11.9, nginx 1.31.8 + acme 0.4.1; Rust 1.99.1, wasm-bindgen 0.2.130, Playwright 1.65.0 Chromium. Node 26.8.1 for every arm (the pinned 26.13.1 was not installed on this Mac; all arms share the runtime). Five interleaved rounds (B/W/R cyclic Latin square), first display then sync, no competing jobs, AC power (checked before and after every arm), no thermal limit recorded, load average 1.07–3.66. Output is **MAC-RELATIVE**.
-- Reproduce:
-  - Gates: `cargo test --locked && npm --prefix web run check && npm --prefix web test && SYNC_CORE=ts npm --prefix web test && CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts`
-  - First display: `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts` per arm and round (5 interleaved rounds)
-  - Sync step, sustained, bulk receipt, memory: `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm|ts|main-ts --out <dir> --round <n>`, then `--aggregate --out <dir>` (B runs the same script in a `main` worktree)
-
-### Required gates
-
-| Gate | Evidence | Status |
-|---|---|---|
-| Functional equivalence (#464, controller, E2E) | `117e75a` CI 16/16 (client-core wasm tests, web check/test incl. 4 seeded traces > 6,000 steps comparing wasm with `protocol.ts`), e2e workflow, Compose E2E workflow (Caddy and nginx acceptance) | PASS |
-| Real-time contract C1–C10 | protocol, controller and E2E suites above on `SYNC_CORE=wasm` | PASS |
-| Data integrity (no loss/dup/reorder, catch-up) | 212,902 per-step and 527 completion assertions per arm per round, all rounds | PASS |
-| Security (CSP `wasm-unsafe-eval`, MIME, immutable cache) | local `CHECK_COMPOSE_ACCEPTANCE=1` on the W image, both proxies; headers below | PASS |
-| Rollback (`SYNC_CORE=ts` build, tests, baseline parity) | CI `SYNC_CORE=ts` build/test, no wasm asset in R; R within every target vs B below | PASS |
-
-### Bundle size and proxy transfer
-
-| Asset | Build | Raw (B) | gzip -9 (B) | zstd -19 (B) | Brotli -11 (B) | Caddy encoding / transfer (B) | nginx encoding / transfer (B) | Target | Status |
-|---|---|---:|---:|---:|---:|---|---|---|---|
-| `fukulow_client_core_bg-*.wasm` | W | 424,938 | 123,217 | 102,735 | 95,913 | zstd / 121,552 | gzip / 146,531 | Brotli <= 102,400 B | MET |
-| `sync-wasm-*.js` | W | 4,176 | 1,728 | 1,717 | 1,550 | zstd / 1,847 | gzip / 1,845 | recorded | — |
-| `index-*.js` | B | 331,151 | 95,529 | 85,264 | 81,404 | — | — | recorded | — |
-| `index-*.js` | W | 321,103 | 93,108 | 83,146 | 79,384 | zstd / 98,752 | gzip / 116,674 | recorded | — |
-| `index-*.js` | R | 331,829 | 95,888 | 85,576 | 81,724 | — | — | recorded | — |
-
-Raw/compressed sizes are the host build; transfers are the W image (its wasm is 424,339 B raw). Both proxies send `application/wasm` and `public, max-age=31536000, immutable`. Before the size tuning (12b8c9e) the wasm was 676,822 / 172,157 gzip / 132,701 Brotli.
-
-### First display (#345 conditions, re-measured at `d2fc5ea`, 45 runs/cell across 9 interleaved rounds, median of round p50 / p95 ms)
-
-Re-run 2026-11-16 21:35–23:00 JST after the startup fix (shell mounts while the core loads; sync starts after it). Same plan, conditions, runner and criteria; images `fukulow-466:{wasm,ts}` rebuilt at `d2fc5ea`, B unchanged. Five rounds left INCONCLUSIVE cells, so the pre-committed extension to 9 rounds ran. Load average 1.10–2.70, AC power on every arm. One R arm (round 6, first cell) hit the runner's 60 s Timeline timeout; its log is kept and the arm was rerun whole in the same order position. The 9-round table uses the aggregator's evaluation and seeds (its combined check needs as many sync rounds, which stay at 5).
-
-| Cell | B (`main`) p50 / p95 | W (`wasm`) p50 / p95 (change vs B) | R (`ts`) p50 / p95 (change vs B) | Target | Status |
-|---|---:|---:|---:|---|---|
-| `/` unthrottled cold (FCP; Timeline) | FCP 52.0/52.0; TL 406.5/413.2 | FCP 52.0/52.0 (+0.0%); TL 427.3/432.6 (+5.2%) | FCP 52.0/52.0 (+0.0%); TL 405.0/413.1 (+0.5%) | <= +5.0% | INCONCLUSIVE |
-| `/` unthrottled warm (FCP; Timeline) | FCP 48.0/48.0; TL 401.3/406.8 | FCP 48.0/48.0 (+0.0%); TL 406.2/426.0 (+1.4%) | FCP 48.0/52.0 (+0.0%); TL 399.6/406.5 (+1.0%) | <= +5.0% | INCONCLUSIVE |
-| `/o/:org/c/:channel` unthrottled cold (FCP; Timeline) | FCP 52.0/52.0; TL 426.6/452.4 | FCP 52.0/52.0 (+0.0%); TL 429.8/433.9 (-3.0%) | FCP 52.0/52.0 (+0.0%); TL 426.4/470.3 (-0.4%) | <= +5.0% | INCONCLUSIVE |
-| `/o/:org/c/:channel` unthrottled warm (FCP; Timeline) | FCP 48.0/48.0; TL 424.4/428.3 | FCP 48.0/48.0 (+0.0%); TL 426.2/429.5 (-0.1%) | FCP 48.0/48.0 (+0.0%); TL 422.9/427.5 (-0.3%) | <= +5.0% | INCONCLUSIVE |
-| `/` throttled cold (FCP; Timeline) | FCP 952.0/960.0; TL 2792.7/2806.7 | FCP 944.0/960.0 (+0.0%); TL 3246.1/3260.3 (+16.4%) | FCP 952.0/964.0 (+0.4%); TL 2799.9/2808.2 (+0.1%) | <= +5.0% | MISSED |
-| `/` throttled warm (FCP; Timeline) | FCP 232.0/244.0; TL 2082.7/2095.4 | FCP 236.0/244.0 (+0.0%); TL 2090.3/2102.2 (+0.3%) | FCP 236.0/244.0 (+0.0%); TL 2073.8/2089.9 (-0.2%) | <= +5.0% | MET |
-| `/o/:org/c/:channel` throttled cold (FCP; Timeline) | FCP 952.0/964.0; TL 2787.6/2803.7 | FCP 952.0/964.0 (+0.0%); TL 3245.2/3261.8 (+16.2%) | FCP 956.0/968.0 (+0.4%); TL 2779.9/2801.9 (-0.1%) | <= +5.0% | MISSED |
-| `/o/:org/c/:channel` throttled warm (FCP; Timeline) | FCP 236.0/244.0; TL 2080.6/2088.7 | FCP 236.0/244.0 (+0.0%); TL 2082.2/2094.1 (+0.1%) | FCP 236.0/236.0 (+0.0%); TL 2076.4/2082.4 (-0.3%) | <= +5.0% | MET |
-
-INCONCLUSIVE causes (paired round deltas, 95% CI): `/` unthrottled cold Timeline p50 +5.1% [+3.6, +6.2] and p95 +5.2% [-2.9, +6.0] (+19–21 ms); the other three unthrottled cells have medians -0.1% to +1.4% but a CI straddling +5% or B spread above 10% (single slow rounds), FCP difference 0 ms.
-
-Waterfall (round 1, `/` cold, p50 ms, B → W): throttled JS end 910.6 → 909.7, app mount 932.6 → 929.4, FCP 956 → 952, first API request 927 → 925, Organization check end 1,254 → 1,255, wasm end — → 1,698, Channel list request start 1,260 → 1,709, Timeline 2,793 → 3,246; unthrottled mount 39.4 → 39.3, wasm end — → 41.0, Timeline 406 → 430. The shell and the REST Organization check no longer wait; the session (Channel list, Members, socket) starts when the core is ready.
-
-Earlier first display at `117e75a` (5 rounds, shell waited for the core; throttled cold FCP 952 → 1,728 ms): moved to #466 (https://github.com/tkakkie/fukulow/issues/466#issuecomment-6918560096), superseded by this re-measurement.
-
-### Sync processing and memory (5 interleaved rounds, median of round percentiles [min–max])
-
-
-| Metric | Workload | B (`main`) | W (`wasm`) (change vs B) | R (`ts`) (change vs B) | Target | Status |
-|---|---|---:|---:|---:|---|---|
-| `step()` (µs) | Grid + 6,000-step trace p50 / p95 / p99 | 4.83 [4.79–5.04] / 27.75 [27.04–28.04] / 34.63 [33.54–37.96] | 36.54 [36.13–37.17] (+656.1%) / 474.42 [472.04–476.75] (+1601.9%) / 1146.50 [1144.50–1148.63] (+3205.4%) | 4.92 [4.88–5.08] (+1.7%) / 24.50 [24.00–25.21] (-11.3%) / 35.04 [34.25–37.13] (+0.6%) | p50, p95 <= +10%; p99 investigated above +25% | MISSED; p99 INVESTIGATE |
-| Sustained latency (ms) | 100 msg/s × 60 s across 8 Channels, p50 / p95 / p99 | 0.59 [0.59–0.61] / 1.39 [1.36–1.40] / 1.78 [1.73–1.87] | 0.78 [0.76–1.01] / 1.78 [1.73–2.09] (+27.6%, CI [+24.7%, +48.8%]) / 2.29 [2.25–2.69] (queue 0) | 0.61 [0.59–0.61] / 1.40 [1.37–1.41] (+0.6%, CI [-1.1%, +1.2%]) / 1.79 [1.71–1.86] | p95 <= +10%, queue 0 | MISSED |
-| Max sustainable rate (msg/s) | 10 s stepped arrival windows | 8000 [8000–8000] | 8000 [8000–8000] | 8000 [8000–8000] | >= 500 msg/s | MET |
-| Bulk receipt (ms) | 8×50, 2×200 history; 250, 1000 catch-up p50 / p95 | history_8x50: 0.25/0.27; history_2x200: 0.14/0.15; catchup_250: 0.17/0.19; catchup_1000: 1.09/1.23 | history_8x50: 3.74/3.78 (+1337.3%); history_2x200: 3.40/3.45 (+2271.7%); catchup_250: 2.36/2.39 (+1167.2%); catchup_1000: 9.69/9.85 (+703.7%) | history_8x50: 0.19/0.20 (-25.6%); history_2x200: 0.12/0.13 (-8.9%); catchup_250: 0.16/0.17 (-9.1%); catchup_1000: 1.02/1.07 (-12.3%) | <= +10% | MISSED |
-| Steady memory (MiB) | Post-GC heap + wasm linear (2.5k–10k msg) | 11.34 [11.34–11.34] | 14.88 [14.88–14.88] (wasm: 1664 KiB) (+31.3%, CI [+31.2%, +31.3%]) | 11.37 [11.37–11.37] (+0.3%, CI [+0.3%, +0.3%]) | <= +10% | MISSED |
-| Peak memory (MiB) | Pre-GC peak heap + wasm linear | 46.31 [46.26–46.36] | 39.26 [39.19–48.05] (wasm: 26 pages) (-15.2%, CI [-15.3%, +3.6%]) | 44.27 [44.25–44.31] (-4.3%, CI [-4.5%, -4.2%]) | <= +20% | MET |
-| Memory growth slope | OLS slope over 2.5k–10k msg (B/msg); wasm pages added | -37.02 [-38.17–-37.01] B/msg; +0 pages | 3.04 [3.02–3.35] B/msg; +0 pages | 1.06 [1.02–2.22] B/msg; +0 pages | <= +64 B/msg; +0 pages | PASS |
-
-Per class (round 3, µs, B → W): stream append p50 2.5–4.8 → 58–60; duplicate 2.4–6.2 → 10–12; send + ACK 3.0–7.0 → 26–55; history 50 p50 20–28 → 349–470; mixed trace p99 64 → 1,208.
-
-- Missed targets, user impact, and improvement options (cause from exploratory profiling, not part of the formal run):
-  - First display, throttled cold (after the fix, `d2fc5ea`): FCP equal to B (no blank-screen delay); Timeline +0.45 s (2,793 → 3,246 ms, +16%), MISSED. A first visit on a 1.6 Mbps link shows the shell at the same time as B, and the Messages about 0.45 s later; cached visits are within +0.3%. Cause: the 121,552 B wasm (Caddy zstd) needs ~0.61 s at 200 KB/s; ~0.15 s of it overlaps the Organization check, the rest delays the session. Starting the Channel list before the core is ready would only share the saturated link, so only fewer bytes help: Brotli precompression (#486, −25.6 KB ≈ −0.13 s, still above +5%) and wasm-opt (#490). A `<link rel=preload>` was tried and dropped: it competed with the entry JS (exploratory FCP ~1,456 ms).
-  - First display, unthrottled (after the fix): FCP equal; `/` cold Timeline +19–21 ms (+5.1–5.2%, INCONCLUSIVE after 9 rounds), other cells −3.0% to +1.4%.
-  - Minor misses accepted on #466 (not met), the four items below; follow-ups #487–#489.
-  - `step()`: append ~59 µs vs 2.5–4.8 µs, p99 1.15 ms vs 35 µs. Natively `Core::step` takes 1.6–2.2 µs while the whole `WasmCore::step` takes 18–27 µs: about 90% is building the JSON delta (`serde_json::Value` trees, linear body interning, session on every step). In the browser the wasm call is ~37 µs of ~58 µs; `JSON.parse`, body expansion and the view merge add ~20 µs. Options: serialise typed deltas directly, op-based message deltas, Map lookups in the JS merge. A JS/wasm boundary keeps a fixed cost (the no-op duplicate path is 10–12 µs), so +10% of TS is unlikely to be reachable by optimisation alone.
-  - Sustained 100 msg/s: p95 +0.39 ms (1.39 → 1.78 ms), queue 0, max rate 8,000 msg/s. Small; follows from `step()`.
-  - Bulk receipt: 1,000-message catch-up 9.7 ms vs 1.1 ms; history pages 3.4–3.7 ms vs 0.14–0.25 ms. Under one frame; follows from `step()`.
-  - Steady memory: +3.5 MiB (11.34 → 14.88 MiB): 1.6 MiB wasm linear memory (state held in Rust as well as the JS view) and ~1.9 MiB JS heap (cause not confirmed). No growth (slope 3 B/msg, 0 pages).
-- Limits: single developer Mac (`MAC-RELATIVE`), loopback Docker network, synthetic deterministic message bodies, single browser/Node runtime, Node 26.8.1 instead of the pinned 26.13.1. Raw artifacts outside Git: `/private/tmp/fukulow-466-artifacts`.
-
-## Precompressed web asset transfer (#486, 2026-11-17 JST)
-
-Decision evidence: use build-time Brotli-11 sidecars and app negotiation; disable proxy compression so clients declining Brotli receive identity bytes. No dependency added: Node's built-in zlib generates sidecars in Vite's `writeBundle` hook, including public files and HTML but excluding private `.vite` metadata. The hook also runs in Docker's `npm run build --ignore-scripts` path.
-
-Conditions: `41248ff1cb1b538010311b643031d8623f0ccbc1` plus the #486 patch, one `docker build -t fk486-app .` (image `sha256:a0ba689775b185c832558d915b9599b23adaf820c3bc2aeca9501e38dfda6f20`). Mac17,2 / 10 CPUs / 32 GiB, macOS 27.0.1; Docker 29.9.3 / 10 CPUs / 19.53 GiB VM. Pinned image toolchains: Rust 1.99.1, wasm-bindgen 0.2.130, Node 26.13.1; Caddy 2.11.9 and nginx 1.31.8 from `compose.yml`. Host orchestration used Node 26.8.1. These bytes describe this image, not the older #466 bundle or the slightly different host-generated wasm.
-
-Method: `node /private/tmp/fk486-transfer.ts` used disposable `fk486-transfer` Compose stacks, the same image for both arms/proxies, private loopback HTTPS ports, no deployment `.env`, and a disposable static certificate (`curl -k`). Baseline proxy configs came from `git show 41248ff:deploy/Caddyfile` and `git show 41248ff:deploy/nginx.conf`; only ACME certificate issuance was replaced with static TLS. Baseline `Accept-Encoding: gzip, zstd` made the app send identity bytes and exercised the previous proxies' runtime compression (the previous app likewise had no Brotli negotiation). Candidate configs came from the working tree; requests offered `gzip, deflate, br, zstd`. Count raw response-body bytes with curl decompression disabled, excluding HTTP headers/TLS framing. The same candidate assets are used before/after to isolate compression, with no second image build. Raw results and the ad-hoc runner remain outside Git at `/private/tmp/fk486-transfer.jsonl` and `/private/tmp/fk486-transfer.ts`.
-
-| Asset (image basename) | Raw / identity (B) | Brotli-11 (B) | Caddy before (zstd B) | Caddy after (br B) | nginx before (gzip B) | nginx after (br B) |
-|---|---:|---:|---:|---:|---:|---:|
-| `fukulow_client_core_bg-nm1B4dGL.wasm` | 463,332 | 103,813 | 131,573 | 103,813 | 159,174 | 103,813 |
-| `index-BUWRK4KV.js` | 326,393 | 80,479 | 100,111 | 80,479 | 118,611 | 80,479 |
-| `index-D-cae5yN.css` | 34,285 | 4,825 | 6,401 | 4,825 | 7,216 | 4,825 |
-
-Wasm body bytes fall 21.1% against Caddy zstd and 34.8% against nginx gzip on these identical inputs. Both candidate proxies sent exactly the Brotli body, with `Content-Encoding: br`, `Vary: Accept-Encoding`, original MIME (`application/wasm` for wasm) and immutable caching. `scripts/asset-compression.ts` recursively discovers the emitted HTML/JS references, checks HTML, favicon, main JS/CSS, glue and wasm, and compares a single Brotli decode byte-for-byte against identity. Missing/empty headers, gzip/zstd-only, `br;q=0` and explicit refusal overriding a wildcard all return the full raw identity body; positive q-values and wildcard acceptance return Brotli. HTML remains `no-cache`.
-
-Reproduce the candidate checks with `CHECK_COMPOSE_PROJECT=fukulow-security-486 CHECK_COMPOSE_IMAGE=fk486-app CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts` after the single image build. This uses the unchanged Pebble ACME fixture and adds browser acceptance to both production proxy profiles. Limit: a deterministic body-size comparison on the developer Mac, with static TLS for the before/after measurement; it measures neither first-display latency nor production capacity. The existing #466 102,400 B host-build wasm target is not re-evaluated here; this newer image's Brotli wasm is 103,813 B.
-
-## #196 B before/after: method
-
-Run `PATH=/Users/tomoya/.local/share/mise/installs/node/26.13.1/bin:$PATH node load/pool-before-after.ts --out /private/tmp/fukulow-196b-overnight` from the repository root, alone on the same Mac. This evaluates **whole PR #388, not the acquire timeout alone**: B `956f91e`, A `7e3762a`, release images built once each, fresh database per run, three B/A, A/B, B/A pairs per scenario. Both scenarios use `THROUGHPUT_SCENARIO=many` equivalent (200 public Channels, no subscribers), 250/500/1,000/2,000 offered sends/s for 60 s each, 10 s request timeout, 11 s drains; 4,000 distinct Members round robin and Channels by iteration modulo 200. At the maximum, 2,000/4,000 = 0.5 sends/s per Member (one every 2 s), below unchanged burst 10/refill 1/s. Scenarios: sends only; sends plus 500 ordinary Channel-list reads/s and 20 correct sign-ins/s during each step. Both add a second-Organization reader at 2/s continuously, including drains. Authentication holds pool connections during password verification in these commits; the mixed scenario adds contention that short send transactions alone may not sustain. Disposable SQL fixtures copy one genuine password hash and seed distinct Members/sessions; the isolated app alone trusts rotating synthetic sign-in IPs. No server patch or limiter override is applied.
-
-Artifacts record commits, immutable image IDs, machine/settings/harness hashes; per step and run, offers, attempts, accepted/success rate, successful-request p95/p99, separate 429/503/other HTTP errors/client timeouts/transport failures/drops, other-Organization attempts/successes/errors/p95, and 1 s app CPU/RSS plus app-role `pg_stat_activity` connections (including idle; active separately). Any drops, offers below the existing 95% delivery-harness tolerance, send 429s or incomplete evidence invalidate a step. Above B's saturation, report only. Where B succeeds ≥99%, A must also reach ≥99%, lose at most 1 percentage point per pair, and have success p95 and p99 ≤1.10× B; in the mixed scenario this applies to sends, Channel-list reads and sign-ins alike, and a step where B saturates any of them never passes; the other Organization must succeed 100% in both arms during that step (maintainer, 2026-11-17); its whole-run result including drains is recorded, not judged. Success latency is k6 `http_req_duration` (fractional ms, excluding connection setup). A failed resource sample invalidates only the step it falls in; a sample skipped while the previous one runs counts through the 2.5 s maximum sample gap. Fewer than three valid, applicable pairs or missing evidence is NOT EVALUATED; nothing invalid/unmeasured passes. `load/pool-before-after-report.ts <directory>` regenerates judgement. Neither arm has #426 pool instrumentation: both map SQLx pool errors to HTTP 500 / `ErrorBody.error="internal error"`, logging `database operation failed: pool timed out while waiting for an open connection` for `PoolTimedOut`. Exact observed log events are retained by emission step only; absent request attribution and late/background/cancelled work mean per-request pool timeout counts are **NOT EVALUATED**, never inferred from 503/500. The 10 s client timeout means B's 30 s acquire timeout itself cannot be observed directly. Mac-relative only; `--smoke` runs B alone at 50/s for 10 s and cannot enter comparison judgement.
-
-## #196 B before/after: results (2026-11-17 JST, Mac)
-
-**Whole PR #388, not the acquire timeout alone; Mac-relative only. Overall: not a pass.** Method as in the section above, harness at `ee36849` (PR #503), run 03:08–04:09 JST alone on the developer Mac (Apple M5, 10 CPUs, 32 GiB, Docker Desktop 29.9.3 VM 19.5 GiB), Node 26.13.1, k6 `grafana/k6:1.8.2`. B `956f91e` image `sha256:8f40122e…1d6c`, A `7e3762a` image `sha256:1cf73846…9acd`. Runner record complete (12 runs, no missing results, no cleanup errors); judgement regenerated with `load/pool-before-after-report.ts`. Raw artifacts outside Git.
-
-| Scenario | Step (sends/s) | Pair 1 (B/A) | Pair 2 (A/B) | Pair 3 (B/A) | Step result |
-|---|---:|---|---|---|---|
-| send | 250 | FAIL (latency) | PASS | FAIL (latency) | **FAIL** |
-| send | 500 | PASS | PASS | PASS | **PASS** |
-| send | 1,000 | PASS | PASS | PASS | **PASS** |
-| send | 2,000 | NOT EVALUATED (B 120,002 attempts > 120,001 bound) | PASS | PASS | **NOT EVALUATED** |
-| mixed | 250 | PASS | PASS | PASS | **PASS** |
-| mixed | 500, 1,000, 2,000 | NOT EVALUATED | NOT EVALUATED | NOT EVALUATED | **NOT EVALUATED** (target load not generated) |
-
-- **send 250 FAIL.** Every arm 15,001/15,001 sends (100%), other Organization 120/120. Success p95 (ms) B/A: pair 1 1.66/1.93 (1.16×), pair 2 1.73/1.82, pair 3 1.92/1.94; p99 pair 3 3.16/4.05 (1.28×). B's own p95 spread across pairs is 1.66–1.92 ms (16%); the fixed criteria have no noise rule, so the FAIL stands.
-- **send 500/1,000.** 100% in every arm; A p95/p99 within 1.10× of B in every pair (p95 1.25–1.64 ms). 2,000/s: 100% everywhere, pairs 2 and 3 pass; pair 1 is invalid by the fixed upper attempt bound (one extra arrival), so fewer than three valid pairs.
-- **mixed 250 PASS.** Sends, Channel-list reads and sign-ins 100% in every arm (sign-in p95 13.9–14.8 ms); all within 1.10×.
-- **mixed ≥500 not generated.** At 500/s app CPU averaged ~95% in both arms and k6 dropped 1,100–1,400 send arrivals (p95 ~1–1.5 s). At 1,000 and 2,000/s both arms collapsed (sends ~1,000–1,600 accepted of ~36,000–40,000, mostly 503 and client timeouts; sign-ins 36–54% accepted). Report-only observations there: B's other-Organization reader stayed 100% in every step, while A's had 120/121 in pair 1 at 1,000/s and 110/121, 114/120 and 113/120 at 2,000/s; A's Channel-list reads had 1,500–2,000 other HTTP errors at 2,000/s, B had none.
-- **Pool acquire timeouts: NOT EVALUATED** (no request attribution). Observed `pool timed out` log events by emission step: A mixed 1,000/s 16 / 134 / 28 and 2,000/s 6,208 / 5,954 / 6,464 (pairs 1–3); B none in any run; none in the send scenario. The 10 s client timeout means B's 30 s acquire timeout itself cannot be observed directly.
-- **Limits.** One Mac with all roles shared; sub-2 ms latencies at low steps; no production hardware. #196 stays open.
-
-## #196 B before/after after PR #511: results (2026-11-17 JST, Mac)
-
-**B `956f91e` (PR #388 base) vs A `fa1790b` (`main` after PR #511): the whole diff, not the #511 fix alone. Mac-relative only. Overall: not a pass (FAIL).**
-
-**Method and conditions.**
-- Method as in "#196 B before/after: method", criteria unchanged; arms approved by the maintainer on 2026-11-17.
-- Run 10:18–11:19 JST, alone on the same developer Mac and setup as the previous run (Apple M5, 10 CPUs, 32 GiB, Docker Desktop 29.9.3), Node 26.13.1.
-- Command: `node load/pool-before-after.ts --out <dir>` at harness `ee36849` (PR #503). Two local edits were applied (the A commit and the scope string), retained as `harness.patch` (sha256 `1ca41986…`).
-- A includes the 65 commits after `7e3762a`, which was the previous run's A.
-- The per-second latency and `pg_stat_statements` extras were not added.
-- Images: B `sha256:9cc380ec…4092`, A `sha256:cdecab3e…d5a2`; k6 `grafana/k6:1.8.2`.
-- Runner record complete: 12 runs, no cleanup errors. Raw artifacts are outside Git.
-
-| Scenario | Step (sends/s) | Pair 1 (B/A) | Pair 2 (A/B) | Pair 3 (B/A) | Step result |
-|---|---:|---|---|---|---|
-| send | 250 | FAIL (latency) | FAIL (latency) | FAIL (latency) | **FAIL** |
-| send | 500 | FAIL (latency) | FAIL (latency) | FAIL (latency) | **FAIL** |
-| send | 1,000 | NOT EVALUATED (target load not generated) | FAIL (latency) | FAIL (latency) | **NOT EVALUATED** |
-| send | 2,000 | NOT EVALUATED | NOT EVALUATED | FAIL (latency) | **NOT EVALUATED** |
-| mixed | 250 | NOT EVALUATED (missing continuous other-Organization evidence) | same | same | **NOT EVALUATED** |
-| mixed | 500, 1,000, 2,000 | NOT EVALUATED | NOT EVALUATED | NOT EVALUATED | **NOT EVALUATED** |
-
-- **send 250/s.** Every arm accepted all 15,000–15,001 attempted sends (100%). The other Organization was 120/120 in every arm. Success p95/p99 (ms), B vs A:
-
-  | Pair | B | A |
-  |---|---|---|
-  | 1 | 2.69/4.29 | 4.89/14.72 |
-  | 2 | 2.11/3.70 | 12.13/18.71 |
-  | 3 | 2.26/3.97 | 6.30/6.89 |
-
-  At 500/s, every arm was 100%. A's p95 was 1.75–3.76 ms; B's was 1.32–1.69 ms.
-- **mixed 250/s.** NOT EVALUATED never passes (method).
-  - **B, every pair:**
-    - sends, Channel-list reads and sign-ins: 100%;
-    - p95: sends 5.3–13 ms, reads 11–20 ms, sign-ins 28–43 ms;
-    - other Organization: 120/120, p95 2.6–8.2 ms;
-    - mean active DB connections: 2.9–4.9.
-  - **A, every pair** (report only):
-    - sends: 19.3–20.6% (about 6,300 × 503 and 4,000 client timeouts per run);
-    - sign-ins: 33.4–34.3% (about 780 × 503);
-    - reads: all accepted, but p95 2.8–3.1 s;
-    - other Organization: 120/120 within the step, but p95 2.7–3.1 s;
-    - mean active DB connections: 13–14;
-    - no other HTTP errors (statuses other than 2xx/429/503).
-
-  A's success rates are far below the ≥99% that would apply. A's send and read lanes also dropped arrivals (sends about 2,000; reads 5,656–7,484 per run).
-- **Other Organization, whole run including drains (recorded, not judged).**
-  - mixed, A: 541/562, 556/562 and 535/563. A dropped 6–7 arrivals per run and had 6–28 other HTTP errors.
-  - mixed, B: 569/569, 569/569 and 568/568.
-  - A's step reader at mixed 1,000/s: 109/116, 112/115 and 107/116.
-  - A's step reader at mixed 2,000/s: 106/120, 117/120 and 101/120.
-  - B stayed 100% in every step. In the send scenario, both arms were 100%.
-- **mixed at 500, 1,000 and 2,000/s.** Both arms saturate:
-  - B's sends: 9.0–27.2%;
-  - A's sends: 0.94–3.2%.
-
-  A also had other HTTP errors (not 429/503; status not recorded), excluding the reader: 550–4,912 per run at 1,000/s and 1,392–6,662 at 2,000/s. B had none.
-- **Pool acquire timeouts: NOT EVALUATED** (no request attribution). Observed `pool timed out` log events: 0 in every run and step. The 10 s client timeout means B's 30 s acquire timeout itself cannot be observed directly.
-- **Comparison with the previous run (reference only, not an improvement rate).** In this run, A's mixed 250/s read p95 was about 160–240× B's in the same pair (2.8–3.1 s vs 11–20 ms). The previous run's A `7e3762a` passed mixed 250/s (100% everywhere). That points to the range `7e3762a..fa1790b`. This is not verified, and the mechanism is not identified (#519).
-- **Limits.**
-  - One Mac with all roles shared.
-  - No production hardware.
-  - A is the whole diff since PR #388's base.
-
-  #196 stays open.
-
-## Authoritative Reply count SQL plans (#409, 2026-11-17)
-
-Reproduce with `DATABASE_URL` set to a throwaway PostgreSQL owner connection: `cargo test --locked -p fukulow-server --lib reply_count_query_plans -- --ignored --nocapture --test-threads=1`. The committed probe is `server/src/messages/tests/replies/counts/plans.rs`; it executes the production `COUNTS_SQL` in `server/src/messages/replies/counts.rs`. No new index or counter column. Fixture: 100,000 Messages, 2,000 Topics, one Channel; 100 distinct roots with 10 Replies each and one root with 10,000 Replies; W=100,000. Counts and returned anchor cardinalities are checked before each plan.
-
-Conditions: arm64 Mac17,2, 10 CPUs/32 GiB, Docker 29.9.3, PostgreSQL 18.6, Rust 1.99.1, shared host. `fukulow_sqlx_test_app` is the restricted app test role with production grants/policies; NOSUPERUSER/NOBYPASSRLS and active Message RLS are asserted. Each mode uses an Organization-scoped REPEATABLE READ READ ONLY transaction, JIT off, and actual `PREPARE` / `EXPLAIN (ANALYZE, BUFFERS) EXECUTE` with forced custom/generic plans. `VACUUM (ANALYZE)` follows seeding; a correctness read warms each shape. One retained SQL plan per shape/mode; no other test or build from this worktree ran during the samples. Other sessions were not isolated.
-
-| Shape | Plan mode | Planning / execution ms | Top-level shared buffer hits |
-|---|---|---:|---:|
-| 100 ids, 100 roots × 10 Replies | Custom | 0.825 / 4.387 | 627 |
-| 100 ids, 100 roots × 10 Replies | Generic | 0.853 / 2.201 | 632 |
-| One root, 10,000 Replies | Custom | 0.435 / 4.790 | 174 |
-| One root, 10,000 Replies | Generic | 0.039 / 5.384 | 174 |
-
-Plans materialize bounded anchors, deduplicate roots, aggregate once per root with an Index Only Scan on `messages_reply_chain_seq`, then join back to anchors and sort by requested id. Batch aggregates perform 100 index-only scans × 10 rows; the long chain performs one × 10,000. All Reply aggregate scans have Heap Fetches: 0 (301 shared hits for the batch, 170 for the long chain); no Seq Scan on `messages` or disk read appears. Anchors use `messages_pkey` (custom batch) or `messages_org_channel_id_key` (other cases), with heap access for root metadata. The generic plans retain `$1`–`$4` in their predicates.
-
-These warm SQL-only samples exclude HTTP/authentication, watermark admission/barrier, pool acquisition and concurrent writes; they do not establish p95 or production capacity. Formal load verification of the provisional 100-id p95 <=50 ms and extreme-chain p95 <=200 ms targets remains open. No heavy load was run.
-
-Later HTTP evidence: see "Reply count HTTP p95 verification" below (#409, 2026-11-17).
-
-### Reply count HTTP p95 verification (#409, 2026-11-18 JST)
-
-Formal run 4 at clean `d3a9b28`, 2026-11-18 01:05–01:16 JST, exited 0; elapsed 664.882 s (11 min 4.882 s), including setup/cleanup. Reproduce from the worktree root with pinned Node 26.13.1 and Docker: `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal4-409` (use a new external directory). The preceding pilot is `/private/tmp/fk409p-pilot7-409`; it is not acceptance evidence. Raw artifacts stay outside Git: results, metadata/source hashes, image IDs/build log, settings/migration checksums, samples, plans and resource/cleanup records.
-
-Run 1 at `8b0b593` (`/private/tmp/fk409p-formal-409`) is voided: closed-loop, below the 152/s rate floor; NOT EVALUATED, with no accepted latency results.
-
-Run 2 at `0847c59` (`/private/tmp/fk409p-formal2-409`) is superseded: closed-loop and noncompliant with #57; its historical values do not establish acceptance.
-
-Initial open-loop stage at `9b15d21`: one request per 6.25 ms (160/s). Both pilots, `/private/tmp/fk409p-pilot3-409` and `/private/tmp/fk409p-pilot4-409`, were NOT EVALUATED after missed deadlines; their retained results record maximum start lags of 31.466 and 11.071 ms respectively.
-
-Run 3 at `d52f00d` (`/private/tmp/fk409p-formal3-409`) used four requests per 25 ms (160/s) and is voided: normal-1 had a request start 27.618 ms late against a 25 ms tick, giving the whole formal run NOT EVALUATED. Recomputed from results.json, the other five repeats had per-repeat maximum start lags of 15.544, 20.386, 17.774, 23.452 and 24.339 ms (about 15–24 ms). An unretained bare-timer and GC diagnostic observed maximum timer lag of 2–5.5 ms and GC pauses under 5 ms; it has no retained artifact. Host scheduling stalls are an inference on this shared host, not an established cause.
-
-After NOT EVALUATED results, the validity tolerance was widened twice: 6.25 → 25 → 100 ms ticks, ending at 16 requests per 100 ms, still 160/s, following the `load/scheduler.ts` tick model (250 ms default). Lag stays inside scheduled-start latency throughout; widening the tolerance does not subtract it.
-
-Post-run code: commits after `d3a9b28` refactor the dispatch for testability without changing timing semantics. The retained measurement remains run 4 at `d3a9b28`; no measurement was re-run for this refactor.
-
-Run 4 conditions: one developer Mac, Apple M5, 10 CPUs/32 GiB, Darwin 27.0.0 arm64; Node 26.13.1, Docker 29.9.3 (10 CPUs, 20,965,158,912 bytes allocated), no other containers running. Locked Dockerfile release build; app image `sha256:ad36d08f2ca681092b5809789bdf4e51e8043e70500305c9d34d4bd7370a5f89`, PostgreSQL 18.6 pinned to `sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42`; production role/pool/settings. Host process snapshots are retained; this is not a dedicated production host.
-
-Fixture: seed 409, fresh database per shape/repeat, one Organization/public Channel and cookie-authenticated Account Session. Normal has 25,000 roots with 0–6 Replies each (74,997 Replies; 99,997 Messages); descendants reply to the preceding Reply. Each batch has 100 distinct ids resolving to 100 roots, 78.5708% roots/21.4292% descendants across the 10,000 modeled samples (214,292 descendant anchors out of 1,000,000). Extreme shapes add a 10,000- or 100,000-Reply chain (109,998 / 199,998 Messages); each 100-id batch includes its root, 49 descendants and 50 normal anchors; those normal anchors are 77.7136% roots/22.2864% descendants (111,432 descendants out of 500,000 across the 10,000 modeled samples, for either long shape). The 10,000 shape follows `web/src/replies-navigation.test.ts`; 100,000 is additional 10× stress, not a supported-size ceiling. Bodies are 120/132 bytes with fixed timestamps; no Topics, writes, subscribers, proxy or TLS.
-
-Method: loopback HTTP POST through production authorization/watermark and restricted `fukulow_app` RLS. Open-loop fixed-rate arrivals: request k uses deterministic batch(scenario, k), dispatched 16 per 100 ms tick at start + floor(k/16) × 100 ms (nominal 160 batches/s; the load/scheduler.ts tick model from #57, whose default interval is 250 ms), without awaiting earlier responses. Deadlines never shift; a start 100 ms or more late records a missed deadline and stops dispatch, with no catch-up burst. Track start-lag p99/max and peak in-flight. Exceeding 256 in-flight aborts as FAIL: this allows 1.6 s of arrivals, well beyond either p95 target, while bounding overload resource use. Three fresh-database repeats per shape in rotated order. After VACUUM ANALYZE, restart database/app; observe one first request before warm-up or EXPLAIN. Shared buffers start empty but host/VM filesystem caches remain. Then 100 sequential warm-ups and 10,000 measured requests per repeat. Every response checks status, no-store, watermark, anchor/root identities and exact counts. Primary latency runs from scheduled start through full body consumption (including generator lag, HTTP/auth/pool/barrier/query/transfer and possible connection setup); send-to-full-body latency is a secondary diagnostic. Oracle validation is excluded. Nearest-rank percentiles are per repeat; ranges are min–max across repeats, never pooled. First requests are separate, outside warmed percentiles and p95 judgement. Cleanup removes and verifies the run's app image on success, failure and interrupt, alongside owned containers/network/volume.
-
-Run 4 results: ranges across three repeats per shape; times are ms. Each repeat has 10,000 measured successes; errors include measured, first-request and warm-up request/validation errors. All nine repeats completed, with zero cleanup errors.
-
-| Shape | Repeats / measured successes | Scheduled-start p50 / p95 / p99 / max | Send-based p95 (diagnostic) | First request | Start-lag p99 / max | Peak in-flight | Missed deadlines / errors | Fixed p95 target | Verdict; worst-repeat margin |
-|---|---|---|---|---|---|---|---|---|---|
-| Normal, 100 ids | 3 / 30,000 | 19.445–19.714 / 27.508–28.282 / 31.551–35.431 / 41.000–143.193 | 23.097–24.765 | 6.107–6.830 | 7.923–9.343 / 11.034–19.053 | 16–28 | 0 / 0 | <=50 ms | PASS; 21.718 ms |
-| 10,000-Reply chain, 100 ids | 3 / 30,000 | 20.288–21.558 / 29.456–30.185 / 34.630–37.961 / 41.616–133.722 | 24.831–25.968 | 6.312–7.200 | 7.573–9.648 / 11.372–16.441 | 16–29 | 0 / 0 | <=200 ms | PASS; 169.815 ms |
-| 100,000-Reply chain, 100 ids | 3 / 30,000 | 25.920–26.179 / 33.788–34.142 / 38.363–46.787 / 98.545–139.022 | 29.489–29.791 | 14.141–15.571 | 8.908–8.946 / 11.205–12.173 | 16–31 | 0 / 0 | <=200 ms | PASS; 165.858 ms |
-
-Judgement: **PASS for all three shapes**. All three repeats must have 10,000 measured successes and scheduled-start p95 <=50 ms for normal or <=200 ms for either long shape. A missed deadline stops dispatch and the runner throws, making the whole formal run NOT EVALUATED, even with a low p95. Attribution to the generator is an inference on this shared host. Exceeding the in-flight cap is FAIL and takes precedence. In scenario judgement, missed deadlines are checked before errors: an error followed by a stall gives NOT EVALUATED, never PASS. Without a missed deadline, request/validation errors, including first-request/warm-up errors, give FAIL; scheduled-start p95 over target gives FAIL. Pilot, incomplete or missing evidence cannot PASS. Targets and exact API counts are unchanged. The reason scheduled-start p95 (about 28–34 ms) is higher than in closed-loop run 2 is not established: send-based p95 is also about 23–30 ms, and peak in-flight was 16 in five of nine repeats. No target was relaxed. Recomputed from run 4 results.json, maximum outliers of 98.508–143.193 ms occur in six of nine repeats; the other three peaked at 41.000, 41.616 and 42.334 ms. These are tail observations outside the p95 judgement.
-
-Run 4 SQL evidence: all `*-plans.json` files capture representative plans for production `COUNTS_SQL`, using sample 0's batch in a separate psql session after HTTP sampling, via `EXPLAIN (ANALYZE, BUFFERS, SETTINGS)`, Organization-scoped REPEATABLE READ READ ONLY, `SET LOCAL ROLE fukulow_app`; NOSUPERUSER/NOBYPASSRLS and active Message RLS are asserted. Forced custom/generic and auto plans retain bounded materialized anchors, deduplicated roots, one aggregate per root, a join back to anchors and a final sort. Anchor Index Scans use `messages_pkey` (custom) or `messages_org_channel_id_key` (generic/auto); every Reply aggregate uses `messages_reply_chain_seq` Index Only Scan. Normal executes 100 aggregate loops; either long shape executes 51, counting its long chain once. Auto records five custom/three generic executions in every repeat. These are not the plans executed by the HTTP connections; forced custom and generic modes bound that plan choice. This retains the SQL-only plan structure above with the new mixed-anchor fixture.
-
-Across all three modes/repeats, top-level execution shared hits are normal 674–691, long10000 702–714 and long100000 2,208–2,219; Reply index-only shared hits are respectively 301, 320 and 1,820. All Reply scans have Heap Fetches: 0; all plans have zero shared reads and no Message Seq Scan. Zero heap fetches relies on VACUUM making every page all-visible and on this fixture fitting in shared_buffers. Under concurrent writes, index-only scans may fetch heap pages; that case is not measured. SQL execution time ranges are respectively 0.301–0.837, 1.205–2.259 and 10.067–13.268 ms; these are separate warm plan observations, not HTTP percentiles.
-
-Limits: single developer Mac, loopback, synthetic static data and a warm cache; this is not production-host evidence or a production capacity/latency guarantee. First-request observations retain filesystem caches and do not represent cold disk. Concurrent writes, real-time fan-out, proxy/TLS and external network effects are outside this measurement. Representative plans use sample 0 in a separate psql session, not the HTTP connections' actual plans. Zero heap fetches depends on all-visible pages after VACUUM and the fixture fitting shared_buffers; concurrent writes may require heap fetches.
-
-## Watermark subscription admission investigation (#478, 2026-11-17 JST)
-
-Classification: every reproduced subscription 1011 was a one-second watermark admission rejection under load; no product race or non-admission 1011 was found. Historical CI failures lack attribution. The maintainer chose to separate deterministic delivery contracts from the 512-subscription wall-clock capacity check; production limits, deadlines, pool sizes and Close mapping remain unchanged.
-
-Evidence: Rust 1.99.1 debug tests, PostgreSQL 18.6, disposable databases, 20 application connections, 32 Channels and at most 32 concurrent handshakes on the shared Mac during other workers' builds/tests. Half the sockets targeted 1, 4 or 32 popular Channels, half spread across all 32. Across 31 valid matrix runs (64/512 sockets, zero/40 ms extra watermark service), all 4,617 subscription closes matched admission rejections: 207 Channel, 4,410 global; 4,324 at the first watermark and 293 at confirmation. Five handshake setup timeouts were excluded. Separate 512-socket/four-popular-Channel baseline repetitions passed 1/20 without injected delay and 0/20 with 40 ms extra service; all 4,586 and 8,044 respective closes matched admission rejection. These are diagnostic baseline results, not a production-capacity comparison.
-
-Mechanism: admission shares one absolute one-second deadline across four per-Channel slots and eight global slots. Expiry returns Io(WouldBlock) before SQL; both WebSocket watermark callers map it to 1011. Accepting 512 subscriptions requires 1,024 watermark transactions, each holding its permits through pool acquisition, BEGIN, barrier, sequence read and COMMIT. A loaded runner need not finish this burst within the admission budget; spreading Channels cannot remove the global bottleneck.
-
-Contract split: 512 simultaneous authenticated sockets across 32 Channels (half concentrated on four) must all reach ready and receive canonical live Messages. The per-Delivery hook retains both FIFO limits while holding admission expiry. Holding only that expiry is insufficient: the 10 s watermark work deadline includes admission waiting, so a correct queue on a loaded runner can still 1011 (capacity, not contract). Fixed Tokio time freezes notification, helper read, work, pool/session/write and heartbeat timers. A blocking watchdog inhibits auto-advance while letting the runtime park; its five-minute wall-clock bound detects hangs only and its sender drops on success/panic. PostgreSQL safety timeouts and error assertions stay active. Handshakes queue behind 32 permits. A paused-time unit test checks caps/handoffs; the real-expiry integration test asserts exact initial/confirmation caller and Channel/global rejection sequences, no confirmation after initial rejection, and delivery after release. This proves delivery after admission, not wall-clock burst capacity.
-
-Dedicated timer coverage (existing tests): notification deadline — `messages::delivery::tests::notification_timeout_signals_and_releases_capacity`; watermark work deadline — `realtime::tests::commit::unresolved_commit_subscription_timeout_closes_and_later_reconnect_recovers`; session expiry — `realtime::tests::session_expiry_closes_idle_and_replaying_sockets`; pool acquire — `database::pool::tests::configured_pool_bounds_acquisition_and_sets_every_new_connection`; heartbeat — `realtime::tests::lifecycle::missing_pong_disconnects_idle_websocket` and `answering_pings_keeps_websocket_and_live_delivery_healthy`. All five categories have dedicated tests.
-
-Load harness outcome: proposal only, tracked in #530. The light CI scenario in load/scenario.ts assumes every socket subscribes before publishing. Public Close frames cannot distinguish admission from other 1011 paths; authoritative watermark_channel/watermark_global counts are cumulative server aggregates emitted every 60 seconds. A small client-only scenario would mislabel internal errors as admission rejections. Proposed follow-up: load/subscriptions.ts reuses seed.ts, opens all sockets before a subscription barrier and never retries; inputs are socket count (default 512), Channel count (32), popular Channels (4), concentrated share (50%), handshake concurrency and outcome timeout. Extend load/record.ts to capture aggregate deltas bracketing the burst on an isolated stack, waiting for a post-burst aggregate. Report accepted subscriptions, Channel/global admission rejections, other Close codes, unattributed 1011, upgrade failures, incomplete sockets and actual subscription launch span in JSON, with no capacity threshold or pass/fail claim; refuse attribution when telemetry coverage is incomplete. Provision enough Accounts for the production 32-socket Account cap. Keep this manual and outside CI; retain production limits and record host/server/database/generator resources and competing load.
-
-## Unread Topic-count seq index bound under RLS (#356, 2026-11-17 JST)
-
-Comparison: B is `LIST_COUNTS_SQL` at main `4fa2ba0` (includes #355/PR #448); A adds the persisted/fallback lower bound to #355's existing materialized `unread_topics` CTE and consumes it as `t.read_seq`, removing the second Topic-position join. No policies, authorization conditions, migrations, function attributes or indexes change. The scoped position joins, snapshot upper bound and own-Message exclusion are retained.
-
-Cause: the higher-security user qual `m.seq > COALESCE(tr.read_seq,p.initial_seq)` cannot cross the lower-security RLS quals. PostgreSQL 18.6's [`contain_leaked_vars_walker`](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/clauses.c#L1191-L1355) does not recognize `CoalesceExpr`, so conservatively reports it as potentially leaky. This is not a non-leakproof bigint comparison: the catalog reports `int8gt` and `int8le` as leakproof. [`restriction_is_securely_promotable`](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/restrictinfo.c#L392-L410) therefore rejects promotion, and [`match_clause_to_index`](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/path/indxpath.c#L2448-L2453) excludes the qual. Computing COALESCE in the materialized row leaves a plain Var/Var comparison eligible for the index. Existing RLS evaluation remains in place.
-
-Causal controls on the same 25-unread fixture, in all three cache modes: B as owner (RLS bypass) has both seq bounds in Index Cond and reads 500 Messages; B as the restricted role reads 50,500. A plain `CROSS JOIN LATERAL (SELECT COALESCE(...) AS read_seq)` is flattened back into the expression and still reads 50,500. Replacing only the lower COALESCE with `CASE WHEN tr.read_seq IS NULL THEN p.initial_seq ELSE tr.read_seq END` also restores the lower Index Cond (500 Messages, 329 root hits). A uses the already materialized row instead (500 Messages, 328 root hits), avoiding both expression dependence at the scan and the duplicate position lookup. These controls establish plan/scan behavior; their separate timings are not pooled with the comparison below.
-
-Method and environment: an ad-hoc dependency-free Node/psql harness ran the comparison and causal controls on a fresh `fk356-pg` container. It applied the sorted `server/migrations/*.sql` in individual transactions and production `deploy/db-grants.sql` with only the test role identifier substituted. The harness, SQL, raw JSON plans and summaries under `/private/tmp/fk356/` were not retained. The measured role `fk356_app` is non-owner/NOSUPERUSER/NOBYPASSRLS; each session asserts restricted status and `row_security_active('messages')`. Owner access is used only for fixture setup and the explicitly separate bypass control.
-
-Fixture reproduction: one Organization, two Members, one public Channel, 20 interleaved Topics; Topic k has seq `k+20*n`, n from 0 through `2499+U`, U = 25/250/2500. Every Message is from the other Member; no Mentions or main-timeline Messages. Each viewer Topic position is `k+20*2499`; Channel initial/read positions remain 0; the committed Channel counter is `20*(2500+U)`. VACUUM(ANALYZE) Messages and ANALYZE Topics, both position tables, the counter and Mentions after each seed. B is extracted from the Rust constant at `4fa2ba0`, A from the working-tree constant; the harness verifies A equals the proposed rewrite. Every warm-up checks the identical result tuple: `(as_of_seq,read_seq,missing_position,main_unread_count,unread_count,main_mention_unread_count,mention_unread_count) = (20*(2500+U),0,false,0,20*U,0,0)`.
-
-Each backlog/mode uses a fresh psql session, restricted-role Organization-local REPEATABLE READ READ ONLY transaction, JIT off (production setting), actual `PREPARE name(uuid,uuid,bigint,uuid[]) AS ...`, then `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Five warm-ups per arm precede 15 retained executions per arm, alternating B/A and A/B order. Report medians of all 15 retained Execution Times; buffers/scan work were identical across retained samples. `pg_prepared_statements` confirms forced Custom = 20 Custom/0 Generic and forced Generic = 0 Custom/20 Generic per arm. Auto chose 20 Custom/0 Generic for both arms at every backlog; it was allowed to choose after the first five executions. Raw sample times are not application round-trip latency.
-
-Host: Mac17,2, macOS 27.0.1 arm64, 10 CPUs/32 GiB; Docker 29.9.3, VM 10 CPUs/20,965,158,912 bytes; PostgreSQL 18.6 Debian arm64 image `sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722`, tmpfs database, max_connections=300, shared_buffers=128MB, work_mem=4MB. Node 26.8.1 orchestrates psql through docker exec (no client transport included in Execution Time); Rust 1.99.1 for verification. No build/test from this worktree overlapped the retained timing samples. Shared host/other worktrees and desktop activity were not isolated.
-
-All Custom/Generic/Auto B plans use `messages_topic_seq` through Bitmap Index Scan + exact Bitmap Heap Scan; only Organization, Channel and Topic are Index Conds. Filter includes `seq > COALESCE(tr.read_seq,p.initial_seq)`, `seq <= COALESCE(s.seq,0)` and sender exclusion. The inlined policy appears in Result gates as `One-Time Filter: NULLIF(current_setting('fukulow.organization_id',true),'')::uuid = $1` in Generic (literal Organization in Custom/Auto). A retains those gates and uses Index Scan on that same index with `organization_id=$1 AND channel_id=c.channel_id AND topic_id=t.id AND seq > t.read_seq`; Custom/Auto substitute the Organization literal for `$1`. Upper-bound COALESCE and sender exclusion remain Filters in A; no semantic bound is removed. Every Topic scan loops 20 times, returns U rows/loop and removes 2,500 rows/loop before versus 0 after; no lossy rechecks or shared reads occur.
-
-| Unread/Topic | Message rows examined B → A (all modes) | Root shared hits B → A (all modes) | Topic subscan shared hits B → A |
-|---:|---:|---:|---:|
-| 25 | 50,500 → 500 | 26,142 → 328 | 26,134 → 321 |
-| 250 | 55,000 → 5,000 | 28,452 → 2,630 | 28,444 → 2,623 |
-| 2,500 | 100,000 → 50,000 | 51,695 → 25,873 | 51,687 → 25,866 |
-
-| Unread/Topic | Custom median ms B → A | Generic median ms B → A | Auto median ms B → A |
-|---:|---:|---:|---:|
-| 25 | 32.154 → 0.788 | 32.470 → 1.419 | 30.004 → 0.793 |
-| 250 | 36.059 → 5.079 | 40.238 → 8.814 | 36.159 → 5.285 |
-| 2,500 | 184.954 → 84.267 | 228.084 → 151.211 | 167.185 → 82.238 |
-
-Limits: warm-cache focused SQL probe, one Channel and fixed Topic count, no concurrent writer, own Messages or Mentions in the timing fixture. At U=2,500 retained min–max ms were Custom B/A 111.070–210.330 / 63.415–108.338, Generic 167.418–285.885 / 117.301–184.807, Auto 105.967–207.109 / 56.368–158.937. Shared-host variance prevents a production latency/capacity claim. The optimization removes read-prefix work; exact counts still grow with unread backlog. The upper-bound Filter remains a separate limitation, harmless to this fixture's scan bound because there are no Messages beyond the committed counter.
-
-Verification coverage: `unread_main_timeline_and_topics_are_independent_monotonic_and_exclude_own_sends` covers independent positions, monotonic/clamped marks and own sends; `mention_counts_dedup_own_independent_positions_marks_and_no_backfill` covers Mention counts and own-Message exclusion in both scopes; `unread_list_baseline_and_counts_share_snapshot_across_message_commit` checks Unread/Mention counts, counter and positions across concurrent later commits. `unread_new_member_and_regrant_start_at_new_grants_committed_seq` covers fallback initial positions for new Topics. Their assertions are unchanged. The always-on `unread_topic_counts_read_only_unread_topic_ranges` now bounds Message work to 25 (not the full 50-Message Topic), uses actual PREPARE/EXECUTE in Custom/Generic/Auto, and checks that main `4fa2ba0`'s query reads the full 50-Message Topic and fails that bound in all three modes. It also retains the `BEFORE` full-history negative control against the same 25 bound. Conclusion: restore the lower Index Cond by carrying the bound in the existing materialized candidate row; retain all policies and count semantics.
+- [Load harness methods](../load/measurements-archive.md#load-harness-methods-20-57) — procedures for `make load` and `load/record.ts`. [Load decisions](decisions/load.md#load-testing-and-measurement)
+- [Earlier reconnect runs](../load/measurements-archive.md#graceful-shutdown-and-reconnect-storm-195-2026-11-11-jst) — superseded by the pinned repeat.
+- [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
+- [Search preliminary engine comparison](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) — superseded by frozen-manifest runs.
+- [Search preliminary quality comparison](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) — frozen rerun reproduced the scores.
+- [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
+- [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
+- [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
+- [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
+- [Channel log smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) — functional smoke only.
+- [Channel log full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) — INVALID for the comparison gate.
+- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending. See `load/proxy-compare.ts`.
+- [Earlier wasm first display](../load/measurements-archive.md#first-display-345-conditions-re-measured-at-d2fc5ea-45-runscell-across-9-interleaved-rounds-median-of-round-p50--p95-ms) — superseded by the startup fix.
+- [Pool before and after PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac) — superseded by the post-PR #511 comparison.
+- [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17) — superseded by HTTP and SQL evidence.
+- [Reply count HTTP run 1](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, closed-loop and below the rate floor.
+- [Reply count HTTP run 2](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — superseded, closed-loop and noncompliant with #57.
+- [Reply count initial open-loop pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED after missed deadlines.
+- [Reply count final pilot](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — pilot only.
+- [Reply count HTTP run 3](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, missed deadline.

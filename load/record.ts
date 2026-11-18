@@ -1,5 +1,5 @@
 import { tmpdir } from 'node:os';
-import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, execFile, execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { writeFileSync, mkdirSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { cpus, totalmem, platform, arch } from 'node:os';
@@ -9,6 +9,8 @@ import { createCertificate, domain, outsideCheckout, proxyOverride, recordTls } 
 import type { Proxy } from './proxy-judgment.ts';
 import { sampledCpuPeaks, type ResourceSample } from './throughput-summary.ts';
 import { requireSuccessfulRun } from './summary.ts';
+import { loadRecipe } from './generator.ts';
+import { appEvidence, proxyEvidence, type AppEvidence, type ProxyEvidence } from './app-evidence.ts';
 const execAsync = promisify(execFile);
 const proxy = process.env.LOAD_PROXY as Proxy | undefined;
 if (proxy && !['caddy', 'nginx'].includes(proxy)) throw new Error('LOAD_PROXY must be caddy or nginx');
@@ -80,6 +82,10 @@ let rate: { startedAt?: number; offered: number; [key: string]: unknown } | unde
 let measurementError: unknown;
 let exitCode = 1;
 let generatorExitCode: number | undefined;
+let generatorWindow: { startedAt: number; clientClosingAt?: number; endedAt?: number } | undefined;
+let appContainer: string | undefined;
+let appSide: AppEvidence | undefined;
+let proxySide: ProxyEvidence | undefined;
 let primaryError: unknown;
 let child: ChildProcess | undefined;
 const cleanupErrors: unknown[] = [];
@@ -103,6 +109,7 @@ try {
   docker(...compose, 'up', '-d', ...(process.env.LOAD_APP_IMAGE ? ['--no-build'] : ['--build']), '--wait');
   sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
   const app = docker(...compose, 'ps', '-q', 'app');
+  appContainer = app;
   const db = docker(...compose, 'ps', '-q', 'db');
   if (proxy) {
     resourceNames.proxy = docker('inspect', '--format', '{{.Name}}', docker(...compose, 'ps', '-q', 'proxy')).replace(/^\//, '');
@@ -115,7 +122,7 @@ try {
   const metadata = {
     hostNode: process.version,
     harness: Object.fromEntries(['Makefile', 'Dockerfile', 'compose.yml', 'deploy/Caddyfile', 'deploy/nginx.conf', 'deploy/nginx-acme.sh', 'web/scripts/first-paint.ts', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
-      'load/seed.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
+      'load/seed.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/generator.ts', 'load/app-evidence.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
       [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),
@@ -171,7 +178,10 @@ try {
     FIRST_PAINT_EXTERNAL: '1', FIRST_PAINT_COMPOSE: JSON.stringify(compose), FIRST_PAINT_OUT: `${output}/first-paint`,
     FIRST_PAINT_PORT: String(Number(port) + 1), FIRST_PAINT_API: `http://127.0.0.1:${port}`,
     FIRST_PAINT_DOMAIN: domain, FUKULOW_SETUP_TOKEN: env.LOAD_SETUP_TOKEN } : env;
-  const generator = spawn(firstPaint ? process.execPath : 'make', firstPaint ? ['web/scripts/first-paint.ts'] : ['load'],
+  // Not `make load`: make reports k6's exit 99 (failed thresholds, a capacity result) as its own exit 2.
+  const generatorCommand = firstPaint ? { file: process.execPath, args: ['web/scripts/first-paint.ts'] } : loadRecipe(generatorEnvironment);
+  generatorWindow = { startedAt: Date.now() };
+  const generator = spawn(generatorCommand.file, generatorCommand.args,
     { env: generatorEnvironment, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child = generator;
   let buffered = '';
@@ -197,7 +207,11 @@ try {
         if (typeof message === 'string' && message.startsWith('LOAD_RECONNECT_STORM ')) storm = JSON.parse(message.slice(21));
         if (typeof message === 'string' && message.startsWith('LOAD_TLS ')) clientTls.add(message.slice(9));
         if (typeof message === 'string' && message.startsWith('LOAD_RATE ')) rate = JSON.parse(message.slice(10));
-        if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) progress = JSON.parse(message.slice(14));
+        if (typeof message === 'string' && message.startsWith('LOAD_PROGRESS ')) {
+          // scenario.ts prints this just before closing its sockets and revoking Sessions (4001 closes): the evidence window ends here.
+          generatorWindow!.clientClosingAt ??= Date.now();
+          progress = JSON.parse(message.slice(14));
+        }
         if (typeof message === 'string' && message.startsWith('LOAD_SETUP_COMPLETE ')) setupComplete = JSON.parse(message.slice(20));
         if (line.startsWith('LOAD_THROUGHPUT ')) {
           throughput = JSON.parse(line.slice(16));
@@ -214,6 +228,7 @@ try {
     generator.on('error', reject);
     generator.on('close', (code) => done(code ?? 1));
   });
+  generatorWindow.endedAt = Date.now();
   generatorExitCode = exitCode;
   await restart;
   if (env.LOAD_RECONNECT_STORM === '1' && (!storm || restartMs === undefined)) throw new Error('Missing storm measurement/restart');
@@ -250,6 +265,25 @@ try {
     try { action(); } catch (error) { cleanupErrors.push(error); }
   };
   attempt(() => writeFileSync(`${output}/k6.log`, log));
+  // Proxy runs never retain app logs (public artifacts); keep only allowlisted aggregates, also after a failure.
+  if (proxy && appContainer && generatorWindow) {
+    const window = { startedAt: generatorWindow.startedAt, endedAt: generatorWindow.clientClosingAt ?? generatorWindow.endedAt ?? Date.now() };
+    try {
+      // pool_stats is written every second: wait for the sample that closes the window, at most 5 s.
+      for (let attempt = 0; ; attempt++) {
+        const read = spawnSync('docker', ['logs', appContainer], { env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+        const failed = read.error ? `app log read failed: ${read.error.message}` : read.status !== 0 ? `docker logs exited ${read.status}` : undefined;
+        appSide = appEvidence(`${read.stdout ?? ''}\n${read.stderr ?? ''}`, window.startedAt, window.endedAt, failed);
+        if (attempt >= 5 || !appSide.reasons.includes('no pool_stats sample within 2 s after the window')) break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      if (resourceNames.proxy) {
+        const read = spawnSync('docker', ['logs', resourceNames.proxy], { env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+        const failed = read.error ? `proxy log read failed: ${read.error.message}` : read.status !== 0 ? `docker logs exited ${read.status}` : undefined;
+        proxySide = proxyEvidence(`${read.stdout ?? ''}\n${read.stderr ?? ''}`, proxy, window.startedAt, window.endedAt, failed);
+      }
+    } catch (error) { cleanupErrors.push(error); }
+  }
   attempt(() => {
     const previous = new Map(snapshots.before?.statements.map((s) => [s.queryid + ':' + s.toplevel, s]));
     const statementDeltas = snapshots.after?.statements.map((s) => ({ ...s,
@@ -270,7 +304,7 @@ try {
         ...(firstPaint ? { generator: hostGeneratorSamples.length ? Math.max(...hostGeneratorSamples.map(s => s.cpuPercent)) : null } : {}) },
       generatorCpuSource: firstPaint ? 'host ps lifetime %CPU summed over runner and browser descendants' : 'docker stats; instantaneous sampled CPU',
       cpuSamplingScope: 'whole generator run including provisioning, boundaries, idle/drain and teardown; 100% is one core',
-      progress, setupComplete, measurementError }, null, 2));
+      progress, setupComplete, appEvidence: appSide, proxyEvidence: proxySide, generatorWindow, measurementError }, null, 2));
   });
   if (!proxy) attempt(() => writeFileSync(`${output}/server.log`, docker(...compose, 'logs', '--no-color', 'app')));
   if (!proxy) attempt(() => writeFileSync(`${output}/database.log`, docker(...compose, 'logs', '--no-color', 'db')));

@@ -41,7 +41,7 @@ Accounts, sign-in, tenancy, Account Sessions and revocation. Writing rules and t
 - CI probes health through Caddy HTTPS and nginx HTTPS with a local Pebble CA (#469); main/manual acceptance also proves WSS, renewal and persisted certificate reuse. Public-domain issuance/renewal remains manual.
 - Cookie WebSockets require one matching Origin: same Host over HTTPS (HTTP when cookie_secure=false) or `FUKULOW_WS_ALLOWED_ORIGINS`; forwarded headers never decide it. Origin is checked before Auth and Organization parsing; Bearer needs no Origin.
 - #144 uses one deny-by-default authorize function, including SQL role sets derived from it. Owner changes Roles/invites any Role; Admin invites non-Owners. Guests need explicit current grants even for public Channels; private grants remain required for every Role.
-- #303 lists range over unconsumed expiry, then sort live candidates; retain the final clock check and all anchors. Reason: expired history must not extend the Organization lock; replace the creation-order index to avoid generic-plan history scans. Evidence: measurements #303.
+- #303 lists range over unconsumed expiry, then sort live candidates; retain the final clock check and all anchors. Reason: expired history must not extend the Organization lock; replace the creation-order index to avoid generic-plan history scans. Evidence: [#303 baseline](../measurements.md#invite-list-expiry-range-303).
 - #303 management follows authorize(Invite(Role)), independent of issuer status. Filter before page fill to hide Owner-Role Invites from Admins; uniformly deny unavailable targets without email disclosure.
 - #303 retains random UUID cursor anchors per Invite and management Role, scoped by Organization. Keysets use creation time/id; consumed anchors stay valid, avoiding offset skips. Separate Role anchors prevent cross-Role reuse without keys or cursor storage tables.
 - #303 management rechecks Role/activity/revision under Organization -> Invite locks through COMMIT. Acceptance checks revoked_at inside its transaction, so the first operation wins atomically and issuer promotion cannot revive revocation.
@@ -115,3 +115,5 @@ Entries that also govern this area, listed by the start of the entry in that par
 - [messages](messages.md): `#311 Target Member NO KEY UPDATE precedes`, `#311 Right-only updates skip Unread triggers`, `#311 The private-Channel trigger locks its Channel row`
 
 - [messages](messages.md): `#515 uses Organization UUID epochs`
+
+- [realtime](realtime.md): `#396/#551 revocations carry`

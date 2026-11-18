@@ -233,7 +233,9 @@ async fn check_entries(
         // subscription originally dependent on a grant retains its lifetime.
         let mut captured = entry.grant.lock().unwrap_or_else(|e| e.into_inner());
         let lost = !visible || (captured.is_some() && grant.is_some() && *captured != grant);
-        if !current || lost {
+        if !current {
+            activity.retire_membership(entry.organization, entry.member);
+        } else if lost {
             activity.retire(entry.organization, entry.member.0);
         }
         if !current {
