@@ -74,3 +74,67 @@ test('connection capacity failures are distinct from instrumentation/setup failu
   assert.ok(connectionMetric('caddy', [ok, { ...ok, tls: [] }], [1000,2000]).observation.error);
   assert.equal(connectionMetric('caddy', [{ ...ok, cpuPeakPercent: {} }], [1000]).observation.generatorCpu, null);
 });
+
+test('a make-converted exit 2 is never a capacity result', async () => {
+  const { stepMetric } = await import('./proxy-results.ts');
+  const ok: RunResult = { exitCode: 0, summary: {}, tls: [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }], cpuPeakPercent: { generator: 20 },
+    resources: [{ rows: [] }], setupComplete: { sessions: 63, accounts: 63 } };
+  const made = { ...ok, exitCode: 1, generatorExitCode: 2, measurementError: 'Error: Invalid measurement: generator exited with code 2; failed thresholds: load_errors' };
+  assert.match(stepMetric('caddy', [ok, made], [1000, 2000]).observation.error ?? '', /code 2/);
+});
+
+test('connection ceilings are attributed to the app, the proxy or unknown from app-side evidence', async () => {
+  const { ceilingCause, stepMetric } = await import('./proxy-results.ts');
+  const { appEvidence } = await import('./app-evidence.ts');
+  const clean = appEvidence(Array.from({ length: 4 }, (_, i) => JSON.stringify({ timestamp: new Date(i * 1000).toISOString(), target: 'fukulow',
+    fields: { event: 'pool_stats', sample_sequence: i + 1, in_use: 0, idle: 20, waiting: 0, acquire_success: 0, acquire_timeout: 0, acquire_closed: 0,
+      acquire_io: 0, acquire_database: 0, acquire_other: 0, acquire_cancelled: 0, wait_le_1000000_us: 0, wait_count: 0 } })).join('\n'), 500, 2500);
+  assert.equal(clean.complete, true);
+  const app1011 = (count: number) => ({ ...clean, closes: { ...clean.closes, '1011': { count, firstMs: 0, lastMs: 0, perSecond: [] } } });
+  const client = (count: number): RunResult['summary'] => ({ metrics: { 'socket_closes{code:1011}': { values: { count } } } });
+  const failures = { ...clean.databaseFailures, pool_timeout: 4 };
+  const proxyLog = (errorLines: number, complete = true, capacityMarkers: Record<string, number> = errorLines ? { 'worker_connections exhausted': errorLines } : {}) =>
+    ({ complete, reasons: [], levels: { error: errorLines }, errorLines, capacityMarkers });
+  const cause = (summary: RunResult['summary'], appEvidence?: RunResult['appEvidence'], proxyEvidence: RunResult['proxyEvidence'] = proxyLog(0)) =>
+    ceilingCause({ exitCode: 1, summary, appEvidence, proxyEvidence }, 2000);
+  // Every client 1011 was sent by the app, with the database cause.
+  assert.deepEqual(cause(client(499), { ...app1011(499), databaseFailures: failures }),
+    { cause: 'app', reasons: ['app sent 499 closes with 1011', 'database_failure pool_timeout: 4'] });
+  // App 1011 without a database failure is still app-side, with the cause left unidentified.
+  assert.match(cause(client(3), app1011(3)).reasons.join(), /app-side cause is not identified/);
+  assert.equal(cause(client(3), app1011(3)).cause, 'app');
+  // More client 1011s than the app sent: some did not come from the app.
+  assert.equal(cause(client(5), app1011(3)).cause, 'unknown');
+  // App-side failures that no client 1011 ties to the failure are not decided either way.
+  assert.equal(cause(client(0), { ...clean, databaseFailures: failures }).cause, 'unknown');
+  // Missing or incomplete evidence is unknown, never the proxy.
+  assert.equal(cause(client(0)).cause, 'unknown');
+  assert.equal(cause(client(0), { ...clean, complete: false, reasons: ['missing pool_stats'] }).cause, 'unknown');
+  assert.equal(cause({ metrics: {} }, clean).cause, 'unknown');
+  // The proxy is named only with positive evidence: its own error lines naming a proxy capacity limit while the app logged no failure.
+  assert.deepEqual(cause(client(0), clean, proxyLog(3)),
+    { cause: 'proxy', reasons: ['proxy worker_connections exhausted: 3', 'no app-side failure', 'app opened 0 of 2000 requested sockets'] });
+  // Error level alone is not proxy evidence: upstream timeouts and refused upstream connections can be app-side.
+  assert.deepEqual(cause(client(0), clean, proxyLog(3, true, {})),
+    { cause: 'unknown', reasons: ['proxy logged 3 error-level lines, none naming a proxy capacity limit', 'app opened 0 of 2000 requested sockets'] });
+  assert.equal(cause(client(0), clean, proxyLog(3, true, { 'open file limit': 0 })).cause, 'unknown');
+  // No failure logged on either side is not proxy evidence: an app limit can leave none.
+  assert.equal(cause(client(0), clean, proxyLog(0)).cause, 'unknown');
+  assert.equal(cause(client(0), clean, proxyLog(3, false)).cause, 'unknown');
+  assert.equal(cause(client(0), clean, undefined).cause, 'unknown');
+  // Proxy errors never override app-side failures, including server-sent 1001 and other app warnings.
+  assert.equal(cause(client(0), { ...clean, closes: { ...clean.closes, '1001': { count: 2, firstMs: 0, lastMs: 0, perSecond: [] } } }, proxyLog(3)).cause, 'unknown');
+  assert.equal(cause(client(0), { ...clean, otherWarnings: { work_deadline_expired: 1 } }, proxyLog(3)).cause, 'unknown');
+  // A panic (no timestamp, counted over the whole log) is an app-side signal, never a proxy limit.
+  assert.equal(cause(client(0), { ...clean, panics: 1 }).cause, 'unknown');
+
+  const ok: RunResult = { exitCode: 0, summary: {}, tls: [{ protocol: 'TLSv1.3', cipher: 'AES', alpn: 'http/1.1' }], cpuPeakPercent: { generator: 20 },
+    resources: [{ rows: [] }], setupComplete: { sessions: 63, accounts: 63 } };
+  const capacity: RunResult = { ...ok, exitCode: 1, generatorExitCode: 99, summary: client(499), appEvidence: { ...app1011(499), databaseFailures: failures },
+    measurementError: 'Error: Invalid measurement: generator exited with code 99; failed thresholds: load_errors' };
+  const observation = stepMetric('caddy', [ok, capacity], [1000, 2000], undefined, true).observation;
+  assert.deepEqual([observation.value, observation.error, observation.ceiling?.failedStep, observation.ceiling?.cause], [1000, undefined, 2000, 'app']);
+  // Throughput ladders and passing ladders carry no ceiling.
+  assert.equal(stepMetric('caddy', [ok, capacity], [1000, 2000]).observation.ceiling, undefined);
+  assert.equal(stepMetric('caddy', [ok, ok], [1000, 2000], undefined, true).observation.ceiling, undefined);
+});
