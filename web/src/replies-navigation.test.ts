@@ -1,3 +1,4 @@
+import { replyPage } from './topic-test-helpers'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Message, ReplyChainPage, Result } from './api'
 import { deferred, ok, reply, replyClient, root } from './reply-test-helpers'
@@ -13,7 +14,7 @@ async function longChain() {
   c.listReplyChain.mockImplementation(async (_channel?: unknown, _anchor?: unknown, query?: { after_seq?: number }) => {
     const after = query?.after_seq ?? 0
     const messages = records.filter(m => m.created_seq > after).slice(0, 50)
-    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages, has_more: messages.at(-1)!.created_seq < 10_001 })
+    return ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages, has_more: messages.at(-1)!.created_seq < 10_001 }))
   })
   await c.boot()
   return c
@@ -86,7 +87,7 @@ it('cached navigation preserves an in-flight page and its continuation', async (
   await c.replies.open('A', reply(20))
   expect(c.listReplyChain).toHaveBeenCalledTimes(calls)
   expect(c.replies.get('A')).toMatchObject({ loading: true, anchor: reply(20) })
-  held.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (records.slice(50, 100)).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: records.slice(50, 100), has_more: true }))
+  held.resolve(ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (records.slice(50, 100)).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: records.slice(50, 100), has_more: true })))
   await loading
   expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(seqs(1, 100))
   await c.replies.loadMore('A')
@@ -151,7 +152,7 @@ it('older and newer pages remain contiguous and bounded after a far jump despite
 })
 
 it('uncached jumps fence superseded same-chain pages and C9 without losing late 401 or C10', async () => {
-  for (const response of [ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(2)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(2)], has_more: false }),
+  for (const response of [ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply(2)]).at(-1)?.created_seq ?? 0,  root_id: 'id1', messages: [reply(2)], has_more: false })),
     { ok: false, kind: 'http', status: 403 } as const,
     { ok: false, kind: 'http', status: 401 } as const,
     { ok: false, kind: 'http', status: 404, error: 'organization_unavailable' } as const]) {

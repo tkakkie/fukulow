@@ -1,3 +1,4 @@
+import { replyPage } from './topic-test-helpers'
 import { flushSync, tick } from 'svelte'
 import type {
   Channel,
@@ -224,7 +225,7 @@ export function fakeNetwork() {
             if (query?.after_seq === undefined || m.created_seq > query.after_seq) messages.push(m)
           }
         }
-        return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  root_id: root.id, messages, has_more: false } }
+        return { ok: true, data: replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  root_id: root.id, messages, has_more: false }) }
       },
     },
     unreadApi: {

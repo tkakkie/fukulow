@@ -335,6 +335,7 @@ impl Step<'_> {
         }
         let id = match &event {
             ServerEvent::Message { message, .. } => message.channel_id,
+            ServerEvent::Move(event) => event.channel_id,
             ServerEvent::Subscribed { channel_id, .. }
             | ServerEvent::ChannelAccessLost { channel_id } => *channel_id,
             ServerEvent::Error {
@@ -352,7 +353,7 @@ impl Step<'_> {
         if !c.watched || c.state == Availability::Unavailable {
             return;
         }
-        if !matches!(event, ServerEvent::Message { .. })
+        if !matches!(event, ServerEvent::Message { .. } | ServerEvent::Move(_))
             && subscription.is_some_and(|n| n != sub.id)
         {
             return;
@@ -365,6 +366,12 @@ impl Step<'_> {
                 }
                 if Self::envelope_consistent(kind, seq, &message) {
                     self.merge_event(id, vec![message], Source::Stream, Some(seq));
+                    self.reconcile(id, false);
+                }
+            }
+            ServerEvent::Move(event) => {
+                if self.accept_generation(event.history_generation) {
+                    self.merge_move(event, Source::Stream);
                     self.reconcile(id, false);
                 }
             }

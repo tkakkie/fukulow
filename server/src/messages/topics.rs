@@ -85,17 +85,42 @@ impl ListProjectionQuery {
     }
 }
 
+pub(super) fn valid_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('\0') && name.trim() == name && name.chars().count() <= 60
+}
+
+pub(super) async fn find(
+    tx: &mut sqlx::PgConnection,
+    organization: Uuid,
+    channel: Uuid,
+    id: Option<Uuid>,
+    name: Option<&str>,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let sql = if id.is_some() {
+        "SELECT id FROM topics WHERE organization_id=$1 AND channel_id=$2 AND id=$3 AND $4::text IS NULL"
+    } else {
+        "SELECT id FROM topics WHERE organization_id=$1 AND channel_id=$2 AND $3::uuid IS NULL AND name_key=lower($4 COLLATE \"C\")"
+    };
+    sqlx::query_scalar(sql)
+        .bind(organization)
+        .bind(channel)
+        .bind(id)
+        .bind(name)
+        .fetch_optional(tx)
+        .await
+}
+
 pub(super) async fn join(
     connection: &mut sqlx::PgConnection,
     organization: Uuid,
     channel: Uuid,
-    seq: i64,
+    seq: Option<i64>,
     name: Option<&str>,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let Some(name) = name else { return Ok(None) };
     sqlx::query(
         "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) \
-         VALUES ($1, $2, $3, $4, $5, $5, 1) ON CONFLICT (organization_id, channel_id, name_key) DO NOTHING",
+         VALUES ($1, $2, $3, $4, $5, $5, CASE WHEN $5::bigint IS NULL THEN 0 ELSE 1 END) ON CONFLICT (organization_id, channel_id, name_key) DO NOTHING",
     ).bind(organization).bind(channel).bind(Uuid::new_v4()).bind(name).bind(seq)
         .execute(&mut *connection).await?;
     sqlx::query_scalar("SELECT id FROM topics WHERE organization_id = $1 AND channel_id = $2 AND name_key = lower($3 COLLATE \"C\")")
@@ -112,8 +137,8 @@ pub(super) async fn record(
         // A new Topic already includes its first Message; the Channel counter lock
         // serializes subsequent updates, and failed/duplicate sends roll back both.
         sqlx::query(
-            "UPDATE topics SET last_seq = $3, message_count = message_count + 1 \
-                     WHERE organization_id = $1 AND id = $2 AND last_seq <> $3",
+            "UPDATE topics SET first_seq = COALESCE(first_seq, $3), last_seq = $3, message_count = message_count + 1 \
+                     WHERE organization_id = $1 AND id = $2 AND last_seq IS DISTINCT FROM $3",
         )
         .bind(organization)
         .bind(topic)
@@ -121,6 +146,32 @@ pub(super) async fn record(
         .execute(connection)
         .await?;
     }
+    Ok(())
+}
+
+pub(super) async fn repair_after_move(
+    tx: &mut sqlx::PgConnection,
+    organization: Uuid,
+    channel: Uuid,
+    source: Option<Uuid>,
+    destination: Uuid,
+    count: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE topics t SET message_count = t.message_count + CASE WHEN t.id=$4 THEN $5 ELSE -$5 END, \
+           first_seq = (SELECT seq FROM messages m WHERE m.organization_id=$1 AND m.channel_id=$2 \
+                        AND m.topic_id=t.id AND NOT m.deleted ORDER BY seq LIMIT 1), \
+           last_seq = (SELECT seq FROM messages m WHERE m.organization_id=$1 AND m.channel_id=$2 \
+                       AND m.topic_id=t.id AND NOT m.deleted ORDER BY seq DESC LIMIT 1) \
+         WHERE t.organization_id=$1 AND t.channel_id=$2 AND t.id IN ($3,$4)",
+    )
+    .bind(organization)
+    .bind(channel)
+    .bind(source)
+    .bind(destination)
+    .bind(count)
+    .execute(tx)
+    .await?;
     Ok(())
 }
 
@@ -180,7 +231,7 @@ pub async fn topic_history(
             )
         };
         let sql = format!(
-            "SELECT id, channel_id, seq, version, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+            "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
             FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
             ORDER BY seq {order} LIMIT $5"

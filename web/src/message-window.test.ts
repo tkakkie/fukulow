@@ -4,7 +4,7 @@ import { initialState, step, MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT, REPLY_MESS
   type Input } from './protocol-driver'
 import { record } from './protocol-test-helpers'
 import { windowClient } from './message-window-test-helpers'
-import { topicClient, deferred, msg, ok } from './topic-test-helpers'
+import { replyPage, topicClient, deferred, msg, ok } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 import type { MessagePage, ReplyChainPage, Result, TimelinePage } from './api'
 import { countSequencesAfter, rememberSequence } from './message-window'
@@ -256,11 +256,11 @@ it('retains Topic positions after evicting their latest body and refetches the e
 
 it('Reply history failure keeps its bounded window and a superseded restart cannot deny the Channel', async () => {
   const c = replyClient(); await c.boot()
-  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), ...Array.from({ length: 199 }, (_, n) => reply(n + 2))]).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: true,
-    messages: [root(), ...Array.from({ length: 199 }, (_, n) => reply(n + 2))] }))
+  c.listReplyChain.mockResolvedValueOnce(ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), ...Array.from({ length: 199 }, (_, n) => reply(n + 2))]).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: true,
+    messages: [root(), ...Array.from({ length: 199 }, (_, n) => reply(n + 2))] })))
   await c.replies.open('A', root())
-  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 50 }, (_, n) => reply(n + 201))).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: false,
-    messages: Array.from({ length: 50 }, (_, n) => reply(n + 201)) }))
+  c.listReplyChain.mockResolvedValueOnce(ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 50 }, (_, n) => reply(n + 201))).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: false,
+    messages: Array.from({ length: 50 }, (_, n) => reply(n + 201)) })))
   await c.replies.loadMore('A')
   const before = c.replies.get('A').messages
   c.listReplyChain.mockResolvedValueOnce({ ok: false, kind: 'network' })
@@ -269,8 +269,8 @@ it('Reply history failure keeps its bounded window and a superseded restart cann
   const held = deferred<Result<ReplyChainPage>>()
   c.listReplyChain.mockReturnValueOnce(held.promise)
   const first = c.replies.loadOlder('A'); await flush()
-  c.listReplyChain.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), ...Array.from({ length: 49 }, (_, n) => reply(n + 2))]).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: true,
-    messages: [root(), ...Array.from({ length: 49 }, (_, n) => reply(n + 2))] }))
+  c.listReplyChain.mockResolvedValueOnce(ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root(), ...Array.from({ length: 49 }, (_, n) => reply(n + 2))]).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: true,
+    messages: [root(), ...Array.from({ length: 49 }, (_, n) => reply(n + 2))] })))
   await c.replies.loadOlder('A')
   held.resolve({ ok: false, kind: 'http', status: 403, error: 'denied' }); await first
   expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(Array.from({ length: 50 }, (_, n) => n + 1))

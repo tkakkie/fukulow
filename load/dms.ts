@@ -101,7 +101,7 @@ export async function sockets() {
         if (notice.seq <= lastSeq) { duplicates.add(1); return; }
         if (notice.seq !== lastSeq+1) errors.add(1, { shape: 'sequence_gap' });
         lastSeq = notice.seq;
-        if (notice.message.sender !== member.id) {
+        if (notice.kind === 'create' && notice.message.sender !== member.id) {
           let data: { sent?: number; phase?: string };
           try { data = JSON.parse(notice.message.body ?? '') as typeof data; }
           catch { return; } // Seed/history bodies have no generator timestamp.

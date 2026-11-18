@@ -62,7 +62,10 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
         .map(|_| queue.events.try_recv().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(
-        events.iter().map(|m| m.created_seq).collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|m| m.message().created_seq)
+            .collect::<Vec<_>>(),
         [1, 2, 3, 4]
     );
     assert!(queue.events.try_recv().is_err());
@@ -83,11 +86,17 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
         assert!(message["created_seq"].as_i64().unwrap() > baseline);
     }
     assert_eq!(
-        events.iter().filter(|m| m.created_seq <= baseline).count(),
+        events
+            .iter()
+            .filter(|m| m.message().created_seq <= baseline)
+            .count(),
         2
     );
     assert_eq!(
-        events.iter().filter(|m| m.created_seq > baseline).count(),
+        events
+            .iter()
+            .filter(|m| m.message().created_seq > baseline)
+            .count(),
         2
     );
     let fresh = channels(&app, &viewer).await;

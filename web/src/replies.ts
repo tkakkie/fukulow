@@ -83,6 +83,15 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       if (w) {
         if (!next.running || next.organization === 'unavailable' || !after?.watched || after.state === 'unavailable' ||
           (before?.cursor != null && after.cursor === null) || previous.historyEpoch !== next.historyEpoch) { release(w); chains.delete(id); changed.add(id) }
+        else if (after.moveSeq !== undefined && before?.moveSeq !== after.moveSeq) {
+          const position = after.moveSeq
+          w.read = Symbol(); w.loading = false; w.restart = true
+          w.messages.clear(); inFlight.delete(w)
+          changed.add(id)
+          queueMicrotask(() => {
+            if (current(id, w) && w.restart && sync.get().channels[id]?.moveSeq === position) void loadMore(id)
+          })
+        }
         else {
           const oldPending = pending(w, before)
           if ((before?.messages !== after.messages || records?.has(id)) && mergeStream(id, w, records?.get(id))) changed.add(id)
@@ -127,7 +136,10 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       const generation = result.ok ? result.data.history_generation : undefined
       if (generation !== undefined && !sync.observeHistoryGeneration(generation)) return
       if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
-      if (mutationFloor < (sync.get().channels[channel]?.mutationSeq ?? 0) && result.ok && result.data.as_of_seq < (sync.get().channels[channel]?.mutationSeq ?? 0)) result = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
+      const state = sync.get().channels[channel]
+      const mutationSeq = state?.mutationSeq ?? 0
+      const floor = mutationFloor < mutationSeq ? mutationSeq : state?.moveSeq ?? 0
+      if (result.ok && result.data.as_of_seq < floor) result = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
       if (!result.ok && result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) {
         w.messages.clear(); w.asOfSeq = undefined; w.after = 0; w.restart = true; w.hasMore = true
         const state = sync.get().channels[channel]
@@ -150,7 +162,13 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
           w.messages.clear(); w.after = 0; w.hasOlder = w.hasNewer = false; w.newerCount = 0
           w.liveSequences = []; w.liveFloor = 0; w.following = true; w.restart = false
         }
-        for (const m of messages) { const state = canonical(channel, w.messages.get(m.id), m); if (state) w.messages.set(m.id, state) }
+        for (const m of messages) {
+          const current = canonical(channel, w.messages.get(m.id), m)
+          if (current) {
+            w.messages.set(m.id, current)
+            if (w.anchor.id === current.id) w.anchor = current
+          }
+        }
         // Only the returned page advances continuation: a live append may be far beyond an unpaged sibling.
         const after = messages.at(-1)?.created_seq ?? requestedAfter
         // An empty or non-advancing filtered page cannot safely continue, even if has_more is set.
@@ -198,7 +216,9 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   function snapshot(channel: string) {
     const w = closed ? undefined : chains.get(channel)
     const c = closed ? undefined : sync.get().channels[channel]
-    return { anchor: w?.anchor ?? null, rootId: w?.rootId ?? null, topicId: w?.anchor.topic_id ?? null,
+    const topicMessage = w?.messages.values().next().value ?? (w?.restart ? undefined : w?.anchor)
+    const topicId = topicMessage?.topic_id ?? null
+    return { anchor: w?.anchor ?? null, rootId: w?.rootId ?? null, topicId,
       messages: w ? [...w.messages.values()].sort((a, b) => a.created_seq - b.created_seq) : [],
       pending: w ? pending(w, c) : [],
       loading: w?.loading ?? false, error: w?.error ?? false, hasMore: w?.hasMore ?? false,

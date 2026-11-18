@@ -33,6 +33,7 @@ const paging = (): Paging => ({ hasMore: true, hasNewer: false, following: true,
 const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false, notFound: false })
 const window = (generation: number) => ({ generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
   listRead: Promise.resolve(), listVersion: 0, listPage: undefined as symbol | undefined,
+  moveRefresh: undefined as { main: boolean; list: boolean } | undefined,
   mainTopics: new Set<string>(), listTopics: new Set<string>(), mainPositions: new Map<string, number>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
   evidence: topicEvidence(), evidenceRefresh: new Set<string>(),
   summaryThrough: new Map<string, number>(),
@@ -104,6 +105,29 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     for (const id of changed) channelListeners.get(id)?.forEach(l => l())
     listeners.forEach(l => l(changed))
   }
+  function refetchMovedWindow(channel: string, stale: Window) {
+    const refresh = {
+      main: stale.main.asOfSeq !== undefined || stale.main.loading || !!stale.moveRefresh?.main,
+      list: stale.list.asOfSeq !== undefined || stale.list.loading || !!stale.moveRefresh?.list,
+    }
+    const topic = stale.topics.keys().next().value
+    freezeWindow(stale)
+    clearActivity(channel)
+    const fresh = window(nextGeneration++)
+    fresh.moveRefresh = refresh
+    if (topic) fresh.topics.set(topic, topicWindow())
+    windows.set(channel, fresh)
+    queueMicrotask(() => {
+      if (!current(channel, fresh)) return
+      fresh.moveRefresh = undefined
+      if (refresh.main && fresh.main.asOfSeq === undefined) void loadMainPage(channel)
+      if (refresh.list && fresh.list.asOfSeq === undefined) void controller.loadList(channel)
+      if (topic && fresh.topics.has(topic) && !fresh.topics.get(topic)?.initialized) {
+        void controller.loadTopic(channel, topic)
+        void ensureSummary(channel, topic)
+      }
+    })
+  }
   const reconcileSync = (syncChanged?: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => {
     const next = sync.get()
     if (next === previous) return false
@@ -137,6 +161,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           w.generation = nextGeneration++
         } else if (!next.running || next.organization === 'unavailable' || after.state === 'unavailable') {
           clearActivity(id); freezeWindow(w)
+        } else if (after.moveSeq !== undefined && before?.moveSeq !== after.moveSeq) {
+          refetchMovedWindow(id, w)
         } else if (before?.messages !== after.messages || records?.has(id)) {
           const incoming = records?.get(id) ?? after.messages
           rememberTopicMessages(w.evidence, incoming)
@@ -239,7 +265,11 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         if (typeof generation === 'string' && !sync.observeHistoryGeneration(generation)) return { result: { ok: false, kind: 'network' } as Result<T>, isCurrent: () => false }
         if (!response.ok && response.kind === 'http' && response.status === 409 && response.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return { result: response, isCurrent: () => false } }
       }
-      const belowFloor = mutationFloor < (sync.get().channels[channel]?.mutationSeq ?? 0) && response.ok && response.data && typeof response.data === 'object' && 'as_of_seq' in response.data && typeof response.data.as_of_seq === 'number' && response.data.as_of_seq < (sync.get().channels[channel]?.mutationSeq ?? 0)
+      const state = sync.get().channels[channel]
+      const mutationSeq = state?.mutationSeq ?? 0
+      const floor = mutationFloor < mutationSeq ? mutationSeq : state?.moveSeq ?? 0
+      const belowFloor = response.ok && response.data && typeof response.data === 'object' &&
+        'as_of_seq' in response.data && typeof response.data.as_of_seq === 'number' && response.data.as_of_seq < floor
       const result: Result<T> = belowFloor ? { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' } : response.ok && !completeCountFields(response.data) ? { ok: false, kind: 'network' } : response
       // Bootstrap denials belong to sync's history request; C10 must never become a C9 denial.
       if (!bootstrap && !api.isOrganizationUnavailable(result) && isCurrent() && !result.ok && result.kind === 'http' &&
@@ -716,7 +746,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     listeners.add(listener)
     return () => { listeners.delete(listener) }
   }
-  return {
+  const controller = {
     countMessages(channel: string): Iterable<Message>[] {
       const w = windows.get(channel)
       return w ? [w.messages.values(), ...[...w.topics.values()].map(t => t.messages.values())] : []
@@ -898,5 +928,6 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       notify(); listeners.clear(); channelListeners.clear()
     },
   }
+  return controller
 }
 export type Topics = ReturnType<typeof createTopics>

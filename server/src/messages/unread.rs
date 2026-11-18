@@ -84,7 +84,7 @@ CROSS JOIN LATERAL (
         OFFSET 0
     ) mm ON mm.message_id = m.id
     WHERE p.channel_id IS NOT NULL AND m.organization_id = $1 AND m.channel_id = c.channel_id
-        AND m.topic_id IS NULL AND m.seq > p.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
+        AND m.topic_id IS NULL AND NOT m.deleted AND m.seq > p.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
 ) main
 CROSS JOIN LATERAL (
     SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count
@@ -93,7 +93,7 @@ CROSS JOIN LATERAL (
         CROSS JOIN LATERAL (
             SELECT m.id FROM messages m
             WHERE m.organization_id = $1 AND m.channel_id = c.channel_id AND m.topic_id = t.id
-                AND m.seq > t.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
+                AND NOT m.deleted AND m.seq > t.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
             OFFSET 0
         ) m
         WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
