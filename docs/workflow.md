@@ -101,7 +101,7 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 
 ## 8. Dependency updates and versions
 - Web sync (#465): `cargo install wasm-bindgen-cli --version 0.2.130 --locked`. `npm --prefix web run wasm` builds release wasm for the pinned Rust target. Check/test/build regenerate it. `scripts/check-versions.ts` guards CLI/crate/Docker/CI pins. CI runs wasm Vitest and builds. Every bundle must contain the Rust bridge, glue and exactly one wasm asset. `contract/realtime/core-traces.json` runs in native Rust and wasm tests (#467). Use the original checkout for historical TS measurements.
-- To regenerate deduplicated values/steps in `core-traces.json` and `core-boundary.json` from the current Rust core: `UPDATE_CONTRACT=1 cargo test -p fukulow-client-core --test differential`. Tests write them only with this opt-in.
+- To intentionally regenerate `core-traces.json` (deduplicated values/steps) and `core-boundary.json` from the current Rust core: `UPDATE_CONTRACT=1 cargo test -p fukulow-client-core --test differential`. Tests write them only with this opt-in.
 - CI and image Cargo build/run/clippy/test/nextest/check (every dependency-resolving command) use `--locked`. A mismatch between `Cargo.toml` and `Cargo.lock` fails without re-resolving (#313). Dependabot Cargo PRs update the lock and must pass. Local Commands may omit the flag. Non-resolving commands such as fmt are out of scope.
 - Dependabot opens grouped weekly PRs for Cargo, npm, GitHub Actions, Dockerfile and Docker Compose (`/` and `/load`). Preserve tag + digest pins. Resolve new digests via `docker buildx imagetools inspect <tag>`, then build and verify proxy startup.
 - For dependency PRs, read the changelog for breaking changes, run Commands and comment the result. Follow §2 and §5 to `status:human-review`, asking the maintainer to merge only when those gates pass.
@@ -121,7 +121,7 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 ## 10. Merge (only when the maintainer explicitly says so)
 1. `gh pr view <n> --json headRefOid,mergeable,statusCheckRollup,isDraft,reviews,comments`. Verify CI ran on the head SHA (`gh run list --branch <branch> --json headSha,conclusion`), all checks pass, the PR is `MERGEABLE` with `isDraft: false`, and required reviews finished (`reviews`/`comments` with signed `AI:` verdicts).
 2. `gh pr merge <n> --squash --match-head-commit <verified-sha>`.
-3. Confirm Issue closed, remove labels, delete branch and worktree, and unblock dependents, in that order. Other merges use §2 cleanup.
+3. Confirm Issue closed, remove labels, delete branch and worktree, and unblock dependents. Other merges use §2 cleanup.
 
 ## 11. Labels and milestones
 - Status names and meanings are in AGENTS.md. Filter with `label:status:human-review`.
