@@ -318,15 +318,10 @@ async fn persist(
         }
         return Err(error.into());
     }
-    delivery.channel_access.activity.spawn(
-        state.pool.clone(),
-        org,
-        channels::activity::Notice::ChannelActivity {
-            channel_id: channel,
-            seq: event.seq,
-        },
-        None,
-    );
+    delivery
+        .channel_access
+        .activity
+        .message_moved(state.pool.clone(), org, channel, event.seq);
     notification.spawn(state.pool.clone(), ChannelEvent::moved(event));
     Ok(outcome)
 }

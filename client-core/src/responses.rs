@@ -45,8 +45,9 @@ impl Step<'_> {
             return;
         }
         if let Ok(HistoryPage::Messages(result)) = &result
-            && mutation_seq < self.channel(id).mutation_seq
             && result.as_of_seq < self.channel(id).mutation_seq
+            && (mutation_seq < self.channel(id).mutation_seq
+                || result.as_of_seq < self.channel(id).move_seq.unwrap_or_default())
         {
             let retry = page != Page::Latest || mutation_seq < self.channel(id).mutation_seq;
             let c = self.channel(id);
@@ -86,11 +87,20 @@ impl Step<'_> {
                 }
                 let before = c.cursor;
                 for event in result.events {
-                    if let fukulow_api::ServerEvent::Message { seq, kind, message } = event
-                        && message.channel_id == id
-                        && Self::envelope_consistent(kind, seq, &message)
-                    {
-                        self.merge_event(id, vec![message], Source::Events, Some(seq));
+                    match event {
+                        fukulow_api::ServerEvent::Message { seq, kind, message }
+                            if message.channel_id == id
+                                && Self::envelope_consistent(kind, seq, &message) =>
+                        {
+                            self.merge_event(id, vec![message], Source::Events, Some(seq));
+                        }
+                        fukulow_api::ServerEvent::Move(event)
+                            if event.channel_id == id
+                                && event.history_generation == result.history_generation =>
+                        {
+                            self.merge_move(event, Source::Events);
+                        }
+                        _ => {}
                     }
                 }
                 let c = self.channel(id);

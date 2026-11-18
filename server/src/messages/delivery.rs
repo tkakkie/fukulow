@@ -127,14 +127,14 @@ impl LiveMessage {
         enum Event<'a> {
             Message {
                 seq: i64,
-                kind: fukulow_api::ChannelEventKind,
+                kind: fukulow_api::MessageStateKind,
                 message: &'a Message,
             },
         }
         let frame = match &event.payload {
             super::log::Payload::Create(message) => serde_json::to_string(&Event::Message {
                 seq: event.seq,
-                kind: fukulow_api::ChannelEventKind::Create,
+                kind: fukulow_api::MessageStateKind::Create,
                 message,
             }),
             super::log::Payload::Move(event) => serde_json::to_string(event),

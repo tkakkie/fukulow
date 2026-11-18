@@ -4,6 +4,7 @@ import type { Message, ReplyCountPage, Result } from './api'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { deferred, ok, reply, replyClient, root } from './reply-test-helpers'
 import { flush } from './sync-test-helpers'
+import { moveEvent } from './protocol-test-helpers'
 
 const observed = vi.hoisted(() => ({ input: vi.fn() }))
 vi.mock('#sync-core', async importOriginal => {
@@ -217,8 +218,9 @@ it('C8 clamp fences late snapshots and clears pre-restore evidence above the rew
 it('Edit Delete and Move events stay unresolved until a covering refetch without mutation deltas', async () => {
   for (const kind of ['edit', 'delete', 'move'] as const) {
     const c = await client(), pending = deferred<Result<ReplyCountPage>>()
+    if (kind === 'move') { await c.replies.open('A', root()); await flush() }
     c.read.mockReturnValueOnce(pending.promise)
-    c.handlers[0].onEvent({ type: 'message', kind, seq: 2, message: { ...root(), version: 2, deleted: kind === 'delete' } })
+    c.handlers[0].onEvent(kind === 'move' ? moveEvent(2) : { type: 'message', kind, seq: 2, message: { ...root(), version: 2, deleted: kind === 'delete' } })
     expect(c.counts.get('A').id1).toBeNull()
     await flush()
     pending.resolve(ok(page(2, 51))); await flush()

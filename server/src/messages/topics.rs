@@ -158,8 +158,7 @@ pub(super) async fn repair_after_move(
     count: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE topics t SET \
-           message_count = t.message_count + CASE WHEN t.id=$4 THEN $5 ELSE -$5 END, \
+        "UPDATE topics t SET message_count = t.message_count + CASE WHEN t.id=$4 THEN $5 ELSE -$5 END, \
            first_seq = (SELECT seq FROM messages m WHERE m.organization_id=$1 AND m.channel_id=$2 \
                         AND m.topic_id=t.id AND NOT m.deleted ORDER BY seq LIMIT 1), \
            last_seq = (SELECT seq FROM messages m WHERE m.organization_id=$1 AND m.channel_id=$2 \

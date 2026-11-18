@@ -443,3 +443,132 @@ async fn move_limit_counts_tombstones_and_accepts_exactly_one_thousand(pool: PgP
         }
     }
 }
+
+#[fukulow_test::test]
+async fn move_retry_rechecks_ownership_past_the_oversized_chain_prefix(pool: PgPool) {
+    let f = Fixture::new(&pool).await;
+    let root = f.root().await;
+    let intent = named(1, "Target");
+    let committed =
+        moved(move_request(&f.app, &f.token, f.channel, id(&root), intent.clone()).await).await;
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO messages(organization_id,channel_id,id,seq,sender,client_message_id,body,topic_id,reply_to_id,reply_root_id)
+         SELECT $1,$2,gen_random_uuid(),n,$3,gen_random_uuid(),'Reply',$4,$5,$5 FROM generate_series(3,1002) n",
+    )
+    .bind(f.org).bind(f.channel).bind(f.sender)
+    .bind(committed.destination_topic_id).bind(id(&root))
+    .execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "INSERT INTO channel_log(organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id)
+         SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id
+         FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq>2",
+    )
+    .bind(f.org).bind(f.channel).execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "UPDATE channel_message_sequences SET seq=1002 WHERE organization_id=$1 AND channel_id=$2",
+    )
+    .bind(f.org)
+    .bind(f.channel)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE topics SET last_seq=1002, message_count=1001 WHERE organization_id=$1 AND channel_id=$2 AND id=$3")
+        .bind(f.org).bind(f.channel).bind(committed.destination_topic_id)
+        .execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let before = state(&pool, f.org, f.channel).await;
+    let retry =
+        moved(move_request(&f.app, &f.token, f.channel, id(&root), intent.clone()).await).await;
+    assert_eq!(retry.move_seq, committed.move_seq);
+    assert_eq!(retry.chain_version, 1002);
+    assert_eq!(retry.destination_topic_id, committed.destination_topic_id);
+    assert_eq!(state(&pool, f.org, f.channel).await, before);
+
+    let peer = member(&pool, f.org, Uuid::new_v4()).await;
+    let later = f.post(&peer, reply(Uuid::new_v4(), &root)).await;
+    assert_eq!(later["created_seq"], 1003);
+    no_effect(
+        &pool,
+        &f,
+        f.channel,
+        StatusCode::FORBIDDEN,
+        "move_not_allowed",
+        move_request(&f.app, &f.token, f.channel, id(&root), intent),
+    )
+    .await;
+}
+
+#[fukulow_test::test]
+async fn move_denies_guest_even_if_private_grant_carries_a_manager_flag(pool: PgPool) {
+    let f = Fixture::new(&pool).await;
+    let private = Uuid::new_v4();
+    channel(&pool, f.org, private, f.sender, true).await;
+    let root = sent(&f.app, &f.token, private, input(Uuid::new_v4(), "Private")).await;
+    let guest = Uuid::new_v4();
+    let guest_token = member(&pool, f.org, guest).await;
+    role(&pool, f.org, guest, "guest").await;
+    grant(&pool, f.org, private, guest, false).await;
+    // Exercise the authorization defense against an inconsistent persisted grant.
+    // Ordinary writes cannot set a manager flag for a Guest.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE channel_members DISABLE TRIGGER channel_members_manager")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE channel_members SET manager=true WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+        .bind(f.org).bind(private).bind(guest).execute(&mut *tx).await.unwrap();
+    sqlx::query("ALTER TABLE channel_members ENABLE TRIGGER channel_members_manager")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let intent = named(1, "Target");
+    no_effect(
+        &pool,
+        &f,
+        private,
+        StatusCode::FORBIDDEN,
+        "move_not_allowed",
+        move_request(&f.app, &guest_token, private, id(&root), intent.clone()),
+    )
+    .await;
+    let manager = Uuid::new_v4();
+    let manager_token = member(&pool, f.org, manager).await;
+    grant(&pool, f.org, private, manager, true).await;
+    assert_eq!(
+        moved(move_request(&f.app, &manager_token, private, id(&root), intent).await,)
+            .await
+            .move_seq,
+        Some(2)
+    );
+}
+
+#[fukulow_test::test]
+async fn move_requires_one_destination_selector(pool: PgPool) {
+    let f = Fixture::new(&pool).await;
+    let root = f.root().await;
+    let intent = named(1, "Target");
+    for input in [
+        json!({"expected_version":1,"operation_id":intent["operation_id"]}),
+        json!({"expected_version":1,"operation_id":intent["operation_id"],"topic_name":"Target","topic_id":Uuid::new_v4()}),
+    ] {
+        no_effect(
+            &pool,
+            &f,
+            f.channel,
+            StatusCode::BAD_REQUEST,
+            "invalid input",
+            move_request(&f.app, &f.token, f.channel, id(&root), input),
+        )
+        .await;
+    }
+    assert_eq!(
+        moved(move_request(&f.app, &f.token, f.channel, id(&root), intent).await,)
+            .await
+            .move_seq,
+        Some(2)
+    );
+}

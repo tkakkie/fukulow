@@ -811,7 +811,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
             (
                 ServerEvent::Message {
                     seq: message.created_seq,
-                    kind: fukulow_api::ChannelEventKind::Create,
+                    kind: fukulow_api::MessageStateKind::Create,
                     message,
                 },
                 "message",
@@ -1563,7 +1563,7 @@ fn message_state_wire_has_creation_version_and_body_free_tombstones() {
     message.mentions = None;
     let tombstone = serde_json::to_value(ServerEvent::Message {
         seq: 1,
-        kind: fukulow_api::ChannelEventKind::Create,
+        kind: fukulow_api::MessageStateKind::Create,
         message,
     })
     .unwrap();
@@ -1601,7 +1601,7 @@ fn move_contract_shares_the_message_envelope_without_a_message_body() {
     let required = schemas["ReplyChainPage"]["required"].as_array().unwrap();
     assert!(required.contains(&json!("chain_version")));
     assert_eq!(
-        schemas["MoveChainRequest"]["required"],
+        schemas["MoveChainRequest"]["allOf"][0]["required"],
         json!(["operation_id", "expected_version"])
     );
     let envelope = &schemas["ServerEvent"]["discriminator"]["mapping"]["message"];
@@ -1621,4 +1621,67 @@ fn move_contract_shares_the_message_envelope_without_a_message_body() {
             .unwrap()
             .contains_key("message")
     );
+}
+
+#[test]
+fn message_state_envelope_rejects_move_with_a_full_message() {
+    let api = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &api["components"]["schemas"];
+    assert_eq!(
+        schemas["MessageStateEvent"]["properties"]["kind"]["$ref"],
+        "#/components/schemas/MessageStateKind"
+    );
+    assert_eq!(
+        schemas["MessageStateKind"]["enum"],
+        json!(["create", "edit", "delete"])
+    );
+    assert_eq!(schemas["MessageMoveEvent"]["additionalProperties"], false);
+    let channel = Uuid::from_u128(1);
+    let root = Uuid::from_u128(2);
+    let message = Message {
+        history_generation: Uuid::nil(),
+        id: root,
+        channel_id: channel,
+        created_seq: 1,
+        version: 1,
+        deleted: false,
+        client_message_id: Uuid::from_u128(3),
+        sender: Uuid::from_u128(4),
+        body: Some("original".into()),
+        created_at: "2026-11-18T00:00:00Z".into(),
+        topic_id: None,
+        reply_to: None,
+        reply_root_id: None,
+        mentions: Some(Vec::new()),
+    };
+    let mut state = json!({"type":"message","kind":"create","seq":1,"message":message});
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(state.clone()),
+        Ok(ServerEvent::Message { .. })
+    ));
+    state["kind"] = json!("move");
+    assert!(serde_json::from_value::<ServerEvent>(state).is_err());
+    let mut event = json!({
+        "type":"message","kind":"move","history_generation":Uuid::nil(),"channel_id":channel,
+        "seq":2,"version":2,"root_id":root,"source_topic_id":null,
+        "destination_topic_id":Uuid::from_u128(5),"operation_id":Uuid::from_u128(6),
+    });
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(event.clone()),
+        Ok(ServerEvent::Move(_))
+    ));
+    event["message"] = json!(message);
+    assert!(serde_json::from_value::<ServerEvent>(event).is_err());
+}
+
+#[test]
+fn move_request_schema_requires_exactly_one_concrete_destination() {
+    let api = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let request = &api["components"]["schemas"]["MoveChainRequest"];
+    let one_of = request["allOf"][1]["oneOf"].as_array().unwrap();
+    assert_eq!(one_of.len(), 2);
+    for (branch, key) in one_of.iter().zip(["topic_id", "topic_name"]) {
+        assert_eq!(branch["required"], json!([key]));
+        assert_eq!(branch["properties"][key]["type"], "string");
+    }
 }

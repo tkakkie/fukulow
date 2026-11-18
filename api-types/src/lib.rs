@@ -152,10 +152,9 @@ pub enum ClientMessage {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum ChannelEventKind {
+pub enum MessageStateKind {
     Create,
     Edit,
-    Move,
     Delete,
 }
 
@@ -226,7 +225,7 @@ pub enum ServerEvent {
     Message {
         #[schema(minimum = 1)]
         seq: i64,
-        kind: ChannelEventKind,
+        kind: MessageStateKind,
         message: Message,
     },
     /// Sent after committed replay and queued live events have been handed off.

@@ -1,6 +1,9 @@
 import { expect, it } from 'vitest'
-import { replyPage, msg, ok, page, summary, topicClient } from './topic-test-helpers'
+import { deferred, replyPage, msg, ok, page, summary, topicClient } from './topic-test-helpers'
 import { reply, replyClient, root } from './reply-test-helpers'
+import { moveEvent } from './protocol-test-helpers'
+import { flush } from './sync-test-helpers'
+import type { ReplyChainPage, Result, TimelinePage } from './api'
 const generation = '00000000-0000-4000-8000-000000000515'
 const expired = { ok: false as const, kind: 'http' as const, status: 409, error: 'snapshot_expired' }
 
@@ -86,5 +89,55 @@ it('Reply expiry restarts just its chain and never loops on repeated fresh expir
   expect(c.listReplyChain).toHaveBeenCalledTimes(before + 2)
   expect(c.replies.get('A').error).toBe(true)
   expect(c.sync.get().channels.A!.cursor).toBe(1)
+  await c.sync.close()
+})
+
+
+it('refetches held main and Topic windows on Move and fences a late pre-Move projection', async () => {
+  const c = topicClient(); await c.boot()
+  await c.topics.loadList('A'); await c.topics.loadTopic('A', 'T')
+  const stale = deferred<Result<TimelinePage>>()
+  c.topicsApi.listTimeline.mockReturnValueOnce(stale.promise)
+  const pending = c.topics.loadMain('A')
+  await flush()
+  const moved = { ...msg(8, 'T'), version: 11 }
+  const timeline = { ...page(11), items: [{ kind: 'topic' as const, topic: summary('T', 10, 4) }] }
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok(timeline))
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, has_more: false, topics: [summary('T', 10, 4)] }))
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, messages: [moved, msg(10, 'T')], has_more: false }))
+  c.listMessages.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, messages: [moved, msg(10, 'T')], has_more: false }))
+  c.handlers[0].onEvent({ ...moveEvent(11, 'id8'), destination_topic_id: 'T' })
+  await flush()
+  expect(c.topicsApi.listTimeline).toHaveBeenLastCalledWith('A', { history_generation: generation })
+  expect(c.topicsApi.listTopics).toHaveBeenLastCalledWith('A', { history_generation: generation })
+  expect(c.topicsApi.listTopicMessages).toHaveBeenLastCalledWith('A', 'T', { history_generation: generation })
+  expect(c.topics.get('A').main.asOfSeq).toBe(11)
+  expect(c.topics.get('A').topic('T').messages).toContainEqual(moved)
+  stale.resolve(ok(page(10)))
+  await pending; await flush()
+  expect(c.topics.get('A').lines.some(line => line.kind === 'message' && line.message.id === moved.id)).toBe(false)
+  expect(c.sync.get().channels.A.cursor).toBe(11)
+  await c.sync.close()
+})
+
+it('refetches an open Reply chain on Move and fences its older page', async () => {
+  const c = replyClient(); await c.boot(); await c.replies.open('A', root())
+  const stale = deferred<Result<ReplyChainPage>>()
+  c.listReplyChain.mockReturnValueOnce(stale.promise)
+  const pending = c.replies.loadMore('A')
+  await flush()
+  const moved = { ...root('destination'), version: 2 }
+  c.listReplyChain.mockResolvedValueOnce(ok(replyPage({
+    history_generation: generation, as_of_seq: 2, root_id: 'id1', messages: [moved], has_more: false,
+  })))
+  c.listMessages.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 2, messages: [moved], has_more: false }))
+  c.handlers[0].onEvent(moveEvent(2))
+  await flush()
+  expect(c.listReplyChain).toHaveBeenLastCalledWith('A', 'id1', { history_generation: generation, as_of_seq: undefined, after_seq: 0 })
+  expect(c.replies.get('A').topicId).toBe('destination')
+  stale.resolve(ok(replyPage({ history_generation: generation, as_of_seq: 1, root_id: 'id1', messages: [root()], has_more: false })))
+  await pending; await flush()
+  expect(c.replies.get('A').messages).toEqual([moved])
+  expect(c.sync.get().channels.A.cursor).toBe(2)
   await c.sync.close()
 })

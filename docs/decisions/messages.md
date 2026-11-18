@@ -76,6 +76,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - [#141](https://github.com/tkakkie/fukulow/issues/141) gives ordinary Members Move rights over chains they authored in full, with broader rights for usable management. This preserves ownership across Replies and prevents Organization Role from widening private access.
 - [#141](https://github.com/tkakkie/fukulow/issues/141) uses one position per chain and preserves emptied Topic identity/read positions. Per-Message positions would multiply replay and write cost, and removing the Topic would reset Unread on revival.
 - [#141](https://github.com/tkakkie/fukulow/issues/141) records a same-Topic receipt without a position. The key remains bound to the original request even if the chain moves later. Canonical retries return the original outcome alongside the current chain version and Topic.
+- #141 rebuilds the main Unread index and adds `messages` indexes in the atomic migration. The nonconcurrent builds scan `messages` while migration locks can block reads and writes until COMMIT. The outage threshold remains open under [realtime decision 5](../spec/realtime.md#open-maintainer-decisions).
 
 ## Mentions (#152, specification for approval)
 

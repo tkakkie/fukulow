@@ -731,8 +731,6 @@ export interface components {
             can_manage_managers: components["schemas"]["Capability"];
             can_remove_members: components["schemas"]["Capability"];
         };
-        /** @enum {string} */
-        ChannelEventKind: "create" | "edit" | "move" | "delete";
         /** @description Bounded ascending Channel log page, with the same envelopes as WebSocket replay. */
         ChannelEventPage: {
             events: components["schemas"]["ServerEvent"][];
@@ -1040,13 +1038,15 @@ export interface components {
         };
         /** @description Live and replayed messages have exactly the same canonical shape. */
         MessageStateEvent: {
-            kind: components["schemas"]["ChannelEventKind"];
+            kind: components["schemas"]["MessageStateKind"];
             message: components["schemas"]["Message"];
             /** Format: int64 */
             seq: number;
             /** @enum {string} */
             type: "message";
         };
+        /** @enum {string} */
+        MessageStateKind: "create" | "edit" | "delete";
         MoveChainRequest: {
             /** Format: int64 */
             expected_version: number;
@@ -1061,7 +1061,11 @@ export interface components {
             topic_id?: string | null;
             /** @description Joins an existing normalized name or creates a Topic in this Channel. */
             topic_name?: string | null;
-        };
+        } & ({
+            topic_id: string;
+        } | {
+            topic_name: string;
+        });
         MoveChainResponse: {
             /**
              * Format: int64
@@ -1445,7 +1449,6 @@ export type ChannelAccessLost = components['schemas']['ChannelAccessLost'];
 export type ChannelAccessRevoked = components['schemas']['ChannelAccessRevoked'];
 export type ChannelActivity = components['schemas']['ChannelActivity'];
 export type ChannelCapabilities = components['schemas']['ChannelCapabilities'];
-export type ChannelEventKind = components['schemas']['ChannelEventKind'];
 export type ChannelEventPage = components['schemas']['ChannelEventPage'];
 export type ChannelList = components['schemas']['ChannelList'];
 export type ChannelListChanged = components['schemas']['ChannelListChanged'];
@@ -1482,6 +1485,7 @@ export type MessageEventType = components['schemas']['MessageEventType'];
 export type MessageMoveEvent = components['schemas']['MessageMoveEvent'];
 export type MessagePage = components['schemas']['MessagePage'];
 export type MessageStateEvent = components['schemas']['MessageStateEvent'];
+export type MessageStateKind = components['schemas']['MessageStateKind'];
 export type MoveChainRequest = components['schemas']['MoveChainRequest'];
 export type MoveChainResponse = components['schemas']['MoveChainResponse'];
 export type MoveEventKind = components['schemas']['MoveEventKind'];

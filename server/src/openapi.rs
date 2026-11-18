@@ -2,7 +2,7 @@ use utoipa::{
     Modify, OpenApi,
     openapi::{
         RefOr,
-        schema::{AllOfBuilder, Discriminator, OneOfBuilder, Ref, Schema},
+        schema::{AllOfBuilder, Discriminator, ObjectBuilder, OneOfBuilder, Ref, Schema},
         security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme},
     },
 };
@@ -16,7 +16,7 @@ use utoipa::{
         crate::channels::members::AddChannelMemberRequest, crate::channels::members::ChangeChannelManagerRequest, crate::channels::members::ChannelMember, crate::channels::members::ChannelMemberList, crate::channels::Channel, crate::channels::ChannelCapabilities, crate::channels::ChannelVisibility, crate::channels::CreateChannelRequest, crate::messages::ChannelList, crate::messages::UnreadChannel, crate::messages::MarkReadRequest, crate::messages::ReadPosition,
         crate::auth::members::DisplayIdentity, crate::messages::authors::AuthorLookupRequest, crate::messages::authors::AuthorIdentities, crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage, crate::messages::ReplyChainPage, crate::messages::ReplyChainQuery, crate::messages::ReplyCountRequest, crate::messages::ReplyCount, crate::messages::ReplyCountPage, crate::messages::ListProjectionQuery, crate::messages::TimelineItem, crate::messages::TimelinePage, crate::messages::TopicPage, crate::messages::TopicSummary, crate::messages::TopicSummaryResponse,
         crate::realtime::ClientMessage, crate::realtime::ServerEvent)),
-    modifiers(&Security, &WebSocketDiscriminators, &ShutdownResponses)
+    modifiers(&Security, &MoveDestination, &WebSocketDiscriminators, &ShutdownResponses)
 )]
 pub struct ApiDoc;
 
@@ -84,6 +84,37 @@ impl Modify for Security {
             "cookie",
             SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description("__Host-fukulow_session", "HTTPS production cookie; local HTTP with FUKULOW_COOKIE_SECURE=false uses fukulow_session"))),
         );
+    }
+}
+
+struct MoveDestination;
+impl Modify for MoveDestination {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let Some(schema) = openapi
+            .components
+            .as_mut()
+            .and_then(|components| components.schemas.get_mut("MoveChainRequest"))
+        else {
+            return;
+        };
+        let destination = OneOfBuilder::new()
+            .item(ObjectBuilder::new().required("topic_id").property(
+                "topic_id",
+                ObjectBuilder::new().schema_type(utoipa::openapi::schema::Type::String),
+            ))
+            .item(ObjectBuilder::new().required("topic_name").property(
+                "topic_name",
+                ObjectBuilder::new().schema_type(utoipa::openapi::schema::Type::String),
+            ))
+            .build();
+        // A null selector is equivalent to omission in the JSON request.
+        *schema = Schema::AllOf(
+            AllOfBuilder::new()
+                .item(schema.clone())
+                .item(Schema::OneOf(destination))
+                .build(),
+        )
+        .into();
     }
 }
 

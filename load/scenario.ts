@@ -174,15 +174,16 @@ export default async function (data: Setup): Promise<void> {
           if (stormStarted && firstClose[socketIndex] !== undefined) recovered.add(socketIndex);
           subscriptions.add(++perChannel[channel], tags);
         } else if (event.type === 'message') {
-          const message = event.message;
           // Reconnect replay events may precede the subscribed acknowledgement; the default scenario stays strict.
           if (!reconnect && !subscribed) throw new Error('Unexpected Channel');
-          if (message.channel_id !== channelId) throw new Error('Unexpected Channel');
+          if ((event.kind === 'move' ? event.channel_id : event.message.channel_id) !== channelId) throw new Error('Unexpected Channel');
           if (event.seq <= lastSeq) return; // Contract permits duplicate events.
           if (event.seq !== lastSeq + 1) throw new Error('Sequence gap');
           lastSeq = event.seq;
-          deliveryLatency.add(deliveries.receive(message.client_message_id, Date.now()), tags);
-          delivered.add(1, tags);
+          if (event.kind === 'create') {
+            deliveryLatency.add(deliveries.receive(event.message.client_message_id, Date.now()), tags);
+            delivered.add(1, tags);
+          }
         } else {
           throw new Error('Unexpected event');
         }

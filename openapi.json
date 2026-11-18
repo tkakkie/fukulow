@@ -5880,15 +5880,6 @@
           }
         }
       },
-      "ChannelEventKind": {
-        "type": "string",
-        "enum": [
-          "create",
-          "edit",
-          "move",
-          "delete"
-        ]
-      },
       "ChannelEventPage": {
         "type": "object",
         "description": "Bounded ascending Channel log page, with the same envelopes as WebSocket replay.",
@@ -6742,7 +6733,7 @@
         ],
         "properties": {
           "kind": {
-            "$ref": "#/components/schemas/ChannelEventKind"
+            "$ref": "#/components/schemas/MessageStateKind"
           },
           "message": {
             "$ref": "#/components/schemas/Message"
@@ -6760,48 +6751,86 @@
           }
         }
       },
+      "MessageStateKind": {
+        "type": "string",
+        "enum": [
+          "create",
+          "edit",
+          "delete"
+        ]
+      },
       "MoveChainRequest": {
-        "type": "object",
-        "required": [
-          "operation_id",
-          "expected_version"
-        ],
-        "properties": {
-          "expected_version": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 1
-          },
-          "history_generation": {
-            "type": [
-              "string",
-              "null"
+        "allOf": [
+          {
+            "type": "object",
+            "required": [
+              "operation_id",
+              "expected_version"
             ],
-            "format": "uuid"
+            "properties": {
+              "expected_version": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 1
+              },
+              "history_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              },
+              "operation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "topic_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid",
+                "description": "Supply exactly one of topic_id and topic_name."
+              },
+              "topic_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Joins an existing normalized name or creates a Topic in this Channel.",
+                "maxLength": 60,
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
           },
-          "operation_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "topic_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Supply exactly one of topic_id and topic_name."
-          },
-          "topic_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Joins an existing normalized name or creates a Topic in this Channel.",
-            "maxLength": 60,
-            "minLength": 1
+          {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "topic_id"
+                ],
+                "properties": {
+                  "topic_id": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "topic_name"
+                ],
+                "properties": {
+                  "topic_name": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
           }
-        },
-        "additionalProperties": false
+        ]
       },
       "MoveChainResponse": {
         "type": "object",

@@ -63,7 +63,7 @@ export function createCore(selfId: string): SyncCore {
         if (!patch) { delete channelViews[id]; continue }
         const before = view.channels[id]
         const next = { retiredThrough: undefined, heldThrough: undefined, forgottenThrough: undefined, lastUsed: undefined, retainedCount: undefined,
-          streamBase: undefined, snapshotSeq: undefined, latest: undefined, older: undefined, fill: undefined, wait: undefined, subscription: undefined,
+          streamBase: undefined, snapshotSeq: undefined, moveSeq: undefined, latest: undefined, older: undefined, fill: undefined, wait: undefined, subscription: undefined,
           ...patch,
           messages: patch.messages ?? before?.messages ?? [],
           pending: patch.pending ?? before?.pending ?? [],

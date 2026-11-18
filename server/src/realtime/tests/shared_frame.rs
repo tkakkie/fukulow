@@ -114,7 +114,7 @@ fn measure_live_frame_serialization_and_sharing() {
                             let queued = black_box(live.clone());
                             let event = ServerEvent::Message {
                                 seq: 2,
-                                kind: fukulow_api::ChannelEventKind::Create,
+                                kind: fukulow_api::MessageStateKind::Create,
                                 message: (*queued).clone(),
                             };
                             let json = serde_json::to_string(&event).unwrap();
@@ -214,7 +214,7 @@ async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed
     // Exact old per-connection expression, on the same delivery_snapshot Message.
     let old = serde_json::to_string(&ServerEvent::Message {
         seq: enriched.seq,
-        kind: fukulow_api::ChannelEventKind::Create,
+        kind: fukulow_api::MessageStateKind::Create,
         message: enriched.message().clone(),
     })
     .unwrap();

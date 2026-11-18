@@ -2,7 +2,7 @@ use super::{Message, MessageError, REPLAY_PAGE_SIZE, mentions, message_from_row}
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
-use fukulow_api::{ChannelEventKind, MessageMoveEvent, ServerEvent};
+use fukulow_api::{MessageMoveEvent, MessageStateKind, ServerEvent};
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(transparent)]
@@ -42,7 +42,7 @@ impl ChannelEvent {
         match self.payload {
             Payload::Create(message) => ServerEvent::Message {
                 seq: self.seq,
-                kind: ChannelEventKind::Create,
+                kind: MessageStateKind::Create,
                 message,
             },
             Payload::Move(event) => ServerEvent::Move(event),

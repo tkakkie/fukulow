@@ -19,7 +19,7 @@ describe('pure protocol shared client fixtures', () => {
 })
 
 import { initialState, step, type Input, type Effect, type State } from './protocol-driver'
-import { record } from './protocol-test-helpers'
+import { moveEvent, record } from './protocol-test-helpers'
 
 it('keeps duplicate Mention arrays stable and accepts a refreshed display name', () => {
   const d = boot()
@@ -56,6 +56,28 @@ function id(effects: Effect[], type: 'fetch_history' | 'wait' | 'send' | 'connec
   if (!effect || !('id' in effect)) throw new Error(`missing ${type}`)
   return effect.id
 }
+
+it('advances past a live Move without installing a Message and confirms the following Create', () => {
+  const d = boot(), move = moveEvent(101, 'id100')
+  const input = { type: 'event', connection: d.connection, event: move } as const
+  expect(d.feed(input)).toContainEqual(expect.objectContaining({ type: 'fetch_history', page: 'latest', channel: 'A' }))
+  expect(d.get().channels.A).toMatchObject({ cursor: 101, moveSeq: 101, mutationSeq: 101, messages: [] })
+  d.event(102)
+  expect(d.get().channels.A.messages).toEqual([record(102)])
+  expect(d.get().channels.A.cursor).toBe(102)
+  expect(d.feed(input)).toEqual([])
+})
+
+it('fills a Move gap and confirms a buffered following Create without another fill', () => {
+  const d = boot(), move = moveEvent(101, 'id100')
+  const wait = id(d.event(102), 'wait')
+  const fill = id(d.feed({ type: 'timer_elapsed', id: wait }), 'fetch_history')
+  const effects = d.feed({ type: 'events_result', request: fill, page: {
+    history_generation: move.history_generation, events: [move], has_more: false,
+  } })
+  expect(effects).toEqual([expect.objectContaining({ type: 'fetch_history', page: 'latest', channel: 'A' })])
+  expect(d.get().channels.A).toMatchObject({ cursor: 102, moveSeq: 101, messages: [record(102)] })
+})
 
 it('429 waits without resending early, re-arms with a new delay and preserves the entire request', () => {
   for (const target of [{}, { topic_name: 'Release' }, { reply_to: 'parent' }]) {

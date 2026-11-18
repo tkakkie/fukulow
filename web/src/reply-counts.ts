@@ -113,7 +113,9 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
         if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return }
         clearTimeout(batch.timeout); c.batch = undefined
         update(c, { type: 'failed', tickets })
-        if (result.ok) {
+        if (result.ok && result.data.as_of_seq < (sync.get().channels[id]?.moveSeq ?? 0)) {
+          backoff(c)
+        } else if (result.ok) {
           const rows = new Map(result.data.counts.filter(row => row.root_id === row.message_id).map(row => [row.message_id, row]))
           for (const t of tickets) {
             if (!valid(c, t)) continue
@@ -156,7 +158,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       const expired = input.type === 'history_failed' && input.status === 409 && input.error === 'snapshot_expired' &&
         old && [old.latest, old.older, old.fill].includes(input.request)
       const reset = before.historyEpoch !== after.historyEpoch || expired || (before.connected && !after.connected) || (old && now && (
-        old.versionEpoch !== now.versionEpoch || (old.cursor !== null && now.cursor === null) ||
+        old.versionEpoch !== now.versionEpoch || old.moveSeq !== now.moveSeq || (old.cursor !== null && now.cursor === null) ||
         (old.fill === undefined && now.fill !== undefined) || (old.wait === undefined && now.wait !== undefined)))
       if (reset) recover(c)
     }

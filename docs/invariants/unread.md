@@ -5,6 +5,7 @@ Unread positions and counts, server and web. Writing rules and the other parts: 
 | Rule | Test |
 |---|---|
 | Move recomputes Unread and Mention unread in the destination scope using original creation positions. A new destination inherits the access-time baseline and Move advances no read position | `server/src/realtime/tests/move_topic.rs::move_live_gap_and_subscribe_replay_converge_topics_chain_unread_and_mentions`, `server/src/messages/tests/move_topic.rs::move_from_main_to_new_topic_uses_access_baseline_and_creation_positions` |
+| A client Move invalidates Unread and Mention unread until a covering refetch and preserves read positions | `web/src/mention-unread.test.ts::Move refetches Unread and Mention unread at a covering watermark and preserves read positions` |
 | Mutations below a count baseline invalidate it and refetch through the mutation version; unresolved counts stay hidden | `web/src/unread.test.ts::refetches baseline W100 for Message90 mutations v101` |
 | Overflow recovery coalesces with pending Channel-list and per-Topic reads/backoff; sufficient completed baselines need no follow-up | `web/src/unread-retention.test.ts::coalesces overflow recovery through in-flight reads and backoff until the completed baselines suffice` |
 | Long visits bound Unread metadata even with stalled refreshes; the first-Unread marker survives eviction | `web/src/message-window-review.test.ts::bounds a long active Unread visit including stalled refreshes while preserving its first-Unread marker` |
