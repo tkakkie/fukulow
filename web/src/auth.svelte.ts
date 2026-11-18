@@ -30,15 +30,15 @@ export type AuthDeps = {
   getOrganization: typeof getOrganizationMe
   /** Resolves once the sync core is ready; rejects if it never will (main.ts shows the startup error). */
   coreReady?: () => Promise<void>
-  openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void) => ReturnType<typeof membersAdapter>
+  openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, isGuest: () => boolean) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, isGuest?: () => boolean): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
-  openMembers: (id, ended, unavailable) => membersAdapter(createMembers(id, ended, unavailable)),
-  openSession(selfId, onEnded, organizationId, drafts, onIdentity) {
-    const session = createSession({ selfId, onEnded, organizationId, onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+  openMembers: (id, ended, unavailable, isGuest) => membersAdapter(createMembers(id, ended, unavailable, undefined, isGuest)),
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity, isGuest) {
+    const session = createSession({ selfId, onEnded, organizationId, isGuest, onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
@@ -123,18 +123,19 @@ export function createAuth(deps: AuthDeps = defaults) {
       if (account !== accountGeneration || selection !== selectionGeneration) return
     }
     organization = result.data
+    const isGuest = () => !organization || organization.member.role === 'guest'
     session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       capabilitiesPending = identity === null
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
-    })
+    }, isGuest)
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       void session?.sync.markUnavailable()
-    }) ?? null
+    }, isGuest) ?? null
     if (members) session.holdActivity?.('members', members.activityTarget)
     stopMemberAvailability = session.sync.onUnavailable(() => members?.unavailable())
     if (session.sync.unavailable) members?.unavailable()

@@ -315,6 +315,46 @@ it('held Member loads coalesce with reconciliation, replace author Maps and reje
   } finally { activity.close(); c.close(); vi.useRealTimers() }
 })
 
+it('retains or withholds Member directory rows by viewer Role while rejecting stale refetches', async () => {
+  vi.useFakeTimers()
+  try {
+    for (const reason of ['periodic', 'reconcile', 'access'] as const) {
+      for (const guest of [false, true]) {
+        const self: Member = { id: 'self', name: '本人', role: guest ? 'guest' : 'member' }
+        const initial = [self, member]
+        const refreshed = [self]
+        const displayed = guest ? [] : initial
+        const context = `${reason}, guest=${guest}`
+        let resolveStale!: (result: Result<MemberList>) => void
+        const listMembers = vi.fn()
+          .mockResolvedValueOnce(ok({ members: initial }))
+          .mockImplementationOnce(() => new Promise(resolve => { resolveStale = resolve }))
+          .mockResolvedValueOnce({ ok: false, kind: 'http', status: 503, retryAfterMs: 1000 })
+          .mockResolvedValueOnce(ok({ members: refreshed }))
+        const c = createMembers(org, vi.fn(), vi.fn(), {
+          listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+        }, () => guest)
+        c.activityTarget.held()
+        try {
+          await c.load()
+          expect(c.get().members).toEqual(initial)
+          const stale = c.load()
+          c.activityTarget.invalidate(reason)
+          expect(c.get(), context).toMatchObject({ members: displayed, loading: guest })
+          resolveStale(ok({ members: [self, { ...member, name: '古い名前' }] }))
+          await stale
+          expect(c.get().members, context).toEqual(displayed)
+          await vi.advanceTimersByTimeAsync(200)
+          expect(c.get(), context).toMatchObject({ members: displayed, loading: false })
+          expect(c.get().error, context).not.toBe('')
+          await vi.advanceTimersByTimeAsync(1000)
+          expect(c.get(), context).toMatchObject({ members: refreshed, loading: false, error: '' })
+        } finally { c.close() }
+      }
+    }
+  } finally { vi.useRealTimers() }
+})
+
 it('held Member loads retain Membership loss and late 401 authority across invalidation and shutdown', async () => {
   const { createActivity } = await import('./activity')
   const finishes: ((result: Result<{ members: Member[] }>) => void)[] = []

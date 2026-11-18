@@ -107,7 +107,7 @@ export function createActivity(options: {
   let timer: ReturnType<typeof setTimeout> | undefined, generation = 0, closed = false
   const retire = (target: ActivityTarget | undefined) => { if (target?.suspend) target.suspend(); else target?.close() }
   const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200) => targets.get(key)?.invalidate(reason, delay)
-  const directories = (delay = 200) => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access', delay) }
+  const invalidateMemberLists = () => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access') }
   function all(delay: number, reason: Invalidation = 'reconcile') {
     options.reconcile?.()
     for (const target of targets.values()) target.invalidate(reason, delay)
@@ -126,6 +126,7 @@ export function createActivity(options: {
   }
   return {
     hold(key: string, target: ActivityTarget) { target.held?.(); if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
+    invalidateMemberLists,
     notice(event: ActivityNotice) {
       if (closed) return
       switch (event.type) {
@@ -146,12 +147,12 @@ export function createActivity(options: {
           break
         case 'channel_access_revoked':
           options.revoke?.(event.channel_id); retire(targets.get(`channel-members:${event.channel_id}`)); targets.delete(`channel-members:${event.channel_id}`)
-          lists(event.channel_id, 'access'); directories(); break
-        case 'channel_access_gained': options.access?.(event.channel_id); lists(event.channel_id, 'access'); directories(); break
+          lists(event.channel_id, 'access'); invalidateMemberLists(); break
+        case 'channel_access_gained': options.access?.(event.channel_id); lists(event.channel_id, 'access'); invalidateMemberLists(); break
         case 'dm_list_changed': invalidate('dms', 'access'); break
         case 'channel_list_changed': invalidate('channels', 'access'); break
         case 'channel_members_changed': invalidate(`channel-members:${event.channel_id}`, 'access'); break
-        case 'members_changed': directories(); invalidate('capabilities', 'access'); break
+        case 'members_changed': invalidateMemberLists(); invalidate('capabilities', 'access'); break
       }
     },
     disconnected() { clearTimeout(timer); generation++; targets.forEach(target => target.disconnected?.()) },

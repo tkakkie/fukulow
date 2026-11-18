@@ -17,7 +17,7 @@ export function channelMemberError(r: Exclude<api.Result<unknown>, { ok: true }>
 }
 
 export function createChannelMembers(org: string, channel: string, onResult: (r: api.Result<unknown>) => void,
-  deps: Deps = api, onUnavailable: () => void = () => {}, onRefreshChannels: () => unknown = () => {}) {
+  deps: Deps = api, onUnavailable: () => void = () => {}, onRefreshChannels: () => unknown = () => {}, isGuest = () => true) {
   let state = { members: [] as api.ChannelMember[], loading: true, busy: false, error: '', unavailable: false, retryable: false }
   let generation = 0, closed = false
   const listeners = new Set<() => void>()
@@ -34,7 +34,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
   const activityTarget = createActivityTarget({
     load: signal => request(() => deps.listChannelMembers(org, channel, undefined, signal), false),
     accept: data => { if (!state.unavailable) set({ members: data.members, loading: false, error: '' }) },
-    hide: () => set({ members: [], loading: true }),
+    hide: () => { if (isGuest()) set({ members: [], loading: true }) },
     error: r => {
       if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && !api.isOrganizationUnavailable(r)))) { onUnavailable(); set({ members: [], loading: false, unavailable: true }) }
       else set({ loading: false, error: channelMemberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })

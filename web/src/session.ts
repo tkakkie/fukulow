@@ -25,6 +25,7 @@ export type SessionOptions = {
   repliesApi?: RepliesApi
   unreadApi?: UnreadApi
   dmsApi?: DmsApi
+  isGuest?: () => boolean
   onIdentity?: (identity: api.Identity) => void
   onIdentityInvalidated?: () => void
   sync?: Partial<SyncOptions>
@@ -190,7 +191,12 @@ export function createSession(options: SessionOptions) {
   }
   const capabilities = createActivityTarget({
     load: signal => observe(api.getOrganizationMe(organizationId, undefined, signal)),
-    accept: identity => options.onIdentity?.(identity),
+    accept: identity => {
+      const wasGuest = options.isGuest?.()
+      options.onIdentity?.(identity)
+      // A list refresh can be in flight under the viewer's previous Role.
+      if (wasGuest === false && options.isGuest?.()) activity.invalidateMemberLists()
+    },
     hide: () => options.onIdentityInvalidated?.(),
     terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.error === 'organization_unavailable'),
   })
@@ -238,7 +244,7 @@ export function createSession(options: SessionOptions) {
       const controller = createChannelMembers(organizationId, channel, r => {
         if (!r.ok && r.kind === 'http' && r.status === 401) notifyEnded()
         else if (!closed && api.isOrganizationUnavailable(r)) terminate()
-      }, api, () => { void sync.channelUnavailable(channel) }, () => channels.load())
+      }, api, () => { void sync.channelUnavailable(channel) }, () => channels.load(), options.isGuest)
       memberControllers.set(channel, controller)
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable'
       memberAvailability.set(channel, lost)

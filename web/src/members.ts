@@ -51,7 +51,7 @@ export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
 
 type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; lookupAuthors?: typeof lookupAuthors; baseUrl(): string }
 const defaults: MembersDeps = { listMembers, changeRole, deactivateMember, createInvite, baseUrl: () => `${location.origin}${location.pathname}` }
-export function createMembers(organizationId: string, onEnded: () => void, onUnavailable: () => void, deps: MembersDeps = defaults) {
+export function createMembers(organizationId: string, onEnded: () => void, onUnavailable: () => void, deps: MembersDeps = defaults, isGuest = () => true) {
   let state = { members: [] as Member[], loading: true, busy: false, error: '', inviteLink: '' }
   let closed = false
   let loadSequence = 0
@@ -85,7 +85,10 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       authors.replaceMembers(data.members)
       set({ members: data.members, loading: false, error: '' })
     },
-    hide: () => { loadSequence++; set({ members: [], loading: true }) },
+    hide: () => {
+      loadSequence++
+      if (isGuest()) set({ members: [], loading: true })
+    },
     error: r => {
       if (!(r.kind === 'http' && r.status === 401) && !isOrganizationUnavailable(r)) failed(r)
       set({ loading: false })
