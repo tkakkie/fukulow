@@ -8,10 +8,10 @@ import { legacyOrganization, organizationPath, signInPath } from './compat.ts';
 import { accountCount } from './scheduler.ts';
 export const baseUrl = (__ENV.BASE_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 const requestTimeout = positiveInteger(__ENV.REQUEST_TIMEOUT_SECONDS, 45);
-export type Setup = { token: string; tokens: string[]; channelIds: string[]; organizationId: string };
+export type Setup = { token: string; tokens: string[]; publisherTokens: string[]; channelIds: string[]; organizationId: string };
 type SeedConfig = { channels: number; subscribers: number; socketsPerSession: number; visibility: Channel['visibility']; legacy: boolean;
   /** 0 keeps every socket on the Owner's Account (pre-#196 baselines). */
-  socketsPerAccount?: number };
+  socketsPerAccount?: number; publishMembers?: number };
 
 export function params(operation: string, token?: string): Params {
   return { timeout: `${requestTimeout}s`, redirects: 0, tags: { name: operation, operation },
@@ -40,6 +40,13 @@ export function requireStatus(response: Response, status: number, operation: str
 
 export function seed(config: SeedConfig): Setup {
   const { channels, subscribers, socketsPerSession, visibility, legacy } = config;
+  const { socketsPerAccount = 0, publishMembers = 1 } = config;
+  if (socketsPerAccount && (legacy || socketsPerSession !== socketsPerAccount || visibility !== 'public')) {
+    fail('SOCKETS_PER_ACCOUNT needs the current API, public Channels and SOCKETS_PER_SESSION equal to it');
+  }
+  if (publishMembers > 1 && (legacy || visibility !== 'public')) {
+    fail('PUBLISH_MEMBERS greater than 1 needs the current API and public Channels');
+  }
   requireStatus(http.get(`${baseUrl}/api/v1/health`, params('health')), 200, 'health');
   const email = __ENV.LOAD_EMAIL;
   const password = __ENV.LOAD_PASSWORD;
@@ -53,22 +60,26 @@ export function seed(config: SeedConfig): Setup {
   const response = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
   requireStatus(response, 200, 'sign_in');
   const { token, identity } = response.json() as NativeSessionResponse;
-  const organizationId = legacy ? legacyOrganization(identity) : (__ENV.LOAD_ORGANIZATION_ID || identity.organizations[0]?.organization_id);
-  if (!organizationId || (!legacy && !identity.organizations.some((organization) => organization.organization_id === organizationId))) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
   const tokens = [token];
-  const socketsPerAccount = config.socketsPerAccount ?? 0;
-  if (socketsPerAccount && (legacy || socketsPerSession !== socketsPerAccount || visibility !== 'public')) {
-    fail('SOCKETS_PER_ACCOUNT needs the current API, public Channels and SOCKETS_PER_SESSION equal to it');
-  }
+  const publisherTokens = [token];
   try {
-    if (socketsPerAccount) {
-      const run = uuid().slice(0, 8);
-      for (let i = 1; i < accountCount(channels * subscribers, socketsPerAccount); i++) tokens.push(member(organizationId, token, run, i));
-    } else {
+    const organizationId = legacy ? legacyOrganization(identity) : (__ENV.LOAD_ORGANIZATION_ID || identity.organizations[0]?.organization_id);
+    if (!organizationId || (!legacy && !identity.organizations.some((organization) => organization.organization_id === organizationId))) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
+    const socketAccounts = socketsPerAccount ? accountCount(channels * subscribers, socketsPerAccount) : 1;
+    if (!socketsPerAccount) {
       for (let i = 1; i < Math.ceil(channels * subscribers / socketsPerSession); i++) {
         const session = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
         requireStatus(session, 200, 'sign_in');
         tokens.push((session.json() as NativeSessionResponse).token);
+      }
+    }
+    const accounts = Math.max(socketAccounts, publishMembers);
+    if (accounts > 1) {
+      const run = uuid().slice(0, 8);
+      for (let i = 1; i < accounts; i++) {
+        const accountToken = member(organizationId, token, run, i);
+        tokens.push(accountToken);
+        if (i < publishMembers) publisherTokens.push(accountToken);
       }
     }
     const channelIds = Array.from({ length: channels }, (_, index) => {
@@ -78,7 +89,7 @@ export function seed(config: SeedConfig): Setup {
       return (response.json() as Channel).id;
     });
     // Prove before measuring that every Account may read each Channel its sockets subscribe to.
-    if (socketsPerAccount) tokens.forEach((accountToken, account) => {
+    if (socketsPerAccount) tokens.slice(0, socketAccounts).forEach((accountToken, account) => {
       const first = account * socketsPerAccount;
       const last = Math.min(first + socketsPerAccount, channels * subscribers) - 1;
       for (let channel = Math.floor(first / subscribers); channel <= Math.floor(last / subscribers); channel++) {
@@ -86,11 +97,11 @@ export function seed(config: SeedConfig): Setup {
           params('channel_access', accountToken)), 200, 'channel_access');
       }
     });
-    return { token, tokens, channelIds, organizationId };
+    return { token, tokens, publisherTokens, channelIds, organizationId };
   } catch (error) {
     // k6 skips teardown when setup fails; retain the provisioning error if sign-out also fails.
     try {
-      revoke({ token, tokens, channelIds: [], organizationId });
+      revoke({ tokens });
     } catch {
       console.error('Failed to revoke session after setup failure');
     }
@@ -124,7 +135,7 @@ export function uuid(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-export function revoke(data: Setup): void {
+export function revoke(data: Pick<Setup, 'tokens'>): void {
   revokeSessions(data?.tokens ?? [], (token) => {
     requireStatus(http.del(`${baseUrl}/api/v1/session`, null, params('sign_out', token)), 204, 'sign_out');
   });

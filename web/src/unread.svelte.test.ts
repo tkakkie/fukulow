@@ -1,3 +1,4 @@
+import { replyPage } from './topic-test-helpers'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { unreadAdapter } from './unread.svelte'
 import { flush, msg, ok, row, unreadClient } from './unread-test-helpers'
@@ -39,7 +40,7 @@ it('forwards view presentation visibility refresh and exit intents with fixed vi
 it.each(['Topics', 'Topics and Replies'] as const)('%s composition clears Unread synchronously before replacement and close sync notifications', async composition => {
   const base = unreadClient(); await base.boot()
   const reply = composition === 'Topics and Replies' ? createReplySync({ selfId: 'me', repliesApi: {
-    listReplyChain: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(1)]).at(-1)?.created_seq ?? 0,  root_id: msg(1).id, messages: [msg(1)], has_more: false }),
+    listReplyChain: async () => ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(1)]).at(-1)?.created_seq ?? 0,  root_id: msg(1).id, messages: [msg(1)], has_more: false })),
   } }, base.sync) : undefined
   const source = reply?.sync ?? base.sync
   const seen: { position: number | null; unreadCount: number | null; entry: unknown; topicCount: number }[] = []

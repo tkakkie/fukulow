@@ -4,7 +4,7 @@ import { record } from './protocol-test-helpers'
 import { expect, it } from 'vitest'
 import { replyClient, reply, root } from './reply-test-helpers'
 import { windowClient } from './message-window-test-helpers'
-import { msg, ok, summary, topicClient, deferred } from './topic-test-helpers'
+import { replyPage, msg, ok, summary, topicClient, deferred } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 import { retentionClient } from './unread-retention-test-helpers'
 import { boundTopicEvidence, EVIDENCE_LIMIT, rememberTopicMessages, topicEvidence } from './message-window'
@@ -15,8 +15,8 @@ it('keeps fetched Reply pages contiguous when the newest 200 same-chain records 
   for (let seq = 801; seq <= 1000; seq++) c.event(reply(seq))
   c.listReplyChain.mockImplementation(async (_channel?: unknown, _anchor?: unknown, query?: { after_seq?: number }) => {
     const after = query?.after_seq ?? 0
-    return ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1))).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: after + 50 < 1000,
-      messages: Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1)) })
+    return ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1))).at(-1)?.created_seq ?? 0,  root_id: 'id1', has_more: after + 50 < 1000,
+      messages: Array.from({ length: 50 }, (_, i) => after + i + 1 === 1 ? root() : reply(after + i + 1)) }))
   })
   await c.replies.open('A', root())
   expect(c.replies.get('A').messages.map(m => m.created_seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1))
@@ -57,7 +57,7 @@ it('keeps an unresolved descendant Reply visible and retryable after selecting i
       await c.replies.send('A', 'unknown Reply', 'id2')
     }
     await c.replies.open('A', root())
-    c.listReplyChain.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  root_id: 'id1', messages: [], has_more: false }))
+    c.listReplyChain.mockResolvedValue(ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  root_id: 'id1', messages: [], has_more: false })))
     await c.replies.loadMore('A')
     for (let seq = 3; seq <= 500; seq++) c.event(reply(seq))
     expect(c.replies.get('A').messages.some(m => m.id === 'id2')).toBe(false)

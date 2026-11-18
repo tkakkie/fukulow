@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import { connectRealtime, type SocketLike } from './realtime'
-import { record } from './protocol-test-helpers'
+import { moveEvent, record } from './protocol-test-helpers'
 
 it('transports generated controls and events without owning reconnection policy', () => {
   const socket: SocketLike = { send: vi.fn(), close: vi.fn(), onopen: null, onmessage: null, onclose: null }
@@ -104,4 +104,21 @@ it('validates the channel-only access-loss event and rejects missing, malformed 
   expect(onEvent).not.toHaveBeenCalled()
   socket.onmessage?.({ data: JSON.stringify({ type: 'channel_access_lost', channel_id: 'A' }) })
   expect(onEvent).toHaveBeenCalledExactlyOnceWith({ type: 'channel_access_lost', channel_id: 'A' }); connection.close()
+})
+
+
+it('forwards a body-free Move and rejects Move frames carrying Message state', () => {
+  const socket: SocketLike = { send: vi.fn(), close: vi.fn(), onopen: null, onmessage: null, onclose: null }
+  const onEvent = vi.fn()
+  connectRealtime({ onReady() {}, onClose() {}, onEvent }, () => socket)
+  const move = moveEvent(101, 'id100')
+  for (const invalid of [
+    { ...move, message: record(100) },
+    { type: 'message', kind: 'move', seq: 101, message: record(100) },
+    { ...move, version: 100 },
+    { ...move, source_topic_id: undefined },
+  ]) socket.onmessage?.({ data: JSON.stringify(invalid) })
+  expect(onEvent).not.toHaveBeenCalled()
+  socket.onmessage?.({ data: JSON.stringify(move) })
+  expect(onEvent).toHaveBeenCalledExactlyOnceWith(move)
 })

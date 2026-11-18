@@ -1,11 +1,10 @@
 # Invariants
 
-State critical guarantees, cross-cutting rules and denial requirements whose full scope the code, tests and `openapi.json` cannot tell. A Rule cell includes its scope and exceptions. Keep one home per fact and replace or merge updates. [Writing rules](workflow.md#13-splitting-a-doc)
+Record critical guarantees, cross-cutting rules and denial requirements whose full scope code, tests and `openapi.json` cannot tell. Each Rule must always hold and include its scope and exceptions. Cite its guarding test as `path::test_name`. Add that test with the code and run it in CI. [One home per fact, update by replacement or merge](workflow.md#13-splitting-a-doc).
 
-Rules that must always hold. Each one lists the test that guards it as `path::test_name`; the test must run in CI. Add the test with the code.
-E2E rows require a final pass in the CI Playwright report (a pass after retry counts); static checks remain defence in depth. E2E names use the file and leaf title, as in the static check; multiple report entries with that identity are refused.
+For each E2E reference, match its file and leaf title as in the static check. Require exactly one matching entry and a final pass in the CI Playwright report (retry pass counts). Static checks remain defence in depth.
 
-Rows live in parts under `docs/invariants/`, one part per area. A new row goes in the part for its main area. Read every part your change touches. "Rows in other parts" sections are optional and checked when present. Cite a test name unique to the row in its part, or add a `{#id}` (lowercase words and hyphens) at the start of the Rule cell if no test name is unique. Use IDs only for rows referenced by ID.
+File new rows in their main area's part under `docs/invariants/`, one part per area. Read all touched parts. Optional "Rows in other parts" sections are checked. Identify a referenced row by a test name unique to that row in its part. If none is unique, start the Rule cell with `{#id}` (lowercase words and hyphens). Use IDs only for rows referenced by ID.
 
 - [auth](invariants/auth.md): Accounts, sign-in, sessions, roles, permissions, Organization scoping (server)
 - [channels](invariants/channels.md): Channels, membership, Capabilities (server and member UI)

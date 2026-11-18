@@ -390,7 +390,7 @@ async function main() {
             const m = makeSynth(startSeq + i, channel)
             return m.created_seq === 1 ? m : { ...m, reply_to: ROOT_MSG_UUID, reply_root_id: ROOT_MSG_UUID }
           })
-          return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0,  root_id: ROOT_MSG_UUID, has_more: startSeq + count <= highSeq, messages } }
+          return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (messages).at(-1)?.created_seq ?? 0, chain_version: highSeq, root_id: ROOT_MSG_UUID, has_more: startSeq + count <= highSeq, messages } }
         },
       },
     })
@@ -617,7 +617,7 @@ async function main() {
         async listTopicMessages() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } } },
       },
     })
-    const replies = createReplies(sync, { api: { async listReplyChain() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  root_id: ROOT_MSG_UUID, messages: [], has_more: false } } } } })
+    const replies = createReplies(sync, { api: { async listReplyChain() { return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, chain_version: 1, root_id: ROOT_MSG_UUID, messages: [], has_more: false } } } } })
     const unread = createUnread(sync, {
       topics,
       api: {

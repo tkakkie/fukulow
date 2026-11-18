@@ -11,19 +11,20 @@ extern crate rustc_middle;
 extern crate rustc_span;
 
 use rustc_hir::{
-    Expr, ExprKind, HirId, Item, ItemKind, Node, Pat, PatKind, Path, UseKind, UsePath,
+    Expr, ExprKind, HirId, Item, ItemKind, Node, Pat, PatKind, Path, PathSegment, UseKind, UseTree,
     def::{DefKind, Res},
     intravisit,
 };
 use rustc_middle::{
     hir::nested_filter,
-    metadata::ModChild,
+    middle::resolve::ModChild,
     ty::{self, TyCtxt},
 };
 use rustc_span::{
     Span,
     def_id::{CRATE_DEF_ID, CRATE_DEF_INDEX, DefId, LOCAL_CRATE, LocalDefId},
     hygiene::{ExpnKind, LocalExpnId},
+    kw,
 };
 use std::{collections::HashSet, process::ExitCode};
 
@@ -409,7 +410,7 @@ impl<'tcx> Direction<'tcx> {
         }
     }
 
-    fn children(&self, module: DefId) -> &[ModChild] {
+    fn children(&self, module: DefId) -> &'tcx [ModChild] {
         if let Some(local) = module.as_local() {
             self.tcx.module_children_local(local)
         } else {
@@ -417,9 +418,9 @@ impl<'tcx> Direction<'tcx> {
         }
     }
 
-    fn import_scope(&self, item: &Item<'_>) -> Span {
+    fn import_scope(&self, id: HirId) -> Span {
         self.tcx
-            .hir_parent_iter(item.hir_id())
+            .hir_parent_iter(id)
             .find_map(|(_, node)| match node {
                 Node::Block(block) => Some(block.span),
                 Node::Item(Item {
@@ -429,6 +430,90 @@ impl<'tcx> Direction<'tcx> {
                 _ => None,
             })
             .unwrap_or(self.tcx.hir_root_module().spans.inner_span)
+    }
+
+    fn trace_use(
+        &mut self,
+        tree: &UseTree<'tcx>,
+        owner: LocalDefId,
+        scope: Span,
+        parent_span: Option<Span>,
+        segments: &mut Vec<&'tcx PathSegment<'tcx>>,
+    ) {
+        let path = tree.prefix;
+        let parent_len = segments.len();
+        segments.extend(path.segments);
+
+        // Rust 1.100 stores each group prefix once. Rebuild the path of
+        // each import that the flattened HIR used to expose.
+        let span = parent_span.map_or(path.span, |span| span.to(path.span));
+        if let UseKind::Nested { items } = tree.kind
+            && !items.is_empty()
+        {
+            for (child, _, def_id) in items {
+                self.trace_use(child, *def_id, scope, Some(span), segments);
+            }
+            segments.truncate(parent_len);
+            return;
+        }
+
+        let mut resolved = path.res;
+        let mut import_segments = segments.as_slice();
+        let mut diagnostic_span = path.span;
+        match tree.kind {
+            UseKind::Single(ident) => {
+                // A nested `self` can survive lowering and use its parent's name.
+                let mut alias = ident.name;
+                if let [.., parent, last] = import_segments
+                    && last.ident.name == kw::SelfLower
+                {
+                    import_segments = &import_segments[..import_segments.len() - 1];
+                    if alias == kw::SelfLower {
+                        alias = parent.ident.name;
+                    }
+                }
+                if let Some(Res::Def(DefKind::Mod, target)) = resolved.type_ns {
+                    self.imports.push((scope, alias.to_string(), target, false));
+                }
+            }
+            UseKind::Glob => {
+                if let Some(Res::Def(DefKind::Mod, target)) = resolved.type_ns {
+                    for child in self.children(target) {
+                        if let Res::Def(DefKind::Mod, target) = child.res {
+                            self.imports
+                                .push((scope, child.ident.name.to_string(), target, true));
+                        }
+                    }
+                }
+            }
+            UseKind::Nested { .. } => {
+                // Empty groups resolve their prefix without binding a name.
+                // HIR keeps that resolution on the last segment.
+                diagnostic_span = span;
+                resolved = Default::default();
+                resolved.type_ns = match import_segments {
+                    [] => None,
+                    [only] if only.ident.name == kw::PathRoot => None,
+                    [.., last] => Some(last.res),
+                };
+            }
+        }
+        // The first resolution for an edge wins when namespaces share a span.
+        for res in [resolved.value_ns, resolved.type_ns, resolved.macro_ns]
+            .into_iter()
+            .flatten()
+        {
+            self.reference(owner, res, diagnostic_span);
+        }
+        for segment in import_segments {
+            self.reference(owner, segment.res, segment.ident.span);
+        }
+        if !resolved.is_empty() {
+            for segment in import_segments {
+                intravisit::Visitor::visit_path_segment(self, segment);
+            }
+        }
+        segments.truncate(parent_len);
     }
 }
 
@@ -460,35 +545,6 @@ impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
             self.modules
                 .push((module.spans.inner_span, item.owner_id.def_id));
         }
-        if let ItemKind::Use(path, kind) = &item.kind {
-            let scope = self.import_scope(item);
-            if let Some(Res::Def(DefKind::Mod, target)) = path.res.type_ns {
-                match kind {
-                    UseKind::Single(ident) => {
-                        self.imports
-                            .push((scope, ident.name.to_string(), target, false))
-                    }
-                    UseKind::Glob => {
-                        let children = if let Some(local) = target.as_local() {
-                            self.tcx.module_children_local(local)
-                        } else {
-                            self.tcx.module_children(target)
-                        };
-                        for child in children {
-                            if let Res::Def(DefKind::Mod, target) = child.res {
-                                self.imports.push((
-                                    scope,
-                                    child.ident.name.to_string(),
-                                    target,
-                                    true,
-                                ));
-                            }
-                        }
-                    }
-                    UseKind::ListStem => (),
-                }
-            }
-        }
         if let ItemKind::ExternCrate(original, ident) = &item.kind
             && let Some(krate) = self
                 .tcx
@@ -500,7 +556,7 @@ impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
                 })
         {
             self.imports.push((
-                self.import_scope(item),
+                self.import_scope(item.hir_id()),
                 ident.name.to_string(),
                 DefId {
                     krate,
@@ -521,14 +577,8 @@ impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
         intravisit::walk_path(self, path);
     }
 
-    fn visit_use(&mut self, path: &'tcx UsePath<'tcx>, id: HirId) {
-        for res in path.res.iter().flatten() {
-            self.reference(id.owner.def_id, *res, path.span);
-        }
-        for segment in path.segments {
-            self.reference(id.owner.def_id, segment.res, segment.ident.span);
-        }
-        intravisit::walk_use(self, path, id);
+    fn visit_use(&mut self, tree: &'tcx UseTree<'tcx>, id: HirId, def_id: LocalDefId) {
+        self.trace_use(tree, def_id, self.import_scope(id), None, &mut Vec::new());
     }
 
     fn visit_expr(&mut self, expression: &'tcx Expr<'tcx>) {

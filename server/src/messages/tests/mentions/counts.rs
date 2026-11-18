@@ -284,6 +284,7 @@ async fn mention_access_loss_removes_counts_and_regrant_never_resurrects_them(po
         authorized_replay_page(&app_pool, org, (reader, 0), other, 0, 1)
             .await
             .unwrap()[0]
+            .message()
             .mentions
             .as_ref()
             .unwrap()
