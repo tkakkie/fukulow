@@ -2,7 +2,7 @@
 // Usage:
 //   node --expose-gc web/scripts/measure-wasm-core.ts --core wasm|ts|main-ts --out <dir> [--round <n>] [--smoke]
 //   node web/scripts/measure-wasm-core.ts --aggregate --out <dir>
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -15,10 +15,8 @@ import {
 } from '../src/protocol.ts'
 import { aggregateDirectory, nearestRank, olsSlope, type Arm } from './aggregate-wasm-core.ts'
 import { fixtureUuid, normalizeInput } from './client-core-ids.ts'
-import {
-  defaultDir, partitionScenarios, runClientScenario,
-  type ClientScenario, type Effect as FixtureEffect, type Observed, type ResolvedInput,
-} from './realtime-fixtures.ts'
+import { loadClientScenarios, makeProtocolClient } from './measure-fixture-client.ts'
+import { partitionScenarios, runClientScenario } from './realtime-fixtures.ts'
 
 type Message = components['schemas']['Message']
 type MessagePage = components['schemas']['MessagePage']
@@ -173,21 +171,10 @@ const summarizeSamples = (samples: number[]) => ({
 })
 
 function buildMixedTraces(): { id: string; inputs: Input[] }[] {
-  const scenarios: ClientScenario[] = readdirSync(join(defaultDir, 'client')).filter((n) => n.endsWith('.json')).sort()
-    .flatMap((n) => (JSON.parse(readFileSync(join(defaultDir, 'client', n), 'utf8')) as { scenarios: ClientScenario[] }).scenarios)
-  const msgFromFixture = (m: ResolvedInput['message'], channel: string): Message => ({
-    mentions: [], ...m!, channel_id: channel, topic_id: m?.topic ?? null, reply_to: m?.reply_to ?? null, reply_root_id: m?.reply_root_id ?? null,
-  })
+  const scenarios = loadClientScenarios()
   const rec = (seq: number, channel = 'A'): Message => ({ history_generation: '00000000-0000-4000-8000-000000000515',
     mentions: [], channel_id: channel, created_seq: seq, version: seq, deleted: false, body: `m${seq}`, id: `id${seq}`, sender: 'other',
     client_message_id: `auto-${seq}`, created_at: '2026-01-01T00:00:00Z', topic_id: null, reply_to: null, reply_root_id: null,
-  })
-  const observe = (state: State): Observed => ({
-    session: state.session, organization: state.organization,
-    channels: Object.fromEntries(Object.entries(state.channels).map(([id, c]) => [id, {
-      state: c.state, cursor: c.cursor, messages: c.messages,
-      pending: c.pending.map((p) => ({ client_message_id: p.clientMessageId, state: p.state })),
-    }])),
   })
   function makeRecorder(id: string) {
     let state = initialState(SELF_UUID)
@@ -198,45 +185,6 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
     }
     return { id, inputs, feed, get: () => state }
   }
-  function makeProtocolClient(onInput: (input: Input) => void) {
-    let state = initialState('me')
-    return {
-      get: () => state, observe: () => observe(state),
-      feed(i: ResolvedInput): FixtureEffect[] {
-        const e = i.respond_to
-        const channel = (i.channel ?? e?.channel ?? Object.entries(state.channels)
-          .find(([, c]) => c.pending.some((p) => p.clientMessageId === i.client_message_id))?.[0] ?? 'A') as string
-        const msg = () => msgFromFixture(i.message, channel)
-        let input: Input
-        switch (i.type) {
-          case 'organization_refused': input = { type: 'organization_unavailable' }; break
-          case 'session_start': case 'session_replaced': input = { type: i.type, selfId: 'me' }; break
-          case 'connection_ready': input = { type: i.type, connection: state.connection! }; break
-          case 'socket_closed': input = { type: i.type, connection: state.connection!, code: i.code as number }; break
-          case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', kind: 'create', seq: (msg()).created_seq, message: msg() } }; break
-          case 'subscribed': input = { type: 'event', connection: state.connection!, subscription: e?.id as number | undefined,
-            event: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: i.caught_up_seq as number } }; break
-          case 'channel_access_lost': input = { type: 'event', connection: state.connection!, event: { type: 'channel_access_lost', channel_id: channel } }; break
-          case 'error_event': input = { type: 'event', connection: state.connection!, event: { type: 'error', channel_id: channel, code: i.code as string } }; break
-          case 'history_result': input = { type: i.type, request: e!.id as number,
-            page: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', as_of_seq: (i.as_of_seq as number | undefined) ?? i.messages!.at(-1)?.created_seq ?? 0,  messages: i.messages!.map((m) => msgFromFixture(m, channel)), has_more: i.has_more as boolean } }; break
-          case 'send_failed': input = { type: i.type, request: e!.id as number,
-            status: i.status as number | 'network' | 'timeout', retryAfterMs: i.retry_after_ms as number | undefined }; break
-          case 'history_failed': input = { type: i.type, request: e!.id as number, status: i.status as number | 'network' | 'timeout' }; break
-          case 'ack': input = { type: i.type, request: e!.id as number, message: msg() }; break
-          case 'timer_elapsed': input = { type: i.type, id: e!.id as number }; break
-          case 'user_send': input = { type: i.type, channel, clientMessageId: i.client_message_id as string, body: (i.body as string) ?? 'hello' }; break
-          case 'user_retry': case 'user_discard': input = { type: i.type, channel, clientMessageId: i.client_message_id as string }; break
-          case 'watch': case 'unwatch': case 'refresh': case 'load_older': input = { type: i.type, channel }; break
-          default: throw new Error(`unhandled fixture input ${i.type}`)
-        }
-        onInput(input)
-        const result = step(state, input); state = result.state
-        return result.effects.map((ef) => ({ ...ef }))
-      },
-    }
-  }
-
   const traces: { id: string; inputs: Input[] }[] = []
   for (const scenario of partitionScenarios(scenarios).running.filter((s) => s.layer !== 'controller')) {
     const d = makeRecorder(scenario.id)
@@ -253,12 +201,17 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
     const event = (seq: number) => d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (rec(seq)).created_seq, message: rec(seq) } })
     const page = (request: number, start: number, length: number) =>
       d.feed({ type: 'history_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: start + length - 1,  messages: Array.from({ length }, (_, i) => rec(start + i)), has_more: true } })
+    // After-cursor fills answer with Channel events since #515 slice 3; only events advance the cursor.
+    const fill = (request: number, start: number, length: number) =>
+      d.feed({ type: 'events_result', request, page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: true,
+        events: Array.from({ length }, (_, i) => ({ type: 'message' as const, kind: 'create' as const, seq: start + i, message: rec(start + i) })) } })
     d.feed({ type: 'watch', channel }); page(view().latest!, 1, 200)
     d.feed({ type: 'event', connection, subscription: -1, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
     d.feed({ type: 'event', connection, event: { history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: 200 } })
     for (let i = 0; i < 425; i++) event(202 + i * 2)
     d.feed({ type: 'timer_elapsed', id: view().wait! })
-    while (view().fill !== undefined) page(view().fill!, view().cursor! + 1, 200)
+    while (view().fill !== undefined) fill(view().fill!, view().cursor! + 1, 200)
+    if (view().cursor! < 1050 || view().forgottenThrough !== undefined) throw new Error(`Retention trace did not catch up: cursor=${view().cursor}`)
     for (let seq = view().cursor! + 1, end = seq + 450; seq < end; seq++) event(seq)
     const duplicate = rec(view().cursor!)
     d.feed({ type: 'event', connection, event: { type: 'message', kind: 'create', seq: (duplicate).created_seq, message: duplicate } })
@@ -325,7 +278,10 @@ function buildMixedTraces(): { id: string; inputs: Input[] }[] {
         if (r.type === 'history') {
           const hasMore = random(2) === 0
           const messages = Array.from({ length: random(8) }, (_, i) => ({ ...rec((r.seq ?? 190) + i + 1, r.channel), ...(random(5) === 0 ? { sender: 'me', client_message_id: 'c1' } : {}) }))
-          choices.push({ type: 'history_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: messages.at(-1)?.created_seq ?? 0, messages, has_more: hasMore } })
+          choices.push(r.page === 'after'
+            ? { type: 'events_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', has_more: hasMore,
+              events: messages.map((m) => ({ type: 'message' as const, kind: 'create' as const, seq: m.created_seq, message: m })) } }
+            : { type: 'history_result', request: Number(token), page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: messages.at(-1)?.created_seq ?? 0, messages, has_more: hasMore } })
           choices.push({ type: 'history_failed', request: Number(token), status: [401, 403, 404, 500, 'network', 'timeout'][random(6)] as 401 })
         } else {
           choices.push({ type: 'ack', request: Number(token), message: { ...message, channel_id: r.channel, sender: 'me', client_message_id: r.clientMessageId } })
@@ -853,7 +809,9 @@ async function main() {
     for (let p = 0; p < pageCount; p++) {
       const fillReq = subEff.find((e) => e.type === 'fetch_history' && e.page === 'after') as { id: number } | undefined
       if (!fillReq) throw new Error(`Missing after_seq fill request at page ${p}`)
-      subEff = timed(acc, () => core.step({ type: 'history_result', request: fillReq.id, page: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: (pages[p]).at(-1)?.created_seq ?? 0,  messages: pages[p], has_more: p < pageCount - 1 } })).effects
+      // After-cursor fill answers with Channel events since #515 slice 3; only events advance the cursor.
+      subEff = timed(acc, () => core.step({ type: 'events_result', request: fillReq.id, page: { history_generation: '00000000-0000-4000-8000-000000000515',
+        events: pages[p].map((message) => ({ type: 'message' as const, kind: 'create' as const, seq: message.created_seq, message })), has_more: p < pageCount - 1 } })).effects
       assertG3Step(core.get(), new Map([[bulkC0, baseCursor + (p + 1) * 50]]))
     }
     const elapsed = acc.ms; assertG3CatchUpComplete(core.get(), bulkC0, highWaterSeq, MAIN_MESSAGE_LIMIT)

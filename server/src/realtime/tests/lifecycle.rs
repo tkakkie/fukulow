@@ -54,6 +54,16 @@ async fn advance(duration: Duration) {
 }
 
 #[fukulow_test::test]
+async fn delivery_silence_answers_heartbeat_ping(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let (_server, mut socket, _finished) = lifecycle_socket(&f).await;
+    advance(PING_INTERVAL).await;
+    silent(&mut socket).await;
+    let canonical = post(&f, f.channel).await;
+    assert_eq!(event(&mut socket).await["message"], canonical);
+}
+
+#[fukulow_test::test]
 async fn frame_live_and_ping_traffic_does_not_repoll_failure_waits(pool: PgPool) {
     let f = fixture(&pool).await;
     let (_server, mut socket, _finished) = lifecycle_socket(&f).await;
@@ -264,6 +274,9 @@ async fn client_initiated_close_gets_close_frame_back(pool: PgPool) {
         subscribe(&mut socket, f.channel, 0).await;
         ready(&mut socket, f.channel, 0).await;
         socket.close(close.clone()).await.unwrap();
-        assert_eq!(frame(&mut socket).await, tungstenite::Message::Close(close));
+        assert_eq!(
+            delivery_frame(&mut socket).await,
+            tungstenite::Message::Close(close)
+        );
     }
 }

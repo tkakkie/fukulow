@@ -371,7 +371,7 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     const panelTopicReplyItem = panel.locator(`[data-message-id="${topicReply.id}"]`)
     await expect(panelTopicRootItem).toHaveClass(/reply-panel__item--root/)
     await expect(panelTopicRootItem.getByRole('button', { name: '返信 50件›', exact: true })).toBeVisible()
-    const nestedReplyBtn = panelTopicReplyItem.getByRole('button', { name: '返信', exact: true })
+    const nestedReplyBtn = panelTopicReplyItem.getByRole('button', { name: '返信 50件›', exact: true })
     await expect(nestedReplyBtn).toBeVisible()
     await nestedReplyBtn.click()
     await expect(page).toHaveURL(

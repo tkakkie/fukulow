@@ -629,7 +629,7 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -644,7 +644,10 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
         format!("Bearer {token}").parse().unwrap(),
     );
     let (mut socket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
-    let ready = socket.next().await.unwrap().unwrap();
+    let ready = crate::websocket_test_support::websocket_delivery_next(&mut socket, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(ready.to_text().unwrap()).unwrap()["type"],
         "activity_ready"
@@ -656,11 +659,14 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
             ))
             .await
             .unwrap();
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::websocket_test_support::websocket_delivery_next(&mut socket, None),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
         let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
         assert_eq!(event["type"], expected);
         assert_eq!(event["channel_id"], channel_id.to_string());
@@ -690,11 +696,14 @@ async fn reactivation_keeps_member_identity_without_restoring_private_channel_pe
         ))
         .await
         .unwrap();
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let event = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::websocket_test_support::websocket_delivery_next(&mut socket, None),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
     let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
     assert_eq!(event["type"], "subscribed");
     assert_eq!(event["channel_id"], private_id.to_string());

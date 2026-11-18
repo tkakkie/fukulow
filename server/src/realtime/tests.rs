@@ -341,6 +341,29 @@ async fn frame(client: &mut Client) -> tungstenite::Message {
         .unwrap()
         .unwrap()
 }
+async fn delivery_next<S>(
+    client: &mut WebSocketStream<S>,
+    expected_pong: Option<&[u8]>,
+) -> Option<Result<tungstenite::Message, tungstenite::Error>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        let result =
+            crate::websocket_test_support::websocket_delivery_next(client, expected_pong).await?;
+        if result.as_ref().is_ok_and(is_notice) {
+            continue;
+        }
+        return Some(result);
+    }
+}
+async fn delivery_frame(client: &mut Client) -> tungstenite::Message {
+    tokio::time::timeout(Duration::from_secs(5), delivery_next(client, None))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+}
 async fn event(client: &mut Client) -> Value {
     tokio::time::timeout(Duration::from_secs(5), read_event(client))
         .await
@@ -382,12 +405,13 @@ async fn denied(client: &mut Client, channel: Uuid) {
         json!({"type":"error", "channel_id":channel, "code":"channel_not_found"})
     );
 }
-async fn silent(client: &mut Client) {
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), message_next(client))
-            .await
-            .is_err()
-    );
+async fn silent<S>(client: &mut WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let result =
+        tokio::time::timeout(Duration::from_millis(100), delivery_next(client, None)).await;
+    assert!(result.is_err(), "expected delivery silence, got {result:?}");
 }
 async fn closed(client: &mut Client, code: u16) {
     let frame = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1147,6 +1171,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
 mod commit;
 mod contract;
 mod history;
+mod keepalive;
 mod lifecycle;
 mod limits;
 mod load_fixture;
