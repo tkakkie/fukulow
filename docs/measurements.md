@@ -57,7 +57,7 @@ From `server/` with local PostgreSQL and `ulimit -n 100000`, run `MEASURE_READ_B
 
 ## Light k6 run (#351)
 
-2026-11-18 JST, `b156fba`, Caddy Compose on macOS. Eight publishing Members, 11.39 s (55 s cap), 80 sends, 400 deliveries, zero 429s at burst 10 and refill 1/s. From `5fa245f` until `b156fba`, light CI used one publishing Member, burst 10,000 and refill 1,000/s. [CI reproduction](../load/measurements-archive.md#light-k6-reproduction-351)
+2026-11-19, `223a948`, k6 2.4.0, the 2.x baseline; not comparable with 1.x. Eight publishing Members, burst 10, refill 1/s. Three interleaved Mac runs per version: same counts (80 sends, 400 deliveries, no errors/429s), delivery p95 16.00–17.05 ms. [Record and reproduction](../load/measurements-archive.md#light-k6-run-k6-182-vs-240-597-2026-11-19-jst-mac)
 
 ## Sustained write throughput (#309)
 

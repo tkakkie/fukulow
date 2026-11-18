@@ -200,7 +200,7 @@ export default async function (data: Setup): Promise<void> {
     socket.onerror = () => {
       if (!closing && !reconnect) recordError('WebSocket error');
     };
-    // k6 1.8.2 supplies CloseEvent.code; @types/k6 currently declares a zero-argument handler.
+    // k6 supplies CloseEvent.code; @types/k6 currently declares a zero-argument handler.
     socket.onclose = (event?: { code: number }) => {
       const code = event?.code ?? 1006;
       closed.add(1, { code: String(code), channel: String(channel) });

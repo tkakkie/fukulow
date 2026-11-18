@@ -1227,3 +1227,29 @@ LOAD_BOOTSTRAP=1 LOAD_EMAIL=load@example.test LOAD_PASSWORD=ci-load-test-only-pa
 Use a fresh Organization for each multi-Member run. Reusing a persistent `LOAD_ORGANIZATION_ID` adds Members on every run, even though teardown revokes their Account Sessions.
 
 In new `LOAD_SETUP_COMPLETE` and `LOAD_RATE` records, `sessions` counts all provisioned Account Sessions, including publisher-only sessions. `socketSessions` counts the sessions assigned to sockets.
+
+## Light k6 run, k6 1.8.2 vs 2.4.0 (#597, 2026-11-19 JST, Mac)
+
+Compatibility check for the k6 2.x bump, not a performance comparison. Harness `223a948` (PR #613), Caddy Compose on macOS, the exact [light reproduction](#light-k6-reproduction-351) command and environment (eight publishing Members, default send limiter, 55 s cap, unchanged thresholds), with `LOAD_DOCKER_NETWORK=container:<caddy container>` so `BASE_URL` stays `https://localhost`. Six runs interleaved A B A B A B, each with a fresh Compose stack and database (`down -v` between runs). Run alone as one step of the overnight measurement chain; nothing else ran on the host.
+
+- A = `grafana/k6:1.8.2@sha256:00fdcebafbc86cb0137d429529b1caa401a02e09025f02fc74866fa6e2b004d8`
+- B = `grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276`
+
+A one-request probe (`GET /api/v1/health`) from the same network mode reported HTTP/2.0 with status 200 for both versions. All values come from the `LOAD_SUMMARY` line; latencies are p95 in ms. Wall time covers the whole per-run cycle: Compose up (cached build), health check, probe, version check, load run and `down -v`.
+
+| Run | k6 | Exit | delivery_latency | publish_http_response_time | http_req_duration | k6 run | Wall |
+|---|---|---|---|---|---|---|---|
+| 1 | 1.8.2 | 0 | 16.00 | 15.00 | 14.43 | 10.4 s | 21 s |
+| 2 | 2.4.0 | 0 | 16.00 | 15.00 | 14.41 | 10.4 s | 21 s |
+| 3 | 1.8.2 | 0 | 16.00 | 15.05 | 14.66 | 10.4 s | 22 s |
+| 4 | 2.4.0 | 0 | 17.05 | 17.05 | 15.53 | 10.4 s | 21 s |
+| 5 | 1.8.2 | 0 | 16.05 | 16.00 | 14.88 | 10.4 s | 21 s |
+| 6 | 2.4.0 | 0 | 16.00 | 16.00 | 15.25 | 10.4 s | 21 s |
+
+Every run: 80 attempted and published sends, 400 deliveries, `load_errors` 0, `missing_deliveries` 0, `rejected_sends` 0, `rate_limited_sends` 0, `http_req_failed` rate 0, checks 202 passed / 0 failed, `socket_reconnects` 0, five `socket_closes{code:1000}` and no other close codes, no failed thresholds, and no watchdog cap reached. The two versions produced the same counts and the same outcome. Three runs per arm on a shared Mac cannot separate the latency differences from noise; no performance conclusion is drawn. The 2.4.0 runs start a separate 2.x baseline; do not compare them with 1.x latency records.
+
+## Superseded light k6 summary (#351, moved 2026-11-19)
+
+Moved verbatim from `docs/measurements.md` when the 2.x baseline replaced it (only the link target is adjusted for this file):
+
+2026-11-18 JST, `b156fba`, Caddy Compose on macOS. Eight publishing Members, 11.39 s (55 s cap), 80 sends, 400 deliveries, zero 429s at burst 10 and refill 1/s. From `5fa245f` until `b156fba`, light CI used one publishing Member, burst 10,000 and refill 1,000/s. [CI reproduction](#light-k6-reproduction-351)

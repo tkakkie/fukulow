@@ -3,7 +3,7 @@ api:
 	cargo run --locked --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
 
-K6_IMAGE := grafana/k6:1.8.2
+K6_IMAGE := grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276
 LOAD_DOCKER_NETWORK ?= host
 # Default Compose Caddy endpoint; set BASE_URL to the deployed FUKULOW_DOMAIN URL.
 BASE_URL ?= https://localhost
