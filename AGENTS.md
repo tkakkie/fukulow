@@ -1,12 +1,11 @@
 # fukulow
 
-Business chat app (Zulip-like: channels, topics, reply chains), built mostly by AI. Goals: high concurrency, fast display; product quality.
-Source of truth: code, tests, `openapi.json`. Docs (create no others): `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (invariant -> test), `docs/workflow.md` (follow without a human prompt), `docs/measurements.md` (latest baselines, reproduction and limits), `docs/ui.md` (web UI rules). An approved split Issue may add `docs/<kind>/<area>.md` parts of these kinds only (`docs/workflow.md` §13). Each doc's header says how to write it.
-Document only what code, tests and `openapi.json` cannot tell. Give each fact one home and update it in place by replacing or merging.
-CI enforces per-file byte budgets for docs and `AGENTS.md`. See `docs/workflow.md` §13 for writing and budget rules.
+Business chat app (Zulip-like Channels, Topics, Reply chains), built mostly by AI for high concurrency, fast display and product quality.
+Code, tests and `openapi.json` are the source of truth. Docs: `docs/spec.md`, `docs/decisions.md` (why), `docs/invariants.md` (rule -> test), `docs/workflow.md` (follow unprompted), `docs/measurements.md` (latest baselines, reproduction, limits), `docs/ui.md` (web UI). Create no others except `docs/<kind>/<area>.md` parts of these kinds through an approved split Issue. Follow each doc's header.
+Document only what code, tests and `openapi.json` cannot tell. Give each fact one home and update it in place by replacing or merging. CI enforces per-file byte budgets for docs and `AGENTS.md`. See `docs/workflow.md` §13.
 
 ## What to read
-Always this file. Default: search headings/keywords, read only matches; split doc: index, then matching parts (cross-area: every related part). Nothing found: try other keywords (spec terms, modules, error values) and related Issues/PRs before assuming no constraint.
+Always read this file. Default: search headings/keywords and read matches only. For split docs, read the index, then all parts the task touches. If nothing matches, try other keywords (spec terms, modules, error values) and related Issues/PRs before assuming no constraint.
 
 | Task | Read first |
 |---|---|
@@ -17,7 +16,7 @@ Always this file. Default: search headings/keywords, read only matches; split do
 | Implementing / PRs, reviews, labels, sweeps, conflicts, merges | "Workflow essentials" / matching `docs/workflow.md` section |
 | Toolchain, dependencies, languages / writing a doc | `docs/workflow.md` §8 / the doc's header (splits: §13) |
 
-Generated files (`openapi.json`, `web/src/api-schema.d.ts`, lockfiles) and CI/E2E/load logs: grep or read the relevant part first. Reorganising or verifying docs: read in full. "Not whole" is a default, never a ban on a needed diagnosis or consistency check.
+Grep or read relevant excerpts of generated files (`openapi.json`, `web/src/api-schema.d.ts`, lockfiles) and CI/E2E/load logs first. Read docs in full for reorganisation or verification. Read further as needed for diagnosis or consistency.
 
 ## Stack
 Rust (axum, tokio, sqlx), PostgreSQL, WebSocket in `server/`; Svelte + Vite SPA (Rust/wasm sync core, no SvelteKit/SSR) in `web/`, embedded (rust-embed). One Docker image; compose profile Caddy (default) or nginx; Xserver VPS.
@@ -39,8 +38,8 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; shared 
 - No new dependency, abstraction or doc without a reason in the PR.
 
 ## Boundaries
-- Module direction uses the explicit acyclic edge table in `scripts/module-direction.rs`: `realtime` -> `messages`, `channels`, `auth`; `messages` -> `channels`, `auth`; `channels` -> `auth`; `messages`, `realtime` -> `fukulow_api` (shared wire crate, leaf); `fukulow_client_core` -> `fukulow_api` only (native + feature-gated wasm binding; no server edge to the core). Cross-module references require a listed direct edge; reachability does not grant permission. More crates are allowed with a PR reason (responsibility, dependency direction, build time, testability); crates keep this DAG, no cycles; release stays one binary, one image. Production domain split: #378.
-- Target DAG (#319): the four domain modules keep these edges; leaves `database` (used by channels, messages; by auth only once #314 needs it) and `shutdown` (used by messages, realtime) depend on nothing. Both leaves remain outside the checked module list in #318; checking them follows in M1 (#320). Kept on purpose: `docs/decisions/process.md` #319.
+- The explicit acyclic edge table in `scripts/module-direction.rs` governs module direction: `realtime` -> `messages`, `channels`, `auth`; `messages` -> `channels`, `auth`; `channels` -> `auth`; `messages`, `realtime` -> `fukulow_api` (shared wire crate, leaf); `fukulow_client_core` -> `fukulow_api` only (native + feature-gated wasm binding; no server edge to the core). Cross-module references require a listed direct edge. Reachability does not grant permission. More crates need a PR reason (responsibility, dependency direction, build time, testability). Preserve this DAG across crates and release one binary and one image. Production domain split: #378.
+- Target DAG (#319): keep the four domain modules' edges. Leaves `database` (used by channels, messages; by auth only once #314 needs it) and `shutdown` (used by messages, realtime) depend on nothing. Both stay outside the checked module list in #318. Check them in M1 (#320). Kept on purpose: `docs/decisions/process.md` #319.
 - A module owns its tables and exposes functions; others never query them. Handlers live in their module: parse, call, map errors.
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.
 - (3) controller (plain `.ts`): sockets, timers, backoff, HTTP, effects. (4) pure Rust protocol owns State: `step(input)` returns effects, changed Channels, records and stateChanged; no clock, randomness, I/O or Svelte. JS caches changed views only; bounded request/timer accessors. Vitest exercises wasm. (5) API/transport: `src/api.ts`, WebSocket client, generated types.
@@ -53,8 +52,8 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; shared 
 - Migrations: `bash scripts/check-migrations.sh <base-sha>`, `node --test scripts/check-migrations.test.ts`; the schema guard runs in `cargo test` with Postgres. API types: `make api`. Module direction: `docs/workflow.md` §8.
 
 ## Workflow essentials
-- Own worktree, branch `claude/|codex/|antigravity/<topic>`. Never push to `main`; only the maintainer merges (or tells an AI to).
-- Codex and Antigravity run as workers: they do not commit, push or use GitHub; the orchestrator does those steps for them (`docs/workflow.md` §4).
-- Implement only an Issue with "Done when" and `status:ready`; set `status:working`; draft PR; CI green; maintainer always reviews.
+- Own worktree, branch `claude/|codex/|antigravity/<topic>` (workflow §9). Never push to `main`. The human maintainer holds merge authority. An AI may merge only on the maintainer's explicit instruction (§10).
+- Codex and Antigravity never commit, push or use GitHub. The orchestrator acts for them (§4).
+- Implement only an Issue with "Done when" and `status:ready`. Set `status:working` first. After implementing, open a draft PR and get green CI. The maintainer always reviews (workflow §2).
 - At most one status label, set by the AI handing off: `working` (AI busy), `ai-review` (CI/AI/Copilot), `ready` (may start), `human-review` (maintainer; entry conditions in `docs/workflow.md` §2, §5), `needs-decision` (question in last comment). Also `security`, `bug`, `risk:needs-review` (auth, permissions, real-time, migrations), `blocked`; every Issue has a milestone (a sprint, or `Backlog` if unscheduled).
 - GitHub text in English (Japanese only for UI strings). AI comments, reviews, PR bodies end with `AI: <name> / model: <id> / effort: <level>`.
