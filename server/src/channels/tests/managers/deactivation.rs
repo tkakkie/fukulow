@@ -168,6 +168,76 @@ async fn deactivation_authentication_precedes_membership_and_target(pool: PgPool
 }
 
 #[fukulow_test::test]
+async fn member_endpoint_credential_path_and_session_error_precedence(pool: PgPool) {
+    let org = organization(&pool).await;
+    let owner = Uuid::new_v4();
+    let valid = member(&pool, org, owner, "owner").await;
+    let expired = member(&pool, org, Uuid::new_v4(), "owner").await;
+    let expired_sessions =
+        sqlx::query("UPDATE account_sessions SET expires_at=now() WHERE token_hash=$1")
+            .bind(Sha256::digest(expired.as_bytes()).to_vec())
+            .execute(&pool)
+            .await
+            .unwrap();
+    assert_eq!(expired_sessions.rows_affected(), 1);
+    let unknown = "a".repeat(64);
+    let app = router(&pool).await;
+
+    for (method, endpoint, input) in [
+        ("PATCH", "role", json!({"role":"member"})),
+        ("POST", "deactivate", Value::Null),
+    ] {
+        for (id, token, status, error) in [
+            (
+                "%FF",
+                "short",
+                StatusCode::UNAUTHORIZED,
+                "invalid credentials",
+            ),
+            (
+                "%FF",
+                expired.as_str(),
+                StatusCode::BAD_REQUEST,
+                "invalid input",
+            ),
+            (
+                "%FF",
+                unknown.as_str(),
+                StatusCode::BAD_REQUEST,
+                "invalid input",
+            ),
+            (
+                "%6Eot-a-uuid",
+                &expired,
+                StatusCode::UNAUTHORIZED,
+                "invalid credentials",
+            ),
+            (
+                "%6Eot-a-uuid",
+                &unknown,
+                StatusCode::UNAUTHORIZED,
+                "invalid credentials",
+            ),
+            (
+                "%6Eot-a-uuid",
+                &valid,
+                StatusCode::BAD_REQUEST,
+                "invalid input",
+            ),
+        ] {
+            let path = format!("/api/v1/orgs/{org}/members/{id}/{endpoint}");
+            let response = request(&app, method, &path, token, input.clone()).await;
+            assert_eq!(response.status(), status, "{method} {path}");
+            assert_eq!(
+                body(response).await,
+                json!({"error":error}),
+                "{method} {path}"
+            );
+        }
+    }
+}
+
+#[fukulow_test::test]
 async fn deactivation_role_matrix_and_repeat_requests_use_member_ids(pool: PgPool) {
     for actor_role in ["owner", "admin"] {
         let f = Fixture::new(pool.clone()).await;
