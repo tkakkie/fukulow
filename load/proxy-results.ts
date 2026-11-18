@@ -4,7 +4,7 @@ import type { AppEvidence, ProxyEvidence } from './app-evidence.ts';
 export type RunResult = {
   exitCode: number; generatorExitCode?: number; tls?: Tls[]; measurementError?: string;
   /** load/scenario.ts provisioned every Account and Channel (`LOAD_SETUP_COMPLETE`). */
-  setupComplete?: { sessions: number; accounts: number };
+  setupComplete?: { sessions: number; accounts: number; socketSessions?: number };
   /** load/app-evidence.ts aggregates for the generator window (proxy runs only). */
   appEvidence?: AppEvidence;
   proxyEvidence?: ProxyEvidence;
