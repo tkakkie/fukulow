@@ -14,13 +14,16 @@ export const repliesApi = (organizationId: string): RepliesApi => ({
 })
 // Half a default page leaves context on both sides of a descendant in one read.
 const ANCHOR_CONTEXT = 25
-const chain = (anchor: Message, openedThrough: number) => ({ anchor, openedThrough, rootId: anchor.reply_root_id ?? anchor.id,
+const beforeAnchor = (anchor: Message) => anchor.reply_root_id ? Math.max(0, anchor.created_seq - ANCHOR_CONTEXT) : 0
+const chain = (anchor: Message, openedThrough: number) => ({ anchor, anchorCurrent: true, openedThrough, rootId: anchor.reply_root_id ?? anchor.id,
   messages: new Map<string, Message>([[anchor.id, anchor]]),
   asOfSeq: undefined as number | undefined,
-  after: anchor.reply_root_id ? Math.max(0, anchor.created_seq - ANCHOR_CONTEXT) : 0,
+  moveBaseline: undefined as Pick<ReplyChainPage, 'chain_version' | 'history_generation'> | undefined,
+  after: beforeAnchor(anchor),
   hasMore: true, hasOlder: Boolean(anchor.reply_root_id && anchor.created_seq > ANCHOR_CONTEXT),
   following: true, hasNewer: false, newerCount: 0,
   restart: false,
+  restartAfter: 0,
   liveFloor: 0,
   liveSequences: [] as Parameters<typeof rememberSequence>[0],
   loading: false, error: false, read: Symbol() })
@@ -51,9 +54,13 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   const pending = (w: Chain, c: ReturnType<Sync['get']>['channels'][string] | undefined) =>
     (c?.pending ?? []).filter(p => p.reply_to && (p.replyRootId === w.rootId || p.reply_to === w.rootId || w.messages.has(p.reply_to)))
   const mergeStream = (channel: string, w: Chain, incoming?: Message[]) => {
+    if (w.restart && !w.anchorCurrent) return false
     let changed = false
     for (const m of incoming ?? sync.get().channels[channel]?.messages ?? []) {
-      if (w.anchor.id === m.id) w.anchor = canonical(channel, w.anchor, m) ?? w.anchor
+      if (w.anchor.id === m.id) {
+        const anchor = canonical(channel, w.anchorCurrent ? w.anchor : undefined, m)
+        if (anchor) { w.anchor = anchor; w.anchorCurrent = true }
+      }
       if (belongs(w, m) && (!w.hasOlder || m.created_seq > w.after) && w.messages.get(m.id) !== m) {
         const isNew = m.created_seq > w.liveFloor && countSequencesAfter(w.liveSequences, m.created_seq - 1) === countSequencesAfter(w.liveSequences, m.created_seq)
         if (m.created_seq > w.liveFloor) rememberSequence(w.liveSequences, m.created_seq)
@@ -83,13 +90,12 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       if (w) {
         if (!next.running || next.organization === 'unavailable' || !after?.watched || after.state === 'unavailable' ||
           (before?.cursor != null && after.cursor === null) || previous.historyEpoch !== next.historyEpoch) { release(w); chains.delete(id); changed.add(id) }
-        else if (after.moveSeq !== undefined && before?.moveSeq !== after.moveSeq) {
-          const position = after.moveSeq
-          w.read = Symbol(); w.loading = false; w.restart = true
-          w.messages.clear(); inFlight.delete(w)
+        else if (after.moveEpoch !== undefined && before?.moveEpoch !== after.moveEpoch) {
+          const epoch = after.moveEpoch
+          invalidate(w, beforeAnchor(w.anchor))
           changed.add(id)
           queueMicrotask(() => {
-            if (current(id, w) && w.restart && sync.get().channels[id]?.moveSeq === position) void loadMore(id)
+            if (current(id, w) && w.restart && sync.get().channels[id]?.moveEpoch === epoch) void loadMore(id)
           })
         }
         else {
@@ -111,18 +117,26 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     sync.get().organization === 'available' && chains.get(channel) === w &&
     sync.get().channels[channel]?.watched === true && sync.get().channels[channel]?.state !== 'unavailable'
   const release = (w: Chain) => { w.messages.clear(); w.anchor = { ...w.anchor, body: '' } }
+  function invalidate(w: Chain, after: number) {
+    w.read = Symbol(); w.loading = false; w.restart = true; w.restartAfter = after
+    w.messages.clear(); w.asOfSeq = undefined; w.moveBaseline = undefined; w.hasMore = true
+    w.anchorCurrent = false; w.hasOlder = after > 0; w.hasNewer = false; w.newerCount = 0
+    inFlight.delete(w)
+  }
 
   async function readMore(channel: string, restarted = false) {
     const w = chains.get(channel)
     if (!w || !current(channel, w) || w.loading || (!w.hasMore && !w.restart)) return
-    const requestedAfter = w.restart ? 0 : w.after
+    const requestedAfter = w.restart ? w.restartAfter : w.after
+    const requestedW = w.restart ? undefined : w.asOfSeq
     const mutationFloor = sync.get().channels[channel]?.mutationSeq ?? 0
     const versionEpoch = sync.get().channels[channel]?.versionEpoch
     const token = Symbol(), session = sessionToken
     w.read = token; w.loading = true; w.error = false; notify(new Set([channel]))
     const isCurrent = () => current(channel, w) && w.read === token && sync.get().channels[channel]?.versionEpoch === versionEpoch
     let timer: ReturnType<typeof setTimeout> | undefined
-    const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, w.anchor.id, { history_generation: sync.get().historyGeneration, as_of_seq: w.restart ? undefined : w.asOfSeq, after_seq: requestedAfter }))
+    const anchor = w.anchor.id, generation = sync.get().historyGeneration
+    const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, anchor, { history_generation: generation, as_of_seq: requestedW, after_seq: requestedAfter }))
       .catch((): Result<ReplyChainPage> => ({ ok: false, kind: 'network' }))
     // C6 late 401 and C10 remain authoritative for this Account Session, even after timeout or unwatch.
     void operation.then(r => {
@@ -141,9 +155,12 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       const floor = mutationFloor < mutationSeq ? mutationSeq : state?.moveSeq ?? 0
       if (result.ok && result.data.as_of_seq < floor) result = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
       if (!result.ok && result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) {
-        w.messages.clear(); w.asOfSeq = undefined; w.after = 0; w.restart = true; w.hasMore = true
-        const state = sync.get().channels[channel]
-        for (const m of state?.messages ?? []) if (belongs(w, m) && (m.version >= state!.mutationSeq || m.id === w.rootId)) w.messages.set(m.id, m)
+        w.messages.clear(); w.asOfSeq = undefined; w.moveBaseline = undefined; w.after = 0; w.hasMore = true
+        if (!w.restart) { w.restart = true; w.restartAfter = 0 }
+        // Edit/Delete can leave complete current stream records. A Move restart keeps the chain hidden until its page arrives.
+        if (w.anchorCurrent) for (const m of state?.messages ?? []) {
+          if (belongs(w, m) && (m.version >= mutationSeq || m.id === w.rootId)) w.messages.set(m.id, m)
+        }
         return readMore(channel, true)
       }
       if (!result.ok) {
@@ -155,18 +172,21 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       } else if (result.data.root_id !== w.rootId) {
         w.error = true
       } else {
-        if (w.restart) w.asOfSeq = result.data.as_of_seq
-        else w.asOfSeq ??= result.data.as_of_seq
+        if (requestedW === undefined) {
+          w.asOfSeq = result.data.as_of_seq
+          const { chain_version, history_generation } = result.data
+          if (Number.isSafeInteger(chain_version) && chain_version > 0) w.moveBaseline = { chain_version, history_generation }
+        }
         const messages = result.data.messages.filter(m => m.channel_id === channel && belongs(w, m))
         if (w.restart) {
-          w.messages.clear(); w.after = 0; w.hasOlder = w.hasNewer = false; w.newerCount = 0
+          w.messages.clear(); w.after = requestedAfter; w.hasOlder = requestedAfter > 0; w.hasNewer = false; w.newerCount = 0
           w.liveSequences = []; w.liveFloor = 0; w.following = true; w.restart = false
         }
         for (const m of messages) {
           const current = canonical(channel, w.messages.get(m.id), m)
           if (current) {
             w.messages.set(m.id, current)
-            if (w.anchor.id === current.id) w.anchor = current
+            if (w.anchor.id === current.id) { w.anchor = current; w.anchorCurrent = true }
           }
         }
         // Only the returned page advances continuation: a live append may be far beyond an unpaged sibling.
@@ -216,9 +236,10 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   function snapshot(channel: string) {
     const w = closed ? undefined : chains.get(channel)
     const c = closed ? undefined : sync.get().channels[channel]
-    const topicMessage = w?.messages.values().next().value ?? (w?.restart ? undefined : w?.anchor)
+    const topicMessage = w?.messages.values().next().value ?? (w?.anchorCurrent ? w.anchor : undefined)
     const topicId = topicMessage?.topic_id ?? null
-    return { anchor: w?.anchor ?? null, rootId: w?.rootId ?? null, topicId,
+    return { anchor: w?.anchorCurrent ? w.anchor : null, rootId: w?.rootId ?? null, topicId,
+      chainVersion: w?.restart ? undefined : w?.moveBaseline?.chain_version,
       messages: w ? [...w.messages.values()].sort((a, b) => a.created_seq - b.created_seq) : [],
       pending: w ? pending(w, c) : [],
       loading: w?.loading ?? false, error: w?.error ?? false, hasMore: w?.hasMore ?? false,
@@ -239,11 +260,15 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       const old = chains.get(channel)
       if (old?.rootId === (anchor.reply_root_id ?? anchor.id) &&
         (old.messages.has(anchor.id) || old.anchor.id === anchor.id || old.rootId === anchor.id)) {
-        old.anchor = canonical(channel, old.anchor.id === anchor.id ? old.anchor : undefined, old.messages.get(anchor.id) ?? anchor) ?? old.anchor
+        if (!old.restart) {
+          const current = canonical(channel, old.anchorCurrent && old.anchor.id === anchor.id ? old.anchor : undefined, old.messages.get(anchor.id) ?? anchor)
+          if (current) { old.anchor = current; old.anchorCurrent = true }
+        }
         notify(new Set([channel]))
         return
       }
       const w = chain(anchor, sync.get().channels[channel]?.cursor ?? 0)
+      if (anchor.version < (sync.get().channels[channel]?.moveSeq ?? 0)) invalidate(w, beforeAnchor(anchor))
       const changed = new Set([...chains.keys(), channel])
       for (const old of chains.values()) release(old)
       chains.clear(); snapshots.clear()
@@ -251,6 +276,16 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       await loadMore(channel)
     },
     loadMore,
+    moveBaseline(channel: string, anchor: string) {
+      const w = chains.get(channel)
+      if (!w || !w.moveBaseline || w.restart || !current(channel, w) ||
+        (anchor !== w.anchor.id && anchor !== w.rootId && !w.messages.has(anchor))) return undefined
+      return { ...w.moveBaseline, isCurrent: () => current(channel, w), refresh: async () => {
+        if (!current(channel, w)) return
+        invalidate(w, beforeAnchor(w.anchor))
+        await loadMore(channel)
+      } }
+    },
     setPinned(channel: string, pinned: boolean) { const w = chains.get(channel); if (w) w.following = pinned },
     async loadLatest(channel: string) {
       const w = chains.get(channel)
@@ -265,7 +300,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     async loadOlder(channel: string) {
       const w = chains.get(channel)
       if (!w || !current(channel, w)) return
-      w.restart = true; w.read = Symbol(); w.loading = false; w.following = false
+      w.restart = true; w.restartAfter = 0; w.read = Symbol(); w.loading = false; w.following = false
       inFlight.delete(w)
       await loadMore(channel)
     },

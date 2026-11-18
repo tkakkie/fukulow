@@ -696,6 +696,15 @@
       },
       "additionalProperties": false
     },
+    "MoveSpec": {
+      "type": "object", "required": ["seq", "root_id", "source_topic_id", "destination_topic_id", "operation_id"],
+      "properties": {
+        "seq": { "$ref": "#/$defs/Seq" }, "root_id": { "$ref": "#/$defs/Label" },
+        "source_topic_id": { "oneOf": [{ "$ref": "#/$defs/Label" }, { "type": "null" }] },
+        "destination_topic_id": { "$ref": "#/$defs/Label" }, "operation_id": { "$ref": "#/$defs/Label" }
+      },
+      "additionalProperties": false
+    },
     "Status": {
       "$comment": "How an HTTP request ended: a status code, or no response (network) / no answer in time (timeout).",
       "oneOf": [{ "$ref": "#/$defs/HttpStatus" }, { "enum": ["network", "timeout"] }]
@@ -752,7 +761,13 @@
           "$comment": "A message event arrived (live, replayed or echo).",
           "type": "object",
           "required": ["type", "channel", "seq", "kind", "message"],
-          "properties": { "type": { "const": "message" }, "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "move", "delete"] }, "channel": { "$ref": "#/$defs/Label" }, "message": { "$ref": "#/$defs/MessageSpec" } },
+          "properties": { "type": { "const": "message" }, "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "delete"] }, "channel": { "$ref": "#/$defs/Label" }, "message": { "$ref": "#/$defs/MessageSpec" } },
+          "additionalProperties": false
+        },
+        {
+          "$comment": "A body-free Move event arrived live or during replay. Its version equals its position.",
+          "type": "object", "required": ["type", "channel", "move"],
+          "properties": { "type": { "const": "move" }, "channel": { "$ref": "#/$defs/Label" }, "move": { "$ref": "#/$defs/MoveSpec" } },
           "additionalProperties": false
         },
         {
@@ -781,10 +796,10 @@
           "type": "object", "required": ["type", "respond_to", "events", "has_more"],
           "properties": {
             "history_generation": { "type": "string" }, "type": { "const": "events_result" }, "respond_to": { "$ref": "#/$defs/Label" },
-            "events": { "type": "array", "items": {
+            "events": { "type": "array", "items": { "oneOf": [{
               "type": "object", "required": ["seq", "kind", "message"],
-              "properties": { "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "move", "delete"] }, "message": { "$ref": "#/$defs/MessageSpec" } }, "additionalProperties": false
-            } }, "has_more": { "type": "boolean" }
+              "properties": { "seq": { "$ref": "#/$defs/Seq" }, "kind": { "enum": ["create", "edit", "delete"] }, "message": { "$ref": "#/$defs/MessageSpec" } }, "additionalProperties": false
+            }, { "type": "object", "required": ["kind", "move"], "properties": { "kind": { "const": "move" }, "move": { "$ref": "#/$defs/MoveSpec" } }, "additionalProperties": false }] } }, "has_more": { "type": "boolean" }
           }, "additionalProperties": false
         },
         {

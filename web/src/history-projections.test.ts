@@ -1,11 +1,13 @@
-import { expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { deferred, replyPage, msg, ok, page, summary, topicClient } from './topic-test-helpers'
 import { reply, replyClient, root } from './reply-test-helpers'
 import { moveEvent } from './protocol-test-helpers'
 import { flush } from './sync-test-helpers'
 import type { ReplyChainPage, Result, TimelinePage } from './api'
+import { createReplies } from './replies'
 const generation = '00000000-0000-4000-8000-000000000515'
 const expired = { ok: false as const, kind: 'http' as const, status: 409, error: 'snapshot_expired' }
+afterEach(() => vi.useRealTimers())
 
 it('Topic bootstrap trusts the event watermark with empty or older visible records', async () => {
   for (const items of [[], [{ kind: 'topic' as const, topic: summary('T', 3, 1) }]]) {
@@ -139,5 +141,132 @@ it('refetches an open Reply chain on Move and fences its older page', async () =
   await pending; await flush()
   expect(c.replies.get('A').messages).toEqual([moved])
   expect(c.sync.get().channels.A.cursor).toBe(2)
+  await c.sync.close()
+})
+
+it('a Move refetches a distant descendant around its anchor and rejects a below-W retry page', async () => {
+  const c = replyClient(), anchor = reply(75)
+  await c.sync.start(); c.handlers[0].onReady()
+  c.listMessages.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 80, messages: [anchor], has_more: true }))
+  await c.sync.watch('A')
+  c.handlers[0].onEvent({ type: 'subscribed', channel_id: 'A', history_generation: generation, caught_up_seq: 80 })
+  const old = { ...replyPage({ history_generation: generation, as_of_seq: 80, root_id: 'id1', messages: [anchor], has_more: false }), chain_version: 80 }
+  c.listReplyChain.mockResolvedValueOnce(ok(old))
+  await c.replies.open('A', anchor)
+  const refreshed = deferred<Result<ReplyChainPage>>()
+  c.listReplyChain.mockResolvedValueOnce(ok(old)).mockReturnValueOnce(refreshed.promise)
+  c.handlers[0].onEvent(moveEvent(81)); await flush()
+  expect(c.replies.get('A')).toMatchObject({ anchor: null, chainVersion: undefined, messages: [] })
+  expect(c.listReplyChain.mock.calls.slice(-2)).toEqual([
+    ['A', anchor.id, { history_generation: generation, as_of_seq: undefined, after_seq: 50 }],
+    ['A', anchor.id, { history_generation: generation, as_of_seq: undefined, after_seq: 50 }],
+  ])
+  const moved = { ...anchor, topic_id: 'destination', version: 81 }
+  refreshed.resolve(ok({ ...old, as_of_seq: 81, chain_version: 81, messages: [moved] })); await flush()
+  expect(c.replies.get('A')).toMatchObject({ anchor: moved, chainVersion: 81, messages: [moved], hasOlder: true })
+  await c.sync.close()
+})
+
+it('refetches the open Topic after Move even when a summary-only sentinel was inserted first', async () => {
+  const c = topicClient(); await c.boot()
+  const missing = { ok: false as const, kind: 'http' as const, status: 404, error: 'topic_not_found' }
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(missing).mockResolvedValueOnce(missing)
+  await c.topics.loadSummary('A', 'missing')
+  await c.topics.loadSummary('A', 'T')
+  expect(c.topics.get('A').topic('missing')).toMatchObject({ notFound: true, initialized: false })
+  await c.topics.loadTopic('A', 'T')
+  expect(c.topics.get('A').topic('T').initialized).toBe(true)
+  expect(c.topics.get('A').topic('missing').notFound).toBe(true)
+
+  const moved = { ...msg(8, 'T'), version: 11 }
+  const fresh = { history_generation: generation, as_of_seq: 11, has_more: false, messages: [moved, msg(10, 'T')] }
+  c.listMessages.mockResolvedValueOnce(ok(fresh))
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ ...page(11), items: [{ kind: 'topic', topic: summary('T', 10, 4) }] }))
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 10, topic: summary('T', 10, 3) }))
+    .mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, topic: summary('T', 10, 4) }))
+    .mockResolvedValue(missing)
+  c.topicsApi.listTopicMessages.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 10, has_more: false, messages: [msg(5, 'T')] }))
+    .mockResolvedValueOnce(ok(fresh))
+  c.handlers[0].onEvent({ ...moveEvent(11, 'id8'), destination_topic_id: 'T' }); await flush(); await flush()
+  expect(c.topicsApi.listTopicMessages.mock.calls).toEqual([
+    ['A', 'T', { history_generation: generation }], ['A', 'T', { history_generation: generation }], ['A', 'T', { history_generation: generation }],
+  ])
+  expect(c.topicsApi.getTopicSummary.mock.calls).toEqual([['A', 'missing'], ['A', 'T'], ['A', 'T'], ['A', 'T'], ['A', 'missing']])
+  expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 4 })
+  expect(c.topics.get('A').topic('T').messages).toEqual(fresh.messages)
+  await c.sync.close()
+})
+
+it('live Move, reconnect replay and gap fill converge on the same held projections', async () => {
+  vi.useFakeTimers()
+  async function run(mode: 'live' | 'replay' | 'fill') {
+    const c = topicClient()
+    const oldAnchor = msg(5, 'T'), moved = { ...oldAnchor, topic_id: 'destination', version: 11 }
+    const initial = ok(replyPage({ history_generation: generation, as_of_seq: 10, root_id: oldAnchor.id, messages: [oldAnchor], has_more: false }))
+    const latest = deferred<Result<ReplyChainPage>>()
+    const listReplyChain = vi.fn().mockResolvedValueOnce(initial).mockReturnValue(latest.promise)
+    const replies = createReplies(c.sync, { api: { listReplyChain } })
+    await c.boot(); await c.topics.loadList('A'); await c.topics.loadTopic('A', 'T'); await replies.open('A', oldAnchor)
+    const move = { ...moveEvent(11, oldAnchor.id), source_topic_id: 'T' }
+    const next = { type: 'message' as const, kind: 'create' as const, seq: 12, message: msg(12) }
+    const destination = { ...summary('destination', 5, 1), latest_message: moved }
+    c.topicsApi.listTimeline.mockResolvedValue(ok({ history_generation: generation, as_of_seq: 12, has_more: false, items: [
+      { kind: 'topic', topic: destination }, { kind: 'message', message: msg(12) },
+    ] }))
+    c.topicsApi.listTopics.mockResolvedValue(ok({ history_generation: generation, as_of_seq: 12, has_more: false, topics: [destination] }))
+    const missing = { ok: false as const, kind: 'http' as const, status: 404, error: 'topic_not_found' }
+    c.topicsApi.getTopicSummary.mockResolvedValue(missing)
+    c.topicsApi.listTopicMessages.mockResolvedValue(missing)
+    c.listMessages.mockResolvedValue(ok({ history_generation: generation, as_of_seq: 12, has_more: false, messages: [moved, msg(12)] }))
+
+    let socket = c.handlers[0]
+    if (mode === 'replay') {
+      socket.onClose(1006); await vi.advanceTimersByTimeAsync(500)
+      socket = c.handlers[1]; socket.onReady()
+      expect(c.controls.at(-1)).toEqual({ type: 'subscribe', channel_id: 'A', after_seq: 10, history_generation: generation })
+      c.handlers[0].onEvent(move)
+      expect(replies.get('A').messages).toEqual([oldAnchor])
+    }
+    if (mode === 'fill') {
+      c.listChannelEvents.mockResolvedValueOnce(ok({ history_generation: generation, has_more: false, events: [move] }))
+      socket.onEvent(next); await vi.advanceTimersByTimeAsync(100)
+    } else {
+      socket.onEvent(move); socket.onEvent(next)
+      if (mode === 'replay') socket.onEvent({ type: 'subscribed', channel_id: 'A', caught_up_seq: 12, history_generation: generation })
+    }
+    expect(replies.get('A')).toMatchObject({ messages: [], anchor: null, chainVersion: undefined })
+    latest.resolve(ok(replyPage({ history_generation: generation, as_of_seq: 12, root_id: oldAnchor.id, messages: [moved], has_more: false })))
+    await flush()
+    const thread = replies.get('A'), view = c.topics.get('A'), core = c.sync.get().channels.A
+    expect(core.cursor).toBe(12)
+    expect(view.main.asOfSeq).toBe(12)
+    expect(view.list.asOfSeq).toBe(12)
+    expect(view.topic('T')).toMatchObject({ notFound: true, messages: [] })
+    expect(thread).toMatchObject({ chainVersion: 11, topicId: 'destination', messages: [moved] })
+    socket.onEvent(move); await flush()
+    expect(replies.get('A')).toBe(thread)
+    expect(c.topics.get('A')).toBe(view)
+    expect(listReplyChain).toHaveBeenCalledTimes(2)
+    replies.close(); await c.sync.close()
+    return { messages: core.messages, lines: view.lines, list: view.list, thread }
+  }
+  const live = await run('live')
+  expect(await run('replay')).toEqual(live)
+  expect(await run('fill')).toEqual(live)
+})
+
+it('a lower Move for another chain fences a pending projection without lowering the covering watermark', async () => {
+  const c = topicClient(); await c.boot(); await c.topics.loadTopic('A', 'T')
+  const old = deferred<Result<TimelinePage>>(), current = deferred<Result<TimelinePage>>()
+  c.topicsApi.listTimeline.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise)
+  c.handlers[0].onEvent(moveEvent(12, 'id10')); await flush()
+  c.handlers[0].onEvent(moveEvent(11, 'id8')); await flush()
+  expect(c.topicsApi.listTimeline).toHaveBeenCalledTimes(3)
+  const fresh = { ...page(12), items: [], has_more: false }
+  current.resolve(ok(fresh)); await flush()
+  old.resolve(ok(page(11))); await flush()
+  expect(c.sync.get().channels.A).toMatchObject({ cursor: 12, moveSeq: 12 })
+  expect(c.topics.get('A').main.asOfSeq).toBe(12)
+  expect(c.topics.get('A').lines.every(line => line.kind !== 'message' || line.message.id !== 'id8')).toBe(true)
   await c.sync.close()
 })

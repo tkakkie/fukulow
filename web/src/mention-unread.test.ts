@@ -110,6 +110,32 @@ it('Move refetches Unread and Mention unread at a covering watermark and preserv
   expect(c.unread.get('A')).toMatchObject({ unreadCount: 1, mentionUnreadCount: 1, main: { position: 0, unreadCount: 0, mentionUnreadCount: 0 }, topics: { T: { position: 2, unreadCount: 0, mentionUnreadCount: 0 } } })
   await c.sync.close()
 })
+it('a Move can revive a held empty Topic without resetting its Unread or Mention read position', async () => {
+  const c = client()
+  const history_generation = mentioned(2, 'T').history_generation
+  const source = { ...summary('T', 2, 1), mention_unread_count: 1, latest_message: mentioned(2, 'T') }
+  c.summaries.set('T', source)
+  await c.boot(); await c.enter('T')
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 1, unreadCount: 1, mentionUnreadCount: 1 })
+
+  const absent = { ok: false as const, kind: 'http' as const, status: 404, error: 'topic_not_found' }
+  c.unreadApi.getTopicSummary.mockResolvedValue(absent)
+  c.topicsApi.listTopicMessages.mockResolvedValue(absent)
+  c.topicsApi.listTimeline.mockResolvedValue(ok({ history_generation, as_of_seq: 4, has_more: false, items: [] }))
+  c.rows[0] = row({ as_of_seq: 4 })
+  c.handlers[0].onEvent({ ...moveEvent(4, 'id2'), source_topic_id: 'T', destination_topic_id: 'U' }); await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 1, stopped: true, unreadCount: null, mentionUnreadCount: null })
+
+  const revived = { ...source, latest_message: { ...mentioned(2, 'T'), version: 5 } }
+  c.unreadApi.getTopicSummary.mockResolvedValue(ok({ history_generation, as_of_seq: 5, topic: revived }))
+  c.topicsApi.listTopicMessages.mockResolvedValue(ok({ history_generation, as_of_seq: 5, has_more: false, messages: [revived.latest_message] }))
+  c.topicsApi.listTimeline.mockResolvedValue(ok({ history_generation, as_of_seq: 5, has_more: false, items: [{ kind: 'topic', topic: revived }] }))
+  c.rows[0] = row({ as_of_seq: 5 })
+  c.handlers[0].onEvent({ ...moveEvent(5, 'id2'), source_topic_id: 'U', destination_topic_id: 'T' }); await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 1, stopped: false, unreadCount: 1, mentionUnreadCount: 1 })
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  await c.sync.close()
+})
 it.each(['regrant', 'Session', 'Organization'])('Mention late REST and frames cannot restore counts after %s fencing', async boundary => {
   const c = client(); await c.boot()
   const late = deferred<Result<ChannelList>>()

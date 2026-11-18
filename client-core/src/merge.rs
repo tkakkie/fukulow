@@ -10,6 +10,7 @@ pub(crate) enum Source {
     Events,
     Projection,
 }
+
 fn same_message(a: &Message, b: &Message) -> bool {
     a.id == b.id
         && a.channel_id == b.channel_id
@@ -72,8 +73,16 @@ impl Step<'_> {
             || c.advancing
                 .iter()
                 .any(|range| range.start <= event.seq && event.seq <= range.end);
-        if !seen {
+        if seen {
+            return;
+        }
+        if c.moved_roots
+            .get(&event.root_id)
+            .is_none_or(|seq| *seq < event.seq)
+        {
+            Rc::make_mut(&mut c.moved_roots).insert(event.root_id, event.seq);
             c.move_seq = c.move_seq.max(Some(event.seq));
+            c.move_epoch = Some(c.move_epoch.unwrap_or_default() + 1);
             c.mutation_seq = c.mutation_seq.max(event.seq);
             c.snapshot_seq = None;
             let current = |m: &Message| {
@@ -89,6 +98,13 @@ impl Step<'_> {
                 }
                 Rc::make_mut(&mut c.messages).retain(|m| current(m));
             }
+            // A gap page can contain both a Message state and a later invalidation.
+            self.out.records.retain_mut(|(channel, records)| {
+                if *channel == id {
+                    records.retain(&current);
+                }
+                !records.is_empty()
+            });
             for request in self.core.requests.values_mut() {
                 if matches!(request, Request::History { channel, page: Page::Before, stale: false, .. } if *channel == id)
                 {
@@ -97,6 +113,7 @@ impl Step<'_> {
                 }
             }
             self.channel(id).older = None;
+            self.cap_moved_roots(id, MAIN_MESSAGE_LIMIT);
             self.history(id, Page::Latest, None);
         }
         // Move proves event coverage without settling a send or emitting Message state.
@@ -163,6 +180,17 @@ impl Step<'_> {
         let c = self.channel(id);
         let mut messages = None;
         for mut m in incoming {
+            // Before a covering page, an evicted root floor cannot prove that an
+            // unheld state from a delayed stream or ACK still belongs to its Topic.
+            if c.moved_roots
+                .get(&m.reply_root_id.unwrap_or(m.id))
+                .is_some_and(|seq| m.version < *seq)
+                || (matches!(source, Source::Ack | Source::Stream | Source::Events)
+                    && m.version < c.retired_move_through
+                    && !c.messages.iter().any(|held| held.id == m.id))
+            {
+                continue;
+            }
             if m.version > m.created_seq || m.deleted {
                 c.mutation_seq = c.mutation_seq.max(m.version);
             }
@@ -327,6 +355,20 @@ impl Step<'_> {
             c.advancing = Rc::new(merged);
         }
     }
+    pub(crate) fn cap_moved_roots(&mut self, id: Uuid, limit: usize) {
+        let c = self.channel(id);
+        if c.moved_roots.len() <= limit {
+            return;
+        }
+        let roots = Rc::make_mut(&mut c.moved_roots);
+        while roots.len() > limit {
+            let Some((&root, &seq)) = roots.iter().min_by_key(|(_, seq)| *seq) else {
+                break;
+            };
+            roots.remove(&root);
+            c.retired_move_through = c.retired_move_through.max(seq);
+        }
+    }
     pub(crate) fn cap_versions(&mut self, id: Uuid, limit: usize) {
         let c = self.channel(id);
         let mut retired = Vec::new();
@@ -381,5 +423,57 @@ impl Step<'_> {
                 self.history(id, Page::Latest, None);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn retired_move_floors_fence_late_bodies_until_a_covering_read() {
+        let channel = Uuid::from_u128(1);
+        let root = Uuid::from_u128(2);
+        let destination = Uuid::from_u128(3);
+        let mut core = Core::new(Uuid::from_u128(4));
+        let mut step = Step::new(&mut core);
+        for (root_id, seq) in [(root, 10), (Uuid::from_u128(5), 11)] {
+            step.merge_move(
+                serde_json::from_value(json!({
+                    "type":"message","kind":"move","history_generation":Uuid::nil(),
+                    "channel_id":channel,"seq":seq,"version":seq,"root_id":root_id,
+                    "source_topic_id":null,"destination_topic_id":destination,"operation_id":root_id
+                }))
+                .unwrap(),
+                Source::Stream,
+            );
+        }
+        step.cap_moved_roots(channel, 1);
+        let c = step.channel(channel);
+        assert_eq!(c.retired_move_through, 10);
+        assert!(!c.moved_roots.contains_key(&root));
+
+        let stale: Message = serde_json::from_value(json!({
+            "history_generation":Uuid::nil(),"channel_id":channel,"id":Uuid::from_u128(6),
+            "created_seq":7,"version":7,"deleted":false,"client_message_id":Uuid::from_u128(7),
+            "sender":Uuid::from_u128(8),"body":"reply","created_at":"2026-01-01T00:00:00Z",
+            "topic_id":null,"reply_to":root,"reply_root_id":root,"mentions":[]
+        }))
+        .unwrap();
+        step.merge(channel, vec![stale.clone()], Source::Ack);
+        assert!(step.channel(channel).messages.is_empty());
+        assert!(step.out.records.is_empty());
+
+        let moved = Message {
+            version: 10,
+            topic_id: Some(destination),
+            ..stale
+        };
+        step.merge(channel, vec![moved], Source::Window);
+        assert_eq!(
+            step.channel(channel).messages[0].topic_id,
+            Some(destination)
+        );
     }
 }

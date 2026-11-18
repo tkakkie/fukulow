@@ -189,6 +189,11 @@ export type ReplyChainQuery = NonNullable<import('./api-schema').operations['rep
 export const listReplyChain = (organizationId: string, channelId: string, anchor: string, query: ReplyChainQuery = {}, f: typeof fetch = fetch) =>
   call<ReplyChainPage>(f, `${channelPath(organizationId, channelId)}/messages/${encodeURIComponent(anchor)}/chain${querySuffix(query)}`, { cache: 'no-store' }, true)
 
+export type MoveChainRequest = components['schemas']['MoveChainRequest']
+export type MoveChainResponse = components['schemas']['MoveChainResponse']
+export const moveChain = (organizationId: string, channelId: string, anchor: string, body: MoveChainRequest, f: typeof fetch = fetch) =>
+  call<MoveChainResponse>(f, `${channelPath(organizationId, channelId)}/messages/${encodeURIComponent(anchor)}/move`, json(body), true, 200)
+
 export type ChannelMember = components['schemas']['ChannelMember']
 export type ChannelMemberList = components['schemas']['ChannelMemberList']
 export type ChangeChannelManagerRequest = components['schemas']['ChangeChannelManagerRequest']

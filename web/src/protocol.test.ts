@@ -79,6 +79,48 @@ it('fills a Move gap and confirms a buffered following Create without another fi
   expect(d.get().channels.A).toMatchObject({ cursor: 102, moveSeq: 101, messages: [record(102)] })
 })
 
+it('Move fences stale states even for unseen descendants and still consumes reordered positions', () => {
+  const d = boot(), generation = record(100).history_generation
+  const event = (event: Extract<Input, { type: 'event' }>['event']) => ({ type: 'event' as const, connection: d.connection, event })
+  const high = moveEvent(103, 'id100'), superseded = moveEvent(102, 'id100')
+  const latest = id(d.feed(event(high)), 'fetch_history')
+  expect(d.get().channels.A.moveEpoch).toBe(1)
+  expect(d.feed(event(high))).toEqual([])
+  expect(d.feed(event(superseded))).not.toContainEqual(expect.objectContaining({ type: 'fetch_history' }))
+  expect(d.get().channels.A.moveEpoch).toBe(1)
+
+  const stale = { ...record(101), reply_to: 'id100', reply_root_id: 'id100' }
+  const rejected = step(d.get(), event({ type: 'message', kind: 'create', seq: 101, message: stale }))
+  expect(rejected.state.channels.A).toMatchObject({ cursor: 103, messages: [], moveSeq: 103 })
+  expect(rejected.records.size).toBe(0)
+  d.feed(event({ type: 'message', kind: 'create', seq: 101, message: stale }))
+  const moved = { ...stale, version: 103, topic_id: 'destination' }
+  d.feed({ type: 'history_result', request: latest, page: { history_generation: generation, as_of_seq: 103, messages: [moved], has_more: false } })
+  expect(d.get().channels.A.messages).toEqual([moved])
+  expect(d.feed(event(superseded))).toEqual([])
+})
+
+it('a Move removes stale records earlier in the same gap page and a late ACK still settles its send', () => {
+  const d = boot(), move = moveEvent(102, 'id100')
+  const request = id(d.feed({ type: 'user_send', channel: 'A', clientMessageId: 'pending', body: 'reply', reply_to: 'id100' }), 'send')
+  const timer = id(d.event(103), 'wait')
+  const fill = id(d.feed({ type: 'timer_elapsed', id: timer }), 'fetch_history')
+  const older = id(d.feed({ type: 'load_older', channel: 'A' }), 'fetch_history')
+  const reply = { ...record(101), reply_to: 'id100', reply_root_id: 'id100' }
+  const input: Input = { type: 'events_result', request: fill, page: {
+    history_generation: move.history_generation, has_more: false,
+    events: [{ type: 'message', seq: 101, kind: 'create', message: reply }, move],
+  } }
+  expect(step(d.get(), input).records.size).toBe(0)
+  d.feed(input)
+  expect(d.get().channels.A).toMatchObject({ cursor: 103, messages: [record(103)] })
+  d.feed({ type: 'history_result', request: older, page: {
+    history_generation: move.history_generation, as_of_seq: 100, has_more: false, messages: [record(100)],
+  } })
+  d.feed({ type: 'ack', request, message: { ...reply, sender: 'me', client_message_id: 'pending' } })
+  expect(d.get().channels.A).toMatchObject({ cursor: 103, messages: [record(103)], pending: [] })
+})
+
 it('429 waits without resending early, re-arms with a new delay and preserves the entire request', () => {
   for (const target of [{}, { topic_name: 'Release' }, { reply_to: 'parent' }]) {
     const d = boot()

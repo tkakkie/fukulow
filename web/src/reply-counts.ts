@@ -158,7 +158,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
       const expired = input.type === 'history_failed' && input.status === 409 && input.error === 'snapshot_expired' &&
         old && [old.latest, old.older, old.fill].includes(input.request)
       const reset = before.historyEpoch !== after.historyEpoch || expired || (before.connected && !after.connected) || (old && now && (
-        old.versionEpoch !== now.versionEpoch || old.moveSeq !== now.moveSeq || (old.cursor !== null && now.cursor === null) ||
+        old.versionEpoch !== now.versionEpoch || old.moveEpoch !== now.moveEpoch || (old.cursor !== null && now.cursor === null) ||
         (old.fill === undefined && now.fill !== undefined) || (old.wait === undefined && now.wait !== undefined)))
       if (reset) recover(c)
     }
