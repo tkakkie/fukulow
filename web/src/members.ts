@@ -11,14 +11,18 @@ import type { createSync } from './sync'
 export function watchMemberAccess(
   channels: Pick<ReturnType<typeof createChannels>, 'get' | 'subscribe'>,
   sync: Pick<ReturnType<typeof createSync>, 'get' | 'subscribe'>,
-  refresh: () => void,
+  refresh: (reason: 'access' | 'refresh') => void,
 ) {
-  let channelIds = JSON.stringify(channels.get().channels.map(c => c.id).sort())
+  let channelIds = new Set(channels.get().channels.map(c => c.id))
   let connection = sync.get().connected ? sync.get().connection : null
   let lost = new Set<string>()
   const stopChannels = channels.subscribe(() => {
-    const ids = JSON.stringify(channels.get().channels.map(c => c.id).sort())
-    if (ids !== channelIds) { channelIds = ids; refresh() }
+    const ids = new Set(channels.get().channels.map(c => c.id))
+    const removed = [...channelIds].some(id => !ids.has(id))
+    const added = [...ids].some(id => !channelIds.has(id))
+    channelIds = ids
+    if (removed) refresh('access')
+    else if (added) refresh('refresh')
   })
   const stopSync = sync.subscribe(() => {
     const state = sync.get()
@@ -28,7 +32,8 @@ export function watchMemberAccess(
     lost = next
     const reconnected = state.connected && state.connection !== connection
     if (state.connected) connection = state.connection
-    if (accessLost || reconnected) refresh()
+    if (accessLost) refresh('access')
+    else if (reconnected) refresh('refresh')
   })
   return () => { stopChannels(); stopSync() }
 }
@@ -51,8 +56,13 @@ export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
 
 type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; lookupAuthors?: typeof lookupAuthors; baseUrl(): string }
 const defaults: MembersDeps = { listMembers, changeRole, deactivateMember, createInvite, baseUrl: () => `${location.origin}${location.pathname}` }
-export function createMembers(organizationId: string, onEnded: () => void, onUnavailable: () => void, deps: MembersDeps = defaults, isGuest = () => true) {
-  let state = { members: [] as Member[], loading: true, busy: false, error: '', inviteLink: '' }
+// Only a previously verified non-Guest can retain rows during revalidation.
+export type MemberListAccess = Role | 'revalidating' | null
+export const canLoadMemberList = (access: MemberListAccess) => access !== null && access !== 'revalidating'
+
+export function createMembers(organizationId: string, onEnded: () => void, onUnavailable: () => void,
+  deps: MembersDeps = defaults, memberListAccess: () => MemberListAccess = () => 'guest') {
+  let state = { members: [] as Member[], loading: true, busy: false, error: '', retryable: false, inviteLink: '' }
   let closed = false
   let loadSequence = 0
   // Standalone loads keep sequence fencing; held UI loads share the reconciliation queue.
@@ -61,7 +71,12 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   const invites = createInvites(organizationId, onEnded, membershipLost)
   const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors)
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
-  function unavailable() { invites.close(); closed = true; loadSequence++; activityTarget.close(); authors.unavailable() }
+  function unavailable() {
+    if (closed) return
+    closed = true; loadSequence++; activityTarget.close(); invites.close(); authors.unavailable()
+    state = { ...state, members: [], loading: false, error: '', retryable: false }
+    listeners.forEach(l => l())
+  }
   function membershipLost() {
     if (closed) return
     unavailable()
@@ -70,9 +85,13 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   function failed(r: Exclude<Result<unknown>, { ok: true }>) {
     if (r.kind === 'http' && r.status === 401) onEnded()
     else if (isOrganizationUnavailable(r)) membershipLost()
-    set({ error: memberError(r) })
+    set({ error: memberError(r), retryable: false })
+  }
+  function listFailed(r: Exclude<Result<unknown>, { ok: true }>) {
+    set({ members: [], loading: false, error: memberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })
   }
   const activityTarget = createActivityTarget({
+    canLoad: () => canLoadMemberList(memberListAccess()),
     async load(signal) {
       const sequence = ++loadSequence
       const r = await deps.listMembers(organizationId, undefined, signal)
@@ -83,18 +102,34 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     accept: data => {
       if (closed || data.sequence !== loadSequence) return
       authors.replaceMembers(data.members)
-      set({ members: data.members, loading: false, error: '' })
+      set({ members: data.members, loading: false, error: '', retryable: false })
     },
     hide: () => {
       loadSequence++
-      if (isGuest()) set({ members: [], loading: true })
+      const access = memberListAccess()
+      if (access === null || access === 'guest') set({ members: [], loading: true })
     },
-    error: r => {
-      if (!(r.kind === 'http' && r.status === 401) && !isOrganizationUnavailable(r)) failed(r)
-      set({ loading: false })
-    },
+    error: listFailed,
     terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r)),
   })
+  async function load() {
+    if (closed) return
+    if (activityManaged) { await activityTarget.refresh(); return }
+    if (!canLoadMemberList(memberListAccess())) return
+    const sequence = ++loadSequence
+    const r = await deps.listMembers(organizationId)
+    if (!r.ok && r.kind === 'http' && r.status === 401) { failed(r); return }
+    if (closed) return
+    // Freshness changes cannot invalidate Membership loss within this selection.
+    if (!r.ok && isOrganizationUnavailable(r)) { failed(r); return }
+    // Only the latest started load can replace the scoped directory and names.
+    if (sequence !== loadSequence || !canLoadMemberList(memberListAccess())) return
+    if (!r.ok) listFailed(r)
+    else {
+      authors.replaceMembers(r.data.members)
+      set({ members: r.data.members, loading: false, error: '', retryable: false })
+    }
+  }
   return {
     activityTarget: { ...activityTarget, held() { activityManaged = true } },
     authors, invites,
@@ -102,21 +137,8 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
     unavailable,
     close() { invites.close(); closed = true; activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
-    async load() {
-      if (closed) return
-      if (activityManaged) { await activityTarget.refresh(); return }
-      const sequence = ++loadSequence
-      const r = await deps.listMembers(organizationId)
-      if (!r.ok && r.kind === 'http' && r.status === 401) { failed(r); return }
-      if (closed) return
-      // Freshness changes cannot invalidate Membership loss within this selection.
-      if (!r.ok && isOrganizationUnavailable(r)) { failed(r); return }
-      // Only the latest started load can replace the scoped directory and names.
-      if (sequence !== loadSequence) return
-      if (!r.ok) failed(r)
-      else if (!closed) { authors.replaceMembers(r.data.members); set({ members: r.data.members }) }
-      set({ loading: false })
-    },
+    load,
+    async retry() { if (!closed) await (activityManaged ? activityTarget.retryNow() : load()) },
     async invite(email: string, role: Role) {
       if (closed || state.busy) return
       set({ busy: true, error: '', inviteLink: '' })

@@ -96,7 +96,7 @@ describe('Members controller', () => {
     await Promise.resolve()
     expect(listMembers).toHaveBeenCalledTimes(3)
     expect(lookupAuthors).not.toHaveBeenCalled()
-    expect(c.get().members).toEqual([member])
+    expect(c.get().members).toEqual([])
     expect(c.authors.get().get(member.id)?.name).toBe(member.name)
     finishes[2]({ ok: false, kind: 'http', status: 401 }); await late
     expect(ended).toHaveBeenCalledOnce()
@@ -333,7 +333,7 @@ it('retains or withholds Member directory rows by viewer Role while rejecting st
           .mockResolvedValueOnce(ok({ members: refreshed }))
         const c = createMembers(org, vi.fn(), vi.fn(), {
           listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
-        }, () => guest)
+        }, () => self.role)
         c.activityTarget.held()
         try {
           await c.load()
@@ -345,7 +345,7 @@ it('retains or withholds Member directory rows by viewer Role while rejecting st
           await stale
           expect(c.get().members, context).toEqual(displayed)
           await vi.advanceTimersByTimeAsync(200)
-          expect(c.get(), context).toMatchObject({ members: displayed, loading: false })
+          expect(c.get(), context).toMatchObject({ members: [], loading: false, retryable: true })
           expect(c.get().error, context).not.toBe('')
           await vi.advanceTimersByTimeAsync(1000)
           expect(c.get(), context).toMatchObject({ members: refreshed, loading: false, error: '' })

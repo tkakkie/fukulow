@@ -7,7 +7,7 @@ import ChannelMembers from './ChannelMembers.svelte'
 import * as api from './api'
 
 afterEach(() => vi.useRealTimers())
-function fixture(isGuest?: () => boolean) {
+function fixture(memberListRole?: () => api.Role | null) {
   const deps = {
     listChannelMembers: vi.fn().mockResolvedValue({ ok: true, data: { members: [{ id: 'self', name: '本人', role: 'admin', manager: true }] } }),
     addChannelMember: vi.fn().mockResolvedValue({ ok: true, data: undefined }),
@@ -15,14 +15,14 @@ function fixture(isGuest?: () => boolean) {
     changeChannelManager: vi.fn().mockResolvedValue({ ok: true, data: undefined }),
   }
   const observed = vi.fn(), left = vi.fn(), refresh = vi.fn()
-  const controller = createChannelMembers('org', 'channel', observed, deps, left, refresh, isGuest)
+  const controller = createChannelMembers('org', 'channel', observed, deps, left, refresh, memberListRole)
   return { deps, observed, left, refresh, controller }
 }
 it('retains or withholds Channel member rows by viewer Role while rejecting stale refetches', async () => {
   vi.useFakeTimers()
   for (const reason of ['periodic', 'reconcile', 'access'] as const) {
     for (const guest of [false, true]) {
-      const { controller, deps } = fixture(() => guest)
+      const { controller, deps } = fixture(() => guest ? 'guest' : 'admin')
       const initial: api.ChannelMember[] = [{ id: 'self', name: '本人', role: guest ? 'guest' : 'admin', manager: false }]
       const refreshed = [{ ...initial[0], name: '新しい名前' }]
       const displayed = guest ? [] : initial
@@ -43,7 +43,7 @@ it('retains or withholds Channel member rows by viewer Role while rejecting stal
         await stale
         expect(controller.get().members, context).toEqual(displayed)
         await vi.advanceTimersByTimeAsync(200)
-        expect(controller.get(), context).toMatchObject({ members: displayed, loading: false, retryable: true })
+        expect(controller.get(), context).toMatchObject({ members: [], loading: false, retryable: true })
         await vi.advanceTimersByTimeAsync(1000)
         expect(controller.get(), context).toMatchObject({ members: refreshed, loading: false, error: '' })
       } finally { controller.close() }

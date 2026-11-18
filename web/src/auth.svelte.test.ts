@@ -4,7 +4,7 @@ import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createInviteAcceptance, createMembers, watchMemberAccess } from './members'
 import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
-import type { lookupAuthors, listMembers, Result } from './api'
+import type { lookupAuthors, listMembers, MemberList, Result } from './api'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
@@ -22,7 +22,7 @@ const member = (id: string) => ({
 const identity = (id: string) => ({ account: { id, email: `${id}@example.com` }, organizations: [{ organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } }] })
 
 /** Real controllers on fake transports; each opened session gets its own network, like a real page would. */
-function stack(over: Partial<AuthDeps> = {}) {
+function stack(over: Partial<AuthDeps> = {}, holdMemberLists = false) {
   const nets: FakeNetwork[] = []
   const ended: (() => void)[] = []
   const closes: ReturnType<typeof vi.fn>[] = []
@@ -43,7 +43,7 @@ function stack(over: Partial<AuthDeps> = {}) {
       net.socket.onReady()
       const close = vi.fn(() => session.close())
       closes.push(close)
-      return { onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
+      return { holdActivity: holdMemberLists ? session.holdActivity : undefined, onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
     },
     ...over,
   }
@@ -1142,6 +1142,46 @@ it('Guest Organization selection and reconnect reload Members and stop old selec
   old.event({ type: 'channel_access_lost', channel_id: 'A' }); await settle()
   expect(list).toHaveBeenCalledTimes(4)
   await s.auth.signOut()
+})
+
+it('channel_access_lost alone withholds a Guest directory and fences its in-flight response', async () => {
+  const self = { id: 'guest', name: 'ゲスト', role: 'guest' as const }
+  const peer = { id: 'peer', name: '佐藤', role: 'member' as const }
+  const stale = deferred<Result<MemberList>>()
+  const list = vi.fn<typeof listMembers>()
+    .mockResolvedValueOnce(ok({ members: [self, peer] }))
+    .mockResolvedValueOnce(ok({ members: [self, peer] }))
+    .mockReturnValueOnce(stale.promise)
+    .mockResolvedValue(ok({ members: [self] }))
+  const s = stack({
+    getOrganization: async () => ok({ ...member('guest'), member: self }),
+    openMembers: (org, ended, unavailable) => membersAdapter(createMembers(org, ended, unavailable, {
+      listMembers: list, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    })),
+  }, true)
+  try {
+    await signInAs(s, 'guest')
+    const net = s.nets[0]
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 0); await settle()
+    const directory = s.auth.members!
+    expect(directory.state.members).toEqual([self, peer])
+    const pending = directory.load()
+    expect(list).toHaveBeenCalledTimes(3)
+
+    net.event({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(s.auth.session?.sync.unavailable).toBe(false)
+    expect(directory.state.members, 'on observed Channel access loss').toEqual([])
+    stale.resolve(ok({ members: [self, peer] }))
+    await pending
+    expect(directory.state.members, 'after the pre-loss response').toEqual([])
+    expect(list).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(directory.state.members).toEqual([self])
+    expect(list).toHaveBeenCalledTimes(4)
+  } finally { await s.auth.signOut() }
 })
 
 describe('sync controllers wait for the core, REST reads do not (#466)', () => {

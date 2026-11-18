@@ -287,68 +287,111 @@ it('explicitly selecting the current C9 Channel reattempts it while another Orga
   a.session.close(); b.session.close()
 })
 
-it('a confirmed change to Guest withholds both held Member lists and fences pending refreshes', async () => {
+it('members_changed retains both Member lists without publishing refetches during /me', () => checkMemberListRole('members_changed', 'delayed'))
+it('members_changed clears both Member lists when /me fails', () => checkMemberListRole('members_changed', 'failed'))
+it('members_changed clears both Member lists when /me confirms Guest', () => checkMemberListRole('members_changed', 'demoted'))
+it('activity_ready retains both Member lists without publishing refetches during /me', () => checkMemberListRole('activity_ready', 'delayed'))
+it('activity_reset retains both Member lists without publishing refetches during /me', () => checkMemberListRole('activity_reset', 'delayed'))
+it('O5 retains verified Member rows until /me confirms a demotion', () => checkMemberListRole('periodic', 'demoted'))
+it('O5 retains verified Member rows only until the identity probe fails', () => checkMemberListRole('periodic', 'failed'))
+it('members_changed withholds both lists for a confirmed Guest', () => checkMemberListRole('members_changed', 'delayed', 'guest'))
+
+async function checkMemberListRole(
+  trigger: 'members_changed' | 'activity_ready' | 'activity_reset' | 'periodic',
+  outcome: 'delayed' | 'failed' | 'demoted',
+  initialRole: api.Role = 'member',
+) {
   vi.useFakeTimers()
   const net = fakeNetwork()
-  const self: api.Member = { id: 'me', name: '本人', role: 'member' }
+  const self: api.Member = { id: 'me', name: '本人', role: initialRole }
   const guest: api.Member = { ...self, role: 'guest' }
-  const channelInitial = [{ ...self, manager: false }]
-  const channelCurrent = [{ ...guest, manager: false }]
-  const directoryInitial = [self, { id: 'other', name: '佐藤', role: 'member' as const }]
-  const identity = vi.spyOn(api, 'getOrganizationMe').mockResolvedValue(ok({
-    member: guest,
-    organization: { organization_id: 'org', name: '組織', capabilities: {
+  const organization: api.Identity['organization'] = {
+    organization_id: 'org', name: '組織', capabilities: {
       can_invite: { allowed: false }, can_manage_roles: { allowed: false },
       can_deactivate_members: { allowed: false }, can_create_channels: { allowed: false },
-    } },
-  }))
+    },
+  }
+  let resolveIdentity!: (result: api.Result<api.Identity>) => void
+  const identity = vi.spyOn(api, 'getOrganizationMe')
+    .mockImplementation(() => new Promise(resolve => { resolveIdentity = resolve }))
+  const initial = [self, { id: 'other', name: '佐藤', role: 'member' as const }]
+  const channelRows = (members: api.Member[]) => ({ members: members.map(m => ({ ...m, manager: false })) })
+  const current = outcome === 'demoted' ? [guest] : [self, { ...initial[1], name: '新しい名前' }]
   let resolveChannel!: (result: api.Result<api.ChannelMemberList>) => void
   const channelList = vi.spyOn(api, 'listChannelMembers')
-    .mockResolvedValueOnce(ok({ members: channelInitial }))
+    .mockResolvedValueOnce(ok(channelRows(initial)))
     .mockImplementationOnce(() => new Promise(resolve => { resolveChannel = resolve }))
-    .mockResolvedValue(ok({ members: channelCurrent }))
+    .mockResolvedValue(ok(channelRows(current)))
   let resolveDirectory!: (result: api.Result<api.MemberList>) => void
   const listMembers = vi.fn()
-    .mockResolvedValueOnce(ok({ members: directoryInitial }))
+    .mockResolvedValueOnce(ok({ members: initial }))
     .mockImplementationOnce(() => new Promise(resolve => { resolveDirectory = resolve }))
-    .mockResolvedValue(ok({ members: [guest] }))
+    .mockResolvedValue(ok({ members: current }))
   let viewerRole: api.Role = self.role
-  const isGuest = () => viewerRole === 'guest'
-  const session = createSession({ selfId: self.id, onEnded: vi.fn(), ...net.options(), isGuest,
-    onIdentity: current => { viewerRole = current.member.role },
+  const options = net.options()
+  const session = createSession({ selfId: self.id, onEnded: vi.fn(), ...options,
+    sync: { ...options.sync, random: () => 0.5 }, initialRole: self.role,
+    onIdentity: value => { viewerRole = value.member.role },
   })
   const directory = createMembers('org', vi.fn(), vi.fn(), {
     listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
-  }, isGuest)
+  }, session.memberListAccess)
   try {
     net.socket.onReady()
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }))
-    await settle()
+    if (trigger === 'periodic') {
+      net.socket.onEvent({ type: 'activity_ready' })
+      await vi.advanceTimersByTimeAsync(200)
+      resolveIdentity(ok({ member: self, organization }))
+      await vi.advanceTimersByTimeAsync(14_799)
+    }
     session.holdActivity('members', directory.activityTarget)
     const panel = session.channelMembers('A')
     await directory.load()
     await settle()
-    net.socket.onEvent({ type: 'members_changed' })
+    const expectRows = (rows: api.Member[], stage: string) => {
+      expect(directory.get().members, stage).toEqual(rows)
+      expect(panel.get().members, stage).toEqual(channelRows(rows).members)
+    }
+    expectRows(initial, 'initial load')
     const channelRefresh = panel.load(), directoryRefresh = directory.load()
-    expect(panel.get().members).toEqual(channelInitial)
-    expect(directory.get().members).toEqual(directoryInitial)
+    if (trigger === 'periodic') await vi.advanceTimersByTimeAsync(1)
+    else net.socket.onEvent({ type: trigger })
+    const pendingRows = initialRole === 'guest' ? [] : initial
+    expectRows(pendingRows, 'immediately after invalidation')
+    await vi.advanceTimersByTimeAsync(trigger === 'activity_reset' ? 1_000 : 200)
+    expect(identity).toHaveBeenCalledTimes(trigger === 'periodic' ? 2 : 1)
+    expectRows(pendingRows, 'while /me is pending')
 
-    await vi.advanceTimersByTimeAsync(200)
-    expect(viewerRole).toBe('guest')
-    expect(panel.get().members).toEqual([])
-    expect(directory.get().members).toEqual([])
-    resolveChannel(ok({ members: channelInitial }))
-    resolveDirectory(ok({ members: directoryInitial }))
+    const stale = [{ ...self, name: '古い名前' }]
+    resolveChannel(ok(channelRows(stale)))
+    resolveDirectory(ok({ members: stale }))
     await Promise.all([channelRefresh, directoryRefresh])
-    expect(panel.get().members).toEqual([])
-    expect(directory.get().members).toEqual([])
+    expectRows(pendingRows, 'after the pre-invalidation list responses')
     await vi.advanceTimersByTimeAsync(200)
-    expect(panel.get().members).toEqual(channelCurrent)
-    expect(directory.get().members).toEqual([guest])
+    expectRows(pendingRows, 'after the list refresh delay with /me still pending')
+    expect(listMembers).toHaveBeenCalledTimes(2)
+    expect(channelList).toHaveBeenCalledTimes(2)
+
+    if (outcome === 'failed') {
+      resolveIdentity({ ok: false, kind: 'http', status: 503, retryAfterMs: 1_000 })
+      await settle()
+      expectRows([], 'after /me failed')
+      await vi.advanceTimersByTimeAsync(1_000)
+    }
+    const verified = outcome === 'demoted' ? guest : self
+    resolveIdentity(ok({ member: verified, organization }))
+    await settle()
+    expect(viewerRole).toBe(verified.role)
+    expectRows(outcome === 'delayed' ? pendingRows : [], 'after /me, before the list responses')
+    await vi.advanceTimersByTimeAsync(200)
+    expect(listMembers).toHaveBeenCalledTimes(3)
+    expect(channelList).toHaveBeenCalledTimes(3)
+    expectRows(current, 'after replacement under verified Role')
   } finally {
     session.close(); directory.close(); identity.mockRestore(); channelList.mockRestore(); vi.useRealTimers()
   }
-})
+}
 
 it('a Member panel created during C9 recovers on explicit Channel re-selection', async () => {
   const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue(ok({

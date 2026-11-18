@@ -1,6 +1,6 @@
 import { createActivityTarget } from './activity'
 import * as api from './api'
-import { memberError } from './members'
+import { canLoadMemberList, memberError, type MemberListAccess } from './members'
 
 type Deps = Pick<typeof api, 'listChannelMembers' | 'addChannelMember' | 'removeChannelMember' | 'changeChannelManager'>
 export function channelMemberError(r: Exclude<api.Result<unknown>, { ok: true }>) {
@@ -17,7 +17,8 @@ export function channelMemberError(r: Exclude<api.Result<unknown>, { ok: true }>
 }
 
 export function createChannelMembers(org: string, channel: string, onResult: (r: api.Result<unknown>) => void,
-  deps: Deps = api, onUnavailable: () => void = () => {}, onRefreshChannels: () => unknown = () => {}, isGuest = () => true) {
+  deps: Deps = api, onUnavailable: () => void = () => {}, onRefreshChannels: () => unknown = () => {},
+  memberListAccess: () => MemberListAccess = () => 'guest') {
   let state = { members: [] as api.ChannelMember[], loading: true, busy: false, error: '', unavailable: false, retryable: false }
   let generation = 0, closed = false
   const listeners = new Set<() => void>()
@@ -32,12 +33,20 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     })]) } finally { clearTimeout(timer) }
   }
   const activityTarget = createActivityTarget({
+    canLoad: () => canLoadMemberList(memberListAccess()),
     load: signal => request(() => deps.listChannelMembers(org, channel, undefined, signal), false),
-    accept: data => { if (!state.unavailable) set({ members: data.members, loading: false, error: '' }) },
-    hide: () => { if (isGuest()) set({ members: [], loading: true }) },
+    accept: data => {
+      if (!state.unavailable) set({ members: data.members, loading: false, error: '', retryable: false })
+    },
+    hide: () => {
+      const access = memberListAccess()
+      if (access === null || access === 'guest') set({ members: [], loading: true })
+    },
     error: r => {
-      if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && !api.isOrganizationUnavailable(r)))) { onUnavailable(); set({ members: [], loading: false, unavailable: true }) }
-      else set({ loading: false, error: channelMemberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })
+      if (r.kind === 'http' && (r.status === 403 || (r.status === 404 && !api.isOrganizationUnavailable(r)))) {
+        onUnavailable()
+        set({ members: [], loading: false, unavailable: true, error: '', retryable: false })
+      } else set({ members: [], loading: false, error: channelMemberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })
     },
     terminal: r => !r.ok && r.kind === 'http' && (r.status === 401 || r.status === 403 || r.status === 404),
   })
@@ -61,7 +70,7 @@ export function createChannelMembers(org: string, channel: string, onResult: (r:
     remove: (id: string) => mutate(() => deps.removeChannelMember(org, channel, id)),
     changeManager: (id: string, manager: boolean) => mutate(() => deps.changeChannelManager(org, channel, id, { manager }), true),
     reselect() { if (!closed && state.unavailable) { set({ unavailable: false }); void load() } },
-    unavailable() { activityTarget.suspend(); generation++; set({ members: [], unavailable: true, loading: false, busy: false }) },
+    unavailable() { activityTarget.suspend(); generation++; set({ members: [], unavailable: true, loading: false, busy: false, error: '', retryable: false }) },
     close() { activityTarget.close(); closed = true; generation++; listeners.clear() },
   }
 }

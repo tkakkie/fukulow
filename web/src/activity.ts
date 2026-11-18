@@ -6,6 +6,7 @@ export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, 
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
+  canLoad?(): boolean
   load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   hide?(): void
@@ -34,7 +35,7 @@ export function createActivityTarget<T>(options: {
   async function run() {
     if (closed || !dirty) return
     if (inFlight) { queued = true; return }
-    if (retry) return
+    if (retry || options.canLoad?.() === false) return
     inFlight = true; queued = false
     const own = generation
     const request = new AbortController()
@@ -110,7 +111,9 @@ export function createActivity(options: {
   const invalidateMemberLists = () => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access') }
   function all(delay: number, reason: Invalidation = 'reconcile') {
     options.reconcile?.()
-    for (const target of targets.values()) target.invalidate(reason, delay)
+    // Identity authority must be invalidated before the Member lists decide what to retain.
+    invalidate('capabilities', reason, delay)
+    for (const [key, target] of targets) if (key !== 'capabilities') target.invalidate(reason, delay)
   }
   function periodic(own: number, first: boolean) {
     timer = setTimeout(() => {
@@ -152,7 +155,7 @@ export function createActivity(options: {
         case 'dm_list_changed': invalidate('dms', 'access'); break
         case 'channel_list_changed': invalidate('channels', 'access'); break
         case 'channel_members_changed': invalidate(`channel-members:${event.channel_id}`, 'access'); break
-        case 'members_changed': invalidateMemberLists(); invalidate('capabilities', 'access'); break
+        case 'members_changed': invalidate('capabilities', 'access'); invalidateMemberLists(); break
       }
     },
     disconnected() { clearTimeout(timer); generation++; targets.forEach(target => target.disconnected?.()) },
