@@ -1,5 +1,9 @@
 import type { ClientMessage, Message, ServerEvent } from './api'
 
+type MoveEvent = Extract<ServerEvent, { kind: 'move' }>
+const moveFields = ['type', 'kind', 'history_generation', 'channel_id', 'seq', 'version', 'root_id',
+  'source_topic_id', 'destination_topic_id', 'operation_id'] satisfies (keyof MoveEvent)[]
+
 /** The transport has no reconnect, subscription or cursor policy; sync owns its lifetime. */
 export type SocketLike = {
   send(data: string): void
@@ -50,7 +54,16 @@ function isServerEvent(value: unknown): value is ServerEvent {
     case 'read_position_changed': return typeof value.channel_id === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') && isSequence(value.read_seq, 0) && Object.keys(value).every(k => ['type', 'channel_id', 'topic_id', 'read_seq'].includes(k))
     case 'channel_access_gained': case 'channel_access_revoked': case 'channel_members_changed':
       return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
-    case 'message': return isSequence(value.seq, 1) && value.kind === 'create' && isMessage(value.message) && value.message.created_seq === value.seq
+    case 'message':
+      if (!isSequence(value.seq, 1)) return false
+      if (value.kind === 'move') {
+        return value.version === value.seq && typeof value.history_generation === 'string' &&
+          typeof value.channel_id === 'string' && typeof value.root_id === 'string' &&
+          typeof value.destination_topic_id === 'string' && typeof value.operation_id === 'string' &&
+          (value.source_topic_id === null || typeof value.source_topic_id === 'string') &&
+          Object.keys(value).every(key => moveFields.some(field => field === key))
+      }
+      return value.kind === 'create' && isMessage(value.message) && value.message.created_seq === value.seq
     case 'channel_access_lost': return typeof value.channel_id === 'string' && Object.keys(value).every(k => k === 'type' || k === 'channel_id')
     case 'subscribed': return typeof value.history_generation === 'string' && typeof value.channel_id === 'string' && isSequence(value.caught_up_seq, 0)
     case 'error': return typeof value.code === 'string' &&

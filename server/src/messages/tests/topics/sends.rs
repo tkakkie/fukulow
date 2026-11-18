@@ -186,7 +186,7 @@ async fn topic_concurrent_first_sends_resends_and_lost_response_are_exactly_once
     assert_eq!(counts, (1, 18, 18));
     delivery.flush().await;
     for seq in 1..=18 {
-        assert_eq!(queue.events.try_recv().unwrap().created_seq, seq);
+        assert_eq!(queue.events.try_recv().unwrap().message().created_seq, seq);
     }
     assert!(queue.events.try_recv().is_err(), "retries never publish");
 }
@@ -337,7 +337,7 @@ async fn topic_first_creation_duplicates_lost_ack_and_cross_channel_race_leave_n
     assert_eq!(
         delivered
             .iter()
-            .map(|m| m.id)
+            .map(|m| m.message().id)
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         3

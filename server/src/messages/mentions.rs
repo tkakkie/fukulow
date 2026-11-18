@@ -34,7 +34,7 @@ pub(super) fn page_sql(page: &str, order: &str) -> String {
     format!(
         "WITH mention_page AS MATERIALIZED ({page}), mention_sets AS (\
          SELECT mm.message_id, jsonb_agg(jsonb_build_object('member_id',mm.member_id,'name',u.name) ORDER BY mm.member_id) AS mentions \
-         FROM mention_page p JOIN message_mentions mm ON mm.organization_id=$1 AND mm.channel_id=p.channel_id AND mm.message_id=p.id \
+         FROM mention_page p JOIN message_mentions mm ON mm.organization_id=$1 AND mm.channel_id=p.channel_id AND mm.message_id=p.id AND NOT p.deleted \
          JOIN ({}) u ON u.organization_id=mm.organization_id AND u.id=mm.member_id \
          GROUP BY mm.message_id) \
          SELECT p.*, ({}) AS history_generation, COALESCE(ms.mentions,'[]'::jsonb)::text AS mentions \
@@ -72,12 +72,13 @@ pub(super) async fn delivery_snapshot(
     members: &[(Uuid, i64)],
     messages: &[super::ChannelEvent],
 ) -> Result<(Vec<(Uuid, i64, bool)>, Vec<super::ChannelEvent>), sqlx::Error> {
+    use super::log::Payload;
     let mut messages = messages.to_vec();
     let channel = messages.first().ok_or(sqlx::Error::RowNotFound)?.channel_id;
-    if messages
-        .iter()
-        .all(|m| m.mentions.as_ref().is_none_or(Vec::is_empty))
-    {
+    if messages.iter().all(|event| match &event.payload {
+        Payload::Create(m) => m.mentions.as_ref().is_none_or(Vec::is_empty),
+        Payload::Move(_) => true,
+    }) {
         return Ok((
             channels::member_access(pool, organization, channel, members).await?,
             messages,
@@ -90,7 +91,12 @@ pub(super) async fn delivery_snapshot(
             let allowed = channels::member_access_in(tx, organization, channel, members).await?;
             let ids: Vec<_> = messages
                 .iter()
-                .flat_map(|m| m.mentions.iter().flatten().map(|m| m.member_id))
+                .filter_map(|event| match &event.payload {
+                    Payload::Create(m) => m.mentions.as_ref(),
+                    Payload::Move(_) => None,
+                })
+                .flatten()
+                .map(|m| m.member_id)
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
@@ -98,7 +104,10 @@ pub(super) async fn delivery_snapshot(
                 crate::auth::members::display_identities(tx, organization, &ids).await?;
             let names: std::collections::HashMap<_, _> =
                 identities.into_iter().map(|i| (i.id, i.name)).collect();
-            for message in &mut messages {
+            for event in &mut messages {
+                let Payload::Create(message) = &mut event.payload else {
+                    continue;
+                };
                 for mention in message.mentions.iter_mut().flatten() {
                     mention.name = names
                         .get(&mention.member_id)

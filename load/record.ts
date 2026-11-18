@@ -122,7 +122,7 @@ try {
   const metadata = {
     hostNode: process.version,
     harness: Object.fromEntries(['Makefile', 'Dockerfile', 'compose.yml', 'deploy/Caddyfile', 'deploy/nginx.conf', 'deploy/nginx-acme.sh', 'web/scripts/first-paint.ts', 'load/scenario.ts', 'load/record.ts', 'load/scheduler.ts',
-      'load/seed.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/generator.ts', 'load/app-evidence.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
+      'load/seed.ts', 'load/session-layout.ts', 'load/proxy-target.ts', 'load/proxy-judgment.ts', 'load/proxy-results.ts', 'load/proxy-compare.ts', 'load/proxy-run.ts', 'load/generator.ts', 'load/app-evidence.ts', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/sessions.ts', 'web/src/reconnect.ts', 'load/compat.ts', 'load/delivery.ts', 'load/summary.ts', 'load/compose.yml'].map(path =>
       [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
     commit: command('git', ['rev-parse', 'HEAD']), dirty: command('git', ['status', '--porcelain']),
     serverCommit: command('git', ['-C', env.LOAD_SERVER_SOURCE, 'rev-parse', 'HEAD']),

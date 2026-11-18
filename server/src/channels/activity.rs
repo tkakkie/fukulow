@@ -327,7 +327,7 @@ pub struct Activity {
     directory_member: Option<Uuid>,
     directory_channels: Vec<Uuid>,
     capacity: Arc<Semaphore>,
-    batches: Arc<Mutex<HashMap<(Uuid, Uuid), Senders>>>,
+    batches: Arc<Mutex<HashMap<(Uuid, Uuid), ActivityBatch>>>,
     #[cfg(test)]
     tasks: Arc<Mutex<HashMap<(Uuid, Uuid), tokio::task::AbortHandle>>>,
     #[cfg(test)]
@@ -352,19 +352,33 @@ impl Default for Activity {
     }
 }
 #[derive(Clone, Default)]
-pub(crate) struct Senders(Vec<(Uuid, i64)>);
-impl Senders {
-    fn add(&mut self, sender: Uuid, seq: i64) {
-        if let Some(row) = self.0.iter_mut().find(|r| r.0 == sender) {
+pub(crate) struct ActivityBatch {
+    senders: Vec<(Uuid, i64)>,
+    everyone: Option<i64>,
+}
+impl ActivityBatch {
+    fn add(&mut self, sender: Option<Uuid>, seq: i64) {
+        let Some(sender) = sender else {
+            self.everyone = self.everyone.max(Some(seq));
+            return;
+        };
+        if let Some(row) = self.senders.iter_mut().find(|r| r.0 == sender) {
             row.1 = row.1.max(seq);
         } else {
-            self.0.push((sender, seq));
+            self.senders.push((sender, seq));
         }
-        self.0.sort_unstable_by_key(|r| std::cmp::Reverse(r.1));
-        self.0.truncate(2);
+        self.senders
+            .sort_unstable_by_key(|r| std::cmp::Reverse(r.1));
+        self.senders.truncate(2);
     }
+
     fn eligible(&self, member: Uuid) -> Option<i64> {
-        self.0.iter().find(|r| r.0 != member).map(|r| r.1)
+        self.everyone
+            .max(self.senders.iter().find(|r| r.0 != member).map(|r| r.1))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.everyone.is_none() && self.senders.is_empty()
     }
 }
 pub(crate) struct Registration {
@@ -492,6 +506,27 @@ impl Activity {
         sender: Uuid,
         seq: i64,
     ) {
+        self.channel_activity(pool, organization, channel, Some(sender), seq);
+    }
+
+    pub(crate) fn message_moved(
+        &self,
+        pool: sqlx::PgPool,
+        organization: Uuid,
+        channel: Uuid,
+        seq: i64,
+    ) {
+        self.channel_activity(pool, organization, channel, None, seq);
+    }
+
+    fn channel_activity(
+        &self,
+        pool: sqlx::PgPool,
+        organization: Uuid,
+        channel: Uuid,
+        sender: Option<Uuid>,
+        seq: i64,
+    ) {
         let key = (organization, channel);
         let mut batches = self.batches.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(batch) = batches.get_mut(&key) {
@@ -501,7 +536,7 @@ impl Activity {
         let Ok(slot) = self.capacity.clone().try_acquire_owned() else {
             return;
         };
-        let mut batch = Senders::default();
+        let mut batch = ActivityBatch::default();
         batch.add(sender, seq);
         batches.insert(key, batch);
         let this = self.clone();
@@ -531,7 +566,7 @@ impl Activity {
                 );
                 let _ = tokio::time::timeout(Duration::from_secs(10), work).await;
                 let mut batches = this.batches.lock().unwrap_or_else(|e| e.into_inner());
-                if batches.get(&key).is_none_or(|b| b.0.is_empty()) {
+                if batches.get(&key).is_none_or(ActivityBatch::is_empty) {
                     batches.remove(&key);
                     _lease.finished = true;
                     break;
@@ -549,7 +584,7 @@ impl Activity {
         organization: Uuid,
         notice: Notice,
         target: Option<Uuid>,
-        senders: Option<&Senders>,
+        senders: Option<&ActivityBatch>,
     ) -> Result<(), sqlx::Error> {
         let channel = notice.channel();
         let captured: Vec<_> = self
@@ -1709,7 +1744,7 @@ impl Activity {
 }
 
 struct BatchLease {
-    batches: Arc<Mutex<HashMap<(Uuid, Uuid), Senders>>>,
+    batches: Arc<Mutex<HashMap<(Uuid, Uuid), ActivityBatch>>>,
     key: (Uuid, Uuid),
     finished: bool,
 }
@@ -2385,14 +2420,14 @@ mod tests {
             [(alice, 1), (bob, 2), (alice, 3)],
             [(bob, 2), (alice, 3), (alice, 1)],
         ] {
-            let mut senders = Senders::default();
+            let mut senders = ActivityBatch::default();
             for (sender, seq) in rows {
-                senders.add(sender, seq);
+                senders.add(Some(sender), seq);
             }
             assert_eq!(senders.eligible(alice), Some(2));
             assert_eq!(senders.eligible(bob), Some(3));
             assert_eq!(senders.eligible(third), Some(3));
-            assert!(senders.0.len() <= 2);
+            assert!(senders.senders.len() <= 2);
         }
     }
 }

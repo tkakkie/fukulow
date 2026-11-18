@@ -114,3 +114,99 @@ fn event_page_records_replace_each_identity_in_native_output() -> Result<(), Box
     );
     Ok(())
 }
+
+#[test]
+fn move_positions_advance_live_replay_and_gap_fill_without_creating_state() {
+    use fukulow_client_core::{Effect, Page};
+
+    let channel = Uuid::from_u128(1);
+    let self_id = Uuid::from_u128(2);
+    let generation = Uuid::nil();
+    let message = |seq| {
+        json!({
+            "history_generation":generation,"id":Uuid::from_u128(seq),"channel_id":channel,
+            "created_seq":seq,"version":seq,"deleted":false,"client_message_id":Uuid::from_u128(seq+1000),
+            "sender":self_id,"body":"body","created_at":"2026-01-01T00:00:00Z","topic_id":null,
+            "reply_to":null,"reply_root_id":null,"mentions":[]
+        })
+    };
+    let moved = json!({
+        "type":"message","kind":"move","seq":101,"version":101,"channel_id":channel,
+        "history_generation":generation,"root_id":Uuid::from_u128(100),"source_topic_id":null,
+        "destination_topic_id":Uuid::from_u128(9),"operation_id":Uuid::from_u128(10)
+    });
+    let following = json!({"type":"message","kind":"create","seq":102,"message":message(102)});
+    let event = |event| json!({"type":"event","connection":1,"event":event});
+    let subscribed = |position| {
+        event(json!({
+            "type":"subscribed","channel_id":channel,"history_generation":generation,"caught_up_seq":position,
+        }))
+    };
+    let request = |effects: &[Effect], expected: Page| {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::FetchHistory { id, page, .. } if *page == expected => Some(*id),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    for mode in ["live", "replay", "fill"] {
+        let mut core = Core::new(self_id);
+        let feed = |core: &mut Core, input| core.step(serde_json::from_value(input).unwrap());
+        feed(&mut core, json!({"type":"session_start","selfId":self_id}));
+        feed(&mut core, json!({"type":"connection_ready","connection":1}));
+        let watched = feed(&mut core, json!({"type":"watch","channel":channel}));
+        feed(
+            &mut core,
+            json!({"type":"history_result","request":request(&watched.effects,Page::Latest),
+            "page":{"history_generation":generation,"as_of_seq":100,"messages":[message(100)],"has_more":false}}),
+        );
+        let result = if mode == "fill" {
+            let sub = feed(&mut core, subscribed(102));
+            let fill = request(&sub.effects, Page::After);
+            feed(&mut core, event(following.clone()));
+            assert_eq!(core.channel(channel).unwrap().cursor, Some(100));
+            feed(
+                &mut core,
+                json!({"type":"events_result","request":fill,
+                "page":{"history_generation":generation,"events":[moved.clone()],"has_more":false}}),
+            )
+        } else {
+            if mode == "live" {
+                feed(&mut core, subscribed(100));
+            }
+            feed(&mut core, event(moved.clone()))
+        };
+        assert!(result.records.is_empty(), "{mode}");
+        assert!(
+            !result.effects.iter().any(|effect| matches!(
+                effect,
+                Effect::FetchHistory {
+                    page: Page::After,
+                    ..
+                }
+            )),
+            "{mode}"
+        );
+        request(&result.effects, Page::Latest);
+        let state = core.channel(channel).unwrap();
+        assert_eq!(state.move_seq, Some(101));
+        assert_eq!(state.mutation_seq, 101);
+        assert!(state.messages.iter().all(|m| m.created_seq == 102));
+        assert_eq!(state.cursor, Some(if mode == "fill" { 102 } else { 101 }));
+        if mode != "fill" {
+            feed(&mut core, event(following.clone()));
+            if mode == "replay" {
+                feed(&mut core, subscribed(102));
+            }
+        }
+        let duplicate = feed(&mut core, event(moved.clone()));
+        assert!(duplicate.effects.is_empty(), "{mode}");
+        let state = core.channel(channel).unwrap();
+        assert_eq!(state.cursor, Some(102), "{mode}");
+        assert_eq!(state.messages.len(), 1, "{mode}");
+        assert_eq!(state.messages[0].created_seq, 102, "{mode}");
+    }
+}

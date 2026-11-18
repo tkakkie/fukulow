@@ -290,7 +290,7 @@ try {
   const appImage = await imageId(appTag);
   const dbImage = await imageId(dbTag);
   const harnessFiles = ['Makefile', 'load/compose.yml', 'load/throughput.ts', 'load/throughput-summary.ts', 'load/summary.ts',
-    'load/seed.ts', 'load/compat.ts', 'load/delivery.ts', 'load/sessions.ts', 'load/scheduler.ts', 'load/proxy-target.ts',
+    'load/seed.ts', 'load/session-layout.ts', 'load/compat.ts', 'load/delivery.ts', 'load/sessions.ts', 'load/scheduler.ts', 'load/proxy-target.ts',
     'load/search-m1.ts', 'load/search-m1-bodies.ts', 'load/search-m1-report.ts', 'load/search-m1-results.ts',
     'load/search-m1-report.test.ts', 'load/search-m1-runner.test.ts',
     'deploy/init-db-roles.sh', 'deploy/db-roles.sql', 'deploy/db-role-settings.sql', 'deploy/db-grants.sql',

@@ -17,6 +17,7 @@ mod channel_log;
 mod dms_pool;
 pub(super) mod history;
 mod mentions;
+mod move_topic;
 mod receipts;
 mod text_input;
 pub(super) mod unread;

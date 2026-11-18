@@ -24,8 +24,9 @@ use uuid::Uuid;
 const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
-// All 40 operations document shutdown, including Reply counts, author lookup, Account security and Invite management.
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 294;
+// Every operation documents the common shutdown response.
+const EXPECTED_API_OPERATIONS: usize = 41;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 304;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -226,7 +227,7 @@ fn every_api_operation_documents_shutdown_retry_contract() {
                 }
             }
         }
-        assert_eq!(operations, 40);
+        assert_eq!(operations, EXPECTED_API_OPERATIONS);
     }
 }
 
@@ -265,7 +266,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             }
         }
     }
-    assert_eq!(requests.len(), 40);
+    assert_eq!(requests.len(), EXPECTED_API_OPERATIONS);
     requests.extend(
         [
             "/",
@@ -689,12 +690,25 @@ fn assert_variant_contract<T: Serialize>(root: &str, variants: &[(T, &str)]) {
     assert_eq!(union["discriminator"]["propertyName"], "type");
     let mapping = union["discriminator"]["mapping"].as_object().unwrap();
     assert_eq!(union["oneOf"].as_array().unwrap().len(), variants.len());
-    let mut schema_tags = BTreeSet::new();
-    for variant in union["oneOf"].as_array().unwrap() {
-        let reference = variant["$ref"].as_str().unwrap();
+    let representative = |reference: &str| {
         let schema = document
             .pointer(reference.strip_prefix('#').unwrap())
             .unwrap();
+        // The Message discriminator entry groups two shapes. These cases use
+        // its state envelope, and the Move contract test checks the other branch.
+        if let Some(branch) = schema
+            .pointer("/allOf/0/oneOf/0/$ref")
+            .and_then(Value::as_str)
+        {
+            document.pointer(branch.strip_prefix('#').unwrap()).unwrap()
+        } else {
+            schema
+        }
+    };
+    let mut schema_tags = BTreeSet::new();
+    for variant in union["oneOf"].as_array().unwrap() {
+        let reference = variant["$ref"].as_str().unwrap();
+        let schema = representative(reference);
         assert!(
             schema["required"]
                 .as_array()
@@ -713,9 +727,7 @@ fn assert_variant_contract<T: Serialize>(root: &str, variants: &[(T, &str)]) {
         assert_eq!(serialized["type"], *expected);
         assert!(serialized_tags.insert(*expected));
         let reference = mapping[*expected].as_str().unwrap();
-        let schema = document
-            .pointer(reference.strip_prefix('#').unwrap())
-            .unwrap();
+        let schema = representative(reference);
         for field in schema["required"].as_array().unwrap() {
             assert!(
                 serialized.get(field.as_str().unwrap()).is_some(),
@@ -799,7 +811,7 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
             (
                 ServerEvent::Message {
                     seq: message.created_seq,
-                    kind: fukulow_api::ChannelEventKind::Create,
+                    kind: fukulow_api::MessageStateKind::Create,
                     message,
                 },
                 "message",
@@ -1551,7 +1563,7 @@ fn message_state_wire_has_creation_version_and_body_free_tombstones() {
     message.mentions = None;
     let tombstone = serde_json::to_value(ServerEvent::Message {
         seq: 1,
-        kind: fukulow_api::ChannelEventKind::Create,
+        kind: fukulow_api::MessageStateKind::Create,
         message,
     })
     .unwrap();
@@ -1561,5 +1573,115 @@ fn message_state_wire_has_creation_version_and_body_free_tombstones() {
     assert_eq!(tombstone["message"]["deleted"], true);
     for field in ["body", "mentions", "excerpt", "seq"] {
         assert!(tombstone["message"].get(field).is_none());
+    }
+}
+
+#[test]
+fn move_contract_shares_the_message_envelope_without_a_message_body() {
+    let api = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let path = &api["paths"]["/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move"]["post"];
+    assert_eq!(
+        path["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/MoveChainRequest"
+    );
+    let responses = &path["responses"];
+    assert_eq!(
+        responses["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/MoveChainResponse"
+    );
+    for status in [
+        "400", "401", "403", "404", "409", "413", "415", "500", "503",
+    ] {
+        assert_eq!(
+            responses[status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorBody"
+        );
+    }
+    let schemas = &api["components"]["schemas"];
+    let required = schemas["ReplyChainPage"]["required"].as_array().unwrap();
+    assert!(required.contains(&json!("chain_version")));
+    assert_eq!(
+        schemas["MoveChainRequest"]["allOf"][0]["required"],
+        json!(["operation_id", "expected_version"])
+    );
+    let envelope = &schemas["ServerEvent"]["discriminator"]["mapping"]["message"];
+    assert_eq!(envelope, "#/components/schemas/MessageEvent");
+    assert_eq!(
+        schemas["MessageEvent"]["allOf"][0]["oneOf"],
+        json!([
+            {"$ref":"#/components/schemas/MessageStateEvent"},
+            {"$ref":"#/components/schemas/MessageMoveEvent"}
+        ])
+    );
+    assert_eq!(schemas["MoveEventKind"]["enum"], json!(["move"]));
+    assert_eq!(schemas["MessageEventType"]["enum"], json!(["message"]));
+    assert!(
+        !schemas["MessageMoveEvent"]["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("message")
+    );
+}
+
+#[test]
+fn message_state_envelope_rejects_move_with_a_full_message() {
+    let api = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schemas = &api["components"]["schemas"];
+    assert_eq!(
+        schemas["MessageStateEvent"]["properties"]["kind"]["$ref"],
+        "#/components/schemas/MessageStateKind"
+    );
+    assert_eq!(
+        schemas["MessageStateKind"]["enum"],
+        json!(["create", "edit", "delete"])
+    );
+    assert_eq!(schemas["MessageMoveEvent"]["additionalProperties"], false);
+    let channel = Uuid::from_u128(1);
+    let root = Uuid::from_u128(2);
+    let message = Message {
+        history_generation: Uuid::nil(),
+        id: root,
+        channel_id: channel,
+        created_seq: 1,
+        version: 1,
+        deleted: false,
+        client_message_id: Uuid::from_u128(3),
+        sender: Uuid::from_u128(4),
+        body: Some("original".into()),
+        created_at: "2026-11-18T00:00:00Z".into(),
+        topic_id: None,
+        reply_to: None,
+        reply_root_id: None,
+        mentions: Some(Vec::new()),
+    };
+    let mut state = json!({"type":"message","kind":"create","seq":1,"message":message});
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(state.clone()),
+        Ok(ServerEvent::Message { .. })
+    ));
+    state["kind"] = json!("move");
+    assert!(serde_json::from_value::<ServerEvent>(state).is_err());
+    let mut event = json!({
+        "type":"message","kind":"move","history_generation":Uuid::nil(),"channel_id":channel,
+        "seq":2,"version":2,"root_id":root,"source_topic_id":null,
+        "destination_topic_id":Uuid::from_u128(5),"operation_id":Uuid::from_u128(6),
+    });
+    assert!(matches!(
+        serde_json::from_value::<ServerEvent>(event.clone()),
+        Ok(ServerEvent::Move(_))
+    ));
+    event["message"] = json!(message);
+    assert!(serde_json::from_value::<ServerEvent>(event).is_err());
+}
+
+#[test]
+fn move_request_schema_requires_exactly_one_concrete_destination() {
+    let api = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let request = &api["components"]["schemas"]["MoveChainRequest"];
+    let one_of = request["allOf"][1]["oneOf"].as_array().unwrap();
+    assert_eq!(one_of.len(), 2);
+    for (branch, key) in one_of.iter().zip(["topic_id", "topic_name"]) {
+        assert_eq!(branch["required"], json!([key]));
+        assert_eq!(branch["properties"][key]["type"], "string");
     }
 }
