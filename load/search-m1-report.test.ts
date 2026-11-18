@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { sha256 } from './search-m1-bodies.ts';
 import { collect, type Boundary } from './search-m1-results.ts';
 import {
   classify, countKeys, limiter, orders, rates, report, workload,
@@ -8,7 +14,8 @@ import {
 
 const bodyHash = 'bodies';
 const expected = { commit: 'main', appImage: 'app', migrateImage: 'app', dbImage: 'db', k6Image: 'k6',
-  limiter, bodySha256: bodyHash, bodySeed: 153202611, dbSettings: {
+  limiter: { LOAD_SEND_BURST: '1000000', LOAD_SEND_REFILL_PER_SECOND: '1000000' },
+  bodySha256: bodyHash, bodySeed: 153202611, dbSettings: {
     shared_preload_libraries: 'pg_stat_statements,pgroonga_wal_resource_manager,pgroonga_crash_safer',
     'pg_stat_statements.track': 'all', 'pgroonga.enable_wal_resource_manager': 'on', 'pgroonga.enable_crash_safe': 'on',
     'pgroonga.enable_wal': 'off', fsync: 'on', wal_level: 'replica', synchronous_commit: 'on',
@@ -28,7 +35,9 @@ function fixture(smoke = false) {
   const batch: Batch = { runs, imageCleanupVerified: true, errors: [] };
   const runOrders = smoke ? [['B']] as const : orders;
   for (const [index, arms] of runOrders.entries()) for (const arm of arms) {
-    const config = workload('many', smoke);
+    const config = { mode: 'many' as const, channels: 200, members: 4, subscribers: 0,
+      preAllocatedVUs: 20, maxVUs: 100, requestTimeoutSeconds: 3,
+      rates: smoke ? [50] : [50, 100, 250, 500, 1000, 2000, 4000], seconds: smoke ? 10 : 60 };
     const { bodySha256, bodySeed, k6Image, ...stack } = structuredClone(metadata.expected);
     stack.overlay = { storedBody: true, pgroongaIndex: arm === 'A' };
     runs.push({ scenario: 'many', pair: index + 1, arm, sequence: runs.length + 1, cleanupVerified: true, errors: [],
@@ -50,6 +59,57 @@ function fixture(smoke = false) {
   };
   return { judge, metadata, batch, run, at, shortfall };
 }
+
+test('report CLI reads artifacts from the supplied directory and requires its bodies.json', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'search-m1-report-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const dir = join(cwd, 'artifacts');
+  mkdirSync(dir);
+  const bodies = '["test body"]\n';
+  const f = fixture();
+  f.metadata.expected.bodySha256 = sha256(bodies);
+  for (const run of f.batch.runs) run.identity!.bodySha256 = f.metadata.expected.bodySha256;
+  assert.equal(f.judge(f.metadata.expected.bodySha256).judgement, 'No material impact');
+  writeFileSync(join(dir, 'metadata.json'), JSON.stringify(f.metadata));
+  writeFileSync(join(dir, 'runs.json'), JSON.stringify(f.batch));
+  writeFileSync(join(cwd, 'bodies.json'), bodies);
+  const cli = fileURLToPath(new URL('./search-m1-report.ts', import.meta.url));
+  const regenerate = (arg: string, from: string) =>
+    execFileSync(process.execPath, [cli, arg], { cwd: from, encoding: 'utf8' });
+
+  assert.match(regenerate('artifacts', cwd), /^many NOT EVALUATED$/m);
+  const invalid = JSON.parse(readFileSync(join(dir, 'report.json'), 'utf8'));
+  assert.ok(invalid.scenarios[0].runs.every((run: { steps: { classification: string }[] }) =>
+    run.steps.every(row => row.classification === 'INVALID run')));
+
+  writeFileSync(join(dir, 'bodies.json'), bodies);
+  assert.match(regenerate('artifacts', cwd), /^many No material impact$/m);
+  assert.match(regenerate('.', dir), /^many No material impact$/m);
+});
+
+test('matching identities must still use the approved seed, DB settings, limiter and images', () => {
+  assert.equal(fixture().judge().judgement, 'No material impact', 'literal approved identity');
+  const cases = [
+    ['body seed', { bodySeed: 1 }],
+    ...Object.keys(expected.dbSettings).map(key =>
+      [key, { dbSettings: { ...expected.dbSettings, [key]: key === 'pgroonga.enable_crash_safe' ? 'off' : 'wrong' } }] as const),
+    ['extra DB setting', { dbSettings: { ...expected.dbSettings, jit: 'off' } }],
+    ['limiter', { limiter: { ...expected.limiter, LOAD_SEND_BURST: '10' } }],
+    ['migration image', { migrateImage: 'other-app' }],
+  ] as const;
+  for (const [label, change] of cases) {
+    const f = fixture();
+    Object.assign(f.metadata.expected, change);
+    for (const run of f.batch.runs) {
+      Object.assign(run.identity!, change);
+      if (!('bodySeed' in change)) Object.assign(run.finalStack!, change);
+    }
+    const result = f.judge();
+    assert.equal(result.judgement, 'NOT EVALUATED', label);
+    assert.ok(result.runs.every(run => run.problems.includes('Run identity mismatch') &&
+      run.steps.every(row => row.classification === 'INVALID run')), label);
+  }
+});
 
 test('sustained uses 99% inclusive and requires zero drops and complete counts and latencies', () => {
   const row = step(50);

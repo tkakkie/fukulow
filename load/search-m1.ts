@@ -3,15 +3,17 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, createWriteStream, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, cpus, platform, tmpdir, totalmem } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { finished } from 'node:stream/promises';
 import { parseArgs, promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
-import { fileSha256, frozenManifest, manifestPath, overlayHashes, sha256, writeBodies } from './search-m1-bodies.ts';
+import {
+  dbImageHashes, fileSha256, frozenManifest, manifestPath, overlayHashes, repoPath, sha256, verifyDbImageInputs, writeBodies,
+} from './search-m1-bodies.ts';
 import { collect, type Boundary, type CpuSample } from './search-m1-results.ts';
 import {
-  limiter, limiterNote, orders, scenarios, workload, writeReport,
+  dbSettings, expectedDbSettings, limiter, limiterNote, orders, scenarios, workload, writeReport,
   type Arm, type Batch, type Metadata, type Run, type Scenario, type StackIdentity,
 } from './search-m1-report.ts';
 
@@ -25,12 +27,14 @@ if (!values.out) throw new Error('Use --out /absolute/new/external/directory [--
 const output = outsideCheckout(values.out);
 const smoke = values.smoke === true;
 const { hash: manifestHash, frozen } = frozenManifest();
+const dbHashes = dbImageHashes(frozen.sourceHashes);
 assert.equal(process.version, `v${frozen.node}`, 'Use the frozen Node version');
 mkdirSync(dirname(output), { recursive: true });
 mkdirSync(output);
 const scratch = mkdtempSync(`${tmpdir()}/search-m1-`);
 const root = `fukulow-load-m1-${randomUUID().replaceAll('-', '').slice(0, 16)}`;
 const source = `${scratch}/main`;
+const recipe = `${scratch}/pgroonga`;
 const appTag = `${root}-app`;
 const dbTag = `${root}-db`;
 const bodyPath = `${output}/bodies.json`;
@@ -51,15 +55,6 @@ process.on('SIGTERM', stop);
 const check = () => assert.ok(!interrupted, 'Measurement interrupted');
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-const dbSettings = {
-  shared_preload_libraries: `pg_stat_statements,${frozen.settings.shared_preload_libraries}`,
-  'pg_stat_statements.track': 'all',
-  'pgroonga.enable_wal_resource_manager': frozen.settings['pgroonga.enable_wal_resource_manager'],
-  'pgroonga.enable_crash_safe': frozen.settings['pgroonga.enable_crash_safe'],
-  'pgroonga.enable_wal': 'off',
-};
-const expectedDbSettings = { ...dbSettings, fsync: frozen.settings.fsync, wal_level: frozen.settings.wal_level,
-  synchronous_commit: frozen.settings.synchronous_commit };
 const sqlSettings = Object.keys(expectedDbSettings).map(name => `'${name}'`).join(',');
 const pgroongaIndexDefinition = "CREATE INDEX search_body ON public.messages USING pgroonga (normalized_body) " +
   `WITH (normalizers='', tokenizer='TokenNgram("unify_alphabet", false, "unify_symbol", false, "unify_digit", false)')`;
@@ -99,11 +94,12 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
   const ownershipFilter = `label=${ownership}`;
   const run: Run = { scenario, pair, arm, sequence: batch.runs.length + 1, errors: [], cleanupVerified: false, steps: [] };
   const verifyHarness = () => {
+    verifyDbImageInputs(recipe, dbHashes);
     for (const [path, hash] of Object.entries(harnessHashes)) assert.equal(fileSha256(path), hash, `Harness changed: ${path}`);
   };
   const readOverlay = (name: string) => {
     const path = `${engines}/${name}`;
-    const bytes = readFileSync(path);
+    const bytes = readFileSync(repoPath(path));
     assert.equal(sha256(bytes), harnessHashes[path], `Harness changed: ${path}`);
     return bytes.toString('utf8');
   };
@@ -284,9 +280,9 @@ try {
   await call('git', ['archive', '--format=tar', `--output=${scratch}/main.tar`, commit]);
   await call('tar', ['-xf', `${scratch}/main.tar`, '-C', source]);
   await build(appTag, ['--label', `org.opencontainers.image.revision=${commit}`, source]);
-  const recipe = `${scratch}/pgroonga`;
   mkdirSync(recipe);
-  copyFileSync(`${engines}/Dockerfile`, `${recipe}/Dockerfile`);
+  for (const path of Object.keys(dbHashes)) copyFileSync(repoPath(path), join(recipe, basename(path)));
+  verifyDbImageInputs(recipe, dbHashes);
   await build(dbTag, [recipe]);
   check();
   const k6 = await call('make', ['-s', 'load-image']);
@@ -298,11 +294,11 @@ try {
     'load/search-m1.ts', 'load/search-m1-bodies.ts', 'load/search-m1-report.ts', 'load/search-m1-results.ts',
     'load/search-m1-report.test.ts', 'load/search-m1-runner.test.ts',
     'deploy/init-db-roles.sh', 'deploy/db-roles.sql', 'deploy/db-role-settings.sql', 'deploy/db-grants.sql',
-    manifestPath, ...['Dockerfile', 'seed.ts'].map(name => `${engines}/${name}`)];
+    manifestPath];
   metadata = { smoke, expected: { commit, appImage, migrateImage: appImage, dbImage, k6Image, limiter, dbSettings: expectedDbSettings,
     overlay: { storedBody: true, pgroongaIndex: false }, bodySha256: bodies.sha256, bodySeed: bodies.seed } };
   const harnessHashes = { ...Object.fromEntries(harnessFiles.map(path => [path, fileSha256(path)])),
-    ...overlayHashes(frozen.sourceHashes) };
+    ...overlayHashes(frozen.sourceHashes), ...dbHashes };
   save(`${output}/metadata.json`, { ...metadata, machine, node: process.version, manifestHash, bodies, k6, limiterNote, harnessHashes });
   if (smoke) await runArm('many', 1, 'B', metadata.expected, harnessHashes);
   else for (const scenario of scenarios) {

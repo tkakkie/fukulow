@@ -1,12 +1,22 @@
 import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { fileSha256 } from './search-m1-bodies.ts';
+import { seed } from './search-engines/seed.ts';
+import { sha256 } from './search-m1-bodies.ts';
 
 export const scenarios = ['many', 'hot'] as const;
 export const rates = [50, 100, 250, 500, 1000, 2000, 4000];
 export const orders = [['B', 'A'], ['A', 'B'], ['B', 'A']] as const;
 export const limiterNote = 'send limiter raised for this Mac-relative comparison';
 export const limiter = { LOAD_SEND_BURST: '1000000', LOAD_SEND_REFILL_PER_SECOND: '1000000' };
+export const dbSettings = {
+  shared_preload_libraries: 'pg_stat_statements,pgroonga_wal_resource_manager,pgroonga_crash_safer',
+  'pg_stat_statements.track': 'all',
+  'pgroonga.enable_wal_resource_manager': 'on',
+  'pgroonga.enable_crash_safe': 'on',
+  'pgroonga.enable_wal': 'off',
+};
+export const expectedDbSettings = { ...dbSettings, fsync: 'on', wal_level: 'replica', synchronous_commit: 'on' };
 
 export type Scenario = typeof scenarios[number];
 export type Arm = typeof orders[number][number];
@@ -66,8 +76,6 @@ export function classify(step: Step, validRun: boolean) {
   return sustained;
 }
 
-const dbSettingKeys = ['shared_preload_libraries', 'pg_stat_statements.track', 'pgroonga.enable_wal_resource_manager',
-  'pgroonga.enable_crash_safe', 'pgroonga.enable_wal', 'fsync', 'wal_level', 'synchronous_commit'];
 const nonempty = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
 
 export function runProblems(run: Run, metadata: Metadata, bodyHash: string | null, imageCleanupVerified: boolean) {
@@ -76,9 +84,8 @@ export function runProblems(run: Run, metadata: Metadata, bodyHash: string | nul
   const expected = { ...metadata.expected, overlay: { storedBody: true, pgroongaIndex: run.arm === 'A' } };
   const { bodySha256, bodySeed, k6Image, ...expectedStack } = expected;
   if (![expected.commit, expected.appImage, expected.migrateImage, expected.dbImage, k6Image, bodySha256].every(nonempty) ||
-      !Number.isSafeInteger(bodySeed) || bodySeed <= 0 ||
-      Object.keys(expected.dbSettings ?? {}).length !== dbSettingKeys.length ||
-      !dbSettingKeys.every(key => nonempty(expected.dbSettings[key])) ||
+      expected.migrateImage !== expected.appImage || bodySeed !== seed ||
+      !isDeepStrictEqual(expected.dbSettings, expectedDbSettings) ||
       !isDeepStrictEqual(metadata.expected?.overlay, { storedBody: true, pgroongaIndex: false }) ||
       bodyHash !== bodySha256 || !isDeepStrictEqual(expected.limiter, limiter) ||
       !isDeepStrictEqual(run.identity, { ...expected, workload: expectedWorkload }) || !isDeepStrictEqual(run.finalStack, expectedStack)) {
@@ -166,10 +173,11 @@ export function report(metadata: Metadata, batch: Batch, bodyHash: string | null
 }
 
 export function writeReport(dir: string) {
+  dir = resolve(dir);
   const metadata = JSON.parse(readFileSync(`${dir}/metadata.json`, 'utf8')) as Metadata;
   const batch = JSON.parse(readFileSync(`${dir}/runs.json`, 'utf8')) as Batch;
   let bodyHash: string | null = null;
-  try { bodyHash = fileSha256(`${dir}/bodies.json`); } catch { /* missing body evidence invalidates the run */ }
+  try { bodyHash = sha256(readFileSync(`${dir}/bodies.json`)); } catch { /* missing body evidence invalidates the run */ }
   const result = report(metadata, batch, bodyHash);
   writeFileSync(`${dir}/report.json`, JSON.stringify(result, (_, value) => value === Infinity ? 'Infinity' : value, 2) + '\n');
   return result;

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { epoch, generate, seed } from './search-engines/seed.ts';
 
@@ -12,13 +12,24 @@ export const repoPath = (path: string) => isAbsolute(path) ? path : resolve(impo
 export const sha256 = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 export const fileSha256 = (path: string) => sha256(readFileSync(repoPath(path)));
 
-export function overlayHashes(sourceHashes: { path: string; sha256: string }[]) {
-  return Object.fromEntries(['schema.sql', 'pgroonga.sql'].map(name => {
+type SourceHashes = { path: string; sha256: string }[];
+
+function pinnedHashes(sourceHashes: SourceHashes, names: string[]) {
+  return Object.fromEntries(names.map(name => {
     const path = `load/search-engines/${name}`;
     const hash = sourceHashes.find(entry => entry.path === path)?.sha256;
-    assert.ok(hash && /^[a-f0-9]{64}$/.test(hash), `Missing manifest v2 overlay hash: ${path}`);
+    assert.ok(hash && /^[a-f0-9]{64}$/.test(hash), `Missing manifest v2 source hash: ${path}`);
     return [path, hash];
   }));
+}
+
+export const overlayHashes = (sourceHashes: SourceHashes) => pinnedHashes(sourceHashes, ['schema.sql', 'pgroonga.sql']);
+export const dbImageHashes = (sourceHashes: SourceHashes) => pinnedHashes(sourceHashes, ['Dockerfile', 'seed.ts']);
+
+export function verifyDbImageInputs(dir: string, hashes: Record<string, string>) {
+  for (const [path, hash] of Object.entries(hashes)) {
+    assert.equal(sha256(readFileSync(join(dir, basename(path)))), hash, `DB image input changed: ${path}`);
+  }
 }
 
 export function frozenManifest() {
@@ -27,16 +38,13 @@ export function frozenManifest() {
     frozen: {
       node: string;
       generator: { version: number; seed: number; clock: string };
-      sourceHashes: { path: string; sha256: string }[];
-      settings: Record<string, string>;
+      sourceHashes: SourceHashes;
       image: { extensions: { pgroonga: string } };
     };
   };
   assert.equal(sha256(JSON.stringify(frozen)), hash, 'Manifest v2 hash mismatch');
-  for (const path of ['seed.ts', 'schema.sql', 'pgroonga.sql', 'Dockerfile']) {
-    const source = `load/search-engines/${path}`;
-    assert.equal(fileSha256(source), frozen.sourceHashes.find(entry => entry.path === source)?.sha256, source);
-  }
+  const inputs = { ...overlayHashes(frozen.sourceHashes), ...dbImageHashes(frozen.sourceHashes) };
+  for (const [path, expected] of Object.entries(inputs)) assert.equal(fileSha256(path), expected, path);
   assert.deepEqual(frozen.generator, { version: 1, seed, clock: new Date(epoch).toISOString() });
   return { hash, frozen };
 }
