@@ -47,7 +47,7 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
   const echoes: Message[] = []
   a.on('websocket', socket => socket.on('framereceived', ({ payload }) => {
     const event = JSON.parse(String(payload)) as ServerEvent
-    if (event.type === 'message') {
+    if (event.type === 'message' && 'message' in event) {
       expect(event.kind).toBe('create')
       expect(event.seq).toBe(event.message.created_seq)
       expect(event.message.version).toBeGreaterThanOrEqual(event.message.created_seq)
@@ -162,7 +162,7 @@ test('HTTPS SPA loads and WebSocket reconnects under CSP, with live delivery and
     ws.onerror = () => { clearTimeout(timeout); ws.close(); reject(new Error('Replay socket failed')) }
     ws.onmessage = ({ data }) => {
       const event = JSON.parse(String(data)) as ServerEvent
-      if (event.type === 'message') events.push(event)
+      if (event.type === 'message' && 'message' in event) events.push(event)
       if (event.type === 'subscribed' && event.channel_id === channel) {
         clearTimeout(timeout); ws.close(); resolve(events)
       }

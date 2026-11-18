@@ -54,7 +54,7 @@ for (const role of ['member', 'guest'] as const) test(`DM discovery and live Unr
     await owner.getByRole('textbox', { name: 'メッセージ', exact: true }).fill(body)
     await owner.getByRole('button', { name: '送信', exact: true }).click()
     await expect(row.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 1件')
-    expect(frames.some(frame => frame.type === 'message' && frame.message.channel_id === dm.id)).toBe(false)
+    expect(frames.some(frame => frame.type === 'message' && 'message' in frame && frame.message.channel_id === dm.id)).toBe(false)
     expect(subscriptions.has(dm.id)).toBe(false)
     await row.click()
     await expect(peer.page.getByRole('heading', { name: 'Alice', exact: true })).toBeVisible()

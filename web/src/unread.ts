@@ -451,7 +451,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     previous = next
     if (!next.running || next.organization !== 'available') { if (before.running) reset(); return }
     if (before.historyEpoch !== next.historyEpoch) reset()
-    let rebootstrap = false
+    let rebootstrap = false, moveRefresh = false
     const changed = new Set<string>()
     const selfChanged = before.selfId !== next.selfId
     if (selfChanged) {
@@ -493,6 +493,17 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         c.requiredBase = now.cursor; rebootstrap = true
         channelChanged = true
       }
+      if (now?.moveSeq !== undefined && old?.moveSeq !== now.moveSeq) {
+        const position = now.moveSeq
+        c.requiredBase = Math.max(c.requiredBase, position)
+        for (const [seq, message] of c.records)
+          if ((message.version ?? seq) < position) c.records.delete(seq)
+        if (visit?.scope.channel === id) {
+          visit.boundary = null; visit.unreadAtEntry = null; visit.firstUnread = undefined; visit.presented.clear()
+          if (visit.scope.topicId) void refreshTopic(id, visit.scope.topicId)
+        }
+        moveRefresh = channelChanged = true
+      }
       for (const m of records?.get(id) ?? []) if (collectRecord(c, m)) channelChanged = true
       if (collect(id, c)) channelChanged = true
       if (visit?.scope.channel === id && old?.messages !== now?.messages) channelChanged = true
@@ -501,6 +512,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
     notify(changed)
     if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); cancelDeadlines() }
+    if (moveRefresh && !rebootstrap) void refresh()
     if ((!before.running && next.running) || (!before.connected && next.connected) || rebootstrap) {
       if (channels.size === 0 || [...channels.keys()].some(watched)) void refresh()
       for (const [id, c] of channels) if (watched(id)) for (const topic of c.topics.keys()) void refreshTopic(id, topic)

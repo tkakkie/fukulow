@@ -122,7 +122,7 @@ async fn one_statement_paths_read_only_the_context_organization_under_rls(pool: 
                 );
                 let bodies = |page: Vec<messages::ChannelEvent>| {
                     page.into_iter()
-                        .map(|m| m.message.body.unwrap())
+                        .map(|m| m.message().body.clone().unwrap())
                         .collect::<Vec<_>>()
                 };
                 assert_eq!(

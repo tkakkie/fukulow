@@ -7,7 +7,7 @@ import { replyClient, reply, root } from './reply-test-helpers'
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { lookupAuthors, Member, ReadPosition, Result, TopicSummary } from './api'
+import type { lookupAuthors, Member, ReadPosition, ReplyChainPage, Result, TopicSummary } from './api'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import { channelMembersAdapter } from './channel-members.svelte'
@@ -30,7 +30,7 @@ import { membersAdapter } from './members.svelte'
 import MemberList from './MemberList.svelte'
 import Workspace from './Workspace.svelte'
 import { windowClient } from './message-window-test-helpers'
-import { msg, summary } from './topic-test-helpers'
+import { replyPage, msg, summary } from './topic-test-helpers'
 import CreateChannelForm from './CreateChannelForm.svelte'
 
 type ListenerEntry = {
@@ -1478,7 +1478,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const composer = c.sync.getTimeline('A').reply('id1')
     composer.setDraft('親が消えても残る返信'); await composer.submit('id2')
     await c.replies.open('A', root())
-    c.listReplyChain.mockResolvedValue(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  root_id: 'id1', messages: [], has_more: false }))
+    c.listReplyChain.mockResolvedValue(ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  root_id: 'id1', messages: [], has_more: false })))
     await c.replies.loadMore('A')
     const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
     const instance = mount(ReplyPanel, { target: host as unknown as Element, props: {
@@ -2617,8 +2617,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       { kind: 'topic', topic: summary }, { kind: 'message', message: recent },
     ] })
     net.topicSummaries['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: summary })
-    net.replyChains[`c1:${root.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root]).at(-1)?.created_seq ?? 0,  root_id: root.id, messages: [root], has_more: true })
-    net.replyChains[`c1:${root.id}:1`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply]).at(-1)?.created_seq ?? 0,  root_id: root.id, messages: [reply], has_more: false })
+    net.replyChains[`c1:${root.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([root]).at(-1)?.created_seq ?? 0,  root_id: root.id, messages: [root], has_more: true }))
+    net.replyChains[`c1:${root.id}:1`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([reply]).at(-1)?.created_seq ?? 0,  root_id: root.id, messages: [reply], has_more: false }))
     const base = net.options('me')
     const topicReads = vi.fn(async (_channel: string, _topic: string, query?: { before_seq?: number }) =>
       query?.before_seq ? ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([older]).at(-1)?.created_seq ?? 0,  messages: [older], has_more: false }) : ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([latest]).at(-1)?.created_seq ?? 0,  messages: [latest], has_more: true }))
@@ -4355,21 +4355,21 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       },
     })
     net.topicMessages['c1:t-1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([tm1]).at(-1)?.created_seq ?? 0,  messages: [tm1], has_more: false })
-    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${m1.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [m1, r1],
       has_more: false,
-    })
-    net.replyChains[`c1:${m2.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,
+    }))
+    net.replyChains[`c1:${m2.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,
       root_id: m2.id,
       messages: [m2],
       has_more: false,
-    })
-    net.replyChains[`c1:${tm1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([tm1, tr1]).at(-1)?.created_seq ?? 0,
+    }))
+    net.replyChains[`c1:${tm1.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([tm1, tr1]).at(-1)?.created_seq ?? 0,
       root_id: tm1.id,
       messages: [tm1, tr1],
       has_more: false,
-    })
+    }))
 
     net.replyCountPages.c1 = { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 5, counts: [m1, m2, tm1].map(m => ({ message_id: m.id, root_id: m.id, reply_count: m.id === m2.id ? 0 : 1 })) }
 
@@ -4597,11 +4597,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       has_more: false,
       items: [{ kind: 'message', message: m1 }],
     })
-    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${m1.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [m1, r1],
       has_more: true,
-    })
+    }))
 
     net.replyCountPages.c1 = { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, counts: [{ message_id: m1.id, root_id: m1.id, reply_count: 2 }] }
 
@@ -4675,11 +4675,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(buttonsByText(panel, 'さらに返信を読み込む')).toHaveLength(1)
 
     // 1. Paging trigger: clicking さらに返信を読み込む fetches after_seq: 2 and appends r2
-    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([r2]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${m1.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([r2]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [r2],
       has_more: false,
-    })
+    }))
     buttonsByText(panel, 'さらに返信を読み込む')[0].click()
     flushSync()
     await settle()
@@ -4900,11 +4900,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     expect(buttonsByText(panel, '再試行')).toHaveLength(1)
 
     // Retry succeeds
-    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${m1.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [m1, r1],
       has_more: false,
-    })
+    }))
     buttonsByText(panel, '再試行')[0].click()
     flushSync()
     await settle()
@@ -5017,22 +5017,22 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       items: [{ kind: 'message', message: mRecent }],
     })
     // Cold URL lookup for rDesc2 with limit: 1 returns the root message (mRoot)
-    net.replyChains[`c1:${rDesc2.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${rDesc2.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot]).at(-1)?.created_seq ?? 0,
       root_id: mRoot.id,
       messages: [mRoot],
       has_more: true,
-    })
+    }))
     // Opening the chain from mRoot returns page 1 ([mRoot, rDesc1], has_more: true), then page 2 ([rDesc2], has_more: false)
-    net.replyChains[`c1:${mRoot.id}:0`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot, rDesc1]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${mRoot.id}:0`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot, rDesc1]).at(-1)?.created_seq ?? 0,
       root_id: mRoot.id,
       messages: [mRoot, rDesc1],
       has_more: true,
-    })
-    net.replyChains[`c1:${mRoot.id}:2`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([rDesc2]).at(-1)?.created_seq ?? 0,
+    }))
+    net.replyChains[`c1:${mRoot.id}:2`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([rDesc2]).at(-1)?.created_seq ?? 0,
       root_id: mRoot.id,
       messages: [rDesc2],
       has_more: false,
-    })
+    }))
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
@@ -5195,11 +5195,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'message', message: m3 },
       ],
     })
-    net.replyChains[`c1:${m2.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${m2.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,
       root_id: m2.id,
       messages: [m2],
       has_more: false,
-    })
+    }))
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
@@ -5321,11 +5321,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       has_more: false,
       items: [{ kind: 'message', message: mRoot }],
     })
-    const chainPayload = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot, r1, r2]).at(-1)?.created_seq ?? 0,
+    const chainPayload = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([mRoot, r1, r2]).at(-1)?.created_seq ?? 0,
       root_id: mRoot.id,
       messages: [mRoot, r1, r2],
       has_more: false,
-    })
+    }))
     net.replyChains[`c1:${mRoot.id}`] = chainPayload
     net.replyChains[`c1:${r1.id}`] = chainPayload
     net.replyChains[`c1:${r2.id}`] = chainPayload
@@ -5523,11 +5523,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
         { kind: 'message', message: r1 },
       ],
     })
-    net.replyChains[`c1:${m1.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${m1.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m1, r1]).at(-1)?.created_seq ?? 0,
       root_id: m1.id,
       messages: [m1, r1],
       has_more: false,
-    })
+    }))
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
@@ -5653,7 +5653,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
   it('preserves a Reply Composer draft typed while a Topic reply URL is still resolving', async () => {
     const net = fakeNetwork()
     const baseOptions = net.options('me')
-    let resolveChainLookup!: (result: ReturnType<typeof ok<{ history_generation: string; as_of_seq: number;  root_id: string; messages: ReturnType<typeof record>[]; has_more: boolean }>>) => void
+    let resolveChainLookup!: (result: Result<ReplyChainPage>) => void
     const rawSession = createSession({
       selfId: 'me',
       organizationId: 'org-1',
@@ -5687,11 +5687,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       has_more: false,
       items: [],
     })
-    net.replyChains[`c1:${topicRoot.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicRoot]).at(-1)?.created_seq ?? 0,
+    net.replyChains[`c1:${topicRoot.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicRoot]).at(-1)?.created_seq ?? 0,
       root_id: topicRoot.id,
       messages: [topicRoot],
       has_more: false,
-    })
+    }))
 
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
     await settle()
@@ -5760,11 +5760,11 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     // Now the lookup resolves with topic_id: 't-1'
     resolveChainLookup(
-      ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicRoot]).at(-1)?.created_seq ?? 0,
+      ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([topicRoot]).at(-1)?.created_seq ?? 0,
         root_id: topicRoot.id,
         messages: [topicRoot],
         has_more: false,
-      }),
+      })),
     )
     await settle()
     await settle()
@@ -6044,7 +6044,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       ],
     })
     net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, topic: t1Summary })
-    net.replyChains[`c1:${m2.id}`] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,  root_id: m2.id, messages: [m2], has_more: false })
+    net.replyChains[`c1:${m2.id}`] = ok(replyPage({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([m2]).at(-1)?.created_seq ?? 0,  root_id: m2.id, messages: [m2], has_more: false }))
     net.unreadChannels.c1 = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       ...channel('c1', 'general'),

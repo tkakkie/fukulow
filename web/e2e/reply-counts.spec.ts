@@ -32,7 +32,7 @@ test('authoritative totals survive partial history and cold child navigation and
   const streamed = new Set<string>()
   page.on('websocket', socket => socket.on('framereceived', frame => {
     const event = JSON.parse(String(frame.payload)) as components['schemas']['ServerEvent']
-    if (event.type === 'message') streamed.add(event.message.id)
+    if (event.type === 'message' && 'message' in event) streamed.add(event.message.id)
   }))
   const batches: components['schemas']['ReplyCountRequest'][] = []
   await page.route(`**${base}/reply-counts`, async route => {
