@@ -930,6 +930,9 @@
             <ReplyPanel
               channel={currentChannel}
               replies={currentReplies}
+              topics={currentTopics}
+              moveChain={session.moveChain}
+              onannounce={onannounce}
               channelId={selected.id}
               anchorMessageId={activeReplyMessageId}
               resolvedAnchor={resolvedReplyAnchor}

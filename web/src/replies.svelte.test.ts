@@ -167,3 +167,15 @@ it('reply.migrateDraftFrom moves temporary (anchor, null) drafts into resolved (
 
   await c.sync.close()
 })
+
+it('forwards move(anchor, destination) to the session moveChain controller and defaults to baseline_unavailable', async () => {
+  const c = replyClient(); await c.boot()
+  const withoutMove = repliesAdapter(c.replies, 'A')
+  await expect(withoutMove.move('id1', { topicName: 'New' })).resolves.toEqual({ kind: 'baseline_unavailable' })
+
+  const moveChain = vi.fn().mockResolvedValue({ kind: 'denied' as const })
+  const withMove = repliesAdapter(c.replies, 'A', undefined, moveChain)
+  await expect(withMove.move('id1', { topicId: 'topic-1' })).resolves.toEqual({ kind: 'denied' })
+  expect(moveChain).toHaveBeenCalledExactlyOnceWith('A', 'id1', { topicId: 'topic-1' })
+  await c.sync.close()
+})

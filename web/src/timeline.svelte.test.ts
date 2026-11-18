@@ -7399,3 +7399,206 @@ it('DM access loss hides both retained baseline badges until a renewed controlle
     expect(host.textContent).not.toContain('未読を確認中')
   } finally { await unmount(list); session.close() }
 })
+
+it('ReplyPanel トピックに移動 disables submit until chainVersion is ready, moves to existing or new Topic, retries unknown outcomes, and renders every Japanese failure message', async () => {
+  const net = fakeNetwork()
+  const moveChainApi = vi.fn()
+  const rawSession = createSession({
+    selfId: 'me',
+    organizationId: 'org-1',
+    onEnded: () => {},
+    moveChainApi,
+    ...net.options('me'),
+  })
+  net.socket.onReady()
+  const rootMsg = { ...record(1, 'A'), id: 'id1', body: 'ルート' }
+  const topicT = summary('topic-existing', 5, 2)
+  net.timelines.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 5,
+    has_more: false,
+    items: [{ kind: 'message', message: rootMsg }, { kind: 'topic', topic: topicT }],
+  })
+  net.topicLists.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 5,
+    topics: [topicT],
+    has_more: false,
+  })
+  // First open with chain_version omitted (0) so chainVersion is undefined
+  net.replyChains[`A:${rootMsg.id}`] = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 1,
+    root_id: rootMsg.id,
+    chain_version: 0,
+    messages: [rootMsg],
+    has_more: false,
+  })
+  net.lists[0].resolve(ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    channels: [channel('A', 'general')],
+  }))
+  await settle()
+  net.subscribed('A', 5)
+  await settle()
+
+  await rawSession.topics.loadList('A')
+  await rawSession.replies.open('A', rootMsg)
+  expect(rawSession.replies.get('A').chainVersion).toBeUndefined()
+
+  const moveChain = vi.fn()
+  const announced: string[] = []
+  const host = testDoc.createElement('div')
+  testDoc.body.appendChild(host)
+  const channelAdapter = syncAdapter(rawSession.sync).channel('A')
+  const replies = repliesAdapter(rawSession.replies, 'A', rawSession.replyCounts, moveChain)
+  const topics = topicsAdapter(rawSession.topics, 'A')
+
+  const instance = mount(ReplyPanel, {
+    target: host as unknown as Element,
+    props: {
+      channel: channelAdapter,
+      replies,
+      topics,
+      moveChain,
+      onannounce: (m: string) => announced.push(m),
+      channelId: 'A',
+      anchorMessageId: rootMsg.id,
+      resolvedAnchor: rootMsg,
+    },
+  })
+
+  try {
+    await settle()
+    flushSync()
+
+    // Open Move dialog while chainVersion is not ready: submit button is disabled
+    const openBtn = buttonsByText(host, 'トピックに移動')[0]
+    expect(openBtn).toBeDefined()
+    openBtn.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    const dialog = host.querySelector('[role="dialog"]')!
+    expect(dialog).not.toBeNull()
+    expect(dialog.textContent).toContain('返信のつながりを読み込んでいます…')
+    const submitBtn = () => buttonsByText(dialog, 'トピックに移動')[0]
+    expect(submitBtn().disabled).toBe(true)
+
+    // Refresh chain so chainVersion becomes ready
+    net.replyChains[`A:${rootMsg.id}`] = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 5,
+      root_id: rootMsg.id,
+      chain_version: 5,
+      messages: [rootMsg],
+      has_more: false,
+    })
+    await rawSession.replies.loadOlder('A')
+    await settle()
+    flushSync()
+
+    expect(rawSession.replies.get('A').chainVersion).toBe(5)
+    expect(dialog.textContent).not.toContain('返信のつながりを読み込んでいます…')
+    expect(submitBtn().disabled).toBe(false)
+
+    // 1. Existing Topic destination -> check each failure outcome and Japanese message
+    const failureCases: Array<[ Awaited<ReturnType<typeof replies.move>>, string ]> = [
+      [{ kind: 'conflict', error: 'version_conflict' }, '返信のつながりが更新されました。最新の状態を読み込みましたので、もう一度お試しください。'],
+      [{ kind: 'too_large' }, 'メッセージが1,000件を超える返信のつながりは移動できません。'],
+      [{ kind: 'denied' }, 'この返信のつながりをトピックに移動する権限がありません。'],
+      [{ kind: 'not_found' }, '移動対象の返信のつながりまたは移動先のトピックが見つかりません。'],
+      [{ kind: 'snapshot_expired' }, '表示していた情報が古くなりました。もう一度お試しください。'],
+      [{ kind: 'history_generation_changed' }, '履歴が更新されました。読み込み直してから、もう一度お試しください。'],
+      [{ kind: 'baseline_unavailable' }, '返信のつながりを読み込んでから、もう一度お試しください。'],
+      [{ kind: 'superseded' }, '移動対象が変更されたため、移動を中断しました。もう一度お試しください。'],
+      [{ kind: 'failed', status: 400, error: 'invalid_input' }, 'トピックに移動できませんでした。入力内容を確認して、もう一度お試しください。'],
+    ]
+
+    for (const [outcome, expectedMessage] of failureCases) {
+      moveChain.mockResolvedValueOnce(outcome)
+      submitBtn().click()
+      await settle()
+      flushSync()
+      expect(moveChain).toHaveBeenLastCalledWith('A', rootMsg.id, { topicId: 'topic-existing' })
+      const alertEl = dialog.querySelector('[role="alert"]')
+      expect(alertEl?.textContent).toBe(expectedMessage)
+      expect(buttonsByText(dialog, '再試行')).toHaveLength(0)
+    }
+
+    // 2. Unknown outcome offers 再試行 that calls retry(), and moved closes dialog and announces
+    const receipt = {
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      move_seq: 6,
+      operation_id: 'op-1',
+      root_id: rootMsg.id,
+      destination_topic_id: 'topic-existing',
+      chain_version: 6,
+      operation_version: 6,
+      topic_id: 'topic-existing',
+    }
+    const retryFn = vi.fn().mockResolvedValueOnce({ kind: 'moved' as const, receipt })
+    moveChain.mockResolvedValueOnce({ kind: 'unknown' as const, retry: retryFn })
+    submitBtn().click()
+    await settle()
+    flushSync()
+
+    expect(dialog.querySelector('[role="alert"]')?.textContent).toBe(
+      '移動を確認できませんでした。通信状況を確認して、もう一度お試しください。',
+    )
+    const retryBtn = buttonsByText(dialog, '再試行')[0]
+    expect(retryBtn).toBeDefined()
+    retryBtn.click()
+    await settle()
+    flushSync()
+
+    expect(retryFn).toHaveBeenCalledTimes(1)
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+    expect(host.textContent).toContain('トピックに移動しました。')
+    expect(announced).toEqual(['トピックに移動しました。'])
+
+    // 3. Reopen dialog, switch to new Topic name, validate Topic name and submit { topicName }
+    openBtn.click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    const dialog2 = host.querySelector('[role="dialog"]')!
+    const newRadio = queryAll(dialog2, 'input[type="radio"]').find((r) => r.getAttribute('value') === 'new')!
+    newRadio.checked = true
+    newRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    flushSync()
+
+    const nameInput = dialog2.querySelector('input[name="move_topic_name"]')!
+    expect(buttonsByText(dialog2, 'トピックに移動')[0].disabled).toBe(true)
+
+    // Invalid surrounding whitespace shows topicNameError without calling moveChain
+    const callsBefore = moveChain.mock.calls.length
+    nameInput.value = ' 前後空白 '
+    nameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    buttonsByText(dialog2, 'トピックに移動')[0].click()
+    await settle()
+    flushSync()
+    expect(moveChain).toHaveBeenCalledTimes(callsBefore)
+    expect(dialog2.querySelector('[role="alert"]')?.textContent).toBe(
+      'トピック名の前後に空白を入れず、1〜60文字にしてください。',
+    )
+
+    // Valid new Topic name calls moveChain with { topicName }
+    nameInput.value = '新規移動トピック'
+    nameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    moveChain.mockResolvedValueOnce({ kind: 'moved' as const, receipt })
+    buttonsByText(dialog2, 'トピックに移動')[0].click()
+    await settle()
+    flushSync()
+
+    expect(moveChain).toHaveBeenLastCalledWith('A', rootMsg.id, { topicName: '新規移動トピック' })
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await unmount(instance)
+    rawSession.close()
+  }
+})
