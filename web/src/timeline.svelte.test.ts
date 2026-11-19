@@ -7359,7 +7359,7 @@ it('MessageBody links follow the roving tabindex of their MessageRow across conf
   }))
   await settle()
   net.subscribed('c1', 2)
-  // Also queue a pending send containing a link (must stay tabindex="-1")
+  // Also queue a pending send containing a link (non-roving pending rows stay in Tab order: tabindex="0")
   void adapter.channel('c1').send('送信中 https://example.com/pending')
   await settle()
 
@@ -7382,15 +7382,15 @@ it('MessageBody links follow the roving tabindex of their MessageRow across conf
 
   expect(focusableRows()).toHaveLength(2)
   expect(links()).toHaveLength(3)
-  // Latest confirmed row (m2) is the default roving row; m1 (inactive) and pending stay -1
+  // Latest confirmed row (m2) is the default roving row; m1 (inactive) stays -1; pending row link stays 0
   expect(focusableRows().map((r) => r.getAttribute('tabindex'))).toEqual(['-1', '0'])
   expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
     ['https://example.com/one', '-1'],
     ['https://example.com/two', '0'],
-    ['https://example.com/pending', '-1'],
+    ['https://example.com/pending', '0'],
   ])
 
-  // ArrowUp moves roving focus to m1: only m1's link becomes tabindex="0"
+  // ArrowUp moves roving focus to m1: m1's link becomes tabindex="0", m2's becomes "-1", pending stays "0"
   focusableRows()[1].focus()
   const up = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
   up.key = 'ArrowUp'
@@ -7401,10 +7401,10 @@ it('MessageBody links follow the roving tabindex of their MessageRow across conf
   expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
     ['https://example.com/one', '0'],
     ['https://example.com/two', '-1'],
-    ['https://example.com/pending', '-1'],
+    ['https://example.com/pending', '0'],
   ])
 
-  // ArrowDown moves roving focus back to m2: only m2's link becomes tabindex="0"
+  // ArrowDown moves roving focus back to m2: m2's link becomes tabindex="0", m1's becomes "-1", pending stays "0"
   const down = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
   down.key = 'ArrowDown'
   focusableRows()[0].dispatchEvent(down)
@@ -7414,8 +7414,26 @@ it('MessageBody links follow the roving tabindex of their MessageRow across conf
   expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
     ['https://example.com/one', '-1'],
     ['https://example.com/two', '0'],
-    ['https://example.com/pending', '-1'],
+    ['https://example.com/pending', '0'],
   ])
+
+  // Failed pending row (e.g. after Channel access loss / targetUnavailable) also keeps its link in the Tab order
+  const failedHost = testDoc.createElement('div')
+  testDoc.body.appendChild(failedHost)
+  const failedRow = mount(MessageRow, {
+    target: failedHost as unknown as Element,
+    props: {
+      body: 'See https://example.com/help',
+      pendingStatus: 'failed',
+      targetUnavailable: true,
+      ondiscard: () => {},
+    },
+  })
+  flushSync()
+  const failedLink = failedHost.querySelector('a.ui-message-body__link')
+  expect(failedLink?.getAttribute('href')).toBe('https://example.com/help')
+  expect(failedLink?.getAttribute('tabindex')).toBe('0')
+  await unmount(failedRow)
 
   await unmount(instance)
   session.close()

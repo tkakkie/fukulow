@@ -195,4 +195,30 @@ test('Message body formatting (#628): multi-row roving tabindex keeps only the a
 
   await page.keyboard.press('Tab')
   await expect(link2).toBeFocused()
+
+  // A failed pending row keeps its link in the Tab order alongside its action buttons
+  await page.route(`**/api/v1/orgs/${org}/channels/${channel.id}/messages`, async (route) => {
+    if (route.request().method() === 'POST') {
+      await route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'forbidden', message: 'forbidden' }),
+      })
+      return
+    }
+    await route.continue()
+  })
+  const composer = main.locator('textarea').first()
+  await composer.fill('See https://example.invalid/help')
+  await composer.press('Enter')
+
+  const failedLink = main.locator('a[href="https://example.invalid/help"]')
+  await expect(failedLink).toBeVisible()
+  await expect(failedLink).toHaveAttribute('tabindex', '0')
+
+  // Tab from row2's link reaches the failed pending row's link
+  await link2.focus()
+  await expect(link2).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(failedLink).toBeFocused()
 })

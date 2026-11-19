@@ -237,13 +237,27 @@ function sliceCodeChildren(
   return out
 }
 
-function findNextPlainPair(line: IndexedLine, pairChar: string, from: number, end: number): number {
+function isPairAt(line: IndexedLine, idx: number, end: number, ch: string): boolean {
+  return (
+    idx + 1 < end &&
+    !line.atoms.has(idx) &&
+    !line.atoms.has(idx + 1) &&
+    line.str[idx] === ch &&
+    line.str[idx + 1] === ch
+  )
+}
+
+function findNextPlainPairOrOuter(
+  line: IndexedLine,
+  innerChar: string,
+  outerChar: string,
+  from: number,
+  end: number,
+): { kind: 'inner' | 'outer'; index: number } | null {
   const isBreak = (k: number) =>
     line.atoms.has(k) ||
-    (k + 1 < end &&
-      line.str[k] === pairChar &&
-      line.str[k + 1] === pairChar &&
-      !line.atoms.has(k + 1))
+    isPairAt(line, k, end, innerChar) ||
+    isPairAt(line, k, end, outerChar)
   let urlRun: UrlRun | null = null
 
   for (let i = from; i + 1 < end; i++) {
@@ -255,9 +269,6 @@ function findNextPlainPair(line: IndexedLine, pairChar: string, from: number, en
       if (closeBacktick > i + 1 && closeBacktick < end) {
         i = closeBacktick
         continue
-      }
-      if (closeBacktick >= end) {
-        return -1
       }
     }
     if (ch === 'h' || ch === 'H' || ch === 'm' || ch === 'M') {
@@ -275,8 +286,65 @@ function findNextPlainPair(line: IndexedLine, pairChar: string, from: number, en
         }
       }
     }
-    if (ch === pairChar && line.str[i + 1] === pairChar && !line.atoms.has(i + 1)) {
+    if (isPairAt(line, i, end, outerChar)) {
+      return { kind: 'outer', index: i }
+    }
+    if (isPairAt(line, i, end, innerChar)) {
+      return { kind: 'inner', index: i }
+    }
+  }
+  return null
+}
+
+function findNextPlainPair(
+  line: IndexedLine,
+  pairChar: string,
+  from: number,
+  end: number,
+  disallowOther: boolean,
+): number {
+  const otherChar = pairChar === '*' ? '~' : '*'
+  const isBreak = (k: number) => line.atoms.has(k) || isPairAt(line, k, end, pairChar)
+  let urlRun: UrlRun | null = null
+
+  for (let i = from; i + 1 < end; i++) {
+    if (line.atoms.has(i)) continue
+
+    const ch = line.str[i]
+    if (ch === '`') {
+      const closeBacktick = line.nextBacktick.get(i) ?? -1
+      if (closeBacktick > i + 1 && closeBacktick < end) {
+        i = closeBacktick
+        continue
+      }
+    }
+    if (ch === 'h' || ch === 'H' || ch === 'm' || ch === 'M') {
+      if (i === 0 || line.atoms.has(i - 1) || !ASCII_ALNUM.test(line.str[i - 1])) {
+        const scheme = matchScheme(line.str, i, end)
+        if (scheme !== null) {
+          if (urlRun === null || urlRun.end <= i) {
+            urlRun = scanUrlRun(line.str, i, end, isBreak)
+          }
+          const linkEnd = matchAutolink(urlRun, i, scheme)
+          if (linkEnd !== -1) {
+            i = linkEnd - 1
+            continue
+          }
+        }
+      }
+    }
+    if (isPairAt(line, i, end, pairChar)) {
       return i
+    }
+    if (!disallowOther && isPairAt(line, i, end, otherChar)) {
+      const inner = findNextPlainPairOrOuter(line, otherChar, pairChar, i + 2, end)
+      if (inner === null) return -1
+      if (inner.kind === 'outer') return inner.index
+      if (inner.index > i + 2) {
+        i = inner.index + 1
+      } else {
+        i += 1
+      }
     }
   }
   return -1
@@ -371,7 +439,7 @@ function parseInlineRange(
       !line.atoms.has(i + 1)
     ) {
       if (noBoldAfter === -1 || i < noBoldAfter) {
-        const closeIdx = findNextPlainPair(line, '*', i + 2, end)
+        const closeIdx = findNextPlainPair(line, '*', i + 2, end, disallowStrike)
         if (closeIdx === -1) {
           noBoldAfter = i
         } else if (closeIdx > i + 2) {
@@ -398,7 +466,7 @@ function parseInlineRange(
       !line.atoms.has(i + 1)
     ) {
       if (noStrikeAfter === -1 || i < noStrikeAfter) {
-        const closeIdx = findNextPlainPair(line, '~', i + 2, end)
+        const closeIdx = findNextPlainPair(line, '~', i + 2, end, disallowBold)
         if (closeIdx === -1) {
           noStrikeAfter = i
         } else if (closeIdx > i + 2) {

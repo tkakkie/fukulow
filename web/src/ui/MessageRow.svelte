@@ -53,7 +53,9 @@
 
   let replyBtnRef = $state<HTMLButtonElement | null>(null)
   const isRowFocusable = $derived(!pendingStatus && (focusable || Boolean(onopenreplies)))
-  const linkTabindex = $derived<0 | -1>(isRowFocusable && rovingTabindex === 0 ? 0 : -1)
+  const linkTabindex = $derived<0 | -1>(
+    Boolean(pendingStatus) || (isRowFocusable && rovingTabindex === 0) ? 0 : -1,
+  )
 
   const formattedTime = $derived(
     createdAt ? new Date(createdAt).toLocaleString('ja-JP') : '',

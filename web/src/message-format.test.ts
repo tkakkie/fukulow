@@ -446,6 +446,8 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       'http://[bad]/',
     ].map(unit => unit.repeat(Math.floor(4000 / unit.length)))
     const unclosedBoldFailedUrls = '**' + 'http://)'.repeat(499)
+    const nestedEmphasisFailedUrls = '**' + '~~http://)'.repeat(399)
+    const repeatedInnerEmphasis = '**' + '~~a~~'.repeat(799)
 
     expect(worstCaseMarkers.length).toBe(4000)
     expect(worstCaseSchemeRuns.length).toBe(4000)
@@ -462,6 +464,8 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       worstCaseTrailingParens,
       ...failedCandidateRuns,
       unclosedBoldFailedUrls,
+      nestedEmphasisFailedUrls,
+      repeatedInnerEmphasis,
     ]) {
       const start = performance.now()
       for (let i = 0; i < 20; i++) {
@@ -624,6 +628,58 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
         type: 'strikethrough',
         children: [{ type: 'link', href: 'https://a.example/x', text: 'https://a.example/x' }],
       },
+    ])
+
+    // Nested emphasis wrapping a URL followed by inline code containing the outer marker
+    expect(firstLine(tokenizeMessageBody('**~~https://example.com/x~~`code**` end**'))).toEqual([
+      {
+        type: 'bold',
+        children: [
+          {
+            type: 'strikethrough',
+            children: [{ type: 'link', href: 'https://example.com/x', text: 'https://example.com/x' }],
+          },
+          { type: 'code', children: [{ type: 'text', text: 'code**' }] },
+          { type: 'text', text: ' end' },
+        ],
+      },
+    ])
+    expect(firstLine(tokenizeMessageBody('~~**https://example.com/x**`code~~` end~~'))).toEqual([
+      {
+        type: 'strikethrough',
+        children: [
+          {
+            type: 'bold',
+            children: [{ type: 'link', href: 'https://example.com/x', text: 'https://example.com/x' }],
+          },
+          { type: 'code', children: [{ type: 'text', text: 'code~~' }] },
+          { type: 'text', text: ' end' },
+        ],
+      },
+    ])
+
+    // URL containing ~~ when no strikethrough is open still consumes its backtick and closes outer bold
+    expect(firstLine(tokenizeMessageBody('**https://example.com/a~~b` foo** bar'))).toEqual([
+      {
+        type: 'bold',
+        children: [
+          { type: 'link', href: 'https://example.com/a~~b`', text: 'https://example.com/a~~b`' },
+          { type: 'text', text: ' foo' },
+        ],
+      },
+      { type: 'text', text: ' bar' },
+    ])
+
+    // Outer closer before inner closer keeps inner marker literal and ends URL at outer closer
+    expect(firstLine(tokenizeMessageBody('**~~https://example.com/x**~~'))).toEqual([
+      {
+        type: 'bold',
+        children: [
+          { type: 'text', text: '~~' },
+          { type: 'link', href: 'https://example.com/x', text: 'https://example.com/x' },
+        ],
+      },
+      { type: 'text', text: '~~' },
     ])
   })
 })
