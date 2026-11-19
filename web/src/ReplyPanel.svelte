@@ -100,6 +100,8 @@
   let moveRetry = $state<{ destination: MoveDestination; retry: () => Promise<MoveResult> } | null>(null)
   let moveRefreshFailed = $state(false)
   let moveGeneration = 0
+  let moveDialogOpening = 0
+  let moveSelectVersion = 0
 
   const moveTopicId = $derived(moveTopic?.topicId ?? '')
   const moveOptions = $derived(
@@ -260,6 +262,7 @@
     if (key !== lastMoveKey) {
       lastMoveKey = key
       moveGeneration++
+      moveDialogOpening++
       moveDialogOpen = false
       moveBusy = false
       moveError = null
@@ -286,7 +289,7 @@
     const current = orderedTopics.find((t) => t.topicId === moveTopicId)
     if (current) {
       moveTopic = current
-    } else if (!moveBusy && moveListSettled) {
+    } else if (!moveBusy && moveListSettled && (!moveTopic || !tState?.list.hasMore)) {
       moveTopic = orderedTopics[0] ?? null
       if (!moveTopic) moveMode = 'new'
     }
@@ -298,6 +301,7 @@
 
   function openMoveDialog() {
     if (!topics || targetUnavailable) return
+    moveDialogOpening++
     moveError = null
     moveNotice = null
     moveRetry = null
@@ -310,6 +314,7 @@
 
   function closeMoveDialog() {
     if (moveBusy) return
+    moveDialogOpening++
     moveDialogOpen = false
     moveError = null
     moveRetry = null
@@ -353,6 +358,7 @@
       const result = await action()
       if (gen !== moveGeneration) return
       if (result.kind === 'moved') {
+        moveDialogOpening++
         moveRetry = null
         moveRefreshFailed = false
         moveDialogOpen = false
@@ -414,20 +420,20 @@
   async function handleLoadMoreTopics() {
     if (!topics || moveBusy || tState?.list.loading) return
     const gen = moveGeneration
-    const trigger =
-      typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null
+    const opening = moveDialogOpening
+    const selectVer = moveSelectVersion
+    const parkedOnSelect = focusTarget(moveSelectRef)
     await topics.loadList().catch(console.error)
     await tick()
-    if (gen !== moveGeneration || !moveDialogOpen) return
+    if (gen !== moveGeneration || opening !== moveDialogOpening || !moveDialogOpen) return
     const active = typeof document !== 'undefined' ? document.activeElement : null
     const focusLost =
       !active ||
       active === document.body ||
       active === document.documentElement ||
-      (active instanceof HTMLElement && (!active.isConnected || active === trigger))
-    if (!focusLost) return
+      (active instanceof HTMLElement && !active.isConnected)
+    const stillParked = parkedOnSelect && active === moveSelectRef && selectVer === moveSelectVersion
+    if (!focusLost && !stillParked) return
     if (!focusTarget(moveLoadMoreRef)) {
       focusTarget(moveSelectRef)
     }
@@ -818,6 +824,8 @@
           role="alert"
           message="トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
           actionLabel="再試行"
+          actionAriaLabel="トピック一覧の読み込みを再試行"
+          actionDisabled={tState.list.loading || moveBusy}
           onaction={() => void topics?.loadList().catch(console.error)}
         />
       {/if}
@@ -868,6 +876,7 @@
             value={moveTopicId}
             disabled={moveBusy}
             onchange={(e) => {
+              moveSelectVersion++
               const selected = moveOptions.find((t) => t.topicId === e.currentTarget.value)
               if (selected) moveTopic = selected
               moveError = null
@@ -880,22 +889,31 @@
             {/each}
           </select>
         </label>
-        {#if topics && tState && !targetUnavailable && !tState.unavailable && tState.list.asOfSeq !== undefined && tState.list.hasMore}
-          <div class="reply-panel__move-older">
-            <Button
-              bind:buttonRef={moveLoadMoreRef}
-              variant="secondary"
-              disabled={tState.list.loading || moveBusy}
-              onclick={() => void handleLoadMoreTopics()}
-            >
-              以前のトピックを読み込む
-            </Button>
+        {#if topics && tState && !targetUnavailable && !tState.unavailable && ((tState.list.asOfSeq !== undefined && tState.list.hasMore) || tState.list.loading)}
+          <div class="reply-panel__move-older" aria-busy={tState.list.loading}>
+            {#if tState.list.asOfSeq !== undefined && tState.list.hasMore}
+              <div class="reply-panel__move-older-action">
+                <Button
+                  bind:buttonRef={moveLoadMoreRef}
+                  variant="secondary"
+                  disabled={tState.list.loading || moveBusy}
+                  onclick={() => void handleLoadMoreTopics()}
+                >
+                  以前のトピックを読み込む
+                </Button>
+              </div>
+            {/if}
+            {#if tState.list.loading}
+              <Skeleton rows={2} label="以前のトピックを読み込み中" />
+            {/if}
             {#if tState.list.error}
               <StatusBanner
                 tone="danger"
                 role="alert"
                 message="以前のトピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-                actionLabel="再試行"
+                actionLabel="読み込みを再試行"
+                actionAriaLabel="以前のトピックの読み込みを再試行"
+                actionDisabled={tState.list.loading || moveBusy}
                 onaction={() => void handleLoadMoreTopics()}
               />
             {/if}
@@ -922,6 +940,7 @@
           role="alert"
           message={moveError ?? chainLoadError}
           actionLabel={!moveBusy && displayedMoveRetry ? '再試行' : canReloadMoveChain ? '再読み込み' : undefined}
+          actionAriaLabel={!moveBusy && displayedMoveRetry ? '移動を再試行' : undefined}
           onaction={!moveBusy && displayedMoveRetry ? () => void handleRetryMove() : canReloadMoveChain ? () => void handleReloadChainForMove() : undefined}
           secondaryActionLabel={displayedMoveRetry && canReloadMoveChain ? '再読み込み' : undefined}
           onsecondaryaction={displayedMoveRetry && canReloadMoveChain ? () => void handleReloadChainForMove() : undefined}
@@ -1062,9 +1081,12 @@
 
   .reply-panel__move-older {
     display: grid;
-    justify-items: start;
     gap: var(--space-8);
     min-width: 0;
+  }
+
+  .reply-panel__move-older-action {
+    justify-self: start;
   }
 
   .reply-panel__move-actions {
