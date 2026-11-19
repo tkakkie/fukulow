@@ -3,6 +3,7 @@ import type { Message, ReplyChainPage, Result } from './api'
 import { createReplySync } from './reply-sync'
 import { replyPage, topicClient } from './topic-test-helpers'
 import { deferred, ok, reply, replyClient, root } from './reply-test-helpers'
+import { moveEvent } from './protocol-test-helpers'
 import { flush } from './sync-test-helpers'
 
 beforeEach(() => vi.useFakeTimers())
@@ -478,5 +479,49 @@ it('identifies a live Reply by reply_root_id when its parent is outside all load
   expect(c.replies.get('A').messages.map(m => m.id)).toEqual(['id1', 'id11'])
   expect(c.sync.get().channels.A.messages.map(m => m.id)).toEqual(['id10', 'id11'])
   expect(c.sync.get().channels.A.cursor).toBe(11)
+  await c.sync.close()
+})
+
+it('invalidates a chain opened from a pre-Move anchor until a covering page arrives', async () => {
+  const c = replyClient(); await c.boot()
+  const staleAnchor = root('source')
+  const moved = { ...staleAnchor, topic_id: 'destination', version: 5 }
+  c.listMessages.mockResolvedValueOnce(ok({
+    history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 5, messages: [moved], has_more: false,
+  }))
+  c.handlers[0].onEvent(moveEvent(5, staleAnchor.id))
+  await flush()
+  expect(c.sync.get().channels.A.moveSeq).toBe(5)
+
+  const read = deferred<Result<ReplyChainPage>>()
+  c.listReplyChain.mockReturnValueOnce(read.promise)
+  const opening = c.replies.open('A', staleAnchor)
+  await flush()
+
+  expect(c.replies.get('A')).toMatchObject({
+    anchor: null,
+    anchorId: staleAnchor.id,
+    rootId: staleAnchor.id,
+    topicId: null,
+    moveInvalidated: true,
+    chainVersion: undefined,
+    messages: [],
+  })
+
+  read.resolve(ok(replyPage({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 5,
+    root_id: staleAnchor.id,
+    messages: [moved],
+    has_more: false,
+  })))
+  await opening
+  expect(c.replies.get('A')).toMatchObject({
+    anchor: moved,
+    topicId: 'destination',
+    moveInvalidated: false,
+    chainVersion: 5,
+    messages: [moved],
+  })
   await c.sync.close()
 })

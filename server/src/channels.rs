@@ -561,6 +561,7 @@ pub(crate) async fn visible_members(
 mod access;
 pub mod dms;
 pub mod members;
+pub(crate) mod sections;
 pub use access::AccessChanges;
 pub(crate) use access::AccessWatch;
 #[cfg(test)]
