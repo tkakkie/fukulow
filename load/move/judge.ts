@@ -118,7 +118,10 @@ function performanceGate(step: Step, move: Measurement, baseline: Measurement | 
   switch (step.part) {
     case 'A': return within(move.lanes.move, 'p95', moveLimits[step.size as keyof typeof moveLimits] ?? null, 'Move');
     case 'B': {
-      if (!send || send.accepted / send.attempted < thresholds.accepted) return verdict('FAIL', 'send acceptance below 99%');
+      const baseSend = control?.send;
+      if (!baseSend || baseSend.accepted / baseSend.attempted < thresholds.accepted)
+        return verdict('FAIL', 'baseline send acceptance below 99%');
+      if (!send || send.accepted / send.attempted < thresholds.accepted) return verdict('FAIL', 'Move arm send acceptance below 99%');
       if (step.size === 100) return against(send, control?.send, 'p95', 'send');
       if (!a || a.status === 'INVALID' || a.status === 'NOT EVALUATED' || !duration(aP95))
         return verdict('NOT EVALUATED', 'same-round Part A 1,000-Message p95 unavailable');

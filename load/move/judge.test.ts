@@ -168,14 +168,18 @@ test('A allows each exact p95 limit and requires all 30 position and version che
   }
 });
 
-test('B enforces exactly 99% acceptance in the Move arm on both chain sizes', () => {
+test('B requires at least 99% send acceptance in each arm in every round', () => {
   for (const size of [100, 1000]) {
-    const r = results(), m = measurement(r, 'B', size);
-    measurement(r, 'B', size, 'baseline').lanes.send = lane(15_000, 10, 20, 14_849);
-    m.lanes.send = lane(15_000, 10, 20, 14_850);
-    assert.equal(status(r, 'B', size), 'PASS');
-    m.lanes.send = lane(15_000, 10, 20, 14_849);
-    assert.equal(status(r, 'B', size), 'FAIL');
+    for (const arm of ['baseline', 'move'] as const) {
+      for (let round = 1; round <= formal.rounds; round++) {
+        const r = results();
+        const m = measurement(r, 'B', size, arm, round);
+        m.lanes.send = lane(15_000, 10, 20, 14_850);
+        assert.equal(status(r, 'B', size), 'PASS', `${size}, ${arm}, round ${round}`);
+        m.lanes.send = lane(15_000, 10, 20, 14_849);
+        assert.equal(status(r, 'B', size), 'FAIL', `${size}, ${arm}, round ${round}`);
+      }
+    }
   }
 });
 
