@@ -610,3 +610,41 @@ async fn channel_delete_requires_explicit_section_placement_cleanup(pool: PgPool
     assert_eq!(deleted.rows_affected(), 1);
     tx.commit().await.unwrap();
 }
+
+#[fukulow_test::test]
+async fn section_storage_rls_rejects_foreign_organization_update(pool: PgPool) {
+    let pools = TestPools::new(pool).await;
+    let (own, foreign) = (
+        organization(&pools.admin).await,
+        organization(&pools.admin).await,
+    );
+    let owner = Uuid::new_v4();
+    for org in [own, foreign] {
+        member(&pools.admin, org, owner, "member").await;
+    }
+    let mut tx = scoped_transaction(&pools.app, Some(own)).await;
+    sqlx::query(INSERT_GENERATION)
+        .bind(own)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let mut attempt = tx.begin().await.unwrap();
+    let error = sqlx::query(
+        "UPDATE member_section_generations SET organization_id=$3 WHERE organization_id=$1 AND member_id=$2",
+    )
+    .bind(own).bind(owner).bind(foreign).execute(&mut *attempt).await.unwrap_err();
+    assert_sqlstate(error, "42501");
+    attempt.rollback().await.unwrap();
+    let updated = sqlx::query(
+        "UPDATE member_section_generations SET generation=1 WHERE organization_id=$1 AND member_id=$2",
+    ).bind(own).bind(owner).execute(&mut *tx).await.unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+    tx.commit().await.unwrap();
+    let stored: Vec<(Uuid, i64)> =
+        sqlx::query_as("SELECT organization_id,generation FROM member_section_generations")
+            .fetch_all(&pools.admin)
+            .await
+            .unwrap();
+    assert_eq!(stored, [(own, 1)]);
+}
