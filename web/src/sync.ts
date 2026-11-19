@@ -41,6 +41,7 @@ export type PendingMessageState = {
   status: 'sending' | 'throttled' | 'failed'
   retryable: boolean
   failureCode?: string
+  failureMessage?: string
 }
 export type TopicComposerState = {
   draft: string
@@ -735,6 +736,9 @@ export function createSync(options: SyncOptions) {
             status: p.state === 'sending' || p.state === 'throttled' ? p.state : 'failed',
             retryable: p.state !== 'failed',
             failureCode: p.failureCode,
+            ...(p.state === 'failed' && p.failureCode === 'channel_archived' ? {
+              failureMessage: 'このチャンネルはアーカイブされているため、送信できません。',
+            } : {}),
           })),
           hasOlder: c?.hasOlder ?? false, loadingOlder: c?.older !== undefined,
           olderError,

@@ -59,7 +59,7 @@ export function createSession(options: SessionOptions) {
     return result
   }
   const activity = createActivity({
-    kind: id => dms?.get().rows.some(row => row.identity.id === id) ? 'dm' : channels.get().channels.some(row => row.id === id) ? 'channel' : undefined,
+    kind: id => isDm(id) ? 'dm' : channels.isOrdinary(id) ? 'channel' : undefined,
     watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
     covered: (notice, target) => {
       if (notice.type === 'channel_activity') return (unread.get(notice.channel_id).asOfSeq ?? -1) >= notice.seq
@@ -76,9 +76,13 @@ export function createSession(options: SessionOptions) {
     reconcile: () => unread.activityReconcile(),
     random: options.sync?.random,
   })
-  const source = options.channelsApi ?? {
+  const isDm = (id: string) => dms?.get().rows.some(row => row.identity.id === id) ?? false
+  const source: ChannelsApi = options.channelsApi ?? {
     listChannels: signal => api.listChannels(organizationId, undefined, signal, { history_generation: history?.get().historyGeneration }),
     createChannel: body => api.createChannel(organizationId, body),
+    listArchivedChannels: signal => api.listChannels(organizationId, undefined, signal, { archived: true, history_generation: history?.get().historyGeneration }),
+    getChannel: (id, signal) => api.getChannel(organizationId, id, undefined, signal),
+    updateChannel: (id, body) => api.updateChannel(organizationId, id, body),
   }
   const timeline = options.sync?.api ?? {
     listChannelEvents: (channel, query) => api.listChannelEvents(organizationId, channel, query),
@@ -89,7 +93,7 @@ export function createSession(options: SessionOptions) {
   const replySource = options.repliesApi ?? repliesApi(organizationId)
   const unreadSource = options.unreadApi ?? unreadApi(organizationId, () => history?.get().historyGeneration)
   const topicComposition = createTopicSync({ ...options.sync, activity, selfId: options.selfId, organizationId,
-    isDm: id => dms?.get().rows.some(row => row.identity.id === id) ?? false,
+    isDm,
     api: { listChannelEvents: (channel, query) => observe(timeline.listChannelEvents(channel, query)),
       listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
       sendMessage: async (channel, body) => {
@@ -128,7 +132,7 @@ export function createSession(options: SessionOptions) {
       organizationId,
       refreshList: !options.channelsApi ? () => Promise.resolve().then(() => channels.load()) : undefined,
       refreshDms: () => dms?.refresh(),
-      isDm: id => dms?.get().rows.some(row => row.identity.id === id) ?? false,
+      isDm,
       unreadApi: {
         listChannels: () => observe(unreadSource.listChannels()),
         markRead: (scope, body) => observe(unreadSource.markRead(scope, body)),
@@ -156,10 +160,18 @@ export function createSession(options: SessionOptions) {
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
   let watched: string | null = null
+  const { listArchivedChannels, getChannel, updateChannel } = source
   const channels = createChannels(
     {
       listChannels: signal => observe(options.channelsApi ? source.listChannels(signal) : unreadSource.listChannels(signal)),
       createChannel: body => observe(source.createChannel(body)),
+      listArchivedChannels: listArchivedChannels && (signal => observe(listArchivedChannels(signal))),
+      getChannel: getChannel && ((id, signal) => observe(getChannel(id, signal))),
+      updateChannel: updateChannel && (async (id, body) => {
+        const result = await updateChannel(id, body)
+        observeAccess(result)
+        return result
+      }),
     },
     id => {
       if (!closed && !unavailable && id === watched && sync.get().organization === 'available') {
@@ -175,6 +187,16 @@ export function createSession(options: SessionOptions) {
       const baselines = rows.filter((row): row is api.UnreadChannel => 'as_of_seq' in row && completeCountFields(row))
       if (baselines.length || rows.length === 0) unread.activitySnapshot(baselines)
     },
+    {
+      canOpen: id => !isDm(id) && sync.get().channels[id]?.state !== 'unavailable',
+      verifyOrdinary: (id, signal) => observe(topicSource.listTopics(id, { limit: 1 }, signal)),
+      unavailable: id => { void sync.channelUnavailable(id) },
+      onOpen: channel => unread.activityArchive(channel.id, channel.archived),
+      onArchivedSnapshot: rows => {
+        const active = new Set(channels.get().channels.map(c => c.id))
+        unread.activityArchivedSnapshot(rows.filter(row => !active.has(row.id)))
+      },
+    },
   )
   const dmSource = options.dmsApi ?? dmsApi(organizationId)
   dms = createDms({ api: {
@@ -183,7 +205,10 @@ export function createSession(options: SessionOptions) {
     open: (body, signal) => observe(dmSource.open(body, signal)),
   }, activity, watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
   baseline: (dm, replace) => unread.activityDmSnapshot(dm, replace),
-  processed: identity => topicComposition.resolveDm(identity.id),
+  processed: identity => {
+    if (channels.get().selectedId === identity.id) channels.refreshOpen()
+    topicComposition.resolveDm(identity.id)
+  },
   drop: id => unread.activityRevoke(id),
   select: id => {
     if (closed || unavailable) return
@@ -226,14 +251,23 @@ export function createSession(options: SessionOptions) {
   })
   activity.hold('capabilities', capabilities)
   let historyEpoch = sync.get().historyEpoch
+  let openUnavailable = false
   const stopSync = sync.subscribe(() => {
-    if (historyEpoch !== sync.get().historyEpoch) {
-      historyEpoch = sync.get().historyEpoch
+    const state = sync.get()
+    if (historyEpoch !== state.historyEpoch) {
+      historyEpoch = state.historyEpoch
       dms?.resetHistory()
       navigationTargets.resetHistory()
+      channels.resetHistory()
     }
-    if (!sync.get().connected) activity.disconnected()
-    if (sync.get().organization === 'unavailable') terminate()
+    if (!state.connected) activity.disconnected()
+    if (state.organization === 'unavailable') return terminate()
+    const id = channels.get().selectedId
+    const nextUnavailable = id !== null && state.channels[id]?.state === 'unavailable'
+    if (nextUnavailable !== openUnavailable) {
+      openUnavailable = nextUnavailable
+      channels.refreshOpen()
+    }
   })
   const memberControllers = new Map<string, ReturnType<typeof createChannelMembers>>()
   const memberAvailability = new Map<string, boolean>()

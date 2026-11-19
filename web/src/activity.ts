@@ -122,9 +122,12 @@ export function createActivity(options: {
       periodic(own, false)
     }, first ? random() * period : period + (random() * 2 - 1) * period / 10)
   }
-  const lists = (channel: string, reason: Invalidation = 'notice') => {
-    const kind = options.kind?.(channel)
-    if (kind !== 'dm') invalidate('channels', reason)
+  const channelLists = (reason: Invalidation) => {
+    invalidate('channels', reason)
+    invalidate('archived-channels', reason)
+  }
+  const lists = (kind: 'dm' | 'channel' | undefined, reason: Invalidation = 'notice') => {
+    if (kind !== 'dm') channelLists(reason)
     if (kind !== 'channel') invalidate('dms', reason)
   }
   return {
@@ -136,24 +139,33 @@ export function createActivity(options: {
         case 'activity_ready':
           clearTimeout(timer); periodic(++generation, true); all(200); break
         case 'activity_reset': all(random() * 2000); break
-        case 'channel_activity':
-          if (options.kind && options.kind(event.channel_id) === undefined) lists(event.channel_id)
-          else if (!options.watched(event.channel_id) && !options.covered?.(event, options.kind?.(event.channel_id) === 'dm' ? 'dms' : 'channels')) lists(event.channel_id)
+        case 'channel_activity': {
+          const kind = options.kind?.(event.channel_id)
+          if ((options.kind && kind === undefined) || (!options.watched(event.channel_id) && !options.covered?.(event, kind === 'dm' ? 'dms' : 'channels'))) lists(kind)
           break
-        case 'read_position_changed':
-          if (options.kind && options.kind(event.channel_id) === undefined) lists(event.channel_id)
-          else if (!options.covered?.(event, options.kind?.(event.channel_id) === 'dm' ? 'dms' : 'channels')) lists(event.channel_id)
+        }
+        case 'read_position_changed': {
+          const kind = options.kind?.(event.channel_id)
+          if ((options.kind && kind === undefined) || !options.covered?.(event, kind === 'dm' ? 'dms' : 'channels')) lists(kind)
           if (options.watched(event.channel_id)) {
             const key = event.topic_id === null ? `main:${event.channel_id}` : `topic:${event.channel_id}:${event.topic_id}`
             if (!options.covered?.(event, key)) invalidate(key)
           }
           break
+        }
         case 'channel_access_revoked':
-          options.revoke?.(event.channel_id); retire(targets.get(`channel-members:${event.channel_id}`)); targets.delete(`channel-members:${event.channel_id}`)
-          lists(event.channel_id, 'access'); invalidateMemberLists(); break
-        case 'channel_access_gained': options.access?.(event.channel_id); lists(event.channel_id, 'access'); invalidateMemberLists(); break
+        case 'channel_access_gained': {
+          const id = event.channel_id, kind = options.kind?.(id)
+          if (event.type === 'channel_access_revoked') {
+            options.revoke?.(id); retire(targets.get(`channel-members:${id}`)); targets.delete(`channel-members:${id}`)
+          } else options.access?.(id)
+          lists(kind, 'access')
+          if (kind !== 'dm') invalidate('open-channel', 'access')
+          invalidateMemberLists()
+          break
+        }
         case 'dm_list_changed': invalidate('dms', 'access'); break
-        case 'channel_list_changed': invalidate('channels', 'access'); break
+        case 'channel_list_changed': channelLists('access'); invalidate('open-channel', 'access'); break
         case 'channel_members_changed': invalidate(`channel-members:${event.channel_id}`, 'access'); break
         case 'members_changed': invalidate('capabilities', 'access'); invalidateMemberLists(); break
       }

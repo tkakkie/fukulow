@@ -344,6 +344,8 @@
           : '返信のつながりが更新されましたが、最新の状態を読み込めませんでした。通信状況を確認して、再読み込みしてください。'
       case 'too_large':
         return 'メッセージが1,000件を超える返信のつながりは移動できません。'
+      case 'archived':
+        return result.message
       case 'denied':
         return 'この返信のつながりをトピックに移動する権限がありません。'
       case 'not_found':

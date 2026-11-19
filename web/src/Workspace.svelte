@@ -88,7 +88,7 @@
   const nav = navigationAdapter(() => navigation)
   const route = $derived(nav.state.target)
   const routeChannelId = $derived(route?.organizationId === currentOrganizationId ? route.channelId : s.selectedId)
-  const selected = $derived<Channel | DmDiscovery | undefined>(dmState?.rows.find(row => row.identity.id === routeChannelId)?.identity ?? s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
+  const selected = $derived<Channel | DmDiscovery | undefined>(dmState?.rows.find(row => row.identity.id === routeChannelId)?.identity ?? s.channels.find((c) => c.id === routeChannelId) ?? (s.openChannel?.id === routeChannelId ? s.openChannel : undefined) ?? (routeChannelId ? {
     id: routeChannelId, kind: 'channel', archived: false, name: 'チャンネル', visibility: 'public',
     capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false }, can_rename: { allowed: false }, can_archive: { allowed: false } },
   } : undefined))
