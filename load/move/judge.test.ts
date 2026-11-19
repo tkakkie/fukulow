@@ -235,6 +235,21 @@ test('C requires at least 99% send acceptance in each arm in every round', () =>
   }
 });
 
+test('D requires at least 99% Channel-list acceptance in each arm in every round', () => {
+  for (const size of [100, 1000]) {
+    for (const arm of ['baseline', 'move'] as const) {
+      for (let round = 1; round <= formal.rounds; round++) {
+        const r = results();
+        const m = measurement(r, 'D', size, arm, round);
+        m.lanes.channels = lane(30_000, 10, 20, 29_700);
+        assert.equal(status(r, 'D', size), 'PASS', `${size}, ${arm}, round ${round}`);
+        m.lanes.channels = lane(30_000, 10, 20, 29_699);
+        assert.equal(status(r, 'D', size), 'FAIL', `${size}, ${arm}, round ${round}`);
+      }
+    }
+  }
+});
+
 test('C checks both inclusive 110% send latency ratios', () => {
   for (const size of [100, 1000]) {
     for (const metric of ['p95', 'p99'] as const) {

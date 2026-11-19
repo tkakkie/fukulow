@@ -133,10 +133,17 @@ function performanceGate(step: Step, move: Measurement, baseline: Measurement | 
         return verdict('FAIL', 'Move arm send acceptance below 99%');
       return combine([against(send, baseSend, 'p95', 'send'), against(send, baseSend, 'p99', 'send')]);
     }
-    case 'D': return combine([
-      against(move.lanes.channels, control?.channels, 'p95', 'Channel-list'),
+    case 'D': {
+      const base = control?.channels, active = move.lanes.channels;
+      if (!base || base.accepted / base.attempted < thresholds.accepted)
+        return verdict('FAIL', 'baseline Channel-list acceptance below 99%');
+      if (!active || active.accepted / active.attempted < thresholds.accepted)
+        return verdict('FAIL', 'Move arm Channel-list acceptance below 99%');
+      return combine([
+      against(active, base, 'p95', 'Channel-list'),
       within(move.lanes.topics, 'p95', thresholds.pageP95, 'Topic-list'),
     ]);
+    }
     case 'E': return combine([
       against(move.lanes.replay, control?.replay, 'p95', 'subscribe-replay'),
       within(move.lanes.replay, 'p95', thresholds.pageP95, 'subscribe-replay'),

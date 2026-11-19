@@ -23,6 +23,7 @@ export function render(p: Plan, results: Result[], complete: boolean) {
       '', '| Part | Chain size | Rounds | Result |', '| --- | ---: | --- | --- |', ...rows, '',
       ...(!p.smoke ? [
         `- Part B requires ≥${thresholds.accepted * 100}% send acceptance in the Move arm each round. For 100 Messages, send p95 must be ≤${thresholds.latencyPercent}% of the no-Move p95. For 1,000 Messages, send p99 must be ≤ no-Move p99 + min(same-round Part A 1,000-Message Move p95, ${moveLimits[1000]} ms).`,
+        `- Part D requires ≥${thresholds.accepted * 100}% Channel-list acceptance in each arm in every round. Move-arm Channel-list p95 must be ≤${thresholds.latencyPercent}% of the no-Move p95, and Topic-list 50-item p95 ≤${thresholds.pageP95} ms.`,
         `- Part C requires ≥${thresholds.accepted * 100}% send acceptance in each arm in every round. Move-arm send p95 and p99 must each be ≤${thresholds.latencyPercent}% of the corresponding no-Move latency.`,
         '',
       ] : []),
