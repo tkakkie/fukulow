@@ -496,6 +496,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         c.requiredBase = now.cursor; rebootstrap = true
         channelChanged = true
       }
+      // Out-of-order lower Moves leave moveSeq unchanged; moveEpoch still re-prunes records
+      // that remained in sync after an earlier Move for another chain and restarts visit/refresh.
       if (now?.moveSeq !== undefined && old?.moveEpoch !== now.moveEpoch) {
         const position = now.moveSeq
         c.requiredBase = Math.max(c.requiredBase, position)
