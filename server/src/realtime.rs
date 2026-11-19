@@ -217,6 +217,9 @@ impl From<crate::channels::activity::Notice> for ServerEvent {
             }
             Notice::ChannelListChanged => Self::ChannelListChanged,
             Notice::DmListChanged => Self::DmListChanged,
+            Notice::SectionsChanged { generation } => Self::SectionsChanged {
+                generation: generation.to_string(),
+            },
             Notice::ChannelMembersChanged { channel_id } => {
                 Self::ChannelMembersChanged { channel_id }
             }

@@ -274,9 +274,9 @@ REST remains authoritative for lists and counts. Notices carry only identifiers 
 
 Capabilities are per-operation availability for UI affordances ([web decision](../decisions/web.md)).
 
-### Personal section notices (#204, specified, not implemented)
+### Personal section notices (#204, E1–E3 implemented, E4–E6 specified)
 
-Add one held target to A1–A14/O5. [Layout, REST and limits](sections.md).
+Add one held target to A1–A14/O5. [Layout, REST and limits](sections.md). E1 Channel cleanup is not implemented yet; it ships with Channel deletion (Q6).
 
 - E1. Only one new ServerEvent, `{"type":"sections_changed","generation":"1"}` with Q10 committed owner/Organization generation as a decimal string. No section/Channel data, counts, placement/order or ClientMessage variant. Emit on committed create, rename, reorder, move or delete advancing exposed layout generation. Channel cleanup emits only to affected Members with effective access in the locked pre-deletion state. Hidden-only cleanup is atomic with no exposed generation or notice. No-op/refusal/rollback emit nothing. Access changes use A9 and do not advance Q10.
 - E2. Only changed Member's registered sockets in that Organization, including the caller, all other Account Sessions and sockets with zero subscriptions. Recheck active matching revision and valid Session after COMMIT under A3/A8. Deny other Members (including Owner/Admin), other Organizations of the same Account, stale revisions, inactive Members and ended Sessions. Channel access is unnecessary, including for a Guest with an empty layout.
