@@ -56,6 +56,7 @@ function channelAdapter(sync: Sync, channel: string) {
       restore: (clientMessageId: string) => rc.restore(clientMessageId),
       migrateDraftFrom: (fromReplyRootId: string, fromTopicId?: string | null) =>
         rc.migrateDraftFrom(fromReplyRootId, fromTopicId),
+      reconcileDrafts: () => rc.reconcileDrafts(),
     }
   }
   return {

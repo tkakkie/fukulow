@@ -265,10 +265,9 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       const old = chains.get(channel)
       if (old?.rootId === (anchor.reply_root_id ?? anchor.id) &&
         (old.messages.has(anchor.id) || old.anchor.id === anchor.id || old.rootId === anchor.id)) {
-        if (!old.restart) {
-          const current = canonical(channel, old.anchorCurrent && old.anchor.id === anchor.id ? old.anchor : undefined, old.messages.get(anchor.id) ?? anchor)
-          if (current) { old.anchor = current; old.anchorCurrent = true }
-        }
+        if (old.restart) return
+        const current = canonical(channel, old.anchorCurrent && old.anchor.id === anchor.id ? old.anchor : undefined, old.messages.get(anchor.id) ?? anchor)
+        if (current) { old.anchor = current; old.anchorCurrent = true }
         notify(new Set([channel]))
         return
       }

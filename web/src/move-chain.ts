@@ -80,6 +80,9 @@ export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'get' 
       if (!result) return dispatched ? unknown(target) : { kind: 'superseded' }
       if (result.ok) {
         if (target.isCurrent()) sync.observeHistoryGeneration(result.data.history_generation)
+        if (result.data.topic_id !== result.data.destination_topic_id) {
+          return { kind: 'conflict', error: 'version_conflict', refreshed: await target.refresh() }
+        }
         return { kind: 'moved', receipt: result.data }
       }
       if (result.kind === 'network' || result.status === 408 || result.status >= 500) {

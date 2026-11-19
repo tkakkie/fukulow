@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { lookupAuthors, Member, MoveChainResponse, ReadPosition, ReplyChainPage, Result, TopicSummary } from './api'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
+import { createDraftStore } from './drafts'
 import { channelMembersAdapter } from './channel-members.svelte'
 import ChannelMembers from './ChannelMembers.svelte'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
@@ -8116,9 +8117,13 @@ it('ReplyPanel renders a refresh failure message and keyboard-reachable 再読�
   }
 })
 
-async function mountReplyPanelForMove({ descendant = false, sourceTopic = null }: {
+async function mountReplyPanelForMove({ descendant = false, sourceTopic = null, dm = false,
+  initialChainError = false, initialListError = false }: {
   descendant?: boolean
   sourceTopic?: string | null
+  dm?: boolean
+  initialChainError?: boolean
+  initialListError?: boolean
 } = {}) {
   const historyGeneration = '00000000-0000-4000-8000-000000000515'
   const net = fakeNetwork()
@@ -8126,11 +8131,12 @@ async function mountReplyPanelForMove({ descendant = false, sourceTopic = null }
   const listTopics = vi.fn(base.topicsApi!.listTopics)
   const listReplyChain = vi.fn(base.repliesApi!.listReplyChain)
   const moveChainApi = vi.fn<MoveChainApi>()
+  const drafts = createDraftStore()
   const session = createSession({
     selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...base, moveChainApi,
     topicsApi: { ...base.topicsApi!, listTopics },
     repliesApi: { listReplyChain },
-    sync: { ...base.sync, requestTimeoutMs: 20 },
+    sync: { ...base.sync, drafts: drafts.scope(), requestTimeoutMs: 20 },
   })
   const topicB = summary('topic-b', 9, 1)
   const topicC = summary('topic-c', 8, 1)
@@ -8155,7 +8161,9 @@ async function mountReplyPanelForMove({ descendant = false, sourceTopic = null }
   await settle()
   net.subscribed('A', 10)
   await settle()
-  await session.topics.loadList('A')
+  if (initialListError) listTopics.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  if (!dm) await session.topics.loadList('A')
+  if (initialChainError) listReplyChain.mockResolvedValueOnce({ ok: false, kind: 'network' })
   await session.replies.open('A', anchor)
 
   const host = testDoc.createElement('div')
@@ -8163,10 +8171,11 @@ async function mountReplyPanelForMove({ descendant = false, sourceTopic = null }
   const channelAdapter = syncAdapter(session.sync).channel('A')
   const replies = repliesAdapter(session.replies, 'A', session.replyCounts, session.moveChain)
   const topics = topicsAdapter(session.topics, 'A')
-  const instance = mount(ReplyPanel, {
+  const mountPanel = (resolvedAnchor = anchor) => mount(ReplyPanel, {
     target: host as unknown as Element,
-    props: { channel: channelAdapter, replies, topics, channelId: 'A', anchorMessageId: anchor.id, resolvedAnchor: anchor },
+    props: { channel: channelAdapter, replies, topics: dm ? null : topics, channelId: 'A', anchorMessageId: resolvedAnchor.id, resolvedAnchor },
   })
+  let instance: ReturnType<typeof mountPanel> | null = mountPanel()
   await settle()
 
   function moveEvent(rootId: string, source: string, destination: string) {
@@ -8177,10 +8186,20 @@ async function mountReplyPanelForMove({ descendant = false, sourceTopic = null }
     })
   }
   return {
-    net, host, channelAdapter, replies, anchor, rootMessage, topicC, historyGeneration, moveChainApi,
+    net, host, channelAdapter, replies, anchor, rootMessage, topicB, topicC, historyGeneration, moveChainApi, drafts,
     chainPage, listReplyChain, moveEvent, listTopics, topics,
+    async dismiss() {
+      if (instance) await unmount(instance)
+      instance = null
+      replies.dismiss()
+    },
+    async reopen(resolvedAnchor: typeof anchor) {
+      await replies.open(resolvedAnchor)
+      instance = mountPanel(resolvedAnchor)
+      await settle()
+    },
     async close() {
-      await unmount(instance)
+      if (instance) await unmount(instance)
       session.close()
       host.remove()
     },
@@ -8211,6 +8230,150 @@ it('ReplyPanel keeps text typed during Move invalidation in the descendant chain
     expect(c.channelAdapter.reply(c.rootMessage.id, 'topic-a').composer.draft).toBe('')
     expect(c.channelAdapter.reply(c.rootMessage.id, null).composer.draft).toBe('')
     expect(c.channelAdapter.reply(c.anchor.id, null).composer.draft).toBe('')
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel recovers a Reply draft after the chain moves while the panel is closed', async () => {
+  const c = await mountReplyPanelForMove({ descendant: true, sourceTopic: 'topic-a' })
+  try {
+    const text = '移動前の返信の下書き'
+    const textarea = c.host.querySelector('textarea')!
+    textarea.value = text
+    textarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    const anotherOrganization = {
+      organizationId: 'org-2', channelId: 'A', replyRootId: c.rootMessage.id, topicId: 'topic-a',
+    }
+    c.drafts.set(anotherOrganization, '別の組織の下書き')
+    await c.dismiss()
+
+    c.moveEvent(c.rootMessage.id, 'topic-a', 'topic-b')
+    await settle()
+    c.listReplyChain.mockResolvedValueOnce(c.chainPage(11, 'topic-b'))
+    await c.reopen({ ...c.anchor, topic_id: 'topic-b', version: 11 })
+
+    expect(c.host.querySelector('textarea')?.value).toBe(text)
+    expect(c.channelAdapter.reply(c.rootMessage.id, 'topic-a').composer.draft).toBe('')
+    expect(c.drafts.get(anotherOrganization)).toBe('別の組織の下書き')
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel preserves the selected Topic and its Move retry while the Topic list rebuilds', async () => {
+  vi.useFakeTimers()
+  const c = await mountReplyPanelForMove()
+  const pendingPost = deferred<Result<MoveChainResponse>>()
+  const pendingList = deferred<Result<api.TopicPage>>()
+  try {
+    c.moveChainApi.mockReturnValueOnce(pendingPost.promise).mockResolvedValueOnce({ ok: false, kind: 'network' })
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const submit = buttonsByText(dialog, 'トピックに移動')[0]
+    expect(dialog.querySelector('select')?.value).toBe('topic-b')
+    submit.click()
+    await settle()
+
+    c.listTopics.mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' })
+      .mockReturnValueOnce(pendingList.promise)
+    const refresh = c.topics.loadList()
+    await settle()
+    expect(c.topics.state.list.loading).toBe(true)
+    expect(dialog.querySelector('select')?.value).toBe('topic-b')
+    expect(submit.disabled).toBe(true)
+
+    pendingPost.resolve({ ok: false, kind: 'network' })
+    await settle()
+    expect(dialog.querySelector('select')?.value).toBe('topic-b')
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    pendingList.resolve(ok({
+      history_generation: c.historyGeneration, as_of_seq: 11, topics: [c.topicC, c.topicB], has_more: false,
+    }))
+    await refresh
+    await settle()
+    expect(dialog.querySelector('select')?.value).toBe('topic-b')
+    buttonsByText(dialog, '再試行')[0].click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(2)
+    expect(c.moveChainApi.mock.calls[1]).toEqual(c.moveChainApi.mock.calls[0])
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel omits the Move action when the Channel has no Topic support', async () => {
+  const c = await mountReplyPanelForMove({ dm: true })
+  try {
+    expect(c.host.querySelector('textarea')).not.toBeNull()
+    expect(buttonsByText(c.host, 'トピックに移動')).toHaveLength(0)
+  } finally {
+    await c.close()
+  }
+})
+
+it.each(['initial chain read', 'conflict refresh followed by a destination edit'])(
+  'ReplyPanel offers chain recovery in the Move dialog after a failed %s',
+  async failure => {
+    const initialChainError = failure === 'initial chain read'
+    const c = await mountReplyPanelForMove({ initialChainError })
+    try {
+      buttonsByText(c.host, 'トピックに移動')[0].click()
+      await settle()
+      const dialog = c.host.querySelector('[role="dialog"]')!
+      const submit = buttonsByText(dialog, 'トピックに移動')[0]
+      if (!initialChainError) {
+        c.moveChainApi.mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'version_conflict' })
+        c.listReplyChain.mockResolvedValueOnce({ ok: false, kind: 'network' })
+        submit.click()
+        await settle()
+        const select = dialog.querySelector('select')!
+        select.value = 'topic-c'
+        select.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+        await settle()
+      }
+      expect(c.replies.state).toMatchObject({ loading: false, error: true, chainVersion: undefined })
+      expect(submit.disabled).toBe(true)
+      expect(dialog.textContent).not.toContain('返信のつながりを読み込んでいます…')
+      expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('読み込めませんでした')
+      buttonsByText(dialog, '再読み込み')[0].click()
+      await settle()
+      expect(submit.disabled).toBe(false)
+      expect(buttonsByText(dialog, '再読み込み')).toHaveLength(0)
+    } finally {
+      await c.close()
+    }
+  },
+)
+
+it('ReplyPanel retries a failed Topic list after reopening the Move dialog', async () => {
+  const c = await mountReplyPanelForMove({ initialListError: true })
+  try {
+    const open = buttonsByText(c.host, 'トピックに移動')[0]
+    open.click()
+    await settle()
+    buttonsByText(c.host.querySelector('[role="dialog"]')!, 'キャンセル')[0].click()
+    await settle()
+    open.click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    expect(dialog.querySelector('[role="alert"]')?.textContent ?? '').toContain('トピックを読み込めませんでした')
+    expect(c.listTopics).toHaveBeenCalledTimes(1)
+
+    c.moveChainApi.mockResolvedValueOnce({ ok: false, kind: 'http', status: 403, error: 'move_not_allowed' })
+    buttonsByText(dialog, 'トピックに移動')[0].click()
+    await settle()
+    expect(queryAll(dialog, '[role="alert"]')).toHaveLength(2)
+
+    buttonsByText(dialog, '再試行')[0].click()
+    await settle()
+    expect(c.listTopics).toHaveBeenCalledTimes(2)
+    expect(queryAll(dialog, '[role="alert"]').map(alert => alert.textContent)).toEqual([
+      'この返信のつながりをトピックに移動する権限がありません。',
+    ])
+    expect(queryAll(dialog, 'input[type="radio"]').map(radio => radio.value)).toContain('existing')
   } finally {
     await c.close()
   }

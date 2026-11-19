@@ -90,7 +90,7 @@
   let moveDialogOpen = $state(false)
   let moveButtonRef = $state<HTMLButtonElement | null>(null)
   let moveMode = $state<'existing' | 'new'>('new')
-  let moveTopicId = $state('')
+  let moveTopic = $state.raw<(typeof orderedTopics)[number] | null>(null)
   let moveTopicName = $state('')
   let moveBusy = $state(false)
   let moveError = $state<string | null>(null)
@@ -99,6 +99,15 @@
   let moveRefreshFailed = $state(false)
   let moveGeneration = 0
 
+  const moveTopicId = $derived(moveTopic?.topicId ?? '')
+  const moveOptions = $derived(
+    moveMode === 'existing' && moveTopic && !orderedTopics.some((t) => t.topicId === moveTopicId)
+      ? [...orderedTopics, moveTopic]
+      : orderedTopics,
+  )
+  const moveListSettled = $derived(
+    tState !== null && tState.list.asOfSeq !== undefined && !tState.list.loading && !tState.list.error,
+  )
   const moveDestination: MoveDestination = $derived(
     moveMode === 'existing' ? { topicId: moveTopicId } : { topicName: moveTopicName },
   )
@@ -218,11 +227,14 @@
   $effect(() => {
     if (!isTargetResolved) return
     rc.migrateDraftFrom(anchorMessageId, null)
-    if (!isCurrentAnchor || previousDraftTarget?.topicId === draftTopicId) return
-    if (previousDraftTarget) {
+    if (!isCurrentAnchor || rState.chainVersion === undefined) return
+    if (previousDraftTarget && previousDraftTarget.topicId !== draftTopicId) {
       rc.migrateDraftFrom(effectiveRootId, previousDraftTarget.topicId)
     }
-    draftTarget = { channelId, rootId: effectiveRootId, topicId: draftTopicId }
+    rc.reconcileDrafts()
+    if (!previousDraftTarget || previousDraftTarget.topicId !== draftTopicId) {
+      draftTarget = { channelId, rootId: effectiveRootId, topicId: draftTopicId }
+    }
   })
 
   const canSendReply = $derived(!targetUnavailable && isCurrentAnchor)
@@ -268,14 +280,13 @@
   })
 
   $effect(() => {
-    if (!moveDialogOpen) return
-    if (moveMode === 'existing') {
-      if (orderedTopics.length === 0) {
-        moveMode = 'new'
-        moveTopicId = ''
-      } else if (!orderedTopics.some((t) => t.topicId === moveTopicId)) {
-        moveTopicId = orderedTopics[0].topicId
-      }
+    if (!moveDialogOpen || moveMode !== 'existing') return
+    const current = orderedTopics.find((t) => t.topicId === moveTopicId)
+    if (current) {
+      moveTopic = current
+    } else if (!moveBusy && moveListSettled) {
+      moveTopic = orderedTopics[0] ?? null
+      if (!moveTopic) moveMode = 'new'
     }
   })
 
@@ -284,19 +295,13 @@
   })
 
   function openMoveDialog() {
-    if (targetUnavailable) return
+    if (!topics || targetUnavailable) return
     moveError = null
     moveNotice = null
     moveRetry = null
     moveRefreshFailed = false
-    if (orderedTopics.length > 0) {
-      moveMode = 'existing'
-      const candidate = orderedTopics.find((t) => t.topicId !== effectiveTopicId) ?? orderedTopics[0]
-      moveTopicId = candidate.topicId
-    } else {
-      moveMode = 'new'
-      moveTopicId = ''
-    }
+    moveTopic = orderedTopics.find((t) => t.topicId !== effectiveTopicId) ?? orderedTopics[0] ?? null
+    moveMode = moveTopic ? 'existing' : 'new'
     moveTopicName = ''
     moveDialogOpen = true
   }
@@ -392,6 +397,11 @@
 
   async function handleReloadChainForMove() {
     if (moveBusy || rState.loading || targetUnavailable) return
+    scrollController.resetLoadingTimeout()
+    if (!isCurrentAnchor) {
+      onretrytarget?.()
+      return
+    }
     const gen = moveGeneration
     await replies.loadMore().catch(console.error)
     if (gen !== moveGeneration || !moveRefreshFailed || rState.chainVersion === undefined) return
@@ -414,6 +424,11 @@
         (!isCurrentAnchor && replyTargetStatus === 'error') ||
         scrollView.loadingTimedOut),
   )
+  const chainLoadError = '返信のつながりを読み込めませんでした。通信状況を確認して、もう一度お試しください。'
+  const moveChainReadFailed = $derived(
+    !targetUnavailable && !rState.loading && (!isCurrentAnchor || rState.chainVersion === undefined) && hasError,
+  )
+  const canReloadMoveChain = $derived(!moveBusy && moveChainReadFailed)
   const isLoading = $derived(
     !targetUnavailable && !hasError && (!isCurrentAnchor || rState.loading || isMoveInvalidated),
   )
@@ -619,7 +634,7 @@
         <StatusBanner
           tone="danger"
           role="alert"
-          message="返信のつながりを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
+          message={chainLoadError}
           actionLabel="再試行"
           onaction={handleRetryLoad}
         />
@@ -630,14 +645,16 @@
       {#if currentTopicName}
         <span class="reply-panel__topic-label">トピック: {currentTopicName}</span>
       {/if}
-      <Button
-        bind:buttonRef={moveButtonRef}
-        variant="secondary"
-        disabled={targetUnavailable || moveBusy}
-        onclick={openMoveDialog}
-      >
-        トピックに移動
-      </Button>
+      {#if topics}
+        <Button
+          bind:buttonRef={moveButtonRef}
+          variant="secondary"
+          disabled={targetUnavailable || moveBusy}
+          onclick={openMoveDialog}
+        >
+          トピックに移動
+        </Button>
+      {/if}
     </div>
 
     {#if moveNotice}
@@ -768,12 +785,21 @@
         void handleSubmitMove()
       }}
     >
-      {#if !canMoveChain && (!moveRefreshFailed || rState.loading)}
+      {#if !canMoveChain && !moveChainReadFailed && !targetUnavailable}
         <p class="reply-panel__move-status">返信のつながりを読み込んでいます…</p>
+      {/if}
+      {#if topics && tState?.list.error && !targetUnavailable && !tState.unavailable}
+        <StatusBanner
+          tone="danger"
+          role="alert"
+          message="トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
+          actionLabel="再試行"
+          onaction={() => void topics?.loadList().catch(console.error)}
+        />
       {/if}
       <fieldset class="reply-panel__move-fieldset" disabled={moveBusy}>
         <legend class="reply-panel__move-legend">移動先</legend>
-        {#if orderedTopics.length > 0}
+        {#if moveOptions.length > 0}
           <label class="reply-panel__move-choice">
             <input
               type="radio"
@@ -785,9 +811,7 @@
                 moveError = null
                 moveRetry = null
                 moveRefreshFailed = false
-                if (!moveTopicId && orderedTopics.length > 0) {
-                  moveTopicId = orderedTopics[0].topicId
-                }
+                moveTopic = orderedTopics.find((t) => t.topicId === moveTopicId) ?? orderedTopics[0] ?? null
               }}
             />
             <span>既存のトピック</span>
@@ -810,7 +834,7 @@
         </label>
       </fieldset>
 
-      {#if moveMode === 'existing' && orderedTopics.length > 0}
+      {#if moveMode === 'existing' && moveOptions.length > 0}
         <label class="reply-panel__move-field">
           <span class="reply-panel__move-label">移動先のトピック</span>
           <select
@@ -819,13 +843,14 @@
             value={moveTopicId}
             disabled={moveBusy}
             onchange={(e) => {
-              moveTopicId = e.currentTarget.value
+              const selected = moveOptions.find((t) => t.topicId === e.currentTarget.value)
+              if (selected) moveTopic = selected
               moveError = null
               moveRetry = null
               moveRefreshFailed = false
             }}
           >
-            {#each orderedTopics as t (t.topicId)}
+            {#each moveOptions as t (t.topicId)}
               <option value={t.topicId}>{t.baseline?.summary.name ?? 'トピック'}</option>
             {/each}
           </select>
@@ -845,19 +870,15 @@
         />
       {/if}
 
-      {#if moveError}
+      {#if moveError || moveChainReadFailed}
         <StatusBanner
           tone="danger"
           role="alert"
-          message={moveError}
-          actionLabel={!moveBusy ? (displayedMoveRetry ? '再試行' : moveRefreshFailed ? '再読み込み' : undefined) : undefined}
-          onaction={!moveBusy
-            ? displayedMoveRetry
-              ? () => void handleRetryMove()
-              : moveRefreshFailed
-                ? () => void handleReloadChainForMove()
-                : undefined
-            : undefined}
+          message={moveError ?? chainLoadError}
+          actionLabel={!moveBusy && displayedMoveRetry ? '再試行' : canReloadMoveChain ? '再読み込み' : undefined}
+          onaction={!moveBusy && displayedMoveRetry ? () => void handleRetryMove() : canReloadMoveChain ? () => void handleReloadChainForMove() : undefined}
+          secondaryActionLabel={displayedMoveRetry && canReloadMoveChain ? '再読み込み' : undefined}
+          onsecondaryaction={displayedMoveRetry && canReloadMoveChain ? () => void handleReloadChainForMove() : undefined}
         />
       {/if}
 

@@ -255,7 +255,7 @@ test('Move to topic: Member moves own chain to an existing Topic and to a new To
   }
 })
 
-test('Move to topic denials: non-author Member, Guest and DM participant receive the Japanese denial and nothing changes', async ({
+test('Move to topic: non-author Member and Guest receive the Japanese denial, and DMs omit the action', async ({
   page,
   browser,
 }) => {
@@ -332,7 +332,7 @@ test('Move to topic denials: non-author Member, Guest and DM participant receive
     await guestDialog.getByRole('button', { name: 'キャンセル', exact: true }).click()
     await expect(guestPage.locator('#main-content button[data-topic-id]')).toHaveCount(0)
 
-    // (d2) DM participant cannot Move a chain in a DM
+    // (d2) DMs do not offer Move
     const dmRes = await secretSafe(() =>
       memberContext.request.post(`/api/v1/orgs/${orgId}/dms`, {
         data: { member_id: memberIdentity.member.id },
@@ -355,12 +355,7 @@ test('Move to topic denials: non-author Member, Guest and DM participant receive
     await expect(memberPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(memberPanel.locator(`[data-message-id="${dmMsg.id}"]`)).toContainText('DMの親メッセージ')
 
-    await memberPanel.getByRole('button', { name: 'トピックに移動', exact: true }).click()
-    await expect(memberDialog).toBeVisible()
-    await memberDialog.getByLabel('新しいトピック名', { exact: true }).fill('DMトピック不可')
-    await memberDialog.getByRole('button', { name: 'トピックに移動', exact: true }).click()
-
-    await expect(memberDialog.getByRole('alert')).toHaveText('この返信のつながりをトピックに移動する権限がありません。')
+    await expect(memberPanel.getByRole('button', { name: 'トピックに移動', exact: true })).toHaveCount(0)
   } finally {
     await memberContext.close()
     await guestContext.close()

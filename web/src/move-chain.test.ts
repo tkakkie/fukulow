@@ -108,6 +108,36 @@ it('submitting the same Move after a timeout and a fresh chain read reuses the o
   await c.sync.close()
 })
 
+it.each([{ topicId: 'T' }, { topicName: 'Release' }])(
+  'refreshes and allocates a fresh Move after a replayed receipt reports an intervening Move (%j)',
+  async destination => {
+    const c = await client()
+    const replay = { ...receipt(), topic_id: 'C', chain_version: 22 }
+    c.transport.mockResolvedValueOnce({ ok: false, kind: 'network' })
+      .mockResolvedValueOnce(ok(replay))
+    c.listReplyChain.mockResolvedValueOnce(ok({
+      history_generation, as_of_seq: 22, root_id: 'id1', chain_version: 22, has_more: false,
+      messages: [{ ...root('C'), version: 22 }, { ...anchor, topic_id: 'C', version: 22 }],
+    }))
+    try {
+      await expect(c.move('A', anchor.id, destination)).resolves.toMatchObject({ kind: 'unknown' })
+      await expect(c.move('A', anchor.id, destination)).resolves.toEqual({
+        kind: 'conflict', error: 'version_conflict', refreshed: true,
+      })
+      expect(c.transport.mock.calls[1]).toEqual(c.transport.mock.calls[0])
+      expect(c.replies.get('A')).toMatchObject({ topicId: 'C', chainVersion: 22 })
+
+      c.transport.mockResolvedValueOnce(ok({ ...receipt(23), operation_id: 'operation-2' }))
+      await expect(c.move('A', anchor.id, destination)).resolves.toMatchObject({ kind: 'moved' })
+      expect(c.transport.mock.calls[2][2]).toEqual({
+        ...c.transport.mock.calls[0][2], operation_id: 'operation-2', expected_version: 22,
+      })
+    } finally {
+      await c.sync.close()
+    }
+  },
+)
+
 it('allocates a fresh Move after a different destination is confirmed for the same chain', async () => {
   const c = await client()
   const movedToC = {
