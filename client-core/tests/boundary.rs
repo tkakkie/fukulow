@@ -136,11 +136,14 @@ fn move_positions_advance_live_replay_and_gap_fill_without_creating_state() {
         "destination_topic_id":Uuid::from_u128(9),"operation_id":Uuid::from_u128(10)
     });
     let following = json!({"type":"message","kind":"create","seq":102,"message":message(102)});
-    let event = |event| json!({"type":"event","connection":1,"event":event});
-    let subscribed = |position| {
-        event(json!({
-            "type":"subscribed","channel_id":channel,"history_generation":generation,"caught_up_seq":position,
-        }))
+    let event = |connection, event| json!({"type":"event","connection":connection,"event":event});
+    let subscribed = |connection, position| {
+        event(
+            connection,
+            json!({
+                "type":"subscribed","channel_id":channel,"history_generation":generation,"caught_up_seq":position,
+            }),
+        )
     };
     let request = |effects: &[Effect], expected: Page| {
         effects
@@ -163,10 +166,58 @@ fn move_positions_advance_live_replay_and_gap_fill_without_creating_state() {
             json!({"type":"history_result","request":request(&watched.effects,Page::Latest),
             "page":{"history_generation":generation,"as_of_seq":100,"messages":[message(100)],"has_more":false}}),
         );
+        feed(
+            &mut core,
+            subscribed(1, if mode == "fill" { 102 } else { 100 }),
+        );
+        let connection = if mode == "replay" {
+            let closed = feed(
+                &mut core,
+                json!({"type":"socket_closed","connection":1,"code":1006}),
+            );
+            let timer = closed
+                .effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::Wait {
+                        id,
+                        purpose: fukulow_client_core::Purpose::ReconnectBackoff,
+                        ..
+                    } => Some(*id),
+                    _ => None,
+                })
+                .unwrap();
+            let connecting = feed(&mut core, json!({"type":"timer_elapsed","id":timer}));
+            let connection = connecting
+                .effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::Connect { id } => Some(*id),
+                    _ => None,
+                })
+                .unwrap();
+            let ready = feed(
+                &mut core,
+                json!({"type":"connection_ready","connection":connection}),
+            );
+            assert!(
+                ready
+                    .effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Subscribe { after_seq: 100, .. }))
+            );
+            assert!(
+                feed(&mut core, event(1, moved.clone()))
+                    .changed_channels
+                    .is_empty()
+            );
+            connection
+        } else {
+            1
+        };
         let result = if mode == "fill" {
-            let sub = feed(&mut core, subscribed(102));
-            let fill = request(&sub.effects, Page::After);
-            feed(&mut core, event(following.clone()));
+            let fill = core.channel(channel).unwrap().fill.unwrap();
+            feed(&mut core, event(connection, following.clone()));
             assert_eq!(core.channel(channel).unwrap().cursor, Some(100));
             feed(
                 &mut core,
@@ -174,10 +225,7 @@ fn move_positions_advance_live_replay_and_gap_fill_without_creating_state() {
                 "page":{"history_generation":generation,"events":[moved.clone()],"has_more":false}}),
             )
         } else {
-            if mode == "live" {
-                feed(&mut core, subscribed(100));
-            }
-            feed(&mut core, event(moved.clone()))
+            feed(&mut core, event(connection, moved.clone()))
         };
         assert!(result.records.is_empty(), "{mode}");
         assert!(
@@ -190,23 +238,41 @@ fn move_positions_advance_live_replay_and_gap_fill_without_creating_state() {
             )),
             "{mode}"
         );
-        request(&result.effects, Page::Latest);
+        let latest = request(&result.effects, Page::Latest);
         let state = core.channel(channel).unwrap();
         assert_eq!(state.move_seq, Some(101));
         assert_eq!(state.mutation_seq, 101);
         assert!(state.messages.iter().all(|m| m.created_seq == 102));
         assert_eq!(state.cursor, Some(if mode == "fill" { 102 } else { 101 }));
         if mode != "fill" {
-            feed(&mut core, event(following.clone()));
+            feed(&mut core, event(connection, following.clone()));
             if mode == "replay" {
-                feed(&mut core, subscribed(102));
+                feed(&mut core, subscribed(connection, 102));
             }
         }
-        let duplicate = feed(&mut core, event(moved.clone()));
+        let duplicate = feed(&mut core, event(connection, moved.clone()));
         assert!(duplicate.effects.is_empty(), "{mode}");
         let state = core.channel(channel).unwrap();
         assert_eq!(state.cursor, Some(102), "{mode}");
         assert_eq!(state.messages.len(), 1, "{mode}");
         assert_eq!(state.messages[0].created_seq, 102, "{mode}");
+
+        let mut canonical = message(100);
+        canonical["topic_id"] = json!(Uuid::from_u128(9));
+        canonical["version"] = json!(101);
+        feed(
+            &mut core,
+            json!({"type":"history_result","request":latest,"page":{
+                "history_generation":generation,"as_of_seq":102,"messages":[canonical, message(102)],"has_more":false
+            }}),
+        );
+        let state = core.channel(channel).unwrap();
+        assert_eq!(state.messages[0].version, 101, "{mode}");
+        assert_eq!(
+            state.messages[0].topic_id,
+            Some(Uuid::from_u128(9)),
+            "{mode}"
+        );
+        assert_eq!(state.messages[1].created_seq, 102, "{mode}");
     }
 }

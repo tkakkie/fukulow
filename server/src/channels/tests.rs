@@ -18,6 +18,7 @@ mod name_nonempty;
 mod name_whitespace;
 mod names;
 mod role_changes;
+mod sections_storage;
 mod visibility;
 
 async fn router(pool: &PgPool) -> Router {

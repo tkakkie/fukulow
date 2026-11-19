@@ -33,6 +33,30 @@ it('pages the root and siblings from root and descendant anchors without cursor 
 })
 const recordOther = (seq: number): Message => ({ ...root(), created_seq: seq, version: seq, deleted: false, id: `other${seq}` })
 
+it('reopening the same anchor during a chain restart leaves the snapshot and read alone', async () => {
+  const c = replyClient()
+  await c.boot()
+  await c.replies.open('A', root())
+  const read = deferred<Result<ReplyChainPage>>()
+  c.listReplyChain.mockReturnValueOnce(read.promise)
+  const refreshing = c.replies.moveTarget('A', root().id)!.refresh()
+  await flush()
+  try {
+    const before = c.replies.get('A')
+    expect(before).toMatchObject({ anchor: null, loading: true })
+    const listener = vi.fn()
+    c.replies.subscribe(listener)
+    await c.replies.open('A', root())
+    expect(listener).not.toHaveBeenCalled()
+    expect(c.replies.get('A')).toBe(before)
+    expect(c.listReplyChain).toHaveBeenCalledTimes(2)
+  } finally {
+    read.resolve({ ok: false, kind: 'network' })
+    await refreshing
+    await c.sync.close()
+  }
+})
+
 it('seeks a different same-chain anchor in one page without skipping requested history or moving sync', async () => {
   const c = replyClient(); await c.boot()
   const queries: number[] = []

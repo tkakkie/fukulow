@@ -20,6 +20,7 @@ export type ChannelState = {
   snapshotSeq?: number
   mutationSeq: number
   moveSeq?: number
+  moveEpoch?: number
   messages: Message[]
   versions: Record<string, [number, boolean, number]>
   retiredVersions: { start: number; end: number }[]

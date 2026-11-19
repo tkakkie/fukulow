@@ -2,7 +2,7 @@ export type DraftTarget = { organizationId: string; channelId: string; topicId?:
 
 /** Account Session memory only; independent of Organization/controller lifetimes. */
 export function createDraftStore() {
-  const drafts = new Map<string, { text: string; topicDraft: string }>()
+  const drafts = new Map<string, { target: DraftTarget; text: string; topicDraft: string }>()
   const revisions = new Map<string, number>()
   const listeners = new Set<(target: DraftTarget) => void>()
   let epoch = 0
@@ -14,7 +14,7 @@ export function createDraftStore() {
     set(target: DraftTarget, text: string, topicDraft = '') {
       const id = key(target)
       revisions.set(id, (revisions.get(id) ?? 0) + 1)
-      if (text || topicDraft) drafts.set(id, { text, topicDraft }); else drafts.delete(id)
+      if (text || topicDraft) drafts.set(id, { target: { ...target }, text, topicDraft }); else drafts.delete(id)
       listeners.forEach(listener => listener(target))
     },
     subscribe(listener: (target: DraftTarget) => void) {
@@ -23,6 +23,16 @@ export function createDraftStore() {
     },
     revision: (target: DraftTarget) => revisions.get(key(target)) ?? 0,
     hasDrafts: () => drafts.size > 0,
+    replyDraftTopics({ organizationId, channelId, replyRootId }: DraftTarget) {
+      const topics: (string | null)[] = []
+      if (replyRootId == null) return topics
+      for (const { target, text } of drafts.values()) {
+        if (text && target.organizationId === organizationId && target.channelId === channelId && target.replyRootId === replyRootId) {
+          topics.push(target.topicId ?? null)
+        }
+      }
+      return topics
+    },
   }
   return {
     ...store,
@@ -38,6 +48,7 @@ export function createDraftStore() {
         revision: (target: DraftTarget) => mine === epoch ? store.revision(target) : -1,
         subscribe: (listener: (target: DraftTarget) => void) => mine === epoch ? store.subscribe(listener) : () => {},
         hasDrafts: () => mine === epoch && drafts.size > 0,
+        replyDraftTopics: (target: DraftTarget) => mine === epoch ? store.replyDraftTopics(target) : [],
       }
     },
   }

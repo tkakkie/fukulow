@@ -708,6 +708,11 @@ export function createSync(options: SyncOptions) {
             composerError: null,
           })
         },
+        reconcileDrafts(): void {
+          for (const fromTopicId of options.drafts?.replyDraftTopics(target) ?? []) {
+            this.migrateDraftFrom(replyRootId, fromTopicId)
+          }
+        },
       }
     }
     return {

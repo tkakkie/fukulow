@@ -6,6 +6,7 @@ import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
 import { createChannels, type ChannelsApi } from './channels'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
+import { createMoveChain, type MoveChainApi } from './move-chain'
 import { repliesApi, type RepliesApi } from './replies'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
@@ -24,6 +25,7 @@ export type SessionOptions = {
   topicsApi?: TopicsApi
   replyCountsApi?: ReplyCountsApi
   repliesApi?: RepliesApi
+  moveChainApi?: MoveChainApi
   unreadApi?: UnreadApi
   dmsApi?: DmsApi
   initialRole?: api.Role
@@ -41,11 +43,14 @@ export function createSession(options: SessionOptions) {
   let unavailable = false
   let dms: Dms | undefined
   let history: ReturnType<typeof createTopicSync>['sync'] | undefined
+  const observeAccess = (result: api.Result<unknown>) => {
+    if (!result.ok && result.kind === 'http' && result.status === 401) notifyEnded()
+    else if (!closed && api.isOrganizationUnavailable(result)) terminate()
+  }
   const observe = async <T>(promise: Promise<api.Result<T>>): Promise<api.Result<T>> => {
     const epoch = history?.get().historyEpoch
     const result = await promise
-    if (!result.ok && result.kind === 'http' && result.status === 401) notifyEnded()
-    else if (!closed && api.isOrganizationUnavailable(result)) terminate()
+    observeAccess(result)
     if (!closed && history && (epoch === undefined || epoch === history.get().historyEpoch)) {
       const generation = result.ok && result.data && typeof result.data === 'object' && 'history_generation' in result.data ? result.data.history_generation : undefined
       if (typeof generation === 'string' && !history.observeHistoryGeneration(generation)) return { ok: false, kind: 'network' }
@@ -136,6 +141,14 @@ export function createSession(options: SessionOptions) {
   const replyCounts = createReplyCounts(sync, { replies, topics }, {
     api: (channel, body, signal) => observe(options.replyCountsApi ? options.replyCountsApi(channel, body, signal) : api.getReplyCounts(organizationId, channel, body, signal)),
     onSessionEnded: notifyEnded, requestTimeoutMs: options.sync?.requestTimeoutMs, random: options.sync?.random,
+  })
+  const moveChain = createMoveChain(sync, replies, {
+    newId: options.sync?.newId, requestTimeoutMs: options.sync?.requestTimeoutMs,
+    async api(channel, anchor, body) {
+      const result = await (options.moveChainApi?.(channel, anchor, body) ?? api.moveChain(organizationId, channel, anchor, body))
+      observeAccess(result)
+      return result
+    },
   })
   const navigationTargets = createNavigationTargets({
     topic: (channel, topic) => observe(topicSource.getTopicSummary(channel, topic)),
@@ -248,7 +261,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, topics, replies, replyCounts, unread, channels, dms, navigationTargets,
+    sync, topics, replies, moveChain, replyCounts, unread, channels, dms, navigationTargets,
     memberListAccess,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
