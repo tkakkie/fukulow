@@ -1,7 +1,15 @@
 use super::*;
 
-pub(super) const LOCK_CHANNELS: &str = "SELECT id, visibility='public' FROM channels
+pub(super) const LOCK_CHANNELS: &str =
+    "SELECT id, visibility='public' AS public, archived_at IS NOT NULL AS archived FROM channels
      WHERE organization_id=$1 AND id=ANY($2) AND kind='channel' ORDER BY id FOR SHARE";
+
+#[derive(sqlx::FromRow)]
+pub(super) struct LockedChannel {
+    id: Uuid,
+    public: bool,
+    archived: bool,
+}
 
 pub(super) const GROUP_POSITIONS: &str =
     "SELECT channel_id, position FROM member_section_placements
@@ -11,7 +19,7 @@ pub(super) async fn lock_channels(
     tx: &mut PgConnection,
     org: Uuid,
     ids: &[Uuid],
-) -> Result<Vec<(Uuid, bool)>, sqlx::Error> {
+) -> Result<Vec<LockedChannel>, sqlx::Error> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -26,11 +34,11 @@ pub(super) async fn lock_grants(
     tx: &mut PgConnection,
     owner: Owner,
     role: Role,
-    locked: &[(Uuid, bool)],
+    locked: &[LockedChannel],
 ) -> Result<HashSet<Uuid>, sqlx::Error> {
     let needs_grant: Vec<_> = locked
         .iter()
-        .filter_map(|&(id, public)| (!can_read(owner, role, public, false)).then_some(id))
+        .filter_map(|row| (!can_read(owner, role, row.public, false)).then_some(row.id))
         .collect();
     if needs_grant.is_empty() {
         return Ok(HashSet::new());
@@ -53,13 +61,20 @@ pub(super) fn authorize_supplied(
     owner: Owner,
     role: Role,
     supplied: usize,
-    locked: &[(Uuid, bool)],
+    locked: &[LockedChannel],
     grants: &HashSet<Uuid>,
-) -> bool {
-    supplied == locked.len()
-        && locked
+) -> Result<(), ApiError> {
+    if supplied != locked.len()
+        || !locked
             .iter()
-            .all(|&(id, public)| can_read(owner, role, public, grants.contains(&id)))
+            .all(|row| can_read(owner, role, row.public, grants.contains(&row.id)))
+    {
+        return Err(channel_not_found());
+    }
+    if locked.iter().any(|row| row.archived) {
+        return Err(channel_archived());
+    }
+    Ok(())
 }
 
 fn can_read(owner: Owner, role: Role, public: bool, granted: bool) -> bool {
@@ -94,7 +109,7 @@ pub(super) async fn visible_layout(
              SELECT section_id, position FROM member_section_placements
              WHERE organization_id=$1 AND member_id=$2 AND channel_id=c.id OFFSET 0
          ) p ON true
-         WHERE ({visible})
+         WHERE ({visible}) AND c.archived_at IS NULL
          ORDER BY p.position NULLS LAST, CASE WHEN p.position IS NULL THEN lower(c.name COLLATE \"C\") END, c.id"
     ))
     .bind(owner.org)
@@ -111,8 +126,8 @@ pub(super) async fn visible_placement(
 ) -> Result<Option<Uuid>, ApiError> {
     let member = auth::current_member_sql(false);
     let visible = visible_channel_sql();
-    sqlx::query_scalar(&format!(
-        "SELECT p.section_id FROM ({member}) u
+    let (section_id, archived): (Option<Uuid>, bool) = sqlx::query_as(&format!(
+        "SELECT p.section_id, c.archived_at IS NOT NULL FROM ({member}) u
          JOIN channels c ON c.organization_id=$1 AND c.kind='channel' AND c.id=$4
          LEFT JOIN member_section_placements p
            ON p.organization_id=$1 AND p.member_id=$2 AND p.channel_id=c.id
@@ -124,7 +139,11 @@ pub(super) async fn visible_placement(
     .bind(channel)
     .fetch_optional(tx)
     .await?
-    .ok_or_else(channel_not_found)
+    .ok_or_else(channel_not_found)?;
+    if archived {
+        return Err(channel_archived());
+    }
+    Ok(section_id)
 }
 
 #[derive(sqlx::FromRow)]
@@ -163,7 +182,7 @@ pub(super) fn group_slots_sql(custom: bool) -> String {
                 "UNION ALL
              SELECT c.id, NULL, true, lower(c.name COLLATE \"C\")
              FROM ({member}) u JOIN channels c ON c.organization_id=$1 AND c.kind='channel'
-             WHERE ({visible}) AND NOT EXISTS (
+             WHERE ({visible}) AND c.archived_at IS NULL AND NOT EXISTS (
                  SELECT 1 FROM member_section_placements p
                  WHERE p.organization_id=$1 AND p.member_id=$2 AND p.channel_id=c.id OFFSET 0)"
             ),
@@ -171,11 +190,11 @@ pub(super) fn group_slots_sql(custom: bool) -> String {
     };
     format!(
         "SELECT channel_id, position, visible FROM (
-             SELECT p.channel_id, p.position, ({visible}) AS visible, NULL::text AS name
+             SELECT p.channel_id, p.position, (({visible}) AND c.archived_at IS NULL) AS visible, NULL::text AS name
              FROM ({member}) u
              JOIN member_section_placements p ON p.organization_id=$1 AND p.member_id=$2
              JOIN LATERAL (
-                 SELECT id, organization_id, kind, visibility, lower_member_id, higher_member_id
+                 SELECT id, organization_id, kind, visibility, lower_member_id, higher_member_id, archived_at
                  FROM channels WHERE organization_id=$1 AND id=p.channel_id OFFSET 0
              ) c ON true
              WHERE {group}

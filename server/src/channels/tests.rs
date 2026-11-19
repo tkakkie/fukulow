@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+pub(super) mod archive;
 mod guest_members;
 mod managers;
 mod membership;
@@ -26,7 +27,7 @@ async fn router(pool: &PgPool) -> Router {
 }
 
 pub(crate) async fn body(response: Response) -> Value {
-    serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap()
+    serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap()
 }
 
 pub(crate) async fn request(
@@ -101,7 +102,8 @@ async fn create(app: &Router, token: &str, name: &str, visibility: &str) -> Valu
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let channel = body(response).await;
     assert!(Uuid::parse_str(channel["id"].as_str().unwrap()).is_ok());
-    assert_eq!(channel.as_object().unwrap().len(), 5);
+    assert_eq!(channel.as_object().unwrap().len(), 6);
+    assert_eq!(channel["archived"], false);
     assert_eq!(channel["name"], name);
     assert_eq!(channel["visibility"], visibility);
     channel
@@ -386,6 +388,8 @@ async fn foreign_membership_does_not_grant_private_channel_visibility(pool: PgPo
         "can_add_members",
         "can_remove_members",
         "can_manage_managers",
+        "can_rename",
+        "can_archive",
     ] {
         private["capabilities"][capability] = json!({"allowed":false,"reason":"forbidden"});
     }

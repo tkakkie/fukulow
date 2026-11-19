@@ -4,6 +4,9 @@ use std::{future::Future, pin::Pin, sync::Arc};
 pub type Capture<'a> =
     Pin<Box<dyn Future<Output = Result<Box<dyn ActivityChange>, sqlx::Error>> + Send + 'a>>;
 pub enum ChannelChange {
+    Metadata {
+        channel: Uuid,
+    },
     Created {
         channel: Uuid,
         creator: Uuid,

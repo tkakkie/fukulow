@@ -1,3 +1,4 @@
+use super::archive::channel_archived;
 use super::*;
 use axum::{
     Router,

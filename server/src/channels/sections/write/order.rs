@@ -33,11 +33,9 @@ pub(super) async fn move_channel(
     owner: Owner,
     channel: Uuid,
     input: MoveChannel,
-    authorize_channels: impl FnOnce(usize) -> bool,
+    authorize_channels: impl FnOnce(usize) -> Result<(), ApiError>,
 ) -> Result<Change, ApiError> {
-    if !authorize_channels(1) {
-        return Err(channel_not_found());
-    }
+    authorize_channels(1)?;
     require_destination(tx, owner, input.section_id).await?;
     let current: Option<Option<Uuid>> = sqlx::query_scalar(
         "SELECT section_id FROM member_section_placements
@@ -71,12 +69,10 @@ pub(super) async fn channels(
     tx: &mut PgConnection,
     owner: Owner,
     input: ChannelOrder,
-    authorize_channels: impl FnOnce(usize) -> bool,
+    authorize_channels: impl FnOnce(usize) -> Result<(), ApiError>,
 ) -> Result<Change, ApiError> {
     require_destination(tx, owner, input.section_id).await?;
-    if !authorize_channels(input.channel_ids.len()) {
-        return Err(channel_not_found());
-    }
+    authorize_channels(input.channel_ids.len())?;
     // This is the only set-validation read. Public creation may commit
     // afterwards and is serialized after this reorder in the automatic tail.
     let slots = channels::group_slots(tx, owner, input.section_id).await?;

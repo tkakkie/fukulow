@@ -11,8 +11,8 @@ export { flush } from './sync-test-helpers'
 import { ok } from './topic-test-helpers'
 import { flush } from './sync-test-helpers'
 export const msg = (seq: number, topic: string | null = null, sender = 'other', channel = 'A'): Message => ({ ...record(seq, channel), topic_id: topic, sender })
-export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ history_generation: '00000000-0000-4000-8000-000000000515', mention_unread_count: 0, main_mention_unread_count: 0, id: 'A', kind: 'channel', name: 'A', visibility: 'public',
-  capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false } },
+export const row = (extra: Partial<UnreadChannel> = {}): UnreadChannel => ({ history_generation: '00000000-0000-4000-8000-000000000515', mention_unread_count: 0, main_mention_unread_count: 0, id: 'A', kind: 'channel', archived: false, name: 'A', visibility: 'public',
+  capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false }, can_rename: { allowed: false }, can_archive: { allowed: false } },
   as_of_seq: 3, read_seq: 0, main_unread_count: 1, unread_count: 3, ...extra })
 export const summary = (id = 'T', w = 3, p = 0, count = 1): TopicSummary => ({ mention_unread_count: 0, id, name: id, first_seq: 2,
   last_seq: w, latest_message: msg(w, id), message_count: count, read_seq: p, unread_count: count })

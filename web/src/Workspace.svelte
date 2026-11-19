@@ -89,8 +89,8 @@
   const route = $derived(nav.state.target)
   const routeChannelId = $derived(route?.organizationId === currentOrganizationId ? route.channelId : s.selectedId)
   const selected = $derived<Channel | DmDiscovery | undefined>(dmState?.rows.find(row => row.identity.id === routeChannelId)?.identity ?? s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
-    id: routeChannelId, kind: 'channel', name: 'チャンネル', visibility: 'public',
-    capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false } },
+    id: routeChannelId, kind: 'channel', archived: false, name: 'チャンネル', visibility: 'public',
+    capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false }, can_rename: { allowed: false }, can_archive: { allowed: false } },
   } : undefined))
   const conversationName = $derived(selected?.kind === 'dm' ? selected.peer.name : selected?.name ?? '')
   const dmLapsed = $derived(selected?.kind === 'dm' && dmState?.sendBlocks[selected.id] === 'dm_peer_access_lapsed')
