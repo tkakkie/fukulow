@@ -276,3 +276,60 @@ fn move_positions_advance_live_replay_and_gap_fill_without_creating_state() {
         assert_eq!(state.messages[1].created_seq, 102, "{mode}");
     }
 }
+
+#[test]
+fn move_epochs_increase_across_channel_resets_and_are_shared_across_channels() {
+    let channel = Uuid::from_u128(1);
+    let other_channel = Uuid::from_u128(5);
+    let self_id = Uuid::from_u128(2);
+    let first_generation = Uuid::from_u128(3);
+    let next_generation = Uuid::from_u128(4);
+    let mut core = Core::new(self_id);
+    let feed = |core: &mut Core, value| core.step(serde_json::from_value(value).unwrap());
+    feed(&mut core, json!({"type":"session_start","selfId":self_id}));
+
+    let mut previous_epoch = 0;
+    for (channel, generation) in [
+        (channel, first_generation),
+        (channel, next_generation),
+        (other_channel, next_generation),
+    ] {
+        feed(
+            &mut core,
+            json!({"type":"history_generation","generation":generation}),
+        );
+        let connection = core.session().connection.unwrap();
+        feed(
+            &mut core,
+            json!({"type":"connection_ready","connection":connection}),
+        );
+        feed(&mut core, json!({"type":"watch","channel":channel}));
+        let state = core.channel(channel).unwrap();
+        assert_eq!(state.move_epoch, None);
+        let latest = state.latest.unwrap();
+        feed(
+            &mut core,
+            json!({"type":"history_result","request":latest,
+            "page":{"history_generation":generation,"as_of_seq":100,"messages":[],"has_more":false}}),
+        );
+        feed(
+            &mut core,
+            json!({"type":"event","connection":connection,"event":{
+                "type":"message","kind":"move","seq":101,"version":101,"channel_id":channel,
+                "history_generation":generation,"root_id":Uuid::from_u128(100),"source_topic_id":null,
+                "destination_topic_id":Uuid::from_u128(9),"operation_id":Uuid::from_u128(10)
+            }}),
+        );
+        let state = core.channel(channel).unwrap();
+        assert_eq!(state.move_seq, Some(101));
+        let epoch = state.move_epoch.unwrap();
+        assert!(
+            epoch > previous_epoch,
+            "Move epoch {epoch} reused after {previous_epoch}"
+        );
+        previous_epoch = epoch;
+    }
+    let first = core.channel(channel).unwrap().move_epoch.unwrap();
+    let other = core.channel(other_channel).unwrap().move_epoch.unwrap();
+    assert!(first < other);
+}
