@@ -27,7 +27,7 @@ Later: attachments, reactions, push notifications, bots/webhooks, OIDC.
 - [Accounts](spec/accounts.md): Accounts and Memberships; Password and Account Session security; Members, Roles and Invites; Channel membership and Channel managers; Setup.
 - [Channels](spec/channels.md): Channel rename and archive (#410, proposed).
 - [Deployment](spec/deployment.md): Proxy and sign-in limits; Database deployment and upgrade (#194 B); Deployment (#194 C); HTTP availability; Operations: backup and restore (#198 C).
-- [Realtime](spec/realtime.md): Real-time sync contract; Mention and Mention unread (#152, approved, not implemented); Message body formatting (#628, implemented); Organization activity notices (#307, implemented); Desktop notifications (#413, proposed).
+- [Realtime](spec/realtime.md): Real-time sync contract; Mention and Mention unread (#152, implemented); Message body formatting (#628, implemented); Organization activity notices (#307, implemented); Desktop notifications (#413, approved, not implemented).
 - [Direct messages](spec/dms.md): DM pair/grant lifetimes, permissions, send eligibility, durable discovery and acceptance gates (#151).
 - [Sections](spec/sections.md): Personal layout, effective access, ordering, concurrency and proposed REST contract (#204).
 

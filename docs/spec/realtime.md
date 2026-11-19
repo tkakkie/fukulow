@@ -145,11 +145,13 @@ Keep [DM acceptance bounds](dms.md#performance-acceptance-adopted-2026-11-14) (#
 4. Resolve edited Mention rendering/acceptance/count identity before #287. #287 keeps Mention unread unchanged and #152 accepts an immutable set. A count change requires amending #287. Move's destination-read rule and Edit's unchanged Unread/Topic creation order stand.
 5. Mutation latency, replay, WAL, storage and migration-outage thresholds must be fixed before #141/#287 measurement (#431).
 
-### Mention and Mention unread (#152, approved, not implemented)
+### Mention and Mention unread (#152, implemented)
 
-This section records #152's approved contract. S/C/P still apply. No directory or search expansion, group Mention or separate Mention notification. Expose accepted identity only to readers of that Message.
+This section records #152's contract. M1–M5 and the DM part of M6 are implemented (`server/src/messages/mentions.rs`, `server/src/messages/unread.rs`). Tests: [messages](../invariants/messages.md), [unread](../invariants/unread.md), [realtime](../invariants/realtime.md), [web](../invariants/web.md) invariants. Edit (#287) is open. S/C/P still apply. No directory or search expansion, group Mention or separate Mention notification. Expose accepted identity only to readers of that Message.
 
 #### M1. Body token and shared Message shape
+
+Status: implemented.
 
 Scan left to right for complete `@{member:<uuid>}` tokens anywhere in the unchanged body. Use the Member id in lowercase ASCII hexadecimal UUID 8-4-4-4-12 form. No word boundaries, escapes or Markdown/code exceptions. Uppercase, malformed/incomplete/whitespace forms, display names, `@all` and `@channel` stay literal. Resolve UUIDs as Member ids only. Keep body validation, scalar limits and byte-exact retries.
 
@@ -158,6 +160,8 @@ Every canonical Message (ACK/retry, history/fill, main/Topic/Reply projections i
 Render every exact occurrence of an accepted id and highlight the reader by accepted id alone. Use a newer authorized Member display identity if held, otherwise the newest authorized response for that Message. Reads never revalidate the accepted set. Refetch follows renames even for never-authors or deactivated Members. Accepted identity confers no access, directory or autocomplete membership. Rejected tokens never resolve, including after grants, history, replay and retries. They do not fail a send. Pending text has no accepted set before C5 settlement.
 
 #### M2. Acceptance, retry and access ordering
+
+Status: implemented.
 
 After sender authorization, accept each distinct active same-Organization target with current Channel access in the send transaction. Use Channels' visibility rule: public non-Guest implicit access qualifies even with a stale redundant grant. Private (including Owner/Admin) and public Guest access require usable current-revision grants. Every DM Role requires pair participation and a current participant grant (D3).
 
@@ -171,6 +175,8 @@ Revocation/deactivation committed before the locked acceptance check excludes th
 
 #### M3. Mention unread and REST counts
 
+Status: implemented.
+
 Count the subset of P8 Unread whose accepted set contains the reader, once per other-sender Message with creation position strictly above scope read position and at or below W. Inherited Topic determines Reply scope. Opening a chain marks neither scope and adds no separate badge. Topic lines are summaries. Channel total is main plus Topics. No separate position, mark endpoint or stored counter.
 
 Require nonnegative integer counts throughout. Channel Unread carries `main_mention_unread_count` and aggregate `mention_unread_count`. Each enclosing-W Topic summary and DM list/open carry `mention_unread_count`. All DM Messages use the Channel position. Batch counts alongside Unread in the same authorized read-only snapshot as positions/W, with no-store and no per-item SQL or literal-token counting. P8's missing-position suppression, 404 mark denial, max/clamp, grant-time initialization, continuous-access preservation and loss/re-grant apply equally. Preexisting Messages contribute zero. No retrospective acceptance/backfill.
@@ -179,23 +185,29 @@ Show counts alongside Unread on Channel/DM lists and displayed Topic summaries. 
 
 #### M4. Real-time count convergence (P8 and #307)
 
+Status: implemented.
+
 Merge scope REST baselines with the unique eligible other-sender Mention suffix above both W and read position, deduped by (Channel, creation position) across live, ACK/history settlement and replay. Projections leave the cursor alone. Reapply suffix after winning baseline. Unknown/unloaded or evicted scope evidence stays unresolved pending refresh within #308's bounds.
 
 Within the access generation take larger W, then larger scope position, then smaller count at equal coverage, independently for main and aggregate. Stale responses cannot raise counts. Reconnect refetches and merges positions by max with old reads fenced. Confirmed Topic marks require aggregate refetch without guessed subtraction or borrowed scope coverage. Own sends move/add nothing.
 
 Unwatched targets and cross-device marks use A9–A12/O5 and DM E4–E7. Notices carry no accepted set/body/target identity/count and only dirty or coalesce. Ready/reset/reconnect/O5 refresh held baselines. Coverage requires both Unread and Mention fields for that target. Topic/main coverage cannot satisfy aggregate. Revocation immediately removes both badges. Re-grant/renewal starts a new baseline generation. Stale REST/live/replay/notices cannot restore lost ids, names or counts. Preserve Session/Organization and in-flight boundaries. No Mention-specific event, timer or queue.
 
-#### M5. Storage outline for the later migration
+#### M5. Storage
 
-Messages owns `message_mentions` and its SQL. Allocate the version in the append-only #152 migration (`_message_mentions.sql`). Use non-null UUID Organization/Channel/Message/Member ids, tenant RLS and scoped keys: PK (Organization, Message, Member), FK (Organization, Channel, Message) to `messages(organization_id, channel_id, id)`, and FK (Organization, Member) to retained `users(organization_id, id)`. Reuse scoped unique keys. Database constraints prevent duplicate/dangling/cross-Organization identities. Application acceptance enforces access. Store no name, read state or grant lifetime.
+Status: implemented.
+
+Messages owns `message_mentions` and its SQL. Allocate the version in the append-only #152 migration (`202611140300_message_mentions.sql`). Use non-null UUID Organization/Channel/Message/Member ids, tenant RLS and scoped keys: PK (Organization, Message, Member), FK (Organization, Channel, Message) to `messages(organization_id, channel_id, id)`, and FK (Organization, Member) to retained `users(organization_id, id)`. Reuse scoped unique keys. Database constraints prevent duplicate/dangling/cross-Organization identities. Application acceptance enforces access. Store no name, read state or grant lifetime.
 
 Use the PK for batch hydration, `message_mentions_member_channel_message` on (Organization, Member, Channel, Message) for reader joins and `message_mentions_channel_message` on (Organization, Channel, Message) for the FK and Channel reads/cleanup. Join scoped Message indexes to scan only unread ranges and skip fully read scopes. Verify plans for Channel lists, DM pages/id batches and W-relative Topic summaries. Access loss removes positions, preserving stored sets. Eventual Message deletion removes Mention rows atomically.
 
 #### M6. Dependencies and open decisions
 
+Status: Move (#141) and DM (#385) integration implemented. Edit (#287) open.
+
 #141 delivers and tests atomic Move/count integration across live/replay/positions. Keep the Message's accepted set and use the destination read position. #152 owns that set/count contract and tests unchanged projections. #160 adopts current-state replay. #141 decision 4 settled Move rights, limits, activity and empty-Topic identity/read lifetime. Edit is outside #152. If the agreed Edit policy changes accepted ids, update them atomically. Resolve edited-body acceptance and count identity before #287 (see #160 open decisions). No Edit/Delete/log rule follows from immutable acceptance alone.
 
-DM integration with #385 applies #151 pair/grant/peer-send rules to the same Message, Reply and count surfaces. Keep discovery and query budgets, renewal and peer-refusal order. Test DM Mention integration jointly once both are available. A count field does not establish implemented semantics. See the [authorized-control requirement](#move-edit-and-projections-141--287) for Mention target denials. Record executable invariant tests when implemented.
+DM integration with #385 applies #151 pair/grant/peer-send rules to the same Message, Reply and count surfaces. Keep discovery and query budgets, renewal and peer-refusal order. DM Mention integration is tested jointly (`server/src/messages/tests/mentions/dms.rs`, `server/src/realtime/tests/dms.rs`). A count field does not establish implemented semantics. See the [authorized-control requirement](#move-edit-and-projections-141--287) for Mention target denials. Invariant rows name these tests.
 
 ### Message body formatting (#628, implemented)
 
@@ -273,14 +285,13 @@ Add one held target to A1–A14/O5. [Layout, REST and limits](sections.md).
 - E5. Fence pre-ready/reset/access/list-change/O5 responses and queue follow-up. Fence local reads across mutation start and completion/unknown outcome. Reject layout below latest observed notice or last accepted generation. Accept atomically as complete ordered snapshot, without merging old groups or adding from mutation ACKs. Newly visible/reappearing Channels require both access-authoritative layout and list. Intersect by id once. Existing entries can remain pending except observed loss. Equal generation proves no access freshness. Ready/reset/reconnect rebuild version floors in a local epoch. Lower post-restore baseline requires fresh socket. Unnoticed live rollback is out of scope. Closed/replaced socket/Organization/Session work cannot affect new floors. A12 and C6/C9/C10 stay in force.
 - E6. Revoke removes Channel and badge from every group immediately, drops held display placement and fences earlier layout/list reads. Q5 keeps placement server-side. Fresh omission hides and older data cannot undo it. Current direct-placement 404 `channel not found` also hides and fences. Direct-placement 409 `channel_archived` (#410) is not access loss: it hides the Channel from the layout and refetches both as a list change, with no revoke fence, new A12 generation or baseline discard, and restore re-shows it in the same generation. Refetch both on revoke, placement denial, gain or list change through E4. Regain requires a fresh access-authoritative intersection in the new A12 access generation. Redundant public grant removal preserves order and Unread. Subscription loss stays C9 (ignored unwatched), separate from revoke/list refresh. Layout never authorizes or revives a watch. 4003 stops Organization work and 4001/401 ends Account work.
 
-### Desktop notifications (#413, proposed, P3, not implemented)
+### Desktop notifications (#413, approved, not implemented, P3)
 
-Web only, while the page is open. No Push, Service Worker, new API, event or persistence.
+Web only, page open; no new API, event or persistence. Accepted limits and required measurement: [web decisions](../decisions/web.md).
 
-- N1. Off by default, in Account Session memory: on only when a 設定 action's `Notification.requestPermission()` resolves `granted` (`default` stays off; `denied` or no API shows unavailable). Reload, new tab, sign-out, Session replacement turn it off; Organization switch does not. Each opt-in starts an epoch.
-- N2. Eligible: a `message` event with `kind` `create`, `message.deleted` false, `sender` not the reader's Member, in a DM or with the reader in accepted `mentions` (M1). A later hydrated `version` still counts. Not eligible: other kinds and tombstones, Messages at or below the floor or the held read position for their scope. Never compare a Topic Message with the main `read_seq`; an unheld Topic read position limits nothing beyond the floor.
-- N3. Identify only Channels whose `kind` a current-generation list gives and whose floor is set; other `channel_activity` only dirties lists (A9, E4–E5). Sources: a live event on a subscribed Channel, or `GET /api/v1/orgs/{org}/channels/{id}/events?after_seq=<floor>` once W exceeds the floor (DMs, or ordinary Channels whose list row shows `mention_unread_count > 0`). Notices, counts and W alone never confirm. Use `history_generation`, A10 coalescing, backoff, one in-flight read plus one follow-up per Channel, one page of 50. If `has_more`, skip the tail: the floor moves to the higher of that W and the last page `seq`, nothing is guessed.
-- N4. A floor starts unset at opt-in, access gain or authoritative reappearance (not O5 or reconnect), C8 reset, `history_generation` change and Organization switch, then takes the W of the first current-generation baseline. It advances over gap-free positions of every kind. Decided `created_seq`s above it (C3 gaps) are kept, at most 200 per Channel; on overflow the floor moves to the highest. A decided Message never notifies again.
-- N5. Show only if `document.visibilityState` is `hidden` at show time; each tab decides alone. `tag` = Organization, Channel, `created_seq`, no `renotify`. Fixed text: 新しいダイレクトメッセージがあります for DMs, else 新しいメンションがあります. No body, sender, names or count; `data` holds ids.
-- N6. Opt-out, access loss (C9, `channel_access_revoked`, `channel_access_lost`, list omission A11/E6), C8 or `history_generation_changed`, Organization switch or `organization_unavailable`, 401/4001, 4003, sign-out and Session replacement close this page's notifications for that scope and fence reads. Responses from an older epoch, Session, Organization, access or history generation decide nothing. Read errors follow C6 (401), C10, C9/A9 (404), C8 (409), A10 (503).
-- N7. On click, focus. If `data` differs from the current Session or Organization, open nothing. Else do an authorized read, fenced like N6, then open the Message's scope by the [URL rules](../ui.md) or follow C6/C9/C10. Never navigate from `data` alone.
+- N1. Off by default, in Account Session memory; on only after a 設定 action's `Notification.requestPermission()` gives `granted` (`denied` or no API: unavailable). Reload, new tab, sign-out and Session replacement turn it off; Organization switch does not. Each opt-in starts an epoch.
+- N2. Eligible: `message` event, `kind` `create`, not deleted, other sender, in a DM or mentioning the reader (M1); a hydrated `version` counts. Not at or below the floor or the held read position of its scope. Never use the main `read_seq` for Topic Messages; an unheld Topic read position limits nothing, so a Topic Mention read elsewhere may notify once.
+- N3. Only Channels with a current-generation list `kind` and a set floor; other `channel_activity` only dirties lists (A9, E4–E5). Sources: live events on subscribed Channels, or Channel `/events?after_seq=<floor>` once W exceeds the floor (DMs, or `mention_unread_count > 0`). Never notify from notices, counts, W or unconfirmed events. `history_generation`, A10 coalescing, backoff, one in-flight read plus one follow-up per Channel, one page of 50; on `has_more` the floor moves to max(W, last `seq`) and the tail is not notified. Unread is unaffected.
+- N4. The floor is unset at opt-in, access gain or authoritative reappearance (not O5/reconnect), C8, `history_generation` change and Organization switch, then takes the first current-generation baseline's W. It advances over gap-free positions of every kind; up to 200 decided `created_seq`s above it (C3 gaps) are kept per Channel, overflow moves it to the highest. A decided Message never notifies again.
+- N5. Show only while `document.visibilityState` is `hidden`. Tabs decide alone (no `BroadcastChannel`) and may duplicate. `tag` = Organization, Channel, `created_seq`; no `renotify`; `data` holds ids. Text and click: [UI](../ui.md) §2, §10.
+- N6. Opt-out, access loss (C9, `channel_access_revoked`, `channel_access_lost`, A11/E6), C8, `history_generation_changed`, Organization switch or `organization_unavailable`, 401/4001, 4003, sign-out and Session replacement close that scope's notifications and fence reads; older epoch, Session, Organization, access or history responses decide nothing. Read errors: C6 (401), C10, C9/A9 (404), C8 (409), A10 (503).
