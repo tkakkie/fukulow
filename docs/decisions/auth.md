@@ -31,7 +31,7 @@
 - #314 single-statement hot reads use materialized context CTE before non-flattened LATERAL to save three round trips. This covers Channel visibility, member_access, single-batch access_rows, replay pages and the send barrier (fresh watermark snapshot). Revert any path to transactions unless isolation holds across plan modes, scope, reuse, unset and cancellation (#334).
 - #151 maintenance enumerates one Organization UUID per minute with wraparound. Bounded local-RLS reclamation needs no traffic or global tenant data access.
 - #151 DM access needs participation and current grant to preclude third-party access and Role bypass.
-- #151 explicit non-Guest open resolves already accessible DMs before peer eligibility for safe lost-response retries. The renewal branch replaces lapsed grants atomically and preserves current ones.
+- #151 explicit non-Guest open resolves already accessible DMs before peer eligibility for safe lost-response retries. The renewal branch replaces lapsed grants atomically and preserves current ones; reactivation restores nothing.
 - #151 peer eligibility belongs to new sends and create/renew, preserving active peer history/mark-read at offboarding.
 - #294 A (#315) limits Guest discovery to shared grantees and uses readable authors (#301) to resolve past names without widening access.
 - #305 Owner may deactivate another active Member and Admin only non-Owners. Authorize before disclosure and check target before guards to prevent leaks/self-lockout.
