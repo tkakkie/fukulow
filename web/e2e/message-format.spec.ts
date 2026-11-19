@@ -79,9 +79,11 @@ test('Message body formatting (#628): link keyboard focus and activation, target
   expect(darkStyles.preBg).not.toBe(lightStyles.preBg)
   expect(darkStyles.quoteColor).not.toBe(lightStyles.quoteColor)
 
-  // Keyboard focus and activation on link
-  // Pressing Enter on focused link should activate the link (new tab popup), NOT open the row's Reply panel
-  await link.focus()
+  // Keyboard focus and activation on link:
+  // Focus the confirmed row, press Tab to reach the link, then press Enter to activate it without opening the Reply panel
+  await article.focus()
+  await expect(article).toBeFocused()
+  await page.keyboard.press('Tab')
   await expect(link).toBeFocused()
   const popupPromise = page.waitForEvent('popup')
   await page.keyboard.press('Enter')

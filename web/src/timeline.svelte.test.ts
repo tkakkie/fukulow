@@ -7296,6 +7296,46 @@ it('MessageRow and MessageBody render formatted blocks, safe autolinks, Mention 
   await unmount(instance); authors.close()
 })
 
+it('MessageBody preserves authored empty lines at quote and code fence boundaries (#628)', async () => {
+  const props = $state({
+    body: '> first\n\n> second',
+  })
+  const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+  const instance = mount(MessageRow, { target: host as unknown as Element, props: {
+    get body() { return props.body },
+  } })
+  await settle()
+
+  const bodyEl = () => host.querySelector('.ui-message-body')!
+  const nonCommentChildren = () =>
+    bodyEl().childNodes
+      .filter(node => node.nodeType !== 8 && (node instanceof MiniElement || node.textContent !== ''))
+      .map(node =>
+        node instanceof MiniElement ? `${node.localName}:${node.textContent}` : `text:${JSON.stringify(node.textContent)}`,
+      )
+
+  // Blank line between two block quotes
+  expect(host.querySelectorAll('blockquote').map(el => el.textContent)).toEqual(['first', 'second'])
+  expect(bodyEl().textContent).toBe('first\nsecond')
+  expect(nonCommentChildren()).toEqual(['blockquote:first', 'text:"\\n"', 'blockquote:second'])
+
+  // Blank line between two fenced code blocks, and leading/trailing blank lines at fence/quote boundaries
+  props.body = '\n```\na\n```\n\n```\nb\n```\n\n> after\n'
+  await settle()
+  expect(host.querySelectorAll('pre code').map(el => el.textContent)).toEqual(['a', 'b'])
+  expect(nonCommentChildren()).toEqual([
+    'text:"\\n"',
+    'pre:a',
+    'text:"\\n"',
+    'pre:b',
+    'text:"\\n"',
+    'blockquote:after',
+    'text:"\\n"',
+  ])
+
+  await unmount(instance)
+})
+
 it('Mention autocomplete uses only directory candidates with keyboard selection literal tokens IME and Escape safety', async () => {
   const id = '123e4567-e89b-12d3-a456-426614174000', second = '123e4567-e89b-12d3-a456-426614174001'
   const props = $state({ body: '', members: [{ id, name: '田中', role: 'member' as const }, { id: second, name: '鈴木', role: 'member' as const }] })

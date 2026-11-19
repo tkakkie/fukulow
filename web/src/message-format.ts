@@ -65,13 +65,8 @@ type AtomPart =
   | { type: 'literal'; text: string }
 type Atom = Exclude<AtomPart, { type: 'text' }>
 
-type CacheEntry = {
-  acceptedKey: string
-  blocks: BlockToken[]
-}
-
 const MAX_CACHE_ENTRIES = 1024
-const tokenCache = new Map<string, CacheEntry>()
+const tokenCache = new Map<string, BlockToken[]>()
 
 export function clearMessageFormatCache(): void {
   tokenCache.clear()
@@ -126,7 +121,7 @@ function splitAtomsIntoLines(parts: AtomPart[]): AtomPart[][] {
     if (part.type !== 'text') {
       lines[lines.length - 1].push(part)
     } else {
-      const segments = part.text.split('\n')
+      const segments = part.text.split(/\r?\n/)
       for (let i = 0; i < segments.length; i++) {
         if (i > 0) lines.push([])
         if (segments[i].length > 0) {
@@ -179,28 +174,92 @@ function joinCodeLines(lines: AtomPart[][]): (TextToken | MentionToken)[] {
 }
 
 const ASCII_ALNUM = /^[A-Za-z0-9]$/
-const SCHEME_RE = /^(?:https?:\/\/|mailto:)/i
 const TRAILING_PUNCT = new Set(['.', ',', ':', ';', '!', '?', "'", '"'])
-
-function countChar(s: string, ch: string): number {
-  let n = 0
-  for (let i = 0; i < s.length; i++) {
-    if (s[i] === ch) n++
-  }
-  return n
-}
 
 function isAllowedUrlChar(code: number): boolean {
   // Printable ASCII (0x21..0x7e): excludes whitespace, control chars, and non-ASCII
   return code >= 0x21 && code <= 0x7e
 }
 
-function trimAutolink(raw: string): string | null {
-  const schemeMatch = SCHEME_RE.exec(raw)
-  if (!schemeMatch) return null
-  const schemeLen = schemeMatch[0].length
-  const isMailto = schemeMatch[0].toLowerCase().startsWith('mailto:')
+function matchSchemePrefix(
+  str: string,
+  index: number,
+  end: number,
+): { schemeLen: number; isMailto: boolean } | null {
+  if (index + 7 > end) return null
+  const prefix = str.slice(index, Math.min(end, index + 8)).toLowerCase()
+  if (prefix.startsWith('https://')) return { schemeLen: 8, isMailto: false }
+  if (prefix.startsWith('http://')) return { schemeLen: 7, isMailto: false }
+  if (prefix.startsWith('mailto:')) return { schemeLen: 7, isMailto: true }
+  return null
+}
 
+function hasValidMailtoAddress(remainder: string): boolean {
+  const addrEnd = remainder.search(/[?#]/)
+  const address = addrEnd === -1 ? remainder : remainder.slice(0, addrEnd)
+  if (address.length === 0 || address.startsWith('/')) return false
+  if (address.startsWith('@') || address.endsWith('@')) return false
+  return true
+}
+
+function hasValidHttpHost(remainder: string): boolean {
+  const authorityEnd = remainder.search(/[/?#]/)
+  const authority = authorityEnd === -1 ? remainder : remainder.slice(0, authorityEnd)
+  if (authority.length === 0) return false
+
+  const atIdx = authority.lastIndexOf('@')
+  if (atIdx === 0) return false
+  const hostPort = atIdx === -1 ? authority : authority.slice(atIdx + 1)
+  if (hostPort.length === 0) return false
+
+  if (hostPort.startsWith('[')) {
+    const closeBracket = hostPort.indexOf(']')
+    if (closeBracket <= 1) return false
+    const afterBracket = hostPort.slice(closeBracket + 1)
+    return afterBracket.length === 0 || /^:\d+$/.test(afterBracket)
+  }
+
+  const colonIdx = hostPort.indexOf(':')
+  const hostname = colonIdx === -1 ? hostPort : hostPort.slice(0, colonIdx)
+  if (hostname.length === 0 || /[[\]]/.test(hostname)) return false
+  if (colonIdx !== -1) {
+    const port = hostPort.slice(colonIdx + 1)
+    if (!/^\d+$/.test(port)) return false
+  }
+  return true
+}
+
+function computeMatchedClosers(raw: string, schemeLen: number, limit: number): Set<number> {
+  let openParens = 0
+  let openBrackets = 0
+  const matched = new Set<number>()
+  for (let i = schemeLen; i < limit; i++) {
+    const ch = raw[i]
+    if (ch === '(') {
+      openParens++
+    } else if (ch === ')') {
+      if (openParens > 0) {
+        openParens--
+        matched.add(i)
+      }
+    } else if (ch === '[') {
+      openBrackets++
+    } else if (ch === ']') {
+      if (openBrackets > 0) {
+        openBrackets--
+        matched.add(i)
+      }
+    }
+  }
+  return matched
+}
+
+function trimAutolink(raw: string, schemeLen: number, isMailto: boolean): string | null {
+  if (raw.length <= schemeLen) return null
+  const firstAfterScheme = raw[schemeLen]
+  if (firstAfterScheme === '/' || firstAfterScheme === '#') return null
+
+  let matchedClosers: Set<number> | null = null
   let end = raw.length
   while (end > schemeLen) {
     const ch = raw[end - 1]
@@ -208,16 +267,9 @@ function trimAutolink(raw: string): string | null {
       end--
       continue
     }
-    if (ch === ')') {
-      const sub = raw.slice(schemeLen, end)
-      if (countChar(sub, ')') > countChar(sub, '(')) {
-        end--
-        continue
-      }
-    }
-    if (ch === ']') {
-      const sub = raw.slice(schemeLen, end)
-      if (countChar(sub, ']') > countChar(sub, '[')) {
+    if (ch === ')' || ch === ']') {
+      matchedClosers ??= computeMatchedClosers(raw, schemeLen, end)
+      if (!matchedClosers.has(end - 1)) {
         end--
         continue
       }
@@ -230,26 +282,21 @@ function trimAutolink(raw: string): string | null {
   if (remainder.length === 0) return null
 
   if (isMailto) {
-    // Non-empty address
-    if (remainder.startsWith('/') || remainder.startsWith('?')) return null
-    return target
-  } else {
-    // Non-empty host after http:// or https://
-    const hostEnd = remainder.search(/[/?#]/)
-    const host = hostEnd === -1 ? remainder : remainder.slice(0, hostEnd)
-    if (host.length === 0 || host.startsWith(':')) return null
-    return target
+    return hasValidMailtoAddress(remainder) ? target : null
   }
+  return hasValidHttpHost(remainder) ? target : null
 }
 
 /**
  * Flatten a line's AtomParts into a character sequence where each mention atom
  * occupies one sentinel code unit (\uFFFC) and stores its member id in a map
- * by exact string index.
+ * by exact string index. Also precompute the next plain backtick index for O(1)
+ * inline-code lookup and skipping.
  */
 type IndexedLine = {
   str: string
   atoms: Map<number, Atom>
+  nextBacktick: Map<number, number>
 }
 
 const ATOM_SENTINEL = '\uFFFC'
@@ -265,7 +312,15 @@ function indexLine(parts: AtomPart[]): IndexedLine {
       str += ATOM_SENTINEL
     }
   }
-  return { str, atoms }
+  const nextBacktick = new Map<number, number>()
+  let lastBacktick = -1
+  for (let i = str.length - 1; i >= 0; i--) {
+    if (str[i] === '`' && !atoms.has(i)) {
+      nextBacktick.set(i, lastBacktick)
+      lastBacktick = i
+    }
+  }
+  return { str, atoms, nextBacktick }
 }
 
 function sliceCodeChildren(
@@ -294,15 +349,18 @@ function sliceCodeChildren(
   return out
 }
 
-function findNextPlainChar(line: IndexedLine, ch: string, from: number, end: number): number {
-  for (let i = from; i < end; i++) {
-    if (line.str[i] === ch && !line.atoms.has(i)) return i
-  }
-  return -1
-}
-
 function findNextPlainPair(line: IndexedLine, pairChar: string, from: number, end: number): number {
   for (let i = from; i + 1 < end; i++) {
+    if (line.str[i] === '`' && !line.atoms.has(i)) {
+      const closeBacktick = line.nextBacktick.get(i) ?? -1
+      if (closeBacktick > i + 1 && closeBacktick < end) {
+        i = closeBacktick
+        continue
+      }
+      if (closeBacktick >= end) {
+        return -1
+      }
+    }
     if (
       line.str[i] === pairChar &&
       line.str[i + 1] === pairChar &&
@@ -313,24 +371,6 @@ function findNextPlainPair(line: IndexedLine, pairChar: string, from: number, en
     }
   }
   return -1
-}
-
-function matchAutolinkInLine(line: IndexedLine, index: number, end: number): string | null {
-  if (line.atoms.has(index)) return null
-  if (index > 0 && !line.atoms.has(index - 1) && ASCII_ALNUM.test(line.str[index - 1])) {
-    return null
-  }
-  const c0 = line.str.charCodeAt(index) | 32
-  if (c0 !== 104 && c0 !== 109) return null
-
-  // Find extent up to end, whitespace, atom, or non-ASCII
-  let rawEnd = index
-  while (rawEnd < end && !line.atoms.has(rawEnd) && isAllowedUrlChar(line.str.charCodeAt(rawEnd))) {
-    rawEnd++
-  }
-  const raw = line.str.slice(index, rawEnd)
-  if (!SCHEME_RE.test(raw)) return null
-  return trimAutolink(raw)
 }
 
 function parseInlineRange(
@@ -355,10 +395,10 @@ function parseInlineRange(
     }
   }
 
-  // Track failed closer searches so repeated markers degrade in O(N) instead of O(N^2)
-  let noBacktickAfter = -1
+  // Track failed closer searches and printable URL run boundaries so repeated markers degrade in O(N)
   let noBoldAfter = -1
   let noStrikeAfter = -1
+  let urlRunEnd = -1
 
   let i = start
   while (i < end) {
@@ -378,33 +418,44 @@ function parseInlineRange(
 
     // 1. Inline code: backtick to the next backtick, non-empty
     if (ch === '`') {
-      if (noBacktickAfter === -1 || i < noBacktickAfter) {
-        const closeIdx = findNextPlainChar(line, '`', i + 1, end)
-        if (closeIdx === -1) {
-          noBacktickAfter = i
-        } else if (closeIdx > i + 1) {
-          flushText()
-          out.push({
-            type: 'code',
-            children: sliceCodeChildren(line, i + 1, closeIdx),
-          })
-          i = closeIdx + 1
-          continue
-        }
+      const closeIdx = line.nextBacktick.get(i) ?? -1
+      if (closeIdx > i + 1 && closeIdx < end) {
+        flushText()
+        out.push({
+          type: 'code',
+          children: sliceCodeChildren(line, i + 1, closeIdx),
+        })
+        i = closeIdx + 1
+        continue
       }
       textBuffer += ch
       i++
       continue
     }
 
-    // 2. Autolink
+    // 2. Autolink: check scheme prefix before scanning and reuse the printable run boundary
     if (ch === 'h' || ch === 'H' || ch === 'm' || ch === 'M') {
-      const url = matchAutolinkInLine(line, i, end)
-      if (url !== null) {
-        flushText()
-        out.push({ type: 'link', href: url, text: url })
-        i += url.length
-        continue
+      if (i === 0 || line.atoms.has(i - 1) || !ASCII_ALNUM.test(line.str[i - 1])) {
+        const scheme = matchSchemePrefix(line.str, i, end)
+        if (scheme !== null) {
+          if (urlRunEnd <= i) {
+            urlRunEnd = i + scheme.schemeLen
+            while (
+              urlRunEnd < end &&
+              !line.atoms.has(urlRunEnd) &&
+              isAllowedUrlChar(line.str.charCodeAt(urlRunEnd))
+            ) {
+              urlRunEnd++
+            }
+          }
+          const url = trimAutolink(line.str.slice(i, urlRunEnd), scheme.schemeLen, scheme.isMailto)
+          if (url !== null) {
+            flushText()
+            out.push({ type: 'link', href: url, text: url })
+            i += url.length
+            continue
+          }
+        }
       }
     }
 
@@ -483,13 +534,14 @@ export function tokenizeMessageBody(
 ): BlockToken[] {
   const raw = body ?? ''
   const { set: accepted, key: acceptedKey } = buildAcceptedSet(mentions, pending)
+  const cacheKey = `${acceptedKey}\0${raw}`
 
-  const cached = tokenCache.get(raw)
-  if (cached && cached.acceptedKey === acceptedKey) {
+  const cached = tokenCache.get(cacheKey)
+  if (cached !== undefined) {
     // Refresh LRU order
-    tokenCache.delete(raw)
-    tokenCache.set(raw, cached)
-    return cached.blocks
+    tokenCache.delete(cacheKey)
+    tokenCache.set(cacheKey, cached)
+    return cached
   }
 
   const atoms = splitAtoms(raw, accepted)
@@ -552,7 +604,7 @@ export function tokenizeMessageBody(
     const oldestKey = tokenCache.keys().next().value
     if (oldestKey !== undefined) tokenCache.delete(oldestKey)
   }
-  tokenCache.set(raw, { acceptedKey, blocks })
+  tokenCache.set(cacheKey, blocks)
 
   return blocks
 }

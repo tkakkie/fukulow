@@ -197,7 +197,7 @@ Use the PK for batch hydration, `message_mentions_member_channel_message` on (Or
 
 DM integration with #385 applies #151 pair/grant/peer-send rules to the same Message, Reply and count surfaces. Keep discovery and query budgets, renewal and peer-refusal order. Test DM Mention integration jointly once both are available. A count field does not establish implemented semantics. See the [authorized-control requirement](#move-edit-and-projections-141--287) for Mention target denials. Record executable invariant tests when implemented.
 
-### Message body formatting (#628, approved, not implemented)
+### Message body formatting (#628, implemented)
 
 Clients render the unchanged body. Server, API, storage, M1 acceptance and S5 retries ignore formatting. Everything not matched below, including unclosed or malformed markers, stays literal with whitespace and line breaks kept. No raw HTML.
 

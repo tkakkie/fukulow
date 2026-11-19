@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Message } from '../api'
   import type { MentionName } from '../mentions'
-  import { tokenizeMessageBody, type InlineToken } from '../message-format'
+  import { tokenizeMessageBody, type BlockToken, type InlineToken } from '../message-format'
 
   let {
     body,
@@ -25,6 +25,17 @@
     if (fallback === undefined) return `@{member:${id}}`
     return `@${resolveMentionName?.(id, fallback, mentions) ?? fallback}`
   }
+
+  function shouldPreserveEmptyLine(allBlocks: BlockToken[], i: number): boolean {
+    const next = allBlocks[i + 1]
+    if (next !== undefined) return next.type !== 'line'
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = allBlocks[j]
+      if (prev.type !== 'line') return true
+      if (prev.children.length > 0) return false
+    }
+    return false
+  }
 </script>
 
 {#snippet renderInline(tokens: InlineToken[])}{#each tokens as token}{#if token.type === 'text'}{token.text}{:else if token.type === 'mention'}<span class="ui-message-body__mention">{formatMention(token.id)}</span>{:else if token.type === 'code'}<code class="ui-message-body__inline-code">{#each token.children as child}{#if child.type === 'text'}{child.text}{:else}<span class="ui-message-body__mention">{formatMention(child.id)}</span>{/if}{/each}</code>{:else if token.type === 'link'}<a
@@ -34,7 +45,7 @@
   rel="noopener noreferrer"
 >{token.text}</a>{:else if token.type === 'bold'}<strong class="ui-message-body__bold">{@render renderInline(token.children)}</strong>{:else if token.type === 'strikethrough'}<del class="ui-message-body__strike">{@render renderInline(token.children)}</del>{/if}{/each}{/snippet}
 
-<div class="body ui-message-body">{#each blocks as block, i}{#if i > 0 && block.type === 'line' && blocks[i - 1].type === 'line'}{'\n'}{/if}{#if block.type === 'line'}{@render renderInline(block.children)}{:else if block.type === 'code_block'}<pre class="ui-message-body__code-block"><code>{#each block.children as child}{#if child.type === 'text'}{child.text}{:else}<span class="ui-message-body__mention">{formatMention(child.id)}</span>{/if}{/each}</code></pre>{:else if block.type === 'quote'}<blockquote class="ui-message-body__quote">{#each block.lines as line, lineIdx}{#if lineIdx > 0}{'\n'}{/if}{@render renderInline(line)}{/each}</blockquote>{/if}{/each}</div>
+<div class="body ui-message-body">{#each blocks as block, i}{#if i > 0 && block.type === 'line' && blocks[i - 1].type === 'line'}{'\n'}{/if}{#if block.type === 'line'}{#if block.children.length === 0}{#if shouldPreserveEmptyLine(blocks, i)}{'\n'}{/if}{:else}{@render renderInline(block.children)}{/if}{:else if block.type === 'code_block'}<pre class="ui-message-body__code-block"><code>{#each block.children as child}{#if child.type === 'text'}{child.text}{:else}<span class="ui-message-body__mention">{formatMention(child.id)}</span>{/if}{/each}</code></pre>{:else if block.type === 'quote'}<blockquote class="ui-message-body__quote">{#each block.lines as line, lineIdx}{#if lineIdx > 0}{'\n'}{/if}{@render renderInline(line)}{/each}</blockquote>{/if}{/each}</div>
 
 <style>
   .ui-message-body {

@@ -73,6 +73,15 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       },
       { type: 'line', children: [{ type: 'text', text: 'after' }] },
     ])
+
+    // Stored CRLF body produces the exact same code block as its LF equivalent
+    expect(tokenizeMessageBody('```\r\nx\r\n```')).toEqual(tokenizeMessageBody('```\nx\n```'))
+    expect(tokenizeMessageBody('```\r\nx\r\n```')).toEqual([
+      {
+        type: 'code_block',
+        children: [{ type: 'text', text: 'x' }],
+      },
+    ])
   })
 
   it('treats an unclosed code fence as literal and parses following lines normally', () => {
@@ -176,13 +185,36 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       },
     ])
 
-    // Earliest start wins: inline code opening before bold closer consumes the bold closer
-    expect(firstLine(tokenizeMessageBody('**bold `code**` after'))).toEqual([
+    // Inline code inside bold/strikethrough containing the surrounding marker does not close the outer emphasis
+    expect(firstLine(tokenizeMessageBody('**before `**` after**'))).toEqual([
       {
         type: 'bold',
-        children: [{ type: 'text', text: 'bold `code' }],
+        children: [
+          { type: 'text', text: 'before ' },
+          { type: 'code', children: [{ type: 'text', text: '**' }] },
+          { type: 'text', text: ' after' },
+        ],
       },
-      { type: 'text', text: '` after' },
+    ])
+    expect(firstLine(tokenizeMessageBody('~~before `~~` after~~'))).toEqual([
+      {
+        type: 'strikethrough',
+        children: [
+          { type: 'text', text: 'before ' },
+          { type: 'code', children: [{ type: 'text', text: '~~' }] },
+          { type: 'text', text: ' after' },
+        ],
+      },
+    ])
+
+    // Earliest start wins: inline code opening before bold closer consumes the bold closer, leaving the outer ** unclosed
+    expect(firstLine(tokenizeMessageBody('**bold `code**` after'))).toEqual([
+      { type: 'text', text: '**bold ' },
+      {
+        type: 'code',
+        children: [{ type: 'text', text: 'code**' }],
+      },
+      { type: 'text', text: ' after' },
     ])
 
     // Inline code starting before bold opener wins
@@ -265,8 +297,12 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       'http://',
       'https:///no-host',
       'https://:8080/no-host',
+      'https://user@/x',
+      'https://user@:8080/x',
       'mailto:',
       'mailto:?subject=hi',
+      'mailto:#frag',
+      'mailto:user@',
       'foohttps://example.com',
       '9http://example.com',
       'amailto:user@example.com',
@@ -308,11 +344,11 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       { type: 'text', text: ']!' },
     ])
 
-    // Balanced parentheses and brackets inside URL are kept
+    // Balanced parentheses and brackets inside URL are kept, including matched closing delimiters after an unmatched closer
     expect(
       firstLine(
         tokenizeMessageBody(
-          'Wiki (https://en.wikipedia.org/wiki/Rust_(programming_language)) and https://example.com/arr[0]',
+          'Wiki (https://en.wikipedia.org/wiki/Rust_(programming_language)) and https://example.com/arr[0] and https://e/x)(a) and https://e/x][a]',
         ),
       ),
     ).toEqual([
@@ -327,6 +363,18 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
         type: 'link',
         href: 'https://example.com/arr[0]',
         text: 'https://example.com/arr[0]',
+      },
+      { type: 'text', text: ' and ' },
+      {
+        type: 'link',
+        href: 'https://e/x)(a)',
+        text: 'https://e/x)(a)',
+      },
+      { type: 'text', text: ' and ' },
+      {
+        type: 'link',
+        href: 'https://e/x][a]',
+        text: 'https://e/x][a]',
       },
     ])
 
@@ -363,7 +411,7 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       { type: 'text', text: ` @{member:${ID_1}} @{member:${ID_2}}` },
     ])
 
-    // Different accepted id set -> re-tokenized
+    // Different accepted id set -> re-tokenized, while keeping both accepted-set variants cached simultaneously
     const tokensBoth = tokenizeMessageBody(body, mentions1And2)
     expect(tokensBoth).not.toBe(tokensA)
     expect(firstLine(tokensBoth)).toEqual([
@@ -374,23 +422,41 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       { type: 'text', text: ' ' },
       { type: 'mention', id: ID_2 },
     ])
+
+    // Alternating two Messages with identical body text where the Mention is accepted in one and rejected in the other preserves both cached trees
+    const tokensRejected = tokenizeMessageBody(body, [])
+    expect(tokensRejected).toBe(tokensPending)
+    expect(tokenizeMessageBody(body, mentions1)).toBe(tokensA)
+    expect(tokenizeMessageBody(body, [])).toBe(tokensRejected)
+    expect(tokenizeMessageBody(body, mentions1And2)).toBe(tokensBoth)
   })
 
-  it('tokenizes a 4000-character worst-case body with unclosed markers in linear time', () => {
-    // 4000 chars of alternating unclosed markers and URL-like prefixes
+  it('tokenizes 4000-character worst-case bodies in linear time', () => {
     const pattern = '**~~`http:// '
-    const worstCase = pattern.repeat(Math.ceil(4000 / pattern.length)).slice(0, 4000)
-    expect(worstCase.length).toBe(4000)
+    const worstCaseMarkers = pattern.repeat(Math.ceil(4000 / pattern.length)).slice(0, 4000)
+    const worstCaseSchemeRuns = '!h'.repeat(2000)
+    const worstCaseTrailingParens = 'http://x' + ')'.repeat(3992)
 
-    const start = performance.now()
-    for (let i = 0; i < 20; i++) {
-      clearMessageFormatCache()
-      const blocks = tokenizeMessageBody(worstCase)
-      expect(blocks.length).toBe(1)
+    expect(worstCaseMarkers.length).toBe(4000)
+    expect(worstCaseSchemeRuns.length).toBe(4000)
+    expect(worstCaseTrailingParens.length).toBe(4000)
+
+    expect(firstLine(tokenizeMessageBody(worstCaseTrailingParens))).toEqual([
+      { type: 'link', href: 'http://x', text: 'http://x' },
+      { type: 'text', text: ')'.repeat(3992) },
+    ])
+
+    for (const sample of [worstCaseMarkers, worstCaseSchemeRuns, worstCaseTrailingParens]) {
+      const start = performance.now()
+      for (let i = 0; i < 20; i++) {
+        clearMessageFormatCache()
+        const blocks = tokenizeMessageBody(sample)
+        expect(blocks.length).toBe(1)
+      }
+      const elapsedMs = performance.now() - start
+      // 20 uncached runs of each 4000-char worst-case body should take only a few milliseconds
+      expect(elapsedMs).toBeLessThan(50)
     }
-    const elapsedMs = performance.now() - start
-    // 20 uncached runs of 4000-char worst-case body should take a few milliseconds
-    expect(elapsedMs).toBeLessThan(200)
   })
   it('keeps rejected and pending Mention tokens as unparsed atoms that end URLs and hide markers', () => {
     const rejected = `@{member:${ID_REJECTED}}`
