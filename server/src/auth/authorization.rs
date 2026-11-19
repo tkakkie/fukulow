@@ -27,6 +27,8 @@ pub enum Action {
     DeactivateMember,
     ReadChannel,
     MoveChain { owns_chain: bool },
+    RenameChannel,
+    ArchiveChannel,
     AddChannelMembers,
     RemoveChannelMembers,
     ManageChannelManagers,
@@ -119,7 +121,10 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
                 Action::MoveChain { owns_chain } => {
                     manages || (visible && role == Role::Member && owns_chain)
                 }
-                Action::AddChannelMembers | Action::RemoveChannelMembers => manages,
+                Action::AddChannelMembers
+                | Action::RemoveChannelMembers
+                | Action::RenameChannel
+                | Action::ArchiveChannel => manages,
                 Action::ManageChannelManagers => !public && manages,
                 Action::LeaveChannel => visible,
                 _ => false,
@@ -141,19 +146,20 @@ pub fn authorize(actor: Actor, action: Action, resource: Resource) -> Capability
     Capability {
         allowed,
         reason: (!allowed).then(|| {
-            if matches!(resource, Resource::Dm { .. })
-                && matches!(
-                    action,
+            match (resource, action) {
+                (Resource::Dm { .. }, Action::RenameChannel | Action::ArchiveChannel) => {
+                    "dm_channel_fixed"
+                }
+                (
+                    Resource::Dm { .. },
                     Action::AddChannelMembers
-                        | Action::RemoveChannelMembers
-                        | Action::ManageChannelManagers
-                        | Action::LeaveChannel
-                )
-            {
-                "dm_membership_fixed".into()
-            } else {
-                "forbidden".into()
+                    | Action::RemoveChannelMembers
+                    | Action::ManageChannelManagers
+                    | Action::LeaveChannel,
+                ) => "dm_membership_fixed",
+                _ => "forbidden",
             }
+            .into()
         }),
     }
 }

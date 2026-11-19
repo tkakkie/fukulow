@@ -74,6 +74,7 @@ pub(crate) async fn section_order(
     responses((status=204,description="Channel moved or already in the requested group"),
     (status=400,description="invalid input",body=ErrorBody), (status=401,description="invalid credentials",body=ErrorBody),
     (status=404,description="organization_unavailable, channel not found or section_not_found",body=ErrorBody),
+    (status=409,description="channel_archived",body=ErrorBody),
     (status=413,description="Body exceeds 16 KiB",body=ErrorBody), (status=415,description="expected application/json",body=ErrorBody),
     (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn move_channel(
@@ -88,10 +89,10 @@ pub(crate) async fn move_channel(
 
 #[utoipa::path(put, path="/api/v1/orgs/{org}/me/section-channel-order",request_body=ChannelOrder,
     params(("org"=Uuid,Path)), security(("cookie"=[]),("bearer"=[])),
-    responses((status=204,description="Complete accessible Channel order set or already current"),
+    responses((status=204,description="Complete accessible active Channel order set or already current"),
     (status=400,description="invalid input or invalid_section_order",body=ErrorBody), (status=401,description="invalid credentials",body=ErrorBody),
     (status=404,description="organization_unavailable, section_not_found or channel not found",body=ErrorBody),
-    (status=409,description="section_layout_changed",body=ErrorBody),
+    (status=409,description="channel_archived or section_layout_changed",body=ErrorBody),
     (status=413,description="Body exceeds 1 MiB",body=ErrorBody), (status=415,description="expected application/json",body=ErrorBody),
     (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn channel_order(

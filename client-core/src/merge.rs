@@ -80,9 +80,12 @@ impl Step<'_> {
             .get(&event.root_id)
             .is_none_or(|seq| *seq < event.seq)
         {
+            self.core.move_epoch += 1;
+            let epoch = self.core.move_epoch;
+            let c = self.channel(id);
             Rc::make_mut(&mut c.moved_roots).insert(event.root_id, event.seq);
             c.move_seq = c.move_seq.max(Some(event.seq));
-            c.move_epoch = Some(c.move_epoch.unwrap_or_default() + 1);
+            c.move_epoch = Some(epoch);
             c.mutation_seq = c.mutation_seq.max(event.seq);
             c.snapshot_seq = None;
             let current = |m: &Message| {

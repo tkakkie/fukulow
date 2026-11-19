@@ -524,6 +524,80 @@ async fn a_charged_leader_refused_by_admission_charges_its_identical_waiters_not
     }
 }
 
+#[fukulow_test::test]
+async fn identical_waiter_rechecks_archive_before_replaying_admission_refusal(pool: PgPool) {
+    let l = limited(&pool).await;
+    sqlx::query("UPDATE users SET role='owner' WHERE organization_id=$1 AND id=$2")
+        .bind(l.organization)
+        .bind(l.member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let delivery = &l.state.message_delivery;
+    let admission = delivery.admission(&pool);
+    let _queued: Vec<_> = (0..CHANNEL_QUEUE_CAP)
+        .map(|_| admission.reserve_send(l.organization, l.channel).unwrap())
+        .collect();
+
+    let key = Uuid::new_v4();
+    let gate = crate::messages::limiter::pause_after_charge(key);
+    let spawn = || {
+        let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
+        tokio::spawn(async move { send(&app, &token, channel, input(key, "once")).await })
+    };
+    let leader = spawn();
+    let timeout = Duration::from_secs(5);
+    tokio::time::timeout(timeout, gate.entered.acquire())
+        .await
+        .expect("the leader reaches the gate after charging")
+        .unwrap()
+        .forget();
+    let waiter = spawn();
+    let limiter = &delivery.send_limiter;
+    tokio::time::timeout(timeout, async {
+        while limiter.waiters((l.organization, l.member, key)) != 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the identical request waits on the leader");
+
+    let archived = tokio::time::timeout(
+        timeout,
+        request(
+            &l.app,
+            "PATCH",
+            &format!("/api/v1/channels/{}", l.channel),
+            &l.token,
+            json!({"archived": true}),
+        ),
+    )
+    .await
+    .expect("archive commits while the leader is paused");
+    assert_eq!(archived.status(), StatusCode::NO_CONTENT);
+    gate.release.add_permits(1);
+
+    let (leader, waiter) = tokio::time::timeout(timeout, async { tokio::join!(leader, waiter) })
+        .await
+        .expect("both requests settle");
+    let leader = leader.unwrap();
+    assert_eq!(leader.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body(leader).await["error"], "send admission unavailable");
+    let waiter = waiter.unwrap();
+    assert_eq!(waiter.status(), StatusCode::CONFLICT);
+    assert_eq!(body(waiter).await["error"], "channel_archived");
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM messages WHERE organization_id = $1 AND client_message_id = $2",
+    )
+    .bind(l.organization)
+    .bind(key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
 fn limiter_pending(l: &Limited) -> usize {
     l.state.message_delivery.send_limiter.pending()
 }

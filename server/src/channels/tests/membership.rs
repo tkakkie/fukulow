@@ -25,7 +25,7 @@ async fn channel_list_denies_deactivation_after_auth_and_stale_reactivation(pool
                 .await
                 .unwrap();
         }
-        let response = visible_list(&state.pool, &auth)
+        let response = visible_list(&state.pool, &auth, Some(false))
             .await
             .unwrap_err()
             .into_response();

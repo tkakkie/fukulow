@@ -12,6 +12,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 mod access;
+mod archive;
 mod races;
 mod rest;
 
@@ -73,13 +74,18 @@ impl Fixture {
     }
 
     async fn channel(&self, name: &str, visibility: &str) -> Uuid {
-        let response = self
-            .send(
-                "POST",
-                "/channels",
-                json!({"name": name, "visibility": visibility}),
-            )
-            .await;
+        self.channel_as(&self.token, name, visibility).await
+    }
+
+    async fn channel_as(&self, token: &str, name: &str, visibility: &str) -> Uuid {
+        let response = crate::channels::tests::request(
+            &self.app,
+            "POST",
+            "/api/v1/channels",
+            token,
+            json!({"name": name, "visibility": visibility}),
+        )
+        .await;
         let channel = expected(response, StatusCode::CREATED).await;
         serde_json::from_value(channel["id"].clone()).unwrap()
     }

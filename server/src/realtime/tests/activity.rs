@@ -1,5 +1,6 @@
 use super::*;
 
+mod archive;
 mod sections;
 
 async fn raw_event(socket: &mut Client) -> Value {

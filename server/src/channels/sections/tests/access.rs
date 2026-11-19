@@ -17,11 +17,17 @@ async fn grant(f: &Fixture, channel: Uuid, id: Uuid, enable: bool) {
     expected(f.send(method, &suffix, input).await, StatusCode::NO_CONTENT).await;
 }
 
-async fn as_member(f: &Fixture, token: &str, method: &str, suffix: &str, input: Value) -> Response {
+pub(super) async fn as_member(
+    f: &Fixture,
+    token: &str,
+    method: &str,
+    suffix: &str,
+    input: Value,
+) -> Response {
     send(&f.app, method, &path(f.owner.org, suffix), token, input).await
 }
 
-async fn layout_as(f: &Fixture, token: &str) -> Value {
+pub(super) async fn layout_as(f: &Fixture, token: &str) -> Value {
     expected(
         as_member(f, token, "GET", SECTIONS, Value::Null).await,
         StatusCode::OK,
