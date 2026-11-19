@@ -57,7 +57,7 @@ export const relationSizesSQL = `SELECT COALESCE(json_agg(r ORDER BY r.relation)
   SELECT c.relname AS relation, pg_relation_size(c.oid, 'main') AS heap,
     pg_relation_size(c.oid, 'fsm') + pg_relation_size(c.oid, 'vm') + pg_relation_size(c.oid, 'init') AS maps,
     CASE WHEN c.reltoastrelid = 0 THEN 0 ELSE pg_total_relation_size(c.reltoastrelid) END AS toast,
-    COALESCE((SELECT json_object_agg(i.relname, pg_total_relation_size(i.oid)) FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+    COALESCE((SELECT json_object_agg(i.relname, pg_total_relation_size(i.oid) ORDER BY i.relname) FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
       WHERE x.indrelid = c.oid), '{}') AS indexes,
     pg_total_relation_size(c.oid) AS total
   FROM pg_stat_user_tables s JOIN pg_class c ON c.oid = s.relid) r`;
