@@ -1,7 +1,7 @@
 import { check, fail } from 'k6';
 import { randomBytes } from 'k6/crypto';
 import http, { type Params, type Response } from 'k6/http';
-import type { AcceptInviteRequest, Channel, CreateChannelRequest, CreateInviteRequest, InviteResponse, NativeSessionResponse, SetupRequest, SignInRequest } from '../web/src/api-schema.d.ts';
+import type { AcceptInviteRequest, Channel, CreateChannelRequest, CreateInviteRequest, InviteResponse, NativeSessionResponse, SendMessageRequest, SetupRequest, SignInRequest } from '../web/src/api-schema.d.ts';
 import { positiveInteger } from './delivery.ts';
 import { revokeSessions } from './sessions.ts';
 import { legacyOrganization, organizationPath, signInPath } from './compat.ts';
@@ -16,6 +16,20 @@ type SeedConfig = { channels: number; subscribers: number; socketsPerSession: nu
 export function params(operation: string, token?: string): Params {
   return { timeout: `${requestTimeout}s`, redirects: 0, tags: { name: operation, operation },
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) } };
+}
+
+export function publish(base: string, organization: string, channel: string, token: string, member: number, body: SendMessageRequest, lane: string) {
+  const ip = member % 10000;
+  return http.post(`${base}/api/v1/orgs/${organization}/channels/${channel}/messages`, JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'X-Load-Client-IP': `10.${(ip >>> 16) & 255}.${(ip >>> 8) & 255}.${ip & 255}` },
+    timeout: '10s', redirects: 0, tags: { name: lane },
+  });
+}
+
+export function httpOutcome(r: Response, expected?: number) {
+  return r.error_code === 1050 ? 'clientTimeouts'
+    : (expected === undefined ? r.status >= 200 && r.status < 300 : r.status === expected) ? 'accepted'
+    : r.status === 429 ? 'rejected429' : r.status === 503 ? 'rejected503' : r.status === 0 ? 'transportErrors' : 'otherErrors';
 }
 
 let transportRecorded = false;
