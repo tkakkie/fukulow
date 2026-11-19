@@ -138,6 +138,17 @@ test('never-started reader invalidates every part even with zero reported drops'
   assert.equal(status(r, 'A', 100), 'INVALID');
 });
 
+test('a second-Organization reader 5xx makes the round FAIL', () => {
+  const r = results();
+  const reader = measurement(r, 'B', 100, 'baseline', 2).lanes.reader!;
+  reader.accepted--;
+  reader.rejected503++;
+  const row = selected(judge(formal, r, true), 'B', 100);
+  assert.equal(row.rounds[1].status, 'FAIL');
+  assert.match(row.rounds[1].reasons.join(), /second-Organization reader errors/);
+  assert.equal(row.status, 'FAIL');
+});
+
 test('A allows each exact p95 limit and requires all 30 position and version checks', () => {
   for (const size of formalSizes) {
     const r = results();
@@ -157,9 +168,10 @@ test('A allows each exact p95 limit and requires all 30 position and version che
   }
 });
 
-test('B enforces exactly 99% acceptance on both chain sizes', () => {
+test('B enforces exactly 99% acceptance in the Move arm on both chain sizes', () => {
   for (const size of [100, 1000]) {
     const r = results(), m = measurement(r, 'B', size);
+    measurement(r, 'B', size, 'baseline').lanes.send = lane(15_000, 10, 20, 14_849);
     m.lanes.send = lane(15_000, 10, 20, 14_850);
     assert.equal(status(r, 'B', size), 'PASS');
     m.lanes.send = lane(15_000, 10, 20, 14_849);
@@ -184,6 +196,43 @@ test('B uses the 110% p95 limit for 100, and same-round A p95 added to baseline 
   send1000.p99 = 520;
   measurement(r, 'A', 1000, 'move', 2).lanes.move!.p95 = null;
   assert.equal(status(r, 'B', 1000), 'NOT EVALUATED');
+});
+
+test('B-1000 allows exactly the lower of same-round A p95 and 500 ms above baseline p99', () => {
+  for (const [aP95, limit] of [[50, 70], [2000, 520]]) {
+    const r = results();
+    measurement(r, 'A', 1000, 'move', 2).lanes.move = lane(30, aP95, aP95);
+    const send = measurement(r, 'B', 1000, 'move', 2).lanes.send!;
+    send.p99 = limit;
+    assert.equal(status(r, 'B', 1000), 'PASS');
+    send.p99 += 0.001;
+    assert.equal(status(r, 'B', 1000), 'FAIL');
+  }
+});
+
+test('B-1000 is NOT EVALUATED when same-round A-1000 is INVALID with a p95', () => {
+  const r = results();
+  measurement(r, 'A', 1000, 'move', 2).lanes.move!.droppedIterations = 1;
+  const verdict = judge(formal, r, true);
+  assert.equal(selected(verdict, 'A', 1000).rounds[1].status, 'INVALID');
+  const b = selected(verdict, 'B', 1000);
+  assert.equal(b.rounds[1].status, 'NOT EVALUATED');
+  assert.equal(b.status, 'NOT EVALUATED');
+});
+
+test('C requires at least 99% send acceptance in each arm in every round', () => {
+  for (const size of [100, 1000]) {
+    for (const arm of ['baseline', 'move'] as const) {
+      for (let round = 1; round <= formal.rounds; round++) {
+        const r = results();
+        const m = measurement(r, 'C', size, arm, round);
+        m.lanes.send = lane(15_000, 10, 20, 14_850);
+        assert.equal(status(r, 'C', size), 'PASS', `${size}, ${arm}, round ${round}`);
+        m.lanes.send = lane(15_000, 10, 20, 14_849);
+        assert.equal(status(r, 'C', size), 'FAIL', `${size}, ${arm}, round ${round}`);
+      }
+    }
+  }
 });
 
 test('C checks both inclusive 110% send latency ratios', () => {

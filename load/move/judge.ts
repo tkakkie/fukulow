@@ -123,9 +123,16 @@ function performanceGate(step: Step, move: Measurement, baseline: Measurement | 
       if (!a || a.status === 'INVALID' || a.status === 'NOT EVALUATED' || !duration(aP95))
         return verdict('NOT EVALUATED', 'same-round Part A 1,000-Message p95 unavailable');
       const p99 = control?.send?.p99 ?? null;
-      return within(send, 'p99', duration(p99) ? p99 + aP95 : null, 'send');
+      return within(send, 'p99', duration(p99) ? p99 + Math.min(aP95, moveLimits[1000]) : null, 'send');
     }
-    case 'C': return combine([against(send, control?.send, 'p95', 'send'), against(send, control?.send, 'p99', 'send')]);
+    case 'C': {
+      const baseSend = control?.send;
+      if (!baseSend || baseSend.accepted / baseSend.attempted < thresholds.accepted)
+        return verdict('FAIL', 'baseline send acceptance below 99%');
+      if (!send || send.accepted / send.attempted < thresholds.accepted)
+        return verdict('FAIL', 'Move arm send acceptance below 99%');
+      return combine([against(send, baseSend, 'p95', 'send'), against(send, baseSend, 'p99', 'send')]);
+    }
     case 'D': return combine([
       against(move.lanes.channels, control?.channels, 'p95', 'Channel-list'),
       within(move.lanes.topics, 'p95', thresholds.pageP95, 'Topic-list'),

@@ -1,5 +1,5 @@
 import { judge, type Result } from './judge.ts';
-import { stepId, type Plan } from './plan.ts';
+import { moveLimits, stepId, thresholds, type Plan } from './plan.ts';
 
 export function render(p: Plan, results: Result[], complete: boolean) {
   const verdict = judge(p, results, complete);
@@ -21,6 +21,11 @@ export function render(p: Plan, results: Result[], complete: boolean) {
       '', `Overall **${verdict.overall}**. Functional checks **${verdict.functional}**.`,
       '', `1,000-Message limit · **${verdict.limit.status}**${verdict.limit.size ? ` (${verdict.limit.size} Messages)` : ''}.`,
       '', '| Part | Chain size | Rounds | Result |', '| --- | ---: | --- | --- |', ...rows, '',
+      ...(!p.smoke ? [
+        `- Part B requires ≥${thresholds.accepted * 100}% send acceptance in the Move arm each round. For 100 Messages, send p95 must be ≤${thresholds.latencyPercent}% of the no-Move p95. For 1,000 Messages, send p99 must be ≤ no-Move p99 + min(same-round Part A 1,000-Message Move p95, ${moveLimits[1000]} ms).`,
+        `- Part C requires ≥${thresholds.accepted * 100}% send acceptance in each arm in every round. Move-arm send p95 and p99 must each be ≤${thresholds.latencyPercent}% of the corresponding no-Move latency.`,
+        '',
+      ] : []),
       ...(reasons.length ? ['## Round details', '', ...reasons, ''] : []),
       ...(wal.length ? ['## WAL and storage', '', ...wal, ''] : []),
       'See [run identity](metadata.json) and [round measurements](results.json).',
