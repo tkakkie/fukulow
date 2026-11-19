@@ -425,8 +425,31 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
     await page.addInitScript(() => {
       Math.random = () => 0.99
     })
+    // Wait for the startup activity_ready Channel-list refresh before jumping; otherwise its late
+    // unread.activitySnapshot() -> notify() could re-run Timeline's visibility/entry effects after mount.
+    let activityReadySeen = false
+    const postReadyChannelRequests = new WeakSet<import('@playwright/test').Request>()
+    const isChannelsListRequest = (req: import('@playwright/test').Request) =>
+      req.method() === 'GET' && new URL(req.url()).pathname === `/api/v1/orgs/${orgId}/channels`
+    page.on('websocket', (ws) => {
+      ws.on('framereceived', (frame) => {
+        if (typeof frame.payload === 'string' && frame.payload.includes('"activity_ready"')) {
+          activityReadySeen = true
+        }
+      })
+    })
+    page.on('request', (req) => {
+      if (activityReadySeen && isChannelsListRequest(req)) {
+        postReadyChannelRequests.add(req)
+      }
+    })
+    const startupChannelsRefresh = page.waitForResponse(
+      (res) => postReadyChannelRequests.has(res.request()) && res.ok(),
+    )
     await page.goto(`/o/${orgId}/c/${channel.id}`)
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    const startupRefreshResponse = await startupChannelsRefresh
+    await startupRefreshResponse.finished()
 
     const main = page.locator('#main-content')
     const scroll = main.locator('.timeline-scroll')
@@ -464,6 +487,24 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
     const firstTarget = targetUnread[0]
     await expect(main.locator(`[data-message-id="${firstTarget.id}"]`)).toHaveCount(0)
 
+    // Record whether firstTarget is in the DOM during every native scroll event from the jump
+    // through read advancement. Listen in capture phase on document (filtering to el) so the
+    // probe runs before target-phase listeners (handleScroll and row-window's refresh, whose
+    // post-listener microtask checkpoint mounts firstTarget).
+    await scroll.evaluate((el, targetId) => {
+      const key = Symbol.for('fukulow.e2e.scrollProbe')
+      const targetPresentPerScroll: boolean[] = []
+      const onScroll = (event: Event) => {
+        if (event.target !== el) return
+        targetPresentPerScroll.push(el.querySelector(`[data-message-id="${CSS.escape(targetId)}"]`) !== null)
+      }
+      document.addEventListener('scroll', onScroll, { passive: true, capture: true })
+      ;(el as unknown as Record<symbol, { targetPresentPerScroll: boolean[]; stop: () => void }>)[key] = {
+        targetPresentPerScroll,
+        stop: () => document.removeEventListener('scroll', onScroll, { capture: true }),
+      }
+    }, firstTarget.id)
+
     // Native single jump with no synthetic scroll event. Rows above firstTarget already have cached heights,
     // so ResizeObserver's layout(saved) keeps offsets[index] and scrollTop unchanged and emits no extra scroll event.
     await scroll.evaluate((el, top) => {
@@ -476,6 +517,17 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
       const data = (await response.json()) as components['schemas']['ChannelList']
       return data.channels.find((c) => c.id === channel.id)?.read_seq
     }).toBeGreaterThanOrEqual(firstTarget.created_seq)
+
+    const targetPresentPerScroll = await scroll.evaluate((el) => {
+      const key = Symbol.for('fukulow.e2e.scrollProbe')
+      const store = el as unknown as Record<symbol, { targetPresentPerScroll: boolean[]; stop: () => void } | undefined>
+      const probe = store[key]
+      probe?.stop()
+      delete store[key]
+      return probe?.targetPresentPerScroll ?? []
+    })
+    expect(targetPresentPerScroll.length).toBeGreaterThanOrEqual(1)
+    expect(targetPresentPerScroll.every((present) => !present)).toBe(true)
   } finally {
     await bobContext.close()
   }
