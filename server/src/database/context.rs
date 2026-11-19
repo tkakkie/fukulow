@@ -55,6 +55,26 @@ where
     with_context(pool, organization, false, true, super::Discard::Close, body).await
 }
 
+/// Deadline-bound write: unconfirmed cleanup frees the pool slot synchronously.
+pub(crate) async fn organization_detached<T, E>(
+    pool: &PgPool,
+    organization: Uuid,
+    body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<sqlx::Error>,
+{
+    with_context(
+        pool,
+        organization,
+        false,
+        true,
+        super::Discard::Detach,
+        body,
+    )
+    .await
+}
+
 /// A REPEATABLE READ, READ ONLY snapshot with Organization context.
 pub async fn organization_read_only<T, E>(
     pool: &PgPool,

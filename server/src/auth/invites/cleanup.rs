@@ -9,6 +9,7 @@ pub(super) const BATCH_SIZE: i64 = 100;
 
 // Limit each indexed range before combining it with the others. Grouping by
 // id applies the earlier clock to revoked and expired Invites in both ranges.
+// New tombstones are visible to the DELETE only through INSERT RETURNING.
 pub(super) const BATCH_SQL: &str = "WITH cutoff AS (
     SELECT statement_timestamp() - interval '720 hours' AS at
 ), candidates AS (
@@ -29,8 +30,14 @@ pub(super) const BATCH_SQL: &str = "WITH cutoff AS (
     INSERT INTO invite_tombstones (organization_id,id,created_at,role,owner_cursor,admin_cursor)
     SELECT organization_id,id,created_at,role,owner_cursor,admin_cursor FROM invites
     WHERE organization_id=$1 AND id=ANY(ARRAY(SELECT id FROM candidates)) FOR UPDATE
+    ON CONFLICT (organization_id, id) DO NOTHING
     RETURNING id
-) DELETE FROM invites WHERE organization_id=$1 AND id=ANY(ARRAY(SELECT id FROM saved))";
+) DELETE FROM invites WHERE organization_id=$1 AND id=ANY(ARRAY(
+    SELECT id FROM saved
+    UNION ALL
+    SELECT id FROM invite_tombstones
+    WHERE organization_id=$1 AND id=ANY(ARRAY(SELECT id FROM candidates))
+))";
 
 pub(super) async fn lock_batch(tx: &mut PgConnection, org: Uuid) -> Result<(), ApiError> {
     sqlx::query(
@@ -53,7 +60,7 @@ pub(super) async fn delete_batch(tx: &mut PgConnection, org: Uuid) -> Result<u64
 }
 
 pub(super) async fn batch(pool: &PgPool, org: Uuid) -> Result<u64, ApiError> {
-    crate::database::organization(pool, org, async |tx: &mut PgConnection| {
+    crate::database::organization_detached(pool, org, async |tx: &mut PgConnection| {
         lock_batch(tx, org).await?;
         Ok(delete_batch(tx, org).await?)
     })

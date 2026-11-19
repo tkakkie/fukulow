@@ -102,6 +102,34 @@ async fn cleanup_batch_is_bounded_and_resumes_remaining_work(pool: sqlx::PgPool)
 }
 
 #[fukulow_test::test]
+async fn cleanup_deletes_invite_with_preexisting_tombstone(pool: sqlx::PgPool) {
+    let org = org(&pool).await;
+    let (_, issuer, _, _) = account(&pool, org, Role::Owner).await;
+    let mut ids = seed(&pool, org, issuer, 2, false).await;
+    ids.sort();
+    age(&pool, org, &ids, "expires_at").await;
+    sqlx::query(
+        "INSERT INTO invite_tombstones (organization_id,id,created_at,role,owner_cursor,admin_cursor) \
+         SELECT organization_id,id,created_at,role,owner_cursor,admin_cursor FROM invites \
+         WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(org)
+    .bind(ids[0])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let existing = tombstones(&pool, org).await;
+
+    let state = AppState::for_test(pool.clone()).await;
+    assert_eq!(batch(&state.pool, org).await.unwrap(), 2);
+    assert_eq!(batch(&state.pool, org).await.unwrap(), 0);
+    let saved = tombstones(&pool, org).await;
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0], existing[0]);
+    assert_eq!(saved[1]["id"], json!(ids[1]));
+}
+
+#[fukulow_test::test]
 async fn cleanup_plan_uses_indexed_retention_cutoffs_under_rls(pool: sqlx::PgPool) {
     let org = org(&pool).await;
     let (_, issuer, _, _) = account(&pool, org, Role::Owner).await;

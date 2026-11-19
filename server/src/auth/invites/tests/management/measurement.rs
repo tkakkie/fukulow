@@ -323,20 +323,21 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                 )
                 .await;
             }
-            // Keep the above-cap list measurements separate from the HTTP write
-            // scenarios. Successful create starts at 99; refusals start at 100.
-            below_cap(&pool, org).await;
             for op in [
-                "create",
-                "quota-refusal",
+                "list",
                 "accept",
                 "revoke",
                 "role",
                 "signin",
                 "send",
                 "other-create",
-                "list",
+                "create",
+                "quota-refusal",
             ] {
+                // Keep the 260-live fixture until the quota-sensitive samples.
+                if op == "create" {
+                    below_cap(&pool, org).await;
+                }
                 for contention in ["idle", "list", "cleanup"] {
                     if contention == "cleanup"
                         && (variant == "before"
