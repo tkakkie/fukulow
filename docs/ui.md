@@ -62,7 +62,7 @@ Values in `web/src/app.css` under `:root`, with dark overrides under `prefers-co
 | `--tint` / `--on-tint` | selected row, active tab |
 | `--link` | links |
 | `--focus` | focus ring |
-| `--amber` / `--on-amber` | logo, @ badge, micro-interactions; never use `--amber` for text on light; use `--on-amber` on the amber fill |
+| `--amber` / `--on-amber` | logo (Ink body with amber eyes, not teal), @ badge, micro-interactions; never use `--amber` for text on light; use `--on-amber` on the amber fill |
 | `--mention` / `--on-mention` | Message that mentions you |
 | `--danger` / `--danger-bg` | errors |
 | `--info-bg` / `--on-info` | connection status and notices, never amber |
