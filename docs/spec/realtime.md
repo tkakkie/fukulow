@@ -205,7 +205,7 @@ Clients render the unchanged body. Server, API, storage, M1 acceptance and S5 re
 2. Fenced code block: a line that is exactly three backticks opens it and the next such line closes it. Lines between are verbatim apart from atoms. Without a closing line the opening line is literal and later lines are parsed normally.
 3. Block quote: outside code blocks, consecutive lines starting `> ` form one quote of inline content without the prefix. No nesting.
 4. Inline, per line, left to right, earliest start wins: inline code (backtick to the next backtick, non-empty), autolink, `**bold**`, `~~strikethrough~~`. Code and links contain no formatting. Bold and strikethrough may contain each other, not themselves, and need non-empty content and a closer on the same line, else the marker is literal.
-5. Autolink: case-insensitive `http://` or `https://` with a non-empty host, or `mailto:` with a non-empty address, not preceded by an ASCII letter or digit. It ends before whitespace, an atom or a non-ASCII character; trailing `.,:;!?'"` and unbalanced `)` or `]` are excluded. Other schemes stay literal. The shown text equals the link target. Links open in a new tab with `rel="noopener noreferrer"`.
+5. Autolink: case-insensitive `http://` or `https://` with a non-empty host, or `mailto:` with a non-empty address, not preceded by an ASCII letter or digit. It ends before whitespace, an atom, a non-ASCII character or the closing marker of an open emphasis; trailing `.,:;!?'"` and unbalanced `)` or `]` are excluded. Other schemes stay literal. The shown text equals the link target. Links open in a new tab with `rel="noopener noreferrer"`.
 
 Search excerpts and DM list previews stay plain text.
 

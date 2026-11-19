@@ -247,149 +247,123 @@ function isPairAt(line: IndexedLine, idx: number, end: number, ch: string): bool
   )
 }
 
-function findNextPlainPairOrOuter(
-  line: IndexedLine,
-  innerChar: string,
-  outerChar: string,
-  from: number,
-  end: number,
-): { kind: 'inner' | 'outer'; index: number } | null {
-  const isBreak = (k: number) =>
-    line.atoms.has(k) ||
-    isPairAt(line, k, end, innerChar) ||
-    isPairAt(line, k, end, outerChar)
-  let urlRun: UrlRun | null = null
+const STACK_NONE = 0
+const STACK_BOLD = 1
+const STACK_STRIKE = 2
+const STACK_BOLD_STRIKE = 3
+const STACK_STRIKE_BOLD = 4
+type EmphasisStack =
+  | typeof STACK_NONE
+  | typeof STACK_BOLD
+  | typeof STACK_STRIKE
+  | typeof STACK_BOLD_STRIKE
+  | typeof STACK_STRIKE_BOLD
 
-  for (let i = from; i + 1 < end; i++) {
-    if (line.atoms.has(i)) continue
-
-    const ch = line.str[i]
-    if (ch === '`') {
-      const closeBacktick = line.nextBacktick.get(i) ?? -1
-      if (closeBacktick > i + 1 && closeBacktick < end) {
-        i = closeBacktick
-        continue
-      }
-    }
-    if (ch === 'h' || ch === 'H' || ch === 'm' || ch === 'M') {
-      if (i === 0 || line.atoms.has(i - 1) || !ASCII_ALNUM.test(line.str[i - 1])) {
-        const scheme = matchScheme(line.str, i, end)
-        if (scheme !== null) {
-          if (urlRun === null || urlRun.end <= i) {
-            urlRun = scanUrlRun(line.str, i, end, isBreak)
-          }
-          const linkEnd = matchAutolink(urlRun, i, scheme)
-          if (linkEnd !== -1) {
-            i = linkEnd - 1
-            continue
-          }
-        }
-      }
-    }
-    if (isPairAt(line, i, end, outerChar)) {
-      return { kind: 'outer', index: i }
-    }
-    if (isPairAt(line, i, end, innerChar)) {
-      return { kind: 'inner', index: i }
-    }
-  }
-  return null
-}
-
-function findNextPlainPair(
-  line: IndexedLine,
-  pairChar: string,
-  from: number,
-  end: number,
-  disallowOther: boolean,
-): number {
-  const otherChar = pairChar === '*' ? '~' : '*'
-  const isBreak = (k: number) => line.atoms.has(k) || isPairAt(line, k, end, pairChar)
-  let urlRun: UrlRun | null = null
-
-  for (let i = from; i + 1 < end; i++) {
-    if (line.atoms.has(i)) continue
-
-    const ch = line.str[i]
-    if (ch === '`') {
-      const closeBacktick = line.nextBacktick.get(i) ?? -1
-      if (closeBacktick > i + 1 && closeBacktick < end) {
-        i = closeBacktick
-        continue
-      }
-    }
-    if (ch === 'h' || ch === 'H' || ch === 'm' || ch === 'M') {
-      if (i === 0 || line.atoms.has(i - 1) || !ASCII_ALNUM.test(line.str[i - 1])) {
-        const scheme = matchScheme(line.str, i, end)
-        if (scheme !== null) {
-          if (urlRun === null || urlRun.end <= i) {
-            urlRun = scanUrlRun(line.str, i, end, isBreak)
-          }
-          const linkEnd = matchAutolink(urlRun, i, scheme)
-          if (linkEnd !== -1) {
-            i = linkEnd - 1
-            continue
-          }
-        }
-      }
-    }
-    if (isPairAt(line, i, end, pairChar)) {
-      return i
-    }
-    if (!disallowOther && isPairAt(line, i, end, otherChar)) {
-      const inner = findNextPlainPairOrOuter(line, otherChar, pairChar, i + 2, end)
-      if (inner === null) return -1
-      if (inner.kind === 'outer') return inner.index
-      if (inner.index > i + 2) {
-        i = inner.index + 1
-      } else {
-        i += 1
-      }
-    }
-  }
-  return -1
-}
-
-function parseInlineRange(
+/**
+ * Single-pass recursive inline parser. Emphasis closers are found by the same
+ * scan that emits tokens, so autolinks, inline code, and nested emphasis can
+ * never disagree on boundaries.
+ *
+ * Soundness of `dead[stack]`: for any non-empty `stack`, every transition from
+ * a position `i` in this loop depends solely on `(i, stack)` (and on `i > start`
+ * for the target closer). If a non-empty scan fails (reaches EOL, an outer
+ * closer, or a position already in `dead[stack]`), none of its visited positions
+ * was the target closer, so any future call with the same `stack` reaching any
+ * of those positions will follow the identical path and fail. Empty failures at
+ * `i === start` return in O(1) without marking `start` dead (since `start` IS a
+ * valid closer for any non-empty span reaching it).
+ */
+function parseInline(
   line: IndexedLine,
   start: number,
-  end: number,
-  disallowBold: boolean,
-  disallowStrike: boolean,
-): InlineToken[] {
-  const out: InlineToken[] = []
+  stack: EmphasisStack,
+  dead: (Uint8Array | null)[],
+): { tokens: InlineToken[]; nextPos: number } | null {
+  const end = line.str.length
+  const tokens: InlineToken[] = []
   let textBuffer = ''
 
   const flushText = () => {
     if (textBuffer.length > 0) {
-      const last = out[out.length - 1]
+      const last = tokens[tokens.length - 1]
       if (last && last.type === 'text') {
         last.text += textBuffer
       } else {
-        out.push({ type: 'text', text: textBuffer })
+        tokens.push({ type: 'text', text: textBuffer })
       }
       textBuffer = ''
     }
   }
 
-  // Track failed closer searches and printable URL run boundaries so repeated markers degrade in O(N)
-  let noBoldAfter = -1
-  let noStrikeAfter = -1
-  let urlRun: UrlRun | null = null
+  const boldOpen =
+    stack === STACK_BOLD || stack === STACK_BOLD_STRIKE || stack === STACK_STRIKE_BOLD
+  const strikeOpen =
+    stack === STACK_STRIKE || stack === STACK_BOLD_STRIKE || stack === STACK_STRIKE_BOLD
+  const closeChar =
+    stack === STACK_BOLD || stack === STACK_STRIKE_BOLD
+      ? '*'
+      : stack === STACK_STRIKE || stack === STACK_BOLD_STRIKE
+        ? '~'
+        : null
+  const outerCloseChar =
+    stack === STACK_BOLD_STRIKE ? '*' : stack === STACK_STRIKE_BOLD ? '~' : null
 
+  const deadForStack = stack === STACK_NONE ? null : dead[stack]
+  const visited: number[] | null = stack === STACK_NONE ? null : []
+
+  const markDeadAndFail = (): null => {
+    if (visited !== null && visited.length > 0) {
+      let arr = dead[stack]
+      if (arr === null) {
+        arr = new Uint8Array(end + 1)
+        dead[stack] = arr
+      }
+      for (let k = 0; k < visited.length; k++) {
+        arr[visited[k]] = 1
+      }
+    }
+    return null
+  }
+
+  const isUrlBreak = (k: number): boolean =>
+    line.atoms.has(k) ||
+    (boldOpen && isPairAt(line, k, end, '*')) ||
+    (strikeOpen && isPairAt(line, k, end, '~'))
+
+  let urlRun: UrlRun | null = null
   let i = start
+
   while (i < end) {
+    if (deadForStack !== null && deadForStack[i] === 1) {
+      return markDeadAndFail()
+    }
+
     const atom = line.atoms.get(i)
     if (atom !== undefined) {
+      if (visited !== null) visited.push(i)
       if (atom.type === 'literal') {
         textBuffer += atom.text
       } else {
         flushText()
-        out.push({ type: 'mention', id: atom.id })
+        tokens.push({ type: 'mention', id: atom.id })
       }
       i++
       continue
     }
+
+    if (closeChar !== null && isPairAt(line, i, end, closeChar)) {
+      if (i === start) {
+        return null
+      }
+      flushText()
+      return { tokens, nextPos: i + 2 }
+    }
+
+    if (outerCloseChar !== null && isPairAt(line, i, end, outerCloseChar)) {
+      return markDeadAndFail()
+    }
+
+    if (visited !== null) visited.push(i)
 
     const ch = line.str[i]
 
@@ -398,7 +372,7 @@ function parseInlineRange(
       const closeIdx = line.nextBacktick.get(i) ?? -1
       if (closeIdx > i + 1 && closeIdx < end) {
         flushText()
-        out.push({
+        tokens.push({
           type: 'code',
           children: sliceCodeChildren(line, i + 1, closeIdx),
         })
@@ -416,13 +390,13 @@ function parseInlineRange(
         const scheme = matchScheme(line.str, i, end)
         if (scheme !== null) {
           if (urlRun === null || urlRun.end <= i) {
-            urlRun = scanUrlRun(line.str, i, end, k => line.atoms.has(k))
+            urlRun = scanUrlRun(line.str, i, end, isUrlBreak)
           }
           const linkEnd = matchAutolink(urlRun, i, scheme)
           if (linkEnd !== -1) {
             const url = line.str.slice(i, linkEnd)
             flushText()
-            out.push({ type: 'link', href: url, text: url })
+            tokens.push({ type: 'link', href: url, text: url })
             i = linkEnd
             continue
           }
@@ -431,26 +405,14 @@ function parseInlineRange(
     }
 
     // 3. Bold: **...**
-    if (
-      !disallowBold &&
-      ch === '*' &&
-      i + 1 < end &&
-      line.str[i + 1] === '*' &&
-      !line.atoms.has(i + 1)
-    ) {
-      if (noBoldAfter === -1 || i < noBoldAfter) {
-        const closeIdx = findNextPlainPair(line, '*', i + 2, end, disallowStrike)
-        if (closeIdx === -1) {
-          noBoldAfter = i
-        } else if (closeIdx > i + 2) {
-          flushText()
-          out.push({
-            type: 'bold',
-            children: parseInlineRange(line, i + 2, closeIdx, true, disallowStrike),
-          })
-          i = closeIdx + 2
-          continue
-        }
+    if (!boldOpen && isPairAt(line, i, end, '*')) {
+      const nextStack: EmphasisStack = strikeOpen ? STACK_STRIKE_BOLD : STACK_BOLD
+      const inner = parseInline(line, i + 2, nextStack, dead)
+      if (inner !== null) {
+        flushText()
+        tokens.push({ type: 'bold', children: inner.tokens })
+        i = inner.nextPos
+        continue
       }
       textBuffer += '**'
       i += 2
@@ -458,26 +420,14 @@ function parseInlineRange(
     }
 
     // 4. Strikethrough: ~~...~~
-    if (
-      !disallowStrike &&
-      ch === '~' &&
-      i + 1 < end &&
-      line.str[i + 1] === '~' &&
-      !line.atoms.has(i + 1)
-    ) {
-      if (noStrikeAfter === -1 || i < noStrikeAfter) {
-        const closeIdx = findNextPlainPair(line, '~', i + 2, end, disallowBold)
-        if (closeIdx === -1) {
-          noStrikeAfter = i
-        } else if (closeIdx > i + 2) {
-          flushText()
-          out.push({
-            type: 'strikethrough',
-            children: parseInlineRange(line, i + 2, closeIdx, disallowBold, true),
-          })
-          i = closeIdx + 2
-          continue
-        }
+    if (!strikeOpen && isPairAt(line, i, end, '~')) {
+      const nextStack: EmphasisStack = boldOpen ? STACK_BOLD_STRIKE : STACK_STRIKE
+      const inner = parseInline(line, i + 2, nextStack, dead)
+      if (inner !== null) {
+        flushText()
+        tokens.push({ type: 'strikethrough', children: inner.tokens })
+        i = inner.nextPos
+        continue
       }
       textBuffer += '~~'
       i += 2
@@ -488,14 +438,19 @@ function parseInlineRange(
     i++
   }
 
+  if (stack !== STACK_NONE) {
+    return markDeadAndFail()
+  }
+
   flushText()
-  return out
+  return { tokens, nextPos: end }
 }
 
 function parseInlineLine(parts: AtomPart[]): InlineToken[] {
   if (parts.length === 0) return []
   const indexed = indexLine(parts)
-  return parseInlineRange(indexed, 0, indexed.str.length, false, false)
+  const dead: (Uint8Array | null)[] = [null, null, null, null, null]
+  return parseInline(indexed, 0, STACK_NONE, dead)?.tokens ?? []
 }
 
 export function tokenizeMessageBody(

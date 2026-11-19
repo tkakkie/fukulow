@@ -431,51 +431,89 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
     expect(tokenizeMessageBody(body, mentions1And2)).toBe(tokensBoth)
   })
 
-  it('tokenizes 4000-character worst-case bodies in linear time', () => {
-    const pattern = '**~~`http:// '
-    const worstCaseMarkers = pattern.repeat(Math.ceil(4000 / pattern.length)).slice(0, 4000)
-    const worstCaseSchemeRuns = '!h'.repeat(2000)
-    const worstCaseTrailingParens = 'http://x' + ')'.repeat(3992)
-    // Many failed candidates inside one printable run (round-2 review of #634)
-    const failedCandidateRuns = [
-      'http://)',
-      'http://.',
-      'http://@',
-      'mailto:@',
-      'http://a%b/',
-      'http://[bad]/',
-    ].map(unit => unit.repeat(Math.floor(4000 / unit.length)))
-    const unclosedBoldFailedUrls = '**' + 'http://)'.repeat(499)
-    const nestedEmphasisFailedUrls = '**' + '~~http://)'.repeat(399)
-    const repeatedInnerEmphasis = '**' + '~~a~~'.repeat(799)
+  it('tokenizes 4000-character and 16000-character worst-case bodies in linear time', () => {
+    const repeatToLen = (unit: string, len: number) =>
+      unit.repeat(Math.ceil(len / unit.length)).slice(0, len)
 
-    expect(worstCaseMarkers.length).toBe(4000)
-    expect(worstCaseSchemeRuns.length).toBe(4000)
-    expect(worstCaseTrailingParens.length).toBe(4000)
+    const sampleFactories: Array<{ name: string; build: (size: number) => string }> = [
+      { name: 'mixed markers', build: size => repeatToLen('**~~`http:// ', size) },
+      { name: 'scheme runs', build: size => repeatToLen('!h', size) },
+      { name: 'trailing parens', build: size => 'http://x' + ')'.repeat(size - 8) },
+      // Many failed candidates inside one printable run (round-2 review of #634)
+      { name: 'failed http://)', build: size => repeatToLen('http://)', size) },
+      { name: 'failed http://.', build: size => repeatToLen('http://.', size) },
+      { name: 'failed http://@', build: size => repeatToLen('http://@', size) },
+      { name: 'failed mailto:@', build: size => repeatToLen('mailto:@', size) },
+      { name: 'failed http://a%b/', build: size => repeatToLen('http://a%b/', size) },
+      { name: 'failed http://[bad]/', build: size => repeatToLen('http://[bad]/', size) },
+      { name: 'unclosed bold failed URLs', build: size => '**' + repeatToLen('http://)', size - 2) },
+      {
+        name: 'nested emphasis failed URLs',
+        build: size => '**' + repeatToLen('~~http://)', size - 2),
+      },
+      { name: 'repeated inner emphasis', build: size => '**' + repeatToLen('~~a~~', size - 2) },
+      { name: 'unclosed bold + ~~a', build: size => '**' + repeatToLen('~~a', size - 2) },
+      { name: 'alternating markers', build: size => repeatToLen('**~~', size) },
+      { name: 'backtick-heavy ** + `a', build: size => '**' + repeatToLen('`a', size - 2) },
+      { name: 'backtick-heavy **~~ + `', build: size => '**~~' + '`'.repeat(size - 4) },
+    ]
 
-    expect(firstLine(tokenizeMessageBody(worstCaseTrailingParens))).toEqual([
+    const trailingParens4k = sampleFactories[2].build(4000)
+    expect(trailingParens4k.length).toBe(4000)
+    expect(firstLine(tokenizeMessageBody(trailingParens4k))).toEqual([
       { type: 'link', href: 'http://x', text: 'http://x' },
       { type: 'text', text: ')'.repeat(3992) },
     ])
 
-    for (const sample of [
-      worstCaseMarkers,
-      worstCaseSchemeRuns,
-      worstCaseTrailingParens,
-      ...failedCandidateRuns,
-      unclosedBoldFailedUrls,
-      nestedEmphasisFailedUrls,
-      repeatedInnerEmphasis,
-    ]) {
-      const start = performance.now()
-      for (let i = 0; i < 20; i++) {
+    const BATCH = 5
+    const SAMPLES = 7
+    const measurePair = (s4k: string, s16k: string): { med4k: number; med16k: number } => {
+      // Warm up JIT before measuring
+      for (let i = 0; i < 3; i++) {
         clearMessageFormatCache()
-        const blocks = tokenizeMessageBody(sample)
-        expect(blocks.length).toBe(1)
+        tokenizeMessageBody(s4k)
+        clearMessageFormatCache()
+        tokenizeMessageBody(s16k)
       }
-      const elapsedMs = performance.now() - start
-      // 20 uncached runs of each 4000-char worst-case body should take only a few milliseconds
-      expect(elapsedMs).toBeLessThan(50)
+      const runs4k: number[] = []
+      const runs16k: number[] = []
+      for (let s = 0; s < SAMPLES; s++) {
+        const t4 = performance.now()
+        for (let b = 0; b < BATCH; b++) {
+          clearMessageFormatCache()
+          expect(tokenizeMessageBody(s4k).length).toBe(1)
+        }
+        runs4k.push(performance.now() - t4)
+
+        const t16 = performance.now()
+        for (let b = 0; b < BATCH; b++) {
+          clearMessageFormatCache()
+          expect(tokenizeMessageBody(s16k).length).toBe(1)
+        }
+        runs16k.push(performance.now() - t16)
+      }
+      runs4k.sort((a, b) => a - b)
+      runs16k.sort((a, b) => a - b)
+      return {
+        med4k: runs4k[Math.floor(runs4k.length / 2)],
+        med16k: runs16k[Math.floor(runs16k.length / 2)],
+      }
+    }
+
+    for (const { name, build } of sampleFactories) {
+      const s4k = build(4000)
+      const s16k = build(16000)
+      expect(s4k.length, name).toBe(4000)
+      expect(s16k.length, name).toBe(16000)
+
+      const { med4k, med16k } = measurePair(s4k, s16k)
+      // 4x input growth should stay well below 16x quadratic scaling; 1ms denominator floor absorbs sub-ms GC/timer jitter
+      expect(
+        med16k / Math.max(med4k, 1),
+        `${name}: 4k=${med4k.toFixed(2)}ms 16k=${med16k.toFixed(2)}ms`,
+      ).toBeLessThan(8)
+      // Generous per-call cap at 16k catches quadratic regressions even if 4k was noisy
+      expect(med16k / BATCH, `${name}: 16k per-call`).toBeLessThan(50)
     }
   })
   it('rejects every failed candidate in a shared run and still links a later valid one', () => {
@@ -680,6 +718,58 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
         ],
       },
       { type: 'text', text: '~~' },
+    ])
+
+    // Unclosed inner emphasis fails and stays literal, letting the outer emphasis parse the URL with its backtick
+    expect(firstLine(tokenizeMessageBody('**~~https://user:`~~@example.com/ ** `'))).toEqual([
+      {
+        type: 'bold',
+        children: [
+          { type: 'text', text: '~~' },
+          {
+            type: 'link',
+            href: 'https://user:`~~@example.com/',
+            text: 'https://user:`~~@example.com/',
+          },
+          { type: 'text', text: ' ' },
+        ],
+      },
+      { type: 'text', text: ' `' },
+    ])
+
+    // Failed outer emphasis must not suppress a valid emphasis later on the line after an alternate parse path
+    expect(
+      firstLine(tokenizeMessageBody('**~~https://user:`**@example.com/ ~~ **ok** `')),
+    ).toEqual([
+      { type: 'text', text: '**' },
+      {
+        type: 'strikethrough',
+        children: [
+          {
+            type: 'link',
+            href: 'https://user:`**@example.com/',
+            text: 'https://user:`**@example.com/',
+          },
+          { type: 'text', text: ' ' },
+        ],
+      },
+      { type: 'text', text: ' ' },
+      { type: 'bold', children: [{ type: 'text', text: 'ok' }] },
+      { type: 'text', text: ' `' },
+    ])
+
+    // Inside open emphasis, an autolink stops before that emphasis closer rather than swallowing it
+    expect(
+      firstLine(tokenizeMessageBody('~~https://user:`~~@a.b/https://user:`a~~')),
+    ).toEqual([
+      {
+        type: 'strikethrough',
+        children: [
+          { type: 'text', text: 'https://user:' },
+          { type: 'code', children: [{ type: 'text', text: '~~@a.b/https://user:' }] },
+          { type: 'text', text: 'a' },
+        ],
+      },
     ])
   })
 })
