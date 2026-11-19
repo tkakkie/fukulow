@@ -74,7 +74,9 @@ describe('total documentation budget', () => {
 
   afterEach(() => rmSync(root, { recursive: true, force: true }))
 
-  it('accepts a total at its byte limit', () => {
+  it('accepts a total at its byte limit and ignores the measurement archive outside docs', () => {
+    mkdirSync(join(root, 'load'))
+    writeFileSync(join(root, 'load/measurements-archive.md'), 'x'.repeat(4096))
     expect(checkDocBudgets(root, budgets, 2)).toEqual([])
   })
 
@@ -160,5 +162,8 @@ describe('parsing the base budgets', () => {
   it('fails closed when the map is missing or empty', () => {
     expect(() => parseBudgets('export {}')).toThrow('BUDGETS_KIB map not found')
     expect(() => parseBudgets('const BUDGETS_KIB = new Map<string, number>([\n])')).toThrow('BUDGETS_KIB map has no entries')
+    expect(() => parseBudgets("const BUDGETS_KIB = new Map<string, number>([['AGENTS.md', 10]])\nconst TOTAL_BUDGET_KIB: number = 684")).toThrow(
+      'TOTAL_BUDGET_KIB present but not parsed',
+    )
   })
 })

@@ -1,5 +1,5 @@
 // Enforce per-file and total byte budgets for AGENTS.md and every file under docs/ (any extension; symlinks are refused).
-// With --base <file>, also refuse budget raises and new budgets against the PR base unless DOC_BUDGET_RAISE_APPROVED=true (#603).
+// With --base <file>, instead refuse budget raises and new budgets against the PR base unless DOC_BUDGET_RAISE_APPROVED=true (#603).
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
@@ -97,6 +97,7 @@ export function parseBudgets(source: string): Budgets {
   for (const [, file, kib] of block[1].matchAll(/\['([^']+)',\s*(\d+)\]/g)) files.set(file, Number(kib))
   if (files.size === 0) throw new Error('base budgets: BUDGETS_KIB map has no entries')
   const total = /TOTAL_BUDGET_KIB = (\d+)/.exec(source)
+  if (!total && source.includes('TOTAL_BUDGET_KIB')) throw new Error('base budgets: TOTAL_BUDGET_KIB present but not parsed')
   return { files, totalKiB: total ? Number(total[1]) : undefined }
 }
 
