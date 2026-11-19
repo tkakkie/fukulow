@@ -105,6 +105,12 @@ pub struct ChannelView {
     pub mutation_seq: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub move_seq: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub move_epoch: Option<Token>,
+    #[serde(skip)]
+    pub(crate) moved_roots: Rc<std::collections::BTreeMap<Uuid, i64>>,
+    #[serde(skip)]
+    pub(crate) retired_move_through: i64,
     pub messages: Rc<Vec<Rc<Message>>>,
     pub versions: Rc<std::collections::BTreeMap<Uuid, (i64, bool, i64)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,6 +152,9 @@ impl Default for ChannelView {
             snapshot_seq: None,
             mutation_seq: 0,
             move_seq: None,
+            move_epoch: None,
+            moved_roots: Rc::default(),
+            retired_move_through: 0,
             messages: Rc::default(),
             versions: Rc::default(),
             retired_through: None,
@@ -177,6 +186,7 @@ impl ChannelView {
             && self.snapshot_seq == other.snapshot_seq
             && self.mutation_seq == other.mutation_seq
             && self.move_seq == other.move_seq
+            && self.move_epoch == other.move_epoch
             && Rc::ptr_eq(&self.messages, &other.messages)
             && Rc::ptr_eq(&self.versions, &other.versions)
             && Rc::ptr_eq(&self.retired_versions, &other.retired_versions)

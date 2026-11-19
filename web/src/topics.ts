@@ -33,7 +33,8 @@ const paging = (): Paging => ({ hasMore: true, hasNewer: false, following: true,
 const topicWindow = (): TopicWindow => ({ messages: new Map(), initialized: false, hasMore: true, hasNewer: false, following: true, newerCount: 0, loading: false, error: false, notFound: false })
 const window = (generation: number) => ({ generation, main: paging(), list: paging(), messages: new Map<number, Message>(),
   listRead: Promise.resolve(), listVersion: 0, listPage: undefined as symbol | undefined,
-  moveRefresh: undefined as { main: boolean; list: boolean } | undefined,
+  moveRefresh: undefined as { main: boolean; list: boolean; summaries: Set<string> } | undefined,
+  activeTopic: undefined as string | undefined,
   mainTopics: new Set<string>(), listTopics: new Set<string>(), mainPositions: new Map<string, number>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
   evidence: topicEvidence(), evidenceRefresh: new Set<string>(),
   summaryThrough: new Map<string, number>(),
@@ -106,26 +107,36 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     listeners.forEach(l => l(changed))
   }
   function refetchMovedWindow(channel: string, stale: Window) {
+    const prefix = `topic:${channel}:`
     const refresh = {
       main: stale.main.asOfSeq !== undefined || stale.main.loading || !!stale.moveRefresh?.main,
-      list: stale.list.asOfSeq !== undefined || stale.list.loading || !!stale.moveRefresh?.list,
+      list: stale.list.asOfSeq !== undefined || stale.list.loading || !!stale.moveRefresh?.list || activityTargets.has(`main:${channel}`),
+      summaries: new Set([...(stale.moveRefresh?.summaries ?? []), ...stale.topics.keys(), ...stale.summaries, ...stale.summaryRetries.keys()]),
     }
-    const topic = stale.topics.keys().next().value
+    for (const [id] of stale.baselines) if (!stale.mainTopics.has(id) && !stale.listTopics.has(id)) refresh.summaries.add(id)
+    for (const key of activityTargets.keys()) if (key.startsWith(prefix)) refresh.summaries.add(key.slice(prefix.length))
+    const topic = stale.activeTopic
+    if (topic !== undefined) refresh.summaries.add(topic)
     freezeWindow(stale)
     clearActivity(channel)
     const fresh = window(nextGeneration++)
     fresh.moveRefresh = refresh
-    if (topic) fresh.topics.set(topic, topicWindow())
+    fresh.activeTopic = topic
+    if (topic !== undefined) fresh.topics.set(topic, topicWindow())
     windows.set(channel, fresh)
     queueMicrotask(() => {
       if (!current(channel, fresh)) return
-      fresh.moveRefresh = undefined
-      if (refresh.main && fresh.main.asOfSeq === undefined) void loadMainPage(channel)
-      if (refresh.list && fresh.list.asOfSeq === undefined) void controller.loadList(channel)
-      if (topic && fresh.topics.has(topic) && !fresh.topics.get(topic)?.initialized) {
-        void controller.loadTopic(channel, topic)
-        void ensureSummary(channel, topic)
-      }
+      const pages = []
+      if (refresh.main && fresh.main.asOfSeq === undefined) pages.push(loadMainPage(channel))
+      if (refresh.list && fresh.list.asOfSeq === undefined) pages.push(controller.loadList(channel))
+      if (topic !== undefined && fresh.activeTopic === topic && !fresh.topics.get(topic)?.initialized) void controller.loadTopic(channel, topic)
+      if (topic !== undefined && refresh.summaries.has(topic)) void ensureSummary(channel, topic)
+      // A first page can cover most held summaries in one request.
+      void Promise.all(pages).then(() => {
+        if (!current(channel, fresh)) return
+        fresh.moveRefresh = undefined
+        for (const id of refresh.summaries) if (id !== topic) void ensureSummary(channel, id)
+      })
     })
   }
   const reconcileSync = (syncChanged?: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => {
@@ -161,7 +172,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           w.generation = nextGeneration++
         } else if (!next.running || next.organization === 'unavailable' || after.state === 'unavailable') {
           clearActivity(id); freezeWindow(w)
-        } else if (after.moveSeq !== undefined && before?.moveSeq !== after.moveSeq) {
+        } else if (after.moveEpoch !== undefined && before?.moveEpoch !== after.moveEpoch) {
           refetchMovedWindow(id, w)
         } else if (before?.messages !== after.messages || records?.has(id)) {
           const incoming = records?.get(id) ?? after.messages
@@ -606,7 +617,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         return value
       } }
   }
-  async function fetchSummary(channel: string, topicId: string) {
+  async function fetchSummary(channel: string, topicId: string, restarted = false): Promise<Result<TopicSummaryResponse> | undefined> {
     const w = getWindow(channel)
     if (!current(channel, w) || w.summaries.has(topicId)) return
     const pendingRetry = w.summaryRetries.get(topicId)
@@ -618,6 +629,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const through = w.evidence.sequences.get(topicId)?.at(-1)?.end ?? 0
     const { result, isCurrent } = await read(channel, w, `summary:${topicId}`, () => options.api.getTopicSummary(channel, topicId))
     if (!isCurrent()) return
+    if (!result.ok && result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) {
+      w.summaries.delete(topicId)
+      return fetchSummary(channel, topicId, true)
+    }
     if (result.ok) {
       w.summaryThrough.set(topicId, through)
       const existing = w.topics.get(topicId)
@@ -810,6 +825,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     releaseTopic(channel: string, topicId: string) {
       const w = windows.get(channel)
       if (!w) return
+      if (w.activeTopic === topicId) { w.activeTopic = undefined; w.moveRefresh?.summaries.delete(topicId) }
       w.topics.get(topicId)?.messages.clear()
       if (!w.baselines.has(topicId)) clearSummaryRetry(w, topicId)
       w.reads.delete(`topic:${topicId}`); w.topics.delete(topicId); pruneActivity(w); notify(channel)
@@ -874,7 +890,12 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (!current(channel, w)) return
       for (const [id, other] of windows) if (other !== w && other.topics.size) {
         for (const [topic, value] of other.topics) { value.messages.clear(); other.reads.delete(`topic:${topic}`) }
-        other.topics.clear(); pruneActivity(other); notify(id)
+        other.topics.clear(); other.activeTopic = undefined; pruneActivity(other); notify(id)
+      }
+      if (w.activeTopic !== topicId) {
+        const previousTopic = w.activeTopic
+        w.activeTopic = topicId
+        if (previousTopic !== undefined) controller.releaseTopic(channel, previousTopic)
       }
       let t = w.topics.get(topicId)
       if (!t) {

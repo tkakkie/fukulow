@@ -1,14 +1,15 @@
 import { replyPage } from './topic-test-helpers'
 import { describe, expect, it, vi } from 'vitest'
-import { createSession } from './session'
+import { createSession, type SessionOptions } from './session'
 import { createMembers } from './members'
 import * as api from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
+import type { MoveChainApi } from './move-chain'
 
-function open() {
+function open(overrides: Partial<SessionOptions> = {}) {
   const net = fakeNetwork()
   const onEnded = vi.fn()
-  const session = createSession({ selfId: 'me', onEnded, ...net.options() })
+  const session = createSession({ selfId: 'me', onEnded, ...net.options(), ...overrides })
   net.socket.onReady()
   return { net, session, onEnded }
 }
@@ -84,6 +85,28 @@ describe('session controllers', () => {
     expect(onEnded).toHaveBeenCalledTimes(1)
     session.close()
   })
+})
+
+it('a Move refusal leaves the Channel available and Organization loss follows the session boundary', async () => {
+  const moveChainApi = vi.fn<MoveChainApi>()
+  const { net, session, onEnded } = open({ moveChainApi })
+  const anchor = record(100), history_generation = anchor.history_generation
+  net.pages.A = ok({ history_generation, as_of_seq: 100, messages: [anchor], has_more: false })
+  net.replyChains[`A:${anchor.id}`] = ok(replyPage({ history_generation, as_of_seq: 100, root_id: anchor.id, messages: [anchor], has_more: false }))
+  net.lists[0].resolve(ok({ history_generation, channels: [channel('A')] }))
+  await settle(); net.subscribed('A', 100)
+  await session.replies.open('A', anchor)
+
+  moveChainApi.mockResolvedValueOnce({ ok: false, kind: 'http', status: 403, error: 'move_not_allowed' })
+  await expect(session.moveChain('A', anchor.id, { topicId: 'T' })).resolves.toEqual({ kind: 'denied' })
+  expect(session.sync.get().channels.A.state).toBe('ready')
+  expect(net.replyHistory).toHaveLength(1)
+
+  moveChainApi.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+  await expect(session.moveChain('A', anchor.id, { topicName: 'T' })).resolves.toEqual({ kind: 'not_found' })
+  expect(session.sync.get().organization).toBe('unavailable')
+  expect(onEnded).not.toHaveBeenCalled()
+  session.close()
 })
 
 it('ordinary REST organization_unavailable ends only its Organization', async () => {

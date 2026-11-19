@@ -13,8 +13,9 @@
     discardAndFocusComposer,
     focusTarget,
   } from './focus-management'
+  import type { MoveDestination, MoveResult } from './move-chain'
   import { type RepliesAdapter } from './replies.svelte'
-  import type { ChannelSync } from './sync.svelte'
+  import { topicNameError, type ChannelSync } from './sync.svelte'
   import {
     applyTimelineScrollAction,
     createTimelineScrollController,
@@ -23,9 +24,11 @@
     type ScrollAction,
     type ScrollAnchor,
   } from './timeline-scroll'
+  import type { TopicsAdapter } from './topics.svelte'
   import Button from './ui/Button.svelte'
   import Dialog from './ui/Dialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
+  import Input from './ui/Input.svelte'
   import MessageRow from './ui/MessageRow.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
@@ -34,6 +37,9 @@
   let {
     channel,
     replies,
+    topics = null,
+    moveChain,
+    onannounce,
     channelId,
     anchorMessageId,
     resolvedAnchor = null,
@@ -54,6 +60,9 @@
   }: {
     channel: ChannelSync
     replies: RepliesAdapter
+    topics?: TopicsAdapter | null
+    moveChain?: (channel: string, anchor: string, destination: MoveDestination) => Promise<MoveResult>
+    onannounce?: (message: string) => void
     channelId: string
     anchorMessageId: string
     resolvedAnchor?: Message | null
@@ -75,6 +84,40 @@
 
   const s = $derived(channel.timeline)
   const rState = $derived(replies.state)
+  const tState = $derived(topics ? topics.state : null)
+  const orderedTopics = $derived(tState ? [...tState.topics].reverse() : [])
+
+  let moveDialogOpen = $state(false)
+  let moveButtonRef = $state<HTMLButtonElement | null>(null)
+  let moveMode = $state<'existing' | 'new'>('new')
+  let moveTopic = $state.raw<(typeof orderedTopics)[number] | null>(null)
+  let moveTopicName = $state('')
+  let moveBusy = $state(false)
+  let moveError = $state<string | null>(null)
+  let moveNotice = $state<string | null>(null)
+  let moveRetry = $state<{ destination: MoveDestination; retry: () => Promise<MoveResult> } | null>(null)
+  let moveRefreshFailed = $state(false)
+  let moveGeneration = 0
+
+  const moveTopicId = $derived(moveTopic?.topicId ?? '')
+  const moveOptions = $derived(
+    moveMode === 'existing' && moveTopic && !orderedTopics.some((t) => t.topicId === moveTopicId)
+      ? [...orderedTopics, moveTopic]
+      : orderedTopics,
+  )
+  const moveListSettled = $derived(
+    tState !== null && tState.list.asOfSeq !== undefined && !tState.list.loading && !tState.list.error,
+  )
+  const moveDestination: MoveDestination = $derived(
+    moveMode === 'existing' ? { topicId: moveTopicId } : { topicName: moveTopicName },
+  )
+  const displayedMoveRetry = $derived(
+    moveRetry &&
+      moveRetry.destination.topicId === moveDestination.topicId &&
+      moveRetry.destination.topicName === moveDestination.topicName
+      ? moveRetry
+      : null,
+  )
 
   let retained = $state<{
     key: string
@@ -94,17 +137,18 @@
   const targetRootId = $derived(
     matchedAnchor
       ? (matchedAnchor.reply_root_id ?? matchedAnchor.id)
-      : rState.rootId === anchorMessageId
+      : rState.rootId && (rState.rootId === anchorMessageId || rState.anchorId === anchorMessageId)
         ? rState.rootId
         : null,
   )
   const isCurrentAnchor = $derived(
     Boolean(rState.rootId && targetRootId && rState.rootId === targetRootId),
   )
+  const isMoveInvalidated = $derived(isCurrentAnchor && rState.moveInvalidated)
 
   $effect(() => {
     const key = currentKey
-    if (isCurrentAnchor && rState.messages.length > 0) {
+    if (isCurrentAnchor && !rState.moveInvalidated && rState.messages.length > 0) {
       retained = {
         key,
         rootId: rState.rootId,
@@ -112,10 +156,11 @@
         messages: rState.messages,
       }
     } else if (
-      retained.key !== key &&
-      !rState.unavailable &&
-      s.status !== 'unavailable' &&
-      !organizationUnavailable
+      isMoveInvalidated ||
+      (retained.key !== key &&
+        !rState.unavailable &&
+        s.status !== 'unavailable' &&
+        !organizationUnavailable)
     ) {
       retained = { key, rootId: null, topicId: null, messages: [] }
     }
@@ -135,20 +180,24 @@
       anchorMessageId,
   )
   const effectiveTopicId = $derived(
-    (isCurrentAnchor ? rState.topicId : null) ??
-      (matchedAnchor ? matchedAnchor.topic_id : null) ??
-      (retained.key === currentKey ? retained.topicId : null),
+    isMoveInvalidated
+      ? null
+      : (isCurrentAnchor ? rState.topicId : null) ??
+          (matchedAnchor ? matchedAnchor.topic_id : null) ??
+          (retained.key === currentKey ? retained.topicId : null),
   )
   const historyMessages = $derived(
-    isCurrentAnchor && rState.messages.length > 0
-      ? rState.messages
-      : retained.key === currentKey
-        ? retained.messages
-        : [],
+    isMoveInvalidated
+      ? []
+      : isCurrentAnchor && rState.messages.length > 0
+        ? rState.messages
+        : retained.key === currentKey
+          ? retained.messages
+          : [],
   )
   // The active navigation anchor is retained separately from the bounded history.
   const visibleMessages = $derived(
-    isCurrentAnchor && rState.anchor?.id === anchorMessageId && !historyMessages.some(m => m.id === anchorMessageId)
+    !isMoveInvalidated && isCurrentAnchor && rState.anchor?.id === anchorMessageId && !historyMessages.some(m => m.id === anchorMessageId)
       ? [...historyMessages, rState.anchor].sort((a, b) => a.created_seq - b.created_seq)
       : historyMessages,
   )
@@ -167,15 +216,198 @@
   const targetUnavailable = $derived(
     organizationUnavailable || channelUnavailable || replyNotFound,
   )
-  const rc = $derived(channel.reply(effectiveRootId, effectiveTopicId))
+  let draftTarget = $state.raw<{ channelId: string; rootId: string; topicId: string | null } | null>(null)
+  const previousDraftTarget = $derived(
+    draftTarget?.channelId === channelId && draftTarget.rootId === effectiveRootId ? draftTarget : null,
+  )
+  const draftTopicId = $derived(isMoveInvalidated ? previousDraftTarget?.topicId ?? null : effectiveTopicId)
+  const rc = $derived(channel.reply(effectiveRootId, draftTopicId))
   const composerState = $derived(rc.composer)
 
   $effect(() => {
     if (!isTargetResolved) return
     rc.migrateDraftFrom(anchorMessageId, null)
+    if (!isCurrentAnchor || rState.chainVersion === undefined) return
+    if (previousDraftTarget && previousDraftTarget.topicId !== draftTopicId) {
+      rc.migrateDraftFrom(effectiveRootId, previousDraftTarget.topicId)
+    }
+    rc.reconcileDrafts()
+    if (!previousDraftTarget || previousDraftTarget.topicId !== draftTopicId) {
+      draftTarget = { channelId, rootId: effectiveRootId, topicId: draftTopicId }
+    }
   })
 
   const canSendReply = $derived(!targetUnavailable && isCurrentAnchor)
+  const canMoveChain = $derived(
+    !targetUnavailable && isCurrentAnchor && (rState.chainVersion !== undefined || displayedMoveRetry !== null),
+  )
+  const currentTopicName = $derived(
+    effectiveTopicId
+      ? (tState?.topics.find((t) => t.topicId === effectiveTopicId)?.baseline?.summary.name ?? 'トピック')
+      : null,
+  )
+  const moveSubmitDisabled = $derived(
+    moveBusy ||
+      !canMoveChain ||
+      (moveMode === 'existing' ? moveTopicId === '' : moveTopicName === ''),
+  )
+
+  let lastMoveKey = ''
+  $effect(() => {
+    const key = `${channelId}:${effectiveRootId}`
+    if (key !== lastMoveKey) {
+      lastMoveKey = key
+      moveGeneration++
+      moveDialogOpen = false
+      moveBusy = false
+      moveError = null
+      moveNotice = null
+      moveRetry = null
+      moveRefreshFailed = false
+    }
+  })
+
+  $effect(() => {
+    if (!moveDialogOpen || !topics || !tState || targetUnavailable || tState.unavailable) return
+    if (tState.list.asOfSeq === undefined && !tState.list.loading && !tState.list.error) {
+      void topics.loadList().catch(console.error)
+    }
+    for (const topic of tState.topics) {
+      if (topic.baseline === null && topic.summaryError === null) {
+        void topics.ensureSummary(topic.topicId).catch(console.error)
+      }
+    }
+  })
+
+  $effect(() => {
+    if (!moveDialogOpen || moveMode !== 'existing') return
+    const current = orderedTopics.find((t) => t.topicId === moveTopicId)
+    if (current) {
+      moveTopic = current
+    } else if (!moveBusy && moveListSettled) {
+      moveTopic = orderedTopics[0] ?? null
+      if (!moveTopic) moveMode = 'new'
+    }
+  })
+
+  $effect(() => {
+    if (moveRetry && !displayedMoveRetry) moveRetry = null
+  })
+
+  function openMoveDialog() {
+    if (!topics || targetUnavailable) return
+    moveError = null
+    moveNotice = null
+    moveRetry = null
+    moveRefreshFailed = false
+    moveTopic = orderedTopics.find((t) => t.topicId !== effectiveTopicId) ?? orderedTopics[0] ?? null
+    moveMode = moveTopic ? 'existing' : 'new'
+    moveTopicName = ''
+    moveDialogOpen = true
+  }
+
+  function closeMoveDialog() {
+    if (moveBusy) return
+    moveDialogOpen = false
+    moveError = null
+    moveRetry = null
+    moveRefreshFailed = false
+  }
+
+  function formatMoveFailure(result: Exclude<MoveResult, { kind: 'moved' }>): string {
+    switch (result.kind) {
+      case 'unknown':
+        return '移動を確認できませんでした。通信状況を確認して、もう一度お試しください。'
+      case 'conflict':
+        return result.refreshed
+          ? '返信のつながりが更新されました。最新の状態を読み込みましたので、もう一度お試しください。'
+          : '返信のつながりが更新されましたが、最新の状態を読み込めませんでした。通信状況を確認して、再読み込みしてください。'
+      case 'too_large':
+        return 'メッセージが1,000件を超える返信のつながりは移動できません。'
+      case 'denied':
+        return 'この返信のつながりをトピックに移動する権限がありません。'
+      case 'not_found':
+        return '移動対象の返信のつながりまたは移動先のトピックが見つかりません。'
+      case 'snapshot_expired':
+        return '表示していた情報が古くなりました。もう一度お試しください。'
+      case 'history_generation_changed':
+        return '履歴が更新されました。読み込み直してから、もう一度お試しください。'
+      case 'baseline_unavailable':
+        return '返信のつながりを読み込んでから、もう一度お試しください。'
+      case 'superseded':
+        return '移動対象が変更されたため、移動を中断しました。もう一度お試しください。'
+      case 'failed':
+        return 'トピックに移動できませんでした。入力内容を確認して、もう一度お試しください。'
+    }
+  }
+
+  async function runMoveAttempt(destination: MoveDestination, action: () => Promise<MoveResult>) {
+    if (moveBusy) return
+    const gen = ++moveGeneration
+    moveBusy = true
+    moveError = null
+    moveRefreshFailed = false
+    try {
+      const result = await action()
+      if (gen !== moveGeneration) return
+      if (result.kind === 'moved') {
+        moveRetry = null
+        moveRefreshFailed = false
+        moveDialogOpen = false
+        moveNotice = 'トピックに移動しました。'
+        onannounce?.('トピックに移動しました。')
+        return
+      }
+      moveRetry = result.kind === 'unknown' ? { destination, retry: result.retry } : null
+      moveRefreshFailed = result.kind === 'conflict' && !result.refreshed
+      moveError = formatMoveFailure(result)
+    } catch (err) {
+      console.error(err)
+      if (gen !== moveGeneration) return
+      moveError = '移動を確認できませんでした。通信状況を確認して、もう一度お試しください。'
+    } finally {
+      if (gen === moveGeneration) moveBusy = false
+    }
+  }
+
+  async function handleSubmitMove() {
+    if (moveSubmitDisabled) return
+    if (displayedMoveRetry) {
+      await handleRetryMove()
+      return
+    }
+    const destination = moveDestination
+    if (destination.topicName !== undefined) {
+      const nameError = topicNameError(destination.topicName)
+      if (nameError !== null) {
+        moveError = nameError
+        return
+      }
+    }
+    await runMoveAttempt(destination, () =>
+      moveChain ? moveChain(channelId, anchorMessageId, destination) : replies.move(anchorMessageId, destination),
+    )
+  }
+
+  async function handleRetryMove() {
+    const retry = displayedMoveRetry
+    if (!retry || moveBusy) return
+    await runMoveAttempt(retry.destination, retry.retry)
+  }
+
+  async function handleReloadChainForMove() {
+    if (moveBusy || rState.loading || targetUnavailable) return
+    scrollController.resetLoadingTimeout()
+    if (!isCurrentAnchor) {
+      onretrytarget?.()
+      return
+    }
+    const gen = moveGeneration
+    await replies.loadMore().catch(console.error)
+    if (gen !== moveGeneration || !moveRefreshFailed || rState.chainVersion === undefined) return
+    moveError = null
+    moveRefreshFailed = false
+  }
 
   const scrollController = createTimelineScrollController()
   const subscribeScroll = createSubscriber((update) => scrollController.subscribe(update))
@@ -192,11 +424,16 @@
         (!isCurrentAnchor && replyTargetStatus === 'error') ||
         scrollView.loadingTimedOut),
   )
+  const chainLoadError = '返信のつながりを読み込めませんでした。通信状況を確認して、もう一度お試しください。'
+  const moveChainReadFailed = $derived(
+    !targetUnavailable && !rState.loading && (!isCurrentAnchor || rState.chainVersion === undefined) && hasError,
+  )
+  const canReloadMoveChain = $derived(!moveBusy && moveChainReadFailed)
   const isLoading = $derived(
-    !targetUnavailable && !hasError && (!isCurrentAnchor || rState.loading),
+    !targetUnavailable && !hasError && (!isCurrentAnchor || rState.loading || isMoveInvalidated),
   )
   const chainInitialLoading = $derived(
-    !targetUnavailable && !hasError && (!isCurrentAnchor || (rState.loading && visibleMessages.length <= 1)),
+    !targetUnavailable && !hasError && (!isCurrentAnchor || isMoveInvalidated || (rState.loading && visibleMessages.length <= 1)),
   )
   const effectiveScrollStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
     targetUnavailable
@@ -367,41 +604,65 @@
 </script>
 
 <div class="reply-panel">
-  {#if organizationUnavailable}
-    <div class="reply-panel__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="この組織は利用できません。"
-        detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-        actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
-        onaction={onrecheckmembership}
-        secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
-        onsecondaryaction={onswitchorganization}
-      />
+  <div class="reply-panel__header">
+    {#if organizationUnavailable}
+      <div class="reply-panel__banner">
+        <StatusBanner
+          tone="danger"
+          role="alert"
+          message="この組織は利用できません。"
+          detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
+          actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
+          onaction={onrecheckmembership}
+          secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
+          onsecondaryaction={onswitchorganization}
+        />
+      </div>
+    {:else if channelUnavailable}
+      <div class="reply-panel__banner">
+        <StatusBanner
+          tone="danger"
+          role="alert"
+          message="このチャンネルは利用できません。"
+          detail="チャンネルが削除されたか、アクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
+          actionLabel={ongoToChannelList ? 'チャンネル一覧へ' : undefined}
+          onaction={ongoToChannelList}
+        />
+      </div>
+    {:else if hasError}
+      <div class="reply-panel__banner">
+        <StatusBanner
+          tone="danger"
+          role="alert"
+          message={chainLoadError}
+          actionLabel="再試行"
+          onaction={handleRetryLoad}
+        />
+      </div>
+    {/if}
+
+    <div class="reply-panel__actions">
+      {#if currentTopicName}
+        <span class="reply-panel__topic-label">トピック: {currentTopicName}</span>
+      {/if}
+      {#if topics}
+        <Button
+          bind:buttonRef={moveButtonRef}
+          variant="secondary"
+          disabled={targetUnavailable || moveBusy}
+          onclick={openMoveDialog}
+        >
+          トピックに移動
+        </Button>
+      {/if}
     </div>
-  {:else if channelUnavailable}
-    <div class="reply-panel__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="このチャンネルは利用できません。"
-        detail="チャンネルが削除されたか、アクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-        actionLabel={ongoToChannelList ? 'チャンネル一覧へ' : undefined}
-        onaction={ongoToChannelList}
-      />
-    </div>
-  {:else if hasError}
-    <div class="reply-panel__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="返信のつながりを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
-        actionLabel="再試行"
-        onaction={handleRetryLoad}
-      />
-    </div>
-  {/if}
+
+    {#if moveNotice}
+      <div class="reply-panel__banner">
+        <StatusBanner tone="info" role={null} message={moveNotice} />
+      </div>
+    {/if}
+  </div>
 
   <div class="reply-panel__scroll" bind:this={scrollEl} onscroll={handleScroll}>
     {#if replyNotFound && visibleMessages.length === 0 && pending.length === 0}
@@ -509,6 +770,125 @@
   </div>
 
   <Dialog
+    open={moveDialogOpen}
+    busy={moveBusy}
+    title="トピックに移動"
+    description="この返信のつながり全体を移動先のトピックに移します。"
+    cancelLabel="キャンセル"
+    returnFocusFallback={moveButtonRef ?? composerRef}
+    oncancel={closeMoveDialog}
+  >
+    <form
+      class="reply-panel__move-form"
+      onsubmit={(e) => {
+        e.preventDefault()
+        void handleSubmitMove()
+      }}
+    >
+      {#if !canMoveChain && !moveChainReadFailed && !targetUnavailable}
+        <p class="reply-panel__move-status">返信のつながりを読み込んでいます…</p>
+      {/if}
+      {#if topics && tState?.list.error && !targetUnavailable && !tState.unavailable}
+        <StatusBanner
+          tone="danger"
+          role="alert"
+          message="トピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
+          actionLabel="再試行"
+          onaction={() => void topics?.loadList().catch(console.error)}
+        />
+      {/if}
+      <fieldset class="reply-panel__move-fieldset" disabled={moveBusy}>
+        <legend class="reply-panel__move-legend">移動先</legend>
+        {#if moveOptions.length > 0}
+          <label class="reply-panel__move-choice">
+            <input
+              type="radio"
+              name="move_destination_mode"
+              value="existing"
+              checked={moveMode === 'existing'}
+              onchange={() => {
+                moveMode = 'existing'
+                moveError = null
+                moveRetry = null
+                moveRefreshFailed = false
+                moveTopic = orderedTopics.find((t) => t.topicId === moveTopicId) ?? orderedTopics[0] ?? null
+              }}
+            />
+            <span>既存のトピック</span>
+          </label>
+        {/if}
+        <label class="reply-panel__move-choice">
+          <input
+            type="radio"
+            name="move_destination_mode"
+            value="new"
+            checked={moveMode === 'new'}
+            onchange={() => {
+              moveMode = 'new'
+              moveError = null
+              moveRetry = null
+              moveRefreshFailed = false
+            }}
+          />
+          <span>新しいトピック</span>
+        </label>
+      </fieldset>
+
+      {#if moveMode === 'existing' && moveOptions.length > 0}
+        <label class="reply-panel__move-field">
+          <span class="reply-panel__move-label">移動先のトピック</span>
+          <select
+            class="reply-panel__move-select"
+            aria-label="移動先のトピック"
+            value={moveTopicId}
+            disabled={moveBusy}
+            onchange={(e) => {
+              const selected = moveOptions.find((t) => t.topicId === e.currentTarget.value)
+              if (selected) moveTopic = selected
+              moveError = null
+              moveRetry = null
+              moveRefreshFailed = false
+            }}
+          >
+            {#each moveOptions as t (t.topicId)}
+              <option value={t.topicId}>{t.baseline?.summary.name ?? 'トピック'}</option>
+            {/each}
+          </select>
+        </label>
+      {:else}
+        <Input
+          label="新しいトピック名"
+          name="move_topic_name"
+          required
+          disabled={moveBusy}
+          bind:value={moveTopicName}
+          oninput={() => {
+            moveError = null
+            moveRetry = null
+            moveRefreshFailed = false
+          }}
+        />
+      {/if}
+
+      {#if moveError || moveChainReadFailed}
+        <StatusBanner
+          tone="danger"
+          role="alert"
+          message={moveError ?? chainLoadError}
+          actionLabel={!moveBusy && displayedMoveRetry ? '再試行' : canReloadMoveChain ? '再読み込み' : undefined}
+          onaction={!moveBusy && displayedMoveRetry ? () => void handleRetryMove() : canReloadMoveChain ? () => void handleReloadChainForMove() : undefined}
+          secondaryActionLabel={displayedMoveRetry && canReloadMoveChain ? '再読み込み' : undefined}
+          onsecondaryaction={displayedMoveRetry && canReloadMoveChain ? () => void handleReloadChainForMove() : undefined}
+        />
+      {/if}
+
+      <div class="reply-panel__move-actions">
+        <Button variant="primary" type="submit" disabled={moveSubmitDisabled}>トピックに移動</Button>
+      </div>
+    </form>
+  </Dialog>
+
+  <Dialog
     open={confirmReplaceId !== null}
     title="入力中の下書きを置き換えますか？"
     description="失敗したメッセージを編集欄に戻すと、現在入力中の下書きは上書きされます。"
@@ -531,9 +911,113 @@
     overflow: hidden;
   }
 
+  .reply-panel__header {
+    display: grid;
+    gap: var(--space-8);
+    min-width: 0;
+  }
+
+  .reply-panel__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-8);
+    padding: var(--space-8) var(--space-12) 0;
+    min-width: 0;
+  }
+
+  .reply-panel__topic-label {
+    font-size: var(--font-size-13);
+    font-weight: var(--font-weight-medium);
+    color: var(--text2);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .reply-panel__banner {
     padding: var(--space-8) var(--space-12) 0;
     min-width: 0;
+  }
+
+  .reply-panel__move-form {
+    display: grid;
+    gap: var(--space-12);
+    min-width: 0;
+  }
+
+  .reply-panel__move-status {
+    margin: 0;
+    font-size: var(--font-size-13);
+    color: var(--text2);
+  }
+
+  .reply-panel__move-fieldset {
+    display: grid;
+    gap: var(--space-8);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
+
+  .reply-panel__move-legend {
+    margin: 0;
+    padding: 0;
+    font-size: var(--font-size-14);
+    font-weight: var(--font-weight-medium);
+    color: var(--text);
+  }
+
+  .reply-panel__move-choice {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-8);
+    min-height: var(--touch-target);
+    padding: var(--space-4) var(--space-8);
+    font-size: var(--font-size-14);
+    color: var(--text);
+    cursor: pointer;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .reply-panel__move-choice input {
+    margin: 0;
+    accent-color: var(--primary);
+  }
+
+  .reply-panel__move-field {
+    display: grid;
+    gap: var(--space-4);
+    min-width: 0;
+  }
+
+  .reply-panel__move-label {
+    font-size: var(--font-size-14);
+    font-weight: var(--font-weight-medium);
+    color: var(--text);
+  }
+
+  .reply-panel__move-select {
+    width: 100%;
+    min-width: 0;
+    min-height: var(--touch-target);
+    padding: var(--space-4) var(--space-8);
+    background-color: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border-input);
+    border-radius: var(--radius-8);
+    font-family: var(--font-sans);
+    font-size: var(--font-size-14);
+  }
+
+  .reply-panel__move-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-8);
   }
 
   .reply-panel__scroll {

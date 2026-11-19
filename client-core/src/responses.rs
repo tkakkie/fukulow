@@ -85,6 +85,12 @@ impl Step<'_> {
                 if page != Page::After {
                     return;
                 }
+                // Event pages hydrate current state. Re-read from the cursor if
+                // this request could have predated an evicted Move floor.
+                if mutation_seq < c.retired_move_through {
+                    self.reconcile(id, true);
+                    return;
+                }
                 let before = c.cursor;
                 for event in result.events {
                     match event {

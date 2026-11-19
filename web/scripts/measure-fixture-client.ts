@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { components } from '../src/api-schema.d.ts'
 import type { Input, State } from '../src/protocol-types.ts'
-import { defaultDir, type ClientScenario, type Effect as FixtureEffect, type Observed, type ResolvedInput } from './realtime-fixtures.ts'
+import { defaultDir, fixtureEvents, fixtureMove, type ClientScenario, type Effect as FixtureEffect, type Observed, type ResolvedInput } from './realtime-fixtures.ts'
 
 type Message = components['schemas']['Message']
 const GENERATION = '00000000-0000-4000-8000-000000000515'
@@ -44,14 +44,14 @@ export function makeProtocolClient(onInput: (input: Input) => void, { initialSta
         case 'socket_closed': input = { type: i.type, connection: state.connection!, code: i.code as number }; break
         case 'message': input = { type: 'event', connection: state.connection!,
           event: { type: 'message', kind: (i.kind ?? 'create') as 'create', seq: typeof i.seq === 'number' ? i.seq : msg().created_seq, message: msg() } }; break
+        case 'move': input = { type: 'event', connection: state.connection!, event: fixtureMove(i.move!, channel, generation) }; break
         case 'subscribed': input = { type: 'event', connection: state.connection!, subscription: e?.id as number | undefined,
           event: { history_generation: generation, type: 'subscribed', channel_id: channel, caught_up_seq: i.caught_up_seq as number } }; break
         case 'channel_access_lost': input = { type: 'event', connection: state.connection!, event: { type: 'channel_access_lost', channel_id: channel } }; break
         case 'error_event': input = { type: 'event', connection: state.connection!, event: { type: 'error', channel_id: channel, code: i.code as string } }; break
         case 'events_result': input = { type: i.type, request: e!.id as number,
           page: { history_generation: generation, has_more: i.has_more as boolean,
-            events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[])
-              .map((ev) => ({ type: 'message', seq: ev.seq, kind: ev.kind, message: msgFromFixture(ev.message, channel) })) } }; break
+            events: fixtureEvents(i, channel, generation, msgFromFixture) } }; break
         case 'history_result': input = { type: i.type, request: e!.id as number,
           page: { history_generation: generation, as_of_seq: (i.as_of_seq as number | undefined) ?? i.messages!.at(-1)?.created_seq ?? 0,
             messages: i.messages!.map((m) => msgFromFixture(m, channel)), has_more: i.has_more as boolean } }; break

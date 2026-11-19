@@ -2,6 +2,30 @@
   "kind": "client",
   "scenarios": [
     {
+      "id": "body-free-moves-converge-after-reconnect-and-gap-fill",
+      "title": "Live, replay and gap fill consume Move positions and reject a late page below the covering watermark",
+      "covers": ["C1","C2","C3","C7"],
+      "layer": "controller",
+      "steps": [
+        {"input":{"type":"session_start"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"}},
+        {"input":{"type":"watch","channel":"A"},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"initial"}]}},
+        {"input":{"type":"history_result","respond_to":"initial","messages":[{"created_seq":1}],"has_more":false},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":1,"as":"first"}]}},
+        {"input":{"type":"subscribed","respond_to":"first","channel":"A","caught_up_seq":1}},
+        {"input":{"type":"move","channel":"A","move":{"seq":2,"root_id":"id1","source_topic_id":null,"destination_topic_id":"T","operation_id":"live"}},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"live_read"}]},"observe":{"channels":{"A":{"cursor":2,"visible":[]}}}},
+        {"input":{"type":"history_result","respond_to":"live_read","as_of_seq":2,"messages":[{"created_seq":1,"version":2,"topic":"T"}],"has_more":false},"observe":{"channels":{"A":{"cursor":2,"records":[{"created_seq":1,"version":2}]}}}},
+        {"input":{"type":"socket_closed","code":1006},"effects":{"required":[{"type":"wait","purpose":"reconnect_backoff","as":"backoff"}]}},
+        {"input":{"type":"timer_elapsed","respond_to":"backoff"},"effects":{"required":[{"type":"connect"}]}},
+        {"input":{"type":"connection_ready"},"effects":{"required":[{"type":"subscribe","channel":"A","after_seq":2,"as":"second"}]}},
+        {"input":{"type":"move","channel":"A","move":{"seq":3,"root_id":"id1","source_topic_id":"T","destination_topic_id":"U","operation_id":"replay"}},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"replay_read"}]},"observe":{"channels":{"A":{"cursor":3,"visible":[]}}}},
+        {"input":{"type":"move","channel":"A","move":{"seq":3,"root_id":"id1","source_topic_id":"T","destination_topic_id":"U","operation_id":"replay"}},"effects":{"forbidden":[{"type":"fetch_history"}]}},
+        {"input":{"type":"subscribed","respond_to":"second","channel":"A","caught_up_seq":4},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"after","seq":3,"as":"gap"}]}},
+        {"input":{"type":"events_result","respond_to":"gap","events":[{"kind":"move","move":{"seq":4,"root_id":"id1","source_topic_id":"U","destination_topic_id":"V","operation_id":"fill"}}],"has_more":false},"observe":{"channels":{"A":{"cursor":4,"visible":[]}}}},
+        {"input":{"type":"history_result","respond_to":"replay_read","as_of_seq":3,"messages":[{"created_seq":1,"version":3,"topic":"U"}],"has_more":false},"effects":{"required":[{"type":"fetch_history","channel":"A","page":"latest","as":"covering"}]},"observe":{"channels":{"A":{"cursor":4,"visible":[]}}}},
+        {"input":{"type":"history_result","respond_to":"covering","as_of_seq":4,"messages":[{"created_seq":1,"version":4,"topic":"V"}],"has_more":false},"observe":{"channels":{"A":{"cursor":4,"visible":[1],"records":[{"created_seq":1,"version":4}]}}}}
+      ]
+    },
+    {
       "id": "out-of-order-ack-and-websocket",
       "title": "PILOT. Cursor 100: the ack for 102 arrives before WebSocket 101; the cursor stays at 100 until 101 arrives, then moves to 102 without a fill",
       "covers": ["C1","C2","C3","C5"],
