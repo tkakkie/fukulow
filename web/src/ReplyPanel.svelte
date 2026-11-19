@@ -96,6 +96,7 @@
   let moveError = $state<string | null>(null)
   let moveNotice = $state<string | null>(null)
   let moveRetry = $state<(() => Promise<MoveResult>) | null>(null)
+  let moveRefreshFailed = $state(false)
   let moveGeneration = 0
 
   let retained = $state<{
@@ -116,17 +117,18 @@
   const targetRootId = $derived(
     matchedAnchor
       ? (matchedAnchor.reply_root_id ?? matchedAnchor.id)
-      : rState.rootId === anchorMessageId
+      : rState.rootId && (rState.rootId === anchorMessageId || rState.anchorId === anchorMessageId)
         ? rState.rootId
         : null,
   )
   const isCurrentAnchor = $derived(
     Boolean(rState.rootId && targetRootId && rState.rootId === targetRootId),
   )
+  const isMoveInvalidated = $derived(isCurrentAnchor && rState.moveInvalidated)
 
   $effect(() => {
     const key = currentKey
-    if (isCurrentAnchor && rState.messages.length > 0) {
+    if (isCurrentAnchor && !rState.moveInvalidated && rState.messages.length > 0) {
       retained = {
         key,
         rootId: rState.rootId,
@@ -134,10 +136,11 @@
         messages: rState.messages,
       }
     } else if (
-      retained.key !== key &&
-      !rState.unavailable &&
-      s.status !== 'unavailable' &&
-      !organizationUnavailable
+      isMoveInvalidated ||
+      (retained.key !== key &&
+        !rState.unavailable &&
+        s.status !== 'unavailable' &&
+        !organizationUnavailable)
     ) {
       retained = { key, rootId: null, topicId: null, messages: [] }
     }
@@ -157,20 +160,24 @@
       anchorMessageId,
   )
   const effectiveTopicId = $derived(
-    (isCurrentAnchor ? rState.topicId : null) ??
-      (matchedAnchor ? matchedAnchor.topic_id : null) ??
-      (retained.key === currentKey ? retained.topicId : null),
+    isMoveInvalidated
+      ? null
+      : (isCurrentAnchor ? rState.topicId : null) ??
+          (matchedAnchor ? matchedAnchor.topic_id : null) ??
+          (retained.key === currentKey ? retained.topicId : null),
   )
   const historyMessages = $derived(
-    isCurrentAnchor && rState.messages.length > 0
-      ? rState.messages
-      : retained.key === currentKey
-        ? retained.messages
-        : [],
+    isMoveInvalidated
+      ? []
+      : isCurrentAnchor && rState.messages.length > 0
+        ? rState.messages
+        : retained.key === currentKey
+          ? retained.messages
+          : [],
   )
   // The active navigation anchor is retained separately from the bounded history.
   const visibleMessages = $derived(
-    isCurrentAnchor && rState.anchor?.id === anchorMessageId && !historyMessages.some(m => m.id === anchorMessageId)
+    !isMoveInvalidated && isCurrentAnchor && rState.anchor?.id === anchorMessageId && !historyMessages.some(m => m.id === anchorMessageId)
       ? [...historyMessages, rState.anchor].sort((a, b) => a.created_seq - b.created_seq)
       : historyMessages,
   )
@@ -192,14 +199,26 @@
   const rc = $derived(channel.reply(effectiveRootId, effectiveTopicId))
   const composerState = $derived(rc.composer)
 
+  let confirmedChainTarget: { channelId: string; rootId: string; topicId: string | null } | null = null
   $effect(() => {
     if (!isTargetResolved) return
     rc.migrateDraftFrom(anchorMessageId, null)
+    if (isCurrentAnchor && !rState.moveInvalidated && rState.rootId) {
+      if (
+        confirmedChainTarget &&
+        confirmedChainTarget.channelId === channelId &&
+        confirmedChainTarget.rootId === rState.rootId &&
+        confirmedChainTarget.topicId !== rState.topicId
+      ) {
+        rc.migrateDraftFrom(rState.rootId, confirmedChainTarget.topicId)
+      }
+      confirmedChainTarget = { channelId, rootId: rState.rootId, topicId: rState.topicId }
+    }
   })
 
   const canSendReply = $derived(!targetUnavailable && isCurrentAnchor)
   const canMoveChain = $derived(
-    !targetUnavailable && isCurrentAnchor && rState.chainVersion !== undefined,
+    !targetUnavailable && isCurrentAnchor && (rState.chainVersion !== undefined || moveRetry !== null),
   )
   const currentTopicName = $derived(
     effectiveTopicId
@@ -223,6 +242,7 @@
       moveError = null
       moveNotice = null
       moveRetry = null
+      moveRefreshFailed = false
     }
   })
 
@@ -255,6 +275,7 @@
     moveError = null
     moveNotice = null
     moveRetry = null
+    moveRefreshFailed = false
     if (orderedTopics.length > 0) {
       moveMode = 'existing'
       const candidate = orderedTopics.find((t) => t.topicId !== effectiveTopicId) ?? orderedTopics[0]
@@ -272,6 +293,7 @@
     moveDialogOpen = false
     moveError = null
     moveRetry = null
+    moveRefreshFailed = false
   }
 
   function formatMoveFailure(result: Exclude<MoveResult, { kind: 'moved' }>): string {
@@ -279,7 +301,9 @@
       case 'unknown':
         return '移動を確認できませんでした。通信状況を確認して、もう一度お試しください。'
       case 'conflict':
-        return '返信のつながりが更新されました。最新の状態を読み込みましたので、もう一度お試しください。'
+        return result.refreshed
+          ? '返信のつながりが更新されました。最新の状態を読み込みましたので、もう一度お試しください。'
+          : '返信のつながりが更新されましたが、最新の状態を読み込めませんでした。通信状況を確認して、再読み込みしてください。'
       case 'too_large':
         return 'メッセージが1,000件を超える返信のつながりは移動できません。'
       case 'denied':
@@ -304,17 +328,20 @@
     const gen = ++moveGeneration
     moveBusy = true
     moveError = null
+    moveRefreshFailed = false
     try {
       const result = await action()
       if (gen !== moveGeneration) return
       if (result.kind === 'moved') {
         moveRetry = null
+        moveRefreshFailed = false
         moveDialogOpen = false
         moveNotice = 'トピックに移動しました。'
         onannounce?.('トピックに移動しました。')
         return
       }
       moveRetry = result.kind === 'unknown' ? result.retry : null
+      moveRefreshFailed = result.kind === 'conflict' && !result.refreshed
       moveError = formatMoveFailure(result)
     } catch (err) {
       console.error(err)
@@ -327,6 +354,10 @@
 
   async function handleSubmitMove() {
     if (moveSubmitDisabled) return
+    if (moveRetry) {
+      await handleRetryMove()
+      return
+    }
     let destination: MoveDestination
     if (moveMode === 'existing') {
       if (!moveTopicId) {
@@ -342,7 +373,6 @@
       }
       destination = { topicName: moveTopicName }
     }
-    moveRetry = null
     await runMoveAttempt(() =>
       moveChain ? moveChain(channelId, anchorMessageId, destination) : replies.move(anchorMessageId, destination),
     )
@@ -352,6 +382,13 @@
     const retry = moveRetry
     if (!retry || moveBusy) return
     await runMoveAttempt(() => retry())
+  }
+
+  function handleReloadChainForMove() {
+    if (moveBusy) return
+    moveError = null
+    moveRefreshFailed = false
+    void replies.loadMore().catch(console.error)
   }
 
   const scrollController = createTimelineScrollController()
@@ -370,10 +407,10 @@
         scrollView.loadingTimedOut),
   )
   const isLoading = $derived(
-    !targetUnavailable && !hasError && (!isCurrentAnchor || rState.loading),
+    !targetUnavailable && !hasError && (!isCurrentAnchor || rState.loading || isMoveInvalidated),
   )
   const chainInitialLoading = $derived(
-    !targetUnavailable && !hasError && (!isCurrentAnchor || (rState.loading && visibleMessages.length <= 1)),
+    !targetUnavailable && !hasError && (!isCurrentAnchor || isMoveInvalidated || (rState.loading && visibleMessages.length <= 1)),
   )
   const effectiveScrollStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
     targetUnavailable
@@ -739,6 +776,7 @@
                 moveMode = 'existing'
                 moveError = null
                 moveRetry = null
+                moveRefreshFailed = false
                 if (!moveTopicId && orderedTopics.length > 0) {
                   moveTopicId = orderedTopics[0].topicId
                 }
@@ -757,6 +795,7 @@
               moveMode = 'new'
               moveError = null
               moveRetry = null
+              moveRefreshFailed = false
             }}
           />
           <span>新しいトピック</span>
@@ -775,6 +814,7 @@
               moveTopicId = e.currentTarget.value
               moveError = null
               moveRetry = null
+              moveRefreshFailed = false
             }}
           >
             {#each orderedTopics as t (t.topicId)}
@@ -792,6 +832,7 @@
           oninput={() => {
             moveError = null
             moveRetry = null
+            moveRefreshFailed = false
           }}
         />
       {/if}
@@ -801,8 +842,14 @@
           tone="danger"
           role="alert"
           message={moveError}
-          actionLabel={moveRetry && !moveBusy ? '再試行' : undefined}
-          onaction={moveRetry && !moveBusy ? () => void handleRetryMove() : undefined}
+          actionLabel={!moveBusy ? (moveRetry ? '再試行' : moveRefreshFailed ? '再読み込み' : undefined) : undefined}
+          onaction={!moveBusy
+            ? moveRetry
+              ? () => void handleRetryMove()
+              : moveRefreshFailed
+                ? handleReloadChainForMove
+                : undefined
+            : undefined}
         />
       {/if}
 

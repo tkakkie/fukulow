@@ -7,7 +7,7 @@ import { replyClient, reply, root } from './reply-test-helpers'
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { lookupAuthors, Member, ReadPosition, ReplyChainPage, Result, TopicSummary } from './api'
+import type { lookupAuthors, Member, MoveChainResponse, ReadPosition, ReplyChainPage, Result, TopicSummary } from './api'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import { channelMembersAdapter } from './channel-members.svelte'
@@ -30,7 +30,7 @@ import { membersAdapter } from './members.svelte'
 import MemberList from './MemberList.svelte'
 import Workspace from './Workspace.svelte'
 import { windowClient } from './message-window-test-helpers'
-import { replyPage, msg, summary } from './topic-test-helpers'
+import { deferred, replyPage, msg, summary } from './topic-test-helpers'
 import CreateChannelForm from './CreateChannelForm.svelte'
 
 type ListenerEntry = {
@@ -7597,6 +7597,518 @@ it('ReplyPanel トピックに移動 disables submit until chainVersion is ready
 
     expect(moveChain).toHaveBeenLastCalledWith('A', rootMsg.id, { topicName: '新規移動トピック' })
     expect(host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await unmount(instance)
+    rawSession.close()
+  }
+})
+
+it('ReplyPanel reuses the saved Move POST on form resubmit after a timeout', async () => {
+  vi.useFakeTimers()
+  const firstPost = deferred<Result<MoveChainResponse>>()
+  const moveChainApi = vi.fn().mockReturnValueOnce(firstPost.promise)
+  const net = fakeNetwork()
+  const baseOptions = net.options('me')
+  const delayedChainReads: Array<Promise<Result<ReplyChainPage>>> = []
+  let opSeq = 0
+  const rawSession = createSession({
+    selfId: 'me',
+    organizationId: 'org-1',
+    onEnded: () => {},
+    moveChainApi,
+    ...baseOptions,
+    repliesApi: {
+      listReplyChain: (channel, anchor, query) =>
+        delayedChainReads.shift() ?? baseOptions.repliesApi!.listReplyChain(channel, anchor, query),
+    },
+    sync: {
+      ...baseOptions.sync,
+      newId: () => `op-${++opSeq}`,
+      requestTimeoutMs: 20,
+    },
+  })
+  net.socket.onReady()
+  const rootMsg = { ...record(1, 'A'), id: 'id1', body: 'ルート', version: 10 }
+  net.timelines.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    has_more: false,
+    items: [{ kind: 'message', message: rootMsg }],
+  })
+  net.topicLists.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    topics: [],
+    has_more: false,
+  })
+  net.replyChains[`A:${rootMsg.id}`] = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    root_id: rootMsg.id,
+    chain_version: 10,
+    messages: [rootMsg],
+    has_more: false,
+  })
+  net.lists[0].resolve(ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    channels: [channel('A', 'general')],
+  }))
+  await settle()
+  net.subscribed('A', 10)
+  await settle()
+
+  await rawSession.topics.loadList('A')
+  await rawSession.replies.open('A', rootMsg)
+
+  const host = testDoc.createElement('div')
+  testDoc.body.appendChild(host)
+  const channelAdapter = syncAdapter(rawSession.sync).channel('A')
+  const replies = repliesAdapter(rawSession.replies, 'A', rawSession.replyCounts, rawSession.moveChain)
+  const topics = topicsAdapter(rawSession.topics, 'A')
+
+  const receipt: MoveChainResponse = {
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    move_seq: 26,
+    operation_id: 'op-1',
+    root_id: rootMsg.id,
+    destination_topic_id: 'topic-release',
+    chain_version: 26,
+    operation_version: 26,
+    topic_id: 'topic-release',
+  }
+
+  const instance = mount(ReplyPanel, {
+    target: host as unknown as Element,
+    props: {
+      channel: channelAdapter,
+      replies,
+      topics,
+      moveChain: rawSession.moveChain,
+      channelId: 'A',
+      anchorMessageId: rootMsg.id,
+      resolvedAnchor: rootMsg,
+    },
+  })
+
+  try {
+    await settle()
+    flushSync()
+
+    buttonsByText(host, 'トピックに移動')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    const dialog = host.querySelector('[role="dialog"]')!
+    const nameInput = dialog.querySelector('input[name="move_topic_name"]')!
+    nameInput.value = 'リリース'
+    nameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    // First submit times out -> unknown outcome
+    buttonsByText(dialog, 'トピックに移動')[0].click()
+    await vi.advanceTimersByTimeAsync(25)
+    await settle()
+    flushSync()
+
+    expect(moveChainApi).toHaveBeenCalledTimes(1)
+    expect(dialog.querySelector('[role="alert"]')?.textContent).toBe(
+      '移動を確認できませんでした。通信状況を確認して、もう一度お試しください。',
+    )
+
+    // Even if the chain is temporarily invalidated (chainVersion undefined), submit stays enabled to reuse the saved POST
+    const delayedRead = deferred<Result<ReplyChainPage>>()
+    delayedChainReads.push(delayedRead.promise)
+    net.event({
+      type: 'message',
+      kind: 'move',
+      seq: 20,
+      version: 20,
+      channel_id: 'A',
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      operation_id: '00000000-0000-4000-8000-000000000777',
+      root_id: rootMsg.id,
+      source_topic_id: null,
+      destination_topic_id: 'topic-other',
+    })
+    await settle()
+    flushSync()
+    expect(rawSession.replies.get('A').chainVersion).toBeUndefined()
+    expect(buttonsByText(dialog, 'トピックに移動')[0].disabled).toBe(false)
+
+    // Resubmit form (button or Enter) reuses the saved POST with identical operation_id and expected_version
+    moveChainApi.mockResolvedValueOnce(ok(receipt))
+    buttonsByText(dialog, 'トピックに移動')[0].click()
+    await settle()
+    flushSync()
+
+    expect(moveChainApi).toHaveBeenCalledTimes(2)
+    expect(moveChainApi.mock.calls[0][2]).toEqual({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      operation_id: 'op-1',
+      expected_version: 10,
+      topic_name: 'リリース',
+    })
+    expect(moveChainApi.mock.calls[1][2]).toEqual(moveChainApi.mock.calls[0][2])
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await unmount(instance)
+    rawSession.close()
+  }
+})
+
+it('ReplyPanel hides retained rows and the source Topic label and shows loading while moveInvalidated is set', async () => {
+  const net = fakeNetwork()
+  const baseOptions = net.options('me')
+  const delayedChainReads: Array<Promise<Result<ReplyChainPage>>> = []
+  const rawSession = createSession({
+    selfId: 'me',
+    organizationId: 'org-1',
+    onEnded: () => {},
+    ...baseOptions,
+    repliesApi: {
+      listReplyChain: (channel, anchor, query) =>
+        delayedChainReads.shift() ?? baseOptions.repliesApi!.listReplyChain(channel, anchor, query),
+    },
+  })
+  net.socket.onReady()
+  const topicA = summary('topic-a', 10, 2)
+  const topicB = summary('topic-b', 11, 2)
+  const rootMsg = { ...record(1, 'A'), id: 'id1', topic_id: 'topic-a', body: 'トピックAのルート', version: 10 }
+  const replyMsg = { ...record(2, 'A'), id: 'id2', reply_to: 'id1', reply_root_id: 'id1', topic_id: 'topic-a', body: 'トピックAの返信', version: 10 }
+  net.timelines.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    has_more: false,
+    items: [{ kind: 'topic', topic: topicA }],
+  })
+  net.topicLists.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    topics: [topicA, topicB],
+    has_more: false,
+  })
+  net.replyChains[`A:${replyMsg.id}`] = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    root_id: rootMsg.id,
+    chain_version: 10,
+    messages: [rootMsg, replyMsg],
+    has_more: false,
+  })
+  net.lists[0].resolve(ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    channels: [channel('A', 'general')],
+  }))
+  await settle()
+  net.subscribed('A', 10)
+  await settle()
+
+  await rawSession.topics.loadList('A')
+  await rawSession.replies.open('A', replyMsg)
+
+  const host = testDoc.createElement('div')
+  testDoc.body.appendChild(host)
+  const channelAdapter = syncAdapter(rawSession.sync).channel('A')
+  const replies = repliesAdapter(rawSession.replies, 'A', rawSession.replyCounts, rawSession.moveChain)
+  const topics = topicsAdapter(rawSession.topics, 'A')
+
+  const instance = mount(ReplyPanel, {
+    target: host as unknown as Element,
+    props: {
+      channel: channelAdapter,
+      replies,
+      topics,
+      channelId: 'A',
+      anchorMessageId: replyMsg.id,
+      resolvedAnchor: replyMsg,
+    },
+  })
+
+  try {
+    await settle()
+    flushSync()
+
+    expect(host.textContent).toContain('トピック: Topic topic-a')
+    expect(host.textContent).toContain('トピックAのルート')
+    expect(host.textContent).toContain('トピックAの返信')
+
+    // Delay the covering chain read on Move
+    const delayedChain = deferred<Result<ReplyChainPage>>()
+    delayedChainReads.push(delayedChain.promise)
+    net.topicLists.A = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 11,
+      topics: [topicA, topicB],
+      has_more: false,
+    })
+    net.timelines.A = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 11,
+      has_more: false,
+      items: [{ kind: 'topic', topic: topicB }],
+    })
+    net.event({
+      type: 'message',
+      kind: 'move',
+      seq: 11,
+      version: 11,
+      channel_id: 'A',
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      operation_id: '00000000-0000-4000-8000-000000000999',
+      root_id: rootMsg.id,
+      source_topic_id: 'topic-a',
+      destination_topic_id: 'topic-b',
+    })
+    await settle()
+    flushSync()
+
+    expect(replies.state.moveInvalidated).toBe(true)
+    expect(host.textContent).not.toContain('トピック: Topic topic-a')
+    expect(host.textContent).not.toContain('トピックAのルート')
+    expect(host.textContent).not.toContain('トピックAの返信')
+    expect(host.querySelector('[aria-busy="true"]')).not.toBeNull()
+
+    // Resolve covering chain read -> renders Topic B and moved rows
+    const movedRoot = { ...rootMsg, topic_id: 'topic-b', version: 11 }
+    const movedReply = { ...replyMsg, topic_id: 'topic-b', version: 11 }
+    delayedChain.resolve(ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 11,
+      root_id: rootMsg.id,
+      chain_version: 11,
+      messages: [movedRoot, movedReply],
+      has_more: false,
+    }))
+    await settle()
+    flushSync()
+
+    expect(replies.state.moveInvalidated).toBe(false)
+    expect(host.textContent).toContain('トピック: Topic topic-b')
+    expect(host.textContent).toContain('トピックAのルート')
+    expect(host.textContent).toContain('トピックAの返信')
+  } finally {
+    await unmount(instance)
+    rawSession.close()
+  }
+})
+
+it('ReplyPanel migrates the Composer draft when an open chain with a descendant anchor moves from Topic A to Topic B', async () => {
+  const net = fakeNetwork()
+  const rawSession = createSession({
+    selfId: 'me',
+    organizationId: 'org-1',
+    onEnded: () => {},
+    ...net.options('me'),
+  })
+  net.socket.onReady()
+  const topicA = summary('topic-a', 10, 2)
+  const topicB = summary('topic-b', 11, 2)
+  const rootMsg = { ...record(1, 'A'), id: 'id1', topic_id: 'topic-a', body: 'ルート', version: 10 }
+  const descAnchor = { ...record(2, 'A'), id: 'id2', reply_to: 'id1', reply_root_id: 'id1', topic_id: 'topic-a', body: '子孫アンカー', version: 10 }
+  net.timelines.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    has_more: false,
+    items: [{ kind: 'topic', topic: topicA }],
+  })
+  net.topicLists.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    topics: [topicA, topicB],
+    has_more: false,
+  })
+  net.replyChains[`A:${descAnchor.id}`] = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 10,
+    root_id: rootMsg.id,
+    chain_version: 10,
+    messages: [rootMsg, descAnchor],
+    has_more: false,
+  })
+  net.lists[0].resolve(ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    channels: [channel('A', 'general')],
+  }))
+  await settle()
+  net.subscribed('A', 10)
+  await settle()
+
+  await rawSession.topics.loadList('A')
+  await rawSession.replies.open('A', descAnchor)
+
+  const host = testDoc.createElement('div')
+  testDoc.body.appendChild(host)
+  const channelAdapter = syncAdapter(rawSession.sync).channel('A')
+  const replies = repliesAdapter(rawSession.replies, 'A', rawSession.replyCounts, rawSession.moveChain)
+  const topics = topicsAdapter(rawSession.topics, 'A')
+
+  const instance = mount(ReplyPanel, {
+    target: host as unknown as Element,
+    props: {
+      channel: channelAdapter,
+      replies,
+      topics,
+      channelId: 'A',
+      anchorMessageId: descAnchor.id,
+      resolvedAnchor: descAnchor,
+    },
+  })
+
+  try {
+    await settle()
+    flushSync()
+
+    const textarea = host.querySelector('textarea')!
+    textarea.value = '移動前の下書きテキスト'
+    textarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    expect(channelAdapter.reply(rootMsg.id, 'topic-a').composer.draft).toBe('移動前の下書きテキスト')
+
+    // Move the chain from topic-a to topic-b
+    const movedRoot = { ...rootMsg, topic_id: 'topic-b', version: 11 }
+    const movedDesc = { ...descAnchor, topic_id: 'topic-b', version: 11 }
+    net.replyChains[`A:${descAnchor.id}`] = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 11,
+      root_id: rootMsg.id,
+      chain_version: 11,
+      messages: [movedRoot, movedDesc],
+      has_more: false,
+    })
+    net.event({
+      type: 'message',
+      kind: 'move',
+      seq: 11,
+      version: 11,
+      channel_id: 'A',
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      operation_id: '00000000-0000-4000-8000-000000000998',
+      root_id: rootMsg.id,
+      source_topic_id: 'topic-a',
+      destination_topic_id: 'topic-b',
+    })
+    await settle()
+    flushSync()
+
+    expect(replies.state.topicId).toBe('topic-b')
+    expect(host.querySelector('textarea')?.value).toBe('移動前の下書きテキスト')
+    expect(channelAdapter.reply(rootMsg.id, 'topic-b').composer.draft).toBe('移動前の下書きテキスト')
+    expect(channelAdapter.reply(rootMsg.id, 'topic-a').composer.draft).toBe('')
+  } finally {
+    await unmount(instance)
+    rawSession.close()
+  }
+})
+
+it('ReplyPanel renders a refresh failure message and keyboard-reachable 再読み込み action on version_conflict with failed chain GET', async () => {
+  const net = fakeNetwork()
+  const moveChainApi = vi.fn().mockResolvedValueOnce({
+    ok: false,
+    kind: 'http',
+    status: 409,
+    error: 'version_conflict',
+  })
+  const rawSession = createSession({
+    selfId: 'me',
+    organizationId: 'org-1',
+    onEnded: () => {},
+    moveChainApi,
+    ...net.options('me'),
+  })
+  net.socket.onReady()
+  const topicT = summary('topic-existing', 5, 2)
+  const rootMsg = { ...record(1, 'A'), id: 'id1', body: 'ルート', version: 5 }
+  net.timelines.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 5,
+    has_more: false,
+    items: [{ kind: 'message', message: rootMsg }, { kind: 'topic', topic: topicT }],
+  })
+  net.topicLists.A = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 5,
+    topics: [topicT],
+    has_more: false,
+  })
+  net.replyChains[`A:${rootMsg.id}`] = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 5,
+    root_id: rootMsg.id,
+    chain_version: 5,
+    messages: [rootMsg],
+    has_more: false,
+  })
+  net.lists[0].resolve(ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    channels: [channel('A', 'general')],
+  }))
+  await settle()
+  net.subscribed('A', 5)
+  await settle()
+
+  await rawSession.topics.loadList('A')
+  await rawSession.replies.open('A', rootMsg)
+
+  const host = testDoc.createElement('div')
+  testDoc.body.appendChild(host)
+  const channelAdapter = syncAdapter(rawSession.sync).channel('A')
+  const replies = repliesAdapter(rawSession.replies, 'A', rawSession.replyCounts, rawSession.moveChain)
+  const topics = topicsAdapter(rawSession.topics, 'A')
+  const loadMoreSpy = vi.spyOn(replies, 'loadMore')
+
+  const instance = mount(ReplyPanel, {
+    target: host as unknown as Element,
+    props: {
+      channel: channelAdapter,
+      replies,
+      topics,
+      channelId: 'A',
+      anchorMessageId: rootMsg.id,
+      resolvedAnchor: rootMsg,
+    },
+  })
+
+  try {
+    await settle()
+    flushSync()
+
+    buttonsByText(host, 'トピックに移動')[0].click()
+    flushSync()
+    await settle()
+    flushSync()
+
+    const dialog = host.querySelector('[role="dialog"]')!
+    // Make the conflict refresh GET fail
+    net.replyChains[`A:${rootMsg.id}`] = { ok: false, kind: 'network' }
+    buttonsByText(dialog, 'トピックに移動')[0].click()
+    await settle()
+    flushSync()
+
+    const alertText = dialog.querySelector('[role="alert"]')?.textContent ?? ''
+    expect(alertText).not.toContain('最新の状態を読み込みました')
+    expect(alertText).toContain('最新の状態を読み込めませんでした')
+
+    const reloadBtn = buttonsByText(dialog, '再読み込み')[0]
+    expect(reloadBtn).toBeDefined()
+    expect(reloadBtn.tabIndex).toBe(0)
+
+    // Clicking 再読み込み calls replies.loadMore() and restores the baseline
+    net.replyChains[`A:${rootMsg.id}`] = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 12,
+      root_id: rootMsg.id,
+      chain_version: 12,
+      messages: [rootMsg],
+      has_more: false,
+    })
+    reloadBtn.click()
+    await settle()
+    flushSync()
+
+    expect(loadMoreSpy).toHaveBeenCalledTimes(1)
+    expect(replies.state.chainVersion).toBe(12)
+    expect(buttonsByText(dialog, 'トピックに移動')[0].disabled).toBe(false)
   } finally {
     await unmount(instance)
     rawSession.close()
