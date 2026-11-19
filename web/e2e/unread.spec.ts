@@ -425,12 +425,30 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
     await page.addInitScript(() => {
       Math.random = () => 0.99
     })
-    // Wait for the startup activity_ready Channel-list refresh before jumping; otherwise its late
-    // unread.activitySnapshot() -> notify() could re-run Timeline's visibility/entry effects after mount.
+    // Track startup and post-jump refresh requests for this Organization/Channel so no late
+    // activitySnapshot() or Topics notify() can re-run Timeline's scroll-sync/visibility effects
+    // after the jump and advance read_seq without IntersectionObserver.
     let activityReadySeen = false
-    const postReadyChannelRequests = new WeakSet<import('@playwright/test').Request>()
+    let timelineFinished = false
+    let postReadyMeCompleted = 0
+    let postBootstrapChannelsCompleted = 0
+    let recordingPostJumpRequests = false
+    const postJumpRefreshRequests: string[] = []
+    const inFlightChannels = new Set<import('@playwright/test').Request>()
+    const inFlightTopics = new Set<import('@playwright/test').Request>()
+    const postBootstrapChannelRequests = new WeakSet<import('@playwright/test').Request>()
+    const postReadyMeRequests = new WeakSet<import('@playwright/test').Request>()
+    const okResponses = new WeakSet<import('@playwright/test').Request>()
+    const isGetPath = (req: import('@playwright/test').Request, pathname: string) =>
+      req.method() === 'GET' && new URL(req.url()).pathname === pathname
     const isChannelsListRequest = (req: import('@playwright/test').Request) =>
-      req.method() === 'GET' && new URL(req.url()).pathname === `/api/v1/orgs/${orgId}/channels`
+      isGetPath(req, `/api/v1/orgs/${orgId}/channels`)
+    const isTopicsListRequest = (req: import('@playwright/test').Request) =>
+      isGetPath(req, `/api/v1/orgs/${orgId}/channels/${channel.id}/topics`)
+    const isTimelineRequest = (req: import('@playwright/test').Request) =>
+      isGetPath(req, `/api/v1/orgs/${orgId}/channels/${channel.id}/timeline`)
+    const isOrgMeRequest = (req: import('@playwright/test').Request) =>
+      isGetPath(req, `/api/v1/orgs/${orgId}/me`)
     page.on('websocket', (ws) => {
       ws.on('framereceived', (frame) => {
         if (typeof frame.payload === 'string' && frame.payload.includes('"activity_ready"')) {
@@ -439,17 +457,42 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
       })
     })
     page.on('request', (req) => {
-      if (activityReadySeen && isChannelsListRequest(req)) {
-        postReadyChannelRequests.add(req)
+      if (isChannelsListRequest(req)) {
+        inFlightChannels.add(req)
+        if (activityReadySeen && timelineFinished) {
+          postBootstrapChannelRequests.add(req)
+        }
+        if (recordingPostJumpRequests) {
+          postJumpRefreshRequests.push(`GET ${new URL(req.url()).pathname}`)
+        }
+      } else if (isTopicsListRequest(req)) {
+        inFlightTopics.add(req)
+        if (recordingPostJumpRequests) {
+          postJumpRefreshRequests.push(`GET ${new URL(req.url()).pathname}`)
+        }
+      } else if (activityReadySeen && isOrgMeRequest(req)) {
+        postReadyMeRequests.add(req)
       }
     })
-    const startupChannelsRefresh = page.waitForResponse(
-      (res) => postReadyChannelRequests.has(res.request()) && res.ok(),
-    )
+    page.on('response', (res) => {
+      if (res.ok()) {
+        okResponses.add(res.request())
+      }
+    })
+    page.on('requestfinished', (req) => {
+      inFlightChannels.delete(req)
+      inFlightTopics.delete(req)
+      if (!okResponses.has(req)) return
+      if (isTimelineRequest(req)) timelineFinished = true
+      if (postBootstrapChannelRequests.has(req)) postBootstrapChannelsCompleted++
+      if (postReadyMeRequests.has(req)) postReadyMeCompleted++
+    })
+    page.on('requestfailed', (req) => {
+      inFlightChannels.delete(req)
+      inFlightTopics.delete(req)
+    })
     await page.goto(`/o/${orgId}/c/${channel.id}`)
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
-    const startupRefreshResponse = await startupChannelsRefresh
-    await startupRefreshResponse.finished()
 
     const main = page.locator('#main-content')
     const scroll = main.locator('.timeline-scroll')
@@ -487,6 +530,37 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
     const firstTarget = targetUnread[0]
     await expect(main.locator(`[data-message-id="${firstTarget.id}"]`)).toHaveCount(0)
 
+    // Wait until startup activity_ready and Channel bootstrap refreshes have completely settled:
+    // - activity_ready invalidates capabilities (/me), channels, and main:<channel> (/topics, if
+    //   holdMain() ran before activity_ready) in the same 200 ms batch. Once the post-activity_ready
+    //   /me GET finishes, any main:<channel> /topics GET has already started, so inFlightTopics === 0
+    //   guarantees it has finished (without hanging when holdMain() ran after activity_ready).
+    // - Channel bootstrap (cursor null -> non-null after /timeline finishes, unread.ts) and
+    //   activity_ready are the only startup triggers for /channels. Waiting for a /channels GET that
+    //   started after both activity_ready and /timeline finished to complete (with inFlightChannels === 0)
+    //   guarantees no queued follow-up refresh (activity.ts schedule(200)) remains pending.
+    await expect
+      .poll(() => ({
+        activityReadySeen,
+        timelineFinished,
+        postReadyMeCompleted: postReadyMeCompleted >= 1,
+        postBootstrapChannelsCompleted: postBootstrapChannelsCompleted >= 1,
+        inFlightChannels: inFlightChannels.size,
+        inFlightTopics: inFlightTopics.size,
+      }))
+      .toEqual({
+        activityReadySeen: true,
+        timelineFinished: true,
+        postReadyMeCompleted: true,
+        postBootstrapChannelsCompleted: true,
+        inFlightChannels: 0,
+        inFlightTopics: 0,
+      })
+    // Flush any renderer microtasks/effects queued by the just-finished startup responses before jumping.
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+    )
+
     // Record whether firstTarget is in the DOM during every native scroll event from the jump
     // through read advancement. Listen in capture phase on document (filtering to el) so the
     // probe runs before target-phase listeners (handleScroll and row-window's refresh, whose
@@ -507,6 +581,7 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
 
     // Native single jump with no synthetic scroll event. Rows above firstTarget already have cached heights,
     // so ResizeObserver's layout(saved) keeps offsets[index] and scrollTop unchanged and emits no extra scroll event.
+    recordingPostJumpRequests = true
     await scroll.evaluate((el, top) => {
       el.scrollTo({ top, behavior: 'instant' })
     }, targetTop)
@@ -517,6 +592,7 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
       const data = (await response.json()) as components['schemas']['ChannelList']
       return data.channels.find((c) => c.id === channel.id)?.read_seq
     }).toBeGreaterThanOrEqual(firstTarget.created_seq)
+    recordingPostJumpRequests = false
 
     const targetPresentPerScroll = await scroll.evaluate((el) => {
       const key = Symbol.for('fukulow.e2e.scrollProbe')
@@ -528,6 +604,7 @@ test('read reporting advances over rows mounted after scroll stops via Intersect
     })
     expect(targetPresentPerScroll.length).toBeGreaterThanOrEqual(1)
     expect(targetPresentPerScroll.every((present) => !present)).toBe(true)
+    expect(postJumpRefreshRequests).toEqual([])
   } finally {
     await bobContext.close()
   }
