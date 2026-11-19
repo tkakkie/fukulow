@@ -436,6 +436,8 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
     const worstCaseMarkers = pattern.repeat(Math.ceil(4000 / pattern.length)).slice(0, 4000)
     const worstCaseSchemeRuns = '!h'.repeat(2000)
     const worstCaseTrailingParens = 'http://x' + ')'.repeat(3992)
+    // Many failed candidates inside one printable run (round-2 review of #634)
+    const failedCandidateRuns = ['http://)', 'http://.', 'http://@', 'mailto:@'].map(unit => unit.repeat(500))
 
     expect(worstCaseMarkers.length).toBe(4000)
     expect(worstCaseSchemeRuns.length).toBe(4000)
@@ -446,7 +448,7 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       { type: 'text', text: ')'.repeat(3992) },
     ])
 
-    for (const sample of [worstCaseMarkers, worstCaseSchemeRuns, worstCaseTrailingParens]) {
+    for (const sample of [worstCaseMarkers, worstCaseSchemeRuns, worstCaseTrailingParens, ...failedCandidateRuns]) {
       const start = performance.now()
       for (let i = 0; i < 20; i++) {
         clearMessageFormatCache()
@@ -458,6 +460,18 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       expect(elapsedMs).toBeLessThan(50)
     }
   })
+  it('rejects every failed candidate in a shared run and still links a later valid one', () => {
+    for (const unit of ['http://)', 'http://.', 'http://@', 'mailto:@']) {
+      expect(firstLine(tokenizeMessageBody(unit.repeat(50)))).toEqual([{ type: 'text', text: unit.repeat(50) }])
+    }
+    const body = 'http://)http://@(https://ok.example/a(b))).'
+    expect(firstLine(tokenizeMessageBody(body))).toEqual([
+      { type: 'text', text: 'http://)http://@(' },
+      { type: 'link', href: 'https://ok.example/a(b)', text: 'https://ok.example/a(b)' },
+      { type: 'text', text: ')).' },
+    ])
+  })
+
   it('keeps rejected and pending Mention tokens as unparsed atoms that end URLs and hide markers', () => {
     const rejected = `@{member:${ID_REJECTED}}`
     const mentions = [{ member_id: ID_1, name: 'Alice' }]
