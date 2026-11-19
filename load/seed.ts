@@ -1,7 +1,7 @@
 import { check, fail } from 'k6';
 import { randomBytes } from 'k6/crypto';
 import http, { type Params, type Response } from 'k6/http';
-import type { AcceptInviteRequest, Channel, CreateChannelRequest, CreateInviteRequest, InviteResponse, NativeSessionResponse, SetupRequest, SignInRequest } from '../web/src/api-schema.d.ts';
+import type { AcceptInviteRequest, Channel, CreateChannelRequest, CreateInviteRequest, InviteResponse, NativeSessionResponse, SendMessageRequest, SetupRequest, SignInRequest } from '../web/src/api-schema.d.ts';
 import { positiveInteger } from './delivery.ts';
 import { revokeSessions } from './sessions.ts';
 import { legacyOrganization, organizationPath, signInPath } from './compat.ts';
@@ -16,6 +16,20 @@ type SeedConfig = { channels: number; subscribers: number; socketsPerSession: nu
 export function params(operation: string, token?: string): Params {
   return { timeout: `${requestTimeout}s`, redirects: 0, tags: { name: operation, operation },
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) } };
+}
+
+export function publish(base: string, organization: string, channel: string, token: string, member: number, body: SendMessageRequest, lane: string) {
+  const ip = member % 10000;
+  return http.post(`${base}/api/v1/orgs/${organization}/channels/${channel}/messages`, JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'X-Load-Client-IP': `10.${(ip >>> 16) & 255}.${(ip >>> 8) & 255}.${ip & 255}` },
+    timeout: '10s', redirects: 0, tags: { name: lane },
+  });
+}
+
+export function httpOutcome(r: Response, expected?: number) {
+  return r.error_code === 1050 ? 'clientTimeouts'
+    : (expected === undefined ? r.status >= 200 && r.status < 300 : r.status === expected) ? 'accepted'
+    : r.status === 429 ? 'rejected429' : r.status === 503 ? 'rejected503' : r.status === 0 ? 'transportErrors' : 'otherErrors';
 }
 
 let transportRecorded = false;
@@ -57,19 +71,22 @@ export function seed(config: SeedConfig): Setup {
     requireStatus(http.post(`${baseUrl}/api/v1/setup`, JSON.stringify(body), params('setup')), 201, 'setup');
   }
   const body: SignInRequest = { email, password };
-  const response = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
-  requireStatus(response, 200, 'sign_in');
-  const { token, identity } = response.json() as NativeSessionResponse;
-  const tokens = [token];
-  const layout = sessionLayout(channels * subscribers, socketsPerSession, socketsPerAccount, publishMembers);
+  const tokens: string[] = [];
   try {
+    const response = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
+    const signedIn = response.status === 200 ? response.json() as NativeSessionResponse : undefined;
+    if (signedIn) tokens.push(signedIn.token);
+    requireStatus(response, 200, 'sign_in');
+    const { token, identity } = signedIn!;
+    const layout = sessionLayout(channels * subscribers, socketsPerSession, socketsPerAccount, publishMembers);
     // Each multi-Member run adds Members; use a fresh Organization (load/measurements-archive.md, #604).
     const organizationId = legacy ? legacyOrganization(identity) : (__ENV.LOAD_ORGANIZATION_ID || identity.organizations[0]?.organization_id);
     if (!organizationId || (!legacy && !identity.organizations.some((organization) => organization.organization_id === organizationId))) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
     for (let i = 1; i < layout.ownerSessions; i++) {
       const session = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
+      const signedIn = session.status === 200 ? session.json() as NativeSessionResponse : undefined;
+      if (signedIn) tokens.push(signedIn.token);
       requireStatus(session, 200, 'sign_in');
-      tokens.push((session.json() as NativeSessionResponse).token);
     }
     if (layout.accounts > 1) {
       const run = uuid().slice(0, 8);

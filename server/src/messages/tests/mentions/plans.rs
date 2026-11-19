@@ -1,4 +1,122 @@
 use super::*;
+use crate::messages::unread::LIST_COUNTS_SQL;
+
+fn mention_scan_loops(node: &Value, loops: &mut Vec<u64>) {
+    if node["Relation Name"] == "message_mentions" {
+        loops.push(node["Actual Loops"].as_u64().unwrap());
+    }
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        mention_scan_loops(child, loops);
+    }
+}
+
+#[fukulow_test::test]
+async fn channel_list_mention_scans_are_bounded_by_channel_count(pool: PgPool) {
+    let org = organization(&pool).await;
+    let sender = Uuid::new_v4();
+    member(&pool, org, sender).await;
+    let mut channels = Vec::new();
+    for _ in 0..20 {
+        let channel = Uuid::new_v4();
+        super::super::channel(&pool, org, channel, sender, false).await;
+        channels.push(channel);
+    }
+    let reader = Uuid::new_v4();
+    member(&pool, org, reader).await;
+    sqlx::query(
+        "INSERT INTO topics (organization_id,channel_id,id,name,first_seq,last_seq,message_count) \
+        SELECT $1,c,gen_random_uuid(),'Plan',2,240,120 FROM unnest($2::uuid[]) c",
+    )
+    .bind(org)
+    .bind(&channels)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) \
+        SELECT $1,gen_random_uuid(),t.channel_id,n,$2,gen_random_uuid(),'plan',CASE WHEN n%2=0 THEN t.id END \
+        FROM topics t CROSS JOIN generate_series(1,240) n WHERE t.organization_id=$1")
+        .bind(org).bind(sender).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO channel_message_sequences SELECT $1,c,240 FROM unnest($2::uuid[]) c")
+        .bind(org)
+        .bind(&channels)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE channel_read_positions SET read_seq=40 WHERE organization_id=$1 AND member_id=$2",
+    )
+    .bind(org)
+    .bind(reader)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO topic_read_positions SELECT organization_id,channel_id,$2,id,80 FROM topics WHERE organization_id=$1")
+        .bind(org).bind(reader).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO message_mentions SELECT organization_id,channel_id,id,$2 FROM messages WHERE organization_id=$1 AND seq%17=0")
+        .bind(org).bind(reader).execute(&pool).await.unwrap();
+    for table in [
+        "messages",
+        "message_mentions",
+        "topics",
+        "channel_read_positions",
+        "topic_read_positions",
+        "channel_message_sequences",
+    ] {
+        sqlx::query(&format!("ANALYZE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let app = crate::test_app_pool(pool.clone()).await;
+    let arguments = format!(
+        "('{org}','{reader}',0,'{{{}}}'::uuid[])",
+        channels
+            .iter()
+            .map(Uuid::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let channel_count = channels.len() as u64;
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        let loops =
+            crate::database::organization_read_only(&app, org, async |tx| {
+                let active: (bool, bool) = sqlx::query_as(
+                "SELECT row_security_active('messages'),row_security_active('message_mentions')",
+            ).fetch_one(&mut *tx).await?;
+                assert_eq!(active, (true, true));
+                sqlx::query("SET LOCAL jit=off").execute(&mut *tx).await?;
+                sqlx::query(&format!("SET LOCAL plan_cache_mode={mode}"))
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::raw_sql(&format!(
+                    "PREPARE channel_list_mentions(uuid,uuid,bigint,uuid[]) AS {LIST_COUNTS_SQL}"
+                ))
+                .execute(&mut *tx)
+                .await?;
+                let plan: Value = sqlx::query_scalar(&format!(
+                    "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE channel_list_mentions{arguments}"
+                ))
+                .fetch_one(&mut *tx)
+                .await?;
+                sqlx::query("DEALLOCATE channel_list_mentions")
+                    .execute(&mut *tx)
+                    .await?;
+                let mut loops = Vec::new();
+                mention_scan_loops(&plan[0]["Plan"], &mut loops);
+                Ok::<_, sqlx::Error>(loops)
+            })
+            .await
+            .unwrap();
+        assert!(!loops.is_empty(), "{mode}: no message_mentions scan nodes");
+        eprintln!("{mode}: message_mentions Actual Loops {loops:?}, Channel count {channel_count}");
+        assert!(
+            loops.iter().all(|&actual| actual <= channel_count),
+            "{mode}: message_mentions Actual Loops {loops:?} exceed Channel count {channel_count}"
+        );
+    }
+    app.close().await;
+}
 
 #[fukulow_test::test]
 #[ignore = "manual restricted-role EXPLAIN of Mention count ranges"]
