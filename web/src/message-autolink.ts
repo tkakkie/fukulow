@@ -117,8 +117,11 @@ function validHttpAuthority(authority: string): boolean {
     if (colonIdx !== -1 && !/^\d+$/.test(hostPort.slice(colonIdx + 1))) return false
   }
 
+  const candidate = `http://${authority}`
+  if (typeof URL.canParse === 'function' && !URL.canParse(candidate)) return false
+
   try {
-    const parsed = new URL(`http://${authority}`)
+    const parsed = new URL(candidate)
     return (
       parsed.hostname.length > 0 &&
       parsed.pathname === '/' &&
