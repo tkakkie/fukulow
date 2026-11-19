@@ -7230,6 +7230,217 @@ it('Mention components render accepted tokens highlight the reader and follow au
   await unmount(instance); authors.close()
 })
 
+it('MessageRow and MessageBody render formatted blocks, safe autolinks, Mention atoms inside code, and update renames without reparsing names as formatting or URLs (#628)', async () => {
+  const id = '123e4567-e89b-12d3-a456-426614174000', rejected = '123e4567-e89b-12d3-a456-426614174001'
+  const body = [
+    `**bold ~~strike~~** \`code @{member:${id}} https://no-link.example\` https://example.com/ok?a=1`,
+    `javascript:alert(1) <script>alert(1)</script> @{member:${id}} @{member:${rejected}}`,
+    '> quoted **line**',
+    '> second quote line',
+    '```',
+    `fenced @{member:${id}} **raw**`,
+    '```',
+  ].join('\n')
+  const props = $state({
+    mentions: [{ member_id: id, name: '**https://evil.example**' }],
+    pending: false,
+  })
+  rememberIdentityResponse(props.mentions)
+  const authors = createAuthors('org', vi.fn(), vi.fn()), adapter = authorsAdapter(authors)
+  const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+  const instance = mount(MessageRow, { target: host as unknown as Element, props: {
+    body, selfId: id, get mentions() { return props.mentions },
+    get pendingStatus() { return props.pending ? 'sending' : undefined },
+    resolveMentionName: adapter.mentionName,
+  } })
+  await settle()
+
+  // Escaped markup never creates DOM script tags
+  expect(host.querySelectorAll('script')).toHaveLength(0)
+
+  // Only https://example.com/ok?a=1 is linked; resolved name with https://evil.example and code URL are NOT linked
+  const links = host.querySelectorAll('a')
+  expect(links).toHaveLength(1)
+  expect(links[0].getAttribute('href')).toBe('https://example.com/ok?a=1')
+  expect(links[0].textContent).toBe('https://example.com/ok?a=1')
+  expect(links[0].getAttribute('target')).toBe('_blank')
+  expect(links[0].getAttribute('rel')).toBe('noopener noreferrer')
+
+  // Resolved name containing **https://evil.example** is rendered literally as a mention span, never reparsed as bold or link
+  const mentionSpans = host.querySelectorAll('.ui-message-body__mention')
+  expect(mentionSpans.map(el => el.textContent)).toEqual([
+    '@**https://evil.example**',
+    '@**https://evil.example**',
+    '@**https://evil.example**',
+  ])
+  expect(host.querySelectorAll('strong').map(el => el.textContent)).toEqual(['bold strike', 'line'])
+  expect(host.querySelectorAll('del').map(el => el.textContent)).toEqual(['strike'])
+  expect(host.querySelector('blockquote')?.textContent).toBe('quoted line\nsecond quote line')
+  expect(host.querySelector('pre code')?.textContent).toBe('fenced @**https://evil.example** **raw**')
+
+  // Rename updates cached Message without re-tokenizing
+  authors.replaceMembers([{ id, name: '改名後の名前', role: 'member' }])
+  await settle()
+  expect(host.querySelectorAll('.ui-message-body__mention').map(el => el.textContent)).toEqual([
+    '@改名後の名前',
+    '@改名後の名前',
+    '@改名後の名前',
+  ])
+  expect(host.querySelector('pre code')?.textContent).toBe('fenced @改名後の名前 **raw**')
+
+  // Pending message renders formatting and autolinks with no accepted Mentions
+  props.pending = true
+  await settle()
+  expect(host.querySelectorAll('.ui-message-body__mention')).toHaveLength(0)
+  expect(host.querySelector('pre code')?.textContent).toBe(`fenced @{member:${id}} **raw**`)
+  expect(host.querySelectorAll('a')).toHaveLength(1)
+
+  await unmount(instance); authors.close()
+})
+
+it('MessageBody preserves authored empty lines at quote and code fence boundaries (#628)', async () => {
+  const props = $state({
+    body: '> first\n\n> second',
+  })
+  const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+  const instance = mount(MessageRow, { target: host as unknown as Element, props: {
+    get body() { return props.body },
+  } })
+  await settle()
+
+  const bodyEl = () => host.querySelector('.ui-message-body')!
+  const nonCommentChildren = () =>
+    bodyEl().childNodes
+      .filter(node => node.nodeType !== 8 && (node instanceof MiniElement || node.textContent !== ''))
+      .map(node =>
+        node instanceof MiniElement ? `${node.localName}:${node.textContent}` : `text:${JSON.stringify(node.textContent)}`,
+      )
+
+  // Blank line between two block quotes
+  expect(host.querySelectorAll('blockquote').map(el => el.textContent)).toEqual(['first', 'second'])
+  expect(bodyEl().textContent).toBe('first\nsecond')
+  expect(nonCommentChildren()).toEqual(['blockquote:first', 'text:"\\n"', 'blockquote:second'])
+
+  // Blank line between two fenced code blocks, and leading/trailing blank lines at fence/quote boundaries
+  props.body = '\n```\na\n```\n\n```\nb\n```\n\n> after\n'
+  await settle()
+  expect(host.querySelectorAll('pre code').map(el => el.textContent)).toEqual(['a', 'b'])
+  expect(nonCommentChildren()).toEqual([
+    'text:"\\n"',
+    'pre:a',
+    'text:"\\n"',
+    'pre:b',
+    'text:"\\n"',
+    'blockquote:after',
+    'text:"\\n"',
+  ])
+
+  await unmount(instance)
+})
+
+it('MessageBody links follow the roving tabindex of their MessageRow across confirmed and pending rows (#628)', async () => {
+  const net = fakeNetwork()
+  const session = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+  const adapter = syncAdapter(session.sync)
+  net.socket.onReady()
+
+  const m1 = { ...record(1, 'c1'), body: '1件目 https://example.com/one' }
+  const m2 = { ...record(2, 'c1'), body: '2件目 https://example.com/two' }
+  net.timelines.c1 = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 2,
+    has_more: false,
+    items: [
+      { kind: 'message', message: m1 },
+      { kind: 'message', message: m2 },
+    ],
+  })
+  net.lists[0].resolve(ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    channels: [channel('c1', 'general')],
+  }))
+  await settle()
+  net.subscribed('c1', 2)
+  // Also queue a pending send containing a link (non-roving pending rows stay in Tab order: tabindex="0")
+  void adapter.channel('c1').send('送信中 https://example.com/pending')
+  await settle()
+
+  const host = testDoc.createElement('div')
+  testDoc.body.appendChild(host)
+  const instance = mount(Timeline, {
+    target: host as unknown as Element,
+    props: {
+      channel: adapter.channel('c1'),
+      topics: topicsAdapter(session.topics, 'c1'),
+      channelId: 'c1',
+      selfId: 'me',
+    },
+  })
+  await settle()
+  flushSync()
+
+  const focusableRows = () => queryAll(host, '.ui-message-row[data-focusable="true"]')
+  const links = () => host.querySelectorAll('a.ui-message-body__link')
+
+  expect(focusableRows()).toHaveLength(2)
+  expect(links()).toHaveLength(3)
+  // Latest confirmed row (m2) is the default roving row; m1 (inactive) stays -1; pending row link stays 0
+  expect(focusableRows().map((r) => r.getAttribute('tabindex'))).toEqual(['-1', '0'])
+  expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
+    ['https://example.com/one', '-1'],
+    ['https://example.com/two', '0'],
+    ['https://example.com/pending', '0'],
+  ])
+
+  // ArrowUp moves roving focus to m1: m1's link becomes tabindex="0", m2's becomes "-1", pending stays "0"
+  focusableRows()[1].focus()
+  const up = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+  up.key = 'ArrowUp'
+  focusableRows()[1].dispatchEvent(up)
+  flushSync()
+
+  expect(focusableRows().map((r) => r.getAttribute('tabindex'))).toEqual(['0', '-1'])
+  expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
+    ['https://example.com/one', '0'],
+    ['https://example.com/two', '-1'],
+    ['https://example.com/pending', '0'],
+  ])
+
+  // ArrowDown moves roving focus back to m2: m2's link becomes tabindex="0", m1's becomes "-1", pending stays "0"
+  const down = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+  down.key = 'ArrowDown'
+  focusableRows()[0].dispatchEvent(down)
+  flushSync()
+
+  expect(focusableRows().map((r) => r.getAttribute('tabindex'))).toEqual(['-1', '0'])
+  expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
+    ['https://example.com/one', '-1'],
+    ['https://example.com/two', '0'],
+    ['https://example.com/pending', '0'],
+  ])
+
+  // Failed pending row (e.g. after Channel access loss / targetUnavailable) also keeps its link in the Tab order
+  const failedHost = testDoc.createElement('div')
+  testDoc.body.appendChild(failedHost)
+  const failedRow = mount(MessageRow, {
+    target: failedHost as unknown as Element,
+    props: {
+      body: 'See https://example.com/help',
+      pendingStatus: 'failed',
+      targetUnavailable: true,
+      ondiscard: () => {},
+    },
+  })
+  flushSync()
+  const failedLink = failedHost.querySelector('a.ui-message-body__link')
+  expect(failedLink?.getAttribute('href')).toBe('https://example.com/help')
+  expect(failedLink?.getAttribute('tabindex')).toBe('0')
+  await unmount(failedRow)
+
+  await unmount(instance)
+  session.close()
+})
+
 it('Mention autocomplete uses only directory candidates with keyboard selection literal tokens IME and Escape safety', async () => {
   const id = '123e4567-e89b-12d3-a456-426614174000', second = '123e4567-e89b-12d3-a456-426614174001'
   const props = $state({ body: '', members: [{ id, name: '田中', role: 'member' as const }, { id: second, name: '鈴木', role: 'member' as const }] })

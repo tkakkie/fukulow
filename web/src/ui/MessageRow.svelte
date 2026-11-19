@@ -1,8 +1,9 @@
 <script lang="ts">
   import { shouldOpenRepliesFromRowKey } from '../composer-keys'
   import Button from './Button.svelte'
+  import MessageBody from './MessageBody.svelte'
   import type { Message } from '../api'
-  import { mentionText, type MentionName } from '../mentions'
+  import type { MentionName } from '../mentions'
 
   let {
     body,
@@ -52,6 +53,9 @@
 
   let replyBtnRef = $state<HTMLButtonElement | null>(null)
   const isRowFocusable = $derived(!pendingStatus && (focusable || Boolean(onopenreplies)))
+  const linkTabindex = $derived<0 | -1>(
+    Boolean(pendingStatus) || (isRowFocusable && rovingTabindex === 0) ? 0 : -1,
+  )
 
   const formattedTime = $derived(
     createdAt ? new Date(createdAt).toLocaleString('ja-JP') : '',
@@ -107,7 +111,7 @@
   {/if}
 
   <div class="ui-message-row__content">
-    <span class="body">{pendingStatus ? body : mentionText(body, mentions, resolveMentionName)}</span>
+    <MessageBody {body} {mentions} {resolveMentionName} pending={Boolean(pendingStatus)} {linkTabindex} />
   </div>
 
   {#if pendingStatus === 'sending'}
