@@ -456,6 +456,27 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       { name: 'alternating markers', build: size => repeatToLen('**~~', size) },
       { name: 'backtick-heavy ** + `a', build: size => '**' + repeatToLen('`a', size - 2) },
       { name: 'backtick-heavy **~~ + `', build: size => '**~~' + '`'.repeat(size - 4) },
+      // Successful nested emphasis reparsed inside failing outer openers (round-4 review of #634)
+      {
+        name: 'nested strike in failing bold',
+        build: size => {
+          const unit = '**http://u:~~``**@x/ '
+          const suffix = '`~~'
+          const count = Math.floor((size - suffix.length) / unit.length)
+          const pad = size - count * unit.length - suffix.length
+          return ' '.repeat(pad) + unit.repeat(count) + suffix
+        },
+      },
+      {
+        name: 'nested bold in failing strike',
+        build: size => {
+          const unit = '~~http://u:**``~~@x/ '
+          const suffix = '`**'
+          const count = Math.floor((size - suffix.length) / unit.length)
+          const pad = size - count * unit.length - suffix.length
+          return ' '.repeat(pad) + unit.repeat(count) + suffix
+        },
+      },
     ]
 
     const trailingParens8k = sampleFactories[2].build(8000)

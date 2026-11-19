@@ -13,11 +13,15 @@ export type UrlRun = {
   end: number
   /** Indexed by `k - start`: for `)` or `]`, the index of its matching opener, else -1. */
   opener: Int32Array
+  /** Indexed by `k - start`: suffix max of keep-threshold for out-of-order trim lookups. */
+  suffixMax: Int32Array
   /** Indexed by `k - start`: next `/`, `?` or `#` at or after k, else `end`. */
   nextHttpDelim: Int32Array
   /** Indexed by `k - start`: next `?` or `#` at or after k, else `end`. */
   nextMailDelim: Int32Array
-  /** Trim boundary shared by later candidates; it only moves left (see `matchAutolink`). */
+  /** Last candidate index queried on the monotonic forward fast path, else -1. */
+  lastIndex: number
+  /** Trim boundary shared by forward-ordered candidates; it only moves left (see `matchAutolink`). */
   trimEnd: number
 }
 
@@ -48,12 +52,21 @@ export function scanUrlRun(str: string, start: number, limit: number, isBreak: (
     else if (ch === ')') opener[k - start] = parens.pop() ?? -1
     else if (ch === ']') opener[k - start] = brackets.pop() ?? -1
   }
+  const suffixMax = new Int32Array(size)
   const nextHttpDelim = new Int32Array(size)
   const nextMailDelim = new Int32Array(size)
+  let maxKeep = -1
   let http = end
   let mail = end
   for (let k = end - 1; k >= start; k--) {
     const ch = str[k]
+    const keep = TRAILING_PUNCT.has(ch)
+      ? -1
+      : ch === ')' || ch === ']'
+        ? opener[k - start]
+        : end
+    if (keep > maxKeep) maxKeep = keep
+    suffixMax[k - start] = maxKeep
     if (ch === '?' || ch === '#') {
       http = k
       mail = k
@@ -63,28 +76,52 @@ export function scanUrlRun(str: string, start: number, limit: number, isBreak: (
     nextHttpDelim[k - start] = http
     nextMailDelim[k - start] = mail
   }
-  return { str, start, end, opener, nextHttpDelim, nextMailDelim, trimEnd: end }
+  return {
+    str,
+    start,
+    end,
+    opener,
+    suffixMax,
+    nextHttpDelim,
+    nextMailDelim,
+    lastIndex: -1,
+    trimEnd: end,
+  }
 }
 
 /**
  * Returns the link end for a candidate at `index` (inside `run`, scheme already matched),
- * or -1. Candidates must be tried in increasing `index` order within one run: a trailing
- * character trimmable for an earlier candidate is trimmable for every later one, so the
- * shared trim boundary only moves left and the total trimming work is linear.
+ * or -1. Forward-ordered candidates share `run.trimEnd` in O(1) amortized; out-of-order
+ * queries on a cached run binary-search `run.suffixMax` in O(log run) without mutating it.
  */
 export function matchAutolink(run: UrlRun, index: number, scheme: Scheme): number {
   const { str } = run
   const body = index + scheme.schemeLen
   if (body >= run.end || str[body] === '/' || str[body] === '#') return -1
 
-  let end = Math.max(run.trimEnd, body)
-  while (end > body) {
-    const ch = str[end - 1]
-    const unmatchedCloser = (ch === ')' || ch === ']') && run.opener[end - 1 - run.start] < body
-    if (!TRAILING_PUNCT.has(ch) && !unmatchedCloser) break
-    end--
+  let end: number
+  if (index >= run.lastIndex) {
+    end = Math.max(run.trimEnd, body)
+    while (end > body) {
+      const ch = str[end - 1]
+      const unmatchedCloser = (ch === ')' || ch === ']') && run.opener[end - 1 - run.start] < body
+      if (!TRAILING_PUNCT.has(ch) && !unmatchedCloser) break
+      end--
+    }
+    run.lastIndex = index
+    run.trimEnd = end
+  } else if (run.suffixMax[body - run.start] < body) {
+    end = body
+  } else {
+    let lo = body
+    let hi = run.end - 1
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1
+      if (run.suffixMax[mid - run.start] >= body) lo = mid
+      else hi = mid - 1
+    }
+    end = lo + 1
   }
-  run.trimEnd = end
   if (end === body) return -1
 
   if (scheme.isMailto) {

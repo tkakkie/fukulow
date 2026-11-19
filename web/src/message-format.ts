@@ -1,5 +1,5 @@
 import type { Message } from './api'
-import { matchAutolink, matchScheme, scanUrlRun, type UrlRun } from './message-autolink'
+import { isUrlChar, matchAutolink, matchScheme, scanUrlRun, type UrlRun } from './message-autolink'
 
 const tokenPattern = /@\{member:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\}/g
 
@@ -259,42 +259,88 @@ type EmphasisStack =
   | typeof STACK_BOLD_STRIKE
   | typeof STACK_STRIKE_BOLD
 
+type StepItem =
+  | { type: 'text'; text: string }
+  | { type: 'mention'; id: string }
+  | { type: 'code'; start: number; end: number }
+  | { type: 'link'; start: number; end: number }
+  | { type: 'bold'; head: SpanNode }
+  | { type: 'strikethrough'; head: SpanNode }
+
+type SpanNode =
+  | { kind: 'item'; item: StepItem; next: SpanNode | null; nextPos: number }
+  | { kind: 'slice'; start: number; end: number; next: SpanNode | null; nextPos: number }
+
+type StepRecord =
+  | { kind: 'item'; pos: number; item: StepItem }
+  | { kind: 'slice'; start: number; end: number }
+
+const DEAD = 0 as const
+type MemoEntry = typeof DEAD | SpanNode
+type UrlRunSlot = { last: UrlRun | null; byPos: (UrlRun | undefined)[] | null }
+type UrlRunTable = [UrlRunSlot, UrlRunSlot, UrlRunSlot, UrlRunSlot]
+
+const LONG_URL_RUN_THRESHOLD = 128
+
+function getUrlRun(
+  line: IndexedLine,
+  i: number,
+  end: number,
+  breakKind: number,
+  isUrlBreak: (k: number) => boolean,
+  urlRuns: UrlRunTable,
+): UrlRun {
+  const slot = urlRuns[breakKind]
+  if (slot.last !== null && i >= slot.last.start && i < slot.last.end) {
+    return slot.last
+  }
+  if (slot.byPos !== null) {
+    const existing = slot.byPos[i]
+    if (existing !== undefined) {
+      slot.last = existing
+      return existing
+    }
+  }
+  let runStart = i
+  while (runStart > 0 && !isUrlBreak(runStart - 1) && isUrlChar(line.str.charCodeAt(runStart - 1))) {
+    runStart--
+  }
+  const run = scanUrlRun(line.str, runStart, end, isUrlBreak)
+  slot.last = run
+  if (run.end - run.start >= LONG_URL_RUN_THRESHOLD) {
+    if (slot.byPos === null) {
+      slot.byPos = new Array<UrlRun | undefined>(end)
+    }
+    for (let k = run.start; k < run.end; k++) {
+      slot.byPos[k] = run
+    }
+  }
+  return run
+}
+
 /**
- * Single-pass recursive inline parser. Emphasis closers are found by the same
- * scan that emits tokens, so autolinks, inline code, and nested emphasis can
+ * Single-pass memoised inline parser. Emphasis closers are found by the same
+ * scan that records steps, so autolinks, inline code, and nested emphasis can
  * never disagree on boundaries.
  *
- * Soundness of `dead[stack]`: for any non-empty `stack`, every transition from
- * a position `i` in this loop depends solely on `(i, stack)` (and on `i > start`
- * for the target closer). If a non-empty scan fails (reaches EOL, an outer
- * closer, or a position already in `dead[stack]`), none of its visited positions
- * was the target closer, so any future call with the same `stack` reaching any
- * of those positions will follow the identical path and fail. Empty failures at
- * `i === start` return in O(1) without marking `start` dead (since `start` IS a
- * valid closer for any non-empty span reaching it).
+ * Complexity O(N * stacks): for each non-empty `stack` (4 values), every
+ * transition from position `i` depends only on `(i, stack)` (except `i === start`
+ * at `closeChar`, which fails in O(1) without memoising). Each `(i, stack)` is
+ * therefore scanned at most once and then permanently memoised as either `DEAD`
+ * or an immutable `SpanNode` suffix linked to the span's closer (`nextPos`).
+ * Reusing a `SpanNode` is O(1) with no array copying, and `UrlRun` tables are
+ * cached per `(breakKind, run)`. Only surviving `STACK_NONE` spans are
+ * materialized into fresh `InlineToken[]` trees, so total work is linear in N
+ * and no token object is ever shared and mutated.
  */
-function parseInline(
+function parseSpan(
   line: IndexedLine,
   start: number,
   stack: EmphasisStack,
-  dead: (Uint8Array | null)[],
-): { tokens: InlineToken[]; nextPos: number } | null {
+  memo: ((MemoEntry | undefined)[] | null)[],
+  urlRuns: UrlRunTable,
+): SpanNode | null {
   const end = line.str.length
-  const tokens: InlineToken[] = []
-  let textBuffer = ''
-
-  const flushText = () => {
-    if (textBuffer.length > 0) {
-      const last = tokens[tokens.length - 1]
-      if (last && last.type === 'text') {
-        last.text += textBuffer
-      } else {
-        tokens.push({ type: 'text', text: textBuffer })
-      }
-      textBuffer = ''
-    }
-  }
-
   const boldOpen =
     stack === STACK_BOLD || stack === STACK_BOLD_STRIKE || stack === STACK_STRIKE_BOLD
   const strikeOpen =
@@ -308,62 +354,131 @@ function parseInline(
   const outerCloseChar =
     stack === STACK_BOLD_STRIKE ? '*' : stack === STACK_STRIKE_BOLD ? '~' : null
 
-  const deadForStack = stack === STACK_NONE ? null : dead[stack]
-  const visited: number[] | null = stack === STACK_NONE ? null : []
+  if (closeChar !== null && isPairAt(line, start, end, closeChar)) {
+    return null
+  }
 
-  const markDeadAndFail = (): null => {
-    if (visited !== null && visited.length > 0) {
-      let arr = dead[stack]
-      if (arr === null) {
-        arr = new Uint8Array(end + 1)
-        dead[stack] = arr
+  let memoForStack = stack === STACK_NONE ? null : memo[stack]
+  if (memoForStack !== null) {
+    const cached = memoForStack[start]
+    if (cached === DEAD) return null
+    if (cached !== undefined) {
+      return cached.kind === 'slice' && cached.start !== start
+        ? { kind: 'slice', start, end: cached.end, next: cached.next, nextPos: cached.nextPos }
+        : cached
+    }
+  }
+
+  const steps: StepRecord[] = []
+  let sliceStart = -1
+
+  const flushSlice = (pos: number) => {
+    if (sliceStart !== -1) {
+      steps.push({ kind: 'slice', start: sliceStart, end: pos })
+      sliceStart = -1
+    }
+  }
+
+  const ensureMemo = (): (MemoEntry | undefined)[] => {
+    if (memoForStack === null) {
+      memoForStack = new Array<MemoEntry | undefined>(end + 1)
+      memo[stack] = memoForStack
+    }
+    return memoForStack
+  }
+
+  const markDeadAndFail = (extraPos?: number): null => {
+    if (stack !== STACK_NONE) {
+      const table = ensureMemo()
+      for (let k = 0; k < steps.length; k++) {
+        const s = steps[k]
+        if (s.kind === 'item') {
+          table[s.pos] = DEAD
+        } else {
+          for (let p = s.start; p < s.end; p++) table[p] = DEAD
+        }
       }
-      for (let k = 0; k < visited.length; k++) {
-        arr[visited[k]] = 1
+      if (extraPos !== undefined) {
+        table[extraPos] = DEAD
       }
     }
     return null
   }
 
+  const commitSuccess = (tail: SpanNode | null, nextPos: number): SpanNode | null => {
+    let cur: SpanNode | null = tail
+    const table = stack !== STACK_NONE ? ensureMemo() : null
+    for (let k = steps.length - 1; k >= 0; k--) {
+      const s = steps[k]
+      if (s.kind === 'item') {
+        const node: SpanNode = { kind: 'item', item: s.item, next: cur, nextPos }
+        if (table !== null) table[s.pos] = node
+        cur = node
+      } else {
+        const node: SpanNode = {
+          kind: 'slice',
+          start: s.start,
+          end: s.end,
+          next: cur,
+          nextPos,
+        }
+        if (table !== null) {
+          for (let p = s.start; p < s.end; p++) table[p] = node
+        }
+        cur = node
+      }
+    }
+    return cur
+  }
+
+  const breakKind = (boldOpen ? 1 : 0) | (strikeOpen ? 2 : 0)
   const isUrlBreak = (k: number): boolean =>
     line.atoms.has(k) ||
     (boldOpen && isPairAt(line, k, end, '*')) ||
     (strikeOpen && isPairAt(line, k, end, '~'))
 
-  let urlRun: UrlRun | null = null
   let i = start
-
   while (i < end) {
-    if (deadForStack !== null && deadForStack[i] === 1) {
-      return markDeadAndFail()
+    if (closeChar !== null && isPairAt(line, i, end, closeChar)) {
+      flushSlice(i)
+      return commitSuccess(null, i + 2)
+    }
+
+    if (outerCloseChar !== null && isPairAt(line, i, end, outerCloseChar)) {
+      flushSlice(i)
+      return markDeadAndFail(i)
+    }
+
+    if (memoForStack !== null) {
+      const cached = memoForStack[i]
+      if (cached === DEAD) {
+        flushSlice(i)
+        return markDeadAndFail()
+      }
+      if (cached !== undefined) {
+        flushSlice(i)
+        const tail: SpanNode =
+          cached.kind === 'slice' && cached.start !== i
+            ? { kind: 'slice', start: i, end: cached.end, next: cached.next, nextPos: cached.nextPos }
+            : cached
+        return commitSuccess(tail, tail.nextPos)
+      }
     }
 
     const atom = line.atoms.get(i)
     if (atom !== undefined) {
-      if (visited !== null) visited.push(i)
-      if (atom.type === 'literal') {
-        textBuffer += atom.text
-      } else {
-        flushText()
-        tokens.push({ type: 'mention', id: atom.id })
-      }
+      flushSlice(i)
+      steps.push({
+        kind: 'item',
+        pos: i,
+        item:
+          atom.type === 'literal'
+            ? { type: 'text', text: atom.text }
+            : { type: 'mention', id: atom.id },
+      })
       i++
       continue
     }
-
-    if (closeChar !== null && isPairAt(line, i, end, closeChar)) {
-      if (i === start) {
-        return null
-      }
-      flushText()
-      return { tokens, nextPos: i + 2 }
-    }
-
-    if (outerCloseChar !== null && isPairAt(line, i, end, outerCloseChar)) {
-      return markDeadAndFail()
-    }
-
-    if (visited !== null) visited.push(i)
 
     const ch = line.str[i]
 
@@ -371,15 +486,12 @@ function parseInline(
     if (ch === '`') {
       const closeIdx = line.nextBacktick.get(i) ?? -1
       if (closeIdx > i + 1 && closeIdx < end) {
-        flushText()
-        tokens.push({
-          type: 'code',
-          children: sliceCodeChildren(line, i + 1, closeIdx),
-        })
+        flushSlice(i)
+        steps.push({ kind: 'item', pos: i, item: { type: 'code', start: i + 1, end: closeIdx } })
         i = closeIdx + 1
         continue
       }
-      textBuffer += ch
+      if (sliceStart === -1) sliceStart = i
       i++
       continue
     }
@@ -389,14 +501,11 @@ function parseInline(
       if (i === 0 || line.atoms.has(i - 1) || !ASCII_ALNUM.test(line.str[i - 1])) {
         const scheme = matchScheme(line.str, i, end)
         if (scheme !== null) {
-          if (urlRun === null || urlRun.end <= i) {
-            urlRun = scanUrlRun(line.str, i, end, isUrlBreak)
-          }
-          const linkEnd = matchAutolink(urlRun, i, scheme)
+          const run = getUrlRun(line, i, end, breakKind, isUrlBreak, urlRuns)
+          const linkEnd = matchAutolink(run, i, scheme)
           if (linkEnd !== -1) {
-            const url = line.str.slice(i, linkEnd)
-            flushText()
-            tokens.push({ type: 'link', href: url, text: url })
+            flushSlice(i)
+            steps.push({ kind: 'item', pos: i, item: { type: 'link', start: i, end: linkEnd } })
             i = linkEnd
             continue
           }
@@ -407,14 +516,14 @@ function parseInline(
     // 3. Bold: **...**
     if (!boldOpen && isPairAt(line, i, end, '*')) {
       const nextStack: EmphasisStack = strikeOpen ? STACK_STRIKE_BOLD : STACK_BOLD
-      const inner = parseInline(line, i + 2, nextStack, dead)
+      const inner = parseSpan(line, i + 2, nextStack, memo, urlRuns)
+      flushSlice(i)
       if (inner !== null) {
-        flushText()
-        tokens.push({ type: 'bold', children: inner.tokens })
+        steps.push({ kind: 'item', pos: i, item: { type: 'bold', head: inner } })
         i = inner.nextPos
         continue
       }
-      textBuffer += '**'
+      steps.push({ kind: 'item', pos: i, item: { type: 'text', text: '**' } })
       i += 2
       continue
     }
@@ -422,35 +531,90 @@ function parseInline(
     // 4. Strikethrough: ~~...~~
     if (!strikeOpen && isPairAt(line, i, end, '~')) {
       const nextStack: EmphasisStack = boldOpen ? STACK_BOLD_STRIKE : STACK_STRIKE
-      const inner = parseInline(line, i + 2, nextStack, dead)
+      const inner = parseSpan(line, i + 2, nextStack, memo, urlRuns)
+      flushSlice(i)
       if (inner !== null) {
-        flushText()
-        tokens.push({ type: 'strikethrough', children: inner.tokens })
+        steps.push({ kind: 'item', pos: i, item: { type: 'strikethrough', head: inner } })
         i = inner.nextPos
         continue
       }
-      textBuffer += '~~'
+      steps.push({ kind: 'item', pos: i, item: { type: 'text', text: '~~' } })
       i += 2
       continue
     }
 
-    textBuffer += ch
+    if (sliceStart === -1) sliceStart = i
     i++
   }
 
+  flushSlice(end)
   if (stack !== STACK_NONE) {
     return markDeadAndFail()
   }
+  return commitSuccess(null, end)
+}
 
+function materializeSpan(line: IndexedLine, head: SpanNode | null): InlineToken[] {
+  const tokens: InlineToken[] = []
+  let textBuffer = ''
+
+  const flushText = () => {
+    if (textBuffer.length > 0) {
+      tokens.push({ type: 'text', text: textBuffer })
+      textBuffer = ''
+    }
+  }
+
+  for (let cur = head; cur !== null; cur = cur.next) {
+    if (cur.kind === 'slice') {
+      textBuffer += line.str.slice(cur.start, cur.end)
+      continue
+    }
+    const { item } = cur
+    switch (item.type) {
+      case 'text':
+        textBuffer += item.text
+        break
+      case 'mention':
+        flushText()
+        tokens.push({ type: 'mention', id: item.id })
+        break
+      case 'code':
+        flushText()
+        tokens.push({ type: 'code', children: sliceCodeChildren(line, item.start, item.end) })
+        break
+      case 'link': {
+        flushText()
+        const url = line.str.slice(item.start, item.end)
+        tokens.push({ type: 'link', href: url, text: url })
+        break
+      }
+      case 'bold':
+        flushText()
+        tokens.push({ type: 'bold', children: materializeSpan(line, item.head) })
+        break
+      case 'strikethrough':
+        flushText()
+        tokens.push({ type: 'strikethrough', children: materializeSpan(line, item.head) })
+        break
+    }
+  }
   flushText()
-  return { tokens, nextPos: end }
+  return tokens
 }
 
 function parseInlineLine(parts: AtomPart[]): InlineToken[] {
   if (parts.length === 0) return []
   const indexed = indexLine(parts)
-  const dead: (Uint8Array | null)[] = [null, null, null, null, null]
-  return parseInline(indexed, 0, STACK_NONE, dead)?.tokens ?? []
+  const memo: ((MemoEntry | undefined)[] | null)[] = [null, null, null, null, null]
+  const urlRuns: UrlRunTable = [
+    { last: null, byPos: null },
+    { last: null, byPos: null },
+    { last: null, byPos: null },
+    { last: null, byPos: null },
+  ]
+  const head = parseSpan(indexed, 0, STACK_NONE, memo, urlRuns)
+  return materializeSpan(indexed, head)
 }
 
 export function tokenizeMessageBody(
