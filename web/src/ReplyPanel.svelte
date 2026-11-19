@@ -89,6 +89,8 @@
 
   let moveDialogOpen = $state(false)
   let moveButtonRef = $state<HTMLButtonElement | null>(null)
+  let moveSelectRef = $state<HTMLSelectElement | null>(null)
+  let moveLoadMoreRef = $state<HTMLButtonElement | null>(null)
   let moveMode = $state<'existing' | 'new'>('new')
   let moveTopic = $state.raw<(typeof orderedTopics)[number] | null>(null)
   let moveTopicName = $state('')
@@ -407,6 +409,28 @@
     if (gen !== moveGeneration || !moveRefreshFailed || rState.chainVersion === undefined) return
     moveError = null
     moveRefreshFailed = false
+  }
+
+  async function handleLoadMoreTopics() {
+    if (!topics || moveBusy || tState?.list.loading) return
+    const gen = moveGeneration
+    const trigger =
+      typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null
+    await topics.loadList().catch(console.error)
+    await tick()
+    if (gen !== moveGeneration || !moveDialogOpen) return
+    const active = typeof document !== 'undefined' ? document.activeElement : null
+    const focusLost =
+      !active ||
+      active === document.body ||
+      active === document.documentElement ||
+      (active instanceof HTMLElement && (!active.isConnected || active === trigger))
+    if (!focusLost) return
+    if (!focusTarget(moveLoadMoreRef)) {
+      focusTarget(moveSelectRef)
+    }
   }
 
   const scrollController = createTimelineScrollController()
@@ -788,7 +812,7 @@
       {#if !canMoveChain && !moveChainReadFailed && !targetUnavailable}
         <p class="reply-panel__move-status">返信のつながりを読み込んでいます…</p>
       {/if}
-      {#if topics && tState?.list.error && !targetUnavailable && !tState.unavailable}
+      {#if topics && tState && tState.list.asOfSeq === undefined && tState.list.error && !targetUnavailable && !tState.unavailable}
         <StatusBanner
           tone="danger"
           role="alert"
@@ -838,6 +862,7 @@
         <label class="reply-panel__move-field">
           <span class="reply-panel__move-label">移動先のトピック</span>
           <select
+            bind:this={moveSelectRef}
             class="reply-panel__move-select"
             aria-label="移動先のトピック"
             value={moveTopicId}
@@ -855,6 +880,27 @@
             {/each}
           </select>
         </label>
+        {#if topics && tState && !targetUnavailable && !tState.unavailable && tState.list.asOfSeq !== undefined && tState.list.hasMore}
+          <div class="reply-panel__move-older">
+            <Button
+              bind:buttonRef={moveLoadMoreRef}
+              variant="secondary"
+              disabled={tState.list.loading || moveBusy}
+              onclick={() => void handleLoadMoreTopics()}
+            >
+              以前のトピックを読み込む
+            </Button>
+            {#if tState.list.error}
+              <StatusBanner
+                tone="danger"
+                role="alert"
+                message="以前のトピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。"
+                actionLabel="再試行"
+                onaction={() => void handleLoadMoreTopics()}
+              />
+            {/if}
+          </div>
+        {/if}
       {:else}
         <Input
           label="新しいトピック名"
@@ -1012,6 +1058,13 @@
     border-radius: var(--radius-8);
     font-family: var(--font-sans);
     font-size: var(--font-size-14);
+  }
+
+  .reply-panel__move-older {
+    display: grid;
+    justify-items: start;
+    gap: var(--space-8);
+    min-width: 0;
   }
 
   .reply-panel__move-actions {
