@@ -197,6 +197,18 @@ Use the PK for batch hydration, `message_mentions_member_channel_message` on (Or
 
 DM integration with #385 applies #151 pair/grant/peer-send rules to the same Message, Reply and count surfaces. Keep discovery and query budgets, renewal and peer-refusal order. Test DM Mention integration jointly once both are available. A count field does not establish implemented semantics. See the [authorized-control requirement](#move-edit-and-projections-141--287) for Mention target denials. Record executable invariant tests when implemented.
 
+### Message body formatting (#628, implemented)
+
+Clients render the unchanged body. Server, API, storage, M1 acceptance and S5 retries ignore formatting. Everything not matched below, including unclosed or malformed markers, stays literal with whitespace and line breaks kept. No raw HTML.
+
+1. Mention atoms first. Every complete M1 token in the original body is one atom before any other rule, inside code too. An accepted id renders its M1 name; a rejected token, or any token in pending text (no accepted set before C5), shows the token text. Names are never parsed as formatting or URLs.
+2. Fenced code block: a line that is exactly three backticks opens it and the next such line closes it. Lines between are verbatim apart from atoms. Without a closing line the opening line is literal and later lines are parsed normally.
+3. Block quote: outside code blocks, consecutive lines starting `> ` form one quote of inline content without the prefix. No nesting.
+4. Inline, per line, left to right, earliest start wins: inline code (backtick to the next backtick, non-empty), autolink, `**bold**`, `~~strikethrough~~`. Code and links contain no formatting. Bold and strikethrough may contain each other, not themselves, and need non-empty content and a closer on the same line, else the marker is literal.
+5. Autolink: case-insensitive `http://` or `https://` with a non-empty host, or `mailto:` with a non-empty address, not preceded by an ASCII letter or digit. It ends before whitespace, an atom, a non-ASCII character or the closing marker of an open emphasis; trailing `.,:;!?'"` and unbalanced `)` or `]` are excluded. Other schemes stay literal. The shown text equals the link target. Links open in a new tab with `rel="noopener noreferrer"`.
+
+Search excerpts and DM list previews stay plain text.
+
 ### Organization activity notices (#307, implemented)
 
 REST remains authoritative for lists and counts. Notices carry only identifiers and positions, never bodies or counts. Bodies require a Message subscription (S2). [DM activity and discovery](dms.md#dm-discovery-and-activity-notices-b4) shares this protocol with an independent list target. #152 adds REST counts.

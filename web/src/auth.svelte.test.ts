@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createAuth, type AuthDeps, type SessionModel } from './auth.svelte'
+import { tokenizeMessageBody } from './message-format'
 import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createInviteAcceptance, createMembers, watchMemberAccess } from './members'
@@ -1228,4 +1229,33 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
     expect(t.nets).toHaveLength(0)
     expect(t.auth.session).toBeNull()
   })
+})
+
+it('sign-out, expiry, 401, Account replacement and Organization switch clear the Message body formatting cache (#628)', async () => {
+  const body = '**cached secret** https://example.com'
+  for (const event of ['sign-out', 'expiry', '401', 'Account replacement', 'Organization switch'] as const) {
+    const s = stack()
+    await signInAs(s, 'm1')
+    const net = await openChannelA(s)
+    const before = tokenizeMessageBody(body)
+    expect(tokenizeMessageBody(body)).toBe(before)
+
+    if (event === 'sign-out') {
+      expect(await s.auth.signOut()).toBe(true)
+    } else if (event === 'expiry') {
+      net.socket.onClose(4001)
+    } else if (event === '401') {
+      void s.auth.session!.sync.channel('A').send('401')
+      await settle()
+      net.sends[0].resolve({ ok: false, kind: 'http', status: 401 })
+    } else if (event === 'Account replacement') {
+      await signInAs(s, 'm2')
+    } else {
+      await s.auth.selectOrganization('other')
+    }
+    await settle()
+
+    expect(tokenizeMessageBody(body), event).not.toBe(before)
+    if (s.auth.view.screen === 'app') await s.auth.signOut()
+  }
 })
