@@ -95,9 +95,20 @@
   let moveBusy = $state(false)
   let moveError = $state<string | null>(null)
   let moveNotice = $state<string | null>(null)
-  let moveRetry = $state<(() => Promise<MoveResult>) | null>(null)
+  let moveRetry = $state<{ destination: MoveDestination; retry: () => Promise<MoveResult> } | null>(null)
   let moveRefreshFailed = $state(false)
   let moveGeneration = 0
+
+  const moveDestination: MoveDestination = $derived(
+    moveMode === 'existing' ? { topicId: moveTopicId } : { topicName: moveTopicName },
+  )
+  const displayedMoveRetry = $derived(
+    moveRetry &&
+      moveRetry.destination.topicId === moveDestination.topicId &&
+      moveRetry.destination.topicName === moveDestination.topicName
+      ? moveRetry
+      : null,
+  )
 
   let retained = $state<{
     key: string
@@ -196,29 +207,27 @@
   const targetUnavailable = $derived(
     organizationUnavailable || channelUnavailable || replyNotFound,
   )
-  const rc = $derived(channel.reply(effectiveRootId, effectiveTopicId))
+  let draftTarget = $state.raw<{ channelId: string; rootId: string; topicId: string | null } | null>(null)
+  const previousDraftTarget = $derived(
+    draftTarget?.channelId === channelId && draftTarget.rootId === effectiveRootId ? draftTarget : null,
+  )
+  const draftTopicId = $derived(isMoveInvalidated ? previousDraftTarget?.topicId ?? null : effectiveTopicId)
+  const rc = $derived(channel.reply(effectiveRootId, draftTopicId))
   const composerState = $derived(rc.composer)
 
-  let confirmedChainTarget: { channelId: string; rootId: string; topicId: string | null } | null = null
   $effect(() => {
     if (!isTargetResolved) return
     rc.migrateDraftFrom(anchorMessageId, null)
-    if (isCurrentAnchor && !rState.moveInvalidated && rState.rootId) {
-      if (
-        confirmedChainTarget &&
-        confirmedChainTarget.channelId === channelId &&
-        confirmedChainTarget.rootId === rState.rootId &&
-        confirmedChainTarget.topicId !== rState.topicId
-      ) {
-        rc.migrateDraftFrom(rState.rootId, confirmedChainTarget.topicId)
-      }
-      confirmedChainTarget = { channelId, rootId: rState.rootId, topicId: rState.topicId }
+    if (!isCurrentAnchor || previousDraftTarget?.topicId === draftTopicId) return
+    if (previousDraftTarget) {
+      rc.migrateDraftFrom(effectiveRootId, previousDraftTarget.topicId)
     }
+    draftTarget = { channelId, rootId: effectiveRootId, topicId: draftTopicId }
   })
 
   const canSendReply = $derived(!targetUnavailable && isCurrentAnchor)
   const canMoveChain = $derived(
-    !targetUnavailable && isCurrentAnchor && (rState.chainVersion !== undefined || moveRetry !== null),
+    !targetUnavailable && isCurrentAnchor && (rState.chainVersion !== undefined || displayedMoveRetry !== null),
   )
   const currentTopicName = $derived(
     effectiveTopicId
@@ -268,6 +277,10 @@
         moveTopicId = orderedTopics[0].topicId
       }
     }
+  })
+
+  $effect(() => {
+    if (moveRetry && !displayedMoveRetry) moveRetry = null
   })
 
   function openMoveDialog() {
@@ -323,7 +336,7 @@
     }
   }
 
-  async function runMoveAttempt(action: () => Promise<MoveResult>) {
+  async function runMoveAttempt(destination: MoveDestination, action: () => Promise<MoveResult>) {
     if (moveBusy) return
     const gen = ++moveGeneration
     moveBusy = true
@@ -340,7 +353,7 @@
         onannounce?.('トピックに移動しました。')
         return
       }
-      moveRetry = result.kind === 'unknown' ? result.retry : null
+      moveRetry = result.kind === 'unknown' ? { destination, retry: result.retry } : null
       moveRefreshFailed = result.kind === 'conflict' && !result.refreshed
       moveError = formatMoveFailure(result)
     } catch (err) {
@@ -354,41 +367,36 @@
 
   async function handleSubmitMove() {
     if (moveSubmitDisabled) return
-    if (moveRetry) {
+    if (displayedMoveRetry) {
       await handleRetryMove()
       return
     }
-    let destination: MoveDestination
-    if (moveMode === 'existing') {
-      if (!moveTopicId) {
-        moveError = '移動先のトピックを選んでください。'
-        return
-      }
-      destination = { topicId: moveTopicId }
-    } else {
-      const nameError = topicNameError(moveTopicName)
+    const destination = moveDestination
+    if (destination.topicName !== undefined) {
+      const nameError = topicNameError(destination.topicName)
       if (nameError !== null) {
         moveError = nameError
         return
       }
-      destination = { topicName: moveTopicName }
     }
-    await runMoveAttempt(() =>
+    await runMoveAttempt(destination, () =>
       moveChain ? moveChain(channelId, anchorMessageId, destination) : replies.move(anchorMessageId, destination),
     )
   }
 
   async function handleRetryMove() {
-    const retry = moveRetry
+    const retry = displayedMoveRetry
     if (!retry || moveBusy) return
-    await runMoveAttempt(() => retry())
+    await runMoveAttempt(retry.destination, retry.retry)
   }
 
-  function handleReloadChainForMove() {
-    if (moveBusy) return
+  async function handleReloadChainForMove() {
+    if (moveBusy || rState.loading || targetUnavailable) return
+    const gen = moveGeneration
+    await replies.loadMore().catch(console.error)
+    if (gen !== moveGeneration || !moveRefreshFailed || rState.chainVersion === undefined) return
     moveError = null
     moveRefreshFailed = false
-    void replies.loadMore().catch(console.error)
   }
 
   const scrollController = createTimelineScrollController()
@@ -760,7 +768,7 @@
         void handleSubmitMove()
       }}
     >
-      {#if !canMoveChain}
+      {#if !canMoveChain && (!moveRefreshFailed || rState.loading)}
         <p class="reply-panel__move-status">返信のつながりを読み込んでいます…</p>
       {/if}
       <fieldset class="reply-panel__move-fieldset" disabled={moveBusy}>
@@ -842,12 +850,12 @@
           tone="danger"
           role="alert"
           message={moveError}
-          actionLabel={!moveBusy ? (moveRetry ? '再試行' : moveRefreshFailed ? '再読み込み' : undefined) : undefined}
+          actionLabel={!moveBusy ? (displayedMoveRetry ? '再試行' : moveRefreshFailed ? '再読み込み' : undefined) : undefined}
           onaction={!moveBusy
-            ? moveRetry
+            ? displayedMoveRetry
               ? () => void handleRetryMove()
               : moveRefreshFailed
-                ? handleReloadChainForMove
+                ? () => void handleReloadChainForMove()
                 : undefined
             : undefined}
         />

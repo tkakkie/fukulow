@@ -108,6 +108,82 @@ it('submitting the same Move after a timeout and a fresh chain read reuses the o
   await c.sync.close()
 })
 
+it('allocates a fresh Move after a different destination is confirmed for the same chain', async () => {
+  const c = await client()
+  const movedToC = {
+    ...receipt(22), operation_id: 'operation-2', destination_topic_id: 'C', topic_id: 'C',
+  }
+  c.transport.mockResolvedValueOnce({ ok: false, kind: 'network' }).mockResolvedValueOnce(ok(movedToC))
+
+  async function reopenAt(topicId: string, version: number) {
+    c.replies.dismiss('A')
+    c.listReplyChain.mockResolvedValueOnce(ok({
+      history_generation, as_of_seq: version, root_id: 'id1', chain_version: version, has_more: false,
+      messages: [{ ...root(topicId), version }, { ...anchor, topic_id: topicId, version }],
+    }))
+    await c.replies.open('A', anchor)
+    expect(c.replies.get('A')).toMatchObject({ topicId, chainVersion: version })
+  }
+
+  try {
+    await expect(c.move('A', anchor.id, { topicId: 'B' })).resolves.toMatchObject({ kind: 'unknown' })
+    await reopenAt('B', 21)
+    await expect(c.move('A', anchor.id, { topicId: 'C' })).resolves.toEqual({ kind: 'moved', receipt: movedToC })
+    expect(c.transport).toHaveBeenLastCalledWith('A', anchor.id, {
+      history_generation, operation_id: 'operation-2', expected_version: 21, topic_id: 'C',
+    })
+
+    await reopenAt('C', 22)
+    await c.move('A', anchor.id, { topicId: 'B' })
+    expect(c.transport).toHaveBeenLastCalledWith('A', anchor.id, {
+      history_generation, operation_id: 'operation-3', expected_version: 22, topic_id: 'B',
+    })
+  } finally {
+    await c.sync.close()
+  }
+})
+
+it('posts a fresh Move in the recovered history generation', async () => {
+  const c = await client()
+  const nextGeneration = '00000000-0000-4000-8000-000000000516'
+  const recoveredRoot = { ...root(), history_generation: nextGeneration }
+  const recoveredAnchor = { ...anchor, history_generation: nextGeneration }
+  c.transport.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  try {
+    await expect(c.move('A', anchor.id, { topicId: 'T' })).resolves.toMatchObject({ kind: 'unknown' })
+
+    c.listMessages.mockResolvedValue(ok({
+      history_generation: nextGeneration, as_of_seq: 1, messages: [recoveredRoot], has_more: false,
+    }))
+    c.sync.observeHistoryGeneration(nextGeneration)
+    await flush()
+    c.handlers.at(-1)!.onReady()
+    c.handlers.at(-1)!.onEvent({
+      type: 'subscribed', channel_id: 'A', caught_up_seq: 1, history_generation: nextGeneration,
+    })
+    await flush()
+    c.listReplyChain.mockResolvedValueOnce(ok({
+      history_generation: nextGeneration, as_of_seq: 20, root_id: recoveredRoot.id, chain_version: 20,
+      messages: [recoveredRoot, recoveredAnchor], has_more: false,
+    }))
+    await c.replies.open('A', recoveredAnchor)
+    expect(c.replies.get('A').chainVersion).toBe(20)
+
+    const epoch = c.sync.get().historyEpoch
+    c.transport.mockImplementationOnce(async (_channel, _anchor, body) =>
+      body.history_generation === nextGeneration ? ok({ ...receipt(), history_generation: nextGeneration })
+        : http(409, 'history_generation_changed'),
+    )
+    await c.move('A', recoveredAnchor.id, { topicId: 'T' })
+    expect(c.transport).toHaveBeenLastCalledWith('A', recoveredAnchor.id, {
+      history_generation: nextGeneration, operation_id: 'operation-2', expected_version: 20, topic_id: 'T',
+    })
+    expect(c.sync.get().historyEpoch).toBe(epoch)
+  } finally {
+    await c.sync.close()
+  }
+})
+
 it('reports a committed receipt when the Reply chain is dismissed during the POST', async () => {
   const c = await client()
   const answer = deferred<Result<MoveChainResponse>>()

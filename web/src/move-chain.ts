@@ -12,21 +12,31 @@ export type MoveResult =
 
 export type MoveChainApi = (channel: string, anchor: string, body: MoveChainRequest) => Promise<Result<MoveChainResponse>>
 type MoveTarget = NonNullable<ReturnType<Replies['moveTarget']>>
+type MoveAttempt = (target: MoveTarget) => Promise<MoveResult>
 
-export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'observeHistoryGeneration'>,
+export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'get' | 'observeHistoryGeneration'>,
   replies: Pick<Replies, 'moveTarget'>, options: { api: MoveChainApi; newId?: () => string; requestTimeoutMs?: number }) {
   const newId = options.newId ?? (() => crypto.randomUUID())
-  const unresolved = new Map<string, (target: MoveTarget) => Promise<MoveResult>>()
+  const unresolved = new Map<string, { generation: string; attempts: Map<string, MoveAttempt> }>()
   return function moveChain(channel: string, anchor: string, destination: MoveDestination): Promise<MoveResult> {
     const target = replies.moveTarget(channel, anchor)
     if (!target) return Promise.resolve({ kind: 'baseline_unavailable' })
+    const { baseline } = target
+    const generation = baseline?.history_generation ?? sync.get().historyGeneration
+    const chainKey = JSON.stringify([channel, target.rootId])
+    const saved = unresolved.get(chainKey)
+    const sameGeneration = saved?.generation === generation ? saved?.attempts : undefined
     const { topicId, topicName } = destination
     // The receipt matches names case-insensitively for ASCII and binds the original anchor.
-    const key = JSON.stringify([channel, target.rootId, topicId, topicName?.replace(/[A-Z]/g, c => c.toLowerCase())])
-    const existing = unresolved.get(key)
+    const key = JSON.stringify([topicId, topicName?.replace(/[A-Z]/g, c => c.toLowerCase())])
+    const existing = sameGeneration?.get(key)
     if (existing) return existing(target)
-    const { baseline } = target
     if (!baseline) return Promise.resolve({ kind: 'baseline_unavailable' })
+    const attempts = sameGeneration ?? new Map<string, MoveAttempt>()
+    if (!sameGeneration) {
+      saved?.attempts.clear()
+      unresolved.set(chainKey, { generation: baseline.history_generation, attempts })
+    }
     const body: MoveChainRequest = {
       operation_id: newId(), expected_version: baseline.chain_version, history_generation: baseline.history_generation,
       ...(topicId !== undefined ? { topic_id: topicId } : { topic_name: topicName }),
@@ -38,11 +48,15 @@ export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'obser
     function attempt(target: MoveTarget): Promise<MoveResult> {
       if (terminal) return Promise.resolve(terminal)
       if (pending) return pending
+      if (attempts.get(key) !== attempt) return Promise.resolve({ kind: 'superseded' })
       pending = run(target).then(result => {
         pending = undefined
         if (result.kind !== 'unknown') {
           terminal = result
-          unresolved.delete(key)
+          // Once a Move is confirmed, earlier unknown outcomes can no longer stand in for new intents.
+          if (result.kind === 'moved') attempts.clear()
+          else if (attempts.get(key) === attempt) attempts.delete(key)
+          if (!attempts.size && unresolved.get(chainKey)?.attempts === attempts) unresolved.delete(chainKey)
         }
         return result
       })
@@ -87,7 +101,7 @@ export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'obser
       }
       return { kind: 'failed', status: result.status, error: result.error }
     }
-    unresolved.set(key, attempt)
+    attempts.set(key, attempt)
     return attempt(target)
   }
 }
