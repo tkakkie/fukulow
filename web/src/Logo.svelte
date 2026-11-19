@@ -6,12 +6,10 @@
   />
   <path
     class="logo__eyes"
-    stroke="#15201E"
     d="M16.1 34a5.4 5.4 0 1 0 10.8 0a5.4 5.4 0 1 0 -10.8 0ZM37.1 34a5.4 5.4 0 1 0 10.8 0a5.4 5.4 0 1 0 -10.8 0ZM32 36L35 40L32 44L29 40Z"
   />
   <path
     class="logo__pupils"
-    fill="#15201E"
     d="M20 34.4a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0 -4.2 0ZM41 34.4a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0 -4.2 0Z"
   />
 </svg>
@@ -29,10 +27,15 @@
 
   .logo__eyes {
     fill: var(--amber);
+    stroke: var(--logo-ink);
     stroke-width: 0;
     stroke-opacity: 0;
     stroke-linejoin: round;
     paint-order: stroke fill;
+  }
+
+  .logo__pupils {
+    fill: var(--logo-ink);
   }
 
   @media (prefers-color-scheme: dark) {

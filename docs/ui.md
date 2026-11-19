@@ -63,6 +63,7 @@ Values in `web/src/app.css` under `:root`, with dark overrides under `prefers-co
 | `--link` | links |
 | `--focus` | focus ring |
 | `--amber` / `--on-amber` | logo (Ink body with amber eyes, not teal), @ badge, micro-interactions; never use `--amber` for text on light; use `--on-amber` on the amber fill |
+| `--logo-ink` | logo eye ring and pupils in both themes; not for UI text or surfaces |
 | `--mention` / `--on-mention` | Message that mentions you |
 | `--danger` / `--danger-bg` | errors |
 | `--info-bg` / `--on-info` | connection status and notices, never amber |
