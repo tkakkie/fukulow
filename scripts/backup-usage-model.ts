@@ -59,9 +59,11 @@ export function accountUsage(client: AnalyticsClient, account: string): UsageCli
         }
         const accounts = response?.data?.viewer?.accounts, groups = accounts?.[0]?.r2OperationsAdaptiveGroups
         if (response?.errors || accounts?.length !== 1 || !Array.isArray(groups) || groups.length >= 1000) throw new Error('Incomplete analytics')
-        // An empty day is zero only before the month's first usage: closed past
-        // the lag, with every earlier day known and zero (#316). Otherwise unknown.
-        if (!groups.length && !(now >= from + 86_400_000 + analyticsLag && leadingZero(cache, known, start, from))) throw new Error('Incomplete analytics')
+        // An empty closed day is zero only before the month's first usage: past
+        // the lag, with every earlier day known and zero (#316). Today is never
+        // cached and is requeried, and is empty right after UTC midnight, when
+        // the daily alive runs, so an empty today counts as zero.
+        if (!groups.length && from !== today && !(now >= from + 86_400_000 + analyticsLag && leadingZero(cache, known, start, from))) throw new Error('Incomplete analytics')
         const seen = new Set<string>()
         for (const group of groups) {
           const action = group.dimensions?.actionType, count = group.sum?.requests
