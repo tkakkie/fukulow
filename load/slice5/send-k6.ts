@@ -5,7 +5,7 @@ import http from 'k6/http';
 import { SharedArray } from 'k6/data';
 import { Counter, Trend } from 'k6/metrics';
 import type { Options } from 'k6/options';
-import { uuid } from '../seed.ts';
+import { httpOutcome, publish, uuid } from '../seed.ts';
 
 const data = JSON.parse(open('/fixture/data.json')) as { organization: string; otherOrganization: string; reader: string; channels: string[]; body: string;
   retry: { member: number; channel: string; client_message_id: string; body: string }[] };
@@ -41,12 +41,8 @@ function post(member: number, channel: string, body: { client_message_id: string
   initialize(lane);
   const at = Date.now() - execution.scenario.startTime;
   const window = mode === 'open' ? 'all' : at < warmup * 1000 ? 'warmup' : at < (warmup + seconds) * 1000 ? 'measured' : 'after';
-  const ip = member % 10000;
-  const r = http.post(`${__ENV.BASE_URL}/api/v1/orgs/${data.organization}/channels/${channel}/messages`, JSON.stringify(body), {
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokens[member]}`, 'X-Load-Client-IP': `10.${(ip >>> 16) & 255}.${(ip >>> 8) & 255}.${ip & 255}` },
-    timeout: '10s', redirects: 0, tags: { name: lane } });
-  const outcome = r.error_code === 1050 ? 'clientTimeouts' : r.status >= 200 && r.status < 300 ? 'accepted' : r.status === 429 ? 'rejected429'
-    : r.status === 503 ? 'rejected503' : r.status === 0 ? 'transportErrors' : 'otherErrors';
+  const r = publish(__ENV.BASE_URL, data.organization, channel, tokens[member], member, body, lane);
+  const outcome = httpOutcome(r);
   const tags = { scenario: lane, window };
   counters.attempted.add(1, tags);
   for (const n of names.slice(1)) counters[n].add(Number(outcome === n), tags);
