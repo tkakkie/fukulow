@@ -10,6 +10,14 @@ const ID_1 = '123e4567-e89b-12d3-a456-426614174000'
 const ID_2 = '123e4567-e89b-12d3-a456-426614174001'
 const ID_REJECTED = '123e4567-e89b-12d3-a456-426614174999'
 
+// '**http://u:`**@x/ ** ' + 'http://@/'.repeat(n) + '`http://@', cut to exactly `size` characters
+function outOfOrderUrlBody(size: number): string {
+  const prefix = '**http://u:`**@x/ ** '
+  const suffix = '`http://@'
+  const middle = size - prefix.length - suffix.length
+  return prefix + 'http://@/'.repeat(Math.ceil(middle / 9)).slice(0, middle) + suffix
+}
+
 function firstLine(blocks: BlockToken[]): InlineToken[] {
   expect(blocks.length).toBe(1)
   expect(blocks[0].type).toBe('line')
@@ -431,7 +439,7 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
     expect(tokenizeMessageBody(body, mentions1And2)).toBe(tokensBoth)
   })
 
-  it('tokenizes 8000-character and 64000-character worst-case bodies in linear time', () => {
+  it('tokenizes 8000-character and 64000-character worst-case bodies without quadratic growth', () => {
     const repeatToLen = (unit: string, len: number) =>
       unit.repeat(Math.ceil(len / unit.length)).slice(0, len)
 
@@ -477,6 +485,8 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
           return ' '.repeat(pad) + unit.repeat(count) + suffix
         },
       },
+      // Accepted O(N log N) family: out-of-order autolink queries (round-5 review of #634)
+      { name: 'out-of-order URL queries', build: size => outOfOrderUrlBody(size) },
     ]
 
     const trailingParens8k = sampleFactories[2].build(8000)
@@ -537,6 +547,27 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       expect(med64k, `${name}: 64k per-call`).toBeLessThan(50)
     }
   })
+  it('tokenizes the accepted O(N log N) family at 3,999 characters and the 32 KiB body limit', () => {
+    // #628 accepts worst-case O(N log N); this family is the round-5 reproduction from #634
+    expect(outOfOrderUrlBody(3999)).toBe(
+      '**http://u:`**@x/ ** ' + 'http://@/'.repeat(441) + '`http://@',
+    )
+    for (const size of [3999, 32 * 1024]) {
+      const body = outOfOrderUrlBody(size)
+      expect(body.length).toBe(size)
+      const runs: number[] = []
+      for (let s = 0; s < 5; s++) {
+        clearMessageFormatCache()
+        const start = performance.now()
+        expect(tokenizeMessageBody(body).length).toBe(1)
+        runs.push(performance.now() - start)
+      }
+      runs.sort((a, b) => a - b)
+      // Measured well under 1 ms; the cap only catches gross regressions
+      expect(runs[2], `${size} characters`).toBeLessThan(50)
+    }
+  })
+
   it('rejects every failed candidate in a shared run and still links a later valid one', () => {
     for (const unit of ['http://)', 'http://.', 'http://@', 'mailto:@']) {
       expect(firstLine(tokenizeMessageBody(unit.repeat(50)))).toEqual([{ type: 'text', text: unit.repeat(50) }])

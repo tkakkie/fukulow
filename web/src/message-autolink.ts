@@ -1,6 +1,7 @@
 // Autolink matching for Message body formatting (#628, docs/spec/realtime.md rule 5).
 // Every candidate inside one printable run shares the run's precomputed tables, so a
-// body full of failed candidates stays linear instead of rescanning the run's suffix.
+// body full of failed candidates never rescans the run's suffix: in-order queries are
+// amortised O(1) and out-of-order ones binary-search, so the worst case is O(N log N).
 
 const TRAILING_PUNCT = new Set(['.', ',', ':', ';', '!', '?', "'", '"'])
 

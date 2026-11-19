@@ -330,8 +330,9 @@ function getUrlRun(
  * or an immutable `SpanNode` suffix linked to the span's closer (`nextPos`).
  * Reusing a `SpanNode` is O(1) with no array copying, and `UrlRun` tables are
  * cached per `(breakKind, run)`. Only surviving `STACK_NONE` spans are
- * materialized into fresh `InlineToken[]` trees, so total work is linear in N
- * and no token object is ever shared and mutated.
+ * materialized into fresh `InlineToken[]` trees, and no token object is ever
+ * shared and mutated. Out-of-order autolink queries fall back to a binary search
+ * in `matchAutolink`, so the worst case is O(N log N), accepted for #628.
  */
 function parseSpan(
   line: IndexedLine,
