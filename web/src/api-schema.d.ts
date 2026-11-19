@@ -4050,6 +4050,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description invite_limit_reached: the requested Role's Outstanding Invite pool is full */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Request too large */
             413: {
                 headers: {
