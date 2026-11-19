@@ -29,6 +29,7 @@ Web client. Writing rules and the other parts: [index](../decisions.md).
 - #211: Compose browser acceptance runs on main pushes and manual dispatch only, keeping image/browser costs off PR feedback. Both profiles use Pebble HTTPS/WSS. `ci.yml` retains PR security checks.
 - #211/#254: upload only allowlisted report.json on failure (3 days). No traces, ARIA snapshots or raw requests. Screenshots can expose the setup token and raw sqlx errors keep Compose logs out of artifacts.
 - #266 Keep Unread reconnect/equal-baseline fixtures proposed and reference-merge only. Reverse responses require concurrent reads, whereas the web controller serializes Channel-list fetches and tests that path separately.
+- #413 Desktop notifications (approved 2026-11-19): each tab decides alone, without `BroadcastChannel`, so duplicate notifications across tabs are accepted. Text is DM or Mention only, never body or sender. One 50-event `/events` page per read; skipping the tail is accepted because only confirmed events notify and Unread is untouched. A Topic Mention read on another device may notify once; the main `read_seq` is never a Topic read proxy. The implementation must load-measure the extra REST reads and confirm a bound. Setting persistence, Service Worker and Push are separate Issues.
 
 ## Entries in other parts
 

@@ -1,0 +1,26 @@
+name: doc-budgets
+# Separate from ci so that adding or removing the docs:budget-raise label re-runs only this check (#603).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+permissions:
+  contents: read
+concurrency:
+  group: doc-budgets-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  budget-changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The merge commit's first parent is the current base tip, so approved raises already on main are not re-flagged.
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 2 }
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version }
+      - name: Budget raises and new budgets need the docs:budget-raise label
+        env:
+          DOC_BUDGET_RAISE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'docs:budget-raise') }}
+        run: |
+          git show HEAD^1:web/scripts/check-doc-budgets.ts > "$RUNNER_TEMP/base-budgets.ts"
+          node web/scripts/check-doc-budgets.ts --base "$RUNNER_TEMP/base-budgets.ts"

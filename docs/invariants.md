@@ -8,6 +8,7 @@ File new rows in their main area's part under `docs/invariants/`, one part per a
 
 - [auth](invariants/auth.md): Accounts, sign-in, sessions, roles, permissions, Organization scoping (server)
 - [channels](invariants/channels.md): Channels, membership, Capabilities (server and member UI)
+- [sections](invariants/sections.md): Personal sections: storage, REST, locks and races (server)
 - [messages](invariants/messages.md): Sending, admission, fan-out, removal, delivery, message body and drafts
 - [topics](invariants/topics.md): Topics, server and web, incl. their real-time delivery tests
 - [replies](invariants/replies.md): Reply chains, server and web, incl. their real-time delivery tests
