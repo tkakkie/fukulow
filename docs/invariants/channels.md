@@ -62,6 +62,7 @@ Channels, membership, Capabilities (server and member UI). Writing rules and the
 | The runtime role cannot read or write section, placement, generation or reserved id rows with unset or foreign Organization context | `server/src/channels/tests/sections_storage.rs::section_storage_requires_organization_context` |
 | Rename preserves the original section name. A retired section id cannot be reused by its owner. | `server/src/channels/tests/sections_storage.rs::section_id_reservation_survives_rename_and_delete` |
 | Section storage requires names of 1–60 Unicode scalars without NUL and nonnegative generations defaulting to zero | `server/src/channels/tests/sections_storage.rs::section_storage_checks_name_length_and_generation` |
+| Channel metadata writes recheck scoped access and manager rights. Archived names stay reserved and lists keep current access rules. | `server/src/channels/tests/archive.rs::archive_permissions_and_capabilities`, `server/src/channels/tests/archive.rs::archive_rechecks_role_grant_and_revision_after_auth`, `server/src/channels/tests/archive.rs::archive_input_scope_and_dm_denials`, `server/src/channels/tests/archive.rs::archived_list_and_name_uniqueness`, `server/src/channels/tests/archive.rs::archive_migration_preserves_existing_channels_and_rejects_dms` |
 
 ## Rows in other parts
 

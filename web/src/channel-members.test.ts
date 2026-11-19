@@ -401,14 +401,14 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
 
     const makeChannel = (canManageManagers: boolean): api.Channel => ({
       id: 'ch-1',
-      kind: 'channel',
+      kind: 'channel', archived: false,
       name: 'secret',
       visibility: 'private',
       capabilities: {
         can_add_members: { allowed: false },
         can_remove_members: { allowed: false },
         can_manage_managers: { allowed: canManageManagers },
-        can_leave: { allowed: true },
+        can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false },
       },
     })
 

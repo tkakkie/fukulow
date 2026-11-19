@@ -24,7 +24,7 @@ import type { SessionOptions } from './session'
 import type { UnreadScope } from './unread'
 
 export { record }
-export const channel = (id: string, name = id): Channel => ({ id, kind: 'channel', name, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true } } })
+export const channel = (id: string, name = id): Channel => ({ id, kind: 'channel', archived: false, name, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false } } })
 export const flush = async () => { for (let i = 0; i < 16; i++) await Promise.resolve() }
 
 /** Lets pending promises finish, then applies Svelte's pending effects. */
@@ -126,14 +126,14 @@ export function fakeNetwork() {
     return { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       id,
-      kind: 'channel',
+      kind: 'channel', archived: false,
       name: id,
       visibility: 'public',
       capabilities: {
         can_add_members: { allowed: false },
         can_remove_members: { allowed: false },
         can_manage_managers: { allowed: false },
-        can_leave: { allowed: true },
+        can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false },
       },
       as_of_seq: maxSeq,
       read_seq: maxSeq,

@@ -111,6 +111,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/channels/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one accessible ordinary Channel, including archived Channels. */
+        get: operations["get_channel"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Supply exactly one of name or archived. An authorized no-op returns 204. */
+        patch: operations["update_channel"];
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/channels/{id}/events": {
         parameters: {
             query?: never;
@@ -678,6 +696,7 @@ export interface components {
             role: components["schemas"]["Role"];
         };
         Channel: {
+            archived: boolean;
             capabilities: components["schemas"]["ChannelCapabilities"];
             /** Format: uuid */
             id: string;
@@ -727,9 +746,11 @@ export interface components {
         };
         ChannelCapabilities: {
             can_add_members: components["schemas"]["Capability"];
+            can_archive: components["schemas"]["Capability"];
             can_leave: components["schemas"]["Capability"];
             can_manage_managers: components["schemas"]["Capability"];
             can_remove_members: components["schemas"]["Capability"];
+            can_rename: components["schemas"]["Capability"];
         };
         /** @description Bounded ascending Channel log page, with the same envelopes as WebSocket replay. */
         ChannelEventPage: {
@@ -1424,6 +1445,11 @@ export interface components {
              */
             type: "unsubscribe";
         };
+        UpdateChannelRequest: {
+            name: string;
+        } | {
+            archived: boolean;
+        };
     };
     responses: never;
     parameters: never;
@@ -1521,6 +1547,7 @@ export type TopicSummary = components['schemas']['TopicSummary'];
 export type TopicSummaryResponse = components['schemas']['TopicSummaryResponse'];
 export type UnreadChannel = components['schemas']['UnreadChannel'];
 export type Unsubscribe = components['schemas']['Unsubscribe'];
+export type UpdateChannelRequest = components['schemas']['UpdateChannelRequest'];
 export type $defs = Record<string, never>;
 export interface operations {
     health: {
@@ -1904,6 +1931,8 @@ export interface operations {
         parameters: {
             query?: {
                 history_generation?: string;
+                /** @description Return archived Channels when true. The default lists active Channels. */
+                archived?: boolean;
             };
             header?: never;
             path: {
@@ -1923,7 +1952,7 @@ export interface operations {
                     "application/json": components["schemas"]["ChannelList"];
                 };
             };
-            /** @description Malformed Organization id */
+            /** @description Malformed Organization id or invalid query input */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2072,6 +2101,188 @@ export interface operations {
                 };
             };
             /** @description Database failure while resolving the session or creating the Channel and its membership */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accessible ordinary Channel */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Channel"];
+                };
+            };
+            /** @description Invalid path or dm_channel_fixed for an accessible DM */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateChannelRequest"];
+            };
+        };
+        responses: {
+            /** @description Channel updated or already in the requested state */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid path, input or name; dm_channel_fixed for an accessible DM */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: current Member may not change this Channel */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description channel_archived or channel name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request body exceeds the size limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Requires application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database or worker failure */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -2701,7 +2912,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed */
+            /** @description history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; channel_archived; new DM send: dm_peer_deactivated or dm_peer_access_lapsed */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2917,7 +3128,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description version_conflict, operation_conflict, chain_too_large or history_generation_changed */
+            /** @description version_conflict, operation_conflict, chain_too_large, history_generation_changed or channel_archived */
             409: {
                 headers: {
                     [name: string]: unknown;

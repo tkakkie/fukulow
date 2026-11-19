@@ -113,7 +113,7 @@ async fn move_ambiguous_commit_recovers_by_same_key_without_reallocating(pool: P
     assert_eq!(after[4].as_array().unwrap().len(), 1);
 }
 
-async fn wait_for_lock(pool: &PgPool, query: &str) {
+pub(super) async fn wait_for_lock(pool: &PgPool, query: &str) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let waiting: bool = sqlx::query_scalar(

@@ -32,6 +32,7 @@ pub struct Channel {
     #[schema(min_length = 1, max_length = 128)]
     pub name: String,
     pub visibility: ChannelVisibility,
+    pub archived: bool,
     pub capabilities: ChannelCapabilities,
 }
 
@@ -41,6 +42,8 @@ pub struct ChannelCapabilities {
     pub can_remove_members: Capability,
     pub can_leave: Capability,
     pub can_manage_managers: Capability,
+    pub can_rename: Capability,
+    pub can_archive: Capability,
 }
 
 impl ChannelCapabilities {
@@ -57,9 +60,17 @@ impl ChannelCapabilities {
             can_remove_members: authorize(actor, Action::RemoveChannelMembers, resource),
             can_manage_managers: authorize(actor, Action::ManageChannelManagers, resource),
             can_leave: authorize(actor, Action::LeaveChannel, resource),
+            can_rename: authorize(actor, Action::RenameChannel, resource),
+            can_archive: authorize(actor, Action::ArchiveChannel, resource),
         }
     }
-    fn for_visible(organization: Uuid, role: Role, public: bool, manager: bool) -> Self {
+    fn for_visible(
+        organization: Uuid,
+        role: Role,
+        public: bool,
+        manager: bool,
+        archived: bool,
+    ) -> Self {
         let actor = Actor::Member {
             organization,
             role,
@@ -70,23 +81,20 @@ impl ChannelCapabilities {
             organization,
             public,
         };
+        let mut can_rename = authorize(actor, Action::RenameChannel, resource);
+        if can_rename.allowed && archived {
+            can_rename = Capability {
+                allowed: false,
+                reason: Some("channel_archived".into()),
+            };
+        }
         Self {
             can_manage_managers: authorize(actor, Action::ManageChannelManagers, resource),
             can_remove_members: authorize(actor, Action::RemoveChannelMembers, resource),
             can_leave: authorize(actor, Action::LeaveChannel, resource),
-            can_add_members: authorize(
-                Actor::Member {
-                    organization,
-                    role,
-                    channel_member: true,
-                    channel_manager: manager,
-                },
-                Action::AddChannelMembers,
-                Resource::Channel {
-                    organization,
-                    public,
-                },
-            ),
+            can_add_members: authorize(actor, Action::AddChannelMembers, resource),
+            can_archive: authorize(actor, Action::ArchiveChannel, resource),
+            can_rename,
         }
     }
 }
@@ -108,55 +116,107 @@ pub struct CreateChannelRequest {
 pub(crate) async fn visible_list<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     auth: &Auth,
+    archived: Option<bool>,
 ) -> Result<Vec<Channel>, ApiError> {
+    Ok(
+        visible_channel_rows(executor, auth, ChannelSelection::List(archived))
+            .await?
+            .into_iter()
+            .filter_map(|row| row.ordinary(auth.identity.organization.organization_id))
+            .collect(),
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct VisibleChannelRow {
+    id: Option<Uuid>,
+    name: Option<String>,
+    visibility: Option<ChannelVisibility>,
+    role: Role,
+    manager: bool,
+    archived: bool,
+}
+
+impl VisibleChannelRow {
+    fn ordinary(self, organization: Uuid) -> Option<Channel> {
+        let visibility = self.visibility?;
+        let capabilities = ChannelCapabilities::for_visible(
+            organization,
+            self.role,
+            matches!(visibility, ChannelVisibility::Public),
+            self.manager,
+            self.archived,
+        );
+        Some(Channel {
+            kind: dms::OrdinaryChannelKind::Channel,
+            id: self.id?,
+            name: self.name?,
+            visibility,
+            archived: self.archived,
+            capabilities,
+        })
+    }
+}
+
+enum ChannelSelection {
+    List(Option<bool>),
+    ById(Uuid),
+}
+
+async fn visible_channel_rows<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    auth: &Auth,
+    selection: ChannelSelection,
+) -> Result<Vec<VisibleChannelRow>, ApiError> {
     auth.require(Action::ReadOrganization)?;
     let visible = visible_channel_sql();
+    let (filter, order) = match selection {
+        ChannelSelection::List(_) => (
+            "c.kind='channel' AND ($4::bool IS NULL OR (c.archived_at IS NOT NULL)=$4)",
+            "ORDER BY lower(c.name COLLATE \"C\"), c.id",
+        ),
+        ChannelSelection::ById(_) => ("c.id=$4", ""),
+    };
     // The LEFT JOIN retains one empty row for an active Member with no visible Channels.
     let sql = format!(
-        "SELECT c.id, c.name, c.visibility, u.role, EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=$1 AND cm.member_id=$2 AND cm.membership_revision=$3 AND cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision AND cm.manager) FROM ({}) u \
-         LEFT JOIN channels c ON c.organization_id = $1 AND c.kind='channel' \
-         AND ({visible}) WHERE u.id = $2 AND u.membership_revision = $3 \
-         ORDER BY lower(c.name COLLATE \"C\"), c.id",
+        "SELECT c.id, c.name, c.visibility, u.role, EXISTS (SELECT 1 FROM channel_members cm WHERE cm.organization_id=$1 AND cm.member_id=$2 AND cm.membership_revision=$3 AND cm.organization_id=c.organization_id AND cm.channel_id=c.id AND cm.member_id=u.id AND cm.membership_revision=u.membership_revision AND cm.manager) AS manager, \
+         c.archived_at IS NOT NULL AS archived FROM ({}) u \
+         LEFT JOIN channels c ON c.organization_id = $1 AND ({filter}) AND ({visible}) \
+         WHERE u.id = $2 AND u.membership_revision = $3 {order}",
         auth::ACTIVE_MEMBERS_SQL
     );
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Option<Uuid>,
-            Option<String>,
-            Option<ChannelVisibility>,
-            Role,
-            bool,
-        ),
-    >(&sql)
-    .bind(auth.identity.organization.organization_id)
-    .bind(auth.identity.member.id)
-    .bind(auth.membership_revision)
-    .fetch_all(executor)
-    .await?;
+    let query = sqlx::query_as(&sql)
+        .bind(auth.identity.organization.organization_id)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision);
+    let query = match selection {
+        ChannelSelection::List(archived) => query.bind(archived),
+        ChannelSelection::ById(id) => query.bind(id),
+    };
+    let rows = query.fetch_all(executor).await?;
     if rows.is_empty() {
         return Err(ApiError::organization_unavailable());
     }
-    let channels = rows
-        .into_iter()
-        .filter_map(|(id, name, visibility, role, manager)| {
-            let visibility = visibility?;
-            let capabilities = ChannelCapabilities::for_visible(
-                auth.identity.organization.organization_id,
-                role,
-                matches!(visibility, ChannelVisibility::Public),
-                manager,
-            );
-            Some(Channel {
-                kind: dms::OrdinaryChannelKind::Channel,
-                id: id?,
-                name: name?,
-                visibility,
-                capabilities,
-            })
-        })
-        .collect();
-    Ok(channels)
+    Ok(rows)
+}
+
+fn validate_name(name: &str) -> Result<(), ApiError> {
+    auth::validate_text(name)?;
+    if name.is_empty() || name.chars().count() > 128 || name != name.trim() {
+        return Err(ApiError::bad_request());
+    }
+    Ok(())
+}
+
+fn name_write_error(error: sqlx::Error) -> ApiError {
+    if error.as_database_error().is_some_and(|error| {
+        error.is_unique_violation()
+            && error.constraint() == Some("channels_organization_name_unique")
+    }) {
+        ApiError(StatusCode::CONFLICT, "channel name already exists", None)
+    } else {
+        error.into()
+    }
 }
 
 /// Create a public or private channel with an organization-unique name.
@@ -179,11 +239,7 @@ pub async fn create_channel(
     auth: Auth,
     ApiJson(input): ApiJson<CreateChannelRequest>,
 ) -> Result<Response, ApiError> {
-    auth::validate_text(&input.name)?;
-    if input.name.is_empty() || input.name.chars().count() > 128 || input.name != input.name.trim()
-    {
-        return Err(ApiError::bad_request());
-    }
+    validate_name(&input.name)?;
     let organization_id = auth.identity.organization.organization_id;
     let task_state = state.clone();
     let channel = tokio::spawn(async move {
@@ -197,7 +253,7 @@ pub async fn create_channel(
             Actor::Member { role, .. } => role,
             _ => return Err(ApiError::forbidden()),
         };
-        let channel = match sqlx::query_as::<_, (Uuid, String, ChannelVisibility)>(
+        let channel = sqlx::query_as::<_, (Uuid, String, ChannelVisibility)>(
             "INSERT INTO channels (organization_id, id, name, visibility) \
              VALUES ($1, $2, $3, $4) RETURNING id, name, visibility",
         )
@@ -207,18 +263,7 @@ pub async fn create_channel(
         .bind(input.visibility)
         .fetch_one(&mut *tx)
         .await
-        {
-            Ok(channel) => channel,
-            Err(error)
-                if error.as_database_error().is_some_and(|error| {
-                    error.is_unique_violation()
-                        && error.constraint() == Some("channels_organization_name_unique")
-                }) =>
-            {
-                return Err(ApiError(StatusCode::CONFLICT, "channel name already exists", None));
-            }
-            Err(error) => return Err(error.into()),
-        };
+        .map_err(name_write_error)?;
         let channel = Channel {
             kind: dms::OrdinaryChannelKind::Channel,
             id: channel.0,
@@ -228,8 +273,10 @@ pub async fn create_channel(
                 role,
                 matches!(channel.2, ChannelVisibility::Public),
                 matches!(channel.2, ChannelVisibility::Private),
+                false,
             ),
             visibility: channel.2,
+            archived: false,
         };
         if matches!(channel.visibility, ChannelVisibility::Private) {
             sqlx::query(
@@ -353,28 +400,43 @@ pub(crate) async fn is_visible_for_write(
     ))
 }
 
-pub(crate) enum MoveAccess {
-    OrganizationUnavailable,
-    ChannelUnavailable,
-    Visible(Actor, Resource),
+pub(crate) enum ChannelLock {
+    Share,
+    NoKeyUpdate,
 }
 
-/// The same Channel -> Member -> grant order used to authorize new sends.
-pub(crate) async fn lock_move_access(
+pub(crate) enum LockedAccess {
+    OrganizationUnavailable,
+    ChannelUnavailable,
+    Visible {
+        actor: Actor,
+        resource: Resource,
+        archived: bool,
+    },
+}
+
+/// Channel -> Member -> grant, after any required Organization lock.
+pub(crate) async fn lock_channel_access(
     tx: &mut sqlx::PgConnection,
     organization: Uuid,
     member: (Uuid, i64),
     channel: Uuid,
-) -> Result<MoveAccess, sqlx::Error> {
-    let public = sqlx::query_scalar::<_, Option<bool>>(
-        "SELECT visibility='public' FROM channels WHERE organization_id=$1 AND id=$2 \
-         AND (kind='channel' OR $3 IN(lower_member_id,higher_member_id)) FOR SHARE",
-    )
-    .bind(organization)
-    .bind(channel)
-    .bind(member.0)
-    .fetch_optional(&mut *tx)
-    .await?;
+    lock: ChannelLock,
+) -> Result<LockedAccess, sqlx::Error> {
+    let locking = match lock {
+        ChannelLock::Share => "FOR SHARE",
+        ChannelLock::NoKeyUpdate => "FOR NO KEY UPDATE",
+    };
+    let sql = format!(
+        "SELECT visibility='public', archived_at IS NOT NULL FROM channels WHERE organization_id=$1 AND id=$2 \
+         AND (kind='channel' OR $3 IN(lower_member_id,higher_member_id)) {locking}"
+    );
+    let channel_state = sqlx::query_as::<_, (Option<bool>, bool)>(&sql)
+        .bind(organization)
+        .bind(channel)
+        .bind(member.0)
+        .fetch_optional(&mut *tx)
+        .await?;
     let sql = format!("SELECT role FROM ({}) u", auth::current_member_sql(true));
     let role: Option<Role> = sqlx::query_scalar(&sql)
         .bind(organization)
@@ -383,10 +445,10 @@ pub(crate) async fn lock_move_access(
         .fetch_optional(&mut *tx)
         .await?;
     let Some(role) = role else {
-        return Ok(MoveAccess::OrganizationUnavailable);
+        return Ok(LockedAccess::OrganizationUnavailable);
     };
-    let Some(public) = public else {
-        return Ok(MoveAccess::ChannelUnavailable);
+    let Some((public, archived)) = channel_state else {
+        return Ok(LockedAccess::ChannelUnavailable);
     };
     let resource = match public {
         Some(public) => Resource::Channel {
@@ -416,9 +478,13 @@ pub(crate) async fn lock_move_access(
         channel_manager: manager.unwrap_or(false),
     };
     Ok(if authorize(actor, Action::ReadChannel, resource).allowed {
-        MoveAccess::Visible(actor, resource)
+        LockedAccess::Visible {
+            actor,
+            resource,
+            archived,
+        }
     } else {
-        MoveAccess::ChannelUnavailable
+        LockedAccess::ChannelUnavailable
     })
 }
 
@@ -430,9 +496,9 @@ pub(crate) async fn authorize_send_targets(
     sender: (Uuid, i64),
     channel: Uuid,
     targets: &[Uuid],
-) -> Result<(Option<bool>, Vec<Uuid>), sqlx::Error> {
-    let public: Option<bool> = sqlx::query_scalar(
-        "SELECT visibility='public' FROM channels WHERE organization_id=$1 AND id=$2 FOR SHARE",
+) -> Result<(Option<bool>, bool, Vec<Uuid>), sqlx::Error> {
+    let channel_state: Option<(bool, bool)> = sqlx::query_as(
+        "SELECT visibility='public', archived_at IS NOT NULL FROM channels WHERE organization_id=$1 AND id=$2 AND kind='channel' FOR SHARE",
     )
     .bind(organization)
     .bind(channel)
@@ -447,10 +513,10 @@ pub(crate) async fn authorize_send_targets(
         .iter()
         .any(|&(id, revision, _)| (id, revision) == sender)
     {
-        return Ok((None, Vec::new()));
+        return Ok((None, false, Vec::new()));
     }
-    let Some(public) = public else {
-        return Ok((Some(false), Vec::new()));
+    let Some((public, archived)) = channel_state else {
+        return Ok((Some(false), false, Vec::new()));
     };
     let grants: Vec<(Uuid, i64)> = sqlx::query_as(
         "SELECT member_id,membership_revision FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=ANY($3) ORDER BY member_id FOR SHARE",
@@ -479,7 +545,30 @@ pub(crate) async fn authorize_send_targets(
             accepted.push(id);
         }
     }
-    Ok((Some(sender_visible), accepted))
+    Ok((Some(sender_visible), archived, accepted))
+}
+
+/// In one snapshot, distinguish an unavailable Membership, an invisible Channel
+/// and a visible Channel with its archive state.
+pub(crate) async fn visible_archive_state(
+    connection: &mut sqlx::PgConnection,
+    organization: Uuid,
+    member: (Uuid, i64),
+    channel: Uuid,
+) -> Result<Option<Option<bool>>, sqlx::Error> {
+    let sql = format!(
+        "SELECT (SELECT c.archived_at IS NOT NULL FROM channels c \
+         WHERE c.organization_id=$1 AND c.id=$4 AND ({})) FROM ({}) u",
+        visible_channel_sql(),
+        auth::current_member_sql(false),
+    );
+    sqlx::query_scalar(&sql)
+        .bind(organization)
+        .bind(member.0)
+        .bind(member.1)
+        .bind(channel)
+        .fetch_optional(connection)
+        .await
 }
 
 pub(crate) async fn is_visible_scoped(
@@ -559,6 +648,7 @@ pub(crate) async fn visible_members(
 }
 
 mod access;
+pub mod archive;
 pub mod dms;
 pub mod members;
 pub use access::AccessChanges;

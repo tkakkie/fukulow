@@ -247,8 +247,9 @@ async fn unread_rejects_foreign_topics_invalid_inputs_and_stale_member_revision(
                 _ => list_channels(
                     state,
                     auth,
-                    Ok(Query(fukulow_api::HistoryQuery {
+                    Ok(Query(crate::messages::unread::ChannelListQuery {
                         history_generation: None,
+                        archived: None,
                     })),
                 )
                 .await
