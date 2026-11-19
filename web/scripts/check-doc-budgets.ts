@@ -21,6 +21,7 @@ export const BUDGETS_KIB = new Map<string, number>([
   ['docs/invariants/messages.md', 29],
   ['docs/invariants/realtime.md', 36],
   ['docs/invariants/replies.md', 25],
+  ['docs/invariants/sections.md', 6],
   ['docs/invariants/sync.md', 31],
   ['docs/invariants/topics.md', 12],
   ['docs/invariants/unread.md', 16],
