@@ -36,7 +36,10 @@ export function runKind() {
   return process.env.SEARCH_SMOKE==='1' ? 'smoke' : 'evaluation';
 }
 export const smokeLabel = 'SMOKE / NON-EVALUATION';
-// v6 (#223) records the Invite cleanup migration with the same evaluation conditions.
+// v1 through v5 stay as recorded; runs use the current version only.
+// v4 (#141) records the Move migration with the same evaluation conditions.
+// v5 (#204) records the sections migration with the same evaluation conditions.
+// v6 (#410) records the Channel archive migration with the same evaluation conditions.
 export const manifestFile = 'load/search-engines/manifest-v6.json';
 // P2 (maintainer, 2026-11-17): app-role search goes through the definer function.
 export const queryPath = {kind:'SECURITY DEFINER, LANGUAGE sql BEGIN ATOMIC',source:'load/search-engines/definer.sql',

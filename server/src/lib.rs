@@ -200,6 +200,10 @@ pub fn app(state: AppState) -> Router {
             get(messages::list_channels).post(channels::create_channel),
         )
         .route(
+            "/api/v1/orgs/{org}/channels/{id}",
+            get(channels::archive::get_channel).patch(channels::archive::update_channel),
+        )
+        .route(
             "/api/v1/orgs/{org}/channels/{id}/members",
             get(channels::members::list).post(channels::members::add),
         )

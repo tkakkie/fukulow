@@ -93,7 +93,7 @@ impl Move {
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 403, description = "move_not_allowed for a visible chain the caller may not Move", body = ErrorBody),
         (status = 404, description = "Organization, Channel, Message or destination Topic unavailable", body = ErrorBody),
-        (status = 409, description = "version_conflict, operation_conflict, chain_too_large or history_generation_changed", body = ErrorBody),
+        (status = 409, description = "version_conflict, operation_conflict, chain_too_large, history_generation_changed or channel_archived", body = ErrorBody),
         (status = 413, description = "Move request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Move requires an application/json content type", body = ErrorBody),
         (status = 500, description = "Database or worker failure, including unknown COMMIT outcome; retry with the same operation_id", body = ErrorBody),
@@ -329,14 +329,25 @@ async fn persist(
 async fn prepare(tx: &mut PgConnection, request: &Move) -> Result<Prepared, MessageError> {
     let org = request.organization;
     let channel = request.channel;
-    let (actor, resource) =
-        match channels::lock_move_access(tx, org, request.member, channel).await? {
-            channels::MoveAccess::OrganizationUnavailable => {
-                return Err(MessageError::OrganizationUnavailable);
-            }
-            channels::MoveAccess::ChannelUnavailable => return Err(MessageError::NotFound),
-            channels::MoveAccess::Visible(actor, resource) => (actor, resource),
-        };
+    let (actor, resource, archived) = match channels::lock_channel_access(
+        tx,
+        org,
+        request.member,
+        channel,
+        channels::ChannelLock::Share,
+    )
+    .await?
+    {
+        channels::LockedAccess::OrganizationUnavailable => {
+            return Err(MessageError::OrganizationUnavailable);
+        }
+        channels::LockedAccess::ChannelUnavailable => return Err(MessageError::NotFound),
+        channels::LockedAccess::Visible {
+            actor,
+            resource,
+            archived,
+        } => (actor, resource, archived),
+    };
     commit::lock(tx, org, channel, false).await?;
     let generation =
         history::validate(tx, org, channel, request.input.history_generation, None).await?;
@@ -361,6 +372,7 @@ async fn prepare(tx: &mut PgConnection, request: &Move) -> Result<Prepared, Mess
             }))
         }
         receipts::Resolution::Conflict => Err(MessageError::OperationConflict),
+        receipts::Resolution::New if archived => Err(MessageError::ChannelArchived),
         receipts::Resolution::New => prepare_new(tx, request, chain, operation, generation).await,
     }
 }

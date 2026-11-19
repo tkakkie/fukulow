@@ -587,6 +587,19 @@ impl Activity {
         senders: Option<&ActivityBatch>,
     ) -> Result<(), sqlx::Error> {
         let channel = notice.channel();
+        self.publish_scoped(pool, organization, notice, channel, target, senders)
+            .await
+    }
+
+    async fn publish_scoped(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        notice: Notice,
+        channel: Option<Uuid>,
+        target: Option<Uuid>,
+        senders: Option<&ActivityBatch>,
+    ) -> Result<(), sqlx::Error> {
         let captured: Vec<_> = self
             .snapshot(organization)
             .into_iter()
@@ -712,17 +725,29 @@ impl Activity {
         notice: Notice,
         target: Option<Uuid>,
     ) {
+        let channel = notice.channel();
+        self.spawn_scoped(pool, organization, notice, channel, target);
+    }
+
+    fn spawn_scoped(
+        &self,
+        pool: sqlx::PgPool,
+        organization: Uuid,
+        notice: Notice,
+        channel: Option<Uuid>,
+        target: Option<Uuid>,
+    ) {
         let Ok(slot) = self.capacity.clone().try_acquire_owned() else {
             return;
         };
         let this = self.clone();
         #[cfg(test)]
-        let key = (organization, notice.channel().unwrap_or(Uuid::nil()));
+        let key = (organization, channel.unwrap_or(Uuid::nil()));
         let task = tokio::spawn(async move {
             let _slot = slot;
             let _ = tokio::time::timeout(
                 Duration::from_secs(10),
-                this.publish(&pool, organization, notice, target, None),
+                this.publish_scoped(&pool, organization, notice, channel, target, None),
             )
             .await;
         });
@@ -772,11 +797,10 @@ fn enqueue(entry: &Entry, mut pending: Pending) {
         entry.wake.notify_one();
         return;
     }
-    if let Some(old) = b
-        .pending
-        .iter_mut()
-        .find(|p| p.notice.key() == pending.notice.key())
-    {
+    if let Some(old) = b.pending.iter_mut().find(|p| {
+        p.notice.key() == pending.notice.key()
+            && (!matches!(pending.notice, Notice::ChannelListChanged) || p.channel == channel)
+    }) {
         let recovery = old.recovery.get_or_insert_with(Default::default).clone();
         old.valid.contribute(&recovery);
         pending.valid.contribute(&recovery);
@@ -1238,6 +1262,16 @@ impl auth::activity::ActivityChanges for Activity {
         change: auth::activity::ChannelChange,
     ) {
         match change {
+            auth::activity::ChannelChange::Metadata { channel } => {
+                // The wire notice carries no id, but its proof and handoff are Channel-scoped.
+                self.spawn_scoped(
+                    pool,
+                    organization,
+                    Notice::ChannelListChanged,
+                    Some(channel),
+                    None,
+                );
+            }
             auth::activity::ChannelChange::Created {
                 channel,
                 creator,

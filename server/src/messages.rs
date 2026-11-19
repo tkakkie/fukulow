@@ -195,7 +195,7 @@ pub async fn list_messages(
         (status = 400, description = "Malformed Organization id, Channel id or Message JSON; body must be 1..=4000 scalars, nonblank and NUL-free; topic_name must be 1..=60 scalars, NUL-free and have no surrounding str::trim whitespace; topic_id is forbidden; reply_to with topic_name gives reply_topic_not_allowed; accessible DMs reject non-null Topic intent with dm_topics_not_allowed", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable for an unavailable Organization; otherwise Channel does not exist or is private and the caller is not a member; reply_parent_not_found for an unknown, uncommitted or foreign Organization/Channel parent", body = ErrorBody),
-        (status = 409, description = "history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed", body = ErrorBody),
+        (status = 409, description = "history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; channel_archived; new DM send: dm_peer_deactivated or dm_peer_access_lapsed", body = ErrorBody),
         (status = 413, description = "Message send request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Sending a Message requires an application/json content type", body = ErrorBody),
         (status = 429, description = "send_rate_limited: the per-(Organization, Member) send limit (burst 10, 1 per second) is exhausted; checked after Channel authorization and before admission; nothing was charged, queued or persisted; retry after the delay with the same request and client_message_id", body = ErrorBody,
@@ -240,6 +240,11 @@ pub async fn send_message(
         if let limiter::Settled::Refused(refusal) = &outcome
             && identical
         {
+            if let Some(message) =
+                committed(&state.pool, organization_id, sender, channel_id, &input).await?
+            {
+                return Ok(created(message));
+            }
             return Err(refusal.replay());
         }
         if let limiter::Settled::Executed(failure) = outcome {
@@ -333,7 +338,10 @@ async fn committed(
         pool,
         organization_id,
         async |tx: &mut sqlx::PgConnection| {
-            require_visible(&mut *tx, organization_id, sender, channel_id).await?;
+            let archived = channels::visible_archive_state(tx, organization_id, sender, channel_id)
+                .await?
+                .ok_or(MessageError::OrganizationUnavailable)?
+                .ok_or(MessageError::NotFound)?;
             history::validate(
                 tx,
                 organization_id,
@@ -343,9 +351,10 @@ async fn committed(
             )
             .await?;
             match receipt(&mut *tx, organization_id, sender.0, channel_id, input).await? {
-                None => Ok(None),
                 Some((message, true)) => Ok(Some(message)),
                 Some((_, false)) => Err(MessageError::Conflict),
+                None if archived => Err(MessageError::ChannelArchived),
+                None => Ok(None),
             }
         },
     )
@@ -409,6 +418,7 @@ pub enum MessageError {
     HistoryGenerationChanged,
     SnapshotExpired,
     MoveNotAllowed,
+    ChannelArchived,
     VersionConflict,
     OperationConflict,
     ChainTooLarge,
@@ -440,6 +450,7 @@ impl MessageError {
             Self::HistoryGenerationChanged => Self::HistoryGenerationChanged,
             Self::SnapshotExpired => Self::SnapshotExpired,
             Self::MoveNotAllowed => Self::MoveNotAllowed,
+            Self::ChannelArchived => Self::ChannelArchived,
             Self::VersionConflict => Self::VersionConflict,
             Self::OperationConflict => Self::OperationConflict,
             Self::ChainTooLarge => Self::ChainTooLarge,
@@ -477,6 +488,7 @@ impl IntoResponse for MessageError {
             Self::SnapshotExpired => (StatusCode::CONFLICT, "snapshot_expired"),
             Self::MoveNotAllowed => (StatusCode::FORBIDDEN, "move_not_allowed"),
             Self::VersionConflict => (StatusCode::CONFLICT, "version_conflict"),
+            Self::ChannelArchived => (StatusCode::CONFLICT, "channel_archived"),
             Self::OperationConflict => (StatusCode::CONFLICT, "operation_conflict"),
             Self::ChainTooLarge => (StatusCode::CONFLICT, "chain_too_large"),
             Self::InvalidInput => (StatusCode::BAD_REQUEST, "invalid input"),
@@ -712,7 +724,7 @@ async fn persist_admitted(
             .await?;
         accepted
     } else {
-        let (visible, accepted) = channels::authorize_send_targets(
+        let (visible, archived, accepted) = channels::authorize_send_targets(
             tx.connection()?,
             organization_id,
             member,
@@ -724,6 +736,24 @@ async fn persist_admitted(
             Some(true) => {}
             Some(false) => return Err(MessageError::NotFound),
             None => return Err(MessageError::OrganizationUnavailable),
+        }
+        if archived {
+            // Another send can commit before our Channel lock is granted.
+            // Resolve its receipt in the locked state before refusing new work.
+            let canonical = receipt(
+                tx.connection()?,
+                organization_id,
+                sender,
+                channel_id,
+                &input,
+            )
+            .await?;
+            tx.rollback().await?;
+            return match canonical {
+                Some((message, true)) => Ok(message),
+                Some((_, false)) => Err(MessageError::Conflict),
+                None => Err(MessageError::ChannelArchived),
+            };
         }
         accepted
     };

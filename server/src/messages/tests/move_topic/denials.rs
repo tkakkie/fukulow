@@ -432,6 +432,22 @@ async fn move_limit_counts_tombstones_and_accepts_exactly_one_thousand(pool: PgP
                 call,
             )
             .await;
+            archive::owner(&pool, &f).await;
+            assert_eq!(
+                archive::patch_archive(&f.app, &f.token, f.channel, true)
+                    .await
+                    .status(),
+                StatusCode::NO_CONTENT
+            );
+            no_effect(
+                &pool,
+                &f,
+                f.channel,
+                StatusCode::CONFLICT,
+                "channel_archived",
+                move_request(&f.app, &f.token, f.channel, id(&root), named(size, "Large")),
+            )
+            .await;
         } else {
             let result = moved(call.await).await;
             assert_eq!(result.move_seq, Some(size + 1));

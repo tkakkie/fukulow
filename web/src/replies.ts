@@ -2,7 +2,7 @@ import * as api from './api'
 import { knownMessageState } from './identity-order'
 import type { Message, ReplyChainPage, ReplyChainQuery, Result } from './api'
 import type { createSync } from './sync'
-import { REPLY_MESSAGE_LIMIT } from './protocol-types'
+import { REPLY_MESSAGE_LIMIT, type ChannelState } from './protocol-types'
 import { countSequencesAfter, rememberSequence, trimMessages, EVIDENCE_LIMIT } from './message-window'
 
 type Sync = ReturnType<typeof createSync>
@@ -15,7 +15,8 @@ export const repliesApi = (organizationId: string): RepliesApi => ({
 // Half a default page leaves context on both sides of a descendant in one read.
 const ANCHOR_CONTEXT = 25
 const beforeAnchor = (anchor: Message) => anchor.reply_root_id ? Math.max(0, anchor.created_seq - ANCHOR_CONTEXT) : 0
-const chain = (anchor: Message, openedThrough: number) => ({ anchor, anchorCurrent: true, openedThrough, rootId: anchor.reply_root_id ?? anchor.id,
+const observedThrough = (c: ChannelState | undefined) => Math.max(c?.cursor ?? 0, c?.heldThrough ?? 0)
+const chain = (anchor: Message, channel: ChannelState | undefined) => ({ anchor, anchorCurrent: true, openedThrough: channel?.cursor ?? 0, rootId: anchor.reply_root_id ?? anchor.id,
   messages: new Map<string, Message>([[anchor.id, anchor]]),
   asOfSeq: undefined as number | undefined,
   moveBaseline: undefined as Pick<ReplyChainPage, 'chain_version' | 'history_generation'> | undefined,
@@ -24,6 +25,7 @@ const chain = (anchor: Message, openedThrough: number) => ({ anchor, anchorCurre
   following: true, hasNewer: false, newerCount: 0,
   restart: false, moveInvalidated: false,
   restartAfter: 0,
+  moveLiveFrom: observedThrough(channel),
   liveFloor: 0,
   liveSequences: [] as Parameters<typeof rememberSequence>[0],
   loading: false, error: false, read: Symbol() })
@@ -51,8 +53,33 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     deadlines.clear()
   }
   const belongs = (w: Chain, m: Message) => m.id === w.rootId || m.reply_root_id === w.rootId
-  const pending = (w: Chain, c: ReturnType<Sync['get']>['channels'][string] | undefined) =>
+  const pending = (w: Chain, c: ChannelState | undefined) =>
     (c?.pending ?? []).filter(p => p.reply_to && (p.replyRootId === w.rootId || p.reply_to === w.rootId || w.messages.has(p.reply_to)))
+  const advanceMoveBaseline = (w: Chain, c: ChannelState | undefined) => {
+    const baseline = w.moveBaseline
+    if (!baseline || w.restart || w.hasNewer || w.asOfSeq === undefined || !c || c.mutationSeq > w.asOfSeq) return false
+    // Neither bootstrap history nor a discarded Reply window proves coverage after W.
+    if (c.streamBase === undefined || c.streamBase > w.asOfSeq || w.moveLiveFrom > w.asOfSeq) return false
+    const covered = Math.max(w.asOfSeq, c.cursor ?? 0)
+    const through = c.advancing.find(range => range.start <= covered + 1 && range.end > covered)?.end ?? covered
+    const floor = Math.max(baseline.chain_version, w.asOfSeq)
+    if (through <= floor || w.liveFloor > floor) return false
+    // The newer badge can clear even if some observed Replies were evicted.
+    const countAfter = (seq: number) => countSequencesAfter(w.liveSequences, seq)
+    let missing = countAfter(floor) - countAfter(through)
+    if (missing === 0) return false
+    let version = floor
+    for (const m of w.messages.values()) {
+      if (m.created_seq <= floor || m.created_seq > through || countAfter(m.created_seq - 1) === countAfter(m.created_seq)) continue
+      missing--
+      // A hydrated mutation version on one Reply cannot stand for the whole chain.
+      if (m.reply_root_id === w.rootId && !m.deleted && m.version === m.created_seq &&
+        m.history_generation === baseline.history_generation && m.version > version && m.version <= through) version = m.version
+    }
+    if (missing !== 0 || version === floor) return false
+    w.moveBaseline = { ...baseline, chain_version: version }
+    return true
+  }
   const mergeStream = (channel: string, w: Chain, incoming?: Message[]) => {
     if (w.restart && !w.anchorCurrent) return false
     let changed = false
@@ -101,6 +128,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         else {
           const oldPending = pending(w, before)
           if ((before?.messages !== after.messages || records?.has(id)) && mergeStream(id, w, records?.get(id))) changed.add(id)
+          if ((changed.has(id) || before?.cursor !== after.cursor || before?.advancing !== after.advancing) && advanceMoveBaseline(w, after)) changed.add(id)
           if (before?.pending !== after.pending || changed.has(id)) {
             const newPending = pending(w, after)
             if (oldPending.length !== newPending.length || oldPending.some((p, i) => p !== newPending[i])) changed.add(id)
@@ -176,13 +204,15 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       } else if (result.data.root_id !== w.rootId) {
         w.error = true
       } else {
+        // Continuations use the same W and cannot supersede a live advance.
         if (requestedW === undefined) {
           w.asOfSeq = result.data.as_of_seq
           const { chain_version, history_generation } = result.data
-          if (Number.isSafeInteger(chain_version) && chain_version > 0) w.moveBaseline = { chain_version, history_generation }
+          w.moveBaseline = Number.isSafeInteger(chain_version) && chain_version > 0 ? { chain_version, history_generation } : undefined
         }
         const messages = result.data.messages.filter(m => m.channel_id === channel && belongs(w, m))
         if (w.restart) {
+          w.moveLiveFrom = observedThrough(state)
           w.messages.clear(); w.after = requestedAfter; w.hasOlder = requestedAfter > 0; w.hasNewer = false; w.newerCount = 0
           w.liveSequences = []; w.liveFloor = 0; w.following = true; w.restart = false; w.moveInvalidated = false
         }
@@ -210,6 +240,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         void sync.settleHistory(channel, messages)
         mergeStream(channel, w)
         if (!w.hasMore) { w.hasNewer = false; w.newerCount = 0 }
+        advanceMoveBaseline(w, sync.get().channels[channel])
       }
       notify(new Set([channel]))
     })
@@ -271,7 +302,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
         notify(new Set([channel]))
         return
       }
-      const w = chain(anchor, sync.get().channels[channel]?.cursor ?? 0)
+      const w = chain(anchor, sync.get().channels[channel])
       if (anchor.version < (sync.get().channels[channel]?.moveSeq ?? 0)) invalidateForMove(w)
       const changed = new Set([...chains.keys(), channel])
       for (const old of chains.values()) release(old)

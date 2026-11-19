@@ -513,14 +513,14 @@ it('refreshes Channel capabilities from the server when the メンバー tab is 
   const { net, session } = open()
   const privateChannel = (allowed: boolean): api.Channel => ({
     id: 'A',
-    kind: 'channel',
+    kind: 'channel', archived: false,
     name: 'A',
     visibility: 'private',
     capabilities: {
       can_add_members: { allowed },
       can_remove_members: { allowed },
       can_manage_managers: { allowed },
-      can_leave: { allowed: true },
+      can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false },
     },
   })
   try {
@@ -634,14 +634,14 @@ it('composes unread, replies and topics over a single sync instance and fences r
     net.unreadChannels.A = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       id: 'A',
-      kind: 'channel',
+      kind: 'channel', archived: false,
       name: 'A',
       visibility: 'public',
       capabilities: {
         can_add_members: { allowed: false },
         can_remove_members: { allowed: false },
         can_manage_managers: { allowed: false },
-        can_leave: { allowed: true },
+        can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false },
       },
       as_of_seq: 100,
       read_seq: 0,

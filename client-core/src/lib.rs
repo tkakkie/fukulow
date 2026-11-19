@@ -15,6 +15,7 @@ use uuid::Uuid;
 /// Owns protocol state. There is deliberately no whole-State serialization API.
 pub struct Core {
     pub(crate) session: SessionView,
+    pub(crate) move_epoch: Token,
     pub(crate) channels: BTreeMap<Uuid, ChannelView>,
     pub(crate) channel_order: Vec<Uuid>,
     pub(crate) requests: BTreeMap<Token, Request>,
@@ -36,6 +37,7 @@ impl Core {
                 reconnect_attempt: 0,
                 reconnect_wait: None,
             },
+            move_epoch: 0,
             channels: BTreeMap::new(),
             channel_order: Vec::new(),
             requests: BTreeMap::new(),

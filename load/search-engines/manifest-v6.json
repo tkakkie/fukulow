@@ -1,5 +1,5 @@
 {
-  "sha256": "3fc79162a5f832cd48fad47a5408423c73082f8e9a5481d22ce6af0d50fad96d",
+  "sha256": "c17048e8ca5f584af8b9314c8e8dab9d799dab42e214ae61a9c57ea6a095c56b",
   "frozen": {
     "version": 6,
     "date": "2026-11-17",
@@ -12,7 +12,7 @@
     "sourceHashes": [
       {
         "path": ".gitattributes",
-        "sha256": "72d4f214f00d98c2664ecfcb3298559d0be5b929a3dd9afc197527d0207091e5"
+        "sha256": "7408d92d0ebd377be46abf0d5fa46910a601153c765cb3672d06a3dc5de448c2"
       },
       {
         "path": ".node-version",
@@ -60,7 +60,7 @@
       },
       {
         "path": "load/search-engines/manifest.ts",
-        "sha256": "91669a1fa2eef6bb8a5b6b0a43bab62a06e9b457e72b11bebd77881afb965d86"
+        "sha256": "1b9bf08b4d67fdfd0582436fb4eda40f313451e09a9cd3dd3ad6614290b0c5e2"
       },
       {
         "path": "load/search-engines/pgroonga.sql",
@@ -247,8 +247,8 @@
         "sha256": "a42447eda0b19033229f89ae059742aacdd6ee3a879a4b412a17f39a434a21cf"
       },
       {
-        "path": "server/migrations/202611200223_invite_cleanup.sql",
-        "sha256": "c2d4fe1945a9c76f22a8edc25101633e664df8ee43650205330926df580ce22a"
+        "path": "server/migrations/202611200410_channel_archive.sql",
+        "sha256": "ff22b99ee96a73a664a738deab99e340636a032e2c96871309882d1c3bdfbf7c"
       }
     ],
     "quality": {

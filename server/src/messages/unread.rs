@@ -26,6 +26,14 @@ pub struct ChannelList {
     pub channels: Vec<UnreadChannel>,
 }
 
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ChannelListQuery {
+    pub history_generation: Option<Uuid>,
+    /// Return archived Channels when true. The default lists active Channels.
+    pub archived: Option<bool>,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MarkReadRequest {
@@ -120,10 +128,10 @@ CROSS JOIN LATERAL (
 ///
 /// Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels",
-    params(("org" = Uuid, Path, description = "Organization id"), fukulow_api::HistoryQuery),
+    params(("org" = Uuid, Path, description = "Organization id"), ChannelListQuery),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Visible Channels with current Member positions and Unread counts; refetch on reconnect", body = ChannelList),
-        (status = 400, description = "Malformed Organization id", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id or invalid query input", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 409, description = "history_generation_changed for a stale Organization epoch", body = crate::auth::ErrorBody),
         (status = 404, description = "Non-Member, unknown Organization or deactivated Member: organization_unavailable", body = ErrorBody),
@@ -131,7 +139,7 @@ CROSS JOIN LATERAL (
 pub async fn list_channels(
     State(state): State<AppState>,
     auth: Auth,
-    query: Result<Query<fukulow_api::HistoryQuery>, QueryRejection>,
+    query: Result<Query<ChannelListQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(query) =
         query.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid input", None))?;
@@ -139,7 +147,9 @@ pub async fn list_channels(
         &state.pool,
         auth.identity.organization.organization_id,
         async |tx: &mut sqlx::PgConnection| {
-            let channels = channels::visible_list(&mut *tx, &auth).await?;
+            let channels =
+                channels::visible_list(&mut *tx, &auth, Some(query.archived.unwrap_or(false)))
+                    .await?;
             #[cfg(test)]
             tests::unread::baseline::pause_list(auth.identity.member.id).await;
             let history_generation = crate::auth::history::validate(

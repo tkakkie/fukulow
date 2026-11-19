@@ -3,6 +3,7 @@ use sqlx::{Postgres, Transaction};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
+mod archive;
 mod authority;
 mod ordering;
 

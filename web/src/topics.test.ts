@@ -997,14 +997,14 @@ it('retains Topic window, baselines and paging cursors across C9 loss and same-C
   const controls: unknown[] = []
   const channelA: Channel = {
     id: 'A',
-    kind: 'channel',
+    kind: 'channel', archived: false,
     name: 'general',
     visibility: 'private',
     capabilities: {
       can_add_members: { allowed: false },
       can_remove_members: { allowed: false },
       can_manage_managers: { allowed: false },
-      can_leave: { allowed: false },
+      can_leave: { allowed: false }, can_rename: { allowed: false }, can_archive: { allowed: false },
     },
   }
   const listMessages = vi.fn(async (): Promise<Result<MessagePage>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false }))
@@ -1301,7 +1301,7 @@ it('creates a Topic via topic_name from the Topic composer during main paging ex
 
 it('recovers C9 Topic state by selecting a different Channel and back', async () => {
   const c = topicClient()
-  const channel = (id: string): Channel => ({ id, kind: 'channel', name: id, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true } } })
+  const channel = (id: string): Channel => ({ id, kind: 'channel', archived: false, name: id, visibility: 'public', capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false } } })
   const session = createSession({ selfId: 'me', onEnded: vi.fn(), topicsApi: c.topicsApi,
     channelsApi: { listChannels: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('B')] }), createChannel: async () => ok(channel('B')) },
     sync: { api: { listChannelEvents: async () => ({ ok: false, kind: 'network' }), listMessages: c.listMessages, sendMessage: c.sendMessage },

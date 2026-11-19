@@ -37,7 +37,7 @@ pub async fn lookup_authors(
     }
     let organization = auth.identity.organization.organization_id;
     crate::database::organization_read_only(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
-        let channels = channels::visible_list(&mut *tx, &auth).await?;
+        let channels = channels::visible_list(&mut *tx, &auth, None).await?;
         let channels: Vec<_> = channels.into_iter().map(|channel| channel.id).collect();
         #[cfg(test)]
         super::tests::authors::pause(organization).await;

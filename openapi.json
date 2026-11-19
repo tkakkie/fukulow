@@ -558,6 +558,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Return archived Channels when true. The default lists active Channels.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -572,7 +581,7 @@
             }
           },
           "400": {
-            "description": "Malformed Organization id",
+            "description": "Malformed Organization id or invalid query input",
             "content": {
               "application/json": {
                 "schema": {
@@ -768,6 +777,277 @@
           },
           "500": {
             "description": "Database failure while resolving the session or creating the Channel and its membership",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/channels/{id}": {
+      "get": {
+        "tags": [
+          "crate::channels::archive"
+        ],
+        "summary": "Read one accessible ordinary Channel, including archived Channels.",
+        "operationId": "get_channel",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accessible ordinary Channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or dm_channel_fixed for an accessible DM",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "crate::channels::archive"
+        ],
+        "summary": "Supply exactly one of name or archived. An authorized no-op returns 204.",
+        "operationId": "update_channel",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Channel updated or already in the requested state"
+          },
+          "400": {
+            "description": "Invalid path, input or name; dm_channel_fixed for an accessible DM",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Account Session unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "forbidden: current Member may not change this Channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "channel_archived or channel name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Requires application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database or worker failure",
             "content": {
               "application/json": {
                 "schema": {
@@ -1790,7 +2070,7 @@
             }
           },
           "409": {
-            "description": "history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed",
+            "description": "history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; channel_archived; new DM send: dm_peer_deactivated or dm_peer_access_lapsed",
             "content": {
               "application/json": {
                 "schema": {
@@ -2165,7 +2445,7 @@
             }
           },
           "409": {
-            "description": "version_conflict, operation_conflict, chain_too_large or history_generation_changed",
+            "description": "version_conflict, operation_conflict, chain_too_large, history_generation_changed or channel_archived",
             "content": {
               "application/json": {
                 "schema": {
@@ -4485,7 +4765,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Group of an accessible ordinary Channel",
+            "description": "Group of an accessible active ordinary Channel",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -4540,6 +4820,24 @@
           },
           "404": {
             "description": "organization_unavailable or channel not found",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "channel_archived",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -4711,6 +5009,24 @@
               }
             }
           },
+          "409": {
+            "description": "channel_archived",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "413": {
             "description": "Body exceeds 16 KiB",
             "headers": {
@@ -4831,7 +5147,7 @@
         },
         "responses": {
           "204": {
-            "description": "Complete accessible Channel order set or already current",
+            "description": "Complete accessible active Channel order set or already current",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -4896,7 +5212,7 @@
             }
           },
           "409": {
-            "description": "section_layout_changed",
+            "description": "channel_archived or section_layout_changed",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -5023,7 +5339,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Personal layout with accessible Channels only",
+            "description": "Personal layout with accessible active Channels only",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -5604,7 +5920,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Owned section with accessible Channels only",
+            "description": "Owned section with accessible active Channels only",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -7369,9 +7685,13 @@
           "kind",
           "name",
           "visibility",
+          "archived",
           "capabilities"
         ],
         "properties": {
+          "archived": {
+            "type": "boolean"
+          },
           "capabilities": {
             "$ref": "#/components/schemas/ChannelCapabilities"
           },
@@ -7482,10 +7802,15 @@
           "can_add_members",
           "can_remove_members",
           "can_leave",
-          "can_manage_managers"
+          "can_manage_managers",
+          "can_rename",
+          "can_archive"
         ],
         "properties": {
           "can_add_members": {
+            "$ref": "#/components/schemas/Capability"
+          },
+          "can_archive": {
             "$ref": "#/components/schemas/Capability"
           },
           "can_leave": {
@@ -7495,6 +7820,9 @@
             "$ref": "#/components/schemas/Capability"
           },
           "can_remove_members": {
+            "$ref": "#/components/schemas/Capability"
+          },
+          "can_rename": {
             "$ref": "#/components/schemas/Capability"
           }
         }
@@ -9582,6 +9910,36 @@
             ]
           }
         }
+      },
+      "UpdateChannelRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              }
+            },
+            "maxProperties": 1
+          },
+          {
+            "type": "object",
+            "required": [
+              "archived"
+            ],
+            "properties": {
+              "archived": {
+                "type": "boolean"
+              }
+            },
+            "maxProperties": 1
+          }
+        ]
       }
     },
     "securitySchemes": {
