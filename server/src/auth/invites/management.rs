@@ -9,7 +9,27 @@ use utoipa::IntoParams;
 pub(super) const LIST_SQL: &str = "SELECT id,email,role,created_by,to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at FROM invites \
              WHERE organization_id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>statement_timestamp() AND expires_at>clock_timestamp() \
              AND ($2 OR role<>'owner') AND ($3::uuid IS NULL OR (created_at,id) > \
-             (SELECT created_at,id FROM invites WHERE organization_id=$1 AND id=$3)) ORDER BY created_at,id LIMIT 101";
+             (SELECT created_at,id FROM invites WHERE organization_id=$1 AND id=$3 \
+              UNION ALL SELECT created_at,id FROM invite_tombstones WHERE organization_id=$1 AND id=$3 \
+              LIMIT 1)) ORDER BY created_at,id LIMIT 101";
+
+pub(super) fn cursor_column(owner: bool) -> &'static str {
+    // Column choice comes only from fresh authorization.
+    if owner {
+        "owner_cursor"
+    } else {
+        "admin_cursor"
+    }
+}
+
+pub(super) fn anchor_sql(owner: bool) -> String {
+    let column = cursor_column(owner);
+    format!(
+        "SELECT id FROM invites WHERE organization_id=$1 AND {column}=$2 AND ($3 OR role<>'owner') \
+             UNION ALL SELECT id FROM invite_tombstones WHERE organization_id=$1 AND {column}=$2 AND ($3 OR role<>'owner') \
+             LIMIT 1"
+    )
+}
 
 #[derive(Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct OutstandingInvite {
@@ -53,30 +73,60 @@ pub async fn list_invites(
 ) -> Result<Response, ApiError> {
     let Query(query) = query.map_err(|_| ApiError::bad_request())?;
     let org = auth.identity.organization.organization_id;
-    let page = crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
-        members::lock_organization(tx, org).await?;
-        let actor = members::current_actor(tx, &auth, Action::Invite(Role::Member)).await?;
-        let owner = authorize(actor, Action::Invite(Role::Owner), Resource::Organization(org)).allowed;
-        // Column choice is server-controlled and comes only from fresh authorization.
-        let cursor_column = if owner { "owner_cursor" } else { "admin_cursor" };
-        let anchor = if let Some(cursor) = query.cursor {
-            let cursor = Uuid::parse_str(&cursor).map_err(|_| ApiError::bad_request())?;
-            // Do not require the anchor to remain outstanding: acceptance, revocation
-            // and expiry must not invalidate a boundary or shift subsequent pages.
-            let sql = format!("SELECT id FROM invites WHERE organization_id=$1 AND {cursor_column}=$2 AND ($3 OR role<>'owner')");
-            Some(sqlx::query_scalar::<_, Uuid>(&sql).bind(org).bind(cursor).bind(owner)
-                .fetch_optional(&mut *tx).await?.ok_or_else(ApiError::bad_request)?)
-        } else { None };
-        let mut invites: Vec<OutstandingInvite> = sqlx::query_as(LIST_SQL).bind(org).bind(owner).bind(anchor).fetch_all(&mut *tx).await?;
-        let next_cursor = if invites.len() > 100 {
-            invites.truncate(100);
-            let last = invites.last().ok_or_else(ApiError::bad_request)?;
-            let sql = format!("SELECT {cursor_column} FROM invites WHERE organization_id=$1 AND id=$2");
-            let cursor: Uuid = sqlx::query_scalar(&sql).bind(org).bind(last.id).fetch_one(&mut *tx).await?;
-            Some(cursor.to_string())
-        } else { None };
-        Ok::<_, ApiError>(InvitePage { invites, next_cursor })
-    }).await?;
+    let page =
+        crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
+            members::lock_organization(tx, org).await?;
+            let actor = members::current_actor(tx, &auth, Action::Invite(Role::Member)).await?;
+            let owner = authorize(
+                actor,
+                Action::Invite(Role::Owner),
+                Resource::Organization(org),
+            )
+            .allowed;
+            let cursor_column = cursor_column(owner);
+            let anchor = if let Some(cursor) = query.cursor {
+                let cursor = Uuid::parse_str(&cursor).map_err(|_| ApiError::bad_request())?;
+                // Do not require the anchor to remain outstanding: acceptance, revocation
+                // and expiry must not invalidate a boundary or shift subsequent pages.
+                Some(
+                    sqlx::query_scalar::<_, Uuid>(&anchor_sql(owner))
+                        .bind(org)
+                        .bind(cursor)
+                        .bind(owner)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .ok_or_else(ApiError::bad_request)?,
+                )
+            } else {
+                None
+            };
+            let mut invites: Vec<OutstandingInvite> = sqlx::query_as(LIST_SQL)
+                .bind(org)
+                .bind(owner)
+                .bind(anchor)
+                .fetch_all(&mut *tx)
+                .await?;
+            let next_cursor = if invites.len() > 100 {
+                invites.truncate(100);
+                let last = invites.last().ok_or_else(ApiError::bad_request)?;
+                let sql = format!(
+                    "SELECT {cursor_column} FROM invites WHERE organization_id=$1 AND id=$2"
+                );
+                let cursor: Uuid = sqlx::query_scalar(&sql)
+                    .bind(org)
+                    .bind(last.id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                Some(cursor.to_string())
+            } else {
+                None
+            };
+            Ok::<_, ApiError>(InvitePage {
+                invites,
+                next_cursor,
+            })
+        })
+        .await?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(page)).into_response())
 }
 

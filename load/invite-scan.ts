@@ -59,7 +59,8 @@ try {
     const current = join(root, 'server/migrations')
     for (const file of readdirSync(current).filter(f => f.endsWith('.sql'))) {
       copyFileSync(join(current, file), join(combined, file))
-      if (!file.startsWith('202611140303_') && !file.startsWith('202611140388_')) copyFileSync(join(current, file), join(first, file))
+      const version = Number(file.split('_')[0])
+      if (version <= 202611140387 && version !== 202611140303) copyFileSync(join(current, file), join(first, file))
     }
     for (const prefix of ['202611140370_', '202611140386_', '202611140387_']) {
       const file = readdirSync(dm).find(f => f.startsWith(prefix) && f.endsWith('.sql'))

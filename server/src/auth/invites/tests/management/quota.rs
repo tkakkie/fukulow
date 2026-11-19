@@ -77,7 +77,8 @@ async fn invite_quota_separates_roles_and_organizations(pool: sqlx::PgPool) {
     let other = org_fn(&pool).await;
     let (_, owner_id, _, owner) = account(&pool, org, Role::Owner).await;
     let (_, admin_id, _, admin) = account(&pool, org, Role::Admin).await;
-    let (_, _, _, other_owner) = account(&pool, other, Role::Owner).await;
+    let (_, other_issuer, _, other_owner) = account(&pool, other, Role::Owner).await;
+    let (_, _, _, other_admin) = account(&pool, other, Role::Admin).await;
     let app = crate::app(AppState::for_test(pool.clone()).await);
     seed_role(&pool, org, owner_id, Role::Member, 97).await;
     seed_role(&pool, org, owner_id, Role::Guest, 1).await;
@@ -96,7 +97,6 @@ async fn invite_quota_separates_roles_and_organizations(pool: sqlx::PgPool) {
         Role::Owner,
     )
     .await;
-    let last = invite(&app, org, &admin, "last@example.invalid", Role::Member).await;
     seed_role(&pool, org, owner_id, Role::Owner, 8).await;
     invite(
         &app,
@@ -107,12 +107,43 @@ async fn invite_quota_separates_roles_and_organizations(pool: sqlx::PgPool) {
     )
     .await;
     full(&pool, &app, org, &owner, Role::Owner).await;
+    // With 99 non-Owner and 10 Owner-Role Outstanding Invites, Admin can fill
+    // exactly the remaining non-Owner slot and sees only the new Invite.
+    let last = invite(&app, org, &admin, "last@example.invalid", Role::Member).await;
+    let public_fields = HashSet::from(["id", "organization_id", "token", "expires_at"]);
+    assert_eq!(
+        last.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>(),
+        public_fields
+    );
     full(&pool, &app, org, &admin, Role::Guest).await;
     full(&pool, &app, org, &owner, Role::Admin).await;
 
     for role in [Role::Owner, Role::Member] {
         invite(&app, other, &other_owner, "other@example.invalid", role).await;
     }
+    seed_role(&pool, other, other_issuer, Role::Owner, 9).await;
+    full(&pool, &app, other, &other_owner, Role::Owner).await;
+    let created = invite(
+        &app,
+        other,
+        &other_admin,
+        "other-admin@example.invalid",
+        Role::Guest,
+    )
+    .await;
+    assert_eq!(
+        created
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>(),
+        public_fields
+    );
     revoke(&app, org, &admin, id(&last)).await;
     invite(&app, org, &owner, "refill@example.invalid", Role::Admin).await;
     full(&pool, &app, org, &owner, Role::Owner).await;

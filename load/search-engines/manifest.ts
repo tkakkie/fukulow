@@ -36,10 +36,8 @@ export function runKind() {
   return process.env.SEARCH_SMOKE==='1' ? 'smoke' : 'evaluation';
 }
 export const smokeLabel = 'SMOKE / NON-EVALUATION';
-// v1 through v4 stay as recorded; runs use the current version only.
-// v4 (#141) records the Move migration with the same evaluation conditions.
-// v5 (#204) records the sections migration with the same evaluation conditions.
-export const manifestFile = 'load/search-engines/manifest-v5.json';
+// v6 (#223) records the Invite cleanup migration with the same evaluation conditions.
+export const manifestFile = 'load/search-engines/manifest-v6.json';
 // P2 (maintainer, 2026-11-17): app-role search goes through the definer function.
 export const queryPath = {kind:'SECURITY DEFINER, LANGUAGE sql BEGIN ATOMIC',source:'load/search-engines/definer.sql',
   function:'public.fukulow_search_messages(uuid,text,boolean)',owner:'fukulow_search (NOLOGIN BYPASSRLS; column SELECT on messages, channels, users, channel_members)',
@@ -58,7 +56,7 @@ export function snapshot() {
       readdirSync(new URL(dir,sourceRoot)).filter(n=>!n.includes('.test.') && /\.(ts|sql)$/.test(n)).map(n=>`${dir}/${n}`)),
     'load/search-engines/Dockerfile','deploy/db-grants.sql','deploy/db-roles.sql','deploy/db-role-settings.sql'].sort();
   const data = corpus();
-  return {version:5,date:'2026-11-17',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
+  return {version:6,date:'2026-11-17',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
     node:readSource('.node-version').trim(),
     sourceHashes:files.map(path=>({path,sha256:hash(readSource(path))})),
     quality:{querySet:qualityQueries.map(({gold,...q})=>({...q,relevantKeys:gold.map(id=>data.find(m=>m.id===id)?.key)})),

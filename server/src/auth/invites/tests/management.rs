@@ -9,6 +9,7 @@ async fn snapshot(pool: &sqlx::PgPool) -> Value {
         (SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM accounts a), \
         (SELECT jsonb_agg(to_jsonb(u) ORDER BY organization_id,id) FROM users u), \
         (SELECT jsonb_agg(to_jsonb(i) ORDER BY organization_id,id) FROM invites i), \
+        (SELECT jsonb_agg(to_jsonb(t) ORDER BY organization_id,id) FROM invite_tombstones t), \
         (SELECT jsonb_agg(to_jsonb(s) ORDER BY token_hash) FROM account_sessions s))",
     )
     .fetch_one(pool)
@@ -78,6 +79,7 @@ async fn waiting(pool: &sqlx::PgPool, pattern: &str) {
     }).await.unwrap();
 }
 
+mod cleanup;
 mod concurrency;
 mod denials;
 mod expiry;
