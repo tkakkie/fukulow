@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { createActivity } from './activity'
 import { deferred, replyPage, msg, ok, page, summary, topicClient } from './topic-test-helpers'
 import { reply, replyClient, root } from './reply-test-helpers'
 import { moveEvent } from './protocol-test-helpers'
@@ -273,5 +274,73 @@ it('a lower Move for another chain fences a pending projection without lowering 
   expect(c.sync.get().channels.A).toMatchObject({ cursor: 12, moveSeq: 12 })
   expect(c.topics.get('A').main.asOfSeq).toBe(12)
   expect(c.topics.get('A').lines.every(line => line.kind !== 'message' || line.message.id !== 'id8')).toBe(true)
+  await c.sync.close()
+})
+
+it('keeps deferred moveRefresh summaries when a second Move arrives before the first Move pages resolve', async () => {
+  const c = topicClient(); await c.boot()
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 10, topic: summary('aux', 4, 1) }))
+  await c.topics.loadSummary('A', 'aux')
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(1)
+
+  const firstMain = deferred<Result<TimelinePage>>(), secondMain = deferred<Result<TimelinePage>>()
+  c.topicsApi.listTimeline.mockReturnValueOnce(firstMain.promise).mockReturnValueOnce(secondMain.promise)
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 12, topic: summary('aux', 4, 2) }))
+  c.listMessages.mockResolvedValue(ok({ history_generation: generation, as_of_seq: 12, has_more: false, messages: [] }))
+
+  c.handlers[0].onEvent(moveEvent(11, 'id8')); await flush()
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(1)
+
+  c.handlers[0].onEvent(moveEvent(12, 'id10')); await flush()
+  secondMain.resolve(ok({ history_generation: generation, as_of_seq: 12, has_more: false, items: [] }))
+  await flush(); await flush()
+
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  expect(c.topicsApi.getTopicSummary).toHaveBeenLastCalledWith('A', 'aux')
+  expect(c.topics.get('A').topics.find(t => t.topicId === 'aux')).toMatchObject({ messageCount: 2 })
+
+  firstMain.resolve(ok(page(11))); await flush()
+  expect(c.topics.get('A').main.asOfSeq).toBe(12)
+  await c.sync.close()
+})
+
+it('refreshes the Topic list on Move when main is held only through activity', async () => {
+  const activity = createActivity({ watched: () => true })
+  const c = topicClient(activity); await c.boot()
+  expect(c.topicsApi.listTopics).not.toHaveBeenCalled()
+  expect(c.topics.get('A').list.asOfSeq).toBeUndefined()
+
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, has_more: false, items: [] }))
+  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, has_more: false, topics: [summary('T', 10, 4)] }))
+  c.listMessages.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, has_more: false, messages: [] }))
+
+  c.handlers[0].onEvent(moveEvent(11, 'id8')); await flush(); await flush()
+
+  expect(c.topicsApi.listTopics).toHaveBeenCalledTimes(1)
+  expect(c.topicsApi.listTopics).toHaveBeenCalledWith('A', { history_generation: generation })
+  expect(c.topics.get('A').list.asOfSeq).toBe(11)
+  expect(c.topics.get('A').topics.find(t => t.topicId === 'T')).toMatchObject({ messageCount: 4 })
+  await c.sync.close(); activity.close()
+})
+
+it('still refreshes held summaries on Move when a page-loader promise rejects', async () => {
+  const c = topicClient(); await c.boot()
+  await c.topics.loadList('A')
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 10, topic: summary('aux', 4, 1) }))
+  await c.topics.loadSummary('A', 'aux')
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(1)
+
+  const loadList = vi.spyOn(c.topics, 'loadList').mockRejectedValueOnce(new Error('list loader rejected'))
+  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, has_more: false, items: [] }))
+  c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, topic: summary('aux', 4, 2) }))
+  c.listMessages.mockResolvedValueOnce(ok({ history_generation: generation, as_of_seq: 11, has_more: false, messages: [] }))
+
+  c.handlers[0].onEvent(moveEvent(11, 'id8')); await flush(); await flush()
+
+  expect(loadList).toHaveBeenCalledTimes(1)
+  expect(loadList).toHaveBeenCalledWith('A')
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  expect(c.topicsApi.getTopicSummary).toHaveBeenLastCalledWith('A', 'aux')
+  expect(c.topics.get('A').topics.find(t => t.topicId === 'aux')).toMatchObject({ messageCount: 2 })
   await c.sync.close()
 })

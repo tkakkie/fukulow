@@ -651,6 +651,7 @@ mod access;
 pub mod archive;
 pub mod dms;
 pub mod members;
+pub(crate) mod sections;
 pub use access::AccessChanges;
 pub(crate) use access::AccessWatch;
 #[cfg(test)]

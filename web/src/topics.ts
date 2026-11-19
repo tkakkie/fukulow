@@ -132,7 +132,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (topic !== undefined && fresh.activeTopic === topic && !fresh.topics.get(topic)?.initialized) void controller.loadTopic(channel, topic)
       if (topic !== undefined && refresh.summaries.has(topic)) void ensureSummary(channel, topic)
       // A first page can cover most held summaries in one request.
-      void Promise.all(pages).then(() => {
+      void Promise.allSettled(pages).then(() => {
         if (!current(channel, fresh)) return
         fresh.moveRefresh = undefined
         for (const id of refresh.summaries) if (id !== topic) void ensureSummary(channel, id)
