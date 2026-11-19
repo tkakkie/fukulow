@@ -99,7 +99,7 @@ export function matchAutolink(run: UrlRun, index: number, scheme: Scheme): numbe
 // Each http candidate's authority ends at the next `/`, which every later `http://`
 // candidate contains, so authorities overlap by at most a scheme and slicing stays linear.
 function validHttpAuthority(authority: string): boolean {
-  if (authority.length === 0) return false
+  if (authority.length === 0 || authority.includes('\\')) return false
   const atIdx = authority.lastIndexOf('@')
   if (atIdx === 0) return false
   const hostPort = atIdx === -1 ? authority : authority.slice(atIdx + 1)
@@ -109,11 +109,23 @@ function validHttpAuthority(authority: string): boolean {
     const closeBracket = hostPort.indexOf(']')
     if (closeBracket <= 1) return false
     const afterBracket = hostPort.slice(closeBracket + 1)
-    return afterBracket.length === 0 || /^:\d+$/.test(afterBracket)
+    if (afterBracket.length > 0 && !/^:\d+$/.test(afterBracket)) return false
+  } else {
+    const colonIdx = hostPort.indexOf(':')
+    const hostname = colonIdx === -1 ? hostPort : hostPort.slice(0, colonIdx)
+    if (hostname.length === 0 || /[[\]]/.test(hostname)) return false
+    if (colonIdx !== -1 && !/^\d+$/.test(hostPort.slice(colonIdx + 1))) return false
   }
 
-  const colonIdx = hostPort.indexOf(':')
-  const hostname = colonIdx === -1 ? hostPort : hostPort.slice(0, colonIdx)
-  if (hostname.length === 0 || /[[\]]/.test(hostname)) return false
-  return colonIdx === -1 || /^\d+$/.test(hostPort.slice(colonIdx + 1))
+  try {
+    const parsed = new URL(`http://${authority}`)
+    return (
+      parsed.hostname.length > 0 &&
+      parsed.pathname === '/' &&
+      parsed.search === '' &&
+      parsed.hash === ''
+    )
+  } catch {
+    return false
+  }
 }

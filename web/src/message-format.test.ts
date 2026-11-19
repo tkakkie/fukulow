@@ -437,7 +437,15 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
     const worstCaseSchemeRuns = '!h'.repeat(2000)
     const worstCaseTrailingParens = 'http://x' + ')'.repeat(3992)
     // Many failed candidates inside one printable run (round-2 review of #634)
-    const failedCandidateRuns = ['http://)', 'http://.', 'http://@', 'mailto:@'].map(unit => unit.repeat(500))
+    const failedCandidateRuns = [
+      'http://)',
+      'http://.',
+      'http://@',
+      'mailto:@',
+      'http://a%b/',
+      'http://[bad]/',
+    ].map(unit => unit.repeat(Math.floor(4000 / unit.length)))
+    const unclosedBoldFailedUrls = '**' + 'http://)'.repeat(499)
 
     expect(worstCaseMarkers.length).toBe(4000)
     expect(worstCaseSchemeRuns.length).toBe(4000)
@@ -448,7 +456,13 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       { type: 'text', text: ')'.repeat(3992) },
     ])
 
-    for (const sample of [worstCaseMarkers, worstCaseSchemeRuns, worstCaseTrailingParens, ...failedCandidateRuns]) {
+    for (const sample of [
+      worstCaseMarkers,
+      worstCaseSchemeRuns,
+      worstCaseTrailingParens,
+      ...failedCandidateRuns,
+      unclosedBoldFailedUrls,
+    ]) {
       const start = performance.now()
       for (let i = 0; i < 20; i++) {
         clearMessageFormatCache()
@@ -486,6 +500,130 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
     expect(firstLine(tokenizeMessageBody(pendingAccepted, mentions, true))).toEqual([
       { type: 'link', href: 'https://example.com/', text: 'https://example.com/' },
       { type: 'text', text: `@{member:${ID_1}}` },
+    ])
+  })
+
+  it('rejects malformed HTTP authorities while linking valid IPv6, userinfo, ports and uppercase spellings', () => {
+    const malformed = [
+      'https://exa%mple.com/x',
+      'https://example.com:99999/x',
+      'https://example.com:65536/x',
+      'https://[not-ipv6]/x',
+      'https://example.com\\foo',
+    ]
+    for (const sample of malformed) {
+      expect(firstLine(tokenizeMessageBody(sample)), sample).toEqual([{ type: 'text', text: sample }])
+    }
+
+    const valid = [
+      'https://[::1]:8080/x',
+      'https://user:pass@example.com/x',
+      'https://example.com:443/x',
+      'http://example.com:0/x',
+      'HTTPS://EXAMPLE.COM:443/Path',
+    ]
+    for (const url of valid) {
+      expect(firstLine(tokenizeMessageBody(url)), url).toEqual([{ type: 'link', href: url, text: url }])
+    }
+
+    // Rejected authority in a shared printable run still allows a later valid candidate
+    expect(firstLine(tokenizeMessageBody('https://exa%mple.com/https://ok.example/x'))).toEqual([
+      { type: 'text', text: 'https://exa%mple.com/' },
+      { type: 'link', href: 'https://ok.example/x', text: 'https://ok.example/x' },
+    ])
+    expect(firstLine(tokenizeMessageBody('https://[not-ipv6]/https://ok.example/x'))).toEqual([
+      { type: 'text', text: 'https://[not-ipv6]/' },
+      { type: 'link', href: 'https://ok.example/x', text: 'https://ok.example/x' },
+    ])
+  })
+
+  it('ignores backticks inside autolinks when matching bold and strikethrough closers while keeping emphasis-wrapped links', () => {
+    // Backtick inside autolink does not open inline code or hide the closing ** / ~~
+    expect(firstLine(tokenizeMessageBody('**see https://example.com/` foo** tail'))).toEqual([
+      {
+        type: 'bold',
+        children: [
+          { type: 'text', text: 'see ' },
+          { type: 'link', href: 'https://example.com/`', text: 'https://example.com/`' },
+          { type: 'text', text: ' foo' },
+        ],
+      },
+      { type: 'text', text: ' tail' },
+    ])
+    expect(firstLine(tokenizeMessageBody('~~see https://example.com/` foo~~ tail'))).toEqual([
+      {
+        type: 'strikethrough',
+        children: [
+          { type: 'text', text: 'see ' },
+          { type: 'link', href: 'https://example.com/`', text: 'https://example.com/`' },
+          { type: 'text', text: ' foo' },
+        ],
+      },
+      { type: 'text', text: ' tail' },
+    ])
+
+    // Real inline code span after a URL with a backtick (both outside and inside emphasis)
+    expect(firstLine(tokenizeMessageBody('**see https://example.com/` foo** `code`'))).toEqual([
+      {
+        type: 'bold',
+        children: [
+          { type: 'text', text: 'see ' },
+          { type: 'link', href: 'https://example.com/`', text: 'https://example.com/`' },
+          { type: 'text', text: ' foo' },
+        ],
+      },
+      { type: 'text', text: ' ' },
+      { type: 'code', children: [{ type: 'text', text: 'code' }] },
+    ])
+    expect(firstLine(tokenizeMessageBody('~~see https://example.com/` foo~~ `code`'))).toEqual([
+      {
+        type: 'strikethrough',
+        children: [
+          { type: 'text', text: 'see ' },
+          { type: 'link', href: 'https://example.com/`', text: 'https://example.com/`' },
+          { type: 'text', text: ' foo' },
+        ],
+      },
+      { type: 'text', text: ' ' },
+      { type: 'code', children: [{ type: 'text', text: 'code' }] },
+    ])
+    expect(firstLine(tokenizeMessageBody('**see https://example.com/` and `code**` end**'))).toEqual([
+      {
+        type: 'bold',
+        children: [
+          { type: 'text', text: 'see ' },
+          { type: 'link', href: 'https://example.com/`', text: 'https://example.com/`' },
+          { type: 'text', text: ' and ' },
+          { type: 'code', children: [{ type: 'text', text: 'code**' }] },
+          { type: 'text', text: ' end' },
+        ],
+      },
+    ])
+    expect(firstLine(tokenizeMessageBody('~~see https://example.com/` and `code~~` end~~'))).toEqual([
+      {
+        type: 'strikethrough',
+        children: [
+          { type: 'text', text: 'see ' },
+          { type: 'link', href: 'https://example.com/`', text: 'https://example.com/`' },
+          { type: 'text', text: ' and ' },
+          { type: 'code', children: [{ type: 'text', text: 'code~~' }] },
+          { type: 'text', text: ' end' },
+        ],
+      },
+    ])
+
+    // Emphasis-wrapped links still close cleanly at the trailing emphasis marker
+    expect(firstLine(tokenizeMessageBody('**https://a.example/x**'))).toEqual([
+      {
+        type: 'bold',
+        children: [{ type: 'link', href: 'https://a.example/x', text: 'https://a.example/x' }],
+      },
+    ])
+    expect(firstLine(tokenizeMessageBody('~~https://a.example/x~~'))).toEqual([
+      {
+        type: 'strikethrough',
+        children: [{ type: 'link', href: 'https://a.example/x', text: 'https://a.example/x' }],
+      },
     ])
   })
 })

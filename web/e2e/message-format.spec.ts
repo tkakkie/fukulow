@@ -122,3 +122,77 @@ test('Message body formatting (#628): link keyboard focus and activation, target
   expect(urlLayout.fitsViewport).toBe(true)
   expect(urlLayout.lineRects).toBeGreaterThan(1)
 })
+
+test('Message body formatting (#628): multi-row roving tabindex keeps only the active row link tabbable across ArrowUp and ArrowDown', async ({
+  page,
+}) => {
+  const org = await signInOwner(page.request)
+  const channel = await createChannel(page.request, org, `fmt-roving-${crypto.randomUUID().slice(0, 8)}`)
+
+  for (const body of [
+    '1件目のリンク: https://example.invalid/first',
+    '2件目のリンク: https://example.invalid/second',
+  ]) {
+    const seed: components['schemas']['SendMessageRequest'] = {
+      client_message_id: crypto.randomUUID(),
+      body,
+    }
+    const posted = await secretSafe(() =>
+      page.request.post(`/api/v1/orgs/${org}/channels/${channel.id}/messages`, { data: seed }),
+    )
+    expect(posted.status()).toBe(201)
+  }
+
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto(`/o/${org}/c/${channel.id}`)
+  await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+
+  const main = page.locator('#main-content')
+  const articles = main.getByRole('article')
+  await expect(articles).toHaveCount(2)
+
+  const row1 = articles.nth(0)
+  const row2 = articles.nth(1)
+  const link1 = row1.locator('a')
+  const link2 = row2.locator('a')
+
+  // Default roving row is the latest confirmed row (row2); row1's link is not a Tab stop
+  await expect(row1).toHaveAttribute('tabindex', '-1')
+  await expect(link1).toHaveAttribute('tabindex', '-1')
+  await expect(row2).toHaveAttribute('tabindex', '0')
+  await expect(link2).toHaveAttribute('tabindex', '0')
+
+  // Tab from row2 reaches row2's link, not row1's
+  await row2.focus()
+  await expect(row2).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(link2).toBeFocused()
+
+  // ArrowUp moves roving focus to row1: row1's link becomes the sole tabbable link
+  await row2.focus()
+  await page.keyboard.press('ArrowUp')
+  await expect(row1).toBeFocused()
+  await expect(row1).toHaveAttribute('tabindex', '0')
+  await expect(link1).toHaveAttribute('tabindex', '0')
+  await expect(row2).toHaveAttribute('tabindex', '-1')
+  await expect(link2).toHaveAttribute('tabindex', '-1')
+
+  // Tab from row1 reaches link1; another Tab skips row2 and link2
+  await page.keyboard.press('Tab')
+  await expect(link1).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(row2).not.toBeFocused()
+  await expect(link2).not.toBeFocused()
+
+  // ArrowDown moves roving focus back to row2: row2's link becomes tabbable again
+  await row1.focus()
+  await page.keyboard.press('ArrowDown')
+  await expect(row2).toBeFocused()
+  await expect(row1).toHaveAttribute('tabindex', '-1')
+  await expect(link1).toHaveAttribute('tabindex', '-1')
+  await expect(row2).toHaveAttribute('tabindex', '0')
+  await expect(link2).toHaveAttribute('tabindex', '0')
+
+  await page.keyboard.press('Tab')
+  await expect(link2).toBeFocused()
+})

@@ -15,6 +15,7 @@ import { initCore } from '#sync-core'
 import { dmsAdapter, type DmsAdapter } from './dms.svelte'
 import { createMembers, watchMemberAccess, type MemberListAccess } from './members'
 import { membersAdapter } from './members.svelte'
+import { clearMessageFormatCache } from './message-format'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
@@ -107,6 +108,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     stopMemberRefresh?.(); stopMemberRefresh = undefined
     session?.close(); session = null
     members?.close(); members = null
+    clearMessageFormatCache()
     organization = null
     capabilitiesPending = false
     selectionGeneration++

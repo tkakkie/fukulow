@@ -7336,6 +7336,91 @@ it('MessageBody preserves authored empty lines at quote and code fence boundarie
   await unmount(instance)
 })
 
+it('MessageBody links follow the roving tabindex of their MessageRow across confirmed and pending rows (#628)', async () => {
+  const net = fakeNetwork()
+  const session = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+  const adapter = syncAdapter(session.sync)
+  net.socket.onReady()
+
+  const m1 = { ...record(1, 'c1'), body: '1件目 https://example.com/one' }
+  const m2 = { ...record(2, 'c1'), body: '2件目 https://example.com/two' }
+  net.timelines.c1 = ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    as_of_seq: 2,
+    has_more: false,
+    items: [
+      { kind: 'message', message: m1 },
+      { kind: 'message', message: m2 },
+    ],
+  })
+  net.lists[0].resolve(ok({
+    history_generation: '00000000-0000-4000-8000-000000000515',
+    channels: [channel('c1', 'general')],
+  }))
+  await settle()
+  net.subscribed('c1', 2)
+  // Also queue a pending send containing a link (must stay tabindex="-1")
+  void adapter.channel('c1').send('送信中 https://example.com/pending')
+  await settle()
+
+  const host = testDoc.createElement('div')
+  testDoc.body.appendChild(host)
+  const instance = mount(Timeline, {
+    target: host as unknown as Element,
+    props: {
+      channel: adapter.channel('c1'),
+      topics: topicsAdapter(session.topics, 'c1'),
+      channelId: 'c1',
+      selfId: 'me',
+    },
+  })
+  await settle()
+  flushSync()
+
+  const focusableRows = () => queryAll(host, '.ui-message-row[data-focusable="true"]')
+  const links = () => host.querySelectorAll('a.ui-message-body__link')
+
+  expect(focusableRows()).toHaveLength(2)
+  expect(links()).toHaveLength(3)
+  // Latest confirmed row (m2) is the default roving row; m1 (inactive) and pending stay -1
+  expect(focusableRows().map((r) => r.getAttribute('tabindex'))).toEqual(['-1', '0'])
+  expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
+    ['https://example.com/one', '-1'],
+    ['https://example.com/two', '0'],
+    ['https://example.com/pending', '-1'],
+  ])
+
+  // ArrowUp moves roving focus to m1: only m1's link becomes tabindex="0"
+  focusableRows()[1].focus()
+  const up = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+  up.key = 'ArrowUp'
+  focusableRows()[1].dispatchEvent(up)
+  flushSync()
+
+  expect(focusableRows().map((r) => r.getAttribute('tabindex'))).toEqual(['0', '-1'])
+  expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
+    ['https://example.com/one', '0'],
+    ['https://example.com/two', '-1'],
+    ['https://example.com/pending', '-1'],
+  ])
+
+  // ArrowDown moves roving focus back to m2: only m2's link becomes tabindex="0"
+  const down = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+  down.key = 'ArrowDown'
+  focusableRows()[0].dispatchEvent(down)
+  flushSync()
+
+  expect(focusableRows().map((r) => r.getAttribute('tabindex'))).toEqual(['-1', '0'])
+  expect(links().map((a) => [a.getAttribute('href'), a.getAttribute('tabindex')])).toEqual([
+    ['https://example.com/one', '-1'],
+    ['https://example.com/two', '0'],
+    ['https://example.com/pending', '-1'],
+  ])
+
+  await unmount(instance)
+  session.close()
+})
+
 it('Mention autocomplete uses only directory candidates with keyboard selection literal tokens IME and Escape safety', async () => {
   const id = '123e4567-e89b-12d3-a456-426614174000', second = '123e4567-e89b-12d3-a456-426614174001'
   const props = $state({ body: '', members: [{ id, name: '田中', role: 'member' as const }, { id: second, name: '鈴木', role: 'member' as const }] })

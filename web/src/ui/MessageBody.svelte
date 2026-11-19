@@ -8,11 +8,13 @@
     mentions = [],
     resolveMentionName,
     pending = false,
+    linkTabindex = -1,
   }: {
     body: string
     mentions?: Message['mentions']
     resolveMentionName?: MentionName
     pending?: boolean
+    linkTabindex?: 0 | -1
   } = $props()
 
   const blocks = $derived(tokenizeMessageBody(body, mentions, pending))
@@ -43,6 +45,7 @@
   href={token.href}
   target="_blank"
   rel="noopener noreferrer"
+  tabindex={linkTabindex}
 >{token.text}</a>{:else if token.type === 'bold'}<strong class="ui-message-body__bold">{@render renderInline(token.children)}</strong>{:else if token.type === 'strikethrough'}<del class="ui-message-body__strike">{@render renderInline(token.children)}</del>{/if}{/each}{/snippet}
 
 <div class="body ui-message-body">{#each blocks as block, i}{#if i > 0 && block.type === 'line' && blocks[i - 1].type === 'line'}{'\n'}{/if}{#if block.type === 'line'}{#if block.children.length === 0}{#if shouldPreserveEmptyLine(blocks, i)}{'\n'}{/if}{:else}{@render renderInline(block.children)}{/if}{:else if block.type === 'code_block'}<pre class="ui-message-body__code-block"><code>{#each block.children as child}{#if child.type === 'text'}{child.text}{:else}<span class="ui-message-body__mention">{formatMention(child.id)}</span>{/if}{/each}</code></pre>{:else if block.type === 'quote'}<blockquote class="ui-message-body__quote">{#each block.lines as line, lineIdx}{#if lineIdx > 0}{'\n'}{/if}{@render renderInline(line)}{/each}</blockquote>{/if}{/each}</div>

@@ -238,8 +238,19 @@ function sliceCodeChildren(
 }
 
 function findNextPlainPair(line: IndexedLine, pairChar: string, from: number, end: number): number {
+  const isBreak = (k: number) =>
+    line.atoms.has(k) ||
+    (k + 1 < end &&
+      line.str[k] === pairChar &&
+      line.str[k + 1] === pairChar &&
+      !line.atoms.has(k + 1))
+  let urlRun: UrlRun | null = null
+
   for (let i = from; i + 1 < end; i++) {
-    if (line.str[i] === '`' && !line.atoms.has(i)) {
+    if (line.atoms.has(i)) continue
+
+    const ch = line.str[i]
+    if (ch === '`') {
       const closeBacktick = line.nextBacktick.get(i) ?? -1
       if (closeBacktick > i + 1 && closeBacktick < end) {
         i = closeBacktick
@@ -249,12 +260,22 @@ function findNextPlainPair(line: IndexedLine, pairChar: string, from: number, en
         return -1
       }
     }
-    if (
-      line.str[i] === pairChar &&
-      line.str[i + 1] === pairChar &&
-      !line.atoms.has(i) &&
-      !line.atoms.has(i + 1)
-    ) {
+    if (ch === 'h' || ch === 'H' || ch === 'm' || ch === 'M') {
+      if (i === 0 || line.atoms.has(i - 1) || !ASCII_ALNUM.test(line.str[i - 1])) {
+        const scheme = matchScheme(line.str, i, end)
+        if (scheme !== null) {
+          if (urlRun === null || urlRun.end <= i) {
+            urlRun = scanUrlRun(line.str, i, end, isBreak)
+          }
+          const linkEnd = matchAutolink(urlRun, i, scheme)
+          if (linkEnd !== -1) {
+            i = linkEnd - 1
+            continue
+          }
+        }
+      }
+    }
+    if (ch === pairChar && line.str[i + 1] === pairChar && !line.atoms.has(i + 1)) {
       return i
     }
   }
