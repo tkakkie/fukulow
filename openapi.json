@@ -4286,6 +4286,16 @@
               }
             }
           },
+          "409": {
+            "description": "invite_limit_reached: the requested Role's Outstanding Invite pool is full",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "413": {
             "description": "Request too large",
             "content": {

@@ -27,6 +27,7 @@ Write shared web UI rules beyond code and tests (#200), including layout, naviga
 | `×`, `Esc` | replace with the current main URL without `panel` (never pops, so main cannot change); older entries stay, so Browser Back may reopen a panel | unchanged | closed | the control that opened the panel; if gone, the main Composer |
 | Browser/OS Back | the browser pops | from the URL | from the URL | as for the matching row above |
 | Direct link or reload | one entry, no synthetic parents | from the URL | from the URL | Composer; in-app `‹` replaces with the parent level (panel -> view -> チャンネル list), so it never leaves the app |
+- Desktop notification click ([N6](spec/realtime.md#desktop-notifications-413-approved-not-implemented-p3)): focus the page. If `data` differs from the current Session or Organization, open nothing; else do an authorized read fenced like N6 and open the scope by the URL rules or follow C6/C9/C10. Never navigate from `data` alone.
 - Every view change is announced once through the page live region (§6): `# チャンネル名` or `トピック名`.
 
 ## 3. Responsive
@@ -151,6 +152,7 @@ Keyboard first: every action has a keyboard path; frequent ones have shortcuts a
 - Every Message view and announcement retains `名前（無効）` for deactivated authors (full-width parentheses, no space). Show the whole name and state as visible, ordinary accessible text in the sender label. Never use colour alone.
 - Polite plain tone (です・ます), short; no exclamation marks; no blame.
 - Errors: what happened + what to do, for example `メッセージを読み込めませんでした。通信状況を確認して、もう一度お試しください。` Never show raw codes, HTTP status or English error values.
+- Desktop notifications (#413): `新しいダイレクトメッセージがあります` for DMs, else `新しいメンションがあります`; no body, sender, names or count.
 - Buttons are verbs: `送信`, `再試行`, `再送する`, `破棄`, `チャンネル一覧へ`.
 - Unread badges use `未読 n件` as their accessible label (`Badge`); the timeline read marker uses `未読` (`ReadMarker`).
 - Terms only from `docs/spec.md`; no synonyms (not スレッド for 返信のつながり, not ワークスペース for 組織).
