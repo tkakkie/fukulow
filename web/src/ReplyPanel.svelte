@@ -90,7 +90,8 @@
   let moveDialogOpen = $state(false)
   let moveButtonRef = $state<HTMLButtonElement | null>(null)
   let moveSelectRef = $state<HTMLSelectElement | null>(null)
-  let moveLoadMoreRef = $state<HTMLButtonElement | null>(null)
+  let moveTopicNameRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let moveNewRadioRef = $state<HTMLInputElement | null>(null)
   let moveMode = $state<'existing' | 'new'>('new')
   let moveTopic = $state.raw<(typeof orderedTopics)[number] | null>(null)
   let moveTopicName = $state('')
@@ -101,14 +102,8 @@
   let moveRefreshFailed = $state(false)
   let moveGeneration = 0
   let moveDialogOpening = 0
-  let moveSelectVersion = 0
 
   const moveTopicId = $derived(moveTopic?.topicId ?? '')
-  const moveOptions = $derived(
-    moveMode === 'existing' && moveTopic && !orderedTopics.some((t) => t.topicId === moveTopicId)
-      ? [...orderedTopics, moveTopic]
-      : orderedTopics,
-  )
   const moveListSettled = $derived(
     tState !== null && tState.list.asOfSeq !== undefined && !tState.list.loading && !tState.list.error,
   )
@@ -121,6 +116,27 @@
       moveRetry.destination.topicName === moveDestination.topicName
       ? moveRetry
       : null,
+  )
+  const selectableTopics = $derived(
+    orderedTopics.filter((t) => !(tState && !tState.unavailable && tState.topic(t.topicId).notFound)),
+  )
+  const moveSelectedInList = $derived(
+    moveTopicId !== '' && selectableTopics.some((t) => t.topicId === moveTopicId),
+  )
+  const moveListComplete = $derived(
+    moveListSettled && tState !== null && !tState.unavailable && !tState.list.hasMore,
+  )
+  const moveTopicGone = $derived(
+    moveMode === 'existing' &&
+      moveTopic !== null &&
+      ((moveListComplete && !moveSelectedInList) ||
+        Boolean(tState && !tState.unavailable && tState.topic(moveTopic.topicId).notFound)),
+  )
+  const moveDestinationUnavailable = $derived(moveTopicGone && displayedMoveRetry === null)
+  const moveOptions = $derived(
+    moveMode === 'existing' && moveTopic && !moveSelectedInList && !moveDestinationUnavailable
+      ? [...selectableTopics, moveTopic]
+      : selectableTopics,
   )
 
   let retained = $state<{
@@ -253,7 +269,7 @@
   const moveSubmitDisabled = $derived(
     moveBusy ||
       !canMoveChain ||
-      (moveMode === 'existing' ? moveTopicId === '' : moveTopicName === ''),
+      (moveMode === 'existing' ? moveTopicId === '' || moveDestinationUnavailable : moveTopicName === ''),
   )
 
   let lastMoveKey = ''
@@ -285,13 +301,10 @@
   })
 
   $effect(() => {
-    if (!moveDialogOpen || moveMode !== 'existing') return
-    const current = orderedTopics.find((t) => t.topicId === moveTopicId)
+    if (!moveDialogOpen || moveMode !== 'existing' || !moveTopic) return
+    const current = orderedTopics.find((t) => t.topicId === moveTopic!.topicId)
     if (current) {
       moveTopic = current
-    } else if (!moveBusy && moveListSettled && (!moveTopic || !tState?.list.hasMore)) {
-      moveTopic = orderedTopics[0] ?? null
-      if (!moveTopic) moveMode = 'new'
     }
   })
 
@@ -306,7 +319,7 @@
     moveNotice = null
     moveRetry = null
     moveRefreshFailed = false
-    moveTopic = orderedTopics.find((t) => t.topicId !== effectiveTopicId) ?? orderedTopics[0] ?? null
+    moveTopic = selectableTopics.find((t) => t.topicId !== effectiveTopicId) ?? selectableTopics[0] ?? null
     moveMode = moveTopic ? 'existing' : 'new'
     moveTopicName = ''
     moveDialogOpen = true
@@ -417,12 +430,21 @@
     moveRefreshFailed = false
   }
 
+  function focusStableMoveDialogControl(): boolean {
+    return (
+      (moveMode === 'existing' && focusTarget(moveSelectRef)) ||
+      (moveMode === 'new' && focusTarget(moveTopicNameRef)) ||
+      focusTarget(moveSelectRef) ||
+      focusTarget(moveTopicNameRef) ||
+      focusTarget(moveNewRadioRef)
+    )
+  }
+
   async function handleLoadMoreTopics() {
     if (!topics || moveBusy || tState?.list.loading) return
     const gen = moveGeneration
     const opening = moveDialogOpening
-    const selectVer = moveSelectVersion
-    const parkedOnSelect = focusTarget(moveSelectRef)
+    focusStableMoveDialogControl()
     await topics.loadList().catch(console.error)
     await tick()
     if (gen !== moveGeneration || opening !== moveDialogOpening || !moveDialogOpen) return
@@ -431,12 +453,10 @@
       !active ||
       active === document.body ||
       active === document.documentElement ||
-      (active instanceof HTMLElement && !active.isConnected)
-    const stillParked = parkedOnSelect && active === moveSelectRef && selectVer === moveSelectVersion
-    if (!focusLost && !stillParked) return
-    if (!focusTarget(moveLoadMoreRef)) {
-      focusTarget(moveSelectRef)
-    }
+      (active instanceof HTMLElement &&
+        (!active.isConnected || ('disabled' in active && Boolean((active as HTMLButtonElement).disabled))))
+    if (!focusLost) return
+    focusStableMoveDialogControl()
   }
 
   const scrollController = createTimelineScrollController()
@@ -826,12 +846,12 @@
           actionLabel="再試行"
           actionAriaLabel="トピック一覧の読み込みを再試行"
           actionDisabled={tState.list.loading || moveBusy}
-          onaction={() => void topics?.loadList().catch(console.error)}
+          onaction={() => void handleLoadMoreTopics()}
         />
       {/if}
       <fieldset class="reply-panel__move-fieldset" disabled={moveBusy}>
         <legend class="reply-panel__move-legend">移動先</legend>
-        {#if moveOptions.length > 0}
+        {#if moveOptions.length > 0 || moveDestinationUnavailable}
           <label class="reply-panel__move-choice">
             <input
               type="radio"
@@ -843,7 +863,7 @@
                 moveError = null
                 moveRetry = null
                 moveRefreshFailed = false
-                moveTopic = orderedTopics.find((t) => t.topicId === moveTopicId) ?? orderedTopics[0] ?? null
+                moveTopic = selectableTopics.find((t) => t.topicId === moveTopicId) ?? selectableTopics[0] ?? null
               }}
             />
             <span>既存のトピック</span>
@@ -851,6 +871,7 @@
         {/if}
         <label class="reply-panel__move-choice">
           <input
+            bind:this={moveNewRadioRef}
             type="radio"
             name="move_destination_mode"
             value="new"
@@ -866,17 +887,16 @@
         </label>
       </fieldset>
 
-      {#if moveMode === 'existing' && moveOptions.length > 0}
+      {#if moveMode === 'existing' && (moveOptions.length > 0 || moveDestinationUnavailable)}
         <label class="reply-panel__move-field">
           <span class="reply-panel__move-label">移動先のトピック</span>
           <select
             bind:this={moveSelectRef}
             class="reply-panel__move-select"
             aria-label="移動先のトピック"
-            value={moveTopicId}
+            value={moveDestinationUnavailable ? '' : moveTopicId}
             disabled={moveBusy}
             onchange={(e) => {
-              moveSelectVersion++
               const selected = moveOptions.find((t) => t.topicId === e.currentTarget.value)
               if (selected) moveTopic = selected
               moveError = null
@@ -884,17 +904,26 @@
               moveRefreshFailed = false
             }}
           >
+            {#if moveDestinationUnavailable}
+              <option value="" disabled>移動先のトピックを選択してください</option>
+            {/if}
             {#each moveOptions as t (t.topicId)}
               <option value={t.topicId}>{t.baseline?.summary.name ?? 'トピック'}</option>
             {/each}
           </select>
         </label>
+        {#if moveDestinationUnavailable}
+          <StatusBanner
+            tone="danger"
+            role="alert"
+            message="選択中のトピックは利用できなくなりました。別のトピックを選択してください。"
+          />
+        {/if}
         {#if topics && tState && !targetUnavailable && !tState.unavailable && ((tState.list.asOfSeq !== undefined && tState.list.hasMore) || tState.list.loading)}
           <div class="reply-panel__move-older" aria-busy={tState.list.loading}>
             {#if tState.list.asOfSeq !== undefined && tState.list.hasMore}
               <div class="reply-panel__move-older-action">
                 <Button
-                  bind:buttonRef={moveLoadMoreRef}
                   variant="secondary"
                   disabled={tState.list.loading || moveBusy}
                   onclick={() => void handleLoadMoreTopics()}
@@ -921,6 +950,7 @@
         {/if}
       {:else}
         <Input
+          bind:inputRef={moveTopicNameRef}
           label="新しいトピック名"
           name="move_topic_name"
           required
