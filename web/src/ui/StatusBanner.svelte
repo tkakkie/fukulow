@@ -9,6 +9,8 @@
     message,
     detail,
     actionLabel,
+    actionAriaLabel,
+    actionDisabled = false,
     onaction,
     secondaryActionLabel,
     onsecondaryaction,
@@ -19,6 +21,8 @@
     message: string
     detail?: string
     actionLabel?: string
+    actionAriaLabel?: string
+    actionDisabled?: boolean
     onaction?: () => void
     secondaryActionLabel?: string
     onsecondaryaction?: () => void
@@ -35,7 +39,7 @@
   {#if (actionLabel && onaction) || (secondaryActionLabel && onsecondaryaction)}
     <div class="ui-status-banner__action">
       {#if actionLabel && onaction}
-        <Button variant="secondary" onclick={onaction}>{actionLabel}</Button>
+        <Button variant="secondary" ariaLabel={actionAriaLabel} disabled={actionDisabled} onclick={onaction}>{actionLabel}</Button>
       {/if}
       {#if secondaryActionLabel && onsecondaryaction}
         <Button variant="secondary" onclick={onsecondaryaction}>{secondaryActionLabel}</Button>

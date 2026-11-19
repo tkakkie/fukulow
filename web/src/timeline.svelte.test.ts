@@ -8329,12 +8329,13 @@ it('ReplyPanel renders a refresh failure message and keyboard-reachable 再読�
 })
 
 async function mountReplyPanelForMove({ descendant = false, sourceTopic = null, dm = false,
-  initialChainError = false, initialListError = false }: {
+  initialChainError = false, initialListError = false, topicListPage }: {
   descendant?: boolean
   sourceTopic?: string | null
   dm?: boolean
   initialChainError?: boolean
   initialListError?: boolean
+  topicListPage?: api.TopicPage
 } = {}) {
   const historyGeneration = '00000000-0000-4000-8000-000000000515'
   const net = fakeNetwork()
@@ -8361,9 +8362,10 @@ async function mountReplyPanelForMove({ descendant = false, sourceTopic = null, 
     messages: messages.map(message => ({ ...message, topic_id: topicId, version: chainVersion })), has_more: false,
   })
   net.timelines.A = ok({
-    history_generation: historyGeneration, as_of_seq: 10, has_more: false, items: [{ kind: 'topic', topic: topicC }],
+    history_generation: historyGeneration, as_of_seq: topicListPage?.as_of_seq ?? 10, has_more: false,
+    items: topicListPage ? [] : [{ kind: 'topic', topic: topicC }],
   })
-  net.topicLists.A = ok({
+  net.topicLists.A = ok(topicListPage ?? {
     history_generation: historyGeneration, as_of_seq: 10, topics: [topicC, topicB], has_more: true,
   })
   net.replyChains[`A:${anchor.id}`] = chainPage(10)
@@ -8590,12 +8592,15 @@ it('ReplyPanel retries a failed Topic list after reopening the Move dialog', asy
   }
 })
 
-it('ReplyPanel submits the Topic displayed after a refresh removes the timed-out Move destination', async () => {
+it('ReplyPanel keeps a timed-out Move destination for retry after refresh removes it, and switches only on explicit selection', async () => {
   vi.useFakeTimers()
   const c = await mountReplyPanelForMove()
   try {
     const pendingPost = deferred<Result<MoveChainResponse>>()
-    c.moveChainApi.mockReturnValueOnce(pendingPost.promise).mockResolvedValueOnce({ ok: false, kind: 'network' })
+    c.moveChainApi
+      .mockReturnValueOnce(pendingPost.promise)
+      .mockResolvedValueOnce({ ok: false, kind: 'network' })
+      .mockResolvedValueOnce({ ok: false, kind: 'network' })
     buttonsByText(c.host, 'トピックに移動')[0].click()
     await settle()
     const dialog = c.host.querySelector('[role="dialog"]')!
@@ -8615,13 +8620,20 @@ it('ReplyPanel submits the Topic displayed after a refresh removes the timed-out
     await c.topics.loadList()
     await settle()
     const refreshedSelect = dialog.querySelector('select')!
-    expect(refreshedSelect?.options.map(option => option.value)).toEqual(['topic-c'])
-    expect(refreshedSelect.value).toBe('topic-c')
+    expect(refreshedSelect?.options.map(option => option.value)).toEqual(['topic-c', 'topic-b'])
+    expect(refreshedSelect.value).toBe('topic-b')
     expect(submit.disabled).toBe(false)
 
     submit.click()
     await settle()
-    expect(c.moveChainApi.mock.calls.map(([, , body]) => body.topic_id)).toEqual(['topic-b', 'topic-c'])
+    expect(c.moveChainApi.mock.calls[1]).toEqual(c.moveChainApi.mock.calls[0])
+
+    refreshedSelect.value = 'topic-c'
+    refreshedSelect.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    submit.click()
+    await settle()
+    expect(c.moveChainApi.mock.calls.map(([, , body]) => body.topic_id)).toEqual(['topic-b', 'topic-b', 'topic-c'])
   } finally {
     await c.close()
   }
@@ -8654,5 +8666,738 @@ it('ReplyPanel keeps 再読み込み available after another failed chain read i
     expect(buttonsByText(dialog, '再読み込み')).toHaveLength(0)
   } finally {
     await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog loads a second page after 50 Topics, keeps focus, and moves to a page-2 Topic', async () => {
+  const historyGeneration = '00000000-0000-4000-8000-000000000515'
+  const firstPage = Array.from({ length: 50 }, (_, i) => summary(`topic-${101 + i}`, 101 + i, 1))
+  const secondPage = Array.from({ length: 50 }, (_, i) => summary(`topic-${51 + i}`, 51 + i, 1))
+  const c = await mountReplyPanelForMove({
+    topicListPage: { history_generation: historyGeneration, as_of_seq: 150, topics: firstPage, has_more: true },
+  })
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    expect(select.options).toHaveLength(50)
+
+    const loadMore = buttonsByText(dialog, '以前のトピックを読み込む')[0]
+    expect(loadMore).toBeDefined()
+    expect(loadMore.disabled).toBe(false)
+    expect(loadMore.getAttribute('type')).toBe('button')
+
+    let reached = false
+    for (let i = 0; i < 10; i++) {
+      if (testDoc.activeElement === loadMore) { reached = true; break }
+      const tab = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      tab.key = 'Tab'
+      dialog.dispatchEvent(tab)
+    }
+    expect(reached).toBe(true)
+
+    c.listTopics.mockResolvedValueOnce(ok({
+      history_generation: historyGeneration, as_of_seq: 150, topics: secondPage, has_more: false,
+    }))
+    loadMore.click()
+    await settle()
+
+    expect(c.listTopics).toHaveBeenCalledTimes(2)
+    expect(c.listTopics.mock.calls[1][1]).toMatchObject({ as_of_seq: 150, before_position: 101 })
+    expect(select.options).toHaveLength(100)
+    expect(select.options.some(option => option.value === 'topic-51')).toBe(true)
+    expect(buttonsByText(dialog, '以前のトピックを読み込む')).toHaveLength(0)
+    expect(testDoc.activeElement).toBe(select)
+
+    select.value = 'topic-51'
+    select.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+
+    c.moveChainApi.mockResolvedValueOnce(ok({
+      history_generation: historyGeneration, root_id: c.rootMessage.id, topic_id: 'topic-51',
+      destination_topic_id: 'topic-51', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000643',
+      operation_version: 11, move_seq: 11,
+    }))
+    buttonsByText(dialog, 'トピックに移動')[0].click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(1)
+    expect(c.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-51')
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog hides load-more when hasMore is false', async () => {
+  const historyGeneration = '00000000-0000-4000-8000-000000000515'
+  const c = await mountReplyPanelForMove({
+    topicListPage: {
+      history_generation: historyGeneration, as_of_seq: 10, topics: [summary('topic-b', 9, 1)], has_more: false,
+    },
+  })
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    expect(buttonsByText(dialog, '以前のトピックを読み込む')).toHaveLength(0)
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog shows Skeleton/aria-busy while loading, keeps select usable, retries errors, and restores focus', async () => {
+  const c = await mountReplyPanelForMove()
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    const loadMore = buttonsByText(dialog, '以前のトピックを読み込む')[0]
+
+    const pendingPage = deferred<Result<api.TopicPage>>()
+    c.listTopics.mockReturnValueOnce(pendingPage.promise)
+    loadMore.focus()
+    loadMore.click()
+    await settle()
+    const paginationRegion = dialog.querySelector('.reply-panel__move-older')!
+    expect(paginationRegion.getAttribute('aria-busy')).toBe('true')
+    expect(paginationRegion.querySelector('.ui-skeleton')).not.toBeNull()
+    expect(select.disabled).toBe(false)
+    expect(loadMore.disabled).toBe(true)
+    expect(testDoc.activeElement).toBe(select)
+    loadMore.click()
+    expect(c.listTopics).toHaveBeenCalledTimes(2)
+
+    pendingPage.resolve({ ok: false, kind: 'network' })
+    await settle()
+    expect(paginationRegion.getAttribute('aria-busy')).toBe('false')
+    expect(paginationRegion.querySelector('.ui-skeleton')).toBeNull()
+    expect(loadMore.disabled).toBe(false)
+    expect(testDoc.activeElement).toBe(select)
+    expect(queryAll(dialog, '[role="alert"]').map(alert => alert.textContent)).toEqual([
+      '以前のトピックを読み込めませんでした。通信状況を確認して、もう一度お試しください。',
+    ])
+
+    const topicA = summary('topic-a', 7, 1)
+    c.listTopics.mockResolvedValueOnce(ok({
+      history_generation: c.historyGeneration, as_of_seq: 10, topics: [topicA], has_more: true,
+    }))
+    const retryBtn = buttonsByText(dialog, '読み込みを再試行')[0]
+    expect(retryBtn.getAttribute('aria-label')).toBe('以前のトピックの読み込みを再試行')
+    retryBtn.focus()
+    retryBtn.click()
+    await settle()
+
+    expect(c.listTopics).toHaveBeenCalledTimes(3)
+    expect(queryAll(dialog, '[role="alert"]')).toHaveLength(0)
+    expect(dialog.querySelector('select')?.options.map(option => option.value)).toEqual(['topic-b', 'topic-c', 'topic-a'])
+    expect(buttonsByText(dialog, '以前のトピックを読み込む')).toHaveLength(1)
+    expect(testDoc.activeElement).toBe(select)
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog preserves selected Topic and pending Move retry after loading another Topic page', async () => {
+  const c = await mountReplyPanelForMove()
+  try {
+    c.moveChainApi
+      .mockResolvedValueOnce({ ok: false, kind: 'network' })
+      .mockResolvedValueOnce(ok({
+        history_generation: c.historyGeneration, root_id: c.rootMessage.id, topic_id: 'topic-c',
+        destination_topic_id: 'topic-c', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000644',
+        operation_version: 11, move_seq: 11,
+      }))
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    select.value = 'topic-c'
+    select.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+
+    buttonsByText(dialog, 'トピックに移動')[0].click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(1)
+    expect(c.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-c')
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    const topicA = summary('topic-a', 7, 1)
+    c.listTopics.mockResolvedValueOnce(ok({
+      history_generation: c.historyGeneration, as_of_seq: 10, topics: [topicA], has_more: false,
+    }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    expect(select.value).toBe('topic-c')
+    expect(select.options.map(option => option.value)).toEqual(['topic-b', 'topic-c', 'topic-a'])
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    buttonsByText(dialog, '再試行')[0].click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(2)
+    expect(c.moveChainApi.mock.calls[1]).toEqual(c.moveChainApi.mock.calls[0])
+    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog pins a page-two Topic and preserves Move retry across snapshot_expired on page three', async () => {
+  const historyGeneration = '00000000-0000-4000-8000-000000000515'
+  const firstPage = Array.from({ length: 50 }, (_, i) => summary(`topic-${101 + i}`, 101 + i, 1))
+  const secondPage = Array.from({ length: 50 }, (_, i) => summary(`topic-${51 + i}`, 51 + i, 1))
+  const freshFirstPage = Array.from({ length: 50 }, (_, i) => summary(`topic-${102 + i}`, 102 + i, 1))
+  const c = await mountReplyPanelForMove({
+    topicListPage: { history_generation: historyGeneration, as_of_seq: 150, topics: firstPage, has_more: true },
+  })
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+
+    c.listTopics.mockResolvedValueOnce(ok({
+      history_generation: historyGeneration, as_of_seq: 150, topics: secondPage, has_more: true,
+    }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+    expect(select.options).toHaveLength(100)
+
+    select.value = 'topic-51'
+    select.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+
+    c.moveChainApi
+      .mockResolvedValueOnce({ ok: false, kind: 'network' })
+      .mockResolvedValueOnce(ok({
+        history_generation: historyGeneration, root_id: c.rootMessage.id, topic_id: 'topic-51',
+        destination_topic_id: 'topic-51', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000645',
+        operation_version: 11, move_seq: 11,
+      }))
+    buttonsByText(dialog, 'トピックに移動')[0].click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(1)
+    expect(c.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-51')
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    c.listTopics
+      .mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' })
+      .mockResolvedValueOnce(ok({
+        history_generation: historyGeneration, as_of_seq: 160, topics: freshFirstPage, has_more: true,
+      }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    expect(select.value).toBe('topic-51')
+    expect(select.options.some(option => option.value === 'topic-51')).toBe(true)
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    buttonsByText(dialog, '再試行')[0].click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(2)
+    expect(c.moveChainApi.mock.calls[1]).toEqual(c.moveChainApi.mock.calls[0])
+    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape while pagination or retry is pending, and scopes completion focus to the same dialog opening', async () => {
+  const c = await mountReplyPanelForMove()
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    let dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    const loadMore = buttonsByText(dialog, '以前のトピックを読み込む')[0]
+
+    const pendingPage = deferred<Result<api.TopicPage>>()
+    c.listTopics.mockReturnValueOnce(pendingPage.promise)
+    loadMore.focus()
+    loadMore.click()
+    await settle()
+
+    expect(testDoc.activeElement).toBe(select)
+    const tab = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    tab.key = 'Tab'
+    ;(testDoc.activeElement as MiniElement).dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(true)
+    expect(testDoc.activeElement).not.toBe(select)
+    expect(testDoc.activeElement).not.toBe(testDoc.body)
+
+    const esc = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    esc.key = 'Escape'
+    ;(testDoc.activeElement as MiniElement).dispatchEvent(esc)
+    await settle()
+    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+
+    // Reopen dialog before the previous opening's request resolves; completion must not hijack focus.
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    dialog = c.host.querySelector('[role="dialog"]')!
+    const newRadio = queryAll(dialog, 'input[type="radio"]').find(r => r.value === 'new')!
+    newRadio.focus()
+    pendingPage.resolve({ ok: false, kind: 'network' })
+    await settle()
+    expect(testDoc.activeElement).toBe(newRadio)
+
+    // Retry button also transfers focus immediately before unmounting, so Tab and Escape work while pending.
+    const retryBtn = buttonsByText(dialog, '読み込みを再試行')[0]
+    const pendingRetry = deferred<Result<api.TopicPage>>()
+    c.listTopics.mockReturnValueOnce(pendingRetry.promise)
+    retryBtn.focus()
+    retryBtn.click()
+    await settle()
+
+    expect(buttonsByText(dialog, '読み込みを再試行')).toHaveLength(0)
+    expect(testDoc.activeElement).toBe(dialog.querySelector('select'))
+    const tab2 = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    tab2.key = 'Tab'
+    ;(testDoc.activeElement as MiniElement).dispatchEvent(tab2)
+    expect(tab2.defaultPrevented).toBe(true)
+    expect(testDoc.activeElement).not.toBe(testDoc.body)
+
+    const esc2 = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    esc2.key = 'Escape'
+    ;(testDoc.activeElement as MiniElement).dispatchEvent(esc2)
+    await settle()
+    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+
+    pendingRetry.resolve({ ok: false, kind: 'network' })
+    await settle()
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog gives distinct accessible names to pagination and Move retries and disables pagination retry while Move is busy', async () => {
+  const c = await mountReplyPanelForMove()
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+
+    c.listTopics.mockResolvedValueOnce({ ok: false, kind: 'network' })
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    const pendingMoveRetry = deferred<Result<MoveChainResponse>>()
+    c.moveChainApi
+      .mockResolvedValueOnce({ ok: false, kind: 'network' })
+      .mockReturnValueOnce(pendingMoveRetry.promise)
+    buttonsByText(dialog, 'トピックに移動')[0].click()
+    await settle()
+
+    const paginationRetry = buttonsByText(dialog, '読み込みを再試行')[0]
+    const moveRetry = buttonsByText(dialog, '再試行')[0]
+    expect(paginationRetry).toBeDefined()
+    expect(moveRetry).toBeDefined()
+    expect(paginationRetry.getAttribute('aria-label')).toBe('以前のトピックの読み込みを再試行')
+    expect(moveRetry.getAttribute('aria-label')).toBe('移動を再試行')
+    expect(paginationRetry.getAttribute('aria-label')).not.toBe(moveRetry.getAttribute('aria-label'))
+    expect(paginationRetry.disabled).toBe(false)
+
+    moveRetry.click()
+    await settle()
+    expect(paginationRetry.disabled).toBe(true)
+    paginationRetry.click()
+    expect(c.listTopics).toHaveBeenCalledTimes(2)
+
+    pendingMoveRetry.resolve(ok({
+      history_generation: c.historyGeneration, root_id: c.rootMessage.id, topic_id: 'topic-b',
+      destination_topic_id: 'topic-b', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000646',
+      operation_version: 11, move_seq: 11,
+    }))
+    await settle()
+    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog disables fresh Move and shows alert when selected Topic disappears from a complete list until another Topic is explicitly chosen', async () => {
+  const c = await mountReplyPanelForMove()
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    const submit = buttonsByText(dialog, 'トピックに移動')[0]
+    expect(select.value).toBe('topic-b')
+    expect(submit.disabled).toBe(false)
+
+    c.listTopics
+      .mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' })
+      .mockResolvedValueOnce(ok({
+        history_generation: c.historyGeneration, as_of_seq: 11, topics: [c.topicC], has_more: false,
+      }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    expect(select.value).toBe('')
+    expect(select.options.map(option => option.value)).toEqual(['', 'topic-c'])
+    expect(select.options[0].disabled).toBe(true)
+    expect(submit.disabled).toBe(true)
+    expect(queryAll(dialog, '[role="alert"]').map(alert => alert.textContent)).toEqual([
+      '選択中のトピックは利用できなくなりました。別のトピックを選択してください。',
+    ])
+    submit.click()
+    await settle()
+    expect(c.moveChainApi).not.toHaveBeenCalled()
+
+    select.value = 'topic-c'
+    select.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+
+    expect(select.value).toBe('topic-c')
+    expect(submit.disabled).toBe(false)
+    expect(queryAll(dialog, '[role="alert"]')).toHaveLength(0)
+
+    c.moveChainApi.mockResolvedValueOnce(ok({
+      history_generation: c.historyGeneration, root_id: c.rootMessage.id, topic_id: 'topic-c',
+      destination_topic_id: 'topic-c', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000647',
+      operation_version: 11, move_seq: 11,
+    }))
+    submit.click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(1)
+    expect(c.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-c')
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog retries an unknown-outcome Move with the identical operation_id and destination even after the destination disappears from a complete list', async () => {
+  const c = await mountReplyPanelForMove()
+  try {
+    c.moveChainApi
+      .mockResolvedValueOnce({ ok: false, kind: 'network' })
+      .mockResolvedValueOnce(ok({
+        history_generation: c.historyGeneration, root_id: c.rootMessage.id, topic_id: 'topic-b',
+        destination_topic_id: 'topic-b', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000648',
+        operation_version: 11, move_seq: 11,
+      }))
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    const submit = buttonsByText(dialog, 'トピックに移動')[0]
+    expect(select.value).toBe('topic-b')
+
+    submit.click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(1)
+    expect(c.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-b')
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    c.listTopics
+      .mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' })
+      .mockResolvedValueOnce(ok({
+        history_generation: c.historyGeneration, as_of_seq: 11, topics: [c.topicC], has_more: false,
+      }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    expect(select.value).toBe('topic-b')
+    expect(submit.disabled).toBe(false)
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    buttonsByText(dialog, '再試行')[0].click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(2)
+    expect(c.moveChainApi.mock.calls[1]).toEqual(c.moveChainApi.mock.calls[0])
+    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog keeps selected Topic and allows fresh Move when it is missing from a partial first page after snapshot_expired', async () => {
+  const historyGeneration = '00000000-0000-4000-8000-000000000515'
+  const firstPage = Array.from({ length: 50 }, (_, i) => summary(`topic-${101 + i}`, 101 + i, 1))
+  const secondPage = Array.from({ length: 50 }, (_, i) => summary(`topic-${51 + i}`, 51 + i, 1))
+  const freshFirstPage = Array.from({ length: 50 }, (_, i) => summary(`topic-${102 + i}`, 102 + i, 1))
+  const c = await mountReplyPanelForMove({
+    topicListPage: { history_generation: historyGeneration, as_of_seq: 150, topics: firstPage, has_more: true },
+  })
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    const submit = buttonsByText(dialog, 'トピックに移動')[0]
+
+    c.listTopics.mockResolvedValueOnce(ok({
+      history_generation: historyGeneration, as_of_seq: 150, topics: secondPage, has_more: true,
+    }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    select.value = 'topic-51'
+    select.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+
+    c.listTopics
+      .mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' })
+      .mockResolvedValueOnce(ok({
+        history_generation: historyGeneration, as_of_seq: 160, topics: freshFirstPage, has_more: true,
+      }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    expect(select.value).toBe('topic-51')
+    expect(select.options.some(option => option.value === 'topic-51')).toBe(true)
+    expect(submit.disabled).toBe(false)
+    expect(queryAll(dialog, '[role="alert"]')).toHaveLength(0)
+
+    c.moveChainApi.mockResolvedValueOnce(ok({
+      history_generation: historyGeneration, root_id: c.rootMessage.id, topic_id: 'topic-51',
+      destination_topic_id: 'topic-51', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000649',
+      operation_version: 11, move_seq: 11,
+    }))
+    submit.click()
+    await settle()
+    expect(c.moveChainApi).toHaveBeenCalledTimes(1)
+    expect(c.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-51')
+    expect(c.host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog keeps focus inside dialog for Tab and Escape during first-page retry in both existing-Topic and new-Topic modes', async () => {
+  // New-Topic mode: initial list load fails and user is in new-Topic mode.
+  const cNew = await mountReplyPanelForMove({ initialListError: true })
+  try {
+    buttonsByText(cNew.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = cNew.host.querySelector('[role="dialog"]')!
+    const newRadio = queryAll(dialog, 'input[type="radio"]').find(r => r.value === 'new')!
+    newRadio.checked = true
+    newRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    const nameInput = dialog.querySelector('input[name="move_topic_name"]')!
+    expect(nameInput).not.toBeNull()
+    const retryBtn = buttonsByText(dialog, '再試行')[0]
+    expect(retryBtn.getAttribute('aria-label')).toBe('トピック一覧の読み込みを再試行')
+
+    const pendingNewRetry = deferred<Result<api.TopicPage>>()
+    cNew.listTopics.mockReturnValueOnce(pendingNewRetry.promise)
+    retryBtn.focus()
+    retryBtn.click()
+    await settle()
+
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(0)
+    expect(testDoc.activeElement).toBe(nameInput)
+    const tab = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    tab.key = 'Tab'
+    ;(testDoc.activeElement as MiniElement).dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(true)
+    expect(testDoc.activeElement).not.toBe(nameInput)
+    expect(testDoc.activeElement).not.toBe(testDoc.body)
+
+    const esc = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    esc.key = 'Escape'
+    ;(testDoc.activeElement as MiniElement).dispatchEvent(esc)
+    await settle()
+    expect(cNew.host.querySelector('[role="dialog"]')).toBeNull()
+
+    pendingNewRetry.resolve({ ok: false, kind: 'network' })
+    await settle()
+  } finally {
+    await cNew.close()
+  }
+
+  // Existing-Topic mode: snapshot_expired reload fails on the fresh first page, showing first-page retry while select stays mounted.
+  const cExisting = await mountReplyPanelForMove()
+  try {
+    buttonsByText(cExisting.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = cExisting.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+
+    cExisting.listTopics
+      .mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' })
+      .mockResolvedValueOnce({ ok: false, kind: 'network' })
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    const retryBtn = buttonsByText(dialog, '再試行')[0]
+    expect(retryBtn.getAttribute('aria-label')).toBe('トピック一覧の読み込みを再試行')
+    const pendingExistingRetry = deferred<Result<api.TopicPage>>()
+    cExisting.listTopics.mockReturnValueOnce(pendingExistingRetry.promise)
+    retryBtn.focus()
+    retryBtn.click()
+    await settle()
+
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(0)
+    expect(testDoc.activeElement).toBe(select)
+    const tab = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    tab.key = 'Tab'
+    ;(testDoc.activeElement as MiniElement).dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(true)
+    expect(testDoc.activeElement).not.toBe(select)
+    expect(testDoc.activeElement).not.toBe(testDoc.body)
+
+    const esc = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    esc.key = 'Escape'
+    ;(testDoc.activeElement as MiniElement).dispatchEvent(esc)
+    await settle()
+    expect(cExisting.host.querySelector('[role="dialog"]')).toBeNull()
+
+    pendingExistingRetry.resolve({ ok: false, kind: 'network' })
+    await settle()
+  } finally {
+    await cExisting.close()
+  }
+})
+
+it('ReplyPanel Move dialog does not steal focus from the still-focused select when Topic list loading completes', async () => {
+  const c = await mountReplyPanelForMove()
+  try {
+    buttonsByText(c.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = c.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    const loadMore = buttonsByText(dialog, '以前のトピックを読み込む')[0]
+
+    const pendingPage = deferred<Result<api.TopicPage>>()
+    c.listTopics.mockReturnValueOnce(pendingPage.promise)
+    loadMore.focus()
+    loadMore.click()
+    await settle()
+    expect(testDoc.activeElement).toBe(select)
+
+    pendingPage.resolve(ok({
+      history_generation: c.historyGeneration, as_of_seq: 10, topics: [summary('topic-a', 7, 1)], has_more: true,
+    }))
+    await settle()
+
+    expect(buttonsByText(dialog, '以前のトピックを読み込む')).toHaveLength(1)
+    expect(buttonsByText(dialog, '以前のトピックを読み込む')[0].disabled).toBe(false)
+    expect(testDoc.activeElement).toBe(select)
+  } finally {
+    await c.close()
+  }
+})
+
+it('ReplyPanel Move dialog treats a Topic missing from a partial list as unavailable once confirmed notFound for fresh Move, while keeping exact retry for pending unknown-outcome Move', async () => {
+  // Fresh Move: missing from a replaced partial page remains selectable until confirmed notFound via 404 topic_not_found.
+  const cFresh = await mountReplyPanelForMove()
+  try {
+    buttonsByText(cFresh.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = cFresh.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    const submit = buttonsByText(dialog, 'トピックに移動')[0]
+    expect(select.value).toBe('topic-b')
+    expect(submit.disabled).toBe(false)
+
+    cFresh.listTopics
+      .mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' })
+      .mockResolvedValueOnce(ok({
+        history_generation: cFresh.historyGeneration, as_of_seq: 11, topics: [cFresh.topicC], has_more: true,
+      }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    expect(cFresh.topics.state.list.hasMore).toBe(true)
+    expect(select.value).toBe('topic-b')
+    expect(select.options.map(option => option.value)).toEqual(['topic-c', 'topic-b'])
+    expect(submit.disabled).toBe(false)
+    expect(queryAll(dialog, '[role="alert"]')).toHaveLength(0)
+
+    cFresh.net.topicSummaries['A:topic-b'] = { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
+    await cFresh.topics.loadSummary('topic-b')
+    await settle()
+
+    expect(cFresh.topics.state.list.hasMore).toBe(true)
+    expect(cFresh.topics.state.topic('topic-b').notFound).toBe(true)
+    expect(select.value).toBe('')
+    expect(select.options.map(option => option.value)).toEqual(['', 'topic-c'])
+    expect(select.options[0].disabled).toBe(true)
+    expect(submit.disabled).toBe(true)
+    expect(queryAll(dialog, '[role="alert"]').map(alert => alert.textContent)).toEqual([
+      '選択中のトピックは利用できなくなりました。別のトピックを選択してください。',
+    ])
+    submit.click()
+    await settle()
+    expect(cFresh.moveChainApi).not.toHaveBeenCalled()
+
+    select.value = 'topic-c'
+    select.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+
+    expect(select.value).toBe('topic-c')
+    expect(submit.disabled).toBe(false)
+    expect(queryAll(dialog, '[role="alert"]')).toHaveLength(0)
+
+    cFresh.moveChainApi.mockResolvedValueOnce(ok({
+      history_generation: cFresh.historyGeneration, root_id: cFresh.rootMessage.id, topic_id: 'topic-c',
+      destination_topic_id: 'topic-c', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000650',
+      operation_version: 11, move_seq: 11,
+    }))
+    submit.click()
+    await settle()
+    expect(cFresh.moveChainApi).toHaveBeenCalledTimes(1)
+    expect(cFresh.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-c')
+    expect(cFresh.host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await cFresh.close()
+  }
+
+  // Pending unknown-outcome Move: same confirmed-gone state on a partial page keeps the exact retry (same operation_id and destination).
+  const cRetry = await mountReplyPanelForMove()
+  try {
+    cRetry.moveChainApi
+      .mockResolvedValueOnce({ ok: false, kind: 'network' })
+      .mockResolvedValueOnce(ok({
+        history_generation: cRetry.historyGeneration, root_id: cRetry.rootMessage.id, topic_id: 'topic-b',
+        destination_topic_id: 'topic-b', chain_version: 11, operation_id: '00000000-0000-4000-8000-000000000651',
+        operation_version: 11, move_seq: 11,
+      }))
+    buttonsByText(cRetry.host, 'トピックに移動')[0].click()
+    await settle()
+    const dialog = cRetry.host.querySelector('[role="dialog"]')!
+    const select = dialog.querySelector('select')!
+    const submit = buttonsByText(dialog, 'トピックに移動')[0]
+    expect(select.value).toBe('topic-b')
+
+    submit.click()
+    await settle()
+    expect(cRetry.moveChainApi).toHaveBeenCalledTimes(1)
+    expect(cRetry.moveChainApi.mock.calls[0][2].topic_id).toBe('topic-b')
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    cRetry.listTopics
+      .mockResolvedValueOnce({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' })
+      .mockResolvedValueOnce(ok({
+        history_generation: cRetry.historyGeneration, as_of_seq: 11, topics: [cRetry.topicC], has_more: true,
+      }))
+    buttonsByText(dialog, '以前のトピックを読み込む')[0].click()
+    await settle()
+
+    cRetry.net.topicSummaries['A:topic-b'] = { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
+    await cRetry.topics.loadSummary('topic-b')
+    await settle()
+
+    expect(cRetry.topics.state.list.hasMore).toBe(true)
+    expect(cRetry.topics.state.topic('topic-b').notFound).toBe(true)
+    expect(select.value).toBe('topic-b')
+    expect(select.options.map(option => option.value)).toEqual(['topic-c', 'topic-b'])
+    expect(submit.disabled).toBe(false)
+    expect(queryAll(dialog, '[role="alert"]').map(alert => alert.textContent)).not.toContain(
+      '選択中のトピックは利用できなくなりました。別のトピックを選択してください。',
+    )
+    expect(buttonsByText(dialog, '再試行')).toHaveLength(1)
+
+    buttonsByText(dialog, '再試行')[0].click()
+    await settle()
+    expect(cRetry.moveChainApi).toHaveBeenCalledTimes(2)
+    expect(cRetry.moveChainApi.mock.calls[1]).toEqual(cRetry.moveChainApi.mock.calls[0])
+    expect(cRetry.host.querySelector('[role="dialog"]')).toBeNull()
+  } finally {
+    await cRetry.close()
   }
 })
