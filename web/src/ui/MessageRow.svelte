@@ -1,8 +1,9 @@
 <script lang="ts">
   import { shouldOpenRepliesFromRowKey } from '../composer-keys'
   import Button from './Button.svelte'
+  import MessageBody from './MessageBody.svelte'
   import type { Message } from '../api'
-  import { mentionText, type MentionName } from '../mentions'
+  import type { MentionName } from '../mentions'
 
   let {
     body,
@@ -107,7 +108,7 @@
   {/if}
 
   <div class="ui-message-row__content">
-    <span class="body">{pendingStatus ? body : mentionText(body, mentions, resolveMentionName)}</span>
+    <MessageBody {body} {mentions} {resolveMentionName} pending={Boolean(pendingStatus)} />
   </div>
 
   {#if pendingStatus === 'sending'}

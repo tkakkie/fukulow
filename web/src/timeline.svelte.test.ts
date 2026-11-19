@@ -7228,6 +7228,74 @@ it('Mention components render accepted tokens highlight the reader and follow au
   await unmount(instance); authors.close()
 })
 
+it('MessageRow and MessageBody render formatted blocks, safe autolinks, Mention atoms inside code, and update renames without reparsing names as formatting or URLs (#628)', async () => {
+  const id = '123e4567-e89b-12d3-a456-426614174000', rejected = '123e4567-e89b-12d3-a456-426614174001'
+  const body = [
+    `**bold ~~strike~~** \`code @{member:${id}} https://no-link.example\` https://example.com/ok?a=1`,
+    `javascript:alert(1) <script>alert(1)</script> @{member:${id}} @{member:${rejected}}`,
+    '> quoted **line**',
+    '> second quote line',
+    '```',
+    `fenced @{member:${id}} **raw**`,
+    '```',
+  ].join('\n')
+  const props = $state({
+    mentions: [{ member_id: id, name: '**https://evil.example**' }],
+    pending: false,
+  })
+  rememberIdentityResponse(props.mentions)
+  const authors = createAuthors('org', vi.fn(), vi.fn()), adapter = authorsAdapter(authors)
+  const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+  const instance = mount(MessageRow, { target: host as unknown as Element, props: {
+    body, selfId: id, get mentions() { return props.mentions },
+    get pendingStatus() { return props.pending ? 'sending' : undefined },
+    resolveMentionName: adapter.mentionName,
+  } })
+  await settle()
+
+  // Escaped markup never creates DOM script tags
+  expect(host.querySelectorAll('script')).toHaveLength(0)
+
+  // Only https://example.com/ok?a=1 is linked; resolved name with https://evil.example and code URL are NOT linked
+  const links = host.querySelectorAll('a')
+  expect(links).toHaveLength(1)
+  expect(links[0].getAttribute('href')).toBe('https://example.com/ok?a=1')
+  expect(links[0].textContent).toBe('https://example.com/ok?a=1')
+  expect(links[0].getAttribute('target')).toBe('_blank')
+  expect(links[0].getAttribute('rel')).toBe('noopener noreferrer')
+
+  // Resolved name containing **https://evil.example** is rendered literally as a mention span, never reparsed as bold or link
+  const mentionSpans = host.querySelectorAll('.ui-message-body__mention')
+  expect(mentionSpans.map(el => el.textContent)).toEqual([
+    '@**https://evil.example**',
+    '@**https://evil.example**',
+    '@**https://evil.example**',
+  ])
+  expect(host.querySelectorAll('strong').map(el => el.textContent)).toEqual(['bold strike', 'line'])
+  expect(host.querySelectorAll('del').map(el => el.textContent)).toEqual(['strike'])
+  expect(host.querySelector('blockquote')?.textContent).toBe('quoted line\nsecond quote line')
+  expect(host.querySelector('pre code')?.textContent).toBe('fenced @**https://evil.example** **raw**')
+
+  // Rename updates cached Message without re-tokenizing
+  authors.replaceMembers([{ id, name: '改名後の名前', role: 'member' }])
+  await settle()
+  expect(host.querySelectorAll('.ui-message-body__mention').map(el => el.textContent)).toEqual([
+    '@改名後の名前',
+    '@改名後の名前',
+    '@改名後の名前',
+  ])
+  expect(host.querySelector('pre code')?.textContent).toBe('fenced @改名後の名前 **raw**')
+
+  // Pending message renders formatting and autolinks with no accepted Mentions
+  props.pending = true
+  await settle()
+  expect(host.querySelectorAll('.ui-message-body__mention')).toHaveLength(0)
+  expect(host.querySelector('pre code')?.textContent).toBe(`fenced @{member:${id}} **raw**`)
+  expect(host.querySelectorAll('a')).toHaveLength(1)
+
+  await unmount(instance); authors.close()
+})
+
 it('Mention autocomplete uses only directory candidates with keyboard selection literal tokens IME and Escape safety', async () => {
   const id = '123e4567-e89b-12d3-a456-426614174000', second = '123e4567-e89b-12d3-a456-426614174001'
   const props = $state({ body: '', members: [{ id, name: '田中', role: 'member' as const }, { id: second, name: '鈴木', role: 'member' as const }] })
