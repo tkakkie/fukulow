@@ -535,6 +535,7 @@ async fn regained_slots_and_reactivation(pool: PgPool) {
     .await;
     let error = write::write(
         &f.state,
+        activity::Activity::default(),
         stale,
         write::Mutation::Rename(
             section,

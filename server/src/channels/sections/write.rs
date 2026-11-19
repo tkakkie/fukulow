@@ -1,4 +1,5 @@
 use super::*;
+use tracing::Instrument;
 
 mod handlers;
 mod order;
@@ -87,11 +88,25 @@ impl Mutation {
 
 pub(super) async fn write(
     state: &AppState,
+    activity: activity::Activity,
+    owner: Owner,
+    mutation: Mutation,
+) -> Result<Response, ApiError> {
+    // A disconnected request drops the join handle. The task still owns COMMIT
+    // and the publication of its outcome.
+    tokio::spawn(write_and_publish(state.pool.clone(), activity, owner, mutation).in_current_span())
+        .await
+        .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))?
+}
+
+async fn write_and_publish(
+    pool: sqlx::PgPool,
+    activity: activity::Activity,
     owner: Owner,
     mutation: Mutation,
 ) -> Result<Response, ApiError> {
     let committed =
-        crate::database::organization(&state.pool, owner.org, async |tx: &mut PgConnection| {
+        crate::database::organization(&pool, owner.org, async |tx: &mut PgConnection| {
             // Deletion's exclusive Organization lock stabilizes the placement
             // discovery before Channel locks, including hidden placements.
             if matches!(mutation, Mutation::Delete(_)) {
@@ -122,15 +137,18 @@ pub(super) async fn write(
             .bind(owner.member)
             .fetch_one(tx)
             .await?;
-            Ok((created, generation))
+            let notice = activity.arm_sections(owner.org, owner.member, generation);
+            Ok((created, generation, notice))
         })
         .await;
     match committed {
-        // PR 3 publishes sections_changed here after COMMIT for this owner.
-        Ok((created, committed_generation)) => Ok(match created {
-            Some(id) => created_section(StatusCode::CREATED, id, committed_generation),
-            None => StatusCode::NO_CONTENT.into_response(),
-        }),
+        Ok((created, committed_generation, notice)) => {
+            notice.committed(&pool).await;
+            Ok(match created {
+                Some(id) => created_section(StatusCode::CREATED, id, committed_generation),
+                None => StatusCode::NO_CONTENT.into_response(),
+            })
+        }
         Err(WriteExit::Unchanged(response)) => Ok(response),
         Err(WriteExit::Failed(error)) => Err(error),
     }

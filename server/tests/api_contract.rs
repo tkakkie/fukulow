@@ -781,6 +781,12 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         "ServerEvent",
         &[
             (ServerEvent::DmListChanged, "dm_list_changed"),
+            (
+                ServerEvent::SectionsChanged {
+                    generation: i64::MAX.to_string(),
+                },
+                "sections_changed",
+            ),
             (ServerEvent::ActivityReady, "activity_ready"),
             (ServerEvent::ActivityReset, "activity_reset"),
             (
@@ -853,6 +859,25 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
     assert_eq!(CLOSE_QUEUE_OVERFLOW, 4008);
     assert_eq!(CLOSE_SESSION_ENDED, 4001);
     assert_eq!(CLOSE_ORGANIZATION_UNAVAILABLE, 4003);
+}
+
+#[test]
+fn sections_changed_contract_carries_only_a_decimal_generation() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schema = &document["components"]["schemas"]["SectionsChanged"];
+    assert_eq!(schema["required"], json!(["generation", "type"]));
+    assert_eq!(schema["properties"].as_object().unwrap().len(), 2);
+    let generation = &schema["properties"]["generation"];
+    assert_eq!(generation["type"], "string");
+    assert_eq!(generation["pattern"], "^(0|[1-9][0-9]*)$");
+    assert_eq!(generation["maxLength"], 19);
+    assert_eq!(
+        serde_json::to_value(ServerEvent::SectionsChanged {
+            generation: i64::MAX.to_string(),
+        })
+        .unwrap(),
+        json!({"type":"sections_changed", "generation":"9223372036854775807"})
+    );
 }
 
 #[tokio::test]

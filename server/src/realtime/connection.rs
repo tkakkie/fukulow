@@ -487,6 +487,14 @@ impl Connection<'_> {
             .channel_access
             .activity
             .register(self.auth);
+        #[cfg(test)]
+        crate::channels::activity::test_pause(
+            self.auth.identity.organization.organization_id,
+            Uuid::nil(),
+            "ready",
+            Some(self.auth.identity.member.id),
+        )
+        .await;
         Self::event(socket, ServerEvent::ActivityReady).await?;
         let mut ping_sent_at: Option<Instant> = None;
         let mut next_ping = Instant::now() + lifecycle.ping_interval;

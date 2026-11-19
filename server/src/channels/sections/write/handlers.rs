@@ -11,11 +11,12 @@ use super::*;
     (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn create(
     State(state): State<AppState>,
+    Extension(activity): Extension<activity::Activity>,
     owner: Owner,
     ApiJson(input): ApiJson<CreateSection>,
 ) -> Result<Response, ApiError> {
     validate_name(&input.name)?;
-    write(&state, owner, Mutation::Create(input)).await
+    write(&state, activity, owner, Mutation::Create(input)).await
 }
 
 #[utoipa::path(patch, path="/api/v1/orgs/{org}/me/sections/{id}",request_body=RenameSection,
@@ -27,12 +28,13 @@ pub(crate) async fn create(
     (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn rename(
     State(state): State<AppState>,
+    Extension(activity): Extension<activity::Activity>,
     owner: Owner,
     TargetId(id): TargetId,
     ApiJson(input): ApiJson<RenameSection>,
 ) -> Result<Response, ApiError> {
     validate_name(&input.name)?;
-    write(&state, owner, Mutation::Rename(id, input)).await
+    write(&state, activity, owner, Mutation::Rename(id, input)).await
 }
 
 #[utoipa::path(delete, path="/api/v1/orgs/{org}/me/sections/{id}",
@@ -42,10 +44,11 @@ pub(crate) async fn rename(
     (status=404,description="organization_unavailable",body=ErrorBody), (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn delete(
     State(state): State<AppState>,
+    Extension(activity): Extension<activity::Activity>,
     owner: Owner,
     TargetId(id): TargetId,
 ) -> Result<Response, ApiError> {
-    write(&state, owner, Mutation::Delete(id)).await
+    write(&state, activity, owner, Mutation::Delete(id)).await
 }
 
 #[utoipa::path(put, path="/api/v1/orgs/{org}/me/sections/order",request_body=SectionOrder,
@@ -58,11 +61,12 @@ pub(crate) async fn delete(
     (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn section_order(
     State(state): State<AppState>,
+    Extension(activity): Extension<activity::Activity>,
     owner: Owner,
     ApiJson(input): ApiJson<SectionOrder>,
 ) -> Result<Response, ApiError> {
     validate_order(&input.section_ids, MAX_SECTIONS)?;
-    write(&state, owner, Mutation::SectionOrder(input)).await
+    write(&state, activity, owner, Mutation::SectionOrder(input)).await
 }
 
 #[utoipa::path(put, path="/api/v1/orgs/{org}/me/channel-sections/{channel_id}",request_body=MoveChannel,
@@ -74,11 +78,12 @@ pub(crate) async fn section_order(
     (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn move_channel(
     State(state): State<AppState>,
+    Extension(activity): Extension<activity::Activity>,
     owner: Owner,
     TargetId(channel): TargetId,
     ApiJson(input): ApiJson<MoveChannel>,
 ) -> Result<Response, ApiError> {
-    write(&state, owner, Mutation::Move(channel, input)).await
+    write(&state, activity, owner, Mutation::Move(channel, input)).await
 }
 
 #[utoipa::path(put, path="/api/v1/orgs/{org}/me/section-channel-order",request_body=ChannelOrder,
@@ -91,9 +96,10 @@ pub(crate) async fn move_channel(
     (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn channel_order(
     State(state): State<AppState>,
+    Extension(activity): Extension<activity::Activity>,
     owner: Owner,
     ApiJson(input): ApiJson<ChannelOrder>,
 ) -> Result<Response, ApiError> {
     validate_order(&input.channel_ids, MAX_CHANNELS)?;
-    write(&state, owner, Mutation::ChannelOrder(input)).await
+    write(&state, activity, owner, Mutation::ChannelOrder(input)).await
 }

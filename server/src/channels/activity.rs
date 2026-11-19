@@ -45,6 +45,9 @@ pub enum Notice {
     },
     ChannelListChanged,
     DmListChanged,
+    SectionsChanged {
+        generation: i64,
+    },
     ChannelMembersChanged {
         channel_id: Uuid,
     },
@@ -72,6 +75,7 @@ impl Notice {
             Self::ActivityReset => 6,
             Self::ActivityReady => 7,
             Self::DmListChanged => 8,
+            Self::SectionsChanged { .. } => 9,
         };
         (
             kind,
@@ -720,16 +724,68 @@ impl Activity {
         let key = (organization, notice.channel().unwrap_or(Uuid::nil()));
         let task = tokio::spawn(async move {
             let _slot = slot;
-            let _ = tokio::time::timeout(
-                Duration::from_secs(10),
-                this.publish(&pool, organization, notice, target, None),
-            )
-            .await;
+            this.publish_with_deadline(&pool, organization, notice, target)
+                .await;
         });
         #[cfg(test)]
         self.tasks.lock().unwrap().insert(key, task.abort_handle());
         #[cfg(not(test))]
         drop(task);
+    }
+
+    async fn publish_with_deadline(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+        notice: Notice,
+        target: Option<Uuid>,
+    ) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.publish(pool, organization, notice, target, None),
+        )
+        .await;
+    }
+
+    pub(super) fn arm_sections(
+        &self,
+        organization: Uuid,
+        member: Uuid,
+        generation: i64,
+    ) -> SectionsPublication {
+        SectionsPublication {
+            activity: self.clone(),
+            organization,
+            member,
+            generation,
+        }
+    }
+}
+
+// Construct inside the write transaction and consume after confirmed COMMIT.
+// Unconfirmed outcomes and failures without recipient proof recover through O5.
+pub(super) struct SectionsPublication {
+    activity: Activity,
+    organization: Uuid,
+    member: Uuid,
+    generation: i64,
+}
+
+impl SectionsPublication {
+    pub(super) async fn committed(self, pool: &sqlx::PgPool) {
+        let Ok(_slot) = self.activity.capacity.clone().try_acquire_owned() else {
+            return;
+        };
+        self.activity
+            .publish_with_deadline(
+                pool,
+                self.organization,
+                Notice::SectionsChanged {
+                    generation: self.generation,
+                },
+                Some(self.member),
+            )
+            .await;
     }
 }
 fn enqueue(entry: &Entry, mut pending: Pending) {
@@ -788,6 +844,10 @@ fn enqueue(entry: &Entry, mut pending: Pending) {
                 Notice::ReadPositionChanged { read_seq, .. },
                 Notice::ReadPositionChanged { read_seq: new, .. },
             ) if *read_seq >= *new => {}
+            (
+                Notice::SectionsChanged { generation },
+                Notice::SectionsChanged { generation: new },
+            ) if *generation >= *new => {}
             _ => *old = pending,
         }
     } else if b.pending.len() == 256 {
@@ -1791,7 +1851,12 @@ pub(crate) fn pause_member(
     gate
 }
 #[cfg(test)]
-async fn test_pause(organization: Uuid, channel: Uuid, phase: &'static str, member: Option<Uuid>) {
+pub(crate) async fn test_pause(
+    organization: Uuid,
+    channel: Uuid,
+    phase: &'static str,
+    member: Option<Uuid>,
+) {
     let gate = {
         let mut gates = TEST_GATES.lock().unwrap();
         // Independent socket gates must not replace each other at the same boundary.
@@ -2088,6 +2153,61 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn section_notices_keep_the_numeric_maximum_in_one_key() {
+        let entry = entry();
+        for generation in [9, 10, 9, i64::MAX, 11] {
+            let mut change = pending(Uuid::nil(), None);
+            change.notice = Notice::SectionsChanged { generation };
+            change.channel = None;
+            enqueue(&entry, change);
+        }
+        let b = entry.buffer.lock().unwrap();
+        assert_eq!(b.pending.len(), 1);
+        assert_eq!(b.pending[0].notice.key(), (9, None, None));
+        assert_eq!(
+            b.pending[0].notice,
+            Notice::SectionsChanged {
+                generation: i64::MAX
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn section_notice_overflow_resets_only_with_a_still_proven_contribution() {
+        for loses_proof in [false, true] {
+            let entry = entry();
+            let channel = Uuid::new_v4();
+            for _ in 0..256 {
+                enqueue(&entry, pending(channel, Some(Uuid::new_v4())));
+            }
+            let mut change = pending(Uuid::nil(), None);
+            change.notice = Notice::SectionsChanged { generation: 1 };
+            change.channel = None;
+            let proof = change.valid.clone();
+            enqueue(&entry, change);
+            let registration = Registration {
+                id: entry.id,
+                registry: Weak::new(),
+                entry: entry.clone(),
+            };
+            let frame = registration.next().await.unwrap();
+            assert_eq!(frame.event, Notice::ActivityReset);
+            if loses_proof {
+                let _gate = entry.buffer.lock().unwrap();
+                proof.retire();
+            }
+            assert_eq!(
+                frame.poll_handoff(None, |event| async { event }).await,
+                (!loses_proof).then_some(Notice::ActivityReset)
+            );
+            let b = entry.buffer.lock().unwrap();
+            assert!(b.pending.is_empty());
+            assert!(!b.reset);
+        }
+    }
+
     #[tokio::test]
     async fn buffer_overflow_with_valid_provenance_latches_one_reset_and_keeps_the_socket_open() {
         let entry = entry();

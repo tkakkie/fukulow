@@ -9061,6 +9061,28 @@
           }
         }
       },
+      "SectionsChanged": {
+        "type": "object",
+        "description": "Own-Member section layout invalidation.",
+        "required": [
+          "generation",
+          "type"
+        ],
+        "properties": {
+          "generation": {
+            "type": "string",
+            "description": "Canonical unsigned decimal, at most 9223372036854775807.",
+            "maxLength": 19,
+            "pattern": "^(0|[1-9][0-9]*)$"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "sections_changed"
+            ]
+          }
+        }
+      },
       "SendMessageRequest": {
         "type": "object",
         "description": "Idempotency key: (organization, sender, client_message_id), derived from the session.\nMatching body, Channel, normalized Topic name and reply target returns the canonical Message/sequence;\nchanging any of them returns 409.",
@@ -9110,6 +9132,9 @@
         "oneOf": [
           {
             "$ref": "#/components/schemas/DmListChanged"
+          },
+          {
+            "$ref": "#/components/schemas/SectionsChanged"
           },
           {
             "$ref": "#/components/schemas/ActivityReady"
@@ -9168,6 +9193,7 @@
             "members_changed": "#/components/schemas/MembersChanged",
             "message": "#/components/schemas/MessageEvent",
             "read_position_changed": "#/components/schemas/ReadPositionChanged",
+            "sections_changed": "#/components/schemas/SectionsChanged",
             "subscribed": "#/components/schemas/Subscribed"
           }
         }

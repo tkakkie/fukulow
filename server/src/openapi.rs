@@ -187,6 +187,7 @@ impl Modify for WebSocketDiscriminators {
                 "type",
                 &[
                     ("dm_list_changed", "DmListChanged"),
+                    ("sections_changed", "SectionsChanged"),
                     ("activity_ready", "ActivityReady"),
                     ("activity_reset", "ActivityReset"),
                     ("channel_activity", "ChannelActivity"),
