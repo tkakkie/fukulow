@@ -431,7 +431,7 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
     expect(tokenizeMessageBody(body, mentions1And2)).toBe(tokensBoth)
   })
 
-  it('tokenizes 4000-character and 16000-character worst-case bodies in linear time', () => {
+  it('tokenizes 8000-character and 64000-character worst-case bodies in linear time', () => {
     const repeatToLen = (unit: string, len: number) =>
       unit.repeat(Math.ceil(len / unit.length)).slice(0, len)
 
@@ -458,62 +458,62 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
       { name: 'backtick-heavy **~~ + `', build: size => '**~~' + '`'.repeat(size - 4) },
     ]
 
-    const trailingParens4k = sampleFactories[2].build(4000)
-    expect(trailingParens4k.length).toBe(4000)
-    expect(firstLine(tokenizeMessageBody(trailingParens4k))).toEqual([
+    const trailingParens8k = sampleFactories[2].build(8000)
+    expect(trailingParens8k.length).toBe(8000)
+    expect(firstLine(tokenizeMessageBody(trailingParens8k))).toEqual([
       { type: 'link', href: 'http://x', text: 'http://x' },
-      { type: 'text', text: ')'.repeat(3992) },
+      { type: 'text', text: ')'.repeat(7992) },
     ])
 
-    const BATCH = 5
-    const SAMPLES = 7
-    const measurePair = (s4k: string, s16k: string): { med4k: number; med16k: number } => {
-      // Warm up JIT before measuring
-      for (let i = 0; i < 3; i++) {
+    const MIN_BATCH_MS = 5
+    const SAMPLES = 5
+    const measureBatch = (input: string): number => {
+      let count = 0
+      const start = performance.now()
+      do {
         clearMessageFormatCache()
-        tokenizeMessageBody(s4k)
-        clearMessageFormatCache()
-        tokenizeMessageBody(s16k)
-      }
-      const runs4k: number[] = []
-      const runs16k: number[] = []
-      for (let s = 0; s < SAMPLES; s++) {
-        const t4 = performance.now()
-        for (let b = 0; b < BATCH; b++) {
-          clearMessageFormatCache()
-          expect(tokenizeMessageBody(s4k).length).toBe(1)
-        }
-        runs4k.push(performance.now() - t4)
+        expect(tokenizeMessageBody(input).length).toBe(1)
+        count++
+      } while (performance.now() - start < MIN_BATCH_MS)
+      return (performance.now() - start) / count
+    }
 
-        const t16 = performance.now()
-        for (let b = 0; b < BATCH; b++) {
-          clearMessageFormatCache()
-          expect(tokenizeMessageBody(s16k).length).toBe(1)
-        }
-        runs16k.push(performance.now() - t16)
+    const measurePair = (s8k: string, s64k: string): { med8k: number; med64k: number } => {
+      // Warm up JIT before measuring
+      for (let i = 0; i < 2; i++) {
+        clearMessageFormatCache()
+        tokenizeMessageBody(s8k)
+        clearMessageFormatCache()
+        tokenizeMessageBody(s64k)
       }
-      runs4k.sort((a, b) => a - b)
-      runs16k.sort((a, b) => a - b)
+      const runs8k: number[] = []
+      const runs64k: number[] = []
+      for (let s = 0; s < SAMPLES; s++) {
+        runs8k.push(measureBatch(s8k))
+        runs64k.push(measureBatch(s64k))
+      }
+      runs8k.sort((a, b) => a - b)
+      runs64k.sort((a, b) => a - b)
       return {
-        med4k: runs4k[Math.floor(runs4k.length / 2)],
-        med16k: runs16k[Math.floor(runs16k.length / 2)],
+        med8k: runs8k[Math.floor(runs8k.length / 2)],
+        med64k: runs64k[Math.floor(runs64k.length / 2)],
       }
     }
 
     for (const { name, build } of sampleFactories) {
-      const s4k = build(4000)
-      const s16k = build(16000)
-      expect(s4k.length, name).toBe(4000)
-      expect(s16k.length, name).toBe(16000)
+      const s8k = build(8000)
+      const s64k = build(64000)
+      expect(s8k.length, name).toBe(8000)
+      expect(s64k.length, name).toBe(64000)
 
-      const { med4k, med16k } = measurePair(s4k, s16k)
-      // 4x input growth should stay well below 16x quadratic scaling; 1ms denominator floor absorbs sub-ms GC/timer jitter
+      const { med8k, med64k } = measurePair(s8k, s64k)
+      // 8x input growth should stay well below 64x quadratic scaling
       expect(
-        med16k / Math.max(med4k, 1),
-        `${name}: 4k=${med4k.toFixed(2)}ms 16k=${med16k.toFixed(2)}ms`,
-      ).toBeLessThan(8)
-      // Generous per-call cap at 16k catches quadratic regressions even if 4k was noisy
-      expect(med16k / BATCH, `${name}: 16k per-call`).toBeLessThan(50)
+        med64k / med8k,
+        `${name}: 8k=${med8k.toFixed(3)}ms 64k=${med64k.toFixed(3)}ms`,
+      ).toBeLessThan(24)
+      // Generous per-call cap at 64k catches quadratic regressions even if 8k was noisy
+      expect(med64k, `${name}: 64k per-call`).toBeLessThan(50)
     }
   })
   it('rejects every failed candidate in a shared run and still links a later valid one', () => {
