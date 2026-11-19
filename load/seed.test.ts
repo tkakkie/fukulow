@@ -9,6 +9,7 @@ export const randomBytes = (length: number) => new ArrayBuffer(length);
 
 const signedOut: string[] = [];
 let signIns = 0;
+let firstSignInProto: string;
 const response = (status: number, body?: unknown, proto = 'HTTP/1.1') => ({
   status, json: () => body, proto, tls_version: 'tls1.3', tls_cipher_suite: 'TLS_AES_128_GCM_SHA256',
 });
@@ -19,7 +20,7 @@ export default {
       case 'invite': return response(201, { token: 'invite' });
       case 'accept_invite': return response(200);
       case 'sign_in':
-        if (++signIns === 1) return response(200, { token: 'owner', identity: { organizations: [{ organization_id: 'org' }] } });
+        if (++signIns === 1) return response(200, { token: 'owner', identity: { organizations: [{ organization_id: 'org' }] } }, firstSignInProto);
         if (__ENV.LOAD_PROXY) return response(200, { token: 'extra-owner' }, 'HTTP/2.0');
         return response(200, { token: 'member', identity: { organizations: [] } });
       default: return assert.fail(`Unexpected operation ${params.tags.operation}`);
@@ -31,9 +32,10 @@ export default {
   },
 };
 
-function mockK6(t: TestContext) {
+function mockK6(t: TestContext, ownerProto = 'HTTP/1.1') {
   signedOut.length = 0;
   signIns = 0;
+  firstSignInProto = ownerProto;
   const hooks = registerHooks({
     resolve(specifier, context, nextResolve) {
       return ['k6', 'k6/crypto', 'k6/http'].includes(specifier)
@@ -62,4 +64,14 @@ test('setup revokes an extra Owner Account Session when its proxy transport chec
   assert.throws(() => seed({ channels: 1, subscribers: 2, socketsPerSession: 1,
     visibility: 'public', legacy: false }), { message: /^Proxy measurement requires HTTP\/1\.1/ });
   assert.deepEqual(signedOut, ['Bearer owner', 'Bearer extra-owner']);
+});
+
+test('setup revokes the first Owner Account Session when its proxy transport check fails', async (t) => {
+  mockK6(t, 'HTTP/2.0');
+  __ENV.LOAD_PROXY = '1';
+  t.mock.method(console, 'log', () => {});
+  const { seed } = await import('./seed.ts');
+  assert.throws(() => seed({ channels: 1, subscribers: 1, socketsPerSession: 1,
+    visibility: 'public', legacy: false }), { message: /^Proxy measurement requires HTTP\/1\.1/ });
+  assert.deepEqual(signedOut, ['Bearer owner']);
 });

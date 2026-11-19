@@ -57,12 +57,14 @@ export function seed(config: SeedConfig): Setup {
     requireStatus(http.post(`${baseUrl}/api/v1/setup`, JSON.stringify(body), params('setup')), 201, 'setup');
   }
   const body: SignInRequest = { email, password };
-  const response = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
-  requireStatus(response, 200, 'sign_in');
-  const { token, identity } = response.json() as NativeSessionResponse;
-  const tokens = [token];
-  const layout = sessionLayout(channels * subscribers, socketsPerSession, socketsPerAccount, publishMembers);
+  const tokens: string[] = [];
   try {
+    const response = http.post(`${baseUrl}${signInPath(legacy)}`, JSON.stringify(body), params('sign_in'));
+    const signedIn = response.status === 200 ? response.json() as NativeSessionResponse : undefined;
+    if (signedIn) tokens.push(signedIn.token);
+    requireStatus(response, 200, 'sign_in');
+    const { token, identity } = signedIn!;
+    const layout = sessionLayout(channels * subscribers, socketsPerSession, socketsPerAccount, publishMembers);
     // Each multi-Member run adds Members; use a fresh Organization (load/measurements-archive.md, #604).
     const organizationId = legacy ? legacyOrganization(identity) : (__ENV.LOAD_ORGANIZATION_ID || identity.organizations[0]?.organization_id);
     if (!organizationId || (!legacy && !identity.organizations.some((organization) => organization.organization_id === organizationId))) fail('LOAD_ORGANIZATION_ID must name an active Organization membership');
