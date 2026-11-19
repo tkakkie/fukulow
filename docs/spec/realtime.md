@@ -193,11 +193,11 @@ Within the access generation take larger W, then larger scope position, then sma
 
 Unwatched targets and cross-device marks use A9–A12/O5 and DM E4–E7. Notices carry no accepted set/body/target identity/count and only dirty or coalesce. Ready/reset/reconnect/O5 refresh held baselines. Coverage requires both Unread and Mention fields for that target. Topic/main coverage cannot satisfy aggregate. Revocation immediately removes both badges. Re-grant/renewal starts a new baseline generation. Stale REST/live/replay/notices cannot restore lost ids, names or counts. Preserve Session/Organization and in-flight boundaries. No Mention-specific event, timer or queue.
 
-#### M5. Storage outline for the later migration
+#### M5. Storage
 
-Status: implemented (`202611140300_message_mentions.sql`).
+Status: implemented.
 
-Messages owns `message_mentions` and its SQL. Allocate the version in the append-only #152 migration (`_message_mentions.sql`). Use non-null UUID Organization/Channel/Message/Member ids, tenant RLS and scoped keys: PK (Organization, Message, Member), FK (Organization, Channel, Message) to `messages(organization_id, channel_id, id)`, and FK (Organization, Member) to retained `users(organization_id, id)`. Reuse scoped unique keys. Database constraints prevent duplicate/dangling/cross-Organization identities. Application acceptance enforces access. Store no name, read state or grant lifetime.
+Messages owns `message_mentions` and its SQL. Allocate the version in the append-only #152 migration (`202611140300_message_mentions.sql`). Use non-null UUID Organization/Channel/Message/Member ids, tenant RLS and scoped keys: PK (Organization, Message, Member), FK (Organization, Channel, Message) to `messages(organization_id, channel_id, id)`, and FK (Organization, Member) to retained `users(organization_id, id)`. Reuse scoped unique keys. Database constraints prevent duplicate/dangling/cross-Organization identities. Application acceptance enforces access. Store no name, read state or grant lifetime.
 
 Use the PK for batch hydration, `message_mentions_member_channel_message` on (Organization, Member, Channel, Message) for reader joins and `message_mentions_channel_message` on (Organization, Channel, Message) for the FK and Channel reads/cleanup. Join scoped Message indexes to scan only unread ranges and skip fully read scopes. Verify plans for Channel lists, DM pages/id batches and W-relative Topic summaries. Access loss removes positions, preserving stored sets. Eventual Message deletion removes Mention rows atomically.
 
@@ -207,7 +207,7 @@ Status: Move (#141) and DM (#385) integration implemented. Edit (#287) open.
 
 #141 delivers and tests atomic Move/count integration across live/replay/positions. Keep the Message's accepted set and use the destination read position. #152 owns that set/count contract and tests unchanged projections. #160 adopts current-state replay. #141 decision 4 settled Move rights, limits, activity and empty-Topic identity/read lifetime. Edit is outside #152. If the agreed Edit policy changes accepted ids, update them atomically. Resolve edited-body acceptance and count identity before #287 (see #160 open decisions). No Edit/Delete/log rule follows from immutable acceptance alone.
 
-DM integration with #385 applies #151 pair/grant/peer-send rules to the same Message, Reply and count surfaces. Keep discovery and query budgets, renewal and peer-refusal order. Test DM Mention integration jointly once both are available. A count field does not establish implemented semantics. See the [authorized-control requirement](#move-edit-and-projections-141--287) for Mention target denials. Record executable invariant tests when implemented.
+DM integration with #385 applies #151 pair/grant/peer-send rules to the same Message, Reply and count surfaces. Keep discovery and query budgets, renewal and peer-refusal order. DM Mention integration is tested jointly (`server/src/messages/tests/mentions/dms.rs`, `server/src/realtime/tests/dms.rs`). A count field does not establish implemented semantics. See the [authorized-control requirement](#move-edit-and-projections-141--287) for Mention target denials. Invariant rows name these tests.
 
 ### Message body formatting (#628, implemented)
 

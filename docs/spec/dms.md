@@ -189,4 +189,4 @@ The acceptance matrix remains on #151 (#442). For open/Topic/grant denials, use 
 
 ## Open decisions (maintainer)
 
-No open #151 product decisions. Formal acceptance remains due under #431 after first deployment. #152 owns [Mention syntax, sets and counts](realtime.md#mention-and-mention-unread-152-implemented) and applies to DMs once both implementations run together. #153 owns Search request/ranking. Both preserve D3/R1–R3 visibility, snapshot and Unread hooks.
+No open #151 product decisions. Formal acceptance remains due under #431 after first deployment. #152 owns [Mention syntax, sets and counts](realtime.md#mention-and-mention-unread-152-implemented) and applies to DMs (implemented with #385). #153 owns Search request/ranking. Both preserve D3/R1–R3 visibility, snapshot and Unread hooks.
