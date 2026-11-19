@@ -602,6 +602,31 @@ pub struct AccountAuth {
     account_id: Uuid,
     token_hash: Vec<u8>,
 }
+impl AccountAuth {
+    pub(crate) async fn active_membership(
+        &self,
+        pool: &sqlx::PgPool,
+        organization: Uuid,
+    ) -> Result<(Uuid, i64), ApiError> {
+        crate::database::organization_read_only(
+            pool,
+            organization,
+            async |tx: &mut sqlx::PgConnection| {
+                sqlx::query_as(
+                    "SELECT id, membership_revision FROM users
+                 WHERE organization_id=$1 AND account_id=$2 AND deactivated_at IS NULL",
+                )
+                .bind(organization)
+                .bind(self.account_id)
+                .fetch_optional(tx)
+                .await?
+                .ok_or_else(ApiError::organization_unavailable)
+            },
+        )
+        .await
+    }
+}
+
 impl FromRequestParts<AppState> for AccountAuth {
     type Rejection = ApiError;
     async fn from_request_parts(
