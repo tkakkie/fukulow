@@ -4728,7 +4728,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Group of an accessible ordinary Channel */
+            /** @description Group of an accessible active ordinary Channel */
             200: {
                 headers: {
                     /** @description no-store */
@@ -4763,6 +4763,17 @@ export interface operations {
             };
             /** @description organization_unavailable or channel not found */
             404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description channel_archived */
+            409: {
                 headers: {
                     /** @description no-store */
                     "Cache-Control"?: string;
@@ -4856,6 +4867,17 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description channel_archived */
+            409: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Body exceeds 16 KiB */
             413: {
                 headers: {
@@ -4919,7 +4941,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Complete accessible Channel order set or already current */
+            /** @description Complete accessible active Channel order set or already current */
             204: {
                 headers: {
                     /** @description no-store */
@@ -4961,7 +4983,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description section_layout_changed */
+            /** @description channel_archived or section_layout_changed */
             409: {
                 headers: {
                     /** @description no-store */
@@ -5031,7 +5053,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Personal layout with accessible Channels only */
+            /** @description Personal layout with accessible active Channels only */
             200: {
                 headers: {
                     /** @description no-store */
@@ -5358,7 +5380,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Owned section with accessible Channels only */
+            /** @description Owned section with accessible active Channels only */
             200: {
                 headers: {
                     /** @description no-store */

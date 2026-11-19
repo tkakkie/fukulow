@@ -43,6 +43,10 @@ fn dm_channel_fixed() -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, "dm_channel_fixed", None)
 }
 
+pub(super) fn channel_archived() -> ApiError {
+    ApiError(StatusCode::CONFLICT, "channel_archived", None)
+}
+
 /// Read one accessible ordinary Channel, including archived Channels.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels/{id}",
     params(("org" = Uuid, Path), ("id" = Uuid, Path)),
@@ -163,7 +167,7 @@ async fn update(
         UpdateChannelRequest::Rename { name } => {
             auth::authorization::require(actor, Action::RenameChannel, resource)?;
             if archived {
-                return Err(ApiError(StatusCode::CONFLICT, "channel_archived", None));
+                return Err(channel_archived());
             }
             let result = sqlx::query(
                 "UPDATE channels SET name=$3 WHERE organization_id=$1 AND id=$2 \

@@ -43,7 +43,7 @@ impl Mutation {
         &self,
         tx: &mut PgConnection,
         owner: Owner,
-    ) -> Result<Vec<(Uuid, bool)>, ApiError> {
+    ) -> Result<Vec<channels::LockedChannel>, ApiError> {
         let channels = match self {
             Self::Move(channel, _) => channels::lock_channels(tx, owner.org, &[*channel]).await?,
             Self::ChannelOrder(order) => {
@@ -68,7 +68,7 @@ impl Mutation {
         self,
         tx: &mut PgConnection,
         owner: Owner,
-        authorized_channels: impl FnOnce(usize) -> bool,
+        authorize_channels: impl FnOnce(usize) -> Result<(), ApiError>,
     ) -> Result<Change, ApiError> {
         match self {
             Self::Create(input) => section::create(tx, owner, input).await,
@@ -76,10 +76,10 @@ impl Mutation {
             Self::Delete(id) => section::delete(tx, owner, id).await,
             Self::SectionOrder(input) => order::sections(tx, owner, input).await,
             Self::Move(channel, input) => {
-                order::move_channel(tx, owner, channel, input, authorized_channels).await
+                order::move_channel(tx, owner, channel, input, authorize_channels).await
             }
             Self::ChannelOrder(input) => {
-                order::channels(tx, owner, input, authorized_channels).await
+                order::channels(tx, owner, input, authorize_channels).await
             }
         }
     }

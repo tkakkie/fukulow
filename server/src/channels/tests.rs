@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-mod archive;
+pub(super) mod archive;
 mod guest_members;
 mod managers;
 mod membership;

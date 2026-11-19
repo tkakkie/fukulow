@@ -19,7 +19,7 @@ async fn expect_error(response: Response, status: StatusCode, code: &str) {
     );
 }
 
-async fn patch(app: &Router, token: &str, path: &str, input: Value) {
+pub(in crate::channels) async fn patch(app: &Router, token: &str, path: &str, input: Value) {
     let response = request(app, "PATCH", path, token, input).await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(to_bytes(response.into_body(), 1).await.unwrap().is_empty());

@@ -71,7 +71,7 @@ Authenticate Session → parse Organization UUID → resolve current Membership/
 | Unsupported content type on a body route | 415 `expected application/json` |
 | Unknown/deleted/foreign-Organization/other owner's section in GET/PATCH, move destination or reorder | 404 `section_not_found`. DELETE stays 204 |
 | Unknown/foreign-Organization/inaccessible supplied Channel, including guessed hidden placement | 404 `channel not found` |
-| Accessible archived supplied Channel (#410, proposed) | 409 `channel_archived` |
+| Accessible archived supplied Channel (#410, implemented) | 409 `channel_archived` |
 | New create exceeds live-section cap | 409 `section_limit` |
 | Conflicting original name / retired id | 409 `section_id_conflict` / `section_deleted` |
 | Reorder id set differs | 409 `section_layout_changed` |

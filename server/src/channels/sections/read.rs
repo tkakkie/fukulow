@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 #[utoipa::path(get, path="/api/v1/orgs/{org}/me/sections",
     params(("org"=Uuid,Path)), security(("cookie"=[]),("bearer"=[])),
-    responses((status=200,description="Personal layout with accessible Channels only",body=SectionLayout),
+    responses((status=200,description="Personal layout with accessible active Channels only",body=SectionLayout),
     (status=400,description="invalid input",body=ErrorBody), (status=401,description="invalid credentials",body=ErrorBody),
     (status=404,description="organization_unavailable",body=ErrorBody), (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn layout(
@@ -39,7 +39,7 @@ pub(crate) async fn layout(
 
 #[utoipa::path(get, path="/api/v1/orgs/{org}/me/sections/{id}",
     params(("org"=Uuid,Path),("id"=Uuid,Path)), security(("cookie"=[]),("bearer"=[])),
-    responses((status=200,description="Owned section with accessible Channels only",body=SectionSnapshot),
+    responses((status=200,description="Owned section with accessible active Channels only",body=SectionSnapshot),
     (status=400,description="invalid input",body=ErrorBody), (status=401,description="invalid credentials",body=ErrorBody),
     (status=404,description="organization_unavailable or section_not_found",body=ErrorBody),
     (status=500,description="internal error",body=ErrorBody)))]
@@ -71,9 +71,10 @@ pub(crate) async fn section(
 
 #[utoipa::path(get, path="/api/v1/orgs/{org}/me/channel-sections/{channel_id}",
     params(("org"=Uuid,Path),("channel_id"=Uuid,Path)), security(("cookie"=[]),("bearer"=[])),
-    responses((status=200,description="Group of an accessible ordinary Channel",body=ChannelPlacement),
+    responses((status=200,description="Group of an accessible active ordinary Channel",body=ChannelPlacement),
     (status=400,description="invalid input",body=ErrorBody), (status=401,description="invalid credentials",body=ErrorBody),
     (status=404,description="organization_unavailable or channel not found",body=ErrorBody),
+    (status=409,description="channel_archived",body=ErrorBody),
     (status=500,description="internal error",body=ErrorBody)))]
 pub(crate) async fn placement(
     State(state): State<AppState>,
