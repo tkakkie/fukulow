@@ -9,6 +9,7 @@
   import type { Channel, DmDiscovery, Identity, Message } from './api'
   import DmList from './DmList.svelte'
   import DmSendStatus from './DmSendStatus.svelte'
+  import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
   import ChannelList from './ChannelList.svelte'
@@ -603,7 +604,7 @@
   <nav class="rail" aria-label="メインナビゲーション">
     <div class="rail__top">
       <div class="rail__logo" aria-hidden="true">
-        <span class="rail__owl">🦉</span>
+        <Logo />
       </div>
       <Button
         variant="icon"
@@ -1038,10 +1039,6 @@
     place-items: center;
     width: var(--touch-target);
     height: var(--touch-target);
-    background-color: var(--amber);
-    color: var(--on-amber);
-    border-radius: var(--radius-10);
-    font-size: var(--font-size-17);
   }
 
   .channel-column {

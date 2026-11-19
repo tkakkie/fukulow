@@ -20,6 +20,7 @@
   --focus: #0B6B63;
   --amber: #F59E0B;
   --on-amber: #3B2300;
+  --logo-ink: #15201E;
   --mention: #FFF3D6;
   --on-mention: #6B3F00;
   --danger: #B42318;
@@ -96,6 +97,7 @@
     --focus: #6FD9C9;
     --amber: #F5A524;
     --on-amber: #3B2300;
+    --logo-ink: #15201E;
     --mention: #36290C;
     --on-mention: #FCE3A6;
     --danger: #F97066;
@@ -129,6 +131,7 @@
   --focus: #6FD9C9;
   --amber: #F5A524;
   --on-amber: #3B2300;
+  --logo-ink: #15201E;
   --mention: #36290C;
   --on-mention: #FCE3A6;
   --danger: #F97066;
