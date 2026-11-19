@@ -24,6 +24,7 @@
 - #144 centralizes deny-by-default authority and SQL Role sets. Version the Organization lock row to abort stale REPEATABLE READ updates before using an old Owner count.
 - #303 lists range over unconsumed expiry, sort live rows and recheck the clock. Creation-order indexing prolonged locks by scanning expired history in generic plans. [Baseline](../measurements.md#invite-list-expiry-range-303)
 - #303 management follows invited-Role policy regardless of issuer. Pre-fill filtering and uniform 404s hide counts/email. Lock with acceptance to serialize irrevocable revocation.
+- #223 separates the Owner-Role Invite quota because Admins cannot see Owner-Role counts. Admin creation outcomes depend only on the shared non-Owner-Role pool.
 - #303 retains random UUID cursor anchors scoped by Organization/Invite/Role to prevent foreign reuse without keys/tables. Consumed anchors and keysets avoid offset skips.
 - #144 uses seven-day Invites and stores only SHA-256 of the 256-bit token. Authenticate Accounts instead of trusting email equality. Recheck issuer under Organization lock so old Invites cannot bypass lost authority.
 - #293/#314 RLS USING/WITH CHECK require transaction-local Organization as the app role, alongside SQL scope and authorize. Unset fails closed. Global credentials/Sessions, own-Member SELECT, boolean setup definer (#334) and owner jobs (ENABLE without FORCE) are narrow exceptions. Direct EXISTS would miss hidden Organizations. Verify as app role and compare hot paths.

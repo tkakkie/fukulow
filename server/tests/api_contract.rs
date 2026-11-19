@@ -26,7 +26,7 @@ const HTTP_METHODS: [&str; 8] = [
 ];
 // Every operation documents the common shutdown response.
 const EXPECTED_API_OPERATIONS: usize = 50;
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 372;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 373;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();

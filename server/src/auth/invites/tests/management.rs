@@ -84,4 +84,5 @@ mod expiry;
 mod measurement;
 mod migration_order;
 mod paging;
+mod quota;
 mod upgrade;
