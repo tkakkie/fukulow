@@ -51,6 +51,17 @@ export const checksumSQL = `SELECT md5(string_agg(row, ',' ORDER BY row)) FROM (
 
 export const relationBytesSQL = `SELECT COALESCE(sum(pg_total_relation_size(relid)), 0)::bigint FROM pg_stat_user_tables`;
 
+// #620 diagnosis only (never judged): the same relations as relationBytesSQL, split into heap,
+// free-space/visibility maps, TOAST and each index, so heap + maps + toast + sum(indexes) = total.
+export const relationSizesSQL = `SELECT COALESCE(json_agg(r ORDER BY r.relation), '[]') FROM (
+  SELECT c.relname AS relation, pg_relation_size(c.oid, 'main') AS heap,
+    pg_relation_size(c.oid, 'fsm') + pg_relation_size(c.oid, 'vm') + pg_relation_size(c.oid, 'init') AS maps,
+    CASE WHEN c.reltoastrelid = 0 THEN 0 ELSE pg_total_relation_size(c.reltoastrelid) END AS toast,
+    COALESCE((SELECT json_object_agg(i.relname, pg_total_relation_size(i.oid)) FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+      WHERE x.indrelid = c.oid), '{}') AS indexes,
+    pg_total_relation_size(c.oid) AS total
+  FROM pg_stat_user_tables s JOIN pg_class c ON c.oid = s.relid) r`;
+
 // Relations whose autovacuum or autoanalyze inside a step invalidates its WAL: the Message tables, their TOAST and both sets of indexes.
 export const watchedRelationsSQL = `WITH tables AS (
   SELECT c.oid, c.reltoastrelid FROM pg_class c
