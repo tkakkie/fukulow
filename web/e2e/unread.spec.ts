@@ -402,3 +402,81 @@ test('keyboard path: open Unread Channel, enter Unread Topic via real key presse
     await bobContext.close()
   }
 })
+
+test('read reporting advances over rows mounted after scroll stops via IntersectionObserver alone', async ({
+  page,
+  browser,
+}) => {
+  const suffix = crypto.randomUUID().slice(0, 8)
+  const orgId = await signInOwner(page.request)
+  const channel = await createChannel(page.request, orgId, `unread-observer-${suffix}`)
+  const bobContext = await createSecondMemberRequest(page.request, browser, orgId)
+  try {
+    // Seed 30 own messages so opening at the bottom measures the lower half and scrolling to the top
+    // measures the upper half: all 30 rows above the future Unread insertion point have cached heights.
+    const ownMessages: components['schemas']['Message'][] = []
+    for (let i = 1; i <= 30; i++) {
+      ownMessages.push(await postMessage(page.request, orgId, channel.id, `自分の履歴 ${i}`))
+    }
+
+    await page.setViewportSize({ width: 1280, height: 800 })
+    // Pin periodic activity reconcile jitter near the end of its 30 s window so a random periodic
+    // notify() cannot re-run Timeline's visibility/entry effects during the post-scroll assertion.
+    await page.addInitScript(() => {
+      Math.random = () => 0.99
+    })
+    await page.goto(`/o/${orgId}/c/${channel.id}`)
+    await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+
+    const main = page.locator('#main-content')
+    const scroll = main.locator('.timeline-scroll')
+    const channelRow = page
+      .locator('#channel-content .channel-list > li > .ui-list-row-group > button.ui-list-row')
+      .filter({ hasText: channel.name })
+
+    // Wait for bottom rows to mount and be measured at the bottom, then scroll to top so the view is
+    // unpinned and the upper rows are also measured (bottom rows unmount, keeping their cached heights).
+    await expect(main.locator(`[data-message-id="${ownMessages.at(-1)!.id}"]`)).toBeInViewport()
+    await scroll.evaluate((el) => {
+      el.scrollTo({ top: 0, behavior: 'instant' })
+    })
+    await expect(main.locator(`[data-message-id="${ownMessages[0].id}"]`)).toBeInViewport()
+    await expect(main.locator(`[data-message-id="${ownMessages.at(-1)!.id}"]`)).toHaveCount(0)
+
+    // Record the exact top offset where the next message (seq 31) will land now that all 30 rows are measured.
+    const targetTop = await scroll.evaluate((el: HTMLElement) => {
+      const list = el.querySelector('.timeline-list') as HTMLElement
+      return (list.offsetTop - el.offsetTop) + list.offsetHeight
+    })
+
+    // While Alice stays unpinned at the top, Bob posts 15 Unread messages (using Bob for all 15 avoids
+    // ownSendAtTail auto-scrolling to bottom, and the extra rows keep the jump destination unpinned so
+    // followBottom never writes scrollTop).
+    const targetUnread: components['schemas']['Message'][] = []
+    for (let i = 1; i <= 15; i++) {
+      targetUnread.push(await postMessage(bobContext.request, orgId, channel.id, `停止後にマウントされる未読 ${i}`))
+    }
+
+    // Wait for all 45 messages (30 initial + 15 Unread) to arrive over WS and for
+    // reactive effects (scroll-sync, visibility, entry) to settle while target rows remain unmounted.
+    await expect(channelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 15件')
+    await expect(main.locator(`[data-message-id="${ownMessages[0].id}"]`)).toHaveAttribute('aria-setsize', '45')
+    const firstTarget = targetUnread[0]
+    await expect(main.locator(`[data-message-id="${firstTarget.id}"]`)).toHaveCount(0)
+
+    // Native single jump with no synthetic scroll event. Rows above firstTarget already have cached heights,
+    // so ResizeObserver's layout(saved) keeps offsets[index] and scrollTop unchanged and emits no extra scroll event.
+    await scroll.evaluate((el, top) => {
+      el.scrollTo({ top, behavior: 'instant' })
+    }, targetTop)
+
+    await expect(main.locator(`[data-message-id="${firstTarget.id}"]`)).toBeInViewport()
+    await expect.poll(async () => {
+      const response = await page.request.get(`/api/v1/orgs/${orgId}/channels`)
+      const data = (await response.json()) as components['schemas']['ChannelList']
+      return data.channels.find((c) => c.id === channel.id)?.read_seq
+    }).toBeGreaterThanOrEqual(firstTarget.created_seq)
+  } finally {
+    await bobContext.close()
+  }
+})
