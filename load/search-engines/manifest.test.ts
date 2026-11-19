@@ -8,8 +8,21 @@ const frozen = snapshot();
 const document = {sha256:hash(JSON.stringify(frozen)),frozen};
 const recorded = (version: number) => JSON.parse(readFileSync(new URL(`./manifest-v${version}.json`,import.meta.url),'utf8'));
 test('checked-in current manifest matches the evaluation inputs',()=>{
-  assert.equal(manifestFile,'load/search-engines/manifest-v4.json');
-  assert.equal(verifyManifest(recorded(4)),document.sha256);
+  assert.equal(manifestFile,'load/search-engines/manifest-v5.json');
+  assert.equal(verifyManifest(recorded(5)),document.sha256);
+});
+test('v5 records only the sections migration and its manifest bookkeeping',()=>{
+  const v4 = recorded(4), v5 = recorded(5);
+  assert.equal(hash(JSON.stringify(v4.frozen)),v4.sha256);
+  const {version,sourceHashes,...conditions} = v5.frozen;
+  const {version:previousVersion,sourceHashes:previousSources,...previousConditions} = v4.frozen;
+  assert.equal(version,previousVersion+1);
+  assert.deepEqual(conditions,previousConditions);
+  const before = new Map<string,string>(previousSources.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  const after = new Map<string,string>(sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  assert.deepEqual([...after.keys()].filter(path=>before.get(path)!==after.get(path)),
+    ['.gitattributes','load/search-engines/manifest.ts','server/migrations/202611200204_member_sections.sql']);
+  assert.ok([...before.keys()].every(path=>after.has(path)));
 });
 test('v4 records only the Move migration and its manifest bookkeeping',()=>{
   const v3 = recorded(3), v4 = recorded(4);
@@ -70,7 +83,7 @@ test('LF attributes cover exactly the frozen inputs and manifests',()=>{
   const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
     .split('\n').filter(line=>line && !line.startsWith('#'));
   assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),
-    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json',manifestFile]
+    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json',manifestFile]
     .sort().map(path=>`/${path} text eol=lf`));
 });
 test('manifest content tampering is refused',()=>{
