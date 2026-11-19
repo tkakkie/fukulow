@@ -145,11 +145,13 @@ Keep [DM acceptance bounds](dms.md#performance-acceptance-adopted-2026-11-14) (#
 4. Resolve edited Mention rendering/acceptance/count identity before #287. #287 keeps Mention unread unchanged and #152 accepts an immutable set. A count change requires amending #287. Move's destination-read rule and Edit's unchanged Unread/Topic creation order stand.
 5. Mutation latency, replay, WAL, storage and migration-outage thresholds must be fixed before #141/#287 measurement (#431).
 
-### Mention and Mention unread (#152, approved, not implemented)
+### Mention and Mention unread (#152, implemented)
 
-This section records #152's approved contract. S/C/P still apply. No directory or search expansion, group Mention or separate Mention notification. Expose accepted identity only to readers of that Message.
+This section records #152's contract. M1–M5 and the DM part of M6 are implemented (`server/src/messages/mentions.rs`, `server/src/messages/unread.rs`). Tests: [messages](../invariants/messages.md), [unread](../invariants/unread.md), [realtime](../invariants/realtime.md), [web](../invariants/web.md) invariants. Edit (#287) is open. S/C/P still apply. No directory or search expansion, group Mention or separate Mention notification. Expose accepted identity only to readers of that Message.
 
 #### M1. Body token and shared Message shape
+
+Status: implemented.
 
 Scan left to right for complete `@{member:<uuid>}` tokens anywhere in the unchanged body. Use the Member id in lowercase ASCII hexadecimal UUID 8-4-4-4-12 form. No word boundaries, escapes or Markdown/code exceptions. Uppercase, malformed/incomplete/whitespace forms, display names, `@all` and `@channel` stay literal. Resolve UUIDs as Member ids only. Keep body validation, scalar limits and byte-exact retries.
 
@@ -158,6 +160,8 @@ Every canonical Message (ACK/retry, history/fill, main/Topic/Reply projections i
 Render every exact occurrence of an accepted id and highlight the reader by accepted id alone. Use a newer authorized Member display identity if held, otherwise the newest authorized response for that Message. Reads never revalidate the accepted set. Refetch follows renames even for never-authors or deactivated Members. Accepted identity confers no access, directory or autocomplete membership. Rejected tokens never resolve, including after grants, history, replay and retries. They do not fail a send. Pending text has no accepted set before C5 settlement.
 
 #### M2. Acceptance, retry and access ordering
+
+Status: implemented.
 
 After sender authorization, accept each distinct active same-Organization target with current Channel access in the send transaction. Use Channels' visibility rule: public non-Guest implicit access qualifies even with a stale redundant grant. Private (including Owner/Admin) and public Guest access require usable current-revision grants. Every DM Role requires pair participation and a current participant grant (D3).
 
@@ -171,6 +175,8 @@ Revocation/deactivation committed before the locked acceptance check excludes th
 
 #### M3. Mention unread and REST counts
 
+Status: implemented.
+
 Count the subset of P8 Unread whose accepted set contains the reader, once per other-sender Message with creation position strictly above scope read position and at or below W. Inherited Topic determines Reply scope. Opening a chain marks neither scope and adds no separate badge. Topic lines are summaries. Channel total is main plus Topics. No separate position, mark endpoint or stored counter.
 
 Require nonnegative integer counts throughout. Channel Unread carries `main_mention_unread_count` and aggregate `mention_unread_count`. Each enclosing-W Topic summary and DM list/open carry `mention_unread_count`. All DM Messages use the Channel position. Batch counts alongside Unread in the same authorized read-only snapshot as positions/W, with no-store and no per-item SQL or literal-token counting. P8's missing-position suppression, 404 mark denial, max/clamp, grant-time initialization, continuous-access preservation and loss/re-grant apply equally. Preexisting Messages contribute zero. No retrospective acceptance/backfill.
@@ -178,6 +184,8 @@ Require nonnegative integer counts throughout. Channel Unread carries `main_ment
 Show counts alongside Unread on Channel/DM lists and displayed Topic summaries. Authorized Member directory autocomplete inserts M1 tokens without promising acceptance. Highlight accepted Mentions of the reader.
 
 #### M4. Real-time count convergence (P8 and #307)
+
+Status: implemented.
 
 Merge scope REST baselines with the unique eligible other-sender Mention suffix above both W and read position, deduped by (Channel, creation position) across live, ACK/history settlement and replay. Projections leave the cursor alone. Reapply suffix after winning baseline. Unknown/unloaded or evicted scope evidence stays unresolved pending refresh within #308's bounds.
 
@@ -187,11 +195,15 @@ Unwatched targets and cross-device marks use A9–A12/O5 and DM E4–E7. Notices
 
 #### M5. Storage outline for the later migration
 
+Status: implemented (`202611140300_message_mentions.sql`).
+
 Messages owns `message_mentions` and its SQL. Allocate the version in the append-only #152 migration (`_message_mentions.sql`). Use non-null UUID Organization/Channel/Message/Member ids, tenant RLS and scoped keys: PK (Organization, Message, Member), FK (Organization, Channel, Message) to `messages(organization_id, channel_id, id)`, and FK (Organization, Member) to retained `users(organization_id, id)`. Reuse scoped unique keys. Database constraints prevent duplicate/dangling/cross-Organization identities. Application acceptance enforces access. Store no name, read state or grant lifetime.
 
 Use the PK for batch hydration, `message_mentions_member_channel_message` on (Organization, Member, Channel, Message) for reader joins and `message_mentions_channel_message` on (Organization, Channel, Message) for the FK and Channel reads/cleanup. Join scoped Message indexes to scan only unread ranges and skip fully read scopes. Verify plans for Channel lists, DM pages/id batches and W-relative Topic summaries. Access loss removes positions, preserving stored sets. Eventual Message deletion removes Mention rows atomically.
 
 #### M6. Dependencies and open decisions
+
+Status: Move (#141) and DM (#385) integration implemented. Edit (#287) open.
 
 #141 delivers and tests atomic Move/count integration across live/replay/positions. Keep the Message's accepted set and use the destination read position. #152 owns that set/count contract and tests unchanged projections. #160 adopts current-state replay. #141 decision 4 settled Move rights, limits, activity and empty-Topic identity/read lifetime. Edit is outside #152. If the agreed Edit policy changes accepted ids, update them atomically. Resolve edited-body acceptance and count identity before #287 (see #160 open decisions). No Edit/Delete/log rule follows from immutable acceptance alone.
 
