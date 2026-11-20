@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { denialCases, probe } from './definer.ts';
+import { begin } from './queries.ts';
 import { literal, member, org } from './seed.ts';
 
 export const b1Role = 'fukulow_b1';
@@ -59,6 +60,21 @@ export function b1Denials(sql: (text: string)=>string) {
   }));
 }
 
+export function b1Cleanup(sql: (text: string)=>string) {
+  // Restore one setting at a time on the same connection after COMMIT.
+  const count = 'SELECT count(*) FROM public.messages;';
+  const rls = sql(`${b1Begin('denialprobe')}SELECT count(*) FROM public.messages WHERE organization_id='${org(2)}';
+SELECT count(*) FROM public.messages WHERE organization_id='${org(1)}';
+COMMIT;
+${count}
+${b1Begin('denialprobe',null)}${count}
+COMMIT;
+${begin()}${count}
+COMMIT;`);
+  assert.equal(rls,`${org(1)}|t\n0\n7\n0\nt\n0\n${org(1)}\n0`,'B1 RLS isolation or context cleanup failed');
+  return rls;
+}
+
 type PlanNode = {'Node Type':string; 'Actual Loops':number; 'Actual Rows':number;
   'Index Name'?:string; 'Relation Name'?:string; 'Index Cond'?:string; 'Recheck Cond'?:string; 'Filter'?:string;
   'Rows Removed by Filter'?:number; 'Rows Removed by Index Recheck'?:number; Plans?:PlanNode[]};
@@ -77,4 +93,36 @@ export function planFacts(explain: [{Plan:PlanNode; 'Execution Time':number}]) {
       removedByFilterPerLoop:n['Rows Removed by Filter'] ?? 0,
       removedByRecheckPerLoop:n['Rows Removed by Index Recheck'] ?? 0,
     }))};
+}
+
+export function b1Plan(sql: (text: string)=>string, query: string, record: (explain: unknown)=>void,
+  {settings = '', actor = member(1,2), prepared = false} = {}) {
+  const page = b1Query(actor);
+  const prepare = prepared ? `PREPARE b1_search_page AS ${page};\n` : '';
+  const explain = JSON.parse(b1Rows(sql(b1Begin(query)+settings+prepare+
+    'EXPLAIN (ANALYZE, BUFFERS, SETTINGS, VERBOSE, FORMAT JSON) '+
+    (prepared ? 'EXECUTE b1_search_page' : page)+';\nCOMMIT;')));
+  record(explain);
+  return planFacts(explain);
+}
+
+export function b1ForcedDenialPlan(sql: (text: string)=>string, record: (explain: unknown)=>void) {
+  const facts = b1Plan(sql,'denialprobe',record,{settings:'SET LOCAL enable_seqscan=off;\n',actor:member(1,1)});
+  assert.ok(facts.searchIndex,'B1 forced denial plan did not use search_body');
+}
+
+export function b1TimingFixture(sql: (arm: 'few'|'many', text: string)=>string, classes: number, foreignRowsPerClass: number) {
+  const text = `SELECT count(*) FILTER (WHERE organization_id='${org(1)}'),
+    count(*) FILTER (WHERE organization_id='${org(2)}'),
+    md5(string_agg(organization_id || '|' || id || '|' || octet_length(body) || '|' ||
+      CASE WHEN organization_id='${org(1)}' THEN md5(body) ELSE '' END, ',' ORDER BY organization_id,id))
+    FROM public.messages;`;
+  const few = sql('few',text);
+  const many = sql('many',text);
+  const [visible,foreign,fingerprint] = few.split('|');
+  assert.equal(visible,String(classes),'B1 timing fixture visible row count');
+  assert.equal(foreign,String(classes*foreignRowsPerClass),'B1 timing fixture foreign row count');
+  assert.match(fingerprint ?? '',/^[a-f0-9]{32}$/,'Missing B1 timing fixture fingerprint');
+  assert.equal(many,few,'B1 timing fixture arms differ in IDs, row counts, byte lengths or visible bodies');
+  return {visibleRows:Number(visible),foreignRows:Number(foreign),fingerprint};
 }

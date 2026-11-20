@@ -12,7 +12,7 @@ import { benchmark, CommandTimeoutError, command, docker, save, sql } from './be
 import { channel, copySql, finishSql, fixtureSql, generate, literal, member, org } from './seed.ts';
 import { begin, normalizedQuery, pattern, search, visibility } from './queries.ts';
 import { denialCases, probeSql } from './definer.ts';
-import { b1Begin, b1Denials, b1Query, b1Role, b1Rows, planFacts, verifyB1 } from './b1.ts';
+import { b1Begin, b1Cleanup, b1Denials, b1ForcedDenialPlan, b1Plan, b1Query, b1Role, b1Rows, b1TimingFixture, verifyB1 } from './b1.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 process.chdir(root);
@@ -103,11 +103,8 @@ type Query = {id:string,raw:string,value:string};
 const normalized: Query[] = [];
 const script = (query: string) => b1Begin(query)+b1Query()+';\nCOMMIT;';
 
-function plan(db: string, query: string, dest: string, settings = '', actor = member(1,2)) {
-  const explain = JSON.parse(b1Rows(b1(db,b1Begin(query)+settings+
-    'EXPLAIN (ANALYZE, BUFFERS, SETTINGS, VERBOSE, FORMAT JSON) '+b1Query(actor)+';\nCOMMIT;')));
-  save(dest,explain);
-  return planFacts(explain);
+function plan(db: string, query: string, dest: string, prepared = false) {
+  return b1Plan(text=>b1(db,text),query,explain=>save(dest,explain),{prepared});
 }
 
 function ids(db: string, query: string, role = 'fukulow_app', sequential = false) {
@@ -169,16 +166,10 @@ function checkDenials() {
   const verification = checkB1('denial');
   const checks = b1Denials(text=>b1('denial',text));
   // Direct reads isolate the RLS/pattern checks from the query's visibility predicates.
-  const rls = b1('denial',`${b1Begin('denialprobe')}SELECT count(*) FROM public.messages WHERE organization_id='${org(2)}';
-SELECT count(*) FROM public.messages WHERE organization_id='${org(1)}';
-COMMIT;
-SELECT count(*) FROM public.messages;
-${begin()}SELECT count(*) FROM public.messages;
-COMMIT;`);
+  const rls = b1Cleanup(text=>b1('denial',text));
   save(`${out}/denials.json`,{cases:denialCases.map(c=>c.name),checks,verification,rls});
-  assert.equal(rls,`${org(1)}|t\n0\n7\n0\n${org(1)}\n0`,'B1 RLS isolation or context cleanup failed');
   assert.ok(checks.every(c=>JSON.stringify(c.found)===JSON.stringify(c.expected)),'B1 denial mismatch; see denials.json');
-  plan('denial','denialprobe',`${out}/denial-forced-plan.json`,'SET LOCAL enable_seqscan=off;\n',member(1,1));
+  b1ForcedDenialPlan(text=>b1('denial',text),explain=>save(`${out}/denial-forced-plan.json`,explain));
   drop('denial');
 }
 
@@ -222,6 +213,16 @@ async function timingExposure() {
       few:{foreignMatches:few.foreignMatches,...few.latency},many:{foreignMatches:many.foreignMatches,...many.latency}});
     save(`${out}/timing.json`,evidence);
   }
+  // Collect EXPLAIN and fixture evidence after sampling so these reads cannot warm either arm.
+  const pairedPlans = evidence.map((sample,i)=>{
+    const q = normalized[i]!;
+    const capture = (arm: typeof arms[number]) => plan(`timing_${arm}`,q.value,`${dest}/${q.id}-${arm}-plan.json`,true);
+    return {...sample,
+      few:{...sample.few,plan:capture('few')},many:{...sample.many,plan:capture('many')}};
+  });
+  const fixture = b1TimingFixture((arm,text)=>owner(`timing_${arm}`,text),normalized.length,foreignRowsPerClass);
+  save(`${dest}/fixture.json`,fixture);
+  save(`${out}/timing.json`,pairedPlans);
   for (const arm of arms) drop(`timing_${arm}`);
 }
 

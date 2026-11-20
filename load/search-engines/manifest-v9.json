@@ -1,5 +1,5 @@
 {
-  "sha256": "84339f514fa8ed1993188fc32b274accc274eef76c5dd57062e26382edb082fe",
+  "sha256": "7c8a761771b513b3166ed9789b3e7e112815c8a7f7ac59837f6739d8ee4c971d",
   "frozen": {
     "version": 9,
     "date": "2026-11-20",
@@ -48,7 +48,7 @@
       },
       {
         "path": "load/search-engines/b1.ts",
-        "sha256": "826bdecc03d5be96f37b76b106dce059b9fb2567cbbda58568346b3a919f0c0a"
+        "sha256": "e9d486af2624595c6c9d099a3da94cd4dd227ef3a89e3a7eb9d1b9f0b6419e66"
       },
       {
         "path": "load/search-engines/bench.ts",
@@ -72,7 +72,7 @@
       },
       {
         "path": "load/search-engines/manifest.ts",
-        "sha256": "d5dac947e0d00ee3142101ea561d8ced6fac9d925daa948b91944642b0c04c39"
+        "sha256": "9f5cd8ad1bdec15ce6463b736a1cfd7efad4c4be09409ec9cf0493981ea5ddc0"
       },
       {
         "path": "load/search-engines/pgroonga.sql",
@@ -104,7 +104,7 @@
       },
       {
         "path": "load/search-engines/run.ts",
-        "sha256": "3250cb53f39cec2734314e339e365b52dea9444220004d289450848b23b93c28"
+        "sha256": "7fdf187ccf92f89a040f9291469b3db6e9dc881e8e33ac1b7cc36063b16029b1"
       },
       {
         "path": "load/search-engines/runtime.ts",
@@ -120,7 +120,7 @@
       },
       {
         "path": "load/search-engines/summarize.ts",
-        "sha256": "4233dfd89ffd4ba67a3b0e5d119e3c114ce730aa5bb3101a73212db97288578e"
+        "sha256": "da99c9093e05ed86d5f4bd18226878c8b7c32cc1270ff76b39a685cc287fcae1"
       },
       {
         "path": "load/search-engines/trgm.sql",
@@ -1051,12 +1051,18 @@
         "completeness": "full result sets for six Members, page order, and two engine controls, including the small restore",
         "denials": "all v2 denial cases on PGroonga, unforced and with enable_seqscan=off; per-class no-grant Guest and deactivated Member"
       },
+      "evidenceChecks": {
+        "publication": "B1 artifacts must match the checked-in v9 manifest",
+        "denials": "the forced EXPLAIN must execute search_body; same-connection post-COMMIT reads with neither setting and with each setting alone must return zero rows"
+      },
       "timingProbe": {
         "foreignRowsPerClass": 1000,
         "method": "after the 1M rounds, paired small databases with identical visible results and foreign row counts; only equal-byte-length foreign bodies vary",
         "few": "one matching foreign Message per inserted class before overlaps",
         "many": "1000 matching foreign Messages per inserted class before overlaps",
-        "latency": "same query/role, clients and transactions as one measured round; alternate arm order by class"
+        "latency": "same query/role, clients and transactions as one measured round; alternate arm order by class",
+        "plans": "unforced EXPLAIN ANALYZE of the prepared query in both arms for every class after sampling; timing evidence requires executed search_body in both",
+        "fixtureCheck": "verify paired Message IDs, row counts, per-row body byte lengths and visible bodies after sampling"
       }
     }
   }

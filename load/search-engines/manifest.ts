@@ -88,11 +88,15 @@ export function snapshot() {
         minimumLength:criteria.minimumLength.pgroonga,rareQueries:criteria.rareQueries,
         completeness:'full result sets for six Members, page order, and two engine controls, including the small restore',
         denials:'all v2 denial cases on PGroonga, unforced and with enable_seqscan=off; per-class no-grant Guest and deactivated Member'},
+      evidenceChecks:{publication:'B1 artifacts must match the checked-in v9 manifest',
+        denials:'the forced EXPLAIN must execute search_body; same-connection post-COMMIT reads with neither setting and with each setting alone must return zero rows'},
       timingProbe:{foreignRowsPerClass:1000,
         method:'after the 1M rounds, paired small databases with identical visible results and foreign row counts; only equal-byte-length foreign bodies vary',
         few:'one matching foreign Message per inserted class before overlaps',
         many:'1000 matching foreign Messages per inserted class before overlaps',
-        latency:'same query/role, clients and transactions as one measured round; alternate arm order by class'}}};
+        latency:'same query/role, clients and transactions as one measured round; alternate arm order by class',
+        plans:'unforced EXPLAIN ANALYZE of the prepared query in both arms for every class after sampling; timing evidence requires executed search_body in both',
+        fixtureCheck:'verify paired Message IDs, row counts, per-row body byte lengths and visible bodies after sampling'}}};
 
 }
 export function verifyManifest(document: {sha256:string; frozen:ReturnType<typeof snapshot>}, actual = snapshot()) {

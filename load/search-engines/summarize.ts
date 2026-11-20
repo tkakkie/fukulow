@@ -91,10 +91,11 @@ export function judge(runs: JudgedRun[], rawQueries: unknown, definer: unknown, 
       scope:'MAC developer-Mac comparison (maintainer 2026-11-15); not a formal #431 budget; P2 production adoption held (#314)'};
   });
 }
-type B1Plan = Plan & {scans:unknown[];executionMs:number};
+type B1PlanFacts = Omit<Plan,'query'> & {scans:unknown[];executionMs:number};
+type B1Plan = B1PlanFacts & {query:string};
 type B1Completeness = {query:string;actors:{actor:number;equal:boolean;rows:number}[];ownerIndexEqual:boolean;directEqual:boolean;
   pageEqual:boolean;matchesByOrganization:Record<string,number>};
-type TimingArm = Latency & {foreignMatches:number};
+type TimingArm = Latency & {foreignMatches:number;plan?:B1PlanFacts};
 type Timing = {query:string;few:TimingArm;many:TimingArm;equalNonemptyPage:boolean};
 type B1Round = Omit<Run,'write'|'walBytesPerInsert'> & {plans?:B1Plan[];completeness?:B1Completeness[];
   safety?:{definers:string;policy:string;role:string;rls:string;memberships:string}};
@@ -107,6 +108,10 @@ function oneFor<T extends {query:string}>(items: unknown, id: string) {
 function latencyValid(value: Latency | undefined, samples: number): value is Latency {
   return value?.n===samples && [value.p50,value.p95,value.p99].every(n=>Number.isFinite(n) && n>=0)
     && value.p50<=value.p95 && value.p95<=value.p99;
+}
+function planRecorded(plan?: B1PlanFacts): plan is B1PlanFacts {
+  return !!plan && Number.isFinite(plan.executionMs) && Array.isArray(plan.scans) && plan.scans.length>0 &&
+    typeof plan.searchIndex==='boolean' && typeof plan.seqScanMessages==='boolean';
 }
 function completenessChecks(c?: B1Completeness) {
   const actors = objects<B1Completeness['actors'][number]>(c?.actors);
@@ -138,8 +143,7 @@ export function judgeB1(evidence: B1Evidence, expectedQueries: [string,string][]
       : groupComplete && sampled.length===rounds ? 'PASS' : 'NOT EVALUATED';
     const plan = oneFor<B1Plan>(first?.plans,q.id);
     const required = q.id in criteria.rareQueries && q.scalars>=criteria.minimumLength.pgroonga!;
-    const index: Status = !plan || !Number.isFinite(plan.executionMs) || !Array.isArray(plan.scans) || !plan.scans.length ||
-      typeof plan.searchIndex!=='boolean' || typeof plan.seqScanMessages!=='boolean' ? 'NOT EVALUATED'
+    const index: Status = !planRecorded(plan) ? 'NOT EVALUATED'
       : plan.seqScanMessages || (required && !plan.searchIndex) ? 'FAIL' : 'PASS';
     const complete = oneFor<B1Completeness>(first?.completeness,q.id);
     const completeness = checksStatus(completenessChecks(complete),9);
@@ -151,7 +155,9 @@ export function judgeB1(evidence: B1Evidence, expectedQueries: [string,string][]
     const timingEvaluated = counts.length===3 && counts.every(count=>Number.isSafeInteger(count) && count>=0) &&
       timing?.equalNonemptyPage===true && latencyValid(timing.few,samples) && latencyValid(timing.many,samples) &&
       Number.isSafeInteger(timing.few.foreignMatches) && timing.few.foreignMatches>=0 &&
-      Number.isSafeInteger(timing.many.foreignMatches) && timing.many.foreignMatches>timing.few.foreignMatches;
+      Number.isSafeInteger(timing.many.foreignMatches) && timing.many.foreignMatches>timing.few.foreignMatches &&
+      planRecorded(timing.few.plan) && timing.few.plan.searchIndex &&
+      planRecorded(timing.many.plan) && timing.many.plan.searchIndex;
     const percentiles = sampled.length ? {p50:stats(sampled.map(l=>l.p50)),p95:stats(sampled.map(l=>l.p95)),
       p99:stats(sampled.map(l=>l.p99))} : undefined;
     return {query:q.id,latency,index,completeness,actorDenials,restore,timingEvaluated,percentiles,latencies,plan,
@@ -185,6 +191,8 @@ export function summarize(root: string, publication: 'evaluation'|'smoke' = 'eva
   }
   if (!manifestHash || runs.some(r=>r.manifestHash!==manifestHash || (r.runKind ?? 'evaluation')!==kind)) throw new Error('Result manifest hash mismatch');
   if (manifest.frozen.b1) {
+    const frozenB1 = JSON.parse(readFileSync(new URL('manifest-v9.json',import.meta.url),'utf8'));
+    if (manifestHash!==frozenB1.sha256) throw new Error('B1 artifact must match the checked-in v9 manifest');
     const performance = kind==='smoke' ? {...manifest.frozen.performance,...manifest.frozen.smoke.performance} : manifest.frozen.performance;
     const {classes,...verdict} = judgeB1({rounds:runs,queries:readJson(`${root}/queries.json`),
       denials:readJson(`${root}/denials.json`),restore:readJson(`${root}/restore.json`),timing:readJson(`${root}/timing.json`)},
