@@ -107,7 +107,7 @@ async fn write_and_publish(
         let committed = write_attempt(&pool, &activity, owner, mutation).await;
         match committed {
             Ok((created, committed_generation, notice)) => {
-                notice.committed(&pool).await;
+                notice.committed(pool);
                 return Ok(match created {
                     Some(id) => created_section(StatusCode::CREATED, id, committed_generation),
                     None => StatusCode::NO_CONTENT.into_response(),
