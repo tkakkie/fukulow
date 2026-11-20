@@ -869,6 +869,21 @@ it('records notFound per Topic on 404 topic_not_found for summary and Topic hist
   await c.sync.close()
 })
 
+it('hanging Topic summaries exhaust the automatic retry budget', async () => {
+  const c = topicClient()
+  await c.boot()
+  c.event(11, 'U')
+  c.topicsApi.getTopicSummary.mockImplementation(() => new Promise(() => {}))
+  const loading = c.topics.ensureSummary('A', 'U')
+  await vi.advanceTimersByTimeAsync(29_999)
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(150_001); await loading
+  expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(5)
+  expect(c.topics.get('A').topic('U').summaryError).toBe('retryable')
+  expect(vi.getTimerCount()).toBe(0)
+  await c.sync.close()
+})
+
 it('ensureSummary bounds automatic retries on persistent 503 and network failures, enters terminal retryable error, and restarts on explicit retry or new generation', async () => {
   for (const makeFailure of [
     () => ({ ok: false as const, kind: 'http' as const, status: 503 }),

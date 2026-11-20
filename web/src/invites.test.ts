@@ -169,12 +169,15 @@ describe('Invite management', () => {
     vi.useFakeTimers()
     try {
       let finish!: (r: Result<InvitePage>) => void
-      const list = vi.fn(() => new Promise<Result<InvitePage>>(resolve => { finish = resolve }))
+      const list = vi.fn<typeof listInvites>(() => new Promise<Result<InvitePage>>(resolve => { finish = resolve }))
       const c = createInvites('org', vi.fn(), vi.fn(), { listInvites: list, revokeInvite: vi.fn() })
       const pending = c.load()
+      const signal = list.mock.calls[0][3]
+      expect(signal?.aborted).toBe(false)
       await vi.advanceTimersByTimeAsync(10_000); await pending
+      expect(signal?.aborted).toBe(true)
       expect(c.get().loading).toBe(false); expect(c.get().retryable).toBe(true)
-      finish(ok({ invites: [row(1)] })); await Promise.resolve()
+      finish(ok({ invites: [row(1)] })); await vi.advanceTimersByTimeAsync(0)
       expect(c.get().invites).toEqual([])
       c.close()
     } finally { vi.useRealTimers() }

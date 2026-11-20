@@ -5,12 +5,13 @@ import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createInviteAcceptance, createMembers, watchMemberAccess } from './members'
 import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
-import type { lookupAuthors, listMembers, MemberList, Result } from './api'
+import { listReplyChain, type lookupAuthors, type listMembers, type MemberList, type Result } from './api'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
 import type { AuthState } from './auth'
+import { replyPage } from './topic-test-helpers'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -23,8 +24,9 @@ const member = (id: string) => ({
 const identity = (id: string) => ({ account: { id, email: `${id}@example.com` }, organizations: [{ organization_id: 'o', name: 'Org', capabilities: { can_invite: { allowed: true }, can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true }, can_create_channels: { allowed: true } } }] })
 
 /** Real controllers on fake transports; each opened session gets its own network, like a real page would. */
-function stack(over: Partial<AuthDeps> = {}, holdMemberLists = false) {
+function stack(over: Partial<AuthDeps> = {}, holdMemberLists = false, replyFetch?: typeof fetch) {
   const nets: FakeNetwork[] = []
+  const sessions: ReturnType<typeof createSession>[] = []
   const ended: (() => void)[] = []
   const closes: ReturnType<typeof vi.fn>[] = []
   const stores: DraftStore[] = []
@@ -35,12 +37,16 @@ function stack(over: Partial<AuthDeps> = {}, holdMemberLists = false) {
     setupAndSignIn: vi.fn(),
     signOut: vi.fn(async () => true),
     getOrganization: vi.fn(async () => ok(member(signedIn))),
-    openSession(selfId, onEnded, organizationId, drafts): SessionModel {
+    openSession(selfId, onEnded, organizationId, drafts, _onIdentity, _initialRole, accountSignal): SessionModel {
       if (drafts) stores.push(drafts)
       const net = fakeNetwork()
       nets.push(net)
       ended.push(onEnded)
-      const session = createSession({ selfId, onEnded, ...net.options(selfId), organizationId, sync: { ...net.options(selfId).sync, drafts } })
+      const options = net.options(selfId)
+      const session = createSession({ selfId, onEnded, ...options, organizationId, accountSignal, sync: { ...options.sync, drafts },
+        repliesApi: replyFetch ? { listReplyChain: (channel, anchor, query, signal) =>
+          listReplyChain(organizationId, channel, anchor, query, replyFetch, signal) } : options.repliesApi })
+      sessions.push(session)
       net.socket.onReady()
       const close = vi.fn(() => session.close())
       closes.push(close)
@@ -48,7 +54,7 @@ function stack(over: Partial<AuthDeps> = {}, holdMemberLists = false) {
     },
     ...over,
   }
-  return { auth: createAuth(deps), deps, nets, ended, closes, stores }
+  return { auth: createAuth(deps), deps, nets, sessions, ended, closes, stores }
 }
 type Stack = ReturnType<typeof stack>
 
@@ -160,6 +166,81 @@ async function openChannelA(s: Stack, hasOlder = false) {
   await settle()
   return net
 }
+
+it.each([401, 404])('Reply transport stays live through its deadline and unwatch for same-Account HTTP %s', async status => {
+  const response = deferred<Response>()
+  const fetch = vi.fn<typeof globalThis.fetch>(() => response.promise)
+  const s = stack({}, false, fetch)
+  await signInAs(s, 'first'); await openChannelA(s)
+  const session = s.sessions[0]
+
+  const opening = session.replies.open('A', record(100))
+  await settle()
+  const signal = fetch.mock.calls[0][1]?.signal
+  expect(signal).toBeInstanceOf(AbortSignal)
+  await vi.advanceTimersByTimeAsync(30_000); await opening
+  expect(session.replies.get('A').error).toBe(true)
+  expect(signal?.aborted).toBe(false)
+  await session.sync.unwatch('A')
+  expect(signal?.aborted).toBe(false)
+
+  response.resolve(Response.json({ error: status === 404 ? 'organization_unavailable' : 'unauthorized' }, { status }))
+  await settle()
+  if (status === 401) expect(s.auth.view.screen).toBe('signin')
+  else {
+    expect(s.auth.view.screen).toBe('app')
+    expect(session.sync.get().organization).toBe('unavailable')
+    await s.auth.signOut()
+  }
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+async function expectReplyAbortAfterAccountFence(status: number) {
+  const response = deferred<Response>()
+  const fetch = vi.fn<typeof globalThis.fetch>()
+    .mockReturnValueOnce(response.promise)
+    .mockImplementation(async () => {
+      const anchor = record(100)
+      return Response.json(replyPage({ history_generation: anchor.history_generation, root_id: anchor.id, as_of_seq: 100, messages: [anchor], has_more: false }))
+    })
+  const s = stack({}, false, fetch)
+  await signInAs(s, 'first'); await openChannelA(s)
+  const first = s.sessions[0], anchor = record(100)
+  const opening = first.replies.open('A', anchor)
+  await settle()
+  const signal = fetch.mock.calls[0][1]?.signal
+  const onAbort = vi.fn()
+  signal?.addEventListener('abort', onAbort)
+  await s.auth.selectOrganization('other')
+  await opening
+  expect(signal?.aborted).toBe(false)
+  expect(first.replies.get('A').rootId).toBeNull()
+
+  await s.auth.signOut()
+  expect(signal?.aborted).toBe(true)
+  expect(onAbort).toHaveBeenCalledOnce()
+  await signInAs(s, 'next'); await openChannelA(s)
+  const next = s.sessions.at(-1)!
+  await next.replies.open('A', anchor)
+  const snapshot = next.replies.get('A')
+  expect(snapshot.messages.map(m => m.created_seq)).toEqual([100])
+  expect(fetch.mock.calls[1][1]?.signal?.aborted).toBe(false)
+
+  const oldReply = { ...record(101), reply_to: anchor.id, reply_root_id: anchor.id }
+  response.resolve(Response.json(status === 200
+    ? replyPage({ history_generation: anchor.history_generation, root_id: anchor.id, as_of_seq: 101, messages: [anchor, oldReply], has_more: false })
+    : { error: status === 404 ? 'organization_unavailable' : 'unauthorized' }, { status }))
+  await settle()
+  expect(s.auth.view.screen).toBe('app')
+  expect(next.sync.get().organization).toBe('available')
+  expect(next.replies.get('A')).toBe(snapshot)
+  expect(first.replies.get('A').rootId).toBeNull()
+  await s.auth.signOut()
+}
+
+it('aborts Reply reads after the Account fence and ignores late results', async () => {
+  for (const status of [200, 401, 404]) await expectReplyAbortAfterAccountFence(status)
+})
 
 describe('auth adapter: screens', () => {
   it('shows each screen change, and opens the session only for the app screen', async () => {

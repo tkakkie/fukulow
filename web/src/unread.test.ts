@@ -46,6 +46,15 @@ it('computes the highest presented prefix and stops at unseen rows and projectio
   expect(sequenceToSubmit(0, records, [{ after: 0, through: 5 }], new Set([1, 3, 5]), main, 'me')).toBe(5)
   expect(sequenceToSubmit(1, [msg(2, null, 'me')], [{ after: 1, through: 2 }], new Set([2]), main, 'me')).toBe(1)
 })
+it('computes Topic presentation using only rows in its Channel and Topic', () => {
+  const records = [msg(1, 'T'), msg(2), msg(3, 'U'), msg(4, 'T', 'other', 'B'), msg(5, 'T', 'me'), msg(6, 'T'), msg(7, 'T')]
+  const coverage = [{ after: 0, through: 7 }]
+  const topic = { channel: 'A', topicId: 'T' }
+  expect(sequenceToSubmit(0, records, coverage, new Set([1, 7]), topic, 'me')).toBe(1)
+  expect(sequenceToSubmit(0, records, coverage, new Set([1, 6, 7]), topic, 'me')).toBe(7)
+  expect(sequenceToSubmit(0, records, coverage, new Set([1, 6, 7]), main, 'me')).toBe(0)
+  expect(sequenceToSubmit(0, records, coverage, new Set([1, 6, 7]), { ...topic, channel: 'B' }, 'me')).toBe(0)
+})
 it('keeps smaller same-W same-position Channel counts when a stale response arrives later', async () => {
   const c = unreadClient(); await c.boot()
   c.rows[0] = row({ unread_count: 1, main_unread_count: 0 }); await c.unread.refresh()
@@ -557,6 +566,24 @@ it.each(['navigation', 'unwatch', 'C9', 'C8', 'Organization switch', 'Account re
   d.resolve(http(401)); await flush()
   expect(c.onSessionEnded).toHaveBeenCalledTimes(reason === 'Account replacement' ? 0 : 1)
   await c.sync.close()
+})
+
+it.each([401, 404])('late Unread HTTP %s after timeout retains only its Session authority', async status => {
+  for (const replace of [false, true]) {
+    const c = unreadClient(), response = deferred<Result<ChannelList>>()
+    await c.boot()
+    c.unreadApi.listChannels.mockReturnValueOnce(response.promise)
+    const waiting = c.unread.refresh()
+    await vi.advanceTimersByTimeAsync(1000); await waiting
+    if (replace) await c.sync.replaceSession('next')
+
+    response.resolve(http(status, status === 404 ? 'organization_unavailable' : undefined)); await flush()
+    expect(c.onSessionEnded).toHaveBeenCalledTimes(!replace && status === 401 ? 1 : 0)
+    expect(c.sync.get().organization).toBe(!replace && status === 404 ? 'unavailable' : 'available')
+    expect(c.sync.get().running).toBe(replace)
+    await c.sync.close()
+    expect(vi.getTimerCount()).toBe(0)
+  }
 })
 it('organization_unavailable and 4003 stop only their Organization while 4001 ends the Session', async () => {
   const a = unreadClient(), b = unreadClient(); await a.boot(); await b.boot()

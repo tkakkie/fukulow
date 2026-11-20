@@ -194,8 +194,8 @@ export const getReplyCounts = (organizationId: string, channelId: string, body: 
 export type ReplyChainPage = components['schemas']['ReplyChainPage']
 export type ReplyChainQuery = NonNullable<import('./api-schema').operations['reply_chain']['parameters']['query']>
 
-export const listReplyChain = (organizationId: string, channelId: string, anchor: string, query: ReplyChainQuery = {}, f: typeof fetch = fetch) =>
-  call<ReplyChainPage>(f, `${channelPath(organizationId, channelId)}/messages/${encodeURIComponent(anchor)}/chain${querySuffix(query)}`, { cache: 'no-store' }, true)
+export const listReplyChain = (organizationId: string, channelId: string, anchor: string, query: ReplyChainQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<ReplyChainPage>(f, `${channelPath(organizationId, channelId)}/messages/${encodeURIComponent(anchor)}/chain${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export type MoveChainRequest = components['schemas']['MoveChainRequest']
 export type MoveChainResponse = components['schemas']['MoveChainResponse']
