@@ -525,27 +525,33 @@ test('hidden tab, ReplyPanel, Topic summary lines and failed pending sends never
       },
     ])
 
-    await scrollToBottom(scrollEl)
-    await expect.poll(() => readMarks.at(-1)?.read_seq).toBe(unreadReply.created_seq)
-    await flushAnimationFrames(page)
-
-    // Verify full ordered request sequence: channel scope only, exact history_generation, strictly increasing read_seq, no Topic marks
-    expect(readMarks.length).toBeGreaterThanOrEqual(3)
-    for (let i = 0; i < readMarks.length; i++) {
-      expect(readMarks[i].scope).toBe('channel')
-      expect(readMarks[i].topicId).toBeNull()
-      expect(readMarks[i].history_generation).toBe(historyGeneration)
-      expect(typeof readMarks[i].read_seq).toBe('number')
-      if (i > 0) {
-        expect(readMarks[i].read_seq!).toBeGreaterThan(readMarks[i - 1].read_seq!)
+    // sequenceToSubmit advances only across a contiguous prefix of presented rows, so step
+    // through the remaining viewport windows deterministically and await each PUT /read before the next step.
+    const expectedMarks: ReadMark[] = [...afterMidMarks]
+    let lastExpectedSeq = midVisibleSeq
+    while (await scrollEl.evaluate((el) => el.scrollTop + el.clientHeight < el.scrollHeight - 1)) {
+      await scrollEl.evaluate((el) => {
+        const step = Math.max(100, Math.floor(el.clientHeight * 0.7))
+        el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step)
+        el.dispatchEvent(new Event('scroll'))
+      })
+      await flushAnimationFrames(page)
+      const stepVisibleSeq = await maxVisibleConfirmedSeq(scrollEl, seqById)
+      if (stepVisibleSeq > lastExpectedSeq) {
+        lastExpectedSeq = stepVisibleSeq
+        expectedMarks.push({
+          scope: 'channel',
+          topicId: null,
+          history_generation: historyGeneration,
+          read_seq: stepVisibleSeq,
+        })
+        await expect.poll(() => readMarks.at(-1)?.read_seq).toBe(stepVisibleSeq)
+        await flushAnimationFrames(page)
       }
     }
-    expect(readMarks.at(-1)).toEqual({
-      scope: 'channel',
-      topicId: null,
-      history_generation: historyGeneration,
-      read_seq: unreadReply.created_seq,
-    })
+    expect(lastExpectedSeq).toBe(unreadReply.created_seq)
+    expect(expectedMarks.length).toBeGreaterThan(afterMidMarks.length)
+    expect(readMarks).toEqual(expectedMarks)
 
     // Topic summary line never marked Topic as read -> Topic badge and Channel badge stay 1
     const summaryBtn = page.locator(`#main-content button.ui-topic-summary[data-topic-id="${topicMsg.topic_id}"]`)
@@ -609,6 +615,8 @@ test('phone 375px: defers first-Unread positioning and markRead while ?panel=top
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(page.locator('#panel-content')).toBeVisible()
     await expect(page.locator('#main-content')).toBeHidden()
+    const firstUnread = page.locator(`#main-content [data-message-id="${unreadMsgs[0].id}"]`)
+    await expect(firstUnread).toBeAttached()
     await flushAnimationFrames(page)
 
     const scrollEl = page.locator('#main-content .timeline-scroll')
@@ -618,7 +626,6 @@ test('phone 375px: defers first-Unread positioning and markRead while ?panel=top
     // Closing the panel displays main, aligns to first Unread, and submits one complete markRead for the last visible confirmed row
     await page.locator('#panel-content').getByRole('button', { name: 'パネルを閉じる(Esc)' }).click()
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
-    const firstUnread = page.locator(`#main-content [data-message-id="${unreadMsgs[0].id}"]`)
     const marker = firstUnread.locator('[data-read-marker="true"]')
     await expect(marker).toHaveText('未読')
     await expect.poll(() => readMarks.length).toBeGreaterThan(0)
