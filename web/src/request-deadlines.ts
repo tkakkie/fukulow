@@ -8,32 +8,47 @@ export function createRequestDeadlines() {
       channel?: string
       signal?: AbortSignal
     }) {
-      let cancel!: () => void
+      let cancel: (() => void) | undefined
       let timer: ReturnType<typeof setTimeout> | undefined
       const { signal, channel, timeoutMs, onTimeout } = options
+      const clear = () => {
+        clearTimeout(timer)
+        timer = undefined
+        if (!cancel) return
+        const fn = cancel
+        cancel = undefined
+        signal?.removeEventListener('abort', fn)
+        pending.delete(fn)
+      }
       const until = new Promise<T>(resolve => {
+        if (signal?.aborted) {
+          resolve(cancelled)
+          return
+        }
         cancel = () => {
-          clearTimeout(timer)
+          clear()
           resolve(cancelled)
         }
         pending.set(cancel, channel)
-        if (signal?.aborted) cancel()
-        else signal?.addEventListener('abort', cancel, { once: true })
-        if (timeoutMs !== undefined) timer = setTimeout(() => resolve(onTimeout ? onTimeout() : cancelled), timeoutMs)
+        signal?.addEventListener('abort', cancel, { once: true })
+        if (timeoutMs !== undefined) {
+          timer = setTimeout(() => {
+            clear()
+            let outcome = cancelled
+            try {
+              if (onTimeout) outcome = onTimeout()
+            } finally {
+              // Settle the wait even if onTimeout throws; let the error surface to the host.
+              resolve(outcome)
+            }
+          }, timeoutMs)
+        }
       })
-      return {
-        until,
-        clear() {
-          clearTimeout(timer)
-          signal?.removeEventListener('abort', cancel)
-          pending.delete(cancel)
-        },
-      }
+      return { until, clear }
     },
     cancel(channel?: string) {
       for (const [cancel, owner] of pending) {
         if (channel !== undefined && owner !== channel) continue
-        pending.delete(cancel)
         cancel()
       }
     },
