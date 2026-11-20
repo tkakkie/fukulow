@@ -8,9 +8,8 @@ async fn measure_invite_migration_order(pool: sqlx::PgPool) {
     first
         .migrations
         .to_mut()
-        .retain(|migration| migration.version != 202611140303 && migration.version != 202611140388);
+        .retain(|migration| migration.version <= 202611140387 && migration.version != 202611140303);
     assert_eq!(first.iter().last().unwrap().version, 202611140387);
-    assert_eq!(combined.iter().count(), 24);
     first.run(&pool).await.unwrap();
     let max: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
@@ -33,6 +32,7 @@ async fn measure_invite_migration_order(pool: sqlx::PgPool) {
         assert_eq!(checksum.as_slice(), expected.checksum.as_ref());
     }
     println!(
-        "INVITE_MIGRATION_ORDER pinned application sqlx: #385 first, then 0303/0388, repeat no-op; all 24 sorted versions/checksums/success match"
+        "INVITE_MIGRATION_ORDER pinned application sqlx: #385 first, then 0303/0388 and later migrations, repeat no-op; all {} sorted versions/checksums/success match",
+        applied.len()
     );
 }

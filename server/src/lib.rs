@@ -158,7 +158,9 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(auth::security::revoke_others),
         )
         .route("/api/v1/orgs/{org}/me", get(auth::organization_me))
-        .merge(channels::sections::router())
+        .merge(channels::sections::router(
+            state.message_delivery.channel_access.activity.clone(),
+        ))
         .route(
             "/api/v1/orgs/{org}/members",
             get(auth::members::list_members::<channels::members::MemberListVisibility>),

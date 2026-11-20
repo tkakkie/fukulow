@@ -1376,6 +1376,16 @@ export interface components {
             generation: string;
             section: components["schemas"]["Section"];
         };
+        /** @description Own-Member section layout invalidation. */
+        SectionsChanged: {
+            /** @description Canonical unsigned decimal, at most 9223372036854775807. */
+            generation: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "sections_changed";
+        };
         /**
          * @description Idempotency key: (organization, sender, client_message_id), derived from the session.
          *     Matching body, Channel, normalized Topic name and reply target returns the canonical Message/sequence;
@@ -1401,7 +1411,7 @@ export interface components {
             topic_name?: string | null;
         };
         /** @description Server -> client events. Event positions and Message state versions are independent. */
-        ServerEvent: components["schemas"]["DmListChanged"] | components["schemas"]["ActivityReady"] | components["schemas"]["ActivityReset"] | components["schemas"]["ChannelActivity"] | components["schemas"]["ReadPositionChanged"] | components["schemas"]["ChannelAccessGained"] | components["schemas"]["ChannelAccessRevoked"] | components["schemas"]["ChannelListChanged"] | components["schemas"]["ChannelMembersChanged"] | components["schemas"]["MembersChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
+        ServerEvent: components["schemas"]["DmListChanged"] | components["schemas"]["SectionsChanged"] | components["schemas"]["ActivityReady"] | components["schemas"]["ActivityReset"] | components["schemas"]["ChannelActivity"] | components["schemas"]["ReadPositionChanged"] | components["schemas"]["ChannelAccessGained"] | components["schemas"]["ChannelAccessRevoked"] | components["schemas"]["ChannelListChanged"] | components["schemas"]["ChannelMembersChanged"] | components["schemas"]["MembersChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
         SessionResponse: {
             /** Format: int32 */
             expires_in: number;
@@ -1669,6 +1679,7 @@ export type Section = components['schemas']['Section'];
 export type SectionLayout = components['schemas']['SectionLayout'];
 export type SectionOrder = components['schemas']['SectionOrder'];
 export type SectionSnapshot = components['schemas']['SectionSnapshot'];
+export type SectionsChanged = components['schemas']['SectionsChanged'];
 export type SendMessageRequest = components['schemas']['SendMessageRequest'];
 export type ServerEvent = components['schemas']['ServerEvent'];
 export type SessionResponse = components['schemas']['SessionResponse'];

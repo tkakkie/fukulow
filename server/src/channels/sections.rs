@@ -1,7 +1,7 @@
 use super::archive::channel_archived;
 use super::*;
 use axum::{
-    Router,
+    Extension, Router,
     extract::{DefaultBodyLimit, FromRequestParts, RawPathParams},
     http::request::Parts,
     routing::{get, put},
@@ -227,7 +227,7 @@ fn validate_order(ids: &[Uuid], limit: usize) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(crate) fn router() -> Router<AppState> {
+pub(crate) fn router(activity: activity::Activity) -> Router<AppState> {
     Router::new()
         .route(
             "/api/v1/orgs/{org}/me/sections",
@@ -254,6 +254,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/api/v1/orgs/{org}/me/section-channel-order",
             put(write::channel_order).layer(DefaultBodyLimit::max(1024 * 1024)),
         )
+        .layer(Extension(activity))
 }
 
 #[cfg(test)]
