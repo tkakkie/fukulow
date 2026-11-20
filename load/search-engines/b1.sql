@@ -19,12 +19,13 @@ ALTER TABLE public.channels FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.users FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.channel_members FORCE ROW LEVEL SECURITY;
 
--- org_isolation still applies. NULL or empty query context makes LIKE NULL.
--- Escaping is bound inside the policy, using a literal backslash escape character.
+-- The guard denies missing or empty context, and COALESCE keeps the PGroonga scan key non-NULL.
+-- Keep LIKE directly on normalized_body with a row-independent pattern so PGroonga can index it.
 DROP POLICY IF EXISTS b1_match ON public.messages;
 CREATE POLICY b1_match ON public.messages AS RESTRICTIVE FOR SELECT TO fukulow_b1 USING (
-    normalized_body LIKE '%' ||
-        replace(replace(replace(nullif(current_setting('fukulow.search_query', true), ''),
+    coalesce(current_setting('fukulow.search_query', true), '') <> ''
+    AND normalized_body LIKE '%' ||
+        replace(replace(replace(coalesce(current_setting('fukulow.search_query', true), ''),
             chr(92), chr(92) || chr(92)), '%', chr(92) || '%'), '_', chr(92) || '_') || '%'
         ESCAPE chr(92)
 );

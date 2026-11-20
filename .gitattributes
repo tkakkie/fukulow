@@ -15,6 +15,7 @@
 /load/search-engines/definer.sql text eol=lf
 /load/search-engines/definer.ts text eol=lf
 /load/search-engines/manifest-v1.json text eol=lf
+/load/search-engines/manifest-v11.json text eol=lf
 /load/search-engines/manifest-v2.json text eol=lf
 /load/search-engines/manifest-v3.json text eol=lf
 /load/search-engines/manifest-v4.json text eol=lf

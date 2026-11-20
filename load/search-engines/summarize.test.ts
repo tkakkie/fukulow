@@ -185,10 +185,10 @@ test('B1 timing requires search_body evidence in both arms for every class',()=>
 });
 
 for (const [rounds,clients,transactions] of [[3,5,20],[1,5,20],[3,1,1],[1,1,1]] as const) {
-  test(`B1 publication verifies v9 with ${rounds} rounds and ${clients*transactions} samples per query`,t=>{
+  test(`B1 publication verifies v11 with ${rounds} rounds and ${clients*transactions} samples per query`,t=>{
     const dir = mkdtempSync(join(tmpdir(),'search-b1-summary-'));
     t.after(()=>rmSync(dir,{recursive:true,force:true}));
-    const {frozen} = JSON.parse(readFileSync(new URL('manifest-v9.json',import.meta.url),'utf8'));
+    const {frozen} = JSON.parse(readFileSync(new URL('manifest-v11.json',import.meta.url),'utf8'));
     Object.assign(frozen.performance,{rounds,clients,transactions});
     const manifestHash = hash(JSON.stringify(frozen));
     const save = (name: string,value: unknown)=>writeFileSync(join(dir,name+'.json'),JSON.stringify(value));
@@ -202,7 +202,7 @@ for (const [rounds,clients,transactions] of [[3,5,20],[1,5,20],[3,1,1],[1,1,1]] 
       summarize(dir);
       assert.equal(JSON.parse(readFileSync(join(dir,'judgement.json'),'utf8')).status,'PASS');
     } else {
-      assert.throws(()=>summarize(dir),/must match the checked-in v9 manifest/);
+      assert.throws(()=>summarize(dir),/must match the checked-in v11 manifest/);
       assert.equal(existsSync(join(dir,'judgement.json')),false);
     }
   });

@@ -38,8 +38,8 @@ export function runKind() {
   return process.env.SEARCH_SMOKE==='1' ? 'smoke' : 'evaluation';
 }
 export const smokeLabel = 'SMOKE / NON-EVALUATION';
-// Historical manifests stay as recorded. v9 freezes the B1-only evaluation.
-export const manifestFile = 'load/search-engines/manifest-v9.json';
+// v11 freezes the NULL-safe B1 policy. v10 is reserved for the sections migration on main.
+export const manifestFile = 'load/search-engines/manifest-v11.json';
 const baselineSha256 = '9b649cf9773b4926d28e2ef30d57fe74175d449c5d85bf9b560ee4694234e272';
 function baselineMigrations() {
   const baseline = JSON.parse(readSource('load/search-engines/manifest-v2.json'));
@@ -64,7 +64,7 @@ export function snapshot() {
       readdirSync(new URL(dir,sourceRoot)).filter(n=>!n.includes('.test.') && /\.(ts|sql)$/.test(n)).map(n=>`${dir}/${n}`)),
     'load/search-engines/Dockerfile','deploy/db-grants.sql','deploy/db-roles.sql','deploy/db-role-settings.sql'].sort();
   const data = corpus();
-  return {version:9,date:'2026-11-20',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
+  return {version:11,date:'2026-11-20',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
     node:readSource('.node-version').trim(),
     sourceHashes:files.map(path=>({path,sha256:hash(readSource(path))})),
     quality:{querySet:qualityQueries.map(({gold,...q})=>({...q,relevantKeys:gold.map(id=>data.find(m=>m.id===id)?.key)})),
@@ -88,7 +88,7 @@ export function snapshot() {
         minimumLength:criteria.minimumLength.pgroonga,rareQueries:criteria.rareQueries,
         completeness:'full result sets for six Members, page order, and two engine controls, including the small restore',
         denials:'all v2 denial cases on PGroonga, unforced and with enable_seqscan=off; per-class no-grant Guest and deactivated Member'},
-      evidenceChecks:{publication:'B1 artifacts must match the checked-in v9 manifest',
+      evidenceChecks:{publication:'B1 artifacts must match the checked-in v11 manifest',
         denials:'the forced EXPLAIN must execute search_body; same-connection post-COMMIT reads with neither setting and with each setting alone must return zero rows'},
       timingProbe:{foreignRowsPerClass:1000,
         method:'after the 1M rounds, paired small databases with identical visible results and foreign row counts; only equal-byte-length foreign bodies vary',

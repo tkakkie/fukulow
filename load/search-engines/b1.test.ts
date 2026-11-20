@@ -45,7 +45,6 @@ for (const [index,drift,message] of [
 test('B1 supplies a local literal and keeps matching inside the restrictive policy',()=>{
   const sql = readFileSync(new URL('b1.sql',import.meta.url),'utf8');
   assert.match(sql,/AS RESTRICTIVE FOR SELECT TO fukulow_b1/);
-  assert.match(sql,/nullif\(current_setting\('fukulow.search_query', true\), ''\)/);
   assert.doesNotMatch(sql,/\bBYPASSRLS\b|SECURITY DEFINER/i);
   const literal = "a'b%_\\";
   assert.match(b1Begin(literal),/REPEATABLE READ READ ONLY/);
@@ -54,10 +53,11 @@ test('B1 supplies a local literal and keeps matching inside the restrictive poli
   assert.match(b1Query(),/ORDER BY m.created_at DESC, m.id DESC LIMIT 20$/);
   assert.match(b1Query(member(3,2),false),/ORDER BY m.id$/);
 });
-test('B1 policy LIKE treats percent, underscore and backslash as literal characters',t=>{
+test('B1 policy denies absent queries with a non-NULL LIKE pattern and escapes literals',t=>{
   const sql = readFileSync(new URL('b1.sql',import.meta.url),'utf8');
   const predicate = sql.split('AS RESTRICTIVE FOR SELECT TO fukulow_b1 USING (')[1]?.split('\n);')[0];
-  assert.ok(predicate);
+  const pattern = predicate?.match(/\bnormalized_body\s+LIKE\s+([\s\S]+?)\s+ESCAPE chr\(92\)/i)?.[1];
+  assert.ok(predicate && pattern);
   // Execute the policy's portable scalar expression with the two PostgreSQL functions supplied by the test.
   const db = new DatabaseSync(':memory:');
   t.after(()=>db.close());
@@ -68,14 +68,19 @@ test('B1 policy LIKE treats percent, underscore and backslash as literal charact
     return query;
   });
   db.function('chr',code=>String.fromCodePoint(Number(code)));
-  const matches = db.prepare(`SELECT (${predicate}) AS matched FROM (SELECT ? AS normalized_body)`);
+  const matches = db.prepare(`SELECT (${predicate}) AS matched, (${pattern}) AS pattern FROM (SELECT ? AS normalized_body)`);
   for (const [literal,body,decoy] of [['x%y','prefix x%y suffix','x middle y'],['a_b','a_b','acb'],
     ['c\\d','c\\d','cd'],['ab\\','ab\\y','abz'],['\\%_','\\%_','\\xy']]) {
     query = literal!;
     assert.equal(matches.get(body!)?.matched,1,literal);
     assert.equal(matches.get(decoy!)?.matched,0,literal);
   }
-  for (query of ['',null]) assert.equal(matches.get('any body')?.matched,null);
+  for (query of ['',null]) {
+    const row = matches.get('any body');
+    assert.equal(row?.pattern,'%%','B1 LIKE pattern must stay non-NULL without query context');
+    assert.equal(row?.matched,0);
+  }
+  assert.doesNotMatch(pattern,/\bnullif\s*\(/i);
 });
 test('the B1 denial runner executes the same cases with distinct actor and Organization context',()=>{
   const expected = denialCases.flatMap(c=>[false,true].map(forced=>({c,forced})));
