@@ -16,7 +16,7 @@
     pendingStatus,
     retryable = false,
     targetUnavailable = false,
-    failedReason = '送信できませんでした。内容を確認してください。',
+    failureCode,
     replyCount = 0,
     focusable = false,
     rovingTabindex = -1,
@@ -38,7 +38,7 @@
     pendingStatus?: 'sending' | 'throttled' | 'failed'
     retryable?: boolean
     targetUnavailable?: boolean
-    failedReason?: string
+    failureCode?: string
     replyCount?: number | null
     focusable?: boolean
     rovingTabindex?: 0 | -1
@@ -51,6 +51,15 @@
     onrowkeydown?: (e: KeyboardEvent) => void
   } = $props()
 
+  function failureReason(code: string | undefined): string {
+    switch (code) {
+      case 'channel_archived': return 'このチャンネルはアーカイブされているため、送信できません。'
+      case 'dm_peer_deactivated': return 'このメンバーは無効化されています。履歴は引き続き閲覧できます。'
+      case 'dm_peer_access_lapsed': return 'このダイレクトメッセージには現在送信できません。'
+      default: return '送信できませんでした。内容を確認してください。'
+    }
+  }
+
   let replyBtnRef = $state<HTMLButtonElement | null>(null)
   const isRowFocusable = $derived(!pendingStatus && (focusable || Boolean(onopenreplies)))
   const linkTabindex = $derived<0 | -1>(
@@ -62,12 +71,12 @@
   )
 
   function handleFocus(e: FocusEvent) {
-    if (e.target !== e.currentTarget) return
+    if (!isRowFocusable || e.target !== e.currentTarget) return
     onrowfocus?.()
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.target !== e.currentTarget) return
+    if (!isRowFocusable || e.target !== e.currentTarget) return
     if (onopenreplies && shouldOpenRepliesFromRowKey(e)) {
       e.preventDefault()
       onopenreplies(rowRef)
@@ -75,29 +84,20 @@
     }
     onrowkeydown?.(e)
   }
-
-  $effect(() => {
-    const el = rowRef
-    if (!el) return
-    el.tabIndex = isRowFocusable ? rovingTabindex : -1
-    if (!isRowFocusable) return
-    el.addEventListener('focus', handleFocus)
-    el.addEventListener('keydown', handleKeydown)
-    return () => {
-      el.removeEventListener('focus', handleFocus)
-      el.removeEventListener('keydown', handleKeydown)
-    }
-  })
 </script>
 
+<!-- Message rows are roving-tabindex `<article>` elements with row keyboard navigation (docs/ui.md §5, §6, §9). -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <article
   bind:this={rowRef}
   class="ui-message-row"
   class:ui-message-row--mentioned={mentioned || (!pendingStatus && (mentions ?? []).some(target => target.member_id === selfId))}
   class:ui-message-row--sending={pendingStatus === 'sending'}
   class:ui-message-row--failed={pendingStatus === 'failed'}
-  tabindex="-1"
+  tabindex={isRowFocusable ? rovingTabindex : -1}
   data-focusable={isRowFocusable ? 'true' : undefined}
+  onfocus={isRowFocusable ? handleFocus : undefined}
+  onkeydown={isRowFocusable ? handleKeydown : undefined}
 >
   {#if senderName || createdAt}
     <header class="ui-message-row__meta">
@@ -144,7 +144,7 @@
           {/if}
         </div>
       {:else}
-        <small role="alert" class="ui-message-row__error">{failedReason}</small>
+        <small role="alert" class="ui-message-row__error">{failureReason(failureCode)}</small>
         <div class="ui-message-row__actions">
           {#if onrestore}
             <Button variant="primary" onclick={onrestore}>編集して送り直す</Button>

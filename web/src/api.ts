@@ -84,6 +84,7 @@ export const isOrganizationUnavailable = (r: Result<unknown>) =>
 export type Channel = components['schemas']['Channel']
 export type ChannelVisibility = components['schemas']['ChannelVisibility']
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest']
+export type { UpdateChannelRequest } from './api-schema'
 export type Message = components['schemas']['Message']
 export type ChannelEventPage = components['schemas']['ChannelEventPage']
 export type ListChannelEventsQuery = NonNullable<import('./api-schema').operations['list_channel_events']['parameters']['query']>
@@ -160,6 +161,13 @@ export type TopicHistoryQuery = NonNullable<import('./api-schema').operations['t
 
 const channelPath = (organizationId: string, channelId: string) =>
   `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}`
+
+export const getChannel = (org: string, id: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<Channel>(f, channelPath(org, id), { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
+
+export const updateChannel = (org: string, id: string, body: components['schemas']['UpdateChannelRequest'], f: typeof fetch = fetch) =>
+  call<undefined>(f, channelPath(org, id), { ...json(body), method: 'PATCH' }, false, 204)
+
 const querySuffix = (query: object) => {
   const qs = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) if (value !== undefined) qs.set(key, String(value))

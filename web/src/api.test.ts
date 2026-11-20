@@ -28,7 +28,7 @@ describe('checkHealth', () => {
   })
 })
 
-import { createChannel, listChannels, listMessages, sendMessage } from './api'
+import { createChannel, getChannel, listChannels, listMessages, sendMessage, updateChannel } from './api'
 
 describe('channel and message calls', () => {
   const f = () => vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
@@ -36,6 +36,29 @@ describe('channel and message calls', () => {
     const m = f()
     await listChannels('o', m)
     expect(m).toHaveBeenCalledWith('/api/v1/orgs/o/channels', expect.objectContaining({ credentials: 'same-origin' }))
+  })
+  it('lists archived Channels using the existing Channel list query', async () => {
+    const fetcher = f()
+    await listChannels('org/1', fetcher, undefined, { archived: true, history_generation: 'generation' })
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/orgs/org%2F1/channels?archived=true&history_generation=generation',
+      { credentials: 'same-origin', cache: 'no-store' })
+  })
+  it('reads one Channel by id with no-store and cancellation', async () => {
+    const signal = new AbortController().signal
+    const channel = { id: 'channel/2', name: 'Archive', archived: true }
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(channel))
+    await expect(getChannel('org/1', 'channel/2', fetcher, signal)).resolves.toEqual({ ok: true, data: channel })
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith('/api/v1/orgs/org%2F1/channels/channel%2F2',
+      { credentials: 'same-origin', cache: 'no-store', signal })
+  })
+  it.each([{ name: ' renamed ' }, { archived: true }, { archived: false }])('PATCHes one Channel field and accepts an empty 204 (%j)', async body => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }))
+    await expect(updateChannel('org/1', 'channel/2', body, fetcher)).resolves.toEqual({ ok: true, data: undefined })
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith('/api/v1/orgs/org%2F1/channels/channel%2F2', {
+      credentials: 'same-origin', method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+    fetcher.mockResolvedValueOnce(Response.json({}))
+    await expect(updateChannel('org/1', 'channel/2', body, fetcher)).resolves.toEqual({ ok: false, kind: 'network' })
   })
   it('creates a channel with a JSON body', async () => {
     const m = f()

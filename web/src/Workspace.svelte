@@ -12,7 +12,9 @@
   import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
+  import ArchivedChannelList from './ArchivedChannelList.svelte'
   import ChannelList from './ChannelList.svelte'
+  import ChannelOverview from './ChannelOverview.svelte'
   import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
   import CreateChannelForm from './CreateChannelForm.svelte'
   import {
@@ -89,13 +91,16 @@
   const nav = navigationAdapter(() => navigation)
   const route = $derived(nav.state.target)
   const routeChannelId = $derived(route?.organizationId === currentOrganizationId ? route.channelId : s.selectedId)
-  const selected = $derived<Channel | DmDiscovery | undefined>(dmState?.rows.find(row => row.identity.id === routeChannelId)?.identity ?? s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
+  const selected = $derived<Channel | DmDiscovery | undefined>(dmState?.rows.find(row => row.identity.id === routeChannelId)?.identity ?? s.channels.find((c) => c.id === routeChannelId) ?? (s.openChannel?.id === routeChannelId ? s.openChannel : undefined) ?? s.archivedList?.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
     id: routeChannelId, kind: 'channel', archived: false, name: 'チャンネル', visibility: 'public',
     capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false }, can_rename: { allowed: false }, can_archive: { allowed: false } },
   } : undefined))
   const conversationName = $derived(selected?.kind === 'dm' ? selected.peer.name : selected?.name ?? '')
   const dmLapsed = $derived(selected?.kind === 'dm' && dmState?.sendBlocks[selected.id] === 'dm_peer_access_lapsed')
   const dmSendDisabled = $derived(selected?.kind === 'dm' && (!selected.peer.active || Boolean(dmState?.sendBlocks[selected.id])))
+  const selectedArchived = $derived(selected?.kind === 'channel' && (selected.archived || channels.isArchived(selected.id)))
+  const archiveStatePending = $derived(s.openChannelPending && s.openChannel?.id === selected?.id)
+  const sendDisabled = $derived(dmSendDisabled || selectedArchived || archiveStatePending)
   const currentChannel = $derived(selected ? session.sync.channel(selected.id) : null)
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
@@ -695,6 +700,14 @@
       {#if !organizationUnavailable && (canCreateChannels ?? creationAllowed)}
         <CreateChannelForm oncreate={handleCreateChannel} draft={channelCreation} disabled={canCreateChannels !== true} />
       {/if}
+      <ArchivedChannelList
+        list={s.archivedList}
+        selectedId={s.selectedId}
+        disabled={organizationUnavailable}
+        onhold={() => channels.holdArchived()}
+        onretry={() => channels.retryArchived()}
+        onselect={handleSelectChannel}
+      />
       {#if dmState && session.dms}
         <DmList rows={dmState.rows} selectedId={s.selectedId} loading={dmState.status === 'loading'}
           error={dmState.status === 'error'} message={dmState.message} busy={dmState.busy}
@@ -774,9 +787,18 @@
       </header>
       <div class="main-card__body">
         {#if selected.kind === 'dm'}
-          <DmSendStatus peer={selected.peer} lapsed={dmLapsed} canRenew={organization?.member.role !== 'guest'} busy={dmState?.busy}
-            onrenew={() => { if (selected?.kind === 'dm') void handleOpenDm(selected.peer.id, true) }} />
+          <div class="main-card__notice">
+            <DmSendStatus peer={selected.peer} lapsed={dmLapsed} canRenew={organization?.member.role !== 'guest'} busy={dmState?.busy}
+              onrenew={() => { if (selected?.kind === 'dm') void handleOpenDm(selected.peer.id, true) }} />
+          </div>
+        {:else if (selectedArchived || archiveStatePending) && !organizationUnavailable && currentTimeline?.status !== 'unavailable'}
+          <div class="main-card__notice">
+            <StatusBanner message={selectedArchived
+              ? 'このチャンネルはアーカイブされています。メッセージを送信できませんが、履歴は引き続き閲覧できます。'
+              : 'チャンネルの状態を確認しています。確認が終わるまでメッセージを送信できません。'} />
+          </div>
         {/if}
+        <div class="main-card__timeline">
         {#if route?.topicId && currentTopics}
           {#key `${selected.id}:${route.topicId}`}
             <TopicView
@@ -791,6 +813,7 @@
               selfId={organization?.member.id ?? ''}
               viewSelected={mainViewSelected}
               {organizationUnavailable}
+              {sendDisabled}
               reconnecting={announcementView.reconnecting}
               resolveSenderName={resolveSender}
             {resolveMentionName}
@@ -814,7 +837,7 @@
             replies={currentReplies}
             unread={currentUnread}
             channelId={selected.id}
-            sendDisabled={dmSendDisabled}
+            {sendDisabled}
             selfId={organization?.member.id ?? ''}
             viewSelected={mainViewSelected}
             {organizationUnavailable}
@@ -833,6 +856,7 @@
           />
         {/key}
         {/if}
+        </div>
       </div>
     {:else if organizationUnavailable}
       <header class="main-card__header">
@@ -940,7 +964,8 @@
               replyTargetStatus={replyTargetState.status}
               selfId={organization?.member.id ?? ''}
               {organizationUnavailable}
-              sendDisabled={dmSendDisabled}
+              {sendDisabled}
+              archived={selectedArchived}
               bind:composerRef={replyComposerRef}
               resolveSenderName={resolveSender}
               {resolveMentionName}
@@ -971,16 +996,25 @@
               activeTopicId={route?.topicId ?? null}
               unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
               onselecttopic={handleSelectTopic}
-              onstartnewtopic={organizationUnavailable || currentTimeline?.status === 'unavailable' ? undefined : handleStartNewTopic}
+              onstartnewtopic={organizationUnavailable || currentTimeline?.status === 'unavailable' || sendDisabled ? undefined : handleStartNewTopic}
             />
           {:else}
             <EmptyState title="チャンネルを選んでください。" />
           {/if}
         {:else if activePanelTab === 'overview'}
-          <EmptyState
-            title="チャンネル概要は準備中です。"
-            description={selected?.kind === 'channel' ? `# ${selected.name}（${selected.visibility === 'private' ? 'プライベート' : 'パブリック'}）` : undefined}
-          />
+          {#if selected?.kind === 'channel'}
+            <ChannelOverview
+              channel={selected}
+              unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
+              pending={archiveStatePending}
+              onrename={(name) => channels.rename(selected.id, name)}
+              onarchive={() => channels.archive(selected.id)}
+              onrestore={() => channels.restore(selected.id)}
+              {onannounce}
+            />
+          {:else}
+            <EmptyState title="チャンネルを選んでください。" />
+          {/if}
         {:else}
           {#if channelMemberModel && selected?.kind === 'channel' && organization}
             <ChannelMembers model={channelMemberModel} channel={selected} self={organization.member.id} candidates={members?.state.members ?? []} />
@@ -1177,10 +1211,24 @@
   }
 
   .main-card__body {
+    display: flex;
+    flex-direction: column;
     min-height: 0;
     min-width: 0;
     height: 100%;
     overflow: hidden;
+  }
+
+  .main-card__notice {
+    flex-shrink: 0;
+    padding: 0 var(--space-16) var(--space-8);
+    min-width: 0;
+  }
+
+  .main-card__timeline {
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
   }
 
   .main-card__empty {

@@ -1,6 +1,5 @@
 import { parse, type AST } from 'svelte/compiler'
 import { afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest'
-import { createNavigation, type NavigationBrowser } from './navigation'
 
 type ListenerEntry = {
   fn: (event: MiniDomEvent) => void
@@ -926,23 +925,4 @@ export function installMiniDom(): MiniDomEnv {
       return win
     },
   }
-}
-
-export function createTestNavigation(initialHref: string, innerWidth: number | (() => number) = 1280) {
-  let href = initialHref
-  let historyState: unknown = null
-  const browser: NavigationBrowser = {
-    get innerWidth() {
-      return typeof innerWidth === 'function' ? innerWidth() : innerWidth
-    },
-    location: { get href() { return href } } as Location,
-    history: {
-      get state() { return historyState },
-      pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
-      replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
-    } as History,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  }
-  return createNavigation(browser)
 }

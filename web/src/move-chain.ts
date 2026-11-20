@@ -7,6 +7,7 @@ export type MoveResult =
   | { kind: 'moved'; receipt: MoveChainResponse }
   | { kind: 'unknown'; retry: () => Promise<MoveResult>; retryAfterMs?: number }
   | { kind: 'conflict'; error: 'version_conflict' | 'operation_conflict'; refreshed: boolean }
+  | { kind: 'archived'; message: string }
   | { kind: 'too_large' | 'denied' | 'not_found' | 'snapshot_expired' | 'history_generation_changed' | 'baseline_unavailable' | 'superseded' }
   | { kind: 'failed'; status: number; error?: string }
 
@@ -96,6 +97,7 @@ export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'get' 
           case 'operation_conflict':
             return { kind: 'conflict', error: result.error, refreshed: await target.refresh() }
           case 'chain_too_large': return { kind: 'too_large' }
+          case 'channel_archived': return { kind: 'archived', message: 'このチャンネルはアーカイブされているため、トピックに移動できません。' }
           case 'snapshot_expired': return { kind: 'snapshot_expired' }
           case 'history_generation_changed':
             if (target.isCurrent()) sync.observeHistoryGeneration()

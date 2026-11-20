@@ -728,4 +728,270 @@ describe('Unread badges, enter/leave lifecycle and recovery', () => {
     await unmount(instance)
     sessionModel.close()
   })
+
+  it('creates a distinct Unread visit with the recovered read boundary after same-Channel C9 reselection', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const msgs = [1, 2, 3, 4, 5, 6].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      body: `メッセージ${seq}`,
+    }))
+    net.pages.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, messages: msgs, has_more: false })
+    net.timelines.c1 = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 6,
+      has_more: false,
+      items: msgs.map((message) => ({ kind: 'message' as const, message })),
+    })
+    net.unreadChannels.c1 = {
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      mention_unread_count: 0,
+      main_mention_unread_count: 0,
+      ...channel('c1', 'general'),
+      as_of_seq: 6,
+      read_seq: 6,
+      unread_count: 0,
+      main_unread_count: 0,
+    }
+
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 6)
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 1280,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_deactivate_members: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    try {
+      await settle()
+      await settle()
+      flushSync()
+
+      const firstVisitId = sessionModel.unread('c1').state.entry?.id
+      expect(firstVisitId).toBeDefined()
+      expect(sessionModel.unread('c1').state.entry?.boundary).toBe(6)
+
+      // Lose Channel access via C9
+      net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'c1' })
+      await settle()
+      flushSync()
+      expect(sessionModel.sync.channel('c1').timeline.status).toBe('unavailable')
+
+      // Access returns with boundary 20 and 0 Unread; user explicitly reselects Channel c1
+      net.unreadChannels.c1 = {
+        history_generation: '00000000-0000-4000-8000-000000000515',
+        mention_unread_count: 0,
+        main_mention_unread_count: 0,
+        ...channel('c1', 'general'),
+        as_of_seq: 20,
+        read_seq: 20,
+        unread_count: 0,
+        main_unread_count: 0,
+      }
+      host
+        .querySelectorAll('#channel-content button')
+        .find((b) => b.textContent.includes('general'))!
+        .click()
+      flushSync()
+      await settle()
+      net.subscribed('c1', 20)
+      await settle()
+      await settle()
+      flushSync()
+
+      const secondVisitId = sessionModel.unread('c1').state.entry?.id
+      expect(secondVisitId).toBeDefined()
+      expect(secondVisitId).not.toBe(firstVisitId)
+      expect(sessionModel.unread('c1').state.entry?.boundary).toBe(20)
+    } finally {
+      navigation.destroy()
+      await unmount(instance)
+      sessionModel.close()
+    }
+  })
+
+  it('sets the nonzero Topic entry boundary and marks the first Unread Topic Message on entering TopicView', async () => {
+    const net = fakeNetwork()
+    const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+    const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
+    const sessionModel = {
+      channels: channelsAdapter(rawSession.channels),
+      sync: syncAdapter(rawSession.sync),
+      topics: (id: string) => topicsAdapter(rawSession.topics, id),
+      replies: (id: string) => repliesAdapter(rawSession.replies, id, rawSession.replyCounts),
+      unread: (id: string) => {
+        let a = unreadAdapters.get(id)
+        if (!a) unreadAdapters.set(id, (a = unreadAdapter(rawSession.unread, id)))
+        return a
+      },
+      navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
+      close: rawSession.close,
+    }
+    net.socket.onReady()
+
+    const mainMsgs = [1, 2, 3, 4, 5, 6].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      body: `メインメッセージ${seq}`,
+    }))
+    const topicMsgs = [7, 8, 9, 10, 11, 12].map((seq) => ({
+      ...record(seq, 'c1'),
+      sender: 'other',
+      topic_id: 't1',
+      body: `トピックメッセージ${seq}`,
+    }))
+    const t1Summary = {
+      mention_unread_count: 0,
+      id: 't1',
+      name: 'トピックA',
+      first_seq: 7,
+      last_seq: 12,
+      message_count: 6,
+      latest_message: topicMsgs[5],
+      read_seq: 8,
+      unread_count: 4,
+    }
+
+    net.pages.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, messages: [...mainMsgs, ...topicMsgs], has_more: false })
+    net.timelines.c1 = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 12,
+      has_more: false,
+      items: [
+        ...mainMsgs.map((message) => ({ kind: 'message' as const, message })),
+        { kind: 'topic' as const, topic: t1Summary },
+      ],
+    })
+    net.topicLists.c1 = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, has_more: false, topics: [t1Summary] })
+    net.topicSummaries['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, topic: t1Summary })
+    net.topicMessages['c1:t1'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, messages: topicMsgs, has_more: false })
+    net.unreadChannels.c1 = {
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      mention_unread_count: 0,
+      main_mention_unread_count: 0,
+      ...channel('c1', 'general'),
+      as_of_seq: 12,
+      read_seq: 2,
+      unread_count: 8,
+      main_unread_count: 4,
+    }
+
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('c1', 'general')] }))
+    await settle()
+    net.subscribed('c1', 12)
+    await settle()
+
+    let href = '/o/org-1/c/c1'
+    let historyState: unknown = null
+    const browser: NavigationBrowser = {
+      innerWidth: 375,
+      location: { get href() { return href } } as Location,
+      history: {
+        get state() { return historyState },
+        pushState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+        replaceState(state: unknown, _: string, url?: string | URL | null) { historyState = state; href = String(url) },
+      } as History,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const navigation = createNavigation(browser)
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        session: sessionModel,
+        navigation,
+        organization: {
+          organization: {
+            organization_id: 'org-1',
+            name: 'Org 1',
+            capabilities: {
+              can_create_channels: { allowed: true },
+              can_invite: { allowed: true },
+              can_deactivate_members: { allowed: true },
+              can_manage_roles: { allowed: true },
+            },
+          },
+          member: { id: 'me', name: '自分', role: 'admin' },
+        },
+        selectedOrganizationId: 'org-1',
+      },
+    })
+
+    try {
+      await settle()
+      await settle()
+      flushSync()
+
+      expect(sessionModel.unread('c1').state.entry?.scope).toEqual({ channel: 'c1', topicId: null })
+      expect(sessionModel.unread('c1').state.entry?.boundary).toBe(2)
+
+      host.querySelector('#main-content button.ui-topic-summary[data-topic-id="t1"]')!.click()
+      flushSync()
+      await settle()
+      await settle()
+      flushSync()
+
+      expect(sessionModel.unread('c1').state.entry?.scope).toEqual({ channel: 'c1', topicId: 't1' })
+      expect(sessionModel.unread('c1').state.entry?.boundary).toBe(8)
+      expect(host.querySelector(`#main-content [data-message-id="${topicMsgs[2].id}"] [data-read-marker="true"]`)).not.toBeNull()
+    } finally {
+      navigation.destroy()
+      await unmount(instance)
+      sessionModel.close()
+    }
+  })
 })

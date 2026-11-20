@@ -1,6 +1,13 @@
-import { expect, test, type APIRequestContext, type Browser } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Browser, type Locator, type Page } from '@playwright/test'
 import type { components } from '../src/api-schema.d.ts'
 import { createChannel, secretSafe, signInOwner } from './helpers.ts'
+
+type ReadMark = {
+  scope: 'channel' | 'topic'
+  topicId: string | null
+  history_generation: string | undefined
+  read_seq: number | undefined
+}
 
 async function createMemberContext(
   ownerRequest: APIRequestContext,
@@ -17,20 +24,25 @@ async function createMemberContext(
   const invite = (await secretSafe(() => invitation.json())) as { token: string }
 
   const context = await browser.newContext()
-  const accepted = await secretSafe(() =>
-    context.request.post(`/api/v1/orgs/${org}/invites/accept`, {
-      data: { token: invite.token, email, name: role === 'guest' ? 'Geom Guest' : 'Bob', password },
-    }),
-  )
-  expect(accepted.ok()).toBe(true)
-  const identity = (await secretSafe(() => accepted.json())) as components['schemas']['Identity']
+  try {
+    const accepted = await secretSafe(() =>
+      context.request.post(`/api/v1/orgs/${org}/invites/accept`, {
+        data: { token: invite.token, email, name: role === 'guest' ? 'Geom Guest' : 'Bob', password },
+      }),
+    )
+    expect(accepted.ok()).toBe(true)
+    const identity = (await secretSafe(() => accepted.json())) as components['schemas']['Identity']
 
-  const login = await secretSafe(() =>
-    context.request.post('/api/v1/session', { data: { email, password } }),
-  )
-  expect(login.ok()).toBe(true)
+    const login = await secretSafe(() =>
+      context.request.post('/api/v1/session', { data: { email, password } }),
+    )
+    expect(login.ok()).toBe(true)
 
-  return { context, memberId: identity.member.id }
+    return { context, memberId: identity.member.id }
+  } catch (err) {
+    await context.close()
+    throw err
+  }
 }
 
 async function postMessage(
@@ -38,7 +50,7 @@ async function postMessage(
   org: string,
   channelId: string,
   body: string,
-  opts?: { topicName?: string },
+  opts?: { topicName?: string; replyTo?: string },
 ): Promise<components['schemas']['Message']> {
   const res = await secretSafe(() =>
     request.post(`/api/v1/orgs/${org}/channels/${channelId}/messages`, {
@@ -46,11 +58,100 @@ async function postMessage(
         client_message_id: crypto.randomUUID(),
         body,
         ...(opts?.topicName ? { topic_name: opts.topicName } : {}),
+        ...(opts?.replyTo ? { reply_to: opts.replyTo } : {}),
       },
     }),
   )
   expect(res.ok()).toBe(true)
   return (await secretSafe(() => res.json())) as components['schemas']['Message']
+}
+
+async function flushAnimationFrames(page: Page): Promise<void> {
+  await page.evaluate(
+    () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+  )
+}
+
+async function scrollToBottom(scrollEl: Locator): Promise<void> {
+  await scrollEl.evaluate(async (el) => {
+    const step = Math.max(100, Math.floor(el.clientHeight * 0.7))
+    while (el.scrollTop + el.clientHeight < el.scrollHeight - 1) {
+      el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step)
+      el.dispatchEvent(new Event('scroll'))
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      el.dispatchEvent(new Event('scroll'))
+    }
+  })
+}
+
+async function trackReadMarks(page: Page, orgId: string, channelId: string): Promise<ReadMark[]> {
+  const marks: ReadMark[] = []
+  await page.route(`**/api/v1/orgs/${orgId}/channels/${channelId}/read`, async (route) => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON() as { history_generation?: string; read_seq?: number }
+      marks.push({
+        scope: 'channel',
+        topicId: null,
+        history_generation: body?.history_generation,
+        read_seq: body?.read_seq,
+      })
+    }
+    await route.continue()
+  })
+  await page.route(`**/api/v1/orgs/${orgId}/channels/${channelId}/topics/*/read`, async (route) => {
+    if (route.request().method() === 'PUT') {
+      const url = new URL(route.request().url())
+      const match = url.pathname.match(/\/topics\/([^/]+)\/read$/)
+      const body = route.request().postDataJSON() as { history_generation?: string; read_seq?: number }
+      marks.push({
+        scope: 'topic',
+        topicId: match?.[1] ?? null,
+        history_generation: body?.history_generation,
+        read_seq: body?.read_seq,
+      })
+    }
+    await route.continue()
+  })
+  return marks
+}
+
+async function maxVisibleConfirmedSeq(scrollEl: Locator, seqById: Record<string, number>): Promise<number> {
+  return scrollEl.evaluate((el, map) => {
+    const cRect = el.getBoundingClientRect()
+    let maxSeq = 0
+    for (const row of el.querySelectorAll<HTMLElement>('[data-message-id]')) {
+      const id = row.getAttribute('data-message-id')
+      if (!id || !(id in map)) continue
+      const r = row.getBoundingClientRect()
+      if (r.height === 0 && r.width === 0) continue
+      if (r.bottom > cRect.top && r.top < cRect.bottom) {
+        maxSeq = Math.max(maxSeq, map[id])
+      }
+    }
+    return maxSeq
+  }, seqById)
+}
+
+function installWsMessageTracker(page: Page) {
+  const receivedIds = new Set<string>()
+  page.on('websocket', (ws) => {
+    ws.on('framereceived', (frame) => {
+      if (typeof frame.payload !== 'string') return
+      try {
+        const parsed = JSON.parse(frame.payload) as { type?: string; message?: { id?: string } }
+        if (parsed?.type === 'message' && typeof parsed.message?.id === 'string') {
+          receivedIds.add(parsed.message.id)
+        }
+      } catch {
+        // Ignore non-JSON frames
+      }
+    })
+  })
+  return {
+    async waitForMessage(id: string) {
+      await expect.poll(() => receivedIds.has(id)).toBe(true)
+    },
+  }
 }
 
 test('moves focus to the Channel list on チャンネル一覧へ across desktop, tablet drawer and phone widths', async ({
@@ -89,6 +190,26 @@ test('moves focus to the Channel list on チャンネル一覧へ across desktop
 
     await grantGuest()
     const guestPage = await guestContext.newPage()
+    await guestPage.addInitScript(() => {
+      const calls: string[] = []
+      ;(window as unknown as { __historyCalls: string[] }).__historyCalls = calls
+      const origPush = history.pushState.bind(history)
+      const origReplace = history.replaceState.bind(history)
+      history.pushState = (state, title, url) => {
+        calls.push(`push:${String(url ?? '')}`)
+        return origPush(state, title, url)
+      }
+      history.replaceState = (state, title, url) => {
+        calls.push(`replace:${String(url ?? '')}`)
+        return origReplace(state, title, url)
+      }
+    })
+    const clearHistoryCalls = () =>
+      guestPage.evaluate(() => {
+        ;(window as unknown as { __historyCalls: string[] }).__historyCalls.length = 0
+      })
+    const getHistoryCalls = () =>
+      guestPage.evaluate(() => [...(window as unknown as { __historyCalls: string[] }).__historyCalls])
 
     const nav = guestPage.getByRole('navigation', { name: 'チャンネル' })
     const channelNavById = guestPage.locator('#channel-content')
@@ -97,56 +218,141 @@ test('moves focus to the Channel list on チャンネル一覧へ across desktop
     const goToListButton = timeline.getByRole('button', { name: 'チャンネル一覧へ', exact: true })
     const c9Alert = timeline.getByRole('alert').filter({ hasText: 'このチャンネルは利用できません' })
 
-    for (const width of [1280, 768, 375] as const) {
-      await guestPage.setViewportSize({ width, height: 800 })
-      await guestPage.goto(`/o/${orgId}/c/${singleChannel.id}`)
-      await expect(guestPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
-      expect(await channelNavById.getAttribute('aria-labelledby')).toBe('channel-list-heading')
-      expect(await channelNavById.getAttribute('aria-label')).toBeNull()
+    // 1. Desktop (1280px): heading semantics, hidden-heading preserves action-button focus, normal click focuses heading with zero History writes
+    await guestPage.setViewportSize({ width: 1280, height: 800 })
+    await guestPage.goto(`/o/${orgId}/c/${singleChannel.id}`)
+    await expect(guestPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    expect(await channelNavById.getAttribute('aria-labelledby')).toBe('channel-list-heading')
+    expect(await channelNavById.getAttribute('aria-label')).toBeNull()
+    expect(await channelListHeading.evaluate((el) => el.tagName)).toBe('H2')
+    await expect(channelListHeading).toHaveText('チャンネル')
+    await expect(channelListHeading).toHaveAttribute('tabindex', '-1')
+    await expect(nav).toBeVisible()
+    await expect(channelListHeading).toBeVisible()
 
-      if (width === 1280) {
-        await expect(nav).toBeVisible()
-        await expect(channelListHeading).toBeVisible()
-      } else {
-        await expect(nav).toBeHidden()
-        await expect(channelListHeading).toBeHidden()
-      }
+    await revokeGuest()
+    await expect(c9Alert).toBeVisible()
+    await expect(goToListButton).toBeVisible()
 
-      await revokeGuest()
-      await expect(c9Alert).toBeVisible()
-      await expect(goToListButton).toBeVisible()
+    await channelListHeading.evaluate((el) => {
+      ;(el as HTMLElement).hidden = true
+    })
+    await clearHistoryCalls()
+    await goToListButton.focus()
+    await expect(goToListButton).toBeFocused()
+    await goToListButton.click()
+    await flushAnimationFrames(guestPage)
+    await expect(channelListHeading).toBeHidden()
+    await expect(goToListButton).toBeFocused()
+    expect(await getHistoryCalls()).toEqual([])
+    await channelListHeading.evaluate((el) => {
+      ;(el as HTMLElement).hidden = false
+    })
 
-      // Visibility guard: hidden heading must never receive focus
-      if (width >= 600) {
-        await channelListHeading.evaluate((el) => el.setAttribute('aria-hidden', 'true'))
-        await goToListButton.click()
-        await expect(channelListHeading).not.toBeFocused()
-        await channelListHeading.evaluate((el) => el.removeAttribute('aria-hidden'))
-      }
-      if (width === 768) {
-        await guestPage.keyboard.press('Escape')
-        await expect(nav).toBeHidden()
-      }
+    await clearHistoryCalls()
+    await goToListButton.click()
+    await expect(nav).toBeVisible()
+    await expect(channelListHeading).toBeVisible()
+    await expect(channelListHeading).toBeFocused()
+    await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-drawer-open', 'false')
+    expect(await getHistoryCalls()).toEqual([])
 
-      await goToListButton.click()
-      await expect(nav).toBeVisible()
-      await expect(channelListHeading).toBeVisible()
-      await expect(channelListHeading).toBeFocused()
+    // 2. Tablet (768px): popstate to /o/{org} keeps rail-button focus while heading is hidden; チャンネル一覧へ opens drawer and focuses heading with zero History writes
+    await grantGuest()
+    await guestPage.setViewportSize({ width: 768, height: 800 })
+    await guestPage.goto(`/o/${orgId}`)
+    const railChannelBtn = guestPage.getByRole('button', { name: 'チャンネル一覧', exact: true })
+    await expect(railChannelBtn).toBeVisible()
+    await railChannelBtn.click()
+    await expect(nav).toBeVisible()
+    await nav.getByRole('button', { name: singleChannel.name }).click()
+    await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
+    await expect(guestPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    await expect(nav).toBeHidden()
+    await expect(channelListHeading).toBeHidden()
 
-      if (width < 600) {
-        await expect(guestPage).toHaveURL(`/o/${orgId}`)
-        await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
-        await expect(timeline).toBeHidden()
-      } else {
-        await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
-        await expect(guestPage.locator('.workspace')).toHaveAttribute(
-          'data-drawer-open',
-          width < 960 ? 'true' : 'false',
-        )
-      }
+    await revokeGuest()
+    await expect(c9Alert).toBeVisible()
+    await expect(goToListButton).toBeVisible()
 
-      await grantGuest()
-    }
+    await railChannelBtn.focus()
+    await expect(railChannelBtn).toBeFocused()
+    await guestPage.goBack()
+    await expect(guestPage).toHaveURL(`/o/${orgId}`)
+    await flushAnimationFrames(guestPage)
+    await expect(channelListHeading).toBeHidden()
+    await expect(railChannelBtn).toBeFocused()
+
+    await guestPage.goForward()
+    await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
+    await expect(c9Alert).toBeVisible()
+    await expect(goToListButton).toBeVisible()
+
+    await channelListHeading.evaluate((el) => {
+      ;(el as HTMLElement).hidden = true
+    })
+    await goToListButton.click()
+    await flushAnimationFrames(guestPage)
+    await expect(channelListHeading).not.toBeFocused()
+    await channelListHeading.evaluate((el) => {
+      ;(el as HTMLElement).hidden = false
+    })
+    await guestPage.keyboard.press('Escape')
+    await expect(nav).toBeHidden()
+
+    await clearHistoryCalls()
+    await goToListButton.focus()
+    await expect(goToListButton).toBeFocused()
+    await goToListButton.click()
+    await expect(nav).toBeVisible()
+    await expect(channelListHeading).toBeVisible()
+    await expect(channelListHeading).toBeFocused()
+    await expect(guestPage).toHaveURL(`/o/${orgId}/c/${singleChannel.id}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-drawer-open', 'true')
+    expect(await getHistoryCalls()).toEqual([])
+
+    // 3. Phone (375px): hidden heading never receives focus on C9 action; normal click closes drawer, replaces URL, switches to channels level, and focuses heading
+    await grantGuest()
+    await guestPage.setViewportSize({ width: 375, height: 800 })
+    await guestPage.goto(`/o/${orgId}/c/${singleChannel.id}`)
+    await expect(guestPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    await expect(nav).toBeHidden()
+
+    await revokeGuest()
+    await expect(c9Alert).toBeVisible()
+    await expect(goToListButton).toBeVisible()
+
+    await channelListHeading.evaluate((el) => {
+      ;(el as HTMLElement).hidden = true
+    })
+    await goToListButton.focus()
+    await expect(goToListButton).toBeFocused()
+    await goToListButton.click()
+    await expect(guestPage).toHaveURL(`/o/${orgId}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-drawer-open', 'false')
+    await flushAnimationFrames(guestPage)
+    await expect(channelListHeading).toBeHidden()
+    await expect(channelListHeading).not.toBeFocused()
+
+    // Re-enter the unavailable Channel URL to verify normal phone C9 action with visible heading
+    await guestPage.goto(`/o/${orgId}/c/${singleChannel.id}`)
+    await expect(c9Alert).toBeVisible()
+    await expect(goToListButton).toBeVisible()
+
+    await clearHistoryCalls()
+    await goToListButton.focus()
+    await expect(goToListButton).toBeFocused()
+    await goToListButton.click()
+    await expect(nav).toBeVisible()
+    await expect(channelListHeading).toBeVisible()
+    await expect(channelListHeading).toBeFocused()
+    await expect(guestPage).toHaveURL(`/o/${orgId}`)
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(guestPage.locator('.workspace')).toHaveAttribute('data-drawer-open', 'false')
+    await expect(timeline).toBeHidden()
+    expect(await getHistoryCalls()).toEqual([`replace:/o/${orgId}`])
   } finally {
     await guestContext.close()
   }
@@ -163,9 +369,10 @@ test('hidden tab, ReplyPanel, Topic summary lines and failed pending sends never
   const topicName = `未読トピック-${suffix}`
 
   const ownMsg = await postMessage(page.request, orgId, targetChannel.id, 'Aliceの既読メッセージ')
+  const historyGeneration = ownMsg.history_generation
   const markOwn = await secretSafe(() =>
     page.request.put(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/read`, {
-      data: { history_generation: ownMsg.history_generation, read_seq: ownMsg.created_seq },
+      data: { history_generation: historyGeneration, read_seq: ownMsg.created_seq },
     }),
   )
   expect(markOwn.ok()).toBe(true)
@@ -183,18 +390,23 @@ test('hidden tab, ReplyPanel, Topic summary lines and failed pending sends never
         ),
       )
     }
+    // Seed an unread reply to mainMessages[0] whose seq is past the initial viewport so ReplyPanel renders an unread row
+    const unreadReply = await postMessage(
+      bobContext.request,
+      orgId,
+      targetChannel.id,
+      'ReplyPanel内の未読返信',
+      { replyTo: mainMessages[0].id },
+    )
     const topicMsg = await postMessage(bobContext.request, orgId, targetChannel.id, 'トピック内の未読', {
       topicName,
     })
 
-    const markReadSeqs: number[] = []
-    await page.route(`**/api/v1/orgs/${orgId}/channels/${targetChannel.id}/read`, async (route) => {
-      if (route.request().method() === 'PUT') {
-        const body = route.request().postDataJSON() as { read_seq?: number }
-        if (typeof body?.read_seq === 'number') markReadSeqs.push(body.read_seq)
-      }
-      await route.continue()
-    })
+    const seqById: Record<string, number> = { [ownMsg.id]: ownMsg.created_seq }
+    for (const m of mainMessages) seqById[m.id] = m.created_seq
+    seqById[unreadReply.id] = unreadReply.created_seq
+
+    const readMarks = await trackReadMarks(page, orgId, targetChannel.id)
 
     await page.setViewportSize({ width: 1280, height: 600 })
     await page.goto(`/o/${orgId}/c/${lobbyChannel.id}`)
@@ -204,43 +416,59 @@ test('hidden tab, ReplyPanel, Topic summary lines and failed pending sends never
     const targetChannelRow = channelNav
       .locator('.channel-list > li > .ui-list-row-group > button.ui-list-row')
       .filter({ hasText: targetChannel.name })
-    await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 15件')
+    await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 16件')
 
-    // 1. Open targetChannel -> opens at first Unread with 未読 marker; later rows stay Unread
+    // 1. Open targetChannel -> opens at first Unread with 未読 marker; only visible confirmed rows are marked
     await targetChannelRow.click()
     await expect(page.getByRole('heading', { level: 1, name: targetChannel.name, exact: true })).toBeVisible()
+    const scrollEl = page.locator('#main-content .timeline-scroll')
     const firstUnreadItem = page.locator(`#main-content [data-message-id="${mainMessages[0].id}"]`)
     await expect(firstUnreadItem.locator('[data-read-marker="true"]')).toHaveText('未読')
-    await expect.poll(() => markReadSeqs.length).toBeGreaterThan(0)
-    const initialMarked = Math.max(...markReadSeqs)
-    expect(initialMarked).toBeLessThan(mainMessages[mainMessages.length - 1].created_seq)
+    await expect.poll(() => readMarks.length).toBeGreaterThan(0)
+    await flushAnimationFrames(page)
 
-    // 2. Opening ReplyPanel never marks additional main or Topic messages as read
-    await firstUnreadItem.getByRole('button', { name: '返信' }).click()
+    const initialVisibleSeq = await maxVisibleConfirmedSeq(scrollEl, seqById)
+    expect(initialVisibleSeq).toBeGreaterThanOrEqual(mainMessages[0].created_seq)
+    expect(initialVisibleSeq).toBeLessThan(mainMessages[mainMessages.length - 1].created_seq)
+    const afterOpenMarks = [...readMarks]
+    expect(afterOpenMarks).toEqual([
+      {
+        scope: 'channel',
+        topicId: null,
+        history_generation: historyGeneration,
+        read_seq: initialVisibleSeq,
+      },
+    ])
+
+    const expectedRemainingAfterOpen = 16 - (initialVisibleSeq - ownMsg.created_seq)
+    await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute(
+      'aria-label',
+      `未読 ${expectedRemainingAfterOpen}件`,
+    )
+
+    // 2. Opening ReplyPanel with an unread reply never marks Channel or Topic messages as read
+    await firstUnreadItem.getByRole('button', { name: /返信/ }).click()
     await expect(page.locator('#panel-content')).toBeVisible()
-    await page.waitForTimeout(150)
-    expect(Math.max(...markReadSeqs)).toBe(initialMarked)
+    await expect(page.locator(`#panel-content [data-message-id="${unreadReply.id}"]`)).toBeVisible()
+    await flushAnimationFrames(page)
+    expect(readMarks).toEqual(afterOpenMarks)
     await page.locator('#panel-content').getByRole('button', { name: 'パネルを閉じる(Esc)' }).click()
+    await expect(page.locator('#panel-content')).toHaveCount(0)
 
-    // 3. While document is hidden, scrolling through remaining Unread rows sends no markRead
-    const countBeforeHidden = markReadSeqs.length
+    // 3. While document is hidden, scrolling through remaining Unread rows sends no markRead and keeps Unread count unchanged
     await page.evaluate(() => {
       Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' })
       document.dispatchEvent(new Event('visibilitychange'))
     })
-    const scrollEl = page.locator('#main-content .timeline-scroll')
-    await scrollEl.evaluate(async (el) => {
-      const step = Math.max(100, Math.floor(el.clientHeight * 0.7))
-      while (el.scrollTop + el.clientHeight < el.scrollHeight) {
-        el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step)
-        el.dispatchEvent(new Event('scroll'))
-        await new Promise((r) => setTimeout(r, 25))
-      }
-    })
-    await page.waitForTimeout(150)
-    expect(markReadSeqs.length).toBe(countBeforeHidden)
+    await scrollToBottom(scrollEl)
+    await flushAnimationFrames(page)
+    expect(readMarks).toEqual(afterOpenMarks)
+    await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute(
+      'aria-label',
+      `未読 ${expectedRemainingAfterOpen}件`,
+    )
 
-    // 4. A failed pending send never advances markRead while hidden
+    // 4. A failed pending send reaches failed state while hidden and never advances markRead
     let failNextSend = true
     await page.route(`**/api/v1/orgs/${orgId}/channels/${targetChannel.id}/messages`, async (route) => {
       if (route.request().method() === 'POST' && failNextSend) {
@@ -253,29 +481,73 @@ test('hidden tab, ReplyPanel, Topic summary lines and failed pending sends never
     const composer = page.locator('#main-content').getByRole('textbox', { name: 'メッセージ', exact: true })
     await composer.fill('未確定の送信失敗メッセージ')
     await composer.press('Enter')
+    await expect(page.locator('#main-content').getByText('送信を確認できませんでした。')).toBeVisible()
+    await expect(page.locator('#main-content').getByRole('button', { name: '再送する', exact: true })).toBeVisible()
     await expect(page.locator('#main-content').getByText('未確定の送信失敗メッセージ')).toBeVisible()
-    await page.waitForTimeout(150)
-    expect(markReadSeqs.length).toBe(countBeforeHidden)
+    await flushAnimationFrames(page)
+    expect(readMarks).toEqual(afterOpenMarks)
+    await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute(
+      'aria-label',
+      `未読 ${expectedRemainingAfterOpen}件`,
+    )
 
-    // 5. Returning to visible and scrolling marks visible confirmed rows, ignores Topic summary line and failed send
+    // 5. Return to visible, scroll one controlled viewport step down from first Unread, then scroll to bottom: assert full ordered request sequence
+    await scrollEl.evaluate((el) => {
+      el.scrollTop = 0
+      el.dispatchEvent(new Event('scroll'))
+    })
+    await flushAnimationFrames(page)
     await page.evaluate(() => {
       Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
       document.dispatchEvent(new Event('visibilitychange'))
     })
-    await scrollEl.evaluate(async (el) => {
-      el.scrollTop = 0
-      el.dispatchEvent(new Event('scroll'))
-      await new Promise((r) => setTimeout(r, 25))
-      const step = Math.max(100, Math.floor(el.clientHeight * 0.7))
-      while (el.scrollTop + el.clientHeight < el.scrollHeight) {
-        el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step)
-        el.dispatchEvent(new Event('scroll'))
-        await new Promise((r) => setTimeout(r, 25))
-      }
-    })
-    await expect.poll(() => Math.max(...markReadSeqs)).toBe(mainMessages[mainMessages.length - 1].created_seq)
+    await flushAnimationFrames(page)
 
-    // Topic summary line never marked Topic as read -> Topic badge stays 1
+    await scrollEl.evaluate((el) => {
+      el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + Math.floor(el.clientHeight * 0.7))
+      el.dispatchEvent(new Event('scroll'))
+    })
+    await flushAnimationFrames(page)
+    const midVisibleSeq = await maxVisibleConfirmedSeq(scrollEl, seqById)
+    expect(midVisibleSeq).toBeGreaterThan(initialVisibleSeq)
+    expect(midVisibleSeq).toBeLessThan(unreadReply.created_seq)
+
+    await expect.poll(() => readMarks.at(-1)?.read_seq).toBe(midVisibleSeq)
+    await flushAnimationFrames(page)
+    const afterMidMarks = [...readMarks]
+    expect(afterMidMarks).toEqual([
+      ...afterOpenMarks,
+      {
+        scope: 'channel',
+        topicId: null,
+        history_generation: historyGeneration,
+        read_seq: midVisibleSeq,
+      },
+    ])
+
+    await scrollToBottom(scrollEl)
+    await expect.poll(() => readMarks.at(-1)?.read_seq).toBe(unreadReply.created_seq)
+    await flushAnimationFrames(page)
+
+    // Verify full ordered request sequence: channel scope only, exact history_generation, strictly increasing read_seq, no Topic marks
+    expect(readMarks.length).toBeGreaterThanOrEqual(3)
+    for (let i = 0; i < readMarks.length; i++) {
+      expect(readMarks[i].scope).toBe('channel')
+      expect(readMarks[i].topicId).toBeNull()
+      expect(readMarks[i].history_generation).toBe(historyGeneration)
+      expect(typeof readMarks[i].read_seq).toBe('number')
+      if (i > 0) {
+        expect(readMarks[i].read_seq!).toBeGreaterThan(readMarks[i - 1].read_seq!)
+      }
+    }
+    expect(readMarks.at(-1)).toEqual({
+      scope: 'channel',
+      topicId: null,
+      history_generation: historyGeneration,
+      read_seq: unreadReply.created_seq,
+    })
+
+    // Topic summary line never marked Topic as read -> Topic badge and Channel badge stay 1
     const summaryBtn = page.locator(`#main-content button.ui-topic-summary[data-topic-id="${topicMsg.topic_id}"]`)
     await expect(summaryBtn.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 1件')
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 1件')
@@ -303,9 +575,10 @@ test('phone 375px: defers first-Unread positioning and markRead while ?panel=top
   for (let i = 1; i <= 4; i++) {
     lastReadMsg = await postMessage(page.request, orgId, targetChannel.id, `既読 ${i}`)
   }
+  const historyGeneration = lastReadMsg.history_generation
   const markOwn = await secretSafe(() =>
     page.request.put(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/read`, {
-      data: { history_generation: lastReadMsg.history_generation, read_seq: lastReadMsg.created_seq },
+      data: { history_generation: historyGeneration, read_seq: lastReadMsg.created_seq },
     }),
   )
   expect(markOwn.ok()).toBe(true)
@@ -315,36 +588,66 @@ test('phone 375px: defers first-Unread positioning and markRead while ?panel=top
     const unreadMsgs: components['schemas']['Message'][] = []
     for (let i = 1; i <= 10; i++) {
       unreadMsgs.push(
-        await postMessage(bobContext.request, orgId, targetChannel.id, `未読 ${i}\n2行目 ${i}\n3行目 ${i}`),
+        await postMessage(bobContext.request, orgId, targetChannel.id, `未読 ${i}`),
       )
     }
+    const seqById: Record<string, number> = {}
+    for (const m of unreadMsgs) seqById[m.id] = m.created_seq
 
-    const markReadSeqs: number[] = []
-    await page.route(`**/api/v1/orgs/${orgId}/channels/${targetChannel.id}/read`, async (route) => {
-      if (route.request().method() === 'PUT') {
-        const body = route.request().postDataJSON() as { read_seq?: number }
-        if (typeof body?.read_seq === 'number') markReadSeqs.push(body.read_seq)
-      }
-      await route.continue()
-    })
+    const readMarks = await trackReadMarks(page, orgId, targetChannel.id)
 
     await page.setViewportSize({ width: 375, height: 667 })
+    const initialTimelineLoaded = page.waitForResponse(
+      (res) =>
+        res.url().includes(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/timeline`) &&
+        res.request().method() === 'GET' &&
+        res.status() === 200,
+    )
     await page.goto(`/o/${orgId}/c/${targetChannel.id}?panel=topics`)
+    await initialTimelineLoaded
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(page.locator('#panel-content')).toBeVisible()
     await expect(page.locator('#main-content')).toBeHidden()
-    await page.waitForTimeout(250)
-    expect(markReadSeqs).toEqual([])
+    await flushAnimationFrames(page)
 
-    // Closing the panel displays main, scrolls to first Unread, and submits markRead
+    const scrollEl = page.locator('#main-content .timeline-scroll')
+    expect(await scrollEl.evaluate((el) => el.scrollTop)).toBe(0)
+    expect(readMarks).toEqual([])
+
+    // Closing the panel displays main, aligns to first Unread, and submits one complete markRead for the last visible confirmed row
     await page.locator('#panel-content').getByRole('button', { name: 'パネルを閉じる(Esc)' }).click()
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
     const firstUnread = page.locator(`#main-content [data-message-id="${unreadMsgs[0].id}"]`)
-    await expect(firstUnread.locator('[data-read-marker="true"]')).toHaveText('未読')
-    await expect.poll(() => page.locator('#main-content .timeline-scroll').evaluate((el) => el.scrollTop)).toBeGreaterThan(0)
-    await expect(firstUnread).toBeInViewport()
-    await expect.poll(() => markReadSeqs.length).toBeGreaterThan(0)
+    const marker = firstUnread.locator('[data-read-marker="true"]')
+    await expect(marker).toHaveText('未読')
+    await expect.poll(() => readMarks.length).toBeGreaterThan(0)
+    await flushAnimationFrames(page)
+
+    const alignment = await scrollEl.evaluate((el) => {
+      const markerEl = el.querySelector<HTMLElement>('[data-read-marker="true"]')
+      if (!markerEl) return null
+      const cRect = el.getBoundingClientRect()
+      const mRect = markerEl.getBoundingClientRect()
+      return {
+        scrollTop: el.scrollTop,
+        offsetFromTop: mRect.top - cRect.top,
+      }
+    })
+    expect(alignment).not.toBeNull()
+    expect(alignment!.scrollTop).toBeGreaterThan(0)
+    expect(Math.abs(alignment!.offsetFromTop)).toBeLessThanOrEqual(8)
+
+    const lastVisibleSeq = await maxVisibleConfirmedSeq(scrollEl, seqById)
+    expect(lastVisibleSeq).toBeGreaterThanOrEqual(unreadMsgs[0].created_seq)
+    expect(readMarks).toEqual([
+      {
+        scope: 'channel',
+        topicId: null,
+        history_generation: historyGeneration,
+        read_seq: lastVisibleSeq,
+      },
+    ])
   } finally {
     await bobContext.close()
   }
@@ -450,12 +753,21 @@ test('phone 375px: keeps following the bottom when a live Message arrives while 
   const topicName = `スマホ追従トピック-${suffix}`
 
   const ownMsg = await postMessage(page.request, orgId, targetChannel.id, '既読メイン1')
+  const historyGeneration = ownMsg.history_generation
   const markOwn = await secretSafe(() =>
     page.request.put(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/read`, {
-      data: { history_generation: ownMsg.history_generation, read_seq: ownMsg.created_seq },
+      data: { history_generation: historyGeneration, read_seq: ownMsg.created_seq },
     }),
   )
   expect(markOwn.ok()).toBe(true)
+
+  const ownTopicMsg = await postMessage(page.request, orgId, targetChannel.id, '既読トピック1', { topicName })
+  const markOwnTopic = await secretSafe(() =>
+    page.request.put(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/topics/${ownTopicMsg.topic_id}/read`, {
+      data: { history_generation: historyGeneration, read_seq: ownTopicMsg.created_seq },
+    }),
+  )
+  expect(markOwnTopic.ok()).toBe(true)
 
   const { context: bobContext } = await createMemberContext(page.request, browser, orgId)
   try {
@@ -474,6 +786,9 @@ test('phone 375px: keeps following the bottom when a live Message arrives while 
       )
     }
 
+    const readMarks = await trackReadMarks(page, orgId, targetChannel.id)
+    const wsTracker = installWsMessageTracker(page)
+
     await page.setViewportSize({ width: 375, height: 667 })
     await page.goto(`/o/${orgId}/c/${targetChannel.id}`)
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
@@ -483,20 +798,22 @@ test('phone 375px: keeps following the bottom when a live Message arrives while 
     const mainFirstUnread = page.locator(`#main-content [data-message-id="${mainMsgs[0].id}"]`)
     await expect(mainFirstUnread.locator('[data-read-marker="true"]')).toHaveText('未読')
 
-    // 2. Scroll main to bottom (pinned), open phone panel, receive live main Message, close panel
+    // 2. Scroll main to bottom (pinned), open phone panel, receive live main Message while hidden, then close panel
     const mainScroll = page.locator('#main-content .timeline-scroll')
-    await mainScroll.evaluate(async (el) => {
-      const step = Math.max(100, Math.floor(el.clientHeight * 0.7))
-      while (el.scrollTop + el.clientHeight < el.scrollHeight) {
-        el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step)
-        el.dispatchEvent(new Event('scroll'))
-        await new Promise((r) => setTimeout(r, 25))
-      }
-    })
+    await scrollToBottom(mainScroll)
+    await expect.poll(() => readMarks.at(-1)?.read_seq).toBe(mainMsgs[mainMsgs.length - 1].created_seq)
+
     await page.getByRole('button', { name: 'パネルを開く(⌘.)', exact: true }).click()
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')
+    await expect(page.locator('#main-content')).toBeHidden()
+    const mainMarksBeforeLive = readMarks.length
 
     const liveMain = await postMessage(bobContext.request, orgId, targetChannel.id, 'メイン新着ライブ')
+    await wsTracker.waitForMessage(liveMain.id)
+    await flushAnimationFrames(page)
+    await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')
+    expect(readMarks.length).toBe(mainMarksBeforeLive)
+
     await page.locator('#panel-content').getByRole('button', { name: 'パネルを閉じる(Esc)' }).click()
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
 
@@ -505,8 +822,22 @@ test('phone 375px: keeps following the bottom when a live Message arrives while 
     await expect
       .poll(() => mainScroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop))
       .toBeLessThan(40)
+    await expect.poll(() => readMarks.at(-1)).toEqual({
+      scope: 'channel',
+      topicId: null,
+      history_generation: historyGeneration,
+      read_seq: liveMain.created_seq,
+    })
 
-    // 3. Same scenario in TopicView: open Topic -> positions at first Unread -> scroll to bottom -> open panel -> live Topic Message -> close panel
+    // Read marker stays at mainMsgs[0] after reopening
+    await mainScroll.evaluate((el) => {
+      el.scrollTop = 0
+      el.dispatchEvent(new Event('scroll'))
+    })
+    await expect(mainFirstUnread.locator('[data-read-marker="true"]')).toHaveText('未読')
+
+    // 3. Same scenario in TopicView: open Topic -> positions at first Unread -> scroll to bottom -> open panel -> live Topic Message while hidden -> close panel
+    await scrollToBottom(mainScroll)
     const summaryBtn = page.locator(`#main-content button.ui-topic-summary[data-topic-id="${topicMsgs[0].topic_id}"]`)
     await summaryBtn.click()
     await expect(page.getByRole('heading', { level: 1, name: topicName, exact: true })).toBeVisible()
@@ -514,20 +845,27 @@ test('phone 375px: keeps following the bottom when a live Message arrives while 
     await expect(topicFirstUnread.locator('[data-read-marker="true"]')).toHaveText('未読')
 
     const topicScroll = page.locator('#main-content .topic-view__scroll')
-    await topicScroll.evaluate(async (el) => {
-      const step = Math.max(100, Math.floor(el.clientHeight * 0.7))
-      while (el.scrollTop + el.clientHeight < el.scrollHeight) {
-        el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step)
-        el.dispatchEvent(new Event('scroll'))
-        await new Promise((r) => setTimeout(r, 25))
-      }
+    await scrollToBottom(topicScroll)
+    await expect.poll(() => readMarks.at(-1)).toEqual({
+      scope: 'topic',
+      topicId: topicMsgs[0].topic_id,
+      history_generation: historyGeneration,
+      read_seq: topicMsgs[topicMsgs.length - 1].created_seq,
     })
+
     await page.getByRole('button', { name: 'パネルを開く(⌘.)', exact: true }).click()
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')
+    await expect(page.locator('#main-content')).toBeHidden()
+    const topicMarksBeforeLive = readMarks.length
 
     const liveTopic = await postMessage(bobContext.request, orgId, targetChannel.id, 'トピック新着ライブ', {
       topicName,
     })
+    await wsTracker.waitForMessage(liveTopic.id)
+    await flushAnimationFrames(page)
+    await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')
+    expect(readMarks.length).toBe(topicMarksBeforeLive)
+
     await page.locator('#panel-content').getByRole('button', { name: 'パネルを閉じる(Esc)' }).click()
     await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
 
@@ -536,6 +874,19 @@ test('phone 375px: keeps following the bottom when a live Message arrives while 
     await expect
       .poll(() => topicScroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop))
       .toBeLessThan(40)
+    await expect.poll(() => readMarks.at(-1)).toEqual({
+      scope: 'topic',
+      topicId: topicMsgs[0].topic_id,
+      history_generation: historyGeneration,
+      read_seq: liveTopic.created_seq,
+    })
+
+    // Read marker stays at topicMsgs[0] after reopening
+    await topicScroll.evaluate((el) => {
+      el.scrollTop = 0
+      el.dispatchEvent(new Event('scroll'))
+    })
+    await expect(topicFirstUnread.locator('[data-read-marker="true"]')).toHaveText('未読')
   } finally {
     await bobContext.close()
   }
