@@ -331,6 +331,7 @@ export function createSession(options: SessionOptions) {
   })
   void sync.start()
   void channels.load()
+  sections.hold()
   return {
     sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets,
     memberListAccess,

@@ -92,6 +92,7 @@
   })
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
+  const sectionsState = $derived(session.sections?.state)
   const dmState = $derived(session.dms?.state)
   const channelListStatus = $derived(s.status)
   const currentOrganizationId = $derived(selectedOrganizationId || organization?.organization.organization_id || '')
@@ -834,7 +835,7 @@
     </div>
 
     <div class="channel-column__scroll">
-      {#if !organizationUnavailable && (s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut))}
+      {#if !organizationUnavailable && !sectionsState?.reconnecting && (s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut))}
         <StatusBanner
           tone="danger"
           role="alert"
@@ -846,7 +847,7 @@
             void channels.load()
           }}
         />
-      {:else if !organizationUnavailable && s.status === 'loading' && s.channels.length === 0}
+      {:else if !organizationUnavailable && !sectionsState?.reconnecting && s.status === 'loading' && s.channels.length === 0}
         <Skeleton rows={3} label="チャンネルを読み込み中" />
       {/if}
 
@@ -859,6 +860,9 @@
         {channelUnreadCount}
         channelMentionUnreadCount={(id) => session.unread?.(id).state.mentionUnreadCount ?? null}
         topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
+        sections={session.sections}
+        disabled={organizationUnavailable}
+        channelListHeading={channelListHeadingRef}
         onselect={handleSelectChannel}
         onselecttopic={handleSelectTopic}
         onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}
