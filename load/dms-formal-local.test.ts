@@ -77,11 +77,13 @@ test('portable streaming SHA-256 matches the GNU sha256sum digest field',async t
   const {sha256File}=await import('./dms-formal-local.ts');const dir=temporary(t),path=dir+'/bytes';writeFileSync(path,'abc');
   assert.equal(await sha256File(path),'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
 });
-test('local executor runs a labelled single-arm pilot using bounded copies with no SSH/scp/GNU timeout',async t=>{
+for(const failSeed of [false,true])test(failSeed?'local executor retains timing and stops on seed failure':'local executor runs a labelled single-arm pilot using bounded copies with no SSH/scp/GNU timeout',async t=>{
   const {run}=await import('./dms-formal-run.ts');const {createHash}=await import('node:crypto');
   const dir=temporary(t),output=dir+'/output',events:string[]=[],roots=new Set<string>();
+  t.after(()=>{for(const root of roots)rmSync(root,{recursive:true,force:true});});
   const patch=createHash('sha256').update(readFileSync(import.meta.dirname+'/pool-overhead-baseline.patch')).digest('hex');
-  const result=await run({target:'local',pilot:true,pilotSeconds:30,loadScale:'1/50',app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output,scenario:'pool-overhead',mode:'formal',attempts:3,reviewedPatchSha256:patch},{on:()=>{},off:()=>{},transfer:async()=>{throw new Error('No image transfer on shared daemon');},exec:async command=>{
+  const timing='{"kind":"organization","organization":0,"durationMs":123}\n';
+  const running=run({target:'local',pilot:true,pilotSeconds:30,loadScale:'1/50',app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output,scenario:'pool-overhead',mode:'formal',attempts:3,reviewedPatchSha256:patch},{on:()=>{},off:()=>{},transfer:async()=>{throw new Error('No image transfer on shared daemon');},exec:async command=>{
     assert.ok(command.timeout);assert.ok(!['ssh','scp','timeout'].includes(command.program));
     events.push(command.program+' '+command.args.join(' '));
     const invocation=command.program==='sh'?/NODE_EXTRA_CA_CERTS='([^']+)\/ca.crt'.*dms-formal-host.ts' '([^']+)'/.exec(command.args[1]!):undefined;
@@ -92,17 +94,31 @@ test('local executor runs a labelled single-arm pilot using bounded copies with 
     if(op==='build'){save('image.json',[{Id:'candidate'}]);save('source-toolchains.json',{sha:'a'.repeat(40)});}
     if(op==='database')save('image.json',[{Id:'candidate'}]);
     if(op==='app')writeFileSync(root+'/ca.crt','ca');
-    if(op==='seed'){mkdirSync(root+'/formal');for(let i=0;i<10;i++)save('formal/org-'+i+'.json',{});save('deep.json',{});}
+    if(op==='seed'){
+      mkdirSync(root+'/formal');
+      writeFileSync(root+'/formal/seed-timing.jsonl',timing,{mode:0o600});
+      if(failSeed)return {code:1,stdout:''};
+      for(let i=0;i<10;i++)save('formal/org-'+i+'.json',{});
+      save('deep.json',{});
+    }
     if(op==='reduce') {
       const summary=dir+'/summary';mkdirSync(summary);writeFileSync(summary+'/judgment.json',JSON.stringify({label:'MAC-RELATIVE',pilot:true,acceptance:false,sustained:true}));
       return execute({program:'tar',args:['-czf',root+'/summary-1.tgz','-C',summary,'judgment.json'],timeout:10000});
     }
     return {code:0,stdout:''};
   }});
-  for(const root of roots)rmSync(root,{recursive:true,force:true});
-  assert.equal(result.attempts.length,1);assert.equal(JSON.parse(readFileSync(output+'/metadata.json','utf8')).load.factor,'1/50');
-  assert.equal(JSON.parse(readFileSync(output+'/pilot.json','utf8')).label,'MAC-RELATIVE');
+  if(failSeed) {
+    await assert.rejects(running,/sh failed \(exit 1\)/);
+    assert.equal(events.filter(event=>event.includes("'seed'")).length,1);
+    assert.ok(!events.some(event=>event.includes("'restore'")));
+    assert.equal(JSON.parse(readFileSync(output+'/summary.json','utf8')).status,'NOT EVALUATED');
+  } else {
+    const result=await running;
+    assert.equal(result.attempts.length,1);assert.equal(JSON.parse(readFileSync(output+'/metadata.json','utf8')).load.factor,'1/50');
+    assert.equal(JSON.parse(readFileSync(output+'/pilot.json','utf8')).label,'MAC-RELATIVE');
+  }
   assert.equal(JSON.parse(readFileSync(output+'/summary.json','utf8')).acceptance,false);
+  assert.equal(readFileSync(output+'/formal/seed-timing.jsonl','utf8'),timing);
   assert.ok(events.some(e=>e.startsWith('cp -pR ')));assert.ok(events.every(e=>!e.includes('timeout --signal')));
 });
 

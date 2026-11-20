@@ -291,6 +291,35 @@ test('failure after app container creation still cleans every host before return
   assert.equal(events.filter(e=>e.includes(' cleanup && timeout')).length,3);
   assert.ok(!events.some(e=>e.includes("'generators'")));
 });
+test('pool-overhead seed failure retains partial timing evidence without starting any attempt',async t=>{
+  const {config,runtime,events}=lifecycle(t);config.scenario='pool-overhead';
+  config.reviewedPatchSha256=createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex');
+  const original=runtime.exec;
+  const timing='{"kind":"batch","organization":1,"batchIndex":1,"durationMs":6001}\n';
+  runtime.exec=async command=>{
+    const result=await original(command);
+    if(command.args.join(' ').includes("'seed'"))return {code:1,stdout:''};
+    const dest=command.args.at(-1)!;
+    if(command.program==='scp' && dest===config.output+'/formal/seed-timing.jsonl') {
+      assert.match(command.args.at(-2)!,/^db:.*\/formal\/seed-timing\.jsonl$/);
+      writeFileSync(dest,timing);
+    }
+    return result;
+  };
+  await assert.rejects(run(config,runtime),/ssh failed \(exit 1\)/);
+  assert.equal(events.filter(event=>event.includes("'seed'")).length,1);
+  assert.ok(!events.some(event=>event.includes("'restore'")));
+  assert.equal(events.filter(event=>event.includes(' cleanup && timeout')).length,3);
+  assert.equal(readFileSync(config.output+'/formal/seed-timing.jsonl','utf8'),timing);
+  const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
+  assert.equal(summary.status,'NOT EVALUATED');
+  assert.equal(summary.infrastructureFailure,true);
+  assert.equal(summary.acceptance,false);
+  assert.deepEqual(summary.attempts,[]);
+  const status=JSON.parse(readFileSync(config.output+'/status.json','utf8'));
+  assert.equal(status.outcome,'infrastructure-failed');
+  assert.equal(status.operation,'seed');
+});
 test('config validates deadline timezone and raw opt-in',t=>{
   const path=temporary(t),file=path+'/config.env';
   for(const extra of ['DM_FORMAL_DEADLINE=invalid\n','DM_FORMAL_DEADLINE=2000-01-01T00:00:00Z\n','DM_FORMAL_DOWNLOAD_RAW=yes\n']) {

@@ -129,7 +129,18 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     if(JSON.parse(readFileSync(`${config.output}/db-image.json`,'utf8'))[0].Id!==imageId)throw new Error('Transferred image digest mismatch');
     await artifact(config.app,'ca.crt',`${config.output}/ca.crt`);
     for(const host of [config.db,config.generator])await upload(host,`${config.output}/ca.crt`,'ca.crt');
-    change('seed');await worker(config.db,'seed',0,0,90000000);
+    change('seed');
+    try {await worker(config.db,'seed',0,0,90000000);}
+    catch(error) {
+      try {
+        mkdirSync(`${config.output}/formal`,{mode:0o700});
+        await artifact(config.db,'formal/seed-timing.jsonl',`${config.output}/formal/seed-timing.jsonl`);
+      } catch {
+        json('seed-timing-transfer-failure.json',{remoteRoot:root,operation:'transfer:formal/seed-timing.jsonl'});
+      }
+      operation='seed';
+      throw error;
+    }
     await artifact(config.db,'formal',config.output);await artifact(config.db,'deep.json',`${config.output}/deep.json`);
     // Mode 0600 seeds travel through bounded local copies or authenticated SSH.
     for(const file of ['deep.json',...Array.from({length:config.mode==='smoke'?1:10},(_,i)=>`formal/org-${i}.json`)]) {
@@ -191,7 +202,12 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       try {await artifact(host,'evidence.tgz',`${destination}/evidence.tgz`);}catch {infrastructureFailure=true;json(`host-${index}/transfer-failure.json`,{operation:'retain',remoteRoot:root});}
     }
     json('summary.json',{...(overhead&&!pilot?{status:judgeOverhead(results as OverheadArm[]).status,overhead:judgeOverhead(results as OverheadArm[])}:{}),label,acceptance:false,attempts:results,deferredScenarios,requiredScenarios:['main','held200'],scenarioAcceptance:scenarioAcceptance(results.map((row)=>({...row as {attempt:number;acceptance:boolean},scenario:config.scenario,mode:config.mode})),deferredScenarios),reason:'Acceptance requires main and held200, each with three consecutive passing formal attempts, and all deferred scenarios; missing evidence is NOT EVALUATED.'});
-  } catch(error) {lastError=error instanceof Error?error.message:'Runner failed';json('failure.json',{label,phase,attempt,lastError,acceptance:false});throw error;}
+  } catch(error) {
+    lastError=error instanceof Error?error.message:'Runner failed';
+    json('failure.json',{label,phase,attempt,lastError,acceptance:false});
+    if(phase==='seed')json('summary.json',{status:'NOT EVALUATED',acceptance:false,infrastructureFailure:true,attempts:results,phase,reason:lastError,...(overhead?{design}:{})});
+    throw error;
+  }
   finally {
     try {await cleanup();}catch(error){lastError='Remote cleanup incomplete';throw error;}finally {clearInterval(heartbeat);clearTimeout(deadlineTimer);runtime.off('SIGINT',signal);runtime.off('SIGTERM',signal);phase=lastError?'failed':'complete';outcome=lastError?'infrastructure-failed':'complete';status();}
   }

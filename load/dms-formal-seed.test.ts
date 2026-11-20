@@ -1,15 +1,40 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { checkMessageBatch, checkOrganization, messageBatchBaselineMs, seed } from './dms-formal-seed.ts';
 
-test('formal seed analyzes Messages and Create log after the first batch of every Organization', async t => {
+test('Message batch baseline excludes the first batch and uses the median', () => {
+  assert.equal(messageBatchBaselineMs([50_000]), undefined);
+  assert.equal(messageBatchBaselineMs([50_000, 2_000, 4_000]), 3_000);
+  const times = [50_000, 4_000, 1_000, 2_000];
+  assert.equal(messageBatchBaselineMs(times), 2_000);
+  assert.deepEqual(times, [50_000, 4_000, 1_000, 2_000]);
+});
+
+test('Message batch guard skips Organization 0, first batches, missing baselines and sub-5 s batches', () => {
+  checkMessageBatch(0, 1, 60_000, 2_000);
+  checkMessageBatch(1, 0, 60_000, 2_000);
+  checkMessageBatch(1, 1, 60_000, undefined);
+  checkMessageBatch(1, 1, 4_999, 1_000);
+  checkMessageBatch(1, 1, 6_000, 2_000);
+  assert.throws(() => checkMessageBatch(1, 1, 5_000, 1_000), /Organization 1 Message batch 1 took 5000 ms \(limit 3000 ms\)/);
+  assert.throws(() => checkMessageBatch(2, 7, 6_001, 2_000), /Organization 2 Message batch 7 took 6001 ms \(limit 6000 ms\)/);
+});
+
+test('Organization guard uses a strict 2x total-time limit', () => {
+  checkOrganization(0, 199, 25_000, undefined);
+  checkOrganization(1, 199, 50_000, 25_000);
+  assert.throws(() => checkOrganization(2, 199, 50_001, 25_000), /Organization 2 total through Message batch 199 and final setup took 50001 ms \(limit 50000 ms\)/);
+});
+
+for (const scenario of ['healthy', 'slow batch', 'slow Organization']) test(`formal seed records timing and handles ${scenario}`, t => {
   const output = mkdtempSync(join(tmpdir(), 'dm-formal-seed-test-'));
   t.after(() => rmSync(output, { recursive: true, force: true }));
-  t.mock.method(console, 'log', () => {});
+  const log = t.mock.method(console, 'log', () => {});
   const config = {
     DM_FORMAL_SEED: '1', DM_FORMAL_OUT: output, DM_DB_CONTAINER: 'stub',
     DM_FORMAL_SEED_ORGS: '3', DM_FORMAL_SCENARIO: 'main', DM_FORMAL_SMOKE: '0',
@@ -23,16 +48,33 @@ test('formal seed analyzes Messages and Create log after the first batch of ever
     });
   }
 
+  let now = 0, organizationIndex = -1, batchIndex = 0;
+  t.mock.method(performance, 'now', () => now);
   const events: string[] = [];
   const docker = t.mock.method(childProcess, 'execFileSync', (program: string, _args: string[], { input }: { input: string }) => {
     assert.equal(program, 'docker');
+    if (input.startsWith('INSERT INTO organizations(')) {
+      organizationIndex++;
+      batchIndex = 0;
+    }
+    if (input.startsWith('INSERT INTO messages(')) {
+      now += batchIndex === 0 ? 20_000 : scenario === 'slow batch' && organizationIndex === 1 && batchIndex === 1 ? 6_001 : 2_000;
+      batchIndex++;
+    } else if (scenario === 'slow Organization' && organizationIndex === 1 && input.startsWith('INSERT INTO channel_message_sequences VALUES')) {
+      now += 500_000;
+    } else {
+      now++;
+    }
     for (const statement of input.matchAll(/INSERT INTO organizations\(|INSERT INTO messages\(|EXECUTE fixture_create_log\(|ANALYZE messages, channel_log;/g)) {
       events.push(statement[0]);
     }
+    if (input === 'VACUUM(ANALYZE);') events.push(input);
   });
   syncBuiltinESMExports();
   try {
-    await import('./dms-formal-seed.ts');
+    if (scenario === 'slow batch') assert.throws(seed, /Organization 1 Message batch 1 took 6001 ms \(limit 6000 ms\)/);
+    else if (scenario === 'slow Organization') assert.throws(seed, /Organization 1 total through Message batch 199 .* took \d+ ms \(limit \d+ ms\)/);
+    else seed();
   } finally {
     docker.mock.restore();
     syncBuiltinESMExports();
@@ -43,5 +85,23 @@ test('formal seed analyzes Messages and Create log after the first batch of ever
     'INSERT INTO organizations(', ...batch, 'ANALYZE messages, channel_log;',
     ...Array.from({ length: 200 }, () => batch).flat(),
   ];
-  assert.deepEqual(events, [...organization, ...organization, ...organization]);
+  const expected = scenario === 'healthy' ? [...organization, ...organization, ...organization, 'VACUUM(ANALYZE);']
+    : [...organization, ...(scenario === 'slow batch' ? organization.slice(0, 6) : organization)];
+  assert.deepEqual(events, expected);
+
+  const path = join(output, 'seed-timing.jsonl');
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  const rows = readFileSync(path, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+  const totals = rows.filter(row => row.kind === 'organization');
+  const completed = scenario === 'healthy' ? 3 : scenario === 'slow batch' ? 1 : 2;
+  assert.deepEqual(totals.map(row => row.organization), Array.from({length: completed}, (_, i) => i));
+  assert.equal(log.mock.callCount(), completed);
+  assert.equal(rows.length, completed * 201 + (scenario === 'slow batch' ? 2 : 0));
+  assert.deepEqual(rows[0], { kind: 'batch', organization: 0, batchIndex: 0, durationMs: 20_000 });
+  if (scenario === 'slow batch') {
+    assert.deepEqual(rows.at(-1), { kind: 'batch', organization: 1, batchIndex: 1, durationMs: 6_001 });
+  } else if (scenario === 'slow Organization') {
+    assert.ok(totals[1].durationMs > 2 * totals[0].durationMs);
+    assert.deepEqual(rows.at(-1), totals[1]);
+  }
 });
