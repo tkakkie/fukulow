@@ -199,6 +199,7 @@
 
   let channelListHeadingRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let mainHeadingRef = $state<HTMLElement | null>(null)
   let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let searchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
@@ -244,7 +245,7 @@
     const providedSource = searchSource
     const controller = createSearchController({
       source: providedSource ?? createDefaultSearchSource(orgId),
-      onOpenResult: (target) => handleOpenSearchResult(target),
+      onOpenResult: (target) => handleOpenSearchResult(orgId, target),
       onAnnounce: (message) => onannounce?.(message),
     })
     const entry = { organizationId: orgId, source: providedSource, controller }
@@ -470,7 +471,7 @@
         const preferTopicInput = focusTopicInputNext
         focusTopicInputNext = false
         if (!(preferTopicInput && focusTarget(mainTopicInputRef))) {
-          focusTarget(mainComposerRef)
+          if (!focusTarget(mainComposerRef) && state.searchResult) focusTarget(mainHeadingRef)
         }
       }
     })
@@ -559,14 +560,17 @@
     })
   })
 
-  function handleSelectChannel(id: string) {
-    if (id === s.selectedId) members?.authors.retry()
-    const navigated = nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
-    if (id === s.selectedId || navigated === false) {
+  function handleSelectChannel(id: string, result?: SearchTarget) {
+    const same = id === s.selectedId
+    if (same) members?.authors.retry()
+    const navigated = result
+      ? nav.openSearchResult(currentOrganizationId, result)
+      : nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
+    if (result || same || navigated === false) {
       if (dmState?.rows.some(row => row.identity.id === id)) session.dms?.select(id)
       else channels.select(id)
       if (
-        navigated === false &&
+        (navigated === false || (same && result?.replyRootId && !result.topicId)) &&
         typeof currentUnread !== 'undefined' &&
         currentUnread &&
         (currentUnread.state.stopped || currentUnread.state.main.stopped)
@@ -685,7 +689,7 @@
     if (!target.topicId) return true
     if (isDm) return false
     const topicsState = session.topics(target.channelId).state
-    if (topicsState.unavailable || topicsState.topic(target.topicId).notFound) return false
+    if (topicsState.topic(target.topicId).notFound) return false
     if (topicsState.topics.some((t) => t.topicId === target.topicId)) return true
     const allKnown =
       topicsState.list.asOfSeq !== undefined
@@ -694,16 +698,9 @@
     return !allKnown
   }
 
-  function handleOpenSearchResult(target: SearchTarget): boolean {
-    if (!currentOrganizationId || !canOpenSearchTarget(target)) return false
-    handleSelectChannel(target.channelId)
-    if (target.topicId) {
-      nav.navigate({
-        type: 'topic',
-        topicId: target.topicId,
-        phone: viewportWidth < MOBILE_BREAKPOINT_PX,
-      })
-    }
+  function handleOpenSearchResult(organizationId: string, target: SearchTarget): boolean {
+    if (!organizationId || organizationId !== currentOrganizationId || organizationUnavailable || !canOpenSearchTarget(target)) return false
+    handleSelectChannel(target.channelId, target)
     return true
   }
 
@@ -975,7 +972,7 @@
               </Button>
               <span class="main-card__crumb"># {conversationName} ›</span>
             {/if}
-            <h1 class="main-card__title">
+            <h1 class="main-card__title" tabindex="-1" bind:this={mainHeadingRef}>
               {route?.topicId ? (resolvedTopicName || 'トピック') : conversationName}
             </h1>
           {:else if organizationUnavailable}

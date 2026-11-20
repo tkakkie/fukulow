@@ -71,14 +71,13 @@ export function createNavigation(browser: NavigationBrowser = window) {
     },
     getOpener: () => opener,
     getReturningTopicId: () => returningTopicId,
-    openSearchResult(result: SearchResultTarget) {
+    openSearchResult(organizationId: string, result: SearchResultTarget) {
       const old = snapshot.target
-      if (!old) return false
-      const previousTab = result.replyRootId && old.channelId === result.channelId
+      const previousTab = result.replyRootId && old?.organizationId === organizationId && old.channelId === result.channelId
         ? (old.panel?.startsWith('reply:') ? snapshot.previousTab : old.panel as PanelTab | null)
         : null
       const target: NavigationTarget = {
-        organizationId: old.organizationId, channelId: result.channelId, topicId: result.topicId ?? null,
+        organizationId, channelId: result.channelId, topicId: result.topicId ?? null,
         panel: result.replyRootId ? `reply:${result.messageId}` : null,
       }
       opener = null

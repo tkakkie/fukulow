@@ -699,7 +699,7 @@ describe('Search result navigation', () => {
       await settle()
       net.subscribed('A', 100)
       await settle()
-      app.navigation.openSearchResult({ channelId: 'A', topicId, messageId: 'id4', createdSeq: 4 })
+      app.navigation.openSearchResult('org', { channelId: 'A', topicId, messageId: 'id4', createdSeq: 4 })
       await settle()
       older.resolve(ok({ history_generation, as_of_seq: 100, messages: [message(1), message(2), message(3)], has_more: false }))
       await settle()
@@ -725,7 +725,7 @@ describe('Search result navigation', () => {
     try {
       await settle()
       net.subscribed('A', 100)
-      app.navigation.openSearchResult({ channelId: 'A', messageId: 'id40', createdSeq: 40 })
+      app.navigation.openSearchResult('org', { channelId: 'A', messageId: 'id40', createdSeq: 40 })
       await settle()
       expect(app.host.querySelector('.ui-message-row--search-match')?.textContent).toContain('m40')
       if (action === 'latest') buttonsByText(app.host, '最新のメッセージへ')[0].click()
@@ -764,7 +764,7 @@ describe('Search result navigation', () => {
     try {
       await settle()
       net.subscribed('A', 100)
-      app.navigation.openSearchResult({ channelId: 'A', replyRootId: root.id, messageId: hit.id, createdSeq: 35 })
+      app.navigation.openSearchResult('org', { channelId: 'A', replyRootId: root.id, messageId: hit.id, createdSeq: 35 })
       await settle()
       expect(app.navigation.get().target?.panel).toBe('reply:id35')
       expect(app.host.querySelector('#panel-content .ui-message-row--search-match')?.textContent).toContain('m35')
@@ -772,7 +772,7 @@ describe('Search result navigation', () => {
       expect(net.replyHistory.map(({ query }) => query?.after_seq)).toEqual([34, 10])
       expect(app.session.sync.get().channels.A.cursor).toBe(100)
 
-      app.navigation.openSearchResult({ channelId: 'A', replyRootId: root.id, messageId: 'id34', createdSeq: 34 })
+      app.navigation.openSearchResult('org', { channelId: 'A', replyRootId: root.id, messageId: 'id34', createdSeq: 34 })
       await settle()
       const panel = app.host.querySelector('#panel-content')!
       expect(panel.querySelector('[role="alert"]')?.textContent).toContain('このメッセージは表示できません。')

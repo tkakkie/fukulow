@@ -16,6 +16,7 @@ export type SearchTarget = {
   topicId?: string | null
   replyRootId?: string | null
   messageId: string
+  createdSeq: number
 }
 
 export type SearchStatus =
