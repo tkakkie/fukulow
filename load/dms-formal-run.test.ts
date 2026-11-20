@@ -320,6 +320,22 @@ test('pool-overhead seed failure retains partial timing evidence without startin
   assert.equal(status.outcome,'infrastructure-failed');
   assert.equal(status.operation,'seed');
 });
+test('seed failure records the transfer failure when timing evidence is missing',async t=>{
+  const {config,runtime}=lifecycle(t);
+  const original=runtime.exec;
+  const seedError=new Error('seed failed before writing timing evidence');
+  runtime.exec=async command=>{
+    if(command.args.at(-1)?.includes("'seed'"))throw seedError;
+    if(command.program==='scp' && command.args.at(-1)===config.output+'/formal/seed-timing.jsonl')return {code:1,stdout:''};
+    return original(command);
+  };
+  await assert.rejects(run(config,runtime),error=>error===seedError);
+  const status=JSON.parse(readFileSync(config.output+'/status.json','utf8'));
+  assert.equal(status.operation,'seed');
+  const failure=JSON.parse(readFileSync(config.output+'/seed-timing-transfer-failure.json','utf8'));
+  assert.equal(failure.operation,'transfer:formal/seed-timing.jsonl');
+  assert.equal(failure.remoteRoot,'/tmp/'+status.id);
+});
 test('config validates deadline timezone and raw opt-in',t=>{
   const path=temporary(t),file=path+'/config.env';
   for(const extra of ['DM_FORMAL_DEADLINE=invalid\n','DM_FORMAL_DEADLINE=2000-01-01T00:00:00Z\n','DM_FORMAL_DOWNLOAD_RAW=yes\n']) {
