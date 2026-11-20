@@ -2,7 +2,7 @@
 
 Write cross-cutting work rules and procedures beyond code, tests and `openapi.json` ([writing rules](#13-splitting-a-doc)). Follow unprompted. Rules in `AGENTS.md`, rationale in `docs/decisions.md`.
 
-AIs use `gh` and `git` directly as `tkakkie` by maintainer decision. The §5 signature identifies the AI. For Codex and Antigravity workers, the orchestrator handles all commit, push and GitHub steps (§4), including labels, comments and CI checks. Never push to `main`. See §10 for merge authority.
+AIs use `gh` and `git` directly as `tkakkie` by maintainer decision. The `AI:` signature identifies the AI. For Codex and Antigravity workers, the orchestrator handles all commit, push and GitHub steps (§4), including labels, comments and CI checks. Never push to `main`. See §10 for merge authority.
 
 In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integration for Issues, PRs, labels and reviews. Maintainer-only review may replace §5's second AI only for docs-only changes or changes limited to a doc-length CI script and its tests. Exclude product code, auth, permissions, tenant scoping, real-time delivery, migrations and weakening any existing CI check. State this scope in the Issue and get maintainer approval. The `main` ruleset still requires green `web`, `server` and `docker` checks on the head.
 
@@ -81,7 +81,7 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 - Orchestrator: launch each worker from the task worktree using the Bash tool with `run_in_background: true` (no `nohup ... &`). Harness exit notifications resume §1 unprompted. Keep prompt, `-o` result and logs in the scratchpad outside the repo. Read Codex result and log or Antigravity log on exit, then sweep. `<agy-home>` is the maintainer-provisioned Antigravity login directory shared across worktrees. An empty `HOME` prompts for login.
   Codex (CLI 0.169.0 or later; older CLIs reject the 6.2 model ids): `cd <worktree> && codex exec -m <gpt-6.2-sol|gpt-6.2-astra> -c 'model_reasoning_effort="<low|medium|high>"' --sandbox danger-full-access -C . -o <scratch>/result.md "$(cat <scratch>/prompt.md)" < /dev/null > <scratch>/log 2>&1` (same flags for every role; review or check prompts forbid edits; the log streams progress).
   Antigravity: `env HOME=<agy-home> PATH=/usr/local/argon-agy:$PATH /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model <gemini-4-neon-low|gemini-4-neon-medium|gemini-4-hydrogen-low> --dangerously-skip-permissions --print-timeout 3600s --output-format stream-json < /dev/null > <scratch>/log.jsonl 2>&1` (one JSON event per line plus stderr, so progress shows during the run; the final report ends the log).
-  Both worker prompts forbid commits, pushes and GitHub. The orchestrator reviews the diff, runs checks and commits with the worker as author (`GIT_AUTHOR_NAME=<Codex|Antigravity>`, `GIT_AUTHOR_EMAIL=<codex@users.noreply.github.com|noreply@example.com>`). Check changes left in the worktree after timeout before restarting. Claude runs as the orchestrator or as a subagent, each as itself.
+  The orchestrator reviews the diff, runs checks and commits with the worker as author (`GIT_AUTHOR_NAME=<Codex|Antigravity>`, `GIT_AUTHOR_EMAIL=<codex@users.noreply.github.com|noreply@example.com>`). Check changes left in the worktree after timeout before restarting. Claude runs as the orchestrator or as a subagent, each as itself.
 
   Before launching a worker, write `<scratch>/context.md` next to the prompt, aiming for a few KB (#451). Include Issue number, title, "Done when" and "How I read the spec"; role (implementer/reviewer), limits (no commit/push/GitHub), model, effort, H numbers and H1–H3 stop/report instruction; touched-area AGENTS.md rules and matching spec, decisions and invariants headings, quoted verbatim with path and heading; likely files, owning module, neighbouring tests and Commands; report format (changes, tests/results, open questions, docs read beyond the pack).
   Implementers read the pack first, other docs only if needed, and report each extra doc and why. Reviewers start with the pack and read docs normally. State these reading rules in their prompts. Read summaries first for worker, CI, E2E and load results (result file, failing-job tail, `load/summary.ts`). Use full logs when diagnosis or consistency requires them.
@@ -92,9 +92,7 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 - Independent AI review for PRs touching auth, permissions, real-time or migrations, and astra-authored PRs.
 - Copilot auto-review is off (credits). Manually request once per PR (`gh pr edit <n> --add-reviewer @copilot`) only for `risk:needs-review` or large code PRs, when work is done and CI is green. Request again only within the two-round cap when clearly needed and state why in the PR.
 - Copilot findings in unchanged code become non-blocking follow-up Issues except for security, data loss or corruption, cross-Organization information leak, a serious defect caused by this PR or unmet "Done when" (#275).
-- PR entry to `status:human-review` follows §2's CI, mergeability, review, fix and Copilot gates.
 - Every AI review comment, including orchestrator round-2 checks, puts `Verdict: round=<1|2> blocking=<n> nonblocking=<n>` directly above the signature (#452). Round 2 counts only open or new findings. With no verdict, the review counts as missing.
-- End every Issue comment, review and PR body with `AI: <name> / model: <id> / effort: <level>`. Everything on GitHub is in English.
 
 ## 6. Conflicts and CI
 - In the conflicting PR's worktree, `git fetch origin && git merge origin/main`, resolve, run Commands and push. Keep both sides' current `docs/decisions/` entries. Rewrite only within that index header's writing rules. Existing green CI is stale. Require CI on the new head (§2).
@@ -110,7 +108,6 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 | AI run ended without updating label/comment | Sweeper reads PR/branch, finishes label and comments with next step |
 | Dependent Issue waits on PR | Label `blocked`, comment "blocked by #n" for all blockers. Sweeper follows §2 on merged or unmerged closure |
 | Async CI, Copilot or worker overdue without notification | Check directly once per sweep (§1 commands plus worker log). Handle finished results, or keep label and work elsewhere while running. Recheck at next sweep/stall check. Relaunch dead workers without results (§4). No `status:needs-decision` for waiting |
-| Results arrive while orchestrator idle | Sweep immediately, without waiting for user |
 | AI stuck or needs higher effort | Stop it and comment findings. It counts as a failure only if restarted under §4 Failures. Restart at `high` only for §4 step 1; otherwise follow §4 Failures or report with `status:needs-decision` |
 | Needs token, secret or denied permission | `status:needs-decision` with exact request. Continue other work |
 
@@ -159,5 +156,5 @@ Merges; Issue approvals ("OK"); token/secret changes; adding a language, depende
 ## 14. Focused SQL measurements
 - Keep each harness in `load/sql-probes/` in Git: SQL, run script and reproduction steps. Synthetic data only, with no secrets or real data (#540).
 - Record per run: commit SHA, PostgreSQL image digest, DB settings, measured role and its RLS check, Custom/Generic/Auto, `pg_prepared_statements` state, cache condition and repetitions.
-- Keep raw `EXPLAIN` JSON and samples: small ones in Git, large ones in durable storage with location, SHA-256 and retention. A temporary directory or expiring CI artifact alone does not count.
-- The `docs/measurements.md` entry links harness, raw data and steps.
+- Keep raw `EXPLAIN` JSON and samples. In Git: at most 1 MiB compressed per run in total, never split to evade the cap. Larger: a dedicated Cloudflare R2 measurement bucket, separate from backups, with its own least-privilege credentials. Retain at least 365 days and while current results or decisions cite it; no automatic expiry; after that, review and delete only unneeded data. Creating, credentialing and enabling the bucket need separate approval; until then record the data as not stored. A temporary directory or expiring CI artifact alone never counts as stored.
+- The `docs/measurements.md` entry links harness, steps, raw data location, SHA-256 and retention end.
