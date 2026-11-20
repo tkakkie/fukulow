@@ -23,6 +23,8 @@ export type SearchResultContext =
 
 export type SearchResultItem = {
   messageId: string
+  /** The immutable per-Channel creation sequence. */
+  createdSeq: number
   channelId: string
   topicId: string | null
   replyRootId: string | null
@@ -81,6 +83,7 @@ function buildDefaultMockItems(nowMs: number): readonly SearchResultItem[] {
   return [
     {
       messageId: 'mock-msg-1',
+      createdSeq: 3,
       channelId: 'general',
       topicId: 'topic-release',
       replyRootId: null,
@@ -98,6 +101,7 @@ function buildDefaultMockItems(nowMs: number): readonly SearchResultItem[] {
     },
     {
       messageId: 'mock-msg-2',
+      createdSeq: 2,
       channelId: 'general',
       topicId: null,
       replyRootId: 'mock-root-1',
@@ -113,6 +117,7 @@ function buildDefaultMockItems(nowMs: number): readonly SearchResultItem[] {
     },
     {
       messageId: 'mock-msg-3',
+      createdSeq: 1,
       channelId: 'dm-1',
       topicId: null,
       replyRootId: null,

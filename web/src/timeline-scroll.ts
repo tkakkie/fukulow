@@ -21,7 +21,7 @@ export type ScrollAnchor = {
   offsetTop: number
 }
 
-export type ScrollAction = 'none' | 'scroll_bottom' | 'preserve_anchor' | 'scroll_first_unread'
+export type ScrollAction = 'none' | 'scroll_bottom' | 'preserve_anchor' | 'scroll_first_unread' | 'scroll_search_anchor'
 
 export type TimelineScrollState = {
   channelId: string
@@ -50,6 +50,8 @@ export type TimelineScrollInput =
       pendingIds: readonly string[]
       selfId: string
       firstUnreadMessageId?: string | null
+      searchAnchorId?: string
+      searchAsOfSeq?: number
       awaitingFirstUnread?: boolean
     }
 
@@ -149,13 +151,15 @@ export function stepTimelineScroll(
       const maxSeq = input.messages.at(-1)?.created_seq ?? null
       const messageSeqs = input.messages.map((m) => m.created_seq)
       const hasContent = input.messages.length > 0 || input.pendingIds.length > 0
-      const targetUnreadId = input.firstUnreadMessageId ?? null
+      const searchAnchorId = input.searchAnchorId
+      const hasSearchAnchor = Boolean(searchAnchorId && input.messages.some(m => m.id === searchAnchorId))
+      const targetUnreadId = searchAnchorId ? null : input.firstUnreadMessageId ?? null
       const hasTargetUnread =
         targetUnreadId !== null && input.messages.some((m) => m.id === targetUnreadId)
       const displayed = input.displayed !== false
       const awaitingUnread =
         !displayed ||
-        Boolean(input.awaitingFirstUnread) ||
+        (searchAnchorId ? !hasSearchAnchor : Boolean(input.awaitingFirstUnread)) ||
         (targetUnreadId !== null && !hasTargetUnread)
       const prevVisitId = prev.visitId ?? null
       const nextVisitId = input.visitId ?? null
@@ -219,7 +223,7 @@ export function stepTimelineScroll(
             channelId: input.channelId,
             ...(resolvedVisitId !== null ? { visitId: resolvedVisitId } : {}),
             initialized,
-            pinned: true,
+            pinned: !hasSearchAnchor,
             belowCount: 0,
             minSeq,
             maxSeq,
@@ -227,7 +231,8 @@ export function stepTimelineScroll(
             pendingIds: new Set(input.pendingIds),
             ...(nextScrolledUnreadId !== null ? { firstUnreadScrolledId: nextScrolledUnreadId } : {}),
           },
-          action: hasContent ? (hasTargetUnread ? 'scroll_first_unread' : 'scroll_bottom') : 'none',
+          action: hasSearchAnchor ? 'scroll_search_anchor'
+            : hasContent ? (hasTargetUnread ? 'scroll_first_unread' : 'scroll_bottom') : 'none',
         }
       }
 
@@ -262,8 +267,11 @@ export function stepTimelineScroll(
         prev.maxSeq !== null &&
         [...prev.seenSeqs].some((seq) => seq < prev.maxSeq! && !seenSeqs.has(seq))
       const appendedAtTail = addedMessages.filter((m) => prev.maxSeq === null || m.created_seq > prev.maxSeq)
+      const searchAsOfSeq = input.searchAsOfSeq
+      const liveTail = searchAsOfSeq === undefined ? appendedAtTail
+        : appendedAtTail.filter(m => m.created_seq > searchAsOfSeq)
       const ownSendAtTail =
-        newPendingAdded || (appendedAtTail.length > 0 && appendedAtTail.every((m) => m.sender === input.selfId))
+        newPendingAdded || (liveTail.length > 0 && liveTail.every((m) => m.sender === input.selfId))
 
       if (ownSendAtTail) {
         return {
@@ -280,7 +288,7 @@ export function stepTimelineScroll(
         }
       }
 
-      if ((insertedAboveTail.length > 0 || removedAboveTail) && appendedAtTail.length === 0) {
+      if ((insertedAboveTail.length > 0 || removedAboveTail) && liveTail.length === 0) {
         return {
           state: {
             ...prev,
@@ -293,7 +301,7 @@ export function stepTimelineScroll(
         }
       }
 
-      if (appendedAtTail.length > 0) {
+      if (liveTail.length > 0) {
         if (prev.pinned) {
           return {
             state: {
@@ -308,7 +316,7 @@ export function stepTimelineScroll(
             action: 'scroll_bottom',
           }
         }
-        const newFromOthers = appendedAtTail.filter((m) => m.sender !== input.selfId).length
+        const newFromOthers = liveTail.filter((m) => m.sender !== input.selfId).length
         return {
           state: {
             ...prev,
@@ -529,13 +537,13 @@ export function handleTimelineContainerScroll(
   )
 }
 
-/** Applies a `ScrollAction` (`scroll_bottom`, `scroll_first_unread` or `preserve_anchor`) to a timeline scroll container (`docs/ui.md` §8). */
+/** Applies a scroll action to a timeline scroll container (`docs/ui.md` §8). */
 export function applyTimelineScrollAction(
   container: HTMLElement | null,
   controller: Pick<TimelineScrollController, 'captureAnchor'> & Partial<Pick<TimelineScrollController, 'onScroll'>>,
   action: ScrollAction,
   anchor: ScrollAnchor | null,
-  firstUnreadMessageId?: string | null,
+  targetMessageId?: string | null,
 ): void {
   if (!container || action === 'none') return
   if (action === 'scroll_bottom') {
@@ -543,12 +551,12 @@ export function applyTimelineScrollAction(
     controller.captureAnchor(measureTimelineItems(container))
     return
   }
-  if (action === 'scroll_first_unread') {
-    const marker = container.querySelector<HTMLElement>('[data-read-marker="true"]')
+  if (action === 'scroll_first_unread' || action === 'scroll_search_anchor') {
+    const marker = action === 'scroll_first_unread' && container.querySelector<HTMLElement>('[data-read-marker="true"]')
     const targetEl =
-      marker ??
-      (firstUnreadMessageId
-        ? container.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(firstUnreadMessageId)}"]`)
+      marker ||
+      (targetMessageId
+        ? container.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(targetMessageId)}"]`)
         : null)
     if (targetEl) {
       const cRect = container.getBoundingClientRect()

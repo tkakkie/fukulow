@@ -1,6 +1,7 @@
 import { completeCountFields } from './unread-counts'
 import { createActivity, createActivityTarget, type ActivityTarget } from './activity'
 import { createNavigationTargets } from './navigation-targets'
+import { createSearchAnchor, SEARCH_WINDOW_LIMIT } from './search-anchor'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
@@ -173,6 +174,18 @@ export function createSession(options: SessionOptions) {
     reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
+  const searchAnchor = createSearchAnchor(sync, {
+    messages: ({ channelId, topicId }, query) => observe(topicId
+      ? topicSource.listTopicMessages(channelId, topicId, query)
+      : timeline.listMessages(channelId, query)),
+    reply: ({ channelId, messageId }, query) =>
+      observe(replySource.listReplyChain(channelId, messageId, query, options.accountSignal)),
+  })
+  const stopSearchBudget = searchAnchor.subscribe(() => {
+    const view = searchAnchor.get()
+    const target = view?.status === 'missing' || view?.target.replyRootId ? undefined : view?.target
+    topics.reserveSearch(target?.channelId, target?.topicId ? 'topic' : 'main', target ? SEARCH_WINDOW_LIMIT : 0)
+  })
   let watched: string | null = null
   const { listArchivedChannels, getChannel, updateChannel } = source
   const channels = createChannels(
@@ -332,7 +345,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets,
+    sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets, searchAnchor,
     memberListAccess,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
@@ -368,6 +381,7 @@ export function createSession(options: SessionOptions) {
       closed = true
       stopActivity(); activity.close(); capabilities.close()
       navigationTargets.close(); replyCounts.close()
+      stopSearchBudget(); searchAnchor.close()
       stopFollowing(); stopSync(); stopMemberAccess()
       for (const { controller } of [...memberControllers.values()]) controller.close()
       memberControllers.clear()

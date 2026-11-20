@@ -2,6 +2,7 @@
   import { tick, untrack } from 'svelte'
   import type { Navigation } from './navigation'
   import { navigationAdapter } from './navigation.svelte'
+  import type { SearchPresentation } from './search-anchor.svelte'
   import { createSubscriber } from 'svelte/reactivity'
   import { createAnnouncementController } from './announcements'
   import type { MentionName } from './mentions'
@@ -121,6 +122,14 @@
   const channelUnreadCount = (id: string): number | null =>
     session.unread?.(id).state.unreadCount ?? null
   const activeReplyMessageId = $derived(route?.panel?.startsWith('reply:') ? route.panel.slice(6) : null)
+  const searchResult = $derived(route?.organizationId === currentOrganizationId ? nav.state.searchResult : undefined)
+  const searchRead = $derived(session.searchAnchor?.state)
+  const searchView = $derived(searchRead?.target === searchResult ? searchRead : undefined)
+  const search = $derived<SearchPresentation | undefined>(session.searchAnchor && searchResult && !searchResult.replyRootId
+    ? { target: searchResult, view: searchView, retry: session.searchAnchor.retry, loadOlder: session.searchAnchor.loadOlder,
+        loadNewer: session.searchAnchor.loadNewer, latest: navigation.leaveSearchResult }
+    : undefined)
+  const searchReply = $derived(Boolean(searchResult?.replyRootId))
   let lastOpenedAnchor = $state<Message | null>(null)
   const inMemoryReplyAnchor = $derived.by(() => {
     if (!activeReplyMessageId || !selected) return null
@@ -142,14 +151,17 @@
     return null
   })
   const replyTargetState = $derived(
-    session.navigationTargets &&
+    searchReply
+      ? { status: searchView?.status === 'missing' ? 'unavailable' as const : searchView?.status ?? 'loading' as const,
+          anchor: searchView?.reply }
+      : session.navigationTargets &&
       (!session.navigationTargets.state.reply.targetId ||
         session.navigationTargets.state.reply.targetId === activeReplyMessageId)
       ? session.navigationTargets.state.reply
       : { status: 'idle' as const, name: '' },
   )
   const resolvedReplyAnchor = $derived(
-    inMemoryReplyAnchor ?? replyTargetState.anchor ?? null,
+    (searchReply ? searchView?.reply : inMemoryReplyAnchor ?? replyTargetState.anchor) ?? null,
   )
   const allTopicsKnown = $derived(
     currentTopicsState
@@ -187,6 +199,7 @@
 
   let channelListHeadingRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let mainHeadingRef = $state<HTMLElement | null>(null)
   let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let searchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
@@ -232,7 +245,7 @@
     const providedSource = searchSource
     const controller = createSearchController({
       source: providedSource ?? createDefaultSearchSource(orgId),
-      onOpenResult: (target) => handleOpenSearchResult(target),
+      onOpenResult: (target) => handleOpenSearchResult(orgId, target),
       onAnnounce: (message) => onannounce?.(message),
     })
     const entry = { organizationId: orgId, source: providedSource, controller }
@@ -309,6 +322,7 @@
       for (const message of currentTopicsState.topic(route.topicId).messages) ids.push(message.sender)
     }
     for (const message of currentRepliesState?.messages ?? []) ids.push(message.sender)
+    for (const message of searchView?.messages ?? []) ids.push(message.sender)
     if (resolvedReplyAnchor) ids.push(resolvedReplyAnchor.sender)
     members?.authors.watch(ids)
   })
@@ -350,8 +364,15 @@
 
   $effect(() => {
     if (route?.organizationId !== currentOrganizationId || organizationUnavailable) return
-    const skipReplyHint = Boolean(currentReplies && activeReplyMessageId && untrack(() => inMemoryReplyAnchor))
+    const skipReplyHint = searchReply || Boolean(currentReplies && activeReplyMessageId && untrack(() => inMemoryReplyAnchor))
     void session.navigationTargets?.load(skipReplyHint ? { ...route, panel: null } : route)
+  })
+
+  $effect(() => {
+    const anchor = session.searchAnchor
+    const result = searchResult
+    anchor?.open(result)
+    if (result) drawerOpen = false
   })
 
   $effect(() => {
@@ -450,7 +471,7 @@
         const preferTopicInput = focusTopicInputNext
         focusTopicInputNext = false
         if (!(preferTopicInput && focusTarget(mainTopicInputRef))) {
-          focusTarget(mainComposerRef)
+          if (!focusTarget(mainComposerRef) && state.searchResult) focusTarget(mainHeadingRef)
         }
       }
     })
@@ -539,14 +560,17 @@
     })
   })
 
-  function handleSelectChannel(id: string) {
-    if (id === s.selectedId) members?.authors.retry()
-    const navigated = nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
-    if (id === s.selectedId || navigated === false) {
+  function handleSelectChannel(id: string, result?: SearchTarget) {
+    const same = id === s.selectedId
+    if (same) members?.authors.retry()
+    const navigated = result
+      ? nav.openSearchResult(currentOrganizationId, result)
+      : nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
+    if (result || same || navigated === false) {
       if (dmState?.rows.some(row => row.identity.id === id)) session.dms?.select(id)
       else channels.select(id)
       if (
-        navigated === false &&
+        (navigated === false || (same && result?.replyRootId && !result.topicId)) &&
         typeof currentUnread !== 'undefined' &&
         currentUnread &&
         (currentUnread.state.stopped || currentUnread.state.main.stopped)
@@ -665,7 +689,7 @@
     if (!target.topicId) return true
     if (isDm) return false
     const topicsState = session.topics(target.channelId).state
-    if (topicsState.unavailable || topicsState.topic(target.topicId).notFound) return false
+    if (topicsState.topic(target.topicId).notFound) return false
     if (topicsState.topics.some((t) => t.topicId === target.topicId)) return true
     const allKnown =
       topicsState.list.asOfSeq !== undefined
@@ -674,16 +698,9 @@
     return !allKnown
   }
 
-  function handleOpenSearchResult(target: SearchTarget): boolean {
-    if (!currentOrganizationId || !canOpenSearchTarget(target)) return false
-    handleSelectChannel(target.channelId)
-    if (target.topicId) {
-      nav.navigate({
-        type: 'topic',
-        topicId: target.topicId,
-        phone: viewportWidth < MOBILE_BREAKPOINT_PX,
-      })
-    }
+  function handleOpenSearchResult(organizationId: string, target: SearchTarget): boolean {
+    if (!organizationId || organizationId !== currentOrganizationId || organizationUnavailable || !canOpenSearchTarget(target)) return false
+    handleSelectChannel(target.channelId, target)
     return true
   }
 
@@ -955,7 +972,7 @@
               </Button>
               <span class="main-card__crumb"># {conversationName} ›</span>
             {/if}
-            <h1 class="main-card__title">
+            <h1 class="main-card__title" tabindex="-1" bind:this={mainHeadingRef}>
               {route?.topicId ? (resolvedTopicName || 'トピック') : conversationName}
             </h1>
           {:else if organizationUnavailable}
@@ -1054,6 +1071,7 @@
               topicId={route.topicId}
               topicName={resolvedTopicName}
               topicStatus={session.navigationTargets?.state.topic.status ?? 'idle'}
+              {search}
               selfId={organization?.member.id ?? ''}
               viewSelected={mainViewSelected}
               {organizationUnavailable}
@@ -1082,6 +1100,7 @@
             unread={currentUnread}
             channelId={selected.id}
             {sendDisabled}
+            {search}
             selfId={organization?.member.id ?? ''}
             viewSelected={mainViewSelected}
             {organizationUnavailable}
@@ -1158,6 +1177,8 @@
               anchorMessageId={activeReplyMessageId}
               resolvedAnchor={resolvedReplyAnchor}
               replyTargetStatus={replyTargetState.status}
+              {searchReply}
+              searchVisit={searchReply ? searchView?.visit : undefined}
               selfId={organization?.member.id ?? ''}
               {organizationUnavailable}
               {sendDisabled}
@@ -1169,7 +1190,8 @@
               onmentionrequest={() => { void members?.load() }}
               onopenreplies={handleOpenReplies}
               onretrytarget={() => {
-                if (route) void session.navigationTargets?.load(route, true)
+                if (searchReply) void session.searchAnchor?.retry()
+                else if (route) void session.navigationTargets?.load(route, true)
               }}
               ongoToChannelList={goToChannelList}
               onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}

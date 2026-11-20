@@ -8,7 +8,7 @@ import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageReques
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { createCore } from '#sync-core'
 import type { SyncCore } from './protocol-types'
-import type { ChannelState, Effect, Input } from './protocol-types'
+import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
 
 export type TimelineApi = {
   listChannelEvents(channel: string, query: api.ListChannelEventsQuery): Promise<Result<api.ChannelEventPage>>
@@ -98,6 +98,8 @@ export function topicNameError(name: string): string | null {
 const emptyComposer: ChannelComposerState = { draft: '', topicDraft: '', composerError: null }
 const emptyTopicExtra: TopicComposerState = { draft: '', composerError: null }
 
+type SyncListener = (changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>, moves?: readonly MoveVersion[]) => void
+
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
   const transport = options.api ?? {
@@ -118,7 +120,7 @@ export function createSync(options: SyncOptions) {
   const requests = createRequestDeadlines()
   const noticeListeners = new Set<(notice: ActivityNotice) => void>()
   const inputListeners = new Set<(input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void>()
-  const listeners = new Set<(changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void>()
+  const listeners = new Set<SyncListener>()
   const channelListeners = new Map<string, Set<() => void>>()
   const composerListeners = new Map<string, Set<() => void>>()
   const topicComposerListeners = new Map<string, Set<() => void>>()
@@ -345,7 +347,7 @@ export function createSync(options: SyncOptions) {
         }
       }
     }
-    if (result.stateChanged) listeners.forEach(l => l(result.changedChannels, result.records))
+    if (result.stateChanged) listeners.forEach(l => l(result.changedChannels, result.records, result.moves))
     for (const channel of result.changedChannels) {
       channelListeners.get(channel)?.forEach(l => l())
     }
@@ -828,7 +830,7 @@ export function createSync(options: SyncOptions) {
     get: () => state,
     request: (id: number) => core.request(id),
     timer: (id: number) => core.timer(id),
-    subscribe(listener: (changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    subscribe(listener: SyncListener) { listeners.add(listener); return () => { listeners.delete(listener) } },
     start: () => dispatch({ type: 'session_start', selfId: options.selfId }),
     replaceSession: (selfId: string) => dispatch({ type: 'session_replaced', selfId }),
     watch: (channel: string) => dispatch({ type: 'watch', channel }),

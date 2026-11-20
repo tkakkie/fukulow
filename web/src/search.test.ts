@@ -21,6 +21,7 @@ import { deferred } from './unread-test-helpers'
 function makeItem(index: number, overrides: Partial<SearchResultItem> = {}): SearchResultItem {
   return {
     messageId: `msg-${index}`,
+    createdSeq: index + 1,
     channelId: 'ch-1',
     topicId: null,
     replyRootId: null,
@@ -181,7 +182,7 @@ describe('createSearchController', () => {
     ctrl.destroy()
   })
 
-  it('closes search and invokes openSearchResult(target) with channel, optional topic, optional replyRootId, and messageId', async () => {
+  it('closes search and forwards the target and creation sequence to openSearchResult', async () => {
     const onOpenResult = vi.fn()
     const ctrl = createSearchController({ source: createMockSearchSource(), onOpenResult })
     await ctrl.submit('リリース')
@@ -192,6 +193,7 @@ describe('createSearchController', () => {
       topicId: 'topic-release',
       replyRootId: 'root-1',
       messageId: 'mock-msg-1',
+      createdSeq: 3,
     }
     ctrl.openSearchResult(target)
     expect(ctrl.get().open).toBe(false)
@@ -264,6 +266,7 @@ describe('createSearchController', () => {
       topicId: first.topicId,
       replyRootId: first.replyRootId,
       messageId: first.messageId,
+      createdSeq: first.createdSeq,
     })
     expect(onOpenResult).toHaveBeenCalledTimes(1)
     expect(devCtrl.get().open).toBe(true)

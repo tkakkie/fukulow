@@ -42,7 +42,7 @@ API `/api/v1`; OpenAPI from Rust (utoipa) -> `openapi.json` -> TS types; shared 
 - CI enforces the leaves `database` and `shutdown` (#319, #328). Their only incoming edges are `auth`, `channels`, `messages`, `realtime` -> `database` and `messages`, `realtime` -> `shutdown`.
 - A module owns its tables and exposes functions; others never query them. Handlers live in their module: parse, call, map errors.
 - Web layers (target for new code, Tier 2): (1) small components: display, input, a11y, Japanese strings; no I/O, `fetch`, sockets or sync rules. (2) `.svelte.ts` adapter: thin `$state`/`$derived` over the controller.
-- (3) controller (plain `.ts`): sockets, timers, backoff, HTTP, effects. (4) pure Rust protocol owns State: `step(input)` returns effects, changed Channels, records and stateChanged; no clock, randomness, I/O or Svelte. JS caches changed views only; bounded request/timer accessors. Vitest exercises wasm. (5) API/transport: `src/api.ts`, WebSocket client, generated types.
+- (3) controller (plain `.ts`): sockets, timers, backoff, HTTP, effects. (4) pure Rust protocol owns State: `step(input)` returns effects, changed Channels, records, new Moves and stateChanged; no clock, randomness, I/O or Svelte. JS caches changed views only; bounded request/timer accessors. Vitest exercises wasm. (5) API/transport: `src/api.ts`, WebSocket client, generated types.
 - 4 and 5 do not know each other; only message sync has a protocol, CRUD is controller + adapter; no `$state` in 3 or 4.
 - REST/WebSocket types only from generated `api-schema.d.ts` (review); web-only types not duplicating the contract are fine. Behaviour: `docs/spec/realtime.md` "Real-time sync contract".
 
