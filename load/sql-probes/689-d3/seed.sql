@@ -23,7 +23,7 @@ SELECT probe_org(o), o * 100000 + c * 2000 + n, probe_channel(o, c),
     (ARRAY['開発の確認をお願いします。', '資料を共有しました。', '週末に更新します。'])[1 + (n % 3)]
     || CASE WHEN n % 97 = 0 THEN '確認を再度お願いします。' ELSE '' END
     || CASE WHEN n = 10 THEN '麒麟便　特殊照合' WHEN n = 11 THEN '麒と麟　特殊照会' ELSE '' END
-    || CASE WHEN n = 12 THEN U&'か\3099き\3099' WHEN n = 13 THEN 'がぎ' ELSE '' END
+    || CASE WHEN n = 12 THEN 'か' || chr(12441) || 'き' || chr(12441) WHEN n = 13 THEN 'がぎ' ELSE '' END
     || CASE WHEN n = 14 THEN 'x%y a_b c' || chr(92) || 'd'
             WHEN n = 15 THEN 'xZZy acb cd c/d' ELSE '' END
     || CASE WHEN n % 318 = 0 THEN ' 日程 🦉' ELSE '' END
