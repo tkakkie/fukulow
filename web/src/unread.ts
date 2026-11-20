@@ -1,4 +1,5 @@
 import * as api from './api'
+import { createRequestDeadlines } from './request-deadlines'
 import type { ChannelList, Dm, MarkReadRequest, Message, ReadPosition, Result, TopicSummaryResponse, UnreadChannel } from './api'
 import type { createSync } from './sync'
 import type { Topics } from './topics'
@@ -34,7 +35,6 @@ const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new M
   summaryTimers: new Map<string, ReturnType<typeof setTimeout>>(), summaryAttempts: new Map<string, number>() })
 type Channel = ReturnType<typeof channelState>
 type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAtEntry: number | null; presented: Set<number>; firstUnread?: UnreadRecord }
-type Deadline = { channel?: string; cancel(): void }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
 export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
@@ -42,7 +42,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
-  const deadlines = new Map<ReturnType<typeof setTimeout>, Deadline>()
+  const deadlines = createRequestDeadlines()
   let previous = sync.get(), closed = false, session = 0, epoch = 0, issue = 0
   let list: symbol | undefined, queuedList = false, listTimer: ReturnType<typeof setTimeout> | undefined, listAttempt = 0
   let visit: Visit | undefined, visible = false
@@ -137,13 +137,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (s.timer !== undefined) clearTimeout(s.timer)
     s.timer = undefined; s.operation = undefined; s.intent = undefined; s.queued = undefined
   }
-  const cancelDeadlines = (channel?: string) => {
-    for (const [timer, d] of deadlines) if (channel === undefined || d.channel === channel) {
-      clearTimeout(timer); deadlines.delete(timer); d.cancel()
-    }
-  }
   const fence = (id: string, c: Channel) => {
-    c.token = Symbol(); stopScope(c.main); c.topics.forEach(stopScope); c.summaryReads.clear(); c.queuedSummaries.clear(); cancelDeadlines(id)
+    c.token = Symbol(); stopScope(c.main); c.topics.forEach(stopScope); c.summaryReads.clear(); c.queuedSummaries.clear(); deadlines.cancel(id)
     c.summaryTimers.forEach(clearTimeout); c.summaryTimers.clear()
     if (visit?.scope.channel === id) visit = undefined
   }
@@ -153,11 +148,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     listTimer = undefined
   }
   function reset() {
-    epoch++; cancelList(); channels.forEach((c, id) => fence(id, c)); channels.clear(); cancelDeadlines(); visit = undefined; notify()
+    epoch++; cancelList(); channels.forEach((c, id) => fence(id, c)); channels.clear(); deadlines.cancel(); visit = undefined; notify()
   }
   async function request<T>(run: () => Promise<Result<T>>, channel?: string): Promise<Result<T>> {
     const account = session
-    let timer: ReturnType<typeof setTimeout> | undefined
     const operation = Promise.resolve().then(run).catch((): Result<T> => ({ ok: false, kind: 'network' }))
     // Authentication failures outlive data authority; the old Organization's sync alone receives C10.
     void operation.then(r => {
@@ -165,18 +159,16 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (!r.ok && r.kind === 'http' && r.status === 401) { void sync.close(); options.onSessionEnded?.() }
       else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
     })
+    const historyEpoch = sync.get().historyEpoch
+    const deadline = deadlines.start<Result<T>>({ ok: false, kind: 'network' }, { channel, timeoutMs: options.requestTimeoutMs ?? 30_000 })
     try {
-      const historyEpoch = sync.get().historyEpoch
-      const result = await Promise.race([operation, new Promise<Result<T>>(resolve => {
-        timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
-        deadlines.set(timer, { channel, cancel: () => resolve({ ok: false, kind: 'network' }) })
-      })])
+      const result = await Promise.race([operation, deadline.until])
       if (historyEpoch !== sync.get().historyEpoch) return { ok: false, kind: 'network' }
       const generation = result.ok && result.data && typeof result.data === 'object' && 'history_generation' in result.data ? result.data.history_generation : undefined
       if (typeof generation === 'string' && !sync.observeHistoryGeneration(generation)) return { ok: false, kind: 'network' }
       if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return { ok: false, kind: 'network' } }
       return result.ok && !completeCountFields(result.data) ? { ok: false, kind: 'network' } : result
-    } finally { if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) } }
+    } finally { deadline.clear() }
   }
   const retryDelay = (attempt: number, r: Result<unknown>) => Math.max(backoffCap(attempt), !r.ok ? r.retryAfterMs ?? 0 : 0)
   const retryable = (r: Result<unknown>) => !r.ok && (r.kind === 'network' || r.status === 429 || r.status >= 500)
@@ -526,7 +518,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
     notify(changed)
-    if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); cancelDeadlines() }
+    if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); deadlines.cancel() }
     if (moveRefresh && !rebootstrap) void refresh()
     if ((!before.running && next.running) || (!before.connected && next.connected) || rebootstrap) {
       if (channels.size === 0 || [...channels.keys()].some(watched)) void refresh()
@@ -684,7 +676,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (visit) {
         const c = getChannel(visit.scope.channel), s = getScope(c, visit.scope.topicId)
         if (!value) {
-          stopScope(s); cancelDeadlines(visit.scope.channel)
+          stopScope(s); deadlines.cancel(visit.scope.channel)
           if (visit.boundary === null) visit.presented.clear()
         }
         // Returning to a visible document needs a fresh row presentation intent.

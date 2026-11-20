@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tracing::instrument::WithSubscriber;
 
 struct Gate {
     entered: Semaphore,
@@ -272,6 +273,151 @@ async fn history_generation_rotation_is_explicit_scoped_and_owner_only(pool: PgP
     assert_eq!(generations().await, stable);
     assert_eq!(crate::auth::history::rotate(&pool, None).await.unwrap(), 2);
     assert!(generations().await.iter().all(|r| !stable.contains(r)));
+}
+
+#[fukulow_test::test]
+async fn fresh_send_preflight_reads_generation_only_when_supplied(pool: PgPool) {
+    let (_, org, sender, channel, _) = fixture(&pool).await;
+    let app_pool = crate::test_app_pool(pool.clone()).await;
+    let generation = crate::auth::history::generation(&mut pool.acquire().await.unwrap(), org)
+        .await
+        .unwrap();
+    for requested in [None, Some(generation)] {
+        let output = crate::observability::tests::Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(output.clone())
+            .json()
+            .finish();
+        let result = committed(
+            &app_pool,
+            org,
+            (sender, 0),
+            channel,
+            &SendMessageRequest {
+                history_generation: requested,
+                reply_to: None,
+                topic_name: None,
+                client_message_id: Uuid::new_v4(),
+                body: "fresh send".into(),
+            },
+        )
+        .with_subscriber(subscriber)
+        .await;
+        assert!(result.unwrap().is_none());
+        let standalone_reads = output
+            .events()
+            .iter()
+            .filter(|event| {
+                event["fields"]["db.statement"]
+                    .as_str()
+                    .is_some_and(|sql| sql.trim() == crate::auth::history::GENERATION_SQL)
+            })
+            .count();
+        assert_eq!(standalone_reads, usize::from(requested.is_some()));
+    }
+}
+
+#[fukulow_test::test]
+async fn send_checks_generation_again_after_preflight_and_returns_write_generation(pool: PgPool) {
+    let (app, org, _, channel, token) = fixture(&pool).await;
+    for with_generation in [true, false] {
+        let old = crate::auth::history::generation(&mut pool.acquire().await.unwrap(), org)
+            .await
+            .unwrap();
+        let key = Uuid::new_v4();
+        let mut request = input(key, "rotation during send");
+        if with_generation {
+            request["history_generation"] = json!(old);
+        }
+        let gate = limiter::pause_after_charge(key);
+        let pending = tokio::spawn({
+            let (app, token, request) = (app.clone(), token.clone(), request.clone());
+            async move { send(&app, &token, channel, request).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        // Preflight accepted the request. Rotate before persistence can start.
+        assert_eq!(
+            crate::auth::history::rotate(&pool, Some(org))
+                .await
+                .unwrap(),
+            1
+        );
+        let current = crate::auth::history::generation(&mut pool.acquire().await.unwrap(), org)
+            .await
+            .unwrap();
+        assert_ne!(current, old);
+        gate.release.add_permits(1);
+        let response = pending.await.unwrap();
+        if with_generation {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                body(response).await,
+                json!({"error":"history_generation_changed"})
+            );
+            let mut stale_fresh = input(Uuid::new_v4(), "fresh send with stale epoch");
+            stale_fresh["history_generation"] = json!(old);
+            let response = send(&app, &token, channel, stale_fresh).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                body(response).await,
+                json!({"error":"history_generation_changed"})
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let message = body(response).await;
+            assert_eq!(message["created_seq"], 1);
+            assert_eq!(message["history_generation"], json!(current));
+            assert_eq!(sent(&app, &token, channel, request).await, message);
+        }
+    }
+}
+
+#[fukulow_test::test]
+async fn send_epoch_does_not_expose_private_or_foreign_channels(pool: PgPool) {
+    let (app, org, owner, public, token) = fixture(&pool).await;
+    let private = Uuid::new_v4();
+    channel(&pool, org, private, owner, true).await;
+    let nonmember = member(&pool, org, Uuid::new_v4()).await;
+    let foreign_org = organization(&pool).await;
+    let foreign_sender = Uuid::new_v4();
+    let foreign = member(&pool, foreign_org, foreign_sender).await;
+    let foreign_channel = Uuid::new_v4();
+    channel(&pool, foreign_org, foreign_channel, foreign_sender, false).await;
+
+    for (credential, target, control) in [
+        (&nonmember, private, public),
+        (&foreign, public, foreign_channel),
+    ] {
+        let first = sent(&app, credential, control, input(Uuid::new_v4(), "allowed")).await;
+        for with_generation in [false, true] {
+            let mut request = input(Uuid::new_v4(), "check authorization first");
+            if with_generation {
+                request["history_generation"] = json!(Uuid::new_v4());
+            }
+            let denied = send(&app, credential, target, request.clone()).await;
+            assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+            assert_eq!(body(denied).await, json!({"error":"channel not found"}));
+            if with_generation {
+                request["history_generation"] = first["history_generation"].clone();
+            }
+            sent(&app, credential, control, request).await;
+        }
+    }
+    assert_eq!(
+        sent(
+            &app,
+            &token,
+            private,
+            input(Uuid::new_v4(), "private grant control")
+        )
+        .await["created_seq"],
+        1
+    );
 }
 
 #[fukulow_test::test]

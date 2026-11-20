@@ -641,6 +641,10 @@ export class MiniDocument extends MiniNode {
     return queryFirst(this, selector)
   }
 
+  getElementById(id: string): MiniElement | null {
+    return this.querySelector(`#${id}`)
+  }
+
   querySelectorAll(selector: string): MiniElement[] {
     return queryAll(this, selector)
   }

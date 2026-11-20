@@ -1,4 +1,5 @@
 import * as api from './api'
+import { createRequestDeadlines } from './request-deadlines'
 import { knownMessageState } from './identity-order'
 import type { Message, ReplyChainPage, ReplyChainQuery, Result } from './api'
 import type { createSync } from './sync'
@@ -7,10 +8,10 @@ import { countSequencesAfter, rememberSequence, trimMessages, EVIDENCE_LIMIT } f
 
 type Sync = ReturnType<typeof createSync>
 export type RepliesApi = {
-  listReplyChain(channel: string, anchor: string, query?: ReplyChainQuery): Promise<Result<ReplyChainPage>>
+  listReplyChain(channel: string, anchor: string, query?: ReplyChainQuery, signal?: AbortSignal): Promise<Result<ReplyChainPage>>
 }
 export const repliesApi = (organizationId: string): RepliesApi => ({
-  listReplyChain: (channel, anchor, query) => api.listReplyChain(organizationId, channel, anchor, query),
+  listReplyChain: (channel, anchor, query, signal) => api.listReplyChain(organizationId, channel, anchor, query, undefined, signal),
 })
 // Half a default page leaves context on both sides of a descendant in one read.
 const ANCHOR_CONTEXT = 25
@@ -38,7 +39,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
   const chains = new Map<string, Chain>()
   const listeners = new Set<(channels?: ReadonlySet<string>) => void>()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
-  const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>()
+  const deadlines = createRequestDeadlines()
   const inFlight = new WeakMap<Chain, Promise<void>>()
   let closed = false
   let sessionToken = 0
@@ -48,10 +49,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     else snapshots.clear()
     listeners.forEach(l => l(channels))
   }
-  const cancelReads = () => {
-    deadlines.forEach((resolve, timer) => { clearTimeout(timer); resolve() })
-    deadlines.clear()
-  }
+  const cancelReads = deadlines.cancel
   const belongs = (w: Chain, m: Message) => m.id === w.rootId || m.reply_root_id === w.rootId
   const pending = (w: Chain, c: ChannelState | undefined) =>
     (c?.pending ?? []).filter(p => p.reply_to && (p.replyRootId === w.rootId || p.reply_to === w.rootId || w.messages.has(p.reply_to)))
@@ -166,7 +164,6 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
     const token = Symbol(), session = sessionToken
     w.read = token; w.loading = true; w.error = false; notify(new Set([channel]))
     const isCurrent = () => current(channel, w) && w.read === token && sync.get().channels[channel]?.versionEpoch === versionEpoch
-    let timer: ReturnType<typeof setTimeout> | undefined
     const anchor = w.anchor.id, generation = sync.get().historyGeneration
     const operation = Promise.resolve().then(() => options.api.listReplyChain(channel, anchor, { history_generation: generation, as_of_seq: requestedW, after_seq: requestedAfter }))
       .catch((): Result<ReplyChainPage> => ({ ok: false, kind: 'network' }))
@@ -244,18 +241,14 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; onSessionE
       }
       notify(new Set([channel]))
     })
-    try {
-      await Promise.race([apply, new Promise<void>(resolve => {
-        timer = setTimeout(() => {
-          // Expiry ends this read's authority, not the underlying HTTP operation.
-          if (isCurrent()) { w.read = Symbol(); w.loading = false; w.error = true; notify(new Set([channel])) }
-          resolve()
-        }, options.requestTimeoutMs ?? 30_000)
-        deadlines.set(timer, resolve)
-      })])
-    } finally {
-      if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) }
-    }
+    const deadline = deadlines.start<void>(undefined, {
+      timeoutMs: options.requestTimeoutMs ?? 30_000,
+      onTimeout() {
+        if (isCurrent()) { w.read = Symbol(); w.loading = false; w.error = true; notify(new Set([channel])) }
+      },
+    })
+    try { await Promise.race([apply, deadline.until]) }
+    finally { deadline.clear() }
   }
   function loadMore(channel: string): Promise<void> {
     const w = chains.get(channel)
