@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { parse, type AST } from 'svelte/compiler'
 import { describe, expect, it } from 'vitest'
 import {
   IME_COMPOSING_KEY_CODE,
@@ -158,24 +159,22 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
 
     const messageRowSrc = readFileSync(join(webDir, 'src/ui/MessageRow.svelte'), 'utf8')
     expect(messageRowSrc).toContain('shouldOpenRepliesFromRowKey')
-    const articleMatch = messageRowSrc.match(/<article\s/)
-    expect(articleMatch?.index).toBeGreaterThanOrEqual(0)
-    const articleStart = articleMatch?.index ?? -1
-    let braceDepth = 0
-    let articleEnd = -1
-    for (let i = articleStart; i < messageRowSrc.length; i += 1) {
-      const ch = messageRowSrc[i]
-      if (ch === '{') braceDepth += 1
-      else if (ch === '}') braceDepth -= 1
-      else if (ch === '>' && braceDepth === 0) {
-        articleEnd = i + 1
-        break
-      }
+    const ast = parse(messageRowSrc, { modern: true })
+    const article = ast.fragment.nodes.find(
+      (node): node is AST.RegularElement => node.type === 'RegularElement' && node.name === 'article',
+    )
+    expect(article).toBeDefined()
+    for (const attrName of ['tabindex', 'onfocus', 'onkeydown']) {
+      const attr = article?.attributes.find(
+        (a): a is AST.Attribute => a.type === 'Attribute' && a.name === attrName,
+      )
+      expect(attr, `<article> should have ${attrName}`).toBeDefined()
+      const val = attr?.value
+      const isExpression =
+        (val !== undefined && typeof val === 'object' && !Array.isArray(val) && val.type === 'ExpressionTag') ||
+        (Array.isArray(val) && val.length === 1 && val[0]?.type === 'ExpressionTag')
+      expect(isExpression, `<article> ${attrName} should have an expression value`).toBe(true)
     }
-    const articleOpenTag = messageRowSrc.slice(articleStart, articleEnd)
-    expect(articleOpenTag).toMatch(/\btabindex=\{/)
-    expect(articleOpenTag).toMatch(/\bonfocus=\{/)
-    expect(articleOpenTag).toMatch(/\bonkeydown=\{/)
     expect(messageRowSrc).not.toContain('addEventListener')
     expect(messageRowSrc).toContain('tabindex={-1}')
   })
