@@ -121,6 +121,7 @@ impl Step<'_> {
                 channel_id: id,
                 root_id: event.root_id,
                 version: event.version,
+                destination_topic_id: event.destination_topic_id,
             });
             self.history(id, Page::Latest, None);
         }

@@ -15,7 +15,7 @@
     actionLabel="最新のメッセージへ"
     onaction={onlatest}
   />
-{:else if view?.status === 'error' || view?.pageError === 'newer'}
+{:else if view?.status === 'error' || view?.pageError === 'newer' || view?.pageError === 'refresh'}
   <StatusBanner
     tone="danger"
     role="alert"

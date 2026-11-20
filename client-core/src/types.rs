@@ -432,6 +432,7 @@ pub struct MoveVersion {
     pub channel_id: Uuid,
     pub root_id: Uuid,
     pub version: i64,
+    pub destination_topic_id: Uuid,
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

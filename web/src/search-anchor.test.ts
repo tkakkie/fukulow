@@ -132,9 +132,9 @@ it('merges live Topic Messages and refreshes only when a Move affects the open T
   const neighbour = { ...inTopic(39), reply_to: 'id1', reply_root_id: 'id1' }
   let through = 100
   const read = vi.fn(async (query?: ListMessagesQuery) => {
-    if (query?.after_seq === 39) return page(through === 104 ? [inTopic(102)]
-      : through === 103 ? [inTopic(40), inTopic(102)] : [inTopic(40)], through)
-    if (query?.before_seq === 40) return page(through >= 103 ? [] : [neighbour], through)
+    if (query?.after_seq === 39) return page(through === 104 ? [inTopic(102)] : [inTopic(40)], through)
+    if (query?.before_seq === 40) return page([neighbour], through)
+    if (query?.after_seq === 0) return page([inTopic(40), inTopic(102)], through)
     return page([record(99)], through)
   })
   const { anchor, net, session, ready } = client(read)
@@ -156,13 +156,14 @@ it('merges live Topic Messages and refreshes only when a Move affects the open T
     net.event({ ...moveEvent(103, 'id1'), source_topic_id: 'T' })
     expect(anchor.get()).toMatchObject({ visit, status: 'ready', messages: [inTopic(40), inTopic(102)] })
     await flush()
-    expect(searchReads()).toHaveLength(4)
+    expect(searchReads()).toHaveLength(3)
+    expect(searchReads()[2]?.[0]).toEqual({ history_generation: generation, after_seq: 0, limit: 101 })
     expect(anchor.get()).toMatchObject({ visit, status: 'ready', messages: [inTopic(40), inTopic(102)] })
 
     through = 104
     net.event({ ...moveEvent(104, 'id40'), source_topic_id: 'T' })
     await flush()
-    expect(searchReads()).toHaveLength(5)
+    expect(searchReads()).toHaveLength(4)
     expect(anchor.get()).toMatchObject({ visit, status: 'missing', messages: [] })
   } finally {
     session.close()
@@ -174,7 +175,7 @@ it('fences a fixed-W page overtaken by a Move outside the retained Topic window'
   const delayed = deferred<Result<MessagePage>>()
   let watermark = 100
   const read = vi.fn(async (query?: ListMessagesQuery) => {
-    if (query?.after_seq === 55) return delayed.promise
+    if (query?.after_seq === 55) return query.as_of_seq === 100 ? delayed.promise : page([], watermark)
     if (query?.after_seq === 39) return page([inTopic(40), inTopic(55)], watermark, watermark === 100)
     if (query?.before_seq === 40) return page([inTopic(30)], watermark)
     return page([record(99)], watermark)
@@ -195,7 +196,8 @@ it('fences a fixed-W page overtaken by a Move outside the retained Topic window'
 
     delayed.resolve(page([inTopic(65)], 100))
     await pending
-    expect(searchReads()).toHaveLength(5)
+    expect(searchReads()).toHaveLength(4)
+    expect(searchReads()[3]?.[0]).toEqual({ history_generation: generation, after_seq: 55, limit: 25 })
     expect(anchor.get()).toMatchObject({ visit, status: 'ready', asOfSeq: 101, messages: [inTopic(30), inTopic(40), inTopic(55)] })
   } finally {
     session.close()
@@ -260,13 +262,126 @@ it.each(['generation change', 'cursor clamp'])('reopens the result after a %s an
 
 const expired = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' } as const
 
-it.each([false, true])('restarts expired paging once, preserving the visit (fresh read fails: %s)', async fails => {
-  let refreshing = false
+it.each([
+  ['edit', 'older'], ['edit', 'newer'],
+  ['delete', 'older'], ['delete', 'newer'],
+  ['move', 'older'], ['move', 'newer'],
+] as const)('keeps loaded pages and the visit when paging %s/%s at a fresh W', async (kind, direction) => {
+  let watermark = 100
   const read = vi.fn(async (query?: ListMessagesQuery) => {
-    if (query?.after_seq === 39) return page([record(40)], refreshing ? 102 : 100)
-    if (query?.before_seq === 40) return refreshing && fails ? expired : page([record(30)], refreshing ? 102 : 100, !refreshing)
-    refreshing = true
-    return expired
+    if (query?.after_seq === 39) return page([record(40), record(41)], watermark, true)
+    if (query?.before_seq === 40) return page([record(30)], watermark, true)
+    if (query?.before_seq === 30) return page([record(20)], watermark, true)
+    if (query?.after_seq === 41) return page([record(50)], watermark, true)
+    if (query?.before_seq === 20) return page([record(10)], query.as_of_seq ?? watermark)
+    if (query?.after_seq === 50) return query.as_of_seq ? expired : page([record(60)], watermark, true)
+    throw new Error('Unexpected history query')
+  })
+  const { anchor, cursor, net, session, ready } = client(read)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    await anchor.loadOlder()
+    await anchor.loadNewer()
+    const visit = anchor.get()!.visit
+    expect(anchor.get()?.messages.map(m => m.created_seq)).toEqual([20, 30, 40, 41, 50])
+
+    watermark = 102
+    net.event(kind === 'move' ? moveEvent(101, 'id99') : {
+      type: 'message', kind, seq: 101, message: { ...record(99), version: 101, deleted: kind === 'delete' },
+    })
+    await flush()
+    expect(cursor()).toBe(101)
+    read.mockClear()
+    await (direction === 'older' ? anchor.loadOlder() : anchor.loadNewer())
+    expect(anchor.get()).toMatchObject({ visit, status: 'ready', asOfSeq: 102 })
+    expect(anchor.get()?.messages.map(m => m.created_seq)).toEqual(direction === 'older'
+      ? [10, 20, 30, 40, 41, 50] : [20, 30, 40, 41, 50, 60])
+    const bound = direction === 'older' ? { before_seq: 20 } : { after_seq: 50 }
+    expect(read.mock.calls.map(([query]) => query)).toEqual([
+      { history_generation: generation, ...bound, limit: 25, as_of_seq: 100 },
+      { history_generation: generation, ...bound, limit: 25 },
+    ])
+    expect(cursor()).toBe(101)
+  } finally {
+    session.close()
+  }
+})
+
+it('uses the server-selected initial page W for its fixed-W companion after an unrelated Edit', async () => {
+  const first = deferred<Result<MessagePage>>()
+  let watermark = 100
+  const read = vi.fn(async (query?: ListMessagesQuery) => {
+    if (query?.after_seq === 39) return watermark === 100 ? first.promise : page([record(40)], watermark)
+    if (query?.before_seq === 40) return query.as_of_seq === 100 ? expired : page([record(30)], watermark)
+    throw new Error('Unexpected history query')
+  })
+  const { anchor, cursor, net, session, ready } = client(read)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    watermark = 102
+    net.event({ type: 'message', kind: 'edit', seq: 101, message: { ...record(99), version: 101 } })
+    first.resolve(page([record(40)], 100))
+    await flush()
+    expect(read.mock.calls.map(([query]) => query?.as_of_seq)).toEqual([undefined, 100, undefined, 102])
+    expect(anchor.get()).toMatchObject({ status: 'ready', asOfSeq: 102, messages: [record(30), record(40)] })
+    expect(cursor()).toBe(101)
+  } finally {
+    session.close()
+  }
+})
+
+it('refreshes the retained Topic bounds for a Move into the open Topic only', async () => {
+  const inTopic = (seq: number) => ({ ...record(seq), topic_id: 'T' })
+  const moved = { ...inTopic(25), version: 102 }
+  const refresh = deferred<Result<MessagePage>>()
+  const read = vi.fn(async (query?: ListMessagesQuery) => {
+    if (query?.after_seq === 39) return page([inTopic(40), inTopic(55)], 100, true)
+    if (query?.before_seq === 40) return page([inTopic(30)], 100, true)
+    if (query?.before_seq === 30) return page([inTopic(20)], 100, true)
+    if (query?.after_seq === 19) return refresh.promise
+    throw new Error('Unexpected history query')
+  })
+  const { anchor, cursor, net, session, ready } = client(read)
+  const searchReads = () => read.mock.calls.filter(([query]) => query?.after_seq !== undefined || query?.before_seq !== undefined)
+  try {
+    await ready()
+    anchor.open({ ...target, topicId: 'T' })
+    await flush()
+    await anchor.loadOlder()
+    const visit = anchor.get()!.visit
+    const loaded = [inTopic(20), inTopic(30), inTopic(40), inTopic(55)]
+    net.event({ ...moveEvent(101, 'id27'), source_topic_id: 'B', destination_topic_id: 'C' })
+    await flush()
+    expect(searchReads()).toHaveLength(3)
+    expect(cursor()).toBe(101)
+
+    net.event({ ...moveEvent(102, moved.id), source_topic_id: 'B', destination_topic_id: 'T' })
+    await flush()
+    expect(anchor.get()).toMatchObject({ visit, status: 'ready', messages: loaded })
+    expect(cursor()).toBe(102)
+    refresh.resolve(page([loaded[0], moved, ...loaded.slice(1), inTopic(70)], 103, true))
+    await flush()
+    expect(anchor.get()).toMatchObject({
+      visit, status: 'ready', asOfSeq: 103, messages: [loaded[0], moved, ...loaded.slice(1)], hasOlder: true, hasNewer: true,
+    })
+    expect(searchReads().map(([query]) => query)).toHaveLength(4)
+    expect(searchReads()[3]?.[0]).toMatchObject({ history_generation: generation, after_seq: 19 })
+    expect(searchReads()[3]?.[0]?.as_of_seq).toBeUndefined()
+    expect(cursor()).toBe(102)
+  } finally {
+    session.close()
+  }
+})
+
+it.each([false, true])('retries expired paging once, preserving the visit (fresh read fails: %s)', async fails => {
+  const read = vi.fn(async (query?: ListMessagesQuery) => {
+    if (query?.after_seq === 39) return page([record(40)], 100)
+    if (query?.before_seq === 40) return page([record(30)], 100, true)
+    return query?.as_of_seq || fails ? expired : page([record(20)], 102)
   })
   const { anchor, session, cursor, ready } = client(read)
   try {
@@ -277,8 +392,10 @@ it.each([false, true])('restarts expired paging once, preserving the visit (fres
     const pending = anchor.loadOlder()
     expect(anchor.get()).toMatchObject({ status: 'ready', messages: [record(30), record(40)] })
     await pending
-    expect(read.mock.calls.map(([query]) => query?.as_of_seq)).toEqual([undefined, 100, 100, undefined, 102])
-    expect(anchor.get()).toMatchObject({ visit, status: fails ? 'error' : 'ready', paging: false, messages: [record(30), record(40)] })
+    expect(read.mock.calls.map(([query]) => query?.as_of_seq)).toEqual([undefined, 100, 100, undefined])
+    expect(anchor.get()).toMatchObject({ visit, status: 'ready', paging: false,
+      pageError: fails ? 'older' : undefined, messages: fails ? [record(30), record(40)] : [record(20), record(30), record(40)],
+    })
     expect(cursor()).toBe(100)
   } finally {
     session.close()
