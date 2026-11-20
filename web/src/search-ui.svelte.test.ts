@@ -420,11 +420,12 @@ describe('SearchResults a11y, states, and result opening', () => {
       expect(host.querySelector('[role="alert"]')?.textContent).toContain('検索に失敗しました')
       expect(host.querySelector('button')?.textContent.trim()).toBe('再試行')
 
-      // Empty: distinct empty state + range start date shown
-      props.state = baseState({ status: 'empty', rangeStart: '2026-05-24T00:00:00.000Z' })
+      const rangeStart = '2026-05-24T12:34:56.000Z'
+      props.state = baseState({ status: 'empty', rangeStart })
       flushSync()
       expect(host.textContent).toContain('一致するメッセージが見つかりませんでした')
-      expect(host.querySelector('[data-testid="search-range-note"]')?.textContent).toContain('2026')
+      expect(host.querySelector('[data-testid="search-range-note"]')?.textContent)
+        .toContain(`${new Date(rangeStart).toLocaleString('ja-JP')} 以降`)
 
       // Unavailable (production default before server search lands): polite copy, no retry, no live region
       props.state = baseState({ status: 'unavailable', retryable: false, rangeStart: null })
@@ -451,6 +452,7 @@ describe('SearchResults a11y, states, and result opening', () => {
       const items: SearchResultItem[] = [
         {
           messageId: 'm-1',
+          createdSeq: 37,
           channelId: 'ch-general',
           topicId: 'top-1',
           replyRootId: 'root-1',
@@ -462,6 +464,7 @@ describe('SearchResults a11y, states, and result opening', () => {
         },
         {
           messageId: 'm-2',
+          createdSeq: 12,
           channelId: 'dm-1',
           topicId: null,
           replyRootId: null,
@@ -503,6 +506,7 @@ describe('SearchResults a11y, states, and result opening', () => {
         topicId: 'top-1',
         replyRootId: 'root-1',
         messageId: 'm-1',
+        createdSeq: 37,
       })
 
       // Click load more
@@ -533,6 +537,7 @@ describe('SearchResults a11y, states, and result opening', () => {
       topicId: first.topicId,
       replyRootId: first.replyRootId,
       messageId: first.messageId,
+      createdSeq: first.createdSeq,
     })
     expect(onOpenResult).toHaveBeenCalledTimes(1)
     expect(adapter.state.open).toBe(false)

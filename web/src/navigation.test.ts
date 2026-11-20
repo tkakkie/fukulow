@@ -19,7 +19,7 @@ function harness(target: NavigationTarget = base) {
     removeEventListener() { pop = () => {} },
   } as unknown as NavigationBrowser
   const nav = createNavigation(browser)
-  return { nav, calls, pop(url: string) { href = url; state = null; pop() } }
+  return { nav, calls, get state() { return state }, pop(url: string, entry: unknown = null) { href = url; state = entry; pop() } }
 }
 
 describe('navigation URLs', () => {
@@ -40,6 +40,34 @@ describe('navigation URLs', () => {
 })
 
 describe('History navigation table', () => {
+  it('restores search hints on Back and clears them on explicit latest navigation', () => {
+    const h = harness()
+    const hit = { channelId: 'channel', topicId: 'topic', messageId: 'old', createdSeq: 25 }
+    h.nav.openSearchResult('org', hit)
+    const entry = h.state
+    expect(h.nav.get().searchResult).toEqual(hit)
+    h.nav.navigate({ type: 'channel', organizationId: 'org', channelId: 'other' })
+    expect(h.nav.get().searchResult).toBeUndefined()
+    h.pop('/o/org/c/channel/t/topic', entry)
+    expect(h.nav.get().searchResult).toEqual(hit)
+    h.nav.leaveSearchResult()
+    expect(h.nav.get().searchResult).toBeUndefined()
+    expect(h.state).toEqual({ navigationPreviousTab: null })
+  })
+
+  it('opens a Reply hit in the current Organization without restoring a tab from the previous Organization', () => {
+    const { nav, state: initialState, calls } = harness({ ...base, panel: 'members' })
+    const hit = { channelId: 'channel', replyRootId: 'root', messageId: 'reply', createdSeq: 25 }
+    expect(initialState).toBeNull()
+    nav.openSearchResult('new-org', hit)
+    expect(nav.get()).toMatchObject({
+      target: { ...base, organizationId: 'new-org', panel: 'reply:reply' },
+      previousTab: null, focus: 'reply-composer', searchResult: hit,
+    })
+    expect(calls).toEqual(['push'])
+    nav.destroy()
+  })
+
   it('reselecting the same Channel target never writes History, including an open tab', () => {
     for (const panel of [null, 'topics', 'overview', 'members'] as const) {
       const { nav, calls } = harness({ ...base, panel })

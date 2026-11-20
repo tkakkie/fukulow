@@ -106,7 +106,8 @@ export function createCore(selfId: string): SyncCore {
         view = { ...(out.session ?? view), channels: channelViews }
       }
       const effects = out.effects.map(e => e.type === 'send' ? expandBody<Send>(e, bodies) : e)
-      return { effects, changedChannels: new Set(out.changedChannels), records, stateChanged: out.stateChanged }
+      return { effects, changedChannels: new Set(out.changedChannels), records,
+        ...(out.moves ? { moves: out.moves } : {}), stateChanged: out.stateChanged }
     },
   }
 }

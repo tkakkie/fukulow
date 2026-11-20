@@ -287,6 +287,8 @@ struct StepDelta<'a> {
     changed_channels: &'a [Uuid],
     effects: Vec<EffectDelta<'a>>,
     records: Vec<(Uuid, Vec<MessageDelta<'a>>)>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    moves: &'a [MoveVersion],
     state_changed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     session: Option<&'a SessionView>,
@@ -328,14 +330,20 @@ impl Boundary {
     }
 
     fn delta<'a>(&'a self, result: &'a StepResult, session_changed: bool) -> StepDelta<'a> {
+        // Exhaustive so a new StepResult field cannot be dropped silently.
+        let StepResult {
+            effects,
+            changed_channels,
+            records,
+            moves,
+            state_changed,
+        } = result;
         let mut bodies = Bodies::default();
-        let effects = result
-            .effects
+        let effects = effects
             .iter()
             .map(|e| EffectDelta::new(e, &mut bodies))
             .collect();
-        let records = result
-            .records
+        let records = records
             .iter()
             .map(|(id, messages)| {
                 (
@@ -347,8 +355,7 @@ impl Boundary {
                 )
             })
             .collect();
-        let channels = result
-            .changed_channels
+        let channels = changed_channels
             .iter()
             .map(|&id| {
                 let patch = self
@@ -359,10 +366,11 @@ impl Boundary {
             })
             .collect();
         StepDelta {
-            changed_channels: &result.changed_channels,
+            changed_channels,
             effects,
             records,
-            state_changed: result.state_changed,
+            moves,
+            state_changed: *state_changed,
             session: session_changed.then(|| self.core.session()),
             channels,
             bodies: bodies.text,

@@ -13,6 +13,7 @@
     createdAt,
     senderName,
     mentioned = false,
+    searchMatch = false,
     pendingStatus,
     retryable = false,
     targetUnavailable = false,
@@ -35,6 +36,7 @@
     createdAt?: string
     senderName?: string
     mentioned?: boolean
+    searchMatch?: boolean
     pendingStatus?: 'sending' | 'throttled' | 'failed'
     retryable?: boolean
     targetUnavailable?: boolean
@@ -92,6 +94,7 @@
   bind:this={rowRef}
   class="ui-message-row"
   class:ui-message-row--mentioned={mentioned || (!pendingStatus && (mentions ?? []).some(target => target.member_id === selfId))}
+  class:ui-message-row--search-match={searchMatch}
   class:ui-message-row--sending={pendingStatus === 'sending'}
   class:ui-message-row--failed={pendingStatus === 'failed'}
   tabindex={isRowFocusable ? rovingTabindex : -1}
@@ -106,6 +109,9 @@
       {/if}
       {#if createdAt}
         <time class="ui-message-row__time" datetime={createdAt}>{formattedTime}</time>
+      {/if}
+      {#if searchMatch}
+        <span>検索結果</span>
       {/if}
     </header>
   {/if}
@@ -192,6 +198,10 @@
 
   .ui-message-row--mentioned:hover {
     background-color: var(--mention);
+  }
+
+  .ui-message-row--search-match {
+    box-shadow: inset 0 0 0 2px var(--focus);
   }
 
   .ui-message-row--failed {

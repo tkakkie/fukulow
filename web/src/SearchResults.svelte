@@ -24,13 +24,6 @@
     return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString('ja-JP')
   }
 
-  function formatRangeStart(iso: string): string {
-    const parsed = new Date(iso)
-    return Number.isNaN(parsed.getTime())
-      ? iso
-      : parsed.toLocaleDateString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric' })
-  }
-
   function formatContext(item: SearchResultItem): string {
     if (item.context.kind === 'dm') {
       const peer = `${item.context.peerName}${item.context.peerActive ? '' : '（無効）'}`
@@ -51,12 +44,13 @@
       topicId: item.topicId,
       replyRootId: item.replyRootId,
       messageId: item.messageId,
+      createdSeq: item.createdSeq,
     })
   }
 
   const rangeNote = $derived(
     state.rangeStart
-      ? `直近${state.rangeDays}日間（${formatRangeStart(state.rangeStart)} 以降）のメッセージのみ検索対象です。これより前のメッセージは検索されません。`
+      ? `直近${state.rangeDays}日間（${formatTimestamp(state.rangeStart)} 以降）のメッセージのみ検索対象です。これより前のメッセージは検索されません。`
       : `直近${state.rangeDays}日間のメッセージのみ検索対象です。これより前のメッセージは検索されません。`,
   )
 </script>

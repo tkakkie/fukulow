@@ -4,6 +4,7 @@ import { createAuthOperations } from './auth-operations'
 import { createAccountSecurity } from './account-security'
 import { accountSecurityAdapter } from './account-security.svelte'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
+import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.svelte'
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
@@ -27,6 +28,7 @@ export type SessionModel = {
   holdActivity?(key: string, target: ActivityTarget): unknown
   dms?: DmsAdapter
   navigationTargets?: ReturnType<typeof navigationTargetsAdapter>
+  searchAnchor?: SearchAnchorAdapter
   channels: ChannelsAdapter
   sync: SyncAdapter
   topics(id: string): TopicsAdapter
@@ -62,6 +64,7 @@ const defaults: AuthDeps = {
       holdActivity: session.holdActivity,
       memberListAccess: session.memberListAccess,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
+      searchAnchor: searchAnchorAdapter(session.searchAnchor),
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
       dms: dmsAdapter(session.dms),

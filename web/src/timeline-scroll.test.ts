@@ -12,6 +12,19 @@ import {
 const msg = (seq: number, sender = 'other') => ({ id: `m-${seq}`, created_seq: seq, sender })
 
 describe('timeline-scroll: follow-only-at-bottom and scroll anchoring (docs/ui.md §8)', () => {
+  it('waits for the search anchor and gives it precedence over first Unread', () => {
+    const scroll = createTimelineScrollController()
+    const input = {
+      channelId: 'c1', visitId: Symbol(), selfId: 'me', status: 'ready' as const, pendingIds: [],
+      searchAnchorId: 'm-2', firstUnreadMessageId: 'm-5', awaitingFirstUnread: true,
+    }
+    expect(scroll.sync({ ...input, messages: [msg(5)] }).action).toBe('none')
+    expect(scroll.sync({ ...input, messages: [msg(2), msg(5)] }).action).toBe('scroll_search_anchor')
+    expect(scroll.get().pinned).toBe(false)
+    expect(scroll.sync({ ...input, awaitingFirstUnread: false, messages: [msg(2), msg(5)] }).action).toBe('none')
+    scroll.destroy()
+  })
+
   it('treats scroll positions within 64px of the bottom as pinned', () => {
     expect(PINNED_THRESHOLD_PX).toBe(64)
     expect(isPinnedToBottom({ scrollTop: 436, scrollHeight: 1000, clientHeight: 500 })).toBe(true)
