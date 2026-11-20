@@ -18,7 +18,7 @@ export type SignInRequest = components['schemas']['SignInRequest']
 
 /** Result of an API call. `network` covers fetch failures and 5xx, including admission 503
  * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
-export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; retryAfterMs?: number }
+export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; error?: string; retryAfterMs?: number }
 
 async function call<T>(
   fetchFn: typeof fetch,
@@ -31,9 +31,19 @@ async function call<T>(
     // Cookie auth only: the HttpOnly session cookie is sent by the browser; no token is stored.
     const res = await fetchFn(path, { credentials: 'same-origin', ...init })
     if (res.status >= 500) {
+      let error: string | undefined
+      try {
+        const body = (await res.json()) as Partial<components['schemas']['ErrorBody']> | null
+        if (typeof body?.error === 'string') error = body.error
+      } catch { /* Non-JSON or empty 5xx body leaves error absent. */ }
       const header = res.headers.get('Retry-After')
       const delay = header === null ? NaN : /^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()
-      return { ok: false, kind: 'network', ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}) }
+      return {
+        ok: false,
+        kind: 'network',
+        ...(error === undefined ? {} : { error }),
+        ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}),
+      }
     }
     if (!res.ok) {
       let error: string | undefined

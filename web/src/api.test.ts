@@ -84,9 +84,34 @@ describe('channel and message calls', () => {
       status: 503, headers: { 'Retry-After': '3' },
     }))
     const input = { body: 'x', client_message_id: 'same-key' }
-    expect(await sendMessage('o', 'c', input, m)).toEqual({ ok: false, kind: 'network', retryAfterMs: 3000 })
+    expect(await sendMessage('o', 'c', input, m)).toEqual({
+      ok: false, kind: 'network', error: 'send admission unavailable', retryAfterMs: 3000,
+    })
     expect(m.mock.calls[0][0]).toBe('/api/v1/orgs/o/channels/c/messages')
     expect(JSON.parse(m.mock.calls[0][1].body)).toEqual(input)
+  })
+  it('preserves string ErrorBody codes on 5xx while keeping kind network and Retry-After', async () => {
+    const input = { body: 'x', client_message_id: 'same-key' }
+    const lockContention = vi.fn().mockResolvedValue(new Response('{"error":"lock_contention"}', { status: 503 }))
+    expect(await sendMessage('o', 'c', input, lockContention)).toStrictEqual({
+      ok: false, kind: 'network', error: 'lock_contention',
+    })
+    const retryAfter = vi.fn().mockResolvedValue(new Response('{"error":"lock_contention"}', {
+      status: 503, headers: { 'Retry-After': '5' },
+    }))
+    expect(await sendMessage('o', 'c', input, retryAfter)).toStrictEqual({
+      ok: false, kind: 'network', error: 'lock_contention', retryAfterMs: 5000,
+    })
+    for (const [status, body] of [
+      [502, '<html>Bad Gateway</html>'],
+      [503, ''],
+      [500, '{}'],
+      [503, '{"error":123}'],
+      [503, 'null'],
+    ] as const) {
+      const m = vi.fn().mockResolvedValue(new Response(body, { status }))
+      expect(await sendMessage('o', 'c', input, m)).toStrictEqual({ ok: false, kind: 'network' })
+    }
   })
   it('preserves 429 ErrorBody and Retry-After with a safe one-second fallback', async () => {
     for (const [header, retryAfterMs] of [
