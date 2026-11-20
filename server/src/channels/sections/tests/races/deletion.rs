@@ -19,6 +19,7 @@ async fn missing_and_foreign_section_deletes_leave_other_writes_unblocked(pool: 
             let mut blocker = f.pools.admin.begin().await.unwrap();
             auth::members::active_target(&mut blocker, f.owner.org, actor)
                 .await
+                .unwrap()
                 .unwrap();
             let deleting = spawn(&f, "DELETE", &section_path(id), &token, Value::Null);
             wait_blocked(&f, MEMBER_SHARE).await;
