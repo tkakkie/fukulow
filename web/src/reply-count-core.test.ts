@@ -84,6 +84,27 @@ it('mutation invalidation requires a covering snapshot without guessing mutation
   core.free()
 })
 
+it('duplicate and late Move keep the covering count', () => {
+  const { core, ticket } = tracked()
+  const moved = (seq: number): CountInput => ({ type: 'invalidate', root: 'r', seq })
+  try {
+    install(core, ticket, 10, 4)
+    const next = core.step(moved(12)).needed[0]
+    core.step({ type: 'begin', tickets: [next] })
+    core.step(create(13))
+    for (const seq of [12, 11]) {
+      expect(core.step(moved(seq))).toEqual({ counts: { r: null }, tickets: [next], needed: [] })
+    }
+    expect(install(core, next, 12, 4).counts.r).toBe(5)
+    core.step(create(13))
+    for (const seq of [12, 11]) {
+      const view = core.step(moved(seq))
+      expect(view.counts.r).toBe(5)
+      expect(view.needed).toEqual([])
+    }
+  } finally { core.free() }
+})
+
 it('new root seeds preserve newer baselines and reconcile only the unique Reply suffix', () => {
   const { core, ticket } = tracked()
   core.step(create(12))

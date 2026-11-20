@@ -1,6 +1,82 @@
 use super::*;
 
 #[fukulow_test::test]
+async fn reply_counts_stay_exact_and_scoped_after_move(pool: PgPool) {
+    let (app, org, author, public, token) = fixture(&pool).await;
+    let private = Uuid::new_v4();
+    channel(&pool, org, private, author, true).await;
+    let reader = Uuid::new_v4();
+    let reader_token = member(&pool, org, reader).await;
+    grant(&pool, org, private, reader).await;
+
+    let root = sent(
+        &app,
+        &token,
+        private,
+        topics::topic_input(Uuid::new_v4(), "Source"),
+    )
+    .await;
+    let child = sent(&app, &token, private, reply_input(Uuid::new_v4(), &root)).await;
+    let leaf = sent(&app, &token, private, reply_input(Uuid::new_v4(), &child)).await;
+    let destination = sent(
+        &app,
+        &token,
+        private,
+        topics::topic_input(Uuid::new_v4(), "Destination"),
+    )
+    .await;
+    let root_id = id(&root);
+    let mut ids = [root_id, id(&child), id(&leaf), id(&destination)];
+    ids.sort_unstable();
+    let expected: Vec<_> = ids
+        .iter()
+        .map(|&anchor| {
+            if anchor == id(&destination) {
+                entry(anchor, anchor, 0)
+            } else {
+                entry(anchor, root_id, 2)
+            }
+        })
+        .collect();
+    assert_eq!(
+        page(&app, &reader_token, private, &ids).await,
+        json!({"as_of_seq":4,"counts":expected})
+    );
+
+    let response = request(
+        &app,
+        "POST",
+        &format!("/api/v1/channels/{private}/messages/{}/move", id(&leaf)),
+        &token,
+        json!({"operation_id":Uuid::new_v4(), "expected_version":3, "topic_id":destination["topic_id"]}),
+    ).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt = body(response).await;
+    assert_eq!(receipt["root_id"], json!(root_id));
+    assert_eq!(receipt["destination_topic_id"], destination["topic_id"]);
+    assert_eq!(
+        page(&app, &reader_token, private, &ids).await,
+        json!({"as_of_seq":5,"counts":expected})
+    );
+    assert_eq!(
+        page(&app, &reader_token, public, &ids).await["counts"],
+        json!([])
+    );
+
+    revoke(&pool, org, private, reader).await;
+    error(
+        query(&app, &reader_token, private, &ids).await,
+        StatusCode::NOT_FOUND,
+        "channel not found",
+    )
+    .await;
+    assert_eq!(
+        page(&app, &token, private, &ids).await,
+        json!({"as_of_seq":5,"counts":expected})
+    );
+}
+
+#[fukulow_test::test]
 async fn reply_counts_exact_chain_totals_deduplicate_and_leave_positions_and_publication_unchanged(
     pool: PgPool,
 ) {

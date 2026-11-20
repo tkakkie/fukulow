@@ -34,6 +34,69 @@ pub(super) async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, target: Uuid)
 pub(super) async fn snapshot(pool: &PgPool) -> Value {
     sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(c) ORDER BY organization_id,channel_id,member_id) FROM channel_members c),(SELECT jsonb_agg(to_jsonb(p) ORDER BY organization_id,channel_id,member_id) FROM channel_read_positions p),(SELECT jsonb_agg(to_jsonb(p) ORDER BY organization_id,channel_id,member_id,topic_id) FROM topic_read_positions p))").fetch_one(pool).await.unwrap()
 }
+
+#[fukulow_test::test]
+async fn grant_target_lock_contention_leaves_rows_and_notices_unchanged(pool: PgPool) {
+    use crate::channels::activity::{Activity, Notice};
+    use std::{sync::Arc, time::Duration};
+
+    let state = AppState::for_test(pool.clone()).await;
+    let app = crate::app(state.clone());
+    let org = organization(&pool).await;
+    let owner = member(&pool, org, Uuid::new_v4(), "owner").await;
+    let target = Uuid::new_v4();
+    let target_token = member(&pool, org, target, "member").await;
+    let channel = create(&app, &owner, "Private", "private").await;
+    let channel = serde_json::from_value(channel["id"].clone()).unwrap();
+    grant(&pool, org, channel, target).await;
+    let activity = Activity::default();
+    state
+        .session_changes
+        .set_activity(Arc::new(activity.clone()));
+    let owner_registration = activity.register(&extract_auth(state.clone(), &owner).await);
+    let target_registration = activity.register(&extract_auth(state, &target_token).await);
+    let before = snapshot(&pool).await;
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
+        .bind(org)
+        .bind(target)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let revoke = || mutation(&app, &owner, channel, target, false);
+    let response = tokio::time::timeout(Duration::from_secs(10), revoke())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    assert_eq!(body(response).await, json!({"error":"lock_contention"}));
+    blocker.rollback().await.unwrap();
+    assert_eq!(snapshot(&pool).await, before);
+    activity.drained().await;
+    for registration in [&owner_registration, &target_registration] {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), registration.next())
+                .await
+                .is_err()
+        );
+    }
+
+    assert_eq!(revoke().await.status(), StatusCode::NO_CONTENT);
+    assert_ne!(snapshot(&pool).await, before);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), owner_registration.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .event,
+        Notice::ChannelMembersChanged {
+            channel_id: channel
+        }
+    );
+}
+
 async fn denied(
     pool: &PgPool,
     app: &Router,

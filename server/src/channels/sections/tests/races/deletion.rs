@@ -19,6 +19,7 @@ async fn missing_and_foreign_section_deletes_leave_other_writes_unblocked(pool: 
             let mut blocker = f.pools.admin.begin().await.unwrap();
             auth::members::active_target(&mut blocker, f.owner.org, actor)
                 .await
+                .unwrap()
                 .unwrap();
             let deleting = spawn(&f, "DELETE", &section_path(id), &token, Value::Null);
             wait_blocked(&f, MEMBER_SHARE).await;
@@ -230,12 +231,8 @@ async fn section_delete_restarts_with_new_channel_locks_and_bounds_attempts(pool
                 })
             );
         } else {
-            denied(
-                response,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error",
-            )
-            .await;
+            assert!(!response.headers().contains_key(header::RETRY_AFTER));
+            denied(response, StatusCode::SERVICE_UNAVAILABLE, "lock_contention").await;
             assert_eq!(
                 f.get(SECTIONS).await,
                 json!({

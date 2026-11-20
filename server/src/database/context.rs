@@ -52,7 +52,29 @@ pub async fn organization<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    with_context(pool, organization, false, true, super::Discard::Close, body).await
+    organization_confirming_rollback(pool, organization, |_| false, body).await
+}
+
+/// Let a cleanup error outrank a body error that promises a confirmed rollback.
+pub(crate) async fn organization_confirming_rollback<T, E>(
+    pool: &PgPool,
+    organization: Uuid,
+    confirm_rollback: fn(&E) -> bool,
+    body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<sqlx::Error>,
+{
+    with_context(
+        pool,
+        organization,
+        false,
+        true,
+        super::Discard::Close,
+        confirm_rollback,
+        body,
+    )
+    .await
 }
 
 /// Deadline-bound write: unconfirmed cleanup frees the pool slot synchronously.
@@ -70,6 +92,7 @@ where
         false,
         true,
         super::Discard::Detach,
+        |_| false,
         body,
     )
     .await
@@ -84,7 +107,16 @@ pub async fn organization_read_only<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    with_context(pool, organization, true, true, super::Discard::Close, body).await
+    with_context(
+        pool,
+        organization,
+        true,
+        true,
+        super::Discard::Close,
+        |_| false,
+        body,
+    )
+    .await
 }
 
 /// Deadline-bound snapshot: unconfirmed cleanup frees the pool slot synchronously.
@@ -96,7 +128,16 @@ pub(crate) async fn organization_read_only_detached<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    with_context(pool, organization, true, true, super::Discard::Detach, body).await
+    with_context(
+        pool,
+        organization,
+        true,
+        true,
+        super::Discard::Detach,
+        |_| false,
+        body,
+    )
+    .await
 }
 
 /// Account-only work, without granting an Organization context.
@@ -108,7 +149,16 @@ pub async fn account<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    with_context(pool, account, false, false, super::Discard::Close, body).await
+    with_context(
+        pool,
+        account,
+        false,
+        false,
+        super::Discard::Close,
+        |_| false,
+        body,
+    )
+    .await
 }
 
 /// A REPEATABLE READ, READ ONLY snapshot for Account-only reads.
@@ -120,7 +170,16 @@ pub async fn account_read_only<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    with_context(pool, account, true, false, super::Discard::Close, body).await
+    with_context(
+        pool,
+        account,
+        true,
+        false,
+        super::Discard::Close,
+        |_| false,
+        body,
+    )
+    .await
 }
 
 async fn with_context<T, E>(
@@ -129,6 +188,7 @@ async fn with_context<T, E>(
     read_only: bool,
     organization: bool,
     discard: super::Discard,
+    confirm_rollback: fn(&E) -> bool,
     body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
 ) -> Result<T, E>
 where
@@ -138,6 +198,7 @@ where
         pool,
         read_only,
         discard,
+        confirm_rollback,
         async |connection: &mut PgConnection| {
             if organization {
                 set_organization(connection, id).await?;

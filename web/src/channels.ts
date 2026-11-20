@@ -70,6 +70,14 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   let open: { id: string; release(): void; invalidate(): void } | undefined
   let archived: { release(): void; invalidate(): void; refresh(): void; retry(): void } | undefined
   let archivedHolds = 0
+  let awaitingReady = false
+  let authorized: { channels: readonly Channel[]; current: boolean } = { channels: [], current: false }
+  const authorizedListeners = new Set<() => void>()
+  const setAuthorized = (channels: readonly Channel[], current: boolean) => {
+    if (authorized.channels === channels && authorized.current === current) return
+    authorized = { channels, current }
+    authorizedListeners.forEach(l => l())
+  }
   const listeners = new Set<() => void>()
   const set = (patch: Partial<ChannelsState>) => {
     if (closed) return
@@ -163,6 +171,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   }
 
   const target = activity ? createActivityTarget<{ channels: Channel[] }>({
+    canLoad: () => !awaitingReady,
     load: async signal => validList(await api.listChannels(signal)),
     accept(data) {
       hasList = true
@@ -173,8 +182,13 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
         ...(departed ? { openChannel: previous, openChannelPending: true } : {}),
       })
       onSnapshot?.(data.channels)
+      setAuthorized(data.channels, true)
     },
-    error: () => set({ status: 'error' }),
+    hide: () => setAuthorized(authorized.channels, false),
+    error: () => {
+      setAuthorized(authorized.channels, false)
+      set({ status: 'error' })
+    },
     terminal,
   }) : undefined
   const release = target && activity?.hold('channels', target)
@@ -190,12 +204,27 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   }
   return {
     activityTarget: target,
+    authorizedList: {
+      get: () => authorized,
+      subscribe(listener: () => void) {
+        authorizedListeners.add(listener)
+        return () => authorizedListeners.delete(listener)
+      },
+      invalidate: () => target?.invalidate('access'),
+      disconnected() {
+        awaitingReady = true
+        target?.suspend()
+        setAuthorized(authorized.channels, false)
+      },
+      ready() { awaitingReady = false },
+    },
     revoke(id: string) {
       generation++; loadSeq++
       const list = state.archivedList
       set({ channels: state.channels.filter(c => c.id !== id),
         archivedList: list && { ...list, channels: list.channels.filter(c => c.id !== id) },
         ...(state.openChannel?.id === id ? { openChannel: undefined, openChannelPending: false } : {}) })
+      setAuthorized(authorized.channels.filter(c => c.id !== id), false)
     },
     get: () => state,
     isOrdinary,
@@ -253,6 +282,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       target?.close(); release?.()
       open?.release(); archived?.release()
       listeners.clear()
+      authorizedListeners.clear()
     },
     select(id: string) {
       if (closed || !isOrdinary(id)) return
@@ -269,6 +299,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       if (!r.ok) return { error: channelError(r) }
       generation++
       target?.invalidate('access')
+      activity?.invalidate('sections', 'access')
       set({ channels: [...state.channels.filter(c => c.id !== r.data.id), r.data], selectedId: r.data.id })
       return { channel: r.data }
     },
