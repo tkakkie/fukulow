@@ -237,7 +237,7 @@ REST remains authoritative for lists and counts. Notices carry only identifiers 
 | Channel creation | `channel_access_gained` to active non-Guests for public. For private, it goes only to the creator. No Guest. |
 | Grant add or removal/leave | To target, `channel_access_gained` if newly visible, `channel_access_revoked` if lost, otherwise `channel_list_changed` for continuous public access. To current readers, `channel_members_changed`. |
 | Channel manager change | `channel_list_changed` to target and `channel_members_changed` to current readers. |
-| Channel rename, archive or restore (#410, proposed) | `channel_list_changed` to current readers, including the actor. Never gained/revoked: archive keeps access, baselines and A12 generations. |
+| Channel rename, archive or restore (#410, implemented) | `channel_list_changed` to current readers, including the actor. Never gained/revoked: archive keeps access, baselines and A12 generations. |
 | Role change | Target gets `channel_list_changed` and gained/revoked per public Channel gained on promotion from Guest/lost on demotion without grant. Directory recipients get `members_changed`. Current readers get `channel_members_changed` for Channels where target has usable grants. |
 | Deactivation | Directory notices and `channel_members_changed` to current readers of Channels where target had a usable grant (captured in transaction). Target sockets close 4003. |
 | Invite acceptance, incl. reactivation | Directory notices only. Reactivation restores no grants. |
