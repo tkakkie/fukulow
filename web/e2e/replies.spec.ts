@@ -416,11 +416,15 @@ test('open a reply chain from a Message, send a reply, receive a live update fro
     await expect(latestTopicRow).toHaveAttribute('tabindex', '0')
     await mainComposer(page).fill('消さずに残すトピック下書き')
     await mainComposer(page).focus()
-    // Focusing an overscan row scrolls it into view and can mount more rows below it.
-    // Keep the chosen roving row identity, rather than following the changing last mounted row.
-    const keyboardOpenerId = await latestTopicRow.locator('..').getAttribute('data-message-id')
-    const keyboardOpener = page.locator(`#main-content [data-message-id="${keyboardOpenerId}"] .ui-message-row`)
+    // Rows can mount between any snapshot and the key press (overscan, resize), moving the roving row.
+    // Assert that Shift+Tab lands on whichever row is roving then, and keep that row's identity.
     await page.keyboard.press('Shift+Tab')
+    const focusedTopicRow = page.locator('#main-content .ui-message-row:focus')
+    await expect(focusedTopicRow).toHaveCount(1)
+    await expect(focusedTopicRow).toHaveAttribute('tabindex', '0')
+    const keyboardOpenerId = await focusedTopicRow.locator('..').getAttribute('data-message-id')
+    expect(keyboardOpenerId).toBeTruthy()
+    const keyboardOpener = page.locator(`#main-content [data-message-id="${keyboardOpenerId}"] .ui-message-row`)
     await expect(keyboardOpener).toBeFocused()
     await page.keyboard.press('r')
     await expect(panel).toBeVisible()
