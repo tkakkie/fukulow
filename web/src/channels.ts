@@ -298,7 +298,8 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       if (closed) return { error: sessionEndedError }
       if (!r.ok) return { error: channelError(r) }
       generation++
-      activity?.notice({ type: 'channel_list_changed' })
+      target?.invalidate('access')
+      activity?.invalidate('sections', 'access')
       set({ channels: [...state.channels.filter(c => c.id !== r.data.id), r.data], selectedId: r.data.id })
       return { channel: r.data }
     },

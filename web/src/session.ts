@@ -43,10 +43,11 @@ export function createSession(options: SessionOptions) {
   const organizationId = options.organizationId ?? ''
   let closed = false
   let ended = false
+  let closeSections: (() => void) | undefined
   const notifyEnded = () => {
     if (ended || options.accountSignal?.aborted) return
     ended = true
-    sections.close()
+    closeSections?.()
     activity.close()
     options.onEnded()
   }
@@ -212,9 +213,10 @@ export function createSession(options: SessionOptions) {
     },
   )
   const sections = createSections({
-    api: options.sectionsApi ?? sectionsApi(organizationId), activity, list: channels.authorizedList, isDm, observeAccess,
+    api: options.sectionsApi ?? sectionsApi(organizationId), activity, list: channels.authorizedList, observeAccess,
     random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs,
   })
+  closeSections = sections.close
   const dmSource = options.dmsApi ?? dmsApi(organizationId)
   dms = createDms({ api: {
     list: (query, signal) => observe(dmSource.list({ history_generation: history?.get().historyGeneration, ...query }, signal)),

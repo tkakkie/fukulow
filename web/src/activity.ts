@@ -45,7 +45,7 @@ export function createActivityTarget<T>(options: {
     let pending: Promise<Result<T>>
     try { pending = options.load(request.signal).catch((): Result<T> => ({ ok: false, kind: 'network' })) }
     catch { pending = Promise.resolve({ ok: false, kind: 'network' }) }
-    let result = await Promise.race([pending, new Promise<Result<T>>(resolve => {
+    const result = await Promise.race([pending, new Promise<Result<T>>(resolve => {
       completion = () => { cancelled = true; request.abort(); resolve({ ok: false, kind: 'network' }) }
       deadline = setTimeout(() => { request.abort(); resolve({ ok: false, kind: 'network' }) }, options.timeoutMs ?? 10_000)
     })])
@@ -54,9 +54,9 @@ export function createActivityTarget<T>(options: {
     inFlight = false
     if (closed) return
     if (cancelled) { if (dirty) schedule(0); return }
-    if (result.ok && own === generation && options.covers?.(result.data) === false) result = { ok: false, kind: 'network' }
     try { if (result.ok) {
       if (own !== generation) { if (dirty && !retry) schedule(200); return }
+      if (options.covers?.(result.data) === false) { schedule(200); return }
       dirty = queued
       failure = undefined; stopped = false; attempt = 0; options.accept(result.data)
       if (dirty) schedule(200)
@@ -142,6 +142,7 @@ export function createActivity(options: {
   }
   return {
     hold(key: string, target: ActivityTarget) { target.held?.(); if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
+    invalidate,
     invalidateMemberLists,
     notice(event: ActivityNotice) {
       if (closed) return

@@ -68,7 +68,7 @@ it('coalesces generation gaps and duplicates and rejects reads below either nume
   await advance()
   expect(c.generation()).toBe('9007199254740993')
   c.db.layout = layout('9223372036854775807', [], 'Complete')
-  await advance(750)
+  await advance()
   expect(c.generation()).toBe('9223372036854775807')
   expect(c.groups()).toEqual([['S', []], [null, []]])
 
@@ -78,8 +78,63 @@ it('coalesces generation gaps and duplicates and rejects reads below either nume
   expect(c.generation()).toBe('9223372036854775807')
   expect(c.groups()).toEqual([['S', []], [null, []]])
   c.db.layout = layout('9223372036854775807', ['A'], 'Current access')
-  await advance(750)
+  await advance()
   expect(c.groups()).toEqual([['S', ['A']], [null, []]])
+})
+
+it('repeated notices during layout reads keep the 200 ms follow-up without setting an error', async () => {
+  const c = await boot()
+  const reads = Array.from({ length: 3 }, () => deferred<Result<SectionLayout>>())
+  c.getLayout.mockClear()
+  for (const read of reads) c.getLayout.mockReturnValueOnce(read.promise)
+  c.getLayout.mockResolvedValueOnce(network)
+  const errors = vi.fn()
+  c.sections.subscribe(() => {
+    const { error } = c.sections.get()
+    if (error) errors(error)
+  })
+  c.event({ type: 'sections_changed', generation: '2' })
+  await advance()
+  for (const [index, read] of reads.entries()) {
+    expect(c.getLayout).toHaveBeenCalledTimes(index + 1)
+    c.event({ type: 'sections_changed', generation: String(index + 3) })
+    read.resolve(ok(layout(String(index + 2))))
+    await advance(199)
+    expect(c.getLayout).toHaveBeenCalledTimes(index + 1)
+    expect(c.generation()).toBe('1')
+    expect(c.sections.get().error).toBeUndefined()
+    expect(errors).not.toHaveBeenCalled()
+    await advance(1)
+  }
+
+  expect(c.getLayout).toHaveBeenCalledTimes(4)
+  expect(errors).toHaveBeenCalledExactlyOnceWith(network)
+  c.db.layout = layout('5')
+  await advance(749)
+  expect(c.getLayout).toHaveBeenCalledTimes(4)
+  await advance(1)
+  expect(c.getLayout).toHaveBeenCalledTimes(5)
+  expect(c.generation()).toBe('5')
+  expect(c.sections.get().error).toBeUndefined()
+})
+
+it('Channel creation refetches only the Channel list and sections layout', async () => {
+  const c = await boot()
+  const unrelated = { invalidate: vi.fn(), close: vi.fn() }
+  c.session.holdActivity('archived-channels', unrelated)
+  c.session.holdActivity('open-channel', unrelated)
+  c.getLayout.mockClear()
+  c.list.mockClear()
+  c.db.rows = [row('A'), row('new')]
+  c.db.layout = { ...c.db.layout, other_channel_ids: ['new'] }
+  await expect(c.session.channels.create({ name: 'new', visibility: 'public' })).resolves.toMatchObject({ channel: { id: 'new' } })
+  expect(c.session.channels.authorizedList.get().current).toBe(false)
+  expect(c.groups()).toEqual([['S', ['A']], [null, []]])
+  await advance()
+  expect(c.list).toHaveBeenCalledOnce()
+  expect(c.getLayout).toHaveBeenCalledOnce()
+  expect(c.groups()).toEqual([['S', ['A']], [null, ['new']]])
+  expect(unrelated.invalidate).not.toHaveBeenCalled()
 })
 
 it('fences both reads on revoke and requires a fresh pair to show the saved slot on regain', async () => {
@@ -283,11 +338,21 @@ it('a refused DM placement cannot revoke the DM or reset its Unread', async () =
   await expect(c.sections.placement('A')).resolves.toMatchObject({ ok: true })
 })
 
-it.each(['placement', 'moveChannel'] as const)('current %s denial hides and fences only the affected Channel', async method => {
+it.each<'placement' | 'moveChannel'>(['placement', 'moveChannel'])('current %s denial hides and fences the placement while preserving access state', async method => {
   const db = database()
   db.rows.push(row('B', { visibility: 'private' }))
   db.layout = layout('1', ['A', 'B'])
   const c = await boot(db)
+  const unrelated = { invalidate: vi.fn(), close: vi.fn() }
+  for (const key of ['members', 'channel-members:B', 'open-channel', 'archived-channels']) c.session.holdActivity(key, unrelated)
+  const oldLayout = deferred<Result<SectionLayout>>(), oldList = deferred<Result<{ channels: typeof db.rows }>>()
+  c.getLayout.mockClear().mockReturnValueOnce(oldLayout.promise)
+  c.list.mockClear().mockReturnValueOnce(oldList.promise)
+  c.sections.retry()
+  c.session.channels.authorizedList.invalidate()
+  await advance()
+  const unread = c.session.unread.get('B')
+  expect(unread.unreadCount).toBe(3)
   const denied = http(404, 'channel not found')
   c.sectionsApi[method].mockResolvedValueOnce(denied)
   c.db.rows = [row('A')]
@@ -295,8 +360,22 @@ it.each(['placement', 'moveChannel'] as const)('current %s denial hides and fenc
   const run = () => method === 'placement' ? c.sections.placement('B') : c.sections.moveChannel('B', { section_id: null })
   await expect(run()).resolves.toEqual(denied)
   expect(c.groups()).toEqual([['S', ['A']], [null, []]])
-  expect(c.session.channels.get().channels.map(channel => channel.id)).toEqual(['A'])
+  expect(c.session.channels.get().channels.map(channel => channel.id)).toEqual(['A', 'B'])
+  expect(c.session.unread.get('B')).toEqual(unread)
+  expect(unrelated.close).not.toHaveBeenCalled()
+  expect(unrelated.invalidate).not.toHaveBeenCalled()
+
+  oldLayout.resolve(ok(layout('99', ['B', 'A'])))
+  oldList.resolve(ok({ channels: [row('B', { read_seq: 5, unread_count: 0 }), row('old')] }))
+  await advance(0)
+  expect(c.generation()).toBe('1')
+  expect(c.groups()).toEqual([['S', ['A']], [null, []]])
+  expect(c.session.channels.get().channels.map(channel => channel.id)).toEqual(['A', 'B'])
+  expect(c.session.unread.get('B')).toEqual(unread)
   await advance()
+  expect(c.getLayout).toHaveBeenCalledTimes(2)
+  expect(c.list).toHaveBeenCalledTimes(2)
+  expect(c.session.channels.get().channels.map(channel => channel.id)).toEqual(['A'])
   c.db.rows = [row('A'), row('B')]
   c.db.layout = layout('1', ['A', 'B'])
   c.event({ type: 'channel_access_gained', channel_id: 'B' })

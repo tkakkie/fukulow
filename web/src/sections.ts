@@ -6,7 +6,7 @@ import { sectionGeneration } from './section-generation'
 
 export type SectionsApi = {
   layout(signal: AbortSignal): Promise<api.Result<api.SectionLayout>>
-  placement(channel: string): Promise<api.Result<api.ChannelPlacement>>
+  placement(channel: string, signal: AbortSignal): Promise<api.Result<api.ChannelPlacement>>
   create(body: api.CreateSection, signal: AbortSignal): Promise<api.Result<api.CreatedSection>>
   rename(id: string, body: api.RenameSection, signal: AbortSignal): Promise<api.Result<undefined>>
   reorder(body: api.SectionOrder, signal: AbortSignal): Promise<api.Result<undefined>>
@@ -17,7 +17,7 @@ export type SectionsApi = {
 
 export const sectionsApi = (org: string): SectionsApi => ({
   layout: signal => api.getSectionLayout(org, undefined, signal),
-  placement: channel => api.getChannelPlacement(org, channel),
+  placement: (channel, signal) => api.getChannelPlacement(org, channel, undefined, signal),
   create: (body, signal) => api.createSection(org, body, undefined, signal),
   rename: (id, body, signal) => api.renameSection(org, id, body, undefined, signal),
   reorder: (body, signal) => api.reorderSections(org, body, undefined, signal),
@@ -47,7 +47,6 @@ export function createSections(options: {
   api: SectionsApi
   activity: Activity
   list: ReturnType<typeof createChannels>['authorizedList']
-  isDm(id: string): boolean
   observeAccess(result: api.Result<unknown>): void
   random?: () => number
   timeoutMs?: number
@@ -57,7 +56,6 @@ export function createSections(options: {
   let accepted = -1n, observed = -1n, access = 0
   let layoutCurrent = false, waitingForReady = false, socketReady = false, closed = false
   let recovery: 'write' | 'sections' | 'channels' | undefined
-  let write: AbortController | undefined
   let mutationVersion = 0
   let release: (() => void) | undefined
   let unsubscribe: (() => void) | undefined
@@ -66,6 +64,7 @@ export function createSections(options: {
   let visible = new Set<string>()
   const listeners = new Set<() => void>()
   const deadlines = createRequestDeadlines()
+  const requests = new Set<AbortController>()
   const notify = () => listeners.forEach(listener => listener())
   const observe = async <T>(request: Promise<api.Result<T>>) => {
     const result = await request
@@ -172,12 +171,11 @@ export function createSections(options: {
     render()
   }
 
-  function placementRefusal(channel: string, result: Failure) {
-    if (result.kind !== 'http') return
+  function placementRefusal(channel: string, result: Extract<Failure, { kind: 'http' }>) {
     if (result.status === 404 && result.error === 'channel not found') {
-      // Placement authorization excludes DMs even when their own access remains valid.
-      if (options.isDm(channel)) options.activity.notice({ type: 'channel_list_changed' })
-      else options.activity.notice({ type: 'channel_access_revoked', channel_id: channel })
+      hideChannel(channel)
+      invalidate('access')
+      options.list.invalidate()
     } else if (result.status === 409 && result.error === 'channel_archived') {
       hideChannel(channel)
       options.activity.notice({ type: 'channel_list_changed' })
@@ -189,26 +187,29 @@ export function createSections(options: {
     target.fence()
   }
 
+  async function requestWithDeadline<T>(request: (signal: AbortSignal) => Promise<api.Result<T>>): Promise<api.Result<T> | typeof inactive> {
+    if (closed) return inactive
+    const controller = new AbortController()
+    requests.add(controller)
+    const deadline = deadlines.start<api.Result<T> | typeof inactive>(inactive, {
+      timeoutMs: options.timeoutMs ?? 10_000,
+      onTimeout() { controller.abort(); return network },
+    })
+    try { return await Promise.race([observe(request(controller.signal)), deadline.until]) }
+    catch { return network }
+    finally { deadline.clear(); requests.delete(controller) }
+  }
+
   async function mutate<T>(request: (signal: AbortSignal) => Promise<api.Result<T>>, channel?: string, order?: 'sections' | 'channels'): Promise<SectionResult<T>> {
     if (closed || !release) return inactive
-    if (write) return { ok: false, kind: 'busy' }
+    if (state.writing) return { ok: false, kind: 'busy' }
     if (recovery === 'write' || (order && recovery)) return { ok: false, kind: 'reconciling' }
-    const controller = new AbortController()
-    write = controller
     const own = access
     fenceMutation()
     state = { ...state, writing: true }
     notify()
-    const deadline = deadlines.start<SectionResult<T>>(inactive, {
-      timeoutMs: options.timeoutMs ?? 10_000,
-      onTimeout() { controller.abort(); return network },
-    })
-    let result: SectionResult<T>
-    try { result = await Promise.race([observe(request(controller.signal)), deadline.until]) }
-    catch { result = network }
-    finally { deadline.clear() }
+    const result = await requestWithDeadline(request)
     if (closed) return inactive
-    write = undefined
     state = { ...state, writing: false }
     fenceMutation()
     if (result.ok) target.invalidate()
@@ -233,7 +234,7 @@ export function createSections(options: {
     if (closed) return
     closed = true
     deadlines.cancel()
-    write?.abort()
+    for (const request of requests) request.abort()
     target.close()
     release?.()
     unsubscribe?.()
@@ -285,9 +286,9 @@ export function createSections(options: {
       if (closed || !release || waitingForReady) return inactive
       const own = access
       const mutation = mutationVersion
-      const result = await observe(options.api.placement(channel))
+      const result = await requestWithDeadline(signal => options.api.placement(channel, signal))
       if (closed || own !== access || mutation !== mutationVersion) return inactive
-      if (!result.ok) placementRefusal(channel, result)
+      if (!result.ok && result.kind === 'http') placementRefusal(channel, result)
       return result
     },
     create: (body: api.CreateSection) => mutate(signal => options.api.create(body, signal)),

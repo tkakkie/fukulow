@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { CreatedSection, Result, SectionLayout } from './api'
+import type { ChannelPlacement, CreatedSection, Result, SectionLayout } from './api'
 import { advance, client, database, deferred, http, layout, network, ok, row } from './sections-test-helpers'
 
 const clients: ReturnType<typeof client>[] = []
@@ -216,6 +216,31 @@ it('a timed-out mutation fences its overlapping read and recovers without a retr
   await advance()
   expect(c.generation()).toBe('2')
   expect(c.sectionsApi.create).toHaveBeenCalledOnce()
+})
+
+it('hung placement GETs settle and abort at the deadline and on close', async () => {
+  const c = await ready(open(database(), { timeoutMs: 600 }))
+  const late = deferred<Result<ChannelPlacement>>(), pending = deferred<Result<ChannelPlacement>>()
+  c.sectionsApi.placement.mockReturnValueOnce(late.promise).mockReturnValueOnce(pending.promise)
+  const settled = vi.fn()
+  const reading = c.sections.placement('A').then(settled)
+  const signal = c.sectionsApi.placement.mock.calls[0][1]
+  await advance(599)
+  expect(settled).not.toHaveBeenCalled()
+  expect(signal.aborted).toBe(false)
+  await advance(1)
+  await reading
+  expect(settled).toHaveBeenCalledExactlyOnceWith(network)
+  expect(signal.aborted).toBe(true)
+  late.resolve(http(404, 'channel not found'))
+  await advance(0)
+  expect(c.groups()).toEqual([['S', ['A']], [null, []]])
+
+  const closing = c.sections.placement('A')
+  const closingSignal = c.sectionsApi.placement.mock.calls[1][1]
+  c.session.close()
+  await expect(closing).resolves.toEqual({ ok: false, kind: 'inactive' })
+  expect(closingSignal.aborted).toBe(true)
 })
 
 it('an ordinary layout refusal stops retrying and a later invalidation recovers', async () => {
