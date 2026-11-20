@@ -75,7 +75,7 @@ test('MessageRow declarative roving tabindex, Enter/R reply open, IME guards, ch
 
   const m1 = await postMessage(page.request, org, channel.id, { body: 'タイムライン1件目' })
   const m2 = await postMessage(page.request, org, channel.id, { body: 'タイムライン2件目 https://example.com/link' })
-  await postMessage(page.request, org, channel.id, { body: 'タイムライン返信A', reply_to: m2.id })
+  const r1 = await postMessage(page.request, org, channel.id, { body: 'タイムライン返信A', reply_to: m2.id })
   const r2 = await postMessage(page.request, org, channel.id, { body: 'タイムライン返信B', reply_to: m2.id })
   const m3 = await postMessage(page.request, org, channel.id, { body: 'タイムライン3件目' })
 
@@ -103,6 +103,13 @@ test('MessageRow declarative roving tabindex, Enter/R reply open, IME guards, ch
   await expect(mainRow(m3.id)).toBeVisible()
   await expectSingleRovingTabStop(main)
   await expect(mainRow(m3.id)).toHaveAttribute('tabindex', '0')
+
+  // Direct focus on a confirmed row with tabindex="-1" makes it the sole roving tab stop via declarative onfocus
+  await expect(mainRow(m1.id)).toHaveAttribute('tabindex', '-1')
+  await mainRow(m1.id).focus()
+  await expect(mainRow(m1.id)).toBeFocused()
+  await expect(mainRow(m1.id)).toHaveAttribute('tabindex', '0')
+  await expectSingleRovingTabStop(main)
 
   // 1. Timeline: ArrowUp from empty Composer, mounted-row movement, roving tab stop, IME guard, child-control guard
   await mainComposer(page).focus()
@@ -163,10 +170,9 @@ test('MessageRow declarative roving tabindex, Enter/R reply open, IME guards, ch
   await expectSingleRovingTabStop(panel)
 
   await page.keyboard.press('ArrowUp')
-  const panelPrevRow = panel.locator('.ui-message-row:focus')
-  await expect(panelPrevRow).toHaveCount(1)
+  await expect(panelRow(r1.id)).toBeFocused()
   await expectSingleRovingTabStop(panel)
-  await expectImeKeysIgnoredOnRow(page, panelPrevRow)
+  await expectImeKeysIgnoredOnRow(page, panelRow(r1.id))
 
   // Press Enter on the root message inside ReplyPanel to focus that anchor
   await page.keyboard.press('Home')
@@ -297,7 +303,7 @@ test('MessageRow roving tabindex, keyboard navigation and focus eviction remain 
   const replyRoot = await postMessage(page.request, org, channel.id, { body: multiline('返信仮想化起点', 0) })
   await batch(44, i => ({ body: multiline('返信仮想化', i + 1), reply_to: replyRoot.id }))
 
-  async function verifyVirtualizedScope(scope: Locator, scrollContainer: Locator, composer: Locator) {
+  async function verifyVirtualizedScope(scope: Locator, scrollContainer: Locator, composer: Locator, expectedHomeId: string) {
     await expect.poll(() => scope.locator('[data-message-id]').count()).toBeGreaterThan(0)
     await expect.poll(() => scope.locator('[data-message-id]').count()).toBeLessThan(40)
     await expectSingleRovingTabStop(scope)
@@ -309,21 +315,22 @@ test('MessageRow roving tabindex, keyboard navigation and focus eviction remain 
     const focused = scope.locator('.ui-message-row:focus')
     await expect(focused).toHaveCount(1)
     const bottomId = await focused.locator('..').getAttribute('data-message-id')
+    expect(bottomId).toBeTruthy()
+    expect(bottomId).not.toBe(expectedHomeId)
     await expectSingleRovingTabStop(scope)
 
     await page.keyboard.press('Home')
-    await expect(focused).toHaveCount(1)
-    const topId = await focused.locator('..').getAttribute('data-message-id')
-    expect(topId).toBeTruthy()
-    expect(topId).not.toBe(bottomId)
+    const homeRow = scope.locator(`[data-message-id="${expectedHomeId}"] .ui-message-row`)
+    await expect(homeRow).toBeFocused()
     await expect(scope.locator(`[data-message-id="${bottomId}"]`)).toHaveCount(0)
     await expectSingleRovingTabStop(scope)
 
     // Step across newly mounted rows at the top
     await page.keyboard.press('ArrowDown')
+    await expect(homeRow).not.toBeFocused()
     await expect(focused).toHaveCount(1)
     const secondTopId = await focused.locator('..').getAttribute('data-message-id')
-    expect(secondTopId).not.toBe(topId)
+    expect(secondTopId).not.toBe(expectedHomeId)
     await expectSingleRovingTabStop(scope)
 
     // Scroll far away so the focused row unmounts -> focus must fall back to Composer and roving tab stop remains unique
@@ -347,23 +354,29 @@ test('MessageRow roving tabindex, keyboard navigation and focus eviction remain 
   }
 
   // Timeline virtualization
+  const timelineRes = await secretSafe(() => page.request.get(`/api/v1/orgs/${org}/channels/${channel.id}/timeline`))
+  expect(timelineRes.ok()).toBe(true)
+  const timelinePage = (await secretSafe(() => timelineRes.json())) as components['schemas']['TimelinePage']
+  const timelineFirst = timelinePage.items.find(item => item.kind === 'message')
+  expect(timelineFirst).toBeDefined()
+
   await page.goto(`/o/${org}/c/${channel.id}`)
   await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
   const main = page.locator('#main-content')
   const panel = page.locator('#panel-content')
   expect(mainMessages.length).toBe(45)
-  await verifyVirtualizedScope(main, main.locator('.timeline-scroll'), mainComposer(page))
+  await verifyVirtualizedScope(main, main.locator('.timeline-scroll'), mainComposer(page), timelineFirst!.message.id)
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
 
   // TopicView virtualization
   await page.goto(`/o/${org}/c/${channel.id}/t/${topicRoot.topic_id}`)
-  await verifyVirtualizedScope(main, main.locator('.topic-view__scroll'), mainComposer(page))
+  await verifyVirtualizedScope(main, main.locator('.topic-view__scroll'), mainComposer(page), topicRoot.id)
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
 
   // ReplyPanel virtualization
   await page.goto(`/o/${org}/c/${channel.id}?panel=reply:${replyRoot.id}`)
   await expect(panel.getByRole('heading', { name: '返信のつながり', exact: true })).toBeVisible()
-  await verifyVirtualizedScope(panel, panel.locator('.reply-panel__scroll'), replyComposer(page))
+  await verifyVirtualizedScope(panel, panel.locator('.reply-panel__scroll'), replyComposer(page), replyRoot.id)
 })

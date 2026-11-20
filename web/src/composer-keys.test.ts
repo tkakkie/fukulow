@@ -158,9 +158,24 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
 
     const messageRowSrc = readFileSync(join(webDir, 'src/ui/MessageRow.svelte'), 'utf8')
     expect(messageRowSrc).toContain('shouldOpenRepliesFromRowKey')
-    expect(messageRowSrc).toContain('tabindex={isRowFocusable ? rovingTabindex : -1}')
-    expect(messageRowSrc).toContain('onfocus={isRowFocusable ? handleFocus : undefined}')
-    expect(messageRowSrc).toContain('onkeydown={isRowFocusable ? handleKeydown : undefined}')
+    const articleMatch = messageRowSrc.match(/<article\s/)
+    expect(articleMatch?.index).toBeGreaterThanOrEqual(0)
+    const articleStart = articleMatch?.index ?? -1
+    let braceDepth = 0
+    let articleEnd = -1
+    for (let i = articleStart; i < messageRowSrc.length; i += 1) {
+      const ch = messageRowSrc[i]
+      if (ch === '{') braceDepth += 1
+      else if (ch === '}') braceDepth -= 1
+      else if (ch === '>' && braceDepth === 0) {
+        articleEnd = i + 1
+        break
+      }
+    }
+    const articleOpenTag = messageRowSrc.slice(articleStart, articleEnd)
+    expect(articleOpenTag).toMatch(/\btabindex=\{/)
+    expect(articleOpenTag).toMatch(/\bonfocus=\{/)
+    expect(articleOpenTag).toMatch(/\bonkeydown=\{/)
     expect(messageRowSrc).not.toContain('addEventListener')
     expect(messageRowSrc).toContain('tabindex={-1}')
   })
