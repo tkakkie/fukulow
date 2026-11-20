@@ -31,6 +31,139 @@ async fn read(app: &Router, token: &str, path: &str) -> Value {
     body(response).await
 }
 
+#[fukulow_test::test]
+async fn channel_metadata_organization_contention_preserves_rows_notices_and_denial(pool: PgPool) {
+    use crate::channels::activity::{Activity, Notice};
+    use std::{sync::Arc, time::Duration};
+
+    let state = AppState::for_test(pool.clone()).await;
+    let app = crate::app(state.clone());
+    let org = organization(&pool).await;
+    let owner = member(&pool, org, Uuid::new_v4(), "owner").await;
+    let foreign_org = organization(&pool).await;
+    let foreign_owner = member(&pool, foreign_org, Uuid::new_v4(), "owner").await;
+    let channel = create(&app, &owner, "Original", "public").await;
+    let id = channel["id"].as_str().unwrap();
+    let uri = format!("/api/v1/orgs/{org}/channels/{id}");
+    let activity = Activity::default();
+    state
+        .session_changes
+        .set_activity(Arc::new(activity.clone()));
+    let registration = activity.register(&extract_auth(state, &owner).await);
+    let before = read(&app, &owner, &uri).await;
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT organization_id FROM organizations WHERE organization_id=$1 FOR NO KEY UPDATE",
+    )
+    .bind(org)
+    .fetch_one(&mut *blocker)
+    .await
+    .unwrap();
+    let rename = |token| request(&app, "PATCH", &uri, token, json!({"name":"Renamed"}));
+
+    let denied = tokio::time::timeout(Duration::from_secs(2), rename(&foreign_owner))
+        .await
+        .unwrap();
+    expect_error(denied, StatusCode::NOT_FOUND, "organization_unavailable").await;
+
+    let response = tokio::time::timeout(Duration::from_secs(10), rename(&owner))
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    expect_error(response, StatusCode::SERVICE_UNAVAILABLE, "lock_contention").await;
+    blocker.rollback().await.unwrap();
+    assert_eq!(read(&app, &owner, &uri).await, before);
+    activity.drained().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), registration.next())
+            .await
+            .is_err()
+    );
+
+    assert_eq!(rename(&owner).await.status(), StatusCode::NO_CONTENT);
+    assert_eq!(read(&app, &owner, &uri).await["name"], "Renamed");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), registration.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .event,
+        Notice::ChannelListChanged
+    );
+}
+
+#[fukulow_test::test]
+async fn channel_metadata_database_failure_and_commit_contention_stay_internal(pool: PgPool) {
+    let app = router(&pool).await;
+    let org = organization(&pool).await;
+    let owner = member(&pool, org, Uuid::new_v4(), "owner").await;
+    let channel = create(&app, &owner, "Original", "public").await;
+    let uri = path(&channel["id"]);
+    let before = read(&app, &owner, &uri).await;
+
+    for (code, trigger) in [
+        (
+            "23514",
+            "CREATE TRIGGER test_channel_failure BEFORE UPDATE ON channels",
+        ),
+        (
+            "55P03",
+            "CREATE CONSTRAINT TRIGGER test_channel_failure AFTER UPDATE ON channels DEFERRABLE INITIALLY DEFERRED",
+        ),
+    ] {
+        sqlx::raw_sql(&format!(
+            "CREATE OR REPLACE FUNCTION test_channel_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN RAISE SQLSTATE '{code}'; END $$;
+             {trigger} FOR EACH ROW EXECUTE FUNCTION test_channel_failure()",
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        expect_error(
+            request(&app, "PATCH", &uri, &owner, json!({"name":"Renamed"})).await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        )
+        .await;
+        assert_eq!(read(&app, &owner, &uri).await, before);
+        sqlx::query("DROP TRIGGER test_channel_failure ON channels")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[fukulow_test::test]
+async fn channel_create_lock_contention_stays_internal(pool: PgPool) {
+    let app = router(&pool).await;
+    let org = organization(&pool).await;
+    let owner = member(&pool, org, Uuid::new_v4(), "owner").await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION test_channel_timeout() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE SQLSTATE '55P03'; END $$;
+         CREATE TRIGGER test_channel_timeout BEFORE INSERT ON channels
+         FOR EACH ROW EXECUTE FUNCTION test_channel_timeout()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let response = request(
+        &app,
+        "POST",
+        "/api/v1/channels",
+        &owner,
+        json!({"name":"New","visibility":"private"}),
+    )
+    .await;
+    expect_error(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal error",
+    )
+    .await;
+}
+
 async fn deny_edits(app: &Router, token: &str, path: &str, status: StatusCode, code: &str) {
     for edit in EDITS {
         expect_error(

@@ -165,6 +165,40 @@ fn setup_token_contract_is_required_and_non_nullable() {
 }
 
 #[test]
+fn permission_scoped_writes_document_lock_contention() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for (method, suffix) in [
+        ("patch", "/channels/{id}"),
+        ("post", "/channels/{id}/members"),
+        ("delete", "/channels/{id}/members/{member_id}"),
+        ("patch", "/channels/{id}/members/{member_id}"),
+        ("post", "/me/sections"),
+        ("patch", "/me/sections/{id}"),
+        ("delete", "/me/sections/{id}"),
+        ("put", "/me/sections/order"),
+        ("put", "/me/channel-sections/{channel_id}"),
+        ("put", "/me/section-channel-order"),
+    ] {
+        let path = format!("/api/v1/orgs/{{org}}{suffix}");
+        let response = &document["paths"][&path][method]["responses"]["503"];
+        assert_eq!(
+            response["content"]["application/json"]["schema"],
+            json!({"$ref": "#/components/schemas/ErrorBody"}),
+            "{method} {path}"
+        );
+        let description = response["description"].as_str().unwrap();
+        assert!(
+            description.starts_with("lock_contention on a lock timeout"),
+            "{method} {path}"
+        );
+        assert!(description.contains("(no Retry-After)"), "{method} {path}");
+        if (method, suffix) == ("delete", "/me/sections/{id}") {
+            assert!(description.contains("restart bound is exhausted"));
+        }
+    }
+}
+
+#[test]
 fn every_api_operation_documents_shutdown_retry_contract() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
     let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();

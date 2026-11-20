@@ -88,6 +88,114 @@ describe('channel and message calls', () => {
     expect(m.mock.calls[0][0]).toBe('/api/v1/orgs/o/channels/c/messages')
     expect(JSON.parse(m.mock.calls[0][1].body)).toEqual(input)
   })
+  it('returns immediately without reading the body on 5xx with Retry-After', async () => {
+    vi.useFakeTimers()
+    try {
+      const input = { body: 'x', client_message_id: 'same-key' }
+      const jsonBody = vi.fn<typeof fetch>().mockResolvedValue(new Response('{"error":"lock_contention"}', {
+        status: 503, headers: { 'Retry-After': '5' },
+      }))
+      expect(await sendMessage('o', 'c', input, jsonBody)).toStrictEqual({
+        ok: false, kind: 'network', retryAfterMs: 5000,
+      })
+
+      let pulled = false
+      let cancelled = false
+      const stalled = new Response(new ReadableStream({
+        pull() { pulled = true },
+        cancel() { cancelled = true },
+      }, { highWaterMark: 0 }), {
+        status: 503, headers: { 'Retry-After': '5' },
+      })
+      const stalledFetch = vi.fn<typeof fetch>().mockResolvedValue(stalled)
+      expect(await sendMessage('o', 'c', input, stalledFetch)).toStrictEqual({
+        ok: false, kind: 'network', retryAfterMs: 5000,
+      })
+      expect(pulled).toBe(false)
+      expect(cancelled).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('preserves string ErrorBody codes on 5xx without Retry-After and releases the reader lock', async () => {
+    const input = { body: 'x', client_message_id: 'same-key' }
+    for (const status of [503, 502, 500] as const) {
+      const res = new Response('{"error":"lock_contention"}', { status })
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(res)
+      expect(await sendMessage('o', 'c', input, fetcher)).toStrictEqual({
+        ok: false, kind: 'network', error: 'lock_contention',
+      })
+      expect(res.body?.locked).toBe(false)
+    }
+    for (const [status, body] of [
+      [502, '<html>Bad Gateway</html>'],
+      [503, ''],
+      [503, null],
+      [500, '{}'],
+      [503, '{"error":123}'],
+      [503, 'null'],
+    ] as const) {
+      const m = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status }))
+      expect(await sendMessage('o', 'c', input, m)).toStrictEqual({ ok: false, kind: 'network' })
+    }
+  })
+  it('bounds stalled 5xx body reads without Retry-After and cancels the stream', async () => {
+    vi.useFakeTimers()
+    try {
+      let cancelled = false
+      const stalled = new Response(new ReadableStream({
+        start() {},
+        cancel() { cancelled = true },
+      }), { status: 503 })
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(stalled)
+      let settled = false
+      const pending = sendMessage('o', 'c', { body: 'x', client_message_id: 'same-key' }, fetcher).then(r => {
+        settled = true
+        return r
+      })
+      await vi.advanceTimersByTimeAsync(999)
+      expect(settled).toBe(false)
+      expect(cancelled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toBe(true)
+      expect(await pending).toStrictEqual({ ok: false, kind: 'network' })
+      expect(cancelled).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('cancels 5xx body reads without Retry-After on signal abort and already-aborted signals', async () => {
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      let cancelled = false
+      const fetcher = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({
+        start() {},
+        cancel() { cancelled = true },
+      }), { status: 503 }))
+      const pending = listChannels('o', fetcher, controller.signal)
+      await Promise.resolve()
+      controller.abort()
+      expect(await pending).toStrictEqual({ ok: false, kind: 'network' })
+      expect(cancelled).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+
+      const aborted = new AbortController()
+      aborted.abort()
+      let abortedCancelled = false
+      const abortedFetch = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({
+        start() {},
+        cancel() { abortedCancelled = true },
+      }), { status: 503 }))
+      expect(await listChannels('o', abortedFetch, aborted.signal)).toStrictEqual({ ok: false, kind: 'network' })
+      expect(abortedCancelled).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('preserves 429 ErrorBody and Retry-After with a safe one-second fallback', async () => {
     for (const [header, retryAfterMs] of [
       ['3', 3000], ['1', 1000], [null, 1000], ['', 1000], ['0', 1000], ['-1', 1000],

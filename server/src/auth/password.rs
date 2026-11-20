@@ -1,4 +1,4 @@
-use super::{ApiError, fill_random, throttle};
+use super::{ApiError, ApiErrorDetail, fill_random, throttle};
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 use axum::http::StatusCode;
 use std::time::Duration;
@@ -65,7 +65,9 @@ fn unavailable() -> ApiError {
     ApiError(
         StatusCode::SERVICE_UNAVAILABLE,
         "password admission unavailable",
-        Some(Duration::from_secs(rand::random_range(1..=5))),
+        Some(ApiErrorDetail::RetryAfter(Duration::from_secs(
+            rand::random_range(1..=5),
+        ))),
     )
 }
 

@@ -18,7 +18,64 @@ export type SignInRequest = components['schemas']['SignInRequest']
 
 /** Result of an API call. `network` covers fetch failures and 5xx, including admission 503
  * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
-export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; retryAfterMs?: number }
+export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; error?: string; retryAfterMs?: number }
+
+// Bound 5xx body reads (used only when Retry-After is absent) so stalled responses cannot hang callers.
+const SERVER_ERROR_BODY_TIMEOUT_MS = 1000
+
+function cancelResponseBody(res: Response): void {
+  try {
+    void res.body?.cancel().catch(() => {})
+  } catch { /* Ignore body cancel failures on locked or closed streams. */ }
+}
+
+async function readServerErrorCode(res: Response, signal?: AbortSignal | null): Promise<string | undefined> {
+  if (!res.body) return undefined
+  if (signal?.aborted) {
+    cancelResponseBody(res)
+    return undefined
+  }
+  let reader: ReadableStreamDefaultReader<Uint8Array>
+  try {
+    reader = res.body.getReader()
+  } catch {
+    return undefined
+  }
+  let stopped = false
+  const stop = () => {
+    if (stopped) return
+    stopped = true
+    try { void reader.cancel().catch(() => {}) } catch { /* Ignore cancel failures on closed readers. */ }
+  }
+  const timer = setTimeout(stop, SERVER_ERROR_BODY_TIMEOUT_MS)
+  signal?.addEventListener('abort', stop, { once: true })
+  try {
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (stopped) return undefined
+      if (done) break
+      chunks.push(value)
+      total += value.byteLength
+    }
+    if (total === 0) return undefined
+    const bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Partial<components['schemas']['ErrorBody']> | null
+    return typeof parsed?.error === 'string' ? parsed.error : undefined
+  } catch { /* Non-JSON, empty, or cancelled 5xx body leaves error absent. */
+    return undefined
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', stop)
+    try { reader.releaseLock() } catch { /* Ignore lock release failures. */ }
+  }
+}
 
 async function call<T>(
   fetchFn: typeof fetch,
@@ -32,8 +89,13 @@ async function call<T>(
     const res = await fetchFn(path, { credentials: 'same-origin', ...init })
     if (res.status >= 500) {
       const header = res.headers.get('Retry-After')
-      const delay = header === null ? NaN : /^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()
-      return { ok: false, kind: 'network', ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}) }
+      if (header !== null) {
+        cancelResponseBody(res)
+        const delay = /^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()
+        return { ok: false, kind: 'network', ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}) }
+      }
+      const error = await readServerErrorCode(res, init.signal)
+      return { ok: false, kind: 'network', ...(error === undefined ? {} : { error }) }
     }
     if (!res.ok) {
       let error: string | undefined
