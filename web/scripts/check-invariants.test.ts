@@ -234,6 +234,28 @@ describe.each([1])('describe with named %s', declared)
       'sparse with named %s', 'spread with named %s', 'bracket with named %s', 'skip with named %s',
     ])
   })
+
+  it('fails closed on same-named rebinding the symbol scan cannot see, ambient declarations and generators', () => {
+    const cases: [string, string][] = [
+      ['shorthand destructuring', 'function fn() {}\n;({ fn } = { fn: undefined as any })\nit.each([1])(\'t %s\', fn)'],
+      ['shorthand default', 'function fn() {}\n;({ fn = undefined as any } = {})\nit.each([1])(\'t %s\', fn)'],
+      ['shorthand for-of', 'function fn() {}\nfor ({ fn } of [{ fn: undefined as any }]) {}\nit.each([1])(\'t %s\', fn)'],
+      ['nested shorthand', 'function fn() {}\n;([{ fn }] = [{ fn: undefined as any }])\nit.each([1])(\'t %s\', fn)'],
+      ['var after function', "describe('s', () => {\n  function fn() {}\n  var fn: any = undefined\n  it.each([1])('t %s', fn)\n})"],
+      ['var before function', "describe('s', () => {\n  var fn: any = undefined\n  function fn() {}\n  it.each([1])('t %s', fn)\n})"],
+      ['var in block', "describe('s', () => {\n  function fn() {}\n  if (true) { var fn: any = undefined }\n  it.each([1])('t %s', fn)\n})"],
+      ['var for-of', "describe('s', () => {\n  function fn() {}\n  for (var fn of [undefined as any]) {}\n  it.each([1])('t %s', fn)\n})"],
+      ['var destructuring', "describe('s', () => {\n  function fn() {}\n  var { fn } = { fn: undefined as any }\n  it.each([1])('t %s', fn)\n})"],
+      ['await using', 'await using fn = () => {}\nit.each([1])(\'t %s\', fn)'],
+      ['declare const', 'declare const fn = () => {}\nit.each([1])(\'t %s\', fn)'],
+      ['declare namespace', "declare namespace N { function fn() {}\n  it.each([1])('t %s', fn) }"],
+      ['generator declaration', 'function* fn() {}\nit.each([1])(\'t %s\', fn)'],
+      ['generator const', 'const fn = function* () {}\nit.each([1])(\'t %s\', fn)'],
+      ['inline generator', "it.each([1])('t %s', function* () {})"],
+    ]
+    for (const [label, src] of cases) expect(tsTests(src).filter((t) => !t.skipped), label).toEqual([])
+    expect(tsTests('function fn() {}\nconst o = { fn: 1 }\no.fn\nit.each([1])(\'t %s\', fn)\nfn()')).toEqual([{ title: 't %s', skipped: false }])
+  })
 })
 
 describe('docs/invariants.md parsing', () => {

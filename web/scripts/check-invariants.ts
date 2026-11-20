@@ -222,8 +222,9 @@ function vitestEachCallee(e: ts.Expression): { callee: NonNullable<Callee>; vali
   return { callee, valid: dotEach && isTestRoot && allowedWords && validCases }
 }
 
+// Generators return an iterator without running their body, so they never count as a callback.
 const isInlineFunction = (n: ts.Node | undefined): n is ts.ArrowFunction | ts.FunctionExpression =>
-  !!n && (ts.isArrowFunction(n) || ts.isFunctionExpression(n))
+  !!n && (ts.isArrowFunction(n) || (ts.isFunctionExpression(n) && !n.asteriskToken))
 
 /** Symbol lookup for one file without libs or imports, so imported or global names never resolve to a local function. */
 function fileChecker(sf: ts.SourceFile): ts.TypeChecker {
@@ -241,27 +242,41 @@ function isReadOnlyUse(id: ts.Identifier): boolean {
   return ts.isPropertyAccessExpression(p) && p.expression === id
 }
 
-/** True when a `.each` callback identifier resolves, in this file, to a function declaration or a `const` function
- * initialised before the call, and every other reference is read-only. Imports, `let`/`var`, parameters, other
- * bindings and any possible reassignment (including destructuring, `++` and `for...of` targets) fail closed. */
+/** A property name that is not a binding or a reference: `a.name` or `{ name: value }`. */
+function isPropertyName(id: ts.Identifier): boolean {
+  const p = id.parent
+  return (ts.isPropertyAccessExpression(p) || ts.isPropertyAssignment(p)) && p.name === id
+}
+
+/** Inside a `declare` declaration (e.g. `declare const`, `declare namespace`), which emits no runtime code. */
+function inAmbientContext(n: ts.Node): boolean {
+  for (let p: ts.Node | undefined = n; p; p = p.parent)
+    if (ts.canHaveModifiers(p) && ts.getModifiers(p)?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)) return true
+  return false
+}
+
+/** True when a `.each` callback identifier resolves, in this file, to a non-ambient function declaration or `const`
+ * function (not a generator) initialised before the call. Every other identifier with that text anywhere in the file
+ * must be a property name or a read-only use of the same symbol. Any other same-named binding or reference
+ * (`var` redeclarations, shorthand or nested destructuring, `++`, `for...of` targets, shadowing) fails closed. */
 function isLocalFunction(id: ts.Identifier, call: ts.Node, checker: () => ts.TypeChecker): boolean {
   const symbol = checker().getSymbolAtLocation(id)
-  // A second declaration's name is not a read-only use, so the reference scan below rejects merged declarations.
   const d = symbol?.declarations?.[0]
-  if (!symbol || !d) return false
-  const fn = ts.isFunctionDeclaration(d) && !!d.body
+  if (!symbol || !d || inAmbientContext(d) || inAmbientContext(call)) return false
+  const fn = ts.isFunctionDeclaration(d) && !!d.body && !d.asteriskToken
   const constFn = ts.isVariableDeclaration(d) && ts.isIdentifier(d.name) && isInlineFunction(d.initializer)
-    && (ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const) !== 0 && d.end <= call.getStart()
+    && (ts.getCombinedNodeFlags(d) & ts.NodeFlags.BlockScoped) === ts.NodeFlags.Const && d.end <= call.getStart()
   if (!fn && !constFn) return false
   const name = (d as ts.FunctionDeclaration | ts.VariableDeclaration).name
-  let writable = false
+  let rebindable = false
   const visit = (n: ts.Node) => {
-    if (writable) return
-    if (ts.isIdentifier(n) && n !== name && n.text === id.text && checker().getSymbolAtLocation(n) === symbol && !isReadOnlyUse(n)) writable = true
+    if (rebindable) return
+    if (ts.isIdentifier(n) && n !== name && n.text === id.text && !isPropertyName(n)
+      && !(isReadOnlyUse(n) && checker().getSymbolAtLocation(n) === symbol)) rebindable = true
     ts.forEachChild(n, visit)
   }
   visit(id.getSourceFile())
-  return !writable
+  return !rebindable
 }
 
 export type TsTest = { title: string; skipped: boolean; reason?: string }
