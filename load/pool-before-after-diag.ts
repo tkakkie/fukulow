@@ -300,7 +300,8 @@ try {
         cpuLimit:generatorCpuLimit,vusLimit,vusPeak:metrics?.vusPeak,droppedIterations:metrics?.droppedIterations,generatorExitCode:code,
         http5xx:metrics?.http5xx,app:appLog,statementsCaptured:Array.isArray(statements)&&statements.length>0,
         generatorRun});
-      const armResult={...appCapability,validity,sendP95Ms:send.p95,hasAppFailure:hasAppFailure(failures),failures};
+      const armResult={...appCapability,validity,sendP95Ms:send.p95,hasAppFailure:hasAppFailure(failures),failures,
+        sendSchedule:{attempted:send.attempted,droppedIterations:send.droppedIterations,scheduledSendAttempts}};
       save(`${dir}/results.json`,{...run,...armResult,timeoutNote,pairStart,appEvidence:appLog,scheduledSendAttempts,generatorCpuLimit,vusLimit,generatorExitCode:code,
         lanes:result.lanes,runMetrics:result.runMetrics,diagnosticMetrics:metrics,resources:stats,samples:appSampler.samples,
         generatorRun,generatorSamples:k6Sampler.samples,generatorSamplingErrorTimes:k6Sampler.errors});

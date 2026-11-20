@@ -28,7 +28,7 @@ function validEvidence(vus = 200, vus_max = 3200): Parameters<typeof diagnosticV
     lanes, expectedLanes: lanes.map(l => l.name),
     resources: { complete: true, samples: 71, maxSampleGapMs: 1000, maxInteriorGapMs: 1000, samplingErrors: 0 },
     generator, generatorRun: generator, cpuLimit: 8, vusLimit, vusPeak: 200, droppedIterations: 0, http5xx: 0, generatorExitCode: 0,
-    app: { complete: true, reasons: [], http5xx: 0, panics: 0, databaseFailures }, statementsCaptured: true,
+    app: { complete: true, reasons: [], http5xx: 0, panics: 0, databaseFailures, unknownEvents: [] }, statementsCaptured: true,
   };
 }
 
@@ -75,21 +75,114 @@ test('every validity fault prevents an otherwise valid arm from qualifying', () 
 
 test('pair classifications apply in order at the pre-set boundaries', () => {
   const arm = (sendP95Ms: number | null, hasAppFailure = false) => ({ validity: validityResult([]), sendP95Ms, hasAppFailure });
-  assert.equal(classifyPair(arm(50), arm(100)).classification, 'slow');
-  assert.equal(classifyPair(arm(9), arm(20)).classification, 'healthy');
-  assert.equal(classifyPair(arm(9), arm(20.001)).classification, 'ambiguous');
-  assert.equal(classifyPair(arm(25), arm(50)).classification, 'healthy');
-  assert.equal(classifyPair(arm(25, true), arm(50)).classification, 'healthy');
-  assert.equal(classifyPair(arm(25), arm(null, true)).classification, 'slow');
-  assert.equal(classifyPair(arm(25, true), arm(11, true)).classification, 'slow');
-  assert.equal(classifyPair(arm(25, true), arm(100, true)).classification, 'slow');
-  for (const a of [arm(10), arm(110), arm(5, true)]) for (const side of ['B', 'A']) {
-    const b = arm(9);
-    const outcome = classifyPair(
-      side === 'B' ? { ...b, validity: validityResult(['dropped iterations']) } : b,
-      side === 'A' ? { ...a, validity: validityResult(['dropped iterations']) } : a,
-    );
-    assert.deepEqual(outcome, { validity: { valid: false, reasons: [`${side}: dropped iterations`] }, classification: null });
+  for (const [b, a, classification] of [
+    [arm(50), arm(100), 'slow'],
+    [arm(9), arm(20), 'healthy'],
+    [arm(9), arm(20.001), 'ambiguous'],
+    [arm(25), arm(50), 'healthy'],
+    [arm(25, true), arm(50), 'healthy'],
+    [arm(25), arm(null, true), 'slow'],
+    [arm(25, true), arm(11, true), 'slow'],
+    [arm(25, true), arm(100, true), 'slow'],
+  ] as const) {
+    assert.deepEqual(classifyPair(b, a), { validity: validityResult([]), classification, diagnosticClassification: classification });
+  }
+});
+
+const dropReason = 'dropped iterations';
+const mismatchReason = 'offered sends differ from schedule by more than 1%';
+const validArm = { validity: validityResult([]), sendP95Ms: 10, hasAppFailure: false };
+const droppedArm = (attempted: number, droppedIterations: number, sendP95Ms: number, http503 = 0) => {
+  const evidence = validEvidence();
+  const send = { ...lane('send', attempted), accepted: attempted - http503, rejected503: http503, droppedIterations, p95: sendP95Ms };
+  evidence.send = evidence.lanes[0] = send;
+  evidence.droppedIterations = droppedIterations;
+  return { validity: diagnosticValidity(evidence), sendP95Ms,
+    hasAppFailure: hasAppFailure(appFailures(evidence.lanes, evidence.http5xx, evidence.app)),
+    sendSchedule: { attempted, droppedIterations, scheduledSendAttempts: evidence.scheduledSendAttempts } };
+};
+
+test('only valid B can qualify a drop-limited A', () => {
+  const invalid = droppedArm(14999, 1, 100);
+  assert.deepEqual(invalid.validity, validityResult([dropReason]));
+  assert.deepEqual(classifyPair(invalid, validArm), {
+    validity: validityResult([`B: ${dropReason}`]), classification: null, diagnosticClassification: null,
+  });
+  assert.deepEqual(classifyPair(invalid, invalid), {
+    validity: validityResult([`B: ${dropReason}`, `A: ${dropReason}`]), classification: null, diagnosticClassification: null,
+  });
+});
+
+test('invalid A with no validity reasons has no diagnostic classification', () => {
+  const a = { validity: { valid: false, reasons: [] }, sendP95Ms: 100, hasAppFailure: false };
+  assert.deepEqual(classifyPair(validArm, a), { validity: a.validity, classification: null, diagnosticClassification: null });
+});
+
+test('drop-limited A uses the existing latency and app failure signals', () => {
+  for (const [a, diagnosticClassification] of [
+    [droppedArm(14999, 1, 100), 'slow_with_drops'],
+    [droppedArm(14999, 1, 99, 1), 'slow_with_drops'],
+    [droppedArm(14999, 1, 99), 'ambiguous'],
+    [droppedArm(14999, 1, 10), 'ambiguous'],
+    [{ ...droppedArm(14999, 1, 10, 1), sendP95Ms: null }, 'slow_with_drops'],
+    [{ ...droppedArm(14999, 1, 10), sendP95Ms: null }, 'ambiguous'],
+  ] as const) {
+    assert.deepEqual(a.validity, validityResult([dropReason]));
+    assert.deepEqual(classifyPair(validArm, a), {
+      validity: validityResult([`A: ${dropReason}`]), classification: null, diagnosticClassification,
+    });
+  }
+});
+
+test('only send-lane drops within the schedule tolerance reconcile an offered-send mismatch', () => {
+  const evidence = validEvidence();
+  evidence.send = evidence.lanes[0] = lane('send', 14700);
+  evidence.lanes[1].droppedIterations = evidence.droppedIterations = 300;
+  const readsDropped = { ...droppedArm(14700, 0, 100), validity: diagnosticValidity(evidence) };
+  for (const [a, diagnosticClassification] of [
+    [droppedArm(14700, 150, 100), 'slow_with_drops'], // 1% below the schedule
+    [droppedArm(14700, 450, 100), 'slow_with_drops'], // 1% above the schedule
+    [droppedArm(14700, 149, 100), null],
+    [droppedArm(14700, 451, 100), null], // over 1% above the schedule
+    [droppedArm(15151, 1, 100), null],
+    [readsDropped, null],
+    [{ ...droppedArm(14700, 300, 100), sendSchedule: undefined }, null],
+  ] as const) {
+    assert.deepEqual(a.validity, validityResult([mismatchReason, dropReason]));
+    assert.deepEqual(classifyPair(validArm, a), {
+      validity: validityResult([`A: ${mismatchReason}`, `A: ${dropReason}`]), classification: null, diagnosticClassification,
+    });
+  }
+});
+
+test('invalid send schedule counts cannot explain an offered-send mismatch', () => {
+  const a = droppedArm(14700, 300, 100);
+  for (const [attempted, droppedIterations, scheduledSendAttempts] of [
+    [0, 0, 0],
+    [-1, 15001, 15000],
+    [14700.5, 300, 15000],
+    [NaN, 300, 15000],
+    [15001, -1, 15000],
+    [14700, 300.5, 15000],
+    [14700, NaN, 15000],
+  ]) {
+    const sendSchedule = { attempted, droppedIterations, scheduledSendAttempts };
+    assert.deepEqual(classifyPair(validArm, { ...a, sendSchedule }), {
+      validity: validityResult([`A: ${mismatchReason}`, `A: ${dropReason}`]), classification: null, diagnosticClassification: null,
+    }, `attempted=${attempted}, droppedIterations=${droppedIterations}, scheduledSendAttempts=${scheduledSendAttempts}`);
+  }
+});
+
+test('any other invalidity reason disqualifies the drop-limited outcome', () => {
+  for (const reason of [
+    'generator CPU saturated', 'generator reached maxVUs', 'pair-start host load reached 3', 'missing pg_stat_statements',
+    'app log: unknown database_failure kind', 'generator exited unsuccessfully', 'incomplete dropped iterations evidence',
+    `${mismatchReason} (unverified)`,
+  ]) {
+    const a = { ...droppedArm(14700, 300, 100), validity: validityResult([dropReason, reason]) };
+    assert.deepEqual(classifyPair(validArm, a), {
+      validity: validityResult([`A: ${dropReason}`, `A: ${reason}`]), classification: null, diagnosticClassification: null,
+    });
   }
 });
 
@@ -154,16 +247,18 @@ test('structured database failures include the drain and exclude out-of-window e
   assert.deepEqual(app.databaseFailures, { ...databaseFailures, deadline: 1, pool_timeout: 2 });
   assert.equal(app.complete, false);
   assert.ok(app.reasons.includes('missing pool_stats'));
-  assert.ok(diagnosticAppEvidence(event(2000, 'unknown'), 1000, 71000).reasons.includes('unknown database_failure kind'));
+  const unknown = diagnosticAppEvidence(event(2000, 'unknown'), 1000, 71000);
+  assert.ok(unknown.reasons.includes('unknown database_failure kind'));
+  assert.deepEqual(unknown.unknownEvents.map(entry => entry.fields), [{ event: 'database_failure', kind: 'unknown' }]);
   const dockerLine = (line: string) => `${JSON.parse(line).timestamp} ${line}`;
   const dockerLog = log.split('\n').map(dockerLine).join('\n');
   const read = { startedAt: 71002, uninterrupted: true };
   const legacyApp = diagnosticAppEvidence(dockerLog, 1000, 71000, undefined, read);
   assert.equal(legacyApp.complete, true);
   assert.deepEqual(legacyApp.databaseFailures, app.databaseFailures);
-  assert.deepEqual(diagnosticAppEvidence(`${dockerLog}\n${dockerLine(event(2000, 'unknown'))}`, 1000, 71000, undefined, read).reasons, [
-    'unknown database_failure kind',
-  ]);
+  const legacyUnknown = diagnosticAppEvidence(`${dockerLog}\n${dockerLine(event(2000, 'unknown'))}`, 1000, 71000, undefined, read);
+  assert.deepEqual(legacyUnknown.reasons, ['unknown database_failure kind']);
+  assert.deepEqual(legacyUnknown.unknownEvents, unknown.unknownEvents);
   assert.deepEqual(appFailures([{ ...lane('reader', 4), accepted: 0, rejected429: 1, rejected503: 1, clientTimeouts: 1, otherErrors: 1 }], 1, legacyApp), {
     http429: 1, http503: 1, clientTimeouts: 1, clientHttp5xx: 1, serverHttp5xx: 0, databaseFailures: app.databaseFailures,
     transportErrors: 0, otherErrors: 1, panics: 0,

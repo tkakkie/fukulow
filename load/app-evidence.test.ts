@@ -4,8 +4,8 @@ import { appEvidence, proxyEvidence } from './app-evidence.ts';
 
 const t0 = Date.parse('2026-11-17T00:00:00Z');
 const at = (ms: number) => new Date(t0 + ms).toISOString().replace('Z', '123Z');
-const line = (ms: number, fields: Record<string, unknown>, span?: Record<string, unknown>) =>
-  JSON.stringify({ timestamp: at(ms), level: 'INFO', fields, target: 'fukulow', ...(span ? { span } : {}) });
+const line = (ms: number, fields: Record<string, unknown>, span?: unknown, level = 'INFO') =>
+  JSON.stringify({ timestamp: at(ms), level, fields, target: 'fukulow', span });
 const pool = (sequence: number, extra: Record<string, number> = {}) => line(sequence * 1000 - 500, { event: 'pool_stats', version: 1,
   sample_sequence: sequence, in_use: 1, idle: 19, waiting: 0, acquire_success: sequence * 10, acquire_timeout: 0, acquire_closed: 0,
   acquire_io: 0, acquire_database: 0, acquire_other: 0, acquire_cancelled: 0, wait_le_1000000_us: sequence * 10, wait_count: sequence * 10, ...extra });
@@ -29,11 +29,91 @@ test('aggregates pool deltas, failure kinds, close codes with times and socket r
   assert.deepEqual({ ...evidence.pool, deltas: undefined }, { samples: 8, maxInUse: 20, minIdle: 0, maxWaiting: 40, deltas: undefined, acquireWaitsOver1s: 3 });
   assert.equal(evidence.pool?.deltas.acquire_timeout, 3);
   assert.equal(evidence.databaseFailures.pool_timeout, 1);
+  assert.deepEqual(evidence.unknownEvents, []);
   assert.deepEqual(evidence.closes['1011'], { count: 2, firstMs: 3200, lastMs: 4900, perSecond: [[3, 1], [4, 1]] });
   assert.deepEqual(evidence.sockets, { opened: 5, disconnected: 1, peakConcurrent: 6, peakOpenedPerSecond: 5, openedPerSecond: 13 });
   assert.equal(evidence.http5xx, 1);
-  // Only aggregates leave the module: no route, raw line or other field.
   assert.doesNotMatch(JSON.stringify(evidence), /api\/v1|not json/);
+});
+
+test('unknown database kinds and WebSocket codes retain metadata and redact other values', () => {
+  const secret = 'secret-looking-token-123';
+  const unsafeKinds = [`${secret} extra`, `/api/v1/${secret}`, `${secret}@example.com`, secret.repeat(3)];
+  const log = [
+    ...pools(6),
+    line(1200, { event: 'database_failure', kind: 'new_kind_1', request_id: secret, body: secret, [secret]: 'dynamic' },
+      { route: `/api/v1/${secret}`, name: 'request', account: secret, [`/api/v1/${secret}`]: 'dynamic', '': 'empty' }),
+    ...unsafeKinds.map(kind => line(1500, { event: 'database_failure', kind })),
+    line(1600, { event: 'database_failure' }),
+    line(1700, { event: 'websocket_closed', code: '4999' }),
+    line(1800, { event: 'websocket_closed', code: 4999 }),
+    line(1900, { event: 'websocket_closed', code: { nested: secret } }),
+    line(4100, { event: 'database_failure', kind: 'outside_window' }),
+  ].join('\n');
+  const evidence = appEvidence(log, t0 + 1000, t0 + 4000);
+  assert.equal(evidence.complete, false);
+  assert.deepEqual(evidence.reasons, ['unknown database_failure kind', 'unknown websocket_closed code']);
+  assert.deepEqual(evidence.unknownEvents[0], {
+    timestamp: new Date(t0 + 1200).toISOString(), level: 'INFO', target: 'fukulow',
+    fields: { event: 'database_failure', kind: 'new_kind_1' },
+    otherFieldNames: ['body', 'request_id'], droppedFieldNames: 1,
+    spanNames: ['account', 'name', 'route'], droppedSpanNames: 2,
+  });
+  assert.deepEqual(evidence.unknownEvents.slice(1).map(entry => entry.fields), [
+    ...unsafeKinds.map(kind => ({ event: 'database_failure', kind: { type: 'string', length: kind.length } })),
+    { event: 'database_failure', kind: { type: 'missing' } },
+    { event: 'websocket_closed', code: '4999' },
+    { event: 'websocket_closed', code: { type: 'number', length: 4 } },
+    { event: 'websocket_closed', code: { type: 'object', length: 1 } },
+  ]);
+  assert.doesNotMatch(JSON.stringify(evidence), /secret-looking-token-123|api\/v1|"request"/);
+});
+
+test('unknown kinds and codes retain only strings with server constant shapes', () => {
+  const invalidTokens = ['550e8400-e29b-41d4-a716-446655440000', 'a1'.repeat(32), 'Secret', 'secret-looking-token-123', 'host:5432'];
+  const longKind = 'a'.repeat(32);
+  for (const [event, key, accepted, rejected] of [
+    ['database_failure', 'kind', ['secret', longKind], ['4999', `${longKind}a`]],
+    ['websocket_closed', 'code', ['8', '12345', longKind], ['123456', `${longKind}a`]],
+  ] as const) {
+    const unsafe = [...invalidTokens, ...rejected];
+    const log = [...pools(6), ...[...accepted, ...unsafe].map(value => line(1500, { event, [key]: value }))].join('\n');
+    const evidence = appEvidence(log, t0 + 1000, t0 + 4000);
+    assert.deepEqual(evidence.unknownEvents.map(entry => entry.fields), [
+      ...accepted.map(value => ({ event, [key]: value })),
+      ...unsafe.map(value => ({ event, [key]: { type: 'string', length: value.length } })),
+    ]);
+  }
+});
+
+test('unknown events summarize non-string values and ignore malformed spans and levels', () => {
+  const log = [
+    ...pools(6),
+    line(1500, { event: 'database_failure', kind: null }, null),
+    line(1500, { event: 'database_failure', kind: true }, true),
+    line(1500, { event: 'database_failure', kind: ['private', false] }, ['private']),
+    line(1500, { event: 'websocket_closed', code: false }, 'abc', 'NOTICE'),
+  ].join('\n');
+  const { unknownEvents } = appEvidence(log, t0 + 1000, t0 + 4000);
+  assert.deepEqual(unknownEvents.map(({ fields, level, spanNames, droppedSpanNames }) => [fields, level, spanNames, droppedSpanNames]), [
+    [{ event: 'database_failure', kind: { type: 'null', length: 4 } }, 'INFO', [], 0],
+    [{ event: 'database_failure', kind: { type: 'boolean', length: 4 } }, 'INFO', [], 0],
+    [{ event: 'database_failure', kind: { type: 'array', length: 2 } }, 'INFO', [], 0],
+    [{ event: 'websocket_closed', code: { type: 'boolean', length: 5 } }, null, [], 0],
+  ]);
+});
+
+test('the first 20 unknown events share a cap while later unknowns still make evidence incomplete', () => {
+  const log = [
+    ...pools(6),
+    ...Array.from({ length: 22 }, (_, i) => line(1500 + i, { event: 'database_failure', kind: `unknown_${i}` })),
+    line(1600, { event: 'websocket_closed', code: '4999' }),
+  ].join('\n');
+  const evidence = appEvidence(log, t0 + 1000, t0 + 4000);
+  assert.equal(evidence.complete, false);
+  assert.deepEqual(evidence.reasons, ['unknown database_failure kind', 'unknown websocket_closed code']);
+  assert.deepEqual(evidence.unknownEvents.map(entry => entry.fields),
+    Array.from({ length: 20 }, (_, i) => ({ event: 'database_failure', kind: `unknown_${i}` })));
 });
 
 test('missing, rotated, restarted or late pool samples make the evidence incomplete', () => {

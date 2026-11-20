@@ -6,6 +6,7 @@ import type { Counts, Evidence } from './pool-before-after-summary.ts';
 export const diagnosticRule = {
   sendRate: 250, seconds: 60, offeredTolerance: 0.01, cpuLimitFraction: 0.90, maxHostLoad: 3,
   maxSampleGapMs: 2500, maxInteriorGapMs: 1500, slowP95Ms: 100, healthyP95Multiplier: 2, baselineP95FloorMs: 10,
+  slowWithDrops: '2026-11-20: With valid B and invalid A, allow only dropped iterations and an offered-send mismatch reconciled by send-lane drops within 1% of schedule. A send p95 >= 100 ms or an app failure yields slow_with_drops; otherwise ambiguous. Other invalid pairs yield null. Valid pairs use classification.',
 } as const;
 
 export type Validity = { valid: boolean; reasons: string[] };
@@ -30,9 +31,9 @@ export function diagnosticAppEvidence(log: string, from: number, to: number, err
       return '';
     });
   }
-  const { complete, reasons, databaseFailures, http5xx, panics: structuredPanics } = appEvidence(log, from, to, error);
+  const { complete, reasons, databaseFailures, http5xx, panics: structuredPanics, unknownEvents } = appEvidence(log, from, to, error);
   const panics = structuredPanics + [...log.matchAll(/^thread '[^'\r\n]+'(?: \(\d+\))? panicked at /gm)].length;
-  if (!legacyRead) return { complete, reasons, databaseFailures, http5xx, panics };
+  if (!legacyRead) return { complete, reasons, databaseFailures, http5xx, panics, unknownEvents };
 
   const legacyReasons = reasons.filter(reason => reason !== 'missing pool_stats');
   // A quiet app need not log at the end. A full read started after the window
@@ -40,7 +41,7 @@ export function diagnosticAppEvidence(log: string, from: number, to: number, err
   if (!hasPreWindowLog || !(legacyRead.startedAt >= to) || !legacyRead.uninterrupted) {
     legacyReasons.push('app log does not cover the generator window');
   }
-  return { complete: legacyReasons.length === 0, reasons: legacyReasons, databaseFailures, http5xx, panics };
+  return { complete: legacyReasons.length === 0, reasons: legacyReasons, databaseFailures, http5xx, panics, unknownEvents };
 }
 
 export function appFailures(lanes: Counts[], http5xx: number | undefined, app: ReturnType<typeof diagnosticAppEvidence>) {
@@ -125,18 +126,33 @@ type ArmResult = {
   validity: Validity;
   sendP95Ms: number | null;
   hasAppFailure: boolean;
+  sendSchedule?: Pick<Counts, 'attempted' | 'droppedIterations'> & { scheduledSendAttempts: number };
 };
+
+function sendDropsExplainMismatch({ sendSchedule }: ArmResult) {
+  if (!sendSchedule) return false;
+  const { attempted, droppedIterations, scheduledSendAttempts } = sendSchedule;
+  return count(attempted) && count(droppedIterations) && nonnegative(scheduledSendAttempts) && scheduledSendAttempts > 0 &&
+    Math.abs(attempted + droppedIterations - scheduledSendAttempts) <= scheduledSendAttempts * diagnosticRule.offeredTolerance;
+}
 
 export function classifyPair(b: ArmResult, a: ArmResult) {
   const validity = validityResult([...b.validity.reasons.map(reason => `B: ${reason}`), ...a.validity.reasons.map(reason => `A: ${reason}`)]);
-  if (!b.validity.valid || !a.validity.valid) return { validity: { ...validity, valid: false }, classification: null };
   const { slowP95Ms, healthyP95Multiplier, baselineP95FloorMs } = diagnosticRule;
-  if ((a.sendP95Ms !== null && a.sendP95Ms >= slowP95Ms) || a.hasAppFailure) {
-    return { validity, classification: 'slow' as const };
+  const slow = (a.sendP95Ms !== null && a.sendP95Ms >= slowP95Ms) || a.hasAppFailure;
+  if (!b.validity.valid || !a.validity.valid) {
+    const dropLimited = b.validity.valid && a.validity.reasons.length > 0 && a.validity.reasons.every(reason =>
+      reason === 'dropped iterations' ||
+      (reason === 'offered sends differ from schedule by more than 1%' && sendDropsExplainMismatch(a)));
+    const diagnosticClassification = dropLimited ? (slow ? 'slow_with_drops' as const : 'ambiguous' as const) : null;
+    return { validity: { ...validity, valid: false }, classification: null, diagnosticClassification };
+  }
+  if (slow) {
+    return { validity, classification: 'slow' as const, diagnosticClassification: 'slow' as const };
   }
   if (a.sendP95Ms !== null && b.sendP95Ms !== null && !a.hasAppFailure &&
       a.sendP95Ms <= healthyP95Multiplier * Math.max(b.sendP95Ms, baselineP95FloorMs)) {
-    return { validity, classification: 'healthy' as const };
+    return { validity, classification: 'healthy' as const, diagnosticClassification: 'healthy' as const };
   }
-  return { validity, classification: 'ambiguous' as const };
+  return { validity, classification: 'ambiguous' as const, diagnosticClassification: 'ambiguous' as const };
 }
