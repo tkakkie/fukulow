@@ -249,6 +249,7 @@ async fn section_write_lock_contention_rolls_back_without_notice(pool: PgPool) {
     .await
     .unwrap();
     assert!(!generation_exists);
+    activity.drained().await;
     assert!(
         tokio::time::timeout(Duration::from_millis(20), registration.next())
             .await

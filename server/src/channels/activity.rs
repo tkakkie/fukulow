@@ -2612,6 +2612,7 @@ impl Activity {
     pub(crate) async fn saturate(&self) -> tokio::sync::OwnedSemaphorePermit {
         self.capacity.clone().acquire_many_owned(40).await.unwrap()
     }
+    // One abort handle per key: this aborts the most recent spawn for (organization, channel).
     pub(crate) fn cancel(&self, organization: Uuid, channel: Uuid) {
         self.tasks
             .lock()
