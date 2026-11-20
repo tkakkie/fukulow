@@ -71,12 +71,12 @@
   )
 
   function handleFocus(e: FocusEvent) {
-    if (e.target !== e.currentTarget) return
+    if (!isRowFocusable || e.target !== e.currentTarget) return
     onrowfocus?.()
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.target !== e.currentTarget) return
+    if (!isRowFocusable || e.target !== e.currentTarget) return
     if (onopenreplies && shouldOpenRepliesFromRowKey(e)) {
       e.preventDefault()
       onopenreplies(rowRef)
@@ -84,29 +84,20 @@
     }
     onrowkeydown?.(e)
   }
-
-  $effect(() => {
-    const el = rowRef
-    if (!el) return
-    el.tabIndex = isRowFocusable ? rovingTabindex : -1
-    if (!isRowFocusable) return
-    el.addEventListener('focus', handleFocus)
-    el.addEventListener('keydown', handleKeydown)
-    return () => {
-      el.removeEventListener('focus', handleFocus)
-      el.removeEventListener('keydown', handleKeydown)
-    }
-  })
 </script>
 
+<!-- Message rows are roving-tabindex `<article>` elements with row keyboard navigation (docs/ui.md §5, §6, §9). -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <article
   bind:this={rowRef}
   class="ui-message-row"
   class:ui-message-row--mentioned={mentioned || (!pendingStatus && (mentions ?? []).some(target => target.member_id === selfId))}
   class:ui-message-row--sending={pendingStatus === 'sending'}
   class:ui-message-row--failed={pendingStatus === 'failed'}
-  tabindex="-1"
+  tabindex={isRowFocusable ? rovingTabindex : -1}
   data-focusable={isRowFocusable ? 'true' : undefined}
+  onfocus={isRowFocusable ? handleFocus : undefined}
+  onkeydown={isRowFocusable ? handleKeydown : undefined}
 >
   {#if senderName || createdAt}
     <header class="ui-message-row__meta">
