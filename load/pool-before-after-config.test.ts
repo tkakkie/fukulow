@@ -1,6 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { allowanceSeconds, generatorConfig } from './pool-before-after-config.ts';
+import { readFileSync } from 'node:fs';
+import { allowanceSeconds, diagnosticComposeOverride, diagnosticConfig, diagnosticLogBufferBytes, generatorConfig } from './pool-before-after-config.ts';
+import { settings } from './pool-before-after-summary.ts';
+
+test('the DIAG app log limit and read buffer cover the full mixed arm', () => {
+  const compose = readFileSync(new URL('./compose.yml', import.meta.url), 'utf8');
+  const app = compose.split('\n  app:\n')[1].split('\n  migrate:\n')[0];
+  assert.match(app, /logging: \{ driver: json-file, options: \{ max-size: "10m", max-file: "3" \} \}/);
+  const { lanes } = generatorConfig(false, true);
+  // In-flight work can complete in the drain but only the reader starts new requests then.
+  const requests = lanes.reduce((total, lane) => total + lane.rate * lane.seconds, settings.channels + 5);
+  // Budget 1 KiB per request for the Docker wrapper, http_completed and a possible database_failure.
+  const bytes = requests * 1024;
+  assert.ok(10 * 1024 ** 2 < bytes);
+  const options = diagnosticComposeOverride.services.app.logging.options;
+  assert.ok(Number.parseInt(options['max-size'], 10) * 1024 ** 2 > bytes);
+  assert.ok(diagnosticLogBufferBytes > bytes);
+});
 
 test('no scenario preallocates fewer VUs than origin/main', () => {
   // Verified from origin/main:load/pool-before-after-load.ts for PR #570.
@@ -100,5 +117,39 @@ test('measured schedules, drains, rates and executors remain unchanged with no w
       assert.deepEqual(config,{executor:'constant-arrival-rate',rate:lane.rate,timeUnit:'1s',
         duration:`${lane.seconds}s`,startTime:`${lane.start}s`,exec:lane.exec,gracefulStop:'11s'});
     }
+  }
+});
+
+test('each arm selects preallocation independently, including for the same commit', () => {
+  const commit = 'a714536';
+  const { generators, rates } = diagnosticConfig({ DIAG_B: commit, DIAG_A: commit, DIAG_GEN_B: 'old' });
+  assert.deepEqual(generators, { B: 'old', A: 'new' });
+  assert.deepEqual(diagnosticConfig({ DIAG_GEN_A: 'old' }).generators, { B: 'new', A: 'old' });
+  assert.throws(() => diagnosticConfig({ DIAG_GEN_A: 'other' }), /DIAG_GEN_A/);
+  const b = generatorConfig(false, true, generators.B, rates);
+  const a = generatorConfig(false, true, generators.A, rates);
+  for (const {name, exec} of b.lanes) {
+    const previous = exec === 'send' ? 100 : exec === 'reads' ? 50 : 10;
+    assert.equal(b.scenarios[name].preAllocatedVUs, previous);
+    assert.deepEqual({ ...b.scenarios[name], preAllocatedVUs: a.scenarios[name].preAllocatedVUs }, a.scenarios[name]);
+  }
+  assert.equal(a.scenarios.step_1_send.preAllocatedVUs, 750);
+  assert.equal(a.scenarios.step_1_reads.preAllocatedVUs, 1000);
+});
+
+test('DIAG_RATES selects mixed steps in normal order with unchanged lanes and drains', () => {
+  assert.deepEqual(diagnosticConfig({}).rates, [250]);
+  const { rates } = diagnosticConfig({ DIAG_RATES: '1000, 250' });
+  assert.deepEqual(rates, [250, 1000]);
+  const filtered = generatorConfig(false, true, 'new', rates);
+  assert.deepEqual(filtered.steps.map(s => [s.rate, s.seconds, s.startSeconds]), [[250, 60, 0], [1000, 60, 71]]);
+  assert.equal(filtered.scenarios.step_2_reads.rate, 500);
+  assert.equal(filtered.scenarios.step_2_signin.rate, 20);
+  assert.equal(filtered.duration, 142);
+  assert.deepEqual(generatorConfig(false, false, 'new', rates), generatorConfig());
+  assert.deepEqual(generatorConfig(true, true, 'new', rates), generatorConfig(true, true));
+  assert.equal(generatorConfig(false, true, 'new', diagnosticConfig({ DIAG_RATES: '250' }).rates).duration, 71);
+  for (const invalid of ['', '250,', '250,250', '50', '999']) {
+    assert.throws(() => diagnosticConfig({ DIAG_RATES: invalid }), /DIAG_RATES/);
   }
 });

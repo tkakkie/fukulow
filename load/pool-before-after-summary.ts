@@ -10,7 +10,7 @@ export const scenarios = ['send', 'mixed'] as const;
 export type Scenario = typeof scenarios[number];
 export type Arm = 'B' | 'A';
 export function pairs() { return [['B','A'],['A','B'],['B','A']] as const; }
-export function plan(smoke = false) { return throughputPlan(smoke ? '50' : settings.rates.join(','), smoke ? '10' : '60',10); }
+export function plan(smoke = false, rates = settings.rates) { return throughputPlan(smoke ? '50' : rates.join(','), smoke ? '10' : '60',10); }
 export type Counts = { attempted:number; accepted:number; rejected429:number; rejected503:number;
   otherErrors:number; clientTimeouts:number; transportErrors:number; droppedIterations:number;
   p95:number|null; p99:number|null };
