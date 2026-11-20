@@ -146,6 +146,8 @@ pub(super) async fn create(
 // position visible to validation instead of silently acknowledging past it.
 // Keep the Message lookup correlated. Planning before the RLS context is set
 // can underestimate the cost of materializing all Messages in the Organization.
+// OFFSET 0 is an optimisation fence: it stops the subquery being pulled up into
+// a plain join; removing it can restore the Organization-wide scan (#515).
 fn page_sql(channel: usize, authorized: bool) -> String {
     let (after, through, limit) = (channel + 1, channel + 2, channel + 3);
     let access = if authorized { "AND access.visible" } else { "" };
