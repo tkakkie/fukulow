@@ -433,3 +433,103 @@ test('beforeunload warns for a draft in an Organization that is not selected, in
   await expect(page.getByRole('alert')).toContainText('この組織は利用できません。')
   expect(await warns()).toBe(true)
 })
+
+test('responsive panel geometry: overlays main at 1100px, pushes main at 1280px, and tablet 768px drawer closes on Esc', async ({ page }) => {
+  const main = page.locator('#main-content')
+  const panel = page.locator('#panel-content')
+  const openPanelBtn = page.getByRole('button', { name: 'パネルを開く(⌘.)', exact: true })
+
+  // 1. 1100px (960-1279px): open panel overlays main from the right without narrowing main
+  await page.setViewportSize({ width: 1100, height: 800 })
+  await page.goto(`/o/${org}/c/${first}`)
+  await expect(composer(page)).toBeEnabled()
+  const mainClosed1100 = await main.boundingBox()
+  expect(mainClosed1100).not.toBeNull()
+
+  await openPanelBtn.click()
+  await expect(panel).toBeVisible()
+  const mainOpen1100 = await main.boundingBox()
+  const panel1100 = await panel.boundingBox()
+  expect(mainOpen1100).not.toBeNull()
+  expect(panel1100).not.toBeNull()
+  expect(Math.abs(mainOpen1100!.width - mainClosed1100!.width)).toBeLessThanOrEqual(1)
+  expect(Math.abs(mainOpen1100!.x - mainClosed1100!.x)).toBeLessThanOrEqual(1)
+  expect(panel1100!.width).toBeGreaterThan(200)
+  expect(panel1100!.x).toBeGreaterThan(mainOpen1100!.x)
+  expect(panel1100!.x).toBeLessThan(mainOpen1100!.x + mainOpen1100!.width)
+  expect(Math.abs((panel1100!.x + panel1100!.width) - (mainOpen1100!.x + mainOpen1100!.width))).toBeLessThanOrEqual(2)
+
+  // 2. 1280px (>= 1280px): open panel sits beside main and pushes main narrower
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await expect.poll(async () => (await main.boundingBox())?.width ?? 0).toBeGreaterThan(mainClosed1100!.width + 100)
+  const mainClosed1280 = await main.boundingBox()
+  expect(mainClosed1280).not.toBeNull()
+
+  await openPanelBtn.click()
+  await expect(panel).toBeVisible()
+  const mainOpen1280 = await main.boundingBox()
+  const panel1280 = await panel.boundingBox()
+  expect(mainOpen1280).not.toBeNull()
+  expect(panel1280).not.toBeNull()
+  expect(mainClosed1280!.width - mainOpen1280!.width).toBeGreaterThanOrEqual(panel1280!.width)
+  expect(panel1280!.x).toBeGreaterThanOrEqual(mainOpen1280!.x + mainOpen1280!.width)
+
+  // 3. 768px (600-959px): drawer closes on Esc and focus remains on the rail opener
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+  await page.setViewportSize({ width: 768, height: 800 })
+  const channelNav = page.locator('#channel-content')
+  const railChannelBtn = page.getByRole('button', { name: 'チャンネル一覧', exact: true })
+  await expect(channelNav).toBeHidden()
+  await railChannelBtn.click()
+  await expect(channelNav).toBeVisible()
+  await expect(page.locator('.workspace')).toHaveAttribute('data-drawer-open', 'true')
+  await expect(railChannelBtn).toHaveAttribute('aria-expanded', 'true')
+  await expect(railChannelBtn).toBeFocused()
+
+  await page.keyboard.press('Escape')
+  await expect(channelNav).toBeHidden()
+  await expect(page.locator('.workspace')).toHaveAttribute('data-drawer-open', 'false')
+  await expect(railChannelBtn).toHaveAttribute('aria-expanded', 'false')
+  await expect(railChannelBtn).toBeFocused()
+})
+
+test('direct URL access to ?panel=reply:{id} and ?panel=members renders the requested panel content', async ({ page }) => {
+  const rootRes = await secretSafe(() =>
+    page.request.post(`/api/v1/orgs/${org}/channels/${first}/messages`, {
+      data: { client_message_id: crypto.randomUUID(), body: '直接リンクのルートメッセージ' },
+    }),
+  )
+  expect(rootRes.status()).toBe(201)
+  const rootMsg = (await secretSafe(() => rootRes.json())) as import('../src/api-schema.d.ts').components['schemas']['Message']
+
+  const replyRes = await secretSafe(() =>
+    page.request.post(`/api/v1/orgs/${org}/channels/${first}/messages`, {
+      data: { client_message_id: crypto.randomUUID(), body: '直接リンクの子返信', reply_to: rootMsg.id },
+    }),
+  )
+  expect(replyRes.status()).toBe(201)
+
+  const panel = page.locator('#panel-content')
+
+  // 1. Direct load of ?panel=reply:{id} renders the Reply chain messages and enabled Reply Composer
+  await page.goto(`/o/${org}/c/${first}?panel=reply:${rootMsg.id}`)
+  await expect(page).toHaveURL(`/o/${org}/c/${first}?panel=reply:${rootMsg.id}`)
+  await expect(panel).toBeVisible()
+  await expect(panel.locator('h2')).toHaveText('返信のつながり')
+  await expect(panel.getByRole('article').filter({ hasText: '直接リンクのルートメッセージ' })).toBeVisible()
+  await expect(panel.getByRole('article').filter({ hasText: '直接リンクの子返信' })).toBeVisible()
+  await expect(panel.getByRole('textbox', { name: 'メッセージ', exact: true })).toBeEnabled()
+
+  // 2. Direct load of ?panel=members renders the Channel members tab and member list
+  await page.goto(`/o/${org}/c/${first}?panel=members`)
+  await expect(page).toHaveURL(`/o/${org}/c/${first}?panel=members`)
+  await expect(panel).toBeVisible()
+  await expect(panel.getByRole('tab', { name: 'メンバー', exact: true })).toHaveAttribute('aria-selected', 'true')
+  const membersRegion = panel.getByRole('region', { name: 'チャンネルのメンバー', exact: true })
+  await expect(membersRegion).toBeVisible()
+  await expect(membersRegion.getByText('Alice', { exact: true })).toBeVisible()
+  await expect(membersRegion.getByText('オーナー', { exact: true })).toBeVisible()
+})

@@ -2058,4 +2058,120 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
     await unmount(instance); raw.close()
   })
 
+  it('confirms before replacing a non-empty Topic Composer draft on send refused (置き換える / キャンセル)', async () => {
+    const net = fakeNetwork()
+    const raw = createSession({ selfId: 'me', onEnded: vi.fn(), ...net.options('me') })
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A', 'general')] }))
+    net.topicMessages['A:T'] = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0, messages: [], has_more: false })
+    net.topicSummaries['A:T'] = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 0,
+      topic: summary('T', 0, 0),
+    })
+    await settle()
+    net.subscribed('A', 0)
+    await settle()
+
+    const ch = syncAdapter(raw.sync).channel('A')
+    const tp = topicsAdapter(raw.topics, 'A')
+    const tc = ch.topic('T')
+
+    tc.setDraft('拒否されたトピック本文')
+    const refused = tc.submit('Topic T')
+    await settle()
+    net.sends[0].resolve({ ok: false, kind: 'http', status: 400, error: 'invalid_input' })
+    await refused
+    await settle()
+
+    tc.setDraft('入力途中のトピック下書き')
+    await settle()
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(TopicView, {
+      target: host as unknown as Element,
+      props: {
+        channel: ch,
+        topics: tp,
+        channelId: 'A',
+        topicId: 'T',
+        topicName: 'Topic T',
+        selfId: 'me',
+      },
+    })
+    try {
+      await settle()
+      flushSync()
+
+      const textarea = host.querySelector('textarea')!
+      expect(textarea.value).toBe('入力途中のトピック下書き')
+      expect(host.querySelector('[role="dialog"]')).toBeNull()
+
+      // 1. Clicking 編集して送り直す with a non-empty draft opens the replace dialog without mutating draft or pending
+      buttonsByText(host, '編集して送り直す')[0].click()
+      flushSync()
+      await tick()
+
+      const dialog = host.querySelector('[role="dialog"]')
+      expect(dialog).not.toBeNull()
+      expect(dialog!.getAttribute('aria-label')).toBe('入力中の下書きを置き換えますか？')
+      expect(buttonsByText(dialog!, '置き換える')).toHaveLength(1)
+      expect(buttonsByText(dialog!, 'キャンセル')).toHaveLength(1)
+      expect(tc.composer.draft).toBe('入力途中のトピック下書き')
+      expect(ch.timeline.pending).toHaveLength(1)
+
+      // 2. Clicking キャンセル closes the dialog and keeps both the original draft and the failed send
+      buttonsByText(dialog!, 'キャンセル')[0].click()
+      flushSync()
+      await settle()
+      flushSync()
+
+      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(tc.composer.draft).toBe('入力途中のトピック下書き')
+      expect(textarea.value).toBe('入力途中のトピック下書き')
+      expect(ch.timeline.pending).toHaveLength(1)
+      expect(buttonsByText(host, '編集して送り直す')).toHaveLength(1)
+
+      // 3. Reopen and click 置き換える: replaces the draft, removes the failed send, and returns focus to Composer
+      buttonsByText(host, '編集して送り直す')[0].click()
+      flushSync()
+      const reopened = host.querySelector('[role="dialog"]')!
+      buttonsByText(reopened, '置き換える')[0].click()
+      flushSync()
+      await settle()
+      flushSync()
+
+      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(tc.composer.draft).toBe('拒否されたトピック本文')
+      expect(textarea.value).toBe('拒否されたトピック本文')
+      expect(ch.timeline.pending).toHaveLength(0)
+      expect(buttonsByText(host, '編集して送り直す')).toHaveLength(0)
+      expect(dom.doc.activeElement).toBe(textarea)
+
+      // 4. Empty Topic Composer draft restores immediately without confirmation and focuses Composer
+      tc.setDraft('二度目の拒否トピック本文')
+      const secondRefused = tc.submit('Topic T')
+      await settle()
+      net.sends[1].resolve({ ok: false, kind: 'http', status: 400, error: 'invalid_input' })
+      await secondRefused
+      await settle()
+      flushSync()
+      expect(textarea.value).toBe('')
+
+      buttonsByText(host, '編集して送り直す')[0].click()
+      flushSync()
+      await settle()
+      flushSync()
+
+      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(tc.composer.draft).toBe('二度目の拒否トピック本文')
+      expect(textarea.value).toBe('二度目の拒否トピック本文')
+      expect(dom.doc.activeElement).toBe(textarea)
+    } finally {
+      await unmount(instance)
+      raw.close()
+    }
+  })
+
 })
