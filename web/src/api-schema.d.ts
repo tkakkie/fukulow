@@ -111,6 +111,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/channels/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one accessible ordinary Channel, including archived Channels. */
+        get: operations["get_channel"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Supply exactly one of name or archived. An authorized no-op returns 204. */
+        patch: operations["update_channel"];
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/channels/{id}/events": {
         parameters: {
             query?: never;
@@ -446,6 +464,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/me/channel-sections/{channel_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["placement"];
+        put: operations["move_channel"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/me/section-channel-order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["channel_order"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/me/sections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["layout"];
+        put?: never;
+        post: operations["create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/me/sections/order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["section_order"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/me/sections/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["section"];
+        put?: never;
+        post?: never;
+        delete: operations["delete"];
+        options?: never;
+        head?: never;
+        patch: operations["rename"];
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/members": {
         parameters: {
             query?: never;
@@ -678,6 +776,7 @@ export interface components {
             role: components["schemas"]["Role"];
         };
         Channel: {
+            archived: boolean;
             capabilities: components["schemas"]["ChannelCapabilities"];
             /** Format: uuid */
             id: string;
@@ -727,9 +826,11 @@ export interface components {
         };
         ChannelCapabilities: {
             can_add_members: components["schemas"]["Capability"];
+            can_archive: components["schemas"]["Capability"];
             can_leave: components["schemas"]["Capability"];
             can_manage_managers: components["schemas"]["Capability"];
             can_remove_members: components["schemas"]["Capability"];
+            can_rename: components["schemas"]["Capability"];
         };
         /** @description Bounded ascending Channel log page, with the same envelopes as WebSocket replay. */
         ChannelEventPage: {
@@ -769,6 +870,17 @@ export interface components {
              */
             type: "channel_members_changed";
         };
+        ChannelOrder: {
+            channel_ids: string[];
+            /** Format: uuid */
+            section_id: string | null;
+        };
+        ChannelPlacement: {
+            /** @description Canonical unsigned decimal, at most 9223372036854775807. */
+            generation: string;
+            /** Format: uuid */
+            section_id: string | null;
+        };
         /** @enum {string} */
         ChannelVisibility: "public" | "private";
         /** @description Client -> server control messages. Cursors are per channel and exclusive. */
@@ -786,6 +898,17 @@ export interface components {
         CreateInviteRequest: {
             email: string;
             role: components["schemas"]["Role"];
+        };
+        CreateSection: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        CreatedSection: {
+            /** @description Canonical unsigned decimal, at most 9223372036854775807. */
+            generation: string;
+            /** Format: uuid */
+            id: string;
         };
         DisplayIdentity: {
             deactivated: boolean;
@@ -1099,6 +1222,10 @@ export interface components {
              */
             topic_id: string;
         };
+        MoveChannel: {
+            /** Format: uuid */
+            section_id: string | null;
+        };
         /** @enum {string} */
         MoveEventKind: "move";
         NativeSessionResponse: {
@@ -1157,6 +1284,9 @@ export interface components {
              * @enum {string}
              */
             type: "read_position_changed";
+        };
+        RenameSection: {
+            name: string;
         };
         ReplyChainPage: {
             /** Format: int64 */
@@ -1226,6 +1356,36 @@ export interface components {
         };
         /** @enum {string} */
         Role: "owner" | "admin" | "member" | "guest";
+        Section: {
+            channel_ids: string[];
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        SectionLayout: {
+            /** @description Canonical unsigned decimal, at most 9223372036854775807. */
+            generation: string;
+            other_channel_ids: string[];
+            sections: components["schemas"]["Section"][];
+        };
+        SectionOrder: {
+            section_ids: string[];
+        };
+        SectionSnapshot: {
+            /** @description Canonical unsigned decimal, at most 9223372036854775807. */
+            generation: string;
+            section: components["schemas"]["Section"];
+        };
+        /** @description Own-Member section layout invalidation. */
+        SectionsChanged: {
+            /** @description Canonical unsigned decimal, at most 9223372036854775807. */
+            generation: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "sections_changed";
+        };
         /**
          * @description Idempotency key: (organization, sender, client_message_id), derived from the session.
          *     Matching body, Channel, normalized Topic name and reply target returns the canonical Message/sequence;
@@ -1251,7 +1411,7 @@ export interface components {
             topic_name?: string | null;
         };
         /** @description Server -> client events. Event positions and Message state versions are independent. */
-        ServerEvent: components["schemas"]["DmListChanged"] | components["schemas"]["ActivityReady"] | components["schemas"]["ActivityReset"] | components["schemas"]["ChannelActivity"] | components["schemas"]["ReadPositionChanged"] | components["schemas"]["ChannelAccessGained"] | components["schemas"]["ChannelAccessRevoked"] | components["schemas"]["ChannelListChanged"] | components["schemas"]["ChannelMembersChanged"] | components["schemas"]["MembersChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
+        ServerEvent: components["schemas"]["DmListChanged"] | components["schemas"]["SectionsChanged"] | components["schemas"]["ActivityReady"] | components["schemas"]["ActivityReset"] | components["schemas"]["ChannelActivity"] | components["schemas"]["ReadPositionChanged"] | components["schemas"]["ChannelAccessGained"] | components["schemas"]["ChannelAccessRevoked"] | components["schemas"]["ChannelListChanged"] | components["schemas"]["ChannelMembersChanged"] | components["schemas"]["MembersChanged"] | components["schemas"]["MessageEvent"] | components["schemas"]["Subscribed"] | components["schemas"]["ChannelAccessLost"] | components["schemas"]["ErrorEvent"];
         SessionResponse: {
             /** Format: int32 */
             expires_in: number;
@@ -1424,6 +1584,11 @@ export interface components {
              */
             type: "unsubscribe";
         };
+        UpdateChannelRequest: {
+            name: string;
+        } | {
+            archived: boolean;
+        };
     };
     responses: never;
     parameters: never;
@@ -1455,10 +1620,14 @@ export type ChannelListChanged = components['schemas']['ChannelListChanged'];
 export type ChannelMember = components['schemas']['ChannelMember'];
 export type ChannelMemberList = components['schemas']['ChannelMemberList'];
 export type ChannelMembersChanged = components['schemas']['ChannelMembersChanged'];
+export type ChannelOrder = components['schemas']['ChannelOrder'];
+export type ChannelPlacement = components['schemas']['ChannelPlacement'];
 export type ChannelVisibility = components['schemas']['ChannelVisibility'];
 export type ClientMessage = components['schemas']['ClientMessage'];
 export type CreateChannelRequest = components['schemas']['CreateChannelRequest'];
 export type CreateInviteRequest = components['schemas']['CreateInviteRequest'];
+export type CreateSection = components['schemas']['CreateSection'];
+export type CreatedSection = components['schemas']['CreatedSection'];
 export type DisplayIdentity = components['schemas']['DisplayIdentity'];
 export type Dm = components['schemas']['Dm'];
 export type DmChanges = components['schemas']['DmChanges'];
@@ -1488,6 +1657,7 @@ export type MessageStateEvent = components['schemas']['MessageStateEvent'];
 export type MessageStateKind = components['schemas']['MessageStateKind'];
 export type MoveChainRequest = components['schemas']['MoveChainRequest'];
 export type MoveChainResponse = components['schemas']['MoveChainResponse'];
+export type MoveChannel = components['schemas']['MoveChannel'];
 export type MoveEventKind = components['schemas']['MoveEventKind'];
 export type NativeSessionResponse = components['schemas']['NativeSessionResponse'];
 export type OpenDmRequest = components['schemas']['OpenDmRequest'];
@@ -1497,6 +1667,7 @@ export type OrganizationCapabilities = components['schemas']['OrganizationCapabi
 export type OutstandingInvite = components['schemas']['OutstandingInvite'];
 export type ReadPosition = components['schemas']['ReadPosition'];
 export type ReadPositionChanged = components['schemas']['ReadPositionChanged'];
+export type RenameSection = components['schemas']['RenameSection'];
 export type ReplyChainPage = components['schemas']['ReplyChainPage'];
 export type ReplyChainQuery = components['schemas']['ReplyChainQuery'];
 export type ReplyCount = components['schemas']['ReplyCount'];
@@ -1504,6 +1675,11 @@ export type ReplyCountPage = components['schemas']['ReplyCountPage'];
 export type ReplyCountRequest = components['schemas']['ReplyCountRequest'];
 export type RevokeOtherSessionsRequest = components['schemas']['RevokeOtherSessionsRequest'];
 export type Role = components['schemas']['Role'];
+export type Section = components['schemas']['Section'];
+export type SectionLayout = components['schemas']['SectionLayout'];
+export type SectionOrder = components['schemas']['SectionOrder'];
+export type SectionSnapshot = components['schemas']['SectionSnapshot'];
+export type SectionsChanged = components['schemas']['SectionsChanged'];
 export type SendMessageRequest = components['schemas']['SendMessageRequest'];
 export type ServerEvent = components['schemas']['ServerEvent'];
 export type SessionResponse = components['schemas']['SessionResponse'];
@@ -1521,6 +1697,7 @@ export type TopicSummary = components['schemas']['TopicSummary'];
 export type TopicSummaryResponse = components['schemas']['TopicSummaryResponse'];
 export type UnreadChannel = components['schemas']['UnreadChannel'];
 export type Unsubscribe = components['schemas']['Unsubscribe'];
+export type UpdateChannelRequest = components['schemas']['UpdateChannelRequest'];
 export type $defs = Record<string, never>;
 export interface operations {
     health: {
@@ -1904,6 +2081,8 @@ export interface operations {
         parameters: {
             query?: {
                 history_generation?: string;
+                /** @description Return archived Channels when true. The default lists active Channels. */
+                archived?: boolean;
             };
             header?: never;
             path: {
@@ -1923,7 +2102,7 @@ export interface operations {
                     "application/json": components["schemas"]["ChannelList"];
                 };
             };
-            /** @description Malformed Organization id */
+            /** @description Malformed Organization id or invalid query input */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2072,6 +2251,188 @@ export interface operations {
                 };
             };
             /** @description Database failure while resolving the session or creating the Channel and its membership */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accessible ordinary Channel */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Channel"];
+                };
+            };
+            /** @description Invalid path or dm_channel_fixed for an accessible DM */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateChannelRequest"];
+            };
+        };
+        responses: {
+            /** @description Channel updated or already in the requested state */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid path, input or name; dm_channel_fixed for an accessible DM */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Account Session unavailable */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description forbidden: current Member may not change this Channel */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description channel_archived or channel name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Request body exceeds the size limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Requires application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database or worker failure */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -2701,7 +3062,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; new DM send: dm_peer_deactivated or dm_peer_access_lapsed */
+            /** @description history_generation_changed; Client message id reused with different body, Channel, normalized Topic name or reply target; channel_archived; new DM send: dm_peer_deactivated or dm_peer_access_lapsed */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2917,7 +3278,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description version_conflict, operation_conflict, chain_too_large or history_generation_changed */
+            /** @description version_conflict, operation_conflict, chain_too_large, history_generation_changed or channel_archived */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4050,6 +4411,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description invite_limit_reached: the requested Role's Outstanding Invite pool is full */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Request too large */
             413: {
                 headers: {
@@ -4336,6 +4706,926 @@ export interface operations {
             /** @description Database failure */
             500: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    placement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                channel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group of an accessible active ordinary Channel */
+            200: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelPlacement"];
+                };
+            };
+            /** @description invalid input */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description channel_archived */
+            409: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    move_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                channel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveChannel"];
+            };
+        };
+        responses: {
+            /** @description Channel moved or already in the requested group */
+            204: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description invalid input */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable, channel not found or section_not_found */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description channel_archived */
+            409: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Body exceeds 16 KiB */
+            413: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description expected application/json */
+            415: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    channel_order: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChannelOrder"];
+            };
+        };
+        responses: {
+            /** @description Complete accessible active Channel order set or already current */
+            204: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description invalid input or invalid_section_order */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable, section_not_found or channel not found */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description channel_archived or section_layout_changed */
+            409: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Body exceeds 1 MiB */
+            413: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description expected application/json */
+            415: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    layout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Personal layout with accessible active Channels only */
+            200: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectionLayout"];
+                };
+            };
+            /** @description invalid input */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSection"];
+            };
+        };
+        responses: {
+            /** @description Canonical retry with current generation */
+            200: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedSection"];
+                };
+            };
+            /** @description Section appended */
+            201: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedSection"];
+                };
+            };
+            /** @description invalid input or invalid_section_name */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description section_id_conflict, section_deleted or section_limit */
+            409: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Body exceeds 16 KiB */
+            413: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description expected application/json */
+            415: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    section_order: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SectionOrder"];
+            };
+        };
+        responses: {
+            /** @description Complete section order set or already current */
+            204: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description invalid input or invalid_section_order */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or section_not_found */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description section_layout_changed */
+            409: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Body exceeds 16 KiB */
+            413: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description expected application/json */
+            415: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    section: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Owned section with accessible active Channels only */
+            200: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectionSnapshot"];
+                };
+            };
+            /** @description invalid input */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or section_not_found */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Owned section deleted or unavailable */
+            204: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description invalid input */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    rename: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameSection"];
+            };
+        };
+        responses: {
+            /** @description Name set or already current */
+            204: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description invalid input or invalid_section_name */
+            400: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description invalid credentials */
+            401: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or section_not_found */
+            404: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Body exceeds 16 KiB */
+            413: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description expected application/json */
+            415: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description internal error */
+            500: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
                     [name: string]: unknown;
                 };
                 content: {

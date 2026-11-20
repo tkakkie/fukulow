@@ -11,7 +11,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import type { Message as WireMessage, UnreadChannel } from '../src/api-schema.d.ts'
+import type { Message as WireMessage, ServerEvent, UnreadChannel } from '../src/api-schema.d.ts'
 
 export const defaultDir = resolve(import.meta.dirname, '../../contract/realtime')
 
@@ -459,8 +459,17 @@ export function checkFixtures(dir: string = defaultDir): Problems {
 
 export type Effect = { type: string; [field: string]: unknown }
 export type Message = Omit<WireMessage, 'channel_id' | 'topic_id' | 'reply_to' | 'reply_root_id'> & { topic?: string; reply_to?: WireMessage['reply_to']; reply_root_id?: WireMessage['reply_root_id'] }
+type MoveEvent = Extract<ServerEvent, { kind: 'move' }>
+type MoveSpec = Pick<MoveEvent, 'seq' | 'root_id' | 'source_topic_id' | 'destination_topic_id' | 'operation_id'>
+type EventSpec = { kind: 'move'; move: MoveSpec } | { kind: 'create' | 'edit' | 'delete'; seq: number; message: Message }
+export const fixtureMove = (move: MoveSpec, channel: string, generation: string): MoveEvent => ({
+  ...move, kind: 'move', type: 'message', channel_id: channel, version: move.seq, history_generation: generation,
+})
+export const fixtureEvents = (input: ResolvedInput, channel: string, generation: string,
+  message: (m: Message, channel: string) => WireMessage): ServerEvent[] => input.events!.map(e => e.kind === 'move'
+  ? fixtureMove(e.move, channel, generation) : { type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })
 /** The fixture input with respond_to replaced by the effect (as the client emitted it) it answers, and messages expanded. */
-export type ResolvedInput = { type: string; respond_to?: Effect; message?: Message; messages?: Message[]; [field: string]: unknown }
+export type ResolvedInput = { type: string; respond_to?: Effect; message?: Message; messages?: Message[]; move?: MoveSpec; events?: EventSpec[]; [field: string]: unknown }
 export type ObservedChannel = {
   unread?: Pick<UnreadChannel, 'as_of_seq' | 'read_seq' | 'main_unread_count' | 'unread_count'>
   state?: string
@@ -563,7 +572,8 @@ function* scenarioInputs(scenario: ClientScenario): Generator<ResolvedInput, str
       input.messages = (step.input.messages as Record<string, Json>[]).flatMap((m) => expandMessage(m, channelOf(input.respond_to)))
     }
     if (Array.isArray(step.input.events)) {
-      input.events = step.input.events.map((event: { seq: number; kind: string; message: Record<string, Json> }) => ({ ...event, message: expandMessage(event.message, channelOf(input.respond_to))[0] }))
+      input.events = step.input.events.map((event: { seq: number; kind: string; message: Record<string, Json> }) => event.kind === 'move'
+        ? event : { ...event, message: expandMessage(event.message, channelOf(input.respond_to))[0] }) as EventSpec[]
     }
     if (input.type === 'connection_ready') [connectPending, socketOpen] = [false, true]
     if (input.type === 'socket_closed') socketOpen = false

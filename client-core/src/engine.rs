@@ -403,6 +403,13 @@ impl<'a> Step<'a> {
             if self
                 .core
                 .channel(id)
+                .is_some_and(|c| c.moved_roots.len() > limit)
+            {
+                self.cap_moved_roots(id, limit);
+            }
+            if self
+                .core
+                .channel(id)
                 .is_some_and(|c| c.retained_count.unwrap_or(0) > limit)
             {
                 self.trim(id, limit);

@@ -17,12 +17,12 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 ## 2. State -> next action
 | Item, label | Who acts | Next action | Step ends when |
 |---|---|---|---|
-| Issue, no status | author AI | Add "Done when" and milestone. Feature: "How I read the spec" (3–5 lines, spec terms). Follow §3 | `status:ai-review`, `status:human-review` or `status:ready` (AI-decidable) |
+| Issue, no status | author AI | Add "Done when" and milestone. Feature: "How I read the spec" (3–5 lines, spec terms). Follow §3 | `status:ai-review`, `status:human-review` or `status:ready` (AI-decidable, with the §4 `Assigned:` line) |
 | Issue, `status:ai-review`, unreviewed | independent AI | Review and comment (§5) | verdict posted; no blocking findings -> `status:human-review` |
 | Issue, `status:ai-review`, round 1 blocked | author AI | Fix, comment how each finding was addressed and request round 2 (§5 delta) | round 2 verdict with no blocking findings -> `status:human-review`; blocking findings remain -> `status:needs-decision` |
 | Issue, `status:human-review` | maintainer | AI does other work | maintainer comments "OK" |
-| Issue, `status:human-review` with maintainer "OK" | any AI | Replace label with `status:ready` | ready |
-| Issue, `status:ready`, unblocked | implementer (§4) | With "Done when", set `status:working`, create branch/worktree, implement and open draft PR | PR links `Closes #n`; Issue stays `status:working` |
+| Issue, `status:human-review` with maintainer "OK" | any AI | Replace label with `status:ready` and post the §4 `Assigned:` line | ready |
+| Issue, `status:ready`, unblocked | implementer named by `Assigned:` (§4) | With "Done when", set `status:working`, create branch/worktree, implement and open draft PR | PR links `Closes #n`; Issue stays `status:working` |
 | Issue, `status:ready` and `blocked` | none | Wait until every named blocker is satisfied (each blocker PR merged) and the sweeper removes `blocked` (below) | `blocked` removed |
 | Issue, `status:working` | implementer | Follow its PR row. No PR and no activity: §7 | PR merged, Issue closed |
 | Open PR, CONFLICTING or UNKNOWN mergeability (any status) | implementer | Precedes every transition towards `status:human-review`. Re-query UNKNOWN until known. Resolve conflicts (§6), get CI on the new head and check if the resolution touched reviewed code. Re-verify only that delta | MERGEABLE and CI green on new head |
@@ -46,34 +46,49 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 - Until DM, Mention and Search are merged, process improvements and doc rules are paused (no new Issue, no implementation of an existing one), except for security, serious defects, MVP blockers or an explicit maintainer request (#275).
 
 ## 4. Roles, models, effort
-- Codex: Rust server, DB, auth/permissions, real-time, concurrency, load tests. Claude: design, OpenAPI, docs, review. Antigravity: Svelte (screens, state modules), browser checks, E2E.
-- Codex implements with `gpt-6.2-sol` `medium`. Use `high` only for H1–H3 or security relevance, judged from the whole Issue and touched files. Size alone never qualifies. H4–H6 stay `medium` and always require independent review (#435). List applicable H numbers (or "none") in the PR body.
-  - H1 auth, permissions, Organization separation, sessions.
-  - H2 DB integrity, migrations, transactions, locks.
-  - H3 real-time reconnect, event order, dedup, delivery.
-  - H4 adding, removing or loosening a security, correctness or CI verification gate.
-  - H5 behaviour-preserving conversion without an old/new comparison test.
-  - H6 concurrent paths sharing state or caches, or whether a background job runs, retries or stops.
-- Effort is fixed at launch. Newly discovered H1–H3 or security relevance requires the implementer to stop and report. The orchestrator restarts with sol `high`.
-- Reviews and checks (#435, credit cost): Codex `gpt-6.2-astra` `medium` for `risk:needs-review` round 1 and Argon-authored changes. Antigravity Argon (`gemini-4-argon-medium`) for other reviews, round 2 and delta checks. The orchestrator may do round 2 if it only checks a small fix. Never review at `high`.
-- Add Claude Code Opus subagent review for PRs with H1–H3 or changes to `load/` measurement validity, judgement, gates or aggregation (excluding run procedure alone, #505). Give it only the diff, Issue "Done when", relevant spec, decisions and invariants, and approved criteria. Exclude orchestrator conclusions and other reviews. Its round 2 checks its own findings only. Sign `AI: Claude Code (subagent) / model: claude-opus-5-5 / effort: <level>`.
-- Routine low-risk CI, conflict, type or copy fixes and smoke runs with log summaries: Antigravity Hydrogen (`gemini-4-hydrogen-medium`) during #435 trial, otherwise sol `low`. H1–H3 or security relevance always require sol `high` and exclude Hydrogen.
-- Astra implements only after two substantive sol `high` attempts miss Issue acceptance criteria. One failing test or CI run does not count. Record why in the Issue and follow the same independent-review rules.
-- Antigravity uses `/usr/local/argon-agy/agy` and Gemini 4 Argon (`agy models`, no Carbon, #260). `--model` fixes effort at launch: `gemini-4-argon-low` for small copy, limit or type fixes. Default `gemini-4-argon-medium` for screens, state modules, Vitest and E2E additions and browser checks. `gemini-4-argon-high` is unused (quota-routing defect, #435). Route H1–H3 or security work to sol `high` as an area exception. The effort and stop/report rules above apply.
-- Claude: Sonnet by default. Opus only for high-risk round-1 review, the extra review above or heavy implementation.
-- Antigravity implements web work by area. Web PRs have no extra browser-check review (#275). Sign with model and effort (§5).
+- Principles (#638): no Fable; `high` only for H1–H3 or security implementation, never `xhigh` or `max`; Claude uses `claude-opus-5-5` only; the reviewer is always a different vendor from the author; spread credit use across the three AIs.
+- Models: Claude `claude-opus-5-5`. Codex `gpt-6.2-sol`; `gpt-6.2-astra` only after two failed sol attempts (Failures below). Antigravity `gemini-4-neon-medium` and `gemini-4-neon-low`, `gemini-4-hydrogen-low` for chores; Neon `high`/`xhigh` unused.
+- Choose in order; the first match decides.
+  1. Risk: H1–H3 or security implementation -> sol `high`; quota labels never move it. Design, Issues and contract design for it still follow step 2 row 1. Judge from the whole Issue and touched files; size alone never qualifies. A worker that finds H1–H3 or security relevance stops and reports, never raising its own effort; the orchestrator restarts with sol `high` (under `quota:codex-low`: `status:needs-decision`). H4–H6 stay `medium` with independent review. List H numbers (or "none") in the PR body.
+     - H1 auth, permissions, Organization separation, sessions.
+     - H2 DB integrity, migrations, transactions, locks.
+     - H3 real-time reconnect, event order, dedup, delivery.
+     - H4 adding, removing or loosening a security, correctness or CI verification gate.
+     - H5 behaviour-preserving conversion without an old/new comparison test.
+     - H6 concurrent paths sharing state or caches, or whether a background job runs, retries or stops.
+  2. Work: split an Issue spanning rows; if it cannot be split, the lowest row number decides. The implementing AI writes the tests. A CI failure or conflict needing a logic change goes to rows 2–4 at `medium`.
+
+     | Row | Work | Owner |
+     |---|---|---|
+     | 1 | design, Issues, API contract design (`openapi.json` stays generated from Rust) | Claude |
+     | 2 | Rust (server, DB, client-core) | Codex sol |
+     | 3 | web (Svelte, state modules, E2E) | Antigravity Neon |
+     | 4 | cross-cutting test infrastructure, CI scripts, docs, measurement records | Claude |
+     | 5 | mechanical, behaviour-preserving CI, conflict and type fixes | Antigravity Hydrogen |
+  3. Effort: `low` only for behaviour-preserving work (wording or typo doc edits, copy, type and lint fixes, conflicts without logic changes, round-2 delta checks, Hydrogen chores). `medium` for everything else, including any edit to `docs/spec*`, `docs/decisions*` or `docs/invariants*`, and when unsure. `high` only for step 1. Line or file counts never change effort; effort is fixed at launch.
+- Reviewers by author, round 1 `medium` / round 2 `low` (never `high`): Codex, not H1–H3 or security -> Neon; Codex, H1–H3 or security -> fresh Claude subagent; Antigravity -> sol; Claude -> Neon. Round 2 stays with the round-1 reviewer's AI. The orchestrator may do round 2 itself for a small fix only when the author is not Claude.
+- A Claude reviewer is a fresh subagent given only the diff, Issue "Done when", relevant spec, decisions, invariants and approved criteria, never orchestrator conclusions or other reviews (#505). Sign `AI: Claude Code (subagent) / model: claude-opus-5-5 / effort: <level>`.
+- Changes to `load/` measurement validity, judgement, gates or aggregation (not run procedure alone) get an extra review at the same efforts: a fresh Claude subagent, or sol when the author is Claude. One review covers both when the two reviewers are the same AI.
+- Quota labels: the maintainer sets them (guide: under about 30% of the weekly allowance); AIs act on the labels only.
+  - `quota:codex-low`: non-H Rust -> Claude `medium`, reviewed by Neon `medium`.
+  - `quota:agy-low`: web -> Claude `medium`, reviewed by sol `medium`; chores -> sol `low`.
+  - `quota:claude-low`: measurement and high-risk reviews -> Neon `medium`; CI, docs and records -> sol `medium`; design stays with Claude.
+  - Reviews never move to the author's vendor. If a label would make the reviewer the author's vendor, the third vendor reviews even if labelled: reviews are the last work a low-credit AI keeps. Two labels: the remaining AI implements all non-H work. Three labels, or H1–H3 or security work under `quota:codex-low`: `status:needs-decision`.
+- Failures: a substantive attempt that misses "Done when"; one failing test or CI run does not count, and a stuck run (§7) is reported, not counted, unless restarted here. First failure -> same model and effort with the failure details. Second sol failure (any effort) -> astra `medium`, reason recorded in the Issue. Astra failure -> `status:needs-decision`. Second Neon failure -> Claude `medium` (`status:needs-decision` under `quota:claude-low`). Second Hydrogen failure -> its rows 2–4 owner at `medium`. Second Claude failure, or a failure after any escalation -> `status:needs-decision`.
+- The comment that sets `status:ready` records `Assigned: <name> / model: <id> / effort: <level> / H: <numbers or none>`. The worker follows it and does not re-choose. A later quota label overrides it, and the orchestrator posts a new `Assigned:` line.
+- Antigravity runs `/usr/local/argon-agy/agy` (`agy models`, no Carbon, #260). Web PRs have no extra browser-check review (#275).
 - Permissions (#288): all three AIs can write the task worktree, run all Commands (including throwaway Postgres DB tests), use Docker/Compose and access package registries. Never read or print secrets or `.env` values. Tests use throwaway databases and test-only values. Fix permission problems for all three or document a reasoned exception here. Workers never commit, push or use GitHub because one orchestrator owns commits, attribution and GitHub state. This is the sole exception.
 - Orchestrator: launch each worker from the task worktree using the Bash tool with `run_in_background: true` (no `nohup ... &`). Harness exit notifications resume §1 unprompted. Keep prompt, `-o` result and logs in the scratchpad outside the repo. Read Codex result and log or Antigravity log on exit, then sweep. `<agy-home>` is the maintainer-provisioned Antigravity login directory shared across worktrees. An empty `HOME` prompts for login.
   Codex (CLI 0.169.0 or later; older CLIs reject the 6.2 model ids): `cd <worktree> && codex exec -m <gpt-6.2-sol|gpt-6.2-astra> -c 'model_reasoning_effort="<low|medium|high>"' --sandbox danger-full-access -C . -o <scratch>/result.md "$(cat <scratch>/prompt.md)" < /dev/null > <scratch>/log 2>&1` (the same flag to implement, fix, review or check; a review or check prompt says not to edit files; the log streams progress).
-  Antigravity: `env HOME=<agy-home> PATH=/usr/local/argon-agy:$PATH /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model <gemini-4-argon-low|gemini-4-argon-medium|gemini-4-hydrogen-medium> --dangerously-skip-permissions --print-timeout 3600s --output-format stream-json < /dev/null > <scratch>/log.jsonl 2>&1` (JSON events, one per line, plus any stderr diagnostics, so progress is visible during the run; read the final report at the end of the log).
+  Antigravity: `env HOME=<agy-home> PATH=/usr/local/argon-agy:$PATH /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model <gemini-4-neon-low|gemini-4-neon-medium|gemini-4-hydrogen-low> --dangerously-skip-permissions --print-timeout 3600s --output-format stream-json < /dev/null > <scratch>/log.jsonl 2>&1` (JSON events, one per line, plus any stderr diagnostics, so progress is visible during the run; read the final report at the end of the log).
   Both worker prompts forbid commits, pushes and GitHub. The orchestrator reviews the diff, runs checks and commits with the worker as author (`GIT_AUTHOR_NAME=<Codex|Antigravity>`, `GIT_AUTHOR_EMAIL=<codex@users.noreply.github.com|noreply@example.com>`). Check changes left in the worktree after timeout before restarting. Claude runs as the orchestrator or as a subagent, each as itself.
 
   Before launching a worker, write `<scratch>/context.md` next to the prompt, aiming for a few KB (#451). Include Issue number, title, "Done when" and "How I read the spec"; role (implementer/reviewer), limits (no commit/push/GitHub), model, effort, H numbers and H1–H3 stop/report instruction; touched-area AGENTS.md rules and matching spec, decisions and invariants headings, quoted verbatim with path and heading; likely files, owning module, neighbouring tests and Commands; report format (changes, tests/results, open questions, docs read beyond the pack).
   Implementers read the pack first, other docs only if needed, and report each extra doc and why. Reviewers start with the pack and read docs normally. State these reading rules in their prompts. Read summaries first for worker, CI, E2E and load results (result file, failing-job tail, `load/summary.ts`). Use full logs when diagnosis or consistency requires them.
-- Exceptions to the area table need a line in the Issue (e.g. Codex implements the sync protocol/controller, H3 high; adapter and components stay with Antigravity).
+- Exceptions to the work table need a line in the Issue (e.g. Codex implements the sync protocol/controller, H3 high; adapter and components stay with Antigravity).
 
 ## 5. Reviews
-- At most two AI review rounds total per Issue or PR, regardless of reviewer changes. Round 2 checks changes and responses to earlier findings only. Non-blocking findings go to follow-up Issues and never trigger another round. Blocking findings left after round 2 -> `status:needs-decision` with the question in the last comment.
+- At most two AI review rounds total per Issue or PR, regardless of reviewer changes. Round 2 checks changes and responses to earlier findings only, by the round-1 reviewer's AI (§4). Non-blocking findings go to follow-up Issues and never trigger another round. Blocking findings left after round 2 -> `status:needs-decision` with the question in the last comment.
 - Independent AI review for PRs touching auth, permissions, real-time or migrations, and astra-authored PRs.
 - Copilot auto-review is off (credits). Manually request once per PR (`gh pr edit <n> --add-reviewer @copilot`) only for `risk:needs-review` or large code PRs, when work is done and CI is green. Request again only within the two-round cap when clearly needed and state why in the PR.
 - Copilot findings in unchanged code become non-blocking follow-up Issues except for security, data loss or corruption, cross-Organization information leak, a serious defect caused by this PR or unmet "Done when" (#275).
@@ -96,7 +111,7 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 | Dependent Issue waits on PR | Label `blocked`, comment "blocked by #n" for all blockers. Sweeper follows §2 on merged or unmerged closure |
 | Async CI, Copilot or worker overdue without notification | Check directly once per sweep (§1 commands plus worker log). Handle finished results, or keep label and work elsewhere while running. Recheck at next sweep/stall check. Relaunch dead workers without results (§4). No `status:needs-decision` for waiting |
 | Results arrive while orchestrator idle | Sweep immediately, without waiting for user |
-| AI stuck or needs higher effort | Stop it and comment findings. Restart at `high` only if §4 allows it. Otherwise report with `status:needs-decision` |
+| AI stuck or needs higher effort | Stop it and comment findings. It counts as a failure only if restarted under §4 Failures. Restart at `high` only for §4 step 1; otherwise follow §4 Failures or report with `status:needs-decision` |
 | Needs token, secret or denied permission | `status:needs-decision` with exact request. Continue other work |
 
 ## 8. Dependency updates and versions
@@ -125,7 +140,7 @@ In Claude Code cloud sessions without Codex or Antigravity, use the GitHub integ
 
 ## 11. Labels and milestones
 - Status names and meanings are in AGENTS.md. Filter with `label:status:human-review`.
-- `security` (red), `bug` (orange), `risk:needs-review`, `blocked`. Urgent = `security`/`bug` + `status:human-review`/`status:needs-decision`. No area/type/ai labels.
+- `security` (red), `bug` (orange), `risk:needs-review`, `blocked`, and `quota:codex-low`, `quota:agy-low`, `quota:claude-low` (maintainer-set, §4). Urgent = `security`/`bug` + `status:human-review`/`status:needs-decision`. No area/type/ai labels.
 - Every Issue gets a milestone. A one-week sprint (max two open) holds work planned for that week. Use undated `Backlog` for unscheduled, conditional or future work, outside that cap. No milestone means untriaged. Use labels for modules, never milestones.
 - Only the maintainer moves `Backlog` Issues into a sprint. AIs may propose moves at sprint boundaries.
 
@@ -135,6 +150,7 @@ Merges; Issue approvals ("OK"); token/secret changes; adding a language, depende
 ## 13. Splitting a doc
 - Write only what code, tests and `openapi.json` cannot tell. Record decisions with their rationale and rejected alternatives, cross-client contracts, cross-cutting rules (e.g. lock order), denial requirements, accepted limits and approved but unimplemented behaviour. Mark that behaviour as proposed and keep only its contract once implemented. Give each fact one home and update it in place by replacement or merge. Omit REST shapes, status tables, test name lists in the spec, implementation history and restatements of code constants.
 - `web/scripts/check-doc-budgets.ts` records and enforces a byte budget per file under `docs/` and for `AGENTS.md`. Prune or merge first when over budget.
+- It also enforces a fixed total (684 KiB: 8def9c2 plus 10%, #603). Adding a budget or raising any budget, including the total or through a split, needs a reason in the PR body, the maintainer-set `docs:budget-raise` label (CI) and a PR-body link to the maintainer's approval (review-enforced).
 - Evaluate a split if pruning or merging leaves the doc over budget, the same doc has repeated merge conflicts at any size or a major feature is added to `docs/spec.md`. Split when the benefit justifies it. Keep `docs/measurements.md` small per its header's summary/archive rule (#560).
 - A split needs a reason in the PR and its own maintainer-approved Issue stating the review mode. Keep it out of unrelated PRs. For CI script changes the cloud exception covers doc-length checks and their tests only. Changing which files CI checks (e.g. invariants) follows independent review (§5) unless the maintainer approves otherwise.
 - Keep the original path as index (area, one-line scope, link). Parts are `docs/<kind>/<area>.md` by module (`auth`, `channels`, `messages`, `realtime`) or feature. No per-decision files. New doc kinds need maintainer approval. Never split `AGENTS.md`.

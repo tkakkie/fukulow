@@ -2,6 +2,7 @@ use super::*;
 use crate::messages::move_topic::MoveChainResponse;
 use std::time::Duration;
 
+mod archive;
 mod denials;
 mod races;
 

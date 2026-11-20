@@ -90,6 +90,18 @@ pub(crate) async fn lock_organization(
     Ok(())
 }
 
+pub(crate) async fn share_organization(
+    tx: &mut sqlx::PgConnection,
+    organization: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query("SELECT organization_id FROM organizations WHERE organization_id=$1 FOR SHARE")
+        .bind(organization)
+        .fetch_optional(tx)
+        .await?
+        .ok_or_else(ApiError::organization_unavailable)?;
+    Ok(())
+}
+
 pub(crate) async fn current_actor(
     connection: &mut sqlx::PgConnection,
     auth: &Auth,

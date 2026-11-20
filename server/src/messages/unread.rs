@@ -26,6 +26,14 @@ pub struct ChannelList {
     pub channels: Vec<UnreadChannel>,
 }
 
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ChannelListQuery {
+    pub history_generation: Option<Uuid>,
+    /// Return archived Channels when true. The default lists active Channels.
+    pub archived: Option<bool>,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MarkReadRequest {
@@ -41,9 +49,12 @@ pub struct ReadPosition {
     pub read_seq: i64,
 }
 
-// Join each unread scope to the Member's Channel Mention set once. OFFSET 0
-// keeps Mention scans independent of individual Messages and Topics, including
-// in generic plans; the Topic range fence preserves parameterized seq scans.
+// Count Mentions separately from Unread. A correlated, OFFSET 0-fenced
+// Mention subquery in the Unread join can be probed once per unread Message.
+// Materialize the Member's Mention IDs to bound the scan to once per Channel
+// per scope. Share the unread IDs between both counts so each Message range
+// is read once. Both ID sets already have the same Organization and Channel.
+// The Topic range fence preserves parameterized seq scans.
 // Unread Messages use parameterized index ranges from persisted positions.
 // Fully read Topics never touch Messages; a missing position suppresses only
 // that Channel's Unread at its snapshot's committed counter, without persisting.
@@ -76,19 +87,22 @@ LEFT JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $
     AND p.membership_revision = $3 AND p.channel_id = c.channel_id
 LEFT JOIN channel_message_sequences s ON s.organization_id = $1 AND s.channel_id = c.channel_id
 CROSS JOIN LATERAL (
-    SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count
-    FROM messages m
-    LEFT JOIN (
+    WITH unread AS MATERIALIZED (
+        SELECT m.id FROM messages m
+        WHERE p.channel_id IS NOT NULL AND m.organization_id = $1 AND m.channel_id = c.channel_id
+            AND m.topic_id IS NULL AND NOT m.deleted AND m.seq > p.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
+    ),
+    member_mentions AS MATERIALIZED (
         SELECT message_id FROM message_mentions
         WHERE organization_id = $1 AND member_id = $2 AND channel_id = c.channel_id
-        OFFSET 0
-    ) mm ON mm.message_id = m.id
-    WHERE p.channel_id IS NOT NULL AND m.organization_id = $1 AND m.channel_id = c.channel_id
-        AND m.topic_id IS NULL AND NOT m.deleted AND m.seq > p.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
+            AND p.channel_id IS NOT NULL
+    )
+    SELECT (SELECT count(*) FROM unread) AS unread_count, (
+        SELECT count(*) FROM member_mentions mm JOIN unread m ON m.id = mm.message_id
+    ) AS mention_unread_count
 ) main
 CROSS JOIN LATERAL (
-    SELECT count(*) AS unread_count, count(mm.message_id) AS mention_unread_count
-    FROM (
+    WITH unread AS MATERIALIZED (
         SELECT m.id FROM unread_topics t
         CROSS JOIN LATERAL (
             SELECT m.id FROM messages m
@@ -98,13 +112,15 @@ CROSS JOIN LATERAL (
         ) m
         WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
             AND t.last_seq > t.read_seq
-        OFFSET 0
-    ) unread
-    LEFT JOIN (
+    ),
+    member_mentions AS MATERIALIZED (
         SELECT message_id FROM message_mentions
         WHERE organization_id = $1 AND member_id = $2 AND channel_id = c.channel_id
-        OFFSET 0
-    ) mm ON mm.message_id = unread.id
+            AND p.channel_id IS NOT NULL
+    )
+    SELECT (SELECT count(*) FROM unread) AS unread_count, (
+        SELECT count(*) FROM member_mentions mm JOIN unread m ON m.id = mm.message_id
+    ) AS mention_unread_count
 ) topic
 "#;
 
@@ -112,10 +128,10 @@ CROSS JOIN LATERAL (
 ///
 /// Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.
 #[utoipa::path(get, path = "/api/v1/orgs/{org}/channels",
-    params(("org" = Uuid, Path, description = "Organization id"), fukulow_api::HistoryQuery),
+    params(("org" = Uuid, Path, description = "Organization id"), ChannelListQuery),
     security(("cookie" = []), ("bearer" = [])),
     responses((status = 200, description = "Visible Channels with current Member positions and Unread counts; refetch on reconnect", body = ChannelList),
-        (status = 400, description = "Malformed Organization id", body = ErrorBody),
+        (status = 400, description = "Malformed Organization id or invalid query input", body = ErrorBody),
         (status = 401, description = "Account Session unavailable", body = ErrorBody),
         (status = 409, description = "history_generation_changed for a stale Organization epoch", body = crate::auth::ErrorBody),
         (status = 404, description = "Non-Member, unknown Organization or deactivated Member: organization_unavailable", body = ErrorBody),
@@ -123,7 +139,7 @@ CROSS JOIN LATERAL (
 pub async fn list_channels(
     State(state): State<AppState>,
     auth: Auth,
-    query: Result<Query<fukulow_api::HistoryQuery>, QueryRejection>,
+    query: Result<Query<ChannelListQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Query(query) =
         query.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid input", None))?;
@@ -131,7 +147,9 @@ pub async fn list_channels(
         &state.pool,
         auth.identity.organization.organization_id,
         async |tx: &mut sqlx::PgConnection| {
-            let channels = channels::visible_list(&mut *tx, &auth).await?;
+            let channels =
+                channels::visible_list(&mut *tx, &auth, Some(query.archived.unwrap_or(false)))
+                    .await?;
             #[cfg(test)]
             tests::unread::baseline::pause_list(auth.identity.member.id).await;
             let history_generation = crate::auth::history::validate(

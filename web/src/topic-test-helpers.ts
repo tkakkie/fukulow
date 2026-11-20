@@ -1,6 +1,6 @@
 import { vi } from 'vitest'
 import type { Activity } from './activity'
-import type { Message, ReplyChainPage, Result, SendMessageRequest, TimelinePage, TopicSummary, TopicSummaryResponse, ListChannelEventsQuery } from './api'
+import type { ChannelEventPage, Message, ReplyChainPage, Result, SendMessageRequest, TimelinePage, TopicSummary, TopicSummaryResponse, ListChannelEventsQuery } from './api'
 import type { RealtimeHandlers } from './realtime'
 import { createTopicSync } from './topic-sync'
 import { record } from './protocol-test-helpers'
@@ -38,7 +38,7 @@ export function topicClient(activity?: Activity, requestTimeoutMs?: number) {
     getTopicSummary: vi.fn(async (): Promise<Result<TopicSummaryResponse>> => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, topic: summary('T', 12, 4) })),
     listTopicMessages: vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([msg(5, 'T'), msg(10, 'T')]).at(-1)?.created_seq ?? 0,  messages: [msg(5, 'T'), msg(10, 'T')], has_more: true })),
   }
-  const listChannelEvents = vi.fn(async (_channel: string, _query: ListChannelEventsQuery) => {
+  const listChannelEvents = vi.fn(async (_channel: string, _query: ListChannelEventsQuery): Promise<Result<ChannelEventPage>> => {
     const result = await listMessages()
     return result.ok ? ok({ history_generation: '00000000-0000-4000-8000-000000000515', events: result.data.messages.map(message => ({ type: 'message' as const, seq: message.created_seq, kind: 'create' as const, message })), has_more: result.data.has_more }) : result
   })

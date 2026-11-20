@@ -18,3 +18,8 @@ export function isActivityNotice(event: ServerEvent): boolean {
       return false;
   }
 }
+
+export function consecutivePositions(seen: readonly number[], after: number, through: number) {
+  const count = through - after;
+  return count >= 0 && seen.length >= count && seen.slice(0, count).every((seq, i) => seq === after + i + 1);
+}

@@ -25,8 +25,8 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // Every operation documents the common shutdown response.
-const EXPECTED_API_OPERATIONS: usize = 41;
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 304;
+const EXPECTED_API_OPERATIONS: usize = 52;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 391;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -259,6 +259,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             .replace("{id}", &Uuid::nil().to_string())
             .replace("{topic_id}", &Uuid::nil().to_string())
             .replace("{message_id}", &Uuid::nil().to_string())
+            .replace("{channel_id}", &Uuid::nil().to_string())
             .replace("{member_id}", &Uuid::nil().to_string());
         for method in HTTP_METHODS {
             if item.get(method).is_some() {
@@ -780,6 +781,12 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
         "ServerEvent",
         &[
             (ServerEvent::DmListChanged, "dm_list_changed"),
+            (
+                ServerEvent::SectionsChanged {
+                    generation: i64::MAX.to_string(),
+                },
+                "sections_changed",
+            ),
             (ServerEvent::ActivityReady, "activity_ready"),
             (ServerEvent::ActivityReset, "activity_reset"),
             (
@@ -852,6 +859,25 @@ fn websocket_variants_serialize_with_the_schema_discriminators() {
     assert_eq!(CLOSE_QUEUE_OVERFLOW, 4008);
     assert_eq!(CLOSE_SESSION_ENDED, 4001);
     assert_eq!(CLOSE_ORGANIZATION_UNAVAILABLE, 4003);
+}
+
+#[test]
+fn sections_changed_contract_carries_only_a_decimal_generation() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let schema = &document["components"]["schemas"]["SectionsChanged"];
+    assert_eq!(schema["required"], json!(["generation", "type"]));
+    assert_eq!(schema["properties"].as_object().unwrap().len(), 2);
+    let generation = &schema["properties"]["generation"];
+    assert_eq!(generation["type"], "string");
+    assert_eq!(generation["pattern"], "^(0|[1-9][0-9]*)$");
+    assert_eq!(generation["maxLength"], 19);
+    assert_eq!(
+        serde_json::to_value(ServerEvent::SectionsChanged {
+            generation: i64::MAX.to_string(),
+        })
+        .unwrap(),
+        json!({"type":"sections_changed", "generation":"9223372036854775807"})
+    );
 }
 
 #[tokio::test]
@@ -1683,5 +1709,84 @@ fn move_request_schema_requires_exactly_one_concrete_destination() {
     for (branch, key) in one_of.iter().zip(["topic_id", "topic_name"]) {
         assert_eq!(branch["required"], json!([key]));
         assert_eq!(branch["properties"][key]["type"], "string");
+    }
+}
+
+#[test]
+fn sections_contract_keeps_responses_private_and_nullable_fields_required() {
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for document in [committed, generated] {
+        for (path, methods) in [
+            ("sections", &["get", "post"][..]),
+            ("sections/{id}", &["get", "patch", "delete"][..]),
+            ("sections/order", &["put"][..]),
+            ("channel-sections/{channel_id}", &["get", "put"][..]),
+            ("section-channel-order", &["put"][..]),
+        ] {
+            let path = format!("/api/v1/orgs/{{org}}/me/{path}");
+            for method in methods {
+                let operation = &document["paths"][&path][method];
+                let responses = operation["responses"].as_object().unwrap();
+                assert!(
+                    operation["parameters"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|parameter| parameter["in"] == "path")
+                );
+                for response in responses.values() {
+                    assert_eq!(
+                        response["headers"]["Cache-Control"]["description"],
+                        "no-store"
+                    );
+                }
+                if let Some(response) = responses.get("204") {
+                    assert!(response.get("content").is_none());
+                }
+            }
+        }
+        let schemas = &document["components"]["schemas"];
+        for input in [
+            "CreateSection",
+            "RenameSection",
+            "SectionOrder",
+            "ChannelOrder",
+            "MoveChannel",
+        ] {
+            assert_eq!(schemas[input]["additionalProperties"], false);
+        }
+        for nullable in ["ChannelPlacement", "ChannelOrder", "MoveChannel"] {
+            let shape = &schemas[nullable];
+            assert!(
+                shape["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("section_id"))
+            );
+            assert_eq!(
+                shape["properties"]["section_id"]["type"],
+                json!(["string", "null"])
+            );
+        }
+        for versioned in [
+            "SectionLayout",
+            "SectionSnapshot",
+            "ChannelPlacement",
+            "CreatedSection",
+        ] {
+            assert_eq!(
+                schemas[versioned]["properties"]["generation"]["type"],
+                "string"
+            );
+        }
+        assert_eq!(
+            schemas["SectionOrder"]["properties"]["section_ids"]["maxItems"],
+            50
+        );
+        assert_eq!(
+            schemas["ChannelOrder"]["properties"]["channel_ids"]["maxItems"],
+            20_000
+        );
     }
 }

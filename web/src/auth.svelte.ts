@@ -15,8 +15,10 @@ import { initCore } from '#sync-core'
 import { dmsAdapter, type DmsAdapter } from './dms.svelte'
 import { createMembers, watchMemberAccess, type MemberListAccess } from './members'
 import { membersAdapter } from './members.svelte'
+import { clearMessageFormatCache } from './message-format'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
+import type { MoveDestination, MoveResult } from './move-chain'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 
@@ -29,6 +31,7 @@ export type SessionModel = {
   sync: SyncAdapter
   topics(id: string): TopicsAdapter
   replies?(id: string): RepliesAdapter
+  moveChain?(channel: string, anchor: string, destination: MoveDestination): Promise<MoveResult>
   unread?(id: string): UnreadAdapter
   channelMembers?(id: string): ReturnType<typeof createChannelMembers>
   memberListAccess?(): MemberListAccess
@@ -70,9 +73,10 @@ const defaults: AuthDeps = {
       },
       replies(id: string) {
         let adapter = replyAdapters.get(id)
-        if (!adapter) replyAdapters.set(id, (adapter = repliesAdapter(session.replies, id, session.replyCounts)))
+        if (!adapter) replyAdapters.set(id, (adapter = repliesAdapter(session.replies, id, session.replyCounts, session.moveChain)))
         return adapter
       },
+      moveChain: session.moveChain,
       unread(id: string) {
         let adapter = unreadAdapters.get(id)
         if (!adapter) unreadAdapters.set(id, (adapter = unreadAdapter(session.unread, id)))
@@ -107,6 +111,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     stopMemberRefresh?.(); stopMemberRefresh = undefined
     session?.close(); session = null
     members?.close(); members = null
+    clearMessageFormatCache()
     organization = null
     capabilitiesPending = false
     selectionGeneration++

@@ -9,6 +9,7 @@
   import { createAuth } from './auth.svelte'
   import { focusTarget, type SkipLinkTargetId } from './focus-management'
   import InviteAccept from './InviteAccept.svelte'
+  import Logo from './Logo.svelte'
   import { inviteFromLocation } from './members'
   import { inviteAcceptanceAdapter } from './members.svelte'
   import Button from './ui/Button.svelte'
@@ -191,7 +192,7 @@
     {:else}
       <div class="app-fallback">
         <nav class="app-fallback__rail" aria-label="メインナビゲーション">
-          <div class="app-fallback__logo" aria-hidden="true">🦉</div>
+          <div class="app-fallback__logo" aria-hidden="true"><Logo /></div>
           <Button variant="icon" ariaLabel="設定" onclick={openSettings}>⚙</Button>
           <Button variant="icon" ariaLabel="ログアウト" disabled={auth.busy} onclick={doSignOut}>⇥</Button>
         </nav>
@@ -257,7 +258,7 @@
   <main id="main-content" class="auth-shell" tabindex="-1">
     <div class="auth-card">
       <div class="auth-card__brand">
-        <span class="auth-card__logo" aria-hidden="true">🦉</span>
+        <span class="auth-card__logo" aria-hidden="true"><Logo /></span>
         <span class="auth-card__name">fukulow</span>
       </div>
 
@@ -404,10 +405,6 @@
     place-items: center;
     width: var(--touch-target);
     height: var(--touch-target);
-    background-color: var(--amber);
-    color: var(--on-amber);
-    border-radius: var(--radius-10);
-    font-size: var(--font-size-17);
   }
 
   .auth-card__name {
@@ -458,10 +455,6 @@
     place-items: center;
     width: var(--touch-target);
     height: var(--touch-target);
-    background-color: var(--amber);
-    color: var(--on-amber);
-    border-radius: var(--radius-10);
-    font-size: var(--font-size-17);
   }
 
   .app-fallback__main {

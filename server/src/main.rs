@@ -92,6 +92,10 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     tracing::info!(target: "fukulow", event = "server_listening");
     let signal = fukulow_server::signal()?;
     let shutdown = fukulow_server::shutdown::Shutdown::default();
+    let invite_cleanup = tokio::spawn(fukulow_server::auth::invites::cleanup::run(pool.clone(), {
+        let shutdown = shutdown.clone();
+        async move { shutdown.cancelled().await }
+    }));
     let reclamation = tokio::spawn(fukulow_server::channels::dms::reclamation::run(
         pool.clone(),
         {
@@ -122,6 +126,8 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         fukulow_server::DRAIN_TIMEOUT,
     )
     .await?;
+    invite_cleanup.abort();
+    let _ = invite_cleanup.await;
     receipt_expiry.abort();
     let _ = receipt_expiry.await;
     reclamation.abort();

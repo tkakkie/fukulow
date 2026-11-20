@@ -44,7 +44,7 @@ async fn assert_unavailable(response: Response) {
 
 // Keep the runtime runnable while SQLx/blocking work completes, so paused time
 // cannot auto-advance to a pool timeout or admission deadline during external I/O.
-async fn without_time_advance<F: Future>(future: F) -> F::Output {
+pub(super) async fn without_time_advance<F: Future>(future: F) -> F::Output {
     let watchdog = std::time::Instant::now();
     let mut future = std::pin::pin!(future);
     poll_fn(|cx| {

@@ -1,6 +1,8 @@
-use super::super::super::management::{LIST_SQL, OutstandingInvite};
+use super::super::super::management::{LIST_SQL, OutstandingInvite, anchor_sql, cursor_column};
 use super::*;
 use std::time::Instant;
+
+mod cleanup_probe;
 
 // Exact list statement before the expiry-range fix, including the anchor subquery.
 const BEFORE: &str = "SELECT id,email,role,created_by,to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at FROM invites \
@@ -35,6 +37,51 @@ async fn dataset(pool: &sqlx::PgPool, org: Uuid, issuer: Uuid, count: i32) {
         .unwrap();
 }
 
+async fn below_cap(pool: &sqlx::PgPool, org: Uuid) {
+    sqlx::query(
+        "DELETE FROM invites WHERE organization_id=$1 AND id IN (SELECT id FROM invites \
+         WHERE organization_id=$1 AND role<>'owner' AND accepted_at IS NULL AND revoked_at IS NULL \
+         AND expires_at>now() ORDER BY id OFFSET 99)",
+    )
+    .bind(org)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_operation_invite(pool: &sqlx::PgPool, org: Uuid, issuer: Uuid, email: &str) -> Value {
+    let id = Uuid::new_v4();
+    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO invites (organization_id,id,created_by,email,role,token_hash) VALUES ($1,$2,$3,$4,'member',$5)")
+        .bind(org).bind(id).bind(issuer).bind(email).bind(Sha256::digest(token.as_bytes()).to_vec())
+        .execute(pool).await.unwrap();
+    json!({"id":id,"token":token})
+}
+
+async fn remove_sample_invite(pool: &sqlx::PgPool, org: Uuid, id: Uuid) {
+    assert_eq!(
+        sqlx::query("DELETE FROM invites WHERE organization_id=$1 AND id=$2")
+            .bind(org)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap()
+            .rows_affected(),
+        1
+    );
+}
+
+fn opaque_sql(owner: bool, list_sql: &str) -> String {
+    if list_sql == BEFORE {
+        let column = cursor_column(owner);
+        format!(
+            "SELECT id FROM invites WHERE organization_id=$1 AND {column}=$2 AND ($3 OR role<>'owner')"
+        )
+    } else {
+        anchor_sql(owner)
+    }
+}
+
 // Mirrors the endpoint transaction, sharing its exact statement, authorization,
 // context, locks and anchor lookups; excludes HTTP/extractor/JSON serialization.
 async fn scan(
@@ -49,19 +96,41 @@ async fn scan(
     crate::database::organization(pool, org, async |tx: &mut sqlx::PgConnection| {
         members::lock_organization(tx, org).await?;
         members::current_actor(tx, &auth, Action::Invite(Role::Member)).await?;
-        if let Some(started) = started { let _ = started.send(()); }
-        let column = if owner { "owner_cursor" } else { "admin_cursor" };
-        let anchor = if let Some(cursor) = cursor {
-            Some(sqlx::query_scalar::<_,Uuid>(&format!("SELECT id FROM invites WHERE organization_id=$1 AND {column}=$2 AND ($3 OR role<>'owner')"))
-                .bind(org).bind(cursor).bind(owner).fetch_one(&mut *tx).await?)
-        } else { None };
-        let rows: Vec<OutstandingInvite> = sqlx::query_as(sql).bind(org).bind(owner).bind(anchor).fetch_all(&mut *tx).await?;
-        if rows.len()>100 {
-            let _: Uuid = sqlx::query_scalar(&format!("SELECT {column} FROM invites WHERE organization_id=$1 AND id=$2"))
-                .bind(org).bind(rows[99].id).fetch_one(&mut *tx).await?;
+        if let Some(started) = started {
+            let _ = started.send(());
         }
-        Ok::<_,ApiError>(())
-    }).await.unwrap();
+        let anchor = if let Some(cursor) = cursor {
+            Some(
+                sqlx::query_scalar::<_, Uuid>(&opaque_sql(owner, sql))
+                    .bind(org)
+                    .bind(cursor)
+                    .bind(owner)
+                    .fetch_one(&mut *tx)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let rows: Vec<OutstandingInvite> = sqlx::query_as(sql)
+            .bind(org)
+            .bind(owner)
+            .bind(anchor)
+            .fetch_all(&mut *tx)
+            .await?;
+        if rows.len() > 100 {
+            let column = cursor_column(owner);
+            let _: Uuid = sqlx::query_scalar(&format!(
+                "SELECT {column} FROM invites WHERE organization_id=$1 AND id=$2"
+            ))
+            .bind(org)
+            .bind(rows[99].id)
+            .fetch_one(&mut *tx)
+            .await?;
+        }
+        Ok::<_, ApiError>(())
+    })
+    .await
+    .unwrap();
 }
 
 #[fukulow_test::test]
@@ -74,6 +143,7 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
     let other = org_fn(&pool).await;
     let (_, other_issuer, _, other_token) = account(&pool, other, Role::Owner).await;
     dataset(&pool, other, other_issuer, 10000).await;
+    below_cap(&pool, other).await;
     let state = AppState::for_test(pool.clone()).await;
     let app = crate::app(state.clone()).layer(axum::Extension(axum::extract::ConnectInfo(
         "127.0.0.1:3030".parse::<std::net::SocketAddr>().unwrap(),
@@ -108,8 +178,8 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
         .unwrap();
     let counts = std::env::var("INVITE_COUNTS").unwrap_or("10000,100000,1000000".into());
     for count in counts.split(',').map(|n| n.parse::<i32>().unwrap()) {
-        dataset(&pool, org, issuer, count).await;
         for (variant, sql) in [("before", BEFORE), ("after", LIST_SQL)] {
+            dataset(&pool, org, issuer, count).await;
             if variant == "before" {
                 sqlx::raw_sql("DROP INDEX invites_outstanding_expiry; CREATE INDEX invites_outstanding_order ON invites (organization_id,created_at,id) WHERE accepted_at IS NULL AND revoked_at IS NULL").execute(&pool).await.unwrap();
             } else {
@@ -127,11 +197,7 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                 .await
                 .unwrap();
             for owner in [true, false] {
-                let column = if owner {
-                    "owner_cursor"
-                } else {
-                    "admin_cursor"
-                };
+                let column = cursor_column(owner);
                 let actor = || {
                     if owner {
                         captured_auth(org, issuer, owner_account, &owner_token, Role::Owner)
@@ -209,15 +275,17 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                 for (name, query, key) in [
                     (
                         "opaque",
-                        format!(
-                            "SELECT id FROM invites WHERE organization_id=$1 AND {column}=$2 AND ($3 OR role<>'owner')"
-                        ),
+                        opaque_sql(owner, sql),
                         expired.1,
                     ),
                     (
                         "boundary",
-                        "SELECT created_at,id FROM invites WHERE organization_id=$1 AND id=$2"
-                            .into(),
+                        if variant == "before" {
+                            "SELECT created_at,id FROM invites WHERE organization_id=$1 AND id=$2"
+                        } else {
+                            "SELECT created_at,id FROM invites WHERE organization_id=$1 AND id=$2 \
+                            UNION ALL SELECT created_at,id FROM invite_tombstones WHERE organization_id=$1 AND id=$2 LIMIT 1"
+                        }.into(),
                         expired.0,
                     ),
                     (
@@ -249,19 +317,39 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                     );
                 }
             }
-            // Full in-process HTTP requests against a burst of four lists. Timing
-            // starts once the first has acquired Organization/actor locks.
+            if variant == "after" {
+                cleanup_probe::plans_and_batch_samples(
+                    &pool, &measured, org, issuer, count, samples,
+                )
+                .await;
+            }
             for op in [
-                "create",
+                "list",
                 "accept",
                 "revoke",
                 "role",
                 "signin",
                 "send",
                 "other-create",
-                "list",
+                "create",
+                "quota-refusal",
             ] {
-                for concurrent in [false, true] {
+                // Keep the 260-live fixture until the quota-sensitive samples.
+                if op == "create" {
+                    below_cap(&pool, org).await;
+                }
+                for contention in ["idle", "list", "cleanup"] {
+                    if contention == "cleanup"
+                        && (variant == "before"
+                            || !matches!(op, "create" | "accept" | "revoke" | "role"))
+                    {
+                        continue;
+                    }
+                    let quota_fixture = if op == "quota-refusal" {
+                        Some(seed_operation_invite(&pool, org, issuer, "cap@perf.invalid").await)
+                    } else {
+                        None
+                    };
                     let mut times = vec![];
                     for sample in 0..samples {
                         // One successful send per fresh Member keeps production
@@ -272,12 +360,17 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                             None
                         };
                         let mut token = Some(owner_token.as_str());
+                        let mut sample_invite = None;
                         let (method, url, input, status) = match op {
-                            "create" => (
+                            "create" | "quota-refusal" => (
                                 "POST",
                                 path(org),
                                 json!({"email":"new@perf.invalid","role":"member"}),
-                                StatusCode::CREATED,
+                                if op == "create" {
+                                    StatusCode::CREATED
+                                } else {
+                                    StatusCode::CONFLICT
+                                },
                             ),
                             "other-create" => {
                                 token = Some(&other_token);
@@ -289,14 +382,14 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                                 )
                             }
                             "revoke" => {
-                                let i = invite(
-                                    &app,
+                                let i = seed_operation_invite(
+                                    &pool,
                                     org,
-                                    &owner_token,
+                                    issuer,
                                     "revoke@perf.invalid",
-                                    Role::Member,
                                 )
                                 .await;
+                                sample_invite = Some(id(&i));
                                 (
                                     "DELETE",
                                     format!("{}/{}", path(org), id(&i)),
@@ -306,7 +399,8 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                             }
                             "accept" => {
                                 let (_, _, email, t) = account(&pool, other, Role::Member).await;
-                                let i = invite(&app, org, &owner_token, &email, Role::Member).await;
+                                let i = seed_operation_invite(&pool, org, issuer, &email).await;
+                                sample_invite = Some(id(&i));
                                 // Keep the owned token alive for the request below.
                                 token = None;
                                 (
@@ -352,7 +446,7 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                             input.as_object_mut().unwrap().remove("auth_token");
                         }
                         let mut pending = vec![];
-                        if concurrent {
+                        if contention == "list" {
                             let (started, ready) = tokio::sync::oneshot::channel();
                             let mut started = Some(started);
                             for _ in 0..4 {
@@ -371,21 +465,45 @@ async fn measure_invite_expiry_scan(pool: sqlx::PgPool) {
                             }
                             ready.await.unwrap();
                         }
+                        if contention == "cleanup" {
+                            pending.push(
+                                cleanup_probe::start_burst(&pool, &measured, org, issuer).await,
+                            );
+                        }
                         let start = Instant::now();
                         let response = req(&app, method, &url, token, input).await;
                         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
                         assert_eq!(response.status(), status, "{op}: {}", body(response).await);
+                        if matches!(op, "create" | "other-create") {
+                            sample_invite = Some(id(&body(response).await));
+                        } else if op == "quota-refusal" {
+                            assert_eq!(
+                                body(response).await,
+                                json!({"error":"invite_limit_reached"})
+                            );
+                        }
                         times.push(elapsed);
                         for pending in pending {
                             pending.await.unwrap();
                         }
+                        if let Some(id) = sample_invite {
+                            remove_sample_invite(
+                                &pool,
+                                if op == "other-create" { other } else { org },
+                                id,
+                            )
+                            .await;
+                        }
+                    }
+                    if let Some(invite) = quota_fixture {
+                        remove_sample_invite(&pool, org, id(&invite)).await;
                     }
                     println!(
                         "INVITE_OP {}",
-                        json!({"count":count,"variant":variant,"op":op,"concurrent":concurrent,"ms":distribution(times)})
+                        json!({"count":count,"variant":variant,"op":op,"concurrent":contention!="idle",
+                            "contention":contention,"ms":distribution(times)})
                     );
                 }
-                sqlx::query("DELETE FROM invites WHERE organization_id=$1 AND created_at>now()-interval '29 days'").bind(org).execute(&pool).await.unwrap();
             }
             measured.close().await;
         }

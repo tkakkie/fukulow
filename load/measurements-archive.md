@@ -29,7 +29,7 @@ Record text is copied verbatim from its source line(s) (values and conditions un
 - RLS baseline before tenant RLS (#314 step 2/4, 2026-11-12/13): moved to #314 (superseded by the fresh before/after comparison kept below).
 - Timeline statement persistence (#326, 2026-11-14): moved to #326 (closed; fixed and tested).
 - Bounded web message windows (#308, 2026-11-14): moved to #308 (closed; caps are current decisions in docs/decisions/web.md).
-- Organization activity REST reconciliation (#307 item 5, 2026-11-14): moved to #307 (closed; the debounce and jitter values are in docs/spec/realtime.md O3). Result that kept the 30 s period: 10,000 sockets, steady 967.57 REST requests/s, later periodic round trip p95 2 ms, no errors.
+- Organization activity REST reconciliation (#307 item 5, 2026-11-14): moved to #307 (closed; the debounce and jitter values are in docs/spec/realtime.md O3). Result that kept the 30 s period: 10,000 sockets, steady 967.57 REST requests/s, later periodic round trip p95 2 ms, no errors. Reproduction gap (#612): the checked-in `load/activity.ts` made no REST calls under k6 from #370 until #612, so it could not have produced these numbers; the generator source used for this run is unverified.
 - Web first-paint and timeline waterfall (#345, 2026-11-14): moved to #345 (closed; findings were turned into follow-up Issues).
 - Production-domain crate split Mac build reference (#378, 2026-11-15): moved to #378 (decided and deferred; the decision states the conclusion).
 
@@ -1322,3 +1322,18 @@ Harness fixes after the record (Copilot review of PR #623). The 18 runs above us
 - Every run had 121 pool samples bracketing the recovery window, so the missing-sample check (now explicit) could not have passed a run wrongly. `psql` ran without `ON_ERROR_STOP` and its stderr was discarded; all 39,440 direct probes recorded success, so no masked error is evident, but none can be ruled out.
 
 Limits: one Mac, client arrival timestamps, fault windows of about 3.8 s, at most 4 concurrent holds, and no measurement of the 8 MiB / 4,096-hold memory bound. Reproduce with `ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir` (add `--sizes`, `--kinds` or `--repeats` for a subset) from a release build. Raw run directories are outside Git.
+
+## Invite cleanup (#223, 2026-11-20 JST)
+
+`INVITE_SAMPLES=20 INVITE_COUNTS=10000,100000 node load/invite-scan.ts` on PostgreSQL 18.6, warm shared Mac, short runs. "Before" runs the same cleanup statement with the three retention indexes removed. With the indexes, both plan modes switch from three sequential scans to three index-only retention cutoff scans; the existing-tombstone lookup uses the tombstone primary key.
+
+| Expired Invites | Plan | Execution before → after | Shared blocks before → after |
+|---:|---|---:|---:|
+| 10,000 | Custom | 7.259 → 1.245 ms | 3,783 → 1,710 |
+| 10,000 | Generic | 4.201 → 1.432 ms | 3,941 → 1,708 |
+| 100,000 | Custom | 22.968 → 3.251 ms | 18,511 → 2,987 |
+| 100,000 | Generic | 26.759 → 3.610 ms | 18,703 → 2,981 |
+
+Indexed 100-row batch p50 / p95 / p99: 6.272 / 9.217 / 21.256 ms at 10k and 6.671 / 11.134 / 13.784 ms at 100k. Owner HTTP list p95 under four concurrent lists, before → after the list-index change: 15.947 → 13.256 ms at 10k and 72.970 → 15.000 ms at 100k (260-live fixture kept for list and list-contention samples).
+
+Request p95 idle → during a four-batch cleanup burst (first PR B run, same command): 10k create 6.30 → 5.39, accept 8.90 → 7.93, revoke 4.21 → 4.95, Role change 7.74 → 8.24 ms; 100k create 11.35 → 8.53, accept 12.33 → 8.79, revoke 7.25 → 5.72, Role change 21.91 → 17.26 ms. Idle quota refusal at exactly 100: 3.75 / 4.68 ms (10k / 100k).

@@ -4,7 +4,7 @@ use crate::database;
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-const TABLES: [&str; 13] = [
+const TABLES: [&str; 14] = [
     "organizations",
     "users",
     "channels",
@@ -18,6 +18,7 @@ const TABLES: [&str; 13] = [
     "channel_read_positions",
     "topic_read_positions",
     "invites",
+    "invite_tombstones",
 ];
 
 struct Tenant {
@@ -58,6 +59,7 @@ async fn tenant(admin: &PgPool) -> Tenant {
         "INSERT INTO channel_read_positions (organization_id, channel_id, member_id, membership_revision, initial_seq, read_seq) SELECT $1, $4, $3, membership_revision, 0, 0 FROM users WHERE organization_id = $1 AND id = $3 ON CONFLICT DO NOTHING",
         "INSERT INTO topic_read_positions (organization_id, channel_id, member_id, topic_id, read_seq) VALUES ($1, $4, $3, $5, 0) ON CONFLICT DO NOTHING",
         "INSERT INTO invites (organization_id, id, created_by, email, role, token_hash, expires_at) VALUES ($1, gen_random_uuid(), $3, 'invitee@example.com', 'member', sha256(gen_random_uuid()::text::bytea), now() + interval '1 day')",
+        "INSERT INTO invite_tombstones (organization_id,id,created_at,role,owner_cursor,admin_cursor) VALUES ($1,gen_random_uuid(),now(),'member',gen_random_uuid(),gen_random_uuid())",
     ] {
         sqlx::query(sql)
             .bind(organization)

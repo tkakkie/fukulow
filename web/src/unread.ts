@@ -23,6 +23,7 @@ export const unreadApi = (org: string, generation: () => string | undefined = ()
 // At most the union of sync, main and the active Topic bodies, plus one visit marker.
 export const UNREAD_RECORD_LIMIT = MAIN_MESSAGE_LIMIT * 2 + TOPIC_MESSAGE_LIMIT
 type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: number; stopped: boolean; error: boolean;
+  topicMissing?: true;
   operation?: symbol; intent?: MarkReadRequest; queued?: MarkReadRequest; timer?: ReturnType<typeof setTimeout>; attempt: number }
 const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, attempt: 0 })
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
@@ -369,11 +370,12 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (r.ok && r.data.topic.id === topic) {
       acceptScope(s, topicBaseline(r.data.as_of_seq, r.data.topic))
       if (s.baseline && s.baseline.asOfSeq < c.requiredBase) s.error = true
-      if (!s.error) c.summaryAttempts.delete(topic)
+      if (!s.error) { s.topicMissing = undefined; c.summaryAttempts.delete(topic) }
     } else {
       s.error = true
       if (!retryable(r)) {
         s.stopped = true
+        if (!r.ok && r.kind === 'http' && r.status === 404 && r.error === 'topic_not_found') s.topicMissing = true
         if (!r.ok && !api.isOrganizationUnavailable(r) && r.kind === 'http' && r.status === 404 && r.error !== 'topic_not_found') {
           fence(id, c); c.stopped = true
         }
@@ -407,6 +409,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const s = getScope(c, line.topicId)
         const previous = s.baseline, prevPos = s.position, prevErr = s.error, prevStop = s.stopped
         acceptScope(s, topicBaseline(line.baseline.asOfSeq, line.baseline.summary))
+        if (s.topicMissing && line.baseline.asOfSeq >= c.requiredBase) { s.topicMissing = undefined; s.stopped = false }
         baselineChanged ||= !hadTopic || s.baseline !== previous || s.position !== prevPos || s.error !== prevErr || s.stopped !== prevStop
         observed.push(line.topicId)
       }
@@ -493,14 +496,23 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         c.requiredBase = now.cursor; rebootstrap = true
         channelChanged = true
       }
-      if (now?.moveSeq !== undefined && old?.moveSeq !== now.moveSeq) {
+      // Out-of-order lower Moves leave moveSeq unchanged; moveEpoch still re-prunes records
+      // that remained in sync after an earlier Move for another chain and restarts visit/refresh.
+      if (now?.moveSeq !== undefined && old?.moveEpoch !== now.moveEpoch) {
         const position = now.moveSeq
         c.requiredBase = Math.max(c.requiredBase, position)
         for (const [seq, message] of c.records)
           if ((message.version ?? seq) < position) c.records.delete(seq)
         if (visit?.scope.channel === id) {
           visit.boundary = null; visit.unreadAtEntry = null; visit.firstUnread = undefined; visit.presented.clear()
-          if (visit.scope.topicId) void refreshTopic(id, visit.scope.topicId)
+          const topic = visit.scope.topicId
+          if (topic !== null) {
+            // Absence is specific to the old projection. A Move can revive the same Topic identity.
+            const scope = getScope(c, topic)
+            if (scope.topicMissing) scope.stopped = false
+            c.summaryReads.delete(topic); c.queuedSummaries.delete(topic)
+            void refreshTopic(id, topic)
+          }
         }
         moveRefresh = channelChanged = true
       }

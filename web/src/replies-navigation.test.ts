@@ -34,7 +34,7 @@ it('cached anchors preserve the continuation and live evidence with zero reads i
     expect(c.listReplyChain).toHaveBeenCalledTimes(0)
     const after = c.replies.get('A')
     expect(after.anchor?.id).toBe(anchor.id)
-    expect(after).toEqual({ ...before, anchor })
+    expect(after).toEqual({ ...before, anchor, anchorId: anchor.id })
     expect(after.messages.every((m, i) => m === before.messages[i])).toBe(true)
   }
   expect(c.listReplyChain).toHaveBeenCalledTimes(0)
@@ -72,7 +72,7 @@ it('the current anchor and root keep an evicted history window without any reads
   await c.replies.open('A', reply(9000))
   expect(c.replies.get('A')).toEqual(before)
   await c.replies.open('A', root())
-  expect(c.replies.get('A')).toEqual({ ...before, anchor: root() })
+  expect(c.replies.get('A')).toEqual({ ...before, anchor: root(), anchorId: root().id })
   expect(c.listReplyChain).toHaveBeenCalledTimes(0)
   await c.sync.close()
 })

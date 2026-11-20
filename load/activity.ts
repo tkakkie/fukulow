@@ -9,7 +9,12 @@ import { createActivity, createActivityTarget } from '../web/src/activity.ts';
 import type { ActivityNotice } from '../web/src/activity.ts';
 import type { Result } from '../web/src/api.ts';
 
-Object.assign(globalThis, { setTimeout, clearTimeout });
+// k6 HTTP uses its own 10-second timeout. This signal supports scheduler teardown.
+class LoadAbortController {
+  signal = { aborted: false };
+  abort() { this.signal.aborted = true; }
+}
+Object.assign(globalThis, { setTimeout, clearTimeout, AbortController: LoadAbortController });
 type Seed = { organization: string; tokens: string[]; channel: string; topic: string };
 const seed = JSON.parse(open(__ENV.ACTIVITY_SEED || '/seed.json')) as Seed;
 const count = Number(__ENV.ACTIVITY_SOCKETS || 10_000);

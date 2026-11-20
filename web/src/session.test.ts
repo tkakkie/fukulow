@@ -1,14 +1,15 @@
 import { replyPage } from './topic-test-helpers'
 import { describe, expect, it, vi } from 'vitest'
-import { createSession } from './session'
+import { createSession, type SessionOptions } from './session'
 import { createMembers } from './members'
 import * as api from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
+import type { MoveChainApi } from './move-chain'
 
-function open() {
+function open(overrides: Partial<SessionOptions> = {}) {
   const net = fakeNetwork()
   const onEnded = vi.fn()
-  const session = createSession({ selfId: 'me', onEnded, ...net.options() })
+  const session = createSession({ selfId: 'me', onEnded, ...net.options(), ...overrides })
   net.socket.onReady()
   return { net, session, onEnded }
 }
@@ -84,6 +85,28 @@ describe('session controllers', () => {
     expect(onEnded).toHaveBeenCalledTimes(1)
     session.close()
   })
+})
+
+it('a Move refusal leaves the Channel available and Organization loss follows the session boundary', async () => {
+  const moveChainApi = vi.fn<MoveChainApi>()
+  const { net, session, onEnded } = open({ moveChainApi })
+  const anchor = record(100), history_generation = anchor.history_generation
+  net.pages.A = ok({ history_generation, as_of_seq: 100, messages: [anchor], has_more: false })
+  net.replyChains[`A:${anchor.id}`] = ok(replyPage({ history_generation, as_of_seq: 100, root_id: anchor.id, messages: [anchor], has_more: false }))
+  net.lists[0].resolve(ok({ history_generation, channels: [channel('A')] }))
+  await settle(); net.subscribed('A', 100)
+  await session.replies.open('A', anchor)
+
+  moveChainApi.mockResolvedValueOnce({ ok: false, kind: 'http', status: 403, error: 'move_not_allowed' })
+  await expect(session.moveChain('A', anchor.id, { topicId: 'T' })).resolves.toEqual({ kind: 'denied' })
+  expect(session.sync.get().channels.A.state).toBe('ready')
+  expect(net.replyHistory).toHaveLength(1)
+
+  moveChainApi.mockResolvedValueOnce({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+  await expect(session.moveChain('A', anchor.id, { topicName: 'T' })).resolves.toEqual({ kind: 'not_found' })
+  expect(session.sync.get().organization).toBe('unavailable')
+  expect(onEnded).not.toHaveBeenCalled()
+  session.close()
 })
 
 it('ordinary REST organization_unavailable ends only its Organization', async () => {
@@ -490,14 +513,14 @@ it('refreshes Channel capabilities from the server when the メンバー tab is 
   const { net, session } = open()
   const privateChannel = (allowed: boolean): api.Channel => ({
     id: 'A',
-    kind: 'channel',
+    kind: 'channel', archived: false,
     name: 'A',
     visibility: 'private',
     capabilities: {
       can_add_members: { allowed },
       can_remove_members: { allowed },
       can_manage_managers: { allowed },
-      can_leave: { allowed: true },
+      can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false },
     },
   })
   try {
@@ -611,14 +634,14 @@ it('composes unread, replies and topics over a single sync instance and fences r
     net.unreadChannels.A = { history_generation: '00000000-0000-4000-8000-000000000515',
       mention_unread_count: 0, main_mention_unread_count: 0,
       id: 'A',
-      kind: 'channel',
+      kind: 'channel', archived: false,
       name: 'A',
       visibility: 'public',
       capabilities: {
         can_add_members: { allowed: false },
         can_remove_members: { allowed: false },
         can_manage_managers: { allowed: false },
-        can_leave: { allowed: true },
+        can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false },
       },
       as_of_seq: 100,
       read_seq: 0,

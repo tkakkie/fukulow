@@ -3,6 +3,7 @@ use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConn
 mod context;
 mod pool;
 mod stats;
+pub(crate) use context::organization_detached;
 pub(crate) use context::organization_read_only_detached;
 pub(crate) use context::set_organization;
 pub use context::{account, account_read_only, organization, organization_read_only};

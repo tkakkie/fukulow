@@ -10,6 +10,7 @@ pub(crate) enum Source {
     Events,
     Projection,
 }
+
 fn same_message(a: &Message, b: &Message) -> bool {
     a.id == b.id
         && a.channel_id == b.channel_id
@@ -72,8 +73,19 @@ impl Step<'_> {
             || c.advancing
                 .iter()
                 .any(|range| range.start <= event.seq && event.seq <= range.end);
-        if !seen {
+        if seen {
+            return;
+        }
+        if c.moved_roots
+            .get(&event.root_id)
+            .is_none_or(|seq| *seq < event.seq)
+        {
+            self.core.move_epoch += 1;
+            let epoch = self.core.move_epoch;
+            let c = self.channel(id);
+            Rc::make_mut(&mut c.moved_roots).insert(event.root_id, event.seq);
             c.move_seq = c.move_seq.max(Some(event.seq));
+            c.move_epoch = Some(epoch);
             c.mutation_seq = c.mutation_seq.max(event.seq);
             c.snapshot_seq = None;
             let current = |m: &Message| {
@@ -89,6 +101,13 @@ impl Step<'_> {
                 }
                 Rc::make_mut(&mut c.messages).retain(|m| current(m));
             }
+            // A gap page can contain both a Message state and a later invalidation.
+            self.out.records.retain_mut(|(channel, records)| {
+                if *channel == id {
+                    records.retain(&current);
+                }
+                !records.is_empty()
+            });
             for request in self.core.requests.values_mut() {
                 if matches!(request, Request::History { channel, page: Page::Before, stale: false, .. } if *channel == id)
                 {
@@ -97,6 +116,7 @@ impl Step<'_> {
                 }
             }
             self.channel(id).older = None;
+            self.cap_moved_roots(id, MAIN_MESSAGE_LIMIT);
             self.history(id, Page::Latest, None);
         }
         // Move proves event coverage without settling a send or emitting Message state.
@@ -141,7 +161,7 @@ impl Step<'_> {
             self.settle(id, &valid);
             return;
         }
-        let positions: Vec<_> = if source == Source::Ack {
+        let mut positions: Vec<_> = if source == Source::Ack {
             valid.iter().map(|m| m.created_seq).collect()
         } else {
             event_seq.into_iter().collect()
@@ -163,6 +183,29 @@ impl Step<'_> {
         let c = self.channel(id);
         let mut messages = None;
         for mut m in incoming {
+            if c.moved_roots
+                .get(&m.reply_root_id.unwrap_or(m.id))
+                .is_some_and(|seq| m.version < *seq)
+            {
+                continue;
+            }
+            // An evicted root floor makes unheld stream or ACK state ambiguous.
+            // Keep its position as a gap target until a covering event read hydrates it.
+            if matches!(source, Source::Ack | Source::Stream)
+                && m.version < c.retired_move_through
+                && !c.messages.iter().any(|held| held.id == m.id)
+            {
+                let seq = if source == Source::Ack {
+                    Some(m.created_seq)
+                } else {
+                    event_seq
+                };
+                if let Some(seq) = seq.filter(|seq| c.cursor.is_none_or(|cursor| *seq > cursor)) {
+                    c.forgotten_through = Some(c.forgotten_through.unwrap_or(0).max(seq));
+                    positions.retain(|position| *position != seq);
+                }
+                continue;
+            }
             if m.version > m.created_seq || m.deleted {
                 c.mutation_seq = c.mutation_seq.max(m.version);
             }
@@ -327,6 +370,20 @@ impl Step<'_> {
             c.advancing = Rc::new(merged);
         }
     }
+    pub(crate) fn cap_moved_roots(&mut self, id: Uuid, limit: usize) {
+        let c = self.channel(id);
+        if c.moved_roots.len() <= limit {
+            return;
+        }
+        let roots = Rc::make_mut(&mut c.moved_roots);
+        while roots.len() > limit {
+            let Some((&root, &seq)) = roots.iter().min_by_key(|(_, seq)| *seq) else {
+                break;
+            };
+            roots.remove(&root);
+            c.retired_move_through = c.retired_move_through.max(seq);
+        }
+    }
     pub(crate) fn cap_versions(&mut self, id: Uuid, limit: usize) {
         let c = self.channel(id);
         let mut retired = Vec::new();
@@ -381,5 +438,103 @@ impl Step<'_> {
                 self.history(id, Page::Latest, None);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::responses::HistoryPage;
+    use serde_json::json;
+
+    #[test]
+    fn retired_move_floor_fences_ack_and_delivers_unrelated_create_from_covering_gap_page() {
+        let channel = Uuid::from_u128(1);
+        let root = Uuid::from_u128(2);
+        let destination = Uuid::from_u128(3);
+        let mut core = Core::new(Uuid::from_u128(4));
+        core.session.connected = true;
+        let mut step = Step::new(&mut core);
+        let c = step.channel(channel);
+        c.watched = true;
+        c.cursor = Some(7);
+        c.subscription = Some(Rc::new(Subscription {
+            id: 0,
+            after: 7,
+            confirmed: true,
+            watermark: 7,
+        }));
+        step.history(channel, Page::After, Some(7));
+        let stale_request = step.channel(channel).fill.unwrap();
+        for (root_id, seq) in [(root, 10), (Uuid::from_u128(5), 11)] {
+            step.merge_move(
+                serde_json::from_value(json!({
+                    "type":"message","kind":"move","history_generation":Uuid::nil(),
+                    "channel_id":channel,"seq":seq,"version":seq,"root_id":root_id,
+                    "source_topic_id":null,"destination_topic_id":destination,"operation_id":root_id
+                }))
+                .unwrap(),
+                Source::Stream,
+            );
+        }
+        step.cap_moved_roots(channel, 1);
+        let c = step.channel(channel);
+        assert_eq!(c.retired_move_through, 10);
+        assert!(!c.moved_roots.contains_key(&root));
+
+        let stale: Message = serde_json::from_value(json!({
+            "history_generation":Uuid::nil(),"channel_id":channel,"id":Uuid::from_u128(6),
+            "created_seq":9,"version":9,"deleted":false,"client_message_id":Uuid::from_u128(7),
+            "sender":Uuid::from_u128(8),"body":"reply","created_at":"2026-01-01T00:00:00Z",
+            "topic_id":null,"reply_to":root,"reply_root_id":root,"mentions":[]
+        }))
+        .unwrap();
+        step.merge(channel, vec![stale.clone()], Source::Ack);
+        assert!(step.channel(channel).messages.is_empty());
+        assert!(step.out.records.is_empty());
+
+        let unrelated = Message {
+            id: Uuid::from_u128(9),
+            client_message_id: Uuid::from_u128(10),
+            created_seq: 8,
+            version: 8,
+            reply_to: None,
+            reply_root_id: None,
+            ..stale.clone()
+        };
+        step.merge_event(channel, vec![unrelated.clone()], Source::Stream, Some(8));
+        assert_eq!(step.channel(channel).cursor, Some(7));
+        assert!(step.out.records.is_empty());
+
+        let page = |messages: [Message; 2]| {
+            Ok(HistoryPage::Events(fukulow_api::ChannelEventPage {
+                history_generation: Uuid::nil(),
+                events: messages
+                    .into_iter()
+                    .map(|message| fukulow_api::ServerEvent::Message {
+                        seq: message.created_seq,
+                        kind: fukulow_api::MessageStateKind::Create,
+                        message,
+                    })
+                    .collect(),
+                has_more: true,
+            }))
+        };
+        step.history_response(stale_request, page([unrelated.clone(), stale.clone()]));
+        assert_eq!(step.channel(channel).cursor, Some(7));
+        assert!(step.out.records.is_empty());
+        let moved = Message {
+            version: 10,
+            topic_id: Some(destination),
+            ..stale
+        };
+        let request = step.channel(channel).fill.unwrap();
+        assert_ne!(stale_request, request);
+        step.history_response(request, page([unrelated.clone(), moved.clone()]));
+        assert_eq!(step.channel(channel).cursor, Some(11));
+        let delivered = &step.out.records[0].1;
+        assert_eq!(delivered.len(), 2);
+        assert!(same_message(&delivered[0], &unrelated));
+        assert!(same_message(&delivered[1], &moved));
     }
 }

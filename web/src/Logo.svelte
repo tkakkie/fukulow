@@ -1,0 +1,52 @@
+<svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+  <path
+    class="logo__body"
+    fill-rule="evenodd"
+    d="M 10 22 C 6 18 3 12 4 7 C 4 6 5 6 6 7 C 10 11 15 12 20 15 C 27 12 37 12 44 15 C 49 12 54 11 58 7 C 59 6 60 6 60 7 C 61 12 58 18 54 22 C 58 26 60 31 60 37 C 60 49 50 55 35 55 H 24 L 12 61 Q 10 62 11 59 L 13 51 C 7 48 4 43 4 37 C 4 31 6 26 10 22 Z M 32 26 C 24 18 12 20 10 30 C 7 43 18 50 32 51 C 46 50 57 43 54 30 C 52 20 40 18 32 26 Z M 32 30 C 24 22 15 23 13 31 C 11 41 20 47 32 48 C 44 47 53 41 51 31 C 49 23 40 22 32 30 Z"
+  />
+  <path
+    class="logo__eyes"
+    d="M16.1 34a5.4 5.4 0 1 0 10.8 0a5.4 5.4 0 1 0 -10.8 0ZM37.1 34a5.4 5.4 0 1 0 10.8 0a5.4 5.4 0 1 0 -10.8 0ZM32 36L35 40L32 44L29 40Z"
+  />
+  <path
+    class="logo__pupils"
+    d="M20 34.4a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0 -4.2 0ZM41 34.4a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0 -4.2 0Z"
+  />
+</svg>
+
+<style>
+  .logo {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .logo__body {
+    fill: var(--text);
+  }
+
+  .logo__eyes {
+    fill: var(--amber);
+    stroke: var(--logo-ink);
+    stroke-width: 0;
+    stroke-opacity: 0;
+    stroke-linejoin: round;
+    paint-order: stroke fill;
+  }
+
+  .logo__pupils {
+    fill: var(--logo-ink);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :global(:root:not([data-theme='light'])) .logo__eyes {
+      stroke-width: 1.6;
+      stroke-opacity: 1;
+    }
+  }
+
+  :global(:root[data-theme='dark']) .logo__eyes {
+    stroke-width: 1.6;
+    stroke-opacity: 1;
+  }
+</style>

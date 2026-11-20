@@ -196,6 +196,12 @@ pub enum MoveEventKind {
 pub enum ServerEvent {
     /// Own-Member DM list invalidation.
     DmListChanged,
+    /// Own-Member section layout invalidation.
+    SectionsChanged {
+        /// Canonical unsigned decimal, at most 9223372036854775807.
+        #[schema(pattern = "^(0|[1-9][0-9]*)$", max_length = 19)]
+        generation: String,
+    },
     ActivityReady,
     ActivityReset,
     ChannelActivity {

@@ -435,6 +435,7 @@ async fn security_database_error_rolls_back_password_and_every_session(pool: PgP
 }
 
 mod concurrency;
+mod signin_race;
 mod throttle;
 
 #[fukulow_test::test]

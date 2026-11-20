@@ -38,8 +38,20 @@ async fn vacuum_messages_visible(connection: &mut sqlx::PgConnection) -> Result<
     const ATTEMPTS: usize = 20;
     let mut diagnostic = String::new();
     for attempt in 1..=ATTEMPTS {
-        let transactions: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() \
+        let (transactions, backends): (i64, String) = sqlx::query_as(
+            "SELECT count(*), COALESCE(json_agg(json_build_object(
+                 'pid', pid,
+                 'backend_type', backend_type,
+                 'application_name', application_name,
+                 'state', state,
+                 'wait_event_type', wait_event_type,
+                 'wait_event', wait_event,
+                 'backend_xid_set', backend_xid IS NOT NULL,
+                 'backend_xmin_set', backend_xmin IS NOT NULL,
+                 'transaction_age_ms', (EXTRACT(EPOCH FROM clock_timestamp() - xact_start) * 1000)::bigint,
+                 'query', left(query, 120)
+             ) ORDER BY pid)::text, '[]')
+             FROM pg_stat_activity WHERE datname=current_database()
              AND pid<>pg_backend_pid() AND (backend_xid IS NOT NULL OR backend_xmin IS NOT NULL)",
         )
         .fetch_one(&mut *connection)
@@ -60,7 +72,7 @@ async fn vacuum_messages_visible(connection: &mut sqlx::PgConnection) -> Result<
         }
         diagnostic = format!(
             "messages VACUUM exhausted {attempt} attempts: {visible}/{total} visible/total pages; \
-             {transactions} other same-database transactions"
+             {transactions} other same-database transactions; backends: {backends}"
         );
         if attempt < ATTEMPTS {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;

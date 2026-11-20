@@ -2,7 +2,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Message, ServerEvent } from './api'
-import { defaultDir, type ClientScenario, type Effect as FixtureEffect, type Observed, type ResolvedInput } from '../scripts/realtime-fixtures'
+import { defaultDir, fixtureEvents, fixtureMove, type ClientScenario, type Effect as FixtureEffect, type Observed, type ResolvedInput } from '../scripts/realtime-fixtures'
 import { initialState, step, type Input, type State, type SyncView } from './protocol-driver'
 
 export const scenarios: ClientScenario[] = readdirSync(join(defaultDir, 'client')).filter(n => n.endsWith('.json')).sort()
@@ -31,6 +31,7 @@ export function protocolClient(onInput?: (input: Input) => void) {
       const channel = (i.channel ?? e?.channel ?? Object.entries(state.channels)
         .find(([, c]) => c.pending.some(p => p.clientMessageId === i.client_message_id))?.[0] ?? 'A') as string
       const msg = () => message(i.message, channel)
+      const generation = (i.history_generation as string | undefined) ?? record(1).history_generation
       let input: Input
       switch (i.type) {
         case 'organization_refused': input = { type: 'organization_unavailable' }; break
@@ -38,13 +39,14 @@ export function protocolClient(onInput?: (input: Input) => void) {
         case 'connection_ready': input = { type: i.type, connection: state.connection! }; break
         case 'socket_closed': input = { type: i.type, connection: state.connection!, code: i.code as number }; break
         case 'message': input = { type: 'event', connection: state.connection!, event: { type: 'message', kind: (i.kind ?? 'create') as 'create', seq: typeof i.seq === 'number' ? i.seq : msg().created_seq, message: msg() } }; break
+        case 'move': input = { type: 'event', connection: state.connection!, event: fixtureMove(i.move!, channel, generation) }; break
         case 'subscribed': input = { type: 'event', connection: state.connection!, subscription: e?.id as number | undefined,
           event: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel, caught_up_seq: i.caught_up_seq as number } }; break
         case 'channel_access_lost': input = { type: 'event', connection: state.connection!, event: { type: 'channel_access_lost', channel_id: channel } }; break
         case 'error_event': input = { type: 'event', connection: state.connection!, event: { type: 'error', channel_id: channel,
           code: i.code as string } }; break
         case 'events_result': input = { type: 'events_result', request: e!.id as number,
-          page: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[]).map(e => ({ type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })), has_more: i.has_more as boolean } }; break
+          page: { history_generation: generation, events: fixtureEvents(i, channel, generation, message), has_more: i.has_more as boolean } }; break
         case 'history_result': input = { type: i.type, request: e!.id as number,
           page: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', as_of_seq: (i.as_of_seq as number | undefined) ?? i.messages!.at(-1)?.created_seq ?? 0,  messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more as boolean } }; break
         case 'send_failed': input = { type: i.type, request: e!.id as number,

@@ -9,6 +9,7 @@
   import type { Channel, DmDiscovery, Identity, Message } from './api'
   import DmList from './DmList.svelte'
   import DmSendStatus from './DmSendStatus.svelte'
+  import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
   import ChannelList from './ChannelList.svelte'
@@ -89,8 +90,8 @@
   const route = $derived(nav.state.target)
   const routeChannelId = $derived(route?.organizationId === currentOrganizationId ? route.channelId : s.selectedId)
   const selected = $derived<Channel | DmDiscovery | undefined>(dmState?.rows.find(row => row.identity.id === routeChannelId)?.identity ?? s.channels.find((c) => c.id === routeChannelId) ?? (routeChannelId ? {
-    id: routeChannelId, kind: 'channel', name: 'チャンネル', visibility: 'public',
-    capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false } },
+    id: routeChannelId, kind: 'channel', archived: false, name: 'チャンネル', visibility: 'public',
+    capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: false }, can_rename: { allowed: false }, can_archive: { allowed: false } },
   } : undefined))
   const conversationName = $derived(selected?.kind === 'dm' ? selected.peer.name : selected?.name ?? '')
   const dmLapsed = $derived(selected?.kind === 'dm' && dmState?.sendBlocks[selected.id] === 'dm_peer_access_lapsed')
@@ -603,7 +604,7 @@
   <nav class="rail" aria-label="メインナビゲーション">
     <div class="rail__top">
       <div class="rail__logo" aria-hidden="true">
-        <span class="rail__owl">🦉</span>
+        <Logo />
       </div>
       <Button
         variant="icon"
@@ -930,6 +931,9 @@
             <ReplyPanel
               channel={currentChannel}
               replies={currentReplies}
+              topics={currentTopics}
+              moveChain={session.moveChain}
+              onannounce={onannounce}
               channelId={selected.id}
               anchorMessageId={activeReplyMessageId}
               resolvedAnchor={resolvedReplyAnchor}
@@ -1035,10 +1039,6 @@
     place-items: center;
     width: var(--touch-target);
     height: var(--touch-target);
-    background-color: var(--amber);
-    color: var(--on-amber);
-    border-radius: var(--radius-10);
-    font-size: var(--font-size-17);
   }
 
   .channel-column {

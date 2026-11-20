@@ -1,6 +1,18 @@
 use super::*;
 
+pub mod cleanup;
 pub mod management;
+
+const NON_OWNER_INVITE_LIMIT: i64 = 100;
+const OWNER_INVITE_LIMIT: i64 = 10;
+
+// Match the list's expiry range for the index and use the clock to decide validity.
+// Counting up to the cap is enough even for Organizations already above it.
+const QUOTA_COUNT_SQL: &str = "SELECT count(*) FROM (\
+    SELECT 1 FROM invites WHERE organization_id=$1 AND accepted_at IS NULL AND revoked_at IS NULL \
+    AND expires_at>statement_timestamp() AND expires_at>clock_timestamp() \
+    AND (role='owner')=$2 LIMIT $3\
+    ) outstanding";
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +74,7 @@ impl FromRequestParts<AppState> for InviteAuth {
     (status=401, description="Account Session ended", body=ErrorBody),
     (status=403, description="forbidden: only Owner/Admin can invite; only Owner can invite Owner", body=ErrorBody),
     (status=404, description="organization_unavailable", body=ErrorBody),
+    (status=409, description="invite_limit_reached: the requested Role's Outstanding Invite pool is full", body=ErrorBody),
     (status=413, description="Request too large", body=ErrorBody),
     (status=415, description="Expected application/json", body=ErrorBody),
     (status=500, description="Database or random generation failure", body=ErrorBody)))]
@@ -75,6 +88,7 @@ pub async fn create_invite(
     let (id, token, expires_at) = crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
         members::lock_organization(&mut *tx, org).await?;
         members::current_actor(&mut *tx, &auth, Action::Invite(input.role)).await?;
+        check_invite_quota(tx, org, input.role).await?;
         let mut random = [0; 32];
         fill_random(&mut random)?;
         let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
@@ -94,6 +108,29 @@ pub async fn create_invite(
         }),
     )
         .into_response())
+}
+
+async fn check_invite_quota(
+    tx: &mut sqlx::PgConnection,
+    org: Uuid,
+    role: Role,
+) -> Result<(), ApiError> {
+    let owner = role == Role::Owner;
+    let limit = if owner {
+        OWNER_INVITE_LIMIT
+    } else {
+        NON_OWNER_INVITE_LIMIT
+    };
+    let count: i64 = sqlx::query_scalar(QUOTA_COUNT_SQL)
+        .bind(org)
+        .bind(owner)
+        .bind(limit)
+        .fetch_one(tx)
+        .await?;
+    if count >= limit {
+        return Err(ApiError(StatusCode::CONFLICT, "invite_limit_reached", None));
+    }
+    Ok(())
 }
 
 fn invalid_invite() -> ApiError {

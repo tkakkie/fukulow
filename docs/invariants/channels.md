@@ -1,6 +1,6 @@
 # Invariants: channels
 
-Channels, membership, Capabilities (server and member UI). Writing rules and the other parts: [index](../invariants.md).
+Channels, membership, Capabilities (server and member UI); personal sections are in [sections](sections.md). Writing rules and the other parts: [index](../invariants.md).
 
 | Rule | Test |
 |---|---|
@@ -56,6 +56,7 @@ Channels, membership, Capabilities (server and member UI). Writing rules and the
 | DM reclamation and open/renew/send use compatible lock order and preserve current discovery rows | `server/src/channels/dms/tests/reclamation.rs::reclamation_and_open_renew_send_complete_in_both_lock_orders` |
 | Periodic DM reclamation runs one batch/tick without traffic, survives one Organization's errors and stops on shutdown | `server/src/channels/dms/tests/reclamation_task.rs::periodic_reclamation_needs_no_traffic_survives_errors_and_stops_on_shutdown`, `server/src/channels/dms/tests/reclamation_task.rs::periodic_reclamation_runs_only_one_bounded_batch_per_tick` |
 | DM migration preserves ordinary Channels, grants, Messages, Unread positions and case-insensitive name uniqueness | `server/tests/dms_migration.rs::existing_channels_grants_messages_and_unread_survive_dm_migration` |
+| Channel metadata writes recheck scoped access and manager rights. Archived names stay reserved and lists keep current access rules. | `server/src/channels/tests/archive.rs::archive_permissions_and_capabilities`, `server/src/channels/tests/archive.rs::archive_rechecks_role_grant_and_revision_after_auth`, `server/src/channels/tests/archive.rs::archive_input_scope_and_dm_denials`, `server/src/channels/tests/archive.rs::archived_list_and_name_uniqueness`, `server/src/channels/tests/archive.rs::archive_migration_preserves_existing_channels_and_rejects_dms` |
 
 ## Rows in other parts
 

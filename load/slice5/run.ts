@@ -9,7 +9,7 @@ import { arch, cpus, hostname, platform, release, tmpdir, totalmem } from 'node:
 import { resolve } from 'node:path';
 import { outsideCheckout } from '../proxy-target.ts';
 import { commits, dbSettings, fixture, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
-import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
+import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, relationSizesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
 import { judgePartA, judgePartB, judgePartC, classifyPartDFailure, closedLoopNonSuccess, confirmedPartDInfrastructure, parseTimeline, scanPartDPostgresLog, timelineTopics, vacuumCost, type Counts, type PostgresState, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 import { readResults, scorePartDFiles } from './report.ts';
 import { command, dbCommand, docker, seed, send, sampler, sleep, snapshot, startStack, timed, walDump, walWindow, type Seeded, type Stack } from './stack.ts';
@@ -167,6 +167,7 @@ async function partARun(arm: Arm, round: number, cell: typeof partA.cells[number
     save(`${privateDir}/tokens.json`, seeded.tokens);
     const settled = settle(stack);
     const storage0 = Number(stack.sql(relationBytesSQL));
+    const sizes0 = JSON.parse(stack.sql(relationSizesSQL)) as unknown;
     let gen: string | undefined;
     const samples = sampler(stack, () => gen);
     const steps: StepA[] = [], maintenance: unknown[] = [];
@@ -201,6 +202,8 @@ async function partARun(arm: Arm, round: number, cell: typeof partA.cells[number
       complete: steps.length === plan.rates.length, smoke, steps,
       storage: { bytes: Number(stack.sql(relationBytesSQL)) - storage0, accepted: steps.reduce((s, x) => s + x.send.accepted, 0) } };
     save(`${dir}/result.json`, { ...result, prefillMs, appliedSettings: applied, settle: settled, maintenance });
+    // #620 diagnosis: taken after the judged storage reading, so it never changes it.
+    save(`${dir}/relation-sizes.json`, { before: sizes0, after: JSON.parse(stack.sql(relationSizesSQL)) as unknown });
     return result;
   });
 }

@@ -1,5 +1,8 @@
 use super::*;
 
+mod archive;
+mod sections;
+
 async fn raw_event(socket: &mut Client) -> Value {
     loop {
         match tokio::time::timeout(Duration::from_secs(5), socket.next())

@@ -82,7 +82,22 @@ test('empty closed days count as zero only before the month first usage', async 
     '2026-11-01': { classA: 0, classB: 0 }, '2026-11-02': { classA: 0, classB: 0 }, '2026-11-03': { classA: 2, classB: 3 } } } }), /unavailable/)
   const lag = Date.UTC(2026, 10, 2, 6) - 1
   await assert.rejects(client(() => false).read(lag, {}), /unavailable/)
-  await assert.rejects(client(start => start < '2026-11-02').read(lag, {}), /unavailable/)
-  await assert.rejects(client(() => false).read(lag + 1, {}), /unavailable/)
+  await assert.rejects(client(start => start >= '2026-11-02').read(lag, {}), /unavailable/)
+  assert.deepEqual(await client(() => false).read(lag + 1, {}), { classA: 0, classB: 0 })
   assert.deepEqual(await client(start => start >= '2026-11-02').read(lag + 1, {}), { classA: 2, classB: 3 })
+})
+
+test('an empty today counts as zero at the first run after UTC midnight', async () => {
+  const empty = { data: { viewer: { accounts: [{ r2OperationsAdaptiveGroups: [] }] } } }
+  const cached = { month: '2026-11', days: Object.fromEntries(Array.from({ length: 18 }, (_, i) =>
+    [`2026-11-${String(i + 1).padStart(2, '0')}`, { classA: 2, classB: 3 }])) }
+  const dates: string[] = []
+  const usage = accountUsage({ async query(request) {
+    dates.push(request.variables.start)
+    return request.variables.start === '2026-11-20T00:00:00.000Z' ? empty : payload } }, 'test-only')
+  assert.deepEqual(await usage.read(Date.UTC(2026, 10, 20, 0, 0, 5), { usageCache: structuredClone(cached) }), { classA: 38, classB: 57 })
+  assert.deepEqual(dates, ['2026-11-19T00:00:00.000Z', '2026-11-20T00:00:00.000Z'])
+  const emptyAfterUsage = accountUsage({ async query(request) {
+    return request.variables.start === '2026-11-19T00:00:00.000Z' ? empty : payload } }, 'test-only')
+  await assert.rejects(emptyAfterUsage.read(Date.UTC(2026, 10, 20, 0, 0, 5), { usageCache: structuredClone(cached) }), /unavailable/)
 })

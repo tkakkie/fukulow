@@ -6,7 +6,7 @@ import { createTopicSync } from './topic-sync'
 import { createReplySync } from './reply-sync'
 import { createUnread } from './unread'
 import type { UnreadChannel } from './api'
-import { expandMessage } from '../scripts/realtime-fixtures'
+import { expandMessage, fixtureEvents, fixtureMove } from '../scripts/realtime-fixtures'
 import type { Effect as FixtureEffect, ResolvedInput } from '../scripts/realtime-fixtures'
 import { createSync, type SyncOptions } from './sync'
 import type { Connection, RealtimeHandlers } from './realtime'
@@ -121,6 +121,7 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         .find(([, c]) => c.pending.some(p => p.clientMessageId === i.client_message_id))?.[0] ?? 'A') as string
       const t = sync.getTimeline(channel)
       const socket = sockets.at(-1)!
+      const generation = (i.history_generation as string | undefined) ?? record(1).history_generation
       const resolve = (r: Result<unknown>) => (e!.resolve as (r: Result<unknown>) => void)(r)
       switch (i.type) {
         case 'hold_target': activity.hold(i.target as string, createActivityTarget({
@@ -135,11 +136,12 @@ export function controllerClient(overrides: Partial<SyncOptions> = {}, withTopic
         case 'connection_ready': socket.onReady(); break
         case 'socket_closed': socket.onClose(i.code as number); break
         case 'message': socket.onEvent({ type: 'message', kind: (i.kind ?? 'create') as 'create', seq: typeof i.seq === 'number' ? i.seq : message(i.message, channel).created_seq, message: message(i.message, channel) }); break
+        case 'move': socket.onEvent(fixtureMove(i.move!, channel, generation)); break
         case 'subscribed': (e?.socket as RealtimeHandlers ?? socket).onEvent({ history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: channel,
           caught_up_seq: i.caught_up_seq as number }); break
         case 'channel_access_lost': socket.onEvent({ type: 'channel_access_lost', channel_id: channel }); break
         case 'error_event': socket.onEvent({ type: 'error', channel_id: channel, code: i.code as string }); break
-        case 'events_result': resolve({ ok: true, data: { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', events: (i.events as { seq: number; kind: 'create'; message: ResolvedInput['message'] }[]).map(e => ({ type: 'message', seq: e.seq, kind: e.kind, message: message(e.message, channel) })), has_more: i.has_more } }); break
+        case 'events_result': resolve({ ok: true, data: { history_generation: generation, events: fixtureEvents(i, channel, generation, message), has_more: i.has_more } }); break
         case 'history_result': resolve({ ok: true, data: e?.page === 'after'
           ? { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', events: i.messages!.map(m => ({ type: 'message', seq: m.created_seq, kind: 'create', message: message(m, channel) })), has_more: i.has_more }
           : { history_generation: (i.history_generation as string | undefined) ?? '00000000-0000-4000-8000-000000000515', as_of_seq: (i.as_of_seq as number | undefined) ?? i.messages!.at(-1)?.created_seq ?? 0,  messages: i.messages!.map(m => message(m, channel)), has_more: i.has_more } }); break
