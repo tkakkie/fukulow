@@ -71,7 +71,7 @@ export function createSession(options: SessionOptions) {
       }
       return false
     },
-    revoke: id => { dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.unavailable() },
+    revoke: id => { dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable() },
     access: id => { dms?.access(id); unread.activityAccess(id); topics.activityAccess(id) },
     reconcile: () => unread.activityReconcile(),
     random: options.sync?.random,
@@ -235,26 +235,33 @@ export function createSession(options: SessionOptions) {
     if (!sync.get().connected) activity.disconnected()
     if (sync.get().organization === 'unavailable') terminate()
   })
-  const memberControllers = new Map<string, ReturnType<typeof createChannelMembers>>()
-  const memberAvailability = new Map<string, boolean>()
-  const memberReleases = new Map<string, () => void>()
-  function holdMembers(id: string, controller: ReturnType<typeof createChannelMembers>) {
-    memberReleases.get(id)?.()
-    memberReleases.set(id, activity.hold(`channel-members:${id}`, controller.activityTarget))
+  type MemberEntry = { controller: ReturnType<typeof createChannelMembers>; lost: boolean; release?: () => void }
+  const memberControllers = new Map<string, MemberEntry>()
+  function holdMembers(id: string, entry: MemberEntry) {
+    entry.release?.()
+    entry.release = activity.hold(`channel-members:${id}`, entry.controller.activityTarget)
   }
   function releaseMembers(id: string, controller: ReturnType<typeof createChannelMembers>) {
-    if (memberControllers.get(id) !== controller) return
+    const entry = memberControllers.get(id)
+    if (entry?.controller !== controller) return
     memberControllers.delete(id)
-    memberAvailability.delete(id)
-    memberReleases.get(id)?.()
-    memberReleases.delete(id)
+    entry.release?.()
+    entry.release = undefined
   }
   const stopMemberAccess = sync.subscribe(() => {
-    for (const [id, controller] of memberControllers) {
+    for (const [id, entry] of [...memberControllers]) {
+      if (memberControllers.get(id) !== entry) continue
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[id]?.state === 'unavailable'
-      if (lost) { controller.unavailable(); memberReleases.get(id)?.(); memberReleases.delete(id) }
-      else if (memberAvailability.get(id)) { holdMembers(id, controller); controller.reselect() }
-      memberAvailability.set(id, lost)
+      const wasLost = entry.lost
+      entry.lost = lost
+      if (lost) {
+        entry.release?.()
+        entry.release = undefined
+        entry.controller.unavailable()
+      } else if (wasLost) {
+        holdMembers(id, entry)
+        entry.controller.reselect()
+      }
     }
   })
   const stopFollowing = channels.subscribe(() => {
@@ -272,7 +279,7 @@ export function createSession(options: SessionOptions) {
     memberListAccess,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
-      memberControllers.get(channel)?.close()
+      memberControllers.get(channel)?.controller.close()
       const controller = createChannelMembers(organizationId, channel, r => {
         if (!r.ok && r.kind === 'http' && r.status === 401) notifyEnded()
         else if (!closed && api.isOrganizationUnavailable(r)) terminate()
@@ -289,12 +296,12 @@ export function createSession(options: SessionOptions) {
         rawClose()
         return managed
       }
-      memberControllers.set(channel, managed)
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable'
-      memberAvailability.set(channel, lost)
+      const entry: MemberEntry = { controller: managed, lost }
+      memberControllers.set(channel, entry)
       if (lost) managed.unavailable()
       else {
-        holdMembers(channel, managed)
+        holdMembers(channel, entry)
         void managed.load()
         void channels.load()
       }
@@ -305,9 +312,8 @@ export function createSession(options: SessionOptions) {
       stopActivity(); activity.close(); capabilities.close()
       navigationTargets.close(); replyCounts.close()
       stopFollowing(); stopSync(); stopMemberAccess()
-      for (const controller of [...memberControllers.values()]) controller.close()
-      memberControllers.clear(); memberAvailability.clear()
-      memberReleases.forEach(release => release()); memberReleases.clear()
+      for (const { controller } of [...memberControllers.values()]) controller.close()
+      memberControllers.clear()
       channels.close()
       dms?.close()
       void sync.close()

@@ -2572,6 +2572,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
 
     const s1 = makeSession('org-1', ['c1', 'c2', 'c3'])
     const s2 = makeSession('org-2', ['c1'])
+    const s3 = makeSession('org-2', ['c1'])
     const navigation = makeNav('/o/org-1/c/c1?panel=members')
     const host = testDoc.createElement('div')
     testDoc.body.appendChild(host)
@@ -2581,7 +2582,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       selectedOrganizationId: 'org-1',
       organization: makeOrg('org-1', 'Org 1'),
     })
-    const instance = mount(Workspace, { target: host as unknown as Element, props })
+    let instance: ReturnType<typeof mount> | undefined = mount(Workspace, { target: host as unknown as Element, props })
     try {
       await settle()
       expect(s1.opened.map(o => o.channel)).toEqual(['c1'])
@@ -2678,15 +2679,41 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       await settle()
       expect(host.querySelector('#panel-content')?.textContent).toContain('新組織更新メンバー')
 
-      // Unmounting Workspace (e.g. {#key session}) closes the active controller and releases its hold.
-      await unmount(instance)
+      // Same-Organization, same-Channel Session swap with an old request in flight proves Session identity is tracked on its own.
+      s2.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c1' })
+      await vi.advanceTimersByTimeAsync(200)
+      expect(pending).toHaveLength(8)
+      const s2Calls = s2.opened[0].listener.mock.calls.length
+      props.session = s3.model
+      await settle()
+      expect(s3.opened.map(o => o.channel)).toEqual(['c1'])
+      expect(pending).toHaveLength(9)
+
+      pending[7].resolve(ok({ members: [{ id: 'old-session', name: '旧セッションメンバー', role: 'member', manager: false }] }))
+      await settle()
+      expect(s2.opened[0].listener).toHaveBeenCalledTimes(s2Calls)
+      expect(host.querySelector('#panel-content')?.textContent).not.toContain('旧セッションメンバー')
       s2.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c1' })
       await vi.advanceTimersByTimeAsync(500)
-      expect(pending).toHaveLength(7)
+      expect(pending).toHaveLength(9)
+
+      pending[8].resolve(ok({ members: [{ id: 'new-session', name: '新セッションメンバー', role: 'member', manager: false }] }))
+      await settle()
+      expect(host.querySelector('#panel-content')?.textContent).toContain('新セッションメンバー')
+
+      // Unmounting Workspace (e.g. {#key session}) closes the active controller and releases its hold.
+      const mounted = instance
+      instance = undefined
+      await unmount(mounted)
+      s3.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c1' })
+      await vi.advanceTimersByTimeAsync(500)
+      expect(pending).toHaveLength(9)
     } finally {
+      if (instance) await unmount(instance)
       navigation.destroy()
       s1.raw.close()
       s2.raw.close()
+      s3.raw.close()
       listSpy.mockRestore()
       vi.useRealTimers()
     }
