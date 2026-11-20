@@ -342,14 +342,17 @@ async fn committed(
                 .await?
                 .ok_or(MessageError::OrganizationUnavailable)?
                 .ok_or(MessageError::NotFound)?;
-            history::validate(
-                tx,
-                organization_id,
-                channel_id,
-                input.history_generation,
-                None,
-            )
-            .await?;
+            if input.history_generation.is_some() {
+                history::validate(
+                    tx,
+                    organization_id,
+                    channel_id,
+                    input.history_generation,
+                    None,
+                )
+                .await?;
+            }
+            // The receipt query supplies the generation for a canonical retry.
             match receipt(&mut *tx, organization_id, sender.0, channel_id, input).await? {
                 Some((message, true)) => Ok(Some(message)),
                 Some((_, false)) => Err(MessageError::Conflict),

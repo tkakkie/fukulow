@@ -213,7 +213,7 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    for (message, seq, expected) in [
+    let expected = [
         (
             root,
             1,
@@ -221,17 +221,82 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
         ),
         (reply, 2, send_digest(channel, "reply", None, Some(root))),
         (main, 3, send_digest(channel, "main", None, None)),
-    ] {
-        assert_eq!(stored(&pool, org, message).await, (seq, seq, expected));
+    ];
+    let trigger_properties = async || -> Value {
+        sqlx::query_scalar(
+            "SELECT to_jsonb(p) - 'prosrc' FROM pg_proc p
+             WHERE p.oid='public.fukulow_message_created()'::regprocedure",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let original_properties = trigger_properties().await;
+    for upgraded in [false, true] {
+        if upgraded {
+            apply_migrations_after(&pool, boundary).await;
+            assert_eq!(trigger_properties().await, original_properties);
+        }
+        for (message, seq, digest) in &expected {
+            assert_eq!(
+                stored(&pool, org, *message).await,
+                (*seq, *seq, digest.clone())
+            );
+        }
+        // Evaluate both trigger versions against identical intents, including
+        // the same parent id for the Reply. Keep the backfilled rows for upgrade.
+        let mut tx = pool.begin().await.unwrap();
+        let inserted: Vec<(i64, i64, Vec<u8>)> = sqlx::query_as(
+            "WITH copies AS (
+                INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id)
+                SELECT organization_id, gen_random_uuid(), channel_id, seq+3, sender, gen_random_uuid(), body, topic_id, reply_to_id, reply_root_id
+                FROM messages WHERE organization_id=$1 AND channel_id=$2
+                RETURNING seq, version, send_digest
+             ) SELECT seq, version, send_digest FROM copies ORDER BY seq",
+        )
+        .bind(org)
+        .bind(channel)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(
+            inserted,
+            expected
+                .each_ref()
+                .map(|(_, seq, digest)| (seq + 3, seq + 3, digest.clone()))
+        );
+        tx.rollback().await.unwrap();
     }
-    let distinct: i64 = sqlx::query_scalar(
-        "SELECT count(DISTINCT send_digest) FROM messages WHERE organization_id=$1",
-    )
-    .bind(org)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(distinct, 3);
+}
+
+#[fukulow_test::test]
+async fn send_receipt_for_null_topic_does_not_read_topics(pool: PgPool) {
+    let (_, org, sender, channel, _) = fixture(&pool).await;
+    let app_pool = crate::test_app_pool(pool.clone()).await;
+    // Removing SELECT makes even an empty Topic lookup fail under the invoker.
+    sqlx::query("REVOKE SELECT ON public.topics FROM fukulow_sqlx_test_app")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (version, digest): (i64, Vec<u8>) =
+        crate::database::organization(&app_pool, org, async |tx: &mut sqlx::PgConnection| {
+            sqlx::query_as(
+                "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body)
+                 VALUES ($1,gen_random_uuid(),$2,1,$3,gen_random_uuid(),'main')
+                 RETURNING version, send_digest",
+            )
+            .bind(org)
+            .bind(channel)
+            .bind(sender)
+            .fetch_one(tx)
+            .await
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (version, digest),
+        (1, send_digest(channel, "main", None, None))
+    );
 }
 
 fn operation(actor: Uuid, channel: Uuid, target: Uuid) -> Operation {
