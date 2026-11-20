@@ -33,6 +33,11 @@
   import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
   import ReplyPanel from './ReplyPanel.svelte'
+  import SearchBar from './SearchBar.svelte'
+  import SearchResults from './SearchResults.svelte'
+  import { createSearchController, type SearchTarget } from './search'
+  import { searchAdapter } from './search.svelte'
+  import { createDefaultSearchSource, type SearchSource } from './search-source'
   import Timeline from './Timeline.svelte'
   import TopicList from './TopicList.svelte'
   import TopicView from './TopicView.svelte'
@@ -59,6 +64,7 @@
     onsettings,
     onsignout,
     onannounce,
+    searchSource,
   }: {
     navigation: Navigation
     session: SessionModel
@@ -75,6 +81,7 @@
     onsettings?: () => void
     onsignout?: () => void
     onannounce?: (message: string) => void
+    searchSource?: SearchSource
   } = $props()
 
   const channels = $derived(session.channels)
@@ -194,12 +201,50 @@
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let searchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
   let focusTopicInputNext = false
   let appliedFocusRevision = -1
   let navFocusBaseline: { revision: number; active: Element | null } = { revision: -1, active: null }
   const topicSummaryFocus = createTopicSummaryFocusController()
+
+  let activeSearch = $state.raw<{
+    organizationId: string
+    source: SearchSource | undefined
+    controller: ReturnType<typeof createSearchController>
+  } | undefined>(undefined)
+  const searchModel = $derived(
+    activeSearch &&
+      activeSearch.organizationId === currentOrganizationId &&
+      activeSearch.source === searchSource
+      ? searchAdapter(activeSearch.controller)
+      : undefined,
+  )
+  const searchState = $derived(searchModel?.state)
+  const searchOpen = $derived(Boolean(searchState?.open && !organizationUnavailable))
+  $effect(() => {
+    const orgId = currentOrganizationId
+    const providedSource = searchSource
+    const controller = createSearchController({
+      source: providedSource ?? createDefaultSearchSource(orgId),
+      onOpenResult: (target) => handleOpenSearchResult(target),
+    })
+    const entry = { organizationId: orgId, source: providedSource, controller }
+    activeSearch = entry
+    return () => {
+      controller.destroy()
+      if (activeSearch === entry) activeSearch = undefined
+    }
+  })
+  let lastSearchNavRevision = -1
+  $effect(() => {
+    const revision = nav.state.revision
+    if (lastSearchNavRevision !== -1 && revision !== lastSearchNavRevision) {
+      untrack(() => searchModel?.close())
+    }
+    lastSearchNavRevision = revision
+  })
 
   const selectedChannelId = $derived(selected?.id)
   const selectedKind = $derived(selected?.kind)
@@ -516,6 +561,7 @@
 
   function handleSelectTopic(topicId: string) {
     if (!selected || !currentOrganizationId) return
+    searchModel?.close()
     const wasSameTopic = route?.topicId === topicId
     nav.navigate({
       type: 'topic',
@@ -585,6 +631,25 @@
     })
   }
 
+  function handleOpenSearchResult(target: SearchTarget) {
+    if (!currentOrganizationId) return
+    handleSelectChannel(target.channelId)
+    if (target.topicId) {
+      nav.navigate({
+        type: 'topic',
+        topicId: target.topicId,
+        phone: viewportWidth < MOBILE_BREAKPOINT_PX,
+      })
+    }
+  }
+
+  function handleCloseSearch() {
+    searchModel?.close()
+    void tick().then(() => {
+      focusTarget(searchInputRef)
+    })
+  }
+
   function handleWindowKeydown(e: KeyboardEvent) {
     // A modal dialog is the topmost layer and handles its own Escape / Tab (docs/ui.md §9).
     if (typeof document !== 'undefined' && document.querySelector('[role="dialog"][aria-modal="true"]')) {
@@ -604,6 +669,11 @@
     if (panelOpen) {
       e.preventDefault()
       closePanel()
+      return
+    }
+    if (searchOpen) {
+      e.preventDefault()
+      handleCloseSearch()
       return
     }
     if (typeof document !== 'undefined' && document.activeElement?.closest('.ui-message-row') && mainComposerRef) {
@@ -765,8 +835,44 @@
     {/if}
   </nav>
 
+  {#snippet headerSearch()}
+    {#if searchModel && searchState}
+      <SearchBar
+        value={searchState.input}
+        open={searchOpen}
+        busy={searchState.status === 'loading'}
+        disabled={organizationUnavailable || !currentOrganizationId}
+        bind:inputRef={searchInputRef}
+        oninput={(value) => searchModel.setInput(value)}
+        onsubmit={(value) => { void searchModel.submit(value) }}
+        onclose={handleCloseSearch}
+      />
+    {/if}
+  {/snippet}
+
   <main id="main-content" class="main-card" tabindex="-1">
-    {#if selected && currentChannel}
+    {#if searchOpen && searchModel && searchState}
+      <header class="main-card__header">
+        <div class="main-card__title-group">
+          <Button variant="quiet" onclick={handleCloseSearch}>
+            <span aria-hidden="true">‹</span>
+            <span>戻る</span>
+          </Button>
+          <h1 class="main-card__title">検索結果</h1>
+        </div>
+        <div class="main-card__header-actions">
+          {@render headerSearch()}
+        </div>
+      </header>
+      <div class="main-card__body">
+        <SearchResults
+          state={searchState}
+          onopenresult={(target) => searchModel.openSearchResult(target)}
+          onloadmore={() => { void searchModel.loadMore() }}
+          onretry={() => { void searchModel.retry() }}
+        />
+      </div>
+    {:else if selected && currentChannel}
       <header class="main-card__header">
         <div class="main-card__title-group">
           <span class="mobile-only">
@@ -795,6 +901,7 @@
           </h1>
         </div>
         <div class="main-card__header-actions">
+          {@render headerSearch()}
           <small class="live-status" data-testid="live-status" data-live={currentLive}>
             {currentLive ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
           </small>
@@ -900,6 +1007,9 @@
           </span>
           <h1 class="main-card__title">{organization?.organization.name ?? 'fukulow'}</h1>
         </div>
+        <div class="main-card__header-actions">
+          {@render headerSearch()}
+        </div>
       </header>
       <div class="main-card__empty">
         <StatusBanner
@@ -929,6 +1039,9 @@
           </span>
           <h1 class="main-card__title">チャンネル</h1>
         </div>
+        <div class="main-card__header-actions">
+          {@render headerSearch()}
+        </div>
       </header>
       <div class="main-card__empty">
         <EmptyState
@@ -953,6 +1066,9 @@
             </Button>
           </span>
           <h1 class="main-card__title">fukulow</h1>
+        </div>
+        <div class="main-card__header-actions">
+          {@render headerSearch()}
         </div>
       </header>
       <div class="main-card__empty">
@@ -1226,9 +1342,12 @@
 
   .main-card__header-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-8);
-    flex-shrink: 0;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    min-width: 0;
   }
 
   .live-status {

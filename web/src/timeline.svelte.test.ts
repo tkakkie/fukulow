@@ -2439,7 +2439,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     topicComposer.value = 'トピックからの返信'
     topicComposer.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
     flushSync()
-    const topicForm = host.querySelector('#main-content form')!
+    const topicForm = host.querySelector('#main-content form.composer')!
     topicForm.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
     await settle()
     expect(net.sends.at(-1)?.body).toEqual({ history_generation: '00000000-0000-4000-8000-000000000515',
@@ -3135,7 +3135,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       topicTextarea.value = 'トピックから送信中だった本文'
       topicTextarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
       flushSync()
-      host.querySelector('#main-content form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      host.querySelector('#main-content form.composer')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
       await settle()
       flushSync()
 
