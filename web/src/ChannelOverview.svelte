@@ -151,7 +151,7 @@
     {#if canRename}
       <form class="channel-overview__rename" onsubmit={handleRename}>
         <Input
-          label="チャンネル名"
+          label="変更後の名前"
           name="channel_name"
           required
           disabled={busy}
