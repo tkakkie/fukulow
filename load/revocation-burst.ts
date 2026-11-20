@@ -1,6 +1,7 @@
 // #592: revocation-hold retry bursts during a recheck-only failure and a whole-database outage.
-// Measure only: the server is the unmodified release build; failures are simulated outside it.
+// The release build enables measurement tracing; failures are simulated outside the server.
 // Run: ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir [--smoke] [--sizes 256,1024] [--kinds recheck,outage] [--repeats 3]
+// Recheck only: ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir --kinds recheck --sizes 4096 --repeats 3
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync, createWriteStream } from 'node:fs';
@@ -12,7 +13,7 @@ import { outsideCheckout } from './proxy-target.ts';
 import { Relay } from './revocation-burst-relay.ts';
 import { startRssSampler } from './revocation-burst-rss.ts';
 import { installGate, removeDatabase, seedMembers, Session, sql, startDatabase, waitReady, type Database } from './revocation-burst-db.ts';
-import { judge, verdictBySize, BOUNDARY_EXCEPTION_MS, KINDS, SIZES, THRESHOLDS, type Kind, type Member, type PoolSample, type Probe, type Revocation, type Run, type RunVerdict } from './revocation-burst-judgment.ts';
+import { judge, verdictBySize, KINDS, SIZES, THRESHOLDS, type Kind, type Member, type PoolSample, type Probe, type Revocation, type Run, type RunVerdict, type SendRecord, type SendTiming } from './revocation-burst-judgment.ts';
 import type { Channel, CreateChannelRequest, NativeSessionResponse, ServerEvent, SetupRequest } from '../web/src/api-schema.d.ts';
 
 const run = promisify(execFile);
@@ -69,6 +70,26 @@ async function pool<T>(items: T[], limit: number, work: (item: T) => Promise<voi
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => { while (next < items.length) await work(items[next++]); }));
 }
 
+async function calibrateClock(base: string, samples: number[]): Promise<[number, number]> {
+  let low = -Infinity, high = Infinity;
+  // The health handler stamps its monotonic clock inside each serial loopback round trip.
+  // Subtract the stamp from both Node times and intersect the brackets. Network, scheduling
+  // and handler delays are included without assuming symmetric latency. Log arrival is unused.
+  for (let i = 0; i < 8; i++) {
+    const index = samples.length;
+    const before = now();
+    const response = await fetch(`${base}/api/v1/health`, { signal: AbortSignal.timeout(5_000) });
+    const after = now();
+    if (!response.ok || await response.text() !== 'ok') throw new Error('clock calibration health request failed');
+    for (let attempt = 0; samples.length === index && attempt < 100; attempt++) await sleep(20);
+    if (samples.length !== index + 1) throw new Error('missing or ambiguous server clock sample');
+    low = Math.max(low, before - samples[index]);
+    high = Math.min(high, after - samples[index]);
+  }
+  if (low > high) throw new Error('inconsistent server clock calibration samples');
+  return [low, high];
+}
+
 async function measure(kind: Kind | 'control', size: number, repeat: number): Promise<Run> {
   const id = `${kind}-${size}-r${repeat}`;
   const dir = resolve(output, id); mkdirSync(dir);
@@ -83,15 +104,29 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
   const appPort = 20000 + Math.floor(Math.random() * 20000);
   const setupToken = randomBytes(16).toString('hex');
   const server = spawn(binary, [], { env: { PATH: process.env.PATH, FUKULOW_ADDR: `127.0.0.1:${appPort}`, FUKULOW_COOKIE_SECURE: 'false', FUKULOW_SETUP_TOKEN: setupToken,
-    DATABASE_URL: owner('fukulow_app', db.appPassword, relayPort) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    FUKULOW_REVOCATION_MEASUREMENT: '1', DATABASE_URL: owner('fukulow_app', db.appPassword, relayPort) }, stdio: ['ignore', 'pipe', 'pipe'] });
   active.server = server;
   const log = createWriteStream(resolve(dir, 'server.log'));
+  const serverLogsClosed = new Promise<void>(resolve => server.once('close', () => log.end(resolve)));
   const poolSamples: PoolSample[] = [], metrics: { at: number; fields: Record<string, number> }[] = [];
+  const clockSamples: number[] = [], sendRecords: SendRecord[] = [];
   for (const stream of [server.stdout!, server.stderr!]) createInterface({ input: stream }).on('line', line => {
     log.write(line + '\n');
     try {
-      const event = JSON.parse(line) as { fields?: Record<string, unknown> };
+      const event = JSON.parse(line) as { target?: string; fields?: Record<string, unknown> };
       const f = event.fields ?? {};
+      if (event.target === 'fukulow_revocation_measurement') {
+        if (f.event === 'revocation_clock_sample' && typeof f.server_ms === 'number' && Number.isFinite(f.server_ms)) clockSamples.push(f.server_ms);
+        if (f.event === 'channel_access_revoked_sent' && typeof f.channel_id === 'string' &&
+          typeof f.before_ms === 'number' && typeof f.after_ms === 'number' &&
+          Number.isFinite(f.before_ms) && Number.isFinite(f.after_ms) && f.before_ms <= f.after_ms) {
+          sendRecords.push({
+            channelId: f.channel_id, beforeMs: f.before_ms, afterMs: f.after_ms,
+            afterHold: typeof f.after_hold === 'boolean' ? f.after_hold : undefined,
+          });
+        }
+        return;
+      }
       const numeric = Object.fromEntries(Object.entries(f).filter(([, v]) => typeof v === 'number')) as Record<string, number>;
       if (f.event === 'pool_stats') poolSamples.push({ at: now(), fields: numeric });
       if (f.event === 'metrics') metrics.push({ at: now(), fields: numeric });
@@ -151,6 +186,7 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
     if ((i + 1) % 100 === 0) await sleep(100);
   }
   for (let i = 0; ready < size; i++) { if (i > 1200) throw new Error(`only ${ready}/${size} sockets ready`); await sleep(100); }
+  const clockStart = await calibrateClock(base, clockSamples);
   // Probes for the whole measured phase.
   const control = new Session(db), probeSession = new Session(db); active.sessions = [control, probeSession];
   const dbProbe: Probe[] = [], httpProbe: Probe[] = [];
@@ -205,21 +241,33 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
   stopping = true;
   sampler.stop();
   await sampler.done;
-  const result: Run = {
-    kind, size, repeat, times: { pass, burst, fault, mutationsDone, recovery, end }, removals, mutationFailures,
-    statements: relay.statements, connections: relay.connections, refused: relay.refused,
-    dbProbe, httpProbe, pool: poolSamples, rss, metrics: metrics.filter(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)[0]?.fields, members, revocations, serverCloses,
-  };
+  const drainMetrics = metrics.find(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000)?.fields;
+  const measuredPool = poolSamples.slice();
+  const clockEnd = await calibrateClock(base, clockSamples);
   // Liveness check of the database after the run, outside the relay.
   sql(db, 'SELECT 1;');
   await cleanup();
-  log.end();
+  await serverLogsClosed;
+  // Same-host monotonic clocks share the OS clock rate. Enclose both calibration brackets
+  // to cover a changed offset (e.g. if only one clock counts suspend). Also enclose the
+  // widest successful send from entry to flush, including any backpressure or descheduling.
+  const offsetBoundsMs: SendTiming['offsetBoundsMs'] = [Math.min(clockStart[0], clockEnd[0]), Math.max(clockStart[1], clockEnd[1])];
+  const sendTiming: SendTiming = {
+    offsetBoundsMs,
+    uncertaintyMs: (offsetBoundsMs[1] - offsetBoundsMs[0] + Math.max(0, ...sendRecords.map(record => record.afterMs - record.beforeMs))) / 2,
+    records: sendRecords,
+  };
+  const result: Run = {
+    kind, size, repeat, times: { pass, burst, fault, mutationsDone, recovery, end }, removals, mutationFailures,
+    statements: relay.statements, connections: relay.connections, refused: relay.refused,
+    dbProbe, httpProbe, pool: measuredPool, rss, metrics: drainMetrics, members, revocations, sendTiming, serverCloses,
+  };
   writeFileSync(resolve(dir, 'run.json'), JSON.stringify(result));
   return result;
 }
 
 const results: { kind: Kind | 'control'; size: number; repeat: number; pass: boolean; verdict: RunVerdict; reasons: string[]; summary: unknown }[] = [];
-const environment = { node: process.version, platform: platform(), arch: arch(), release: release(), cpus: cpus().length, memoryBytes: totalmem(), smoke, fallbackIntervalMs: FALLBACK_INTERVAL_MS, burstLeadMs: BURST_LEAD_MS, faultLeadMs: FAULT_LEAD_MS, recoveryAfterPassMs: RECOVERY_AFTER_PASS_MS, removals: REMOVALS, mutationConcurrency: MUTATION_CONCURRENCY, thresholds: THRESHOLDS, boundaryExceptionMs: BOUNDARY_EXCEPTION_MS,
+const environment = { node: process.version, platform: platform(), arch: arch(), release: release(), cpus: cpus().length, memoryBytes: totalmem(), smoke, fallbackIntervalMs: FALLBACK_INTERVAL_MS, burstLeadMs: BURST_LEAD_MS, faultLeadMs: FAULT_LEAD_MS, recoveryAfterPassMs: RECOVERY_AFTER_PASS_MS, removals: REMOVALS, mutationConcurrency: MUTATION_CONCURRENCY, thresholds: THRESHOLDS,
   commit: (await run('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim() };
 writeFileSync(resolve(output, 'environment.json'), JSON.stringify(environment, null, 2));
 try {

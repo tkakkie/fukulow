@@ -22,6 +22,13 @@ export type PoolSample = { at: number; fields: Record<string, number> };
 // Successful request completion bounds COMMIT from above for a tracked Member's removal or restore.
 export type Member = { channelId: string; removeStartedAt?: number; removedAt?: number; restoredAt?: number; resets: number[]; close?: { at: number; code: number } };
 export type Revocation = { socketIndex: number; channelId: string | null; at: number };
+export type SendRecord = { channelId: string; beforeMs: number; afterMs: number; afterHold?: boolean };
+export type SendTiming = {
+  // Add this offset to the server's monotonic clock to express it on the harness clock.
+  offsetBoundsMs: [number, number];
+  uncertaintyMs: number;
+  records: SendRecord[];
+};
 export type Run = {
   kind: Kind | 'control'; size: number; repeat: number;
   // pass: expected start of the fallback recheck pass the fault is aligned to.
@@ -33,6 +40,7 @@ export type Run = {
   rss: { at: number; kb: number }[];
   metrics: Record<string, number> | undefined;
   members: Member[]; revocations: Revocation[];
+  sendTiming?: SendTiming; // Absent in archived runs, which use the original arrival rule.
   serverCloses: number; // sockets of any Member closed by the server during the run
 };
 
@@ -147,6 +155,18 @@ function summarize(run: Run, members: MemberNotices[]) {
 export function judge(run: Run) {
   const reasons: string[] = [];
   const { fault, recovery } = run.times;
+  const timing = run.sendTiming;
+  const clockOffset = timing ? (timing.offsetBoundsMs[0] + timing.offsetBoundsMs[1]) / 2 : 0;
+  const sends = new Map<string, SendRecord | undefined>();
+  for (const record of timing?.records ?? []) {
+    // The fixture has one removed Member and one socket for each tracked Channel.
+    // Multiple records for a Channel cannot be matched unambiguously.
+    sends.set(record.channelId, sends.has(record.channelId) ? undefined : record);
+  }
+  const indeterminate: (Revocation & { sentAt: number })[] = [];
+  const missingSendRecords: Revocation[] = [];
+  let matchedSendRecords = 0;
+  let faultSend = false;
   // The relay measures Sync-to-ReadyForQuery. A successful completion in the removal
   // window is run-level corroboration only. It carries no Member or Channel identity.
   let lastPreFaultRecheck = -Infinity;
@@ -161,13 +181,27 @@ export function judge(run: Run) {
   let unexpected = false;
   let faultArrival = false;
   for (const notice of run.revocations) {
+    const duringFault = notice.at >= fault && notice.at < recovery;
+    if (timing) {
+      const record = notice.channelId === null ? undefined : sends.get(notice.channelId);
+      if (!record) missingSendRecords.push(notice);
+      else {
+        sends.delete(record.channelId);
+        matchedSendRecords++;
+        if (duringFault) {
+          const sentAt = clockOffset + (record.beforeMs + record.afterMs) / 2;
+          if (sentAt - timing.uncertaintyMs >= fault) faultSend = true;
+          else if (sentAt + timing.uncertaintyMs >= fault) indeterminate.push({ ...notice, sentAt });
+        }
+      }
+    }
     const member = members[notice.socketIndex];
     if (!member || member.channelId !== notice.channelId) {
       unexpected = true;
       continue;
     }
     member.revoked.push(notice.at);
-    if (notice.at >= fault && notice.at < recovery) {
+    if (!timing && duringFault) {
       const arrivalAfterFaultMs = notice.at - fault;
       if (run.kind !== 'control' && arrivalAfterFaultMs <= BOUNDARY_EXCEPTION_MS &&
         member.removedAt !== undefined && member.removedAt < fault &&
@@ -186,6 +220,9 @@ export function judge(run: Run) {
   if (!m) reasons.push('no metrics event after the holds resolved');
   if (run.mutationFailures && run.kind !== 'outage') reasons.push(`${run.mutationFailures} removal/restore requests failed`);
   if (faultArrival) reasons.push('a revocation was delivered while the failure was active');
+  if (faultSend) reasons.push('a revocation was sent while the failure was active');
+  if (indeterminate.length) reasons.push('a revocation send time is indeterminate at fault start');
+  if (missingSendRecords.length) reasons.push('a revocation has no matching server send record');
   if (members.some(member => member.revoked.some(at => member.removedAt === undefined || at < member.removeStartedAt!))) reasons.push('a revocation reached a Member without a successful removal or before it');
   if (members.some(member => member.restoredAt !== undefined && member.revoked.some(at => at >= member.restoredAt!))) reasons.push('a restored registration received a revocation');
   if (members.some(member => member.revoked.length > 1)) reasons.push('duplicate revocation');
@@ -216,7 +253,11 @@ export function judge(run: Run) {
   if (!(s.httpProbe.baseline.count > 0) || !(db.baseline.count > 0)) reasons.push('missing baseline probes');
   const verdict: RunVerdict = reasons.length ? 'FAIL' : boundaryExceptions.length ? 'PASS_WITH_BOUNDARY_EXCEPTION' : 'PASS';
   // pass means a clean PASS; read verdict for the boundary exception.
-  return { pass: verdict === 'PASS', verdict, reasons, summary: { ...s, boundaryExceptions } };
+  const sendTiming = timing && {
+    uncertaintyMs: timing.uncertaintyMs, serverSendRecords: timing.records.length, matchedSendRecords,
+    indeterminate, missingSendRecords,
+  };
+  return { pass: verdict === 'PASS', verdict, reasons, summary: { ...s, boundaryExceptions, ...(sendTiming && { sendTiming }) } };
 }
 
 export type RunVerdict = 'PASS' | 'PASS_WITH_BOUNDARY_EXCEPTION' | 'FAIL';

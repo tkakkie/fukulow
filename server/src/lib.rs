@@ -418,6 +418,11 @@ async fn health() -> Result<&'static str, auth::ApiError> {
         auth::Action::Public,
         auth::Resource::Global,
     )?;
+    tracing::trace!(
+        target: observability::REVOCATION_MEASUREMENT_TARGET,
+        event = "revocation_clock_sample",
+        server_ms = observability::measurement_ms()
+    );
     Ok("ok")
 }
 

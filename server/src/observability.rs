@@ -12,10 +12,16 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::Instrument;
-use tracing_subscriber::{filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    filter::{LevelFilter, Targets},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 
 pub const INTERVAL: Duration = Duration::from_secs(60);
 const TARGET: &str = "fukulow";
+pub(crate) const REVOCATION_MEASUREMENT_TARGET: &str = "fukulow_revocation_measurement";
+static MEASUREMENT_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
 
 // Only our reviewed fields are enabled: dependency diagnostics can include SQL,
@@ -29,23 +35,34 @@ pub fn init() -> Result<(), Box<dyn std::error::Error>> {
             b"{\"level\":\"ERROR\",\"target\":\"fukulow\",\"fields\":{\"event\":\"panic\"}}\n",
         );
     }));
-    subscriber(std::io::stderr).try_init()?;
+    let measure_revocations = std::env::var("FUKULOW_REVOCATION_MEASUREMENT").as_deref() == Ok("1");
+    subscriber(std::io::stderr, measure_revocations).try_init()?;
     Ok(())
 }
 
-fn subscriber<W>(writer: W) -> impl tracing::Subscriber + Send + Sync
+fn subscriber<W>(writer: W, measure_revocations: bool) -> impl tracing::Subscriber + Send + Sync
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
-    tracing_subscriber::registry()
-        .with(Targets::new().with_target(TARGET, tracing::Level::INFO))
-        .with(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_writer(writer)
-                .with_current_span(true)
-                .with_span_list(false),
-        )
+    let measurement_level = if measure_revocations {
+        LevelFilter::TRACE
+    } else {
+        LevelFilter::OFF
+    };
+    let targets = Targets::new()
+        .with_target(TARGET, tracing::Level::INFO)
+        .with_target(REVOCATION_MEASUREMENT_TARGET, measurement_level);
+    tracing_subscriber::registry().with(targets).with(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(writer)
+            .with_current_span(true)
+            .with_span_list(false),
+    )
+}
+
+pub(crate) fn measurement_ms() -> f64 {
+    MEASUREMENT_EPOCH.elapsed().as_secs_f64() * 1000.0
 }
 
 pub(crate) async fn request(request: Request, next: Next) -> Response {

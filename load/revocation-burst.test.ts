@@ -176,6 +176,68 @@ test('judge reports the approved 0 and 2 ms boundary arrivals separately from cl
   }
 });
 
+const sendTimeFixture = (sendRelativeToFaultMs?: number) => {
+  const run = boundaryFixture();
+  run.revocations[0].at = run.times.fault + 3;
+  const serverAt = run.times.fault - 100 + (sendRelativeToFaultMs ?? 0);
+  run.sendTiming = {
+    offsetBoundsMs: [99.75, 100.25],
+    uncertaintyMs: 0.5,
+    records: sendRelativeToFaultMs === undefined ? [] : [
+      { channelId: 'two', beforeMs: serverAt - 0.25, afterMs: serverAt + 0.25 },
+    ],
+  };
+  return run;
+};
+
+test('a send before the fault passes even when it arrives beyond the old allowance', () => {
+  const result = judge(sendTimeFixture(-0.75));
+  assert.equal(result.verdict, 'PASS');
+  assert.deepEqual(result.summary.boundaryExceptions, []);
+  assert.equal(result.summary.sendTiming?.matchedSendRecords, 1);
+});
+
+test('a send during the fault fails even when it arrives within the old allowance', () => {
+  const run = sendTimeFixture(0.5);
+  run.revocations[0].at = run.times.fault + 1;
+  const result = judge(run);
+  assert.equal(result.verdict, 'FAIL');
+  assert.deepEqual(result.reasons, ['a revocation was sent while the failure was active']);
+});
+
+test('a send whose uncertainty interval overlaps the fault fails as indeterminate', () => {
+  for (const offset of [-0.5, 0, 0.25]) {
+    const run = sendTimeFixture(offset);
+    const result = judge(run);
+    assert.equal(result.verdict, 'FAIL');
+    assert.deepEqual(result.reasons, ['a revocation send time is indeterminate at fault start']);
+    assert.deepEqual(result.summary.sendTiming?.indeterminate, [
+      { ...run.revocations[0], sentAt: run.times.fault + offset },
+    ]);
+  }
+});
+
+test('a notice without an unambiguous matching send record fails', () => {
+  const missing = sendTimeFixture();
+  const ambiguous = sendTimeFixture(-1);
+  ambiguous.sendTiming!.records.push(ambiguous.sendTiming!.records[0]);
+  for (const run of [missing, ambiguous]) {
+    const result = judge(run);
+    assert.equal(result.verdict, 'FAIL');
+    assert.deepEqual(result.reasons, ['a revocation has no matching server send record']);
+    assert.deepEqual(result.summary.sendTiming?.missingSendRecords, run.revocations);
+  }
+});
+
+test('a serialized old-format run keeps the original boundary verdict', () => {
+  const run = boundaryFixture();
+  run.revocations[0].at = run.times.fault + 2;
+  const result = judge(JSON.parse(JSON.stringify(run)));
+  assert.equal(result.verdict, 'PASS_WITH_BOUNDARY_EXCEPTION');
+  assert.equal(result.summary.boundaryExceptions.length, 1);
+  assert.equal(Object.hasOwn(result.summary, 'sendTiming'), false);
+});
+
 test('judge fails arrivals beyond the bound or without pre-fault removal confirmation', () => {
   for (const [arrivalOffset, removalOffset] of [[2.001, -153], [2, 0], [2, 1]]) {
     const run = boundaryFixture();
