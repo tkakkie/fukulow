@@ -13,8 +13,8 @@ export const validityResult = (reasons: string[]): Validity => ({ valid: reasons
 const count = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
 const nonnegative = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 
-export function poolStatsCapability(commit: string) {
-  const grep = spawnSync('git', ['grep', '-q', '-F', '"pool_stats"', commit, '--', 'server/src']);
+export function poolStatsCapability(commit: string, cwd?: string) {
+  const grep = spawnSync('git', ['grep', '-q', '-F', '"pool_stats"', commit, '--', 'server/src'], { cwd });
   if (grep.status === 0) return { emitsPoolStats: true };
   if (grep.status === 1) return { emitsPoolStats: false, poolStats: 'not emitted by this commit' as const };
   throw new Error('Unable to determine pool_stats capability');

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticValidity, hasAppFailure, poolStatsCapability, validityResult } from './pool-before-after-diagnostic-results.ts';
 import { generatorConfig } from './pool-before-after-config.ts';
 import { parseActivity } from './pool-before-after-db.ts';
@@ -90,9 +94,28 @@ test('pair classifications apply in order at the pre-set boundaries', () => {
 });
 
 test('detects pool_stats in the server source of each arm commit', () => {
-  assert.deepEqual(poolStatsCapability('956f91e'), { emitsPoolStats: false, poolStats: 'not emitted by this commit' });
-  assert.deepEqual(poolStatsCapability('a714536'), { emitsPoolStats: true });
-  assert.throws(() => poolStatsCapability('no-such-arm-commit'), /Unable to determine pool_stats capability/);
+  // A throwaway repository, so the test does not depend on CI's shallow clone holding old commits.
+  const dir = mkdtempSync(join(tmpdir(), 'pool-stats-'));
+  try {
+    const git = (...args: string[]) => {
+      const run = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: dir, encoding: 'utf8' });
+      assert.equal(run.status, 0, run.stderr);
+      return run.stdout.trim();
+    };
+    git('init', '-q');
+    mkdirSync(join(dir, 'server/src'), { recursive: true });
+    writeFileSync(join(dir, 'server/src/main.rs'), 'fn main() {}\n');
+    git('add', '.'); git('commit', '-q', '-m', 'old');
+    const old = git('rev-parse', 'HEAD');
+    writeFileSync(join(dir, 'server/src/pool.rs'), 'const EVENT: &str = "pool_stats";\n');
+    git('add', '.'); git('commit', '-q', '-m', 'new');
+    const emitting = git('rev-parse', 'HEAD');
+    assert.deepEqual(poolStatsCapability(old, dir), { emitsPoolStats: false, poolStats: 'not emitted by this commit' });
+    assert.deepEqual(poolStatsCapability(emitting, dir), { emitsPoolStats: true });
+    assert.throws(() => poolStatsCapability('no-such-arm-commit', dir), /Unable to determine pool_stats capability/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('pre-#427 arm accepts a quiet log covering the window without pool_stats', () => {
