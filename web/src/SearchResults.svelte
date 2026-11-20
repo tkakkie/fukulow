@@ -62,10 +62,23 @@
 </script>
 
 <section class="search-results" aria-label="検索結果">
-  <p class="search-results__range" data-testid="search-range-note">{rangeNote}</p>
+  {#if state.status !== 'unavailable'}
+    <p class="search-results__range" data-testid="search-range-note">{rangeNote}</p>
+  {/if}
+
+  {#if state.openNotice}
+    <div data-testid="search-open-notice">
+      <StatusBanner tone="info" message={state.openNotice} />
+    </div>
+  {/if}
 
   {#if state.status === 'loading'}
     <Skeleton rows={4} label="検索結果を読み込み中" />
+  {:else if state.status === 'unavailable'}
+    <EmptyState
+      title="メッセージ検索は現在準備中です。"
+      description="検索機能が利用できるようになり次第、お使いいただけます。"
+    />
   {:else if state.status === 'too-short'}
     <StatusBanner
       tone="danger"

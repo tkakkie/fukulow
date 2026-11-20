@@ -237,8 +237,10 @@ function appendAst(nodes: AST.TemplateNode[], parent: MiniNode, doc: MiniDoc): v
 function matches(el: MiniEl, sel: string): boolean {
   if (sel === '[role="search"]') return el.getAttribute('role') === 'search'
   if (sel === '[role="alert"]') return el.getAttribute('role') === 'alert'
+  if (sel === '[role="status"]') return el.getAttribute('role') === 'status'
   if (sel === '[aria-busy="true"]') return el.getAttribute('aria-busy') === 'true'
   if (sel === '[data-testid="search-range-note"]') return el.getAttribute('data-testid') === 'search-range-note'
+  if (sel === '[data-testid="search-open-notice"]') return el.getAttribute('data-testid') === 'search-open-notice'
   return el.localName === sel
 }
 
@@ -296,6 +298,7 @@ function baseState(overrides: Partial<SearchState> = {}): SearchState {
     minLength: null,
     retryable: false,
     loadMoreError: null,
+    openNotice: null,
     ...overrides,
   }
 }
@@ -340,6 +343,34 @@ describe('SearchBar a11y and keyboard behaviour', () => {
       // Submit button fires onsubmit with current value.
       host.querySelector('button')!.click()
       expect(onsubmit).toHaveBeenCalledWith('議事録')
+
+      await unmount(inst)
+    })
+  })
+
+  it('keeps the submit button usable while a search is pending so a stalled request can be replaced', async () => {
+    await withDom(async (doc) => {
+      const host = doc.createElement('div')
+      doc.body.appendChild(host)
+      const onsubmit = vi.fn()
+      const props = $state({ value: '新しい検索', busy: true })
+
+      const inst = mount(SearchBar, {
+        target: host as unknown as Element,
+        props: {
+          get value() { return props.value },
+          get busy() { return props.busy },
+          open: true,
+          oninput: (v) => { props.value = v },
+          onsubmit,
+        },
+      })
+      flushSync()
+
+      const submitBtn = host.querySelector('button')!
+      expect(submitBtn.disabled).toBe(false)
+      submitBtn.click()
+      expect(onsubmit).toHaveBeenCalledWith('新しい検索')
 
       await unmount(inst)
     })
@@ -394,6 +425,20 @@ describe('SearchResults a11y, states, and result opening', () => {
       flushSync()
       expect(host.textContent).toContain('一致するメッセージが見つかりませんでした')
       expect(host.querySelector('[data-testid="search-range-note"]')?.textContent).toContain('2026')
+
+      // Unavailable (production default before server search lands): polite copy, no retry, no live region
+      props.state = baseState({ status: 'unavailable', retryable: false, rangeStart: null })
+      flushSync()
+      expect(host.textContent).toContain('メッセージ検索は現在準備中です。')
+      expect(host.querySelector('[data-testid="search-range-note"]')).toBeNull()
+      expect(host.querySelectorAll('button')).toHaveLength(0)
+      expect(host.querySelector('[role="status"]')).toBeNull()
+
+      // Inline openNotice when a hit's Channel cannot be opened: visual notice, no live region
+      props.state = baseState({ status: 'results', openNotice: 'この検索結果のチャンネルは現在開けません。' })
+      flushSync()
+      expect(host.querySelector('[data-testid="search-open-notice"]')?.textContent).toContain('開けません')
+      expect(host.querySelector('[role="status"]')).toBeNull()
 
       await unmount(inst)
     })

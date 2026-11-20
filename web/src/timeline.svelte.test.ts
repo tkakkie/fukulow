@@ -34,6 +34,7 @@ import Workspace from './Workspace.svelte'
 import { windowClient } from './message-window-test-helpers'
 import { deferred, replyPage, msg, summary } from './topic-test-helpers'
 import CreateChannelForm from './CreateChannelForm.svelte'
+import { createMockSearchSource } from './search-source'
 
 type ListenerEntry = {
   fn: (event: MiniDomEvent) => void
@@ -9713,4 +9714,258 @@ it('ReplyPanel Move dialog treats a Topic missing from a partial list as unavail
   } finally {
     await cRetry.close()
   }
+})
+
+describe('Workspace search integration (#153)', () => {
+  const ORG_ID = '00000000-0000-4000-8000-000000000001'
+  const CH_ID = '00000000-0000-4000-8000-000000000010'
+  const TOPIC_ID = '00000000-0000-4000-8000-000000000020'
+
+  async function mountSearchWorkspace(opts: {
+    width?: number
+    href?: string
+    searchSource?: ReturnType<typeof createMockSearchSource>
+    setupNet?: (net: ReturnType<typeof fakeNetwork>) => void
+  } = {}) {
+    testWin.innerWidth = opts.width ?? 1280
+    const net = fakeNetwork()
+    opts.setupNet?.(net)
+    const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.socket.onReady()
+    net.lists[0]!.resolve(ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      channels: [channel(CH_ID, 'general')],
+    }))
+    const navigation = createNavigation({
+      location: { href: opts.href ?? `http://localhost/o/${ORG_ID}/c/${CH_ID}` },
+      history: { state: null, pushState() {}, replaceState() {} },
+      get innerWidth() { return testWin.innerWidth },
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const instance = mount(Workspace, {
+      target: host as unknown as Element,
+      props: {
+        navigation,
+        selectedOrganizationId: ORG_ID,
+        searchSource: opts.searchSource ?? createMockSearchSource(),
+        session: {
+          channels: channelsAdapter(raw.channels),
+          sync: syncAdapter(raw.sync),
+          topics: (id: string) => topicsAdapter(raw.topics, id),
+          close: raw.close,
+        },
+      },
+    })
+    await settle()
+    return {
+      host,
+      navigation,
+      async close() {
+        await unmount(instance)
+        navigation.destroy()
+        raw.close()
+        host.remove()
+      },
+    }
+  }
+
+  it('keeps the same search form and input focus on submit, without extra live regions', async () => {
+    const ctx = await mountSearchWorkspace()
+    try {
+      const formBefore = ctx.host.querySelector('#main-content [role="search"]')!
+      const inputBefore = formBefore.querySelector('input')!
+      inputBefore.focus()
+      expect(testDoc.activeElement).toBe(inputBefore)
+
+      inputBefore.value = 'リリース'
+      inputBefore.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      formBefore.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+
+      const formAfter = ctx.host.querySelector('#main-content [role="search"]')!
+      const inputAfter = formAfter.querySelector('input')!
+      expect(formAfter).toBe(formBefore)
+      expect(inputAfter).toBe(inputBefore)
+      expect(testDoc.activeElement).toBe(inputBefore)
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+      expect(queryAll(ctx.host, '#main-content [role="status"]')).toHaveLength(0)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('keeps the current view and shows an inline notice when selecting a hit whose Channel cannot be opened', async () => {
+    const ctx = await mountSearchWorkspace()
+    try {
+      const routeBefore = ctx.navigation.get().target
+      const form = ctx.host.querySelector('#main-content [role="search"]')!
+      const input = form.querySelector('input')!
+      input.value = 'リリース'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+
+      // Default mock hit has channelId 'general' which is not in the user's loaded UUID channels.
+      const hitButton = ctx.host.querySelector('#main-content ol button')!
+      hitButton.click()
+      await settle()
+
+      expect(ctx.navigation.get().target).toEqual(routeBefore)
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+      expect(ctx.host.querySelector('[data-testid="search-open-notice"]')?.textContent).toContain('開けません')
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('exposes search at the phone Channel-list level (375 px) and transitions to results and back', async () => {
+    const ctx = await mountSearchWorkspace({ width: 375, href: `http://localhost/o/${ORG_ID}` })
+    try {
+      const workspace = ctx.host.querySelector('.workspace')!
+      expect(workspace.getAttribute('data-mobile-level')).toBe('channels')
+
+      const listForm = ctx.host.querySelector('.channel-column [role="search"]')
+      expect(listForm).not.toBeNull()
+      const listInput = listForm!.querySelector('input')!
+      listInput.focus()
+      listInput.value = 'リリース'
+      listInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      listForm!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+
+      expect(workspace.getAttribute('data-mobile-level')).toBe('view')
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+      const mainSearchInput = ctx.host.querySelector('#main-content [role="search"] input')!
+      expect(testDoc.activeElement).toBe(mainSearchInput)
+
+      const backBtn = queryAll(ctx.host, '#main-content header button').find((b) => b.textContent.includes('戻る'))!
+      backBtn.click()
+      await settle()
+
+      expect(workspace.getAttribute('data-mobile-level')).toBe('channels')
+      const restoredListInput = ctx.host.querySelector('.channel-column [role="search"] input')!
+      expect(testDoc.activeElement).toBe(restoredListInput)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('closes the same topmost layer on Escape regardless of focus inside search', async () => {
+    const ctx = await mountSearchWorkspace({
+      href: `http://localhost/o/${ORG_ID}/c/${CH_ID}?panel=topics`,
+    })
+    try {
+      const workspace = ctx.host.querySelector('.workspace')!
+      expect(workspace.getAttribute('data-panel-open')).toBe('true')
+
+      const form = ctx.host.querySelector('#main-content [role="search"]')!
+      const input = form.querySelector('input')!
+      input.focus()
+      input.value = 'リリース'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+
+      // First Escape from the focused search input closes the topmost layer (the right panel), keeping search open.
+      const esc1 = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      esc1.key = 'Escape'
+      input.dispatchEvent(esc1)
+      await settle()
+      expect(workspace.getAttribute('data-panel-open')).toBe('false')
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+
+      // Second Escape closes search.
+      const esc2 = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      esc2.key = 'Escape'
+      input.dispatchEvent(esc2)
+      await settle()
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).not.toBe('検索結果')
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('keeps Topic view Shift+Tab order from Composer -> roving row -> panel toggle -> チャンネルへ戻る ahead of SearchBar', async () => {
+    const topicMsg = {
+      ...record(1, CH_ID),
+      body: 'トピック本文',
+      topic_id: TOPIC_ID,
+      topic_name: 'キーボード議題',
+    }
+    const ctx = await mountSearchWorkspace({
+      href: `http://localhost/o/${ORG_ID}/c/${CH_ID}/t/${TOPIC_ID}`,
+      setupNet(net) {
+        net.topicMessages[`${CH_ID}:${TOPIC_ID}`] = ok({
+          history_generation: '00000000-0000-4000-8000-000000000515',
+          as_of_seq: 1,
+          messages: [topicMsg],
+          has_more: false,
+        })
+        net.topicSummaries[`${CH_ID}:${TOPIC_ID}`] = ok({
+          history_generation: '00000000-0000-4000-8000-000000000515',
+          as_of_seq: 1,
+          topic: {
+            mention_unread_count: 0,
+            id: TOPIC_ID,
+            name: 'キーボード議題',
+            first_seq: 1,
+            last_seq: 1,
+            message_count: 1,
+            latest_message: topicMsg,
+            read_seq: 0,
+            unread_count: 0,
+          },
+        })
+      },
+    })
+    try {
+      const main = ctx.host.querySelector('#main-content')!
+      // Collect desktop-visible tabbable elements in DOM order inside #main-content
+      // (.mobile-only wrappers are display: none at 1280px).
+      const tabbables: MiniElement[] = []
+      const walk = (node: MiniElement) => {
+        if ((node.getAttribute('class') ?? '').split(/\s+/).includes('mobile-only')) return
+        const tag = node.tagName.toLowerCase()
+        const tabindex = node.getAttribute('tabindex')
+        const disabled = node.hasAttribute('disabled') || (node as unknown as { disabled?: boolean }).disabled === true
+        const naturallyTabbable = tag === 'button' || tag === 'input' || tag === 'textarea' || tag === 'select' || (tag === 'a' && node.hasAttribute('href'))
+        const isTabbable = !disabled && (
+          (naturallyTabbable && tabindex !== '-1') ||
+          (tabindex !== null && tabindex !== '' && Number(tabindex) >= 0)
+        )
+        if (isTabbable) tabbables.push(node)
+        for (const child of node.childNodes) {
+          if (child instanceof MiniElement) walk(child)
+        }
+      }
+      walk(main)
+
+      const composer = main.querySelector('textarea')!
+      const rovingRow = main.querySelector('.ui-message-row[data-focusable="true"][tabindex="0"]')!
+      const panelToggle = main.querySelector('button[aria-label="パネルを開く(⌘.)"]')!
+      const backButton = queryAll(main, 'button').find((b) => b.textContent.includes('チャンネルへ戻る'))!
+      const searchSubmit = queryAll(main, '[role="search"] button').find((b) => b.textContent.trim() === '検索')!
+      const searchInput = main.querySelector('[role="search"] input')!
+
+      const composerIdx = tabbables.indexOf(composer)
+      expect(composerIdx).toBeGreaterThanOrEqual(5)
+      // Shift+Tab x1 -> roving Message row, x2 -> panel toggle, x3 -> チャンネルへ戻る (matching e2e/topics.spec.ts & e2e/unread.spec.ts)
+      expect(tabbables[composerIdx - 1]).toBe(rovingRow)
+      expect(tabbables[composerIdx - 2]).toBe(panelToggle)
+      expect(tabbables[composerIdx - 3]).toBe(backButton)
+      // SearchBar controls precede the view header row in DOM and visual order.
+      expect(tabbables[composerIdx - 4]).toBe(searchSubmit)
+      expect(tabbables[composerIdx - 5]).toBe(searchInput)
+    } finally {
+      await ctx.close()
+    }
+  })
 })

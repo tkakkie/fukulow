@@ -55,7 +55,7 @@
       onkeydown={handleKeydown}
     />
   </div>
-  <Button type="submit" variant="secondary" disabled={disabled || busy}>検索</Button>
+  <Button type="submit" variant="secondary" {disabled}>検索</Button>
 </form>
 
 <style>

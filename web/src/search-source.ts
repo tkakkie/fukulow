@@ -52,6 +52,7 @@ export type SearchPage = {
 
 export type SearchFailure =
   | { kind: 'too_short'; minLength?: number }
+  | { kind: 'unavailable' }
   | { kind: 'timeout' }
   | { kind: 'error'; retryable: boolean }
 
@@ -64,66 +65,70 @@ export interface SearchSource {
 }
 
 export const SEARCH_RANGE_DAYS = 180
+const DAY_MS = 24 * 60 * 60 * 1000
 
 export type MockSearchOptions = {
   items?: readonly SearchResultItem[]
   rangeDays?: number
+  /** Clock returning current epoch milliseconds; defaults to `Date.now`. */
+  now?: () => number
+  /** Explicit ISO cutoff override for tests; defaults to `now() - rangeDays` days. */
   rangeStart?: string
   minLength?: number
 }
 
-const DEFAULT_RANGE_START = '2026-05-24T00:00:00.000Z'
-
-const DEFAULT_MOCK_ITEMS: readonly SearchResultItem[] = [
-  {
-    messageId: 'mock-msg-1',
-    channelId: 'general',
-    topicId: 'topic-release',
-    replyRootId: null,
-    context: {
-      kind: 'channel',
+function buildDefaultMockItems(nowMs: number): readonly SearchResultItem[] {
+  return [
+    {
+      messageId: 'mock-msg-1',
       channelId: 'general',
-      channelName: 'general',
       topicId: 'topic-release',
-      topicName: 'リリース準備',
+      replyRootId: null,
+      context: {
+        kind: 'channel',
+        channelId: 'general',
+        channelName: 'general',
+        topicId: 'topic-release',
+        topicName: 'リリース準備',
+      },
+      authorName: '田中 美咲',
+      authorActive: true,
+      createdAt: new Date(nowMs - 1 * DAY_MS).toISOString(),
+      excerpt: '来週のリリース手順書を更新しました。確認をお願いします。',
     },
-    authorName: '田中 美咲',
-    authorActive: true,
-    createdAt: '2026-11-19T09:30:00.000Z',
-    excerpt: '来週のリリース手順書を更新しました。確認をお願いします。',
-  },
-  {
-    messageId: 'mock-msg-2',
-    channelId: 'general',
-    topicId: null,
-    replyRootId: 'mock-root-1',
-    context: {
-      kind: 'channel',
+    {
+      messageId: 'mock-msg-2',
       channelId: 'general',
-      channelName: 'general',
+      topicId: null,
+      replyRootId: 'mock-root-1',
+      context: {
+        kind: 'channel',
+        channelId: 'general',
+        channelName: 'general',
+      },
+      authorName: '佐藤 健',
+      authorActive: true,
+      createdAt: new Date(nowMs - 2 * DAY_MS).toISOString(),
+      excerpt: '進捗率 100% の確認と query_log\\backup の手順を追記しました。',
     },
-    authorName: '佐藤 健',
-    authorActive: true,
-    createdAt: '2026-11-18T14:15:00.000Z',
-    excerpt: '進捗率 100% の確認と query_log\\backup の手順を追記しました。',
-  },
-  {
-    messageId: 'mock-msg-3',
-    channelId: 'dm-1',
-    topicId: null,
-    replyRootId: null,
-    context: {
-      kind: 'dm',
+    {
+      messageId: 'mock-msg-3',
       channelId: 'dm-1',
-      peerName: '鈴木 花子',
-      peerActive: true,
+      topicId: null,
+      replyRootId: null,
+      context: {
+        kind: 'dm',
+        channelId: 'dm-1',
+        peerName: '鈴木 花子',
+        peerActive: true,
+      },
+      authorName: '鈴木 花子',
+      authorActive: true,
+      createdAt: new Date(nowMs - 3 * DAY_MS).toISOString(),
+      excerpt: '明日の定例ミーティングの議題を共有します。',
     },
-    authorName: '鈴木 花子',
-    authorActive: true,
-    createdAt: '2026-11-17T11:05:00.000Z',
-    excerpt: '明日の定例ミーティングの議題を共有します。',
-  },
-]
+  ]
+}
 
 function encodeCursor(offset: number): string {
   return `mock:${offset}`
@@ -135,11 +140,10 @@ function decodeCursor(cursor: string | undefined): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
 }
 
-/** Deterministic in-memory mock used by tests and by the app until the server search API exists. */
+/** Deterministic in-memory mock used by tests and dev builds until the server search API exists. */
 export function createMockSearchSource(options: MockSearchOptions = {}): SearchSource {
-  const items = options.items ?? DEFAULT_MOCK_ITEMS
   const rangeDays = options.rangeDays ?? SEARCH_RANGE_DAYS
-  const rangeStart = options.rangeStart ?? DEFAULT_RANGE_START
+  const now = options.now ?? (() => Date.now())
   const minLength = options.minLength ?? 2
 
   return {
@@ -151,9 +155,23 @@ export function createMockSearchSource(options: MockSearchOptions = {}): SearchS
       if (scalarLength < minLength) {
         return { ok: false, failure: { kind: 'too_short', minLength } }
       }
+      const nowMs = now()
+      const cutoffMs =
+        options.rangeStart !== undefined
+          ? Date.parse(options.rangeStart)
+          : nowMs - rangeDays * DAY_MS
+      const rangeStart =
+        options.rangeStart !== undefined
+          ? options.rangeStart
+          : new Date(cutoffMs).toISOString()
+      const items = options.items ?? buildDefaultMockItems(nowMs)
       const needle = request.query.toLocaleLowerCase()
       const matched = items.filter((item) => {
         if (request.channelId && item.channelId !== request.channelId) return false
+        const createdMs = Date.parse(item.createdAt)
+        if (Number.isFinite(cutoffMs) && (!Number.isFinite(createdMs) || createdMs < cutoffMs)) {
+          return false
+        }
         return item.excerpt.toLocaleLowerCase().includes(needle)
       })
       const offset = decodeCursor(request.cursor)
@@ -173,10 +191,27 @@ export function createMockSearchSource(options: MockSearchOptions = {}): SearchS
   }
 }
 
+/** Placeholder source returned in production builds until the server `/api/v1` search endpoint lands. */
+export function createUnavailableSearchSource(): SearchSource {
+  return {
+    async search(request: SearchRequest): Promise<SearchResponse> {
+      if (request.signal?.aborted) {
+        return { ok: false, failure: { kind: 'error', retryable: true } }
+      }
+      return { ok: false, failure: { kind: 'unavailable' } }
+    },
+  }
+}
+
 /**
  * Single plug-in point for the production search API adapter (#153).
- * Replace `createMockSearchSource()` here once the server `/api/v1` search endpoint is added.
+ * In production builds, returns an unavailable state until the server `/api/v1` search endpoint lands.
+ * The in-memory mock is used only in tests and dev builds (`import.meta.env.DEV`).
  */
-export function createDefaultSearchSource(_organizationId: string): SearchSource {
-  return createMockSearchSource()
+export function createDefaultSearchSource(
+  _organizationId: string,
+  options: { isDev?: boolean } = {},
+): SearchSource {
+  const isDev = options.isDev ?? import.meta.env.DEV
+  return isDev ? createMockSearchSource() : createUnavailableSearchSource()
 }

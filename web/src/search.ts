@@ -1,10 +1,13 @@
 import {
   SEARCH_RANGE_DAYS,
+  type SearchRequest,
+  type SearchResponse,
   type SearchResultItem,
   type SearchSource,
 } from './search-source'
 
 export const SEARCH_PAGE_SIZE = 20
+export const SEARCH_TIMEOUT_MS = 10_000
 
 export type SearchTarget = {
   channelId: string
@@ -20,6 +23,7 @@ export type SearchStatus =
   | 'loading-more'
   | 'empty'
   | 'too-short'
+  | 'unavailable'
   | 'timeout'
   | 'error'
 
@@ -35,11 +39,15 @@ export type SearchState = {
   minLength: number | null
   retryable: boolean
   loadMoreError: 'timeout' | 'error' | null
+  openNotice: string | null
 }
 
 export type SearchControllerOptions = {
   source: SearchSource
-  onOpenResult?: (target: SearchTarget) => void
+  /** Return `false` to cancel navigation and keep the current view with an inline notice. */
+  onOpenResult?: (target: SearchTarget) => boolean | void
+  /** Request timeout in milliseconds (defaults to `SEARCH_TIMEOUT_MS`, 10 s per `docs/ui.md` §5). */
+  timeoutMs?: number
 }
 
 /**
@@ -64,10 +72,12 @@ function initialState(): SearchState {
     minLength: null,
     retryable: false,
     loadMoreError: null,
+    openNotice: null,
   }
 }
 
 export function createSearchController(options: SearchControllerOptions) {
+  const timeoutMs = options.timeoutMs ?? SEARCH_TIMEOUT_MS
   let state: SearchState = initialState()
   let generation = 0
   let destroyed = false
@@ -82,6 +92,50 @@ export function createSearchController(options: SearchControllerOptions) {
   const abortInFlight = () => {
     inFlight?.abort()
     inFlight = null
+  }
+
+  async function runWithTimeout(
+    request: Omit<SearchRequest, 'signal'>,
+    controller: AbortController,
+  ): Promise<SearchResponse | 'aborted'> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
+    let onAbort: (() => void) | undefined
+
+    const deadlinePromise = new Promise<SearchResponse | 'aborted'>((resolve) => {
+      onAbort = () => {
+        if (timer !== undefined) clearTimeout(timer)
+        if (!timedOut) resolve('aborted')
+      }
+      if (controller.signal.aborted) {
+        resolve('aborted')
+        return
+      }
+      controller.signal.addEventListener('abort', onAbort, { once: true })
+      timer = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+        resolve({ ok: false, failure: { kind: 'timeout' } })
+      }, timeoutMs)
+    })
+
+    const requestPromise = (async (): Promise<SearchResponse> => {
+      try {
+        return await options.source.search({
+          ...request,
+          signal: controller.signal,
+        })
+      } catch {
+        return { ok: false, failure: { kind: 'error', retryable: true } }
+      }
+    })()
+
+    try {
+      return await Promise.race([requestPromise, deadlinePromise])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      if (onAbort) controller.signal.removeEventListener('abort', onAbort)
+    }
   }
 
   async function submit(rawQuery?: string): Promise<void> {
@@ -112,61 +166,55 @@ export function createSearchController(options: SearchControllerOptions) {
       minLength: null,
       retryable: false,
       loadMoreError: null,
+      openNotice: null,
     })
 
-    try {
-      const response = await options.source.search({
-        query,
-        limit: SEARCH_PAGE_SIZE,
-        signal: controller.signal,
+    const response = await runWithTimeout({ query, limit: SEARCH_PAGE_SIZE }, controller)
+    if (destroyed || gen !== generation || response === 'aborted') return
+    inFlight = null
+
+    if (response.ok) {
+      const { items, nextCursor, rangeDays, rangeStart } = response.page
+      publish({
+        ...state,
+        status: items.length > 0 ? 'results' : 'empty',
+        items: [...items],
+        nextCursor,
+        rangeDays,
+        rangeStart,
+        minLength: null,
+        retryable: false,
+        loadMoreError: null,
+        openNotice: null,
       })
-      if (destroyed || gen !== generation || controller.signal.aborted) return
-      inFlight = null
+      return
+    }
 
-      if (response.ok) {
-        const { items, nextCursor, rangeDays, rangeStart } = response.page
-        publish({
-          ...state,
-          status: items.length > 0 ? 'results' : 'empty',
-          items: [...items],
-          nextCursor,
-          rangeDays,
-          rangeStart,
-          minLength: null,
-          retryable: false,
-          loadMoreError: null,
-        })
-        return
-      }
-
-      const { failure } = response
-      if (failure.kind === 'too_short') {
-        publish({
-          ...state,
-          status: 'too-short',
-          minLength: failure.minLength ?? null,
-          retryable: false,
-        })
-      } else if (failure.kind === 'timeout') {
-        publish({
-          ...state,
-          status: 'timeout',
-          retryable: true,
-        })
-      } else {
-        publish({
-          ...state,
-          status: 'error',
-          retryable: failure.retryable,
-        })
-      }
-    } catch {
-      if (destroyed || gen !== generation || controller.signal.aborted) return
-      inFlight = null
+    const { failure } = response
+    if (failure.kind === 'too_short') {
+      publish({
+        ...state,
+        status: 'too-short',
+        minLength: failure.minLength ?? null,
+        retryable: false,
+      })
+    } else if (failure.kind === 'unavailable') {
+      publish({
+        ...state,
+        status: 'unavailable',
+        retryable: false,
+      })
+    } else if (failure.kind === 'timeout') {
+      publish({
+        ...state,
+        status: 'timeout',
+        retryable: true,
+      })
+    } else {
       publish({
         ...state,
         status: 'error',
-        retryable: true,
+        retryable: failure.retryable,
       })
     }
   }
@@ -194,50 +242,35 @@ export function createSearchController(options: SearchControllerOptions) {
       ...state,
       status: 'loading-more',
       loadMoreError: null,
+      openNotice: null,
     })
 
-    try {
-      const response = await options.source.search({
-        query,
-        limit: SEARCH_PAGE_SIZE,
-        cursor,
-        signal: controller.signal,
-      })
-      if (destroyed || gen !== generation || controller.signal.aborted) return
-      inFlight = null
+    const response = await runWithTimeout({ query, limit: SEARCH_PAGE_SIZE, cursor }, controller)
+    if (destroyed || gen !== generation || response === 'aborted') return
+    inFlight = null
 
-      if (response.ok) {
-        const { items, nextCursor, rangeDays, rangeStart } = response.page
-        publish({
-          ...state,
-          status: 'results',
-          items: [...state.items, ...items],
-          nextCursor,
-          rangeDays,
-          rangeStart,
-          loadMoreError: null,
-          retryable: false,
-        })
-        return
-      }
-
-      const { failure } = response
+    if (response.ok) {
+      const { items, nextCursor, rangeDays, rangeStart } = response.page
       publish({
         ...state,
         status: 'results',
-        loadMoreError: failure.kind === 'timeout' ? 'timeout' : 'error',
-        retryable: failure.kind === 'error' ? failure.retryable : true,
+        items: [...state.items, ...items],
+        nextCursor,
+        rangeDays,
+        rangeStart,
+        loadMoreError: null,
+        retryable: false,
       })
-    } catch {
-      if (destroyed || gen !== generation || controller.signal.aborted) return
-      inFlight = null
-      publish({
-        ...state,
-        status: 'results',
-        loadMoreError: 'error',
-        retryable: true,
-      })
+      return
     }
+
+    const { failure } = response
+    publish({
+      ...state,
+      status: 'results',
+      loadMoreError: failure.kind === 'timeout' ? 'timeout' : 'error',
+      retryable: failure.kind === 'error' ? failure.retryable : failure.kind !== 'unavailable',
+    })
   }
 
   async function retry(): Promise<void> {
@@ -264,6 +297,7 @@ export function createSearchController(options: SearchControllerOptions) {
       ...state,
       open: false,
       status: nextStatus,
+      openNotice: null,
     })
   }
 
@@ -276,8 +310,15 @@ export function createSearchController(options: SearchControllerOptions) {
 
   function openSearchResult(target: SearchTarget): void {
     if (destroyed) return
+    const opened = options.onOpenResult?.(target)
+    if (opened === false) {
+      publish({
+        ...state,
+        openNotice: 'この検索結果のチャンネルは現在開けません。',
+      })
+      return
+    }
     close()
-    options.onOpenResult?.(target)
   }
 
   return {

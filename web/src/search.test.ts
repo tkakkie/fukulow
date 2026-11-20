@@ -1,7 +1,15 @@
-import { describe, expect, it, vi } from 'vitest'
-import { createSearchController, prepareSearchQuery, SEARCH_PAGE_SIZE, type SearchTarget } from './search'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  createSearchController,
+  prepareSearchQuery,
+  SEARCH_PAGE_SIZE,
+  SEARCH_TIMEOUT_MS,
+  type SearchTarget,
+} from './search'
+import {
+  createDefaultSearchSource,
   createMockSearchSource,
+  SEARCH_RANGE_DAYS,
   type SearchRequest,
   type SearchResponse,
   type SearchResultItem,
@@ -225,4 +233,186 @@ describe('createSearchController', () => {
     search.destroy()
     await sync.close()
   })
+
+  it('returns an unavailable state in production default source and keeps search open with notice when onOpenResult declines', async () => {
+    const prodSource = createDefaultSearchSource('org-1', { isDev: false })
+    const prodCtrl = createSearchController({ source: prodSource })
+    await prodCtrl.submit('リリース')
+    expect(prodCtrl.get().open).toBe(true)
+    expect(prodCtrl.get().status).toBe('unavailable')
+    expect(prodCtrl.get().items).toHaveLength(0)
+    expect(prodCtrl.get().retryable).toBe(false)
+    prodCtrl.destroy()
+
+    const onOpenResult = vi.fn(() => false)
+    const devCtrl = createSearchController({
+      source: createDefaultSearchSource('org-1', { isDev: true }),
+      onOpenResult,
+    })
+    await devCtrl.submit('リリース')
+    expect(devCtrl.get().status).toBe('results')
+    const first = devCtrl.get().items[0]
+    devCtrl.openSearchResult({
+      channelId: first.channelId,
+      topicId: first.topicId,
+      replyRootId: first.replyRootId,
+      messageId: first.messageId,
+    })
+    expect(onOpenResult).toHaveBeenCalledTimes(1)
+    expect(devCtrl.get().open).toBe(true)
+    expect(devCtrl.get().openNotice).toContain('開けません')
+    devCtrl.destroy()
+  })
+
+  it('computes mock rangeStart as now minus 180 days from injected clock and excludes older hits', async () => {
+    const DAY_MS = 24 * 60 * 60 * 1000
+    let nowMs = Date.parse('2026-11-20T12:00:00.000Z')
+    const exactCutoffIso = new Date(nowMs - SEARCH_RANGE_DAYS * DAY_MS).toISOString()
+    const items = [
+      makeItem(1, { createdAt: new Date(nowMs - 1 * DAY_MS).toISOString(), excerpt: '範囲内ヒット' }),
+      makeItem(2, { createdAt: exactCutoffIso, excerpt: '範囲内ヒット 境界' }),
+      makeItem(3, { createdAt: new Date(nowMs - SEARCH_RANGE_DAYS * DAY_MS - 1000).toISOString(), excerpt: '範囲内ヒット 期限切れ' }),
+    ]
+    const source = createMockSearchSource({ items, now: () => nowMs })
+
+    const first = await source.search({ query: '範囲内ヒット', limit: 20 })
+    expect(first.ok).toBe(true)
+    if (!first.ok) return
+    expect(first.page.rangeStart).toBe(exactCutoffIso)
+    expect(first.page.items.map((item) => item.messageId)).toEqual(['msg-1', 'msg-2'])
+
+    // Advance the clock by 10 days: rangeStart moves forward and the boundary item is now excluded.
+    nowMs += 10 * DAY_MS
+    const second = await source.search({ query: '範囲内ヒット', limit: 20 })
+    expect(second.ok).toBe(true)
+    if (!second.ok) return
+    expect(second.page.rangeStart).toBe(new Date(nowMs - SEARCH_RANGE_DAYS * DAY_MS).toISOString())
+    expect(second.page.items.map((item) => item.messageId)).toEqual(['msg-1'])
+  })
+
+  it('aborts and shows retryable timeout after 10 seconds for stalled initial and paging requests', async () => {
+    vi.useFakeTimers()
+    try {
+      const signals: AbortSignal[] = []
+      let callCount = 0
+      const source: SearchSource = {
+        search(req) {
+          callCount += 1
+          if (req.signal) signals.push(req.signal)
+          if (callCount === 1) {
+            // Stalled initial request: never settles.
+            return new Promise<SearchResponse>(() => {})
+          }
+          if (callCount === 2) {
+            return Promise.resolve({
+              ok: true,
+              page: {
+                items: [makeItem(1, { excerpt: 'ページ1' })],
+                nextCursor: 'cursor-1',
+                rangeDays: 180,
+                rangeStart: '2026-05-24T00:00:00.000Z',
+              },
+            })
+          }
+          // Stalled loadMore request: never settles.
+          return new Promise<SearchResponse>(() => {})
+        },
+      }
+
+      const ctrl = createSearchController({ source })
+      const p1 = ctrl.submit('停止クエリ')
+      expect(ctrl.get().status).toBe('loading')
+      expect(signals[0]?.aborted).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(SEARCH_TIMEOUT_MS)
+      await p1
+      expect(signals[0]?.aborted).toBe(true)
+      expect(ctrl.get().status).toBe('timeout')
+      expect(ctrl.get().retryable).toBe(true)
+
+      // Retry succeeds with page 1 and nextCursor.
+      await ctrl.retry()
+      expect(ctrl.get().status).toBe('results')
+      expect(ctrl.get().items).toHaveLength(1)
+      expect(ctrl.get().nextCursor).toBe('cursor-1')
+
+      // Stalled loadMore times out after 10s, aborts, and keeps page 1 for retry.
+      const pMore = ctrl.loadMore()
+      expect(ctrl.get().status).toBe('loading-more')
+      await vi.advanceTimersByTimeAsync(SEARCH_TIMEOUT_MS)
+      await pMore
+      expect(signals[2]?.aborted).toBe(true)
+      expect(ctrl.get().status).toBe('results')
+      expect(ctrl.get().items).toHaveLength(1)
+      expect(ctrl.get().nextCursor).toBe('cursor-1')
+      expect(ctrl.get().loadMoreError).toBe('timeout')
+      expect(ctrl.get().retryable).toBe(true)
+      ctrl.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a stale loadMore response so it cannot append to a new query', async () => {
+    const staleMore = deferred<SearchResponse>()
+    const nextSearch = deferred<SearchResponse>()
+    let step = 0
+    const source: SearchSource = {
+      search() {
+        step += 1
+        if (step === 1) {
+          return Promise.resolve({
+            ok: true,
+            page: {
+              items: [makeItem(1, { excerpt: '古いクエリ 1' })],
+              nextCursor: 'cursor-old',
+              rangeDays: 180,
+              rangeStart: '2026-05-24T00:00:00.000Z',
+            },
+          })
+        }
+        if (step === 2) return staleMore.promise
+        return nextSearch.promise
+      },
+    }
+
+    const ctrl = createSearchController({ source })
+    await ctrl.submit('古いクエリ')
+    expect(ctrl.get().items.map((item) => item.messageId)).toEqual(['msg-1'])
+
+    const pMore = ctrl.loadMore()
+    const pNew = ctrl.submit('新しいクエリ')
+
+    nextSearch.resolve({
+      ok: true,
+      page: {
+        items: [makeItem(200, { excerpt: '新しいクエリ 1' })],
+        nextCursor: null,
+        rangeDays: 180,
+        rangeStart: '2026-05-24T00:00:00.000Z',
+      },
+    })
+    await pNew
+    expect(ctrl.get().items.map((item) => item.messageId)).toEqual(['msg-200'])
+
+    staleMore.resolve({
+      ok: true,
+      page: {
+        items: [makeItem(2, { excerpt: '古いクエリ 2' })],
+        nextCursor: null,
+        rangeDays: 180,
+        rangeStart: '2026-05-24T00:00:00.000Z',
+      },
+    })
+    await pMore
+
+    expect(ctrl.get().submittedQuery).toBe('新しいクエリ')
+    expect(ctrl.get().items.map((item) => item.messageId)).toEqual(['msg-200'])
+    expect(ctrl.get().nextCursor).toBeNull()
+    ctrl.destroy()
+  })
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })

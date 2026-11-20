@@ -183,25 +183,15 @@
   $effect(() => {
     if (selected?.kind === 'dm' && route?.panel && !route.panel.startsWith('reply:')) nav.navigate({ type: 'close' })
   })
-  const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')
-  const effectiveMobileLevel = $derived(mobileLevel)
   let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280)
-  const mainViewSelected = $derived(
-    viewportWidth >= MOBILE_BREAKPOINT_PX || effectiveMobileLevel === 'view',
-  )
-  const currentSkipTargetId = $derived(
-    resolveSkipLinkTargetId({
-      viewportWidth,
-      mobileLevel: effectiveMobileLevel,
-      panelOpen,
-    }),
-  )
 
   let channelListHeadingRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let searchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let channelListSearchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let searchResultsHeadingRef = $state<HTMLElement | null>(null)
   let panelToggleBtn = $state<HTMLButtonElement | null>(null)
   let panelHeadingRef = $state<HTMLElement | null>(null)
   let focusTopicInputNext = false
@@ -223,6 +213,20 @@
   )
   const searchState = $derived(searchModel?.state)
   const searchOpen = $derived(Boolean(searchState?.open && !organizationUnavailable))
+  const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')
+  const effectiveMobileLevel = $derived<'channels' | 'view' | 'panel'>(
+    mobileLevel === 'channels' && searchOpen ? 'view' : mobileLevel,
+  )
+  const mainViewSelected = $derived(
+    viewportWidth >= MOBILE_BREAKPOINT_PX || effectiveMobileLevel === 'view',
+  )
+  const currentSkipTargetId = $derived(
+    resolveSkipLinkTargetId({
+      viewportWidth,
+      mobileLevel: effectiveMobileLevel,
+      panelOpen,
+    }),
+  )
   $effect(() => {
     const orgId = currentOrganizationId
     const providedSource = searchSource
@@ -237,13 +241,13 @@
       if (activeSearch === entry) activeSearch = undefined
     }
   })
-  let lastSearchNavRevision = -1
+  let lastSearchMainKey: string | null = null
   $effect(() => {
-    const revision = nav.state.revision
-    if (lastSearchNavRevision !== -1 && revision !== lastSearchNavRevision) {
+    const mainKey = `${route?.organizationId ?? ''}:${route?.channelId ?? ''}:${route?.topicId ?? ''}`
+    if (lastSearchMainKey !== null && mainKey !== lastSearchMainKey) {
       untrack(() => searchModel?.close())
     }
-    lastSearchNavRevision = revision
+    lastSearchMainKey = mainKey
   })
 
   const selectedChannelId = $derived(selected?.id)
@@ -631,8 +635,17 @@
     })
   }
 
-  function handleOpenSearchResult(target: SearchTarget) {
-    if (!currentOrganizationId) return
+  function canOpenSearchChannel(channelId: string): boolean {
+    return Boolean(
+      s.channels.some((c) => c.id === channelId) ||
+      dmState?.rows.some((row) => row.identity.id === channelId) ||
+      s.archivedList?.channels.some((c) => c.id === channelId) ||
+      s.openChannel?.id === channelId,
+    )
+  }
+
+  function handleOpenSearchResult(target: SearchTarget): boolean {
+    if (!currentOrganizationId || !canOpenSearchChannel(target.channelId)) return false
     handleSelectChannel(target.channelId)
     if (target.topicId) {
       nav.navigate({
@@ -641,12 +654,27 @@
         phone: viewportWidth < MOBILE_BREAKPOINT_PX,
       })
     }
+    return true
+  }
+
+  function handleSubmitSearch(value: string, origin: 'main' | 'channel-list') {
+    if (!searchModel) return
+    void searchModel.submit(value)
+    if (origin === 'channel-list' && value.trim().length > 0) {
+      void tick().then(() => {
+        if (!focusTarget(searchInputRef)) focusTarget(searchResultsHeadingRef)
+      })
+    }
   }
 
   function handleCloseSearch() {
     searchModel?.close()
     void tick().then(() => {
-      focusTarget(searchInputRef)
+      const target =
+        viewportWidth < MOBILE_BREAKPOINT_PX && !route?.channelId
+          ? channelListSearchInputRef
+          : searchInputRef
+      focusTarget(target)
     })
   }
 
@@ -761,6 +789,18 @@
       >
         チャンネル
       </h2>
+      {#if viewportWidth < MOBILE_BREAKPOINT_PX && effectiveMobileLevel === 'channels' && searchModel && searchState}
+        <div class="channel-column__search mobile-only">
+          <SearchBar
+            value={searchState.input}
+            open={searchOpen}
+            disabled={organizationUnavailable || !currentOrganizationId}
+            bind:inputRef={channelListSearchInputRef}
+            oninput={(value) => searchModel.setInput(value)}
+            onsubmit={(value) => handleSubmitSearch(value, 'channel-list')}
+          />
+        </div>
+      {/if}
     </div>
 
     <div class="channel-column__scroll">
@@ -835,35 +875,121 @@
     {/if}
   </nav>
 
-  {#snippet headerSearch()}
-    {#if searchModel && searchState}
-      <SearchBar
-        value={searchState.input}
-        open={searchOpen}
-        busy={searchState.status === 'loading'}
-        disabled={organizationUnavailable || !currentOrganizationId}
-        bind:inputRef={searchInputRef}
-        oninput={(value) => searchModel.setInput(value)}
-        onsubmit={(value) => { void searchModel.submit(value) }}
-        onclose={handleCloseSearch}
-      />
-    {/if}
-  {/snippet}
-
   <main id="main-content" class="main-card" tabindex="-1">
-    {#if searchOpen && searchModel && searchState}
-      <header class="main-card__header">
+    <header class="main-card__header">
+      {#if searchModel && searchState}
+        <div class="main-card__search">
+          <SearchBar
+            value={searchState.input}
+            open={searchOpen}
+            disabled={organizationUnavailable || !currentOrganizationId}
+            bind:inputRef={searchInputRef}
+            oninput={(value) => searchModel.setInput(value)}
+            onsubmit={(value) => handleSubmitSearch(value, 'main')}
+          />
+        </div>
+      {/if}
+      <div class="main-card__header-row">
         <div class="main-card__title-group">
-          <Button variant="quiet" onclick={handleCloseSearch}>
-            <span aria-hidden="true">‹</span>
-            <span>戻る</span>
-          </Button>
-          <h1 class="main-card__title">検索結果</h1>
+          {#if searchOpen && searchModel && searchState}
+            <Button variant="quiet" onclick={handleCloseSearch}>
+              <span aria-hidden="true">‹</span>
+              <span>戻る</span>
+            </Button>
+            <h1
+              class="main-card__title"
+              tabindex="-1"
+              bind:this={searchResultsHeadingRef}
+            >
+              検索結果
+            </h1>
+          {:else if selected && currentChannel}
+            <span class="mobile-only">
+              <Button
+                variant="icon"
+                ariaLabel="チャンネル一覧へ戻る"
+                onclick={() => {
+                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
+                }}
+              >
+                ‹
+              </Button>
+            </span>
+            {#if route?.topicId}
+              <Button
+                variant="quiet"
+                onclick={() => nav.navigate({ type: 'topic-back' })}
+              >
+                <span aria-hidden="true">‹</span>
+                <span>チャンネルへ戻る</span>
+              </Button>
+              <span class="main-card__crumb"># {conversationName} ›</span>
+            {/if}
+            <h1 class="main-card__title">
+              {route?.topicId ? (resolvedTopicName || 'トピック') : conversationName}
+            </h1>
+          {:else if organizationUnavailable}
+            <span class="mobile-only">
+              <Button
+                variant="icon"
+                ariaLabel="チャンネル一覧へ戻る"
+                onclick={() => {
+                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
+                }}
+              >
+                ‹
+              </Button>
+            </span>
+            <h1 class="main-card__title">{organization?.organization.name ?? 'fukulow'}</h1>
+          {:else if s.status === 'ready'}
+            <span class="mobile-only">
+              <Button
+                variant="icon"
+                ariaLabel="チャンネル一覧へ戻る"
+                onclick={() => {
+                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
+                }}
+              >
+                ‹
+              </Button>
+            </span>
+            <h1 class="main-card__title">チャンネル</h1>
+          {:else}
+            <span class="mobile-only">
+              <Button
+                variant="icon"
+                ariaLabel="チャンネル一覧へ戻る"
+                onclick={() => {
+                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
+                }}
+              >
+                ‹
+              </Button>
+            </span>
+            <h1 class="main-card__title">fukulow</h1>
+          {/if}
         </div>
         <div class="main-card__header-actions">
-          {@render headerSearch()}
+          {#if !searchOpen && selected && currentChannel}
+            <small class="live-status" data-testid="live-status" data-live={currentLive}>
+              {currentLive ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
+            </small>
+            {#if selected.kind !== 'dm' || panelOpen}
+            <Button
+              bind:buttonRef={panelToggleBtn}
+              variant="icon"
+              ariaLabel={panelOpen ? 'パネルを閉じる(⌘.)' : 'パネルを開く(⌘.)'}
+              ariaExpanded={panelOpen}
+              onclick={togglePanel}
+            >
+              ☰
+            </Button>
+            {/if}
+          {/if}
         </div>
-      </header>
+      </div>
+    </header>
+    {#if searchOpen && searchModel && searchState}
       <div class="main-card__body">
         <SearchResults
           state={searchState}
@@ -873,51 +999,6 @@
         />
       </div>
     {:else if selected && currentChannel}
-      <header class="main-card__header">
-        <div class="main-card__title-group">
-          <span class="mobile-only">
-            <Button
-              variant="icon"
-              ariaLabel="チャンネル一覧へ戻る"
-              onclick={() => {
-                if (viewportWidth < 600) nav.navigate({ type: 'list' })
-              }}
-            >
-              ‹
-            </Button>
-          </span>
-          {#if route?.topicId}
-            <Button
-              variant="quiet"
-              onclick={() => nav.navigate({ type: 'topic-back' })}
-            >
-              <span aria-hidden="true">‹</span>
-              <span>チャンネルへ戻る</span>
-            </Button>
-            <span class="main-card__crumb"># {conversationName} ›</span>
-          {/if}
-          <h1 class="main-card__title">
-            {route?.topicId ? (resolvedTopicName || 'トピック') : conversationName}
-          </h1>
-        </div>
-        <div class="main-card__header-actions">
-          {@render headerSearch()}
-          <small class="live-status" data-testid="live-status" data-live={currentLive}>
-            {currentLive ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
-          </small>
-          {#if selected.kind !== 'dm' || panelOpen}
-          <Button
-            bind:buttonRef={panelToggleBtn}
-            variant="icon"
-            ariaLabel={panelOpen ? 'パネルを閉じる(⌘.)' : 'パネルを開く(⌘.)'}
-            ariaExpanded={panelOpen}
-            onclick={togglePanel}
-          >
-            ☰
-          </Button>
-          {/if}
-        </div>
-      </header>
       <div class="main-card__body">
         {#if selected.kind === 'dm'}
           <div class="main-card__notice">
@@ -992,25 +1073,6 @@
         </div>
       </div>
     {:else if organizationUnavailable}
-      <header class="main-card__header">
-        <div class="main-card__title-group">
-          <span class="mobile-only">
-            <Button
-              variant="icon"
-              ariaLabel="チャンネル一覧へ戻る"
-              onclick={() => {
-                if (viewportWidth < 600) nav.navigate({ type: 'list' })
-              }}
-            >
-              ‹
-            </Button>
-          </span>
-          <h1 class="main-card__title">{organization?.organization.name ?? 'fukulow'}</h1>
-        </div>
-        <div class="main-card__header-actions">
-          {@render headerSearch()}
-        </div>
-      </header>
       <div class="main-card__empty">
         <StatusBanner
           tone="danger"
@@ -1024,25 +1086,6 @@
         />
       </div>
     {:else if s.status === 'ready'}
-      <header class="main-card__header">
-        <div class="main-card__title-group">
-          <span class="mobile-only">
-            <Button
-              variant="icon"
-              ariaLabel="チャンネル一覧へ戻る"
-              onclick={() => {
-                if (viewportWidth < 600) nav.navigate({ type: 'list' })
-              }}
-            >
-              ‹
-            </Button>
-          </span>
-          <h1 class="main-card__title">チャンネル</h1>
-        </div>
-        <div class="main-card__header-actions">
-          {@render headerSearch()}
-        </div>
-      </header>
       <div class="main-card__empty">
         <EmptyState
           title="チャンネルがありません。"
@@ -1052,25 +1095,6 @@
         />
       </div>
     {:else}
-      <header class="main-card__header">
-        <div class="main-card__title-group">
-          <span class="mobile-only">
-            <Button
-              variant="icon"
-              ariaLabel="チャンネル一覧へ戻る"
-              onclick={() => {
-                if (viewportWidth < 600) nav.navigate({ type: 'list' })
-              }}
-            >
-              ‹
-            </Button>
-          </span>
-          <h1 class="main-card__title">fukulow</h1>
-        </div>
-        <div class="main-card__header-actions">
-          {@render headerSearch()}
-        </div>
-      </header>
       <div class="main-card__empty">
         <Skeleton rows={4} label="読み込み中" />
       </div>
@@ -1290,6 +1314,11 @@
     color: var(--text2);
   }
 
+  .channel-column__search {
+    min-width: 0;
+    width: 100%;
+  }
+
   .main-card {
     display: grid;
     grid-template-rows: auto 1fr;
@@ -1303,11 +1332,24 @@
 
   .main-card__header {
     display: flex;
+    flex-direction: column;
+    gap: var(--space-8);
+    padding: var(--space-12) var(--space-16);
+    min-width: 0;
+  }
+
+  .main-card__search {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .main-card__header-row {
+    display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-8);
-    padding: var(--space-12) var(--space-16);
     min-width: 0;
   }
 
@@ -1345,8 +1387,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-8);
-    flex: 1 1 auto;
-    justify-content: flex-end;
+    flex-shrink: 0;
     min-width: 0;
   }
 
