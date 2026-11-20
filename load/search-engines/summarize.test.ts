@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { hash } from './manifest.ts';
-import { criteria, judge, summarize } from './summarize.ts';
+import { criteria, judge, judgeB1, summarize } from './summarize.ts';
+import { b1RoleFacts, b1RlsFacts } from './b1.ts';
 import { denialCases, probe } from './definer.ts';
 
 for (const mode of ['success','smoke-success','smoke-refused','smoke-mixed','tampered','missing-status','failed-cleanup','invalid-status','wrong-status-hash','missing-completed','missing-finished','wrong-completion-hash']) {
@@ -126,3 +127,83 @@ test('required samples per query and round equal the frozen manifest performance
   assert.equal(frozen.clients*frozen.transactions, criteria.samplesPerQueryRound);
   assert.equal(frozen.rounds, 3);
 });
+
+const b1QuerySet: [string,string][] = [['ja2-rare','麒麟'],['ja1-frequent','開']];
+function b1Evidence(querySet = b1QuerySet, rounds = 3, samples = 100) {
+  const queries = querySet.map(([id,raw])=>({id,raw,value:raw,scalars:[...raw].length}));
+  const cases = denialCases.map(c=>c.name);
+  const checks = denialCases.flatMap(c=>[false,true].map(forced=>({case:c.name,forced,found:c.expect.map(probe),expected:c.expect.map(probe)})));
+  const latencies = queries.map(q=>({query:q.id,n:samples,p50:1,p95:2,p99:3}));
+  const completeness = queries.map(q=>({query:q.id,actors:[1,2,3,4,5,6].map(actor=>({actor,equal:true,rows:0})),
+    ownerIndexEqual:true,directEqual:true,pageEqual:true,matchesByOrganization:{a:100,b:20,c:10}}));
+  const plan = {searchIndex:true,seqScanMessages:false,executionMs:1,scans:[{}]};
+  const plans = queries.map(q=>({query:q.id,...plan}));
+  const timing = latencies.map(q=>({query:q.query,few:{...q,foreignMatches:2,plan},many:{...q,foreignMatches:1000,plan},equalNonemptyPage:true}));
+  const safety = {role:b1RoleFacts,rls:b1RlsFacts,memberships:'0',definers:'0',policy:'a'.repeat(32)};
+  return {queries,rounds:Array.from({length:rounds},(_,i)=>({round:i+1,engine:'pgroonga',latencies,completeness,plans,safety})),
+    denials:{cases,checks},restore:{completeness},timing};
+}
+
+test('B1 judges every round and requires per-class plan, reference and timing evidence',()=>{
+  const evidence = b1Evidence();
+  const {latencies,completeness,plans,safety} = evidence.rounds[0]!;
+  const {timing,denials:{cases,checks}} = evidence;
+  const judge = (value: Parameters<typeof judgeB1>[0],evaluation = true) =>
+    judgeB1(value,b1QuerySet,3,100,evaluation);
+  assert.equal(judge(evidence).status,'PASS');
+  assert.equal(judge(evidence).classes[1]?.latency,'PASS');
+  assert.equal(judge(evidence).classes[1]?.actorDenials,'PASS');
+  assert.equal(judge(evidence,false).status,'NOT EVALUATED');
+
+  for (const missing of ['rounds','queries','denials','restore','timing'] as const)
+    assert.equal(judge({...evidence,[missing]:undefined}).status,'NOT EVALUATED',missing);
+  const drift = <T extends object>(patch: T) => evidence.rounds.map(r=>r.round===1 ? {...r,...patch} : r);
+  assert.equal(judge({...evidence,rounds:drift({safety:{...safety,rls:''}})}).status,'NOT EVALUATED');
+  assert.equal(judge({...evidence,rounds:drift({plans:plans.slice(1)})}).status,'NOT EVALUATED');
+  assert.equal(judge({...evidence,rounds:drift({plans:plans.map(p=>({...p,searchIndex:false}))})}).status,'FAIL');
+  assert.equal(judge({...evidence,rounds:drift({completeness:completeness.map(c=>({...c,pageEqual:false}))})}).status,'FAIL');
+  assert.equal(judge({...evidence,denials:{cases,checks:checks.slice(1)}}).status,'NOT EVALUATED');
+  assert.equal(judge({...evidence,timing:timing.map(t=>({...t,many:t.few}))}).status,'NOT EVALUATED');
+  const slow = latencies.map(l=>l.query==='ja1-frequent' ? {...l,p95:501,p99:550} : l);
+  assert.equal(judge({...evidence,rounds:drift({latencies:slow})}).status,'FAIL');
+});
+
+test('B1 timing requires search_body evidence in both arms for every class',()=>{
+  const evidence = b1Evidence();
+  const judge = (timing: unknown) => judgeB1({...evidence,timing},b1QuerySet,3,100,true);
+  assert.ok(judge(evidence.timing).classes.every(c=>c.timingEvaluated));
+  const [first,other] = evidence.timing;
+  assert.ok(first && other);
+  for (const arm of ['few','many'] as const) {
+    for (const plan of [undefined,{...first[arm].plan,searchIndex:false},{...first[arm].plan,scans:[]}]) {
+      const result = judge([{...first,[arm]:{...first[arm],plan}},other]);
+      assert.equal(result.classes[0]?.timingEvaluated,false,`${arm}: ${JSON.stringify(plan)}`);
+      assert.equal(result.classes[1]?.timingEvaluated,true);
+      assert.equal(result.status,'NOT EVALUATED');
+    }
+  }
+});
+
+for (const [rounds,clients,transactions] of [[3,5,20],[1,5,20],[3,1,1],[1,1,1]] as const) {
+  test(`B1 publication verifies v11 with ${rounds} rounds and ${clients*transactions} samples per query`,t=>{
+    const dir = mkdtempSync(join(tmpdir(),'search-b1-summary-'));
+    t.after(()=>rmSync(dir,{recursive:true,force:true}));
+    const {frozen} = JSON.parse(readFileSync(new URL('manifest-v11.json',import.meta.url),'utf8'));
+    Object.assign(frozen.performance,{rounds,clients,transactions});
+    const manifestHash = hash(JSON.stringify(frozen));
+    const save = (name: string,value: unknown)=>writeFileSync(join(dir,name+'.json'),JSON.stringify(value));
+    const {rounds:results,...files} = b1Evidence(frozen.performance.querySet,rounds,clients*transactions);
+    for (const [name,value] of Object.entries(files)) save(name,value);
+    save('manifest',{sha256:manifestHash,frozen,runKind:'evaluation'});
+    save('results',results.map(r=>({...r,manifestHash,runKind:'evaluation'})));
+    for (const name of ['completed','finished']) save(name,{manifestHash,results:results.length});
+    save('run-status',{manifestHash,valid:true,cleanupVerified:true,exitCode:0});
+    if (rounds===3 && clients*transactions===100) {
+      summarize(dir);
+      assert.equal(JSON.parse(readFileSync(join(dir,'judgement.json'),'utf8')).status,'PASS');
+    } else {
+      assert.throws(()=>summarize(dir),/must match the checked-in v11 manifest/);
+      assert.equal(existsSync(join(dir,'judgement.json')),false);
+    }
+  });
+}
