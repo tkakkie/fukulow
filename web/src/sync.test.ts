@@ -249,7 +249,7 @@ it('request timeout becomes unknown and same-key retry settles; late completion 
   await vi.advanceTimersByTimeAsync(1000)
   expect(client.sync.get().channels.A.pending[0].state).toBe('unknown')
   const retry = (await client.feed({ type: 'user_retry', client_message_id: 'c1' })).find(e => e.type === 'send')!
-  expect(retry.client_message_id).toBe(first.client_message_id)
+  expect(retry).toMatchObject({ channel: first.channel, client_message_id: first.client_message_id, body: first.body })
   await client.feed({ type: 'ack', respond_to: retry, message: { ...record(101), sender: 'me', client_message_id: 'c1' } })
   expect(first.completed).toBe(false)
   await client.feed({ type: 'send_failed', respond_to: first, status: 413 })

@@ -21,6 +21,8 @@ export type SessionOptions = {
   organizationId?: string
   /** Account-lifetime owner fences this callback, including late 401s after an Organization switch. */
   onEnded: () => void
+  /** Aborted by the Account owner after it fences the ended Account Session. */
+  accountSignal?: AbortSignal
   channelsApi?: ChannelsApi
   topicsApi?: TopicsApi
   replyCountsApi?: ReplyCountsApi
@@ -113,7 +115,9 @@ export function createSession(options: SessionOptions) {
       selfId: options.selfId,
       organizationId,
       repliesApi: {
-        listReplyChain: (channel, anchor, query) => observe(replySource.listReplyChain(channel, anchor, query)),
+        listReplyChain: (channel, anchor, query) => observe(options.accountSignal
+          ? replySource.listReplyChain(channel, anchor, query, options.accountSignal)
+          : replySource.listReplyChain(channel, anchor, query)),
       },
       onSessionEnded: notifyEnded,
     },

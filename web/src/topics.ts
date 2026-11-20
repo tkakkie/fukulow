@@ -1,5 +1,6 @@
 import { createActivityTarget, type Activity } from './activity'
 import * as api from './api'
+import { createRequestDeadlines } from './request-deadlines'
 import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, TimelinePage,
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
 import { completeCountFields } from './unread-counts'
@@ -52,7 +53,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const listeners = new Set<(channels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const pendingChannels = new Set<string>()
-  const deadlines = new Set<() => void>()
+  const deadlines = createRequestDeadlines()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
   let closed = false
   let batching = false
@@ -82,8 +83,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   const cancelReads = () => {
     for (const w of windows.values()) clearWindowTimers(w)
-    deadlines.forEach(settle => settle())
-    deadlines.clear()
+    deadlines.cancel()
   }
   let previous = sync.get()
   const notify = (channel?: string | Iterable<string>) => {
@@ -251,8 +251,6 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const token = Symbol(slot)
     w.reads.set(slot, token)
     const isCurrent = () => current(channel, w) && w.reads.get(slot) === token && sync.get().channels[channel]?.versionEpoch === versionEpoch
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let settle: (() => void) | undefined
     // Session replacement fences late authentication failures; same-session late 401 remains authoritative.
     const session = sessionToken
     const operation = Promise.resolve().then(run).catch((): Result<T> => ({ ok: false, kind: 'network' }))
@@ -261,16 +259,12 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         void sync.close(); options.onSessionEnded?.()
       } else if (api.isOrganizationUnavailable(r) && session === sessionToken) void sync.unavailable()
     })
+    const deadline = withTimeout || signal ? deadlines.start<Result<T>>({ ok: false, kind: 'network' }, {
+      timeoutMs: withTimeout ? options.requestTimeoutMs ?? 30_000 : undefined,
+      signal,
+    }) : undefined
     try {
-      const response = withTimeout || signal ? await Promise.race([operation, new Promise<Result<T>>(resolve => {
-        settle = () => resolve({ ok: false, kind: 'network' })
-        deadlines.add(settle)
-        if (signal) {
-          if (signal.aborted) settle()
-          else signal.addEventListener('abort', settle, { once: true })
-        }
-        if (withTimeout) timer = setTimeout(settle, options.requestTimeoutMs ?? 30_000)
-      })]) : await operation
+      const response = await (deadline ? Promise.race([operation, deadline.until]) : operation)
       if (isCurrent()) {
         const generation = response.ok && response.data && typeof response.data === 'object' && 'history_generation' in response.data ? response.data.history_generation : undefined
         if (typeof generation === 'string' && !sync.observeHistoryGeneration(generation)) return { result: { ok: false, kind: 'network' } as Result<T>, isCurrent: () => false }
@@ -293,10 +287,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         notify(channel)
       }
       return { result, isCurrent }
-    } finally {
-      if (timer !== undefined) clearTimeout(timer)
-      if (settle) { signal?.removeEventListener('abort', settle); deadlines.delete(settle) }
-    }
+    } finally { deadline?.clear() }
   }
   function mergeBaselines(w: Window, response: Pick<TopicPage, 'as_of_seq' | 'topics'>, fromList = false) {
     for (const summary of response.topics) {
