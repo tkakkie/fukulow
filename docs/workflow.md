@@ -156,8 +156,8 @@ Merges; Issue approvals ("OK"); token/secret changes; adding a language, depende
 - Pure split: move verbatim. Include an old -> new location table in the PR. Check relative links, heading anchors and file-path references and fix breaks caused by the move. Keep changes to spec guarantees, decisions and invariants out of the split PR and preserve their meaning and scope. Link cross-area rules to their one home where useful.
 - Preserve CI checks and budget every resulting file. An invariants split keeps every `path::test_name` and invariant meaning, ensures `web/scripts/check-invariants.ts` checks every part and preserves existence, skip and cargo reconciliation checks. Add multi-file negative tests.
 
-## 14. Focused SQL measurements (#540)
-- Keep each harness in `load/sql-probes/` in Git: SQL, run script and reproduction steps. Synthetic data only, with no secrets or real data.
+## 14. Focused SQL measurements
+- Keep each harness in `load/sql-probes/` in Git: SQL, run script and reproduction steps. Synthetic data only, with no secrets or real data (#540).
 - Record per run: commit SHA, PostgreSQL image digest, DB settings, measured role and its RLS check, Custom/Generic/Auto, `pg_prepared_statements` state, cache condition and repetitions.
 - Keep raw `EXPLAIN` JSON and samples: small ones in Git, large ones in durable storage with location, SHA-256 and retention. A temporary directory or expiring CI artifact alone does not count.
 - The `docs/measurements.md` entry links harness, raw data and steps.
