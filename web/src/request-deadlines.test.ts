@@ -178,26 +178,38 @@ describe('createRequestDeadlines', () => {
     expect(removeListener).toHaveBeenCalledTimes(1)
   })
 
-  it('treats cancel after timeout as idempotent without altering the resolved value', async () => {
+  it('removes the pending entry on timeout and treats later cancel as idempotent', async () => {
     const deadlines = createRequestDeadlines()
     const ac = new AbortController()
     const removeListener = vi.spyOn(ac.signal, 'removeEventListener')
+    const mapSet = vi.spyOn(Map.prototype, 'set')
+    const mapDelete = vi.spyOn(Map.prototype, 'delete')
 
-    const wait = deadlines.start('cancelled', {
-      timeoutMs: 250,
-      onTimeout: () => 'timed-out',
-      channel: 'A',
-      signal: ac.signal,
-    })
+    try {
+      const wait = deadlines.start('cancelled', {
+        timeoutMs: 250,
+        onTimeout: () => 'timed-out',
+        channel: 'A',
+        signal: ac.signal,
+      })
+      const entry = mapSet.mock.calls.find(([key, value]) => typeof key === 'function' && value === 'A')?.[0]
+      expect(entry).toBeTypeOf('function')
+      expect(mapDelete.mock.calls.filter(([key]) => key === entry)).toHaveLength(0)
 
-    vi.advanceTimersByTime(250)
-    await expect(wait.until).resolves.toBe('timed-out')
-    expect(removeListener).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(250)
+      await expect(wait.until).resolves.toBe('timed-out')
+      expect(removeListener).toHaveBeenCalledTimes(1)
+      expect(mapDelete.mock.calls.filter(([key]) => key === entry)).toHaveLength(1)
 
-    deadlines.cancel('A')
-    deadlines.cancel()
-    ac.abort()
-    await expect(wait.until).resolves.toBe('timed-out')
-    expect(removeListener).toHaveBeenCalledTimes(1)
+      deadlines.cancel('A')
+      deadlines.cancel()
+      ac.abort()
+      await expect(wait.until).resolves.toBe('timed-out')
+      expect(removeListener).toHaveBeenCalledTimes(1)
+      expect(mapDelete.mock.calls.filter(([key]) => key === entry)).toHaveLength(1)
+    } finally {
+      mapSet.mockRestore()
+      mapDelete.mockRestore()
+    }
   })
 })
