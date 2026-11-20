@@ -581,6 +581,269 @@ it('refreshes Channel capabilities from the server when the メンバー tab is 
   }
 })
 
+it('closing a Channel member controller releases its Session registration and activity hold', async () => {
+  vi.useFakeTimers()
+  let resolveInitial!: (r: api.Result<{ members: api.ChannelMember[] }>) => void
+  const list = vi.spyOn(api, 'listChannelMembers')
+    .mockImplementationOnce(() => new Promise(resolve => { resolveInitial = resolve }))
+    .mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin', manager: true }] }))
+  const { net, session } = open({ initialRole: 'admin' })
+  try {
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 100, messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+
+    const panel = session.channelMembers('A')
+    const notifications = vi.fn()
+    panel.subscribe(notifications)
+    expect(list).toHaveBeenCalledTimes(1)
+
+    // Closing the controller releases its Session registration and activity hold, and fences late completions.
+    panel.close()
+    const invalidate = vi.spyOn(panel.activityTarget, 'invalidate')
+    const suspend = vi.spyOn(panel.activityTarget, 'suspend')
+    const unavailable = vi.spyOn(panel, 'unavailable')
+    const reselect = vi.spyOn(panel, 'reselect')
+
+    resolveInitial(ok({ members: [{ id: 'me', name: '遅れた応答', role: 'admin', manager: true }] }))
+    await settle()
+    expect(notifications).not.toHaveBeenCalled()
+    expect(panel.get().members).toEqual([])
+
+    // Activity notices must not invalidate or re-query a closed controller.
+    net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'A' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(list).toHaveBeenCalledTimes(1)
+
+    // Channel access loss + re-selection must not invoke access callbacks or re-hold a closed controller.
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(unavailable).not.toHaveBeenCalled()
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(reselect).not.toHaveBeenCalled()
+    net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'A' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(list).toHaveBeenCalledTimes(1)
+
+    // Replacing the activity slot must not retire the closed controller (proving channel-members:A is unheld).
+    session.holdActivity('channel-members:A', { invalidate: vi.fn(), close: vi.fn() })()
+    expect(suspend).not.toHaveBeenCalled()
+
+    net.socket.onEvent({ type: 'channel_access_revoked', channel_id: 'A' })
+    await settle()
+    expect(unavailable).not.toHaveBeenCalled()
+  } finally {
+    session.close()
+    list.mockRestore()
+    vi.useRealTimers()
+  }
+})
+
+it('closing a Channel member controller inside its subscriber during access loss leaves no registration or activity hold', async () => {
+  vi.useFakeTimers()
+  const list = vi.spyOn(api, 'listChannelMembers')
+    .mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin', manager: true }] }))
+  const { net, session } = open({ initialRole: 'admin' })
+  try {
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 100, messages: [record(100)], has_more: false })
+    net.pages.B = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 100, messages: [record(100, 'B')], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A'), channel('B')] }))
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+
+    const panel = session.channelMembers('A')
+    const sibling = session.channelMembers('B')
+    await settle()
+    expect(list).toHaveBeenCalledTimes(2)
+
+    let closedInCallback = false
+    panel.subscribe(() => {
+      if (panel.get().unavailable && !closedInCallback) {
+        closedInCallback = true
+        panel.close()
+      }
+    })
+
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(closedInCallback).toBe(true)
+
+    const invalidate = vi.spyOn(panel.activityTarget, 'invalidate')
+    const suspend = vi.spyOn(panel.activityTarget, 'suspend')
+    const unavailable = vi.spyOn(panel, 'unavailable')
+    const reselect = vi.spyOn(panel, 'reselect')
+
+    // Activity notices and hold replacement confirm channel-members:A is released.
+    net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'A' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(list).toHaveBeenCalledTimes(2)
+
+    // Reselecting A must not call reselect or re-hold the closed controller.
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(reselect).not.toHaveBeenCalled()
+    net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'A' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(list).toHaveBeenCalledTimes(2)
+
+    session.holdActivity('channel-members:A', { invalidate: vi.fn(), close: vi.fn() })()
+    expect(suspend).not.toHaveBeenCalled()
+
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(unavailable).not.toHaveBeenCalled()
+
+    // Sibling controller B remains registered and held after A was removed mid-loop.
+    net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'B' })
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(list).toHaveBeenCalledTimes(3)
+    sibling.close()
+  } finally {
+    session.close()
+    list.mockRestore()
+    vi.useRealTimers()
+  }
+})
+
+it('closing a Channel member controller inside its subscriber during reselection leaves no registration or activity hold', async () => {
+  vi.useFakeTimers()
+  const list = vi.spyOn(api, 'listChannelMembers')
+    .mockResolvedValue(ok({ members: [{ id: 'me', name: '本人', role: 'admin', manager: true }] }))
+  const { net, session } = open({ initialRole: 'admin' })
+  try {
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 100, messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+
+    const panel = session.channelMembers('A')
+    expect(panel.get().unavailable).toBe(true)
+    expect(list).not.toHaveBeenCalled()
+
+    let closedInCallback = false
+    panel.subscribe(() => {
+      if (!panel.get().unavailable && !closedInCallback) {
+        closedInCallback = true
+        panel.close()
+      }
+    })
+
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(closedInCallback).toBe(true)
+    expect(list).not.toHaveBeenCalled()
+
+    const invalidate = vi.spyOn(panel.activityTarget, 'invalidate')
+    const suspend = vi.spyOn(panel.activityTarget, 'suspend')
+    const unavailable = vi.spyOn(panel, 'unavailable')
+    const reselect = vi.spyOn(panel, 'reselect')
+
+    // Activity hold taken right before reselect() must have been released by close().
+    net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'A' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(list).not.toHaveBeenCalled()
+
+    session.holdActivity('channel-members:A', { invalidate: vi.fn(), close: vi.fn() })()
+    expect(suspend).not.toHaveBeenCalled()
+
+    // Subsequent access loss and reselection must not reach the closed controller.
+    net.socket.onEvent({ type: 'channel_access_lost', channel_id: 'A' })
+    await settle()
+    expect(unavailable).not.toHaveBeenCalled()
+    session.channels.select('A')
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+    expect(reselect).not.toHaveBeenCalled()
+  } finally {
+    session.close()
+    list.mockRestore()
+    vi.useRealTimers()
+  }
+})
+
+it('late close of a replaced Channel member controller does not release the newer controller hold', async () => {
+  vi.useFakeTimers()
+  let resolveFirst!: (r: api.Result<{ members: api.ChannelMember[] }>) => void
+  const list = vi.spyOn(api, 'listChannelMembers')
+    .mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve }))
+    .mockResolvedValueOnce(ok({ members: [{ id: 'me', name: '現在', role: 'admin', manager: true }] }))
+    .mockResolvedValueOnce(ok({ members: [{ id: 'me', name: '更新後', role: 'admin', manager: true }] }))
+  const { net, session } = open({ initialRole: 'admin' })
+  try {
+    net.pages.A = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 100, messages: [record(100)], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 100)
+    await settle()
+
+    const first = session.channelMembers('A')
+    const firstListener = vi.fn()
+    first.subscribe(firstListener)
+    const second = session.channelMembers('A')
+    await settle()
+    expect(second.get().members[0]?.name).toBe('現在')
+
+    // Late close of the replaced controller must not drop the newer controller's hold or registration.
+    first.close()
+    resolveFirst(ok({ members: [{ id: 'me', name: '古い応答', role: 'admin', manager: true }] }))
+    await settle()
+    expect(firstListener).not.toHaveBeenCalled()
+    expect(first.get().members).toEqual([])
+    expect(second.get().members[0]?.name).toBe('現在')
+
+    // Activity notice still refreshes the active newer controller.
+    net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'A' })
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(list).toHaveBeenCalledTimes(3)
+    expect(second.get().members[0]?.name).toBe('更新後')
+
+    second.close()
+    net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'A' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(list).toHaveBeenCalledTimes(3)
+  } finally {
+    session.close()
+    list.mockRestore()
+    vi.useRealTimers()
+  }
+})
+
+it('channelMembers on a closed Session returns a closed controller without registering or loading', async () => {
+  const list = vi.spyOn(api, 'listChannelMembers').mockResolvedValue(ok({ members: [] }))
+  const { net, session } = open({ initialRole: 'admin' })
+  try {
+    session.close()
+    const listsBefore = net.lists.length
+    const panel = session.channelMembers('A')
+    await panel.load()
+    expect(list).not.toHaveBeenCalled()
+    expect(net.lists).toHaveLength(listsBefore)
+  } finally {
+    list.mockRestore()
+  }
+})
+
 it('composes replies and topics over a single sync instance and fences replaceSession/close in order (replies -> topics -> sync)', async () => {
   const { net, session, onEnded } = open()
   try {
