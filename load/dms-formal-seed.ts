@@ -55,6 +55,8 @@ INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${
     const ids = pairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
     sql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
 ${createLog(org, ids)}`);
+    // The first batch gives ANALYZE rows from this Organization in both tables.
+    if (start === 0) sql('ANALYZE messages, channel_log;');
   }
   sql(`INSERT INTO channel_message_sequences VALUES('${org}','${ordinary}',1); INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${ordinary}','${topic}','Topic',1,1,1); INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES('${org}',gen_random_uuid(),'${ordinary}',1,'${members[0].id}',gen_random_uuid(),'seed','${topic}');
 ${createLog(org, [ordinary])}`);
