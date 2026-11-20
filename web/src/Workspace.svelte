@@ -1362,20 +1362,30 @@
 
   .main-card__header {
     display: flex;
-    flex-direction: column;
+    flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-8);
     padding: var(--space-12) var(--space-16);
     min-width: 0;
   }
 
+  /* Before the title row in DOM, Tab and visual order; shares its line when wide so the timeline keeps its height. */
   .main-card__search {
     display: flex;
-    width: 100%;
+    flex: 1 1 240px;
+    max-width: 360px;
     min-width: 0;
+  }
+
+  @media (max-width: 599px) {
+    .main-card__search {
+      max-width: none;
+    }
   }
 
   .main-card__header-row {
     display: flex;
+    flex: 999 1 auto;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
