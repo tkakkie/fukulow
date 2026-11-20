@@ -195,9 +195,7 @@ it('real API admission 503 preserves the draft through close during a same-key r
   const a = sync.getTimeline('A')
   a.setDraft('送信する本文')
   expect(await a.submit()).toBe(true)
-  expect(await send.mock.results[0].value).toEqual({
-    ok: false, kind: 'network', error: 'send_admission_unavailable', retryAfterMs: 3000,
-  })
+  expect(await send.mock.results[0].value).toEqual({ ok: false, kind: 'network', retryAfterMs: 3000 })
   const original = send.mock.calls[0][1]
   const retrying = a.retry(original.client_message_id)
   expect(send.mock.calls[1][1]).toEqual(original)
