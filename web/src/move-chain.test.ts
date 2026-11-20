@@ -522,6 +522,22 @@ it('maps Move refusals without changing projections', async () => {
   await c.sync.close()
 })
 
+it('ends a same-key Move retry after a definite archived refusal', async () => {
+  vi.useFakeTimers()
+  const c = await client()
+  c.transport.mockResolvedValueOnce({ ok: false, kind: 'network' }).mockResolvedValueOnce(http(409, 'channel_archived'))
+  try {
+    const outcome = await c.move('A', anchor.id, { topicId: 'T' })
+    if (outcome.kind !== 'unknown') throw new Error('expected an unknown outcome')
+    const refusal = { kind: 'archived', message: 'このチャンネルはアーカイブされているため、トピックに移動できません。' }
+    await expect(outcome.retry()).resolves.toEqual(refusal)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await expect(outcome.retry()).resolves.toEqual(refusal)
+    expect(c.transport.mock.calls).toEqual([c.transport.mock.calls[0], c.transport.mock.calls[0]])
+    expect(c.listReplyChain).toHaveBeenCalledTimes(1)
+  } finally { await c.sync.close() }
+})
+
 it('routes stale Move generations through the existing history reset', async () => {
   const c = await client()
   c.transport.mockResolvedValueOnce(http(409, 'history_generation_changed'))

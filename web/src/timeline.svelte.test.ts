@@ -1401,6 +1401,108 @@ describe('Channel creation visibility', () => {
 })
 
 describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, §5)', () => {
+  it.each(['Timeline', 'TopicView', 'ReplyPanel'] as const)('%s explains an archived send refusal in Japanese', async view => {
+    const net = fakeNetwork()
+    const message = { ...record(1, 'A'), topic_id: view === 'TopicView' ? 'T' : null }
+    net.pages.A = ok({ history_generation: message.history_generation, as_of_seq: 1, messages: [message], has_more: false })
+    const session = createSession({ selfId: 'me', onEnded: vi.fn(), ...net.options() })
+    net.lists[0].resolve(ok({ history_generation: message.history_generation, channels: [channel('A')] }))
+    const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+    try {
+      net.socket.onReady()
+      await settle()
+      net.subscribed('A', 1)
+      const channel = syncAdapter(session.sync).channel('A')
+      const props = { channel, channelId: 'A', selfId: 'me' }
+      const target = host as unknown as Element
+      const replies = repliesAdapter(session.replies, 'A')
+      if (view === 'ReplyPanel') await replies.open(message)
+      const instance = view === 'Timeline' ? mount(Timeline, { target, props })
+        : view === 'TopicView' ? mount(TopicView, {
+          target, props: { ...props, topics: topicsAdapter(session.topics, 'A'), topicId: 'T', topicName: 'T' },
+        }) : mount(ReplyPanel, {
+          target, props: { ...props, replies, anchorMessageId: message.id, resolvedAnchor: message },
+        })
+      try {
+        await settle()
+        const sending = channel.send('下書き', {
+          topic_name: view === 'TopicView' ? 'T' : undefined,
+          reply_to: view === 'ReplyPanel' ? message.id : undefined,
+        })
+        await settle()
+        net.sends[0].resolve({ ok: false, kind: 'http', status: 409, error: 'channel_archived' })
+        await sending
+        await settle()
+        expect(host.querySelector('.ui-message-row [role="alert"]')?.textContent)
+          .toBe('このチャンネルはアーカイブされているため、送信できません。')
+        expect(buttonsByText(host, '再送する')).toHaveLength(0)
+      } finally { await unmount(instance) }
+    } finally { session.close() }
+  })
+
+  it.each([true, false])('keeps the Channel header and overview until the by-id read resolves archived=%s', async archived => {
+    vi.useFakeTimers()
+    const net = fakeNetwork()
+    const options = net.options()
+    const active = channel('A', 'general')
+    active.capabilities.can_archive = { allowed: true }
+    active.capabilities.can_rename = { allowed: true }
+    const history_generation = record(1).history_generation
+    const getChannelResult = deferred<Result<api.Channel>>()
+    const getChannel = vi.fn(() => getChannelResult.promise)
+    const session = createSession({
+      selfId: 'me', organizationId: 'org-1', onEnded: vi.fn(), ...options,
+      channelsApi: { ...options.channelsApi!, getChannel },
+    })
+    net.lists[0].resolve(ok({ history_generation, channels: [active] }))
+    const navigation = createNavigation({
+      location: { href: 'http://localhost/o/org-1/c/A?panel=overview' },
+      history: { state: null, pushState() {}, replaceState() {} },
+      innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div'); testDoc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, selectedOrganizationId: 'org-1',
+      session: { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync),
+        topics: id => topicsAdapter(session.topics, id), close: session.close },
+    } })
+    try {
+      net.socket.onReady()
+      await settle()
+      const composer = host.querySelector('main textarea')!
+      const archiveButton = buttonsByText(host, 'アーカイブ')[0]
+      expect(composer.disabled).toBe(false)
+      expect(archiveButton).toBeDefined()
+
+      net.event({ type: 'channel_list_changed' })
+      await vi.advanceTimersByTimeAsync(200)
+      net.lists.at(-1)!.resolve(ok({ history_generation, channels: [] }))
+      await settle()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(getChannel).toHaveBeenCalledExactlyOnceWith('A', expect.any(AbortSignal))
+      expect(host.querySelector('main h1')?.textContent).toContain('general')
+      expect(host.querySelector('.channel-overview__name')?.textContent).toContain('general')
+      expect(buttonsByText(host, 'アーカイブ')[0]).toBe(archiveButton)
+      expect(host.querySelector('main textarea')).toBe(composer)
+      expect(composer.disabled).toBe(true)
+      expect(host.querySelector('.main-card__notice')?.textContent).toContain('チャンネルの状態を確認しています。')
+
+      getChannelResult.resolve(ok(archived ? { ...active, archived,
+        capabilities: { ...active.capabilities, can_rename: { allowed: false, reason: 'channel_archived' } },
+      } : active))
+      await settle()
+      expect(host.querySelector('main h1')?.textContent).toContain('general')
+      if (archived) {
+        expect(host.querySelector('.main-card__notice')?.textContent).toContain('このチャンネルはアーカイブされています。')
+        expect(buttonsByText(host, '復元')).toHaveLength(1)
+      } else {
+        expect(host.querySelector('.main-card__notice')).toBeNull()
+        expect(buttonsByText(host, 'アーカイブ')[0]).toBe(archiveButton)
+      }
+      expect(composer.disabled).toBe(archived)
+    } finally { await unmount(instance); navigation.destroy(); session.close() }
+  })
+
   it('TopicView handles an active summary evicted by 400 newer main Messages without rejection or a render loop', async () => {
     vi.useFakeTimers()
     const c = windowClient(), report = vi.spyOn(console, 'error').mockImplementation(() => {})

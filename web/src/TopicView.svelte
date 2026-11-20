@@ -49,6 +49,7 @@
     selfId = '',
     viewSelected = true,
     organizationUnavailable = false,
+    sendDisabled = false,
     reconnecting = false,
     resolveSenderName,
     resolveMentionName,
@@ -72,6 +73,7 @@
     selfId?: string
     viewSelected?: boolean
     organizationUnavailable?: boolean
+    sendDisabled?: boolean
     reconnecting?: boolean
     resolveSenderName?: (senderId: string) => string
     resolveMentionName?: MentionName
@@ -608,10 +610,11 @@
           <MessageRow
             body={p.body}
             pendingStatus={p.status}
+            failureCode={p.failureCode}
             retryable={p.retryable}
             {targetUnavailable}
             onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
-            onrestore={() => handleRestoreRequest(p.clientMessageId)}
+            onrestore={sendDisabled ? undefined : () => handleRestoreRequest(p.clientMessageId)}
             ondiscard={() => handleDiscard(p.clientMessageId)}
           />
         {/snippet}
@@ -645,7 +648,7 @@
       placeholder="トピックにメッセージを入力"
       value={composerState.draft}
       error={composerState.composerError}
-      disabled={targetUnavailable}
+      disabled={targetUnavailable || sendDisabled}
       submitDisabled={!topicName}
       oninput={(b) => tc.setDraft(b)}
       onsubmit={handleSubmit}
