@@ -47,6 +47,7 @@
     selfId = '',
     organizationUnavailable = false,
     sendDisabled = false,
+    archived = false,
     composerRef = $bindable(null),
     resolveSenderName,
     resolveMentionName,
@@ -70,6 +71,7 @@
     selfId?: string
     organizationUnavailable?: boolean
     sendDisabled?: boolean
+    archived?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     resolveSenderName?: (senderId: string) => string
     resolveMentionName?: MentionName
@@ -806,6 +808,9 @@
   {/if}
 
   <div class="reply-panel__composer">
+    {#if archived && !targetUnavailable}
+      <StatusBanner message="このチャンネルはアーカイブされています。メッセージを送信できませんが、履歴は引き続き閲覧できます。" />
+    {/if}
     <Composer
       {members}
       {onmentionrequest}
@@ -1161,6 +1166,8 @@
 
   .reply-panel__composer {
     grid-row: 3;
+    display: grid;
+    gap: var(--space-8);
     padding: var(--space-8) var(--space-12) var(--space-12);
     min-width: 0;
   }
