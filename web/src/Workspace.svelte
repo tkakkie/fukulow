@@ -198,18 +198,44 @@
 
   const selectedChannelId = $derived(selected?.id)
   const selectedKind = $derived(selected?.kind)
-  const channelMemberController = $derived.by(() => {
-    if (!panelOpen || activePanelTab !== 'members' || !selectedChannelId || selectedKind === 'dm') return undefined
-    const open = session.channelMembers
-    return untrack(() => {
-      void members?.load()
-      return open?.(selectedChannelId)
-    })
-  })
-  const channelMemberModel = $derived(channelMemberController ? channelMembersAdapter(channelMemberController) : undefined)
+  const channelMemberTarget = $derived(
+    panelOpen && activePanelTab === 'members' && selectedChannelId && selectedKind !== 'dm'
+      ? selectedChannelId
+      : null,
+  )
+  let activeChannelMembers = $state.raw<{
+    session: SessionModel
+    organizationId: string
+    channelId: string
+    controller: ReturnType<NonNullable<SessionModel['channelMembers']>>
+  } | undefined>(undefined)
+  const channelMemberModel = $derived(
+    activeChannelMembers &&
+      activeChannelMembers.session === session &&
+      activeChannelMembers.organizationId === currentOrganizationId &&
+      activeChannelMembers.channelId === channelMemberTarget
+      ? channelMembersAdapter(activeChannelMembers.controller)
+      : undefined,
+  )
   $effect(() => {
-    const controller = channelMemberController
-    return () => controller?.close()
+    const currentSession = session
+    const orgId = currentOrganizationId
+    const channelId = channelMemberTarget
+    const open = currentSession.channelMembers
+    if (!channelId || !open) {
+      activeChannelMembers = undefined
+      return
+    }
+    const controller = untrack(() => {
+      void members?.load()
+      return open(channelId)
+    })
+    const entry = { session: currentSession, organizationId: orgId, channelId, controller }
+    activeChannelMembers = entry
+    return () => {
+      controller.close()
+      if (activeChannelMembers === entry) activeChannelMembers = undefined
+    }
   })
   let lastViewId = $state('')
   // A cold descendant URL can resolve to its root before its own body is paged in.

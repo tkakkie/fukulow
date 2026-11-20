@@ -242,6 +242,13 @@ export function createSession(options: SessionOptions) {
     memberReleases.get(id)?.()
     memberReleases.set(id, activity.hold(`channel-members:${id}`, controller.activityTarget))
   }
+  function releaseMembers(id: string, controller: ReturnType<typeof createChannelMembers>) {
+    if (memberControllers.get(id) !== controller) return
+    memberControllers.delete(id)
+    memberAvailability.delete(id)
+    memberReleases.get(id)?.()
+    memberReleases.delete(id)
+  }
   const stopMemberAccess = sync.subscribe(() => {
     for (const [id, controller] of memberControllers) {
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[id]?.state === 'unavailable'
@@ -270,23 +277,37 @@ export function createSession(options: SessionOptions) {
         if (!r.ok && r.kind === 'http' && r.status === 401) notifyEnded()
         else if (!closed && api.isOrganizationUnavailable(r)) terminate()
       }, api, () => { void sync.channelUnavailable(channel) }, () => channels.load(), memberListAccess)
-      memberControllers.set(channel, controller)
+      const rawClose = controller.close
+      const managed: ReturnType<typeof createChannelMembers> = {
+        ...controller,
+        close() {
+          releaseMembers(channel, managed)
+          rawClose()
+        },
+      }
+      if (closed) {
+        rawClose()
+        return managed
+      }
+      memberControllers.set(channel, managed)
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable'
       memberAvailability.set(channel, lost)
-      if (lost) controller.unavailable()
+      if (lost) managed.unavailable()
       else {
-        holdMembers(channel, controller)
-        void controller.load()
+        holdMembers(channel, managed)
+        void managed.load()
         void channels.load()
       }
-      return controller
+      return managed
     },
     close() {
       closed = true
       stopActivity(); activity.close(); capabilities.close()
       navigationTargets.close(); replyCounts.close()
       stopFollowing(); stopSync(); stopMemberAccess()
-      memberControllers.forEach(c => c.close()); memberControllers.clear()
+      for (const controller of [...memberControllers.values()]) controller.close()
+      memberControllers.clear(); memberAvailability.clear()
+      memberReleases.forEach(release => release()); memberReleases.clear()
       channels.close()
       dms?.close()
       void sync.close()

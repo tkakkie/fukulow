@@ -727,6 +727,10 @@ class MiniDocument extends MiniNode {
     return queryFirst(this, selector)
   }
 
+  getElementById(id: string): MiniElement | null {
+    return this.querySelector(`#${id}`)
+  }
+
   querySelectorAll(selector: string): MiniElement[] {
     return queryAll(this, selector)
   }
@@ -2506,6 +2510,186 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     navigation.destroy()
     await unmount(instance)
     memberController.close(); channelMembers.close(); rawSession.close()
+  })
+
+  it('Workspace Channel member controller lifecycle cleans up on rapid switching, tab/panel close, and Organization/Session replacement without late publication', async () => {
+    vi.useFakeTimers()
+    type MemberResponse = api.Result<{ members: api.ChannelMember[] }>
+    const pending: Array<{ org: string; channel: string; resolve: (r: MemberResponse) => void }> = []
+    const listSpy = vi.spyOn(api, 'listChannelMembers').mockImplementation((org, ch) => new Promise<MemberResponse>(resolve => {
+      pending.push({ org, channel: ch, resolve })
+    }))
+    const self: Member = { id: 'me', name: '自分', role: 'admin' }
+    const makeOrg = (id: string, name: string) => ({
+      member: self,
+      organization: {
+        organization_id: id,
+        name,
+        capabilities: {
+          can_create_channels: { allowed: true }, can_invite: { allowed: true },
+          can_deactivate_members: { allowed: true }, can_manage_roles: { allowed: true },
+        },
+      },
+    })
+    const makeNav = (initialHref: string) => {
+      let href = initialHref
+      return createNavigation({
+        location: { get href() { return href } },
+        history: {
+          state: null,
+          pushState(_s: unknown, _t: string, url: string) { href = url },
+          replaceState(_s: unknown, _t: string, url: string) { href = url },
+        },
+        innerWidth: 1280,
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as NavigationBrowser)
+    }
+    const makeSession = (orgId: string, channelIds: string[]) => {
+      const net = fakeNetwork()
+      const raw = createSession({ selfId: self.id, organizationId: orgId, initialRole: 'admin', onEnded: vi.fn(), ...net.options() })
+      const opened: Array<{ channel: string; controller: ReturnType<typeof raw.channelMembers>; listener: ReturnType<typeof vi.fn> }> = []
+      const model = {
+        channels: channelsAdapter(raw.channels),
+        sync: syncAdapter(raw.sync),
+        topics: (id: string) => topicsAdapter(raw.topics, id),
+        channelMembers(id: string) {
+          const controller = raw.channelMembers(id)
+          const listener = vi.fn()
+          controller.subscribe(listener)
+          opened.push({ channel: id, controller, listener })
+          return controller
+        },
+        close: raw.close,
+      }
+      net.socket.onReady()
+      net.lists[0].resolve(ok({
+        history_generation: '00000000-0000-4000-8000-000000000515',
+        channels: channelIds.map(id => channel(id, id)),
+      }))
+      return { net, raw, model, opened }
+    }
+
+    const s1 = makeSession('org-1', ['c1', 'c2', 'c3'])
+    const s2 = makeSession('org-2', ['c1'])
+    const navigation = makeNav('/o/org-1/c/c1?panel=members')
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const props = $state({
+      navigation,
+      session: s1.model,
+      selectedOrganizationId: 'org-1',
+      organization: makeOrg('org-1', 'Org 1'),
+    })
+    const instance = mount(Workspace, { target: host as unknown as Element, props })
+    try {
+      await settle()
+      expect(s1.opened.map(o => o.channel)).toEqual(['c1'])
+      expect(pending.map(p => `${p.org}:${p.channel}`)).toEqual(['org-1:c1'])
+
+      // Rapid Channel switching: c1 -> c2 -> c3.
+      navigation.navigate({ type: 'channel', organizationId: 'org-1', channelId: 'c2' })
+      navigation.navigate({ type: 'tab', tab: 'members' })
+      await settle()
+      navigation.navigate({ type: 'channel', organizationId: 'org-1', channelId: 'c3' })
+      navigation.navigate({ type: 'tab', tab: 'members' })
+      await settle()
+      expect(s1.opened.map(o => o.channel)).toEqual(['c1', 'c2', 'c3'])
+      expect(pending.map(p => `${p.org}:${p.channel}`)).toEqual(['org-1:c1', 'org-1:c2', 'org-1:c3'])
+
+      // Late completions for c1 and c2 must publish nothing.
+      pending[0].resolve(ok({ members: [{ id: 'm1', name: '古いC1メンバー', role: 'member', manager: false }] }))
+      pending[1].resolve(ok({ members: [{ id: 'm2', name: '古いC2メンバー', role: 'member', manager: false }] }))
+      await settle()
+      expect(s1.opened[0].listener).not.toHaveBeenCalled()
+      expect(s1.opened[1].listener).not.toHaveBeenCalled()
+      expect(s1.opened[0].controller.get().members).toEqual([])
+      expect(s1.opened[1].controller.get().members).toEqual([])
+      expect(host.querySelector('#panel-content')?.textContent).not.toContain('古いC1メンバー')
+      expect(host.querySelector('#panel-content')?.textContent).not.toContain('古いC2メンバー')
+
+      // Activity notices for closed c1/c2 must not re-query; c3 remains live.
+      s1.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c1' })
+      s1.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c2' })
+      await vi.advanceTimersByTimeAsync(500)
+      expect(pending).toHaveLength(3)
+
+      pending[2].resolve(ok({ members: [{ id: 'm3', name: 'C3メンバー', role: 'member', manager: false }] }))
+      await settle()
+      expect(host.querySelector('#panel-content')?.textContent).toContain('C3メンバー')
+
+      // Tab switch away from 'members' closes c3 and releases its hold.
+      navigation.navigate({ type: 'tab', tab: 'topics' })
+      await settle()
+      s1.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c3' })
+      await vi.advanceTimersByTimeAsync(500)
+      expect(pending).toHaveLength(3)
+
+      // Reopen 'members' then close panel while in-flight; late completion publishes nothing.
+      navigation.navigate({ type: 'tab', tab: 'members' })
+      await settle()
+      expect(pending).toHaveLength(4)
+      const beforeClose = s1.opened[3]
+      navigation.navigate({ type: 'close' })
+      await settle()
+      pending[3].resolve(ok({ members: [{ id: 'm3-late', name: '閉じた後のC3メンバー', role: 'member', manager: false }] }))
+      await settle()
+      expect(beforeClose.listener).not.toHaveBeenCalled()
+      expect(beforeClose.controller.get().members).toEqual([])
+      s1.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c3' })
+      await vi.advanceTimersByTimeAsync(500)
+      expect(pending).toHaveLength(4)
+
+      // Reopen on org-1/c1, then replace Organization and Session in place.
+      navigation.navigate({ type: 'channel', organizationId: 'org-1', channelId: 'c1' })
+      navigation.navigate({ type: 'tab', tab: 'members' })
+      await settle()
+      expect(pending).toHaveLength(5)
+      const oldOrgEntry = s1.opened[4]
+
+      navigation.navigate({ type: 'channel', organizationId: 'org-2', channelId: 'c1' })
+      navigation.navigate({ type: 'tab', tab: 'members' })
+      props.session = s2.model
+      props.selectedOrganizationId = 'org-2'
+      props.organization = makeOrg('org-2', 'Org 2')
+      await settle()
+      expect(s2.opened.map(o => o.channel)).toEqual(['c1'])
+      expect(pending.map(p => `${p.org}:${p.channel}`).slice(4)).toEqual(['org-1:c1', 'org-2:c1'])
+
+      // Late completion from org-1 must publish nothing, and org-1's hold must be released.
+      pending[4].resolve(ok({ members: [{ id: 'old-org', name: '旧組織メンバー', role: 'member', manager: false }] }))
+      await settle()
+      expect(oldOrgEntry.listener).not.toHaveBeenCalled()
+      expect(oldOrgEntry.controller.get().members).toEqual([])
+      expect(host.querySelector('#panel-content')?.textContent).not.toContain('旧組織メンバー')
+      s1.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c1' })
+      await vi.advanceTimersByTimeAsync(500)
+      expect(pending).toHaveLength(6)
+
+      // New Organization/Session renders its members and stays held until unmount.
+      pending[5].resolve(ok({ members: [{ id: 'new-org', name: '新組織メンバー', role: 'member', manager: false }] }))
+      await settle()
+      expect(host.querySelector('#panel-content')?.textContent).toContain('新組織メンバー')
+
+      s2.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c1' })
+      await vi.advanceTimersByTimeAsync(200)
+      expect(pending).toHaveLength(7)
+      pending[6].resolve(ok({ members: [{ id: 'new-org-2', name: '新組織更新メンバー', role: 'member', manager: false }] }))
+      await settle()
+      expect(host.querySelector('#panel-content')?.textContent).toContain('新組織更新メンバー')
+
+      // Unmounting Workspace (e.g. {#key session}) closes the active controller and releases its hold.
+      await unmount(instance)
+      s2.net.socket.onEvent({ type: 'channel_members_changed', channel_id: 'c1' })
+      await vi.advanceTimersByTimeAsync(500)
+      expect(pending).toHaveLength(7)
+    } finally {
+      navigation.destroy()
+      s1.raw.close()
+      s2.raw.close()
+      listSpy.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
   it('Guest Workspace resolves Member list then author lookup then fallback in timeline and announcements', async () => {
