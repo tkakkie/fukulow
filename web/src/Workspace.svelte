@@ -34,6 +34,11 @@
   import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
   import ReplyPanel from './ReplyPanel.svelte'
+  import SearchBar from './SearchBar.svelte'
+  import SearchResults from './SearchResults.svelte'
+  import { createSearchController, type SearchTarget } from './search'
+  import { searchAdapter } from './search.svelte'
+  import { createDefaultSearchSource, type SearchSource } from './search-source'
   import Timeline from './Timeline.svelte'
   import TopicList from './TopicList.svelte'
   import TopicView from './TopicView.svelte'
@@ -60,6 +65,7 @@
     onsettings,
     onsignout,
     onannounce,
+    searchSource,
   }: {
     navigation: Navigation
     session: SessionModel
@@ -76,6 +82,7 @@
     onsettings?: () => void
     onsignout?: () => void
     onannounce?: (message: string) => void
+    searchSource?: SearchSource
   } = $props()
 
   const channels = $derived(session.channels)
@@ -188,9 +195,40 @@
   $effect(() => {
     if (selected?.kind === 'dm' && route?.panel && !route.panel.startsWith('reply:')) nav.navigate({ type: 'close' })
   })
-  const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')
-  const effectiveMobileLevel = $derived(mobileLevel)
   let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280)
+
+  let channelListHeadingRef = $state<HTMLElement | null>(null)
+  let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let searchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let channelListSearchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let searchResultsHeadingRef = $state<HTMLElement | null>(null)
+  let panelToggleBtn = $state<HTMLButtonElement | null>(null)
+  let panelHeadingRef = $state<HTMLElement | null>(null)
+  let focusTopicInputNext = false
+  let appliedFocusRevision = -1
+  let navFocusBaseline: { revision: number; active: Element | null } = { revision: -1, active: null }
+  const topicSummaryFocus = createTopicSummaryFocusController()
+
+  let activeSearch = $state.raw<{
+    organizationId: string
+    source: SearchSource | undefined
+    controller: ReturnType<typeof createSearchController>
+  } | undefined>(undefined)
+  const searchModel = $derived(
+    activeSearch &&
+      activeSearch.organizationId === currentOrganizationId &&
+      activeSearch.source === searchSource
+      ? searchAdapter(activeSearch.controller)
+      : undefined,
+  )
+  const searchState = $derived(searchModel?.state)
+  const searchOpen = $derived(Boolean(searchState?.open && !organizationUnavailable))
+  const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')
+  const effectiveMobileLevel = $derived<'channels' | 'view' | 'panel'>(
+    mobileLevel === 'channels' && searchOpen ? 'view' : mobileLevel,
+  )
   const mainViewSelected = $derived(
     viewportWidth >= MOBILE_BREAKPOINT_PX || effectiveMobileLevel === 'view',
   )
@@ -201,17 +239,29 @@
       panelOpen,
     }),
   )
-
-  let channelListHeadingRef = $state<HTMLElement | null>(null)
-  let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
-  let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
-  let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
-  let panelToggleBtn = $state<HTMLButtonElement | null>(null)
-  let panelHeadingRef = $state<HTMLElement | null>(null)
-  let focusTopicInputNext = false
-  let appliedFocusRevision = -1
-  let navFocusBaseline: { revision: number; active: Element | null } = { revision: -1, active: null }
-  const topicSummaryFocus = createTopicSummaryFocusController()
+  $effect(() => {
+    const orgId = currentOrganizationId
+    const providedSource = searchSource
+    const controller = createSearchController({
+      source: providedSource ?? createDefaultSearchSource(orgId),
+      onOpenResult: (target) => handleOpenSearchResult(target),
+      onAnnounce: (message) => onannounce?.(message),
+    })
+    const entry = { organizationId: orgId, source: providedSource, controller }
+    activeSearch = entry
+    return () => {
+      controller.destroy()
+      if (activeSearch === entry) activeSearch = undefined
+    }
+  })
+  let lastSearchMainKey: string | null = null
+  $effect(() => {
+    const mainKey = `${route?.organizationId ?? ''}:${route?.channelId ?? ''}:${route?.topicId ?? ''}`
+    if (lastSearchMainKey !== null && mainKey !== lastSearchMainKey) {
+      untrack(() => searchModel?.close())
+    }
+    lastSearchMainKey = mainKey
+  })
 
   const selectedChannelId = $derived(selected?.id)
   const selectedKind = $derived(selected?.kind)
@@ -407,7 +457,15 @@
         }
       }
       else if (state.focus === 'tab') focusTarget(document.getElementById(`panel-tab-${activePanelTab}`))
-      else if (state.focus === 'opener') focusAfterPanelClose(navigation.getOpener(), mainComposerRef)
+      else if (state.focus === 'opener') {
+        if (searchOpen) {
+          if (!focusTarget(navigation.getOpener()) && !focusTarget(searchInputRef)) {
+            focusTarget(searchResultsHeadingRef)
+          }
+        } else {
+          focusAfterPanelClose(navigation.getOpener(), mainComposerRef)
+        }
+      }
       else {
         const preferTopicInput = focusTopicInputNext
         focusTopicInputNext = false
@@ -536,6 +594,7 @@
 
   function handleSelectTopic(topicId: string) {
     if (!selected || !currentOrganizationId) return
+    searchModel?.close()
     const wasSameTopic = route?.topicId === topicId
     nav.navigate({
       type: 'topic',
@@ -589,7 +648,16 @@
     return null
   }
 
-  function openPanel() { if (selected?.kind !== 'dm') nav.navigate({ type: 'tab', tab: 'topics' }, panelToggleBtn) }
+  function openPanel() {
+    if (selected?.kind === 'dm') return
+    const active = typeof document !== 'undefined' ? document.activeElement : null
+    const opener = searchOpen
+      ? (active instanceof HTMLElement && active !== document.body && active !== document.documentElement
+          ? active
+          : searchInputRef)
+      : panelToggleBtn
+    nav.navigate({ type: 'tab', tab: 'topics' }, opener)
+  }
   function closePanel() { nav.navigate({ type: 'close' }) }
   function togglePanel() { if (panelOpen) closePanel(); else openPanel() }
   function goToChannelList() {
@@ -602,6 +670,61 @@
     }
     void tick().then(() => {
       focusIfVisible(channelListHeadingRef)
+    })
+  }
+
+  function canOpenSearchTarget(target: SearchTarget): boolean {
+    const isDm = Boolean(dmState?.rows.some((row) => row.identity.id === target.channelId))
+    const hasChannel = Boolean(
+      isDm ||
+      s.channels.some((c) => c.id === target.channelId) ||
+      s.archivedList?.channels.some((c) => c.id === target.channelId) ||
+      s.openChannel?.id === target.channelId,
+    )
+    if (!hasChannel) return false
+    if (!target.topicId) return true
+    if (isDm) return false
+    const topicsState = session.topics(target.channelId).state
+    if (topicsState.unavailable || topicsState.topic(target.topicId).notFound) return false
+    if (topicsState.topics.some((t) => t.topicId === target.topicId)) return true
+    const allKnown =
+      topicsState.list.asOfSeq !== undefined
+        ? !topicsState.list.hasMore
+        : topicsState.main.asOfSeq !== undefined && !topicsState.main.hasMore
+    return !allKnown
+  }
+
+  function handleOpenSearchResult(target: SearchTarget): boolean {
+    if (!currentOrganizationId || !canOpenSearchTarget(target)) return false
+    handleSelectChannel(target.channelId)
+    if (target.topicId) {
+      nav.navigate({
+        type: 'topic',
+        topicId: target.topicId,
+        phone: viewportWidth < MOBILE_BREAKPOINT_PX,
+      })
+    }
+    return true
+  }
+
+  function handleSubmitSearch(value: string, origin: 'main' | 'channel-list') {
+    if (!searchModel) return
+    void searchModel.submit(value)
+    if (origin === 'channel-list' && value.trim().length > 0) {
+      void tick().then(() => {
+        if (!focusTarget(searchInputRef)) focusTarget(searchResultsHeadingRef)
+      })
+    }
+  }
+
+  function handleCloseSearch() {
+    searchModel?.close()
+    void tick().then(() => {
+      const target =
+        viewportWidth < MOBILE_BREAKPOINT_PX && !route?.channelId
+          ? channelListSearchInputRef
+          : searchInputRef
+      focusTarget(target)
     })
   }
 
@@ -624,6 +747,11 @@
     if (panelOpen) {
       e.preventDefault()
       closePanel()
+      return
+    }
+    if (searchOpen) {
+      e.preventDefault()
+      handleCloseSearch()
       return
     }
     if (typeof document !== 'undefined' && document.activeElement?.closest('.ui-message-row') && mainComposerRef) {
@@ -711,6 +839,18 @@
       >
         チャンネル
       </h2>
+      {#if viewportWidth < MOBILE_BREAKPOINT_PX && effectiveMobileLevel === 'channels' && searchModel && searchState}
+        <div class="channel-column__search mobile-only">
+          <SearchBar
+            value={searchState.input}
+            open={searchOpen}
+            disabled={organizationUnavailable || !currentOrganizationId}
+            bind:inputRef={channelListSearchInputRef}
+            oninput={(value) => searchModel.setInput(value)}
+            onsubmit={(value) => handleSubmitSearch(value, 'channel-list')}
+          />
+        </div>
+      {/if}
     </div>
 
     <div class="channel-column__scroll">
@@ -786,51 +926,129 @@
   </nav>
 
   <main id="main-content" class="main-card" tabindex="-1">
-    {#if selected && currentChannel}
-      <header class="main-card__header">
+    <header class="main-card__header">
+      {#if searchModel && searchState}
+        <div class="main-card__search">
+          <SearchBar
+            value={searchState.input}
+            open={searchOpen}
+            disabled={organizationUnavailable || !currentOrganizationId}
+            bind:inputRef={searchInputRef}
+            oninput={(value) => searchModel.setInput(value)}
+            onsubmit={(value) => handleSubmitSearch(value, 'main')}
+          />
+        </div>
+      {/if}
+      <div class="main-card__header-row">
         <div class="main-card__title-group">
-          <span class="mobile-only">
-            <Button
-              variant="icon"
-              ariaLabel="チャンネル一覧へ戻る"
-              onclick={() => {
-                if (viewportWidth < 600) nav.navigate({ type: 'list' })
-              }}
-            >
-              ‹
-            </Button>
-          </span>
-          {#if route?.topicId}
-            <Button
-              variant="quiet"
-              onclick={() => nav.navigate({ type: 'topic-back' })}
-            >
+          {#if searchOpen && searchModel && searchState}
+            <Button variant="quiet" onclick={handleCloseSearch}>
               <span aria-hidden="true">‹</span>
-              <span>チャンネルへ戻る</span>
+              <span>戻る</span>
             </Button>
-            <span class="main-card__crumb"># {conversationName} ›</span>
+            <h1
+              class="main-card__title"
+              tabindex="-1"
+              bind:this={searchResultsHeadingRef}
+            >
+              検索結果
+            </h1>
+          {:else if selected && currentChannel}
+            <span class="mobile-only">
+              <Button
+                variant="icon"
+                ariaLabel="チャンネル一覧へ戻る"
+                onclick={() => {
+                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
+                }}
+              >
+                ‹
+              </Button>
+            </span>
+            {#if route?.topicId}
+              <Button
+                variant="quiet"
+                onclick={() => nav.navigate({ type: 'topic-back' })}
+              >
+                <span aria-hidden="true">‹</span>
+                <span>チャンネルへ戻る</span>
+              </Button>
+              <span class="main-card__crumb"># {conversationName} ›</span>
+            {/if}
+            <h1 class="main-card__title">
+              {route?.topicId ? (resolvedTopicName || 'トピック') : conversationName}
+            </h1>
+          {:else if organizationUnavailable}
+            <span class="mobile-only">
+              <Button
+                variant="icon"
+                ariaLabel="チャンネル一覧へ戻る"
+                onclick={() => {
+                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
+                }}
+              >
+                ‹
+              </Button>
+            </span>
+            <h1 class="main-card__title">{organization?.organization.name ?? 'fukulow'}</h1>
+          {:else if s.status === 'ready'}
+            <span class="mobile-only">
+              <Button
+                variant="icon"
+                ariaLabel="チャンネル一覧へ戻る"
+                onclick={() => {
+                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
+                }}
+              >
+                ‹
+              </Button>
+            </span>
+            <h1 class="main-card__title">チャンネル</h1>
+          {:else}
+            <span class="mobile-only">
+              <Button
+                variant="icon"
+                ariaLabel="チャンネル一覧へ戻る"
+                onclick={() => {
+                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
+                }}
+              >
+                ‹
+              </Button>
+            </span>
+            <h1 class="main-card__title">fukulow</h1>
           {/if}
-          <h1 class="main-card__title">
-            {route?.topicId ? (resolvedTopicName || 'トピック') : conversationName}
-          </h1>
         </div>
         <div class="main-card__header-actions">
-          <small class="live-status" data-testid="live-status" data-live={currentLive}>
-            {currentLive ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
-          </small>
-          {#if selected.kind !== 'dm' || panelOpen}
-          <Button
-            bind:buttonRef={panelToggleBtn}
-            variant="icon"
-            ariaLabel={panelOpen ? 'パネルを閉じる(⌘.)' : 'パネルを開く(⌘.)'}
-            ariaExpanded={panelOpen}
-            onclick={togglePanel}
-          >
-            ☰
-          </Button>
+          {#if !searchOpen && selected && currentChannel}
+            <small class="live-status" data-testid="live-status" data-live={currentLive}>
+              {currentLive ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
+            </small>
+            {#if selected.kind !== 'dm' || panelOpen}
+            <Button
+              bind:buttonRef={panelToggleBtn}
+              variant="icon"
+              ariaLabel={panelOpen ? 'パネルを閉じる(⌘.)' : 'パネルを開く(⌘.)'}
+              ariaExpanded={panelOpen}
+              onclick={togglePanel}
+            >
+              ☰
+            </Button>
+            {/if}
           {/if}
         </div>
-      </header>
+      </div>
+    </header>
+    {#if searchOpen && searchModel && searchState}
+      <div class="main-card__body">
+        <SearchResults
+          state={searchState}
+          onopenresult={(target) => searchModel.openSearchResult(target)}
+          onloadmore={() => { void searchModel.loadMore() }}
+          onretry={() => { void searchModel.retry() }}
+        />
+      </div>
+    {:else if selected && currentChannel}
       <div class="main-card__body">
         {#if selected.kind === 'dm'}
           <div class="main-card__notice">
@@ -907,22 +1125,6 @@
         </div>
       </div>
     {:else if organizationUnavailable}
-      <header class="main-card__header">
-        <div class="main-card__title-group">
-          <span class="mobile-only">
-            <Button
-              variant="icon"
-              ariaLabel="チャンネル一覧へ戻る"
-              onclick={() => {
-                if (viewportWidth < 600) nav.navigate({ type: 'list' })
-              }}
-            >
-              ‹
-            </Button>
-          </span>
-          <h1 class="main-card__title">{organization?.organization.name ?? 'fukulow'}</h1>
-        </div>
-      </header>
       <div class="main-card__empty">
         <StatusBanner
           tone="danger"
@@ -936,22 +1138,6 @@
         />
       </div>
     {:else if s.status === 'ready'}
-      <header class="main-card__header">
-        <div class="main-card__title-group">
-          <span class="mobile-only">
-            <Button
-              variant="icon"
-              ariaLabel="チャンネル一覧へ戻る"
-              onclick={() => {
-                if (viewportWidth < 600) nav.navigate({ type: 'list' })
-              }}
-            >
-              ‹
-            </Button>
-          </span>
-          <h1 class="main-card__title">チャンネル</h1>
-        </div>
-      </header>
       <div class="main-card__empty">
         <EmptyState
           title="チャンネルがありません。"
@@ -961,22 +1147,6 @@
         />
       </div>
     {:else}
-      <header class="main-card__header">
-        <div class="main-card__title-group">
-          <span class="mobile-only">
-            <Button
-              variant="icon"
-              ariaLabel="チャンネル一覧へ戻る"
-              onclick={() => {
-                if (viewportWidth < 600) nav.navigate({ type: 'list' })
-              }}
-            >
-              ‹
-            </Button>
-          </span>
-          <h1 class="main-card__title">fukulow</h1>
-        </div>
-      </header>
       <div class="main-card__empty">
         <Skeleton rows={4} label="読み込み中" />
       </div>
@@ -1199,6 +1369,11 @@
     color: var(--text2);
   }
 
+  .channel-column__search {
+    min-width: 0;
+    width: 100%;
+  }
+
   .main-card {
     display: grid;
     grid-template-rows: auto 1fr;
@@ -1214,9 +1389,32 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
     gap: var(--space-8);
     padding: var(--space-12) var(--space-16);
+    min-width: 0;
+  }
+
+  /* Before the title row in DOM, Tab and visual order; shares its line when wide so the timeline keeps its height. */
+  .main-card__search {
+    display: flex;
+    flex: 1 1 240px;
+    max-width: 360px;
+    min-width: 0;
+  }
+
+  @media (max-width: 599px) {
+    .main-card__search {
+      max-width: none;
+    }
+  }
+
+  .main-card__header-row {
+    display: flex;
+    flex: 999 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-8);
     min-width: 0;
   }
 
@@ -1251,9 +1449,11 @@
 
   .main-card__header-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-8);
     flex-shrink: 0;
+    min-width: 0;
   }
 
   .live-status {

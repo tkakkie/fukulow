@@ -1,3 +1,4 @@
+import { b1Role } from './b1.ts';
 import { timeouts, appStatementTimeoutMs } from './runtime.ts';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -29,7 +30,7 @@ export const docker = (...args: string[]) => command('docker',args);
 // Owner setup/seed/index sessions keep no timeout, as migrations do; only
 // app-role psql/pgbench sessions get the production 10s limit.
 export const sql = (container: string, db: string, text: string, role = 'fukulow') =>
-  command('docker',['exec','-i',...(role==='fukulow_app'?appSessionArguments:[]),container,'psql','-XqAt','-v','VERBOSITY=verbose','-v','ON_ERROR_STOP=1','-U',role,'-d',db],text);
+  command('docker',['exec','-i',...(role==='fukulow_app' || role===b1Role ? appSessionArguments : []),container,'psql','-XqAt','-v','VERBOSITY=verbose','-v','ON_ERROR_STOP=1','-U',role,'-d',db],text);
 // Owner session whose NOTICEs (auto_explain plans) are kept, in order, with the rows.
 export const sqlWithNotices = (container: string, db: string, text: string) =>
   command('docker',['exec','-i',container,'sh','-c','exec psql -XqAt -v ON_ERROR_STOP=1 -U fukulow -d "$1" 2>&1','sh',db],text);
@@ -39,7 +40,7 @@ export const percentile = (xs: number[], p: number) => {
   return sorted[Math.min(sorted.length-1,Math.ceil(sorted.length*p)-1)];
 };
 
-export async function benchmark(container: string, db: string, script: string, dest: string, transactions: number, clients = 5) {
+export async function benchmark(container: string, db: string, script: string, dest: string, transactions: number, clients = 5, role = 'fukulow_app') {
   // Verify the effective setting in every pgbench session/transaction. The
   // guard is included in timing; a mismatch raises division_by_zero and fails.
   const guarded = `SELECT 1 / (current_setting('statement_timeout')::interval = interval '10 seconds')::int;\n${script}`;
@@ -48,7 +49,7 @@ export async function benchmark(container: string, db: string, script: string, d
   const name = `${dest.split('/').at(-1)}-${createHash('sha256').update(dest).digest('hex').slice(0,12)}`;
   docker('exec',container,'mkdir','-p',`/tmp/${name}`);
   const prefix = `/tmp/${name}/log`;
-  const args = ['exec',...appSessionArguments,container,'pgbench','-n','-U','fukulow_app','-d',db,'-c',String(clients),'-j',String(clients),
+  const args = ['exec',...appSessionArguments,container,'pgbench','-n','-U',role,'-d',db,'-c',String(clients),'-j',String(clients),
     '-t',String(transactions),'-M','prepared','-l','--log-prefix',prefix,'-f','/tmp/bench.sql'];
   const start = performance.now();
   const output = await new Promise<string>((resolve,reject)=>{

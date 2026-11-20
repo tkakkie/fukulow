@@ -3,10 +3,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { b1Role } from './b1.ts';
 import { appSessionArguments, benchmark, sql, SqlStatementTimeoutError } from './bench.ts';
 
-for (const client of ['psql','pgbench']) {
-  test(`${client}: app timeout is set and SQL cancellation invalidates rather than sampling`,async t=>{
+for (const client of ['psql','pgbench']) for (const role of ['fukulow_app',b1Role]) {
+  test(`${client}: ${role} timeout is set and SQL cancellation invalidates rather than sampling`,async t=>{
     const dir = mkdtempSync(join(tmpdir(),'search-sql-timeout-'));
     const before = process.env.PATH;
     t.after(()=>{process.env.PATH=before;rmSync(dir,{recursive:true,force:true});});
@@ -21,11 +22,12 @@ if (args.includes('psql') || args.includes('pgbench')) {
 }
 `,{mode:0o755});
     process.env.PATH=dir+':'+before;
-    if (client==='psql') assert.throws(()=>sql('test','test','SELECT pg_sleep(1);','fukulow_app'),SqlStatementTimeoutError);
-    else await assert.rejects(()=>benchmark('test','test','SELECT pg_sleep(1);',join(dir,'slow'),1,1),SqlStatementTimeoutError);
+    if (client==='psql') assert.throws(()=>sql('test','test','SELECT pg_sleep(1);',role),SqlStatementTimeoutError);
+    else await assert.rejects(()=>benchmark('test','test','SELECT pg_sleep(1);',join(dir,'slow'),1,1,role),SqlStatementTimeoutError);
     const args: string[][] = readFileSync(calls,'utf8').trim().split('\n').map(line=>JSON.parse(line));
     const measured = args.find(args=>args.includes(client));
     assert.ok(measured);
+    assert.equal(measured[measured.indexOf('-U')+1],role);
     assert.equal(measured.includes(appSessionArguments[1]!),true);
     assert.equal(appSessionArguments[1],'PGOPTIONS=-c statement_timeout=10000');
     if (client==='psql') assert.ok(measured.includes('ON_ERROR_STOP=1'));

@@ -1,5 +1,20 @@
 use super::*;
 
+pub(super) async fn exists(
+    tx: &mut PgConnection,
+    owner: Owner,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM member_sections WHERE organization_id=$1 AND member_id=$2 AND id=$3)",
+    )
+    .bind(owner.org)
+    .bind(owner.member)
+    .bind(id)
+    .fetch_one(tx)
+    .await
+}
+
 pub(super) async fn create(
     tx: &mut PgConnection,
     owner: Owner,
@@ -14,11 +29,7 @@ pub(super) async fn create(
             return Err(ApiError(StatusCode::CONFLICT, "section_id_conflict", None));
         }
         let generation = owner.generation(tx).await?;
-        return Ok(Change::Unchanged(created_section(
-            StatusCode::OK,
-            input.id,
-            generation,
-        )));
+        return Ok(Change::Unchanged(Some((input.id, generation))));
     }
     let reserved: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM member_section_ids WHERE organization_id=$1 AND member_id=$2 AND id=$3)",
