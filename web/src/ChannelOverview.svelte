@@ -11,6 +11,7 @@
   let {
     channel,
     unavailable = false,
+    pending = false,
     onrename,
     onarchive,
     onrestore,
@@ -18,6 +19,8 @@
   }: {
     channel: Channel | DmDiscovery
     unavailable?: boolean
+    /** The Channel's archived state is being re-read; its Capabilities may be stale. */
+    pending?: boolean
     onrename: (name: string) => Promise<string | null>
     onarchive: () => Promise<string | null>
     onrestore: () => Promise<string | null>
@@ -32,6 +35,7 @@
   let notice = $state('')
   let confirmAction = $state<'archive' | 'restore' | null>(null)
   let sectionEl = $state<HTMLElement | null>(null)
+  const locked = $derived(busy || pending)
 
   const canRename = $derived(channel.kind === 'channel' && !unavailable && !channel.archived && channel.capabilities.can_rename.allowed)
   const canArchive = $derived(channel.kind === 'channel' && !unavailable && channel.capabilities.can_archive.allowed)
@@ -60,7 +64,7 @@
   })
 
   $effect(() => {
-    if (channel.kind !== 'channel' || unavailable || !channel.capabilities.can_archive.allowed) {
+    if (channel.kind !== 'channel' || unavailable || pending || !channel.capabilities.can_archive.allowed) {
       confirmAction = null
       return
     }
@@ -70,7 +74,7 @@
 
   async function handleRename(e: Event) {
     e.preventDefault()
-    if (channel.kind !== 'channel' || !canRename || busy) return
+    if (channel.kind !== 'channel' || !canRename || locked) return
     const targetId = channel.id
     const nextName = nameDraft
     const tooLong = channelNameTooLong(nextName)
@@ -99,7 +103,7 @@
   }
 
   async function handleConfirmArchiveAction() {
-    if (channel.kind !== 'channel' || !canArchive || busy || !confirmAction) return
+    if (channel.kind !== 'channel' || !canArchive || locked || !confirmAction) return
     const action = confirmAction
     const targetId = channel.id
     busy = true
@@ -154,14 +158,14 @@
           label="変更後の名前"
           name="channel_name"
           required
-          disabled={busy}
+          disabled={locked}
           bind:value={nameDraft}
         />
         <div class="channel-overview__actions">
           <Button
             variant="primary"
             type="submit"
-            disabled={busy || nameDraft === '' || nameDraft === channel.name}
+            disabled={locked || nameDraft === '' || nameDraft === channel.name}
           >
             名前を変更
           </Button>
@@ -174,7 +178,7 @@
         {#if channel.archived}
           <Button
             variant="secondary"
-            disabled={busy}
+            disabled={locked}
             onclick={() => { error = ''; notice = ''; confirmAction = 'restore' }}
           >
             復元
@@ -182,7 +186,7 @@
         {:else}
           <Button
             variant="secondary"
-            disabled={busy}
+            disabled={locked}
             onclick={() => { error = ''; notice = ''; confirmAction = 'archive' }}
           >
             アーカイブ

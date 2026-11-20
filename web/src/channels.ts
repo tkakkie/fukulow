@@ -68,7 +68,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   let hasList = false
   let selectedKind: 'channel' | 'dm' | undefined
   let open: { id: string; release(): void; invalidate(): void } | undefined
-  let archived: { release(): void; invalidate(): void; refresh(): void } | undefined
+  let archived: { release(): void; invalidate(): void; refresh(): void; retry(): void } | undefined
   let archivedHolds = 0
   const listeners = new Set<() => void>()
   const set = (patch: Partial<ChannelsState>) => {
@@ -153,6 +153,10 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       release: () => { target.close(); release() },
       invalidate: () => target.invalidate('access'),
       refresh: () => target.invalidate(),
+      retry: () => {
+        set({ archivedList: { status: 'loading', channels: state.archivedList?.channels ?? [] } })
+        void target.retryNow()
+      },
     }
     state = { ...state, archivedList: { status: 'loading', channels: [] } }
     void target.refresh()
@@ -208,6 +212,8 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     },
     resetHistory() { open?.invalidate(); archived?.invalidate() },
     refreshArchived() { archived?.refresh() },
+    // The list may be kept alive by an open archived Channel, so a retry cannot rely on re-holding it.
+    retryArchived() { archived?.retry() },
     holdArchived() {
       if (closed || !activity || !api.listArchivedChannels) return () => {}
       if (++archivedHolds === 1) set({})

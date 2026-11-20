@@ -21,6 +21,7 @@ export function channelsAdapter(channels: Channels) {
     selectHint: (id: string) => channels.selectHint(id),
     create: (name: string, visibility: 'public' | 'private') => channels.create({ name, visibility }),
     holdArchived: () => channels.holdArchived(),
+    retryArchived: () => channels.retryArchived(),
     isArchived: (id: string) => { subscribe(); return channels.isArchived(id) },
     rename: (id: string, name: string) => channels.rename(id, name),
     archive: (id: string) => channels.archive(id),

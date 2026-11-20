@@ -705,6 +705,7 @@
         selectedId={s.selectedId}
         disabled={organizationUnavailable}
         onhold={() => channels.holdArchived()}
+        onretry={() => channels.retryArchived()}
         onselect={handleSelectChannel}
       />
       {#if dmState && session.dms}
@@ -1005,6 +1006,7 @@
             <ChannelOverview
               channel={selected}
               unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
+              pending={archiveStatePending}
               onrename={(name) => channels.rename(selected.id, name)}
               onarchive={() => channels.archive(selected.id)}
               onrestore={() => channels.restore(selected.id)}

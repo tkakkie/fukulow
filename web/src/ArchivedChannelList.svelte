@@ -10,23 +10,23 @@
     selectedId,
     disabled = false,
     onhold,
+    onretry,
     onselect,
   }: {
     list: { status: 'loading' | 'ready' | 'error'; channels: Channel[] } | undefined
     selectedId: string | null
     disabled?: boolean
     onhold: () => () => void
+    onretry: () => void
     onselect: (id: string) => void
   } = $props()
 
   const uid = $props.id()
   const listId = `${uid}-archived-channels`
   let open = $state(false)
-  let retrySeq = $state(0)
   const channels = $derived((list?.channels ?? []).filter((c) => c.kind === 'channel'))
 
   $effect(() => {
-    void retrySeq
     if (!open || disabled) return
     return onhold()
   })
@@ -54,7 +54,7 @@
           message="アーカイブ済みチャンネルを読み込めませんでした。"
           detail="通信状況を確認して、もう一度お試しください。"
           actionLabel="再試行"
-          onaction={() => { retrySeq++ }}
+          onaction={onretry}
         />
       {:else if !list || (list.status === 'loading' && channels.length === 0)}
         <Skeleton rows={2} label="アーカイブ済みチャンネルを読み込み中" />

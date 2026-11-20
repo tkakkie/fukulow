@@ -462,6 +462,68 @@ describe('ChannelOverview UI', () => {
     })
   })
 
+  it('disables rename, archive and restore while the archived state is pending, so stale Capabilities cannot act', async () => {
+    await withDom(async (doc) => {
+      const host = doc.createElement('div')
+      doc.body.appendChild(host)
+      const onrename = vi.fn(async () => null)
+      const onarchive = vi.fn(async () => null)
+      const onrestore = vi.fn(async () => null)
+      const props = $state({ pending: true, archived: false })
+      const inst = mount(ChannelOverview, {
+        target: host as unknown as Element,
+        props: {
+          get channel() {
+            return makeChannel({
+              name: 'general',
+              archived: props.archived,
+              capabilities: { ...makeChannel().capabilities, can_rename: { allowed: true }, can_archive: { allowed: true } },
+            })
+          },
+          get pending() { return props.pending },
+          onrename,
+          onarchive,
+          onrestore,
+        },
+      })
+      flushSync()
+      const buttons = () => host.querySelectorAll('button')
+      const btn = (label: string) => buttons().find(b => b.textContent.trim() === label)
+      const input = host.querySelector('input')!
+      expect(input.disabled).toBe(true)
+      expect(btn('名前を変更')!.disabled).toBe(true)
+      expect(btn('アーカイブ')!.disabled).toBe(true)
+      btn('アーカイブ')!.click()
+      flushSync()
+      expect(host.textContent).not.toContain('チャンネルをアーカイブしますか？')
+      host.querySelector('form')!.dispatchEvent(new MiniEvent("submit"))
+      flushSync()
+      expect(onrename).not.toHaveBeenCalled()
+
+      // Once the by-id read settles the controls work again; pending again closes an open confirmation.
+      props.pending = false
+      flushSync()
+      expect(btn('アーカイブ')!.disabled).toBe(false)
+      btn('アーカイブ')!.click()
+      flushSync()
+      expect(host.textContent).toContain('チャンネルをアーカイブしますか？')
+      props.pending = true
+      flushSync()
+      expect(host.textContent).not.toContain('チャンネルをアーカイブしますか？')
+      expect(onarchive).not.toHaveBeenCalled()
+
+      // Restore is gated the same way for an archived Channel.
+      props.archived = true
+      flushSync()
+      expect(btn('復元')!.disabled).toBe(true)
+      btn('復元')!.click()
+      flushSync()
+      expect(host.textContent).not.toContain('チャンネルを復元しますか？')
+      expect(onrestore).not.toHaveBeenCalled()
+      await unmount(inst)
+    })
+  })
+
   it('confirms archive and restore via Dialog, cancels via button or Escape, prevents double submit, and announces results', async () => {
     await withDom(async (doc) => {
       const host = doc.createElement('div')
@@ -690,6 +752,7 @@ describe('ArchivedChannelList UI', () => {
               get list() { return props.list },
               selectedId: null,
               onhold: () => adapter.holdArchived(),
+              onretry: () => adapter.retryArchived(),
               onselect,
             },
           })
@@ -729,6 +792,82 @@ describe('ArchivedChannelList UI', () => {
           net.event({ type: 'channel_list_changed' })
           await vi.advanceTimersByTimeAsync(300)
           expect(listArchivedChannels).not.toHaveBeenCalled()
+
+          await unmount(inst)
+          stop()
+        } finally {
+          session.close()
+        }
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('ArchivedChannelList retry', () => {
+  it('re-reads the archived list on 再試行 even while an open archived Channel keeps it held', async () => {
+    vi.useFakeTimers()
+    try {
+      await withDom(async (doc) => {
+        const net = fakeNetwork()
+        const archivedRow = { ...row({ id: 'arch-1', name: 'archived-room' }), archived: true }
+        const listArchivedChannels = vi.fn<NonNullable<ChannelsApi['listArchivedChannels']>>(async () => list([archivedRow]))
+        listArchivedChannels.mockResolvedValueOnce(http(400, 'bad_request'))
+        const session = createSession({
+          selfId: 'me',
+          organizationId: 'org',
+          onEnded: vi.fn(),
+          ...net.options(),
+          channelsApi: {
+            listChannels: async () => list([row({ id: 'act-1', name: 'general' })]),
+            listArchivedChannels,
+            getChannel: async () => ok(archivedRow),
+            createChannel: vi.fn(),
+          },
+        })
+        net.socket.onReady()
+        const adapter = channelsAdapter(session.channels)
+        const host = doc.createElement('div')
+        doc.body.appendChild(host)
+        try {
+          // Opening the archived Channel by link holds the archived list, and its first read fails.
+          adapter.selectHint('arch-1')
+          await vi.advanceTimersByTimeAsync(200)
+          expect(listArchivedChannels).toHaveBeenCalledTimes(1)
+          expect(adapter.state.archivedList?.status).toBe('error')
+
+          const props = $state<{ list: ReturnType<typeof channelsAdapter>['state']['archivedList'] }>({ list: undefined })
+          const stop = $effect.root(() => {
+            $effect(() => { props.list = adapter.state.archivedList })
+          })
+          const inst = mount(ArchivedChannelList, {
+            target: host as unknown as Element,
+            props: {
+              get list() { return props.list },
+              selectedId: 'arch-1',
+              onhold: () => adapter.holdArchived(),
+              onretry: () => adapter.retryArchived(),
+              onselect: vi.fn(),
+            },
+          })
+          flushSync()
+          host.querySelector('button')!.click()
+          flushSync()
+          await vi.advanceTimersByTimeAsync(300)
+          flushSync()
+          // Expanding re-uses the held list; a failed read is not retried on its own.
+          expect(listArchivedChannels).toHaveBeenCalledTimes(1)
+          const retry = host.querySelectorAll('button').find(b => b.textContent.trim() === '再試行')!
+          expect(retry).toBeDefined()
+
+          retry.click()
+          await flush()
+          flushSync()
+          expect(listArchivedChannels).toHaveBeenCalledTimes(2)
+          expect(adapter.state.archivedList?.status).toBe('ready')
+          expect(host.querySelectorAll('li').map(li => li.textContent)).toEqual([expect.stringContaining('archived-room')])
+          expect(host.textContent).not.toContain('再試行')
 
           await unmount(inst)
           stop()
