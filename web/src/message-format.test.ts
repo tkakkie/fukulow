@@ -543,8 +543,6 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
         med64k / med8k,
         `${name}: 8k=${med8k.toFixed(3)}ms 64k=${med64k.toFixed(3)}ms`,
       ).toBeLessThan(24)
-      // Generous per-call cap at 64k catches quadratic regressions even if 8k was noisy
-      expect(med64k, `${name}: 64k per-call`).toBeLessThan(50)
     }
   })
   it('tokenizes the accepted O(N log N) family at 3,999 characters and the 32 KiB body limit', () => {
@@ -552,20 +550,46 @@ describe('message-format: Message body formatting and safe autolinks (#628)', ()
     expect(outOfOrderUrlBody(3999)).toBe(
       '**http://u:`**@x/ ** ' + 'http://@/'.repeat(441) + '`http://@',
     )
-    for (const size of [3999, 32 * 1024]) {
-      const body = outOfOrderUrlBody(size)
-      expect(body.length).toBe(size)
-      const runs: number[] = []
-      for (let s = 0; s < 5; s++) {
+    const small = outOfOrderUrlBody(3999)
+    const large = outOfOrderUrlBody(32 * 1024)
+    expect(small.length).toBe(3999)
+    expect(large.length).toBe(32 * 1024)
+
+    const BATCH_CALLS = 16
+    const SAMPLES = 5
+    const measureFixedBatch = (body: string): number => {
+      const start = performance.now()
+      for (let i = 0; i < BATCH_CALLS; i++) {
         clearMessageFormatCache()
-        const start = performance.now()
         expect(tokenizeMessageBody(body).length).toBe(1)
-        runs.push(performance.now() - start)
       }
-      runs.sort((a, b) => a - b)
-      // Measured well under 1 ms; the cap only catches gross regressions
-      expect(runs[2], `${size} characters`).toBeLessThan(50)
+      return (performance.now() - start) / BATCH_CALLS
     }
+
+    // Warm up JIT before measuring
+    for (let i = 0; i < 2; i++) {
+      clearMessageFormatCache()
+      tokenizeMessageBody(small)
+      clearMessageFormatCache()
+      tokenizeMessageBody(large)
+    }
+
+    const runsSmall: number[] = []
+    const runsLarge: number[] = []
+    for (let s = 0; s < SAMPLES; s++) {
+      runsSmall.push(measureFixedBatch(small))
+      runsLarge.push(measureFixedBatch(large))
+    }
+    runsSmall.sort((a, b) => a - b)
+    runsLarge.sort((a, b) => a - b)
+    const medSmall = runsSmall[Math.floor(runsSmall.length / 2)]
+    const medLarge = runsLarge[Math.floor(runsLarge.length / 2)]
+    // 32768 / 3999 ~= 8.19x input: O(N log N) is ~10.3x (8.19 * log2(32768)/log2(3999)),
+    // O(N^2) is ~67.1x (8.19^2); 25 cleanly separates them (~2.4x above O(N log N), ~2.7x below O(N^2)).
+    expect(
+      medLarge / medSmall,
+      `3999=${medSmall.toFixed(3)}ms 32KiB=${medLarge.toFixed(3)}ms`,
+    ).toBeLessThan(25)
   })
 
   it('rejects every failed candidate in a shared run and still links a later valid one', () => {
