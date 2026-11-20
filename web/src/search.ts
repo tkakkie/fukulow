@@ -56,11 +56,12 @@ export type SearchControllerOptions = {
 
 /**
  * Prepares a user-typed search query per #153:
- * trims leading and trailing whitespace while preserving internal whitespace,
+ * trims leading and trailing Unicode White_Space while preserving internal whitespace,
  * Unicode form, case, and literal `%`, `_`, `\` characters (normalization is server-side).
+ * Matches Rust `str::trim()`: unlike `String.prototype.trim()`, it keeps U+FEFF (BOM) and removes U+0085.
  */
 export function prepareSearchQuery(raw: string): string {
-  return raw.trim()
+  return raw.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')
 }
 
 function initialState(): SearchState {

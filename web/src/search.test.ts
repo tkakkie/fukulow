@@ -42,6 +42,13 @@ describe('prepareSearchQuery', () => {
     expect(prepareSearchQuery(` ${nfd} `)).toBe(nfd)
     expect(prepareSearchQuery('   \u3000\t  ')).toBe('')
   })
+
+  it('trims only Unicode White_Space like Rust str::trim: keeps a leading/trailing BOM, removes NEL', () => {
+    expect(prepareSearchQuery('\uFEFF検索\uFEFF')).toBe('\uFEFF検索\uFEFF')
+    expect(prepareSearchQuery(' \uFEFF検索 ')).toBe('\uFEFF検索')
+    expect(prepareSearchQuery('\u0085\u2028検索\u2029\u00A0')).toBe('検索')
+    expect(prepareSearchQuery('\uFEFF')).toBe('\uFEFF')
+  })
 })
 
 describe('createSearchController', () => {
