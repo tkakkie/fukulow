@@ -158,6 +158,104 @@ describe['each']([])('bracket empty suite %s', () => { it('inside bracket empty 
       { title: 'inside bracket empty each', skipped: true },
     ])
   })
+
+  it('accepts .each callbacks that resolve in the file to a function declaration or a const function', () => {
+    const src = `
+function declared(n: number) { expect(n).toBeGreaterThan(0) }
+const arrow = (n: number) => { expect(n).toBeGreaterThan(0) }
+const expression = async function (n: number) { expect(n).toBeGreaterThan(0) }
+it.each([1, 2])('it declared %s', declared)
+test.each([1, 2])('test declared %s', declared)
+it.each([1])('it arrow %s', arrow)
+test.each([1])('test arrow %s', arrow)
+test.concurrent.each([1])('concurrent expression %s', expression)
+it.each([1])('hoisted %s', later)
+function later() {}
+describe('suite', () => {
+  const nested = () => {}
+  it.each([1])('nested const %s', nested)
+})
+`
+    expect(tsTests(src)).toEqual([
+      'it declared %s', 'test declared %s', 'it arrow %s', 'test arrow %s', 'concurrent expression %s', 'hoisted %s', 'nested const %s',
+    ].map((title) => ({ title, skipped: false })))
+  })
+
+  it('fails closed on .each callbacks that do not statically resolve to a local, never-rebound function', () => {
+    const src = `
+import { imported } from './helpers'
+import * as ns from './helpers'
+let reassigned = () => {}
+reassigned = () => {}
+let unassigned = () => {}
+var hoistedVar = function () {}
+function rebound() {}
+rebound = () => {}
+function destructured() {}
+;[destructured] = [() => {}]
+const obj = { fn: () => {} }
+const notFunction = 1
+const { picked } = { picked: () => {} }
+it.each([1])('imported %s', imported)
+it.each([1])('namespace %s', ns.fn)
+it.each([1])('reassigned let %s', reassigned)
+it.each([1])('unassigned let %s', unassigned)
+it.each([1])('var %s', hoistedVar)
+it.each([1])('rebound function %s', rebound)
+it.each([1])('destructured target %s', destructured)
+it.each([1])('member %s', obj.fn)
+it.each([1])('non-function const %s', notFunction)
+it.each([1])('destructured const %s', picked)
+it.each([1])('global %s', undeclared)
+const table = [() => {}]
+it.each([1])('computed %s', table[0])
+function twice() {}
+function twice() {}
+it.each([1])('duplicate declarations %s', twice)
+it.each([1])('const before init %s', arrowAfter)
+const arrowAfter = () => {}
+function wrapper(param: () => void) { it.each([1])('parameter %s', param) }
+function shadow() { const declared = 1; it.each([1])('shadowed %s', declared) }
+function declared() {}
+it.each([1])('missing named callback %s')
+it.each([1])('options then named %s', { skip: true }, declared)
+it.each([])('empty with named %s', declared)
+it.each([,])('sparse with named %s', declared)
+it.each([...cases])('spread with named %s', declared)
+it['each']([1])('bracket with named %s', declared)
+it.skip.each([1])('skip with named %s', declared)
+describe.each([1])('describe with named %s', declared)
+`
+    expect(tsTests(src).filter((t) => !t.skipped)).toEqual([])
+    expect(tsTests(src).map((t) => t.title)).toEqual([
+      'imported %s', 'namespace %s', 'reassigned let %s', 'unassigned let %s', 'var %s', 'rebound function %s', 'destructured target %s',
+      'member %s', 'non-function const %s', 'destructured const %s', 'global %s', 'computed %s', 'duplicate declarations %s', 'const before init %s',
+      'parameter %s', 'shadowed %s', 'missing named callback %s', 'options then named %s', 'empty with named %s',
+      'sparse with named %s', 'spread with named %s', 'bracket with named %s', 'skip with named %s',
+    ])
+  })
+
+  it('fails closed on same-named rebinding the symbol scan cannot see, ambient declarations and generators', () => {
+    const cases: [string, string][] = [
+      ['shorthand destructuring', 'function fn() {}\n;({ fn } = { fn: undefined as any })\nit.each([1])(\'t %s\', fn)'],
+      ['shorthand default', 'function fn() {}\n;({ fn = undefined as any } = {})\nit.each([1])(\'t %s\', fn)'],
+      ['shorthand for-of', 'function fn() {}\nfor ({ fn } of [{ fn: undefined as any }]) {}\nit.each([1])(\'t %s\', fn)'],
+      ['nested shorthand', 'function fn() {}\n;([{ fn }] = [{ fn: undefined as any }])\nit.each([1])(\'t %s\', fn)'],
+      ['var after function', "describe('s', () => {\n  function fn() {}\n  var fn: any = undefined\n  it.each([1])('t %s', fn)\n})"],
+      ['var before function', "describe('s', () => {\n  var fn: any = undefined\n  function fn() {}\n  it.each([1])('t %s', fn)\n})"],
+      ['var in block', "describe('s', () => {\n  function fn() {}\n  if (true) { var fn: any = undefined }\n  it.each([1])('t %s', fn)\n})"],
+      ['var for-of', "describe('s', () => {\n  function fn() {}\n  for (var fn of [undefined as any]) {}\n  it.each([1])('t %s', fn)\n})"],
+      ['var destructuring', "describe('s', () => {\n  function fn() {}\n  var { fn } = { fn: undefined as any }\n  it.each([1])('t %s', fn)\n})"],
+      ['await using', 'await using fn = () => {}\nit.each([1])(\'t %s\', fn)'],
+      ['declare const', 'declare const fn = () => {}\nit.each([1])(\'t %s\', fn)'],
+      ['declare namespace', "declare namespace N { function fn() {}\n  it.each([1])('t %s', fn) }"],
+      ['generator declaration', 'function* fn() {}\nit.each([1])(\'t %s\', fn)'],
+      ['generator const', 'const fn = function* () {}\nit.each([1])(\'t %s\', fn)'],
+      ['inline generator', "it.each([1])('t %s', function* () {})"],
+    ]
+    for (const [label, src] of cases) expect(tsTests(src).filter((t) => !t.skipped), label).toEqual([])
+    expect(tsTests('function fn() {}\nconst o = { fn: 1 }\no.fn\nit.each([1])(\'t %s\', fn)\nfn()')).toEqual([{ title: 't %s', skipped: false }])
+  })
 })
 
 describe('docs/invariants.md parsing', () => {
