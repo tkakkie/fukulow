@@ -423,7 +423,15 @@ pub struct StepResult {
     pub effects: Vec<Effect>,
     pub changed_channels: Vec<Uuid>,
     pub records: Vec<(Uuid, Vec<Message>)>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub moves: Vec<MoveVersion>,
     pub state_changed: bool,
+}
+#[derive(Debug, Serialize)]
+pub struct MoveVersion {
+    pub channel_id: Uuid,
+    pub root_id: Uuid,
+    pub version: i64,
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

@@ -49,8 +49,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const canonical = (channel: string, held: Message | undefined, incoming: Message) =>
     knownMessageState(sync.get().channels[channel], held, incoming)
   const windows = new Map<string, Window>()
-  let mainSearchChannel: string | undefined
   let mainLimit = MAIN_MESSAGE_LIMIT
+  let topicLimit = TOPIC_MESSAGE_LIMIT
   const activityTargets = new Map<string, { close(): void; release(): void; target: ReturnType<typeof createActivityTarget>; observeSummary?(listener: (response: TopicSummaryResponse) => void): () => void }>()
   const listeners = new Set<(channels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -179,7 +179,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         } else if (before?.messages !== after.messages || records?.has(id)) {
           const incoming = records?.get(id) ?? after.messages
           rememberTopicMessages(w.evidence, incoming)
-          if (!w.main.following && w.messages.size + w.baselines.size >= MAIN_MESSAGE_LIMIT) w.main.hasNewer = true
+          if (!w.main.following && w.messages.size + w.baselines.size >= mainLimit) w.main.hasNewer = true
           for (const m of incoming) {
             const baseline = m.topic_id && w.baselines.get(m.topic_id)
             if (baseline && baseline.summary.latest_message.id === m.id) {
@@ -194,17 +194,13 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
                 if (held?.id === m.id && held.version < m.version) t.messages.delete(m.created_seq)
                 continue
               }
-              if (!t.following && t.messages.size >= TOPIC_MESSAGE_LIMIT) t.hasNewer = true
+              if (!t.following && t.messages.size >= topicLimit) t.hasNewer = true
               if (arrived && t.hasNewer) t.newerCount++
               if (!t.hasNewer || t.messages.has(m.created_seq)) { const state = canonical(id, t.messages.get(m.created_seq), m); if (state) t.messages.set(m.created_seq, state) }
             }
           }
           trimMain(w, w.main.hasNewer ? 'older' : 'newer')
-          for (const t of w.topics.values()) {
-            if (trimMessages(t.messages, TOPIC_MESSAGE_LIMIT)) {
-              t.before = Math.min(...t.messages.keys()); t.hasMore = true
-            }
-          }
+          for (const t of w.topics.values()) trimTopic(t, 'newer')
         }
       }
       snapshots.delete(id)
@@ -437,6 +433,16 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       await Promise.resolve()
       for (const [channel, value] of windows) if (value === w && current(channel, w)) await ensureSummary(channel, topicId)
     } finally { w.evidenceRefresh.delete(topicId) }
+  }
+  function trimTopic(t: TopicWindow, edge: 'older' | 'newer') {
+    if (!trimMessages(t.messages, topicLimit, edge)) return
+    if (edge === 'older') {
+      t.hasNewer = true
+      t.through = Math.max(...t.messages.keys())
+    } else {
+      t.hasMore = true
+      t.before = Math.min(...t.messages.keys())
+    }
   }
   function trimMain(w: Window, edge: 'older' | 'newer') {
     const lines = selectMainTimeline([], w.messages.values(), w.baselines.values(), w.evidence)
@@ -755,14 +761,25 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     return () => { listeners.delete(listener) }
   }
   const controller = {
-    reserveMainSearch(channel: string | undefined, records: number) {
-      if (mainSearchChannel === channel) return
-      mainSearchChannel = channel
-      mainLimit = MAIN_MESSAGE_LIMIT - (channel ? records : 0)
-      const entry = channel && (windows.has(channel) ? [channel, windows.get(channel)!] as const : windows.entries().next().value)
-      if (entry) {
-        const [id, w] = entry
-        trimMain(w, w.main.hasNewer ? 'older' : 'newer')
+    reserveSearch(channel: string | undefined, scope: 'main' | 'topic', records: number) {
+      const nextMain = MAIN_MESSAGE_LIMIT - (scope === 'main' ? records : 0)
+      const nextTopic = TOPIC_MESSAGE_LIMIT - (scope === 'topic' ? records : 0)
+      const trimMainNow = nextMain < mainLimit
+      const trimTopicNow = nextTopic < topicLimit
+      mainLimit = nextMain
+      topicLimit = nextTopic
+      if (trimMainNow) {
+        const entry = channel !== undefined && windows.has(channel)
+          ? [channel, windows.get(channel)!] as const : windows.entries().next().value
+        if (entry) {
+          const [id, w] = entry
+          trimMain(w, w.main.hasNewer ? 'older' : 'newer')
+          notify(id)
+        }
+      }
+      if (trimTopicNow) for (const [id, w] of windows) {
+        if (!w.topics.size) continue
+        for (const t of w.topics.values()) trimTopic(t, t.hasNewer ? 'older' : 'newer')
         notify(id)
       }
     },
@@ -907,7 +924,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         pruneActivity(w)
         w.topics.set(topicId, t = topicWindow())
         for (const m of sync.get().channels[channel]?.messages ?? []) if (m.topic_id === topicId) { const state = canonical(channel, t.messages.get(m.created_seq), m); if (state) t.messages.set(m.created_seq, state) }
-        trimMessages(t.messages, TOPIC_MESSAGE_LIMIT)
+        trimMessages(t.messages, topicLimit)
       }
       if (!current(channel, w) || (!latest && (t.loading || !t.hasMore))) return
       const older = t.initialized && !latest
@@ -938,10 +955,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           else for (const m of suffix) { const state = canonical(channel, t.messages.get(m.created_seq), m); if (state) t.messages.set(m.created_seq, state) }
         }
         t.before = result.data.messages[0]?.created_seq; t.hasMore = result.data.has_more
-        if (trimMessages(t.messages, TOPIC_MESSAGE_LIMIT, older ? 'older' : 'newer')) {
-          if (older) t.hasNewer = true
-          else { t.hasMore = true; t.before = Math.min(...t.messages.keys()) }
-        }
+        trimTopic(t, older ? 'older' : 'newer')
         if (t.hasNewer) t.through = Math.max(0, ...t.messages.keys())
         withSync(channel, () => { void sync.settleHistory(channel, result.data.messages) })
       }

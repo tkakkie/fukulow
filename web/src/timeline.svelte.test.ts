@@ -9782,6 +9782,43 @@ describe('Search result navigation', () => {
     }
   })
 
+  it.each(['latest', 'send'])('leaves search history on %s and shows the latest timeline', async action => {
+    const net = fakeNetwork()
+    const options = net.options()
+    const history_generation = record(1).history_generation
+    net.pages.A = ok({ history_generation, as_of_seq: 100, messages: [record(100)], has_more: false })
+    options.sync!.api!.listMessages = async (_id, query) => ok({
+      history_generation, as_of_seq: 100, messages: query?.after_seq === 39 ? [record(40)] : [],
+      has_more: query?.after_seq === 39,
+    })
+    const app = openWorkspace(net, options)
+    try {
+      await settle()
+      net.subscribed('A', 100)
+      app.navigation.openSearchResult({ channelId: 'A', messageId: 'id40', createdSeq: 40 })
+      await settle()
+      expect(app.host.querySelector('.ui-message-row--search-match')?.textContent).toContain('m40')
+      if (action === 'latest') buttonsByText(app.host, '最新のメッセージへ')[0].click()
+      else {
+        const textarea = app.host.querySelector('main textarea')!
+        textarea.value = '検索から送信'
+        textarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+        await settle()
+        buttonsByText(app.host, '送信')[0].click()
+        await settle()
+        expect(net.sends[0]?.body.body).toBe('検索から送信')
+        net.sends[0].resolve(ok({ ...record(101), sender: 'me', body: '検索から送信', client_message_id: net.sends[0].body.client_message_id }))
+      }
+      await settle()
+      expect(app.navigation.get().searchResult).toBeUndefined()
+      expect(app.session.searchAnchor.get()).toBeUndefined()
+      expect(app.host.querySelector('.ui-message-row--search-match')).toBeNull()
+      expect(app.host.querySelector('[data-message-id="id100"]')).not.toBeNull()
+    } finally {
+      await app.close()
+    }
+  })
+
   it('opens the exact Reply in an old chain and reports a stale result without falling back to the root', async () => {
     const net = fakeNetwork()
     const root = record(1)

@@ -88,7 +88,8 @@ export function createCore(selfId: string): SyncCore {
         channelViews[id] = next
       }
       if (out.stateChanged) view = { ...out.session, channels: out.changedChannels.length ? channelViews : view.channels }
-      return { effects: out.effects, changedChannels: new Set(out.changedChannels), records, stateChanged: out.stateChanged }
+      return { effects: out.effects, changedChannels: new Set(out.changedChannels), records,
+        ...(out.moves ? { moves: out.moves } : {}), stateChanged: out.stateChanged }
     },
   }
 }

@@ -117,6 +117,11 @@ impl Step<'_> {
             }
             self.channel(id).older = None;
             self.cap_moved_roots(id, MAIN_MESSAGE_LIMIT);
+            self.out.moves.push(MoveVersion {
+                channel_id: id,
+                root_id: event.root_id,
+                version: event.version,
+            });
             self.history(id, Page::Latest, None);
         }
         // Move proves event coverage without settling a send or emitting Message state.

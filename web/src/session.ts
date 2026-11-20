@@ -173,8 +173,9 @@ export function createSession(options: SessionOptions) {
       observe(replySource.listReplyChain(channelId, messageId, query, options.accountSignal)),
   })
   const stopSearchBudget = searchAnchor.subscribe(() => {
-    const target = searchAnchor.get()?.target
-    topics.reserveMainSearch(target && !target.topicId && !target.replyRootId ? target.channelId : undefined, SEARCH_WINDOW_LIMIT)
+    const view = searchAnchor.get()
+    const target = view?.status === 'missing' || view?.target.replyRootId ? undefined : view?.target
+    topics.reserveSearch(target?.channelId, target?.topicId ? 'topic' : 'main', target ? SEARCH_WINDOW_LIMIT : 0)
   })
   let watched: string | null = null
   const { listArchivedChannels, getChannel, updateChannel } = source

@@ -97,7 +97,11 @@ export type Input = (
 
 
 export type SyncView = Omit<State, "requests" | "timers">
-export type CoreResult = { effects: Effect[]; changedChannels: ReadonlySet<string>; records: ReadonlyMap<string, Message[]>; stateChanged: boolean }
+export type MoveVersion = Pick<Extract<ServerEvent, { kind: 'move' }>, 'channel_id' | 'root_id' | 'version'>
+export type CoreResult = {
+  effects: Effect[]; changedChannels: ReadonlySet<string>; records: ReadonlyMap<string, Message[]>
+  moves?: readonly MoveVersion[]; stateChanged: boolean
+}
 export interface SyncCore {
   get(): SyncView
   request(id: number): Request | undefined
