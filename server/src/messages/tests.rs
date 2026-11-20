@@ -19,6 +19,7 @@ pub(super) mod history;
 mod mentions;
 mod move_topic;
 mod receipts;
+mod replay_plans;
 mod text_input;
 pub(super) mod unread;
 

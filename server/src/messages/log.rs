@@ -144,6 +144,8 @@ pub(super) async fn create(
 
 // Limit positions before hydrating current state. LEFT JOIN keeps an unhydratable
 // position visible to validation instead of silently acknowledging past it.
+// Keep the Message lookup correlated. Planning before the RLS context is set
+// can underestimate the cost of materializing all Messages in the Organization.
 fn page_sql(channel: usize, authorized: bool) -> String {
     let (after, through, limit) = (channel + 1, channel + 2, channel + 3);
     let access = if authorized { "AND access.visible" } else { "" };
@@ -157,8 +159,11 @@ fn page_sql(channel: usize, authorized: bool) -> String {
             l.channel_id AS log_channel_id,m.id,m.channel_id,m.seq,m.version,m.deleted,m.client_message_id,m.sender,m.body,m.topic_id,
             m.reply_to_id AS reply_to,m.reply_root_id,
             to_char(m.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
-        FROM log_page l LEFT JOIN messages m
-            ON m.organization_id=l.organization_id AND m.channel_id=l.channel_id AND m.id=l.message_id AND l.kind='create'
+        FROM log_page l LEFT JOIN LATERAL (
+            SELECT * FROM messages
+            WHERE organization_id=l.organization_id AND channel_id=l.channel_id AND id=l.message_id AND l.kind='create'
+            OFFSET 0
+        ) m ON true
         ORDER BY l.event_seq"#
     )
 }
@@ -200,6 +205,20 @@ fn hydrate(rows: Vec<PgRow>, mut after: i64) -> Result<Vec<ChannelEvent>, sqlx::
     Ok(messages)
 }
 
+pub(super) fn replay_page_sql() -> String {
+    mentions::page_sql(&page_sql(2, false), "p.event_seq")
+}
+
+pub(super) fn authorized_page_sql() -> String {
+    let sql = format!(
+        "WITH access AS MATERIALIZED (SELECT ({}) AS visible) \
+         SELECT access.visible,m.* FROM access LEFT JOIN LATERAL ({}) m ON true ORDER BY m.event_seq",
+        crate::channels::member_visibility_sql(false),
+        page_sql(4, true)
+    );
+    mentions::page_sql(&sql, "p.event_seq")
+}
+
 pub(crate) async fn replay_page(
     pool: &PgPool,
     organization: Uuid,
@@ -207,7 +226,7 @@ pub(crate) async fn replay_page(
     after: i64,
     through: i64,
 ) -> Result<Vec<ChannelEvent>, sqlx::Error> {
-    let sql = mentions::page_sql(&page_sql(2, false), "p.event_seq");
+    let sql = replay_page_sql();
     let rows = crate::database::organization_statement(
         pool,
         &sql,
@@ -259,13 +278,7 @@ async fn authorized_page(
     generation: Option<Uuid>,
 ) -> Result<(Uuid, Vec<ChannelEvent>), MessageError> {
     let (after, through) = bounds;
-    let sql = format!(
-        "WITH access AS MATERIALIZED (SELECT ({}) AS visible) \
-         SELECT access.visible,m.* FROM access LEFT JOIN LATERAL ({}) m ON true ORDER BY m.event_seq",
-        crate::channels::member_visibility_sql(false),
-        page_sql(4, true)
-    );
-    let sql = mentions::page_sql(&sql, "p.event_seq");
+    let sql = authorized_page_sql();
     let rows = crate::database::organization_statement(
         pool,
         &sql,
