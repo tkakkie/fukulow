@@ -137,6 +137,63 @@ it('refreshes value-equal mention snapshots and removes Channels with a changed 
   expect(core.get().channels.A).toBeUndefined()
 })
 
+it('replaces a Message with a body-free tombstone at the same creation position', () => {
+  const { core, feed, history } = startBoundary()
+  const first = { ...record(1), mentions: [{ member_id: 'member', name: 'Name' }] }
+  const second = record(2)
+  history('A', [first, second], 2)
+  const connection = core.get().connection!
+  feed({ type: 'event', connection, event: {
+    type: 'subscribed', channel_id: 'A', history_generation: first.history_generation, caught_up_seq: 2,
+  } })
+  const before = core.get().channels.A.messages
+  const result = feed({ type: 'event', connection, event: {
+    type: 'message', kind: 'delete', seq: 3, message: { ...first, version: 3, deleted: true },
+  } })
+  const [tombstone, kept] = core.get().channels.A.messages
+  expect(tombstone).not.toBe(before[0])
+  expect(tombstone).toMatchObject({ id: first.id, created_seq: first.created_seq, version: 3, deleted: true })
+  expect('body' in tombstone).toBe(false)
+  expect('mentions' in tombstone).toBe(false)
+  expect(result.records.get('A')?.[0]).toBe(tombstone)
+  expect(kept).toBe(before[1])
+})
+
+it('repopulates the same Channel after stopping and starting the Session', () => {
+  const { core, feed, history } = startBoundary()
+  const first = record(1)
+  history('A', [first, record(2)], 2)
+  feed({ type: 'user_send', channel: 'A', clientMessageId: 'old-pending', body: 'old body' })
+  const before = core.get().channels.A
+  expect(before.pending).toHaveLength(1)
+
+  feed({ type: 'stop' })
+  feed({ type: 'session_start', selfId: 'me' })
+  feed({ type: 'connection_ready', connection: core.get().connection! })
+  const request = feed({ type: 'watch', channel: 'A' }).effects.find(e => e.type === 'fetch_history')!.id
+  expect(core.get().channels.A).toMatchObject({ watched: true, cursor: null, messages: [], pending: [] })
+  const fresh = { ...first, body: 'new Session body' }
+  feed({ type: 'history_result', request, page: {
+    history_generation: fresh.history_generation, as_of_seq: 1, messages: [fresh], has_more: false,
+  } })
+  const after = core.get().channels.A
+  expect(after.cursor).toBe(1)
+  expect(after.messages).toHaveLength(1)
+  expect(after.messages[0]).toBe(fresh)
+  expect(after.pending).toEqual([])
+})
+
+it('clears reconnectWait when the next Session snapshot omits it', () => {
+  const { core, feed } = startBoundary()
+  const closed = feed({ type: 'socket_closed', connection: core.get().connection!, code: 1006 })
+  const wait = closed.effects.find(e => e.type === 'wait')!
+  expect(wait.purpose).toBe('reconnect_backoff')
+  expect(core.get().reconnectWait).toBe(wait.id)
+  const reconnect = feed({ type: 'timer_elapsed', id: wait.id })
+  expect(reconnect.effects).toContainEqual({ type: 'connect', id: core.get().connection })
+  expect('reconnectWait' in core.get()).toBe(false)
+})
+
 it('preserves JSON number semantics for large Channel sequence values', () => {
   const { core, history } = startBoundary()
   const seq = Number.MAX_SAFE_INTEGER + 1

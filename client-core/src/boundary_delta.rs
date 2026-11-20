@@ -41,21 +41,37 @@ struct MessageDelta<'a> {
 
 impl<'a> MessageDelta<'a> {
     fn new(message: &'a Message, bodies: &mut Bodies<'a>) -> Self {
+        let Message {
+            history_generation,
+            id,
+            channel_id,
+            created_seq,
+            version,
+            deleted,
+            client_message_id,
+            sender,
+            body,
+            created_at,
+            topic_id,
+            reply_to,
+            reply_root_id,
+            mentions,
+        } = message;
         Self {
-            history_generation: message.history_generation,
-            id: message.id,
-            channel_id: message.channel_id,
-            created_seq: message.created_seq,
-            version: message.version,
-            deleted: message.deleted,
-            client_message_id: message.client_message_id,
-            sender: message.sender,
-            body: message.body.as_deref().map(|body| bodies.intern(body)),
-            created_at: &message.created_at,
-            topic_id: message.topic_id,
-            reply_to: message.reply_to,
-            reply_root_id: message.reply_root_id,
-            mentions: message.mentions.as_deref(),
+            history_generation: *history_generation,
+            id: *id,
+            channel_id: *channel_id,
+            created_seq: *created_seq,
+            version: *version,
+            deleted: *deleted,
+            client_message_id: *client_message_id,
+            sender: *sender,
+            body: body.as_deref().map(|body| bodies.intern(body)),
+            created_at,
+            topic_id: *topic_id,
+            reply_to: *reply_to,
+            reply_root_id: *reply_root_id,
+            mentions: mentions.as_deref(),
         }
     }
 }
@@ -77,6 +93,33 @@ struct PendingDelta<'a> {
     topic_name: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_root_id: Option<Uuid>,
+}
+
+impl<'a> PendingDelta<'a> {
+    fn new(pending: &'a Pending, bodies: &mut Bodies<'a>) -> Self {
+        let Pending {
+            client_message_id,
+            body,
+            state,
+            request,
+            retry_wait,
+            failure_code,
+            reply_to,
+            topic_name,
+            reply_root_id,
+        } = pending;
+        Self {
+            client_message_id: *client_message_id,
+            body: bodies.intern(body),
+            state: *state,
+            request: *request,
+            retry_wait: *retry_wait,
+            failure_code: failure_code.as_deref(),
+            reply_to: *reply_to,
+            topic_name: topic_name.as_deref(),
+            reply_root_id: *reply_root_id,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -223,17 +266,7 @@ impl<'a> ChannelPatch<'a> {
                         {
                             return Entry::Previous(index);
                         }
-                        Entry::New(PendingDelta {
-                            client_message_id: p.client_message_id,
-                            body: bodies.intern(&p.body),
-                            state: p.state,
-                            request: p.request,
-                            retry_wait: p.retry_wait,
-                            failure_code: p.failure_code.as_deref(),
-                            reply_to: p.reply_to,
-                            topic_name: p.topic_name.as_deref(),
-                            reply_root_id: p.reply_root_id,
-                        })
+                        Entry::New(PendingDelta::new(p, bodies))
                     })
                     .collect()
             });

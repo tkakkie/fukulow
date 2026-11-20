@@ -64,6 +64,163 @@ fn message_splices_trim_append_and_replace_at_each_window_size() {
 }
 
 #[test]
+fn load_older_splices_prepend_and_trim_the_main_window_tail() -> serde_json::Result<()> {
+    let id = Uuid::nil();
+    let mut boundary = Boundary::new(id);
+    let mut step = |input| -> serde_json::Result<Value> {
+        serde_json::from_str(&boundary.step(serde_json::from_value(input)?)?)
+    };
+    let limit = MAIN_MESSAGE_LIMIT;
+    let as_of = limit + 2;
+    let page = |request: &Value, first, last, has_more| {
+        json!({
+            "type": "history_result", "request": request,
+            "page": { "history_generation": id, "as_of_seq": as_of, "has_more": has_more,
+                "messages": (first..=last).map(|seq| message(seq, seq)).collect::<Vec<_>>() }
+        })
+    };
+    step(json!({"type":"session_start", "selfId":id}))?;
+    step(json!({"type":"connection_ready", "connection":1}))?;
+    let watch = step(json!({"type":"watch", "channel":id}))?;
+    step(page(&watch["effects"][0]["id"], as_of - 199, as_of, true))?;
+    let older = step(json!({"type":"load_older", "channel":id}))?;
+    step(page(&older["effects"][0]["id"], 3, as_of - 200, true))?;
+    let older = step(json!({"type":"load_older", "channel":id}))?;
+    assert_eq!(older["effects"][0]["page"], "before");
+    assert_eq!(older["effects"][0]["seq"], 3);
+    let result = step(page(&older["effects"][0]["id"], 1, 2, false))?;
+    let ops: Vec<_> = result["channels"][id.to_string()]["splices"]
+        .as_array()
+        .expect("Message window splices")
+        .iter()
+        .map(|op| {
+            (
+                op["start"].as_u64().expect("splice start") as usize,
+                op["delete"].as_u64().expect("splice delete") as usize,
+                op["insert"].as_array().expect("splice insert"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ops.iter()
+            .map(|(start, delete, insert)| (*start, *delete, insert.len()))
+            .collect::<Vec<_>>(),
+        [(0, 0, 2), (limit - 2, 2, 0)]
+    );
+    let mut applied: Vec<_> = (3..=as_of as u64).collect();
+    for (start, delete, insert) in ops.into_iter().rev() {
+        applied.splice(
+            start..start + delete,
+            insert
+                .iter()
+                .map(|m| m["created_seq"].as_u64().expect("creation position")),
+        );
+    }
+    assert_eq!(applied, (1..=limit as u64).collect::<Vec<_>>());
+    Ok(())
+}
+
+fn expand_interned_body(mut value: Value, bodies: &Bodies<'_>) -> Value {
+    if let Some(body) = value.get_mut("body") {
+        let index = body.as_u64().expect("interned body index") as usize;
+        *body = json!(bodies.text[index]);
+    }
+    value
+}
+
+// Message, Pending and Send have no fields sent separately except body,
+// which is stored in the per-step Bodies table and expanded for comparison.
+#[test]
+fn message_delta_matches_populated_message_and_tombstone() -> serde_json::Result<()> {
+    let tombstone = Message {
+        deleted: true,
+        body: None,
+        ..message(3, 4).as_ref().clone()
+    };
+    let populated = Message {
+        history_generation: Uuid::from_u128(1),
+        channel_id: Uuid::from_u128(2),
+        client_message_id: Uuid::from_u128(5),
+        sender: Uuid::from_u128(6),
+        deleted: false,
+        body: Some("Message body".into()),
+        topic_id: Some(Uuid::from_u128(7)),
+        reply_to: Some(Uuid::from_u128(8)),
+        reply_root_id: Some(Uuid::from_u128(9)),
+        mentions: Some(vec![Mention {
+            member_id: Uuid::from_u128(10),
+            name: "Mentioned Member".into(),
+        }]),
+        ..tombstone.clone()
+    };
+    let mut bodies = Bodies::default();
+    for message in [&populated, &tombstone] {
+        let delta = serde_json::to_value(MessageDelta::new(message, &mut bodies))?;
+        assert_eq!(
+            expand_interned_body(delta, &bodies),
+            serde_json::to_value(message)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn pending_delta_matches_populated_and_minimal_pending() -> serde_json::Result<()> {
+    let minimal = Pending {
+        client_message_id: Uuid::from_u128(1),
+        body: "Pending body".into(),
+        state: PendingState::Sending,
+        request: 2,
+        retry_wait: None,
+        failure_code: None,
+        reply_to: None,
+        topic_name: None,
+        reply_root_id: None,
+    };
+    let populated = Pending {
+        body: "Another Pending body".into(),
+        state: PendingState::Throttled,
+        retry_wait: Some(3),
+        failure_code: Some("send_rate_limited".into()),
+        reply_to: Some(Uuid::from_u128(4)),
+        topic_name: Some("Topic".into()),
+        reply_root_id: Some(Uuid::from_u128(5)),
+        ..minimal.clone()
+    };
+    let mut bodies = Bodies::default();
+    for pending in [&minimal, &populated] {
+        let delta = serde_json::to_value(PendingDelta::new(pending, &mut bodies))?;
+        assert_eq!(
+            expand_interned_body(delta, &bodies),
+            serde_json::to_value(pending)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn send_delta_matches_populated_and_minimal_send_effect() -> serde_json::Result<()> {
+    for populated in [false, true] {
+        let send = Effect::Send {
+            history_generation: populated.then(|| Uuid::from_u128(1)),
+            id: 2,
+            channel: Uuid::from_u128(3),
+            client_message_id: Uuid::from_u128(4),
+            body: "Send body".into(),
+            reply_to: populated.then(|| Uuid::from_u128(5)),
+            topic_name: populated.then(|| "Topic".into()),
+        };
+        let mut bodies = Bodies::default();
+        let delta = serde_json::to_value(EffectDelta::new(&send, &mut bodies))?;
+        assert_eq!(
+            expand_interned_body(delta, &bodies),
+            serde_json::to_value(&send)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn step_delta_transmits_session_changes_and_channel_removal() -> Result<(), Box<dyn Error>> {
     let id = Uuid::from_u128(1);
     let mut boundary = Boundary::new(id);
