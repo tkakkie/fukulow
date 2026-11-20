@@ -1,11 +1,11 @@
 # Measurements
 
-Keep only the latest baseline per scenario, the decision or open acceptance it supports, the harness path and reproduction command, and known limits. Append superseded or new detailed records verbatim to `load/measurements-archive.md` and summarise the current evidence here. [Writing rules](workflow.md#13-splitting-a-doc)
+Keep only the latest baseline per scenario, the decision or open acceptance it supports, the harness path and reproduction command ([focused SQL rules](workflow.md#14-focused-sql-measurements)), and known limits. Append superseded or new detailed records verbatim to `load/measurements-archive.md` and summarise the current evidence here. [Writing rules](workflow.md#13-splitting-a-doc)
 
 Measurements are evidence only and establish no performance, capacity or latency guarantee.
 Compare runs only at the same send-limit settings and publishing Member count.
 
-Raw logs, artifact directories and local paths are outside Git and may no longer exist. Checked 2026-11-18 on the maintainer's Mac (`/private/tmp` is volatile): gone for #137, #142, #151, #160 (except `i160-smoke-fix`), #195 send-drain logs, #196 B, #314 step 5 before-run, #469 smoke; still present for #153, #195 storms, #303, #314 step 5, #356, #409, #466, #486; Actions artifact `proxy-measure-43844208337-1` (#469) not yet expired. See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
+Raw logs, artifact directories and local paths outside Git may be gone. Checked 2026-11-18 on the maintainer's Mac: gone for #137, #142, #151, #160 (except `i160-smoke-fix`), #195 send-drain logs, #196 B, #314 step 5 before-run, #469 smoke; still present for #153, #195 storms, #303, #314 step 5, #356, #409, #466, #486; Actions artifact `proxy-measure-43844208337-1` (#469) not yet expired. See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
 
 ## Topic projection paging (#137)
 
