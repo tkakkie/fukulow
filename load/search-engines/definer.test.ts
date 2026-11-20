@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { definerColumns, definerConfig, denialCases } from './definer.ts';
-import { queryPath } from './manifest.ts';
 import { search } from './queries.ts';
 
+const {queryPath} = JSON.parse(readFileSync(new URL('./manifest-v2.json',import.meta.url),'utf8')).frozen;
 const sql = readFileSync(new URL('./definer.sql',import.meta.url),'utf8');
 const code = sql.split('\n').filter(line=>!line.trimStart().startsWith('--')).join('\n');
 

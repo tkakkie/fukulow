@@ -6,6 +6,9 @@
 /deploy/db-roles.sql text eol=lf
 /load/package-lock.json text eol=lf
 /load/search-engines/Dockerfile text eol=lf
+/load/search-engines/b1-query.sql text eol=lf
+/load/search-engines/b1.sql text eol=lf
+/load/search-engines/b1.ts text eol=lf
 /load/search-engines/bench.ts text eol=lf
 /load/search-engines/bigm.sql text eol=lf
 /load/search-engines/cleanup.ts text eol=lf
@@ -19,6 +22,7 @@
 /load/search-engines/manifest-v6.json text eol=lf
 /load/search-engines/manifest-v7.json text eol=lf
 /load/search-engines/manifest-v8.json text eol=lf
+/load/search-engines/manifest-v9.json text eol=lf
 /load/search-engines/manifest.ts text eol=lf
 /load/search-engines/pgroonga.sql text eol=lf
 /load/search-engines/quality/dataset.ts text eol=lf

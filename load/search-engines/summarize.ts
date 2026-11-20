@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { percentile, save } from './bench.ts';
 import { denialCases, probe } from './definer.ts';
+import { b1RlsFacts, b1RoleFacts } from './b1.ts';
 
 type Latency = {query:string,n:number,p50:number,p95:number,p99:number,tps:number};
 type Run = {manifestHash:string,runKind?:string,round:number,engine:string,buildMs:number,relationBytes:number,physicalDeltaBytes:number,
@@ -90,6 +91,83 @@ export function judge(runs: JudgedRun[], rawQueries: unknown, definer: unknown, 
       scope:'MAC developer-Mac comparison (maintainer 2026-11-15); not a formal #431 budget; P2 production adoption held (#314)'};
   });
 }
+type B1Plan = Plan & {scans:unknown[];executionMs:number};
+type B1Completeness = {query:string;actors:{actor:number;equal:boolean;rows:number}[];ownerIndexEqual:boolean;directEqual:boolean;
+  pageEqual:boolean;matchesByOrganization:Record<string,number>};
+type TimingArm = Latency & {foreignMatches:number};
+type Timing = {query:string;few:TimingArm;many:TimingArm;equalNonemptyPage:boolean};
+type B1Round = Omit<Run,'write'|'walBytesPerInsert'> & {plans?:B1Plan[];completeness?:B1Completeness[];
+  safety?:{definers:string;policy:string;role:string;rls:string;memberships:string}};
+type B1Evidence = {rounds:unknown;queries:unknown;denials:unknown;restore:unknown;timing:unknown};
+const stats = (xs: number[]) => ({median:percentile(xs,.5),min:Math.min(...xs),max:Math.max(...xs)});
+function oneFor<T extends {query:string}>(items: unknown, id: string) {
+  const matches = objects<T>(items).filter(item=>item.query===id);
+  return matches.length===1 ? matches[0] : undefined;
+}
+function latencyValid(value: Latency | undefined, samples: number): value is Latency {
+  return value?.n===samples && [value.p50,value.p95,value.p99].every(n=>Number.isFinite(n) && n>=0)
+    && value.p50<=value.p95 && value.p95<=value.p99;
+}
+function completenessChecks(c?: B1Completeness) {
+  const actors = objects<B1Completeness['actors'][number]>(c?.actors);
+  if (actors.length!==6 || actors.some((a,i)=>a.actor!==i+1)) return [];
+  return [...actors.map(a=>a.equal),c?.ownerIndexEqual,c?.directEqual,c?.pageEqual];
+}
+function classDenials(c?: B1Completeness) {
+  const actors = [4,6].map(actor=>objects<B1Completeness['actors'][number]>(c?.actors).find(a=>a.actor===actor));
+  return actors.map(a=>Number.isSafeInteger(a?.rows) && a!.rows>=0 ? a!.rows===0 : undefined);
+}
+function checksStatus(checks: unknown[], count: number): Status {
+  if (checks.includes(false)) return 'FAIL';
+  return checks.length===count && checks.every(check=>check===true) ? 'PASS' : 'NOT EVALUATED';
+}
+
+export function judgeB1(evidence: B1Evidence, expectedQueries: [string,string][], rounds: number, samples: number, evaluation: boolean) {
+  const queries = frozenQueries(evidence.queries,expectedQueries);
+  const group = objects<B1Round>(evidence.rounds).sort((a,b)=>a.round-b.round);
+  const groupComplete = group.length===rounds && group.every((r,i)=>r.engine==='pgroonga' && r.round===i+1);
+  const first = group.find(r=>r.round===1);
+  const restored = (evidence.restore as {completeness?:unknown} | undefined)?.completeness;
+  const denials = evidence.denials as {cases?:unknown;checks?:unknown} | undefined;
+  const denialStatus = JSON.stringify(denials?.cases)===JSON.stringify(denialCases.map(c=>c.name))
+    ? denialEvidence(denials?.checks) : 'NOT EVALUATED';
+  const classes = (queries ?? []).map(q=>{
+    const latencies = group.map(r=>oneFor<Latency>(r.latencies,q.id));
+    const sampled = latencies.filter(l=>latencyValid(l,samples));
+    const latency: Status = sampled.some(l=>l.p95>criteria.p95LimitMs) ? 'FAIL'
+      : groupComplete && sampled.length===rounds ? 'PASS' : 'NOT EVALUATED';
+    const plan = oneFor<B1Plan>(first?.plans,q.id);
+    const required = q.id in criteria.rareQueries && q.scalars>=criteria.minimumLength.pgroonga!;
+    const index: Status = !plan || !Number.isFinite(plan.executionMs) || !Array.isArray(plan.scans) || !plan.scans.length ||
+      typeof plan.searchIndex!=='boolean' || typeof plan.seqScanMessages!=='boolean' ? 'NOT EVALUATED'
+      : plan.seqScanMessages || (required && !plan.searchIndex) ? 'FAIL' : 'PASS';
+    const complete = oneFor<B1Completeness>(first?.completeness,q.id);
+    const completeness = checksStatus(completenessChecks(complete),9);
+    const restoredClass = oneFor<B1Completeness>(restored,q.id);
+    const restore = checksStatus([...completenessChecks(restoredClass),...classDenials(restoredClass)],11);
+    const actorDenials = checksStatus(classDenials(complete),2);
+    const timing = oneFor<Timing>(evidence.timing,q.id);
+    const counts = Object.values(complete?.matchesByOrganization ?? {});
+    const timingEvaluated = counts.length===3 && counts.every(count=>Number.isSafeInteger(count) && count>=0) &&
+      timing?.equalNonemptyPage===true && latencyValid(timing.few,samples) && latencyValid(timing.many,samples) &&
+      Number.isSafeInteger(timing.few.foreignMatches) && timing.few.foreignMatches>=0 &&
+      Number.isSafeInteger(timing.many.foreignMatches) && timing.many.foreignMatches>timing.few.foreignMatches;
+    const percentiles = sampled.length ? {p50:stats(sampled.map(l=>l.p50)),p95:stats(sampled.map(l=>l.p95)),
+      p99:stats(sampled.map(l=>l.p99))} : undefined;
+    return {query:q.id,latency,index,completeness,actorDenials,restore,timingEvaluated,percentiles,latencies,plan,
+      matchesByOrganization:complete?.matchesByOrganization,timing};
+  });
+  const parts = classes.flatMap(c=>[c.latency,c.index,c.completeness,c.actorDenials,c.restore]);
+  const safetyChecked = groupComplete && group.every(r=>r.safety?.definers==='0' && r.safety.memberships==='0' &&
+    r.safety.role===b1RoleFacts && r.safety.rls===b1RlsFacts &&
+    /^[a-f0-9]{32}$/.test(r.safety.policy) && r.safety.policy===first?.safety?.policy);
+  const status: Status = !evaluation ? 'NOT EVALUATED' : [denialStatus,...parts].includes('FAIL') ? 'FAIL'
+    : !queries || !safetyChecked || denialStatus!=='PASS' || parts.includes('NOT EVALUATED') ||
+      classes.some(c=>!c.timingEvaluated) ? 'NOT EVALUATED' : 'PASS';
+  return {method:'B1',engine:'pgroonga',status,denials:denialStatus,safetyChecked,classes,
+    scope:'Measurement gate only. Timing evidence requires separate safety evaluation.'};
+}
+
 export function summarize(root: string, publication: 'evaluation'|'smoke' = 'evaluation') {
   const runs: Run[] = JSON.parse(readFileSync(`${root}/results.json`,'utf8'));
   const manifest = JSON.parse(readFileSync(`${root}/manifest.json`,'utf8'));
@@ -106,9 +184,19 @@ export function summarize(root: string, publication: 'evaluation'|'smoke' = 'eva
       throw new Error('Run did not complete with verified cleanup');
   }
   if (!manifestHash || runs.some(r=>r.manifestHash!==manifestHash || (r.runKind ?? 'evaluation')!==kind)) throw new Error('Result manifest hash mismatch');
+  if (manifest.frozen.b1) {
+    const performance = kind==='smoke' ? {...manifest.frozen.performance,...manifest.frozen.smoke.performance} : manifest.frozen.performance;
+    const {classes,...verdict} = judgeB1({rounds:runs,queries:readJson(`${root}/queries.json`),
+      denials:readJson(`${root}/denials.json`),restore:readJson(`${root}/restore.json`),timing:readJson(`${root}/timing.json`)},
+      performance.querySet,performance.rounds,performance.clients*performance.transactions,kind==='evaluation');
+    const result = {manifestHash,runKind:kind,...verdict,classes};
+    save(`${root}/summary.json`,result);
+    save(`${root}/judgement.json`,{manifestHash,runKind:kind,...verdict});
+    console.log(JSON.stringify({manifestHash,runKind:kind,...verdict},null,2));
+    return;
+  }
   const rounds = kind==='smoke' ? manifest.frozen.smoke.performance.rounds : 3;
   if (runs.length!==rounds*4) throw new Error('Expected all interleaved runs');
-  const stats = (xs: number[]) => ({median:percentile(xs,.5),min:Math.min(...xs),max:Math.max(...xs)});
   const summary = ['none','trgm','bigm','pgroonga'].map(engine=>{
     const group = runs.filter(r=>r.engine===engine);
     if (group.length!==rounds) throw new Error('Expected every repetition');
