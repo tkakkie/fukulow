@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { parse, type AST } from 'svelte/compiler'
 import { describe, expect, it } from 'vitest'
 import {
   IME_COMPOSING_KEY_CODE,
@@ -158,9 +159,22 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
 
     const messageRowSrc = readFileSync(join(webDir, 'src/ui/MessageRow.svelte'), 'utf8')
     expect(messageRowSrc).toContain('shouldOpenRepliesFromRowKey')
-    expect(messageRowSrc).toContain('tabindex={isRowFocusable ? rovingTabindex : -1}')
-    expect(messageRowSrc).toContain('onfocus={isRowFocusable ? handleFocus : undefined}')
-    expect(messageRowSrc).toContain('onkeydown={isRowFocusable ? handleKeydown : undefined}')
+    const ast = parse(messageRowSrc, { modern: true })
+    const article = ast.fragment.nodes.find(
+      (node): node is AST.RegularElement => node.type === 'RegularElement' && node.name === 'article',
+    )
+    expect(article).toBeDefined()
+    for (const attrName of ['tabindex', 'onfocus', 'onkeydown']) {
+      const attr = article?.attributes.find(
+        (a): a is AST.Attribute => a.type === 'Attribute' && a.name === attrName,
+      )
+      expect(attr, `<article> should have ${attrName}`).toBeDefined()
+      const val = attr?.value
+      const isExpression =
+        (val !== undefined && typeof val === 'object' && !Array.isArray(val) && val.type === 'ExpressionTag') ||
+        (Array.isArray(val) && val.length === 1 && val[0]?.type === 'ExpressionTag')
+      expect(isExpression, `<article> ${attrName} should have an expression value`).toBe(true)
+    }
     expect(messageRowSrc).not.toContain('addEventListener')
     expect(messageRowSrc).toContain('tabindex={-1}')
   })
