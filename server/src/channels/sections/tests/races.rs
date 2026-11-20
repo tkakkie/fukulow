@@ -5,6 +5,7 @@ use tokio::task::JoinHandle;
 
 mod archive;
 mod authority;
+mod deletion;
 mod ordering;
 
 const LAYOUT_LOCK: &str = "INSERT INTO member_section_generations%ON CONFLICT%";
@@ -16,13 +17,19 @@ async fn wait_blocked(f: &Fixture, query: &str) {
 }
 
 async fn wait_blocked_count(f: &Fixture, query: &str, minimum: i64) {
+    wait_blocked_matching(f, query, minimum, None).await;
+}
+
+async fn wait_blocked_matching(f: &Fixture, query: &str, minimum: i64, blocker: Option<i32>) {
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database()
-                 AND wait_event_type='Lock' AND query LIKE $1",
+                 AND wait_event_type='Lock' AND query LIKE $1
+                 AND ($2::integer IS NULL OR $2=ANY(pg_blocking_pids(pid)))",
             )
             .bind(query)
+            .bind(blocker)
             .fetch_one(&f.pools.admin)
             .await
             .unwrap();
@@ -33,7 +40,7 @@ async fn wait_blocked_count(f: &Fixture, query: &str, minimum: i64) {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("did not wait on {query}"));
+    .unwrap_or_else(|_| panic!("did not wait on {query} (blocker {blocker:?})"));
 }
 
 async fn pause(f: &Fixture, event: &str, table: &str) -> Transaction<'static, Postgres> {
