@@ -8,8 +8,21 @@ const frozen = snapshot();
 const document = {sha256:hash(JSON.stringify(frozen)),frozen};
 const recorded = (version: number) => JSON.parse(readFileSync(new URL(`./manifest-v${version}.json`,import.meta.url),'utf8'));
 test('checked-in current manifest matches the evaluation inputs',()=>{
-  assert.equal(manifestFile,'load/search-engines/manifest-v11.json');
-  assert.equal(verifyManifest(recorded(11)),document.sha256);
+  assert.equal(manifestFile,'load/search-engines/manifest-v12.json');
+  assert.equal(verifyManifest(recorded(12)),document.sha256);
+});
+test('v12 records only the section placement lookup migration and its manifest bookkeeping',()=>{
+  const v11 = recorded(11), v12 = recorded(12);
+  assert.equal(hash(JSON.stringify(v11.frozen)),v11.sha256);
+  const {version,sourceHashes,...conditions} = v12.frozen;
+  const {version:previousVersion,sourceHashes:previousSources,...previousConditions} = v11.frozen;
+  assert.equal(version,previousVersion+1);
+  assert.deepEqual(conditions,previousConditions);
+  const before = new Map<string,string>(previousSources.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  const after = new Map<string,string>(sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  assert.deepEqual([...after.keys()].filter(path=>before.get(path)!==after.get(path)),
+    ['.gitattributes','load/search-engines/manifest.ts','server/migrations/202611200654_section_placement_channel_lookup.sql']);
+  assert.ok([...before.keys()].every(path=>after.has(path)));
 });
 test('v11 records only the NULL-safe B1 policy and its manifest bookkeeping',()=>{
   const v9 = recorded(9), v11 = recorded(11);
@@ -145,7 +158,7 @@ test('LF attributes cover exactly the frozen inputs and manifests',()=>{
   const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
     .split('\n').filter(line=>line && !line.startsWith('#'));
   assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),
-    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json','load/search-engines/manifest-v5.json','load/search-engines/manifest-v6.json','load/search-engines/manifest-v7.json','load/search-engines/manifest-v8.json','load/search-engines/manifest-v9.json',manifestFile]
+    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json','load/search-engines/manifest-v5.json','load/search-engines/manifest-v6.json','load/search-engines/manifest-v7.json','load/search-engines/manifest-v8.json','load/search-engines/manifest-v9.json','load/search-engines/manifest-v11.json',manifestFile]
     .sort().map(path=>`/${path} text eol=lf`));
 });
 test('manifest content tampering is refused',()=>{

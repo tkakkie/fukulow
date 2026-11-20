@@ -38,8 +38,9 @@ export function runKind() {
   return process.env.SEARCH_SMOKE==='1' ? 'smoke' : 'evaluation';
 }
 export const smokeLabel = 'SMOKE / NON-EVALUATION';
-// v11 freezes the NULL-safe B1 policy. v10 is reserved for the sections migration on main.
-export const manifestFile = 'load/search-engines/manifest-v11.json';
+// v11 freezes the NULL-safe B1 policy. v10 stays unused: #694 merged first.
+// v12 (#654) records the section placement lookup migration with v11's conditions.
+export const manifestFile = 'load/search-engines/manifest-v12.json';
 const baselineSha256 = '9b649cf9773b4926d28e2ef30d57fe74175d449c5d85bf9b560ee4694234e272';
 function baselineMigrations() {
   const baseline = JSON.parse(readSource('load/search-engines/manifest-v2.json'));
@@ -64,7 +65,7 @@ export function snapshot() {
       readdirSync(new URL(dir,sourceRoot)).filter(n=>!n.includes('.test.') && /\.(ts|sql)$/.test(n)).map(n=>`${dir}/${n}`)),
     'load/search-engines/Dockerfile','deploy/db-grants.sql','deploy/db-roles.sql','deploy/db-role-settings.sql'].sort();
   const data = corpus();
-  return {version:11,date:'2026-11-20',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
+  return {version:12,date:'2026-11-20',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
     node:readSource('.node-version').trim(),
     sourceHashes:files.map(path=>({path,sha256:hash(readSource(path))})),
     quality:{querySet:qualityQueries.map(({gold,...q})=>({...q,relevantKeys:gold.map(id=>data.find(m=>m.id===id)?.key)})),
