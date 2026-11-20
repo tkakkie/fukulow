@@ -78,6 +78,21 @@ describe('Members controller', () => {
     expect(url.hash).toBe(`#invite=${org}:${token}`)
     c.close(); expect(c.get().inviteLink).toBe('')
   })
+  it('shows a specific Japanese message when invite_limit_reached is returned', async () => {
+    const c = createMembers(org, vi.fn(), vi.fn(), {
+      listMembers: vi.fn(),
+      changeRole: vi.fn(),
+      deactivateMember: vi.fn(),
+      createInvite: vi.fn(async () => ({ ok: false as const, kind: 'http' as const, status: 409, error: 'invite_limit_reached' })),
+      baseUrl: () => 'https://chat.example/',
+    })
+    try {
+      await c.invite('invited@example.com', 'member')
+      expect(c.get().inviteLink).toBe('')
+      expect(c.get().error).toBe('有効な招待が上限に達しています。不要な招待を取り消してから、もう一度お試しください。')
+      expect(c.get().busy).toBe(false)
+    } finally { c.close() }
+  })
   it('does not change a Member after denial and shows last-Owner protection', async () => {
     const c = createMembers(org, vi.fn(), vi.fn(), {
       listMembers: async () => ok({ members: [member] }),
