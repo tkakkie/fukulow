@@ -17,6 +17,7 @@ import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers
 import { channelsAdapter } from './channels.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
+import { searchAnchorAdapter } from './search-anchor.svelte'
 import { createSession } from './session'
 import { repliesAdapter } from './replies.svelte'
 import { syncAdapter } from './sync.svelte'
@@ -9713,4 +9714,106 @@ it('ReplyPanel Move dialog treats a Topic missing from a partial list as unavail
   } finally {
     await cRetry.close()
   }
+})
+
+describe('Search result navigation', () => {
+  function openWorkspace(net: ReturnType<typeof fakeNetwork>, options = net.options()) {
+    const session = createSession({ ...options, selfId: 'me', organizationId: 'org', onEnded: vi.fn() })
+    let href = '/o/org/c/A'
+    const navigation = createNavigation({
+      location: { get href() { return href } },
+      history: { state: null, pushState: (_state: unknown, _title: string, url: string) => { href = url }, replaceState: vi.fn() },
+      innerWidth: 1280,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = testDoc.createElement('div')
+    testDoc.body.appendChild(host)
+    const replies = repliesAdapter(session.replies, 'A', session.replyCounts)
+    const topics = topicsAdapter(session.topics, 'A')
+    const unread = unreadAdapter(session.unread, 'A')
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, selectedOrganizationId: 'org',
+      session: { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync),
+        topics: () => topics, replies: () => replies, unread: () => unread,
+        navigationTargets: navigationTargetsAdapter(session.navigationTargets),
+        searchAnchor: searchAnchorAdapter(session.searchAnchor), close: session.close },
+    } })
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ history_generation: record(1).history_generation, channels: [channel('A')] }))
+    return { host, navigation, session, async close() {
+      await unmount(instance)
+      navigation.destroy()
+      session.close()
+    } }
+  }
+
+  it.each([null, 'T'])('reveals and highlights a search result ahead of normal entry positioning (Topic %s)', async topicId => {
+    const net = fakeNetwork()
+    const options = net.options()
+    const message = (seq: number) => ({ ...record(seq), topic_id: topicId })
+    const history_generation = message(1).history_generation
+    net.pages.A = ok({ history_generation, as_of_seq: 100, messages: [message(100)], has_more: false })
+    const older = deferred<Result<api.MessagePage>>()
+    const read = async (query?: api.ListMessagesQuery) => query?.before_seq === 4 ? older.promise
+      : ok({ history_generation, as_of_seq: 100, messages: query?.after_seq === 3 ? [message(4), message(5), message(6)] : [message(100)], has_more: false })
+    options.sync!.api!.listMessages = (_channel, query) => read(query)
+    options.topicsApi!.listTopicMessages = (_channel, _topic, query) => read(query)
+    const app = openWorkspace(net, options)
+    try {
+      await settle()
+      net.subscribed('A', 100)
+      await settle()
+      app.navigation.openSearchResult({ channelId: 'A', topicId, messageId: 'id4', createdSeq: 4 })
+      await settle()
+      const scroll = app.host.querySelector(topicId ? '.topic-view__scroll' : '.timeline-scroll')!
+      scroll.layoutRowHeight = 70
+      scroll.clientHeight = 120
+      scroll.scrollHeight = 420
+      older.resolve(ok({ history_generation, as_of_seq: 100, messages: [message(1), message(2), message(3)], has_more: false }))
+      await settle()
+      const selected = app.host.querySelector('.ui-message-row--search-match')!
+      expect(selected.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe('id4')
+      expect(selected.textContent).toContain('検索結果')
+      expect(scroll.scrollTop).toBe(210)
+      expect(app.session.sync.get().channels.A.cursor).toBe(100)
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('opens the exact Reply in an old chain and reports a stale result without falling back to the root', async () => {
+    const net = fakeNetwork()
+    const root = record(1)
+    const hit = { ...record(35), reply_to: root.id, reply_root_id: root.id }
+    const sibling = { ...hit, ...record(36), reply_to: root.id, reply_root_id: root.id }
+    net.pages.A = ok({ history_generation: root.history_generation, as_of_seq: 100, messages: [record(100)], has_more: false })
+    const chain = (messages: api.Message[]) => ok(replyPage({ history_generation: root.history_generation,
+      as_of_seq: 110, root_id: root.id, messages, has_more: false }))
+    net.replyChains['A:id35:34'] = chain([hit])
+    net.replyChains['A:id35:10'] = chain([hit, sibling])
+    net.replyChains['A:id34:33'] = chain([hit])
+    const app = openWorkspace(net)
+    try {
+      await settle()
+      net.subscribed('A', 100)
+      app.navigation.openSearchResult({ channelId: 'A', replyRootId: root.id, messageId: hit.id, createdSeq: 35 })
+      await settle()
+      expect(app.navigation.get().target?.panel).toBe('reply:id35')
+      expect(app.host.querySelector('#panel-content .ui-message-row--search-match')?.textContent).toContain('m35')
+      expect(app.host.querySelector('#panel-content')?.textContent).toContain('m36')
+      expect(net.replyHistory.map(({ query }) => query?.after_seq)).toEqual([34, 10])
+      expect(app.session.sync.get().channels.A.cursor).toBe(100)
+
+      app.navigation.openSearchResult({ channelId: 'A', replyRootId: root.id, messageId: 'id34', createdSeq: 34 })
+      await settle()
+      const panel = app.host.querySelector('#panel-content')!
+      expect(panel.querySelector('[role="alert"]')?.textContent).toContain('このメッセージは表示できません。')
+      expect(panel.querySelector('.ui-message-row--search-match')).toBeNull()
+      expect(panel.textContent).not.toContain('m35')
+      expect(app.session.sync.get().channels.A.state).toBe('ready')
+    } finally {
+      await app.close()
+    }
+  })
 })

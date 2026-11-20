@@ -49,6 +49,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const canonical = (channel: string, held: Message | undefined, incoming: Message) =>
     knownMessageState(sync.get().channels[channel], held, incoming)
   const windows = new Map<string, Window>()
+  let mainSearchChannel: string | undefined
+  let mainLimit = MAIN_MESSAGE_LIMIT
   const activityTargets = new Map<string, { close(): void; release(): void; target: ReturnType<typeof createActivityTarget>; observeSummary?(listener: (response: TopicSummaryResponse) => void): () => void }>()
   const listeners = new Set<(channels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -443,8 +445,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const cost = (line: typeof lines[number]) => line.kind === 'message' ? 1 :
       Number(w.baselines.has(line.topicId)) + Number(liveTopics.has(line.topicId))
     let size = kept.reduce((sum, l) => sum + cost(l), 0)
-    const trimmed = size > MAIN_MESSAGE_LIMIT
-    while (size > MAIN_MESSAGE_LIMIT) size -= cost(edge === 'older' ? kept.pop()! : kept.shift()!)
+    const trimmed = size > mainLimit
+    while (size > mainLimit) size -= cost(edge === 'older' ? kept.pop()! : kept.shift()!)
     const ids = new Set(kept.filter(l => l.kind === 'topic').map(l => l.topicId))
     const seqs = new Set(kept.filter(l => l.kind === 'message').map(l => l.message.created_seq))
     for (const [seq, m] of w.messages) if (m.topic_id ? !ids.has(m.topic_id) : !seqs.has(seq)) w.messages.delete(seq)
@@ -474,7 +476,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     }
     let total = [...windows.values()].reduce((n, value) => n + value.messages.size + value.baselines.size, 0)
     for (const [id, other] of windows) {
-      if (total <= MAIN_MESSAGE_LIMIT) break
+      if (total <= mainLimit) break
       if (other === w) continue
       total -= other.messages.size + other.baselines.size
       other.messages.clear(); other.baselines.clear(); other.mainTopics.clear(); other.mainPositions.clear()
@@ -753,6 +755,17 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     return () => { listeners.delete(listener) }
   }
   const controller = {
+    reserveMainSearch(channel: string | undefined, records: number) {
+      if (mainSearchChannel === channel) return
+      mainSearchChannel = channel
+      mainLimit = MAIN_MESSAGE_LIMIT - (channel ? records : 0)
+      const entry = channel && (windows.has(channel) ? [channel, windows.get(channel)!] as const : windows.entries().next().value)
+      if (entry) {
+        const [id, w] = entry
+        trimMain(w, w.main.hasNewer ? 'older' : 'newer')
+        notify(id)
+      }
+    },
     countMessages(channel: string): Iterable<Message>[] {
       const w = windows.get(channel)
       return w ? [w.messages.values(), ...[...w.topics.values()].map(t => t.messages.values())] : []

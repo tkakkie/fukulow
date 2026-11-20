@@ -19,7 +19,7 @@ function harness(target: NavigationTarget = base) {
     removeEventListener() { pop = () => {} },
   } as unknown as NavigationBrowser
   const nav = createNavigation(browser)
-  return { nav, calls, pop(url: string) { href = url; state = null; pop() } }
+  return { nav, calls, get state() { return state }, pop(url: string, entry: unknown = null) { href = url; state = entry; pop() } }
 }
 
 describe('navigation URLs', () => {
@@ -40,6 +40,21 @@ describe('navigation URLs', () => {
 })
 
 describe('History navigation table', () => {
+  it('restores search hints on Back and clears them on explicit latest navigation', () => {
+    const h = harness()
+    const hit = { channelId: 'channel', topicId: 'topic', messageId: 'old', createdSeq: 25 }
+    h.nav.openSearchResult(hit)
+    const entry = h.state
+    expect(h.nav.get().searchResult).toEqual(hit)
+    h.nav.navigate({ type: 'channel', organizationId: 'org', channelId: 'other' })
+    expect(h.nav.get().searchResult).toBeUndefined()
+    h.pop('/o/org/c/channel/t/topic', entry)
+    expect(h.nav.get().searchResult).toEqual(hit)
+    h.nav.leaveSearchResult()
+    expect(h.nav.get().searchResult).toBeUndefined()
+    expect(h.state).toEqual({ navigationPreviousTab: null })
+  })
+
   it('reselecting the same Channel target never writes History, including an open tab', () => {
     for (const panel of [null, 'topics', 'overview', 'members'] as const) {
       const { nav, calls } = harness({ ...base, panel })
