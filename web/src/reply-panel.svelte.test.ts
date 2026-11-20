@@ -1403,4 +1403,137 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     sessionModel.close()
   })
 
+  it('never offers or confirms restore for a retryable failed Reply send while non-retryable failures still restore', async () => {
+    const c = replyClient()
+    await c.boot()
+    await c.replies.open('A', root())
+
+    const ch = syncAdapter(c.sync).channel('A')
+    const rc = ch.reply('id1', null)
+
+    // 1. A failed retryable send (network error) and a failed non-retryable send (400 refusal) in the same chain
+    c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'network' })
+    rc.setDraft('再送可能な失敗返信')
+    await rc.submit('id1')
+
+    c.sendMessage.mockResolvedValueOnce({ ok: false, kind: 'http', status: 400, error: 'invalid_input' })
+    rc.setDraft('拒否された失敗返信')
+    await rc.submit('id1')
+
+    rc.setDraft('入力中の返信下書き')
+    flushSync()
+    await tick()
+
+    const retryablePending = ch.timeline.pending.find((p) => p.body === '再送可能な失敗返信')!
+    const refusedPending = ch.timeline.pending.find((p) => p.body === '拒否された失敗返信')!
+    expect(retryablePending.status).toBe('failed')
+    expect(retryablePending.retryable).toBe(true)
+    expect(refusedPending.status).toBe('failed')
+    expect(refusedPending.retryable).toBe(false)
+
+    // Override retryable dynamically for the canRestore guard sub-check without mutating sync internals
+    let forceRetryableId = $state<string | null>(null)
+    const wrappedChannel = Object.create(ch, {
+      timeline: {
+        get() {
+          const base = ch.timeline
+          if (!forceRetryableId) return base
+          return {
+            ...base,
+            pending: base.pending.map((p) =>
+              p.clientMessageId === forceRetryableId ? { ...p, retryable: true } : p,
+            ),
+          }
+        },
+      },
+    }) as typeof ch
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(ReplyPanel, {
+      target: host as unknown as Element,
+      props: {
+        channel: wrappedChannel,
+        replies: repliesAdapter(c.replies, 'A'),
+        channelId: 'A',
+        anchorMessageId: 'id1',
+        resolvedAnchor: root(),
+        selfId: 'me',
+      },
+    })
+    try {
+      flushSync()
+      await tick()
+      flushSync()
+
+      const textarea = host.querySelector('textarea')!
+      expect(textarea.value).toBe('入力中の返信下書き')
+
+      // Retryable failed send offers only 再送する / 破棄 (never 編集して送り直す)
+      const retryableRow = queryAll(host, '.reply-panel__item').find((el) =>
+        el.textContent.includes('再送可能な失敗返信'),
+      )!
+      expect(retryableRow).toBeDefined()
+      expect(retryableRow.textContent).toContain('送信を確認できませんでした。')
+      expect(buttonsByText(retryableRow, '再送する')).toHaveLength(1)
+      expect(buttonsByText(retryableRow, '編集して送り直す')).toHaveLength(0)
+      expect(buttonsByText(retryableRow, '破棄')).toHaveLength(1)
+      expect(rc.restore(retryablePending.clientMessageId)).toBe(false)
+      expect(rc.composer.draft).toBe('入力中の返信下書き')
+
+      // Non-retryable failed send offers 編集して送り直す (never 再送する)
+      const refusedRow = queryAll(host, '.reply-panel__item').find((el) =>
+        el.textContent.includes('拒否された失敗返信'),
+      )!
+      expect(refusedRow).toBeDefined()
+      expect(buttonsByText(refusedRow, '再送する')).toHaveLength(0)
+      expect(buttonsByText(refusedRow, '編集して送り直す')).toHaveLength(1)
+
+      // Guard in handleConfirmReplace: if the target becomes retryable before 置き換える, canRestore is false and draft is preserved
+      buttonsByText(refusedRow, '編集して送り直す')[0].click()
+      flushSync()
+      await tick()
+      const dialog = host.querySelector('[role="dialog"]')!
+      expect(dialog).not.toBeNull()
+      forceRetryableId = refusedPending.clientMessageId
+      flushSync()
+      buttonsByText(dialog, '置き換える')[0].click()
+      flushSync()
+      await tick()
+      flushSync()
+      expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(rc.composer.draft).toBe('入力中の返信下書き')
+      expect(textarea.value).toBe('入力中の返信下書き')
+      expect(ch.timeline.pending).toHaveLength(2)
+
+      // When the target remains non-retryable, キャンセル preserves draft and 置き換える restores it into Composer
+      forceRetryableId = null
+      flushSync()
+      buttonsByText(refusedRow, '編集して送り直す')[0].click()
+      flushSync()
+      buttonsByText(host.querySelector('[role="dialog"]')!, 'キャンセル')[0].click()
+      flushSync()
+      expect(rc.composer.draft).toBe('入力中の返信下書き')
+      expect(ch.timeline.pending).toHaveLength(2)
+
+      buttonsByText(refusedRow, '編集して送り直す')[0].click()
+      flushSync()
+      buttonsByText(host.querySelector('[role="dialog"]')!, '置き換える')[0].click()
+      flushSync()
+      await tick()
+      flushSync()
+
+      expect(rc.composer.draft).toBe('拒否された失敗返信')
+      expect(textarea.value).toBe('拒否された失敗返信')
+      expect(dom.doc.activeElement).toBe(textarea)
+      expect(ch.timeline.pending).toHaveLength(1)
+      expect(ch.timeline.pending[0].clientMessageId).toBe(retryablePending.clientMessageId)
+      expect(buttonsByText(host, '再送する')).toHaveLength(1)
+      expect(buttonsByText(host, '編集して送り直す')).toHaveLength(0)
+    } finally {
+      await unmount(instance)
+      await c.sync.close()
+    }
+  })
+
 })

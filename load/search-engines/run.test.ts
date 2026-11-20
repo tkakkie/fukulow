@@ -47,29 +47,32 @@ const state = process.env.STUB_LOG+'.state';
 if (args[1] === 'ls' && args.includes('--format') && process.env.STUB_MODE.startsWith('orphan-')) {
  console.log(process.env.STUB_MODE==='orphan-label'?'another-name|153':'fukulow-search-153-old|');
 }
+if (args[0] === 'info') console.log(JSON.stringify({version:'test',cpus:5,memory:2147483648}));
 if (args[0] === 'image') console.log(process.env.STUB_MODE==='invalid-image'?'sha256:changed':${JSON.stringify(imageId)});
 if (args[0] === 'run') {
   if (process.env.STUB_MODE !== 'absent') writeFileSync(state,'owned');
-  if (!['signal','hang','mismatch','planner-owner','planner-app'].includes(process.env.STUB_MODE)) process.exit(42);
+  if (!['signal','hang','mismatch','planner-owner','planner-app','b1-bypass'].includes(process.env.STUB_MODE)) process.exit(42);
 }
 if (args[0] === 'exec' && process.env.STUB_MODE === 'mismatch' && args.includes('psql')) {
   let input='';for await (const chunk of process.stdin) input+=chunk;
   console.log(input.includes('server_version_num')?'180005':'1');
 }
-if (args[0] === 'exec' && process.env.STUB_MODE.startsWith('planner-')) {
+if (args[0] === 'exec' && (process.env.STUB_MODE.startsWith('planner-') || process.env.STUB_MODE==='b1-bypass')) {
   if (args.includes('dpkg-query')) console.log(${JSON.stringify(Object.entries(manifest.frozen.image.packages).map(p=>p.join('|')).join('\n'))});
   if (args.includes('psql')) {
     let input='';for await (const chunk of process.stdin) input+=chunk;
     if (input.includes('INSERT INTO messages') || input.includes('COPY messages')) appendFileSync(process.env.STUB_LOG,JSON.stringify(['unexpected-load'])+'\\n');
-    if (input.includes('SELECT 1;')) console.log('1');
+    if (input.includes('rolbypassrls') && args.includes('fukulow_b1')) console.log('fukulow_b1|fukulow_b1|f|t|f|f|f|f');
+    else if (input.includes('SELECT 1;')) console.log('1');
     else if (input.includes('server_version_num')) console.log('180006');
     else if (input.includes('SHOW shared_preload_libraries')) console.log(${JSON.stringify(manifest.frozen.settings.shared_preload_libraries)});
     else if (input.includes('pg_available_extensions')) console.log(${JSON.stringify(JSON.stringify(manifest.frozen.image.extensions))});
     else if (input.includes('count(*) FROM pg_settings')) {
       // Model an image PGOPTIONS default or an app-role-specific default.
-      const changed=process.env.STUB_MODE==='planner-owner' || args.includes('fukulow_app');
+      const changed=process.env.STUB_MODE==='planner-owner' || (process.env.STUB_MODE==='planner-app' && args.includes('fukulow_app'));
       console.log(changed?'1':'0');
-    } else if (input.includes("'row_security'") && args.includes('fukulow_app')) console.log(${JSON.stringify(JSON.stringify(manifest.frozen.sessionPolicy.appSettings))});
+    } else if (input.includes("'row_security'") && args.includes('fukulow_b1')) console.log(${JSON.stringify(JSON.stringify(manifest.frozen.sessionPolicy.b1Settings))});
+    else if (input.includes("'row_security'") && args.includes('fukulow_app')) console.log(${JSON.stringify(JSON.stringify(manifest.frozen.sessionPolicy.appSettings))});
     else if (input.includes('pg_settings')) console.log(input.includes("'row_security'")?${JSON.stringify(JSON.stringify(manifest.frozen.sessionPolicy.settings))}:${JSON.stringify(JSON.stringify(manifest.frozen.settings))});
   }
 }
@@ -79,6 +82,7 @@ if (args[0] === 'rm') {
 }
 if (args[0] === 'container' && args[1] === 'ls' && existsSync(state)) console.log('owned');
 `,{mode:0o755});
+  writeFileSync(join(dir,'ps'),"#!/bin/sh\necho 'COMMAND %CPU'\n",{mode:0o755});
   if (existing) {
     // A retained artifact must survive refusal byte-for-byte.
     mkdirSync(out);
@@ -179,3 +183,14 @@ for (const runner of runners) {
     assert.equal(readFileSync(join(run.out,'metadata.json'),'utf8'),'retained artifact\n');
   });
 }
+
+
+test('B1 refuses BYPASSRLS before seeding or running pgbench', {timeout:20000}, async t=>{
+  const run = start(t,'./run.ts','b1-bypass');
+  assert.deepEqual(await run.closed,[1,null]);
+  assert.match(run.stderr(),/B1 requires the dedicated non-superuser NOBYPASSRLS login/);
+  assert.ok(run.calls().some(args=>args.includes('psql') && args.includes('fukulow_b1')));
+  assert.ok(!run.calls().some(args=>args[0]==='cp' || args[0]==='unexpected-load' || args.includes('pgbench')));
+  assertCleanup(run.calls());
+  assert.equal(JSON.parse(readFileSync(join(run.out,'run-status.json'),'utf8')).valid,false);
+});
