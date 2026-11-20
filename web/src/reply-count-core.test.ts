@@ -84,7 +84,7 @@ it('mutation invalidation requires a covering snapshot without guessing mutation
   core.free()
 })
 
-it('duplicate and late Move preserve the covering Reply count', () => {
+it('duplicate and late Move keep the covering count', () => {
   const { core, ticket } = tracked()
   const moved = (seq: number): CountInput => ({ type: 'invalidate', root: 'r', seq })
   try {

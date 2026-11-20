@@ -1,7 +1,7 @@
 use super::*;
 
 #[fukulow_test::test]
-async fn reply_counts_keep_exact_totals_and_channel_scope_after_move(pool: PgPool) {
+async fn reply_counts_stay_exact_and_scoped_after_move(pool: PgPool) {
     let (app, org, author, public, token) = fixture(&pool).await;
     let private = Uuid::new_v4();
     channel(&pool, org, private, author, true).await;

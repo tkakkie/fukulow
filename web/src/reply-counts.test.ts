@@ -231,7 +231,7 @@ it('Edit Delete and Move events stay unresolved until a covering refetch without
   }
 })
 
-it('source and destination Topic views refetch Reply counts once across duplicate and late Moves', async () => {
+it('Move refetches source and destination Topic counts once despite repeats', async () => {
   // A client holds one open Topic per Channel. Exercise both views of the same Move.
   for (const topic of ['source', 'destination']) {
     const c = topicClient()
@@ -289,6 +289,8 @@ it('source and destination Topic views refetch Reply counts once across duplicat
         ['A', topic, { history_generation: generation }],
       ])
       expect(c.topics.get('A').topic(topic)).toMatchObject({ initialized: true, messages: after })
+      const timelineReads = c.topicsApi.listTimeline.mock.calls.length
+      const messageReads = c.listMessages.mock.calls.length
       c.handlers[0].onEvent(move)
       c.handlers[0].onEvent(late)
       expect(refetch[2].aborted).toBe(false)
@@ -304,6 +306,8 @@ it('source and destination Topic views refetch Reply counts once across duplicat
       expect(view.counts[resident.id]).toBe(0)
       expect(read).toHaveBeenCalledTimes(2)
       expect(c.topicsApi.listTopicMessages).toHaveBeenCalledTimes(2)
+      expect(c.topicsApi.listTimeline).toHaveBeenCalledTimes(timelineReads)
+      expect(c.listMessages).toHaveBeenCalledTimes(messageReads)
     } finally {
       counts.close()
       replies.close()
