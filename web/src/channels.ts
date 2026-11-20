@@ -20,6 +20,7 @@ type ChannelListState = {
 export type ChannelsState = ChannelListState & {
   selectedId: string | null
   readonly openChannel?: Channel
+  readonly openChannelPending?: boolean
   archivedList?: ChannelListState
 }
 
@@ -67,7 +68,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   let hasList = false
   let selectedKind: 'channel' | 'dm' | undefined
   let open: { id: string; release(): void; invalidate(): void } | undefined
-  let archived: { release(): void; invalidate(): void } | undefined
+  let archived: { release(): void; invalidate(): void; refresh(): void } | undefined
   let archivedHolds = 0
   const listeners = new Set<() => void>()
   const set = (patch: Partial<ChannelsState>) => {
@@ -75,10 +76,11 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     if (patch.selectedId !== undefined && patch.selectedId !== state.selectedId) {
       selectedKind = undefined
       open?.release(); open = undefined
-      patch = { ...patch, openChannel: undefined }
+      patch = { ...patch, openChannel: undefined, openChannelPending: false }
     }
     state = { ...state, ...patch }
     followOpen()
+    followArchived()
     listeners.forEach((l) => l())
   }
 
@@ -91,7 +93,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     if (!id || !hasList || listed || selectedKind === 'dm' || !details.canOpen(id)) {
       if (open) {
         open.release(); open = undefined
-        if (state.openChannel) state = { ...state, openChannel: undefined }
+        if (state.openChannel) state = { ...state, openChannel: undefined, openChannelPending: false }
       }
       return
     }
@@ -108,7 +110,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
         return getChannel(id, signal)
       },
       accept(channel) {
-        set({ openChannel: channel })
+        set({ openChannel: channel, openChannelPending: false })
         details.onOpen(channel)
       },
       error(r) {
@@ -126,11 +128,46 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     target.invalidate('notice', 0)
   }
 
+  function followArchived() {
+    const load = api.listArchivedChannels
+    if (closed || !activity || !load) return
+    if (archivedHolds === 0 && (!state.openChannel?.archived || state.openChannelPending)) {
+      if (archived) {
+        archived.release(); archived = undefined
+        state = { ...state, archivedList: undefined }
+      }
+      return
+    }
+    if (archived) return
+    const target = createActivityTarget<ChannelList>({
+      load: async signal => validList(await load(signal)),
+      accept(data) {
+        set({ archivedList: { status: 'ready', channels: data.channels } })
+        details?.onArchivedSnapshot(data.channels)
+      },
+      error: () => set({ archivedList: { status: 'error', channels: state.archivedList?.channels ?? [] } }),
+      terminal,
+    })
+    const release = activity.hold('archived-channels', target)
+    archived = {
+      release: () => { target.close(); release() },
+      invalidate: () => target.invalidate('access'),
+      refresh: () => target.invalidate(),
+    }
+    state = { ...state, archivedList: { status: 'loading', channels: [] } }
+    void target.refresh()
+  }
+
   const target = activity ? createActivityTarget<{ channels: Channel[] }>({
     load: async signal => validList(await api.listChannels(signal)),
     accept(data) {
       hasList = true
-      set({ status: 'ready', channels: data.channels, selectedId: state.selectedId ?? data.channels[0]?.id ?? null })
+      const previous = state.channels.find(c => c.id === state.selectedId)
+      const departed = previous && api.getChannel && details?.canOpen(previous.id) && !data.channels.some(c => c.id === previous.id)
+      set({
+        status: 'ready', channels: data.channels, selectedId: state.selectedId ?? data.channels[0]?.id ?? null,
+        ...(departed ? { openChannel: previous, openChannelPending: true } : {}),
+      })
       onSnapshot?.(data.channels)
     },
     error: () => set({ status: 'error' }),
@@ -154,47 +191,31 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       const list = state.archivedList
       set({ channels: state.channels.filter(c => c.id !== id),
         archivedList: list && { ...list, channels: list.channels.filter(c => c.id !== id) },
-        openChannel: state.openChannel?.id === id ? undefined : state.openChannel })
+        ...(state.openChannel?.id === id ? { openChannel: undefined, openChannelPending: false } : {}) })
     },
     get: () => state,
     isOrdinary,
     isArchived(id: string) {
       if (state.channels.some(c => c.id === id)) return false
-      if (state.openChannel?.id === id) return state.openChannel.archived
+      if (state.openChannel?.id === id && !state.openChannelPending) return state.openChannel.archived
       return !!state.archivedList?.channels.some(c => c.id === id)
     },
     refreshOpen() {
       const before = state
       followOpen()
+      followArchived()
       if (before !== state) listeners.forEach(l => l())
     },
     resetHistory() { open?.invalidate(); archived?.invalidate() },
+    refreshArchived() { archived?.refresh() },
     holdArchived() {
-      const load = api.listArchivedChannels
-      if (closed || !activity || !load) return () => {}
-      if (++archivedHolds === 1) {
-        const target = createActivityTarget<ChannelList>({
-          load: async signal => validList(await load(signal)),
-          accept(data) {
-            set({ archivedList: { status: 'ready', channels: data.channels } })
-            details?.onArchivedSnapshot(data.channels)
-          },
-          error: () => set({ archivedList: { status: 'error', channels: state.archivedList?.channels ?? [] } }),
-          terminal,
-        })
-        const release = activity.hold('archived-channels', target)
-        archived = { release: () => { target.close(); release() }, invalidate: () => target.invalidate('access') }
-        set({ archivedList: { status: 'loading', channels: [] } })
-        void target.refresh()
-      }
+      if (closed || !activity || !api.listArchivedChannels) return () => {}
+      if (++archivedHolds === 1) set({})
       let held = true
       return () => {
         if (!held || closed) return
         held = false
-        if (--archivedHolds === 0) {
-          archived?.release(); archived = undefined
-          set({ archivedList: undefined })
-        }
+        if (--archivedHolds === 0) set({})
       }
     },
     rename: (id: string, name: string) => update(id, { name }),

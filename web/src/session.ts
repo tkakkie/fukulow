@@ -131,6 +131,7 @@ export function createSession(options: SessionOptions) {
       selfId: options.selfId,
       organizationId,
       refreshList: !options.channelsApi ? () => Promise.resolve().then(() => channels.load()) : undefined,
+      refreshArchived: () => channels.refreshArchived(),
       refreshDms: () => dms?.refresh(),
       isDm,
       unreadApi: {

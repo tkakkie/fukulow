@@ -4,7 +4,7 @@ import type { Channel, ChannelList, Result } from './api'
 import type { ChannelsApi } from './channels'
 import { dm } from './dm-test-helpers'
 import { createSession } from './session'
-import { deferred, http, ok, row } from './unread-test-helpers'
+import { deferred, http, main, ok, row } from './unread-test-helpers'
 
 const history_generation = record(1).history_generation
 const mentioned = (seq: number) => ({ ...record(seq), mentions: [{ member_id: 'me', name: '自分' }] })
@@ -57,7 +57,7 @@ it('resolves a linked archived Channel by id with its name, Capabilities and rea
     expect(c.channels.isArchived('A')).toBe(true)
     expect(c.getChannel).toHaveBeenCalledExactlyOnceWith('A', expect.any(AbortSignal))
     expect(c.listTopics).toHaveBeenCalledWith('A', { limit: 1 }, expect.any(AbortSignal))
-    expect(c.listArchivedChannels).not.toHaveBeenCalled()
+    expect(c.listArchivedChannels).toHaveBeenCalled()
     expect(c.session.sync.getTimeline('A').get().messages).toEqual([mentioned(1)])
   } finally { c.session.close() }
 })
@@ -157,7 +157,7 @@ it('fences stale ordinary, archived and open Channel responses after list-change
     staleOpen.resolve(http(404, 'channel not found'))
     staleArchive.resolve(list([archived({ ...a, name: 'Stale' })]))
     await flush()
-    expect(c.channels.get()).toMatchObject({ channels: [b], openChannel: archived(), archivedList: { channels: [] } })
+    expect(c.channels.get()).toMatchObject({ channels: [b], openChannel: archived(), archivedList: { channels: [archived()] } })
     expect(c.session.sync.get().channels.A.state).not.toBe('unavailable')
     await vi.advanceTimersByTimeAsync(200)
     expect(c.channels.get().openChannel?.name).toBe('Current')
@@ -241,8 +241,90 @@ it('archive and restore suppress badges without replacing Unread generations, re
     expect(unread.get('B')).toMatchObject({ generation: unwatched.generation, unreadCount: unwatched.unreadCount })
     expect(sync.get().channels.A).toMatchObject({ cursor: 2, subscription })
     expect(c.updateChannel.mock.calls).toEqual([['A', { archived: true }], ['A', { archived: false }]])
-    expect(c.listArchivedChannels).not.toHaveBeenCalled()
+    expect(c.channels.get().archivedList).toBeUndefined()
   } finally { session.close() }
+})
+
+it('marks presented Messages on an archived deep link with the archived section collapsed', async () => {
+  const c = client([archived(), b])
+  const { channels, net, session: { unread } } = c
+  try {
+    channels.selectHint('A')
+    await vi.advanceTimersByTimeAsync(400)
+    net.subscribed('A', 1)
+    unread.visibility(true)
+    const visit = await unread.enter(main)
+    expect(unread.get('A')).toMatchObject({ unreadCount: null, main: { position: 0 }, entry: { boundary: 0 } })
+    unread.presented(visit!, [1])
+    await flush()
+    expect(net.markReads).toEqual([{ scope: main, body: { history_generation, read_seq: 1 } }])
+    expect(unread.get('A').main.position).toBe(1)
+    channels.select('B')
+    expect(channels.get().archivedList).toBeUndefined()
+  } finally { c.session.close() }
+})
+
+it('refreshes the selected archived Channel read baseline after C8 cursor reset', async () => {
+  const c = client([archived(row({ as_of_seq: 1, read_seq: 1, unread_count: 0, main_unread_count: 0 })), b])
+  const { channels, net, session: { unread } } = c
+  try {
+    channels.selectHint('A')
+    await vi.advanceTimersByTimeAsync(400)
+    net.subscribed('A', 1)
+    expect(unread.get('A').main.position).toBe(1)
+    c.listArchivedChannels.mockClear()
+
+    c.rows.set('A', archived(row({ as_of_seq: 0, unread_count: 0, main_unread_count: 0 })))
+    net.pages.A = ok({ history_generation, as_of_seq: 0, messages: [], has_more: false })
+    net.timelines.A = ok({ history_generation, as_of_seq: 0, items: [], has_more: false })
+    net.socket.onClose(1006)
+    await vi.advanceTimersByTimeAsync(1000)
+    net.socket.onReady()
+    await flush()
+    net.subscribed('A', 0)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(c.listArchivedChannels).toHaveBeenCalled()
+    expect(unread.get('A')).toMatchObject({ asOfSeq: 0, unreadCount: null, main: { position: 0 } })
+
+    net.subscribed('A', 0)
+    net.event({ type: 'message', seq: 1, kind: 'create', message: mentioned(1) })
+    unread.visibility(true)
+    const visit = await unread.enter(main)
+    unread.presented(visit!, [1])
+    await flush()
+    expect(c.session.sync.get().channels.A).toMatchObject({ cursor: 1 })
+    expect(unread.get('A').entry).toMatchObject({ boundary: 0 })
+    expect(net.markReads).toEqual([{ scope: main, body: { history_generation, read_seq: 1 } }])
+  } finally { c.session.close() }
+})
+
+it('refreshes the held archived list when a mark-read response leaves the main position unresolved', async () => {
+  const c = client([archived(row({ main_unread_count: 3 })), b])
+  const { channels, net, session: { unread } } = c
+  try {
+    net.pages.A = ok({ history_generation, as_of_seq: 3, messages: [mentioned(1), mentioned(2), mentioned(3)], has_more: false })
+    channels.selectHint('A')
+    await vi.advanceTimersByTimeAsync(400)
+    net.subscribed('A', 3)
+    unread.visibility(true)
+    const visit = await unread.enter(main)
+    await vi.advanceTimersByTimeAsync(400)
+    c.listArchivedChannels.mockClear()
+    net.holdMarkReads = true
+    unread.presented(visit!, [1])
+    await flush()
+    expect(net.pendingMarkReads[0]?.body.read_seq).toBe(1)
+    c.rows.set('A', archived(row({ read_seq: 2, unread_count: 1, main_unread_count: 1 })))
+    net.pendingMarkReads[0].resolve(ok({ history_generation, read_seq: 2 }))
+    await flush()
+    expect(unread.get('A').main).toMatchObject({ error: true, position: 2 })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(c.listArchivedChannels).toHaveBeenCalledTimes(1)
+    expect(unread.get('A').main).toMatchObject({ error: false, position: 2 })
+    unread.presented(visit!, [3])
+    await flush()
+    expect(net.pendingMarkReads[1]?.body.read_seq).toBe(3)
+  } finally { c.session.close() }
 })
 
 it.each(['main', 'first Topic Message', 'Reply'] as const)('settles a 409 archived %s send in WASM without retrying', async scope => {
@@ -264,7 +346,7 @@ it.each(['main', 'first Topic Message', 'Reply'] as const)('settles a 409 archiv
     await submission
     expect(timeline.get().pending).toMatchObject([{
       clientMessageId: send.body.client_message_id, body: 'body', status: 'failed', retryable: false,
-      failureMessage: 'このチャンネルはアーカイブされているため、送信できません。',
+      failureCode: 'channel_archived',
     }])
     await composer.retry(send.body.client_message_id)
     await vi.advanceTimersByTimeAsync(60_000)

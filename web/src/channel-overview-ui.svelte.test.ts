@@ -644,7 +644,7 @@ describe('ChannelOverview UI', () => {
 })
 
 describe('ArchivedChannelList UI', () => {
-  it('holds archived list only while expanded, shows no Unread/Mention badges or DMs, and releases on collapse', async () => {
+  it('shows no Unread/Mention badges or DMs and releases on collapse when no archived Channel is selected', async () => {
     vi.useFakeTimers()
     try {
       await withDom(async (doc) => {
@@ -678,6 +678,7 @@ describe('ArchivedChannelList UI', () => {
         doc.body.appendChild(host)
 
         try {
+          await flush()
           // Reactive wrapper reading adapter.state.archivedList
           const props = $state<{ list: ReturnType<typeof channelsAdapter>['state']['archivedList'] }>({ list: undefined })
           const stop = $effect.root(() => {

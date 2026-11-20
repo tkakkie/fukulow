@@ -610,6 +610,7 @@
           <MessageRow
             body={p.body}
             pendingStatus={p.status}
+            failureCode={p.failureCode}
             retryable={p.retryable}
             {targetUnavailable}
             onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}

@@ -99,7 +99,8 @@
   const dmLapsed = $derived(selected?.kind === 'dm' && dmState?.sendBlocks[selected.id] === 'dm_peer_access_lapsed')
   const dmSendDisabled = $derived(selected?.kind === 'dm' && (!selected.peer.active || Boolean(dmState?.sendBlocks[selected.id])))
   const selectedArchived = $derived(selected?.kind === 'channel' && (selected.archived || channels.isArchived(selected.id)))
-  const sendDisabled = $derived(dmSendDisabled || selectedArchived)
+  const archiveStatePending = $derived(s.openChannelPending && s.openChannel?.id === selected?.id)
+  const sendDisabled = $derived(dmSendDisabled || selectedArchived || archiveStatePending)
   const currentChannel = $derived(selected ? session.sync.channel(selected.id) : null)
   const currentTimeline = $derived(currentChannel ? currentChannel.timeline : null)
   const currentLive = $derived(currentChannel ? currentChannel.live : false)
@@ -789,9 +790,11 @@
             <DmSendStatus peer={selected.peer} lapsed={dmLapsed} canRenew={organization?.member.role !== 'guest'} busy={dmState?.busy}
               onrenew={() => { if (selected?.kind === 'dm') void handleOpenDm(selected.peer.id, true) }} />
           </div>
-        {:else if selectedArchived && !organizationUnavailable && currentTimeline?.status !== 'unavailable'}
+        {:else if (selectedArchived || archiveStatePending) && !organizationUnavailable && currentTimeline?.status !== 'unavailable'}
           <div class="main-card__notice">
-            <StatusBanner message="このチャンネルはアーカイブされています。メッセージを送信できませんが、履歴は引き続き閲覧できます。" />
+            <StatusBanner message={selectedArchived
+              ? 'このチャンネルはアーカイブされています。メッセージを送信できませんが、履歴は引き続き閲覧できます。'
+              : 'チャンネルの状態を確認しています。確認が終わるまでメッセージを送信できません。'} />
           </div>
         {/if}
         <div class="main-card__timeline">
@@ -809,7 +812,7 @@
               selfId={organization?.member.id ?? ''}
               viewSelected={mainViewSelected}
               {organizationUnavailable}
-              sendDisabled={selectedArchived}
+              {sendDisabled}
               reconnecting={announcementView.reconnecting}
               resolveSenderName={resolveSender}
             {resolveMentionName}
@@ -992,7 +995,7 @@
               activeTopicId={route?.topicId ?? null}
               unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
               onselecttopic={handleSelectTopic}
-              onstartnewtopic={organizationUnavailable || currentTimeline?.status === 'unavailable' || selectedArchived ? undefined : handleStartNewTopic}
+              onstartnewtopic={organizationUnavailable || currentTimeline?.status === 'unavailable' || sendDisabled ? undefined : handleStartNewTopic}
             />
           {:else}
             <EmptyState title="チャンネルを選んでください。" />

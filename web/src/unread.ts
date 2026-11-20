@@ -37,7 +37,7 @@ type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAt
 type Deadline = { channel?: string; cancel(): void }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
-export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshDms?(): void; isDm?(id: string): boolean }) {
+export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -193,6 +193,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   }
   async function refresh(retryTokens?: Map<string, symbol>) {
     if (!active()) return
+    options.refreshArchived?.()
     options.refreshDms?.()
     if (options.refreshList) return options.refreshList()
     // Before discovery there are no Channel generations to scope a list retry to.

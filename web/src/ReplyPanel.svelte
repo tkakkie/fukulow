@@ -775,7 +775,7 @@
             body={p.body}
             pendingStatus={p.status}
             retryable={p.retryable}
-            failedReason={p.failureCode === 'dm_peer_deactivated' ? 'このメンバーは無効化されています。履歴は引き続き閲覧できます。' : p.failureCode === 'dm_peer_access_lapsed' ? 'このダイレクトメッセージには現在送信できません。' : undefined}
+            failureCode={p.failureCode}
             {targetUnavailable}
             onretry={() => void rc.retry(p.clientMessageId).catch(console.error)}
             onrestore={sendDisabled ? undefined : () => handleRestoreRequest(p.clientMessageId)}
