@@ -1421,7 +1421,8 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     await rc.submit('id1')
 
     rc.setDraft('入力中の返信下書き')
-    await settle()
+    flushSync()
+    await tick()
 
     const retryablePending = ch.timeline.pending.find((p) => p.body === '再送可能な失敗返信')!
     const refusedPending = ch.timeline.pending.find((p) => p.body === '拒否された失敗返信')!
@@ -1461,7 +1462,8 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
       },
     })
     try {
-      await settle()
+      flushSync()
+      await tick()
       flushSync()
 
       const textarea = host.querySelector('textarea')!
@@ -1497,7 +1499,7 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
       flushSync()
       buttonsByText(dialog, '置き換える')[0].click()
       flushSync()
-      await settle()
+      await tick()
       flushSync()
       expect(host.querySelector('[role="dialog"]')).toBeNull()
       expect(rc.composer.draft).toBe('入力中の返信下書き')
@@ -1518,7 +1520,7 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
       flushSync()
       buttonsByText(host.querySelector('[role="dialog"]')!, '置き換える')[0].click()
       flushSync()
-      await settle()
+      await tick()
       flushSync()
 
       expect(rc.composer.draft).toBe('拒否された失敗返信')

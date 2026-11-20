@@ -660,6 +660,86 @@ test('phone 375px: defers first-Unread positioning and markRead while ?panel=top
   }
 })
 
+test('phone 375px Topic view: defers Topic markRead while ?panel=topics hides main, then submits Topic markRead on panel close', async ({
+  page,
+  browser,
+}) => {
+  const suffix = crypto.randomUUID().slice(0, 8)
+  const orgId = await signInOwner(page.request)
+  const targetChannel = await createChannel(page.request, orgId, `topic-unread-defer-${suffix}`)
+  const topicName = `スマホ未読トピック-${suffix}`
+
+  let lastReadMsg!: components['schemas']['Message']
+  for (let i = 1; i <= 4; i++) {
+    lastReadMsg = await postMessage(page.request, orgId, targetChannel.id, `トピック既読 ${i}`, { topicName })
+  }
+  const topicId = lastReadMsg.topic_id
+  expect(topicId).not.toBeNull()
+  const historyGeneration = lastReadMsg.history_generation
+  const markOwn = await secretSafe(() =>
+    page.request.put(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/topics/${topicId}/read`, {
+      data: { history_generation: historyGeneration, read_seq: lastReadMsg.created_seq },
+    }),
+  )
+  expect(markOwn.ok()).toBe(true)
+
+  const { context: bobContext } = await createMemberContext(page.request, browser, orgId)
+  try {
+    const unreadMsgs: components['schemas']['Message'][] = []
+    for (let i = 1; i <= 10; i++) {
+      unreadMsgs.push(
+        await postMessage(bobContext.request, orgId, targetChannel.id, `トピック未読 ${i}`, { topicName }),
+      )
+    }
+    const seqById: Record<string, number> = {}
+    for (const m of unreadMsgs) seqById[m.id] = m.created_seq
+
+    const readMarks = await trackReadMarks(page, orgId, targetChannel.id)
+
+    await page.setViewportSize({ width: 375, height: 667 })
+    const initialTopicLoaded = page.waitForResponse(
+      (res) =>
+        res.url().includes(`/api/v1/orgs/${orgId}/channels/${targetChannel.id}/topics/${topicId}/messages`) &&
+        res.request().method() === 'GET' &&
+        res.status() === 200,
+    )
+    await page.goto(`/o/${orgId}/c/${targetChannel.id}/t/${topicId}?panel=topics`)
+    await initialTopicLoaded
+    await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'panel')
+    await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    await expect(page.locator('#panel-content')).toBeVisible()
+    await expect(page.locator('#main-content')).toBeHidden()
+    const firstUnread = page.locator(`#main-content [data-message-id="${unreadMsgs[0].id}"]`)
+    await expect(firstUnread).toBeAttached()
+    await flushAnimationFrames(page)
+
+    const scrollEl = page.locator('#main-content .topic-view__scroll')
+    expect(await scrollEl.evaluate((el) => el.scrollTop)).toBe(0)
+    expect(readMarks).toEqual([])
+
+    // Closing the panel reveals TopicView (mobile level view) and submits the Topic-scope markRead
+    await page.locator('#panel-content').getByRole('button', { name: 'パネルを閉じる(Esc)' }).click()
+    await expect(page.locator('.workspace')).toHaveAttribute('data-mobile-level', 'view')
+    const marker = firstUnread.locator('[data-read-marker="true"]')
+    await expect(marker).toHaveText('未読')
+    await expect.poll(() => readMarks.length).toBeGreaterThan(0)
+    await flushAnimationFrames(page)
+
+    const lastVisibleSeq = await maxVisibleConfirmedSeq(scrollEl, seqById)
+    expect(lastVisibleSeq).toBeGreaterThanOrEqual(unreadMsgs[0].created_seq)
+    expect(readMarks).toEqual([
+      {
+        scope: 'topic',
+        topicId,
+        history_generation: historyGeneration,
+        read_seq: lastVisibleSeq,
+      },
+    ])
+  } finally {
+    await bobContext.close()
+  }
+})
+
 test('same-Channel C9 recovery with zero Unread resets scroll state and pins to bottom on reselection', async ({
   page,
   browser,

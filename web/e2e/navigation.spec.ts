@@ -434,36 +434,70 @@ test('beforeunload warns for a draft in an Organization that is not selected, in
   expect(await warns()).toBe(true)
 })
 
-test('responsive panel geometry: overlays main at 1100px, pushes main at 1280px, and tablet 768px drawer closes on Esc', async ({ page }) => {
+test('responsive panel geometry: overlays main at 960px, 1100px and 1279px, pushes main at 1280px, and tablet 768px drawer closes on Esc', async ({ page }) => {
   const main = page.locator('#main-content')
   const panel = page.locator('#panel-content')
   const openPanelBtn = page.getByRole('button', { name: 'パネルを開く(⌘.)', exact: true })
 
-  // 1. 1100px (960-1279px): open panel overlays main from the right without narrowing main
-  await page.setViewportSize({ width: 1100, height: 800 })
-  await page.goto(`/o/${org}/c/${first}`)
-  await expect(composer(page)).toBeEnabled()
-  const mainClosed1100 = await main.boundingBox()
-  expect(mainClosed1100).not.toBeNull()
+  // 1. 960px, 1100px, 1279px (960-1279px inclusive): open panel overlays main from the right,
+  //    stays inside the viewport, and overlaps main vertically without narrowing main
+  let prevMainWidth = 0
+  for (const width of [960, 1100, 1279]) {
+    await page.setViewportSize({ width, height: 800 })
+    if (prevMainWidth === 0) {
+      await page.goto(`/o/${org}/c/${first}`)
+      await expect(composer(page)).toBeEnabled()
+    } else {
+      await expect.poll(async () => (await main.boundingBox())?.width ?? 0).toBeGreaterThan(prevMainWidth + 50)
+    }
+    await expect
+      .poll(() => page.evaluate(() => window.matchMedia('(min-width: 960px) and (max-width: 1279px)').matches))
+      .toBe(true)
 
-  await openPanelBtn.click()
-  await expect(panel).toBeVisible()
-  const mainOpen1100 = await main.boundingBox()
-  const panel1100 = await panel.boundingBox()
-  expect(mainOpen1100).not.toBeNull()
-  expect(panel1100).not.toBeNull()
-  expect(Math.abs(mainOpen1100!.width - mainClosed1100!.width)).toBeLessThanOrEqual(1)
-  expect(Math.abs(mainOpen1100!.x - mainClosed1100!.x)).toBeLessThanOrEqual(1)
-  expect(panel1100!.width).toBeGreaterThan(200)
-  expect(panel1100!.x).toBeGreaterThan(mainOpen1100!.x)
-  expect(panel1100!.x).toBeLessThan(mainOpen1100!.x + mainOpen1100!.width)
-  expect(Math.abs((panel1100!.x + panel1100!.width) - (mainOpen1100!.x + mainOpen1100!.width))).toBeLessThanOrEqual(2)
+    const viewport = page.viewportSize()
+    expect(viewport).not.toBeNull()
+    const mainClosed = await main.boundingBox()
+    expect(mainClosed).not.toBeNull()
+    prevMainWidth = mainClosed!.width
+
+    await openPanelBtn.click()
+    await expect(panel).toBeVisible()
+    const mainOpen = await main.boundingBox()
+    const panelBox = await panel.boundingBox()
+    expect(mainOpen).not.toBeNull()
+    expect(panelBox).not.toBeNull()
+
+    // Horizontal overlay without narrowing main
+    expect(Math.abs(mainOpen!.width - mainClosed!.width)).toBeLessThanOrEqual(1)
+    expect(Math.abs(mainOpen!.x - mainClosed!.x)).toBeLessThanOrEqual(1)
+    expect(panelBox!.width).toBeGreaterThan(200)
+    expect(panelBox!.x).toBeGreaterThan(mainOpen!.x)
+    expect(panelBox!.x).toBeLessThan(mainOpen!.x + mainOpen!.width)
+    expect(Math.abs((panelBox!.x + panelBox!.width) - (mainOpen!.x + mainOpen!.width))).toBeLessThanOrEqual(2)
+
+    // Viewport intersection and vertical overlap with main
+    expect(panelBox!.x).toBeGreaterThanOrEqual(0)
+    expect(panelBox!.y).toBeGreaterThanOrEqual(0)
+    expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(viewport!.width)
+    expect(panelBox!.y).toBeLessThan(viewport!.height)
+    const visibleWidth = Math.min(panelBox!.x + panelBox!.width, viewport!.width) - Math.max(panelBox!.x, 0)
+    const visibleHeight = Math.min(panelBox!.y + panelBox!.height, viewport!.height) - Math.max(panelBox!.y, 0)
+    expect(visibleWidth).toBeGreaterThan(200)
+    expect(visibleHeight).toBeGreaterThan(200)
+    const verticalOverlap =
+      Math.min(panelBox!.y + panelBox!.height, mainOpen!.y + mainOpen!.height) -
+      Math.max(panelBox!.y, mainOpen!.y)
+    expect(verticalOverlap).toBeGreaterThan(200)
+
+    await page.keyboard.press('Escape')
+    await expect(panel).toHaveCount(0)
+  }
 
   // 2. 1280px (>= 1280px): open panel sits beside main and pushes main narrower
-  await page.keyboard.press('Escape')
-  await expect(panel).toHaveCount(0)
   await page.setViewportSize({ width: 1280, height: 800 })
-  await expect.poll(async () => (await main.boundingBox())?.width ?? 0).toBeGreaterThan(mainClosed1100!.width + 100)
+  await expect.poll(() => page.evaluate(() => window.matchMedia('(min-width: 1280px)').matches)).toBe(true)
+  const viewport1280 = page.viewportSize()
+  expect(viewport1280).not.toBeNull()
   const mainClosed1280 = await main.boundingBox()
   expect(mainClosed1280).not.toBeNull()
 
@@ -475,6 +509,13 @@ test('responsive panel geometry: overlays main at 1100px, pushes main at 1280px,
   expect(panel1280).not.toBeNull()
   expect(mainClosed1280!.width - mainOpen1280!.width).toBeGreaterThanOrEqual(panel1280!.width)
   expect(panel1280!.x).toBeGreaterThanOrEqual(mainOpen1280!.x + mainOpen1280!.width)
+  expect(panel1280!.y).toBeGreaterThanOrEqual(0)
+  expect(panel1280!.x + panel1280!.width).toBeLessThanOrEqual(viewport1280!.width)
+  expect(panel1280!.y + panel1280!.height).toBeLessThanOrEqual(viewport1280!.height)
+  const verticalOverlap1280 =
+    Math.min(panel1280!.y + panel1280!.height, mainOpen1280!.y + mainOpen1280!.height) -
+    Math.max(panel1280!.y, mainOpen1280!.y)
+  expect(verticalOverlap1280).toBeGreaterThan(200)
 
   // 3. 768px (600-959px): drawer closes on Esc and focus remains on the rail opener
   await page.keyboard.press('Escape')

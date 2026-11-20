@@ -2069,9 +2069,11 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
       as_of_seq: 0,
       topic: summary('T', 0, 0),
     })
-    await settle()
+    await vi.waitFor(() =>
+      expect(net.socket.sent.some((m) => m.type === 'subscribe' && m.channel_id === 'A')).toBe(true),
+    )
     net.subscribed('A', 0)
-    await settle()
+    await vi.waitFor(() => expect(raw.sync.get().channels.A?.state).toBe('ready'))
 
     const ch = syncAdapter(raw.sync).channel('A')
     const tp = topicsAdapter(raw.topics, 'A')
@@ -2079,13 +2081,15 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
 
     tc.setDraft('拒否されたトピック本文')
     const refused = tc.submit('Topic T')
-    await settle()
+    await vi.waitFor(() => expect(net.sends).toHaveLength(1))
     net.sends[0].resolve({ ok: false, kind: 'http', status: 400, error: 'invalid_input' })
     await refused
-    await settle()
+    flushSync()
+    await tick()
 
     tc.setDraft('入力途中のトピック下書き')
-    await settle()
+    flushSync()
+    await tick()
 
     const host = dom.doc.createElement('div')
     dom.doc.body.appendChild(host)
@@ -2101,7 +2105,9 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
       },
     })
     try {
-      await settle()
+      flushSync()
+      await tick()
+      await vi.waitFor(() => expect(buttonsByText(host, '編集して送り直す')).toHaveLength(1))
       flushSync()
 
       const textarea = host.querySelector('textarea')!
@@ -2124,7 +2130,7 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
       // 2. Clicking キャンセル closes the dialog and keeps both the original draft and the failed send
       buttonsByText(dialog!, 'キャンセル')[0].click()
       flushSync()
-      await settle()
+      await tick()
       flushSync()
 
       expect(host.querySelector('[role="dialog"]')).toBeNull()
@@ -2139,7 +2145,7 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
       const reopened = host.querySelector('[role="dialog"]')!
       buttonsByText(reopened, '置き換える')[0].click()
       flushSync()
-      await settle()
+      await tick()
       flushSync()
 
       expect(host.querySelector('[role="dialog"]')).toBeNull()
@@ -2152,16 +2158,17 @@ describe('Topic summary lines, TopicList and TopicView states', () => {
       // 4. Empty Topic Composer draft restores immediately without confirmation and focuses Composer
       tc.setDraft('二度目の拒否トピック本文')
       const secondRefused = tc.submit('Topic T')
-      await settle()
+      await vi.waitFor(() => expect(net.sends).toHaveLength(2))
       net.sends[1].resolve({ ok: false, kind: 'http', status: 400, error: 'invalid_input' })
       await secondRefused
-      await settle()
+      flushSync()
+      await tick()
       flushSync()
       expect(textarea.value).toBe('')
 
       buttonsByText(host, '編集して送り直す')[0].click()
       flushSync()
-      await settle()
+      await tick()
       flushSync()
 
       expect(host.querySelector('[role="dialog"]')).toBeNull()
