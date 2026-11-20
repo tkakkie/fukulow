@@ -107,6 +107,31 @@ other('not a test', () => {})
 `
     expect(tsTests(src)).toEqual([])
   })
+
+  it('finds Vitest .each with a non-empty literal array and fails closed on skipped/empty/dynamic cases', () => {
+    const src = `
+it.each([401, 404])('literal %s', () => {})
+test.concurrent.each([1])('concurrent %s', () => {})
+it.skip.each([1])('skipped %s', () => {})
+xit.each([1])('xskipped %s', () => {})
+it.each([])('empty %s', () => {})
+it.each(cases)('dynamic %s', () => {})
+it.each([...cases])('spread %s', () => {})
+describe.skip.each([1])('skipped suite %s', () => { it('inside skipped each', () => {}) })
+describe.each([])('empty suite %s', () => { it('inside empty each', () => {}) })
+`
+    expect(tsTests(src)).toEqual([
+      { title: 'literal %s', skipped: false },
+      { title: 'concurrent %s', skipped: false },
+      { title: 'skipped %s', skipped: true },
+      { title: 'xskipped %s', skipped: true },
+      { title: 'empty %s', skipped: true },
+      { title: 'dynamic %s', skipped: true },
+      { title: 'spread %s', skipped: true },
+      { title: 'inside skipped each', skipped: true },
+      { title: 'inside empty each', skipped: true },
+    ])
+  })
 })
 
 describe('docs/invariants.md parsing', () => {

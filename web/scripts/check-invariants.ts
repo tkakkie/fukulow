@@ -196,6 +196,16 @@ function calleeOf(e: ts.Expression): Callee {
   return { root, words }
 }
 
+/** Vitest `it.each([a, b])('title', fn)` (and `.skip.each`, `describe.each`). Fails closed unless cases is a non-empty array literal. */
+function vitestEachCallee(e: ts.Expression): { callee: NonNullable<Callee>; nonEmpty: boolean } | null {
+  if (!ts.isCallExpression(e) || !ts.isPropertyAccessExpression(e.expression) || e.expression.name.text !== 'each') return null
+  const callee = calleeOf(e.expression.expression)
+  if (!callee) return null
+  const cases = e.arguments[0]
+  const nonEmpty = !!cases && ts.isArrayLiteralExpression(cases) && cases.elements.some((el) => !ts.isSpreadElement(el))
+  return { callee, nonEmpty }
+}
+
 export type TsTest = { title: string; skipped: boolean; reason?: string }
 
 function isPlaywrightImport(s: ts.Node): s is ts.ImportDeclaration {
@@ -210,7 +220,8 @@ export function tsTests(src: string, fileName = 'x.ts', nodeTests = false, playw
   const visit = (node: ts.Node, parentSkipped: boolean) => {
     let skipped = parentSkipped
     if (ts.isCallExpression(node)) {
-      const c = calleeOf(node.expression)
+      const each = !nodeTests && !playwright ? vitestEachCallee(node.expression) : null
+      const c = each ? each.callee : calleeOf(node.expression)
       if (playwright) {
         let root = node.expression
         while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) root = root.expression
@@ -221,7 +232,8 @@ export function tsTests(src: string, fileName = 'x.ts', nodeTests = false, playw
         const options = node.arguments[1]
         // Fail closed on node:test options (skip/todo may be computed or spread).
         const nodeOptions = nodeTests && options && !ts.isArrowFunction(options) && !ts.isFunctionExpression(options)
-        const own = nodeOptions || c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w) || (playwright && w === 'fail'))
+        const emptyEach = each !== null && !each.nonEmpty
+        const own = emptyEach || nodeOptions || c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w) || (playwright && w === 'fail'))
         const isSuite = c.root === 'describe' || c.root === 'suite' || c.root === 'xdescribe' || c.words.includes('describe')
         const a = node.arguments[0]
         const literal = a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a))
