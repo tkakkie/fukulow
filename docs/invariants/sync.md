@@ -48,6 +48,14 @@ Web real-time client: protocol, sync controller, Organization sync, shared contr
 | Member confirm Dialogs close with fallback focus when current target or permission disappears | `web/src/member-dialogs.svelte.test.ts::dismisses the Member deactivation Dialog on demotion`, `web/src/member-dialogs.svelte.test.ts::dismisses the Channel removal Dialog on target removal`, `web/src/member-dialogs.svelte.test.ts::dismisses the Channel manager grant Dialog on permission loss` |
 | Bound notice bursts by debounce. Terminal 4xx needs new invalidation or user retry. Transient failures preserve backoff/Retry-After through access and periodic invalidation. Stale responses bypass neither. Closed generations cancel retry timers. | `web/src/activity.test.ts::notice burst costs at most one request per debounce`, `web/src/activity.test.ts::ordinary terminal 4xx stops automatic retry and explicit retry remains possible`, `web/src/activity.test.ts::closed generations fence responses and pending retry timers`, `web/src/activity.test.ts::a stale transient failure retains backoff and Retry-After after a periodic invalidation` |
 
+## Personal section sync
+
+| Rule | Test |
+|---|---|
+| A held layout converges across the Member's own sockets, including zero subscriptions. It shares O5 and Ready recovery with the Channel list. A delayed COMMIT can outlast restart and successful reads. | `web/src/sections-recovery.test.ts::own Sessions converge on section notices including the caller and a socket with zero subscriptions`, `web/src/sections-recovery.test.ts::an early read after restart cannot finish O5 recovery before a delayed COMMIT`, `web/src/sections-recovery.test.ts::Ready fences the first layout and Channel-list reads and queues both follow-ups` |
+| The layout accepts complete snapshots across notice gaps and local writes, with monotonic floors within a socket. Reconnect waits for Ready and permits a fresh lower baseline. Write acknowledgements confer no layout authority. | `web/src/sections.test.ts::coalesces generation gaps and duplicates and rejects reads below either numeric floor`, `web/src/sections.test.ts::fences reads at mutation start and at completion and serializes local intents`, `web/src/sections-recovery.test.ts::reconnect waits for Ready and only the replacement socket can set lower generation floors` |
+| Display intersects the ordered layout with the authoritative Channel list. Revoke immediately hides a placement and regain requires fresh reads from both targets. Archive hides placements and preserves the access generation and Unread. | `web/src/sections.test.ts::intersects complete snapshots by id and preserves section and Other Channels order`, `web/src/sections.test.ts::fences both reads on revoke and requires a fresh pair to show the saved slot on regain`, `web/src/sections.test.ts::archive refusal hides immediately and restores the saved slot and Unread in the same access generation` |
+
 ## DM sync
 
 | Rule | Test |
