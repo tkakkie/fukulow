@@ -20,6 +20,51 @@ export type SignInRequest = components['schemas']['SignInRequest']
  * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
 export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; error?: string; retryAfterMs?: number }
 
+// Bound 5xx body reads so stalled responses cannot keep callers pending or delay Retry-After handling.
+const SERVER_ERROR_BODY_TIMEOUT_MS = 1000
+
+function cancelResponseBody(res: Response): void {
+  try {
+    void res.body?.cancel()?.catch(() => {})
+  } catch { /* Ignore body cancel failures on locked or closed streams. */ }
+}
+
+async function readServerErrorCode(res: Response, signal?: AbortSignal | null): Promise<string | undefined> {
+  if (signal?.aborted) {
+    cancelResponseBody(res)
+    return undefined
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
+  const body = (async () => {
+    try {
+      const parsed = (await res.json()) as Partial<components['schemas']['ErrorBody']> | null
+      return typeof parsed?.error === 'string' ? parsed.error : undefined
+    } catch { /* Non-JSON, empty, or aborted 5xx body leaves error absent. */
+      return undefined
+    }
+  })()
+  const stop = new Promise<undefined>(resolve => {
+    timer = setTimeout(() => {
+      cancelResponseBody(res)
+      resolve(undefined)
+    }, SERVER_ERROR_BODY_TIMEOUT_MS)
+    if (signal) {
+      onAbort = () => {
+        cancelResponseBody(res)
+        resolve(undefined)
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+  })
+  try {
+    return await Promise.race([body, stop])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
+
 async function call<T>(
   fetchFn: typeof fetch,
   path: string,
@@ -31,18 +76,15 @@ async function call<T>(
     // Cookie auth only: the HttpOnly session cookie is sent by the browser; no token is stored.
     const res = await fetchFn(path, { credentials: 'same-origin', ...init })
     if (res.status >= 500) {
-      let error: string | undefined
-      try {
-        const body = (await res.json()) as Partial<components['schemas']['ErrorBody']> | null
-        if (typeof body?.error === 'string') error = body.error
-      } catch { /* Non-JSON or empty 5xx body leaves error absent. */ }
       const header = res.headers.get('Retry-After')
       const delay = header === null ? NaN : /^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()
+      const retryAfterMs = Number.isFinite(delay) ? Math.max(0, delay) : undefined
+      const error = await readServerErrorCode(res, init.signal)
       return {
         ok: false,
         kind: 'network',
         ...(error === undefined ? {} : { error }),
-        ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}),
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       }
     }
     if (!res.ok) {

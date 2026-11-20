@@ -102,6 +102,10 @@ describe('channel and message calls', () => {
     expect(await sendMessage('o', 'c', input, retryAfter)).toStrictEqual({
       ok: false, kind: 'network', error: 'lock_contention', retryAfterMs: 5000,
     })
+    const non503 = vi.fn().mockResolvedValue(new Response('{"error":"lock_contention"}', { status: 502 }))
+    expect(await sendMessage('o', 'c', input, non503)).toStrictEqual({
+      ok: false, kind: 'network', error: 'lock_contention',
+    })
     for (const [status, body] of [
       [502, '<html>Bad Gateway</html>'],
       [503, ''],
@@ -111,6 +115,59 @@ describe('channel and message calls', () => {
     ] as const) {
       const m = vi.fn().mockResolvedValue(new Response(body, { status }))
       expect(await sendMessage('o', 'c', input, m)).toStrictEqual({ ok: false, kind: 'network' })
+    }
+  })
+  it('bounds stalled 5xx body reads and keeps Retry-After without error', async () => {
+    vi.useFakeTimers()
+    try {
+      const stalled = new Response(new ReadableStream({ start() {} }), {
+        status: 503, headers: { 'Retry-After': '5' },
+      })
+      const cancelSpy = vi.spyOn(stalled.body!, 'cancel')
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(stalled)
+      let settled = false
+      const pending = sendMessage('o', 'c', { body: 'x', client_message_id: 'same-key' }, fetcher).then(r => {
+        settled = true
+        return r
+      })
+      await vi.advanceTimersByTimeAsync(999)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toBe(true)
+      expect(await pending).toStrictEqual({ ok: false, kind: 'network', retryAfterMs: 5000 })
+      expect(cancelSpy).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+
+      const fast = vi.fn<typeof fetch>().mockResolvedValue(new Response('{"error":"lock_contention"}', { status: 500 }))
+      expect(await sendMessage('o', 'c', { body: 'x', client_message_id: 'same-key' }, fast)).toStrictEqual({
+        ok: false, kind: 'network', error: 'lock_contention',
+      })
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('keeps Retry-After when a 5xx body read is aborted by the request signal', async () => {
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+        const stream = new ReadableStream({
+          start(streamController) {
+            init?.signal?.addEventListener('abort', () => {
+              streamController.error(new DOMException('Aborted', 'AbortError'))
+            }, { once: true })
+          },
+        })
+        return new Response(stream, { status: 503, headers: { 'Retry-After': '60' } })
+      })
+      const pending = listChannels('o', fetcher, controller.signal)
+      await Promise.resolve()
+      controller.abort()
+      expect(await pending).toStrictEqual({ ok: false, kind: 'network', retryAfterMs: 60000 })
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
     }
   })
   it('preserves 429 ErrorBody and Retry-After with a safe one-second fallback', async () => {
