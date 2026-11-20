@@ -17,6 +17,22 @@ const manifestHash = manifest.sha256;
 const imageId = 'sha256:'+'b'.repeat(64);
 const version = readFileSync(new URL('../../.node-version',import.meta.url),'utf8').trim();
 
+// The stub may still be appending while a test polls; only a final record without its
+// newline is "not yet written". Once the child has exited every record must be complete.
+function parseStubLog(text: string, polling: boolean): string[][] {
+  const lines = text.split('\n');
+  const tail = lines.pop();
+  if (tail !== '' && !polling) throw new Error(`incomplete stub log record: ${tail}`);
+  return lines.map(s=>JSON.parse(s));
+}
+
+test('stub log parsing skips only an unterminated record while polling',()=>{
+  assert.deepEqual(parseStubLog('["run"]\n["exec"',true),[['run']]);
+  assert.throws(()=>parseStubLog('["run"]\n["exec"',false),/incomplete stub log record/);
+  assert.throws(()=>parseStubLog('["run"]\n["ex\n',true),SyntaxError);
+  assert.deepEqual(parseStubLog('',false),[]);
+});
+
 function start(t: TestContext, runnerPath: string, mode: string, existing = false) {
   const runner = new URL(runnerPath,import.meta.url).href;
   const dir = mkdtempSync(join(tmpdir(),'search-lifecycle-'));
@@ -80,7 +96,7 @@ if (args[0] === 'container' && args[1] === 'ls' && existsSync(state)) console.lo
   child.stderr.on('data',data=>{ stderr+=String(data); });
   const closed = once(child,'close');
   t.after(()=>{ if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
-  const calls = (): string[][] => existsSync(log) ? readFileSync(log,'utf8').trim().split('\n').map(s=>JSON.parse(s)) : [];
+  const calls = (polling = false): string[][] => existsSync(log) ? parseStubLog(readFileSync(log,'utf8'),polling) : [];
   return {child,closed,calls,out,stderr:()=>stderr};
 }
 
@@ -125,7 +141,7 @@ for (const runner of runners) {
     test(`${runner}: ${signal} cleans up and exits ${code}`,{timeout:10000},async t=>{
       const run = start(t,runner,'hang');
       // The fake Docker client hangs inside a synchronous readiness call.
-      while (!run.calls().some(args=>args[0]==='exec')) {
+      while (!run.calls(true).some(args=>args[0]==='exec')) {
         t.signal.throwIfAborted();
         assert.equal(run.child.exitCode,null,run.stderr());
         await setTimeout(10);
