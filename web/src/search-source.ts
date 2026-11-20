@@ -130,14 +130,22 @@ function buildDefaultMockItems(nowMs: number): readonly SearchResultItem[] {
   ]
 }
 
-function encodeCursor(offset: number): string {
-  return `mock:${offset}`
+function encodeCursor(offset: number, cutoffMs?: number): string {
+  return cutoffMs !== undefined ? `mock:${offset}:${cutoffMs}` : `mock:${offset}`
 }
 
-function decodeCursor(cursor: string | undefined): number {
-  if (!cursor || !cursor.startsWith('mock:')) return 0
-  const parsed = Number.parseInt(cursor.slice(5), 10)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+function decodeCursor(cursor: string | undefined): { offset: number; cutoffMs?: number } {
+  if (!cursor || !cursor.startsWith('mock:')) return { offset: 0 }
+  const [, rawOffset, rawCutoff] = cursor.split(':')
+  const parsedOffset = Number.parseInt(rawOffset ?? '', 10)
+  const offset = Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0
+  if (rawCutoff !== undefined) {
+    const parsedCutoff = Number.parseInt(rawCutoff, 10)
+    if (Number.isFinite(parsedCutoff)) {
+      return { offset, cutoffMs: parsedCutoff }
+    }
+  }
+  return { offset }
 }
 
 /** Deterministic in-memory mock used by tests and dev builds until the server search API exists. */
@@ -155,16 +163,18 @@ export function createMockSearchSource(options: MockSearchOptions = {}): SearchS
       if (scalarLength < minLength) {
         return { ok: false, failure: { kind: 'too_short', minLength } }
       }
+      const decoded = decodeCursor(request.cursor)
       const nowMs = now()
       const cutoffMs =
         options.rangeStart !== undefined
           ? Date.parse(options.rangeStart)
-          : nowMs - rangeDays * DAY_MS
+          : decoded.cutoffMs ?? nowMs - rangeDays * DAY_MS
       const rangeStart =
         options.rangeStart !== undefined
           ? options.rangeStart
           : new Date(cutoffMs).toISOString()
-      const items = options.items ?? buildDefaultMockItems(nowMs)
+      const itemsAnchorMs = decoded.cutoffMs !== undefined ? decoded.cutoffMs + rangeDays * DAY_MS : nowMs
+      const items = options.items ?? buildDefaultMockItems(itemsAnchorMs)
       const needle = request.query.toLocaleLowerCase()
       const matched = items.filter((item) => {
         if (request.channelId && item.channelId !== request.channelId) return false
@@ -174,10 +184,13 @@ export function createMockSearchSource(options: MockSearchOptions = {}): SearchS
         }
         return item.excerpt.toLocaleLowerCase().includes(needle)
       })
-      const offset = decodeCursor(request.cursor)
+      const offset = decoded.offset
       const pageItems = matched.slice(offset, offset + request.limit)
       const nextOffset = offset + pageItems.length
-      const nextCursor = nextOffset < matched.length ? encodeCursor(nextOffset) : null
+      const nextCursor =
+        nextOffset < matched.length
+          ? encodeCursor(nextOffset, options.rangeStart === undefined ? cutoffMs : undefined)
+          : null
       return {
         ok: true,
         page: {

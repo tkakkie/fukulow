@@ -290,6 +290,35 @@ describe('createSearchController', () => {
     expect(second.page.items.map((item) => item.messageId)).toEqual(['msg-1'])
   })
 
+  it('keeps mock pagination stable when the injected clock advances 1 ms past a boundary hit', async () => {
+    const DAY_MS = 24 * 60 * 60 * 1000
+    let nowMs = Date.parse('2026-11-20T12:00:00.000Z')
+    const exactCutoffIso = new Date(nowMs - SEARCH_RANGE_DAYS * DAY_MS).toISOString()
+    const items = [
+      makeItem(1, { createdAt: exactCutoffIso, excerpt: '境界ページング 1' }),
+      makeItem(2, { createdAt: new Date(nowMs - 1 * DAY_MS).toISOString(), excerpt: '境界ページング 2' }),
+    ]
+    const source = createMockSearchSource({ items, now: () => nowMs })
+
+    const page1 = await source.search({ query: '境界ページング', limit: 1 })
+    expect(page1.ok).toBe(true)
+    if (!page1.ok) return
+    expect(page1.page.items.map((item) => item.messageId)).toEqual(['msg-1'])
+    expect(page1.page.nextCursor).not.toBeNull()
+
+    // Advancing the clock by 1 ms expires msg-1 under a fresh cutoff, but paging must not skip msg-2.
+    nowMs += 1
+    const page2 = await source.search({
+      query: '境界ページング',
+      limit: 1,
+      cursor: page1.page.nextCursor!,
+    })
+    expect(page2.ok).toBe(true)
+    if (!page2.ok) return
+    expect(page2.page.items.map((item) => item.messageId)).toEqual(['msg-2'])
+    expect(page2.page.nextCursor).toBeNull()
+  })
+
   it('aborts and shows retryable timeout after 10 seconds for stalled initial and paging requests', async () => {
     vi.useFakeTimers()
     try {

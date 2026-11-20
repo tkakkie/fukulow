@@ -8,6 +8,8 @@ import {
 
 export const SEARCH_PAGE_SIZE = 20
 export const SEARCH_TIMEOUT_MS = 10_000
+const SEARCH_UNAVAILABLE_NOTICE = 'メッセージ検索は現在準備中です。'
+const SEARCH_OPEN_FAILED_NOTICE = 'この検索結果は現在開けません。'
 
 export type SearchTarget = {
   channelId: string
@@ -46,6 +48,8 @@ export type SearchControllerOptions = {
   source: SearchSource
   /** Return `false` to cancel navigation and keep the current view with an inline notice. */
   onOpenResult?: (target: SearchTarget) => boolean | void
+  /** Announces non-error search outcomes (e.g. unavailable or unopenable hit) through the page live region. */
+  onAnnounce?: (message: string) => void
   /** Request timeout in milliseconds (defaults to `SEARCH_TIMEOUT_MS`, 10 s per `docs/ui.md` §5). */
   timeoutMs?: number
 }
@@ -204,6 +208,7 @@ export function createSearchController(options: SearchControllerOptions) {
         status: 'unavailable',
         retryable: false,
       })
+      options.onAnnounce?.(SEARCH_UNAVAILABLE_NOTICE)
     } else if (failure.kind === 'timeout') {
       publish({
         ...state,
@@ -314,8 +319,9 @@ export function createSearchController(options: SearchControllerOptions) {
     if (opened === false) {
       publish({
         ...state,
-        openNotice: 'この検索結果のチャンネルは現在開けません。',
+        openNotice: SEARCH_OPEN_FAILED_NOTICE,
       })
+      options.onAnnounce?.(SEARCH_OPEN_FAILED_NOTICE)
       return
     }
     close()

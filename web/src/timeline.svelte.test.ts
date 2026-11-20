@@ -34,7 +34,7 @@ import Workspace from './Workspace.svelte'
 import { windowClient } from './message-window-test-helpers'
 import { deferred, replyPage, msg, summary } from './topic-test-helpers'
 import CreateChannelForm from './CreateChannelForm.svelte'
-import { createMockSearchSource } from './search-source'
+import { createDefaultSearchSource, createMockSearchSource, type SearchSource } from './search-source'
 
 type ListenerEntry = {
   fn: (event: MiniDomEvent) => void
@@ -9724,7 +9724,8 @@ describe('Workspace search integration (#153)', () => {
   async function mountSearchWorkspace(opts: {
     width?: number
     href?: string
-    searchSource?: ReturnType<typeof createMockSearchSource>
+    searchSource?: SearchSource
+    onannounce?: (message: string) => void
     setupNet?: (net: ReturnType<typeof fakeNetwork>) => void
   } = {}) {
     testWin.innerWidth = opts.width ?? 1280
@@ -9751,6 +9752,7 @@ describe('Workspace search integration (#153)', () => {
         navigation,
         selectedOrganizationId: ORG_ID,
         searchSource: opts.searchSource ?? createMockSearchSource(),
+        onannounce: opts.onannounce,
         session: {
           channels: channelsAdapter(raw.channels),
           sync: syncAdapter(raw.sync),
@@ -9964,6 +9966,181 @@ describe('Workspace search integration (#153)', () => {
       // SearchBar controls precede the view header row in DOM and visual order.
       expect(tabbables[composerIdx - 4]).toBe(searchSubmit)
       expect(tabbables[composerIdx - 5]).toBe(searchInput)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('restores keyboard focus inside search when closing a panel via Escape while search stays open', async () => {
+    const ctx = await mountSearchWorkspace()
+    try {
+      const workspace = ctx.host.querySelector('.workspace')!
+      const form = ctx.host.querySelector('#main-content [role="search"]')!
+      const input = form.querySelector('input')!
+      input.focus()
+      input.value = 'リリース'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+
+      // Focus a search hit, open the Topics panel with Cmd+., then press Escape from its heading.
+      const hitButton = ctx.host.querySelector('#main-content ol button')!
+      hitButton.focus()
+      expect(testDoc.activeElement).toBe(hitButton)
+
+      const togglePanel = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      togglePanel.key = '.'
+      togglePanel.metaKey = true
+      testWin.dispatchEvent(togglePanel)
+      await settle()
+      expect(workspace.getAttribute('data-panel-open')).toBe('true')
+      const panelHeading = ctx.host.querySelector('#panel-content h2')!
+      expect(testDoc.activeElement).toBe(panelHeading)
+
+      const esc = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      esc.key = 'Escape'
+      panelHeading.dispatchEvent(esc)
+      await settle()
+
+      expect(workspace.getAttribute('data-panel-open')).toBe('false')
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+      expect(testDoc.activeElement).toBe(hitButton)
+      expect(testDoc.activeElement?.isConnected).toBe(true)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('falls back to the search input when closing a pre-opened panel while search stays open', async () => {
+    const ctx = await mountSearchWorkspace({
+      href: `http://localhost/o/${ORG_ID}/c/${CH_ID}?panel=topics`,
+    })
+    try {
+      const workspace = ctx.host.querySelector('.workspace')!
+      const form = ctx.host.querySelector('#main-content [role="search"]')!
+      const input = form.querySelector('input')!
+      input.focus()
+      input.value = 'リリース'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+
+      const panelHeading = ctx.host.querySelector('#panel-content h2')!
+      panelHeading.focus()
+      expect(testDoc.activeElement).toBe(panelHeading)
+
+      const esc = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      esc.key = 'Escape'
+      panelHeading.dispatchEvent(esc)
+      await settle()
+
+      expect(workspace.getAttribute('data-panel-open')).toBe('false')
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+      expect(testDoc.activeElement).toBe(input)
+      expect(testDoc.activeElement?.isConnected).toBe(true)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('announces production unavailable search and unopenable hits through the existing page live region without adding new live regions', async () => {
+    const prodAnnouncements: string[] = []
+    const prodCtx = await mountSearchWorkspace({
+      searchSource: createDefaultSearchSource(ORG_ID, { isDev: false }),
+      onannounce: (msg) => prodAnnouncements.push(msg),
+    })
+    try {
+      const form = prodCtx.host.querySelector('#main-content [role="search"]')!
+      const input = form.querySelector('input')!
+      input.focus()
+      input.value = 'リリース'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+
+      expect(testDoc.activeElement).toBe(input)
+      expect(prodCtx.host.textContent).toContain('メッセージ検索は現在準備中です。')
+      expect(prodAnnouncements).toContain('メッセージ検索は現在準備中です。')
+      expect(queryAll(prodCtx.host, '#main-content [role="status"]')).toHaveLength(0)
+    } finally {
+      await prodCtx.close()
+    }
+
+    const mockAnnouncements: string[] = []
+    const mockCtx = await mountSearchWorkspace({
+      onannounce: (msg) => mockAnnouncements.push(msg),
+    })
+    try {
+      const form = mockCtx.host.querySelector('#main-content [role="search"]')!
+      const input = form.querySelector('input')!
+      input.value = 'リリース'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+
+      const hitButton = mockCtx.host.querySelector('#main-content ol button')!
+      hitButton.click()
+      await settle()
+
+      expect(testDoc.activeElement).toBe(hitButton)
+      expect(mockCtx.host.querySelector('[data-testid="search-open-notice"]')?.textContent).toContain('開けません')
+      expect(mockAnnouncements.some((msg) => msg.includes('開けません'))).toBe(true)
+      expect(queryAll(mockCtx.host, '#main-content [role="status"]')).toHaveLength(0)
+    } finally {
+      await mockCtx.close()
+    }
+  })
+
+  it('rejects a hit with a listed Channel and a missing Topic, keeping search open with an announced notice', async () => {
+    const announcements: string[] = []
+    const missingTopicId = '00000000-0000-4000-8000-000000000999'
+    const ctx = await mountSearchWorkspace({
+      onannounce: (msg) => announcements.push(msg),
+      searchSource: createMockSearchSource({
+        items: [
+          {
+            messageId: 'msg-missing-topic',
+            channelId: CH_ID,
+            topicId: missingTopicId,
+            replyRootId: null,
+            context: {
+              kind: 'channel',
+              channelId: CH_ID,
+              channelName: 'general',
+              topicId: missingTopicId,
+              topicName: '存在しないトピック',
+            },
+            authorName: '田中 美咲',
+            authorActive: true,
+            createdAt: new Date().toISOString(),
+            excerpt: '存在しないトピックの検索ヒット',
+          },
+        ],
+      }),
+    })
+    try {
+      const routeBefore = ctx.navigation.get().target
+      const form = ctx.host.querySelector('#main-content [role="search"]')!
+      const input = form.querySelector('input')!
+      input.value = '存在しないトピック'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+
+      const hitButton = ctx.host.querySelector('#main-content ol button')!
+      hitButton.click()
+      await settle()
+
+      expect(ctx.navigation.get().target).toEqual(routeBefore)
+      expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
+      expect(ctx.host.querySelector('[data-testid="search-open-notice"]')?.textContent).toContain('開けません')
+      expect(announcements.some((msg) => msg.includes('開けません'))).toBe(true)
     } finally {
       await ctx.close()
     }

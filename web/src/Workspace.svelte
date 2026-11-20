@@ -233,6 +233,7 @@
     const controller = createSearchController({
       source: providedSource ?? createDefaultSearchSource(orgId),
       onOpenResult: (target) => handleOpenSearchResult(target),
+      onAnnounce: (message) => onannounce?.(message),
     })
     const entry = { organizationId: orgId, source: providedSource, controller }
     activeSearch = entry
@@ -436,7 +437,15 @@
         }
       }
       else if (state.focus === 'tab') focusTarget(document.getElementById(`panel-tab-${activePanelTab}`))
-      else if (state.focus === 'opener') focusAfterPanelClose(navigation.getOpener(), mainComposerRef)
+      else if (state.focus === 'opener') {
+        if (searchOpen) {
+          if (!focusTarget(navigation.getOpener()) && !focusTarget(searchInputRef)) {
+            focusTarget(searchResultsHeadingRef)
+          }
+        } else {
+          focusAfterPanelClose(navigation.getOpener(), mainComposerRef)
+        }
+      }
       else {
         const preferTopicInput = focusTopicInputNext
         focusTopicInputNext = false
@@ -619,7 +628,16 @@
     return null
   }
 
-  function openPanel() { if (selected?.kind !== 'dm') nav.navigate({ type: 'tab', tab: 'topics' }, panelToggleBtn) }
+  function openPanel() {
+    if (selected?.kind === 'dm') return
+    const active = typeof document !== 'undefined' ? document.activeElement : null
+    const opener = searchOpen
+      ? (active instanceof HTMLElement && active !== document.body && active !== document.documentElement
+          ? active
+          : searchInputRef)
+      : panelToggleBtn
+    nav.navigate({ type: 'tab', tab: 'topics' }, opener)
+  }
   function closePanel() { nav.navigate({ type: 'close' }) }
   function togglePanel() { if (panelOpen) closePanel(); else openPanel() }
   function goToChannelList() {
@@ -635,17 +653,29 @@
     })
   }
 
-  function canOpenSearchChannel(channelId: string): boolean {
-    return Boolean(
-      s.channels.some((c) => c.id === channelId) ||
-      dmState?.rows.some((row) => row.identity.id === channelId) ||
-      s.archivedList?.channels.some((c) => c.id === channelId) ||
-      s.openChannel?.id === channelId,
+  function canOpenSearchTarget(target: SearchTarget): boolean {
+    const isDm = Boolean(dmState?.rows.some((row) => row.identity.id === target.channelId))
+    const hasChannel = Boolean(
+      isDm ||
+      s.channels.some((c) => c.id === target.channelId) ||
+      s.archivedList?.channels.some((c) => c.id === target.channelId) ||
+      s.openChannel?.id === target.channelId,
     )
+    if (!hasChannel) return false
+    if (!target.topicId) return true
+    if (isDm) return false
+    const topicsState = session.topics(target.channelId).state
+    if (topicsState.unavailable || topicsState.topic(target.topicId).notFound) return false
+    if (topicsState.topics.some((t) => t.topicId === target.topicId)) return true
+    const allKnown =
+      topicsState.list.asOfSeq !== undefined
+        ? !topicsState.list.hasMore
+        : topicsState.main.asOfSeq !== undefined && !topicsState.main.hasMore
+    return !allKnown
   }
 
   function handleOpenSearchResult(target: SearchTarget): boolean {
-    if (!currentOrganizationId || !canOpenSearchChannel(target.channelId)) return false
+    if (!currentOrganizationId || !canOpenSearchTarget(target)) return false
     handleSelectChannel(target.channelId)
     if (target.topicId) {
       nav.navigate({
