@@ -129,10 +129,10 @@
     <EmptyState title="このチャンネルは利用できません" description="チャンネル一覧から選び直してください。" />
   {:else}
     <div class="channel-overview__summary">
-      <h3 class="channel-overview__name">
+      <p class="channel-overview__name">
         <span aria-hidden="true">{channel.visibility === 'private' ? '🔒' : '#'}</span>
         <span>{channel.name}</span>
-      </h3>
+      </p>
       <div class="channel-overview__badges">
         <Chip>{channel.visibility === 'private' ? '非公開' : '公開'}</Chip>
         {#if channel.archived}
