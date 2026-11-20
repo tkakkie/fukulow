@@ -144,7 +144,7 @@ pub(super) async fn create(
 
 // Limit positions before hydrating current state. LEFT JOIN keeps an unhydratable
 // position visible to validation instead of silently acknowledging past it.
-// Keep the Message lookup correlated. Planning before the RLS context is set
+// Keep the Message lookup correlated. Planning before the RLS context exists
 // can underestimate the cost of materializing all Messages in the Organization.
 // OFFSET 0 is an optimisation fence: it stops the subquery being pulled up into
 // a plain join; removing it can restore the Organization-wide scan (#515).
