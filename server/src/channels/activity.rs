@@ -798,21 +798,15 @@ pub(super) struct SectionsPublication {
 }
 
 impl SectionsPublication {
-    pub(super) async fn committed(self, pool: &sqlx::PgPool) {
-        let Ok(_slot) = self.activity.capacity.clone().try_acquire_owned() else {
-            return;
-        };
-        self.activity
-            .publish_with_deadline(
-                pool,
-                self.organization,
-                Notice::SectionsChanged {
-                    generation: self.generation,
-                },
-                None,
-                Some(self.member),
-            )
-            .await;
+    pub(super) fn committed(self, pool: sqlx::PgPool) {
+        self.activity.spawn(
+            pool,
+            self.organization,
+            Notice::SectionsChanged {
+                generation: self.generation,
+            },
+            Some(self.member),
+        );
     }
 }
 fn enqueue(entry: &Entry, mut pending: Pending) {
