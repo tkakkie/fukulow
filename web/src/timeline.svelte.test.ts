@@ -9757,6 +9757,7 @@ describe('Workspace search integration (#153)', () => {
           channels: channelsAdapter(raw.channels),
           sync: syncAdapter(raw.sync),
           topics: (id: string) => topicsAdapter(raw.topics, id),
+          replies: (id: string) => repliesAdapter(raw.replies, id),
           close: raw.close,
         },
       },
@@ -9966,6 +9967,130 @@ describe('Workspace search integration (#153)', () => {
       // SearchBar controls precede the view header row in DOM and visual order.
       expect(tabbables[composerIdx - 4]).toBe(searchSubmit)
       expect(tabbables[composerIdx - 5]).toBe(searchInput)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('keeps reverse Tab order from Topic Composer to the roving MessageRow after closing a Reply panel with search closed', async () => {
+    const topicMsg1 = {
+      ...record(1, CH_ID),
+      body: 'トピック内の親メッセージ',
+      topic_id: TOPIC_ID,
+      topic_name: '仕様確認',
+    }
+    const topicMsg2 = {
+      ...record(2, CH_ID),
+      body: 'トピック内の返信-01',
+      topic_id: TOPIC_ID,
+      topic_name: '仕様確認',
+      reply_to: topicMsg1.id,
+      reply_root_id: topicMsg1.id,
+    }
+    const ctx = await mountSearchWorkspace({
+      href: `http://localhost/o/${ORG_ID}/c/${CH_ID}/t/${TOPIC_ID}?panel=reply:${topicMsg1.id}`,
+      setupNet(net) {
+        net.topicMessages[`${CH_ID}:${TOPIC_ID}`] = ok({
+          history_generation: '00000000-0000-4000-8000-000000000515',
+          as_of_seq: 2,
+          messages: [topicMsg1, topicMsg2],
+          has_more: false,
+        })
+        net.topicSummaries[`${CH_ID}:${TOPIC_ID}`] = ok({
+          history_generation: '00000000-0000-4000-8000-000000000515',
+          as_of_seq: 2,
+          topic: {
+            mention_unread_count: 0,
+            id: TOPIC_ID,
+            name: '仕様確認',
+            first_seq: 1,
+            last_seq: 2,
+            message_count: 2,
+            latest_message: topicMsg2,
+            read_seq: 2,
+            unread_count: 0,
+          },
+        })
+        net.replyChains[`${CH_ID}:${topicMsg1.id}`] = ok({
+          history_generation: '00000000-0000-4000-8000-000000000515',
+          as_of_seq: 2,
+          root_id: topicMsg1.id,
+          chain_version: 2,
+          messages: [topicMsg1, topicMsg2],
+          has_more: false,
+        })
+        net.replyChains[`${CH_ID}:${topicMsg2.id}`] = ok({
+          history_generation: '00000000-0000-4000-8000-000000000515',
+          as_of_seq: 2,
+          root_id: topicMsg1.id,
+          chain_version: 2,
+          messages: [topicMsg1, topicMsg2],
+          has_more: false,
+        })
+      },
+    })
+    try {
+      const workspace = ctx.host.querySelector('.workspace')!
+      expect(workspace.getAttribute('data-panel-open')).toBe('true')
+
+      // Close Reply panel via × with search closed: focus returns to main Topic Composer.
+      const closeBtn = ctx.host.querySelector('#panel-content button[aria-label="パネルを閉じる(Esc)"]')!
+      closeBtn.click()
+      await settle()
+      expect(workspace.getAttribute('data-panel-open')).toBe('false')
+
+      const main = ctx.host.querySelector('#main-content')!
+      const composer = main.querySelector('textarea')!
+      expect(testDoc.activeElement).toBe(composer)
+
+      // Fill a non-empty draft and verify reverse Tab from Composer reaches the roving tabindex="0" row directly.
+      composer.value = '消さずに残すトピック下書き'
+      composer.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      flushSync()
+      composer.focus()
+
+      const tabbables: MiniElement[] = []
+      const walk = (node: MiniElement) => {
+        if ((node.getAttribute('class') ?? '').split(/\s+/).includes('mobile-only')) return
+        const tag = node.tagName.toLowerCase()
+        const tabindex = node.getAttribute('tabindex')
+        const disabled = node.hasAttribute('disabled') || (node as unknown as { disabled?: boolean }).disabled === true
+        const naturallyTabbable = tag === 'button' || tag === 'input' || tag === 'textarea' || tag === 'select' || (tag === 'a' && node.hasAttribute('href'))
+        const isTabbable = !disabled && (
+          (naturallyTabbable && tabindex !== '-1') ||
+          (tabindex !== null && tabindex !== '' && Number(tabindex) >= 0)
+        )
+        if (isTabbable) tabbables.push(node)
+        for (const child of node.childNodes) {
+          if (child instanceof MiniElement) walk(child)
+        }
+      }
+      walk(main)
+
+      const rovingRow = main.querySelector(`[data-message-id="${topicMsg2.id}"] .ui-message-row`)!
+      expect(rovingRow.getAttribute('tabindex')).toBe('0')
+      const composerIdx = tabbables.indexOf(composer)
+      expect(tabbables[composerIdx - 1]).toBe(rovingRow)
+
+      // Simulate Shift+Tab landing on rovingRow, press 'r' to open Reply panel without clearing draft, then Escape.
+      rovingRow.focus()
+      expect(testDoc.activeElement).toBe(rovingRow)
+      const openKey = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      openKey.key = 'r'
+      rovingRow.dispatchEvent(openKey)
+      await settle()
+
+      expect(workspace.getAttribute('data-panel-open')).toBe('true')
+      expect(testDoc.activeElement).toBe(ctx.host.querySelector('#panel-content textarea'))
+      expect(composer.value).toBe('消さずに残すトピック下書き')
+
+      const esc = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      esc.key = 'Escape'
+      ctx.host.querySelector('#panel-content textarea')!.dispatchEvent(esc)
+      await settle()
+
+      expect(workspace.getAttribute('data-panel-open')).toBe('false')
+      expect(testDoc.activeElement).toBe(rovingRow)
     } finally {
       await ctx.close()
     }
