@@ -123,6 +123,7 @@ async fn write_and_publish(
             Err(WriteExit::Failed(error)) => return Err(error),
         }
     }
+    tracing::warn!(target: "fukulow", "section DELETE restart attempts exhausted");
     Err(ApiError(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal error",
@@ -137,17 +138,18 @@ async fn write_attempt(
     mutation: Mutation,
 ) -> Result<(Option<Uuid>, i64, activity::SectionsPublication), WriteExit> {
     crate::database::organization(pool, owner.org, async |tx: &mut PgConnection| {
+        sqlx::query("SET LOCAL lock_timeout='5s'")
+            .execute(&mut *tx)
+            .await?;
         // An absent owned id is already a no-op. Recheck Membership without
         // making unrelated Organization writes wait on that no-op.
+        // Read `exists` first only because both paths give the same status and body after the Membership recheck.
         if let Mutation::Delete(id) = &mutation
             && !section::exists(tx, owner, *id).await?
         {
             owner.current_role(tx, true).await?;
             return Err(WriteExit::Unchanged(None));
         }
-        sqlx::query("SET LOCAL lock_timeout='5s'")
-            .execute(&mut *tx)
-            .await?;
         auth::members::share_organization(tx, owner.org).await?;
         let channels = mutation.lock_channels(tx, owner).await?;
         let role = owner.current_role(tx, true).await?;

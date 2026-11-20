@@ -195,6 +195,8 @@ async fn channel_reorder_lock_timeout_releases_organization(pool: PgPool) {
         &f.token,
         json!({"role":"guest"}),
     );
+    // Observe the blocked admin before the reorder's 5 s lock_timeout fires.
+    // The test has no way to inject a shorter timeout.
     wait_blocked(&f, ORG_EXCLUSIVE).await;
     let response = tokio::time::timeout(Duration::from_secs(10), reordering)
         .await
