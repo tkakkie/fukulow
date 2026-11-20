@@ -1,10 +1,12 @@
-import { replyPage } from './topic-test-helpers'
+import { msg, replyPage, summary, topicClient } from './topic-test-helpers'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Message, ReplyCountPage, Result } from './api'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { deferred, ok, reply, replyClient, root } from './reply-test-helpers'
 import { flush } from './sync-test-helpers'
 import { moveEvent } from './protocol-test-helpers'
+import { createReplies } from './replies'
+import { repliesAdapter } from './replies.svelte'
 
 const observed = vi.hoisted(() => ({ input: vi.fn() }))
 vi.mock('#sync-core', async importOriginal => {
@@ -226,6 +228,87 @@ it('Edit Delete and Move events stay unresolved until a covering refetch without
     pending.resolve(ok(page(2, 51))); await flush()
     expect(c.counts.get('A').id1).toBe(51)
     await c.close()
+  }
+})
+
+it('source and destination Topic views refetch Reply counts once across duplicate and late Moves', async () => {
+  // A client holds one open Topic per Channel. Exercise both views of the same Move.
+  for (const topic of ['source', 'destination']) {
+    const c = topicClient()
+    const source = topic === 'source'
+    const resident = msg(source ? 3 : 4, topic)
+    const chain = [root('source'), reply(2, 'id1', 'source')]
+    const before = source ? [...chain, resident] : [resident]
+    const after = source ? [resident] : [...chain.map(m => ({ ...m, topic_id: topic, version: 11 })), resident]
+    const snapshot = (as_of_seq: number, messages: Message[]) => ok({ history_generation: generation, as_of_seq, messages, has_more: false })
+    c.topicsApi.listTimeline.mockImplementation(async () => ok({
+      history_generation: generation, as_of_seq: 10, items: [], has_more: false,
+    }))
+    c.topicsApi.listTopicMessages.mockResolvedValueOnce(snapshot(10, before)).mockResolvedValueOnce(snapshot(11, after))
+    c.topicsApi.getTopicSummary.mockResolvedValue(ok({
+      history_generation: generation, as_of_seq: 11, topic: summary(topic, resident.created_seq, after.length),
+    }))
+    const replies = createReplies(c.sync, { api: { listReplyChain: vi.fn() } })
+    const started = deferred<void>(), pending = deferred<Result<ReplyCountPage>>()
+    const baseline = (seq: number, ids: string[]) => ok({
+      history_generation: generation, as_of_seq: seq,
+      counts: ids.map(id => ({ message_id: id, root_id: id, reply_count: id === 'id1' ? 51 : 0 })),
+    })
+    const read = vi.fn<ReplyCountsApi>()
+      .mockImplementationOnce(async (_channel, { ids }) => baseline(10, ids))
+      .mockImplementationOnce(() => { started.resolve(); return pending.promise })
+    const counts = createReplyCounts(c.sync, { replies, topics: c.topics }, { api: read })
+    const view = repliesAdapter(replies, 'A', counts)
+    const waitForCount = (id: string, expected: number) => new Promise<void>(resolve => {
+      if (view.counts[id] === expected) { resolve(); return }
+      const stop = counts.subscribe(() => {
+        if (view.counts[id] === expected) { stop(); resolve() }
+      })
+    })
+    try {
+      await c.boot()
+      await c.topics.loadTopic('A', topic)
+      await waitForCount(resident.id, 0)
+      expect(view.counts.id1).toBe(source ? 51 : undefined)
+      const move = { ...moveEvent(11), source_topic_id: 'source' }
+      const late = { ...moveEvent(9), destination_topic_id: 'source' }
+      c.topicsApi.listTimeline.mockResolvedValueOnce(ok({
+        history_generation: generation, as_of_seq: 11, items: [], has_more: false,
+      }))
+      c.listMessages.mockResolvedValue(snapshot(11, []))
+      c.handlers[0].onEvent(move)
+      expect(view.counts.id1 ?? null).toBeNull()
+      expect(view.counts[resident.id] ?? null).toBeNull()
+
+      await started.promise
+      const refetch = read.mock.calls[1]
+      const ids = source ? [resident.id] : ['id1', resident.id]
+      expect(refetch[1]).toEqual({ ids, history_generation: generation })
+      expect(c.topicsApi.listTopicMessages.mock.calls).toEqual([
+        ['A', topic, { history_generation: generation }],
+        ['A', topic, { history_generation: generation }],
+      ])
+      expect(c.topics.get('A').topic(topic)).toMatchObject({ initialized: true, messages: after })
+      c.handlers[0].onEvent(move)
+      c.handlers[0].onEvent(late)
+      expect(refetch[2].aborted).toBe(false)
+      expect(view.counts.id1 ?? null).toBeNull()
+      pending.resolve(baseline(11, ids))
+      await waitForCount(resident.id, 0)
+      expect(view.counts.id1).toBe(source ? undefined : 51)
+
+      c.handlers[0].onEvent(move)
+      c.handlers[0].onEvent(late)
+      await flush()
+      expect(view.counts.id1).toBe(source ? undefined : 51)
+      expect(view.counts[resident.id]).toBe(0)
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(c.topicsApi.listTopicMessages).toHaveBeenCalledTimes(2)
+    } finally {
+      counts.close()
+      replies.close()
+      await c.sync.close()
+    }
   }
 })
 

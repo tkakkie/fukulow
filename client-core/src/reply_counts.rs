@@ -296,6 +296,38 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_and_late_move_preserve_covering_reply_count() {
+        let mut core = ReplyCounts::default();
+        let ticket = track(&mut core, &["r"])[0].clone();
+        let moved = |seq| CountInput::Invalidate {
+            root: "r".to_owned(),
+            seq,
+        };
+        install(&mut core, &ticket, 10, 4);
+        let next = core.step(moved(12)).needed[0].clone();
+        core.step(CountInput::Begin {
+            tickets: vec![next.clone()],
+        });
+        create(&mut core, "r", 13);
+        for seq in [12, 11] {
+            let view = core.step(moved(seq));
+            assert_eq!(view.counts["r"], None);
+            assert_eq!(view.tickets.len(), 1);
+            assert_eq!(view.tickets[0].root, next.root);
+            assert_eq!(view.tickets[0].generation, next.generation);
+            assert!(view.needed.is_empty());
+        }
+        install(&mut core, &next, 12, 4);
+        assert_eq!(core.view().counts["r"], Some(5));
+        create(&mut core, "r", 13);
+        for seq in [12, 11] {
+            let view = core.step(moved(seq));
+            assert_eq!(view.counts["r"], Some(5));
+            assert!(view.needed.is_empty());
+        }
+    }
+
+    #[test]
     fn root_seed_keeps_unique_suffix_and_newer_authority() {
         let mut core = ReplyCounts::default();
         let ticket = track(&mut core, &["r"])[0].clone();
