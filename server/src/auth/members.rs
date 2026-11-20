@@ -289,19 +289,12 @@ pub(crate) async fn active_target(
     connection: &mut sqlx::PgConnection,
     organization: Uuid,
     id: Uuid,
-) -> Result<(Member, i64), ApiError> {
+) -> Result<Option<(Member, i64)>, sqlx::Error> {
     // Guest changes clear Channel rights before updating Role. Exclude new
     // sends' Member SHARE locks now, before taking any grant UPDATE lock.
-    let row: (String,Role,i64) = sqlx::query_as("SELECT name,role,membership_revision FROM users WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL FOR NO KEY UPDATE")
-        .bind(organization).bind(id).fetch_optional(connection).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"member_not_found",None))?;
-    Ok((
-        Member {
-            id,
-            name: row.0,
-            role: row.1,
-        },
-        row.2,
-    ))
+    let row: Option<(String, Role, i64)> = sqlx::query_as("SELECT name,role,membership_revision FROM users WHERE organization_id=$1 AND id=$2 AND deactivated_at IS NULL FOR NO KEY UPDATE")
+        .bind(organization).bind(id).fetch_optional(connection).await?;
+    Ok(row.map(|(name, role, revision)| (Member { id, name, role }, revision)))
 }
 
 #[utoipa::path(post, path = "/api/v1/orgs/{org}/members/{id}/deactivate",
@@ -358,7 +351,7 @@ async fn deactivate_transaction<G: RoleChangeGuard>(
         lock_organization(tx, org).await?;
         let guard = G::lock(tx, org, id).await?;
         let actor = current_actor(tx, auth, Action::DeactivateMember).await?;
-        let (target, _) = active_target(tx, org, id).await?;
+        let (target, _) = active_target(tx, org, id).await?.ok_or_else(ApiError::member_not_found)?;
         authorization::require(actor, Action::DeactivateMember, Resource::Member {
             organization: org, role: target.role, is_self: id == auth.identity.member.id,
         })?;

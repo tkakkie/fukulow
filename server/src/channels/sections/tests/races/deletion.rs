@@ -230,12 +230,8 @@ async fn section_delete_restarts_with_new_channel_locks_and_bounds_attempts(pool
                 })
             );
         } else {
-            denied(
-                response,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error",
-            )
-            .await;
+            assert!(!response.headers().contains_key(header::RETRY_AFTER));
+            denied(response, StatusCode::SERVICE_UNAVAILABLE, "lock_contention").await;
             assert_eq!(
                 f.get(SECTIONS).await,
                 json!({

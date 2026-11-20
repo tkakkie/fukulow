@@ -232,6 +232,32 @@ async fn context_helpers_failed_rollback_preserves_body_error_and_discards(pool:
     pools.app.close().await;
 }
 
+#[fukulow_test::test]
+async fn required_rollback_failure_overrides_body_error_and_discards(pool: PgPool) {
+    let pools = pools(pool).await;
+    super::interrupted::failed_rollback(&pools.app, async |single: &PgPool, pid| {
+        let id = Uuid::new_v4();
+        let error = crate::database::organization_confirming_rollback(
+            single,
+            id,
+            |error| matches!(error, sqlx::Error::RowNotFound),
+            async |tx: &mut PgConnection| {
+                inside(tx, id, true).await;
+                Err::<(), _>(sqlx::Error::RowNotFound)
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("22012")
+        );
+        assert_ne!(clean(single).await, pid);
+    })
+    .await;
+    pools.app.close().await;
+}
+
 // TEMP objects stay on the admin connection; the restricted app role has no DDL.
 async fn deferred_violation(tx: &mut PgConnection) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(
