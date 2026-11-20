@@ -107,6 +107,57 @@ other('not a test', () => {})
 `
     expect(tsTests(src)).toEqual([])
   })
+
+  it('accepts only verifiable it.each/test.each with non-empty literal arrays and inline callbacks, failing closed otherwise', () => {
+    const src = `
+it.each([401, 404])('literal it %s', () => {})
+test.each([1])('literal test %s', function () {})
+test.concurrent.each([1])('concurrent %s', () => {})
+it.skip.each([1])('skipped %s', () => {})
+it.only.each([1])('only %s', () => {})
+it.todo.each([1])('todo %s', () => {})
+it.concurrent.skip.each([1])('concurrent skipped %s', () => {})
+xit.each([1])('xskipped %s', () => {})
+it.each([])('empty %s', () => {})
+it.each([,])('sparse %s', () => {})
+it.each([1, , 2])('hole %s', () => {})
+it.each([...cases])('spread only %s', () => {})
+it.each([1, ...cases])('mixed spread %s', () => {})
+it.each(cases)('non-literal %s', () => {})
+it.each([1])('options %s', { skip: true }, () => {})
+it.each([1])('missing callback %s')
+it['each']([1])('bracket it %s', () => {})
+describe.each([1])('describe each %s', () => { it('inside describe each', () => {}) })
+describe.each([])('empty suite %s', () => { it('inside empty each', () => {}) })
+describe.skip.each([1])('skipped suite %s', () => { it('inside skipped each', () => {}) })
+describe['each']([1])('bracket suite %s', () => { it('inside bracket each', () => {}) })
+describe['each']([])('bracket empty suite %s', () => { it('inside bracket empty each', () => {}) })
+`
+    expect(tsTests(src)).toEqual([
+      { title: 'literal it %s', skipped: false },
+      { title: 'literal test %s', skipped: false },
+      { title: 'concurrent %s', skipped: false },
+      { title: 'skipped %s', skipped: true },
+      { title: 'only %s', skipped: true },
+      { title: 'todo %s', skipped: true },
+      { title: 'concurrent skipped %s', skipped: true },
+      { title: 'xskipped %s', skipped: true },
+      { title: 'empty %s', skipped: true },
+      { title: 'sparse %s', skipped: true },
+      { title: 'hole %s', skipped: true },
+      { title: 'spread only %s', skipped: true },
+      { title: 'mixed spread %s', skipped: true },
+      { title: 'non-literal %s', skipped: true },
+      { title: 'options %s', skipped: true },
+      { title: 'missing callback %s', skipped: true },
+      { title: 'bracket it %s', skipped: true },
+      { title: 'inside describe each', skipped: true },
+      { title: 'inside empty each', skipped: true },
+      { title: 'inside skipped each', skipped: true },
+      { title: 'inside bracket each', skipped: true },
+      { title: 'inside bracket empty each', skipped: true },
+    ])
+  })
 })
 
 describe('docs/invariants.md parsing', () => {

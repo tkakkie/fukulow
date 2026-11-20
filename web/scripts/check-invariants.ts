@@ -196,6 +196,31 @@ function calleeOf(e: ts.Expression): Callee {
   return { root, words }
 }
 
+/** Vitest `it.each([a, b])('title', fn)` / `test.each([a, b])('title', fn)` with a non-empty literal array; fails closed on all other `.each` shapes. */
+function vitestEachCallee(e: ts.Expression): { callee: NonNullable<Callee>; valid: boolean } | null {
+  if (!ts.isCallExpression(e)) return null
+  let dotEach = false
+  let target: ts.Expression
+  if (ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'each') {
+    dotEach = true
+    target = e.expression.expression
+  } else if (ts.isElementAccessExpression(e.expression)) {
+    target = e.expression.expression
+  } else {
+    return null
+  }
+  const callee = calleeOf(target)
+  if (!callee) return null
+  const isTestRoot = callee.root === 'it' || callee.root === 'test'
+  const allowedWords = callee.words.every((w) => w === 'concurrent' || w === 'sequential')
+  const cases = e.arguments.length === 1 ? e.arguments[0] : undefined
+  const validCases = !!cases
+    && ts.isArrayLiteralExpression(cases)
+    && cases.elements.length > 0
+    && cases.elements.every((el) => !ts.isSpreadElement(el) && !ts.isOmittedExpression(el))
+  return { callee, valid: dotEach && isTestRoot && allowedWords && validCases }
+}
+
 export type TsTest = { title: string; skipped: boolean; reason?: string }
 
 function isPlaywrightImport(s: ts.Node): s is ts.ImportDeclaration {
@@ -210,7 +235,8 @@ export function tsTests(src: string, fileName = 'x.ts', nodeTests = false, playw
   const visit = (node: ts.Node, parentSkipped: boolean) => {
     let skipped = parentSkipped
     if (ts.isCallExpression(node)) {
-      const c = calleeOf(node.expression)
+      const each = !nodeTests && !playwright ? vitestEachCallee(node.expression) : null
+      const c = each ? each.callee : calleeOf(node.expression)
       if (playwright) {
         let root = node.expression
         while (ts.isPropertyAccessExpression(root) || ts.isElementAccessExpression(root)) root = root.expression
@@ -221,10 +247,12 @@ export function tsTests(src: string, fileName = 'x.ts', nodeTests = false, playw
         const options = node.arguments[1]
         // Fail closed on node:test options (skip/todo may be computed or spread).
         const nodeOptions = nodeTests && options && !ts.isArrowFunction(options) && !ts.isFunctionExpression(options)
-        const own = nodeOptions || c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w) || (playwright && w === 'fail'))
-        const isSuite = c.root === 'describe' || c.root === 'suite' || c.root === 'xdescribe' || c.words.includes('describe')
         const a = node.arguments[0]
         const literal = a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a))
+        const hasCallback = !!options && (ts.isArrowFunction(options) || ts.isFunctionExpression(options))
+        const invalidEach = each !== null && (!each.valid || node.arguments.length !== 2 || !literal || !hasCallback)
+        const own = invalidEach || nodeOptions || c.root.startsWith('x') || c.words.some((w) => SKIP_WORDS.has(w) || (playwright && w === 'fail'))
+        const isSuite = c.root === 'describe' || c.root === 'suite' || c.root === 'xdescribe' || c.words.includes('describe')
         if (playwright) {
           if (c.words.some(w => !['describe', 'skip', 'fixme', 'fail', 'only'].includes(w)))
             unverifiable ??= 'unsupported Playwright modifier or suite mode'
