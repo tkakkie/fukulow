@@ -85,7 +85,7 @@ Run `node load/search-engines/run.ts`, then `node load/search-engines/quality/ru
 
 ## PGroonga Message-send write cost (#153 M1)
 
-Method only; no formal result yet. A adds the PGroonga index to B (same app image from `main`, manifest v2 PostgreSQL recipe, stored `normalized_body`, WAL resource manager and crash-safe settings, 50,000-body prefix from seed 153202611). The #309 `many` and `hot` workloads run three pairs each (B/A, A/B, B/A) at seven 60 s rates from 50 to 4000/s, straight to the app, with four publishing Members and the send limiter raised to 1000000 burst and refill. Fixed #153 criteria apply to the rates B sustains in all pairs, invalid evidence first; the p95 test uses the median paired ratio A / B and the median paired signed difference A − B (signed since the maintainer decision of 2026-11-18, before any formal run) through 1000/s. Outside the #431 budget.
+2026-11-20 JST at `31118ce`, Mac. **No material impact** in `many` and `hot` under the fixed #153 criteria: B sustained 50–250/s in all three pairs, A sustained each of those steps, and the median A/B send p95 ratio was at most 1.13 (+0.26 ms). Recorded only, at 250/s: WAL/send +26–29 %, DB growth ~2.5×, DB CPU peak ~1.8×, app CPU unchanged. Input for F1 only; PGroonga adoption stays on hold. Limiter raised in both arms; search latency not measured; outside #431. [Method and result](../load/measurements-archive.md#pgroonga-message-send-write-cost-153-m1-2026-11-20-jst-mac)
 
 Run overnight on an otherwise idle Mac with Node 26.13.1: `node load/search-m1.ts --out /absolute/new/artifact-directory` (`--smoke`: B, `many`, 50/s for 10 s, never judged); regenerate with `node load/search-m1-report.ts /absolute/new/artifact-directory`.
 
@@ -94,6 +94,12 @@ Run overnight on an otherwise idle Mac with Node 26.13.1: `node load/search-m1.t
 2026-11-17 JST (PR #499). Settled Mac WAL at 250 ops/s, baseline/events-ids/log-ids: 5,190/5,197/5,434 B/op for create-1-17 and 42,511/42,703/43,051 B/op for mixed90-200-4000. Run `node load/log-compare/run.ts --diagnose --out /private/tmp/i160-diagnose --settle-fixture`. Two workloads at 50/250 ops/s, host-to-psql transport included.
 
 Reference for the [Channel log decision](spec/realtime.md#measurement-status), from the INVALID full run. A cold recent 50-entry deleted-range page at 1M positions used 235/34,126/209 shared buffers across baseline/events-ids/log-ids. At 1M Messages, log-ids cutover blocked for about 3.7 s (455 MiB WAL, +153 MiB storage). Command at `1662d5d`: `node load/log-compare/run.ts --full --out /private/tmp/i160-full --rates 50,250,1000 --seconds 30 --max-seconds 15 --clients 16 --rounds 3`. Timing spread exceeded the rule. [Settled WAL](../load/measurements-archive.md#160-log-comparison-wal-variance-diagnose-2026-11-17-jst) · [Replay and migration](../load/measurements-archive.md#160-log-comparison-replay-and-migration-reference-2026-11-17)
+
+## Channel log send and replay (#515 slice 5)
+
+Mac-relative, B `b975ffa` vs A `f7fe08a`, harness `df695bc`; separate from #431. Night 1 (2026-11-19 JST) Part A: FAIL in all 4 cells. Night 2 (2026-11-20) Part B max accepted/s (≥ 0.90): FAIL hot-17 0.878, many-17 0.885, hot-16000 0.865; PASS many-16000 0.923. Part C REST replay: INVALID in all cells; A mostly completed 8–28 of 1,000 requests at p95 2.9–4.9 s vs B 1.5–2.0 ms (candidate-only regression under investigation). Part D (#137 timeline): `boundary=Some(190000)` PASS at 49.0 ms; `boundary=None` INVALID (B spread 10.8 %). [Record](../load/measurements-archive.md#channel-log-send-and-replay-515-slice-5-2026-11-19-to-2026-11-20-jst-mac)
+
+Build, then run each night: `node load/slice5/run.ts --help`.
 
 ## Unread candidate bounds (#355)
 
@@ -154,14 +160,9 @@ Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSO
 - [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
 - [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
 - [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
-- [Channel log smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) — functional smoke only.
-- [Channel log full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) — INVALID for the comparison gate.
+- Channel log [smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) (functional only) and [full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) (INVALID for the gate).
 - [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending. Send workloads use one publishing Member and burst/refill raised to 1,000,000. See `load/proxy-compare.ts`.
 - [Earlier wasm first display](../load/measurements-archive.md#first-display-345-conditions-re-measured-at-d2fc5ea-45-runscell-across-9-interleaved-rounds-median-of-round-p50--p95-ms) — superseded by the startup fix.
 - [Pool before and after PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac) — superseded by the post-PR #511 comparison.
 - [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17) — superseded by HTTP and SQL evidence.
-- [Reply count HTTP run 1](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, closed-loop and below the rate floor.
-- [Reply count HTTP run 2](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — superseded, closed-loop and noncompliant with #57.
-- [Reply count initial open-loop pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED after missed deadlines.
-- [Reply count final pilot](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — pilot only.
-- [Reply count HTTP run 3](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, missed deadline.
+- [Reply count HTTP runs 1–3 and pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, superseded or pilot only; reasons in the record.
