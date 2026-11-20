@@ -186,7 +186,8 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
             .unwrap();
     }
     let (_, org, sender, channel, _) = fixture(&pool).await;
-    let (topic, root, reply, main) = (
+    let (topic, root, reply, main, main_reply) = (
+        Uuid::new_v4(),
         Uuid::new_v4(),
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -198,9 +199,11 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) VALUES \
          ($1,$4,$2,1,$3,gen_random_uuid(),'root',$7,NULL,NULL), \
          ($1,$5,$2,2,$3,gen_random_uuid(),'reply',$7,$4,$4), \
-         ($1,$6,$2,3,$3,gen_random_uuid(),'main',NULL,NULL,NULL)",
+         ($1,$6,$2,3,$3,gen_random_uuid(),'main',NULL,NULL,NULL), \
+         ($1,$8,$2,4,$3,gen_random_uuid(),'main reply',NULL,$6,$6)",
     )
     .bind(org).bind(channel).bind(sender).bind(root).bind(reply).bind(main).bind(topic)
+    .bind(main_reply)
     .execute(&pool).await.unwrap();
     sqlx::raw_sql(
         &std::fs::read_to_string(
@@ -221,6 +224,11 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
         ),
         (reply, 2, send_digest(channel, "reply", None, Some(root))),
         (main, 3, send_digest(channel, "main", None, None)),
+        (
+            main_reply,
+            4,
+            send_digest(channel, "main reply", None, Some(main)),
+        ),
     ];
     let trigger_properties = async || -> Value {
         sqlx::query_scalar(
@@ -244,12 +252,12 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
             );
         }
         // Evaluate both trigger versions against identical intents, including
-        // the same parent id for the Reply. Keep the backfilled rows for upgrade.
+        // the same parent ids for both Replies. Keep the backfilled rows for upgrade.
         let mut tx = pool.begin().await.unwrap();
         let inserted: Vec<(i64, i64, Vec<u8>)> = sqlx::query_as(
             "WITH copies AS (
                 INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id)
-                SELECT organization_id, gen_random_uuid(), channel_id, seq+3, sender, gen_random_uuid(), body, topic_id, reply_to_id, reply_root_id
+                SELECT organization_id, gen_random_uuid(), channel_id, seq+4, sender, gen_random_uuid(), body, topic_id, reply_to_id, reply_root_id
                 FROM messages WHERE organization_id=$1 AND channel_id=$2
                 RETURNING seq, version, send_digest
              ) SELECT seq, version, send_digest FROM copies ORDER BY seq",
@@ -263,7 +271,7 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
             inserted,
             expected
                 .each_ref()
-                .map(|(_, seq, digest)| (seq + 3, seq + 3, digest.clone()))
+                .map(|(_, seq, digest)| (seq + 4, seq + 4, digest.clone()))
         );
         tx.rollback().await.unwrap();
     }
