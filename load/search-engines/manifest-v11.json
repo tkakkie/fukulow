@@ -1,8 +1,8 @@
 {
-  "sha256": "8b873b731eded5e47472551dc1e59f965c46e782b76153d561d836034c3a8805",
+  "sha256": "7019e86f67242d2da4f464b077219391a2487c4cee6f762fa625f0343a5affcd",
   "frozen": {
-    "version": 10,
-    "date": "2026-11-17",
+    "version": 11,
+    "date": "2026-11-20",
     "generator": {
       "version": 1,
       "seed": 153202611,
@@ -12,7 +12,7 @@
     "sourceHashes": [
       {
         "path": ".gitattributes",
-        "sha256": "2a48b2573b293ffc6908b3bb1caf3b7cc668084dbc593bb2225e7e89ee0ac25b"
+        "sha256": "cd7c434c380133ddc95e867e3cf9ba1a57ec958b3f85d623909aea60464a175b"
       },
       {
         "path": ".node-version",
@@ -39,8 +39,20 @@
         "sha256": "035259bdb2ee0bdbeb1ee2e956d7bdfc27482be4199047e34cce756c36ec2ca3"
       },
       {
+        "path": "load/search-engines/b1-query.sql",
+        "sha256": "939e02cb1d21b598ddc766b4cc3a3983503b8b66d3a5b151ac63a27017cd4bb9"
+      },
+      {
+        "path": "load/search-engines/b1.sql",
+        "sha256": "aea7ec294cfbef471240f1a0d82c778c5214295e02a859a43c66d3a6cb72e217"
+      },
+      {
+        "path": "load/search-engines/b1.ts",
+        "sha256": "e9d486af2624595c6c9d099a3da94cd4dd227ef3a89e3a7eb9d1b9f0b6419e66"
+      },
+      {
         "path": "load/search-engines/bench.ts",
-        "sha256": "b5a809a2efcb665e6a1c61a77c622fddbd9f2c62d56244e441bb9c32ef562514"
+        "sha256": "9f9e113d6e71a20800864b2486cd85134975d248bb544e83dbffc924c8084869"
       },
       {
         "path": "load/search-engines/bigm.sql",
@@ -60,7 +72,7 @@
       },
       {
         "path": "load/search-engines/manifest.ts",
-        "sha256": "488d05c030f14bed2bed3390ff41978eb180b55087c165931362381a59e0774f"
+        "sha256": "16cbc72b0e657977a82dad1e9fb6bd56f8d4453275130c97f37f1e1bf5427a66"
       },
       {
         "path": "load/search-engines/pgroonga.sql",
@@ -92,7 +104,7 @@
       },
       {
         "path": "load/search-engines/run.ts",
-        "sha256": "0c36049701a47ca0022b2c7241af86f071eae260678851efa4954eb069e0313b"
+        "sha256": "7fdf187ccf92f89a040f9291469b3db6e9dc881e8e33ac1b7cc36063b16029b1"
       },
       {
         "path": "load/search-engines/runtime.ts",
@@ -108,7 +120,7 @@
       },
       {
         "path": "load/search-engines/summarize.ts",
-        "sha256": "b3c82fd9cf6fe4b6510466a50e12f20af968cf6cf03fee5c2703d380ce9f8e55"
+        "sha256": "306c98a2cee410b65d27ee505be6e236c5ebc66844690f20bae8cc69a1594808"
       },
       {
         "path": "load/search-engines/trgm.sql",
@@ -257,10 +269,6 @@
       {
         "path": "server/migrations/202611200621_send_receipt_null_topic.sql",
         "sha256": "6b17bdd583efbb8b904a5c70abf34c250c067a7cacc9eb5d572bc4034e08158a"
-      },
-      {
-        "path": "server/migrations/202611200654_section_placement_channel_lookup.sql",
-        "sha256": "de3b3eb8d2ed675b25b87294265db6b07fa15c90aef6302e82f25166596e42f4"
       }
     ],
     "quality": {
@@ -965,30 +973,96 @@
         "standard_conforming_strings": "on",
         "statement_timeout": "10000"
       },
+      "b1Settings": {
+        "row_security": "on",
+        "default_transaction_read_only": "off",
+        "default_transaction_isolation": "read committed",
+        "client_encoding": "UTF8",
+        "standard_conforming_strings": "on",
+        "statement_timeout": "10000",
+        "search_path": "pg_catalog, pg_temp"
+      },
       "pgbenchGuard": "effective 10s check before each transaction, included in latency"
     },
     "shmBytes": 1073741824,
     "queryPath": {
-      "kind": "SECURITY DEFINER, LANGUAGE sql BEGIN ATOMIC",
-      "source": "load/search-engines/definer.sql",
-      "function": "public.fukulow_search_messages(uuid,text,boolean)",
-      "owner": "fukulow_search (NOLOGIN BYPASSRLS; column SELECT on messages, channels, users, channel_members)",
-      "caller": "fukulow_app only (EXECUTE revoked from PUBLIC); RLS stays enabled on every table",
-      "organization": "fukulow_current_org() only; NULL or empty returns no rows",
-      "emptyQuery": "returns no rows",
-      "functionSettings": {
-        "search_path": "pg_catalog, pg_temp",
-        "plan_cache_mode": "force_custom_plan"
+      "kind": "B1 restrictive SELECT policy with direct SQL as the search role",
+      "role": "fukulow_b1",
+      "roleSql": "load/search-engines/b1.sql",
+      "querySql": "load/search-engines/b1-query.sql",
+      "searchPath": "pg_catalog, pg_temp",
+      "rls": "enabled, forced and active on all four search tables",
+      "context": "REPEATABLE READ READ ONLY; set Organization and normalized literal query together, transaction-local; NULL or empty context denies",
+      "pattern": "b1_match policy escapes backslash, percent and underscore internally",
+      "plans": "first-round EXPLAIN (ANALYZE, BUFFERS, SETTINGS, VERBOSE, FORMAT JSON) as the search role",
+      "pageSize": 20
+    },
+    "b1": {
+      "baselineSha256": "9b649cf9773b4926d28e2ef30d57fe74175d449c5d85bf9b560ee4694234e272",
+      "migrations": [
+        "server/migrations/202611080001_auth.sql",
+        "server/migrations/202611090001_channels.sql",
+        "server/migrations/202611090002_messages.sql",
+        "server/migrations/202611090003_channel_names.sql",
+        "server/migrations/202611090004_channel_name_length.sql",
+        "server/migrations/202611090053_session_cleanup.sql",
+        "server/migrations/202611090075_drop_sessions_expiry.sql",
+        "server/migrations/202611100146_account_members.sql",
+        "server/migrations/202611100172_member_protection_indexes.sql",
+        "server/migrations/202611110001_topics.sql",
+        "server/migrations/202611110197_revoke_exposed_sessions.sql",
+        "server/migrations/202611110198_replies.sql",
+        "server/migrations/202611110199_unread.sql",
+        "server/migrations/202611110200_invites.sql",
+        "server/migrations/202611110201_unread_access.sql",
+        "server/migrations/202611110202_channel_grant_lifetime.sql",
+        "server/migrations/202611130311_channel_managers.sql",
+        "server/migrations/202611130314_tenant_rls.sql",
+        "server/migrations/202611140299_channel_name_nonempty.sql",
+        "server/migrations/202611140300_message_mentions.sql",
+        "server/migrations/202611140303_invite_revocation.sql",
+        "server/migrations/202611140370_direct_messages.sql",
+        "server/migrations/202611140386_dm_discovery_reclamation.sql",
+        "server/migrations/202611140387_main_unread_covering.sql",
+        "server/migrations/202611140388_invite_expiry_scan.sql",
+        "server/migrations/202611140389_member_directory_order.sql",
+        "server/migrations/202611150390_mention_main_unread_covering.sql",
+        "server/migrations/202611170225_public_channel_topic_positions.sql",
+        "server/migrations/202611170515_channel_log.sql",
+        "server/migrations/202611180515_message_receipts.sql"
+      ],
+      "engine": "pgroonga",
+      "scope": "PGroonga search rounds only; same v2 seed/schema/normalization/range/warmup/samples; no other arms, quality or write runs",
+      "criteria": {
+        "p95LimitMs": 500,
+        "samplesPerQueryRound": 100,
+        "latency": "all three rounds must meet the threshold as in the v2 executable gate",
+        "index": "no Messages Seq Scan; search_body used on every qualifying rare query",
+        "minimumLength": 2,
+        "rareQueries": {
+          "ja1-rare": 1,
+          "ja2-rare": 2,
+          "ja3-rare": 4,
+          "ascii1-rare": 1,
+          "ascii2-rare": 2,
+          "ascii-rare": 3,
+          "mixed": 4
+        },
+        "completeness": "full result sets for six Members, page order, and two engine controls, including the small restore",
+        "denials": "all v2 denial cases on PGroonga, unforced and with enable_seqscan=off; per-class no-grant Guest and deactivated Member"
       },
-      "planCacheReason": "a cached generic plan keeps the query a parameter, so the LIKE pattern would not fold to a constant as in the v1 literal query",
-      "pageSize": 20,
-      "completeness": "non-page form as fukulow_app equals the sequential app-role strpos reference",
-      "plans": {
-        "app": "EXPLAIN ANALYZE of the call as fukulow_app",
-        "body": "auto_explain nested statement of the same call; run fails unless logged",
-        "owner": "direct query as owner with app-run settings",
-        "ownerV1": "v1-form direct query as owner with enable_seqscan=off",
-        "direct": "access-path probe with enable_seqscan=off"
+      "evidenceChecks": {
+        "publication": "B1 artifacts must match the checked-in v11 manifest",
+        "denials": "the forced EXPLAIN must execute search_body; same-connection post-COMMIT reads with neither setting and with each setting alone must return zero rows"
+      },
+      "timingProbe": {
+        "foreignRowsPerClass": 1000,
+        "method": "after the 1M rounds, paired small databases with identical visible results and foreign row counts; only equal-byte-length foreign bodies vary",
+        "few": "one matching foreign Message per inserted class before overlaps",
+        "many": "1000 matching foreign Messages per inserted class before overlaps",
+        "latency": "same query/role, clients and transactions as one measured round; alternate arm order by class",
+        "plans": "unforced EXPLAIN ANALYZE of the prepared query in both arms for every class after sampling; timing evidence requires executed search_body in both",
+        "fixtureCheck": "verify paired Message IDs, row counts, per-row body byte lengths and visible bodies after sampling"
       }
     }
   }

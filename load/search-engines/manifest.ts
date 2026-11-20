@@ -4,6 +4,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { corpus, classes, queries as qualityQueries } from './quality/dataset.ts';
 import { modes } from './quality/modes.ts';
 import { queries } from './queries.ts';
+import { b1Role, b1SearchPath } from './b1.ts';
+import { criteria } from './summarize.ts';
 import { seed, epoch } from './seed.ts';
 import { timeouts, appStatementTimeoutMs } from './runtime.ts';
 const sourceRoot = new URL('../../',import.meta.url);
@@ -36,34 +38,34 @@ export function runKind() {
   return process.env.SEARCH_SMOKE==='1' ? 'smoke' : 'evaluation';
 }
 export const smokeLabel = 'SMOKE / NON-EVALUATION';
-// v1 through v8 stay as recorded; runs use the current version only.
-// v4 (#141) records the Move migration with the same evaluation conditions.
-// v5 (#204) records the sections migration with the same evaluation conditions.
-// v6 (#410) records the Channel archive migration with the same evaluation conditions.
-// v7 (#223) records the Invite cleanup migration with the same evaluation conditions.
-// v8 (#621) records the NULL-Topic receipt trigger migration with the same evaluation conditions.
-// v9 is reserved for the #694 B1 search-path manifest (recorded on #689, not on main yet).
-// v10 (#654) records the section placement lookup migration with the same evaluation conditions.
-export const manifestFile = 'load/search-engines/manifest-v10.json';
-// P2 (maintainer, 2026-11-17): app-role search goes through the definer function.
-export const queryPath = {kind:'SECURITY DEFINER, LANGUAGE sql BEGIN ATOMIC',source:'load/search-engines/definer.sql',
-  function:'public.fukulow_search_messages(uuid,text,boolean)',owner:'fukulow_search (NOLOGIN BYPASSRLS; column SELECT on messages, channels, users, channel_members)',
-  caller:'fukulow_app only (EXECUTE revoked from PUBLIC); RLS stays enabled on every table',organization:'fukulow_current_org() only; NULL or empty returns no rows',
-  emptyQuery:'returns no rows',
-  // Query-path settings only; v1's planner/executor conditions (jit on) stay.
-  functionSettings:{search_path:'pg_catalog, pg_temp',plan_cache_mode:'force_custom_plan'},
-  planCacheReason:'a cached generic plan keeps the query a parameter, so the LIKE pattern would not fold to a constant as in the v1 literal query',
-  pageSize:20,completeness:'non-page form as fukulow_app equals the sequential app-role strpos reference',
-  plans:{app:'EXPLAIN ANALYZE of the call as fukulow_app',body:'auto_explain nested statement of the same call; run fails unless logged',
-    owner:'direct query as owner with app-run settings',ownerV1:'v1-form direct query as owner with enable_seqscan=off',
-    direct:'access-path probe with enable_seqscan=off'}};
+// v11 freezes the NULL-safe B1 policy. v10 stays unused: #694 merged first.
+// v12 (#654) records the section placement lookup migration with v11's conditions.
+export const manifestFile = 'load/search-engines/manifest-v12.json';
+const baselineSha256 = '9b649cf9773b4926d28e2ef30d57fe74175d449c5d85bf9b560ee4694234e272';
+function baselineMigrations() {
+  const baseline = JSON.parse(readSource('load/search-engines/manifest-v2.json'));
+  assert.equal(jsonHash(baseline.frozen),baselineSha256,'B1 requires the recorded P2 baseline');
+  const migrations = (baseline.frozen.sourceHashes as {path:string;sha256:string}[]).filter(source=>source.path.startsWith('server/migrations/'));
+  for (const {path,sha256} of migrations) assert.equal(hash(readSource(path)),sha256,`B1 baseline migration changed: ${path}`);
+  return migrations.map(source=>source.path);
+}
+
+const queryPath = {
+  kind:'B1 restrictive SELECT policy with direct SQL as the search role',
+  role:b1Role, roleSql:'load/search-engines/b1.sql', querySql:'load/search-engines/b1-query.sql',
+  searchPath:b1SearchPath, rls:'enabled, forced and active on all four search tables',
+  context:'REPEATABLE READ READ ONLY; set Organization and normalized literal query together, transaction-local; NULL or empty context denies',
+  pattern:'b1_match policy escapes backslash, percent and underscore internally',
+  plans:'first-round EXPLAIN (ANALYZE, BUFFERS, SETTINGS, VERBOSE, FORMAT JSON) as the search role',
+  pageSize:20,
+};
 export function snapshot() {
   const files = ['.gitattributes','.node-version','load/package-lock.json',
     ...['load/search-engines','load/search-engines/quality','server/migrations'].flatMap(dir=>
       readdirSync(new URL(dir,sourceRoot)).filter(n=>!n.includes('.test.') && /\.(ts|sql)$/.test(n)).map(n=>`${dir}/${n}`)),
     'load/search-engines/Dockerfile','deploy/db-grants.sql','deploy/db-roles.sql','deploy/db-role-settings.sql'].sort();
   const data = corpus();
-  return {version:10,date:'2026-11-17',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
+  return {version:12,date:'2026-11-20',generator:{version:1,seed,clock:new Date(epoch).toISOString()},
     node:readSource('.node-version').trim(),
     sourceHashes:files.map(path=>({path,sha256:hash(readSource(path))})),
     quality:{querySet:qualityQueries.map(({gold,...q})=>({...q,relevantKeys:gold.map(id=>data.find(m=>m.id===id)?.key)})),
@@ -78,7 +80,25 @@ export function snapshot() {
     smoke:{label:smokeLabel,performance:{rows:1000,clients:1,transactions:1,rounds:1,writeWarmTransactions:1,writeTransactions:1},quality:'full fixed 2628-row quality fixture'},
     timing:{timeouts,startupAttempts:60,startupPollMs:500,rangeDays:180,qualityTimed:false},
     image:{historicalId:'sha256:af98e87cf2b786d5ec4d4aacf342892773de8afe585aff61a8fbf76c4f8f1c77',base:readSource('load/search-engines/Dockerfile').split('\n')[0].slice(5),
-      packages,extensions,pgBigmRelease:'v1.2-20250903'},settings,sessionPolicy:{planner:'Query Tuning settings must equal image boot_val',settings:sessionSettings,appSettings:appSessionSettings,pgbenchGuard:'effective 10s check before each transaction, included in latency'},shmBytes:1073741824,queryPath};
+      packages,extensions,pgBigmRelease:'v1.2-20250903'},settings,sessionPolicy:{planner:'Query Tuning settings must equal image boot_val',settings:sessionSettings,appSettings:appSessionSettings,b1Settings:{...appSessionSettings,search_path:b1SearchPath},pgbenchGuard:'effective 10s check before each transaction, included in latency'},shmBytes:1073741824,queryPath,
+    b1:{baselineSha256,migrations:baselineMigrations(),engine:'pgroonga',
+      scope:'PGroonga search rounds only; same v2 seed/schema/normalization/range/warmup/samples; no other arms, quality or write runs',
+      criteria:{p95LimitMs:criteria.p95LimitMs,samplesPerQueryRound:criteria.samplesPerQueryRound,
+        latency:'all three rounds must meet the threshold as in the v2 executable gate',
+        index:'no Messages Seq Scan; search_body used on every qualifying rare query',
+        minimumLength:criteria.minimumLength.pgroonga,rareQueries:criteria.rareQueries,
+        completeness:'full result sets for six Members, page order, and two engine controls, including the small restore',
+        denials:'all v2 denial cases on PGroonga, unforced and with enable_seqscan=off; per-class no-grant Guest and deactivated Member'},
+      evidenceChecks:{publication:'B1 artifacts must match the checked-in v11 manifest',
+        denials:'the forced EXPLAIN must execute search_body; same-connection post-COMMIT reads with neither setting and with each setting alone must return zero rows'},
+      timingProbe:{foreignRowsPerClass:1000,
+        method:'after the 1M rounds, paired small databases with identical visible results and foreign row counts; only equal-byte-length foreign bodies vary',
+        few:'one matching foreign Message per inserted class before overlaps',
+        many:'1000 matching foreign Messages per inserted class before overlaps',
+        latency:'same query/role, clients and transactions as one measured round; alternate arm order by class',
+        plans:'unforced EXPLAIN ANALYZE of the prepared query in both arms for every class after sampling; timing evidence requires executed search_body in both',
+        fixtureCheck:'verify paired Message IDs, row counts, per-row body byte lengths and visible bodies after sampling'}}};
+
 }
 export function verifyManifest(document: {sha256:string; frozen:ReturnType<typeof snapshot>}, actual = snapshot()) {
   assert.equal(jsonHash(document.frozen),document.sha256,'Frozen manifest content hash mismatch');
