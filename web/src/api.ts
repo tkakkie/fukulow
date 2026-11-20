@@ -164,6 +164,27 @@ export const listChannels = (organizationId: string, f: typeof fetch = fetch, si
 export const createChannel = (organizationId: string, body: CreateChannelRequest, f: typeof fetch = fetch) =>
   call<Channel>(f, `${orgPath(organizationId)}/channels`, json(body), true)
 
+export type { ChannelOrder, ChannelPlacement, CreatedSection, CreateSection, MoveChannel, RenameSection, SectionLayout, SectionOrder } from './api-schema'
+const sectionsPath = (org: string) => `${orgPath(org)}/me/sections`
+const placementPath = (org: string, channel: string) => `${orgPath(org)}/me/channel-sections/${encodeURIComponent(channel)}`
+
+export const getSectionLayout = (org: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['SectionLayout']>(f, sectionsPath(org), { cache: 'no-store', signal }, true, 200)
+export const getChannelPlacement = (org: string, channel: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['ChannelPlacement']>(f, placementPath(org, channel), { cache: 'no-store', signal }, true, 200)
+export const createSection = (org: string, body: components['schemas']['CreateSection'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['CreatedSection']>(f, sectionsPath(org), { ...json(body), signal }, true)
+export const renameSection = (org: string, id: string, body: components['schemas']['RenameSection'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, `${sectionsPath(org)}/${encodeURIComponent(id)}`, { ...json(body), method: 'PATCH', signal }, false, 204)
+export const reorderSections = (org: string, body: components['schemas']['SectionOrder'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, `${sectionsPath(org)}/order`, { ...json(body), method: 'PUT', signal }, false, 204)
+export const moveChannel = (org: string, channel: string, body: components['schemas']['MoveChannel'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, placementPath(org, channel), { ...json(body), method: 'PUT', signal }, false, 204)
+export const reorderSectionChannels = (org: string, body: components['schemas']['ChannelOrder'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, `${orgPath(org)}/me/section-channel-order`, { ...json(body), method: 'PUT', signal }, false, 204)
+export const deleteSection = (org: string, id: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, `${sectionsPath(org)}/${encodeURIComponent(id)}`, { method: 'DELETE', signal }, false, 204)
+
 export type { Dm, DmChanges, DmDiscovery, DmList, OpenDmRequest } from './api-schema'
 export type DmListQuery = NonNullable<import('./api-schema').operations['list_dms']['parameters']['query']>
 export type DmChangesQuery = import('./api-schema').operations['dm_changes']['parameters']['query']

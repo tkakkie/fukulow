@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { checkHealth, lookupAuthors } from './api'
+import { checkHealth, lookupAuthors, type ChannelPlacement, type CreatedSection, type SectionLayout } from './api'
 
 it('looks up display identities in the selected Organization using generated request and response types', async () => {
   const identities = [{ id: 'author', name: '名前', deactivated: true }]
@@ -345,4 +345,51 @@ it('posts exact Reply count batches with no-store and cancellation in the select
   expect(f).toHaveBeenCalledWith('/api/v1/orgs/org%2F1/channels/c%201/reply-counts', {
     credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: ['child'], history_generation: data.history_generation }), cache: 'no-store', signal: abort.signal,
   })
+})
+
+it('uses the scoped section routes with generated bodies and no-store reads', async () => {
+  const api = await import('./api')
+  const signal = new AbortController().signal
+  const f = vi.fn<typeof fetch>().mockImplementation(async () => new Response(null, { status: 204 }))
+  const org = 'org/1', section = 'section/2', channel = 'channel/3'
+  const base = '/api/v1/orgs/org%2F1/me'
+  const layout: SectionLayout = { generation: '0', sections: [], other_channel_ids: [] }
+  const placement: ChannelPlacement = { generation: '0', section_id: null }
+  f.mockResolvedValueOnce(Response.json(layout)).mockResolvedValueOnce(Response.json(placement))
+  await expect(api.getSectionLayout(org, f, signal)).resolves.toEqual({ ok: true, data: layout })
+  await expect(api.getChannelPlacement(org, channel, f, signal)).resolves.toEqual({ ok: true, data: placement })
+  const created: CreatedSection = { id: section, generation: '1' }
+  f.mockResolvedValueOnce(Response.json(created, { status: 201 })).mockResolvedValueOnce(Response.json(created, { status: 200 }))
+  for (let i = 0; i < 2; i++)
+    await expect(api.createSection(org, { id: section, name: 'Name' }, f, signal)).resolves.toEqual({ ok: true, data: created })
+  for (const result of [
+    await api.renameSection(org, section, { name: 'New name' }, f, signal),
+    await api.reorderSections(org, { section_ids: [section] }, f, signal),
+    await api.moveChannel(org, channel, { section_id: null }, f, signal),
+    await api.reorderSectionChannels(org, { section_id: null, channel_ids: [channel] }, f, signal),
+    await api.deleteSection(org, section, f, signal),
+  ]) expect(result).toEqual({ ok: true, data: undefined })
+  expect(f.mock.calls.map(([path, init]) => [path, init?.method ?? 'GET', init?.body])).toEqual([
+    [`${base}/sections`, 'GET', undefined],
+    [`${base}/channel-sections/channel%2F3`, 'GET', undefined],
+    [`${base}/sections`, 'POST', '{"id":"section/2","name":"Name"}'],
+    [`${base}/sections`, 'POST', '{"id":"section/2","name":"Name"}'],
+    [`${base}/sections/section%2F2`, 'PATCH', '{"name":"New name"}'],
+    [`${base}/sections/order`, 'PUT', '{"section_ids":["section/2"]}'],
+    [`${base}/channel-sections/channel%2F3`, 'PUT', '{"section_id":null}'],
+    [`${base}/section-channel-order`, 'PUT', '{"section_id":null,"channel_ids":["channel/3"]}'],
+    [`${base}/sections/section%2F2`, 'DELETE', undefined],
+  ])
+  for (const [, init] of f.mock.calls) {
+    expect(init).toMatchObject({ credentials: 'same-origin', signal })
+    if (init?.body) expect(init.headers).toEqual({ 'content-type': 'application/json' })
+    if (!init?.method) expect(init?.cache).toBe('no-store')
+  }
+})
+
+it('preserves the definite section lock contention code without retrying the write', async () => {
+  const { moveChannel } = await import('./api')
+  const f = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ error: 'lock_contention' }, { status: 503 }))
+  await expect(moveChannel('org', 'channel', { section_id: null }, f)).resolves.toEqual({ ok: false, kind: 'network', error: 'lock_contention' })
+  expect(f).toHaveBeenCalledOnce()
 })

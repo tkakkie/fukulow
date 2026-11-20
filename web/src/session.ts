@@ -10,6 +10,7 @@ import { createMoveChain, type MoveChainApi } from './move-chain'
 import { repliesApi, type RepliesApi } from './replies'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
+import { createSections, sectionsApi, type SectionsApi } from './sections'
 import type { SyncOptions } from './sync'
 import { createTopicSync } from './topic-sync'
 import { topicsApi, type TopicsApi } from './topics'
@@ -30,6 +31,7 @@ export type SessionOptions = {
   moveChainApi?: MoveChainApi
   unreadApi?: UnreadApi
   dmsApi?: DmsApi
+  sectionsApi?: SectionsApi
   initialRole?: api.Role
   onIdentity?: (identity: api.Identity) => void
   onIdentityInvalidated?: () => void
@@ -41,7 +43,14 @@ export function createSession(options: SessionOptions) {
   const organizationId = options.organizationId ?? ''
   let closed = false
   let ended = false
-  const notifyEnded = () => { if (!ended) { ended = true; options.onEnded() } }
+  let closeSections: (() => void) | undefined
+  const notifyEnded = () => {
+    if (ended || options.accountSignal?.aborted) return
+    ended = true
+    closeSections?.()
+    activity.close()
+    options.onEnded()
+  }
   let unavailable = false
   let dms: Dms | undefined
   let history: ReturnType<typeof createTopicSync>['sync'] | undefined
@@ -73,7 +82,7 @@ export function createSession(options: SessionOptions) {
       }
       return false
     },
-    revoke: id => { dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable() },
+    revoke: id => { sections.hideChannel(id); dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable() },
     access: id => { dms?.access(id); unread.activityAccess(id); topics.activityAccess(id) },
     reconcile: () => unread.activityReconcile(),
     random: options.sync?.random,
@@ -203,6 +212,11 @@ export function createSession(options: SessionOptions) {
       },
     },
   )
+  const sections = createSections({
+    api: options.sectionsApi ?? sectionsApi(organizationId), activity, list: channels.authorizedList, observeAccess,
+    random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs,
+  })
+  closeSections = sections.close
   const dmSource = options.dmsApi ?? dmsApi(organizationId)
   dms = createDms({ api: {
     list: (query, signal) => observe(dmSource.list({ history_generation: history?.get().historyGeneration, ...query }, signal)),
@@ -222,7 +236,7 @@ export function createSession(options: SessionOptions) {
     if (same && sync.get().channels[id]?.state === 'unavailable') void sync.watch(id)
   }, random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs })
   const stopActivity = sync.onActivity(notice => {
-    if (notice.type === 'activity_ready') dms?.ready()
+    if (notice.type === 'activity_ready') { dms?.ready(); sections.ready() }
     activity.notice(notice)
   })
   function terminate() {
@@ -230,6 +244,7 @@ export function createSession(options: SessionOptions) {
     unavailable = true
     activity.close(); capabilities.close()
     channels.close()
+    sections.close()
     dms?.close()
     void sync.unavailable()
   }
@@ -256,9 +271,12 @@ export function createSession(options: SessionOptions) {
   })
   activity.hold('capabilities', capabilities)
   let historyEpoch = sync.get().historyEpoch
+  let connection = sync.get().connection, connected = sync.get().connected
   let openUnavailable = false
   const stopSync = sync.subscribe(() => {
     const state = sync.get()
+    if ((connection !== null && connection !== state.connection) || (connected && !state.connected)) sections.disconnected()
+    connection = state.connection; connected = state.connected
     if (historyEpoch !== state.historyEpoch) {
       historyEpoch = state.historyEpoch
       dms?.resetHistory()
@@ -314,7 +332,7 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, topics, replies, moveChain, replyCounts, unread, channels, dms, navigationTargets,
+    sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets,
     memberListAccess,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
@@ -354,6 +372,7 @@ export function createSession(options: SessionOptions) {
       for (const { controller } of [...memberControllers.values()]) controller.close()
       memberControllers.clear()
       channels.close()
+      sections.close()
       dms?.close()
       void sync.close()
     },
