@@ -198,14 +198,14 @@ try {
     setup[arm] = { ...image, ...seeded, runtime: roleCheck(db, arm, runtime), ownerControl: roleCheck(db, arm, owner) };
   }
   const harnessPath = fileURLToPath(new URL('.', import.meta.url));
-  const hashes = Object.fromEntries(readdirSync(harnessPath).filter(file => file.endsWith('.ts')).sort().map(file =>
-    [file, createHash('sha256').update(readFileSync(join(harnessPath, file))).digest('hex')]));
+  const corePath = fileURLToPath(new URL('../../harness-core/', import.meta.url));
+  const hashes = Object.fromEntries([harnessPath, corePath].flatMap(dir => readdirSync(dir).filter(file => file.endsWith('.ts')).sort()
+    .map(file => [(dir === corePath ? 'harness-core/' : '') + file, createHash('sha256').update(readFileSync(join(dir, file))).digest('hex')])));
   save('metadata.json', { mode, smoke, commits, setup, cells, fixture: { organizations: 1, members: fixture.members, channels: fixture.channels, bodyBytes: Buffer.byteLength(fixture.shortBody) }, planModes: modes, timingPlanMode: 'auto', order, blockSize, warmups,
     cache: 'VACUUM FREEZE ANALYZE and CHECKPOINT after prefill, then VACUUM ANALYZE, CHECKPOINT and idle per cell; client warmups for timing; no OS cache flush',
     client: 'One psql/pgbench client over TCP loopback in the PostgreSQL container per block',
     pgOptions, node: process.version, harnessCommit: cmd('git', ['rev-parse', 'HEAD']), harnessHashes: hashes, started: new Date().toISOString() });
 
-  run.startSampling();
   for (const cell of cells) {
     stopIfInterrupted();
     run.enter('fk515d: ' + cell.name + ' settle and plans');
@@ -221,6 +221,8 @@ try {
         stopIfInterrupted();
         run.enter(`fk515d: ${arm} ${cell.name} ${mode} plans`);
         const bindings = binding(cell);
+        // EXPLAIN ANALYZE plans are the first recorded samples; the first cell's VACUUM and idle are still setup.
+        run.startSampling();
         const results = {
           runtime: plans(db, mode, sequence, bindings, runtime),
           ownerRolledBack: plans(db, mode, sequence, bindings, owner),

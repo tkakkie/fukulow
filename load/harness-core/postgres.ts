@@ -9,7 +9,7 @@ export async function waitReady(check: () => boolean, o: { tries?: number; delay
   for (let i = 0; i < tries; i++) {
     streak = check() ? streak + 1 : 0;
     if (streak >= stable) return;
-    await new Promise(resolve => setTimeout(resolve, delayMs));
+    if (i < tries - 1) await new Promise(resolve => setTimeout(resolve, delayMs));
   }
   throw new Error('PostgreSQL was not ready over TCP');
 }
