@@ -1,29 +1,26 @@
-import { readFileSync } from 'node:fs'
-import { createSourceFile, isFunctionDeclaration, ScriptTarget, transpileModule } from 'typescript'
-import { expect, it, vi } from 'vitest'
-import { channel, fakeNetwork, ok, settle } from './adapter-test-helpers.svelte'
+import { describe, expect, it, vi } from 'vitest'
+import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createNavigation, type Navigation, type NavigationBrowser } from './navigation'
 import { createSession } from './session'
-
-// Exercise the component's actual handler with real controllers without requiring a browser DOM.
-const workspace = readFileSync(new URL('./Workspace.svelte', import.meta.url), 'utf8')
-const script = workspace.match(/<script\b[^>]*>([\s\S]*?)<\/script>/)?.[1] ?? ''
-const source = createSourceFile('Workspace.ts', script, ScriptTarget.Latest, true)
-const handler = source.statements.find(node => isFunctionDeclaration(node) && node.name?.text === 'handleSelectChannel')
-if (!handler) throw new Error('Workspace Channel selection handler not found')
-const handlerCode = transpileModule(handler.getText(source), { compilerOptions: { target: ScriptTarget.ESNext } }).outputText
+import type { MainTimelineLine } from './topic-selectors'
+import {
+  createChannelSelection,
+  parsePanelTab,
+  parseReplyMessageId,
+  resolveMobileLevel,
+  resolveReplyAnchor,
+  shouldClosePanelForDm,
+} from './workspace-routing'
 
 function selectionHandler(nav: Navigation, channels: ChannelsAdapter, retryAuthors = () => {}) {
-  return new Function('nav', 'channels', 'currentOrganizationId', 'members', `
-    return id => {
-      const s = channels.state;
-      const dmState = undefined;
-      let drawerOpen = true;
-      ${handlerCode}
-      handleSelectChannel(id);
-    };
-  `)(nav, channels, 'org', { authors: { retry: retryAuthors } }) as (id: string) => void
+  return createChannelSelection({
+    getOrganizationId: () => 'org',
+    getSelectedId: () => channels.state.selectedId,
+    getNavigation: () => nav,
+    selectChannel: (id) => channels.select(id),
+    retryAuthors,
+  })
 }
 
 function navigation(topicId: string | null) {
@@ -108,4 +105,201 @@ it.each([null, 'topic'])('explicitly selecting the current ready Channel from vi
     nav.destroy()
     session.close()
   }
+})
+
+describe('createChannelSelection', () => {
+  it('opens a search result, selects the Channel, re-enters stopped unread for same-Channel reply hits, and closes the drawer', () => {
+    let selectedId: string | null = 'A'
+    let orgId = 'org-1'
+    const openSearchResult = vi.fn(() => true)
+    const navigate = vi.fn(() => true)
+    const selectChannel = vi.fn((id: string) => { selectedId = id })
+    const retryAuthors = vi.fn()
+    const enter = vi.fn()
+    const onCloseDrawer = vi.fn()
+
+    const handle = createChannelSelection({
+      getOrganizationId: () => orgId,
+      getSelectedId: () => selectedId,
+      getNavigation: () => ({ navigate, openSearchResult }),
+      selectChannel,
+      retryAuthors,
+      getCurrentUnread: () => ({ state: { stopped: false, main: { stopped: true } }, enter }),
+      onCloseDrawer,
+    })
+
+    const replyHit = { channelId: 'A', topicId: null, replyRootId: 'r1', messageId: 'm2', createdSeq: 2 }
+    handle('A', replyHit)
+    expect(retryAuthors).toHaveBeenCalledTimes(1)
+    expect(openSearchResult).toHaveBeenCalledWith('org-1', replyHit)
+    expect(navigate).not.toHaveBeenCalled()
+    expect(selectChannel).toHaveBeenCalledWith('A')
+    expect(enter).toHaveBeenCalledWith(null)
+    expect(onCloseDrawer).toHaveBeenCalledTimes(1)
+
+    // Subsequent call reads updated live org/selectedId.
+    orgId = 'org-2'
+    const otherHit = { channelId: 'B', topicId: 't1', replyRootId: null, messageId: 'm9', createdSeq: 9 }
+    handle('B', otherHit)
+    expect(retryAuthors).toHaveBeenCalledTimes(1)
+    expect(openSearchResult).toHaveBeenLastCalledWith('org-2', otherHit)
+    expect(selectChannel).toHaveBeenLastCalledWith('B')
+    expect(enter).toHaveBeenCalledTimes(1)
+    expect(onCloseDrawer).toHaveBeenCalledTimes(2)
+  })
+
+  it('routes DM rows through selectDm instead of selectChannel and closes the drawer', () => {
+    const selectChannel = vi.fn()
+    const selectDm = vi.fn()
+    const onCloseDrawer = vi.fn()
+    const navigate = vi.fn(() => false)
+    const openSearchResult = vi.fn(() => true)
+
+    const handle = createChannelSelection({
+      getOrganizationId: () => 'org',
+      getSelectedId: () => 'dm-1',
+      getNavigation: () => ({ navigate, openSearchResult }),
+      selectChannel,
+      isDm: (id) => id === 'dm-1',
+      selectDm,
+      onCloseDrawer,
+    })
+
+    handle('dm-1')
+    expect(navigate).toHaveBeenCalledWith({ type: 'channel', organizationId: 'org', channelId: 'dm-1' })
+    expect(selectDm).toHaveBeenCalledWith('dm-1')
+    expect(selectChannel).not.toHaveBeenCalled()
+    expect(onCloseDrawer).toHaveBeenCalledOnce()
+  })
+})
+
+describe('resolveReplyAnchor', () => {
+  const msg = (id: string, channelId: string, body: string) => ({ ...record(1, channelId), id, body })
+
+  it('follows the exact lookup order and ignores a lastOpenedAnchor from another Channel', () => {
+    const lastSame = msg('m1', 'ch-1', 'last-same')
+    const lastOther = msg('m1', 'ch-2', 'last-other')
+    const timeline = msg('m1', 'ch-1', 'timeline')
+    const topicLine = msg('m1', 'ch-1', 'topic-line')
+    const routedTopic = msg('m1', 'ch-1', 'routed-topic')
+    const repliesAnchor = msg('m1', 'ch-1', 'replies-anchor')
+    const repliesMessage = msg('m1', 'ch-1', 'replies-message')
+    const lines: MainTimelineLine[] = [
+      { kind: 'topic', topicId: 't1', position: 1, baseline: null, latestMessage: msg('m1', 'ch-1', 'topic-summary'), messageCount: 1, summaryError: null },
+      { kind: 'message', message: topicLine },
+    ]
+
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: 'm1',
+      selectedChannelId: 'ch-1',
+      lastOpenedAnchor: lastSame,
+      timelineMessages: [timeline],
+      topicLines: lines,
+      routedTopicMessages: [routedTopic],
+      replies: { anchor: repliesAnchor, messages: [repliesMessage] },
+    })).toBe(lastSame)
+
+    // Other-Channel lastOpenedAnchor is ignored; timeline wins next.
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: 'm1',
+      selectedChannelId: 'ch-1',
+      lastOpenedAnchor: lastOther,
+      timelineMessages: [timeline],
+      topicLines: lines,
+      routedTopicMessages: [routedTopic],
+      replies: { anchor: repliesAnchor, messages: [repliesMessage] },
+    })).toBe(timeline)
+
+    // Topic message line wins over routed Topic and replies (summary line is ignored).
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: 'm1',
+      selectedChannelId: 'ch-1',
+      lastOpenedAnchor: null,
+      timelineMessages: [],
+      topicLines: lines,
+      routedTopicMessages: [routedTopic],
+      replies: { anchor: repliesAnchor, messages: [repliesMessage] },
+    })).toBe(topicLine)
+
+    // Routed Topic messages win over replies.
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: 'm1',
+      selectedChannelId: 'ch-1',
+      lastOpenedAnchor: null,
+      timelineMessages: [],
+      topicLines: [lines[0]],
+      routedTopicMessages: [routedTopic],
+      replies: { anchor: repliesAnchor, messages: [repliesMessage] },
+    })).toBe(routedTopic)
+
+    // Replies anchor wins over replies messages.
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: 'm1',
+      selectedChannelId: 'ch-1',
+      lastOpenedAnchor: null,
+      replies: { anchor: repliesAnchor, messages: [repliesMessage] },
+    })).toBe(repliesAnchor)
+
+    // Replies messages fallback.
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: 'm1',
+      selectedChannelId: 'ch-1',
+      lastOpenedAnchor: null,
+      replies: { anchor: null, messages: [repliesMessage] },
+    })).toBe(repliesMessage)
+
+    // Missing everywhere or missing inputs -> null.
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: 'missing',
+      selectedChannelId: 'ch-1',
+      lastOpenedAnchor: lastSame,
+      timelineMessages: [timeline],
+    })).toBeNull()
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: null,
+      selectedChannelId: 'ch-1',
+      lastOpenedAnchor: lastSame,
+    })).toBeNull()
+    expect(resolveReplyAnchor({
+      activeReplyMessageId: 'm1',
+      selectedChannelId: undefined,
+      lastOpenedAnchor: lastSame,
+    })).toBeNull()
+  })
+})
+
+describe('resolveMobileLevel', () => {
+  it('resolves channels, view, panel, and promotes channels to view while search is open', () => {
+    expect(resolveMobileLevel(null, false)).toBe('channels')
+    expect(resolveMobileLevel({ channelId: null, panel: null }, false)).toBe('channels')
+    expect(resolveMobileLevel({ channelId: null, panel: null }, true)).toBe('view')
+    expect(resolveMobileLevel({ channelId: 'ch-1', panel: null }, false)).toBe('view')
+    expect(resolveMobileLevel({ channelId: 'ch-1', panel: null }, true)).toBe('view')
+    expect(resolveMobileLevel({ channelId: 'ch-1', panel: 'topics' }, false)).toBe('panel')
+    expect(resolveMobileLevel({ channelId: 'ch-1', panel: 'reply:m1' }, true)).toBe('panel')
+  })
+})
+
+describe('panel route parsing', () => {
+  it('parses reply id, panel tab, and DM non-reply close predicate', () => {
+    expect(parseReplyMessageId('reply:m42')).toBe('m42')
+    expect(parseReplyMessageId('topics')).toBeNull()
+    expect(parseReplyMessageId(null)).toBeNull()
+    expect(parseReplyMessageId(undefined)).toBeNull()
+
+    expect(parsePanelTab('topics')).toBe('topics')
+    expect(parsePanelTab('overview')).toBe('overview')
+    expect(parsePanelTab('members')).toBe('members')
+    expect(parsePanelTab('reply:m42')).toBe('topics')
+    expect(parsePanelTab(null)).toBe('topics')
+    expect(parsePanelTab(undefined)).toBe('topics')
+
+    expect(shouldClosePanelForDm('dm', 'topics')).toBe(true)
+    expect(shouldClosePanelForDm('dm', 'overview')).toBe(true)
+    expect(shouldClosePanelForDm('dm', 'members')).toBe(true)
+    expect(shouldClosePanelForDm('dm', 'reply:m42')).toBe(false)
+    expect(shouldClosePanelForDm('dm', null)).toBe(false)
+    expect(shouldClosePanelForDm('channel', 'topics')).toBe(false)
+    expect(shouldClosePanelForDm(undefined, 'topics')).toBe(false)
+  })
 })
