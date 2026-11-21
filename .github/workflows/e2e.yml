@@ -25,7 +25,7 @@ jobs:
       FUKULOW_SEND_BURST: '10000'
       FUKULOW_SEND_REFILL_PER_SECOND: '1000'
       # A Playwright bump must update the tag and digest together.
-      PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.0-noble@sha256:6e3fb709361521eb27161606e6da6d2674e5e89fa16516cb37d6fdd91372273d
+      PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
