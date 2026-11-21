@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { lines, parseSend } from './dms-formal-results.ts';
 import { currentGroup, stopRecordedGroups } from './dms-formal-groups.ts';
-import { checked, execute } from './dms-formal-exec.ts';
+import { checked, execute, type Executor } from './dms-formal-exec.ts';
 import { mixedLoad, fixturePairs, type MixedScenario } from './dms-formal-scenarios.ts';
 import { quote } from './dms-formal-config.ts';
 import { statSync, renameSync } from 'node:fs';
@@ -19,6 +19,7 @@ import { reportOverheadArm } from './dms-formal-overhead-results.ts';
 import { scaledLoad, localIdentity, localCopy, sha256File, dockerfileBases, harnessCaddyfile, localNames, type LocalLimits } from './dms-formal-local.ts';
 import { reportPilot } from './dms-formal-pilot.ts';
 import { reportAttempt } from './dms-formal-results.ts';
+import { failureDetails, restoreSpace, workerLog, writeDiagnostic, type DiagnosticWriter, type ProbeDocker } from './dms-formal-diagnostics.ts';
 export type HostState = { target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
 const root = resolve(import.meta.dirname,'../..');
 const statePath = `${root}/state.json`;
@@ -30,9 +31,9 @@ const docker = (args: string[], input?: string, timeout = 120000) => {
     args=args.map(arg=>arg.includes('@sha256:')?arg.replace(/:[^/:@]+@/,'@'):arg);
     if(args[0]==='run')args.splice(1,0,'--pull=never');
   }
-  return checked(execute, { program: local&&args[0]==='build'?'env':'docker', args:local&&args[0]==='build'?['DOCKER_BUILDKIT=0','docker',...args]:args, input, timeout,log:local&&args[0]==='build'?root+'/build-'+(args.includes(state().id+':baseline')?'baseline':'candidate')+'.log':undefined });
+  return checked(execute, { program: local&&args[0]==='build'?'env':'docker', args:local&&args[0]==='build'?['DOCKER_BUILDKIT=0','docker',...args]:args, input, timeout,captureStderr:true,log:local&&args[0]==='build'?root+'/build-'+(args.includes(state().id+':baseline')?'baseline':'candidate')+'.log':undefined });
 };
-const command = (program: string, args: string[], timeout = 120000) => checked(execute, { program,args,timeout });
+const command = (program: string, args: string[], timeout = 120000) => checked(execute, { program,args,timeout,captureStderr:true });
 const save = (path: string, value: unknown) => writeFileSync(path, typeof value === 'string' ? value : JSON.stringify(value,null,2), { mode: 0o600 });
 function state(): HostState { return JSON.parse(readFileSync(statePath,'utf8')); }
 const image = (s: HostState) => `${s.id}:release`;
@@ -167,11 +168,29 @@ async function seed(s: HostState) {
   await copyVolume(execute,s.id,0,s.id+'-data',s.id+'-snapshot',s.target==='local'?s.postgres.replace(/:[^/:@]+@/,'@'):s.postgres,false,s.target==='local');
   if(s.overhead)save(`${root}/overhead-snapshot.json`,await docker(['volume','inspect',s.id+'-snapshot']));
 }
+export async function restoreVolumes(
+  s: Pick<HostState,'id'|'target'|'postgres'|'mode'|'pilot'>, attempt:number,
+  {directory,stopDb,dockerInfo,exec=execute,probe,write=workerLog}:
+  {directory:string;stopDb:()=>Promise<string>;dockerInfo:()=>Promise<string>;exec?:Executor;probe?:ProbeDocker;write?:DiagnosticWriter},
+) {
+  const local=s.target==='local';
+  const postgres=local?s.postgres.replace(/:[^/:@]+@/,'@'):s.postgres;
+  const space=await restoreSpace(directory,s.id,postgres,attempt,probe);
+  writeDiagnostic(write,space);
+  const start=Date.now();
+  await stopDb();
+  requireHeadroom(local?directory:JSON.parse(await dockerInfo()).DockerRootDir,s.mode==='smoke'||s.pilot?2*GiB:100*GiB);
+  await copyVolume(exec,s.id,attempt,s.id+'-snapshot',s.id+'-data',postgres,true,local,error=>{
+    writeDiagnostic(write,{event:'restore-copy-failure',step:'restore',attempt,...failureDetails(error)});
+  });
+  return start;
+}
 async function restore(s: HostState, attempt: number) {
-  const start = Date.now();
-  await docker([...compose(s),'stop','db']);
-  requireHeadroom(s.target==='local'?root:(JSON.parse(await docker(['info','--format','{{json .}}']))).DockerRootDir,s.mode==='smoke'||s.pilot?2*GiB:100*GiB);
-  await copyVolume(execute,s.id,attempt,s.id+'-snapshot',s.id+'-data',s.target==='local'?s.postgres.replace(/:[^/:@]+@/,'@'):s.postgres,true,s.target==='local');
+  const start = await restoreVolumes(s,attempt,{
+    directory:root,
+    stopDb:()=>docker([...compose(s),'stop','db']),
+    dockerInfo:()=>docker(['info','--format','{{json .}}']),
+  });
   await docker([...compose(s),'up','-d','--no-build',...(s.target==='local'?['--pull','never']:[]),'--wait','db']);
   const counts = await sql(s,countsSql);
   save(`${root}/restore-${attempt}.json`,{ms:Date.now()-start,counts:JSON.parse(counts)});
@@ -400,7 +419,21 @@ async function main() {
     default: throw new Error('Unknown phase');
   }
 }
-if (process.argv[1] === import.meta.filename) main().catch(() => { console.error('Remote phase failed; private artifacts retained until collection'); process.exitCode=1; });
+const workerSteps = new Set([
+  'preflight','rtt','build','stop-generators','prepare-generator','database','app','seed','stop-workers',
+  'stop-copy','ship','overhead-arm','reduce','restore','retain-raw','stop-app','start-app','observe',
+  'generators','durable','cleanup','erase',
+]);
+export async function runWorkerStep(step:string|undefined,attempt:number,run:()=>Promise<void>,write=workerLog) {
+  try {await run();}
+  catch(error) {
+    writeDiagnostic(write,{event:'worker-failure',step:step&&workerSteps.has(step)?step:'unknown',
+      attempt:Number.isSafeInteger(attempt)&&attempt>=0?attempt:null,workerExitCode:1,...failureDetails(error)});
+    throw error;
+  }
+}
+if (process.argv[1] === import.meta.filename) runWorkerStep(process.argv[2],Number(process.argv[3]),main)
+  .catch(() => { process.exitCode=1; });
 
 async function containerIdentity(name:string) {
   const c=JSON.parse(await docker(['inspect',name]))[0];

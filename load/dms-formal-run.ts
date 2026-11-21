@@ -9,6 +9,7 @@ import { poolOverheadDesign, judgeOverhead, type OverheadArm } from './dms-forma
 import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
 import { scaledLoad, localLimits, localCopy } from './dms-formal-local.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
+import { failureDetails, writeDiagnostic } from './dms-formal-diagnostics.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
 export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void };
 const defaultRuntime:Runtime={exec:execute,transfer:transferImage,on:(s,f)=>process.on(s,f),off:(s,f)=>process.off(s,f)};
@@ -43,7 +44,18 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   const hosts=[config.app,config.db,config.generator];
   const remote=(host:string,command:string,timeout=120000,log?:string)=>checked(runtime.exec,{program:local?'sh':'ssh',args:local?['-c',command.replaceAll(root,roleRoot(host))]:[...sshOptions,host,command],timeout:bounded(timeout),log,signal:phase==='cleanup' ? undefined : abort.signal});
   const invocation=(op:string,n:number,epoch:number)=>`env NODE_EXTRA_CA_CERTS=${quote(root+'/ca.crt')} ${local?quote(process.execPath):'node'} ${quote(root+'/harness/load/dms-formal-host.ts')} ${quote(op)} ${n} ${epoch}`;
-  const worker=(host:string,op:string,n=attempt,epoch=0,timeout=120000)=>{operation=op;status();const limit=bounded(timeout);return remote(host,local?invocation(op,n,epoch):`timeout --signal=KILL ${Math.max(1,Math.ceil(limit/1000)-5)}s sh -c 'export DM_FORMAL_OWNED_GROUP=$PPID; exec "$@"' dm-worker ${invocation(op,n,epoch)}`,limit,`${config.output}/host-${hosts.indexOf(host)}-${op}-${n}.log`);};
+  const worker=async(host:string,op:string,n=attempt,epoch=0,timeout=120000)=>{
+    operation=op;status();
+    const limit=bounded(timeout),path=`${config.output}/host-${hosts.indexOf(host)}-${op}-${n}`;
+    try {
+      return await remote(host,local?invocation(op,n,epoch):`timeout --signal=KILL ${Math.max(1,Math.ceil(limit/1000)-5)}s sh -c 'export DM_FORMAL_OWNED_GROUP=$PPID; exec "$@"' dm-worker ${invocation(op,n,epoch)}`,limit,path+'.log');
+    } catch(error) {
+      // A killed or unreachable worker cannot write its own failure record.
+      writeDiagnostic(line=>writeFileSync(path+'-invocation-failure.json',line,{mode:0o600}),
+        {event:'worker-invocation-failure',step:op,attempt:n,...failureDetails(error)});
+      throw error;
+    }
+  };
   let cleanupPromise:Promise<void>|undefined;
   const cleanup=()=>cleanupPromise ??= (async()=>{
     phase='cleanup';status();
