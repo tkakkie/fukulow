@@ -148,7 +148,11 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
     expect(workspaceSrc).toContain('id="main-content"')
     expect(workspaceSrc).toContain('id="panel-content"')
     expect(workspaceSrc).toContain(
-      "const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')",
+      'const effectiveMobileLevel = $derived(resolveMobileLevel(route, () => searchOpen))',
+    )
+    const routingSrc = readFileSync(join(webDir, 'src/workspace-routing.ts'), 'utf8')
+    expect(routingSrc).toContain(
+      "const level: MobileLevel = !route?.channelId ? 'channels' : route.panel ? 'panel' : 'view'",
     )
     expect(workspaceSrc).not.toContain('左のフォーム')
     expect(workspaceSrc).not.toContain('トピックはまだありません。')
