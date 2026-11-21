@@ -11,16 +11,24 @@ export const diagnosticRule = {
 } as const;
 
 // Image builds just before a pair raise the 1-minute load past the pair-start limit (2026-11-21 bisection
-// step 2). Before any sample, wait for it to fall below settleBelow; the pair-start validity rule is unchanged.
+// step 2). Before any sample, wait for it to fall below `below`. If it does not within the bound, the run stops
+// before sampling with a recorded reason (maintainer review, 2026-11-21); the pair-start validity rule is unchanged.
 export const hostSettle = { below: 2, stepMs: 15_000, maxSteps: 60 } as const;
 
-export async function settleHostLoad(read: () => number, wait: (ms: number) => Promise<unknown>, o = hostSettle) {
-  for (let step = 0; step < o.maxSteps; step++) {
-    if (read() < o.below) return step * o.stepMs / 1000;
+export type HostSettle = { settled: boolean; waitSeconds: number; lastLoad: number };
+
+export async function settleHostLoad(read: () => number, wait: (ms: number) => Promise<unknown>, o = hostSettle): Promise<HostSettle> {
+  for (let step = 0; step <= o.maxSteps; step++) {
+    const lastLoad = read();
+    if (lastLoad < o.below) return { settled: true, waitSeconds: step * o.stepMs / 1000, lastLoad };
+    if (step === o.maxSteps) return { settled: false, waitSeconds: step * o.stepMs / 1000, lastLoad };
     await wait(o.stepMs);
   }
-  return o.maxSteps * o.stepMs / 1000;
+  throw new Error('unreachable');
 }
+
+export const hostSettleStopReason = (r: HostSettle, o = hostSettle) => r.settled ? null
+  : `host 1-minute load did not fall below ${o.below} within ${o.maxSteps * o.stepMs / 1000} s (last ${r.lastLoad.toFixed(2)}); stopped before sampling`;
 
 export type Validity = { valid: boolean; reasons: string[] };
 export const validityResult = (reasons: string[]): Validity => ({ valid: reasons.length === 0, reasons });

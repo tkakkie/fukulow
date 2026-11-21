@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticValidity, hasAppFailure, hostSettle, poolStatsCapability, settleHostLoad, validityResult } from './pool-before-after-diagnostic-results.ts';
+import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticValidity, hasAppFailure, hostSettle, hostSettleStopReason, poolStatsCapability, settleHostLoad, validityResult } from './pool-before-after-diagnostic-results.ts';
 import { generatorConfig } from './pool-before-after-config.ts';
 import { parseActivity } from './pool-before-after-db.ts';
 import { activityWindow, generatorStats, generatorWindow } from './pool-before-after-sampling.ts';
@@ -380,10 +380,21 @@ test('diagnosticAppEvidence counts unparseable app lines on both log paths and k
 test('pair start waits for post-build host load to settle, bounded, without changing the validity limit', async () => {
   const loads = [3.4, 2.9, 2.1, 1.7];
   let waits = 0;
-  const waited = await settleHostLoad(() => loads[waits] ?? 1, async () => { waits++; });
+  const settled = await settleHostLoad(() => loads[waits] ?? 1, async () => { waits++; });
+  assert.deepEqual(settled, { settled: true, waitSeconds: 3 * hostSettle.stepMs / 1000, lastLoad: 1.7 });
   assert.equal(waits, 3);
-  assert.equal(waited, 3 * hostSettle.stepMs / 1000);
-  waits = 0;
-  assert.equal(await settleHostLoad(() => 5, async () => { waits++; }), hostSettle.maxSteps * hostSettle.stepMs / 1000);
+  assert.equal(hostSettleStopReason(settled), null);
+});
+
+test('host load that never falls below the limit stops the run before sampling with a reason', async () => {
+  let waits = 0;
+  const stuck = await settleHostLoad(() => 2.5, async () => { waits++; });
+  assert.equal(stuck.settled, false);
+  assert.equal(stuck.lastLoad, 2.5);
   assert.equal(waits, hostSettle.maxSteps);
+  assert.equal(stuck.waitSeconds, hostSettle.maxSteps * hostSettle.stepMs / 1000);
+  assert.match(hostSettleStopReason(stuck) ?? '', /did not fall below 2 within 900 s \(last 2\.50\); stopped before sampling/);
+  waits = 0;
+  const lateDrop = await settleHostLoad(() => waits >= hostSettle.maxSteps ? 1.9 : 2.5, async () => { waits++; });
+  assert.equal(lateDrop.settled, true);
 });

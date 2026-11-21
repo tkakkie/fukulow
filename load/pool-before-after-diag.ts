@@ -9,7 +9,7 @@ import { outsideCheckout } from './proxy-target.ts';
 import { allowanceSeconds, diagnosticComposeOverride, diagnosticConfig, diagnosticLogBufferBytes, generatorConfig } from './pool-before-after-config.ts';
 import { activitySql, explainFixture, parseActivity, psqlArgs, scheduleExplain, topStatementsSql, untrackedSqlArgs } from './pool-before-after-db.ts';
 import { activityWindow, generatorProbe, generatorStats, generatorWindow, k6Address, processStats, sampler, sampleWindow } from './pool-before-after-sampling.ts';
-import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticRule, diagnosticValidity, hasAppFailure, poolStatsCapability, settleHostLoad, validityResult } from './pool-before-after-diagnostic-results.ts';
+import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticRule, diagnosticValidity, hasAppFailure, hostSettleStopReason, poolStatsCapability, settleHostLoad, validityResult } from './pool-before-after-diagnostic-results.ts';
 import { pairs, settings, timeoutNote, type Run, type Arm, type Counts } from './pool-before-after-summary.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, ChannelList, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const exec=promisify(execFile);
@@ -49,6 +49,7 @@ const sequence=pairs().slice(0,smoke?1:diagPairs).flatMap((arms,i)=>
   (smoke?(['B'] as const):arms).map(arm=>({scenario:'mixed' as const,pair:i+1,arm})));
 const runs=new Map<string, Parameters<typeof classifyPair>[0]>();
 const pairStarts=new Map<number, { at: number; hostLoad: number; settleWaitSeconds: number }>();
+let stopReason:string|null=null;
 const missingArm=(arm:Arm,reason='missing arm-run evidence')=>({...appCapabilities[arm],validity:validityResult([reason]),sendP95Ms:null,hasAppFailure:false});
 const pairResults=()=>Array.from({length:smoke?1:diagPairs},(_,index)=>{
   const pair=index+1;
@@ -68,7 +69,7 @@ function saveResults(complete=false) {
   const comparisons=pairResults();
   for(const pair of comparisons) save(`${output}/mixed-${pair.pair}-results.json`,pair);
   save(`${output}/summary.json`,{scope,timeoutNote,smoke,commits,appCapabilities,diagnostics:diagnosticSettings,
-    rule:diagnosticRule,pairs:comparisons,cleanupErrors,complete});
+    rule:diagnosticRule,pairs:comparisons,cleanupErrors,stopReason,complete});
 }
 let failed=false;
 try {
@@ -121,8 +122,10 @@ try {
   for(const cell of sequence) {
     check();
     if(!pairStarts.has(cell.pair)) {
-      const settleWaitSeconds=await settleHostLoad(()=>loadavg()[0],delay);
-      pairStarts.set(cell.pair,{at:Date.now(),hostLoad:loadavg()[0],settleWaitSeconds});
+      const settle=await settleHostLoad(()=>loadavg()[0],delay);
+      stopReason=hostSettleStopReason(settle);
+      if(stopReason)throw new Error('Host load did not settle');
+      pairStarts.set(cell.pair,{at:Date.now(),hostLoad:loadavg()[0],settleWaitSeconds:settle.waitSeconds});
     }
     const id=`${cell.scenario}-${cell.pair}-${cell.arm}`;
     const config=configs[cell.arm];
@@ -332,7 +335,7 @@ try {
 } catch(error) {
   failed=true;
   // Child-process errors may contain seed SQL and credentials. Never serialize them.
-  console.error(`${scope}: runner failed (${error instanceof Error&&error.message==='Interrupted'?'interrupted':'details suppressed'}); inspect completed external artifacts.`);
+  console.error(`${scope}: runner failed (${error instanceof Error&&error.message==='Interrupted'?'interrupted':stopReason??'details suppressed'}); inspect completed external artifacts.`);
 } finally {
   if(generatorName){try{docker('rm','-f',generatorName);}catch{cleanupErrors.push('Generator cleanup failed');}}
   if(activeCompose){try{command('docker',[...activeCompose,'down','--volumes','--remove-orphans'],undefined,activeEnv);}catch{cleanupErrors.push('Final Compose cleanup failed');}}
