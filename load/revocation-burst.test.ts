@@ -283,12 +283,15 @@ test('a slower send widens the run uncertainty without changing the first notice
 test('a notice without an unambiguous matching send record fails', () => {
   const missing = sendTimeFixture();
   const ambiguous = sendTimeFixture(-1);
-  ambiguous.sendTiming!.records.push(ambiguous.sendTiming!.records[0]);
-  for (const run of [missing, ambiguous]) {
+  const first = ambiguous.sendTiming!.records[0];
+  const duplicates = [first, { ...first, afterHold: true }];
+  ambiguous.sendTiming!.records.push(duplicates[1]);
+  for (const [run, unmatched] of [[missing, []], [ambiguous, duplicates]] as const) {
     const result = judge(run);
     assert.equal(result.verdict, 'FAIL');
     assert.deepEqual(result.reasons, ['a revocation has no matching server send record']);
     assert.deepEqual(result.summary.sendTiming?.missingSendRecords, run.revocations);
+    assert.deepEqual(result.summary.sendTiming?.unmatchedSendRecords, unmatched);
   }
 });
 
