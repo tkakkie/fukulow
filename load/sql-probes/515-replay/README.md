@@ -10,11 +10,13 @@ Use the repository Node version and Docker Compose. The runner uses the two revi
 node --test load/sql-probes/515-replay/probe.test.ts
 npm --prefix load run check
 node load/sql-probes/515-replay/run.ts --smoke --out /private/tmp/fk515d-smoke-1
+# Evening before the overnight run: full fixture size, one short cell, never evidence
+node load/sql-probes/515-replay/run.ts --rehearsal --out /absolute/path/to/new-rehearsal
 # On an idle measurement host
 node load/sql-probes/515-replay/run.ts --recorded --out /absolute/path/to/new-output
 ```
 
-The output directory must be new, outside the checkout and have an existing parent. Both modes use one Organization, 4,000 Members and synthetic Session keys, 200 public Channels and 17-byte Messages. Smoke uses 20,000 and 10,000 Messages in the two populated Channels, with 20 timed requests per arm and cell. It serves only to validate the harness. Recorded mode uses 1,000,000 and 100,000 Messages and 1,000 timed requests per arm and cell. Both use the slice 5 DB settings, pg_stat_statements, prefill and Channel log builders, insert-autovacuum reloptions, first freeze/analyze and checkpoint, then analyze, checkpoint and idle for each cell.
+The output directory must be new, outside the checkout and have an existing parent. Both modes use one Organization, 4,000 Members and synthetic Session keys, 200 public Channels and 17-byte Messages. Smoke uses 20,000 and 10,000 Messages in the two populated Channels, with 20 timed requests per arm and cell. It serves only to validate the harness. Rehearsal uses the recorded fixture with the first cell and one B/A block of 50 requests. Recorded mode uses 1,000,000 and 100,000 Messages and 1,000 timed requests per arm and cell. All modes use the slice 5 DB settings, pg_stat_statements, prefill and Channel log builders, insert-autovacuum reloptions, first freeze/analyze and checkpoint, then analyze, checkpoint and idle for each cell. Seed, settle and VACUUM run without the 10 s measurement `statement_timeout` ([harness core](../../harness-core/README.md)); every measured statement keeps it.
 
 ## Read the output
 
