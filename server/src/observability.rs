@@ -19,8 +19,11 @@ use tracing_subscriber::{
 };
 
 pub const INTERVAL: Duration = Duration::from_secs(60);
+const REVOCATION_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 const TARGET: &str = "fukulow";
 pub(crate) const REVOCATION_MEASUREMENT_TARGET: &str = "fukulow_revocation_measurement";
+static MEASURE_REVOCATIONS: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("FUKULOW_REVOCATION_MEASUREMENT").as_deref() == Ok("1"));
 static MEASUREMENT_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
 
@@ -35,8 +38,7 @@ pub fn init() -> Result<(), Box<dyn std::error::Error>> {
             b"{\"level\":\"ERROR\",\"target\":\"fukulow\",\"fields\":{\"event\":\"panic\"}}\n",
         );
     }));
-    let measure_revocations = std::env::var("FUKULOW_REVOCATION_MEASUREMENT").as_deref() == Ok("1");
-    subscriber(std::io::stderr, measure_revocations).try_init()?;
+    subscriber(std::io::stderr, revocation_measurement_enabled()).try_init()?;
     Ok(())
 }
 
@@ -61,8 +63,43 @@ where
     )
 }
 
+pub(crate) fn revocation_measurement_enabled() -> bool {
+    *MEASURE_REVOCATIONS
+}
+
 pub(crate) fn measurement_ms() -> f64 {
     MEASUREMENT_EPOCH.elapsed().as_secs_f64() * 1000.0
+}
+
+pub(crate) struct RevocationHoldCounts {
+    pub active_holds: usize,
+    pub high_water_mark: usize,
+    pub retry_attempts: u64,
+}
+
+pub(crate) fn spawn_revocation_holds_sampler(
+    sample: impl Fn() -> RevocationHoldCounts + Send + 'static,
+) -> Option<tokio::task::JoinHandle<()>> {
+    revocation_measurement_enabled().then(|| {
+        tokio::spawn(async move {
+            let period = REVOCATION_SAMPLE_INTERVAL;
+            let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticks.tick().await;
+                let counts = sample();
+                tracing::trace!(
+                    target: REVOCATION_MEASUREMENT_TARGET,
+                    parent: None,
+                    event = "revocation_holds_sample",
+                    server_ms = measurement_ms(),
+                    active_holds = counts.active_holds,
+                    high_water_mark = counts.high_water_mark,
+                    retry_attempts = counts.retry_attempts,
+                );
+            }
+        })
+    })
 }
 
 pub(crate) async fn request(request: Request, next: Next) -> Response {

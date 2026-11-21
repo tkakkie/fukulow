@@ -186,6 +186,73 @@ fn revocation_measurement_is_off_by_default_and_with_zero() {
     }
 }
 
+#[test]
+fn revocation_hold_samples_require_opt_in() {
+    const CHILD: &str = "FUKULOW_TEST_REVOCATION_HOLDS_CHILD";
+    const FLAG: &str = "FUKULOW_REVOCATION_MEASUREMENT";
+    const TEST: &str = "observability::tests::revocation_hold_samples_require_opt_in";
+    if std::env::var_os(CHILD).is_some() {
+        init().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let sampler = crate::spawn_revocation_holds_sampler();
+            assert_eq!(sampler.is_some(), std::env::var(FLAG).as_deref() == Ok("1"));
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            if let Some(sampler) = sampler {
+                sampler.abort();
+                assert!(sampler.await.unwrap_err().is_cancelled());
+            }
+        });
+        return;
+    }
+
+    for value in [None, Some("0"), Some("1")] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .env_remove(FLAG);
+        if let Some(value) = value {
+            command.env(FLAG, value);
+        }
+        let output = command.output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            output.status.success(),
+            "{FLAG}={value:?}: {stdout}{stderr}"
+        );
+        assert!(stdout.contains(TEST), "{stdout}");
+        if value != Some("1") {
+            assert!(stderr.is_empty(), "{FLAG}={value:?}: {stderr}");
+            assert!(!stdout.contains("revocation_holds_sample"), "{stdout}");
+            continue;
+        }
+        let events: Vec<Value> = stderr
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2, "{stderr}");
+        let mut previous_ms = 0.0;
+        for event in events {
+            assert_eq!(event["target"], REVOCATION_MEASUREMENT_TARGET);
+            let fields = event["fields"].as_object().unwrap();
+            assert_eq!(fields.len(), 5);
+            assert_eq!(fields["event"], "revocation_holds_sample");
+            assert_eq!(fields["active_holds"], 0);
+            assert_eq!(fields["high_water_mark"], 0);
+            assert_eq!(fields["retry_attempts"], 0);
+            let server_ms = fields["server_ms"].as_f64().unwrap();
+            assert!(server_ms.is_finite() && server_ms >= previous_ms);
+            previous_ms = server_ms;
+        }
+    }
+}
+
 #[tokio::test]
 async fn request_spans_redact_secrets_and_use_templates_and_generated_ids() {
     let output = Capture::default();

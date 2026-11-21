@@ -1,8 +1,11 @@
 use super::*;
-use crate::observability::{RevocationMetric, RevocationMetrics, revocation_metrics};
+use crate::observability::{
+    RevocationHoldCounts, RevocationMetric, RevocationMetrics, revocation_measurement_enabled,
+    revocation_metrics,
+};
 use std::{
     collections::BTreeMap,
-    sync::{LazyLock, MutexGuard},
+    sync::{LazyLock, MutexGuard, atomic::AtomicU64},
 };
 
 const REGISTRATION_CAP: usize = 64;
@@ -15,26 +18,40 @@ static CAPACITY: LazyLock<Arc<Capacity>> = LazyLock::new(|| Arc::new(Capacity::n
 
 type HoldKey = (Instant, Uuid, u64);
 
-struct Capacity {
+pub(super) struct Capacity {
     limit: usize,
-    owners: Mutex<BTreeMap<HoldKey, Weak<Entry>>>,
+    measure: bool,
+    reservations: Mutex<Reservations>,
+    retry_attempts: AtomicU64,
+}
+
+#[derive(Default)]
+struct Reservations {
+    owners: BTreeMap<HoldKey, Weak<Entry>>,
+    high_water_mark: usize,
 }
 
 impl Capacity {
     fn new(limit: usize) -> Self {
         Self {
             limit,
-            owners: Mutex::default(),
+            measure: revocation_measurement_enabled(),
+            reservations: Mutex::default(),
+            retry_attempts: AtomicU64::new(0),
         }
     }
 
     fn reserve(self: &Arc<Self>, entry: &Arc<Entry>, id: u64, expires: Instant) -> Option<Permit> {
-        let mut owners = self.owners.lock().unwrap_or_else(|e| e.into_inner());
-        if owners.len() >= self.limit {
+        let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        if reservations.owners.len() >= self.limit {
             return None;
         }
         let key = (expires, entry.id, id);
-        owners.insert(key, Arc::downgrade(entry));
+        reservations.owners.insert(key, Arc::downgrade(entry));
+        if self.measure {
+            reservations.high_water_mark =
+                reservations.high_water_mark.max(reservations.owners.len());
+        }
         Some(Permit {
             capacity: self.clone(),
             key,
@@ -42,22 +59,40 @@ impl Capacity {
     }
 
     fn expired(&self, now: Instant) -> Option<(HoldKey, Weak<Entry>)> {
-        let owners = self.owners.lock().unwrap_or_else(|e| e.into_inner());
-        let (&key, entry) = owners.first_key_value()?;
+        let reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        let (&key, entry) = reservations.owners.first_key_value()?;
         (key.0 <= now).then(|| (key, entry.clone()))
     }
 
     fn release(&self, key: HoldKey) {
-        self.owners
+        self.reservations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .owners
             .remove(&key);
+    }
+
+    pub(super) fn count_retry_attempt(&self) {
+        self.retry_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn sample(&self) -> RevocationHoldCounts {
+        let reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        RevocationHoldCounts {
+            active_holds: reservations.owners.len(),
+            high_water_mark: reservations.high_water_mark,
+            retry_attempts: self.retry_attempts.load(Ordering::Relaxed),
+        }
     }
 
     #[cfg(test)]
     fn available_permits(&self) -> usize {
-        self.limit - self.owners.lock().unwrap().len()
+        self.limit - self.reservations.lock().unwrap().owners.len()
     }
+}
+
+pub(crate) fn revocation_hold_counts() -> RevocationHoldCounts {
+    CAPACITY.sample()
 }
 
 struct Permit {
@@ -171,6 +206,10 @@ impl Holds {
         self.entries.get(&id).map(|hold| hold.expires)
     }
 
+    pub(super) fn retry_measurement(&self) -> Option<Arc<Capacity>> {
+        self.capacity.measure.then(|| self.capacity.clone())
+    }
+
     pub(super) fn park(&mut self, id: u64, pending: impl FnOnce() -> Pending) {
         if let Some(hold) = self.entries.get_mut(&id) {
             hold.parked = Some(pending());
@@ -256,6 +295,13 @@ impl Holds {
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+
+    fn measured_capacity(limit: usize) -> Arc<Capacity> {
+        Arc::new(Capacity {
+            measure: true,
+            ..Capacity::new(limit)
+        })
+    }
 
     fn registration(capacity: Arc<Capacity>) -> Registration {
         let entry = crate::channels::activity::tests::entry();
@@ -535,7 +581,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn retry_limit_retires_revocation() {
-        let reg = registration(Arc::new(Capacity::new(1)));
+        let capacity = Arc::new(Capacity {
+            measure: false,
+            ..Capacity::new(1)
+        });
+        let reg = registration(capacity.clone());
         let (pool, capture) = failed_handoff(&reg).await;
         for (attempt, millis) in [250, 500, 1000, 2000, 4000].into_iter().enumerate() {
             let mut next = std::pin::pin!(reg.next());
@@ -570,5 +620,129 @@ mod tests {
         );
         assert_eq!(metric(&reg, RevocationMetric::Retries), 1);
         assert_eq!(metric(&reg, RevocationMetric::Timeout), 0);
+        // Without the measurement flag, holds and retries leave no measurement trace.
+        let counts = capacity.sample();
+        assert_eq!((counts.high_water_mark, counts.retry_attempts), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hold_counts_track_admission_and_release_across_registrations() {
+        let capacity = measured_capacity(REGISTRATION_CAP + 1);
+        let first = registration(capacity.clone());
+        let second = registration(capacity.clone());
+        let sample = |active_holds, high_water_mark| {
+            let counts = capacity.sample();
+            assert_eq!(counts.active_holds, active_holds);
+            assert_eq!(counts.high_water_mark, high_water_mark);
+            assert_eq!(counts.retry_attempts, 0);
+        };
+        sample(0, 0);
+
+        let captures = fill(&first, REGISTRATION_CAP + 1);
+        assert!(captures[REGISTRATION_CAP].check().is_none());
+        sample(REGISTRATION_CAP, REGISTRATION_CAP);
+        let overflow = fill(&second, 2);
+        assert!(overflow[1].check().is_none());
+        let peak = REGISTRATION_CAP + 1;
+
+        {
+            let mut b = first.entry.buffer.lock().unwrap();
+            // Sample only after release to catch a peak that falls between ticks.
+            for (capture, delivered, active) in [
+                (&captures[0], true, peak - 1),
+                (&captures[1], false, peak - 2),
+            ] {
+                let id = capture.check().unwrap().id;
+                b.holds.complete(id, delivered);
+                b.revocations.finish(id);
+                sample(active, peak);
+            }
+            let channel = captures[2].check().unwrap().channel;
+            b.revocations
+                .capture(ChangeScope::Channel(channel))
+                .retire();
+            b.retire_notices();
+            sample(peak - 3, peak);
+        }
+
+        let _entry = second.entry.clone();
+        drop(second);
+        sample(peak - 4, peak);
+        tokio::time::advance(TIMEOUT).await;
+        assert!(first.next().now_or_never().is_none());
+        sample(0, peak);
+        fill(&first, 1);
+        sample(1, peak);
+        drop(first);
+        sample(0, peak);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_attempts_count_only_started_rechecks() {
+        let capacity = measured_capacity(1);
+        let reg = registration(capacity.clone());
+        let (pool, capture) = failed_handoff(&reg).await;
+        let channel = capture.check().unwrap().channel;
+        assert_eq!(capacity.sample().retry_attempts, 0);
+
+        for (attempt, millis) in [250, 500, 1000, 2000, 4000].into_iter().enumerate() {
+            tokio::time::advance(Duration::from_millis(millis)).await;
+            let retry = reg.next().now_or_never().flatten().unwrap();
+            let gate = pause_member(
+                reg.entry.organization,
+                channel,
+                "handoff_recheck",
+                Some(reg.entry.member.0),
+            );
+            let mut handoff = std::pin::pin!(retry.handoff(&pool, |_| async {
+                panic!("a failed retry polled the held write")
+            }));
+            assert!(handoff.as_mut().now_or_never().is_none());
+            assert_eq!(gate.entered.available_permits(), 1);
+            assert_eq!(capacity.sample().retry_attempts, attempt as u64);
+            gate.release.add_permits(1);
+            assert_eq!(handoff.await, None::<()>);
+            assert_eq!(capacity.sample().retry_attempts, attempt as u64 + 1);
+        }
+        assert!(capture.check().is_none());
+        let counts = capacity.sample();
+        assert_eq!(counts.active_holds, 0);
+        assert_eq!(counts.high_water_mark, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_retired_before_recheck_do_not_count() {
+        let capacity = measured_capacity(3);
+        let fenced = registration(capacity.clone());
+        let closed = registration(capacity.clone());
+        let expired = registration(capacity.clone());
+        let (pool, capture) = failed_handoff(&fenced).await;
+        failed_handoff(&closed).await;
+        failed_handoff(&expired).await;
+
+        tokio::time::advance(BACKOFF).await;
+        let fenced_retry = fenced.next().now_or_never().flatten().unwrap();
+        let closed_retry = closed.next().now_or_never().flatten().unwrap();
+        let expired_retry = expired.next().now_or_never().flatten().unwrap();
+        {
+            let channel = capture.check().unwrap().channel;
+            let mut b = fenced.entry.buffer.lock().unwrap();
+            b.revocations
+                .capture(ChangeScope::Channel(channel))
+                .retire();
+            b.retire_notices();
+        }
+        drop(closed);
+        for retry in [fenced_retry, closed_retry] {
+            assert_eq!(retry.handoff(&pool, |_| async {}).await, None);
+            assert_eq!(capacity.sample().retry_attempts, 0);
+        }
+
+        tokio::time::advance(TIMEOUT).await;
+        assert_eq!(expired_retry.handoff(&pool, |_| async {}).await, None);
+        let counts = capacity.sample();
+        assert_eq!(counts.retry_attempts, 0);
+        assert_eq!(counts.active_holds, 0);
+        assert_eq!(counts.high_water_mark, 3);
     }
 }

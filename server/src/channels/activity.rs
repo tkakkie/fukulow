@@ -18,6 +18,7 @@ mod holds;
 mod revocations;
 pub(crate) use dms::DmPublication;
 use holds::Holds;
+pub(crate) use holds::revocation_hold_counts;
 use revocations::{Capture, Check, Revocations};
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -1067,7 +1068,16 @@ impl NoticeFrame {
                         return std::task::Poll::Ready(Ok(None));
                     }
                     if check.needs_recheck {
-                        return std::task::Poll::Ready(Err((check, hold_deadline)));
+                        let retry_measurement = if self.retry {
+                            holds.retry_measurement()
+                        } else {
+                            None
+                        };
+                        return std::task::Poll::Ready(Err((
+                            check,
+                            hold_deadline,
+                            retry_measurement,
+                        )));
                     }
                     holds.complete(
                         check.id,
@@ -1084,7 +1094,7 @@ impl NoticeFrame {
         let first = loop {
             match std::future::poll_fn(|cx| first_poll(cx, deadline)).await {
                 Ok(first) => break first,
-                Err((check, hold_deadline)) => {
+                Err((check, hold_deadline, retry_measurement)) => {
                     let checked = (check.generation, check.revision);
                     if last_checked.is_some_and(|last| self.retry || checked <= last) {
                         break None;
@@ -1095,7 +1105,10 @@ impl NoticeFrame {
                         hold_deadline.map_or(limit, |expires| expires.min(limit))
                     });
                     let Some(pool) = pool else { break None };
-                    match self.recheck_revocation(pool, check, deadline).await {
+                    match self
+                        .recheck_revocation(pool, check, deadline, retry_measurement)
+                        .await
+                    {
                         Ok(()) => {}
                         Err(RecheckFailure::Deadline) => break None,
                         Err(RecheckFailure::Database) => {
@@ -1144,6 +1157,7 @@ impl NoticeFrame {
         pool: &sqlx::PgPool,
         check: Check,
         deadline: Instant,
+        retry_measurement: Option<Arc<holds::Capacity>>,
     ) -> Result<(), RecheckFailure> {
         let selected = [
             (self.entry.clone(), None),
@@ -1158,6 +1172,9 @@ impl NoticeFrame {
                 Some(self.entry.member.0),
             )
             .await;
+            if let Some(capacity) = retry_measurement {
+                capacity.count_retry_attempt();
+            }
             authorize_batch(pool, &selected).await
         })
         .await
