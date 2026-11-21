@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 export const image=/image: (postgres:[^\s]+)/.exec(readFileSync(new URL('../compose.yml',import.meta.url),'utf8'))?.[1];
 if(!image)throw new Error('missing pinned image');
 export const docker=(...args:string[])=>execFileSync('docker',args,{encoding:'utf8',maxBuffer:128*1024*1024}).trim();
+export const readinessArgs=(container:string)=>['exec',container,'pg_isready','-h','127.0.0.1','-p','5432','-U','postgres'];
 export class Session {
   child:ReturnType<typeof spawn>; buffer=''; stderr='';
   pending?:{marker:string;resolve:(s:string)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>};
@@ -29,7 +30,8 @@ export class Database {
   name=`fukulow-unread-init-${process.pid}-${randomUUID().slice(0,8)}`; created=false;
   start(){this.created=true;docker('run','-d','--name',this.name,'-p','127.0.0.1::5432','-e','POSTGRES_HOST_AUTH_METHOD=trust',image!,
     '-c','shared_buffers=128MB','-c','work_mem=4MB','-c','max_connections=30');}
-  async ready(){for(let i=0;i<120;i++){try{docker('exec',this.name,'pg_isready','-U','postgres');return;}catch{}await new Promise(r=>setTimeout(r,250));}throw new Error('Postgres readiness timeout');}
+  // The image's init step runs a temporary socket-only server; TCP readiness waits for the final one.
+  async ready(){for(let i=0;i<120;i++){try{docker(...readinessArgs(this.name));return;}catch{}await new Promise(r=>setTimeout(r,250));}throw new Error('Postgres readiness timeout');}
   sql(sql:string,db='postgres'){return execFileSync('docker',['exec','-i',this.name,'psql','-XqAt','-v','ON_ERROR_STOP=1','-U','postgres','-d',db],{input:sql,encoding:'utf8',maxBuffer:128*1024*1024}).trim();}
   migrate(){
     this.sql('CREATE DATABASE base;');
