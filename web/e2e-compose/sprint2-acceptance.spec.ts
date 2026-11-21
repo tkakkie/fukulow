@@ -710,9 +710,9 @@ test('Unread (P8)', async ({ browser, baseURL }) => {
     await expect(guestPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
 
     const channelNav = guestPage.locator('#channel-content')
-    const targetChannelRow = channelNav
-      .locator('.channel-list > li > .ui-list-row-group > button.ui-list-row')
-      .filter({ hasText: targetChannel.name })
+    const targetChannelRow = channelNav.locator(
+      `li[data-channel-id="${targetChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
+    )
     await expect(targetChannelRow).toBeVisible()
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveCount(0)
 
