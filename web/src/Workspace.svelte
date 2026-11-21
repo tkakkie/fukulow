@@ -692,9 +692,11 @@
       s.archivedList?.channels.some((c) => c.id === target.channelId) ||
       s.openChannel?.id === target.channelId,
     )
-    if (!hasChannel && target.channelKind !== 'channel') return false
+    // A hit's kind comes from the server, which only returns readable Messages; an unloaded
+    // Channel or DM opens through the unknown-kind hint and the server decides availability.
+    if (!hasChannel && !target.channelKind) return false
     if (!target.topicId) return true
-    if (isDm) return false
+    if (isDm || target.channelKind === 'dm') return false
     const topicsState = session.topics(target.channelId).state
     if (topicsState.topic(target.topicId).notFound) return false
     if (topicsState.topics.some((t) => t.topicId === target.topicId)) return true

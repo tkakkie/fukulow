@@ -433,23 +433,14 @@ describe('Workspace search integration (#153)', () => {
     }
   })
 
-  it('keeps the current view and shows an inline notice when selecting a hit whose Channel cannot be opened', async () => {
+  it('keeps the current view and shows an inline notice when selecting a DM hit that names a Topic', async () => {
     const ctx = await mountSearchWorkspace({
-      searchSource: hitSource({ ...record(37, DM_ID), body: 'リリース' }, 'dm'),
+      searchSource: hitSource({ ...record(37, DM_ID), body: 'リリース', topic_id: 'topic-x' }, 'dm'),
     })
     try {
       const routeBefore = ctx.navigation.get().target
-      const form = ctx.host.querySelector('#main-content [role="search"]')!
-      const input = form.querySelector('input')!
-      input.value = 'リリース'
-      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
-      flushSync()
-      form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
-      await settle()
-
-      // DM hit is absent from loaded DM rows and cannot be opened locally.
-      const hitButton = ctx.host.querySelector('#main-content ol button')!
-      hitButton.click()
+      await submitSearch(ctx.host, 'リリース')
+      ctx.host.querySelector<HTMLButtonElement>('#main-content ol button')!.click()
       await settle()
 
       expect(ctx.navigation.get().target).toEqual(routeBefore)
@@ -457,6 +448,42 @@ describe('Workspace search integration (#153)', () => {
       expect(ctx.host.querySelector('[data-testid="search-open-notice"]')?.textContent).toContain('開けません')
     } finally {
       await ctx.close()
+    }
+  })
+
+  it.each([
+    ['readable', true],
+    ['server-denied', false],
+  ] as const)('opens a %s DM hit absent from loaded DM rows through the server', async (_name, readable) => {
+    vi.useFakeTimers()
+    const hit = { ...record(37, DM_ID), id: 'dm-hit', body: 'リリース古いDM' }
+    const ctx = await mountSearchWorkspace({
+      channelRows: [channel(CH_ID, 'general')],
+      searchSource: hitSource(hit, 'dm'),
+      setupNet(net) {
+        net.pages[DM_ID] = readable
+          ? messagePage([hit])
+          : { ok: false, kind: 'http', status: 404, error: 'channel not found' }
+      },
+    })
+    try {
+      await submitSearch(ctx.host, 'リリース古いDM')
+      ctx.host.querySelector<HTMLButtonElement>('#main-content ol button')!.click()
+      await vi.advanceTimersByTimeAsync(1000)
+      await settle()
+
+      expect(ctx.location.href).toBe(`/o/${ORG_ID}/c/${DM_ID}`)
+      expect(ctx.host.querySelector('[data-testid="search-open-notice"]')).toBeNull()
+      if (readable) {
+        expect(ctx.host.querySelector('#main-content .ui-message-row--search-match')
+          ?.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe(hit.id)
+      } else {
+        expect(ctx.raw.sync.get().channels[DM_ID].state).toBe('unavailable')
+        expect(ctx.host.querySelector('[data-message-id="dm-hit"]')).toBeNull()
+      }
+    } finally {
+      await ctx.close()
+      vi.useRealTimers()
     }
   })
 
@@ -939,7 +966,7 @@ describe('Workspace search integration (#153)', () => {
 
     const mockAnnouncements: string[] = []
     const mockCtx = await mountSearchWorkspace({
-      searchSource: hitSource({ ...record(37, DM_ID), body: 'リリース' }, 'dm'),
+      searchSource: hitSource({ ...record(37, DM_ID), body: 'リリース', topic_id: 'topic-x' }, 'dm'),
       onannounce: (msg) => mockAnnouncements.push(msg),
     })
     try {
