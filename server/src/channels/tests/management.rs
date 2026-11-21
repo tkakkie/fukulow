@@ -38,6 +38,7 @@ pub(super) async fn snapshot(pool: &PgPool) -> Value {
 #[fukulow_test::test]
 async fn grant_target_lock_contention_leaves_rows_and_notices_unchanged(pool: PgPool) {
     use crate::channels::activity::{Activity, Notice};
+    use futures_util::FutureExt;
     use std::{sync::Arc, time::Duration};
 
     let state = AppState::for_test(pool.clone()).await;
@@ -76,24 +77,25 @@ async fn grant_target_lock_contention_leaves_rows_and_notices_unchanged(pool: Pg
     assert_eq!(snapshot(&pool).await, before);
     activity.drained().await;
     for registration in [&owner_registration, &target_registration] {
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), registration.next())
-                .await
-                .is_err()
-        );
+        assert!(registration.next().now_or_never().is_none());
     }
 
     assert_eq!(revoke().await.status(), StatusCode::NO_CONTENT);
     assert_ne!(snapshot(&pool).await, before);
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), owner_registration.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .event,
-        Notice::ChannelMembersChanged {
-            channel_id: channel
-        }
+    // The revoke starts separate post-COMMIT publishers for these two keys.
+    // Either can arrive first (realtime spec A7).
+    activity.drained().await;
+    let notices: Vec<_> = std::iter::from_fn(|| owner_registration.next().now_or_never().flatten())
+        .map(|frame| frame.event)
+        .collect();
+    assert!(
+        matches!(
+            notices.as_slice(),
+            [Notice::ChannelMembersChanged { channel_id }, Notice::MembersChanged]
+                | [Notice::MembersChanged, Notice::ChannelMembersChanged { channel_id }]
+                if *channel_id == channel
+        ),
+        "expected one ChannelMembersChanged for {channel} and one MembersChanged, got {notices:?}"
     );
 }
 
