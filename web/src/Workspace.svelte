@@ -982,9 +982,9 @@
           onswitchorganization={otherOrg && onselectorganization ? () => { if (otherOrg) onselectorganization(otherOrg.organization_id) } : undefined}
           onselecttopic={handleSelectTopic}
           onstartnewtopic={handleStartNewTopic}
-          onrename={async (name) => (selected?.kind === 'channel' ? channels.rename(selected.id, name) : null)}
-          onarchive={async () => (selected?.kind === 'channel' ? channels.archive(selected.id) : null)}
-          onrestore={async () => (selected?.kind === 'channel' ? channels.restore(selected.id) : null)}
+          onrename={(name) => (selected?.kind === 'channel' ? channels.rename(selected.id, name) : Promise.resolve(null))}
+          onarchive={() => (selected?.kind === 'channel' ? channels.archive(selected.id) : Promise.resolve(null))}
+          onrestore={() => (selected?.kind === 'channel' ? channels.restore(selected.id) : Promise.resolve(null))}
         />
       </Panel>
     </div>
