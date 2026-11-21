@@ -14,7 +14,7 @@ import { performance } from 'node:perf_hooks';
 import { setTimeout as pause } from 'node:timers/promises';
 import { appEvidence } from './app-evidence.ts';
 import { judge, type AttackOp, type LockSample, type OwnerOp, type Phase, type ReadOp } from './signin-owner-judgment.ts';
-import type { NativeSessionResponse, SetupRequest } from '../web/src/api-schema.d.ts';
+import type { ErrorBody, NativeSessionResponse, SetupRequest } from '../web/src/api-schema.d.ts';
 
 function integer(key: string, fallback: number, max: number) {
   const value = process.env[key] ?? String(fallback);
@@ -58,6 +58,21 @@ const lockQuery = `SELECT count(*) FILTER (WHERE wait_event_type='Lock' AND quer
     AND query ~ 'FROM accounts WHERE (email|id) = \\$1 FOR UPDATE')),0),
   count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename='fukulow_app' AND backend_type='client backend'`;
 
+// observability::report logs cumulative admission rejections per kind every 60 s; keep the last report
+// per kind as a server-side cross-check of the client's 503 codes (it can trail the run by up to 60 s).
+function admissionRejected(log: string) {
+  const last: Record<string, { count: number; at: string }> = {};
+  for (const line of log.split('\n')) {
+    if (!line.includes('"admission_rejected"')) continue;
+    try {
+      const row = JSON.parse(line), kind = row?.fields?.kind, count = row?.fields?.count;
+      if (row?.fields?.event === 'admission_rejected' && typeof kind === 'string' && /^[a-z_]{1,32}$/.test(kind) && Number.isSafeInteger(count))
+        last[kind] = { count, at: String(row.timestamp) };
+    } catch { /* unparseable lines already make appEvidence incomplete */ }
+  }
+  return last;
+}
+
 const owner: OwnerOp[] = [], attack: AttackOp[] = [], reads: ReadOp[] = [], locks: LockSample[] = [];
 const skipped = { owner: 0, attack: 0, reads: 0 };
 let failed = false, phase = 'source', serverCommit: string | null = null, judgment: ReturnType<typeof judge> | undefined;
@@ -79,15 +94,20 @@ try {
   const base = `http://127.0.0.1:${port}`;
   const request = async (path: string, init: RequestInit) => {
     const start = performance.now();
-    let status = 0, body: unknown = null;
+    let status = 0, body: unknown = null, error: string | undefined;
     try {
       const response = await fetch(base + path, { ...init, redirect: 'error',
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(TIMEOUT_MS)]) });
       status = response.status;
       const text = await response.text();
       if (status === 200 && text) body = JSON.parse(text);
+      // Keep only the ErrorBody code (a server constant) to classify rejections, e.g. each 503's cause.
+      if (status >= 400) {
+        try { const code = (JSON.parse(text) as Partial<ErrorBody>).error; error = typeof code === 'string' && /^[a-z0-9_ ]{1,64}$/.test(code) ? code : 'unrecognised_error_body'; }
+        catch { error = text ? 'unrecognised_error_body' : 'no_error_body'; }
+      }
     } catch { status = 0; }
-    return { status, body, ms: performance.now() - start, end: performance.now() };
+    return { status, body, error, ms: performance.now() - start, end: performance.now() };
   };
   const json = (ip: string | null, token?: string) => ({ 'Content-Type': 'application/json',
     ...(ip ? { 'X-Load-Client-IP': ip } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) });
@@ -159,7 +179,7 @@ try {
           : await request('/api/v1/me/password', { method: 'PUT', headers: json(OWNER_IP, ownerToken),
             body: JSON.stringify({ current_password: passwords[current], new_password: passwords[target] }) });
         if (due === 'password' && r.status === 204) current = target;
-        owner.push({ kind: due, phase: at, status: r.status, ms: r.ms, endMs: r.end - t0 });
+        owner.push({ kind: due, phase: at, status: r.status, ms: r.ms, endMs: r.end - t0, error: r.error });
       })().finally(() => { ownerBusy = false; }));
     }
     while (now >= nextAttack && nextAttack < startAt.B2 && now < startAt.B2) {
@@ -169,7 +189,7 @@ try {
       track((async () => {
         const r = await request('/api/v1/native/session', { method: 'POST', headers: json(ATTACKER_IP),
           body: JSON.stringify({ email: setup.email, password: wrong }) });
-        attack.push({ phase: 'B1', status: r.status, ms: r.ms, endMs: r.end - t0 });
+        attack.push({ phase: 'B1', status: r.status, ms: r.ms, endMs: r.end - t0, error: r.error });
       })().finally(() => { attackActive--; }));
     }
     while (now >= nextRead) {
@@ -179,7 +199,7 @@ try {
       const at = phaseOf(now);
       track((async () => {
         const r = await request(`/api/v1/orgs/${organization}/channels`, { method: 'GET', headers: { Authorization: `Bearer ${readerBody.token}` } });
-        reads.push({ phase: at, status: r.status, ms: r.ms });
+        reads.push({ phase: at, status: r.status, ms: r.ms, error: r.error });
       })().finally(() => { readActive--; }));
     }
     await pause(2);
@@ -197,9 +217,10 @@ try {
   judgment = judge({ owner, attack, reads, locks, phaseStartMs: startAt, endMs, poolMax: POOL_MAX,
     server: { poolTimeouts, panics: evidence.panics, complete: evidence.complete } });
   writeFileSync(`${output}/server-evidence.json`, JSON.stringify({ pool: evidence.pool, databaseFailures: evidence.databaseFailures,
-    http5xx: evidence.http5xx, panics: evidence.panics, reasons: evidence.reasons }, null, 2));
+    http5xx: evidence.http5xx, panics: evidence.panics, otherWarnings: evidence.otherWarnings, complete: evidence.complete,
+    reasons: evidence.reasons, admissionRejected: admissionRejected(logs) }, null, 2));
   console.log('SIGNIN_OWNER_JUDGMENT ' + JSON.stringify({ formal: false, allPass: judgment.allPass, incomplete: judgment.incomplete,
-    checks: judgment.checks, skipped }));
+    checks: judgment.checks, causes: judgment.causes, skipped }));
 } catch {
   // Child-process errors can include environment or SQL. Never serialize raw errors.
   failed = true;

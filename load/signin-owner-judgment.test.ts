@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { judge, type Run, type OwnerOp } from './signin-owner-judgment.ts';
+import { causes, judge, type Run, type OwnerOp } from './signin-owner-judgment.ts';
 
 // B0 owner: sign-in p50 V = 50 ms, p95 60 ms -> B1 bound 60 + 5 * 50 = 310 ms.
 function run(): Run {
@@ -87,4 +87,16 @@ test('missing baseline or samples make the run incomplete, not a pass', () => {
     const m = run(); m.reads = m.reads.filter(x => x.phase !== phase);
     assert.equal(judge(m).incomplete, true, `${phase} reads missing`);
   }
+});
+
+test('non-success answers are tallied by phase, route and ErrorBody code', () => {
+  const r = run();
+  r.owner.find(o => o.status === 503)!.error = 'password admission unavailable';
+  r.attack[1].error = 'rate_limited';
+  r.reads.push({ phase: 'B1', status: 0, ms: 45_000 });
+  assert.deepEqual(causes(r), {
+    B1: { owner_signin: { '429 no_error_body': 1 }, owner_password: { '503 password admission unavailable': 1 },
+      attack: { '401 no_error_body': 1, '429 rate_limited': 1 }, reads: { '0 client_timeout_or_transport': 1 } },
+  });
+  assert.deepEqual(judge(r).causes, causes(r));
 });

@@ -4,9 +4,10 @@
 import { distribution } from './signin-summary.ts';
 
 export type Phase = 'B0' | 'B1' | 'B2';
-export type OwnerOp = { kind: 'signin' | 'password'; phase: Phase; status: number; ms: number; endMs: number };
-export type AttackOp = { phase: Phase; status: number; ms: number; endMs: number };
-export type ReadOp = { phase: Phase; status: number; ms: number };
+// `error` is the response's ErrorBody code for a non-2xx answer (a server constant, never data), else absent.
+export type OwnerOp = { kind: 'signin' | 'password'; phase: Phase; status: number; ms: number; endMs: number; error?: string };
+export type AttackOp = { phase: Phase; status: number; ms: number; endMs: number; error?: string };
+export type ReadOp = { phase: Phase; status: number; ms: number; error?: string };
 export type LockSample = { atMs: number; waiters: number; maxWaitMs: number; connections: number };
 export type ServerEvidence = { poolTimeouts: number; panics: number; complete: boolean };
 export type Run = { owner: OwnerOp[]; attack: AttackOp[]; reads: ReadOp[]; locks: LockSample[];
@@ -38,6 +39,20 @@ export function phaseStats(run: Run, phase: Phase) {
     peakWaiters: peak(locks.map(s => s.waiters)), peakWaitMs: peak(locks.map(s => s.maxWaitMs)),
     peakConnections: peak(locks.map(s => s.connections)), samples: locks.length,
   };
+}
+
+/** Non-success answers per phase and route, keyed `<status> <ErrorBody code>`, so each 503 has a cause. */
+export function causes(run: Run) {
+  const routes = { owner_signin: run.owner.filter(o => o.kind === 'signin'), owner_password: run.owner.filter(o => o.kind === 'password'),
+    attack: run.attack, reads: run.reads };
+  const result: Record<string, Record<string, Record<string, number>>> = {};
+  for (const [route, ops] of Object.entries(routes)) for (const op of ops as readonly { phase: Phase; status: number; error?: string }[]) {
+    if (ok(op.status)) continue;
+    const key = `${op.status} ${op.status === 0 ? 'client_timeout_or_transport' : op.error ?? 'no_error_body'}`;
+    const phase = (result[op.phase] ??= {}), byRoute = (phase[route] ??= {});
+    byRoute[key] = (byRoute[key] ?? 0) + 1;
+  }
+  return result;
 }
 
 export function judge(run: Run) {
@@ -82,6 +97,6 @@ export function judge(run: Run) {
   };
   const b2Strict = !incomplete && b2Owner.length > 0 && b2Owner.every(o => ok(o.status));
   return { formal: false, incomplete, bounds: { ownerMs: bound, readMs: readBound, lastCountedAttackMs: lastCounted }, b2Strict,
-    phases: { B0: b0, B1: b1, B2: b2 }, checks,
+    phases: { B0: b0, B1: b1, B2: b2 }, causes: causes(run), checks,
     allPass: !incomplete && Object.values(checks).every(c => c.pass) };
 }
