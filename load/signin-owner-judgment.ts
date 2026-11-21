@@ -2,6 +2,7 @@
 // unchanged, applied to one run. The workload deviates (one attacker IP, under 50 offered/s),
 // so a pass here is never a formal Part B PASS; `formal` stays false.
 import { distribution } from './signin-summary.ts';
+import type { ErrorBody } from '../web/src/api-schema.d.ts';
 
 export type Phase = 'B0' | 'B1' | 'B2';
 // `error` is the response's ErrorBody code for a non-2xx answer (a server constant, never data), else absent.
@@ -99,4 +100,35 @@ export function judge(run: Run) {
   return { formal: false, incomplete, bounds: { ownerMs: bound, readMs: readBound, lastCountedAttackMs: lastCounted }, b2Strict,
     phases: { B0: b0, B1: b1, B2: b2 }, causes: causes(run), checks,
     allPass: !incomplete && Object.values(checks).every(c => c.pass) };
+}
+
+/** The ErrorBody code of a non-2xx body (server constants such as "too many sign-in attempts"); never other text. */
+export function errorCode(text: string) {
+  if (!text) return 'no_error_body';
+  try {
+    const code = (JSON.parse(text) as Partial<ErrorBody> | null)?.error;
+    return typeof code === 'string' && /^[a-z0-9_ .-]{1,64}$/.test(code) ? code : 'unrecognised_error_body';
+  } catch { return 'unrecognised_error_body'; }
+}
+
+/**
+ * observability::report logs cumulative admission rejections per kind every 60 s; keep the last report per
+ * kind as a server-side cross-check of the client's 503 codes (it can trail the run by up to 60 s). A line
+ * that mentions the event but does not parse marks the result incomplete instead of being skipped.
+ */
+export function admissionRejected(log: string) {
+  const last: Record<string, { count: number; at: string }> = {};
+  let unparsed = 0;
+  for (const line of log.split('\n')) {
+    if (!line.includes('admission_rejected')) continue;
+    try {
+      const row = JSON.parse(line), kind = row?.fields?.kind, count = row?.fields?.count;
+      if (row?.target === 'fukulow' && row?.fields?.event === 'admission_rejected' && typeof kind === 'string'
+        && /^[a-z_]{1,32}$/.test(kind) && Number.isSafeInteger(count) && count >= 0
+        && typeof row.timestamp === 'string' && Number.isFinite(Date.parse(row.timestamp)))
+        last[kind] = { count, at: row.timestamp };
+      else unparsed++;
+    } catch { unparsed++; }
+  }
+  return { complete: unparsed === 0, unparsed, last };
 }
