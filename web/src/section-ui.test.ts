@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildMoveDestinations,
   IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL,
+  normalizeRenderedSectionLabel,
   OTHER_CHANNELS_LABEL,
   reorderList,
   resolveDeleteFocusTargets,
@@ -93,6 +94,32 @@ describe('buildMoveDestinations', () => {
     expect(new Set(reverseAndImplicitCase.map(o => o.label)).size).toBe(reverseAndImplicitCase.length)
     expect(reverseAndImplicitCase[2]!.label).toBe('開発（1番目）')
     expect(reverseAndImplicitCase[4]!.label).toBe(IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL)
+  })
+
+  it('disambiguates names whose rendered whitespace collapses to the same text (e.g. 開 発 vs 開  発)', () => {
+    const options = buildMoveDestinations([
+      { id: 's1', name: '開 発' },
+      { id: 's2', name: '開  発' },
+    ])
+    const normalized = options.map(o => normalizeRenderedSectionLabel(o.label))
+    expect(normalized).toEqual([
+      '開 発（1番目）',
+      '開 発（2番目）',
+      IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL,
+    ])
+    expect(new Set(normalized).size).toBe(options.length)
+
+    // Also prevents collisions across Unicode White_Space runs (e.g. U+0085 NEL) and pre-existing suffix names.
+    const unicodeAndSuffix = buildMoveDestinations([
+      { id: 'u1', name: '開  発（1番目）' },
+      { id: 'u2', name: '開 発' },
+      { id: 'u3', name: '開\u0085発' },
+    ])
+    const normalizedUnicode = unicodeAndSuffix.map(o => normalizeRenderedSectionLabel(o.label))
+    expect(new Set(normalizedUnicode).size).toBe(unicodeAndSuffix.length)
+    expect(normalizedUnicode[0]).toBe('開 発（1番目）')
+    expect(normalizedUnicode[1]).toBe('開 発（2番目）')
+    expect(normalizedUnicode[2]).toBe('開 発（3番目）')
   })
 })
 

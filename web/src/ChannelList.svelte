@@ -123,7 +123,7 @@
   let pendingCreateName = ''
   let activePendingFocus: PendingFocus | null = null
   let pendingFocusTrigger = $state(0)
-  let focusInAttached = false
+  let focusListenersAttached = false
   let unmounted = false
   let dialogOpener: unknown = null
   let applyingFocus = false
@@ -196,23 +196,30 @@
     clearPendingFocus()
   }
 
+  function onPointerDown() {
+    if (!activePendingFocus) return
+    clearPendingFocus()
+  }
+
   function clearPendingFocus() {
     if (activePendingFocus) {
       activePendingFocus.cancelled = true
       activePendingFocus = null
     }
-    if (focusInAttached && typeof document !== 'undefined') {
+    if (focusListenersAttached && typeof document !== 'undefined') {
       document.removeEventListener('focusin', onFocusIn, true)
-      focusInAttached = false
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      focusListenersAttached = false
     }
   }
 
   function beginPendingFocus(token: PendingFocus) {
     clearPendingFocus()
     activePendingFocus = token
-    if (typeof document !== 'undefined' && !focusInAttached) {
+    if (typeof document !== 'undefined' && !focusListenersAttached) {
       document.addEventListener('focusin', onFocusIn, true)
-      focusInAttached = true
+      document.addEventListener('pointerdown', onPointerDown, true)
+      focusListenersAttached = true
     }
     pendingFocusTrigger++
   }

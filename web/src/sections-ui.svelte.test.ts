@@ -822,6 +822,142 @@ describe('personal sections adapter & UI', () => {
     expect(dom.doc.activeElement).toBe(buttonsByText(host, 'セクションを作成')[0])
   })
 
+  it('cancels pending focus restoration on pointerdown outside the Channel list even when focus falls to body', async () => {
+    vi.useFakeTimers()
+    const db = database()
+    db.layout = {
+      generation: '1',
+      sections: [
+        { id: 's1', name: '一', channel_ids: ['A'] },
+        { id: 's2', name: '二', channel_ids: [] },
+      ],
+      other_channel_ids: [],
+    }
+    db.rows = [row('A', { name: 'alpha' })]
+    const c = client(db)
+    cleanups.push(() => c.session.close())
+    await vi.advanceTimersByTimeAsync(0)
+    await c.ready()
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const outsideNonFocusable = dom.doc.createElement('div')
+    outsideNonFocusable.textContent = 'メイン領域'
+    dom.doc.body.appendChild(outsideNonFocusable)
+
+    const inst = mount(ChannelList, {
+      target: host as unknown as Element,
+      props: { channels: db.rows, selectedId: null, sections: sectionsAdapter(c.sections), onselect: vi.fn() },
+    })
+    cleanups.push(() => unmount(inst))
+    await settle()
+
+    // Move Channel A from s1 to s2 with a delayed layout GET.
+    const delayedLayout = deferred<Result<SectionLayout>>()
+    c.getLayout.mockReturnValueOnce(delayedLayout.promise)
+    c.sectionsApi.moveChannel.mockResolvedValueOnce(ok(undefined))
+    host.querySelector('[data-channel-id="A"] button[aria-label="チャンネルを移動"]')!.click()
+    await settle()
+    const radioS2 = queryAll(host, 'input[name="section_move_destination"]').find(el => el.value === 's2')!
+    radioS2.checked = true
+    radioS2.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    buttonsByText(host, '移動する')[0]!.click()
+    await settle()
+
+    // User clicks a non-focusable area outside the Channel list: pointerdown fires and focus clears to body (no focusin).
+    outsideNonFocusable.dispatchEvent(new MiniDomEvent('pointerdown', { bubbles: true }))
+    dom.doc.activeElement = dom.doc.body
+
+    // Delayed layout GET completes -> focus must NOT move into the Channel list.
+    delayedLayout.resolve(ok({
+      generation: '2',
+      sections: [
+        { id: 's1', name: '一', channel_ids: [] },
+        { id: 's2', name: '二', channel_ids: ['A'] },
+      ],
+      other_channel_ids: [],
+    }))
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(host.querySelector('[data-section-id="s2"] [data-channel-id="A"]')).not.toBeNull()
+    expect(dom.doc.activeElement).toBe(dom.doc.body)
+  })
+
+  it('removes document listeners and prevents focus movement when unmounted while a restoration token is still armed', async () => {
+    vi.useFakeTimers()
+    const db = database()
+    db.layout = {
+      generation: '1',
+      sections: [
+        { id: 's1', name: '一', channel_ids: [] },
+        { id: 's2', name: '二', channel_ids: [] },
+      ],
+      other_channel_ids: [],
+    }
+    db.rows = []
+    const c = client(db)
+    cleanups.push(() => c.session.close())
+    await vi.advanceTimersByTimeAsync(0)
+    await c.ready()
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const outsideHeading = dom.doc.createElement('h2')
+    outsideHeading.setAttribute('tabindex', '-1')
+    outsideHeading.textContent = 'チャンネル一覧'
+    dom.doc.body.appendChild(outsideHeading)
+
+    const addSpy = vi.spyOn(dom.doc, 'addEventListener')
+    const removeSpy = vi.spyOn(dom.doc, 'removeEventListener')
+    cleanups.push(() => {
+      addSpy.mockRestore()
+      removeSpy.mockRestore()
+    })
+
+    const inst = mount(ChannelList, {
+      target: host as unknown as Element,
+      props: {
+        channels: [],
+        selectedId: null,
+        sections: sectionsAdapter(c.sections),
+        channelListHeading: outsideHeading as unknown as HTMLElement,
+        onselect: vi.fn(),
+      },
+    })
+    await settle()
+
+    const delayed = deferred<Result<SectionLayout>>()
+    c.getLayout.mockReturnValueOnce(delayed.promise)
+    c.sectionsApi.reorder.mockResolvedValueOnce(ok(undefined))
+    host.querySelector('[data-testid="section-move-up-s2"]')!.click()
+    await settle()
+
+    // Token is still armed (no focusin/pointerdown cancellation before unmount).
+    const focusInAdd = addSpy.mock.calls.find(([type, , capture]) => type === 'focusin' && capture === true)
+    const pointerDownAdd = addSpy.mock.calls.find(([type, , capture]) => type === 'pointerdown' && capture === true)
+    expect(focusInAdd).toBeDefined()
+    expect(pointerDownAdd).toBeDefined()
+
+    // Unmount while the restoration token is live.
+    await unmount(inst)
+    expect(removeSpy).toHaveBeenCalledWith('focusin', focusInAdd![1], true)
+    expect(removeSpy).toHaveBeenCalledWith('pointerdown', pointerDownAdd![1], true)
+
+    dom.doc.activeElement = dom.doc.body
+    delayed.resolve(ok({
+      generation: '2',
+      sections: [
+        { id: 's2', name: '二', channel_ids: [] },
+        { id: 's1', name: '一', channel_ids: [] },
+      ],
+      other_channel_ids: [],
+    }))
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(dom.doc.activeElement).toBe(dom.doc.body)
+  })
+
   it('cancels pending focus restoration on unmount', async () => {
     vi.useFakeTimers()
     const db = database()

@@ -5,6 +5,7 @@ import { createChannel, secretSafe, signInOwner } from './helpers.ts'
 type CreateSection = components['schemas']['CreateSection']
 type CreatedSection = components['schemas']['CreatedSection']
 type SectionLayout = components['schemas']['SectionLayout']
+type ServerEvent = components['schemas']['ServerEvent']
 
 async function cleanupCreatedSections(page: Page, orgId: string, createdIds: ReadonlySet<string>) {
   for (const id of createdIds) {
@@ -395,6 +396,22 @@ test('two-tab convergence without reload', async ({ page, context }) => {
     })
     const tab1Reads = trackLayoutReads(page, layoutPath)
     const tab2Reads = trackLayoutReads(tab2, layoutPath)
+    const tab2Socket = { opened: 0, ready: 0, reset: 0, sectionsChanged: 0 }
+    tab2.on('websocket', (ws) => {
+      tab2Socket.opened++
+      ws.on('framereceived', (frame) => {
+        if (typeof frame.payload !== 'string') return
+        let event: ServerEvent
+        try {
+          event = JSON.parse(frame.payload) as ServerEvent
+        } catch {
+          return
+        }
+        if (event.type === 'activity_ready') tab2Socket.ready++
+        else if (event.type === 'activity_reset') tab2Socket.reset++
+        else if (event.type === 'sections_changed') tab2Socket.sectionsChanged++
+      })
+    })
 
     await page.setViewportSize({ width: 1280, height: 800 })
     await tab2.setViewportSize({ width: 1280, height: 800 })
@@ -416,12 +433,18 @@ test('two-tab convergence without reload', async ({ page, context }) => {
       await expect.poll(() => reads.completed >= 2 && reads.inFlight === 0).toBe(true)
     }
 
-    // Create section in tab 1 -> tab 2 issues a new /me/sections read after the write commits and renders the section.
+    // Create section in tab 1 -> tab 2 issues a notice-driven /me/sections read well below the
+    // ~29.7s periodic window, without reconnecting or receiving Ready/reset recovery.
     await page.locator('#channel-content').getByRole('button', { name: 'セクションを作成', exact: true }).click()
     await page.getByRole('dialog').getByLabel('セクション名', { exact: true }).fill(secName)
     const tab2ReadsBeforeCreate = tab2Reads.completed
+    const tab2OpenedBeforeCreate = tab2Socket.opened
+    const tab2ReadyBeforeCreate = tab2Socket.ready
+    const tab2ResetBeforeCreate = tab2Socket.reset
+    const tab2NoticesBeforeCreate = tab2Socket.sectionsChanged
     const tab2CreateRefresh = tab2.waitForResponse(
       res => res.request().method() === 'GET' && new URL(res.url()).pathname === layoutPath && res.status() === 200,
+      { timeout: 10_000 },
     )
     const secId = await captureCreatedSectionId(page, orgId, createdIds, () =>
       page.getByRole('dialog').getByRole('button', { name: '作成する', exact: true }).click(),
@@ -429,8 +452,12 @@ test('two-tab convergence without reload', async ({ page, context }) => {
     const tab1Sec = page.locator(`#channel-content section[data-section-id="${secId}"]`)
     await expect(tab1Sec).toBeVisible()
     await tab2CreateRefresh
+    expect(tab2Socket.opened).toBe(tab2OpenedBeforeCreate)
+    expect(tab2Socket.ready).toBe(tab2ReadyBeforeCreate)
+    expect(tab2Socket.reset).toBe(tab2ResetBeforeCreate)
+    expect(tab2Socket.sectionsChanged).toBeGreaterThan(tab2NoticesBeforeCreate)
     await expect.poll(() => tab2Reads.completed).toBeGreaterThan(tab2ReadsBeforeCreate)
-    await expect(tab2.locator(`#channel-content section[data-section-id="${secId}"]`)).toBeVisible()
+    await expect(tab2.locator(`#channel-content section[data-section-id="${secId}"]`)).toBeVisible({ timeout: 10_000 })
 
     // Move channel in tab 1 -> tab 2 converges without reload.
     await page.locator(`#channel-content [data-channel-id="${ch.id}"]`).getByRole('button', { name: 'チャンネルを移動', exact: true }).click()

@@ -10,6 +10,15 @@ export const IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL = `${OTHER_CHANNELS_LABEL
 // and excludes U+FEFF (BOM), unlike JS `String.prototype.trim()`.
 const RUST_WHITESPACE_ONLY = /^\p{White_Space}+$/u
 const RUST_SURROUNDING_WHITESPACE = /^\p{White_Space}|\p{White_Space}$/u
+const RUST_WHITESPACE_RUN = /\p{White_Space}+/gu
+
+/**
+ * Normalizes a label to the whitespace-collapsed form users see and hear:
+ * collapses every run of Unicode `White_Space` to a single ASCII space and trims the ends.
+ */
+export function normalizeRenderedSectionLabel(label: string): string {
+  return label.replace(RUST_WHITESPACE_RUN, ' ').replace(/^ | $/g, '')
+}
 
 /**
  * Validates a personal section name against spec R1 without trimming or normalizing:
@@ -45,32 +54,39 @@ export type MoveDestinationOption = {
 export function buildMoveDestinations(
   customSections: readonly { id: string; name: string }[],
 ): MoveDestinationOption[] {
+  const otherKey = normalizeRenderedSectionLabel(OTHER_CHANNELS_LABEL)
+  const implicitKey = normalizeRenderedSectionLabel(IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL)
   const counts = new Map<string, number>([
-    [OTHER_CHANNELS_LABEL, 1],
-    [IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL, 1],
+    [otherKey, 1],
+    [implicitKey, 1],
   ])
   for (const s of customSections) {
-    counts.set(s.name, (counts.get(s.name) ?? 0) + 1)
+    const key = normalizeRenderedSectionLabel(s.name)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const taken = new Set<string>([OTHER_CHANNELS_LABEL, IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL])
+  const taken = new Set<string>([otherKey, implicitKey])
   for (const s of customSections) {
-    if ((counts.get(s.name) ?? 0) === 1) {
-      taken.add(s.name)
+    const key = normalizeRenderedSectionLabel(s.name)
+    if ((counts.get(key) ?? 0) === 1) {
+      taken.add(key)
     }
   }
   const seen = new Map<string, number>()
   const options: MoveDestinationOption[] = customSections.map((s) => {
-    if ((counts.get(s.name) ?? 0) === 1) {
+    const key = normalizeRenderedSectionLabel(s.name)
+    if ((counts.get(key) ?? 0) === 1) {
       return { id: s.id, label: s.name }
     }
-    let occ = (seen.get(s.name) ?? 0) + 1
+    let occ = (seen.get(key) ?? 0) + 1
     let label = `${s.name}（${occ}番目）`
-    while (taken.has(label)) {
+    let candidateKey = normalizeRenderedSectionLabel(label)
+    while (taken.has(candidateKey)) {
       occ++
       label = `${s.name}（${occ}番目）`
+      candidateKey = normalizeRenderedSectionLabel(label)
     }
-    seen.set(s.name, occ)
-    taken.add(label)
+    seen.set(key, occ)
+    taken.add(candidateKey)
     return { id: s.id, label }
   })
   options.push({ id: null, label: IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL })
