@@ -159,8 +159,10 @@ async function main() {
     const tracked = ['load/seed.ts', 'load/events.ts', 'load/compose.yml', 'load/channel-log.sql', 'load/slice5/stack.ts',
       'load/slice5/fixture.ts', 'load/slice5/judge.ts', 'load/pool-before-after-summary.ts', ...harnessFiles];
     save(join(output, selection ? 'DIAGNOSTIC-metadata.json' : 'metadata.json'), {
-      ...(selection ? { mode: diagnosticMode, sendTimingSampleEvery: 32 } : { thresholds: { ...thresholds, moveP95Ms: moveLimits } }),
-      commit, image, k6, k6Id, project, plan: p, orderedSteps,
+      // Formal metadata keeps its pre-diagnostic key order.
+      ...(selection ? { mode: diagnosticMode, sendTimingSampleEvery: 32, commit, image, k6, k6Id, project, plan: p }
+        : { commit, image, k6, k6Id, project, plan: p, thresholds: { ...thresholds, moveP95Ms: moveLimits } }),
+      orderedSteps,
       harnessCommit: command('git', ['-C', repo, 'rev-parse', 'HEAD']),
       harnessHashes: Object.fromEntries(tracked.map(file => [file, createHash('sha256').update(readFileSync(join(repo, file))).digest('hex')])),
       machine: { platform: platform(), arch: arch(), os: release(), cpu: cpus().length, memory: totalmem(), load: loadavg(), node: process.version },
@@ -204,6 +206,11 @@ async function main() {
               ...(!generator?.vus.some(point => point.active !== undefined && point.allocated !== undefined) ? ['k6 VU gauges'] : []),
               ...(!postgres.statementsAvailable ? ['PostgreSQL execution statistics'] : []),
               ...(!postgres.samples.length ? ['PostgreSQL wait samples'] : []),
+              // A starved sampler (one query in flight) still yields samples; require half the window covered.
+              ...(postgres.coveredMs < 500 * (step.part === 'E' ? p.replaySeconds : p.seconds) ? ['PostgreSQL wait sample coverage'] : []),
+              // Log rotation can drop early events: the app must account for every 503 k6 saw on write lanes.
+              ...(app && generator && app.unavailable.length < generator.completed503.send + generator.completed503.move
+                ? ['app 503 reasons (log incomplete)'] : []),
               ...Object.entries(containers.summary).filter(([, container]) => !container.samples).map(([name]) => name + ' cgroup samples'),
               ...(p.smoke && step.arm === 'move' && (!measured.measurement?.moveVerified || !app?.byLane.move.phasesUs.move_apply)
                 ? ['verified Move and Move timings'] : []),
