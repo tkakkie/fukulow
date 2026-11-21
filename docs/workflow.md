@@ -8,11 +8,11 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 
 ## 1. Sweep (run at every wake-up, notification, user message, or finished AI run)
 1. Use `node scripts/sweep-state.ts` first in place of separate lists. It reads state and flags mechanical inconsistencies. Only §2 decides actions. On error or incomplete listing, use `gh pr list --state open --limit 200 --json number,title,labels,headRefOid` and `gh issue list --state open --limit 200 --json number,title,labels,milestone`. At 200 results, split by `--search 'created:<date'` until done. For cleanup also use `gh pr list --state merged --limit 30 --json number,headRefName,labels,mergedAt`. Get every open PR's mergeability (fallback: `gh pr view <n> --json mergeable`). Query checks (`gh pr checks <n>` or `--json statusCheckRollup`) only when the §2 row needs them.
-2. Act on each AI-doable §2 row. List once per sweep iteration. After acting, re-check only changed items (`gh pr view <n>` / `gh issue view <n>`). Repeat while AI-doable work remains.
+2. Act on each AI-doable §2 row. List once per sweep iteration. After acting, re-check only changed items. Repeat while AI-doable work remains.
 3. Fix labels. An open item without a status gets its matching status, including green PRs whose reviews are done. Keep at most one `status:*` per item.
 4. Check stalls (§7), including ended runs missing a label/comment update, stale CI and still-blocked items with merged blockers.
-5. For pending CI, Copilot or background AI runs, keep the current label. Never park them in `status:human-review` or `status:needs-decision`. Query each waiting item once per sweep iteration, non-blocking (`gh pr checks <n>` without `--watch`, `gh pr view --json reviews`, worker `-o` file and `pgrep`).
-6. End the iteration when no AI-doable work remains, even with async results pending. Resume on a completion notification, the next sweep (wake-up or user message) or a stall check (§7), whichever is first. Report items needing human action (`status:human-review` / `status:needs-decision`, question in last comment) and pending results.
+5. For pending CI, Copilot or background AI runs, keep the current label. Never park them in `status:human-review` or `status:needs-decision`. A run waiting for the maintainer's go gets `status:queued`. Query each waiting item once per sweep iteration, non-blocking (`gh pr checks <n>` without `--watch`, `gh pr view --json reviews`, worker `-o` file and `pgrep`).
+6. End the iteration when no AI-doable work remains, even with async results pending. Resume on a completion notification, the next sweep or a stall check (§7). Report items needing human action (`status:human-review` / `status:needs-decision`, question in last comment) and pending results.
 
 ## 2. State -> next action
 | Item, label | Who acts | Next action | Step ends when |
@@ -23,7 +23,7 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 | Issue, `status:human-review` | maintainer | AI does other work | maintainer comments "OK" |
 | Issue, `status:human-review` with maintainer "OK" | any AI | Replace label with `status:ready` and post the §4 `Assigned:` line | ready |
 | Issue, `status:ready`, unblocked | implementer named by `Assigned:` (§4) | With "Done when", set `status:working`, create branch/worktree, implement and open draft PR | PR links `Closes #n`; Issue stays `status:working` |
-| Issue, `status:ready` and `blocked` | none | Wait until every named blocker is satisfied (each blocker PR merged) and the sweeper removes `blocked` (below) | `blocked` removed |
+| Issue, `status:ready` and `blocked` | none | Wait until the sweeper removes `blocked` (below) | `blocked` removed |
 | Issue, `status:working` | implementer | Follow its PR row. No PR and no activity: §7 | PR merged, Issue closed |
 | Open PR, CONFLICTING or UNKNOWN mergeability (any status) | implementer | Precedes every transition towards `status:human-review`. Re-query UNKNOWN until known. Resolve conflicts (§6), get CI on the new head and check if the resolution touched reviewed code. Re-verify only that delta | MERGEABLE and CI green on new head |
 | PR draft/open, `status:working` | implementer | Run AGENTS.md Commands, push, check CI non-blocking (`gh pr checks <n>`, §1) | green CI on head and PR marked ready -> `status:ai-review` |
@@ -33,9 +33,10 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 | PR, `status:ai-review`, blocking findings | implementer | `status:working`, fix, push, CI, comment how each finding was addressed, then `status:ai-review` for round 2 (§5) | blockers resolved |
 | PR, `status:ai-review`, CI green on current head, MERGEABLE, reviews and fixes complete (§5), Copilot finished if requested | sweeper | Set `status:human-review` | label set |
 | PR, `status:human-review` | maintainer | AI acts only on maintainer change request -> `status:working` | maintainer merges or comments |
+| Issue/PR, `status:queued` | run owner | Wait for the run. Then record the result and set the next status | run ended |
 | Issue/PR, `status:needs-decision` | maintainer | AI works elsewhere until answer, then removes label and continues | maintainer answers |
 | Issue/PR, `blocked`, blocker PR merged by anyone | sweeper | Remove `blocked` and set the next status only when all blockers are satisfied. Otherwise retain `blocked`. Comment on the change or what remains | label removed or remaining blockers named |
-| Issue/PR, `blocked`, blocker PR closed unmerged | sweeper | Blocker remains unsatisfied. Reassess whether the work is needed and whether there is a replacement PR. If the Issue lets an AI decide, update the blocker reference and comment; otherwise `status:needs-decision` with question in last comment | updated blocker or decision requested |
+| Issue/PR, `blocked`, blocker PR closed unmerged | sweeper | Blocker stays unsatisfied. Reassess the need and any replacement PR. If the Issue lets an AI decide, update the blocker reference and comment; otherwise `status:needs-decision` with question in last comment | updated blocker or decision requested |
 | Dependency update PR | any AI | Follow §8 | `status:human-review` |
 | PR merged (recent merges in §1) | sweeper | Verify Issue closed, remove status labels, unblock dependents, delete worktree/branch | nothing left open |
 
