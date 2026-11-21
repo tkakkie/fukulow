@@ -132,11 +132,11 @@
     resolveReplyAnchor({
       activeReplyMessageId,
       selectedChannelId: selected?.id,
-      lastOpenedAnchor,
-      timelineMessages: currentTimeline?.messages,
-      topicLines: currentTopicsState?.lines,
-      routedTopicMessages: route?.topicId && currentTopicsState ? currentTopicsState.topic(route.topicId).messages : undefined,
-      replies: currentRepliesState,
+      lastOpenedAnchor: () => lastOpenedAnchor,
+      timelineMessages: () => currentTimeline?.messages,
+      topicLines: () => currentTopicsState?.lines,
+      routedTopicMessages: () => (route?.topicId && currentTopicsState ? currentTopicsState.topic(route.topicId).messages : undefined),
+      replies: () => currentRepliesState,
     }),
   )
   const replyTargetState = $derived(
@@ -182,7 +182,7 @@
   const panelOpen = $derived(!!route?.panel)
   const activePanelTab = $derived(parsePanelTab(route?.panel))
   $effect(() => {
-    if (shouldClosePanelForDm(selected?.kind, route?.panel)) nav.navigate({ type: 'close' })
+    if (shouldClosePanelForDm(selected?.kind, () => route?.panel)) nav.navigate({ type: 'close' })
   })
   let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280)
 
@@ -215,7 +215,7 @@
   )
   const searchState = $derived(searchModel?.state)
   const searchOpen = $derived(Boolean(searchState?.open && !organizationUnavailable))
-  const effectiveMobileLevel = $derived(resolveMobileLevel(route, searchOpen))
+  const effectiveMobileLevel = $derived(resolveMobileLevel(route, () => searchOpen))
   const mainViewSelected = $derived(
     viewportWidth >= MOBILE_BREAKPOINT_PX || effectiveMobileLevel === 'view',
   )

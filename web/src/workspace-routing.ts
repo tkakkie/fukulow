@@ -6,14 +6,14 @@ import type { Replies } from './replies'
 import type { SearchTarget } from './search'
 import type { MainTimelineLine } from './topic-selectors'
 
-export type ResolveReplyAnchorInput = {
+type ResolveReplyAnchorInput = {
   activeReplyMessageId: string | null
   selectedChannelId: string | undefined
-  lastOpenedAnchor: Message | null
-  timelineMessages?: readonly Message[] | null
-  topicLines?: readonly MainTimelineLine[] | null
-  routedTopicMessages?: readonly Message[] | null
-  replies?: Pick<ReturnType<Replies['get']>, 'anchor' | 'messages'> | null
+  lastOpenedAnchor: () => Message | null
+  timelineMessages?: () => readonly Message[] | null | undefined
+  topicLines?: () => readonly MainTimelineLine[] | null | undefined
+  routedTopicMessages?: () => readonly Message[] | null | undefined
+  replies?: () => Pick<ReturnType<Replies['get']>, 'anchor' | 'messages'> | null | undefined
 }
 
 /**
@@ -30,28 +30,30 @@ export function resolveReplyAnchor({
   replies,
 }: ResolveReplyAnchorInput): Message | null {
   if (!activeReplyMessageId || !selectedChannelId) return null
-  if (lastOpenedAnchor?.id === activeReplyMessageId && lastOpenedAnchor.channel_id === selectedChannelId) {
-    return lastOpenedAnchor
+  const opened = lastOpenedAnchor()
+  if (opened?.id === activeReplyMessageId && opened.channel_id === selectedChannelId) {
+    return opened
   }
-  const fromTimeline = timelineMessages?.find((m) => m.id === activeReplyMessageId)
+  const fromTimeline = timelineMessages?.()?.find((m) => m.id === activeReplyMessageId)
   if (fromTimeline) return fromTimeline
-  for (const line of topicLines ?? []) {
+  for (const line of topicLines?.() ?? []) {
     if (line.kind === 'message' && line.message.id === activeReplyMessageId) return line.message
   }
-  const fromTopic = routedTopicMessages?.find((m) => m.id === activeReplyMessageId)
+  const fromTopic = routedTopicMessages?.()?.find((m) => m.id === activeReplyMessageId)
   if (fromTopic) return fromTopic
-  if (replies?.anchor?.id === activeReplyMessageId) return replies.anchor
-  const fromReplies = replies?.messages.find((m) => m.id === activeReplyMessageId)
+  const currentReplies = replies?.()
+  if (currentReplies?.anchor?.id === activeReplyMessageId) return currentReplies.anchor
+  const fromReplies = currentReplies?.messages.find((m) => m.id === activeReplyMessageId)
   if (fromReplies) return fromReplies
   return null
 }
 
 export function resolveMobileLevel(
   route: Pick<NavigationTarget, 'channelId' | 'panel'> | null | undefined,
-  searchOpen: boolean,
+  isSearchOpen: () => boolean,
 ): MobileLevel {
   const level: MobileLevel = !route?.channelId ? 'channels' : route.panel ? 'panel' : 'view'
-  return level === 'channels' && searchOpen ? 'view' : level
+  return level === 'channels' && isSearchOpen() ? 'view' : level
 }
 
 export function parseReplyMessageId(panel: PanelTarget | null | undefined): string | null {
@@ -64,14 +66,16 @@ export function parsePanelTab(panel: PanelTarget | null | undefined): PanelTab {
 
 export function shouldClosePanelForDm(
   selectedKind: 'channel' | 'dm' | undefined,
-  panel: PanelTarget | null | undefined,
+  getPanel: () => PanelTarget | null | undefined,
 ): boolean {
-  return selectedKind === 'dm' && Boolean(panel) && !panel!.startsWith('reply:')
+  if (selectedKind !== 'dm') return false
+  const panel = getPanel()
+  return Boolean(panel) && !panel!.startsWith('reply:')
 }
 
-export type ChannelSelectionNavigation = Pick<Navigation, 'navigate' | 'openSearchResult'>
+type ChannelSelectionNavigation = Pick<Navigation, 'navigate' | 'openSearchResult'>
 
-export type ChannelSelectionUnread = {
+type ChannelSelectionUnread = {
   readonly state: {
     readonly stopped: boolean
     readonly main: { readonly stopped: boolean }
@@ -79,16 +83,16 @@ export type ChannelSelectionUnread = {
   enter(topicId?: string | null): unknown
 }
 
-export type ChannelSelectionDeps = {
+type ChannelSelectionDeps = {
   getOrganizationId: () => string
   getSelectedId: () => string | null
   getNavigation: () => ChannelSelectionNavigation
   selectChannel: (id: string) => void
-  isDm?: (id: string) => boolean
-  selectDm?: (id: string) => void
-  retryAuthors?: () => void
-  getCurrentUnread?: () => ChannelSelectionUnread | null | undefined
-  onCloseDrawer?: () => void
+  isDm: (id: string) => boolean
+  selectDm: (id: string) => void
+  retryAuthors: () => void
+  getCurrentUnread: () => ChannelSelectionUnread | null | undefined
+  onCloseDrawer: () => void
 }
 
 /**
@@ -98,24 +102,22 @@ export type ChannelSelectionDeps = {
 export function createChannelSelection(deps: ChannelSelectionDeps) {
   return function handleSelectChannel(id: string, result?: SearchTarget): void {
     const same = id === deps.getSelectedId()
-    if (same) deps.retryAuthors?.()
+    if (same) deps.retryAuthors()
     const organizationId = deps.getOrganizationId()
     const navigation = deps.getNavigation()
     const navigated = result
       ? navigation.openSearchResult(organizationId, result)
       : navigation.navigate({ type: 'channel', organizationId, channelId: id })
     if (result || same || navigated === false) {
-      if (deps.isDm?.(id)) deps.selectDm?.(id)
+      if (deps.isDm(id)) deps.selectDm(id)
       else deps.selectChannel(id)
-      const currentUnread = deps.getCurrentUnread?.()
-      if (
-        (navigated === false || (same && result?.replyRootId && !result.topicId)) &&
-        currentUnread &&
-        (currentUnread.state.stopped || currentUnread.state.main.stopped)
-      ) {
-        void currentUnread.enter(null)
+      if (navigated === false || (same && result?.replyRootId && !result.topicId)) {
+        const currentUnread = deps.getCurrentUnread()
+        if (currentUnread && (currentUnread.state.stopped || currentUnread.state.main.stopped)) {
+          void currentUnread.enter(null)
+        }
       }
     }
-    deps.onCloseDrawer?.()
+    deps.onCloseDrawer()
   }
 }
