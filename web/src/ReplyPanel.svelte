@@ -27,6 +27,7 @@
   import type { TopicsAdapter } from './topics.svelte'
   import Button from './ui/Button.svelte'
   import Dialog from './ui/Dialog.svelte'
+  import ReplaceDraftDialog from './ui/ReplaceDraftDialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import Input from './ui/Input.svelte'
   import MessageRow from './ui/MessageRow.svelte'
@@ -1002,12 +1003,9 @@
     </form>
   </Dialog>
 
-  <Dialog
-    open={confirmReplaceId !== null}
-    title="入力中の下書きを置き換えますか？"
+  <ReplaceDraftDialog
+    pendingId={confirmReplaceId}
     description="失敗したメッセージを編集欄に戻すと、現在入力中の下書きは上書きされます。"
-    confirmLabel="置き換える"
-    cancelLabel="キャンセル"
     returnFocusFallback={composerRef}
     onconfirm={handleConfirmReplace}
     oncancel={handleCancelReplace}
