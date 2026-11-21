@@ -31,6 +31,10 @@ use std::{
 
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
+pub fn spawn_revocation_holds_sampler() -> Option<tokio::task::JoinHandle<()>> {
+    observability::spawn_revocation_holds_sampler(channels::activity::revocation_hold_counts)
+}
+
 const PERMISSIONS_POLICY: &str = "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()";
 
 #[derive(serde::Deserialize)]

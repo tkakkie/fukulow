@@ -113,6 +113,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         shutdown.clone(),
     ));
     let metrics = tokio::spawn(fukulow_server::observability::report_periodically());
+    let revocation_holds_sampler = fukulow_server::spawn_revocation_holds_sampler();
     let completed = fukulow_server::serve_with_search(
         listener,
         AppState {
@@ -139,6 +140,9 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
     reclamation.abort();
     let _ = reclamation.await;
     metrics.abort();
+    if let Some(sampler) = revocation_holds_sampler {
+        sampler.abort();
+    }
     pool_metrics.abort();
     if !completed {
         tracing::warn!(target: "fukulow", event = "shutdown_drain_deadline", send_outcomes = "unknown");
