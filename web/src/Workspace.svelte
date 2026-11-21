@@ -8,11 +8,9 @@
   import type { MentionName } from './mentions'
   import { senderName } from './authors'
   import type { Channel, DmDiscovery, Identity, Message, SearchHit } from './api'
-  import DmSendStatus from './DmSendStatus.svelte'
   import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
-  import ChannelOverview from './ChannelOverview.svelte'
   import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
   import {
     createTopicSummaryFocusController,
@@ -25,24 +23,16 @@
     resolveSkipLinkTargetId,
     type SkipLinkTargetId,
   } from './focus-management'
-  import ChannelMembers from './ChannelMembers.svelte'
   import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
-  import ReplyPanel from './ReplyPanel.svelte'
-  import SearchBar from './SearchBar.svelte'
-  import SearchResults from './SearchResults.svelte'
   import { createSearchController, type SearchTarget } from './search'
   import { searchAdapter } from './search.svelte'
   import { createDefaultSearchSource, type SearchSource } from './search-source'
-  import Timeline from './Timeline.svelte'
-  import TopicList from './TopicList.svelte'
-  import TopicView from './TopicView.svelte'
   import WorkspaceChannelColumn from './WorkspaceChannelColumn.svelte'
+  import WorkspaceMainView from './WorkspaceMainView.svelte'
+  import WorkspacePanelContent from './WorkspacePanelContent.svelte'
   import Button from './ui/Button.svelte'
-  import EmptyState from './ui/EmptyState.svelte'
   import Panel, { type PanelTabId } from './ui/Panel.svelte'
-  import Skeleton from './ui/Skeleton.svelte'
-  import StatusBanner from './ui/StatusBanner.svelte'
 
   // The session's controllers outlive this component: unmounting it never closes the connection.
   let {
@@ -356,7 +346,7 @@
 
   $effect(() => {
     if (s.status !== 'ready' || !currentOrganizationId) return
-    nav.initialize({ organizationId: currentOrganizationId, channelId: viewportWidth < 600 ? null : s.selectedId, topicId: null, panel: null })
+    nav.initialize({ organizationId: currentOrganizationId, channelId: viewportWidth < MOBILE_BREAKPOINT_PX ? null : s.selectedId, topicId: null, panel: null })
   })
 
   $effect(() => {
@@ -897,233 +887,67 @@
   </nav>
 
   <main id="main-content" class="main-card" tabindex="-1">
-    <header class="main-card__header">
-      {#if searchModel && searchState}
-        <div class="main-card__search">
-          <SearchBar
-            value={searchState.input}
-            open={searchOpen}
-            disabled={organizationUnavailable || !currentOrganizationId}
-            bind:inputRef={searchInputRef}
-            oninput={(value) => searchModel.setInput(value)}
-            onsubmit={(value) => handleSubmitSearch(value, 'main')}
-          />
-        </div>
-      {/if}
-      <div class="main-card__header-row">
-        <div class="main-card__title-group">
-          {#if searchOpen && searchModel && searchState}
-            <Button variant="quiet" onclick={handleCloseSearch}>
-              <span aria-hidden="true">‹</span>
-              <span>戻る</span>
-            </Button>
-            <h1
-              class="main-card__title"
-              tabindex="-1"
-              bind:this={searchResultsHeadingRef}
-            >
-              検索結果
-            </h1>
-          {:else if selected && currentChannel}
-            <span class="mobile-only">
-              <Button
-                variant="icon"
-                ariaLabel="チャンネル一覧へ戻る"
-                onclick={() => {
-                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
-                }}
-              >
-                ‹
-              </Button>
-            </span>
-            {#if route?.topicId}
-              <Button
-                variant="quiet"
-                onclick={() => nav.navigate({ type: 'topic-back' })}
-              >
-                <span aria-hidden="true">‹</span>
-                <span>チャンネルへ戻る</span>
-              </Button>
-              <span class="main-card__crumb"># {conversationName} ›</span>
-            {/if}
-            <h1 class="main-card__title" tabindex="-1" bind:this={mainHeadingRef}>
-              {route?.topicId ? (resolvedTopicName || 'トピック') : conversationName}
-            </h1>
-          {:else if organizationUnavailable}
-            <span class="mobile-only">
-              <Button
-                variant="icon"
-                ariaLabel="チャンネル一覧へ戻る"
-                onclick={() => {
-                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
-                }}
-              >
-                ‹
-              </Button>
-            </span>
-            <h1 class="main-card__title">{organization?.organization.name ?? 'fukulow'}</h1>
-          {:else if s.status === 'ready'}
-            <span class="mobile-only">
-              <Button
-                variant="icon"
-                ariaLabel="チャンネル一覧へ戻る"
-                onclick={() => {
-                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
-                }}
-              >
-                ‹
-              </Button>
-            </span>
-            <h1 class="main-card__title">チャンネル</h1>
-          {:else}
-            <span class="mobile-only">
-              <Button
-                variant="icon"
-                ariaLabel="チャンネル一覧へ戻る"
-                onclick={() => {
-                  if (viewportWidth < 600) nav.navigate({ type: 'list' })
-                }}
-              >
-                ‹
-              </Button>
-            </span>
-            <h1 class="main-card__title">fukulow</h1>
-          {/if}
-        </div>
-        <div class="main-card__header-actions">
-          {#if !searchOpen && selected && currentChannel}
-            <small class="live-status" data-testid="live-status" data-live={currentLive}>
-              {currentLive ? 'リアルタイム接続済み' : 'リアルタイムに接続中…'}
-            </small>
-            {#if selected.kind !== 'dm' || panelOpen}
-            <Button
-              bind:buttonRef={panelToggleBtn}
-              variant="icon"
-              ariaLabel={panelOpen ? 'パネルを閉じる(⌘.)' : 'パネルを開く(⌘.)'}
-              ariaExpanded={panelOpen}
-              onclick={togglePanel}
-            >
-              ☰
-            </Button>
-            {/if}
-          {/if}
-        </div>
-      </div>
-    </header>
-    {#if searchOpen && searchModel && searchState}
-      <div class="main-card__body">
-        <SearchResults
-          state={searchState}
-          resolveContext={resolveSearchContext}
-          {resolveSender}
-          onopenresult={(target) => searchModel.openSearchResult(target)}
-          onloadmore={() => { void searchModel.loadMore() }}
-          onretry={() => { void searchModel.retry() }}
-        />
-      </div>
-    {:else if selected && currentChannel}
-      <div class="main-card__body">
-        {#if selected.kind === 'dm'}
-          <div class="main-card__notice">
-            <DmSendStatus peer={selected.peer} lapsed={dmLapsed} canRenew={organization?.member.role !== 'guest'} busy={dmState?.busy}
-              onrenew={() => { if (selected?.kind === 'dm') void handleOpenDm(selected.peer.id, true) }} />
-          </div>
-        {:else if (selectedArchived || archiveStatePending) && !organizationUnavailable && currentTimeline?.status !== 'unavailable'}
-          <div class="main-card__notice">
-            <StatusBanner message={selectedArchived
-              ? 'このチャンネルはアーカイブされています。メッセージを送信できませんが、履歴は引き続き閲覧できます。'
-              : 'チャンネルの状態を確認しています。確認が終わるまでメッセージを送信できません。'} />
-          </div>
-        {/if}
-        <div class="main-card__timeline">
-        {#if route?.topicId && currentTopics}
-          {#key `${selected.id}:${route.topicId}`}
-            <TopicView
-              channel={currentChannel}
-              topics={currentTopics}
-              replies={currentReplies}
-              unread={currentUnread}
-              channelId={selected.id}
-              topicId={route.topicId}
-              topicName={resolvedTopicName}
-              topicStatus={session.navigationTargets?.state.topic.status ?? 'idle'}
-              {search}
-              selfId={organization?.member.id ?? ''}
-              viewSelected={mainViewSelected}
-              {organizationUnavailable}
-              {sendDisabled}
-              reconnecting={announcementView.reconnecting}
-              resolveSenderName={resolveSender}
-            {resolveMentionName}
-            members={members?.state.members ?? []}
-            onmentionrequest={() => { void members?.load() }}
-              bind:composerRef={mainComposerRef}
-              onopenreplies={handleOpenReplies}
-              onretrytopicmeta={() => {
-                if (route) void session.navigationTargets?.load(route, true)
-              }}
-              ongoToChannelList={goToChannelList}
-              onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
-              onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
-            />
-          {/key}
-        {:else}
-        {#key selected.id}
-          <Timeline
-            channel={currentChannel}
-            topics={currentTopics}
-            replies={currentReplies}
-            unread={currentUnread}
-            channelId={selected.id}
-            {sendDisabled}
-            {search}
-            selfId={organization?.member.id ?? ''}
-            viewSelected={mainViewSelected}
-            {organizationUnavailable}
-            reconnecting={announcementView.reconnecting}
-            resolveSenderName={resolveSender}
-              {resolveMentionName}
-              members={members?.state.members ?? []}
-              onmentionrequest={() => { void members?.load() }}
-            bind:composerRef={mainComposerRef}
-            bind:topicInputRef={mainTopicInputRef}
-            onopentopic={handleSelectTopic}
-            onopenreplies={handleOpenReplies}
-            ongoToChannelList={goToChannelList}
-            onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
-            onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
-          />
-        {/key}
-        {/if}
-        </div>
-      </div>
-    {:else if organizationUnavailable}
-      <div class="main-card__empty">
-        <StatusBanner
-          tone="danger"
-          role="alert"
-          message="この組織は利用できません。"
-          detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-          actionLabel={onselectorganization && currentOrganizationId ? 'メンバー資格を再確認' : undefined}
-          onaction={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
-          secondaryActionLabel={otherOrg && onselectorganization ? '組織を切り替える' : undefined}
-          onsecondaryaction={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
-        />
-      </div>
-    {:else if s.status === 'ready'}
-      <div class="main-card__empty">
-        <EmptyState
-          title="チャンネルがありません。"
-          description="チャンネル一覧から作成してください。"
-          actionLabel="チャンネル一覧へ"
-          onaction={goToChannelList}
-        />
-      </div>
-    {:else}
-      <div class="main-card__empty">
-        <Skeleton rows={4} label="読み込み中" />
-      </div>
-    {/if}
+    <WorkspaceMainView
+      searchState={searchModel ? searchState : undefined}
+      {searchOpen}
+      searchDisabled={organizationUnavailable || !currentOrganizationId}
+      {selected}
+      {conversationName}
+      {currentChannel}
+      {currentLive}
+      currentTimelineUnavailable={currentTimeline?.status === 'unavailable'}
+      {currentTopics}
+      {currentReplies}
+      {currentUnread}
+      activeTopicId={route?.topicId ?? null}
+      {resolvedTopicName}
+      topicStatus={session.navigationTargets?.state.topic.status ?? 'idle'}
+      {search}
+      organizationName={organization?.organization.name}
+      selfId={organization?.member.id ?? ''}
+      canRenewDm={organization?.member.role !== 'guest'}
+      {dmLapsed}
+      dmBusy={dmState?.busy ?? false}
+      {selectedArchived}
+      {archiveStatePending}
+      {sendDisabled}
+      {organizationUnavailable}
+      reconnecting={announcementView.reconnecting}
+      channelListStatus={s.status}
+      {panelOpen}
+      {mainViewSelected}
+      members={members?.state.members ?? []}
+      resolveSenderName={resolveSender}
+      {resolveSearchContext}
+      {resolveMentionName}
+      bind:searchInputRef={searchInputRef}
+      bind:searchResultsHeadingRef={searchResultsHeadingRef}
+      bind:mainHeadingRef={mainHeadingRef}
+      bind:panelToggleBtn={panelToggleBtn}
+      bind:composerRef={mainComposerRef}
+      bind:topicInputRef={mainTopicInputRef}
+      onsearchinput={(value) => searchModel?.setInput(value)}
+      onsearchsubmit={(value) => handleSubmitSearch(value, 'main')}
+      onclosesearch={handleCloseSearch}
+      onopensearchresult={(target) => searchModel?.openSearchResult(target)}
+      onloadmoresearch={() => { void searchModel?.loadMore() }}
+      onretrysearch={() => { void searchModel?.retry() }}
+      onbacktochannels={() => {
+        if (viewportWidth < MOBILE_BREAKPOINT_PX) nav.navigate({ type: 'list' })
+      }}
+      onbacktochannel={() => nav.navigate({ type: 'topic-back' })}
+      ontogglepanel={togglePanel}
+      onrenewdm={() => { if (selected?.kind === 'dm') void handleOpenDm(selected.peer.id, true) }}
+      onmentionrequest={() => { void members?.load() }}
+      onopentopic={handleSelectTopic}
+      onopenreplies={handleOpenReplies}
+      onretrytopicmeta={() => {
+        if (route) void session.navigationTargets?.load(route, true)
+      }}
+      ongoToChannelList={goToChannelList}
+      onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
+      onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
+    />
   </main>
 
   {#if panelOpen}
@@ -1133,7 +957,7 @@
         title={selected ? `${selected.kind === 'dm' ? '' : '# '}${conversationName}` : '詳細'}
         activeTab={activePanelTab}
         mode={route?.panel?.startsWith('reply:') ? 'reply' : 'tabs'}
-        showBack={!!nav.state.previousTab || viewportWidth < 600}
+        showBack={!!nav.state.previousTab || viewportWidth < MOBILE_BREAKPOINT_PX}
         onback={() => nav.navigate({ type: selected?.kind !== 'dm' && nav.state.previousTab ? 'reply-back' : 'close' })}
         bind:headingRef={panelHeadingRef}
         onselecttab={(tab) => {
@@ -1141,81 +965,51 @@
         }}
         onclose={closePanel}
       >
-        {#if route?.panel?.startsWith('reply:')}
-          {#if currentReplies && currentChannel && selected && activeReplyMessageId}
-            <ReplyPanel
-              channel={currentChannel}
-              replies={currentReplies}
-              topics={currentTopics}
-              moveChain={session.moveChain}
-              onannounce={onannounce}
-              channelId={selected.id}
-              anchorMessageId={activeReplyMessageId}
-              resolvedAnchor={resolvedReplyAnchor}
-              replyTargetStatus={replyTargetState.status}
-              {searchReply}
-              searchVisit={searchReply ? searchView?.visit : undefined}
-              selfId={organization?.member.id ?? ''}
-              {organizationUnavailable}
-              {sendDisabled}
-              archived={selectedArchived}
-              bind:composerRef={replyComposerRef}
-              resolveSenderName={resolveSender}
-              {resolveMentionName}
-              members={members?.state.members ?? []}
-              onmentionrequest={() => { void members?.load() }}
-              onopenreplies={handleOpenReplies}
-              onretrytarget={() => {
-                if (searchReply) void session.searchAnchor?.retry()
-                else if (route) void session.navigationTargets?.load(route, true)
-              }}
-              ongoToChannelList={goToChannelList}
-              onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
-              onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
-            />
-          {:else if replyTargetState.status === 'loading'}
-            <Skeleton rows={3} label="返信のつながりを読み込み中" />
-          {:else if replyTargetState.status === 'error'}
-            <StatusBanner tone="danger" role="alert" message="返信のつながりを読み込めませんでした。" actionLabel="再試行" onaction={() => { if (route) void session.navigationTargets?.load(route, true) }} />
-          {:else}
-            <EmptyState title={replyTargetState.status === 'unavailable' ? 'この返信のつながりは利用できません。' : '返信のつながりの表示は準備中です。'} />
-          {/if}
-        {:else if activePanelTab === 'topics'}
-          {#if currentTopics && selected}
-            <TopicList
-              {resolveMentionName}
-              topics={currentTopics}
-              unread={currentUnread}
-              channelId={selected.id}
-              activeTopicId={route?.topicId ?? null}
-              unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
-              onselecttopic={handleSelectTopic}
-              onstartnewtopic={organizationUnavailable || currentTimeline?.status === 'unavailable' || sendDisabled ? undefined : handleStartNewTopic}
-            />
-          {:else}
-            <EmptyState title="チャンネルを選んでください。" />
-          {/if}
-        {:else if activePanelTab === 'overview'}
-          {#if selected?.kind === 'channel'}
-            <ChannelOverview
-              channel={selected}
-              unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
-              pending={archiveStatePending}
-              onrename={(name) => channels.rename(selected.id, name)}
-              onarchive={() => channels.archive(selected.id)}
-              onrestore={() => channels.restore(selected.id)}
-              {onannounce}
-            />
-          {:else}
-            <EmptyState title="チャンネルを選んでください。" />
-          {/if}
-        {:else}
-          {#if channelMemberModel && selected?.kind === 'channel' && organization}
-            <ChannelMembers model={channelMemberModel} channel={selected} self={organization.member.id} candidates={members?.state.members ?? []} />
-          {:else}
-            <EmptyState title="チャンネルを選んでください。" />
-          {/if}
-        {/if}
+        <WorkspacePanelContent
+          mode={route?.panel?.startsWith('reply:') ? 'reply' : 'tabs'}
+          activeTab={activePanelTab}
+          {selected}
+          {currentChannel}
+          {currentTopics}
+          {currentReplies}
+          {currentUnread}
+          {channelMemberModel}
+          moveChain={session.moveChain}
+          activeTopicId={route?.topicId ?? null}
+          {activeReplyMessageId}
+          {resolvedReplyAnchor}
+          replyTargetStatus={replyTargetState.status}
+          {searchReply}
+          searchVisit={searchReply ? searchView?.visit : undefined}
+          selfId={organization?.member.id}
+          {organizationUnavailable}
+          currentTimelineUnavailable={currentTimeline?.status === 'unavailable'}
+          {sendDisabled}
+          {selectedArchived}
+          {archiveStatePending}
+          members={members?.state.members ?? []}
+          resolveSenderName={resolveSender}
+          {resolveMentionName}
+          bind:replyComposerRef={replyComposerRef}
+          {onannounce}
+          onmentionrequest={() => { void members?.load() }}
+          onopenreplies={handleOpenReplies}
+          onretrytarget={() => {
+            if (searchReply) void session.searchAnchor?.retry()
+            else if (route) void session.navigationTargets?.load(route, true)
+          }}
+          onretryreplyload={() => {
+            if (route) void session.navigationTargets?.load(route, true)
+          }}
+          ongoToChannelList={goToChannelList}
+          onrecheckmembership={onselectorganization && currentOrganizationId ? () => { if (currentOrganizationId) onselectorganization(currentOrganizationId) } : undefined}
+          onswitchorganization={otherOrg && onselectorganization ? () => { if (otherOrg) onselectorganization(otherOrg.organization_id) } : undefined}
+          onselecttopic={handleSelectTopic}
+          onstartnewtopic={handleStartNewTopic}
+          onrename={(name) => (selected?.kind === 'channel' ? channels.rename(selected.id, name) : Promise.resolve(null))}
+          onarchive={() => (selected?.kind === 'channel' ? channels.archive(selected.id) : Promise.resolve(null))}
+          onrestore={() => (selected?.kind === 'channel' ? channels.restore(selected.id) : Promise.resolve(null))}
+        />
       </Panel>
     </div>
   {/if}
@@ -1293,117 +1087,11 @@
     overflow: hidden;
   }
 
-  .main-card__header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-8);
-    padding: var(--space-12) var(--space-16);
-    min-width: 0;
-  }
-
-  /* Before the title row in DOM, Tab and visual order; shares its line when wide so the timeline keeps its height. */
-  .main-card__search {
-    display: flex;
-    flex: 1 1 240px;
-    max-width: 360px;
-    min-width: 0;
-  }
-
-  @media (max-width: 599px) {
-    .main-card__search {
-      max-width: none;
-    }
-  }
-
-  .main-card__header-row {
-    display: flex;
-    flex: 999 1 auto;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-8);
-    min-width: 0;
-  }
-
-  .main-card__title-group {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-8);
-    min-width: 0;
-  }
-
-  .main-card__crumb {
-    font-size: var(--font-size-14);
-    font-weight: var(--font-weight-medium);
-    color: var(--text2);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .main-card__title {
-    margin: 0;
-    font-size: var(--font-size-17);
-    font-weight: var(--font-weight-semibold);
-    color: var(--text);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .main-card__header-actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-8);
-    flex-shrink: 0;
-    min-width: 0;
-  }
-
-  .live-status {
-    font-size: var(--font-size-12);
-    color: var(--muted);
-  }
-
-  .main-card__body {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    min-width: 0;
-    height: 100%;
-    overflow: hidden;
-  }
-
-  .main-card__notice {
-    flex-shrink: 0;
-    padding: 0 var(--space-16) var(--space-8);
-    min-width: 0;
-  }
-
-  .main-card__timeline {
-    flex: 1 1 0;
-    min-height: 0;
-    min-width: 0;
-  }
-
-  .main-card__empty {
-    padding: var(--space-16);
-    min-width: 0;
-  }
-
   .right-panel-slot {
     height: 100%;
     min-height: 0;
     min-width: 0;
     transition: transform var(--duration-panel) var(--ease-out);
-  }
-
-  .mobile-only {
-    display: none;
   }
 
   /* 960px - 1279px: right panel overlays main from the right (docs/ui.md §3) */
@@ -1456,10 +1144,6 @@
 
   /* < 600px (phone): one screen at a time, bottom tab bar only at channels level (docs/ui.md §3) */
   @media (max-width: 599px) {
-    .mobile-only {
-      display: inline-flex;
-    }
-
     .workspace,
     .workspace[data-panel-open='true'] {
       grid-template-columns: minmax(0, 1fr);

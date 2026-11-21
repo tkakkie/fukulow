@@ -29,6 +29,36 @@ export type SendTiming = {
   uncertaintyMs: number;
   records: SendRecord[];
 };
+export type ClockSample = { beforeMs: number; afterMs: number; serverMs: number };
+
+export function intersectClockBrackets(samples: readonly ClockSample[]): SendTiming['offsetBoundsMs'] {
+  if (!samples.length) throw new Error('no server clock calibration samples');
+  let low = -Infinity, high = Infinity;
+  for (const { beforeMs, afterMs, serverMs } of samples) {
+    if (![beforeMs, afterMs, serverMs].every(Number.isFinite) || beforeMs > afterMs) {
+      throw new Error('invalid server clock calibration sample');
+    }
+    low = Math.max(low, beforeMs - serverMs);
+    high = Math.min(high, afterMs - serverMs);
+  }
+  if (low > high) throw new Error('inconsistent server clock calibration samples');
+  return [low, high];
+}
+
+export function encloseClockBrackets(start: SendTiming['offsetBoundsMs'], end: SendTiming['offsetBoundsMs']): SendTiming['offsetBoundsMs'] {
+  // Same-host clocks share the OS clock rate, but may count suspend differently.
+  return [Math.min(start[0], end[0]), Math.max(start[1], end[1])];
+}
+
+function sendUncertaintyMs([low, high]: SendTiming['offsetBoundsMs'], sendWidthMs: number) {
+  return ((high - low) + sendWidthMs) / 2;
+}
+
+export function runUncertaintyMs(offsetBoundsMs: SendTiming['offsetBoundsMs'], records: readonly SendRecord[]) {
+  // Include the widest send from entry to flush, including backpressure or descheduling.
+  return sendUncertaintyMs(offsetBoundsMs, Math.max(0, ...records.map(record => record.afterMs - record.beforeMs)));
+}
+
 export type Run = {
   kind: Kind | 'control'; size: number; repeat: number;
   // pass: expected start of the fallback recheck pass the fault is aligned to.
@@ -89,6 +119,7 @@ export function poolWindow(samples: PoolSample[], from: number, to: number) {
 const latency = (statements: Statement[]) => ({ count: statements.length, p95Ms: percentile(statements.map(s => s.ms), 95), p99Ms: percentile(statements.map(s => s.ms), 99) });
 
 type MemberNotices = Member & { revoked: number[] };
+type TimedNotice = Revocation & { sentAt: number; noticeUncertaintyMs: number; afterHold: SendRecord['afterHold'] };
 
 function summarize(run: Run, members: MemberNotices[]) {
   const { fault, mutationsDone, recovery, end } = run.times;
@@ -163,10 +194,10 @@ export function judge(run: Run) {
     // Multiple records for a Channel cannot be matched unambiguously.
     sends.set(record.channelId, sends.has(record.channelId) ? undefined : record);
   }
-  const indeterminate: (Revocation & { sentAt: number })[] = [];
+  const indeterminate: TimedNotice[] = [];
+  const faultSends: TimedNotice[] = [];
   const missingSendRecords: Revocation[] = [];
   let matchedSendRecords = 0;
-  let faultSend = false;
   // The relay measures Sync-to-ReadyForQuery. A successful completion in the removal
   // window is run-level corroboration only. It carries no Member or Channel identity.
   let lastPreFaultRecheck = -Infinity;
@@ -190,8 +221,12 @@ export function judge(run: Run) {
         matchedSendRecords++;
         if (duringFault) {
           const sentAt = clockOffset + (record.beforeMs + record.afterMs) / 2;
-          if (sentAt - timing.uncertaintyMs >= fault) faultSend = true;
-          else if (sentAt + timing.uncertaintyMs >= fault) indeterminate.push({ ...notice, sentAt });
+          const entry = {
+            ...notice, sentAt, afterHold: record.afterHold,
+            noticeUncertaintyMs: sendUncertaintyMs(timing.offsetBoundsMs, record.afterMs - record.beforeMs),
+          };
+          if (sentAt - timing.uncertaintyMs >= fault) faultSends.push(entry);
+          else if (sentAt + timing.uncertaintyMs >= fault) indeterminate.push(entry);
         }
       }
     }
@@ -220,7 +255,7 @@ export function judge(run: Run) {
   if (!m) reasons.push('no metrics event after the holds resolved');
   if (run.mutationFailures && run.kind !== 'outage') reasons.push(`${run.mutationFailures} removal/restore requests failed`);
   if (faultArrival) reasons.push('a revocation was delivered while the failure was active');
-  if (faultSend) reasons.push('a revocation was sent while the failure was active');
+  if (faultSends.length) reasons.push('a revocation was sent while the failure was active');
   if (indeterminate.length) reasons.push('a revocation send time is indeterminate at fault start');
   if (missingSendRecords.length) reasons.push('a revocation has no matching server send record');
   if (members.some(member => member.revoked.some(at => member.removedAt === undefined || at < member.removeStartedAt!))) reasons.push('a revocation reached a Member without a successful removal or before it');
@@ -255,7 +290,8 @@ export function judge(run: Run) {
   // pass means a clean PASS; read verdict for the boundary exception.
   const sendTiming = timing && {
     uncertaintyMs: timing.uncertaintyMs, serverSendRecords: timing.records.length, matchedSendRecords,
-    indeterminate, missingSendRecords,
+    indeterminate, faultSends, missingSendRecords,
+    unmatchedSendRecords: timing.records.filter(record => sends.has(record.channelId)),
   };
   return { pass: verdict === 'PASS', verdict, reasons, summary: { ...s, boundaryExceptions, ...(sendTiming && { sendTiming }) } };
 }

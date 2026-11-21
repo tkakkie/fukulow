@@ -13,7 +13,7 @@ import { outsideCheckout } from './proxy-target.ts';
 import { Relay } from './revocation-burst-relay.ts';
 import { startRssSampler } from './revocation-burst-rss.ts';
 import { installGate, removeDatabase, seedMembers, Session, sql, startDatabase, waitReady, type Database } from './revocation-burst-db.ts';
-import { judge, verdictBySize, KINDS, SIZES, THRESHOLDS, type Kind, type Member, type PoolSample, type Probe, type Revocation, type Run, type RunVerdict, type SendRecord, type SendTiming } from './revocation-burst-judgment.ts';
+import { encloseClockBrackets, intersectClockBrackets, judge, runUncertaintyMs, verdictBySize, KINDS, SIZES, THRESHOLDS, type ClockSample, type Kind, type Member, type PoolSample, type Probe, type Revocation, type Run, type RunVerdict, type SendRecord, type SendTiming } from './revocation-burst-judgment.ts';
 import type { Channel, CreateChannelRequest, NativeSessionResponse, ServerEvent, SetupRequest } from '../web/src/api-schema.d.ts';
 
 const run = promisify(execFile);
@@ -71,7 +71,7 @@ async function pool<T>(items: T[], limit: number, work: (item: T) => Promise<voi
 }
 
 async function calibrateClock(base: string, samples: number[]): Promise<[number, number]> {
-  let low = -Infinity, high = Infinity;
+  const brackets: ClockSample[] = [];
   // The health handler stamps its monotonic clock inside each serial loopback round trip.
   // Subtract the stamp from both Node times and intersect the brackets. Network, scheduling
   // and handler delays are included without assuming symmetric latency. Log arrival is unused.
@@ -83,11 +83,9 @@ async function calibrateClock(base: string, samples: number[]): Promise<[number,
     if (!response.ok || await response.text() !== 'ok') throw new Error('clock calibration health request failed');
     for (let attempt = 0; samples.length === index && attempt < 100; attempt++) await sleep(20);
     if (samples.length !== index + 1) throw new Error('missing or ambiguous server clock sample');
-    low = Math.max(low, before - samples[index]);
-    high = Math.min(high, after - samples[index]);
+    brackets.push({ beforeMs: before, afterMs: after, serverMs: samples[index] });
   }
-  if (low > high) throw new Error('inconsistent server clock calibration samples');
-  return [low, high];
+  return intersectClockBrackets(brackets);
 }
 
 async function measure(kind: Kind | 'control', size: number, repeat: number): Promise<Run> {
@@ -248,13 +246,10 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
   sql(db, 'SELECT 1;');
   await cleanup();
   await serverLogsClosed;
-  // Same-host monotonic clocks share the OS clock rate. Enclose both calibration brackets
-  // to cover a changed offset (e.g. if only one clock counts suspend). Also enclose the
-  // widest successful send from entry to flush, including any backpressure or descheduling.
-  const offsetBoundsMs: SendTiming['offsetBoundsMs'] = [Math.min(clockStart[0], clockEnd[0]), Math.max(clockStart[1], clockEnd[1])];
+  const offsetBoundsMs = encloseClockBrackets(clockStart, clockEnd);
   const sendTiming: SendTiming = {
     offsetBoundsMs,
-    uncertaintyMs: (offsetBoundsMs[1] - offsetBoundsMs[0] + Math.max(0, ...sendRecords.map(record => record.afterMs - record.beforeMs))) / 2,
+    uncertaintyMs: runUncertaintyMs(offsetBoundsMs, sendRecords),
     records: sendRecords,
   };
   const result: Run = {
