@@ -56,16 +56,39 @@ function parse(line: string): Row | undefined {
 }
 const appEventHint = /"target":"fukulow"|pool_stats|database_failure|websocket_|http_completed/;
 
-/** #519: the first unparseable app event lines, capped and truncated, kept only as local diagnostic artefacts. */
+// The unknown-kind shape, minus hex runs that could be tokens.
+const constantShape = (text: string) => /^[a-z][a-z0-9_]{0,31}$/.test(text) && !/^[0-9a-f]{16,}$/.test(text);
+const plainWord = (w: string) =>
+  constantShape(w) || /^[:,]*(?:-?\d+(?:\.\d+)?|true|false|null)?[:,]*$/.test(w) ? w : `<${w.length}>`;
+
+/** Keeps a line's JSON shape: constant-shaped strings and words verbatim, anything else as its length. */
+export function redactedShape(line: string): string {
+  let out = '';
+  for (let i = 0; i < line.length;) {
+    const quote = line.indexOf('"', i);
+    out += (quote < 0 ? line.slice(i) : line.slice(i, quote)).replace(/[^\s{}[\]]+/g, plainWord);
+    if (quote < 0) break;
+    let end = quote + 1;
+    while (end < line.length && line[end] !== '"') end += line[end] === '\\' ? 2 : 1;
+    if (end >= line.length) { out += `"<unterminated ${line.length - quote - 1}>`; break; }
+    const text = line.slice(quote + 1, end);
+    out += constantShape(text) ? `"${text}"` : `"<${text.length}>"`;
+    i = end + 1;
+  }
+  return out;
+}
+
+/** #519: the first unparseable app event lines, redacted to their shape and capped, for local diagnosis only. */
 export function unparseableAppLines(log: string, limit = 5, maxBytes = 2048): string[] {
   const lines: string[] = [];
   for (const line of log.split('\n')) {
     if (lines.length >= limit) break;
     if (!line.trim() || /"event":"panic"/.test(line) || parse(line) || !appEventHint.test(line)) continue;
-    lines.push(Buffer.from(line).subarray(0, maxBytes).toString());
+    lines.push(Buffer.from(redactedShape(line)).subarray(0, maxBytes).toString());
   }
   return lines;
 }
+
 const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : NaN;
 
 function redactUnknownValue(value: unknown, pattern: RegExp): UnknownValue {
