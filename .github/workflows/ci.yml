@@ -32,7 +32,7 @@ jobs:
         run: node web/scripts/check-doc-budgets.ts
       - run: rustup toolchain install --profile minimal
       # Prebuilt, checksum-verified binary: `cargo install` compiled it for 60-90 s in every job.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: wasm-bindgen@0.2.130 }
       - run: npm --prefix web ci
       - run: npm --prefix web run check
@@ -86,7 +86,7 @@ jobs:
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: rustup toolchain install --profile minimal
       # Prebuilt, checksum-verified binary: `cargo install` compiled it for 60-90 s in every job.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: wasm-bindgen@0.2.130 }
       - run: npm --prefix web ci # also for the invariants check, which imports typescript
       - run: npm --prefix web run build
@@ -94,7 +94,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         # Shards build the same target; one main save is enough (PR-ref saves would evict main's, 10 GB limit).
         with: { save-if: "${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}" }
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: cargo-nextest@0.9.151 }
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
       # Keep the build flags in sync with cargo nextest list in web/scripts/check-invariants.ts.
@@ -120,7 +120,7 @@ jobs:
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: rustup toolchain install --profile minimal
       # Prebuilt, checksum-verified binary: `cargo install` compiled it for 60-90 s in every job.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: wasm-bindgen@0.2.130 }
       - run: npm --prefix web ci
       - run: npm --prefix web run build
