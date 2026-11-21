@@ -151,7 +151,7 @@ Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSO
 
 ## Revocation hold retry bursts (#592)
 
-2026-11-21 JST, `2bad2c7d`, send time (#622): `recheck` 4,096 ×3 PASS, 24/24 sends matched, 0 in the fault. 2026-11-20 4096 FAIL kept. Maintainer: backoff acceptable (≤ 4 holds; high counts: #668), no jitter.
+2026-11-21 JST, `2bad2c7d`, send time (#622): `recheck` 4,096 ×3 PASS, 24/24 sends matched each, 0 in fault. 2026-11-20 4096 FAIL kept. Maintainer: backoff acceptable (≤ 4 holds; high counts: #668), no jitter.
 
 Run `node load/revocation-burst.ts --out <dir>`. [Record](../load/measurements-archive.md#revocation-hold-send-time-rerun-592-2026-11-21-jst-mac)
 
