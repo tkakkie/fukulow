@@ -19,6 +19,7 @@ import { membersAdapter } from './members.svelte'
 import { clearMessageFormatCache } from './message-format'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
+import { sectionsAdapter, type SectionsAdapter } from './sections.svelte'
 import type { MoveDestination, MoveResult } from './move-chain'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
@@ -30,6 +31,7 @@ export type SessionModel = {
   navigationTargets?: ReturnType<typeof navigationTargetsAdapter>
   searchAnchor?: SearchAnchorAdapter
   channels: ChannelsAdapter
+  sections?: SectionsAdapter
   sync: SyncAdapter
   topics(id: string): TopicsAdapter
   replies?(id: string): RepliesAdapter
@@ -67,6 +69,7 @@ const defaults: AuthDeps = {
       searchAnchor: searchAnchorAdapter(session.searchAnchor),
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
+      sections: sectionsAdapter(session.sections),
       dms: dmsAdapter(session.dms),
       sync: syncAdapter(session.sync),
       topics(id: string) {

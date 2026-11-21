@@ -134,10 +134,13 @@
   }
 
   .ui-dialog {
-    display: grid;
+    display: flex;
+    flex-direction: column;
     gap: var(--space-12);
     width: 100%;
     max-width: 24rem;
+    max-height: calc(100vh - 2 * var(--space-16));
+    max-height: calc(100dvh - 2 * var(--space-16));
     min-width: 0;
     padding: var(--space-16) var(--space-24);
     background-color: var(--surface);
@@ -151,6 +154,7 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-8);
+    flex-shrink: 0;
     min-width: 0;
   }
 
@@ -164,6 +168,7 @@
 
   .ui-dialog__description {
     margin: 0;
+    flex-shrink: 0;
     font-size: var(--font-size-14);
     color: var(--text2);
     overflow-wrap: anywhere;
@@ -171,6 +176,11 @@
 
   .ui-dialog__body {
     min-width: 0;
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: var(--space-4);
+    margin: calc(-1 * var(--space-4));
   }
 
   .ui-dialog__actions {
@@ -178,5 +188,6 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: var(--space-8);
+    flex-shrink: 0;
   }
 </style>

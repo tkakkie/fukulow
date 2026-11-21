@@ -413,9 +413,9 @@ test('hidden tab, ReplyPanel, Topic summary lines and failed pending sends never
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
 
     const channelNav = page.locator('#channel-content')
-    const targetChannelRow = channelNav
-      .locator('.channel-list > li > .ui-list-row-group > button.ui-list-row')
-      .filter({ hasText: targetChannel.name })
+    const targetChannelRow = channelNav.locator(
+      `li[data-channel-id="${targetChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
+    )
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 16件')
 
     // 1. Open targetChannel -> opens at first Unread with 未読 marker; only visible confirmed rows are marked

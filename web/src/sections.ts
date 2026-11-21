@@ -26,22 +26,24 @@ export const sectionsApi = (org: string): SectionsApi => ({
   delete: (id, signal) => api.deleteSection(org, id, undefined, signal),
 })
 
-type Group =
+export type SectionGroup =
   | { id: string; name: string; channels: readonly api.Channel[] }
   | { id: null; channels: readonly api.Channel[] }
 type Failure = Extract<api.Result<never>, { ok: false }>
 type LocalRefusal = { ok: false; kind: 'busy' | 'inactive' | 'reconciling' }
 export type SectionResult<T> = api.Result<T> | LocalRefusal
-type State = {
-  groups: readonly Group[]
+export type SectionsState = {
+  groups: readonly SectionGroup[]
   generation?: string
+  layoutRevision: number
   error?: Failure
   writing: boolean
+  reconnecting: boolean
 }
 
 const inactive = { ok: false, kind: 'inactive' } as const
 const network = { ok: false, kind: 'network' } as const
-const empty = (): State => ({ groups: [{ id: null, channels: [] }], writing: false })
+const empty = (): SectionsState => ({ groups: [{ id: null, channels: [] }], layoutRevision: 0, writing: false, reconnecting: false })
 
 export function createSections(options: {
   api: SectionsApi
@@ -89,7 +91,7 @@ export function createSections(options: {
       }
       return channels
     }
-    const groups: Group[] = layout.sections.map(section => ({
+    const groups: SectionGroup[] = layout.sections.map(section => ({
       id: section.id, name: section.name, channels: intersect(section.channel_ids),
     }))
     groups.push({ id: null, channels: intersect(layout.other_channel_ids) })
@@ -109,7 +111,7 @@ export function createSections(options: {
     layout = value
     layoutCurrent = true
     if (recovery !== 'channels') recovery = undefined
-    state = { ...state, error: undefined }
+    state = { ...state, error: undefined, layoutRevision: state.layoutRevision + 1 }
     // A later reappearance needs Channel-list authority from after the omission.
     if (omitted) {
       access++
@@ -264,6 +266,10 @@ export function createSections(options: {
       // Reset on a fresh socket. A same-socket reset keeps the monotonic version floors.
       accepted = -1n
       observed = -1n
+      if (state.reconnecting) {
+        state = { ...state, reconnecting: false }
+        notify()
+      }
     },
     disconnected() {
       if (closed || waitingForReady) return
@@ -273,6 +279,8 @@ export function createSections(options: {
       layoutCurrent = false
       target.suspend()
       if (release) options.list.disconnected()
+      state = { ...state, reconnecting: true }
+      notify()
     },
     hideChannel,
     close,
@@ -299,3 +307,4 @@ export function createSections(options: {
     delete: (id: string) => mutate(signal => options.api.delete(id, signal)),
   }
 }
+export type Sections = ReturnType<typeof createSections>

@@ -93,6 +93,7 @@
   })
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
+  const sectionsState = $derived(session.sections?.state)
   const dmState = $derived(session.dms?.state)
   const channelListStatus = $derived(s.status)
   const currentOrganizationId = $derived(selectedOrganizationId || organization?.organization.organization_id || '')
@@ -857,13 +858,15 @@
           role="alert"
           message="チャンネルを読み込めませんでした。"
           detail="通信状況を確認して、もう一度お試しください。"
-          actionLabel="再試行"
-          onaction={() => {
-            announcementController.resetChannelListTimeout()
-            void channels.load()
-          }}
+          actionLabel={sectionsState?.reconnecting ? undefined : '再試行'}
+          onaction={sectionsState?.reconnecting
+            ? undefined
+            : () => {
+                announcementController.resetChannelListTimeout()
+                void channels.load()
+              }}
         />
-      {:else if !organizationUnavailable && s.status === 'loading' && s.channels.length === 0}
+      {:else if !organizationUnavailable && !sectionsState?.reconnecting && s.status === 'loading' && s.channels.length === 0}
         <Skeleton rows={3} label="チャンネルを読み込み中" />
       {/if}
 
@@ -876,6 +879,9 @@
         {channelUnreadCount}
         channelMentionUnreadCount={(id) => session.unread?.(id).state.mentionUnreadCount ?? null}
         topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
+        sections={session.sections}
+        disabled={organizationUnavailable}
+        channelListHeading={channelListHeadingRef}
         onselect={handleSelectChannel}
         onselecttopic={handleSelectTopic}
         onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}

@@ -27,6 +27,7 @@ type Db = ReturnType<typeof database>
 
 export function client(db: Db = database(), options: {
   initialList?: Promise<Result<{ channels: UnreadChannel[] }>>
+  initialLayout?: Promise<Result<SectionLayout>>
   organizationId?: string
   accountSignal?: AbortSignal
   timeoutMs?: number
@@ -34,6 +35,7 @@ export function client(db: Db = database(), options: {
 } = {}) {
   const sockets: SocketLike[] = [], controls: ClientMessage[] = []
   const getLayout = vi.fn(async (_signal: AbortSignal): Promise<Result<SectionLayout>> => ok(db.layout))
+  if (options.initialLayout) getLayout.mockReturnValueOnce(options.initialLayout)
   const list = vi.fn(async (_signal?: AbortSignal): Promise<Result<{ channels: UnreadChannel[] }>> => ok({ channels: db.rows }))
   if (options.initialList) list.mockReturnValueOnce(options.initialList)
   const sectionsApi = {

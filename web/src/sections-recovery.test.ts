@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { createActivity } from './activity'
 import type { ChannelPlacement, CreatedSection, Result, SectionLayout } from './api'
+import { createSections } from './sections'
 import { advance, client, database, deferred, http, layout, network, ok, row } from './sections-test-helpers'
 
 const clients: ReturnType<typeof client>[] = []
@@ -21,9 +23,7 @@ afterEach(() => {
 it('Ready fences the first layout and Channel-list reads and queues both follow-ups', async () => {
   const oldLayout = deferred<Result<SectionLayout>>()
   const oldList = deferred<Result<{ channels: ReturnType<typeof row>[] }>>()
-  const c = open(database(), { initialList: oldList.promise })
-  c.getLayout.mockReturnValueOnce(oldLayout.promise)
-  c.sections.hold()
+  const c = open(database(), { initialList: oldList.promise, initialLayout: oldLayout.promise })
   await c.ready()
   oldLayout.resolve(ok(layout('99', ['pre-ready'])))
   oldList.resolve(ok({ channels: [row('pre-ready')] }))
@@ -37,15 +37,53 @@ it('Ready fences the first layout and Channel-list reads and queues both follow-
 })
 
 it('Ready, section notices and O5 leave an unheld layout unloaded', async () => {
-  const c = open()
-  await c.ready()
-  c.db.layout = layout('2')
-  c.event({ type: 'sections_changed', generation: '2' })
-  await advance(50_000)
-  expect(c.getLayout).not.toHaveBeenCalled()
-  c.sections.hold()
-  await advance(0)
-  expect(c.generation()).toBe('2')
+  let current = layout('1')
+  const getLayout = vi.fn(async (_signal: AbortSignal): Promise<Result<SectionLayout>> => ok(current))
+  const activity = createActivity({
+    kind: () => 'channel',
+    watched: () => false,
+    covered: () => false,
+    revoke: () => {},
+    access: () => {},
+    reconcile: () => {},
+    random: () => 0.5,
+  })
+  const sections = createSections({
+    api: {
+      layout: getLayout,
+      placement: async () => network,
+      create: async () => network,
+      rename: async () => network,
+      reorder: async () => network,
+      moveChannel: async () => network,
+      reorderChannels: async () => network,
+      delete: async () => network,
+    },
+    activity,
+    list: {
+      get: () => ({ channels: [row('A')], current: true }),
+      subscribe: () => () => true,
+      invalidate: () => {},
+      disconnected: () => {},
+      ready: () => {},
+    },
+    observeAccess: () => {},
+    random: () => 0.5,
+  })
+  try {
+    sections.ready()
+    activity.notice({ type: 'activity_ready' })
+    current = layout('2')
+    activity.notice({ type: 'sections_changed', generation: '2' })
+    await advance(50_000)
+    expect(getLayout).not.toHaveBeenCalled()
+    sections.hold()
+    await advance(0)
+    expect(sections.get().generation).toBe('2')
+  } finally {
+    sections.close()
+    activity.close()
+  }
 })
 
 it.each(['activity_reset', 'channel_list_changed', 'periodic'] as const)('%s fences both pending snapshots and leaves one queued follow-up', async trigger => {
