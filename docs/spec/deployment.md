@@ -74,7 +74,11 @@ ss -ltnH '( sport = :80 or sport = :443 )'                                    # 
 The maintainer chooses how to issue and renew certificates.
 
 - DNS-01 keeps 80/443 closed. Use a reviewed, pinned custom Caddy build with a DNS provider module (absent from stock), a private least-privilege DNS API token outside the checkout, and outbound DNS/ACME. Account for DNS propagation and token custody.
-- HTTP-01 (80) or TLS-ALPN-01 (443) needs correct public DNS and a deliberate short public opening without the override. Restore it immediately after issuance and rerun restriction checks. Isolation weakens during the opening. Renew in another approved window before expiry or switch to DNS-01. One opening cannot renew unattended.
+- HTTP-01 (80) or TLS-ALPN-01 (443) needs correct public DNS and a deliberate short public opening. Isolation weakens during the opening. Renew in another approved window before expiry or switch to DNS-01. One opening cannot renew unattended. An opening has two layers, both temporary:
+  - the provider packet filter (and any host firewall) allows the port;
+  - Compose publishes it on the public address: start the proxy without the override, or with a private temporary override that adds only that port.
+  - The filter change can take effect with a delay. Before requesting the certificate, confirm the port is reachable from an external source. A first attempt that fails before the filter applies can be retried in the same window.
+  - After issuance, close the filter and restart the proxy with the loopback-only override. Then rerun the check block above and the restriction checks below.
 
 After approval, on the operator machine (replace placeholders privately):
 
@@ -107,6 +111,8 @@ curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 -
 ```
 
 Use a valid signed-in Member’s cookie jar (0600, outside checkout) and a base64-encoded 16-byte nonce. Keep credentials out of commands/logs. Require the actual TLS `101` even if curl later times out. Allowed Origin without credentials returns 401 before upgrade. Missing/disallowed cookie Origin returns 403 `origin_not_allowed`.
+
+**Image and operator.** CI publishes no image. `compose.yml` builds it on the VPS (`build: .`) from the checked-out revision. Check out the revision that passed #286, or for the restricted deploy the revision under test, and record it. A VPS build matches that revision’s source, not necessarily the image CI built: do not treat them as identical. The build needs enough memory (swap helps on small plans). Keep deployment `.env` as `root:fukulow-backup` 0640 ([backup runbook](#operator-runbook-and-production-hold-316)). A non-root operator runs Compose with `sudo`, for example `sudo docker compose -f compose.yml -f '<override>' --profile caddy up -d --build`. Do not widen `.env` or add the operator to `fukulow-backup` to avoid `sudo`. Docker access is root-equivalent either way.
 
 **Client IP through SSH.** The VPS/Docker loopback peer (typically the bridge gateway) is shared. One operator can exhaust the shared per-IP sign-in budget (20 per IPv4 address or IPv6 /64 per 60 s). Identify operators by Account, since IP logs/metrics cannot distinguish them. Never add forwarded headers or widen `FUKULOW_TRUSTED_PROXIES` to recover original IPs. Only clients connecting directly to public Caddy regain per-client IPs after lifting the restriction.
 
