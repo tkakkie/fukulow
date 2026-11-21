@@ -122,6 +122,10 @@ pub(crate) async fn test_app_pool(admin: sqlx::PgPool) -> sqlx::PgPool {
 }
 
 pub fn app(state: AppState) -> Router {
+    app_with_search(state, messages::search::SearchEngine::Disabled)
+}
+
+fn app_with_search(state: AppState, search_engine: messages::search::SearchEngine) -> Router {
     state.session_changes.set_activity(std::sync::Arc::new(
         state.message_delivery.channel_access.activity.clone(),
     ));
@@ -168,6 +172,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/orgs/{org}/message-authors",
             axum::routing::post(messages::authors::lookup_authors),
+        )
+        .route(
+            "/api/v1/orgs/{org}/search",
+            get(messages::search::search).layer(axum::Extension(search_engine)),
         )
         .route(
             "/api/v1/orgs/{org}/members/{id}/deactivate",
@@ -307,13 +315,31 @@ pub async fn serve(
     signal: impl Future<Output = ()>,
     deadline: Duration,
 ) -> std::io::Result<bool> {
+    serve_with_search(
+        listener,
+        state,
+        messages::search::SearchEngine::Disabled,
+        signal,
+        deadline,
+    )
+    .await
+}
+
+pub async fn serve_with_search(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    search_engine: messages::search::SearchEngine,
+    signal: impl Future<Output = ()>,
+    deadline: Duration,
+) -> std::io::Result<bool> {
     let shutdown = state.shutdown.clone();
     let pool = state.pool.clone();
     let delivery = state.message_delivery.clone();
     let stop_accepting = shutdown.clone();
     let server = axum::serve(
         listener,
-        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app_with_search(state, search_engine)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move { stop_accepting.cancelled().await })
     .into_future();

@@ -310,6 +310,7 @@ async fn persist(
         commit::finish(tx, outcome.operation_id).await?;
         return Ok(outcome);
     };
+    super::search::SearchEngine::index_move(&mut tx, &event);
     let delivery = &state.message_delivery;
     let mut notification = delivery.notification(org, channel, event.seq);
     if let Err(error) = commit::finish(tx, outcome.operation_id).await {

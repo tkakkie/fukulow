@@ -612,6 +612,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search readable Messages, newest first by creation time and then Message id.
+         *     Each page checks current Channel and DM visibility in its own snapshot.
+         */
+        get: operations["search"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/ws": {
         parameters: {
             query?: never;
@@ -839,6 +859,8 @@ export interface components {
             /** Format: uuid */
             history_generation: string;
         };
+        /** @enum {string} */
+        ChannelKind: "channel" | "dm";
         ChannelList: {
             channels: components["schemas"]["UnreadChannel"][];
             /** Format: uuid */
@@ -1356,6 +1378,23 @@ export interface components {
         };
         /** @enum {string} */
         Role: "owner" | "admin" | "member" | "guest";
+        SearchHit: {
+            channel_kind: components["schemas"]["ChannelKind"];
+            /** @description An existing Message. Its deleted field is always false. */
+            message: components["schemas"]["Message"];
+        };
+        SearchPage: {
+            hits: components["schemas"]["SearchHit"][];
+            /** @description Null when there are no more hits in the range. */
+            next_cursor: string | null;
+            /** Format: int32 */
+            range_days: number;
+            /**
+             * Format: date-time
+             * @description Inclusive cutoff fixed on the first page.
+             */
+            range_start: string;
+        };
         Section: {
             channel_ids: string[];
             /** Format: uuid */
@@ -1615,6 +1654,7 @@ export type ChannelAccessRevoked = components['schemas']['ChannelAccessRevoked']
 export type ChannelActivity = components['schemas']['ChannelActivity'];
 export type ChannelCapabilities = components['schemas']['ChannelCapabilities'];
 export type ChannelEventPage = components['schemas']['ChannelEventPage'];
+export type ChannelKind = components['schemas']['ChannelKind'];
 export type ChannelList = components['schemas']['ChannelList'];
 export type ChannelListChanged = components['schemas']['ChannelListChanged'];
 export type ChannelMember = components['schemas']['ChannelMember'];
@@ -1675,6 +1715,8 @@ export type ReplyCountPage = components['schemas']['ReplyCountPage'];
 export type ReplyCountRequest = components['schemas']['ReplyCountRequest'];
 export type RevokeOtherSessionsRequest = components['schemas']['RevokeOtherSessionsRequest'];
 export type Role = components['schemas']['Role'];
+export type SearchHit = components['schemas']['SearchHit'];
+export type SearchPage = components['schemas']['SearchPage'];
 export type Section = components['schemas']['Section'];
 export type SectionLayout = components['schemas']['SectionLayout'];
 export type SectionOrder = components['schemas']['SectionOrder'];
@@ -6003,6 +6045,85 @@ export interface operations {
                 };
             };
             /** @description This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
+            503: {
+                headers: {
+                    /** @description no-store */
+                    "Cache-Control"?: string;
+                    /** @description Jittered retry delay in seconds (1 through 5) */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    search: {
+        parameters: {
+            query: {
+                /** @description Query as typed, up to 256 Unicode scalars after trimming. After Unicode NFKC case folding, every whitespace-separated token must match as a literal substring and at least one token must contain two or more scalars. */
+                q: string;
+                /** @description Limit to one visible Channel or DM */
+                channel_id?: string;
+                /** @description Opaque next_cursor from this search */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Organization id */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Page of matching Messages from the fixed 180-day range. A page can have fewer than 20 hits and still have a next cursor. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchPage"];
+                };
+            };
+            /** @description search_query_too_short, search_query_too_long, invalid_cursor, or malformed input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing, invalid, expired, or revoked Account Session credential */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description organization_unavailable or channel not found for an inaccessible or unknown Channel */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Database failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description search_unavailable when disabled or search_timeout when the database statement deadline expires; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends */
             503: {
                 headers: {
                     /** @description no-store */

@@ -37,6 +37,7 @@ pub use limiter::SendLimit;
 pub(crate) mod replies;
 pub use replies::counts::{ReplyCount, ReplyCountPage, ReplyCountRequest, reply_counts};
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
+pub mod search;
 pub(crate) mod topics;
 pub(crate) mod unread;
 #[cfg(test)]
@@ -807,6 +808,7 @@ async fn persist_admitted(
         .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).bind(history_generation).try_map(|row| message_from_row(&row))
         .fetch_optional(tx.connection()?).await?;
     if let Some(mut message) = message {
+        search::SearchEngine::index_send(&mut tx, organization_id, message.id).await?;
         log::create(tx.connection()?, organization_id, &message).await?;
         mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;

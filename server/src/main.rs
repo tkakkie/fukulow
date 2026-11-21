@@ -66,6 +66,11 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         Ok("true") | Err(std::env::VarError::NotPresent) => true,
         _ => return Err("FUKULOW_COOKIE_SECURE must be true or false".into()),
     };
+    let search_engine = match std::env::var("FUKULOW_SEARCH_ENGINE") {
+        Ok(value) => fukulow_server::messages::search::SearchEngine::configured(Some(&value))?,
+        Err(std::env::VarError::NotPresent) => Default::default(),
+        Err(_) => return Err("FUKULOW_SEARCH_ENGINE must be disabled or d3r".into()),
+    };
     let send_limit = fukulow_server::messages::SendLimit::configured(
         std::env::var("FUKULOW_SEND_BURST").ok().as_deref(),
         std::env::var("FUKULOW_SEND_REFILL_PER_SECOND")
@@ -108,7 +113,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         shutdown.clone(),
     ));
     let metrics = tokio::spawn(fukulow_server::observability::report_periodically());
-    let completed = fukulow_server::serve(
+    let completed = fukulow_server::serve_with_search(
         listener,
         AppState {
             pool,
@@ -122,6 +127,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             ws_allowed_origins,
             socket_gate: Default::default(),
         },
+        search_engine,
         signal,
         fukulow_server::DRAIN_TIMEOUT,
     )

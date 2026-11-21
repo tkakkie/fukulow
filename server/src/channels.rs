@@ -314,6 +314,49 @@ fn visible_channel_sql() -> String {
     )
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize, ToSchema, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum ChannelKind {
+    Channel,
+    Dm,
+}
+
+/// None means the captured Membership is no longer current. The empty result
+/// for an active Member also covers a supplied Channel id that is not visible.
+pub(crate) async fn search_scopes(
+    tx: &mut sqlx::PgConnection,
+    organization: Uuid,
+    member: (Uuid, i64),
+    filter: Option<&[Uuid]>,
+) -> Result<Option<Vec<(Uuid, ChannelKind)>>, sqlx::Error> {
+    let filter_sql = if filter.is_some() {
+        "c.id=ANY($4) AND "
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT c.id, c.kind FROM ({}) u LEFT JOIN channels c ON c.organization_id=$1 \
+         AND {filter_sql}({})",
+        auth::current_member_sql(false),
+        visible_channel_sql(),
+    );
+    let query = sqlx::query_as(&sql)
+        .bind(organization)
+        .bind(member.0)
+        .bind(member.1);
+    let query = match filter {
+        Some(id) => query.bind(id),
+        None => query,
+    };
+    let rows: Vec<(Option<Uuid>, Option<ChannelKind>)> = query.fetch_all(tx).await?;
+    Ok((!rows.is_empty()).then(|| {
+        rows.into_iter()
+            .filter_map(|(id, kind)| id.zip(kind))
+            .collect()
+    }))
+}
+
 fn visibility_sql(member_sql: &str, channel_parameter: &str) -> String {
     let visible = visible_channel_sql();
     format!(

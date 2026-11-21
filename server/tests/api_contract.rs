@@ -25,8 +25,8 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // Every operation documents the common shutdown response.
-const EXPECTED_API_OPERATIONS: usize = 52;
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 391;
+const EXPECTED_API_OPERATIONS: usize = 53;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 397;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -146,6 +146,41 @@ fn author_lookup_contract_bounds_input_and_retains_deactivated_identity() {
             json!({"$ref":"#/components/schemas/AuthorIdentities"})
         );
     }
+}
+
+#[test]
+fn search_contract_requires_query_and_documents_results_and_errors() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let operation = &document["paths"]["/api/v1/orgs/{org}/search"]["get"];
+    let parameters = operation["parameters"].as_array().unwrap();
+    for (name, required) in [("q", true), ("channel_id", false), ("cursor", false)] {
+        let parameter = parameters.iter().find(|p| p["name"] == name).unwrap();
+        assert_eq!(parameter["in"], "query");
+        assert_eq!(parameter["required"], required);
+    }
+    let responses = &operation["responses"];
+    assert_eq!(
+        responses["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/SearchPage"
+    );
+    for status in ["400", "401", "404", "503"] {
+        assert_eq!(
+            responses[status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorBody"
+        );
+    }
+    let schemas = &document["components"]["schemas"];
+    let page = &schemas["SearchPage"]["properties"];
+    assert_eq!(page["hits"]["maxItems"], 20);
+    assert_eq!(page["next_cursor"]["type"], json!(["string", "null"]));
+    assert_eq!(page["range_days"]["minimum"], 180);
+    assert_eq!(page["range_days"]["maximum"], 180);
+    assert_eq!(page["range_start"]["format"], "date-time");
+    assert_eq!(
+        schemas["SearchHit"]["properties"]["message"]["$ref"],
+        "#/components/schemas/Message"
+    );
+    assert_eq!(schemas["ChannelKind"]["enum"], json!(["channel", "dm"]));
 }
 
 #[test]

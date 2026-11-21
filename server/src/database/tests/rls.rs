@@ -4,13 +4,14 @@ use crate::database;
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-const TABLES: [&str; 14] = [
+const TABLES: [&str; 15] = [
     "organizations",
     "users",
     "channels",
     "channel_members",
     "channel_message_sequences",
     "messages",
+    "message_search_terms",
     "channel_log",
     "operation_receipts",
     "message_mentions",
@@ -53,6 +54,7 @@ async fn tenant(admin: &PgPool) -> Tenant {
         "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1, $4, 1)",
         "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) VALUES ($1, $4, $5, 'topic', 1, 1, 1)",
         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id) VALUES ($1, gen_random_uuid(), $4, 1, $3, gen_random_uuid(), 'hello', $5)",
+        "INSERT INTO message_search_terms (organization_id, channel_id, term, created_at, message_id) SELECT $1,$4,'he',created_at,id FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO operation_receipts (organization_id,actor,operation_id,kind,channel_id,target_id,intent_digest,outcome_version,outcome_deleted) SELECT $1,$3,gen_random_uuid(),'edit',$4,id,sha256('intent'::bytea),1,false FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id) SELECT $1,$4,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$4",
