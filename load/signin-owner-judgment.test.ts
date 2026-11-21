@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { judge, type Run, type OwnerOp } from './signin-owner-judgment.ts';
+import { admissionRejected, causes, errorCode, judge, type Run, type OwnerOp } from './signin-owner-judgment.ts';
 
 // B0 owner: sign-in p50 V = 50 ms, p95 60 ms -> B1 bound 60 + 5 * 50 = 310 ms.
 function run(): Run {
@@ -87,4 +87,36 @@ test('missing baseline or samples make the run incomplete, not a pass', () => {
     const m = run(); m.reads = m.reads.filter(x => x.phase !== phase);
     assert.equal(judge(m).incomplete, true, `${phase} reads missing`);
   }
+});
+
+test('non-success answers are tallied by phase, route and ErrorBody code', () => {
+  const r = run();
+  r.owner.find(o => o.status === 503)!.error = 'password admission unavailable';
+  r.attack[1].error = 'too many sign-in attempts';
+  r.reads.push({ phase: 'B1', status: 0, ms: 45_000 });
+  assert.deepEqual(causes(r), {
+    B1: { owner_signin: { '429 no_error_body': 1 }, owner_password: { '503 password admission unavailable': 1 },
+      attack: { '401 no_error_body': 1, '429 too many sign-in attempts': 1 }, reads: { '0 client_timeout_or_transport': 1 } },
+  });
+  assert.deepEqual(judge(r).causes, causes(r));
+});
+
+test('ErrorBody codes are kept only when they are server constants', () => {
+  for (const code of ['too many sign-in attempts', 'password admission unavailable', 'lock_contention', 'shutting_down', 'invalid credentials'])
+    assert.equal(errorCode(JSON.stringify({ error: code })), code);
+  assert.equal(errorCode(''), 'no_error_body');
+  for (const body of ['<html>', 'null', '{}', '{"error":7}', JSON.stringify({ error: 'Owner@example.invalid' }), JSON.stringify({ error: 'x'.repeat(65) })])
+    assert.equal(errorCode(body), 'unrecognised_error_body', body);
+});
+
+test('admission rejections keep the last cumulative report per kind and flag unparsed lines', () => {
+  const line = (count: number, at: string, kind = 'password') => JSON.stringify({ timestamp: at, level: 'INFO',
+    fields: { event: 'admission_rejected', kind, count }, target: 'fukulow' });
+  const log = [line(2, '2026-11-21T00:01:00Z'), line(5, '2026-11-21T00:02:00Z'), line(1, '2026-11-21T00:02:00Z', 'socket'),
+    JSON.stringify({ timestamp: '2026-11-21T00:02:00Z', fields: { event: 'metrics', admission_rejections: 6 }, target: 'fukulow' })].join('\n');
+  assert.deepEqual(admissionRejected(log), { complete: true, unparsed: 0,
+    last: { password: { count: 5, at: '2026-11-21T00:02:00Z' }, socket: { count: 1, at: '2026-11-21T00:02:00Z' } } });
+  for (const bad of [line(-1, '2026-11-21T00:01:00Z'), line(1, 'later'), '{"fields":{"event":"admission_rejected","kind":"pass',
+    JSON.stringify({ timestamp: '2026-11-21T00:01:00Z', fields: { event: 'admission_rejected', kind: 'password', count: 1 }, target: 'other' })])
+    assert.equal(admissionRejected(bad).complete, false, bad);
 });

@@ -13,7 +13,7 @@ import { resolve, relative, isAbsolute } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as pause } from 'node:timers/promises';
 import { appEvidence } from './app-evidence.ts';
-import { judge, type AttackOp, type LockSample, type OwnerOp, type Phase, type ReadOp } from './signin-owner-judgment.ts';
+import { admissionRejected, errorCode, judge, type AttackOp, type LockSample, type OwnerOp, type Phase, type ReadOp } from './signin-owner-judgment.ts';
 import type { NativeSessionResponse, SetupRequest } from '../web/src/api-schema.d.ts';
 
 function integer(key: string, fallback: number, max: number) {
@@ -79,15 +79,19 @@ try {
   const base = `http://127.0.0.1:${port}`;
   const request = async (path: string, init: RequestInit) => {
     const start = performance.now();
-    let status = 0, body: unknown = null;
+    let status = 0, body: unknown = null, error: string | undefined;
     try {
       const response = await fetch(base + path, { ...init, redirect: 'error',
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(TIMEOUT_MS)]) });
       status = response.status;
       const text = await response.text();
       if (status === 200 && text) body = JSON.parse(text);
+      // Keep only the ErrorBody code (a server constant) to classify rejections, e.g. each 503's cause.
+      if (status >= 400) {
+        error = errorCode(text);
+      }
     } catch { status = 0; }
-    return { status, body, ms: performance.now() - start, end: performance.now() };
+    return { status, body, error, ms: performance.now() - start, end: performance.now() };
   };
   const json = (ip: string | null, token?: string) => ({ 'Content-Type': 'application/json',
     ...(ip ? { 'X-Load-Client-IP': ip } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) });
@@ -159,7 +163,7 @@ try {
           : await request('/api/v1/me/password', { method: 'PUT', headers: json(OWNER_IP, ownerToken),
             body: JSON.stringify({ current_password: passwords[current], new_password: passwords[target] }) });
         if (due === 'password' && r.status === 204) current = target;
-        owner.push({ kind: due, phase: at, status: r.status, ms: r.ms, endMs: r.end - t0 });
+        owner.push({ kind: due, phase: at, status: r.status, ms: r.ms, endMs: r.end - t0, error: r.error });
       })().finally(() => { ownerBusy = false; }));
     }
     while (now >= nextAttack && nextAttack < startAt.B2 && now < startAt.B2) {
@@ -169,7 +173,7 @@ try {
       track((async () => {
         const r = await request('/api/v1/native/session', { method: 'POST', headers: json(ATTACKER_IP),
           body: JSON.stringify({ email: setup.email, password: wrong }) });
-        attack.push({ phase: 'B1', status: r.status, ms: r.ms, endMs: r.end - t0 });
+        attack.push({ phase: 'B1', status: r.status, ms: r.ms, endMs: r.end - t0, error: r.error });
       })().finally(() => { attackActive--; }));
     }
     while (now >= nextRead) {
@@ -179,7 +183,7 @@ try {
       const at = phaseOf(now);
       track((async () => {
         const r = await request(`/api/v1/orgs/${organization}/channels`, { method: 'GET', headers: { Authorization: `Bearer ${readerBody.token}` } });
-        reads.push({ phase: at, status: r.status, ms: r.ms });
+        reads.push({ phase: at, status: r.status, ms: r.ms, error: r.error });
       })().finally(() => { readActive--; }));
     }
     await pause(2);
@@ -192,14 +196,15 @@ try {
   if (controller.signal.aborted) throw new Error('interrupted');
   await pause(2500);
   const logs = docker(...compose, 'logs', '--no-color', '--no-log-prefix', 'app');
-  const evidence = appEvidence(logs, wallStart, wallStart + endMs);
+  const evidence = appEvidence(logs, wallStart, wallStart + endMs), admissions = admissionRejected(logs);
   const poolTimeouts = (evidence.pool?.deltas.acquire_timeout ?? 0) + evidence.databaseFailures.pool_timeout;
   judgment = judge({ owner, attack, reads, locks, phaseStartMs: startAt, endMs, poolMax: POOL_MAX,
-    server: { poolTimeouts, panics: evidence.panics, complete: evidence.complete } });
+    server: { poolTimeouts, panics: evidence.panics, complete: evidence.complete && admissions.complete } });
   writeFileSync(`${output}/server-evidence.json`, JSON.stringify({ pool: evidence.pool, databaseFailures: evidence.databaseFailures,
-    http5xx: evidence.http5xx, panics: evidence.panics, reasons: evidence.reasons }, null, 2));
+    http5xx: evidence.http5xx, panics: evidence.panics, otherWarnings: evidence.otherWarnings, complete: evidence.complete,
+    reasons: evidence.reasons, admissionRejected: admissions }, null, 2));
   console.log('SIGNIN_OWNER_JUDGMENT ' + JSON.stringify({ formal: false, allPass: judgment.allPass, incomplete: judgment.incomplete,
-    checks: judgment.checks, skipped }));
+    checks: judgment.checks, causes: judgment.causes, skipped }));
 } catch {
   // Child-process errors can include environment or SQL. Never serialize raw errors.
   failed = true;
