@@ -6107,6 +6107,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description search_rate_limited when Search admission is full or the Member exceeds the concurrency or rate cap */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Database failure */
             500: {
                 headers: {

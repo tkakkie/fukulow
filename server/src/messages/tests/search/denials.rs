@@ -149,6 +149,59 @@ async fn search_requires_dm_participation_and_current_grant(pool: PgPool) {
 }
 
 #[fukulow_test::test]
+async fn search_keeps_dm_hits_for_remaining_participant_after_peer_deactivation(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    role(&f.pools.admin, f.org, f.author, "owner").await;
+    let peer = Uuid::new_v4();
+    let peer_token = member(&f.pools.admin, f.org, peer).await;
+    let response = request(
+        &f.app,
+        "POST",
+        "/api/v1/dms",
+        &f.token,
+        json!({"member_id":peer}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let dm = id(&body(response).await);
+    let message = id(&sent(
+        &f.app,
+        &peer_token,
+        dm,
+        input(Uuid::new_v4(), "conversation"),
+    )
+    .await);
+    let response = request(
+        &f.app,
+        "POST",
+        &format!("/api/v1/orgs/{}/members/{peer}/deactivate", f.org),
+        &f.token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    for channel in [None, Some(dm)] {
+        let hits = page(&f, &f.token, "conversation", channel, None).await;
+        assert_eq!(ids(&hits), [message]);
+        assert_eq!(hits["hits"][0]["channel_kind"], "dm");
+    }
+    error(
+        get(
+            &f.app,
+            f.org,
+            &peer_token,
+            Some("conversation"),
+            Some(dm),
+            None,
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "organization_unavailable",
+    )
+    .await;
+}
+
+#[fukulow_test::test]
 async fn search_rechecks_visibility_between_pages_and_binds_cursor_to_member_query_and_filter(
     pool: PgPool,
 ) {
@@ -209,19 +262,6 @@ async fn search_rechecks_visibility_between_pages_and_binds_cursor_to_member_que
     .await;
 }
 
-async fn with_captured_auth(f: &Fixture, auth: Auth) -> Response {
-    search(
-        State(AppState::with_test_pool(f.pools.app.clone())),
-        Extension(SearchEngine::D3r(D3rEngine)),
-        auth,
-        Ok(Query(
-            serde_json::from_value::<SearchQuery>(json!({"q":"needle"})).unwrap(),
-        )),
-    )
-    .await
-    .into_response()
-}
-
 #[fukulow_test::test]
 async fn search_rechecks_deactivation_revision_and_demotion_after_authentication(pool: PgPool) {
     let f = Fixture::new(pool).await;
@@ -229,15 +269,19 @@ async fn search_rechecks_deactivation_revision_and_demotion_after_authentication
     let token = member(&f.pools.admin, f.org, actor).await;
     let message = id(&f.post(f.public, "needle").await);
     let capture = async || membership::captured_auth(&f.pools.app, &token).await;
-    assert_eq!(
-        ids(&body(with_captured_auth(&f, capture().await).await).await),
-        [message]
-    );
+    let search = |auth| {
+        with_captured_auth(
+            AppState::with_test_pool(f.pools.app.clone()),
+            f.engine.clone(),
+            auth,
+        )
+    };
+    assert_eq!(ids(&body(search(capture().await).await).await), [message]);
     let inactive = capture().await;
     let stale = capture().await;
     deactivate(&f.pools.admin, f.org, actor, false).await;
     error(
-        with_captured_auth(&f, inactive).await,
+        search(inactive).await,
         StatusCode::NOT_FOUND,
         "organization_unavailable",
     )
@@ -249,7 +293,7 @@ async fn search_rechecks_deactivation_revision_and_demotion_after_authentication
         .await
         .unwrap();
     error(
-        with_captured_auth(&f, stale).await,
+        search(stale).await,
         StatusCode::NOT_FOUND,
         "organization_unavailable",
     )
@@ -261,7 +305,7 @@ async fn search_rechecks_deactivation_revision_and_demotion_after_authentication
 
     let demoted = capture().await;
     role(&f.pools.admin, f.org, actor, "guest").await;
-    let response = with_captured_auth(&f, demoted).await;
+    let response = search(demoted).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(ids(&body(response).await).is_empty());
     grant(&f.pools.admin, f.org, f.public, actor).await;
@@ -302,7 +346,15 @@ async fn search_body_fetch_rechecks_visibility_and_deletion_independently_of_can
                 .collect(),
             next_cursor: Some("next".to_owned()),
         };
-        fetch_hits(tx, f.org, (actor, auth.membership_revision), None, &page)
+        let scopes: std::collections::HashMap<_, _> =
+            channels::search_scopes(tx, f.org, (actor, auth.membership_revision), None)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .collect();
+        let visible: Vec<_> = scopes.keys().copied().collect();
+        fetch_hits(tx, f.org, &scopes, &visible, &page)
             .await
             .map_err(ApiError::from)
     })

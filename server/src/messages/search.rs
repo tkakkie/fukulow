@@ -3,31 +3,45 @@ use axum::Extension;
 use channels::ChannelKind;
 use fukulow_api::MessageMoveEvent;
 use sqlx::{PgConnection, Row};
+use std::{collections::HashMap, sync::Arc};
 
+mod admission;
 mod cursor;
 pub(super) mod d3r;
 pub use d3r::D3rEngine;
 
 const PAGE_SIZE: usize = 20;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub enum SearchEngine {
     #[default]
     Disabled,
-    D3r(D3rEngine),
+    D3r(Arc<D3rEngine>),
 }
 
 impl SearchEngine {
     pub fn configured(value: Option<&str>) -> Result<Self, &'static str> {
         match value {
             None | Some("disabled") => Ok(Self::Disabled),
-            Some("d3r") => Ok(Self::D3r(D3rEngine)),
+            Some("d3r") => Self::d3r(admission::BURST),
             _ => Err("FUKULOW_SEARCH_ENGINE must be disabled or d3r"),
         }
     }
 
+    fn d3r(burst: u32) -> Result<Self, &'static str> {
+        Ok(Self::D3r(Arc::new(D3rEngine {
+            admission: admission::Limiter::new(burst),
+            cursor_key: cursor::new_key()?,
+        })))
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_burst(burst: u32) -> Result<Self, &'static str> {
+        Self::d3r(burst)
+    }
+
     async fn candidates(
-        self,
+        &self,
         tx: &mut PgConnection,
         scopes: &[Uuid],
         request: EngineQuery<'_>,
@@ -58,7 +72,6 @@ struct EngineQuery<'a> {
     filter: Option<Uuid>,
     raw: &'a str,
     cursor: Option<&'a str>,
-    secret: &'a str,
     page_size: usize,
 }
 
@@ -102,6 +115,7 @@ pub struct SearchHit {
         (status = 400, description = "search_query_too_short, search_query_too_long, invalid_cursor, or malformed input", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found for an inaccessible or unknown Channel", body = ErrorBody),
+        (status = 429, description = "search_rate_limited when Search admission is full or the Member exceeds the concurrency or rate cap", body = ErrorBody),
         (status = 503, description = "search_unavailable when disabled or search_timeout when the database statement deadline expires", body = ErrorBody),
         (status = 500, description = "Database failure", body = ErrorBody)))]
 pub async fn search(
@@ -110,9 +124,9 @@ pub async fn search(
     auth: Auth,
     query: Result<Query<SearchQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
-    if matches!(engine, SearchEngine::Disabled) {
+    let SearchEngine::D3r(runtime) = &engine else {
         return Err(unavailable());
-    }
+    };
     let Query(query) = query.map_err(|_| ApiError::bad_request())?;
     let raw = query.q.as_deref().unwrap_or_default().trim();
     if raw.is_empty() {
@@ -129,8 +143,16 @@ pub async fn search(
         return Err(ApiError::bad_request());
     }
     let organization = auth.identity.organization.organization_id;
+    let _permit = runtime
+        .admission
+        .acquire((organization, auth.identity.member.id))
+        .ok_or(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "search_rate_limited",
+            None,
+        ))?;
     crate::database::organization_read_only(&state.pool, organization, async |tx| {
-        search_page(tx, engine, &auth, &state.setup_token, raw, &query).await
+        search_page(tx, &engine, &auth, raw, &query).await
     })
     .await
     .map(|page| ([(header::CACHE_CONTROL, "no-store")], Json(page)).into_response())
@@ -139,9 +161,8 @@ pub async fn search(
 
 async fn search_page(
     tx: &mut PgConnection,
-    engine: SearchEngine,
+    engine: &SearchEngine,
     auth: &Auth,
-    secret: &str,
     raw: &str,
     input: &SearchQuery,
 ) -> Result<SearchPage, SearchError> {
@@ -151,8 +172,11 @@ async fn search_page(
     let organization = auth.identity.organization.organization_id;
     let member = (auth.identity.member.id, auth.membership_revision);
     let filter = input.channel_id.as_ref().map(std::slice::from_ref);
-    let scopes = visible_scopes(tx, organization, member, filter).await?;
-    let ids: Vec<_> = scopes.iter().map(|(id, _)| *id).collect();
+    let scopes: HashMap<_, _> = visible_scopes(tx, organization, member, filter)
+        .await?
+        .into_iter()
+        .collect();
+    let ids: Vec<_> = scopes.keys().copied().collect();
     let page = engine
         .candidates(
             tx,
@@ -163,12 +187,11 @@ async fn search_page(
                 filter: input.channel_id,
                 raw,
                 cursor: input.cursor.as_deref(),
-                secret,
                 page_size: PAGE_SIZE,
             },
         )
         .await?;
-    let hits = fetch_hits(tx, organization, member, filter, &page).await?;
+    let hits = fetch_hits(tx, organization, &scopes, &ids, &page).await?;
     Ok(SearchPage {
         hits,
         next_cursor: page.next_cursor,
@@ -193,17 +216,14 @@ async fn visible_scopes(
 pub(super) async fn fetch_hits(
     tx: &mut PgConnection,
     organization: Uuid,
-    member: (Uuid, i64),
-    filter: Option<&[Uuid]>,
+    scope_kinds: &HashMap<Uuid, ChannelKind>,
+    visible: &[Uuid],
     page: &CandidatePage,
 ) -> Result<Vec<SearchHit>, SearchError> {
     if page.candidates.is_empty() {
         return Ok(Vec::new());
     }
-    // Reauthorize body reads in this page's snapshot, independent of the engine.
-    let scopes = visible_scopes(tx, organization, member, filter).await?;
-    let scope_kinds: std::collections::HashMap<_, _> = scopes.into_iter().collect();
-    let visible: Vec<_> = scope_kinds.keys().copied().collect();
+    // Enforce the authorized scopes from this same snapshot on body reads.
     let (ids, times): (Vec<_>, Vec<_>) = page
         .candidates
         .iter()

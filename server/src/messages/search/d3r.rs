@@ -1,13 +1,16 @@
 use super::*;
+use ring::aead::LessSafeKey;
 
 const PAGE_SQL: &str = include_str!("page.sql");
 
-#[derive(Clone, Copy)]
-pub struct D3rEngine;
+pub struct D3rEngine {
+    pub(super) admission: admission::Limiter,
+    pub(super) cursor_key: LessSafeKey,
+}
 
 impl D3rEngine {
     pub(super) async fn search(
-        self,
+        &self,
         tx: &mut PgConnection,
         scopes: &[Uuid],
         request: EngineQuery<'_>,
@@ -37,7 +40,7 @@ impl D3rEngine {
         );
         let position = request
             .cursor
-            .map(|token| scope.decode(request.secret, token))
+            .map(|token| scope.decode(&self.cursor_key, token))
             .transpose()?;
         let (before_at, before_id) = match position.as_ref() {
             Some(position) => (position.created_at.as_str(), position.id),
@@ -64,7 +67,7 @@ impl D3rEngine {
                 .last()
                 .map(|(id, created_at)| {
                     scope.encode(
-                        request.secret,
+                        &self.cursor_key,
                         &cursor::Position {
                             created_at: created_at.clone(),
                             id: *id,

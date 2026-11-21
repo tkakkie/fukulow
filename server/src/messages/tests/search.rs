@@ -4,12 +4,14 @@ use crate::test_support::TestPools;
 use axum::Extension;
 
 mod denials;
+mod limits;
 mod maintenance;
 mod paging;
 
 struct Fixture {
     pools: TestPools,
     app: Router,
+    engine: SearchEngine,
     org: Uuid,
     author: Uuid,
     public: Uuid,
@@ -19,16 +21,18 @@ struct Fixture {
 
 impl Fixture {
     async fn new(pool: PgPool) -> Self {
+        Self::with_engine(pool, SearchEngine::with_test_burst(100).unwrap()).await
+    }
+
+    async fn with_engine(pool: PgPool, engine: SearchEngine) -> Self {
         let pools = TestPools::new(pool).await;
         let org = organization(&pools.admin).await;
         let author = Uuid::new_v4();
         let token = member(&pools.admin, org, author).await;
         let public = Uuid::new_v4();
         channel(&pools.admin, org, public, author, false).await;
-        let app = crate::app_with_search(
-            AppState::with_test_pool(pools.app.clone()),
-            SearchEngine::configured(Some("d3r")).unwrap(),
-        );
+        let app =
+            crate::app_with_search(AppState::with_test_pool(pools.app.clone()), engine.clone());
         let seed_time = sqlx::query_scalar("SELECT now()::text")
             .fetch_one(&pools.admin)
             .await
@@ -36,6 +40,7 @@ impl Fixture {
         Self {
             pools,
             app,
+            engine,
             org,
             author,
             public,
@@ -53,6 +58,19 @@ impl Fixture {
     async fn post(&self, channel: Uuid, text: &str) -> Value {
         sent(&self.app, &self.token, channel, input(Uuid::new_v4(), text)).await
     }
+}
+
+async fn with_captured_auth(state: AppState, engine: SearchEngine, auth: Auth) -> Response {
+    search(
+        State(state),
+        Extension(engine),
+        auth,
+        Ok(Query(
+            serde_json::from_value::<SearchQuery>(json!({"q":"needle"})).unwrap(),
+        )),
+    )
+    .await
+    .into_response()
 }
 
 async fn get(

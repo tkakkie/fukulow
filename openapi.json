@@ -7008,6 +7008,16 @@
               }
             }
           },
+          "429": {
+            "description": "search_rate_limited when Search admission is full or the Member exceeds the concurrency or rate cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Database failure",
             "content": {

@@ -72,6 +72,32 @@ async fn search_terms_follow_send_and_move_and_never_return_deleted_messages(poo
 }
 
 #[fukulow_test::test]
+async fn search_terms_reject_a_message_from_another_channel(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let other = f.channel(false).await;
+    let message = id(&f.post(f.public, "needle").await);
+    let error = crate::database::organization(&f.pools.app, f.org, async |tx| {
+        sqlx::query(
+            "INSERT INTO message_search_terms (organization_id, channel_id, term, created_at, message_id)
+             VALUES ($1, $2, 'nee', now(), $3)",
+        )
+        .bind(f.org)
+        .bind(other)
+        .bind(message)
+        .execute(tx)
+        .await
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .as_database_error()
+            .unwrap()
+            .is_foreign_key_violation()
+    );
+}
+
+#[fukulow_test::test]
 async fn search_terms_roll_back_with_send_before_commit(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let client_id = Uuid::new_v4();
@@ -173,7 +199,7 @@ async fn search_migration_backfills_live_messages_in_each_organization_and_force
     let pools = TestPools::new(pool).await;
     let app = crate::app_with_search(
         AppState::with_test_pool(pools.app.clone()),
-        SearchEngine::D3r(D3rEngine),
+        SearchEngine::configured(Some("d3r")).unwrap(),
     );
     for (org, token, text, live) in orgs {
         let response = get(&app, org, &token, Some(text), None, None).await;

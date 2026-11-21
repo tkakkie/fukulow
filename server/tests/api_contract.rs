@@ -26,7 +26,7 @@ const HTTP_METHODS: [&str; 8] = [
 ];
 // Every operation documents the common shutdown response.
 const EXPECTED_API_OPERATIONS: usize = 53;
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 397;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 398;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -163,12 +163,18 @@ fn search_contract_requires_query_and_documents_results_and_errors() {
         responses["200"]["content"]["application/json"]["schema"]["$ref"],
         "#/components/schemas/SearchPage"
     );
-    for status in ["400", "401", "404", "503"] {
+    for status in ["400", "401", "404", "429", "503"] {
         assert_eq!(
             responses[status]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/ErrorBody"
         );
     }
+    assert!(
+        responses["429"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("search_rate_limited")
+    );
     let schemas = &document["components"]["schemas"];
     let page = &schemas["SearchPage"]["properties"];
     assert_eq!(page["hits"]["maxItems"], 20);

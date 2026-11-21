@@ -4,6 +4,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 
 ## Channels and Messages
 - #725 A future external search engine writes an outbox row in the Message transaction and applies it after COMMIT through a worker.
+- #725 Search generates a dedicated cursor key at process start to avoid reusing credentials or provisioning another secret. Cursors expire on restart.
 - #301 author lookup caps input at 100 ids, dedupes and omits unreadable authors. A shared non-locking history snapshot covers access, authorship and retained identities to prevent directory expansion and authorization races.
 - #149 usable managers add/remove and every Role can leave its own grant. Serialize private removal and its checks per Channel to preserve the last usable grant and any last manager (409).
 - #231/#305 Role demotion or deactivation that loses a private Channel's last usable manager fails atomically with 409 `last_channel_manager` and no Channel details. Reuse #149's locks and check via the guard injected into auth to preserve module direction.

@@ -72,8 +72,42 @@ async fn search_pages_match_full_history_brute_force_at_ties_and_skip_false_cand
 }
 
 #[fukulow_test::test]
-async fn search_statement_timeout_returns_retryable_error_and_recovers(pool: PgPool) {
+async fn search_cursor_expires_when_the_search_engine_restarts(pool: PgPool) {
     let f = Fixture::new(pool).await;
+    bulk(&f, f.public, 1..=21, "needle", "1 minute", false).await;
+    let first = page(&f, &f.token, "needle", None, None).await;
+    let cursor = first["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        ids(&page(&f, &f.token, "needle", None, Some(cursor)).await).len(),
+        1
+    );
+
+    let restarted = crate::app_with_search(
+        AppState::with_test_pool(f.pools.app.clone()),
+        SearchEngine::configured(Some("d3r")).unwrap(),
+    );
+    error(
+        get(
+            &restarted,
+            f.org,
+            &f.token,
+            Some("needle"),
+            None,
+            Some(cursor),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "invalid_cursor",
+    )
+    .await;
+    let fresh = get(&restarted, f.org, &f.token, Some("needle"), None, None).await;
+    assert_eq!(fresh.status(), StatusCode::OK);
+    assert_eq!(ids(&body(fresh).await), ids(&first));
+}
+
+#[fukulow_test::test]
+async fn search_statement_timeout_returns_retryable_error_and_recovers(pool: PgPool) {
+    let f = Fixture::with_engine(pool, SearchEngine::configured(Some("d3r")).unwrap()).await;
     let id = id(&f.post(f.public, "needle").await);
     let mut blocker = f.pools.admin.begin().await.unwrap();
     sqlx::query("LOCK TABLE message_search_terms IN ACCESS EXCLUSIVE MODE")

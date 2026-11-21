@@ -202,7 +202,7 @@ for (const [rounds,clients,transactions] of [[3,5,20],[1,5,20],[3,1,1],[1,1,1]] 
       summarize(dir);
       assert.equal(JSON.parse(readFileSync(join(dir,'judgement.json'),'utf8')).status,'PASS');
     } else {
-      assert.throws(()=>summarize(dir),/must match the checked-in v11 manifest/);
+      assert.throws(()=>summarize(dir),/must match a checked-in B1 manifest/);
       assert.equal(existsSync(join(dir,'judgement.json')),false);
     }
   });
