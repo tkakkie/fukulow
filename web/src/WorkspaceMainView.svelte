@@ -119,7 +119,7 @@
     onbacktochannels?: () => void
     onbacktochannel?: () => void
     ontogglepanel?: () => void
-    onrenewdm?: (peerId: string) => void
+    onrenewdm?: () => void
     onmentionrequest?: () => void
     onopentopic?: (topicId: string) => void
     onopenreplies?: (message: Message, opener?: HTMLElement | null) => void
@@ -229,7 +229,7 @@
           lapsed={dmLapsed}
           canRenew={canRenewDm}
           busy={dmBusy}
-          onrenew={() => onrenewdm?.(selected.peer.id)}
+          onrenew={() => onrenewdm?.()}
         />
       </div>
     {:else if (selectedArchived || archiveStatePending) && !organizationUnavailable && !currentTimelineUnavailable}

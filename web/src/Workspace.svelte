@@ -919,7 +919,7 @@
       }}
       onbacktochannel={() => nav.navigate({ type: 'topic-back' })}
       ontogglepanel={togglePanel}
-      onrenewdm={(peerId) => { void handleOpenDm(peerId, true) }}
+      onrenewdm={() => { if (selected?.kind === 'dm') void handleOpenDm(selected.peer.id, true) }}
       onmentionrequest={() => { void members?.load() }}
       onopentopic={handleSelectTopic}
       onopenreplies={handleOpenReplies}
