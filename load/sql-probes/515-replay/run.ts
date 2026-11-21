@@ -136,7 +136,7 @@ function summary() {
   const a = inventory.get('A')?.sequence;
   const b = inventory.get('B')?.sequence;
   const lines = ['# #515 R1 SQL diagnosis', '', smoke ? '**SMOKE — shape validation only.**' : '**Recorded SQL diagnosis.**',
-    '', 'The cause of the formal R1 HTTP gap is **not identified**. The probe measures the settled database on one connection without the concurrent sender, pool scheduling, Rust row decoding or HTTP. The reference HTTP p95 difference is approximately 0.8–1.1 ms.', '',
+    '', 'This probe does not judge the cause of the formal R1 HTTP gap; the report compares the results below with it. The probe measures the settled database on one connection without the concurrent sender, pool scheduling, Rust row decoding or HTTP. The reference HTTP p95 difference is approximately 0.8–1.1 ms.', '',
     '## Request inventory', '', ...(a ? requestInventory('A', a) : []), ...(b ? requestInventory('B', b) : []),
     'A repeats visibility inside its page. Mentions and history generation are inline in A, and Mentions are inline in B. The requested limit is 50 and both SQL pages fetch 51 to test has_more.', '',
     'For a reused warm connection, the A–B difference is +1 SQL round trip and +2 checkout checks, for +3 synchronous round trips. The pool also sends +2 asynchronous return checks. Each check is a SQLx Sync/ReadyForQuery exchange with no SQL. A cache miss can require a separate prepare/describe exchange for an uncached bound SQL string (up to 6 such executions in A and 5 in B); connection establishment is outside the count.', '',
