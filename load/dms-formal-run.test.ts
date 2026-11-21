@@ -80,6 +80,9 @@ test('preflight failure aborts before build, seeding or timing and cleans all ho
   assert.ok(!events.some(event=>event.includes("'generators'")||event.includes("'seed'")||event.includes("'build'")));
   assert.equal(events[0],'register:SIGINT');
   assert.equal(JSON.parse(readFileSync(`${config.output}/status.json`,'utf8')).phase,'failed');
+  assert.deepEqual(JSON.parse(readFileSync(`${config.output}/host-0-preflight-0-invocation-failure.json`,'utf8')),{
+    event:'worker-invocation-failure',step:'preflight',attempt:0,exitCode:1,errorClass:'CommandFailure',message:'Command exited unsuccessfully',
+  });
 });
 test('remote IPv4 app HostName is rejected before uploading the harness',async t=>{
   const {config,runtime,events}=stub(t,false),original=runtime.exec;
