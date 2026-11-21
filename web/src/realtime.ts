@@ -1,4 +1,5 @@
 import type { ClientMessage, Message, ServerEvent } from './api'
+import { sectionGeneration } from './section-generation'
 
 type MoveEvent = Extract<ServerEvent, { kind: 'move' }>
 const moveFields = ['type', 'kind', 'history_generation', 'channel_id', 'seq', 'version', 'root_id',
@@ -50,6 +51,8 @@ function isServerEvent(value: unknown): value is ServerEvent {
   switch (value.type) {
     case 'activity_ready': case 'activity_reset': case 'channel_list_changed': case 'members_changed':
       return Object.keys(value).every(k => k === 'type')
+    case 'sections_changed':
+      return sectionGeneration(value.generation) !== undefined && Object.keys(value).every(k => k === 'type' || k === 'generation')
     case 'channel_activity': return typeof value.channel_id === 'string' && isSequence(value.seq, 1) && Object.keys(value).every(k => ['type', 'channel_id', 'seq'].includes(k))
     case 'read_position_changed': return typeof value.channel_id === 'string' && (value.topic_id === null || typeof value.topic_id === 'string') && isSequence(value.read_seq, 0) && Object.keys(value).every(k => ['type', 'channel_id', 'topic_id', 'read_seq'].includes(k))
     case 'channel_access_gained': case 'channel_access_revoked': case 'channel_members_changed':

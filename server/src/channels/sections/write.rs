@@ -7,6 +7,8 @@ mod section;
 
 pub(crate) use handlers::*;
 
+const DELETE_ATTEMPTS: usize = 3;
+
 pub(super) enum Mutation {
     Create(CreateSection),
     Rename(Uuid, RenameSection),
@@ -19,11 +21,12 @@ pub(super) enum Mutation {
 enum Change {
     Created(Uuid),
     Layout,
-    Unchanged(Response),
+    Unchanged(Option<(Uuid, i64)>),
 }
 
 enum WriteExit {
-    Unchanged(Response),
+    Unchanged(Option<(Uuid, i64)>),
+    RestartDelete(Uuid),
     Failed(ApiError),
 }
 
@@ -51,12 +54,7 @@ impl Mutation {
                 channels::lock_channels(tx, owner.org, &order.channel_ids).await?
             }
             Self::Delete(section) => {
-                let rows: Vec<(Uuid, i64)> = sqlx::query_as(channels::GROUP_POSITIONS)
-                    .bind(owner.org)
-                    .bind(owner.member)
-                    .bind(section)
-                    .fetch_all(&mut *tx)
-                    .await?;
+                let rows = channels::group_positions(tx, owner, *section).await?;
                 let ids: Vec<_> = rows.into_iter().map(|(id, _)| id).collect();
                 channels::lock_channels(tx, owner.org, &ids).await?
             }
@@ -103,55 +101,111 @@ async fn write_and_publish(
     pool: sqlx::PgPool,
     activity: activity::Activity,
     owner: Owner,
-    mutation: Mutation,
+    mut mutation: Mutation,
 ) -> Result<Response, ApiError> {
-    let committed =
-        crate::database::organization(&pool, owner.org, async |tx: &mut PgConnection| {
-            // Deletion's exclusive Organization lock stabilizes the placement
-            // discovery before Channel locks, including hidden placements.
-            if matches!(mutation, Mutation::Delete(_)) {
-                auth::members::lock_organization(tx, owner.org).await?;
-            } else {
-                auth::members::share_organization(tx, owner.org).await?;
+    for _ in 0..DELETE_ATTEMPTS {
+        let committed = write_attempt(&pool, &activity, owner, mutation).await;
+        match committed {
+            Ok((created, committed_generation, notice)) => {
+                notice.committed(pool);
+                return Ok(match created {
+                    Some(id) => created_section(StatusCode::CREATED, id, committed_generation),
+                    None => StatusCode::NO_CONTENT.into_response(),
+                });
             }
-            let channels = mutation.lock_channels(tx, owner).await?;
-            let role = owner.current_role(tx, true).await?;
-            let grants = if matches!(mutation, Mutation::Move(..) | Mutation::ChannelOrder(_)) {
-                channels::lock_grants(tx, owner, role, &channels).await?
-            } else {
-                HashSet::new()
-            };
-            lock_layout(tx, owner).await?;
-            let authorize_channels =
-                |count| channels::authorize_supplied(owner, role, count, &channels, &grants);
-            let created = match mutation.apply(tx, owner, authorize_channels).await? {
-                Change::Unchanged(response) => return Err(WriteExit::Unchanged(response)),
-                Change::Created(id) => Some(id),
-                Change::Layout => None,
-            };
-            let generation: i64 = sqlx::query_scalar(
-                "UPDATE member_section_generations SET generation=generation+1
-             WHERE organization_id=$1 AND member_id=$2 RETURNING generation",
-            )
-            .bind(owner.org)
-            .bind(owner.member)
-            .fetch_one(tx)
-            .await?;
-            let notice = activity.arm_sections(owner.org, owner.member, generation);
-            Ok((created, generation, notice))
-        })
-        .await;
-    match committed {
-        Ok((created, committed_generation, notice)) => {
-            notice.committed(&pool).await;
-            Ok(match created {
-                Some(id) => created_section(StatusCode::CREATED, id, committed_generation),
-                None => StatusCode::NO_CONTENT.into_response(),
-            })
+            Err(WriteExit::Unchanged(existing)) => {
+                return Ok(match existing {
+                    Some((id, generation)) => created_section(StatusCode::OK, id, generation),
+                    None => StatusCode::NO_CONTENT.into_response(),
+                });
+            }
+            Err(WriteExit::RestartDelete(id)) => mutation = Mutation::Delete(id),
+            Err(WriteExit::Failed(error)) => return Err(error),
         }
-        Err(WriteExit::Unchanged(response)) => Ok(response),
-        Err(WriteExit::Failed(error)) => Err(error),
     }
+    tracing::warn!(target: "fukulow", "section DELETE restart attempts exhausted");
+    Err(ApiError::lock_contention())
+}
+
+async fn write_attempt(
+    pool: &sqlx::PgPool,
+    activity: &activity::Activity,
+    owner: Owner,
+    mutation: Mutation,
+) -> Result<(Option<Uuid>, i64, activity::SectionsPublication), WriteExit> {
+    crate::database::organization_confirming_rollback(
+        pool,
+        owner.org,
+        |exit| match exit {
+            WriteExit::RestartDelete(_) => true,
+            WriteExit::Failed(error) => error.is_lock_contention(),
+            WriteExit::Unchanged(_) => false,
+        },
+        async |tx: &mut PgConnection| {
+            write_body(tx, activity, owner, mutation)
+                .await
+                .map_err(|exit| match exit {
+                    WriteExit::Failed(error) => error.classify_write_contention().into(),
+                    other => other,
+                })
+        },
+    )
+    .await
+}
+
+async fn write_body(
+    tx: &mut PgConnection,
+    activity: &activity::Activity,
+    owner: Owner,
+    mutation: Mutation,
+) -> Result<(Option<Uuid>, i64, activity::SectionsPublication), WriteExit> {
+    sqlx::query("SET LOCAL lock_timeout='5s'")
+        .execute(&mut *tx)
+        .await?;
+    // An absent owned id is already a no-op. Recheck Membership without
+    // making unrelated Organization writes wait on that no-op.
+    // Read `exists` first only because both paths give the same status and body after the Membership recheck.
+    if let Mutation::Delete(id) = &mutation
+        && !section::exists(tx, owner, *id).await?
+    {
+        owner.current_role(tx, true).await?;
+        return Err(WriteExit::Unchanged(None));
+    }
+    auth::members::share_organization(tx, owner.org).await?;
+    let channels = mutation.lock_channels(tx, owner).await?;
+    let role = owner.current_role(tx, true).await?;
+    let grants = if matches!(mutation, Mutation::Move(..) | Mutation::ChannelOrder(_)) {
+        channels::lock_grants(tx, owner, role, &channels).await?
+    } else {
+        HashSet::new()
+    };
+    lock_layout(tx, owner).await?;
+    if let Mutation::Delete(id) = &mutation
+        && channels::group_positions(tx, owner, *id)
+            .await?
+            .iter()
+            .any(|(id, _)| channels.binary_search_by_key(id, |row| row.id).is_err())
+    {
+        // Release the later locks before acquiring the new Channel set.
+        return Err(WriteExit::RestartDelete(*id));
+    }
+    let authorize_channels =
+        |count| channels::authorize_supplied(owner, role, count, &channels, &grants);
+    let created = match mutation.apply(tx, owner, authorize_channels).await? {
+        Change::Unchanged(existing) => return Err(WriteExit::Unchanged(existing)),
+        Change::Created(id) => Some(id),
+        Change::Layout => None,
+    };
+    let generation: i64 = sqlx::query_scalar(
+        "UPDATE member_section_generations SET generation=generation+1
+             WHERE organization_id=$1 AND member_id=$2 RETURNING generation",
+    )
+    .bind(owner.org)
+    .bind(owner.member)
+    .fetch_one(tx)
+    .await?;
+    let notice = activity.arm_sections(owner.org, owner.member, generation);
+    Ok((created, generation, notice))
 }
 
 async fn lock_layout(tx: &mut PgConnection, owner: Owner) -> Result<(), sqlx::Error> {
@@ -166,7 +220,7 @@ async fn lock_layout(tx: &mut PgConnection, owner: Owner) -> Result<(), sqlx::Er
 }
 
 fn unchanged() -> Change {
-    Change::Unchanged(StatusCode::NO_CONTENT.into_response())
+    Change::Unchanged(None)
 }
 
 fn created_section(status: StatusCode, id: Uuid, generation: i64) -> Response {

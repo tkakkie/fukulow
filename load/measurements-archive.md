@@ -1337,3 +1337,114 @@ Limits: one Mac, client arrival timestamps, fault windows of about 3.8 s, at mos
 Indexed 100-row batch p50 / p95 / p99: 6.272 / 9.217 / 21.256 ms at 10k and 6.671 / 11.134 / 13.784 ms at 100k. Owner HTTP list p95 under four concurrent lists, before → after the list-index change: 15.947 → 13.256 ms at 10k and 72.970 → 15.000 ms at 100k (260-live fixture kept for list and list-contention samples).
 
 Request p95 idle → during a four-batch cleanup burst (first PR B run, same command): 10k create 6.30 → 5.39, accept 8.90 → 7.93, revoke 4.21 → 4.95, Role change 7.74 → 8.24 ms; 100k create 11.35 → 8.53, accept 12.33 → 8.79, revoke 7.25 → 5.72, Role change 21.91 → 17.26 ms. Idle quota refusal at exactly 100: 3.75 / 4.68 ms (10k / 100k).
+
+## PGroonga Message-send write cost (#153 M1, 2026-11-20 JST, Mac)
+
+Method (moved verbatim from `docs/measurements.md`): Method only; no formal result yet. A adds the PGroonga index to B (same app image from `main`, manifest v2 PostgreSQL recipe, stored `normalized_body`, WAL resource manager and crash-safe settings, 50,000-body prefix from seed 153202611). The #309 `many` and `hot` workloads run three pairs each (B/A, A/B, B/A) at seven 60 s rates from 50 to 4000/s, straight to the app, with four publishing Members and the send limiter raised to 1000000 burst and refill. Fixed #153 criteria apply to the rates B sustains in all pairs, invalid evidence first; the p95 test uses the median paired ratio A / B and the median paired signed difference A − B (signed since the maintainer decision of 2026-11-18, before any formal run) through 1000/s. Outside the #431 budget.
+
+### M1 Judgement (fixed criteria, issuecomment-6965889576, unchanged)
+
+| | `many` | `hot` |
+|---|---|---|
+| Comparison steps (B sustained in all 3 pairs) | 50, 100, 250/s | 50, 100, 250/s |
+| B's highest sustained rate | 250/s | 250/s |
+| B INVALID at or below 250/s | none | none |
+| A app-side shortfall at comparison steps | none | none |
+| A's highest rate sustained in all 3 pairs | 500/s | 250/s |
+| Median A/B p95 ratio at 50 / 100 / 250 | 1.04 / 1.09 / 1.13 | 0.99 / 1.08 / 1.13 |
+| Median signed difference A − B at 50 / 100 / 250 | +0.22 / +0.24 / +0.25 ms | −0.06 / +0.21 / +0.26 ms |
+| **Judgement** | **No material impact** | **No material impact** |
+
+Order of evaluation as registered: no NOT EVALUATED condition holds; none of the three Material impact conditions holds (ratio ≤ 1.25 and difference ≤ 5 ms at every comparison step); A sustains every comparison step in all pairs.
+
+**Above B's highest sustained rate (recorded, not judged):** 500/s is INVALID by a generator-side shortfall in B `many` pair 2, B `hot` pairs 1–2 and A `hot` pair 2. At 1000/s and above almost every run is a generator-side shortfall (for example, `many` B pair 1 offered about 2,600/s at the 4000/s step). No 429, 503, other HTTP error, client timeout or transport error occurred in any step of any run.
+
+### M1 Recorded-only metrics (not part of the judgement)
+
+| Per run, median of 3 pairs | `many` B → A | `hot` B → A |
+|---|---|---|
+| WAL bytes per send at 250/s | 2,690 → 3,391 (+26 %) | 2,506 → 3,222 (+29 %) |
+| DB size growth in the 60 s 250/s step | 26 → 65 MiB | 25 → 64 MiB |
+| DB CPU peak at 250/s | 22 → 41 % | 23 → 41 % |
+| App CPU peak at 250/s | 14 → 14 % | 14 → 14 % |
+
+The PGroonga index adds about 0.2–0.3 ms to send p95 at 100–250/s, about 700 bytes of WAL per send, roughly 2.5× the DB size growth, and about 1.8× the DB CPU peak at these rates. App CPU is unchanged.
+
+
+## Channel log send and replay (#515 slice 5, 2026-11-19 to 2026-11-20 JST, Mac)
+
+Night 1 (Part A) is recorded in #515 (issuecomment-6994314857). Night 2:
+
+### Part B: maximum sustained accepted/s (threshold A/B ≥ 0.90, spread ≤ 10 %)
+| Cell | Median B | Median A | A/B | Pair ratios | Spread B / A | Status |
+|---|---|---|---|---|---|---|
+| hot-17 | 1055.1 | 926.1 | 0.878 | 0.868, 0.880, 0.877 | 1.2 % / 0.2 % | **FAIL** |
+| many-17 | 3395.0 | 3005.7 | 0.885 | 0.885, 0.892, 0.898 | 2.6 % / 1.9 % | **FAIL** |
+| hot-16000 | 898.6 | 777.5 | 0.865 | 0.859, 0.870, 0.822 | 2.6 % / 7.3 % | **FAIL** |
+| many-16000 | 2565.2 | 2367.4 | 0.923 | 0.915, 0.931, 0.890 | 1.2 % / 4.8 % | PASS |
+
+Every pair ratio in the three FAIL cells is below 0.90, so the result does not hinge on one round. The drop is 11–13 %, consistent with night 1's Part A FAILs on send cost.
+
+### Part C: REST replay pages (threshold p95 ≤ 110 % of B and ≤ 100 ms at 4 readers): all 4 cells INVALID
+The judge marks every cell INVALID because candidate runs did not complete the registered request count. Reasons per cell: request count, reader outside the sender window (4 per affected run), and in `1M-recent` reader errors. Baseline runs were all complete.
+
+| Cell | B p95 (3 rounds) | A p95 (3 rounds) | A requests completed (of 1000) |
+|---|---|---|---|
+| 1M-recent | 1.6, 1.6, 1.5 ms | 2,875, 3,037, 3,286 ms | 16, 17, 16 |
+| 1M-deep | 1.7, 2.0, 1.6 ms | 3,437, 3,368, 3,276 ms | 25, 26, 28 |
+| 100k-recent | 1.7, 1.5, 1.7 ms | 4,872, 4,814, 4,331 ms | 8, 8, 9 |
+| 100k-deep | 1.7, 1.6, 1.7 ms | 215, 4,213, 217 ms | 1000, 8, 1000 |
+
+- In the A runs, k6 logs request timeouts on `GET /channels/{id}/events?after_seq=…&history_generation=…`, and the 1M A app logs show 48–55 `database_failure` warnings per run on the events route and on `websocket_replay`. The 100k A runs log none and are simply slow.
+- R2 (WebSocket replay, report-only): B p95 47–49 ms in every run; A 48 of 100 replays failed in every 1M run, and p95 4.5–4.7 s in the slow 100k runs.
+- Even the two complete A runs in `100k-deep` (p95 215 and 217 ms) would miss both the 110 % ratio and the 100 ms limit.
+- The fixture ends with `VACUUM (FREEZE, ANALYZE)` in both arms, so stale statistics after loading are not an obvious explanation. That is not yet verified at the plan level.
+
+**Assessment under Q8.** Only the candidate fails to complete, and the baseline is about 1,000× faster on the same host and fixture. Under the approved Q8 condition this is investigated as a candidate-specific regression on the REST gap-fill and WebSocket replay path, not dismissed as an environment effect. The verdict stays INVALID; it is not a PASS and not a FAIL by the registered rules.
+
+**Impact.** The candidate (`f7fe08a`, slice 4 merge) is already on `main`. Unless a later commit changed it, reconnect gap fill on long Channels may be seconds slow or fail in production code. This has not yet been checked on current `main`.
+
+### Part D: #137 timeline (existing target p95 ≤ 100 ms, spread ≤ 10 %)
+| Cell | Median B | Median A | A/B | Spread B / A | Status |
+|---|---|---|---|---|---|
+| PAGE boundary=None | 48.8 ms | 50.1 ms | 1.03 | **10.8 %** / 1.7 % | **INVALID** (B spread above 10 %) |
+| PAGE boundary=Some(190000) | 47.7 ms | 49.0 ms | 1.03 | 7.5 % / 2.0 % | PASS |
+| SEND boundary=None | 17.5 ms | 19.1 ms | 1.09 | 8.0 % / 11.3 % | report only |
+| SEND boundary=Some(190000) | 13.4 ms | 15.7 ms | 1.17 | 18.0 % / 1.6 % | report only |
+
+
+## Rust/wasm sync core typed deltas (#487, 2026-11-21 JST, Mac)
+
+Formal re-measurement for maintainer condition 6 on #487 (PR #709). The first display and earlier core results are in the [#466 record](#web-rustwasm-sync-core-evaluation-466-2026-11-16-jst). Run 2026-11-21 08:16–08:53 JST in the overnight chain, behind an idle gate (no builds, tests, workers or containers; 5-minute load below 2), with no retries. Apple Silicon Mac, 10 CPUs, 32 GiB, AC power, Node 26.13.1 for every arm.
+
+| Arm | Label | Commit | Command |
+|---|---|---|---|
+| base | B | `06264eab` (main) | `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --out <dir>/base --round <n>` |
+| PR | W | `c02e1a78` | same; the script is byte-identical to base |
+| old TS core | R | `117e75a1` (#466 arm R) | that checkout's #466 script with `--core ts` |
+
+Five rounds of a cyclic Latin square (round 1: base, PR, TS; each later round rotated by one). Each arm's wasm was built before timing and passed `--smoke`. The TS arm ran in the same session by maintainer decision. The protocol inputs changed shape in #547 and #595, so **the TS ratio is cross-harness**.
+
+The chain did not pass `--arm`, so base rounds were written with label W, the same as PR, and the per-arm aggregation failed. With the maintainer's approval, base's label was changed from W to B in a copy, with the originals and their SHA-256 left untouched. Then `node web/scripts/measure-wasm-core.ts --aggregate --out <copy>` ran once over all arms with PR's aggregator, which is byte-identical to base's. All 5 rounds are included, and the targets are unchanged.
+
+Results are medians of rounds with [min–max]. Each change is against B; W and R are compared with B the same way.
+
+| Metric | B (base) | W (PR) | R (old TS, cross-harness) | Target | Status |
+|---|---|---|---|---|---|
+| `step()` p50 / p95 / p99 (µs), grid + 6,000-step trace | 42.46 / 426.42 / 2150.38 | 25.13 (−40.8%) / 346.25 [345.33–351.92] (−18.8%) / 1493.63 (−30.5%) | 4.79 / 24.08 / 33.38 | p50, p95 ≤ +10% | MET |
+| 100 msg/s × 60 s, 8 Channels, p50 / p95 / p99 (ms) | 0.89 / 1.94 [1.90–2.18] / 2.44 | 0.84 / 1.70 [1.67–2.04] (−12.2%, CI −13.1%..+4.4%) / 2.09, queue 0 | 0.62 / 1.39 [1.37–1.61] / 1.77 | p95 ≤ +10%, queue 0 | MET |
+| Max sustainable rate (msg/s) | 8000 | 8000 | 8000 | ≥ 500 | MET |
+| Bulk p50 / p95 (ms): history 8×50, history 2×200, catch-up 250, catch-up 1000 | 6.82/7.41, 6.85/6.96, 5.10/5.18, 17.70/17.85 | 5.20/5.72, 5.13/5.42, 3.93/4.00, 14.12/14.26 (−19.7% to −24.6%) | 0.19/0.20, 0.12/0.13, 0.16/0.17, 1.01/1.06 | ≤ +10% | INCONCLUSIVE |
+| Steady memory, post-GC heap + wasm linear (MiB) | 18.19 | 18.35 (+0.9%; wasm 1728 KiB) | 11.47 | ≤ +10% | MET |
+| Peak memory, pre-GC (MiB) | 46.30 | 52.19 (+12.8%; 27 pages) | 44.37 | ≤ +20% | MET |
+| Memory growth slope, 2.5k–10k msg | 269.09 B/msg, +0 pages | 255.87 B/msg, +0 pages | 2.39 B/msg, +0 pages | ≤ +64 B/msg, +0 pages | HOLD |
+
+- **Bulk INCONCLUSIVE, not a pass.** Seven of the eight bulk sub-metrics are MET. The eighth, catch-up 250 p95, is INCONCLUSIVE because base's 5-round spread is 19.9%, which is over the 10% noise rule. The cause is base round 4 at 6.17 ms, against 5.14–5.21 ms in the other rounds. That slot ran at 08:38–08:41 with a 5-minute load of 1.57–1.66, before the load rise, so the cause is not determined. PR's five rounds were 3.93–4.21 ms, and every paired delta was between −18.0% and −36.3%.
+- **Growth slope HOLD, not a pass.** The target is absolute: at most 64 B/msg and no added wasm pages. W's median is 255.87 B/msg, so it is held. Base is 269.09 B/msg, so the slope predates this PR, which does not make it worse. The old TS core grows 2.39 B/msg. Tracked in #489.
+- **Open items.** Both stay open after the merge. The next run of this harness (the #489 re-measurement) re-checks them.
+- **Host load.** From 08:43 the 5-minute load rose to 3.5–4.7 because of macOS `mediaanalysisd`; no workers were running. That covers TS round 4 and all of round 5. The rounds 4–5 vs 1–3 comparison below was not pre-registered, so it is report-only, and no round was excluded:
+  - `step()` and catch-up 1000 are within about 1–2% in all arms, except base round 4 catch-up at 18.43 ms against about 17.8 ms.
+  - 100 msg/s p95 is higher in rounds 4–5 in every arm.
+- **Development numbers from phase 1** (not formal; ranges overlapped for 100 msg/s): append p95 86.04 → 39.00 µs, send_ack 82.50 → 34.58 µs, and a Brotli wasm asset of 125,751 → 122,780 bytes. serde-wasm-bindgen was measured and not adopted.
+
+Raw round files, logs and the relabelled copy are in the maintainer's local run directory and are not in Git.

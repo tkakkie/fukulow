@@ -4,6 +4,7 @@ import { createAuthOperations } from './auth-operations'
 import { createAccountSecurity } from './account-security'
 import { accountSecurityAdapter } from './account-security.svelte'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
+import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.svelte'
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
@@ -27,6 +28,7 @@ export type SessionModel = {
   holdActivity?(key: string, target: ActivityTarget): unknown
   dms?: DmsAdapter
   navigationTargets?: ReturnType<typeof navigationTargetsAdapter>
+  searchAnchor?: SearchAnchorAdapter
   channels: ChannelsAdapter
   sync: SyncAdapter
   topics(id: string): TopicsAdapter
@@ -48,13 +50,13 @@ export type AuthDeps = {
   coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
-  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole) {
-    const session = createSession({ selfId, onEnded, organizationId, initialRole, onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal) {
+    const session = createSession({ selfId, onEnded, organizationId, initialRole, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
@@ -62,6 +64,7 @@ const defaults: AuthDeps = {
       holdActivity: session.holdActivity,
       memberListAccess: session.memberListAccess,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
+      searchAnchor: searchAnchorAdapter(session.searchAnchor),
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
       dms: dmsAdapter(session.dms),
@@ -104,6 +107,7 @@ export function createAuth(deps: AuthDeps = defaults) {
   let changes = $state(0)
   const drafts = createDraftStore()
   let accountGeneration = 0
+  let accountRequests = new AbortController()
   let selectionGeneration = 0
 
   function closeOrganization() {
@@ -148,7 +152,7 @@ export function createAuth(deps: AuthDeps = defaults) {
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
-    }, result.data.member.role)
+    }, result.data.member.role, accountRequests.signal)
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
@@ -170,6 +174,9 @@ export function createAuth(deps: AuthDeps = defaults) {
     security?.close(); security = null
     drafts.clear()
     accountGeneration++
+    // Reply reads survive Organization switches for C6. End their transport once the Account is fenced.
+    accountRequests.abort()
+    accountRequests = new AbortController()
     selectedOrganizationId = ''
     organizationStatus = 'loading'
     operations.clearError()

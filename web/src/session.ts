@@ -1,6 +1,7 @@
 import { completeCountFields } from './unread-counts'
 import { createActivity, createActivityTarget, type ActivityTarget } from './activity'
 import { createNavigationTargets } from './navigation-targets'
+import { createSearchAnchor, SEARCH_WINDOW_LIMIT } from './search-anchor'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
@@ -10,6 +11,7 @@ import { createMoveChain, type MoveChainApi } from './move-chain'
 import { repliesApi, type RepliesApi } from './replies'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
+import { createSections, sectionsApi, type SectionsApi } from './sections'
 import type { SyncOptions } from './sync'
 import { createTopicSync } from './topic-sync'
 import { topicsApi, type TopicsApi } from './topics'
@@ -21,6 +23,8 @@ export type SessionOptions = {
   organizationId?: string
   /** Account-lifetime owner fences this callback, including late 401s after an Organization switch. */
   onEnded: () => void
+  /** Aborted by the Account owner after it fences the ended Account Session. */
+  accountSignal?: AbortSignal
   channelsApi?: ChannelsApi
   topicsApi?: TopicsApi
   replyCountsApi?: ReplyCountsApi
@@ -28,6 +32,7 @@ export type SessionOptions = {
   moveChainApi?: MoveChainApi
   unreadApi?: UnreadApi
   dmsApi?: DmsApi
+  sectionsApi?: SectionsApi
   initialRole?: api.Role
   onIdentity?: (identity: api.Identity) => void
   onIdentityInvalidated?: () => void
@@ -39,7 +44,14 @@ export function createSession(options: SessionOptions) {
   const organizationId = options.organizationId ?? ''
   let closed = false
   let ended = false
-  const notifyEnded = () => { if (!ended) { ended = true; options.onEnded() } }
+  let closeSections: (() => void) | undefined
+  const notifyEnded = () => {
+    if (ended || options.accountSignal?.aborted) return
+    ended = true
+    closeSections?.()
+    activity.close()
+    options.onEnded()
+  }
   let unavailable = false
   let dms: Dms | undefined
   let history: ReturnType<typeof createTopicSync>['sync'] | undefined
@@ -59,7 +71,7 @@ export function createSession(options: SessionOptions) {
     return result
   }
   const activity = createActivity({
-    kind: id => dms?.get().rows.some(row => row.identity.id === id) ? 'dm' : channels.get().channels.some(row => row.id === id) ? 'channel' : undefined,
+    kind: id => isDm(id) ? 'dm' : channels.isOrdinary(id) ? 'channel' : undefined,
     watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
     covered: (notice, target) => {
       if (notice.type === 'channel_activity') return (unread.get(notice.channel_id).asOfSeq ?? -1) >= notice.seq
@@ -71,14 +83,18 @@ export function createSession(options: SessionOptions) {
       }
       return false
     },
-    revoke: id => { dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.unavailable() },
+    revoke: id => { sections.hideChannel(id); dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable() },
     access: id => { dms?.access(id); unread.activityAccess(id); topics.activityAccess(id) },
     reconcile: () => unread.activityReconcile(),
     random: options.sync?.random,
   })
-  const source = options.channelsApi ?? {
+  const isDm = (id: string) => dms?.get().rows.some(row => row.identity.id === id) ?? false
+  const source: ChannelsApi = options.channelsApi ?? {
     listChannels: signal => api.listChannels(organizationId, undefined, signal, { history_generation: history?.get().historyGeneration }),
     createChannel: body => api.createChannel(organizationId, body),
+    listArchivedChannels: signal => api.listChannels(organizationId, undefined, signal, { archived: true, history_generation: history?.get().historyGeneration }),
+    getChannel: (id, signal) => api.getChannel(organizationId, id, undefined, signal),
+    updateChannel: (id, body) => api.updateChannel(organizationId, id, body),
   }
   const timeline = options.sync?.api ?? {
     listChannelEvents: (channel, query) => api.listChannelEvents(organizationId, channel, query),
@@ -89,7 +105,7 @@ export function createSession(options: SessionOptions) {
   const replySource = options.repliesApi ?? repliesApi(organizationId)
   const unreadSource = options.unreadApi ?? unreadApi(organizationId, () => history?.get().historyGeneration)
   const topicComposition = createTopicSync({ ...options.sync, activity, selfId: options.selfId, organizationId,
-    isDm: id => dms?.get().rows.some(row => row.identity.id === id) ?? false,
+    isDm,
     api: { listChannelEvents: (channel, query) => observe(timeline.listChannelEvents(channel, query)),
       listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
       sendMessage: async (channel, body) => {
@@ -113,7 +129,9 @@ export function createSession(options: SessionOptions) {
       selfId: options.selfId,
       organizationId,
       repliesApi: {
-        listReplyChain: (channel, anchor, query) => observe(replySource.listReplyChain(channel, anchor, query)),
+        listReplyChain: (channel, anchor, query) => observe(options.accountSignal
+          ? replySource.listReplyChain(channel, anchor, query, options.accountSignal)
+          : replySource.listReplyChain(channel, anchor, query)),
       },
       onSessionEnded: notifyEnded,
     },
@@ -127,8 +145,9 @@ export function createSession(options: SessionOptions) {
       selfId: options.selfId,
       organizationId,
       refreshList: !options.channelsApi ? () => Promise.resolve().then(() => channels.load()) : undefined,
+      refreshArchived: () => channels.refreshArchived(),
       refreshDms: () => dms?.refresh(),
-      isDm: id => dms?.get().rows.some(row => row.identity.id === id) ?? false,
+      isDm,
       unreadApi: {
         listChannels: () => observe(unreadSource.listChannels()),
         markRead: (scope, body) => observe(unreadSource.markRead(scope, body)),
@@ -155,11 +174,31 @@ export function createSession(options: SessionOptions) {
     reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
+  const searchAnchor = createSearchAnchor(sync, {
+    messages: ({ channelId, topicId }, query) => observe(topicId
+      ? topicSource.listTopicMessages(channelId, topicId, query)
+      : timeline.listMessages(channelId, query)),
+    reply: ({ channelId, messageId }, query) =>
+      observe(replySource.listReplyChain(channelId, messageId, query, options.accountSignal)),
+  })
+  const stopSearchBudget = searchAnchor.subscribe(() => {
+    const view = searchAnchor.get()
+    const target = view?.status === 'missing' || view?.target.replyRootId ? undefined : view?.target
+    topics.reserveSearch(target?.channelId, target?.topicId ? 'topic' : 'main', target ? SEARCH_WINDOW_LIMIT : 0)
+  })
   let watched: string | null = null
+  const { listArchivedChannels, getChannel, updateChannel } = source
   const channels = createChannels(
     {
       listChannels: signal => observe(options.channelsApi ? source.listChannels(signal) : unreadSource.listChannels(signal)),
       createChannel: body => observe(source.createChannel(body)),
+      listArchivedChannels: listArchivedChannels && (signal => observe(listArchivedChannels(signal))),
+      getChannel: getChannel && ((id, signal) => observe(getChannel(id, signal))),
+      updateChannel: updateChannel && (async (id, body) => {
+        const result = await updateChannel(id, body)
+        observeAccess(result)
+        return result
+      }),
     },
     id => {
       if (!closed && !unavailable && id === watched && sync.get().organization === 'available') {
@@ -175,7 +214,22 @@ export function createSession(options: SessionOptions) {
       const baselines = rows.filter((row): row is api.UnreadChannel => 'as_of_seq' in row && completeCountFields(row))
       if (baselines.length || rows.length === 0) unread.activitySnapshot(baselines)
     },
+    {
+      canOpen: id => !isDm(id) && sync.get().channels[id]?.state !== 'unavailable',
+      verifyOrdinary: (id, signal) => observe(topicSource.listTopics(id, { limit: 1 }, signal)),
+      unavailable: id => { void sync.channelUnavailable(id) },
+      onOpen: channel => unread.activityArchive(channel.id, channel.archived),
+      onArchivedSnapshot: rows => {
+        const active = new Set(channels.get().channels.map(c => c.id))
+        unread.activityArchivedSnapshot(rows.filter(row => !active.has(row.id)))
+      },
+    },
   )
+  const sections = createSections({
+    api: options.sectionsApi ?? sectionsApi(organizationId), activity, list: channels.authorizedList, observeAccess,
+    random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs,
+  })
+  closeSections = sections.close
   const dmSource = options.dmsApi ?? dmsApi(organizationId)
   dms = createDms({ api: {
     list: (query, signal) => observe(dmSource.list({ history_generation: history?.get().historyGeneration, ...query }, signal)),
@@ -183,7 +237,10 @@ export function createSession(options: SessionOptions) {
     open: (body, signal) => observe(dmSource.open(body, signal)),
   }, activity, watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
   baseline: (dm, replace) => unread.activityDmSnapshot(dm, replace),
-  processed: identity => topicComposition.resolveDm(identity.id),
+  processed: identity => {
+    if (channels.get().selectedId === identity.id) channels.refreshOpen()
+    topicComposition.resolveDm(identity.id)
+  },
   drop: id => unread.activityRevoke(id),
   select: id => {
     if (closed || unavailable) return
@@ -192,7 +249,7 @@ export function createSession(options: SessionOptions) {
     if (same && sync.get().channels[id]?.state === 'unavailable') void sync.watch(id)
   }, random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs })
   const stopActivity = sync.onActivity(notice => {
-    if (notice.type === 'activity_ready') dms?.ready()
+    if (notice.type === 'activity_ready') { dms?.ready(); sections.ready() }
     activity.notice(notice)
   })
   function terminate() {
@@ -200,6 +257,7 @@ export function createSession(options: SessionOptions) {
     unavailable = true
     activity.close(); capabilities.close()
     channels.close()
+    sections.close()
     dms?.close()
     void sync.unavailable()
   }
@@ -226,28 +284,54 @@ export function createSession(options: SessionOptions) {
   })
   activity.hold('capabilities', capabilities)
   let historyEpoch = sync.get().historyEpoch
+  let connection = sync.get().connection, connected = sync.get().connected
+  let openUnavailable = false
   const stopSync = sync.subscribe(() => {
-    if (historyEpoch !== sync.get().historyEpoch) {
-      historyEpoch = sync.get().historyEpoch
+    const state = sync.get()
+    if ((connection !== null && connection !== state.connection) || (connected && !state.connected)) sections.disconnected()
+    connection = state.connection; connected = state.connected
+    if (historyEpoch !== state.historyEpoch) {
+      historyEpoch = state.historyEpoch
       dms?.resetHistory()
       navigationTargets.resetHistory()
+      channels.resetHistory()
     }
-    if (!sync.get().connected) activity.disconnected()
-    if (sync.get().organization === 'unavailable') terminate()
+    if (!state.connected) activity.disconnected()
+    if (state.organization === 'unavailable') return terminate()
+    const id = channels.get().selectedId
+    const nextUnavailable = id !== null && state.channels[id]?.state === 'unavailable'
+    if (nextUnavailable !== openUnavailable) {
+      openUnavailable = nextUnavailable
+      channels.refreshOpen()
+    }
   })
-  const memberControllers = new Map<string, ReturnType<typeof createChannelMembers>>()
-  const memberAvailability = new Map<string, boolean>()
-  const memberReleases = new Map<string, () => void>()
-  function holdMembers(id: string, controller: ReturnType<typeof createChannelMembers>) {
-    memberReleases.get(id)?.()
-    memberReleases.set(id, activity.hold(`channel-members:${id}`, controller.activityTarget))
+  type MemberEntry = { controller: ReturnType<typeof createChannelMembers>; lost: boolean; release?: () => void }
+  const memberControllers = new Map<string, MemberEntry>()
+  function holdMembers(id: string, entry: MemberEntry) {
+    entry.release?.()
+    entry.release = activity.hold(`channel-members:${id}`, entry.controller.activityTarget)
+  }
+  function releaseMembers(id: string, controller: ReturnType<typeof createChannelMembers>) {
+    const entry = memberControllers.get(id)
+    if (entry?.controller !== controller) return
+    memberControllers.delete(id)
+    entry.release?.()
+    entry.release = undefined
   }
   const stopMemberAccess = sync.subscribe(() => {
-    for (const [id, controller] of memberControllers) {
+    for (const [id, entry] of [...memberControllers]) {
+      if (memberControllers.get(id) !== entry) continue
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[id]?.state === 'unavailable'
-      if (lost) { controller.unavailable(); memberReleases.get(id)?.(); memberReleases.delete(id) }
-      else if (memberAvailability.get(id)) { holdMembers(id, controller); controller.reselect() }
-      memberAvailability.set(id, lost)
+      const wasLost = entry.lost
+      entry.lost = lost
+      if (lost) {
+        entry.release?.()
+        entry.release = undefined
+        entry.controller.unavailable()
+      } else if (wasLost) {
+        holdMembers(id, entry)
+        entry.controller.reselect()
+      }
     }
   })
   const stopFollowing = channels.subscribe(() => {
@@ -261,33 +345,48 @@ export function createSession(options: SessionOptions) {
   void sync.start()
   void channels.load()
   return {
-    sync, topics, replies, moveChain, replyCounts, unread, channels, dms, navigationTargets,
+    sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets, searchAnchor,
     memberListAccess,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
-      memberControllers.get(channel)?.close()
+      memberControllers.get(channel)?.controller.close()
       const controller = createChannelMembers(organizationId, channel, r => {
         if (!r.ok && r.kind === 'http' && r.status === 401) notifyEnded()
         else if (!closed && api.isOrganizationUnavailable(r)) terminate()
       }, api, () => { void sync.channelUnavailable(channel) }, () => channels.load(), memberListAccess)
-      memberControllers.set(channel, controller)
+      const rawClose = controller.close
+      const managed: ReturnType<typeof createChannelMembers> = {
+        ...controller,
+        close() {
+          releaseMembers(channel, managed)
+          rawClose()
+        },
+      }
+      if (closed) {
+        rawClose()
+        return managed
+      }
       const lost = sync.get().organization === 'unavailable' || sync.get().channels[channel]?.state === 'unavailable'
-      memberAvailability.set(channel, lost)
-      if (lost) controller.unavailable()
+      const entry: MemberEntry = { controller: managed, lost }
+      memberControllers.set(channel, entry)
+      if (lost) managed.unavailable()
       else {
-        holdMembers(channel, controller)
-        void controller.load()
+        holdMembers(channel, entry)
+        void managed.load()
         void channels.load()
       }
-      return controller
+      return managed
     },
     close() {
       closed = true
       stopActivity(); activity.close(); capabilities.close()
       navigationTargets.close(); replyCounts.close()
+      stopSearchBudget(); searchAnchor.close()
       stopFollowing(); stopSync(); stopMemberAccess()
-      memberControllers.forEach(c => c.close()); memberControllers.clear()
+      for (const { controller } of [...memberControllers.values()]) controller.close()
+      memberControllers.clear()
       channels.close()
+      sections.close()
       dms?.close()
       void sync.close()
     },

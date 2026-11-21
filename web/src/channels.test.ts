@@ -1,11 +1,34 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createChannels } from './channels'
+import { channelError, createChannels } from './channels'
 import { createActivity } from './activity'
+import type { Result } from './api'
 
 const ch = (id: string, name = id) => ({ id, kind: 'channel' as const, archived: false, name, visibility: 'public' as const, capabilities: { can_add_members: { allowed: false }, can_remove_members: { allowed: false }, can_manage_managers: { allowed: false }, can_leave: { allowed: true }, can_rename: { allowed: false }, can_archive: { allowed: false } } })
 const ok = <T>(data: T) => ({ ok: true as const, data })
 
 describe('channels', () => {
+  it.each([
+    [{ ok: false, kind: 'http', status: 400, error: 'invalid channel name' }, 'チャンネル名の前後に空白を入れず、128文字以内にしてください。'],
+    [{ ok: false, kind: 'http', status: 403, error: 'forbidden' }, 'このチャンネルを変更する権限がありません。'],
+    [{ ok: false, kind: 'http', status: 409, error: 'channel_archived' }, 'このチャンネルはアーカイブされています。名前を変更するには復元してください。'],
+    [{ ok: false, kind: 'http', status: 409, error: 'channel name already exists' }, '同じ名前のチャンネルがすでにあります。'],
+    [{ ok: false, kind: 'http', status: 400, error: 'dm_channel_fixed' }, 'ダイレクトメッセージの名前やアーカイブ状態は変更できません。'],
+    [{ ok: false, kind: 'http', status: 404, error: 'channel not found' }, 'このチャンネルは利用できません。チャンネル一覧に戻ってください。'],
+    [{ ok: false, kind: 'network' }, 'サーバーに接続できません。しばらくしてからもう一度お試しください。'],
+  ] as const)('returns Japanese copy for Channel update refusal %j without invalidating the lists', async (refusal, error) => {
+    const activity = createActivity({ watched: () => false })
+    const invalidate = vi.spyOn(activity, 'notice')
+    const updateChannel = vi.fn(async (): Promise<Result<undefined>> => refusal)
+    const c = createChannels({ listChannels: vi.fn(), createChannel: vi.fn(), updateChannel }, undefined, activity)
+    try {
+      await expect(c.rename('a', ' unchanged ')).resolves.toBe(error)
+      if (refusal.kind === 'http' && refusal.status === 400 && refusal.error === 'invalid channel name') {
+        expect(error).toBe(channelError(refusal))
+      }
+      expect(updateChannel).toHaveBeenCalledExactlyOnceWith('a', { name: ' unchanged ' })
+      expect(invalidate).not.toHaveBeenCalled()
+    } finally { c.close(); activity.close() }
+  })
   it('does not duplicate a created Channel discovered by a notice before its POST response', async () => {
     const activity = createActivity({ watched: () => false })
     let resolve!: (value: ReturnType<typeof ok<ReturnType<typeof ch>>>) => void

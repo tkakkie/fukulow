@@ -10,21 +10,28 @@ export function initCore(): Promise<void> {
   return ready ??= init().then(() => undefined)
 }
 
-type Delta = Omit<CoreResult, 'changedChannels' | 'records'> & {
+type Interned<T> = Omit<T, 'body'> & { body?: number }
+type Send = Extract<CoreResult['effects'][number], { type: 'send' }>
+type Splice = { start: number; delete: number; insert: Interned<Message>[] }
+type ChannelPatch = {
+  metadata: Omit<ChannelState, 'messages' | 'pending' | 'advancing'>
+  splices?: Splice[]
+  pending?: (Interned<Pending> | number)[]
+  advancing?: ChannelState['advancing']
+}
+type Session = Omit<State, 'channels' | 'requests' | 'timers'>
+type Delta = Omit<CoreResult, 'changedChannels' | 'records' | 'effects'> & {
   changedChannels: string[]
-  records: [string, Message[]][]
-  channels: Record<string, (Omit<Partial<ChannelState>, 'messages' | 'pending'> & {
-    messages?: (Message | number)[]; pending?: (Pending | number)[]
-  }) | null>
-  session: Omit<State, 'channels' | 'requests' | 'timers'>
+  records: [string, Interned<Message>[]][]
+  effects: (Exclude<CoreResult['effects'][number], Send> | Interned<Send>)[]
+  channels: Record<string, ChannelPatch | null>
+  session?: Session
   bodies: string[]
 }
-function expandBodies(value: unknown, bodies: string[]): void {
-  if (!value || typeof value !== 'object') return
-  for (const [key, child] of Object.entries(value)) {
-    if (key === 'body' && typeof child === 'number') (value as Record<string, unknown>)[key] = bodies[child]
-    else expandBodies(child, bodies)
-  }
+function expandBody<T extends { body?: string }>(value: Interned<T>, bodies: string[]): T {
+  const decoded = value as unknown as T
+  if (value.body !== undefined) decoded.body = bodies[value.body]
+  return decoded
 }
 const sameFields = (a: object, b: object) => {
   const left = a as Record<string, unknown>, right = b as Record<string, unknown>
@@ -39,7 +46,7 @@ export function createCore(selfId: string): SyncCore {
   const { coreId, coreInput, coreOutput } = createValues()
   const read = <T>(json: string): T => coreOutput(JSON.parse(json)) as T
   const core = new WasmCore(coreId(selfId))
-  let view: SyncView = { ...read<Delta['session']>(core.session()), channels: {} }
+  let view: SyncView = { ...read<Session>(core.session()), channels: {} }
   return {
     get: () => view,
     request: id => read<ReturnType<SyncCore['request']>>(core.request(id)) ?? undefined,
@@ -47,12 +54,13 @@ export function createCore(selfId: string): SyncCore {
     hasPending: () => core.hasPending(),
     step(input: Input): CoreResult {
       const out = read<Delta>(core.step(JSON.stringify(coreInput(input))))
-      expandBodies(out, out.bodies)
+      const { bodies } = out
       const incoming = input.type === 'event' && input.event.type === 'message' && 'message' in input.event ? [input.event.message]
         : input.type === 'ack' ? [input.message] : input.type === 'history_result' ? input.page.messages : input.type === 'events_result' ? input.page.events.flatMap(e => e.type === 'message' && 'message' in e ? [e.message] : []) : []
       const originals = new Map(incoming.map(m => [m.id, m]))
       const channelViews = out.changedChannels.length ? { ...view.channels } : view.channels
-      const records = new Map(out.records.map(([id, messages]) => [id, messages.map(m => {
+      const records = new Map(out.records.map(([id, messages]) => [id, messages.map(encoded => {
+        const m = expandBody<Message>(encoded, bodies)
         const original = originals.get(m.id)
         if (original && sameMessage(original, m)) return original
         rememberIdentityResponse(m, original ? identityOrder(original) : undefined)
@@ -64,31 +72,42 @@ export function createCore(selfId: string): SyncCore {
         const before = view.channels[id]
         const next = { retiredThrough: undefined, heldThrough: undefined, forgottenThrough: undefined, lastUsed: undefined, retainedCount: undefined,
           streamBase: undefined, snapshotSeq: undefined, moveSeq: undefined, moveEpoch: undefined, latest: undefined, older: undefined, fill: undefined, wait: undefined, subscription: undefined,
-          ...patch,
-          messages: patch.messages ?? before?.messages ?? [],
-          pending: patch.pending ?? before?.pending ?? [],
+          ...patch.metadata,
+          messages: before?.messages ?? [],
+          pending: before?.pending ?? [],
           advancing: patch.advancing ?? before?.advancing ?? [],
         } as ChannelState
         if (before?.subscription && next.subscription && sameFields(before.subscription, next.subscription)) next.subscription = before.subscription
         if (patch.pending) {
           next.pending = patch.pending.map(p => typeof p === 'number' ? before.pending[p]
-            : { retryWait: undefined, failureCode: undefined, ...p })
+            : { retryWait: undefined, failureCode: undefined, ...expandBody<Pending>(p, bodies) })
         }
-        if (patch.messages) {
+        if (patch.splices) {
           const observed = new Map(records.get(id)?.map(m => [m.id, m]))
-          next.messages = patch.messages.map(m => {
-            if (typeof m === 'number') return before.messages[m]
+          const restore = (encoded: Interned<Message>) => {
+            const m = expandBody<Message>(encoded, bodies)
             const prior = before?.messages.find(old => old.id === m.id)
             const record = observed.get(m.id)
             if (prior && sameMessage(prior, m) && !(input.refreshMentionNames && record)) return prior
             if (record && sameMessage(record, m)) return record
             return m
-          })
+          }
+          next.messages = next.messages.slice()
+          // Offsets are relative to the previous window.
+          for (let i = patch.splices.length - 1; i >= 0; i--) {
+            const op = patch.splices[i]
+            next.messages.splice(op.start, op.delete, ...op.insert.map(restore))
+          }
         }
         channelViews[id] = next
       }
-      if (out.stateChanged) view = { ...out.session, channels: out.changedChannels.length ? channelViews : view.channels }
-      return { effects: out.effects, changedChannels: new Set(out.changedChannels), records, stateChanged: out.stateChanged }
+      if (out.stateChanged) {
+        // A new Session snapshot can also remove optional fields.
+        view = { ...(out.session ?? view), channels: channelViews }
+      }
+      const effects = out.effects.map(e => e.type === 'send' ? expandBody<Send>(e, bodies) : e)
+      return { effects, changedChannels: new Set(out.changedChannels), records,
+        ...(out.moves ? { moves: out.moves } : {}), stateChanged: out.stateChanged }
     },
   }
 }

@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { summarize } from './summarize.ts';
 import { supervise, ownedContainer, ownedVolume, refuseLeftovers, ownershipLabel } from './runtime.ts';
 import { loadManifest, verifyRuntime, resolveImage, verifySession, postgresArguments, runKind, smokeLabel } from './manifest.ts';
@@ -7,10 +8,11 @@ import { existsSync, mkdirSync, realpathSync, readFileSync, readdirSync, writeFi
 import { arch, cpus, totalmem } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmark, CommandTimeoutError, command, docker, save, sql, sqlWithNotices } from './bench.ts';
+import { benchmark, CommandTimeoutError, command, docker, save, sql } from './bench.ts';
 import { channel, copySql, finishSql, fixtureSql, generate, literal, member, org } from './seed.ts';
-import { begin, normalizedQuery, pattern, queries, search, searchCall, visibility, writeSql } from './queries.ts';
-import { definerDenials, verifyDefiner } from './definer.ts';
+import { begin, normalizedQuery, pattern, search, visibility } from './queries.ts';
+import { denialCases, probeSql } from './definer.ts';
+import { b1Begin, b1Cleanup, b1Denials, b1ForcedDenialPlan, b1Plan, b1Query, b1Role, b1Rows, b1TimingFixture, verifyB1 } from './b1.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 process.chdir(root);
@@ -18,7 +20,7 @@ if (process.version !== `v${readFileSync('.node-version','utf8').trim()}`) throw
 const manifest = loadManifest();
 const kind = runKind();
 console.log(kind==='smoke' ? smokeLabel : 'EVALUATION (formal Linux judgement remains separate)');
-const requested = resolve(process.env.SEARCH_RESULT_DIR ?? `/private/tmp/fukulow-search-153-${Date.now()}`);
+const requested = resolve(process.env.SEARCH_RESULT_DIR ?? `/private/tmp/fukulow-search-689-${Date.now()}`);
 const out = resolve(realpathSync(dirname(requested)),requested.split('/').at(-1) ?? '');
 if (out === root || out.startsWith(root+'/')) throw new Error('Artifacts must be outside Git');
 if (existsSync(out)) throw new Error('EEXIST: artifact destination already exists');
@@ -29,8 +31,6 @@ mkdirSync(out);
 const container = ownedContainer();
 const imageTag = 'fukulow-search-measure-153';
 let image = imageTag;
-const engines = ['trgm','bigm','pgroonga'] as const;
-type Engine = typeof engines[number] | 'none';
 const conditions = kind==='smoke' ? {...manifest.frozen.performance,...manifest.frozen.smoke.performance} : manifest.frozen.performance;
 const count = conditions.rows;
 const transactions = conditions.transactions;
@@ -40,31 +40,44 @@ const digest = (text: string) => createHash('sha256').update(text).digest('hex')
 const note = (s: string) => console.log(`${new Date().toISOString()} ${s}`);
 const owner = (db: string, text: string) => sql(container,db,text);
 const app = (db: string,text: string) => sql(container,db,text,'fukulow_app');
+const b1 = (db: string,text: string) => sql(container,db,text,b1Role);
+const drop = (db: string) => owner('postgres',`DROP DATABASE ${db} WITH (FORCE);`);
+let policy: string | undefined;
+function checkB1(db: string) {
+  const session = verifySession(text=>b1(db,text),'app',manifest.frozen.sessionPolicy.b1Settings);
+  const facts = verifyB1(text=>b1(db,text),policy);
+  policy ??= facts.policy;
+  return {...facts,session};
+}
 const grants = readFileSync('deploy/db-grants.sql','utf8');
-const migrations = readdirSync('server/migrations').filter(s=>s.endsWith('.sql')).sort();
-const results: Record<string,unknown>[] = [];
+const migrations = manifest.frozen.b1.migrations;
+const results: object[] = [];
 
 function create(db: string) {
   owner('postgres',`CREATE DATABASE ${db};`);
-  for (const migration of migrations) owner(db,`BEGIN;\n${readFileSync(`server/migrations/${migration}`,'utf8')}\nCOMMIT;`);
+  for (const migration of migrations) owner(db,`BEGIN;\n${readFileSync(migration,'utf8')}\nCOMMIT;`);
   verifySession(text=>owner(db,text));
   verifySession(text=>app(db,text),'app');
-  owner(db,file('schema.sql')); owner(db,grants); owner(db,file('definer.sql')); owner(db,fixtureSql());
+  owner(db,file('schema.sql'));
+  owner(db,grants);
+  owner(db,file('b1.sql'));
+  checkB1(db);
+  owner(db,fixtureSql());
 }
 function seedDb(db: string, rows: number) {
   const meta = generate(`${out}/messages.tsv`,rows); save(`${out}/${db}-seed.json`,meta);
   docker('cp',`${out}/messages.tsv`,`${container}:/tmp/messages.tsv`);
   owner(db,copySql); owner(db,finishSql); return meta;
 }
-function index(db: string, engine: Engine) {
+function index(db: string) {
   // Groonga files must not be copied from a live TEMPLATE database. Install and
   // initialize after cloning, once, before concurrent clients can open them.
   owner(db,"CREATE EXTENSION pgroonga; SELECT pgroonga_command('status');");
   const before = dbBytes(db); const start = performance.now();
-  if (engine !== 'none') owner(db,file(`${engine}.sql`));
+  owner(db,file('pgroonga.sql'));
   const buildMs = performance.now()-start;
   const physicalDeltaBytes = dbBytes(db)-before;
-  const relationBytes = engine === 'none' ? 0 : Number(owner(db,"SELECT pg_relation_size('search_body');"));
+  const relationBytes = Number(owner(db,"SELECT pg_relation_size('search_body');"));
   owner(db,'ANALYZE;'); return {buildMs,relationBytes,physicalDeltaBytes};
 }
 function dbBytes(db: string) {
@@ -86,85 +99,131 @@ function checkRls(db: string) {
   return {facts,access,cross};
 }
 
-// The function body's executed plan: auto_explain logs every statement of the
-// exact app call (SET LOCAL ROLE fukulow_app in an owner session, since LOAD
-// needs a superuser) as NOTICEs, with the app run's planner settings. The run
-// fails unless exactly one nested body plan with these exact parameters and the
-// outer Function Scan were logged.
-function bodyPlan(db: string, query: string, actor = 2, settings = '', page = true) {
-  const log = sqlWithNotices(container,db,`LOAD 'auto_explain';
-SET auto_explain.log_min_duration=0; SET auto_explain.log_nested_statements=on; SET auto_explain.log_analyze=on;
-SET auto_explain.log_buffers=on; SET auto_explain.log_settings=on; SET auto_explain.log_level=notice; SET client_min_messages=notice;
-${begin()}SET LOCAL ROLE fukulow_app;
-${settings}${searchCall(query,actor,page)};
-COMMIT;`);
-  const plans = log.split(/^NOTICE: {2}duration: /m).slice(1);
-  const parameters = `Query Parameters: $1 = '${member(1,actor)}', $2 = ${literal(query)}, $3 = '${page ? 't' : 'f'}'\n`;
-  const bodies = plans.filter(p=>p.includes(parameters));
-  const outer = plans.filter(p=>p.includes(`Query Text: ${searchCall(query,actor,page).split('\n')[0]}`) && /Function Scan on fukulow_search_messages\b/.test(p));
-  if (bodies.length!==1 || outer.length!==1 || !/\bCTE visible\b/.test(bodies[0]!) || !/plan_cache_mode = 'force_custom_plan'/.test(bodies[0]!))
-    throw new Error(`Function body plan not logged: ${query}`);
-  const body = bodies[0]!;
-  // Folded: the LIKE pattern is a literal in the body plan, not a replace() expression of $2.
-  return {log,searchIndex:/ on search_body\b/.test(body),folded:/~~ '%[^']*%'::text/.test(body) && !/\breplace\(/.test(body),
-    seqScanMessages:/Seq Scan on messages\b/.test(body)};
+type Query = {id:string,raw:string,value:string};
+const normalized: Query[] = [];
+const script = (query: string) => b1Begin(query)+b1Query()+';\nCOMMIT;';
+
+function plan(db: string, query: string, dest: string, prepared = false) {
+  return b1Plan(text=>b1(db,text),query,explain=>save(dest,explain),{prepared});
 }
-// pg_get_functiondef hash of the first install; every later database must match.
-let definition = '';
-const normalized: {id:string,raw:string,value:string}[] = [];
+
 function ids(db: string, query: string, role = 'fukulow_app', sequential = false) {
   const settings = sequential ? 'SET LOCAL enable_indexscan=off; SET LOCAL enable_bitmapscan=off; SET LOCAL enable_indexonlyscan=off;' : '';
   const output = sql(container,db,begin()+settings+`\n${query};\nCOMMIT;`,role);
   return output.split('\n').filter(s=>s && s!==org(1)).join('\n');
 }
 function completeness(db: string, dest: string) {
-  const report: Record<string,unknown>[] = [];
+  const report = [];
   for (const q of normalized) {
-    for (const actor of [1,2,3,4,5,6]) {
-      const ref = ids(db,search(q.value,actor,false,true),'fukulow_app',true);
-      const actual = ids(db,searchCall(q.value,actor,false));
-      if (actual !== ref) throw new Error(`Completeness mismatch: app ${q.id} actor ${actor}`);
-      report.push({query:q.id,actor,rows:actual ? actual.split('\n').length:0,sha256:digest(actual),equal:true});
-    }
-    // Separately force the search index as owner: RLS can otherwise mask tokenizer misses.
+    const actors = [1,2,3,4,5,6].map(actor=>{
+      const reference = ids(db,search(q.value,actor,false,true),'fukulow_app',true);
+      const found = b1Rows(b1(db,b1Begin(q.value)+b1Query(member(1,actor),false)+'; COMMIT;'));
+      return {actor,equal:found===reference,rows:found ? found.split('\n').length : 0,
+        foundSha256:digest(found),referenceSha256:digest(reference)};
+    });
+    // The original engine-only controls catch tokenizer misses independently of the search plan.
     const ref = owner(db,`SET enable_indexscan=off; SET enable_bitmapscan=off; SET enable_indexonlyscan=off; ${search(q.value,2,false,true)};`);
-    const actual = owner(db,`SET enable_seqscan=off; ${search(q.value,2,false)};`);
-    if (actual !== ref) throw new Error(`Completeness mismatch: owner indexed ${q.id}`);
-    report.push({query:q.id,actor:'owner-index-diagnostic',rows:actual ? actual.split('\n').length:0,sha256:digest(actual),equal:true});
-    // No Channel/order alternative here: exercise the extension access path itself.
-    const aggregate = "SELECT count(*),md5(string_agg(id::text,',' ORDER BY id)) FROM messages WHERE ";
+    const indexed = owner(db,`SET enable_seqscan=off; ${search(q.value,2,false)};`);
+    const organizations = [1,2,3].map(org);
+    const counts = organizations.map(o=>`count(*) FILTER (WHERE organization_id='${o}')`).join(',');
+    const aggregate = `SELECT ${counts},md5(string_agg(id::text,',' ORDER BY id)) FROM messages WHERE `;
     const directRef = owner(db,`SET enable_indexscan=off; SET enable_bitmapscan=off; SET enable_indexonlyscan=off; ${aggregate}strpos(normalized_body,${literal(q.value)})>0;`);
-    const direct = owner(db,`SET enable_seqscan=off; ${aggregate}normalized_body LIKE ${literal(pattern(q.value))} ESCAPE E'\\\\';`);
-    if (direct!==directRef) throw new Error(`Extension access-path mismatch ${q.id}: ${direct} != ${directRef}`);
-    report.push({query:q.id,actor:'owner-direct-index',digest:direct,equal:true});
-    // Page order and deterministic tie-breaker must match the reference too.
-    if (ids(db,searchCall(q.value)) !== ids(db,search(q.value,2,true,true),'fukulow_app',true)) throw new Error(`Page mismatch ${q.id}`);
+    const direct = owner(db,`SET enable_seqscan=off; ${aggregate}normalized_body LIKE ${literal(pattern(q.value))} ESCAPE chr(92);`);
+    const matchCounts = directRef.split('|');
+    assert.equal(matchCounts.length,4,'Missing Organization match counts');
+    const matchesByOrganization = Object.fromEntries(organizations.map((o,i)=>[o,Number(matchCounts[i])]));
+    const referencePage = ids(db,search(q.value,2,true,true),'fukulow_app',true);
+    const foundPage = b1Rows(b1(db,script(q.value)));
+    report.push({query:q.id,actors,ownerIndexEqual:indexed===ref,directEqual:direct===directRef,
+      pageEqual:foundPage===referencePage,matchesByOrganization});
   }
   save(dest,report);
-  return {cases:report.length,equal:true};
+  return report;
 }
 
-async function restoreDrill() {
-  create('small'); seedDb('small',1000);
-  const report = [];
-  for (const engine of engines) {
-    owner('postgres',`CREATE DATABASE drill TEMPLATE small;`); index('drill',engine);
-    const before = owner('drill',"SELECT count(*),md5(string_agg(id::text||body,'|' ORDER BY id)) FROM messages;");
-    docker('exec',container,'pg_dump','-U','fukulow','-d','drill','-Fc','-f','/tmp/drill.dump');
-    docker('cp',`${container}:/tmp/drill.dump`,`${out}/${engine}-small.dump`);
-    owner('postgres','CREATE DATABASE restored;');
-    const start = performance.now();
-    docker('exec',container,'pg_restore','-U','fukulow','-d','restored','--exit-on-error','--no-owner','--no-acl','/tmp/drill.dump');
-    const restoreMs = performance.now()-start;
-    owner('restored',grants); owner('restored',file('definer.sql'));
-    const after = owner('restored',"SELECT count(*),md5(string_agg(id::text||body,'|' ORDER BY id)) FROM messages;");
-    if (before!==after) throw new Error('Dump/restore data mismatch');
-    report.push({engine,before,after,restoreMs,definer:verifyDefiner(text=>owner('restored',text),definition),rls:checkRls('restored'),completeness:completeness('restored',`${out}/${engine}-restore-completeness.json`),
-      extensions:owner('restored','SELECT extname,extversion FROM pg_extension ORDER BY 1;')});
-    owner('postgres','DROP DATABASE restored WITH (FORCE); DROP DATABASE drill WITH (FORCE);');
-    note(`dump/restore ${engine} verified`);
+function restoreDrill() {
+  create('small'); seedDb('small',conditions.restoreRows); index('small');
+  const checksum = (db: string) => owner(db,"SELECT count(*),md5(string_agg(id::text||body,'|' ORDER BY id)) FROM messages;");
+  const before = checksum('small');
+  docker('exec',container,'pg_dump','-U','fukulow','-d','small','-Fc','-f','/tmp/drill.dump');
+  docker('cp',`${container}:/tmp/drill.dump`,`${out}/pgroonga-small.dump`);
+  owner('postgres','CREATE DATABASE restored;');
+  const start = performance.now();
+  docker('exec',container,'pg_restore','-U','fukulow','-d','restored','--exit-on-error','--no-owner','--no-acl','/tmp/drill.dump');
+  const restoreMs = performance.now()-start;
+  owner('restored',grants);
+  owner('restored',file('b1.sql'));
+  const verification = checkB1('restored');
+  const after = checksum('restored');
+  assert.equal(after,before,'Dump/restore data mismatch');
+  const checked = completeness('restored',`${out}/restore-completeness.json`);
+  save(`${out}/restore.json`,{before,after,restoreMs,verification,rls:checkRls('restored'),completeness:checked});
+  drop('restored'); drop('small');
+}
+
+function checkDenials() {
+  create('denial'); owner('denial',probeSql); index('denial');
+  const verification = checkB1('denial');
+  const checks = b1Denials(text=>b1('denial',text));
+  // Direct reads isolate the RLS/pattern checks from the query's visibility predicates.
+  const rls = b1Cleanup(text=>b1('denial',text));
+  save(`${out}/denials.json`,{cases:denialCases.map(c=>c.name),checks,verification,rls});
+  assert.ok(checks.every(c=>JSON.stringify(c.found)===JSON.stringify(c.expected)),'B1 denial mismatch; see denials.json');
+  b1ForcedDenialPlan(text=>b1('denial',text),explain=>save(`${out}/denial-forced-plan.json`,explain));
+  drop('denial');
+}
+
+async function timingExposure() {
+  const {foreignRowsPerClass} = manifest.frozen.b1.timingProbe;
+  const arms = ['few','many'] as const;
+  const dest = `${out}/timing`;
+  mkdirSync(dest);
+  // Identical visible rows, foreign row IDs and foreign row counts in both arms.
+  // The large arm varies only foreign bodies; small-arm filler has no query terms.
+  const insert = (q: Query, i: number, o: number, rows: number, matches: number) => `INSERT INTO public.messages
+    (organization_id,id,channel_id,seq,sender,client_message_id,body,created_at)
+    SELECT '${org(o)}',md5('${o}:${i}:'||n)::uuid,'${channel(o,0)}',${i*foreignRowsPerClass}+n,'${member(o,1)}',
+      md5('${o}:${i}:'||n)::uuid,CASE WHEN n<=${matches} THEN ${literal(q.value)}
+      ELSE repeat('~',octet_length(${literal(q.value)})) END,'2026-11-14'
+    FROM generate_series(1,${rows}) n;`;
+  create('timing_base');
+  owner('timing_base',normalized.map((q,i)=>insert(q,i,1,1,1)).join('\n'));
+  for (const arm of arms) {
+    const db = `timing_${arm}`;
+    owner('postgres',`CREATE DATABASE ${db} TEMPLATE timing_base;`);
+    owner(db,normalized.map((q,i)=>insert(q,i,2,foreignRowsPerClass,arm==='few' ? 1 : foreignRowsPerClass)).join('\n'));
+    index(db); checkB1(db);
+    for (const q of normalized) b1(db,script(q.value));
   }
-  owner('postgres','DROP DATABASE small;'); save(`${out}/restore.json`,report);
+  drop('timing_base');
+  const evidence = [];
+  for (const [i,q] of normalized.entries()) {
+    const sample = async (arm: typeof arms[number])=>{
+      const db = `timing_${arm}`;
+      const page = b1Rows(b1(db,script(q.value)));
+      const foreignMatches = Number(owner(db,`SELECT count(*) FROM public.messages
+        WHERE organization_id='${org(2)}' AND strpos(normalized_body,${literal(q.value)})>0;`));
+      const latency = await benchmark(container,db,script(q.value),`${dest}/${q.id}-${arm}`,transactions,conditions.clients,b1Role);
+      return {page,foreignMatches,latency};
+    };
+    const [a,b] = i%2===0 ? arms : ['many','few'] as const;
+    const samples = {[a]:await sample(a),[b]:await sample(b)};
+    const few = samples.few!, many = samples.many!;
+    evidence.push({query:q.id,order:[a,b],equalNonemptyPage:few.page!=='' && few.page===many.page,
+      few:{foreignMatches:few.foreignMatches,...few.latency},many:{foreignMatches:many.foreignMatches,...many.latency}});
+    save(`${out}/timing.json`,evidence);
+  }
+  // Collect EXPLAIN and fixture evidence after sampling so these reads cannot warm either arm.
+  const pairedPlans = evidence.map((sample,i)=>{
+    const q = normalized[i]!;
+    const capture = (arm: typeof arms[number]) => plan(`timing_${arm}`,q.value,`${dest}/${q.id}-${arm}-plan.json`,true);
+    return {...sample,
+      few:{...sample.few,plan:capture('few')},many:{...sample.many,plan:capture('many')}};
+  });
+  const fixture = b1TimingFixture((arm,text)=>owner(`timing_${arm}`,text),normalized.length,foreignRowsPerClass);
+  save(`${dest}/fixture.json`,fixture);
+  save(`${out}/timing.json`,pairedPlans);
+  for (const arm of arms) drop(`timing_${arm}`);
 }
 
 {
@@ -199,84 +258,59 @@ async function restoreDrill() {
     os:process.platform,model:cpus()[0]?.model,
     docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{.NCPU}},"memory":{{.MemTotal}}}')),
     image: imageRecord,source:command('git',['rev-parse','HEAD']),
-    hashes:Object.fromEntries([...readdirSync('load/search-engines',{withFileTypes:true}).filter(n=>n.isFile()).map(n=>'load/search-engines/'+n.name),...migrations.map(n=>'server/migrations/'+n)].map(p=>[p,digest(readFileSync(p,'utf8'))])),
+    hashes:Object.fromEntries([...readdirSync('load/search-engines',{withFileTypes:true}).filter(n=>n.isFile()).map(n=>'load/search-engines/'+n.name),...migrations].map(p=>[p,digest(readFileSync(p,'utf8'))])),
     versions:owner('postgres','SELECT version(); SELECT name,default_version FROM pg_available_extensions WHERE name IN (\'pg_trgm\',\'pg_bigm\',\'pgroonga\');'),
     packages:docker('exec',container,'dpkg-query','-W','postgresql-18','postgresql-client-18','postgresql-server-dev-18','postgresql-18-pgdg-pgroonga','libgroonga0'),
     settings:owner('postgres',"SELECT name,setting,unit FROM pg_settings WHERE name IN ('shared_buffers','work_mem','maintenance_work_mem','effective_cache_size','random_page_cost','jit','fsync','synchronous_commit','max_connections','wal_level','max_wal_size','checkpoint_timeout','lc_collate','server_encoding','shared_preload_libraries','max_worker_processes') OR name LIKE 'pgroonga.%';"),
     processStart:command('ps',['-axo','comm,%cpu']),dockerStart:docker('ps','--format','{{.Image}}'),count,transactions};
   save(`${out}/metadata.json`,metadata);
   create('base');
-  definition = verifyDefiner(text=>owner('base',text)).definition;
-  for (const [id,raw] of queries) normalized.push({id,raw,value:owner('base',`SELECT ${normalizedQuery(raw)};`)});
+  for (const [id,raw] of manifest.frozen.performance.querySet)
+    normalized.push({id,raw,value:owner('base',`SELECT ${normalizedQuery(raw)};`)});
   if (normalized.find(q=>q.id==='nfc')?.value!==normalized.find(q=>q.id==='nfd')?.value
     || normalized.find(q=>q.id==='trim')?.value!=='開発'
     || normalized.find(q=>q.id==='bom')?.value!=='\ufeff開発\ufeff') throw new Error('Normalization/trim mismatch');
   save(`${out}/queries.json`,normalized.map(q=>({...q,scalars:[...q.value].length})));
-  await restoreDrill();
-  save(`${out}/definer.json`,definerDenials({owner,app,create,index:(db: string,engine: string)=>index(db,engine as Engine),drop:(db: string)=>owner('postgres',`DROP DATABASE ${db} WITH (FORCE);`),
-    plan:(db: string,query: string,actor: number,settings: string)=>bodyPlan(db,query,actor,settings)},engines,definition));
+  restoreDrill();
+  checkDenials();
   save(`${out}/dataset.json`,seedDb('base',count)); note(`seeded ${count} Messages`);
   save(`${out}/rls.json`,checkRls('base'));
-  for (let round=0;round<conditions.rounds;round++) {
-    const order: Engine[] = round===0 ? ['none',...engines] : round===1 ? ['bigm','pgroonga','none','trgm'] : ['pgroonga','trgm','bigm','none'];
-    for (const engine of order) {
-      const dest = `${out}/round${round+1}-${engine}`; mkdirSync(dest);
-      owner('postgres','CREATE DATABASE measured TEMPLATE base;');
-      const build = index('measured',engine);
-      const definer = verifyDefiner(text=>owner('measured',text),definition);
-      docker('restart',container);
-      // A successful SELECT establishes readiness after each restart.
-      for (let attempt=0;attempt<60;attempt++) {
-        try { if (owner('measured','SELECT 1;')==='1') break; } catch (error) { if (error instanceof CommandTimeoutError) throw error; }
-        await new Promise(r=>setTimeout(r,500));
-      }
-      owner('measured',"SELECT pgroonga_command('status');");
-      verifySession(text=>owner('measured',text));
-      verifySession(text=>app('measured',text),'app');
-      note(`round ${round+1} ${engine}, index ${Math.round(build.buildMs)} ms`);
-      const row: Record<string,unknown> = {manifestHash:manifest.sha256,runKind:kind,image:imageRecord,round:round+1,engine,...build,definer};
-      if (engine!=='none') {
-        // Exactly one complete sweep of all queries before latency sampling.
-        for (const q of normalized) app('measured',begin()+searchCall(q.value)+'; COMMIT;');
-        const latencies = [];
-        for (const q of normalized) {
-          const measured = await benchmark(container,'measured',begin()+searchCall(q.value)+';\nCOMMIT;',`${dest}/${q.id}`,transactions,conditions.clients);
-          latencies.push({query:q.id,...measured});
-          note(`round ${round+1} ${engine} ${q.id} p95=${measured.p95.toFixed(3)} ms`);
-        }
-        row.latencies=latencies;
-        if (round===0) {
-          const plans = [];
-          for (const q of normalized) {
-            writeFileSync(`${dest}/${q.id}-app-plan.txt`,app('measured',begin()+`EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${searchCall(q.value)}; COMMIT;`));
-            const {log,...facts} = bodyPlan('measured',q.value);
-            writeFileSync(`${dest}/${q.id}-body-plan.txt`,log);
-            // Direct query as owner with the app run's planner settings, and the
-            // v1 form (enable_seqscan=off) so v1's owner counts stay comparable.
-            writeFileSync(`${dest}/${q.id}-owner-plan.txt`,owner('measured',`EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)};`));
-            const forced = owner('measured',`SET enable_seqscan=off; EXPLAIN (ANALYZE,BUFFERS,SETTINGS) ${search(q.value)};`);
-            writeFileSync(`${dest}/${q.id}-owner-v1-seqscan-off-plan.txt`,forced);
-            plans.push({query:q.id,...facts,ownerV1SearchIndex:/ on search_body\b/.test(forced)});
-            writeFileSync(`${dest}/${q.id}-direct-plan.txt`,owner('measured',`SET enable_seqscan=off; EXPLAIN (ANALYZE,BUFFERS,SETTINGS) SELECT id FROM messages WHERE normalized_body LIKE ${literal(pattern(q.value))} ESCAPE E'\\\\';`));
-          }
-          row.plans=plans;
-          row.bodySearchIndexQueries=plans.filter(p=>p.searchIndex).length;
-          row.ownerV1SearchIndexQueries=plans.filter(p=>p.ownerV1SearchIndex).length;
-          note(`round 1 ${engine}: body uses search_body in ${row.bodySearchIndexQueries}/${plans.length} queries`);
-          row.completeness=completeness('measured',`${dest}/completeness.json`);
-        }
-      }
-      // Warm the insert path equally; evaluation measures 1,000 inserts with 5 writers.
-      await benchmark(container,'measured',writeSql,`${dest}/write-warm`,conditions.writeWarmTransactions,conditions.clients);
-      owner('measured','CHECKPOINT;');
-      const walBefore = owner('measured','SELECT pg_current_wal_insert_lsn();');
-      row.write = await benchmark(container,'measured',writeSql,`${dest}/write`,conditions.writeTransactions,conditions.clients);
-      row.walBytesPerInsert=Number(owner('measured',`SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(),${literal(walBefore)})/${conditions.writeTransactions*conditions.clients};`));
-      row.endSizeBytes=dbBytes('measured');
-      save(`${dest}/result.json`,row); results.push(row); save(`${out}/results.json`,results);
-      owner('postgres','DROP DATABASE measured WITH (FORCE);'); note(`round ${round+1} ${engine} complete`);
+  for (let round=1;round<=conditions.rounds;round++) {
+    const dest = `${out}/round${round}-pgroonga`; mkdirSync(dest);
+    owner('postgres','CREATE DATABASE measured TEMPLATE base;');
+    const build = index('measured');
+    docker('restart',container);
+    ready = false;
+    for (let attempt=0;attempt<60;attempt++) {
+      try { if (owner('measured','SELECT 1;')==='1') { ready=true; break; } } catch (error) { if (error instanceof CommandTimeoutError) throw error; }
+      await new Promise(r=>setTimeout(r,500));
     }
+    if (!ready) throw new Error('PostgreSQL restart timed out');
+    owner('measured',"SELECT pgroonga_command('status');");
+    verifySession(text=>owner('measured',text));
+    verifySession(text=>app('measured',text),'app');
+    const safety = checkB1('measured');
+    note(`round ${round} PGroonga, index ${Math.round(build.buildMs)} ms`);
+    for (let sweep=0;sweep<conditions.warmupSweeps;sweep++)
+      for (const q of normalized) b1('measured',script(q.value));
+    const latencies = [];
+    for (const q of normalized) {
+      const measured = await benchmark(container,'measured',script(q.value),`${dest}/${q.id}`,transactions,conditions.clients,b1Role);
+      latencies.push({query:q.id,...measured});
+      save(`${dest}/latencies.json`,latencies);
+      note(`round ${round} PGroonga ${q.id} p95=${measured.p95.toFixed(3)} ms`);
+    }
+    const row = {manifestHash:manifest.sha256,runKind:kind,round,engine:'pgroonga',...build,safety,latencies,
+      ...(round===1 ? {
+        plans:normalized.map(q=>({query:q.id,...plan('measured',q.value,`${dest}/${q.id}-plan.json`)})),
+        completeness:completeness('measured',`${dest}/completeness.json`),
+      } : {}),
+      endSizeBytes:dbBytes('measured')};
+    save(`${dest}/result.json`,row); results.push(row); save(`${out}/results.json`,results);
+    drop('measured'); note(`round ${round} PGroonga complete`);
   }
+  drop('base');
+  await timingExposure();
   save(`${out}/completed.json`,{manifestHash:manifest.sha256,runKind:kind,at:new Date().toISOString(),processEnd:command('ps',['-axo','comm,%cpu']),results:results.length});
   note(kind==='smoke' ? smokeLabel+' pipeline completed.' : 'All measurements completed; no formal Linux performance judgement.');
 }

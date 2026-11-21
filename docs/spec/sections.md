@@ -75,7 +75,8 @@ Authenticate Session → parse Organization UUID → resolve current Membership/
 | New create exceeds live-section cap | 409 `section_limit` |
 | Conflicting original name / retired id | 409 `section_id_conflict` / `section_deleted` |
 | Reorder id set differs | 409 `section_layout_changed` |
-| Internal/DB failure, including generation exhaustion | 500 `internal error` |
+| Lock wait timeout or DELETE restart bound exhausted (rolled back) | 503 `lock_contention` ([K10](channels.md#channel-rename-and-archive-410-implemented)) |
+| Other internal/DB failure, including generation exhaustion | 500 `internal error` |
 
 Errors contain only the stated value, without names, owner ids, hidden ids/counts or conflicting layout. Owned layout/section reads succeed with inaccessible Channels omitted. Direct placement reads deny with the same error as for unknown Channels. No additional 403, management permission or Owner/Admin exception.
 

@@ -214,6 +214,39 @@ async fn access_gain_invalidates_an_earlier_order(pool: PgPool) {
 }
 
 #[fukulow_test::test]
+async fn private_placement_waits_on_its_grant_lock(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let channel = f.channel("Private", "private").await;
+    let group = Uuid::new_v4();
+    f.create(group, "Destination").await;
+    let placement = placement_path(channel);
+    let input = json!({"section_id":group});
+
+    // A grant mutation through the API would wait on the Organization row
+    // first. Isolate the grant row lock to exercise the second check.
+    let mut blocker = f.pools.admin.begin().await.unwrap();
+    sqlx::query(
+        "SELECT channel_id FROM channel_members
+         WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 FOR NO KEY UPDATE",
+    )
+    .bind(f.owner.org)
+    .bind(channel)
+    .bind(f.owner.member)
+    .fetch_one(&mut *blocker)
+    .await
+    .unwrap();
+    let moving = spawn(&f, "PUT", &placement, &f.token, input);
+    wait_blocked(&f, "SELECT channel_id FROM channel_members%FOR SHARE").await;
+    assert_eq!(f.get(SECTIONS).await["generation"], "1");
+    blocker.commit().await.unwrap();
+    expected(joined(moving).await, StatusCode::NO_CONTENT).await;
+    assert_eq!(
+        f.get(&placement).await,
+        json!({"section_id":group,"generation":"2"})
+    );
+}
+
+#[fukulow_test::test]
 async fn reads_keep_one_snapshot_without_member_locks(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let private = f.channel("Private", "private").await;

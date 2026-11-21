@@ -84,7 +84,8 @@ pub async fn list(
     (status=403,description="forbidden: requires Owner/Admin with access or a usable private Channel manager right",body=ErrorBody),
     (status=404,description="organization_unavailable, channel not found or member_not_found",body=ErrorBody),
     (status=413,description="Body too large",body=ErrorBody),(status=415,description="Requires application/json",body=ErrorBody),
-    (status=500,description="Database failure",body=ErrorBody)))]
+    (status=500,description="Database failure",body=ErrorBody),
+    (status=503,description="lock_contention on a lock timeout (no Retry-After)",body=ErrorBody)))]
 pub async fn add(
     State(state): State<AppState>,
     auth: Auth,
@@ -102,7 +103,8 @@ pub async fn add(
     (status=403,description="forbidden: removing others requires Owner/Admin with access or a usable private Channel manager right",body=ErrorBody),
     (status=404,description="organization_unavailable, channel not found or member_not_found",body=ErrorBody),
     (status=409,description="last_channel_manager or last_channel_grant: private Channel protection",body=ErrorBody),
-    (status=500,description="Database failure",body=ErrorBody)))]
+    (status=500,description="Database failure",body=ErrorBody),
+    (status=503,description="lock_contention on a lock timeout (no Retry-After)",body=ErrorBody)))]
 pub async fn remove(
     State(state): State<AppState>,
     auth: Auth,
@@ -121,7 +123,8 @@ pub async fn remove(
     (status=404,description="organization_unavailable, channel not found, member_not_found (unknown/foreign/inactive), or channel_grant_not_found (absent/stale)",body=ErrorBody),
     (status=409,description="last_channel_manager",body=ErrorBody),
     (status=413,description="Body too large",body=ErrorBody),(status=415,description="Requires application/json",body=ErrorBody),
-    (status=500,description="Database failure",body=ErrorBody)))]
+    (status=500,description="Database failure",body=ErrorBody),
+    (status=503,description="lock_contention on a lock timeout (no Retry-After)",body=ErrorBody)))]
 pub async fn change_manager(
     State(state): State<AppState>,
     auth: Auth,
@@ -205,124 +208,185 @@ async fn mutate_inner(
     let state = state.clone();
     let auth = auth.clone();
     tokio::spawn(async move {
-    let (changed, notice) = crate::database::organization(&state.pool, org, async |tx: &mut sqlx::PgConnection| {
-        sqlx::query("SET LOCAL lock_timeout='5s'")
-            .execute(&mut *tx)
-            .await?;
-        // Mutations: Organization -> Channel(s, ascending id) -> Member -> grants
-        // -> #142 -> shared #135. Role changes lock all affected private Channels
-        // and deactivation lock in ascending id before Members.
-        // Private creation takes Organization NO KEY UPDATE before creator Member
-        // and new rows, keeping the Role guard's Channel set stable through COMMIT.
-        // Sends take Member -> grant -> exclusive #135; their FK KEY SHARE locks
-        // permit Organization/Channel NO KEY UPDATE, so cannot invert that order.
-        // Mark-read releases #135 before Member/grant/position locks; neither path
-        // waits back on a mutation's earlier locks.
-        auth::members::lock_organization(&mut *tx, org).await?;
-        let public: bool=sqlx::query_scalar("SELECT COALESCE(visibility='public',false) FROM channels WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
-            .bind(org).bind(channel).fetch_optional(&mut *tx).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"channel not found",None))?;
-        let actor = auth::members::current_actor(&mut *tx, &auth, Action::ReadOrganization).await?;
-        if dms::is_dm(tx,org,channel).await? { require_visible(tx,&auth,channel,true).await?; dms::reject_membership(tx,org,channel).await?; }
-        // Lock every Member before grants. Defer a missing target's error until the
-        // actor has passed authorization, so target validation discloses no access.
-        let target_member = auth::members::active_target(&mut *tx, org, target).await;
-        // A retained stale self grant proves prior access and may be cleaned up. An
-        // absent grant is retryable only while visible: otherwise 204 reveals private
-        // Channel existence, so it must match a nonexistent Channel (404).
-        let present: Option<i64>=sqlx::query_scalar("SELECT membership_revision FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
-            .bind(org).bind(channel).bind(target).fetch_optional(&mut *tx).await?;
-        let role = match actor {
-            Actor::Member { role, .. } => role,
-            _ => return Err(ApiError::forbidden()),
-        };
-        let grant: Option<bool> = sqlx::query_scalar("SELECT manager FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR SHARE")
-            .bind(org).bind(channel).bind(auth.identity.member.id).bind(auth.membership_revision).fetch_optional(&mut *tx).await?;
-        let actor = Actor::Member {
-            organization: org,
-            role,
-            channel_member: grant.is_some()
-                || (matches!(mutation, Mutation::Remove)
-                    && target == auth.identity.member.id
-                    && present.is_some()),
-            channel_manager: grant.unwrap_or(false),
-        };
-        let resource = Resource::Channel {
-            organization: org,
-            public,
-        };
-        if !authorize(actor, Action::ReadChannel, resource).allowed {
-            return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
-        }
-        if matches!(mutation, Mutation::Manager(_)) && public {
-            // Require the ordinary management policy first, even for invalid targets/no-ops.
-            auth::authorization::require(actor, Action::AddChannelMembers, resource)?;
-            return Err(ApiError(
-                StatusCode::BAD_REQUEST,
-                "channel_manager_private_only",
-                None,
-            ));
-        }
-        auth::authorization::require(
-            actor,
-            match mutation {
-                Mutation::Add => Action::AddChannelMembers,
-                Mutation::Manager(_) => Action::ManageChannelManagers,
-                Mutation::Remove if target == auth.identity.member.id => Action::LeaveChannel,
-                Mutation::Remove => Action::RemoveChannelMembers,
+        let (changed, notice) = crate::database::organization_confirming_rollback(
+            &state.pool,
+            org,
+            ApiError::is_lock_contention,
+            async |tx: &mut sqlx::PgConnection| {
+                mutate_body(tx, &state, &auth, channel, target, mutation)
+                    .await
+                    .map_err(ApiError::classify_write_contention)
             },
-            resource,
-        )?;
-        let (member, revision) = target_member?;
-        let notice = state.session_changes.capture_activity(tx, org, target, auth::activity::ChangeScope::Channel(channel)).await?;
-        let changed = if let Mutation::Manager(value) = mutation {
-            if member.role == Role::Guest {
-                return Err(ApiError(
-                    StatusCode::BAD_REQUEST,
-                    "channel_manager_guest",
-                    None,
-                ));
+        )
+        .await?;
+        if changed {
+            let mut notice = notice;
+            if let Some(notice) = notice.as_mut() {
+                notice.retire();
             }
-            let current: bool = sqlx::query_scalar("SELECT manager FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE")
-                .bind(org).bind(channel).bind(target).bind(revision).fetch_optional(&mut *tx).await?
-                .ok_or(ApiError(StatusCode::NOT_FOUND, "channel_grant_not_found", None))?;
-            if current != value {
-                if !value {
-                    protect(&mut *tx, org, &[channel], target, ManagerChange::RevokeRight).await?;
-                }
-                sqlx::query("UPDATE channel_members SET manager=$4 WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
-                    .bind(org).bind(channel).bind(target).bind(value).execute(&mut *tx).await?;
+            if !matches!(mutation, Mutation::Manager(_)) {
+                state
+                    .session_changes
+                    .recheck_subscriptions(
+                        &state.pool,
+                        auth::SubscriptionScope::Channel(org, channel),
+                    )
+                    .await;
             }
-            current != value // The right changes no access, Unread, grant_id or subscription.
-        } else if matches!(mutation, Mutation::Add) {
-            sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id,membership_revision) VALUES ($1,$2,$3,$4) ON CONFLICT (organization_id,channel_id,member_id) DO UPDATE SET membership_revision=EXCLUDED.membership_revision,grant_id=gen_random_uuid(),manager=false WHERE channel_members.membership_revision<>EXCLUDED.membership_revision")
-                .bind(org).bind(channel).bind(target).bind(revision).execute(&mut *tx).await?.rows_affected() > 0
-        } else {
-            // Stale grants contribute nothing to the usable-grant/manager counts.
-            if !public && present == Some(revision) {
-                protect(&mut *tx, org, &[channel], target, ManagerChange::RemoveGrant).await?;
+            // The mutation's recheck must not fence its fresh, still-unproved notice queries.
+            if let Some(notice) = notice {
+                notice.committed(state.pool.clone());
             }
-            sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
-                .bind(org).bind(channel).bind(target).execute(&mut *tx).await?.rows_affected() > 0
-        };
-        Ok::<_, ApiError>((changed, notice))
-    }).await?;
-    if changed {
-        let mut notice = notice;
-        if let Some(notice) = notice.as_mut() { notice.retire(); }
-        if !matches!(mutation, Mutation::Manager(_)) {
-            state.session_changes.recheck_subscriptions(&state.pool, auth::SubscriptionScope::Channel(org, channel)).await;
+            state.session_changes.channel_changed(
+                state.pool.clone(),
+                org,
+                auth::activity::ChannelChange::Members { channel },
+            );
         }
-        // The mutation's recheck must not fence its fresh, still-unproved notice queries.
-        if let Some(notice) = notice { notice.committed(state.pool.clone()); }
-        state.session_changes.channel_changed(state.pool.clone(), org, auth::activity::ChannelChange::Members { channel });
-    }
-    Ok::<_, ApiError>(())
-    }).await.map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
+        Ok::<_, ApiError>(())
+    })
+    .await
+    .map_err(|_| ApiError::from(sqlx::Error::WorkerCrashed))??;
     Ok((
         StatusCode::NO_CONTENT,
         [(header::CACHE_CONTROL, "no-store")],
     )
         .into_response())
+}
+
+async fn mutate_body(
+    tx: &mut sqlx::PgConnection,
+    state: &AppState,
+    auth: &Auth,
+    channel: Uuid,
+    target: Uuid,
+    mutation: Mutation,
+) -> Result<(bool, Option<Box<dyn auth::activity::ActivityChange>>), ApiError> {
+    let org = auth.identity.organization.organization_id;
+    sqlx::query("SET LOCAL lock_timeout='5s'")
+        .execute(&mut *tx)
+        .await?;
+    // Mutations: Organization -> Channel(s, ascending id) -> Member -> grants
+    // -> #142 -> shared #135. Role changes lock all affected private Channels
+    // and deactivation lock in ascending id before Members.
+    // Private creation takes Organization NO KEY UPDATE before creator Member
+    // and new rows, keeping the Role guard's Channel set stable through COMMIT.
+    // Sends take Member -> grant -> exclusive #135; their FK KEY SHARE locks
+    // permit Organization/Channel NO KEY UPDATE, so cannot invert that order.
+    // Mark-read releases #135 before Member/grant/position locks; neither path
+    // waits back on a mutation's earlier locks.
+    auth::members::lock_organization(&mut *tx, org).await?;
+    let public: bool=sqlx::query_scalar("SELECT COALESCE(visibility='public',false) FROM channels WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
+            .bind(org).bind(channel).fetch_optional(&mut *tx).await?.ok_or(ApiError(StatusCode::NOT_FOUND,"channel not found",None))?;
+    let actor = auth::members::current_actor(&mut *tx, auth, Action::ReadOrganization).await?;
+    if dms::is_dm(tx, org, channel).await? {
+        require_visible(tx, auth, channel, true).await?;
+        dms::reject_membership(tx, org, channel).await?;
+    }
+    // Lock every Member before grants. Defer a missing target's error until the
+    // actor has passed authorization, so target validation discloses no access.
+    let target_member = auth::members::active_target(&mut *tx, org, target).await?;
+    // A retained stale self grant proves prior access and may be cleaned up. An
+    // absent grant is retryable only while visible: otherwise 204 reveals private
+    // Channel existence, so it must match a nonexistent Channel (404).
+    let present: Option<i64>=sqlx::query_scalar("SELECT membership_revision FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+            .bind(org).bind(channel).bind(target).fetch_optional(&mut *tx).await?;
+    let role = match actor {
+        Actor::Member { role, .. } => role,
+        _ => return Err(ApiError::forbidden()),
+    };
+    let grant: Option<bool> = sqlx::query_scalar("SELECT manager FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR SHARE")
+            .bind(org).bind(channel).bind(auth.identity.member.id).bind(auth.membership_revision).fetch_optional(&mut *tx).await?;
+    let actor = Actor::Member {
+        organization: org,
+        role,
+        channel_member: grant.is_some()
+            || (matches!(mutation, Mutation::Remove)
+                && target == auth.identity.member.id
+                && present.is_some()),
+        channel_manager: grant.unwrap_or(false),
+    };
+    let resource = Resource::Channel {
+        organization: org,
+        public,
+    };
+    if !authorize(actor, Action::ReadChannel, resource).allowed {
+        return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
+    }
+    if matches!(mutation, Mutation::Manager(_)) && public {
+        // Require the ordinary management policy first, even for invalid targets/no-ops.
+        auth::authorization::require(actor, Action::AddChannelMembers, resource)?;
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "channel_manager_private_only",
+            None,
+        ));
+    }
+    auth::authorization::require(
+        actor,
+        match mutation {
+            Mutation::Add => Action::AddChannelMembers,
+            Mutation::Manager(_) => Action::ManageChannelManagers,
+            Mutation::Remove if target == auth.identity.member.id => Action::LeaveChannel,
+            Mutation::Remove => Action::RemoveChannelMembers,
+        },
+        resource,
+    )?;
+    let (member, revision) = target_member.ok_or_else(ApiError::member_not_found)?;
+    let notice = state
+        .session_changes
+        .capture_activity(
+            tx,
+            org,
+            target,
+            auth::activity::ChangeScope::Channel(channel),
+        )
+        .await?;
+    let changed = if let Mutation::Manager(value) = mutation {
+        if member.role == Role::Guest {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "channel_manager_guest",
+                None,
+            ));
+        }
+        let current: bool = sqlx::query_scalar("SELECT manager FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND membership_revision=$4 FOR UPDATE")
+                .bind(org).bind(channel).bind(target).bind(revision).fetch_optional(&mut *tx).await?
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "channel_grant_not_found", None))?;
+        if current != value {
+            if !value {
+                protect(
+                    &mut *tx,
+                    org,
+                    &[channel],
+                    target,
+                    ManagerChange::RevokeRight,
+                )
+                .await?;
+            }
+            sqlx::query("UPDATE channel_members SET manager=$4 WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+                    .bind(org).bind(channel).bind(target).bind(value).execute(&mut *tx).await?;
+        }
+        current != value // The right changes no access, Unread, grant_id or subscription.
+    } else if matches!(mutation, Mutation::Add) {
+        sqlx::query("INSERT INTO channel_members (organization_id,channel_id,member_id,membership_revision) VALUES ($1,$2,$3,$4) ON CONFLICT (organization_id,channel_id,member_id) DO UPDATE SET membership_revision=EXCLUDED.membership_revision,grant_id=gen_random_uuid(),manager=false WHERE channel_members.membership_revision<>EXCLUDED.membership_revision")
+                .bind(org).bind(channel).bind(target).bind(revision).execute(&mut *tx).await?.rows_affected() > 0
+    } else {
+        // Stale grants contribute nothing to the usable-grant/manager counts.
+        if !public && present == Some(revision) {
+            protect(
+                &mut *tx,
+                org,
+                &[channel],
+                target,
+                ManagerChange::RemoveGrant,
+            )
+            .await?;
+        }
+        sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+                .bind(org).bind(channel).bind(target).execute(&mut *tx).await?.rows_affected() > 0
+    };
+    Ok((changed, notice))
 }
 
 enum ManagerChange {
@@ -427,7 +491,9 @@ impl auth::members::RoleChangeGuard for RoleChangeGuard {
         target: Uuid,
         role: Role,
     ) -> Result<(), ApiError> {
-        auth::members::active_target(connection, organization, target).await?;
+        auth::members::active_target(connection, organization, target)
+            .await?
+            .ok_or_else(ApiError::member_not_found)?;
         protect(
             connection,
             organization,

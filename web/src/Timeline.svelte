@@ -27,7 +27,9 @@
   } from './timeline-scroll'
   import { linePosition, type MainTimelineLine } from './topic-selectors'
   import type { TopicsAdapter } from './topics.svelte'
+  import type { SearchPresentation } from './search-anchor.svelte'
   import type { UnreadAdapter } from './unread.svelte'
+  import SearchAnchorStatus from './ui/SearchAnchorStatus.svelte'
   import Button from './ui/Button.svelte'
   import Dialog from './ui/Dialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
@@ -57,6 +59,7 @@
     topicInputRef = $bindable(null),
     onopentopic,
     onopenreplies,
+    search,
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
@@ -79,6 +82,7 @@
     topicInputRef?: HTMLInputElement | HTMLTextAreaElement | null
     onopentopic?: (topicId: string) => void
     onopenreplies?: (message: Message, opener?: HTMLElement | null) => void
+    search?: SearchPresentation
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
@@ -89,13 +93,23 @@
   const cState = $derived(channel.composer)
   const tState = $derived(topics ? topics.state : null)
   const rState = $derived(replies ? replies.state : null)
+  const searchId = $derived(search?.target.messageId)
+  const searchVisit = $derived(search?.view?.visit)
   const uState = $derived(unread ? unread.state : null)
   const targetUnavailable = $derived(
     s.status === 'unavailable' || Boolean(tState?.unavailable) || organizationUnavailable,
   )
-  const lines = $derived<MainTimelineLine[]>(
-    tState ? tState.lines : s.messages.map((message) => ({ kind: 'message', message })),
-  )
+  const lines = $derived.by((): MainTimelineLine[] => {
+    if (!search) return tState?.lines ?? s.messages.map(message => ({ kind: 'message', message }))
+    const messages = search.view?.messages ?? []
+    const first = messages[0]?.created_seq ?? Infinity
+    const last = messages.at(-1)?.created_seq ?? 0
+    // A raw page can contain only part of a Topic. Use the normal projection for summary lines.
+    const summaries = tState?.lines.filter(line => line.kind === 'topic' && line.position >= first && line.position <= last) ?? []
+    const main: MainTimelineLine[] = messages.filter(message => message.topic_id === null).map(message => ({ kind: 'message', message }))
+    return [...main, ...summaries].sort((a, b) => linePosition(a) - linePosition(b))
+  })
+  let skipUnreadVisit = $state(false)
   let scrolledFirstUnreadId = $state<string | null>(null)
   const entry = $derived(uState?.entry?.scope.topicId === null ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
@@ -126,7 +140,7 @@
     ),
   )
   const firstUnreadMessageId = $derived(
-    entry &&
+    !search && !skipUnreadVisit && entry &&
       entry.boundary !== null &&
       (entry.unreadAtEntry ?? 0) > 0 &&
       !needsOlderUnreadPage &&
@@ -139,15 +153,16 @@
   const effectiveStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
     targetUnavailable
       ? 'unavailable'
+      : search ? (!search.view || search.view.status === 'loading' ? 'loading' : 'ready')
       : s.status === 'error' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.error)
         ? 'error'
         : s.status === 'loading' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.loading)
           ? 'loading'
           : 'ready',
   )
-  const hasOlder = $derived(tState ? tState.main.asOfSeq !== undefined && tState.main.hasMore : s.hasOlder)
-  const loadingOlder = $derived(tState ? tState.main.asOfSeq !== undefined && tState.main.loading : s.loadingOlder)
-  const olderError = $derived(tState ? tState.main.asOfSeq !== undefined && tState.main.error : s.olderError)
+  const hasOlder = $derived(search ? search.view?.hasOlder : tState ? tState.main.asOfSeq !== undefined && tState.main.hasMore : s.hasOlder)
+  const loadingOlder = $derived(search ? search.view?.paging : tState ? tState.main.asOfSeq !== undefined && tState.main.loading : s.loadingOlder)
+  const olderError = $derived(search ? search.view?.pageError === 'older' : tState ? tState.main.asOfSeq !== undefined && tState.main.error : s.olderError)
 
   const scrollController = createTimelineScrollController()
   const subscribeScroll = createSubscriber((update) => scrollController.subscribe(update))
@@ -181,11 +196,15 @@
     if (!isDocumentVisible()) return
     const currentEntry = uState?.entry
     if (!currentEntry || currentEntry.scope.topicId !== null) return
-    if (currentEntry.boundary === null || needsOlderUnreadPage) return
-    if ((currentEntry.unreadAtEntry ?? 0) > 0) {
-      if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
-    } else if (!initialScrollApplied) {
-      return
+    if (search) {
+      if (!initialScrollApplied || search.view?.status !== 'ready') return
+    } else if (!skipUnreadVisit) {
+      if (currentEntry.boundary === null || needsOlderUnreadPage) return
+      if ((currentEntry.unreadAtEntry ?? 0) > 0) {
+        if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
+      } else if (!initialScrollApplied) {
+        return
+      }
     }
     const seqs = measureVisibleConfirmedSeqs(scrollEl!)
     if (seqs.length > 0) {
@@ -206,7 +225,7 @@
     void focusMessage(focusableMessageIds[next]).catch(console.error)
   }
   async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
-    const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    const id = (action === 'scroll_first_unread' || action === 'scroll_search_anchor') ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
     if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) await rowWindow?.reveal(id)
   }
 
@@ -226,7 +245,7 @@
     anchor: ScrollAnchor | null,
     firstUnreadId?: string | null,
   ) {
-    const id = action === 'scroll_first_unread' ? firstUnreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    const id = (action === 'scroll_first_unread' || action === 'scroll_search_anchor') ? firstUnreadId : action === 'preserve_anchor' ? anchor?.messageId : null
     if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) {
       void revealScrollTarget(action, anchor, firstUnreadId).then(() => {
         applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
@@ -236,6 +255,16 @@
   }
 
   async function jumpToBottom() {
+    if (search) {
+      skipUnreadVisit = true
+      search.latest()
+      await tick()
+      if (search) return
+      if (topics) await topics.loadMainLatest()
+      else await channel.loadLatest()
+      await tick()
+      if (search) return
+    }
     if (tState?.main.hasNewer) { await topics?.loadMainLatest(); await tick() }
     const action = scrollController.jumpToBottom()
     applyScrollAction(action, null)
@@ -244,7 +273,8 @@
 
   function loadOlderWithAnchor() {
     captureCurrentAnchor()
-    if (topics) void topics.loadMain().catch(console.error)
+    if (search) void search.loadOlder()
+    else if (topics) void topics.loadMain().catch(console.error)
     else void channel.loadOlder().catch(console.error)
   }
 
@@ -345,19 +375,20 @@
   })
 
   $effect(() => {
-    if (!needsOlderUnreadPage || !hasOlder || loadingOlder || olderError || targetUnavailable) return
+    if (search || skipUnreadVisit || !needsOlderUnreadPage || !hasOlder || loadingOlder || olderError || targetUnavailable) return
     if (effectiveStatus !== 'ready') return
     loadOlderWithAnchor()
   })
 
   // Keep scroll state, anchor preservation and 10 s loading timeout synchronized with timeline changes (docs/ui.md §5, §8)
   $effect(() => {
-    const id = currentChannelId
-    const currentEntryId = entryId
+    const id = searchId ? `${currentChannelId}:search` : currentChannelId
+    const currentEntryId = searchId ? searchVisit ?? null : entryId
     if (
       id !== lastScrollScopeKey ||
       (currentEntryId !== null && currentEntryId !== lastScrollEntryId)
     ) {
+      if (searchId) skipUnreadVisit = false
       lastScrollScopeKey = id
       lastScrollEntryId = currentEntryId
       initialScrollApplied = false
@@ -378,7 +409,7 @@
     const status = effectiveStatus
     const targetFirstUnreadId = firstUnreadMessageId
     const awaitingFirstUnread =
-      awaitingEntryBoundary || Boolean(needsOlderUnreadPage && hasOlder && !olderError)
+      !skipUnreadVisit && (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && hasOlder && !olderError))
     const { action, anchor } = scrollController.sync({
       channelId: id,
       visitId: currentEntryId,
@@ -389,17 +420,22 @@
       selfId,
       firstUnreadMessageId: targetFirstUnreadId,
       awaitingFirstUnread,
+      searchAnchorId: searchId,
+      searchAsOfSeq: search?.view?.asOfSeq,
     })
     if (action !== 'none') {
       pendingScrollAction = { action, anchor }
     }
+    const revealVisit = searchVisit
     void tick().then(() => {
+      if (searchVisit !== revealVisit) return
       if (!isTimelineDisplayed(scrollEl, viewSelected)) {
         if (
           !initialScrollApplied &&
           pendingScrollAction &&
           (pendingScrollAction.action === 'scroll_bottom' ||
-            pendingScrollAction.action === 'scroll_first_unread')
+            pendingScrollAction.action === 'scroll_first_unread' ||
+            pendingScrollAction.action === 'scroll_search_anchor')
         ) {
           pendingScrollAction = null
           scrollController.resetInitialScroll()
@@ -409,6 +445,15 @@
       if (pendingScrollAction) {
         const deferred = pendingScrollAction
         pendingScrollAction = null
+        if (deferred.action === 'scroll_search_anchor') {
+          void revealScrollTarget(deferred.action, null, searchId).then(() => {
+            if (searchVisit !== revealVisit || !isTimelineDisplayed(scrollEl, viewSelected)) return
+            applyTimelineScrollAction(scrollEl, scrollController, deferred.action, null, searchId)
+            initialScrollApplied = true
+            reportPresented()
+          }).catch(console.error)
+          return
+        }
         applyScrollAction(deferred.action, deferred.anchor, targetFirstUnreadId)
         if (deferred.action === 'scroll_first_unread' && targetFirstUnreadId) {
           scrolledFirstUnreadId = targetFirstUnreadId
@@ -418,7 +463,7 @@
         }
       } else {
         captureCurrentAnchor()
-        if (status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
+        if (!search && status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
           initialScrollApplied = true
         }
       }
@@ -477,6 +522,7 @@
   async function handleSubmit(): Promise<boolean> {
     const ok = await channel.submit()
     if (!ok) return false
+    if (search) { await jumpToBottom(); return true }
     if (tState?.main.hasNewer) await topics?.loadMainLatest()
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
@@ -517,7 +563,7 @@
         onaction={ongoToChannelList}
       />
     </div>
-  {:else if effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut)}
+  {:else if !search && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
     <div class="timeline-section__banner">
       <StatusBanner
         tone="danger"
@@ -578,6 +624,7 @@
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(line.message.sender) : undefined}
                 createdAt={line.message.created_at}
+                searchMatch={searchId === line.message.id}
                 body={line.message.body ?? ''}
                 mentions={line.message.mentions}
                 {resolveMentionName}
@@ -620,7 +667,7 @@
             body={p.body}
             pendingStatus={p.status}
             retryable={p.retryable}
-            failedReason={p.failureCode === 'dm_peer_deactivated' ? 'このメンバーは無効化されています。履歴は引き続き閲覧できます。' : p.failureCode === 'dm_peer_access_lapsed' ? 'このダイレクトメッセージには現在送信できません。' : undefined}
+            failureCode={p.failureCode}
             {targetUnavailable}
             onretry={() => void channel.retry(p.clientMessageId).catch(console.error)}
             onrestore={sendDisabled ? undefined : () => handleRestoreRequest(p.clientMessageId)}
@@ -628,22 +675,25 @@
           />
         {/snippet}
         </VirtualRows>
-    {:else if effectiveStatus === 'ready' && !organizationUnavailable}
+    {:else if !search && effectiveStatus === 'ready' && !organizationUnavailable}
       <EmptyState
         title="まだメッセージがありません。"
         description="下の入力欄から最初のメッセージを送信できます。"
       />
     {/if}
-    {#if tState?.main.hasNewer && !targetUnavailable && topics}
+    {#if !search && tState?.main.hasNewer && !targetUnavailable && topics}
       <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
     {/if}
 
+    {#if search && !targetUnavailable}
+      <SearchAnchorStatus {search} onlatest={() => void jumpToBottom().catch(console.error)} />
+    {/if}
   </div>
 
-  {#if !scrollView.pinned && (scrollView.belowCount > 0 || (tState?.main.newerCount ?? 0) > 0)}
+  {#if !scrollView.pinned && (scrollView.belowCount > 0 || (search ? 0 : tState?.main.newerCount ?? 0) > 0)}
     <div class="timeline-new-below">
       <Button variant="primary" onclick={() => void jumpToBottom().catch(console.error)}>
-        新着 {Math.max(scrollView.belowCount, tState?.main.newerCount ?? 0)}件 ↓
+        新着 {Math.max(scrollView.belowCount, search ? 0 : tState?.main.newerCount ?? 0)}件 ↓
       </Button>
     </div>
   {/if}

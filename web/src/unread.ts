@@ -1,4 +1,5 @@
 import * as api from './api'
+import { createRequestDeadlines } from './request-deadlines'
 import type { ChannelList, Dm, MarkReadRequest, Message, ReadPosition, Result, TopicSummaryResponse, UnreadChannel } from './api'
 import type { createSync } from './sync'
 import type { Topics } from './topics'
@@ -27,21 +28,21 @@ type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: num
   operation?: symbol; intent?: MarkReadRequest; queued?: MarkReadRequest; timer?: ReturnType<typeof setTimeout>; attempt: number }
 const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, attempt: 0 })
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
+  archived: undefined as boolean | undefined,
   records: new Map<number, UnreadRecord>(), lostThrough: 0, aggregate: undefined as AggregateBaseline | undefined, accepted: 0, requiredAfter: 0, requiredAggregateAfter: 0, requiredBase: 0,
   heldPositions: new Map<string, number>(), stopped: false, error: false,
   summaryReads: new Map<string, symbol>(), queuedSummaries: new Set<string>(), ignoredBaselines: new WeakSet<TopicBaseline>(), observedBaselines: new WeakSet<TopicBaseline>(),
   summaryTimers: new Map<string, ReturnType<typeof setTimeout>>(), summaryAttempts: new Map<string, number>() })
 type Channel = ReturnType<typeof channelState>
 type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAtEntry: number | null; presented: Set<number>; firstUnread?: UnreadRecord }
-type Deadline = { channel?: string; cancel(): void }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
-export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshDms?(): void; isDm?(id: string): boolean }) {
+export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
-  const deadlines = new Map<ReturnType<typeof setTimeout>, Deadline>()
+  const deadlines = createRequestDeadlines()
   let previous = sync.get(), closed = false, session = 0, epoch = 0, issue = 0
   let list: symbol | undefined, queuedList = false, listTimer: ReturnType<typeof setTimeout> | undefined, listAttempt = 0
   let visit: Visit | undefined, visible = false
@@ -136,13 +137,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (s.timer !== undefined) clearTimeout(s.timer)
     s.timer = undefined; s.operation = undefined; s.intent = undefined; s.queued = undefined
   }
-  const cancelDeadlines = (channel?: string) => {
-    for (const [timer, d] of deadlines) if (channel === undefined || d.channel === channel) {
-      clearTimeout(timer); deadlines.delete(timer); d.cancel()
-    }
-  }
   const fence = (id: string, c: Channel) => {
-    c.token = Symbol(); stopScope(c.main); c.topics.forEach(stopScope); c.summaryReads.clear(); c.queuedSummaries.clear(); cancelDeadlines(id)
+    c.token = Symbol(); stopScope(c.main); c.topics.forEach(stopScope); c.summaryReads.clear(); c.queuedSummaries.clear(); deadlines.cancel(id)
     c.summaryTimers.forEach(clearTimeout); c.summaryTimers.clear()
     if (visit?.scope.channel === id) visit = undefined
   }
@@ -152,11 +148,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     listTimer = undefined
   }
   function reset() {
-    epoch++; cancelList(); channels.forEach((c, id) => fence(id, c)); channels.clear(); cancelDeadlines(); visit = undefined; notify()
+    epoch++; cancelList(); channels.forEach((c, id) => fence(id, c)); channels.clear(); deadlines.cancel(); visit = undefined; notify()
   }
   async function request<T>(run: () => Promise<Result<T>>, channel?: string): Promise<Result<T>> {
     const account = session
-    let timer: ReturnType<typeof setTimeout> | undefined
     const operation = Promise.resolve().then(run).catch((): Result<T> => ({ ok: false, kind: 'network' }))
     // Authentication failures outlive data authority; the old Organization's sync alone receives C10.
     void operation.then(r => {
@@ -164,18 +159,16 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (!r.ok && r.kind === 'http' && r.status === 401) { void sync.close(); options.onSessionEnded?.() }
       else if (api.isOrganizationUnavailable(r)) void sync.unavailable()
     })
+    const historyEpoch = sync.get().historyEpoch
+    const deadline = deadlines.start<Result<T>>({ ok: false, kind: 'network' }, { channel, timeoutMs: options.requestTimeoutMs ?? 30_000 })
     try {
-      const historyEpoch = sync.get().historyEpoch
-      const result = await Promise.race([operation, new Promise<Result<T>>(resolve => {
-        timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
-        deadlines.set(timer, { channel, cancel: () => resolve({ ok: false, kind: 'network' }) })
-      })])
+      const result = await Promise.race([operation, deadline.until])
       if (historyEpoch !== sync.get().historyEpoch) return { ok: false, kind: 'network' }
       const generation = result.ok && result.data && typeof result.data === 'object' && 'history_generation' in result.data ? result.data.history_generation : undefined
       if (typeof generation === 'string' && !sync.observeHistoryGeneration(generation)) return { ok: false, kind: 'network' }
       if (!result.ok && result.kind === 'http' && result.status === 409 && result.error === 'history_generation_changed') { sync.observeHistoryGeneration(); return { ok: false, kind: 'network' } }
       return result.ok && !completeCountFields(result.data) ? { ok: false, kind: 'network' } : result
-    } finally { if (timer !== undefined) { clearTimeout(timer); deadlines.delete(timer) } }
+    } finally { deadline.clear() }
   }
   const retryDelay = (attempt: number, r: Result<unknown>) => Math.max(backoffCap(attempt), !r.ok ? r.retryAfterMs ?? 0 : 0)
   const retryable = (r: Result<unknown>) => !r.ok && (r.kind === 'network' || r.status === 429 || r.status >= 500)
@@ -192,6 +185,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   }
   async function refresh(retryTokens?: Map<string, symbol>) {
     if (!active()) return
+    options.refreshArchived?.()
     options.refreshDms?.()
     if (options.refreshList) return options.refreshList()
     // Before discovery there are no Channel generations to scope a list retry to.
@@ -486,7 +480,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (resetHistory || selected) {
         const oldBaselines = options.topics?.get(id).topics.flatMap(t => t.baseline ? [t.baseline] : []) ?? []
         const oldVisit = resetHistory && visit?.scope.channel === id ? visit : undefined
-        fence(id, c); channels.set(id, c = channelState()); rebootstrap = true
+        const archived = c.archived
+        fence(id, c); channels.set(id, c = { ...channelState(), archived }); rebootstrap = true
         for (const b of oldBaselines) { c.ignoredBaselines.add(b); getScope(c, b.summary.id) }
         if (oldVisit) visit = { id: Symbol(), scope: oldVisit.scope, boundary: null, unreadAtEntry: null, presented: new Set() }
         channelChanged = true
@@ -523,7 +518,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
     notify(changed)
-    if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); cancelDeadlines() }
+    if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); deadlines.cancel() }
     if (moveRefresh && !rebootstrap) void refresh()
     if ((!before.running && next.running) || (!before.connected && next.connected) || rebootstrap) {
       if (channels.size === 0 || [...channels.keys()].some(watched)) void refresh()
@@ -561,13 +556,13 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         firstUnread: v.firstUnread ?? rows.find(m => m.created_seq <= through) ?? null,
         needsOlder: !v.firstUnread && v.unreadAtEntry !== null && v.unreadAtEntry > 0 && (rows.length === 0 || through < rows[0].created_seq) }
     }
-    return { generation: c?.token ?? null, asOfSeq: c?.aggregate?.as_of_seq ?? null, unreadCount: c ? aggregateCount(id, c) : null, mentionUnreadCount: c ? aggregateCount(id, c, true) : null, main: c ? scopeSnapshot(id, c, null) : { position: null, unreadCount: null, mentionUnreadCount: null, stopped: false, error: false },
+    return { generation: c?.token ?? null, asOfSeq: c?.aggregate?.as_of_seq ?? null, unreadCount: c && !c.archived ? aggregateCount(id, c) : null, mentionUnreadCount: c && !c.archived ? aggregateCount(id, c, true) : null, main: c ? scopeSnapshot(id, c, null) : { position: null, unreadCount: null, mentionUnreadCount: null, stopped: false, error: false },
       topics: Object.fromEntries(c ? [...c.topics.keys()].map(t => [t, scopeSnapshot(id, c, t, topicRecords.get(t) ?? [])]) : []),
       entry, stopped: c?.stopped ?? false, error: c?.error ?? false }
   }
   function scopeSnapshot(id: string, c: Channel, topic: string | null, records?: Iterable<UnreadRecord>) {
     const s = getScope(c, topic)
-    return { position: s.baseline ? s.position : null, unreadCount: count(id, c, topic, records), mentionUnreadCount: count(id, c, topic, records, true), stopped: s.stopped, error: s.error }
+    return { position: s.baseline ? s.position : null, unreadCount: c.archived ? null : count(id, c, topic, records), mentionUnreadCount: c.archived ? null : count(id, c, topic, records, true), stopped: s.stopped, error: s.error }
   }
   function leave(id?: symbol) {
     if (!visit || (id !== undefined && visit.id !== id)) return
@@ -593,6 +588,14 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     listeners.add(listener)
     return () => { listeners.delete(listener) }
   }
+  function acceptListBaseline(row: UnreadChannel) {
+    if (!completeCountFields(row)) return
+    const c = getChannel(row.id)
+    if (c.stopped) return
+    c.archived = row.archived
+    acceptScope(c.main, mainBaseline(row))
+    c.aggregate = chooseChannelBaseline(c.aggregate, row); c.error = false; c.heldPositions.clear(); prune(c)
+  }
   if (active()) { reconcile(); void refresh() }
   return {
     subscribe,
@@ -600,15 +603,25 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     activitySnapshot(rows: UnreadChannel[]) {
       if (!active()) return
       const ids = new Set(rows.map(r => r.id))
-      for (const [id, c] of channels) if (!ids.has(id) && !watched(id) && !options.isDm?.(id)) { fence(id, c); channels.delete(id) }
-      for (const row of rows) {
-        if (!completeCountFields(row)) continue
-        const c = getChannel(row.id)
-        if (c.stopped) continue
-        acceptScope(c.main, mainBaseline(row))
-        c.aggregate = chooseChannelBaseline(c.aggregate, row); c.error = false; c.heldPositions.clear(); prune(c)
+      for (const [id, c] of channels) {
+        if (ids.has(id)) continue
+        // An ordinary-list omission can be archive. Keep its access lifetime and suppress its badges.
+        if (c.archived !== undefined) c.archived = true
+        else if (!watched(id) && !options.isDm?.(id)) { fence(id, c); channels.delete(id) }
       }
+      rows.forEach(acceptListBaseline)
       resolveBoundary(); notify()
+    },
+    activityArchivedSnapshot(rows: UnreadChannel[]) {
+      if (!active() || rows.length === 0) return
+      rows.forEach(acceptListBaseline)
+      resolveBoundary(); notify(rows.map(row => row.id))
+    },
+    activityArchive(id: string, archived: boolean) {
+      if (!active()) return
+      const c = getChannel(id)
+      if (c.stopped || c.archived === archived) return
+      c.archived = archived; notify(id)
     },
     activityDmSnapshot(row: Dm, replace: boolean) {
       if (!active() || !completeCountFields(row) || sync.get().channels[row.id]?.state === 'unavailable') return
@@ -622,7 +635,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       resolveBoundary(); notify(row.id)
     },
     activityReconcile() {
-      for (const [id, c] of channels) if (!watched(id)) { fence(id, c); channels.set(id, channelState()) }
+      for (const [id, c] of channels) if (!watched(id)) { fence(id, c); channels.set(id, { ...channelState(), archived: c.archived }) }
       notify()
     },
     activityAccess(id: string) {
@@ -663,7 +676,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (visit) {
         const c = getChannel(visit.scope.channel), s = getScope(c, visit.scope.topicId)
         if (!value) {
-          stopScope(s); cancelDeadlines(visit.scope.channel)
+          stopScope(s); deadlines.cancel(visit.scope.channel)
           if (visit.boundary === null) visit.presented.clear()
         }
         // Returning to a visible document needs a fresh row presentation intent.

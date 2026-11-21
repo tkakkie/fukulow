@@ -122,3 +122,20 @@ it('forwards a body-free Move and rejects Move frames carrying Message state', (
   socket.onmessage?.({ data: JSON.stringify(move) })
   expect(onEvent).toHaveBeenCalledExactlyOnceWith(move)
 })
+
+it('forwards canonical section generations losslessly and refuses malformed or extended notices', () => {
+  const socket: SocketLike = { send() {}, close() {}, onopen: null, onmessage: null, onclose: null }
+  const onEvent = vi.fn()
+  connectRealtime({ onReady() {}, onClose() {}, onEvent }, () => socket)
+  const receive = (notice: unknown) => socket.onmessage?.({ data: JSON.stringify(notice) })
+  for (const generation of [undefined, null, 0, '', '01', '1\n', '1.0', '-1', '9223372036854775808'])
+    receive({ type: 'sections_changed', generation })
+  receive({ type: 'sections_changed', generation: '1', section: { name: 'private' } })
+  expect(onEvent).not.toHaveBeenCalled()
+  for (const generation of ['0', '9007199254740993', '9223372036854775807']) {
+    const event = { type: 'sections_changed', generation }
+    receive(event)
+    expect(onEvent).toHaveBeenLastCalledWith(event)
+  }
+  expect(onEvent).toHaveBeenCalledTimes(3)
+})

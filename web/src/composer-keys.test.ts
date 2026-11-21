@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { parse, type AST } from 'svelte/compiler'
 import { describe, expect, it } from 'vitest'
 import {
   IME_COMPOSING_KEY_CODE,
@@ -97,14 +98,20 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
     expect(shouldOpenRepliesFromRowKey({ key: 'R' })).toBe(true)
     expect(shouldOpenRepliesFromRowKey({ key: 'r', metaKey: true })).toBe(false)
     expect(shouldOpenRepliesFromRowKey({ key: 'Enter', isComposing: true })).toBe(false)
+    expect(shouldOpenRepliesFromRowKey({ key: 'Enter', keyCode: 229 })).toBe(false)
+    expect(shouldOpenRepliesFromRowKey({ key: 'r', isComposing: true })).toBe(false)
+    expect(shouldOpenRepliesFromRowKey({ key: 'r', keyCode: 229 })).toBe(false)
     expect(shouldOpenRepliesFromRowKey({ key: 'a' })).toBe(false)
 
     expect(stepMessageRowIndex(1, 3, { key: 'ArrowUp' })).toBe(0)
     expect(stepMessageRowIndex(0, 3, { key: 'ArrowUp' })).toBe(0)
     expect(stepMessageRowIndex(1, 3, { key: 'ArrowDown' })).toBe(2)
     expect(stepMessageRowIndex(2, 3, { key: 'ArrowDown' })).toBe(2)
+    expect(stepMessageRowIndex(1, 3, { key: 'Home' })).toBe(0)
+    expect(stepMessageRowIndex(1, 3, { key: 'End' })).toBe(2)
     expect(stepMessageRowIndex(0, 0, { key: 'ArrowUp' })).toBeNull()
     expect(stepMessageRowIndex(1, 3, { key: 'ArrowUp', isComposing: true })).toBeNull()
+    expect(stepMessageRowIndex(1, 3, { key: 'ArrowUp', keyCode: 229 })).toBeNull()
 
     expect(resolveRovingMessageId([], null)).toBeNull()
     expect(resolveRovingMessageId(['m1', 'm2', 'm3'], null)).toBe('m3')
@@ -152,7 +159,23 @@ describe('composer-keys: IME-safe Enter, Escape, shortcuts and ARIA tabs (docs/u
 
     const messageRowSrc = readFileSync(join(webDir, 'src/ui/MessageRow.svelte'), 'utf8')
     expect(messageRowSrc).toContain('shouldOpenRepliesFromRowKey')
-    expect(messageRowSrc).toContain('el.tabIndex = isRowFocusable ? rovingTabindex : -1')
+    const ast = parse(messageRowSrc, { modern: true })
+    const article = ast.fragment.nodes.find(
+      (node): node is AST.RegularElement => node.type === 'RegularElement' && node.name === 'article',
+    )
+    expect(article).toBeDefined()
+    for (const attrName of ['tabindex', 'onfocus', 'onkeydown']) {
+      const attr = article?.attributes.find(
+        (a): a is AST.Attribute => a.type === 'Attribute' && a.name === attrName,
+      )
+      expect(attr, `<article> should have ${attrName}`).toBeDefined()
+      const val = attr?.value
+      const isExpression =
+        (val !== undefined && typeof val === 'object' && !Array.isArray(val) && val.type === 'ExpressionTag') ||
+        (Array.isArray(val) && val.length === 1 && val[0]?.type === 'ExpressionTag')
+      expect(isExpression, `<article> ${attrName} should have an expression value`).toBe(true)
+    }
+    expect(messageRowSrc).not.toContain('addEventListener')
     expect(messageRowSrc).toContain('tabindex={-1}')
   })
 })

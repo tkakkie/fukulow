@@ -8,8 +8,49 @@ const frozen = snapshot();
 const document = {sha256:hash(JSON.stringify(frozen)),frozen};
 const recorded = (version: number) => JSON.parse(readFileSync(new URL(`./manifest-v${version}.json`,import.meta.url),'utf8'));
 test('checked-in current manifest matches the evaluation inputs',()=>{
-  assert.equal(manifestFile,'load/search-engines/manifest-v7.json');
-  assert.equal(verifyManifest(recorded(7)),document.sha256);
+  assert.equal(manifestFile,'load/search-engines/manifest-v12.json');
+  assert.equal(verifyManifest(recorded(12)),document.sha256);
+});
+test('v12 records only the section placement lookup migration and its manifest bookkeeping',()=>{
+  const v11 = recorded(11), v12 = recorded(12);
+  assert.equal(hash(JSON.stringify(v11.frozen)),v11.sha256);
+  const {version,sourceHashes,...conditions} = v12.frozen;
+  const {version:previousVersion,sourceHashes:previousSources,...previousConditions} = v11.frozen;
+  assert.equal(version,previousVersion+1);
+  assert.deepEqual(conditions,previousConditions);
+  const before = new Map<string,string>(previousSources.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  const after = new Map<string,string>(sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  assert.deepEqual([...after.keys()].filter(path=>before.get(path)!==after.get(path)),
+    ['.gitattributes','load/search-engines/manifest.ts','server/migrations/202611200654_section_placement_channel_lookup.sql']);
+  assert.ok([...before.keys()].every(path=>after.has(path)));
+});
+test('v11 records only the NULL-safe B1 policy and its manifest bookkeeping',()=>{
+  const v9 = recorded(9), v11 = recorded(11);
+  assert.equal(hash(JSON.stringify(v9.frozen)),v9.sha256);
+  const {version,sourceHashes,b1,...conditions} = v11.frozen;
+  const {version:previousVersion,sourceHashes:previousSources,b1:previousB1,...previousConditions} = v9.frozen;
+  assert.deepEqual([previousVersion,version],[9,11]); // v10 is reserved on main.
+  assert.deepEqual(conditions,previousConditions);
+  assert.deepEqual(b1,{...previousB1,evidenceChecks:{...previousB1.evidenceChecks,
+    publication:'B1 artifacts must match the checked-in v11 manifest'}});
+  const before = new Map<string,string>(previousSources.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  const after = new Map<string,string>(sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  assert.deepEqual([...after.keys()],[...before.keys()]);
+  assert.deepEqual([...after.keys()].filter(path=>before.get(path)!==after.get(path)),
+    ['.gitattributes','load/search-engines/b1.sql','load/search-engines/manifest.ts','load/search-engines/summarize.ts']);
+});
+test('v8 records only the NULL-Topic receipt trigger migration and its manifest bookkeeping',()=>{
+  const v7 = recorded(7), v8 = recorded(8);
+  assert.equal(hash(JSON.stringify(v7.frozen)),v7.sha256);
+  const {version,sourceHashes,...conditions} = v8.frozen;
+  const {version:previousVersion,sourceHashes:previousSources,...previousConditions} = v7.frozen;
+  assert.equal(version,previousVersion+1);
+  assert.deepEqual(conditions,previousConditions);
+  const before = new Map<string,string>(previousSources.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  const after = new Map<string,string>(sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  assert.deepEqual([...after.keys()].filter(path=>before.get(path)!==after.get(path)),
+    ['.gitattributes','load/search-engines/manifest.ts','server/migrations/202611200621_send_receipt_null_topic.sql']);
+  assert.ok([...before.keys()].every(path=>after.has(path)));
 });
 test('v7 records only the Invite cleanup migration and its manifest bookkeeping',()=>{
   const v6 = recorded(6), v7 = recorded(7);
@@ -93,29 +134,37 @@ test('v2 changes only the query path and sources; performance conditions equal v
   assert.deepEqual([v2.version,v2.date],[2,'2026-11-17']);
   assert.ok(v2.sourceHashes.some((s: {path:string})=>s.path==='load/search-engines/definer.sql'));
 });
-test('queryPath carries no planner or executor setting beyond the query-path need',()=>{
-  assert.deepEqual(Object.keys(frozen.queryPath.functionSettings).sort(),['plan_cache_mode','search_path']);
-  // Every key is reviewed: a new field (e.g. settings:{jit:'off'}) fails here.
-  const keys = (value: unknown, prefix = ''): string[] => value && typeof value==='object'
-    ? Object.entries(value).flatMap(([k,v])=>[prefix+k,...keys(v,prefix+k+'.')]) : [];
-  assert.deepEqual(keys(frozen.queryPath).sort(),['caller','completeness','emptyQuery','function','functionSettings',
-    'functionSettings.plan_cache_mode','functionSettings.search_path','kind','organization','owner','pageSize','planCacheReason',
-    'plans','plans.app','plans.body','plans.direct','plans.owner','plans.ownerV1','source']);
-  const names = Object.keys(settings).concat(['jit','work_mem','statement_timeout','random_page_cost']);
-  for (const value of Object.values(frozen.queryPath).filter(v=>typeof v==='string') as string[])
-    for (const name of names) assert.doesNotMatch(value,new RegExp(`\\b${name}\\s*=`),`${name} in queryPath`);
+test('v9 pins the v2 data, query classes, migrations, conditions and PGroonga gates',()=>{
+  const v2 = recorded(2);
+  const v9 = recorded(9).frozen;
+  assert.equal(v9.b1.baselineSha256,v2.sha256);
+  for (const field of ['generator','node','quality','performance','smoke','timing','image','settings','shmBytes'])
+    assert.deepEqual(v9[field],v2.frozen[field],field);
+  const {b1Settings,...sessionPolicy} = v9.sessionPolicy;
+  assert.deepEqual(sessionPolicy,v2.frozen.sessionPolicy);
+  assert.deepEqual(b1Settings,{...v2.frozen.sessionPolicy.appSettings,search_path:'pg_catalog, pg_temp'});
+  const migrations = v2.frozen.sourceHashes.filter((s: {path:string})=>s.path.startsWith('server/migrations/'));
+  assert.deepEqual(v9.b1.migrations,migrations.map((s: {path:string})=>s.path));
+  const unchanged = new Set([...v9.b1.migrations,...['schema.sql','seed.ts','queries.ts','pgroonga.sql'].map(f=>'load/search-engines/'+f)]);
+  const sources = (sources: {path:string;sha256:string}[]) => sources.filter(s=>unchanged.has(s.path));
+  assert.deepEqual(sources(v9.sourceHashes),sources(v2.frozen.sourceHashes));
+  assert.equal(v9.b1.engine,'pgroonga');
+  assert.equal(v9.b1.criteria.p95LimitMs,500);
+  assert.equal(v9.b1.criteria.samplesPerQueryRound,100);
+  assert.equal(v9.b1.criteria.minimumLength,2);
+  assert.equal(v9.queryPath.pageSize,20);
 });
 test('LF attributes cover exactly the frozen inputs and manifests',()=>{
   const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
     .split('\n').filter(line=>line && !line.startsWith('#'));
   assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),
-    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json','load/search-engines/manifest-v5.json','load/search-engines/manifest-v6.json',manifestFile]
+    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json','load/search-engines/manifest-v5.json','load/search-engines/manifest-v6.json','load/search-engines/manifest-v7.json','load/search-engines/manifest-v8.json','load/search-engines/manifest-v9.json','load/search-engines/manifest-v11.json',manifestFile]
     .sort().map(path=>`/${path} text eol=lf`));
 });
 test('manifest content tampering is refused',()=>{
   assert.throws(()=>verifyManifest({...document,sha256:'changed'}),/content hash mismatch/);
 });
-for (const field of ['generator','sourceHashes','quality','performance','timing','image','sessionPolicy','settings','shmBytes','smoke','queryPath'] as const) {
+for (const field of ['generator','sourceHashes','quality','performance','timing','image','sessionPolicy','settings','shmBytes','smoke','queryPath','b1'] as const) {
   test(`changed ${field} is refused before a run`,()=>{
     const actual = structuredClone(frozen);
     Object.assign(actual,{[field]:'changed'});

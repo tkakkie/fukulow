@@ -2,12 +2,13 @@ import { newerMentionResponse, rememberIdentityResponse } from './identity-order
 import type { ActivityNotice } from './activity'
 import type { DraftStore } from './drafts'
 import * as api from './api'
+import { createRequestDeadlines } from './request-deadlines'
 import { backoffCap, reconnectDelay } from './reconnect'
 import type { ListMessagesQuery, Message, MessagePage, Result, SendMessageRequest } from './api'
 import { connectRealtime, type Connection, type RealtimeHandlers } from './realtime'
 import { createCore } from '#sync-core'
 import type { SyncCore } from './protocol-types'
-import type { ChannelState, Effect, Input } from './protocol-types'
+import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
 
 export type TimelineApi = {
   listChannelEvents(channel: string, query: api.ListChannelEventsQuery): Promise<Result<api.ChannelEventPage>>
@@ -97,6 +98,8 @@ export function topicNameError(name: string): string | null {
 const emptyComposer: ChannelComposerState = { draft: '', topicDraft: '', composerError: null }
 const emptyTopicExtra: TopicComposerState = { draft: '', composerError: null }
 
+type SyncListener = (changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>, moves?: readonly MoveVersion[]) => void
+
 /** One controller per signed-in session; subscribers only observe, never control its lifetime. */
 export function createSync(options: SyncOptions) {
   const transport = options.api ?? {
@@ -114,10 +117,10 @@ export function createSync(options: SyncOptions) {
   let state = core.get()
   let socket: { transport: Connection; subscriptions: Map<string, number[]> } | undefined
   const timers = new Map<number, unknown>()
-  const requests = new Map<number, () => void>()
+  const requests = createRequestDeadlines()
   const noticeListeners = new Set<(notice: ActivityNotice) => void>()
   const inputListeners = new Set<(input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void>()
-  const listeners = new Set<(changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void>()
+  const listeners = new Set<SyncListener>()
   const channelListeners = new Map<string, Set<() => void>>()
   const composerListeners = new Map<string, Set<() => void>>()
   const topicComposerListeners = new Map<string, Set<() => void>>()
@@ -344,7 +347,7 @@ export function createSync(options: SyncOptions) {
         }
       }
     }
-    if (result.stateChanged) listeners.forEach(l => l(result.changedChannels, result.records))
+    if (result.stateChanged) listeners.forEach(l => l(result.changedChannels, result.records, result.moves))
     for (const channel of result.changedChannels) {
       channelListeners.get(channel)?.forEach(l => l())
     }
@@ -364,21 +367,16 @@ export function createSync(options: SyncOptions) {
     return Promise.all(result.effects.map(execute)).then(() => {})
   }
 
-  // A transport that never answers is an unknown outcome, rather than a permanently sending entry.
-  // Deadlines/cancellation fence results but do not abort HTTP; a retry may overlap the underlying request.
-  async function request<T>(id: number, run: () => Promise<Result<T>>): Promise<Result<T> & { cancelled?: true; timedOut?: true }> {
-    let timeout: ReturnType<typeof setTimeout> | undefined
+  // A send can become unknown while HTTP is still in flight. Late results still reach the Session owner.
+  async function request<T>(run: () => Promise<Result<T>>): Promise<Result<T> & { timedOut?: true }> {
+    const deadline = requests.start<Result<T> & { timedOut?: true }>({ ok: false, kind: 'network' }, {
+      timeoutMs: options.requestTimeoutMs ?? 30_000,
+      onTimeout: () => ({ ok: false, kind: 'network', timedOut: true }),
+    })
     try {
-      const cancelled = new Promise<Result<T> & { cancelled?: true; timedOut?: true }>(resolve => {
-        requests.set(id, () => resolve({ ok: false, kind: 'network', cancelled: true }))
-        timeout = setTimeout(() => resolve({ ok: false, kind: 'network', timedOut: true }), options.requestTimeoutMs ?? 30_000)
-      })
-      return await Promise.race([run(), cancelled])
+      return await Promise.race([run(), deadline.until])
     } catch { return { ok: false, kind: 'network' } }
-    finally {
-      if (timeout !== undefined) clearTimeout(timeout)
-      requests.delete(id)
-    }
+    finally { deadline.clear() }
   }
 
   async function execute(effect: Effect): Promise<void> {
@@ -432,7 +430,7 @@ export function createSync(options: SyncOptions) {
                 void dispatch({ type: 'socket_closed', connection: effect.id, code }); return
               }
               // Browsers hide rejected upgrade responses. Only REST can establish Membership loss.
-              void request(effect.id, options.checkMembership).then(result => {
+              void request(options.checkMembership).then(result => {
                 if (state.connection !== effect.id || !state.running) return
                 if (api.isOrganizationUnavailable(result)) void dispatch({ type: 'organization_unavailable' })
                 else if (!result.ok && result.kind === 'http' && result.status === 401) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
@@ -446,7 +444,7 @@ export function createSync(options: SyncOptions) {
       }
       case 'close':
         socket?.transport.close(); socket = undefined
-        requests.forEach(cancel => cancel())
+        requests.cancel()
         break
       case 'subscribe':
       case 'unsubscribe':
@@ -465,20 +463,20 @@ export function createSync(options: SyncOptions) {
         break
       case 'fetch_history': {
         if (effect.page === 'after') {
-          const result = await request(effect.id, () => transport.listChannelEvents(effect.channel, { after_seq: effect.seq!, history_generation: effect.history_generation }))
+          const result = await request(() => transport.listChannelEvents(effect.channel, { after_seq: effect.seq!, history_generation: effect.history_generation }))
           await dispatch(result.ok ? { type: 'events_result', request: effect.id, page: result.data }
             : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network', error: result.kind === 'http' ? result.error : undefined })
           break
         }
         const query = { before_seq: effect.seq, as_of_seq: effect.as_of_seq, history_generation: effect.history_generation }
-        const result = await request(effect.id, () => effect.page === 'latest'
+        const result = await request(() => effect.page === 'latest'
           ? transport.listMessages(effect.channel, { history_generation: effect.history_generation }) : transport.listMessages(effect.channel, query))
         await dispatch(result.ok ? { type: 'history_result', request: effect.id, page: result.data }
           : { type: 'history_failed', request: effect.id, status: result.kind === 'http' ? result.status : 'network', error: result.kind === 'http' ? result.error : undefined })
         break
       }
       case 'send': {
-        const result = await request(effect.id, () => transport.sendMessage(effect.channel,
+        const result = await request(() => transport.sendMessage(effect.channel,
           { history_generation: effect.history_generation, client_message_id: effect.client_message_id, body: effect.body,
             ...(effect.reply_to ? { reply_to: effect.reply_to } : {}),
             ...(effect.topic_name ? { topic_name: effect.topic_name } : {}) }).then(result => {
@@ -832,7 +830,7 @@ export function createSync(options: SyncOptions) {
     get: () => state,
     request: (id: number) => core.request(id),
     timer: (id: number) => core.timer(id),
-    subscribe(listener: (changedChannels: ReadonlySet<string>, records?: ReadonlyMap<string, Message[]>) => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    subscribe(listener: SyncListener) { listeners.add(listener); return () => { listeners.delete(listener) } },
     start: () => dispatch({ type: 'session_start', selfId: options.selfId }),
     replaceSession: (selfId: string) => dispatch({ type: 'session_replaced', selfId }),
     watch: (channel: string) => dispatch({ type: 'watch', channel }),

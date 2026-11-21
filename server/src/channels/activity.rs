@@ -798,21 +798,15 @@ pub(super) struct SectionsPublication {
 }
 
 impl SectionsPublication {
-    pub(super) async fn committed(self, pool: &sqlx::PgPool) {
-        let Ok(_slot) = self.activity.capacity.clone().try_acquire_owned() else {
-            return;
-        };
-        self.activity
-            .publish_with_deadline(
-                pool,
-                self.organization,
-                Notice::SectionsChanged {
-                    generation: self.generation,
-                },
-                None,
-                Some(self.member),
-            )
-            .await;
+    pub(super) fn committed(self, pool: sqlx::PgPool) {
+        self.activity.spawn(
+            pool,
+            self.organization,
+            Notice::SectionsChanged {
+                generation: self.generation,
+            },
+            Some(self.member),
+        );
     }
 }
 fn enqueue(entry: &Entry, mut pending: Pending) {
@@ -2622,6 +2616,7 @@ impl Activity {
     pub(crate) async fn saturate(&self) -> tokio::sync::OwnedSemaphorePermit {
         self.capacity.clone().acquire_many_owned(40).await.unwrap()
     }
+    // One abort handle per key: this aborts the most recent spawn for (organization, channel).
     pub(crate) fn cancel(&self, organization: Uuid, channel: Uuid) {
         self.tasks
             .lock()

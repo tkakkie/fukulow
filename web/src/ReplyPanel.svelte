@@ -42,11 +42,14 @@
     onannounce,
     channelId,
     anchorMessageId,
+    searchReply = false,
+    searchVisit,
     resolvedAnchor = null,
     replyTargetStatus = 'idle',
     selfId = '',
     organizationUnavailable = false,
     sendDisabled = false,
+    archived = false,
     composerRef = $bindable(null),
     resolveSenderName,
     resolveMentionName,
@@ -65,11 +68,14 @@
     onannounce?: (message: string) => void
     channelId: string
     anchorMessageId: string
+    searchReply?: boolean
+    searchVisit?: symbol
     resolvedAnchor?: Message | null
     replyTargetStatus?: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
     selfId?: string
     organizationUnavailable?: boolean
     sendDisabled?: boolean
+    archived?: boolean
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     resolveSenderName?: (senderId: string) => string
     resolveMentionName?: MentionName
@@ -150,6 +156,7 @@
   const matchedAnchor = $derived(
     resolvedAnchor && resolvedAnchor.channel_id === channelId
       ? resolvedAnchor
+      : searchReply ? null
       : rState.anchor?.id === anchorMessageId
         ? rState.anchor
         : (rState.messages.find((m) => m.id === anchorMessageId) ?? null),
@@ -162,7 +169,7 @@
         : null,
   )
   const isCurrentAnchor = $derived(
-    Boolean(rState.rootId && targetRootId && rState.rootId === targetRootId),
+    Boolean((!searchReply || resolvedAnchor) && rState.rootId && targetRootId && rState.rootId === targetRootId),
   )
   const isMoveInvalidated = $derived(isCurrentAnchor && rState.moveInvalidated)
 
@@ -207,7 +214,7 @@
           (retained.key === currentKey ? retained.topicId : null),
   )
   const historyMessages = $derived(
-    isMoveInvalidated
+    isMoveInvalidated || (searchReply && !resolvedAnchor)
       ? []
       : isCurrentAnchor && rState.messages.length > 0
         ? rState.messages
@@ -344,6 +351,8 @@
           : '返信のつながりが更新されましたが、最新の状態を読み込めませんでした。通信状況を確認して、再読み込みしてください。'
       case 'too_large':
         return 'メッセージが1,000件を超える返信のつながりは移動できません。'
+      case 'archived':
+        return result.message
       case 'denied':
         return 'この返信のつながりをトピックに移動する権限がありません。'
       case 'not_found':
@@ -580,21 +589,25 @@
 
   let previousAnchorKey = ''
   let previousRootId: string | null = null
+  let previousSearchVisit: symbol | undefined
   let revealAnchorKey = $state('')
   $effect(() => {
-    const key = currentKey, root = targetRootId
+    const key = currentKey, root = targetRootId, visit = searchVisit
     if (!root) return
-    if (previousAnchorKey !== key) revealAnchorKey = previousRootId === root || matchedAnchor?.reply_root_id ? key : ''
+    if (previousAnchorKey !== key || previousSearchVisit !== visit) {
+      revealAnchorKey = searchReply || previousRootId === root || matchedAnchor?.reply_root_id ? key : ''
+    }
     previousAnchorKey = key
     previousRootId = root
+    previousSearchVisit = visit
   })
   $effect(() => {
-    const key = currentKey, id = anchorMessageId
+    const key = currentKey, id = anchorMessageId, visit = searchVisit
     if (revealAnchorKey !== key || !isCurrentAnchor || chainInitialLoading || !rowWindow ||
       !visibleMessages.some(m => m.id === id)) return
     revealAnchorKey = ''
     void tick().then(async () => {
-      if (currentKey !== key) return
+      if (currentKey !== key || searchVisit !== visit) return
       const row = scrollEl?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
       const rect = row?.getBoundingClientRect(), viewport = scrollEl?.getBoundingClientRect()
       if (!rect || !viewport || rect.top < viewport.top || rect.bottom > viewport.bottom) await rowWindow?.reveal(id)
@@ -715,7 +728,9 @@
   </div>
 
   <div class="reply-panel__scroll" bind:this={scrollEl} onscroll={handleScroll}>
-    {#if replyNotFound && visibleMessages.length === 0 && pending.length === 0}
+    {#if searchReply && replyNotFound}
+      <StatusBanner tone="danger" role="alert" message="このメッセージは表示できません。パネルを閉じてください。" />
+    {:else if replyNotFound && visibleMessages.length === 0 && pending.length === 0}
       <EmptyState title="この返信のつながりは利用できません。" />
     {:else if isLoading && !scrollView.loadingTimedOut && visibleMessages.length === 0 && pending.length === 0}
       <Skeleton rows={3} label="返信のつながりを読み込み中" />
@@ -747,6 +762,7 @@
         {#snippet children(m)}
 
               <MessageRow
+                searchMatch={searchReply && m.id === anchorMessageId && !m.deleted}
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
                 body={m.body ?? ''}
@@ -771,7 +787,7 @@
             body={p.body}
             pendingStatus={p.status}
             retryable={p.retryable}
-            failedReason={p.failureCode === 'dm_peer_deactivated' ? 'このメンバーは無効化されています。履歴は引き続き閲覧できます。' : p.failureCode === 'dm_peer_access_lapsed' ? 'このダイレクトメッセージには現在送信できません。' : undefined}
+            failureCode={p.failureCode}
             {targetUnavailable}
             onretry={() => void rc.retry(p.clientMessageId).catch(console.error)}
             onrestore={sendDisabled ? undefined : () => handleRestoreRequest(p.clientMessageId)}
@@ -804,6 +820,9 @@
   {/if}
 
   <div class="reply-panel__composer">
+    {#if archived && !targetUnavailable}
+      <StatusBanner message="このチャンネルはアーカイブされています。メッセージを送信できませんが、履歴は引き続き閲覧できます。" />
+    {/if}
     <Composer
       {members}
       {onmentionrequest}
@@ -1159,6 +1178,8 @@
 
   .reply-panel__composer {
     grid-row: 3;
+    display: grid;
+    gap: var(--space-8);
     padding: var(--space-8) var(--space-12) var(--space-12);
     min-width: 0;
   }

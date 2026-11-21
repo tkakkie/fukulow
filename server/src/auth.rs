@@ -49,8 +49,15 @@ pub struct ErrorBody {
 pub struct ApiError(
     pub(crate) StatusCode,
     pub(crate) &'static str,
-    pub(crate) Option<std::time::Duration>,
+    pub(crate) Option<ApiErrorDetail>,
 );
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApiErrorDetail {
+    RetryAfter(std::time::Duration),
+    LockNotAvailable,
+}
+
 impl ApiError {
     pub(crate) fn organization_unavailable() -> Self {
         Self(StatusCode::NOT_FOUND, "organization_unavailable", None)
@@ -58,6 +65,26 @@ impl ApiError {
 
     pub(crate) fn forbidden() -> Self {
         Self(StatusCode::FORBIDDEN, "forbidden", None)
+    }
+
+    pub(crate) fn member_not_found() -> Self {
+        Self(StatusCode::NOT_FOUND, "member_not_found", None)
+    }
+
+    pub(crate) fn lock_contention() -> Self {
+        Self(StatusCode::SERVICE_UNAVAILABLE, "lock_contention", None)
+    }
+
+    // Opt in inside a writer's transaction body, before COMMIT is attempted.
+    pub(crate) fn classify_write_contention(self) -> Self {
+        match self.2 {
+            Some(ApiErrorDetail::LockNotAvailable) => Self::lock_contention(),
+            _ => self,
+        }
+    }
+
+    pub(crate) fn is_lock_contention(&self) -> bool {
+        self.0 == StatusCode::SERVICE_UNAVAILABLE && self.1 == "lock_contention"
     }
 
     fn unauthorized() -> Self {
@@ -70,7 +97,7 @@ impl ApiError {
         Self(
             StatusCode::TOO_MANY_REQUESTS,
             "too many sign-in attempts",
-            Some(retry),
+            Some(ApiErrorDetail::RetryAfter(retry)),
         )
     }
 }
@@ -86,7 +113,7 @@ impl IntoResponse for ApiError {
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        if let Some(retry) = self.2 {
+        if let Some(ApiErrorDetail::RetryAfter(retry)) = self.2 {
             let seconds = retry.as_secs() + u64::from(retry.subsec_nanos() > 0);
             if let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string()) {
                 response.headers_mut().insert(header::RETRY_AFTER, value);
@@ -98,7 +125,16 @@ impl IntoResponse for ApiError {
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
         crate::observability::database_failure(&error);
-        Self(StatusCode::INTERNAL_SERVER_ERROR, "internal error", None)
+        let lock_unavailable = error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref()
+            == Some("55P03");
+        Self(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+            lock_unavailable.then_some(ApiErrorDetail::LockNotAvailable),
+        )
     }
 }
 
@@ -954,7 +990,9 @@ mod tests {
             (StatusCode::UNAUTHORIZED, "organization_unavailable"),
             (StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
         ] {
-            let retry = Some(std::time::Duration::from_secs(3));
+            let retry = Some(ApiErrorDetail::RetryAfter(std::time::Duration::from_secs(
+                3,
+            )));
             let Err(error) =
                 DeferredOrganizationAuth::from_auth_result(Err(ApiError(status, code, retry)))
             else {

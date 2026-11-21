@@ -94,7 +94,8 @@ pub async fn get_channel(
         (status = 409, description = "channel_archived or channel name already exists", body = ErrorBody),
         (status = 413, description = "Request body exceeds the size limit", body = ErrorBody),
         (status = 415, description = "Requires application/json", body = ErrorBody),
-        (status = 500, description = "Database or worker failure", body = ErrorBody)))]
+        (status = 500, description = "Database or worker failure", body = ErrorBody),
+        (status = 503, description = "lock_contention on a lock timeout (no Retry-After)", body = ErrorBody)))]
 pub async fn update_channel(
     State(state): State<AppState>,
     ChannelMetadataAuth(auth): ChannelMetadataAuth,
@@ -108,10 +109,15 @@ pub async fn update_channel(
     let auth = auth.ok_or_else(ApiError::organization_unavailable)?;
     let organization = auth.identity.organization.organization_id;
     tokio::spawn(async move {
-        let changed = crate::database::organization(
+        let changed = crate::database::organization_confirming_rollback(
             &state.pool,
             organization,
-            async |tx: &mut sqlx::PgConnection| update(tx, &auth, channel, input).await,
+            ApiError::is_lock_contention,
+            async |tx: &mut sqlx::PgConnection| {
+                update(tx, &auth, channel, input)
+                    .await
+                    .map_err(ApiError::classify_write_contention)
+            },
         )
         .await?;
         if changed {

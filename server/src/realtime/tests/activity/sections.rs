@@ -211,6 +211,7 @@ async fn section_notices_are_private_even_for_guest_with_no_channels(pool: PgPoo
     denied.push(foreign_socket);
 
     // Queue the notice while the socket is registered but has yet to write Ready.
+    let delivery = &f.state.message_delivery.channel_access.activity;
     let ready = gate(&f, "ready", Some(f.member));
     let mut guest = f.server.connect(&f.token).await;
     reached(&ready).await;
@@ -218,6 +219,7 @@ async fn section_notices_are_private_even_for_guest_with_no_channels(pool: PgPoo
         create(&f, Uuid::new_v4(), "Guest section").await.status(),
         StatusCode::CREATED
     );
+    delivery.drained().await;
     ready.release.add_permits(1);
     assert_eq!(
         raw_event(&mut guest).await,
@@ -255,6 +257,7 @@ async fn section_notices_deny_stale_revisions_and_ended_sessions(pool: PgPool) {
         next(&allowed).await.event,
         Notice::SectionsChanged { generation: 1 }
     );
+    delivery.drained().await;
     tokio::join!(quiet(&stale), quiet(&ended));
 }
 
@@ -277,6 +280,7 @@ async fn section_notices_deny_inactive_members_even_with_matching_revision(pool:
     };
     let (response, ()) = tokio::join!(write, transition);
     assert_eq!(response.status(), StatusCode::CREATED);
+    delivery.drained().await;
     quiet(&inactive).await;
     drop(inactive);
 
@@ -337,6 +341,7 @@ async fn section_notices_fence_observed_loss_at_enqueue_and_first_handoff(pool: 
             assert_eq!(response.status(), StatusCode::CREATED);
             fresh
         };
+        delivery.drained().await;
         quiet(&old).await;
         assert!(notices(&f, &mut fresh).await.is_empty());
         assert_eq!(
@@ -390,21 +395,46 @@ async fn section_write_survives_request_cancellation_and_rollback_is_silent(pool
     let second = session::another_session(&pool, f.organization, f.member).await;
     let mut caller = connect(&f, &f.token).await;
     let mut idle = connect(&f, &second).await;
-    let snapshot = gate(&f, "snapshot", Some(f.member));
+    let mut blocker = pool.begin().await.unwrap();
+    crate::auth::members::lock_organization(&mut blocker, f.organization)
+        .await
+        .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
     let id = Uuid::new_v4();
     let request = tokio::spawn({
         let f = f.clone();
         async move { create(&f, id, "Survives cancellation").await }
     });
-    reached(&snapshot).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+                 AND wait_event_type='Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker_pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("section write must wait for the Organization lock");
+    assert_eq!(layout(&f).await["generation"], "0");
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    blocker.commit().await.unwrap();
+    expect_once(&f, &mut caller, 1).await;
+    expect_once(&f, &mut idle, 1).await;
     let committed = layout(&f).await;
     assert_eq!(committed["generation"], "1");
     assert_eq!(committed["sections"][0]["id"], id.to_string());
-    request.abort();
-    assert!(request.await.unwrap_err().is_cancelled());
-    snapshot.release.add_permits(1);
-    expect_once(&f, &mut caller, 1).await;
-    expect_once(&f, &mut idle, 1).await;
 
     sqlx::raw_sql(
         "CREATE FUNCTION reject_section_commit() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -426,43 +456,100 @@ async fn section_write_survives_request_cancellation_and_rollback_is_silent(pool
 
 #[fukulow_test::test]
 async fn section_publication_failures_never_reset_unproven_recipients(pool: PgPool) {
-    let f = fixture(&pool).await;
+    for failure in [
+        PublicationFailure::Capacity,
+        PublicationFailure::Database,
+        PublicationFailure::Timeout,
+    ] {
+        assert_failed_section_publication(&pool, failure).await;
+    }
+}
+
+#[fukulow_test::test]
+async fn section_publication_panic_keeps_committed_success(pool: PgPool) {
+    assert_failed_section_publication(&pool, PublicationFailure::Panic).await;
+}
+
+#[fukulow_test::test]
+async fn section_publication_cancellation_keeps_committed_success(pool: PgPool) {
+    assert_failed_section_publication(&pool, PublicationFailure::Cancellation).await;
+}
+
+#[derive(Debug)]
+enum PublicationFailure {
+    Capacity,
+    Database,
+    Timeout,
+    Panic,
+    Cancellation,
+}
+
+async fn assert_failed_section_publication(pool: &PgPool, failure: PublicationFailure) {
+    let f = fixture(pool).await;
     let delivery = &f.state.message_delivery.channel_access.activity;
-    let (_, outsider) = member(&pool, f.organization).await;
+    let (_, outsider) = member(pool, f.organization).await;
     let mut caller = connect(&f, &f.token).await;
     let mut other = connect(&f, &outsider).await;
 
-    let permits = delivery.saturate().await;
-    assert_eq!(
-        create(&f, Uuid::new_v4(), "At capacity").await.status(),
-        StatusCode::CREATED
-    );
+    let (permits, query) = match failure {
+        PublicationFailure::Capacity => (Some(delivery.saturate().await), None),
+        PublicationFailure::Database => {
+            fail(f.organization, Uuid::nil(), TestFault::Database);
+            (None, None)
+        }
+        PublicationFailure::Panic => {
+            fail(f.organization, Uuid::nil(), TestFault::Panic);
+            (None, None)
+        }
+        PublicationFailure::Timeout | PublicationFailure::Cancellation => {
+            (None, Some(gate(&f, "query", None)))
+        }
+    };
+    let id = Uuid::new_v4();
+    let name = "Committed section";
+    let start = tokio::time::Instant::now();
+    let prompt = start + Duration::from_secs(5);
+    let response = tokio::time::timeout_at(prompt, async {
+        let query_paused = async {
+            if let Some(query) = &query {
+                reached(query).await;
+            }
+        };
+        tokio::join!(create(&f, id, name), query_paused).0
+    })
+    .await
+    .unwrap_or_else(|_| panic!("HTTP write did not return promptly: {failure:?}"));
+    assert_eq!(response.status(), StatusCode::CREATED, "{failure:?}");
+    assert_eq!(body(response).await, json!({"id":id,"generation":"1"}));
+    if matches!(failure, PublicationFailure::Cancellation) {
+        delivery.cancel(f.organization, Uuid::nil());
+    }
     drop(permits);
-    assert!(notices(&f, &mut caller).await.is_empty());
-    assert!(notices(&f, &mut other).await.is_empty());
 
-    fail(f.organization, Uuid::nil(), TestFault::Database);
+    // Leave the query gate closed so only timeout or cancellation can release its slot.
+    let drain_deadline = if matches!(failure, PublicationFailure::Timeout) {
+        start + Duration::from_secs(15)
+    } else {
+        prompt
+    };
+    tokio::time::timeout_at(drain_deadline, delivery.drained())
+        .await
+        .unwrap_or_else(|_| panic!("publication capacity did not drain: {failure:?}"));
+    let committed = layout(&f).await;
+    assert_eq!(committed["generation"], "1", "{failure:?}");
     assert_eq!(
-        create(&f, Uuid::new_v4(), "Query failed").await.status(),
-        StatusCode::CREATED
+        committed["sections"],
+        json!([{"id":id,"name":name,"channel_ids":[]}])
     );
-    assert!(notices(&f, &mut caller).await.is_empty());
-    assert!(notices(&f, &mut other).await.is_empty());
-
-    let query = gate(&f, "query", None);
-    let timed_out = async { reached(&query).await };
-    let (response, ()) = tokio::join!(create(&f, Uuid::new_v4(), "Query timed out"), timed_out);
-    assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(layout(&f).await["generation"], "3");
-    assert!(notices(&f, &mut caller).await.is_empty());
-    assert!(notices(&f, &mut other).await.is_empty());
+    assert!(notices(&f, &mut caller).await.is_empty(), "{failure:?}");
+    assert!(notices(&f, &mut other).await.is_empty(), "{failure:?}");
 
     assert_eq!(
         create(&f, Uuid::new_v4(), "Query recovered").await.status(),
         StatusCode::CREATED
     );
-    expect_once(&f, &mut caller, 4).await;
-    assert!(notices(&f, &mut other).await.is_empty());
+    expect_once(&f, &mut caller, 2).await;
+    assert!(notices(&f, &mut other).await.is_empty(), "{failure:?}");
 }
 
 #[fukulow_test::test]

@@ -1,5 +1,6 @@
 import { createActivityTarget, type Activity } from './activity'
 import * as api from './api'
+import { createRequestDeadlines } from './request-deadlines'
 import type { ListTimelineQuery, ListTopicsQuery, Message, MessagePage, Result, TimelinePage,
   TopicHistoryQuery, TopicPage, TopicSummaryResponse } from './api'
 import { completeCountFields } from './unread-counts'
@@ -48,11 +49,13 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const canonical = (channel: string, held: Message | undefined, incoming: Message) =>
     knownMessageState(sync.get().channels[channel], held, incoming)
   const windows = new Map<string, Window>()
+  let mainLimit = MAIN_MESSAGE_LIMIT
+  let topicLimit = TOPIC_MESSAGE_LIMIT
   const activityTargets = new Map<string, { close(): void; release(): void; target: ReturnType<typeof createActivityTarget>; observeSummary?(listener: (response: TopicSummaryResponse) => void): () => void }>()
   const listeners = new Set<(channels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
   const pendingChannels = new Set<string>()
-  const deadlines = new Set<() => void>()
+  const deadlines = createRequestDeadlines()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
   let closed = false
   let batching = false
@@ -82,8 +85,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   }
   const cancelReads = () => {
     for (const w of windows.values()) clearWindowTimers(w)
-    deadlines.forEach(settle => settle())
-    deadlines.clear()
+    deadlines.cancel()
   }
   let previous = sync.get()
   const notify = (channel?: string | Iterable<string>) => {
@@ -177,7 +179,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         } else if (before?.messages !== after.messages || records?.has(id)) {
           const incoming = records?.get(id) ?? after.messages
           rememberTopicMessages(w.evidence, incoming)
-          if (!w.main.following && w.messages.size + w.baselines.size >= MAIN_MESSAGE_LIMIT) w.main.hasNewer = true
+          if (!w.main.following && w.messages.size + w.baselines.size >= mainLimit) w.main.hasNewer = true
           for (const m of incoming) {
             const baseline = m.topic_id && w.baselines.get(m.topic_id)
             if (baseline && baseline.summary.latest_message.id === m.id) {
@@ -192,17 +194,13 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
                 if (held?.id === m.id && held.version < m.version) t.messages.delete(m.created_seq)
                 continue
               }
-              if (!t.following && t.messages.size >= TOPIC_MESSAGE_LIMIT) t.hasNewer = true
+              if (!t.following && t.messages.size >= topicLimit) t.hasNewer = true
               if (arrived && t.hasNewer) t.newerCount++
               if (!t.hasNewer || t.messages.has(m.created_seq)) { const state = canonical(id, t.messages.get(m.created_seq), m); if (state) t.messages.set(m.created_seq, state) }
             }
           }
           trimMain(w, w.main.hasNewer ? 'older' : 'newer')
-          for (const t of w.topics.values()) {
-            if (trimMessages(t.messages, TOPIC_MESSAGE_LIMIT)) {
-              t.before = Math.min(...t.messages.keys()); t.hasMore = true
-            }
-          }
+          for (const t of w.topics.values()) trimTopic(t, 'newer')
         }
       }
       snapshots.delete(id)
@@ -251,8 +249,6 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const token = Symbol(slot)
     w.reads.set(slot, token)
     const isCurrent = () => current(channel, w) && w.reads.get(slot) === token && sync.get().channels[channel]?.versionEpoch === versionEpoch
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let settle: (() => void) | undefined
     // Session replacement fences late authentication failures; same-session late 401 remains authoritative.
     const session = sessionToken
     const operation = Promise.resolve().then(run).catch((): Result<T> => ({ ok: false, kind: 'network' }))
@@ -261,16 +257,12 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         void sync.close(); options.onSessionEnded?.()
       } else if (api.isOrganizationUnavailable(r) && session === sessionToken) void sync.unavailable()
     })
+    const deadline = withTimeout || signal ? deadlines.start<Result<T>>({ ok: false, kind: 'network' }, {
+      timeoutMs: withTimeout ? options.requestTimeoutMs ?? 30_000 : undefined,
+      signal,
+    }) : undefined
     try {
-      const response = withTimeout || signal ? await Promise.race([operation, new Promise<Result<T>>(resolve => {
-        settle = () => resolve({ ok: false, kind: 'network' })
-        deadlines.add(settle)
-        if (signal) {
-          if (signal.aborted) settle()
-          else signal.addEventListener('abort', settle, { once: true })
-        }
-        if (withTimeout) timer = setTimeout(settle, options.requestTimeoutMs ?? 30_000)
-      })]) : await operation
+      const response = await (deadline ? Promise.race([operation, deadline.until]) : operation)
       if (isCurrent()) {
         const generation = response.ok && response.data && typeof response.data === 'object' && 'history_generation' in response.data ? response.data.history_generation : undefined
         if (typeof generation === 'string' && !sync.observeHistoryGeneration(generation)) return { result: { ok: false, kind: 'network' } as Result<T>, isCurrent: () => false }
@@ -293,10 +285,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         notify(channel)
       }
       return { result, isCurrent }
-    } finally {
-      if (timer !== undefined) clearTimeout(timer)
-      if (settle) { signal?.removeEventListener('abort', settle); deadlines.delete(settle) }
-    }
+    } finally { deadline?.clear() }
   }
   function mergeBaselines(w: Window, response: Pick<TopicPage, 'as_of_seq' | 'topics'>, fromList = false) {
     for (const summary of response.topics) {
@@ -445,6 +434,16 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       for (const [channel, value] of windows) if (value === w && current(channel, w)) await ensureSummary(channel, topicId)
     } finally { w.evidenceRefresh.delete(topicId) }
   }
+  function trimTopic(t: TopicWindow, edge: 'older' | 'newer') {
+    if (!trimMessages(t.messages, topicLimit, edge)) return
+    if (edge === 'older') {
+      t.hasNewer = true
+      t.through = Math.max(...t.messages.keys())
+    } else {
+      t.hasMore = true
+      t.before = Math.min(...t.messages.keys())
+    }
+  }
   function trimMain(w: Window, edge: 'older' | 'newer') {
     const lines = selectMainTimeline([], w.messages.values(), w.baselines.values(), w.evidence)
     const liveTopics = new Set([...w.messages.values()].flatMap(m => m.topic_id ? [m.topic_id] : []))
@@ -452,8 +451,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     const cost = (line: typeof lines[number]) => line.kind === 'message' ? 1 :
       Number(w.baselines.has(line.topicId)) + Number(liveTopics.has(line.topicId))
     let size = kept.reduce((sum, l) => sum + cost(l), 0)
-    const trimmed = size > MAIN_MESSAGE_LIMIT
-    while (size > MAIN_MESSAGE_LIMIT) size -= cost(edge === 'older' ? kept.pop()! : kept.shift()!)
+    const trimmed = size > mainLimit
+    while (size > mainLimit) size -= cost(edge === 'older' ? kept.pop()! : kept.shift()!)
     const ids = new Set(kept.filter(l => l.kind === 'topic').map(l => l.topicId))
     const seqs = new Set(kept.filter(l => l.kind === 'message').map(l => l.message.created_seq))
     for (const [seq, m] of w.messages) if (m.topic_id ? !ids.has(m.topic_id) : !seqs.has(seq)) w.messages.delete(seq)
@@ -483,7 +482,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     }
     let total = [...windows.values()].reduce((n, value) => n + value.messages.size + value.baselines.size, 0)
     for (const [id, other] of windows) {
-      if (total <= MAIN_MESSAGE_LIMIT) break
+      if (total <= mainLimit) break
       if (other === w) continue
       total -= other.messages.size + other.baselines.size
       other.messages.clear(); other.baselines.clear(); other.mainTopics.clear(); other.mainPositions.clear()
@@ -762,6 +761,28 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     return () => { listeners.delete(listener) }
   }
   const controller = {
+    reserveSearch(channel: string | undefined, scope: 'main' | 'topic', records: number) {
+      const nextMain = MAIN_MESSAGE_LIMIT - (scope === 'main' ? records : 0)
+      const nextTopic = TOPIC_MESSAGE_LIMIT - (scope === 'topic' ? records : 0)
+      const trimMainNow = nextMain < mainLimit
+      const trimTopicNow = nextTopic < topicLimit
+      mainLimit = nextMain
+      topicLimit = nextTopic
+      if (trimMainNow) {
+        const entry = channel !== undefined && windows.has(channel)
+          ? [channel, windows.get(channel)!] as const : windows.entries().next().value
+        if (entry) {
+          const [id, w] = entry
+          trimMain(w, w.main.hasNewer ? 'older' : 'newer')
+          notify(id)
+        }
+      }
+      if (trimTopicNow) for (const [id, w] of windows) {
+        if (!w.topics.size) continue
+        for (const t of w.topics.values()) trimTopic(t, t.hasNewer ? 'older' : 'newer')
+        notify(id)
+      }
+    },
     countMessages(channel: string): Iterable<Message>[] {
       const w = windows.get(channel)
       return w ? [w.messages.values(), ...[...w.topics.values()].map(t => t.messages.values())] : []
@@ -903,7 +924,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         pruneActivity(w)
         w.topics.set(topicId, t = topicWindow())
         for (const m of sync.get().channels[channel]?.messages ?? []) if (m.topic_id === topicId) { const state = canonical(channel, t.messages.get(m.created_seq), m); if (state) t.messages.set(m.created_seq, state) }
-        trimMessages(t.messages, TOPIC_MESSAGE_LIMIT)
+        trimMessages(t.messages, topicLimit)
       }
       if (!current(channel, w) || (!latest && (t.loading || !t.hasMore))) return
       const older = t.initialized && !latest
@@ -934,10 +955,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
           else for (const m of suffix) { const state = canonical(channel, t.messages.get(m.created_seq), m); if (state) t.messages.set(m.created_seq, state) }
         }
         t.before = result.data.messages[0]?.created_seq; t.hasMore = result.data.has_more
-        if (trimMessages(t.messages, TOPIC_MESSAGE_LIMIT, older ? 'older' : 'newer')) {
-          if (older) t.hasNewer = true
-          else { t.hasMore = true; t.before = Math.min(...t.messages.keys()) }
-        }
+        trimTopic(t, older ? 'older' : 'newer')
         if (t.hasNewer) t.through = Math.max(0, ...t.messages.keys())
         withSync(channel, () => { void sync.settleHistory(channel, result.data.messages) })
       }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { partA, partC, replayPosition, requireMergedHarness, timelineEnv, type Arm } from './config.ts';
+import { isNight, nights, partA, partC, replayPosition, requireMergedHarness, timelineEnv, type Arm } from './config.ts';
 import { judgePartA, judgePartB, judgePartC, judgePartD, parseTimeline, timelineTopics, sustainable, compare, closedLoopNonSuccess, vacuumCost, worst,
   type Counts, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 
@@ -101,6 +101,19 @@ test('Part C: ratio and the 100 ms absolute limit both apply; malformed pages ar
   assert.equal(judgePartC(setC(95, 101), '1M-deep').status, 'FAIL');
   assert.equal(judgePartC(setC(20, 20, r => { if (r.arm === 'A') r.invalidPages = 1; }), '1M-deep').status, 'INVALID');
   assert.equal(judgePartC(setC(20, 20, r => { if (r.arm === 'B') r.sender.otherErrors = 1; }), '1M-deep').status, 'INVALID');
+});
+test('night 3 reruns only Part C with A moved to the #674 fix and B unchanged', () => {
+  assert.deepEqual(nights[3].parts, ['C']);
+  assert.equal(nights[3].commits.B, nights[2].commits.B);
+  assert.equal(nights[3].commits.A, '4542f545');
+  assert.equal(nights[3].hardTimeoutMinutes, nights[2].hardTimeoutMinutes);
+  assert.ok(isNight('3') && !isNight('4') && !isNight(undefined));
+  const rerun = { B: commit.B, A: '4542f5453ac66103a643be821728b1d7f4118558' };
+  const setRerun = (a: string) => setC(20, 22).map(r => r.arm === 'A' ? { ...r, commit: a } : r);
+  assert.equal(judgePartC(setRerun(rerun.A), '1M-deep', nights[3].commits).status, 'PASS');
+  // The night 2 candidate, or the default commits, can never satisfy a night 3 verdict, and vice versa.
+  assert.deepEqual(judgePartC(setRerun(commit.A), '1M-deep', nights[3].commits).reasons, ['commit mismatch']);
+  assert.deepEqual(judgePartC(setRerun(rerun.A), '1M-deep').reasons, ['commit mismatch']);
 });
 
 const log = (page: number) => `TOPIC_DATA topics=10000\nTOPIC_PAGE boundary=None n=400 p50_ms=1.0 p95_ms=${page} max_ms=9.0\n` +
