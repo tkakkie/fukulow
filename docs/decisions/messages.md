@@ -28,7 +28,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #17 Scope canonical intent to Organization/sender/client id. Changed body/Channel/Topic name_key/parent gives 409. Concurrent losers roll back allocation before reading the winner. Keep whitespace for byte-exact idempotency. Bodies require 1..=4000 Unicode scalars. Invalid length, NUL or whitespace-only input gets 400 before allocation.
 - #146 History shares authorization and page data in one non-locking read-only REPEATABLE READ snapshot. Prior loss denies and authorized reads see no later Messages.
 
-## Personal sections (#204, specified)
+## Personal sections (#204, implemented)
 
 - #204 sections belong to one Member in one Organization, including Guest; Owner/Admin have no override. Reason: personal grouping must neither grant Channel access nor affect another Member's view.
 - #204 access loss hides but retains placement/order; regain restores it. Section/Channel deletion removes placements atomically; hidden Channel cleanup changes no exposed generation or notice. Reason: retain grouping without dangling placements or disclosing deletion after loss.

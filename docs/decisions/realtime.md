@@ -45,7 +45,7 @@ Real-time delivery, admission, queues and timeouts. Writing rules and the other 
 - #151 discovery rows coalesce per DM with advancing latest position and immutable birth key, bounding storage by DMs and preventing hot-row starvation.
 - #151 bootstrap: a zero coverage cursor enumerates DM births. Delta starts independently at zero and browse/recovery retain separate creation keys, avoiding work proportional to past events.
 
-## Personal section notices (#204, specified)
+## Personal section notices (#204, implemented)
 
 - #204 sections_changed goes only to the changed Member's current Organization sessions, including caller and zero subscriptions, with no layout data. Devices converge privately.
 - #204 section notices share #307's post-COMMIT publication, coalescing, proven-only resets and O5 so loss recovers without another mutation or disclosure.

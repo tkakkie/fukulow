@@ -274,7 +274,7 @@ REST remains authoritative for lists and counts. Notices carry only identifiers 
 
 Capabilities are per-operation availability for UI affordances ([web decision](../decisions/web.md)).
 
-### Personal section notices (#204, E1–E3 implemented, E4–E6 specified)
+### Personal section notices (#204, implemented)
 
 Add one held target to A1–A14/O5. [Layout, REST and limits](sections.md). E1 Channel cleanup is not implemented yet; it ships with Channel deletion (Q6).
 
