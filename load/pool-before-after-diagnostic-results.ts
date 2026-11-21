@@ -1,11 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { appEvidence } from './app-evidence.ts';
+import { appEvidence, unparseableAppLines } from './app-evidence.ts';
 import type { generatorWindow } from './pool-before-after-sampling.ts';
 import type { Counts, Evidence } from './pool-before-after-summary.ts';
 
 export const diagnosticRule = {
   sendRate: 250, seconds: 60, offeredTolerance: 0.01, cpuLimitFraction: 0.90, maxHostLoad: 3,
-  maxSampleGapMs: 2500, maxInteriorGapMs: 1500, slowP95Ms: 100, healthyP95Multiplier: 2, baselineP95FloorMs: 10,
+  maxSampleGapMs: 2500, maxInteriorGapMs: 1500, slowP95Ms: 100, healthyP95Multiplier: 2, baselineP95FloorMs: 10, collapsedP95Ms: 1000,
+  collapsed: '2026-11-21 (#519 bisection): With valid B, an A whose only invalidity is dropped iterations (any amount), an offered-send mismatch or an unparseable app event line yields collapsed when its send p95 >= 1000 ms and it has an HTTP 5xx or a client timeout. Checked after slow_with_drops; the bisection counts collapsed as bad.',
   slowWithDrops: '2026-11-20: With valid B and invalid A, allow only dropped iterations and an offered-send mismatch reconciled by send-lane drops within 1% of schedule. A send p95 >= 100 ms or an app failure yields slow_with_drops; otherwise ambiguous. Other invalid pairs yield null. Valid pairs use classification.',
 } as const;
 
@@ -33,7 +34,8 @@ export function diagnosticAppEvidence(log: string, from: number, to: number, err
   }
   const { complete, reasons, databaseFailures, http5xx, panics: structuredPanics, unknownEvents } = appEvidence(log, from, to, error);
   const panics = structuredPanics + [...log.matchAll(/^thread '[^'\r\n]+'(?: \(\d+\))? panicked at /gm)].length;
-  if (!legacyRead) return { complete, reasons, databaseFailures, http5xx, panics, unknownEvents };
+  const unparseableLines = unparseableAppLines(log);
+  if (!legacyRead) return { complete, reasons, databaseFailures, http5xx, panics, unknownEvents, unparseableLines };
 
   const legacyReasons = reasons.filter(reason => reason !== 'missing pool_stats');
   // A quiet app need not log at the end. A full read started after the window
@@ -41,7 +43,7 @@ export function diagnosticAppEvidence(log: string, from: number, to: number, err
   if (!hasPreWindowLog || !(legacyRead.startedAt >= to) || !legacyRead.uninterrupted) {
     legacyReasons.push('app log does not cover the generator window');
   }
-  return { complete: legacyReasons.length === 0, reasons: legacyReasons, databaseFailures, http5xx, panics, unknownEvents };
+  return { complete: legacyReasons.length === 0, reasons: legacyReasons, databaseFailures, http5xx, panics, unknownEvents, unparseableLines };
 }
 
 export function appFailures(lanes: Counts[], http5xx: number | undefined, app: ReturnType<typeof diagnosticAppEvidence>) {
@@ -126,6 +128,7 @@ type ArmResult = {
   validity: Validity;
   sendP95Ms: number | null;
   hasAppFailure: boolean;
+  failures?: Pick<ReturnType<typeof appFailures>, 'http503' | 'clientHttp5xx' | 'serverHttp5xx' | 'clientTimeouts'>;
   sendSchedule?: Pick<Counts, 'attempted' | 'droppedIterations'> & { scheduledSendAttempts: number };
 };
 
@@ -136,6 +139,15 @@ function sendDropsExplainMismatch({ sendSchedule }: ArmResult) {
     Math.abs(attempted + droppedIterations - scheduledSendAttempts) <= scheduledSendAttempts * diagnosticRule.offeredTolerance;
 }
 
+const collapseReasons = new Set(['dropped iterations', 'offered sends differ from schedule by more than 1%', 'app log: unparseable app event line']);
+
+function collapsed(b: ArmResult, a: ArmResult) {
+  const f = a.failures;
+  return b.validity.valid && a.validity.reasons.length > 0 && a.validity.reasons.every(reason => collapseReasons.has(reason)) &&
+    a.sendP95Ms !== null && a.sendP95Ms >= diagnosticRule.collapsedP95Ms && f !== undefined &&
+    (f.http503 > 0 || (f.clientHttp5xx ?? 0) > 0 || f.serverHttp5xx > 0 || f.clientTimeouts > 0);
+}
+
 export function classifyPair(b: ArmResult, a: ArmResult) {
   const validity = validityResult([...b.validity.reasons.map(reason => `B: ${reason}`), ...a.validity.reasons.map(reason => `A: ${reason}`)]);
   const { slowP95Ms, healthyP95Multiplier, baselineP95FloorMs } = diagnosticRule;
@@ -144,7 +156,8 @@ export function classifyPair(b: ArmResult, a: ArmResult) {
     const dropLimited = b.validity.valid && a.validity.reasons.length > 0 && a.validity.reasons.every(reason =>
       reason === 'dropped iterations' ||
       (reason === 'offered sends differ from schedule by more than 1%' && sendDropsExplainMismatch(a)));
-    const diagnosticClassification = dropLimited ? (slow ? 'slow_with_drops' as const : 'ambiguous' as const) : null;
+    const diagnosticClassification = dropLimited ? (slow ? 'slow_with_drops' as const : 'ambiguous' as const)
+      : collapsed(b, a) ? 'collapsed' as const : null;
     return { validity: { ...validity, valid: false }, classification: null, diagnosticClassification };
   }
   if (slow) {

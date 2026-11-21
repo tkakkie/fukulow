@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appEvidence, proxyEvidence } from './app-evidence.ts';
+import { appEvidence, proxyEvidence, unparseableAppLines } from './app-evidence.ts';
 
 const t0 = Date.parse('2026-11-17T00:00:00Z');
 const at = (ms: number) => new Date(t0 + ms).toISOString().replace('Z', '123Z');
@@ -198,4 +198,13 @@ test('only error lines naming a proxy-internal limit become capacity markers', (
   const c = proxyEvidence(caddy, 'caddy', t0 + 1000, t0 + 5000);
   assert.deepEqual([c.errorLines, c.capacityMarkers], [2, { 'open file limit': 1 }]);
   assert.doesNotMatch(JSON.stringify(c), /accept4|443|deadline/);
+});
+
+test('unparseable app event lines are kept for diagnosis: at most 5, each at most 2 KiB', () => {
+  const bad = (i: number) => `{"fields":{"event":"websocket_closed"${'x'.repeat(i)}`;
+  const log = [...pools(2), bad(1), 'plain text', '{"level":"ERROR","target":"fukulow","fields":{"event":"panic"}}', bad(5000),
+    bad(2), bad(3), bad(4), bad(6)].join('\n');
+  const lines = unparseableAppLines(log);
+  assert.deepEqual(lines.map(l => l.length), [bad(1).length, 2048, bad(2).length, bad(3).length, bad(4).length]);
+  assert.deepEqual(unparseableAppLines(pools(3).join('\n')), []);
 });

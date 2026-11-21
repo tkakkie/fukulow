@@ -28,7 +28,7 @@ function validEvidence(vus = 200, vus_max = 3200): Parameters<typeof diagnosticV
     lanes, expectedLanes: lanes.map(l => l.name),
     resources: { complete: true, samples: 71, maxSampleGapMs: 1000, maxInteriorGapMs: 1000, samplingErrors: 0 },
     generator, generatorRun: generator, cpuLimit: 8, vusLimit, vusPeak: 200, droppedIterations: 0, http5xx: 0, generatorExitCode: 0,
-    app: { complete: true, reasons: [], http5xx: 0, panics: 0, databaseFailures, unknownEvents: [] }, statementsCaptured: true,
+    app: { complete: true, reasons: [], http5xx: 0, panics: 0, databaseFailures, unknownEvents: [], unparseableLines: [] }, statementsCaptured: true,
   };
 }
 
@@ -337,4 +337,29 @@ test('matching allocation during old-generator VU growth stays valid below the c
   const atCap = validEvidence(3200, 3200);
   assert.equal(atCap.generatorRun.reachedMaxVUs, true);
   assert.deepEqual(diagnosticValidity(atCap), validityResult(['generator reached maxVUs']));
+});
+
+test('collapsed: valid B and an A over 1 s with HTTP 5xx or client timeouts and only load or unreadable-line reasons', () => {
+  const parse = 'app log: unparseable app event line';
+  const failures = (http503 = 0, clientTimeouts = 0, serverHttp5xx = 0) => ({ http503, clientHttp5xx: http503, serverHttp5xx, clientTimeouts });
+  const a = (reasons: string[], sendP95Ms: number | null, f = failures(1)) =>
+    ({ validity: validityResult(reasons), sendP95Ms, hasAppFailure: true, failures: f });
+  for (const [arm, b, diagnosticClassification] of [
+    [a([dropReason, mismatchReason, parse], 9014), validArm, 'collapsed'],   // #519 bisection step 1 shape
+    [a([mismatchReason], 1000), validArm, 'collapsed'],
+    [a([parse], 1000, failures(0, 1)), validArm, 'collapsed'],
+    [a([dropReason, parse], 1000, failures(0, 0, 1)), validArm, 'collapsed'],
+    [a([dropReason, parse], 999.9), validArm, null],
+    [a([dropReason, parse], null), validArm, null],
+    [a([dropReason, parse], 5000, failures()), validArm, null],
+    [{ ...a([dropReason, parse], 5000), failures: undefined }, validArm, null],
+    [a([dropReason, 'app log: missing pool_stats'], 5000), validArm, null],
+    [a([dropReason, 'generator CPU saturated'], 5000), validArm, null],
+    [a([dropReason, parse], 5000), { ...validArm, validity: validityResult([dropReason]) }, null],
+  ] as const) {
+    assert.equal(classifyPair(b, arm).diagnosticClassification, diagnosticClassification, JSON.stringify(arm));
+    assert.equal(classifyPair(b, arm).classification, null);
+  }
+  // slow_with_drops keeps priority over collapsed.
+  assert.equal(classifyPair(validArm, a([dropReason], 5000)).diagnosticClassification, 'slow_with_drops');
 });

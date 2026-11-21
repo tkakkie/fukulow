@@ -54,6 +54,18 @@ function parse(line: string): Row | undefined {
       span: span !== null && typeof span === 'object' && !Array.isArray(span) ? span as Record<string, unknown> : undefined };
   } catch { return; }
 }
+const appEventHint = /"target":"fukulow"|pool_stats|database_failure|websocket_|http_completed/;
+
+/** #519: the first unparseable app event lines, capped and truncated, kept only as local diagnostic artefacts. */
+export function unparseableAppLines(log: string, limit = 5, maxBytes = 2048): string[] {
+  const lines: string[] = [];
+  for (const line of log.split('\n')) {
+    if (lines.length >= limit) break;
+    if (!line.trim() || /"event":"panic"/.test(line) || parse(line) || !appEventHint.test(line)) continue;
+    lines.push(Buffer.from(line).subarray(0, maxBytes).toString());
+  }
+  return lines;
+}
 const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : NaN;
 
 function redactUnknownValue(value: unknown, pattern: RegExp): UnknownValue {
@@ -100,7 +112,7 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
     if (/"event":"panic"/.test(line)) { panics++; continue; }
     const row = parse(line);
     // Other targets are disabled in the app; an unreadable app line may be lost evidence.
-    if (!row) { if (/"target":"fukulow"|pool_stats|database_failure|websocket_|http_completed/.test(line)) reasons.push('unparseable app event line'); continue; }
+    if (!row) { if (appEventHint.test(line)) reasons.push('unparseable app event line'); continue; }
     const event = row.fields.event as string;
     if (event === 'pool_stats') { samples.push(row); continue; }
     // Process-wide concurrency includes sockets opened before the window; count every transition.
