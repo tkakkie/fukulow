@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { Session } from './revocation-burst-db.ts';
 import { bindStatement, FALLBACK_MARKER, frame, Framer, gateQuery, RECHECK_MARKER, Relay, rewriteParse } from './revocation-burst-relay.ts';
 import { startRssSampler } from './revocation-burst-rss.ts';
-import { judge, peaks, percentile, poolWindow, verdictBySize, type Kind, type Run, type RunVerdict } from './revocation-burst-judgment.ts';
+import { encloseClockBrackets, intersectClockBrackets, judge, peaks, percentile, poolWindow, runUncertaintyMs, verdictBySize, type Kind, type Run, type RunVerdict } from './revocation-burst-judgment.ts';
 
 const z = (s: string) => Buffer.from(`${s}\0`, 'utf8');
 const parseBody = (name: string, query: string) => Buffer.concat([z(name), z(query), Buffer.from([0, 1, 0, 0, 0, 25])]);
@@ -125,6 +125,43 @@ test('poolWindow takes bucket edges from bracketing cumulative samples', () => {
   assert.equal(w.p95Ms, 0.5); assert.equal(w.p99Ms, 1); assert.equal(w.timeouts, 2); assert.equal(w.acquisitions, 100);
 });
 
+test('calibration brackets a known offset with asymmetric round trips', () => {
+  assert.deepEqual(intersectClockBrackets([
+    { beforeMs: 109, afterMs: 119, serverMs: 10 },
+    { beforeMs: 111, afterMs: 121, serverMs: 20 },
+  ]), [99, 101]); // A 100 ms offset yields outbound/inbound delays of 1/9 and 9/1 ms.
+});
+
+test('calibration rejects brackets with no common offset', () => {
+  assert.throws(() => intersectClockBrackets([
+    { beforeMs: 10, afterMs: 12, serverMs: 5 },
+    { beforeMs: 18, afterMs: 20, serverMs: 10 },
+  ]), /inconsistent server clock calibration samples/);
+});
+
+test('calibration rejects empty, non-finite and reversed samples', () => {
+  assert.throws(() => intersectClockBrackets([]), /no server clock calibration samples/);
+  for (const sample of [
+    { beforeMs: NaN, afterMs: 12, serverMs: 5 },
+    { beforeMs: 10, afterMs: Infinity, serverMs: 5 },
+    { beforeMs: 10, afterMs: 12, serverMs: -Infinity },
+    { beforeMs: 12, afterMs: 10, serverMs: 5 },
+  ]) {
+    assert.throws(() => intersectClockBrackets([sample]), /invalid server clock calibration sample/);
+  }
+});
+
+test('run uncertainty encloses clock drift and the widest send', () => {
+  const bounds = encloseClockBrackets([99, 101], [103, 105]);
+  assert.deepEqual(bounds, [99, 105]);
+  assert.deepEqual(encloseClockBrackets([103, 105], [99, 101]), bounds);
+  assert.equal(runUncertaintyMs(bounds, []), 3);
+  assert.equal(runUncertaintyMs(bounds, [
+    { channelId: 'one', beforeMs: 200, afterMs: 204 },
+    { channelId: 'two', beforeMs: 300, afterMs: 302 },
+  ]), 5);
+});
+
 const fixture = (): Run => {
   const statements = [];
   for (let t = 0; t < 40_000; t += 50) statements.push({ at: t, ms: 1, recheck: t % 100 === 0, fallback: false, error: false });
@@ -200,9 +237,13 @@ test('a send before the fault passes even when it arrives beyond the old allowan
 test('a send during the fault fails even when it arrives within the old allowance', () => {
   const run = sendTimeFixture(0.5);
   run.revocations[0].at = run.times.fault + 1;
+  run.sendTiming!.records[0].afterHold = false;
   const result = judge(run);
   assert.equal(result.verdict, 'FAIL');
   assert.deepEqual(result.reasons, ['a revocation was sent while the failure was active']);
+  assert.deepEqual(result.summary.sendTiming?.faultSends, [{
+    ...run.revocations[0], sentAt: run.times.fault + 0.5, noticeUncertaintyMs: 0.5, afterHold: false,
+  }]);
 });
 
 test('a send whose uncertainty interval overlaps the fault fails as indeterminate', () => {
@@ -211,10 +252,32 @@ test('a send whose uncertainty interval overlaps the fault fails as indeterminat
     const result = judge(run);
     assert.equal(result.verdict, 'FAIL');
     assert.deepEqual(result.reasons, ['a revocation send time is indeterminate at fault start']);
-    assert.deepEqual(result.summary.sendTiming?.indeterminate, [
+    assert.deepEqual(result.summary.sendTiming?.indeterminate.map(({ socketIndex, channelId, at, sentAt }) => ({ socketIndex, channelId, at, sentAt })), [
       { ...run.revocations[0], sentAt: run.times.fault + offset },
     ]);
   }
+});
+
+test('a slower send widens the run uncertainty without changing the first notice half-width', () => {
+  const run = sendTimeFixture(-1);
+  const timing = run.sendTiming!;
+  timing.records[0].afterHold = true;
+  assert.equal(judge(run).verdict, 'PASS');
+
+  delete run.members[0].restoredAt;
+  run.revocations.push({ socketIndex: 0, channelId: 'one', at: run.times.recovery });
+  timing.records.push({ channelId: 'one', beforeMs: 16_395, afterMs: 16_400 });
+  timing.uncertaintyMs = runUncertaintyMs(timing.offsetBoundsMs, timing.records);
+
+  const result = judge(run);
+  assert.equal(result.verdict, 'FAIL');
+  assert.equal(result.pass, false);
+  assert.deepEqual(result.reasons, ['a revocation send time is indeterminate at fault start']);
+  assert.equal(result.summary.sendTiming?.uncertaintyMs, 2.75);
+  assert.equal(result.summary.sendTiming?.matchedSendRecords, 2);
+  assert.deepEqual(result.summary.sendTiming?.indeterminate, [{
+    ...run.revocations[0], sentAt: run.times.fault - 1, noticeUncertaintyMs: 0.5, afterHold: true,
+  }]);
 });
 
 test('a notice without an unambiguous matching send record fails', () => {
@@ -227,6 +290,20 @@ test('a notice without an unambiguous matching send record fails', () => {
     assert.deepEqual(result.reasons, ['a revocation has no matching server send record']);
     assert.deepEqual(result.summary.sendTiming?.missingSendRecords, run.revocations);
   }
+});
+
+test('the report keeps every unmatched send record in input order', () => {
+  const run = sendTimeFixture(-1);
+  const unmatched = [
+    { channelId: 'duplicate', beforeMs: 10, afterMs: 11, afterHold: true },
+    { channelId: 'orphan', beforeMs: 12, afterMs: 13 },
+    { channelId: 'duplicate', beforeMs: 14, afterMs: 15, afterHold: false },
+  ];
+  run.sendTiming!.records.push(...unmatched);
+  const result = judge(run);
+  assert.equal(result.verdict, 'PASS');
+  assert.equal(result.summary.sendTiming?.matchedSendRecords, 1);
+  assert.deepEqual(result.summary.sendTiming?.unmatchedSendRecords, unmatched);
 });
 
 test('a serialized old-format run keeps the original boundary verdict', () => {
