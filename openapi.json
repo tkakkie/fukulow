@@ -6920,6 +6920,151 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/search": {
+      "get": {
+        "tags": [
+          "crate::messages::search"
+        ],
+        "summary": "Search readable Messages, newest first by creation time and then Message id.\nEach page checks current Channel and DM visibility in its own snapshot.",
+        "operationId": "search",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Query as typed, up to 256 Unicode scalars after trimming. After Unicode NFKC case folding, every whitespace-separated token must match as a literal substring and at least one token must contain two or more scalars.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel_id",
+            "in": "query",
+            "description": "Limit to one visible Channel or DM",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque next_cursor from this search",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of matching Messages from the full history, newest first. A page can have fewer than 20 hits and still have a next cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "search_query_too_short, search_query_too_long, invalid_cursor, or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, expired, or revoked Account Session credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "organization_unavailable or channel not found for an inaccessible or unknown Channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "search_rate_limited when Search admission is full or the Member exceeds the concurrency or rate cap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Database failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "search_unavailable when disabled or search_timeout when the database statement deadline expires; alternatively, This instance is stopping: graceful shutdown rejects new requests with error shutting_down; retry after Retry-After, keeping the same client_message_id for sends",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "no-store"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 1
+                },
+                "description": "Jittered retry delay in seconds (1 through 5)"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "cookie": []
+          },
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/ws": {
       "get": {
         "tags": [
@@ -7850,6 +7995,13 @@
             "format": "uuid"
           }
         }
+      },
+      "ChannelKind": {
+        "type": "string",
+        "enum": [
+          "channel",
+          "dm"
+        ]
       },
       "ChannelList": {
         "type": "object",
@@ -9300,6 +9452,45 @@
           "member",
           "guest"
         ]
+      },
+      "SearchHit": {
+        "type": "object",
+        "required": [
+          "message",
+          "channel_kind"
+        ],
+        "properties": {
+          "channel_kind": {
+            "$ref": "#/components/schemas/ChannelKind"
+          },
+          "message": {
+            "$ref": "#/components/schemas/Message",
+            "description": "An existing Message. Its deleted field is always false."
+          }
+        }
+      },
+      "SearchPage": {
+        "type": "object",
+        "required": [
+          "hits",
+          "next_cursor"
+        ],
+        "properties": {
+          "hits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            },
+            "maxItems": 20
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when there are no more hits."
+          }
+        }
       },
       "Section": {
         "type": "object",

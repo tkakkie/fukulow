@@ -1,5 +1,5 @@
 import { supervise, ownedContainer, ownedVolume, refuseLeftovers, ownershipLabel } from '../runtime.ts';
-import { loadManifest, verifyRuntime, resolveImage, verifySession, postgresArguments, runKind, smokeLabel } from '../manifest.ts';
+import { loadManifest, qualityMigrations, verifyRuntime, resolveImage, verifySession, postgresArguments, runKind, smokeLabel } from '../manifest.ts';
 // Quality only: full result sets, no timers or performance measurements.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -67,8 +67,8 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
   save(`${out}/verification.json`,{runKind:kind,image:imageRecord,owner:ownerVerification,
     app:{runtime:verifyRuntime(text=>app('postgres',text),docker,container,text=>owner('postgres',text)),
       session:verifySession(text=>app('postgres',text),'app')}});
-  const migrations = readdirSync('server/migrations').filter(n=>n.endsWith('.sql')).sort();
-  for (const p of migrations) owner('quality_base',`BEGIN; ${read(`server/migrations/${p}`)} COMMIT;`);
+  const migrations = qualityMigrations();
+  for (const p of migrations) owner('quality_base',`BEGIN; ${read(p)} COMMIT;`);
   owner('quality_base',read('load/search-engines/schema.sql')+read('deploy/db-grants.sql')+fixtureSql());
   verifySession(text=>owner('quality_base',text));
   verifySession(text=>app('quality_base',text),'app');
@@ -94,7 +94,7 @@ const hash = (s: string)=>createHash('sha256').update(s).digest('hex');
     source:command('git',['rev-parse','HEAD']),image: imageRecord,
     versions:owner('quality_base','SELECT version(); SELECT extname,extversion FROM pg_extension;'),
     packages:docker('exec',container,'dpkg-query','-W','postgresql-18','postgresql-18-pgdg-pgroonga','libgroonga0'),
-    hashes:Object.fromEntries([...migrations.map(n=>`server/migrations/${n}`),
+    hashes:Object.fromEntries([...migrations,
       ...readdirSync('load/search-engines/quality').map(n=>`load/search-engines/quality/${n}`),
       'load/search-engines/schema.sql','load/search-engines/seed.ts','load/search-engines/queries.ts','load/search-engines/Dockerfile',
       'deploy/db-grants.sql','deploy/db-roles.sql','deploy/db-role-settings.sql'].map(p=>[p,hash(read(p))]))});

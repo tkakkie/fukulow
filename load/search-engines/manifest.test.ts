@@ -1,15 +1,31 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings, appSessionSettings, runKind, manifestFile } from './manifest.ts';
+import { hash, snapshot, verifyManifest, verifyRuntime, extensions, packages, settings, resolveImage, postgresArguments, verifySession, sessionSettings, appSessionSettings, runKind, manifestFile, qualityMigrations } from './manifest.ts';
 import { boundedCommand } from './bench.ts';
 
 const frozen = snapshot();
 const document = {sha256:hash(JSON.stringify(frozen)),frozen};
 const recorded = (version: number) => JSON.parse(readFileSync(new URL(`./manifest-v${version}.json`,import.meta.url),'utf8'));
 test('checked-in current manifest matches the evaluation inputs',()=>{
-  assert.equal(manifestFile,'load/search-engines/manifest-v12.json');
-  assert.equal(verifyManifest(recorded(12)),document.sha256);
+  assert.equal(manifestFile,'load/search-engines/manifest-v13.json');
+  assert.equal(verifyManifest(recorded(13)),document.sha256);
+});
+test('v13 pins the quality migration set to v12 and preserves the B1 baseline',()=>{
+  const v12 = recorded(12), v13 = recorded(13);
+  assert.equal(hash(JSON.stringify(v12.frozen)),v12.sha256);
+  const {version,sourceHashes,b1,...conditions} = v13.frozen;
+  const {version:previousVersion,sourceHashes:previousSources,b1:previousB1,...previousConditions} = v12.frozen;
+  assert.equal(version,previousVersion+1);
+  assert.deepEqual(conditions,previousConditions);
+  assert.deepEqual(b1,{...previousB1,evidenceChecks:{...previousB1.evidenceChecks,
+    publication:'B1 artifacts must match a checked-in B1 manifest'}});
+  const before = new Map<string,string>(previousSources.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  const after = new Map<string,string>(sourceHashes.map((s: {path:string;sha256:string})=>[s.path,s.sha256]));
+  assert.deepEqual([...after.keys()],[...before.keys()]);
+  assert.deepEqual([...after.keys()].filter(path=>before.get(path)!==after.get(path)),
+    ['.gitattributes','load/search-engines/manifest.ts','load/search-engines/quality/run.ts','load/search-engines/summarize.ts']);
+  assert.deepEqual(qualityMigrations(),[...before.keys()].filter(path=>path.startsWith('server/migrations/')));
 });
 test('v12 records only the section placement lookup migration and its manifest bookkeeping',()=>{
   const v11 = recorded(11), v12 = recorded(12);
@@ -158,7 +174,7 @@ test('LF attributes cover exactly the frozen inputs and manifests',()=>{
   const attributes = readFileSync(new URL('../../.gitattributes',import.meta.url),'utf8')
     .split('\n').filter(line=>line && !line.startsWith('#'));
   assert.deepEqual(attributes,[...frozen.sourceHashes.map(source=>source.path),
-    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json','load/search-engines/manifest-v5.json','load/search-engines/manifest-v6.json','load/search-engines/manifest-v7.json','load/search-engines/manifest-v8.json','load/search-engines/manifest-v9.json','load/search-engines/manifest-v11.json',manifestFile]
+    'load/search-engines/manifest-v1.json','load/search-engines/manifest-v2.json','load/search-engines/manifest-v3.json','load/search-engines/manifest-v4.json','load/search-engines/manifest-v5.json','load/search-engines/manifest-v6.json','load/search-engines/manifest-v7.json','load/search-engines/manifest-v8.json','load/search-engines/manifest-v9.json','load/search-engines/manifest-v11.json','load/search-engines/manifest-v12.json',manifestFile]
     .sort().map(path=>`/${path} text eol=lf`));
 });
 test('manifest content tampering is refused',()=>{

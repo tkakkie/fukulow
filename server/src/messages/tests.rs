@@ -20,6 +20,7 @@ mod mentions;
 mod move_topic;
 mod receipts;
 mod replay_plans;
+mod search;
 mod text_input;
 pub(super) mod unread;
 
@@ -506,10 +507,27 @@ async fn equal_ids_in_two_organizations_do_not_collide(pool: PgPool) {
     let a = sent(&app, &first_token, channel_id, input(client_id, "first")).await;
     let mut b = sent(&app, &second_token, channel_id, input(client_id, "second")).await;
     assert_ne!(a["id"], b["id"]);
-    // Fixture only: force equal canonical ids too, exercising the composite primary key.
-    sqlx::query("UPDATE messages SET id = $3 WHERE organization_id = $1 AND channel_id = $2 AND client_message_id = $4")
-        .bind(second).bind(channel_id).bind(Uuid::parse_str(a["id"].as_str().unwrap()).unwrap())
-        .bind(client_id).execute(&pool).await.unwrap();
+    // This fixture rewrites a canonical id and rebuilds its derived search terms.
+    let original = serde_json::from_value::<Uuid>(b["id"].clone()).unwrap();
+    let shared = serde_json::from_value::<Uuid>(a["id"].clone()).unwrap();
+    crate::database::organization(&pool, second, async |tx: &mut sqlx::PgConnection| {
+        sqlx::query(
+            "DELETE FROM message_search_terms WHERE organization_id = $1 AND message_id = $2",
+        )
+        .bind(second)
+        .bind(original)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE messages SET id = $3 WHERE organization_id = $1 AND id = $2")
+            .bind(second)
+            .bind(original)
+            .bind(shared)
+            .execute(&mut *tx)
+            .await?;
+        super::search::D3rEngine::insert_terms(tx, second, &[shared]).await
+    })
+    .await
+    .unwrap();
     b["id"] = a["id"].clone();
     assert_eq!(
         sent(&app, &second_token, channel_id, input(client_id, "second")).await,

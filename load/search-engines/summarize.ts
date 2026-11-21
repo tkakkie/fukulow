@@ -191,8 +191,11 @@ export function summarize(root: string, publication: 'evaluation'|'smoke' = 'eva
   }
   if (!manifestHash || runs.some(r=>r.manifestHash!==manifestHash || (r.runKind ?? 'evaluation')!==kind)) throw new Error('Result manifest hash mismatch');
   if (manifest.frozen.b1) {
-    const frozenB1 = JSON.parse(readFileSync(new URL('manifest-v11.json',import.meta.url),'utf8'));
-    if (manifestHash!==frozenB1.sha256) throw new Error('B1 artifact must match the checked-in v11 manifest');
+    const approved = [11, 13].some(version=>{
+      const frozen = JSON.parse(readFileSync(new URL(`manifest-v${version}.json`,import.meta.url),'utf8'));
+      return manifestHash===frozen.sha256;
+    });
+    if (!approved) throw new Error('B1 artifact must match a checked-in B1 manifest');
     const performance = kind==='smoke' ? {...manifest.frozen.performance,...manifest.frozen.smoke.performance} : manifest.frozen.performance;
     const {classes,...verdict} = judgeB1({rounds:runs,queries:readJson(`${root}/queries.json`),
       denials:readJson(`${root}/denials.json`),restore:readJson(`${root}/restore.json`),timing:readJson(`${root}/timing.json`)},
