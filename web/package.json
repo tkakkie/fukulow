@@ -12,8 +12,7 @@
     "precheck": "npm run wasm",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p tsconfig.backup.json && tsc -p tsconfig.worker.json",
     "pretest": "npm run wasm",
-    "test": "vitest run && npm run test:perf",
-    "test:perf": "FUKULOW_PERF_TESTS=1 vitest run",
+    "test": "vitest run",
     "e2e": "playwright test",
     "e2e:compose": "playwright test -c playwright.compose.config.ts"
   },

@@ -36,10 +36,14 @@ export default defineConfig(({ mode }) => {
     ],
     // Same reason for the runtime: resolve svelte's browser build (it needs no DOM) instead of its server build.
     ssr: { resolve: { conditions: test ? ['browser', 'module', 'node', 'development|production'] : undefined } },
-    // Timing-ratio tests run alone in a second pass (`npm run test:perf`): other test files running in
-    // parallel inflate their ratios (#753).
-    test: process.env.FUKULOW_PERF_TESTS === '1'
-      ? { setupFiles: ['./scripts/init-wasm.ts'], include: [PERF_TESTS], fileParallelism: false }
-      : { setupFiles: ['./scripts/init-wasm.ts'], exclude: ['e2e/**', 'e2e-compose/**', 'node_modules/**', PERF_TESTS] },
+    test: {
+      setupFiles: ['./scripts/init-wasm.ts'],
+      // Timing-ratio tests run after every other file, one file at a time: other test files running
+      // in parallel inflate their ratios (#753).
+      projects: [
+        { extends: true, test: { name: 'unit', exclude: ['e2e/**', 'e2e-compose/**', 'node_modules/**', PERF_TESTS], sequence: { groupOrder: 0 } } },
+        { extends: true, test: { name: 'perf', include: [PERF_TESTS], fileParallelism: false, sequence: { groupOrder: 1 } } },
+      ],
+    },
   }
 })

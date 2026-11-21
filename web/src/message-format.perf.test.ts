@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { clearMessageFormatCache, tokenizeMessageBody, type BlockToken, type InlineToken } from './message-format'
 
 // Timing ratios only hold without other test files competing for the CPU: inside the parallel
-// suite they reached 18 on an idle 10-CPU host against at most 10 alone (#753). `npm test`
-// runs `*.perf.test.ts` files in a second, sequential pass after the main suite.
+// suite they reached 18 on an idle 10-CPU host against at most 10 alone (#753). The `perf`
+// project in vite.config.ts runs `*.perf.test.ts` files after every other file, one at a time.
 
 // '**http://u:`**@x/ ** ' + 'http://@/'.repeat(n) + '`http://@', cut to exactly `size` characters
 function outOfOrderUrlBody(size: number): string {
