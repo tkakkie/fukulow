@@ -1490,7 +1490,9 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
       expect(buttonsByText(refusedRow, '編集して送り直す')).toHaveLength(1)
 
       // Guard in handleConfirmReplace: if the target becomes retryable before 置き換える, canRestore is false and draft is preserved
-      buttonsByText(refusedRow, '編集して送り直す')[0].click()
+      const opener = buttonsByText(refusedRow, '編集して送り直す')[0]
+      opener.focus()
+      opener.click()
       flushSync()
       await tick()
       const dialog = host.querySelector('[role="dialog"]')!
@@ -1502,6 +1504,8 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
       await tick()
       flushSync()
       expect(host.querySelector('[role="dialog"]')).toBeNull()
+      expect(opener.isConnected).toBe(false)
+      expect(dom.doc.activeElement).toBe(textarea)
       expect(rc.composer.draft).toBe('入力中の返信下書き')
       expect(textarea.value).toBe('入力中の返信下書き')
       expect(ch.timeline.pending).toHaveLength(2)

@@ -31,7 +31,7 @@
   import type { UnreadAdapter } from './unread.svelte'
   import SearchAnchorStatus from './ui/SearchAnchorStatus.svelte'
   import Button from './ui/Button.svelte'
-  import Dialog from './ui/Dialog.svelte'
+  import ReplaceDraftDialog from './ui/ReplaceDraftDialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
   import ReadMarker from './ui/ReadMarker.svelte'
@@ -716,12 +716,9 @@
     />
   </div>
 
-  <Dialog
-    open={confirmReplaceId !== null}
-    title="入力中の下書きを置き換えますか？"
+  <ReplaceDraftDialog
+    pendingId={confirmReplaceId}
     description="入力中の下書きを破棄して、送信できなかったメッセージを入力欄に戻します。"
-    confirmLabel="置き換える"
-    cancelLabel="キャンセル"
     returnFocusFallback={composerRef}
     onconfirm={handleConfirmReplace}
     oncancel={handleCancelReplace}
