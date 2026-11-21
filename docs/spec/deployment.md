@@ -76,7 +76,7 @@ The maintainer chooses how to issue and renew certificates.
 - DNS-01 keeps 80/443 closed. Use a reviewed, pinned custom Caddy build with a DNS provider module (absent from stock), a private least-privilege DNS API token outside the checkout, and outbound DNS/ACME. Account for DNS propagation and token custody.
 - HTTP-01 (80) or TLS-ALPN-01 (443) needs correct public DNS and a deliberate short public opening. Isolation weakens during the opening. Renew in another approved window before expiry or switch to DNS-01. One opening cannot renew unattended. An opening has two layers, both temporary:
   - the provider packet filter (and any host firewall) allows the port;
-  - Compose publishes it on the public address: start the proxy without the override, or with a private temporary override that adds only that port.
+  - Compose publishes it on the public address: prefer a private temporary override whose `ports: !override` lists the loopback 443 plus only the challenge port (for example `"80:80"`), so no other port is published. A plain `ports:` list appends to the base.
   - The filter change can take effect with a delay. Before requesting the certificate, confirm the port is reachable from an external source. A first attempt that fails before the filter applies can be retried in the same window.
   - After issuance, close the filter and restart the proxy with the loopback-only override. Then rerun the check block above and the restriction checks below.
 
