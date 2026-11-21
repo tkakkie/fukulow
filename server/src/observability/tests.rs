@@ -171,10 +171,12 @@ fn revocation_measurement_is_off_by_default_and_with_zero() {
         assert!(!stdout.contains("measurement_test"), "{stdout}");
         if value == Some("1") {
             assert!(
-                serde_json::from_str::<Value>(&stderr).is_ok_and(|event| {
-                    event["level"] == "TRACE"
-                        && event["target"] == REVOCATION_MEASUREMENT_TARGET
-                        && event["fields"]["event"] == "measurement_test"
+                stderr.lines().any(|line| {
+                    serde_json::from_str::<Value>(line).is_ok_and(|event| {
+                        event["level"] == "TRACE"
+                            && event["target"] == REVOCATION_MEASUREMENT_TARGET
+                            && event["fields"]["event"] == "measurement_test"
+                    })
                 }),
                 "expected a measurement trace: {stderr}"
             );
