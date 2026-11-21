@@ -1370,7 +1370,9 @@ Results are medians of rounds with [min–max]. Each change is against B; W and 
 | Peak memory, pre-GC (MiB) | 46.30 | 52.19 (+12.8%; 27 pages) | 44.37 | ≤ +20% | MET |
 | Memory growth slope, 2.5k–10k msg | 269.09 B/msg, +0 pages | 255.87 B/msg, +0 pages | 2.39 B/msg, +0 pages | ≤ +64 B/msg, +0 pages | HOLD |
 
-- **Bulk INCONCLUSIVE.** Seven of the eight bulk sub-metrics are MET. The eighth, catch-up 250 p95, is INCONCLUSIVE because base's 5-round spread is 19.9%, which is over the 10% noise rule. The cause is base round 4 at 6.17 ms, against 5.14–5.21 ms in the other rounds. That slot ran at 08:38–08:41 with a 5-minute load of 1.57–1.66, before the load rise, so the cause is not determined. PR's five rounds were 3.93–4.21 ms, and every paired delta was between −18.0% and −36.3%.
+- **Bulk INCONCLUSIVE, not a pass.** Seven of the eight bulk sub-metrics are MET. The eighth, catch-up 250 p95, is INCONCLUSIVE because base's 5-round spread is 19.9%, which is over the 10% noise rule. The cause is base round 4 at 6.17 ms, against 5.14–5.21 ms in the other rounds. That slot ran at 08:38–08:41 with a 5-minute load of 1.57–1.66, before the load rise, so the cause is not determined. PR's five rounds were 3.93–4.21 ms, and every paired delta was between −18.0% and −36.3%.
+- **Growth slope HOLD, not a pass.** The target is absolute: at most 64 B/msg and no added wasm pages. W's median is 255.87 B/msg, so it is held. Base is 269.09 B/msg, so the slope predates this PR, which does not make it worse. The old TS core grows 2.39 B/msg. Tracked in #489.
+- **Open items.** Both stay open after the merge. The next run of this harness (the #489 re-measurement) re-checks them.
 - **Host load.** From 08:43 the 5-minute load rose to 3.5–4.7 because of macOS `mediaanalysisd`; no workers were running. That covers TS round 4 and all of round 5. The rounds 4–5 vs 1–3 comparison below was not pre-registered, so it is report-only, and no round was excluded:
   - `step()` and catch-up 1000 are within about 1–2% in all arms, except base round 4 catch-up at 18.43 ms against about 17.8 ms.
   - 100 msg/s p95 is higher in rounds 4–5 in every arm.
