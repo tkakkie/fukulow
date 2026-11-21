@@ -209,6 +209,10 @@ test('unparseable app event lines are kept for diagnosis: redacted shape, at mos
   assert.deepEqual(lines.map(l => Buffer.byteLength(l)), [bad(1).length, 2048, bad(2).length, bad(3).length, bad(4).length]);
   assert.equal(lines[0], bad(1));
   assert.deepEqual(unparseableAppLines(pools(3).join('\n')), []);
+  // The cap counts UTF-8 bytes and never splits a character.
+  const [wide] = unparseableAppLines(`${'\u3000'.repeat(683)}pool_stats`);
+  assert.equal(wide, '\u3000'.repeat(682));
+  assert.ok(Buffer.byteLength(wide) <= 2048 && !wide.includes('\ufffd'));
 });
 
 test('unparseable app line capture never keeps non-constant values', () => {
@@ -223,8 +227,13 @@ test('unparseable app line capture never keeps non-constant values', () => {
   for (const l of lines) for (const secret of secrets) assert.ok(!l.includes(secret), `${secret} in ${l}`);
   assert.equal(lines[0], '{"timestamp":"<20>","target":"fukulow","fields":{"event":"websocket_closed","id":"<36>","token":"<64>",' +
     '"esc":"<27>","route":"<16>"');
-  assert.equal(lines[1], 'pool_stats <24> <16> <16> <7> <6> xyz');
+  assert.equal(lines[1], '<10> <24> <16> <16> <2>:5432 <6> <3>');
   assert.equal(lines[2], `{"target":"fukulow","fields":{"event":"http_completed","path":"<unterminated ${secrets[3].length}>`);
   assert.equal(redactedShape('{"a":"b c","n":12,"x":true}'), '{"a":"<3>","n":12,"x":true}');
-  assert.equal(redactedShape(`"${'deadbeef'.repeat(2)}" ${'f'.repeat(16)} "deadbeef"`), '"<16>" <16> "deadbeef"');
+  // Constant-shaped values survive only under constant keys (and log levels).
+  assert.equal(redactedShape('{"target":"fukulow","level":"INFO","token":"tok_live_q7m4z9","fields":{"event":"websocket_closed","kind":"pool_timeout"}'),
+    '{"target":"fukulow","level":"INFO","token":"<15>","fields":{"event":"websocket_closed","kind":"pool_timeout"}');
+  assert.equal(redactedShape('{"level":"Bearer","event":"Tok_1"'), '{"level":"<6>","event":"<5>"');
+  assert.equal(redactedShape('{"target":"fukulow","values":[1,2,true,null,-3.5,x9]'), '{"target":"fukulow","values":[1,2,true,null,-3.5,<2>]');
+  assert.equal(redactedShape(`"${'deadbeef'.repeat(2)}" ${'f'.repeat(16)} "deadbeef"`), '"<16>" <16> "<8>"');
 });

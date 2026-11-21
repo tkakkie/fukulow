@@ -58,22 +58,37 @@ const appEventHint = /"target":"fukulow"|pool_stats|database_failure|websocket_|
 
 // The unknown-kind shape, minus hex runs that could be tokens.
 const constantShape = (text: string) => /^[a-z][a-z0-9_]{0,31}$/.test(text) && !/^[0-9a-f]{16,}$/.test(text);
-const plainWord = (w: string) =>
-  constantShape(w) || /^[:,]*(?:-?\d+(?:\.\d+)?|true|false|null)?[:,]*$/.test(w) ? w : `<${w.length}>`;
+// Values kept verbatim only under keys whose values the server writes as code constants.
+const constantKeys = new Set(['target', 'event', 'kind', 'code', 'operation', 'coverage']);
+const plainWord = (w: string) => /^(?:-?\d+(?:\.\d+)?|true|false|null)$/.test(w) ? w : `<${w.length}>`;
 
-/** Keeps a line's JSON shape: constant-shaped strings and words verbatim, anything else as its length. */
+/** Keeps a line's JSON shape: punctuation, numbers, literals, constant-shaped keys and constant values; the rest as lengths. */
 export function redactedShape(line: string): string {
-  let out = '';
+  let out = '', key: string | undefined;
   for (let i = 0; i < line.length;) {
     const quote = line.indexOf('"', i);
-    out += (quote < 0 ? line.slice(i) : line.slice(i, quote)).replace(/[^\s{}[\]]+/g, plainWord);
+    out += (quote < 0 ? line.slice(i) : line.slice(i, quote)).replace(/[^\s{}[\]:,]+/g, plainWord);
     if (quote < 0) break;
     let end = quote + 1;
     while (end < line.length && line[end] !== '"') end += line[end] === '\\' ? 2 : 1;
     if (end >= line.length) { out += `"<unterminated ${line.length - quote - 1}>`; break; }
     const text = line.slice(quote + 1, end);
-    out += constantShape(text) ? `"${text}"` : `"<${text.length}>"`;
+    const isKey = /^\s*:/.test(line.slice(end + 1));
+    const keep = isKey ? constantShape(text)
+      : key === 'level' ? (logLevels as readonly string[]).includes(text) : key !== undefined && constantKeys.has(key) && constantShape(text);
+    out += keep ? `"${text}"` : `"<${text.length}>"`;
+    key = isKey ? text : undefined;
     i = end + 1;
+  }
+  return out;
+}
+
+function capBytes(text: string, maxBytes: number) {
+  let out = '', bytes = 0;
+  for (const char of text) {
+    bytes += Buffer.byteLength(char);
+    if (bytes > maxBytes) break;
+    out += char;
   }
   return out;
 }
@@ -84,7 +99,7 @@ export function unparseableAppLines(log: string, limit = 5, maxBytes = 2048): st
   for (const line of log.split('\n')) {
     if (lines.length >= limit) break;
     if (!line.trim() || /"event":"panic"/.test(line) || parse(line) || !appEventHint.test(line)) continue;
-    lines.push(Buffer.from(redactedShape(line)).subarray(0, maxBytes).toString());
+    lines.push(capBytes(redactedShape(line), maxBytes));
   }
   return lines;
 }

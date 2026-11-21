@@ -349,6 +349,7 @@ test('collapsed: valid B and an A over 1 s with HTTP 5xx or client timeouts and 
     [a([mismatchReason], 1000), validArm, 'collapsed'],
     [a([parse], 1000, failures(0, 1)), validArm, 'collapsed'],
     [a([dropReason, parse], 1000, failures(0, 0, 1)), validArm, 'collapsed'],
+    [a([parse], 1000, { ...failures(), clientHttp5xx: 1 }), validArm, 'collapsed'], // client-observed 502 alone
     [a([dropReason, parse], 999.9), validArm, null],
     [a([dropReason, parse], null), validArm, null],
     [a([dropReason, parse], 5000, failures()), validArm, null],
@@ -362,4 +363,13 @@ test('collapsed: valid B and an A over 1 s with HTTP 5xx or client timeouts and 
   }
   // slow_with_drops keeps priority over collapsed.
   assert.equal(classifyPair(validArm, a([dropReason], 5000)).diagnosticClassification, 'slow_with_drops');
+});
+
+test('diagnosticAppEvidence returns redacted unparseable lines on both log paths', () => {
+  const broken = '{"target":"fukulow","fields":{"event":"websocket_closed","id":"3f2b8c1e"';
+  const shape = '{"target":"fukulow","fields":{"event":"websocket_closed","id":"<8>"';
+  assert.deepEqual(diagnosticAppEvidence(broken, 1000, 71000).unparseableLines, [shape]);
+  // The legacy path strips Docker timestamps before capture.
+  const legacy = diagnosticAppEvidence(`1970-01-01T00:00:00.999000000Z ${broken}`, 1000, 71000, undefined, { startedAt: 71001, uninterrupted: true });
+  assert.deepEqual(legacy.unparseableLines, [shape]);
 });
