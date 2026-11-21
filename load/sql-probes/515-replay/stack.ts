@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { dbCommand } from '../../slice5/stack.ts';
 import { fixture, type Arm } from '../../slice5/config.ts';
 import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, settleSQL } from '../../slice5/fixture.ts';
+import { setupOptions, sqlState, sqlStateMeaning, tcpReadinessArgs, waitReady } from '../../harness-core/postgres.ts';
 
 const locale = { LC_ALL: 'C' };
 export function cmd(file: string, args: string[], input?: string, env = { ...process.env, ...locale }) {
@@ -12,11 +13,10 @@ export function cmd(file: string, args: string[], input?: string, env = { ...pro
     input, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 15 * 60_000, stdio: ['pipe', 'pipe', 'pipe'],
   });
   if (child.status !== 0) {
-    // Child diagnostics can embed connection strings or SQL. Keep only SQLSTATE.
-    const sqlState = /^(?:psql:.*?:\s*)?(?:FATAL|ERROR):\s+([A-Z0-9]{5})(?=[:\s]|$)/m.exec(child.stderr ?? '')?.[1];
+    const state = sqlState(child.stderr ?? '');
     const benchError = /^(pgbench: error: (?:client |invalid command|unexpected|undefined variable|invalid input).*)$/m.exec(child.stderr ?? '')?.[1];
     if (benchError) throw new Error(benchError.replace(/["'][^"']*["']/g, '<quoted>'));
-    throw new Error(`${file} failed (${sqlState ?? (child.error as NodeJS.ErrnoException | undefined)?.code ?? child.signal ?? child.status})`);
+    throw new Error(`${file} failed (${state ? state + (sqlStateMeaning[state] ? ': ' + sqlStateMeaning[state] : '') : (child.error as NodeJS.ErrnoException | undefined)?.code ?? child.signal ?? child.status})`);
   }
   return child.stdout.trim();
 }
@@ -42,8 +42,9 @@ export function stack(source: string, work: string, arm: Arm, commit: string, pr
   if (cmd('docker', ['ps', '-aq', '--filter', 'label=com.docker.compose.project=' + project])) {
     throw new Error('Disposable Compose project already exists');
   }
-  const start = () => {
+  const start = async () => {
     dc(['up', '-d', '--no-build', '--wait', '--wait-timeout', '90', 'db']);
+    await waitReady(() => { try { dc(tcpReadinessArgs(['exec', '-T', 'db'])); return true; } catch { return false; } });
     dc(['run', '--rm', '--no-deps', '--pull', 'never', '--name', project + '-migrate', 'migrate']);
     const dir = join(source, 'server/migrations');
     const expected = readdirSync(dir).filter(name => /^\d+_.*\.sql$/.test(name)).sort().map(name =>
@@ -60,14 +61,17 @@ export function stack(source: string, work: string, arm: Arm, commit: string, pr
       migrationImageId: cmd('docker', ['image', 'inspect', '--format', '{{.Id}}', image]),
     };
   };
-  const client = (role: string, args: string[], input?: string, planMode = 'auto') => dc([
-    'exec', '-T', '-e', `PGOPTIONS=${pgOptions} -c plan_cache_mode=${planMode}`, '-e', 'LC_ALL=C', 'db',
+  const client = (role: string, args: string[], input?: string, planMode = 'auto', setup = false) => dc([
+    'exec', '-T', '-e', `PGOPTIONS=${setup ? setupOptions(pgOptions) : pgOptions} -c plan_cache_mode=${planMode}`, '-e', 'LC_ALL=C', 'db',
     'sh', '-c', role === runtime ? 'export PGPASSWORD="$POSTGRES_APP_PASSWORD"; exec "$@"' :
       'export PGPASSWORD="$POSTGRES_PASSWORD"; exec "$@"',
     'sql-probe', args[0], '-h', '127.0.0.1', '-U', role, '-d', 'fukulow', ...args.slice(1),
   ], input);
   const psql = (sql: string, role = owner, mode = 'auto') =>
     client(role, ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=sqlstate', '-f', '-'], sql, mode);
+  // Seed, settle and VACUUM at full fixture size run without the measurement statement_timeout.
+  const setup = (sql: string) =>
+    client(owner, ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=sqlstate', '-f', '-'], sql, 'auto', true);
   const logPrefix = '/tmp/fk515d-pgbench';
   const pgbench = (script: string, variables: Record<string, string | number>, count: number) => {
     const report = client(runtime, ['pgbench', '-n', '-c', '1', '-j', '1', '-M', 'simple', '-t', String(count),
@@ -77,7 +81,7 @@ export function stack(source: string, work: string, arm: Arm, commit: string, pr
     return { report, log };
   };
   const stop = () => dc(['down', '--volumes']);
-  return { start, stop, psql, pgbench };
+  return { start, stop, psql, setup, pgbench, pgImage: pg };
 }
 
 export type Stack = ReturnType<typeof stack>;
@@ -91,7 +95,7 @@ export const token = '\\x' + '0'.repeat(64);
 
 export function seed(db: Stack, arm: Arm, sizes: readonly number[]) {
   const channels = Array.from({ length: fixture.channels }, (_, i) => channel(i));
-  db.psql(`BEGIN;
+  db.setup(`BEGIN;
     INSERT INTO organizations (organization_id,name) VALUES ('${organization}','Organization A');
     INSERT INTO accounts (id,email,password_hash)
       SELECT md5('fk515d/account/' || n)::uuid,'member-' || n || '@example.invalid','sql-probe-no-login'
@@ -106,14 +110,14 @@ export function seed(db: Stack, arm: Arm, sizes: readonly number[]) {
     INSERT INTO channels (organization_id,id,name,visibility)
       VALUES ${channels.map((channelId, i) => `('${organization}','${channelId}','load-${i}','public')`).join(',')};
     COMMIT;`);
-  db.psql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements;');
-  db.psql(autovacuumSQL);
-  db.psql(prefillSQL(organization, channels, channels.map((_, i) => sizes[i] ?? 0)));
-  db.psql(channelLogSQL(arm, organization, channels.slice(0, sizes.length)));
+  db.setup('CREATE EXTENSION IF NOT EXISTS pg_stat_statements;');
+  db.setup(autovacuumSQL);
+  db.setup(prefillSQL(organization, channels, channels.map((_, i) => sizes[i] ?? 0)));
+  db.setup(channelLogSQL(arm, organization, channels.slice(0, sizes.length)));
   const settings: unknown = JSON.parse(db.psql(appliedSettingsSQL));
   const checksum = db.psql(checksumSQL);
   if (!/^[0-9a-f]{32}$/.test(checksum)) throw new Error('Missing fixture checksum');
-  db.psql(settleSQL);
+  db.setup(settleSQL);
   const generation = arm === 'A' ? db.psql(`SELECT history_generation FROM organizations WHERE organization_id='${organization}';`) : null;
   if (generation !== null && !/^[0-9a-f-]{36}$/.test(generation)) throw new Error('Missing history generation');
   return { settings, checksum, generation };

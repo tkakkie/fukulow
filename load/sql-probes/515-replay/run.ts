@@ -9,11 +9,14 @@ import { fixture, nights, partA, partC, type Arm } from '../../slice5/config.ts'
 import { execute, extract, prepare, quote, type Bindings, type Statement } from './sql.ts';
 import { describePlan, modes, pgbenchScript, pgbenchTimings, position, preparedState, psqlTiming, quantiles, sections, timings, type Cell } from './measure.ts';
 import { channel, cmd, member, organization, owner, pgOptions, runtime, seed, stack, token, type Stack } from './stack.ts';
+import { assertDockerHeadroom } from '../../harness-core/host.ts';
+import { modeOf, stages } from '../../harness-core/stages.ts';
 
-const usage = 'node load/sql-probes/515-replay/run.ts (--smoke | --recorded) --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
-const { values } = parseArgs({ options: { out: { type: 'string' }, smoke: { type: 'boolean' }, recorded: { type: 'boolean' }, help: { type: 'boolean' } } });
+const usage = 'node load/sql-probes/515-replay/run.ts (--smoke | --rehearsal | --recorded) --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
+const { values } = parseArgs({ options: { out: { type: 'string' }, smoke: { type: 'boolean' }, rehearsal: { type: 'boolean' }, recorded: { type: 'boolean' }, help: { type: 'boolean' } } });
 if (values.help) { console.log(usage); process.exit(0); }
-if (!values.out || Boolean(values.smoke) === Boolean(values.recorded)) throw new Error(usage);
+if (!values.out) throw new Error(usage);
+const mode = modeOf(values);
 
 const root = realpathSync(fileURLToPath(new URL('../../../', import.meta.url)));
 process.chdir(root);
@@ -23,12 +26,16 @@ const save = (path: string, value: unknown) => writeFileSync(join(out, path), JS
 const text = (path: string, value: string) => writeFileSync(join(out, path), value + '\n');
 const work = mkdtempSync(join(realpathSync(tmpdir()), 'fk515d-'));
 const project = 'fk515d-' + randomUUID();
-const smoke = Boolean(values.smoke);
+const smoke = mode === 'smoke';
+// Rehearsal: the recorded fixture size end to end through setup, then one short cell and one block pair. Never evidence.
+const rehearsal = mode === 'rehearsal';
 const sizes = smoke ? [20_000, 10_000] : fixture.replayChannels.map(c => c.messages);
-const blockSize = smoke ? 10 : 500;
+const blockSize = smoke ? 10 : rehearsal ? 50 : 500;
 const warmups = smoke ? 2 : partC.warmups;
-const order = [['B', 'A'], ['A', 'B']] as const;
-const cells = partC.cells.map(name => {
+const order = rehearsal ? [['B', 'A']] as const : [['B', 'A'], ['A', 'B']] as const;
+// Two arms of the full fixture plus WAL and settle margin; an estimate, checked on the Docker VM disk.
+const requiredBytes = 2 * sizes.reduce((a, b) => a + b, 0) * 2048 + 4 * 1024 ** 3;
+const cells = (rehearsal ? partC.cells.slice(0, 1) : partC.cells).map(name => {
   const [size, depth] = name.split('-');
   return { name, depth, size: sizes[size === '1M' ? 0 : 1] };
 });
@@ -37,8 +44,7 @@ const cleanup: Stack[] = [];
 const inventory = new Map<Arm, ReturnType<typeof extract>>();
 const clusters = new Map<Arm, Stack>();
 const samples: ReturnType<typeof sampleBlock>[] = [];
-const complete: string[] = [];
-let stage = 'initialization';
+const run = stages(out, mode);
 let interrupted = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { interrupted = true; });
 const stopIfInterrupted = () => { if (interrupted) throw new Error('Interrupted'); };
@@ -135,7 +141,7 @@ function requestInventory(arm: Arm, sequence: Statement[]) {
 function summary() {
   const a = inventory.get('A')?.sequence;
   const b = inventory.get('B')?.sequence;
-  const lines = ['# #515 R1 SQL diagnosis', '', smoke ? '**SMOKE — shape validation only.**' : '**Recorded SQL diagnosis.**',
+  const lines = ['# #515 R1 SQL diagnosis', '', smoke ? '**SMOKE — shape validation only.**' : rehearsal ? '**REHEARSAL — full-size setup check, never evidence.**' : '**Recorded SQL diagnosis.**',
     '', 'This probe does not judge the cause of the formal R1 HTTP gap; the report compares the results below with it. The probe measures the settled database on one connection without the concurrent sender, pool scheduling, Rust row decoding or HTTP. The reference HTTP p95 difference is approximately 0.8–1.1 ms.', '',
     '## Request inventory', '', ...(a ? requestInventory('A', a) : []), ...(b ? requestInventory('B', b) : []),
     'A repeats visibility inside its page. Mentions and history generation are inline in A, and Mentions are inline in B. The requested limit is 50 and both SQL pages fetch 51 to test has_more.', '',
@@ -167,11 +173,10 @@ function summary() {
 }
 
 try {
-  const setup: Partial<Record<Arm, unknown>> = {};
+  const setup: Record<string, unknown> = {};
   for (const arm of arms) {
     stopIfInterrupted();
-    stage = arm + ' source and PostgreSQL stack';
-    console.log('fk515d: ' + stage);
+    run.enter('fk515d: ' + arm + ' source and PostgreSQL stack');
     const source = join(work, arm);
     mkdirSync(source);
     const tar = source + '.tar';
@@ -185,8 +190,9 @@ try {
     const db = stack(source, work, arm, commits[arm], `${project}-${arm.toLowerCase()}`);
     cleanup.push(db);
     clusters.set(arm, db);
-    const image = db.start();
-    stage = arm + ' fixture and first settle';
+    const image = await db.start();
+    if (arm === 'B' && !smoke) setup.headroom = assertDockerHeadroom(db.pgImage!, requiredBytes);
+    run.enter('fk515d: ' + arm + ' fixture and first settle');
     const seeded = seed(db, arm, sizes);
     if (arm === 'A' && seeded.checksum !== (setup.B as { checksum: string }).checksum) throw new Error('Fixture checksums differ');
     setup[arm] = { ...image, ...seeded, runtime: roleCheck(db, arm, runtime), ownerControl: roleCheck(db, arm, owner) };
@@ -194,18 +200,18 @@ try {
   const harnessPath = fileURLToPath(new URL('.', import.meta.url));
   const hashes = Object.fromEntries(readdirSync(harnessPath).filter(file => file.endsWith('.ts')).sort().map(file =>
     [file, createHash('sha256').update(readFileSync(join(harnessPath, file))).digest('hex')]));
-  save('metadata.json', { smoke, commits, setup, cells, fixture: { organizations: 1, members: fixture.members, channels: fixture.channels, bodyBytes: Buffer.byteLength(fixture.shortBody) }, planModes: modes, timingPlanMode: 'auto', order, blockSize, warmups,
+  save('metadata.json', { mode, smoke, commits, setup, cells, fixture: { organizations: 1, members: fixture.members, channels: fixture.channels, bodyBytes: Buffer.byteLength(fixture.shortBody) }, planModes: modes, timingPlanMode: 'auto', order, blockSize, warmups,
     cache: 'VACUUM FREEZE ANALYZE and CHECKPOINT after prefill, then VACUUM ANALYZE, CHECKPOINT and idle per cell; client warmups for timing; no OS cache flush',
     client: 'One psql/pgbench client over TCP loopback in the PostgreSQL container per block',
     pgOptions, node: process.version, harnessCommit: cmd('git', ['rev-parse', 'HEAD']), harnessHashes: hashes, started: new Date().toISOString() });
 
+  run.startSampling();
   for (const cell of cells) {
     stopIfInterrupted();
-    stage = cell.name + ' settle and plans';
-    console.log('fk515d: ' + stage);
+    run.enter('fk515d: ' + cell.name + ' settle and plans');
     for (const arm of arms) {
       mkdirSync(join(out, arm, cell.name));
-      clusters.get(arm)!.psql('VACUUM (ANALYZE);\nCHECKPOINT;');
+      clusters.get(arm)!.setup('VACUUM (ANALYZE);\nCHECKPOINT;');
     }
     await new Promise(resolve => setTimeout(resolve, partA.idleSeconds * 1000));
     for (const arm of arms) {
@@ -213,7 +219,7 @@ try {
       const { sequence, controls } = inventory.get(arm)!;
       for (const mode of modes) {
         stopIfInterrupted();
-        stage = `${arm} ${cell.name} ${mode} plans`;
+        run.enter(`fk515d: ${arm} ${cell.name} ${mode} plans`);
         const bindings = binding(cell);
         const results = {
           runtime: plans(db, mode, sequence, bindings, runtime),
@@ -228,20 +234,19 @@ try {
     }
     for (const [block, pair] of order.entries()) {
       stopIfInterrupted();
-      stage = `${cell.name} block ${block} host load`;
+      run.enter(`fk515d: ${cell.name} block ${block} host load`);
       save(`host-${cell.name}-${block}.json`, { time: new Date().toISOString(), arms: pair,
         uptime: cmd('uptime', []), processes: cmd('ps', ['-axo', 'pid,pcpu,comm']),
         docker: cmd('docker', ['stats', '--no-stream']) });
       for (const arm of pair) {
-        stage = `${arm} ${cell.name} block ${block} timing`;
-        console.log('fk515d: ' + stage);
+        run.enter(`fk515d: ${arm} ${cell.name} block ${block} timing`);
         samples.push(sampleBlock(arm, cell, block, clusters.get(arm)!, inventory.get(arm)!.sequence));
-        complete.push(stage);
+        run.done(run.stage);
       }
     }
   }
 } catch (error) {
-  console.error(`fk515d: ${stage}: ${(error as Error).message}`);
+  console.error(`${run.stage}: ${(error as Error).message}`);
   process.exitCode = 1;
 } finally {
   for (const db of cleanup.reverse()) {
@@ -252,7 +257,8 @@ try {
   }
   rmSync(work, { recursive: true, force: true });
   summary();
-  save('status.json', { complete, smoke, success: !process.exitCode && !interrupted, interrupted, lastStage: stage, finished: new Date().toISOString() });
+  const status = run.write({ failed: Boolean(process.exitCode), interrupted });
+  console.log('fk515d: outcome ' + status.outcome);
   if (interrupted) process.exitCode = 1;
   console.log('fk515d: output ' + out);
 }
