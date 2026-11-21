@@ -258,8 +258,8 @@ try {
     }
   }
   rmSync(work, { recursive: true, force: true });
-  summary();
-  const status = run.write({ failed: Boolean(process.exitCode), interrupted });
+  const status = run.finish(summary, { failed: Boolean(process.exitCode), interrupted });
+  if (status.summaryFailed) process.exitCode = 1;
   console.log('fk515d: outcome ' + status.outcome);
   if (interrupted) process.exitCode = 1;
   console.log('fk515d: output ' + out);

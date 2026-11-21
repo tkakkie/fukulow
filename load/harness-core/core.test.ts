@@ -29,6 +29,27 @@ test('status.json records the stage, sampling state and whether the run is evide
   assert.equal(stages(out, 'recorded').write({ failed: false, interrupted: false }).evidence, true);
 });
 
+test('a recorded run is evidence only once sampling started and it was not interrupted', () => {
+  const out = mkdtempSync(join(tmpdir(), 'harness-core-'));
+  const setupFailed = stages(out, 'recorded').write({ failed: true, interrupted: false });
+  assert.deepEqual([setupFailed.outcome, setupFailed.evidence], ['setup-failure', false]);
+  assert.equal(JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')).evidence, false);
+  const sampled = stages(out, 'recorded');
+  sampled.startSampling();
+  assert.deepEqual([sampled.write({ failed: true, interrupted: false }).evidence,
+    sampled.write({ failed: false, interrupted: true }).evidence], [true, false]);
+  assert.equal(stages(out, 'rehearsal').write({ failed: false, interrupted: false }).evidence, false);
+});
+
+test('status.json is written even when the summary throws', () => {
+  const out = mkdtempSync(join(tmpdir(), 'harness-core-'));
+  const s = stages(out, 'recorded');
+  s.startSampling();
+  const status = s.finish(() => { throw new Error('Invalid latency samples'); }, { failed: false, interrupted: false });
+  const saved = JSON.parse(readFileSync(join(out, 'status.json'), 'utf8'));
+  assert.deepEqual([status.summaryFailed, saved.summaryFailed, saved.outcome], [true, true, 'result-failure']);
+});
+
 test('exactly one mode flag is accepted', () => {
   assert.equal(modeOf({ rehearsal: true }), 'rehearsal');
   assert.throws(() => modeOf({}), /exactly one/);
