@@ -440,7 +440,7 @@ describe('Workspace search integration (#153)', () => {
     try {
       const routeBefore = ctx.navigation.get().target
       await submitSearch(ctx.host, 'リリース')
-      ctx.host.querySelector<HTMLButtonElement>('#main-content ol button')!.click()
+      ctx.host.querySelector('#main-content ol button')!.click()
       await settle()
 
       expect(ctx.navigation.get().target).toEqual(routeBefore)
@@ -468,7 +468,7 @@ describe('Workspace search integration (#153)', () => {
     })
     try {
       await submitSearch(ctx.host, 'リリース古いDM')
-      ctx.host.querySelector<HTMLButtonElement>('#main-content ol button')!.click()
+      ctx.host.querySelector('#main-content ol button')!.click()
       await vi.advanceTimersByTimeAsync(1000)
       await settle()
 
