@@ -113,11 +113,11 @@ Use `load/hot-plans/seed.sql` and `EXPLAIN (ANALYZE, BUFFERS)` on the before/aft
 
 Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-plans/seed.sql`. Warm Mac, no DMs or sends. Measured three five-pass rounds. Current harness takes 15 passes. [Full record](../load/measurements-archive.md#bounded-fan-out-candidates-354-2026-11-16-jst)
 
-## Rust/wasm sync core (#466)
+## Rust/wasm sync core (#466, #487)
 
-2026-11-16 JST (PR #484). [Rust/wasm default](decisions/web.md#web-client) accepted with misses. At `d2fc5ea`, throttled cold `/` Timeline p95 2806.7 → 3260.3 ms and FCP p95 960.0 → 960.0 ms, 45 runs/cell in 9 rounds. At `117e75a`, sustained 100 msg/s p95 1.39 → 1.78 ms (queue 0), steady memory 11.34 → 14.88 MiB, five rounds.
+2026-11-21 JST. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466; at `d2fc5ea`, throttled cold `/` Timeline p95 2806.7 → 3260.3 ms, FCP 960.0 ms both). #487 `06264eab` → `c02e1a78`, 5 rounds: `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, steady 18.19 → 18.35 MiB; TS 24 µs, 1.39 ms, 11.47 MiB (cross-harness). Bulk INCONCLUSIVE.
 
-Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts` and `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm|ts|main-ts --out <dir> --round <n>` (one core per historical checkout). Mac, loopback, synthetic bodies, Node 26.8.1. [Full record](../load/measurements-archive.md#web-rustwasm-sync-core-evaluation-466-2026-11-16-jst)
+Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`; `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --arm B|W --out <dir> --round <n>`, then `--aggregate`. Mac, Node 26.13.1. [Record](../load/measurements-archive.md#rustwasm-sync-core-typed-deltas-487-2026-11-21-jst-mac)
 
 ## Precompressed web assets (#486)
 

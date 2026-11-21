@@ -1343,3 +1343,37 @@ The judge marks every cell INVALID because candidate runs did not complete the r
 | SEND boundary=None | 17.5 ms | 19.1 ms | 1.09 | 8.0 % / 11.3 % | report only |
 | SEND boundary=Some(190000) | 13.4 ms | 15.7 ms | 1.17 | 18.0 % / 1.6 % | report only |
 
+
+## Rust/wasm sync core typed deltas (#487, 2026-11-21 JST, Mac)
+
+Formal re-measurement for maintainer condition 6 on #487 (PR #709). The first display and earlier core results are in the [#466 record](#web-rustwasm-sync-core-evaluation-466-2026-11-16-jst). Run 2026-11-21 08:16–08:53 JST in the overnight chain, behind an idle gate (no builds, tests, workers or containers; 5-minute load below 2), with no retries. Apple Silicon Mac, 10 CPUs, 32 GiB, AC power, Node 26.13.1 for every arm.
+
+| Arm | Label | Commit | Command |
+|---|---|---|---|
+| base | B | `06264eab` (main) | `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --out <dir>/base --round <n>` |
+| PR | W | `c02e1a78` | same; the script is byte-identical to base |
+| old TS core | R | `117e75a1` (#466 arm R) | that checkout's #466 script with `--core ts` |
+
+Five rounds of a cyclic Latin square (round 1: base, PR, TS; each later round rotated by one). Each arm's wasm was built before timing and passed `--smoke`. The TS arm ran in the same session by maintainer decision. The protocol inputs changed shape in #547 and #595, so **the TS ratio is cross-harness**.
+
+The chain did not pass `--arm`, so base rounds were written with label W, the same as PR, and the per-arm aggregation failed. With the maintainer's approval, base's label was changed from W to B in a copy, with the originals and their SHA-256 left untouched. Then `node web/scripts/measure-wasm-core.ts --aggregate --out <copy>` ran once over all arms with PR's aggregator, which is byte-identical to base's. All 5 rounds are included, and the targets are unchanged.
+
+Results are medians of rounds with [min–max]. Each change is against B; W and R are compared with B the same way.
+
+| Metric | B (base) | W (PR) | R (old TS, cross-harness) | Target | Status |
+|---|---|---|---|---|---|
+| `step()` p50 / p95 / p99 (µs), grid + 6,000-step trace | 42.46 / 426.42 / 2150.38 | 25.13 (−40.8%) / 346.25 [345.33–351.92] (−18.8%) / 1493.63 (−30.5%) | 4.79 / 24.08 / 33.38 | p50, p95 ≤ +10% | MET |
+| 100 msg/s × 60 s, 8 Channels, p50 / p95 / p99 (ms) | 0.89 / 1.94 [1.90–2.18] / 2.44 | 0.84 / 1.70 [1.67–2.04] (−12.2%, CI −13.1%..+4.4%) / 2.09, queue 0 | 0.62 / 1.39 [1.37–1.61] / 1.77 | p95 ≤ +10%, queue 0 | MET |
+| Max sustainable rate (msg/s) | 8000 | 8000 | 8000 | ≥ 500 | MET |
+| Bulk p50 / p95 (ms): history 8×50, history 2×200, catch-up 250, catch-up 1000 | 6.82/7.41, 6.85/6.96, 5.10/5.18, 17.70/17.85 | 5.20/5.72, 5.13/5.42, 3.93/4.00, 14.12/14.26 (−19.7% to −24.6%) | 0.19/0.20, 0.12/0.13, 0.16/0.17, 1.01/1.06 | ≤ +10% | INCONCLUSIVE |
+| Steady memory, post-GC heap + wasm linear (MiB) | 18.19 | 18.35 (+0.9%; wasm 1728 KiB) | 11.47 | ≤ +10% | MET |
+| Peak memory, pre-GC (MiB) | 46.30 | 52.19 (+12.8%; 27 pages) | 44.37 | ≤ +20% | MET |
+| Memory growth slope, 2.5k–10k msg | 269.09 B/msg, +0 pages | 255.87 B/msg, +0 pages | 2.39 B/msg, +0 pages | ≤ +64 B/msg, +0 pages | HOLD |
+
+- **Bulk INCONCLUSIVE.** Seven of the eight bulk sub-metrics are MET. The eighth, catch-up 250 p95, is INCONCLUSIVE because base's 5-round spread is 19.9%, which is over the 10% noise rule. The cause is base round 4 at 6.17 ms, against 5.14–5.21 ms in the other rounds. That slot ran at 08:38–08:41 with a 5-minute load of 1.57–1.66, before the load rise, so the cause is not determined. PR's five rounds were 3.93–4.21 ms, and every paired delta was between −18.0% and −36.3%.
+- **Host load.** From 08:43 the 5-minute load rose to 3.5–4.7 because of macOS `mediaanalysisd`; no workers were running. That covers TS round 4 and all of round 5. The rounds 4–5 vs 1–3 comparison below was not pre-registered, so it is report-only, and no round was excluded:
+  - `step()` and catch-up 1000 are within about 1–2% in all arms, except base round 4 catch-up at 18.43 ms against about 17.8 ms.
+  - 100 msg/s p95 is higher in rounds 4–5 in every arm.
+- **Development numbers from phase 1** (not formal; ranges overlapped for 100 msg/s): append p95 86.04 → 39.00 µs, send_ack 82.50 → 34.58 µs, and a Brotli wasm asset of 125,751 → 122,780 bytes. serde-wasm-bindgen was measured and not adopted.
+
+Raw round files, logs and the relabelled copy are in the maintainer's local run directory and are not in Git.
