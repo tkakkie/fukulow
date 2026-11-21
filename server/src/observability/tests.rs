@@ -65,7 +65,10 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
 }
 impl Capture {
     pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-        subscriber(self.clone())
+        subscriber(self.clone(), false)
+    }
+    pub(crate) fn measurement_subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+        subscriber(self.clone(), true)
     }
     pub(crate) fn text(&self) -> String {
         String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
@@ -161,7 +164,7 @@ async fn request_spans_redact_secrets_and_use_templates_and_generated_ids() {
         // Extension methods are arbitrary input and must not become log fields.
         let _ = app.oneshot(Request::builder().method("secret-method").uri("/objects/secret-path")
             .body(Body::empty()).unwrap()).await.unwrap();
-    }.with_subscriber(subscriber(output.clone())).await;
+    }.with_subscriber(output.subscriber()).await;
     assert!(!output.text().contains("secret-"), "{}", output.text());
     let events = output.events();
     let requests: Vec<_> = events
@@ -231,7 +234,7 @@ impl sqlx::error::DatabaseError for SensitiveDatabaseError {
 #[test]
 fn database_errors_never_format_sensitive_details_or_sources() {
     let output = Capture::default();
-    tracing::subscriber::with_default(subscriber(output.clone()), || {
+    tracing::subscriber::with_default(output.subscriber(), || {
         for error in [
             sqlx::Error::Database(Box::new(SensitiveDatabaseError)),
             sqlx::Error::Configuration(Box::new(io::Error::other("secret-configuration"))),
@@ -311,7 +314,7 @@ async fn aggregates_have_fixed_cardinality_and_admission_flood_is_silent() {
             "revocation_retired_global_cap", "revocation_retired_timeout", "revocation_retired_retries",
             "revocation_retired_fenced", "revocation_recheck_errors",
         ].contains(&key.as_str())));
-    }.with_subscriber(subscriber(output.clone())).await;
+    }.with_subscriber(output.subscriber()).await;
 }
 
 #[tokio::test]
@@ -336,7 +339,7 @@ async fn active_socket_guard_releases_on_cancellation_and_normal_exit() {
 #[test]
 fn socket_close_counters_and_lifecycle_logs_use_only_fixed_codes() {
     let output = Capture::default();
-    tracing::subscriber::with_default(subscriber(output.clone()), || {
+    tracing::subscriber::with_default(output.subscriber(), || {
         let metrics = Metrics::new();
         let guard = metrics.socket();
         metrics.report();

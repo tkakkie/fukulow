@@ -2,7 +2,9 @@ use super::{CLOSE_QUEUE_OVERFLOW, ClientMessage, ServerEvent};
 use crate::{
     AppState,
     auth::Auth,
+    channels::activity::NoticeFrame,
     messages::{self, LiveQueue, MessageError},
+    observability::{REVOCATION_MEASUREMENT_TARGET, measurement_ms},
 };
 use axum::extract::ws::{Message as Frame, WebSocket};
 use std::{collections::HashMap, time::Duration};
@@ -180,8 +182,53 @@ impl Connection<'_> {
     }
 
     async fn event(socket: &mut WebSocket, event: ServerEvent) -> Result<(), u16> {
-        let json = serde_json::to_string(&event).map_err(|_| 1011u16)?;
-        Self::send(socket, Frame::Text(json.into())).await
+        Self::send(socket, Self::event_frame(&event)?).await
+    }
+
+    fn event_frame(event: &ServerEvent) -> Result<Frame, u16> {
+        let json = serde_json::to_string(event).map_err(|_| 1011u16)?;
+        Ok(Frame::Text(json.into()))
+    }
+
+    async fn activity_notice(
+        pool: &sqlx::PgPool,
+        socket: &mut WebSocket,
+        notice: NoticeFrame,
+    ) -> Result<(), u16> {
+        let mut sent = None;
+        let timing = &mut sent;
+        if let Some(result) = notice
+            .handoff(pool, |notice| async move {
+                let event = ServerEvent::from(notice);
+                let frame = Self::event_frame(&event)?;
+                // A buffered write can span polls. Bound it from entry through successful flush.
+                let started = if let ServerEvent::ChannelAccessRevoked { channel_id } = event
+                    && tracing::event_enabled!(target: REVOCATION_MEASUREMENT_TARGET, tracing::Level::TRACE)
+                {
+                    Some((channel_id, measurement_ms()))
+                } else {
+                    None
+                };
+                Self::send(socket, frame).await?;
+                *timing = started.map(|(channel_id, before_ms)| (channel_id, before_ms, measurement_ms()));
+                Ok::<(), u16>(())
+            })
+            .await
+        {
+            result?;
+        }
+        // Keep log I/O outside the gate that protects the first write poll.
+        if let Some((channel_id, before_ms, after_ms)) = sent {
+            tracing::trace!(
+                target: REVOCATION_MEASUREMENT_TARGET,
+                event = "channel_access_revoked_sent",
+                %channel_id,
+                before_ms,
+                after_ms,
+                after_hold = notice.is_held_retry()
+            );
+        }
+        Ok(())
     }
 
     async fn send(socket: &mut WebSocket, frame: Frame) -> Result<(), u16> {
@@ -505,7 +552,7 @@ impl Connection<'_> {
                 biased;
                 _ = Self::access_changed(&mut self.access) => { self.retire_lost(socket).await?; continue; },
                 Some(notice) = activity.next() => {
-                    if let Some(result) = notice.handoff(&self.state.pool, |event| Self::event(socket, event.into())).await { result?; }
+                    Self::activity_notice(&self.state.pool, socket, notice).await?;
                     continue;
                 },
                 frame = socket.recv() => frame,

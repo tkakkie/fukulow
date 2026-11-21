@@ -1006,6 +1006,10 @@ impl NoticeFrame {
         }
     }
 
+    pub(crate) fn is_held_retry(&self) -> bool {
+        self.retry
+    }
+
     pub(crate) async fn handoff<F: std::future::Future>(
         &self,
         pool: &sqlx::PgPool,
