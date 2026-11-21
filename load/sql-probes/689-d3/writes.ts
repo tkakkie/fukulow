@@ -13,15 +13,28 @@ export function measureSize(sql: Sql, d3GroongaFiles: number) {
       pg_relation_size('public.search_channel_recent');`).split('|').map(Number) as
       [number,number,number,number,number,number,number];
   const scale = (bytes: number) => scaledBytes(bytes,count);
+  const [recentRows,recentTable,recentMaintenance,recentKey] = sql(`
+    SELECT count(*), pg_table_size('public.search_terms_recent'),
+      pg_relation_size('public.search_terms_recent_message'), pg_relation_size('public.search_terms_recent_key')
+    FROM public.search_terms_recent;`).split('|').map(Number) as [number,number,number,number];
+  assert.equal(count,24007);
+  assert.equal(recentRows,termRows);
   return {messages:count,termRows,termsPerMessage:termRows/count,sharedMessagesTable:scale(messageTable),
     d3:{termTable:scale(termTable),maintenanceIndex:scale(termMaintenance),
       exactIndexRelation:scale(termPGRelation),groongaFileDeltaAtBuild:scale(d3GroongaFiles),
       totalAdded:scale(termTable+termMaintenance+termPGRelation+d3GroongaFiles)},
+    d3r:{termRows:recentRows,termTable:scale(recentTable),maintenanceIndex:scale(recentMaintenance),
+      recencyKeyIndex:scale(recentKey),totalAdded:scale(recentTable+recentMaintenance+recentKey)},
     d4:{recencyIndex:scale(channelRecent)}};
 }
 
-export function measureWrites(sql: Sql, writer: string, repetitions: number) {
-  // Keep only the Message PK and d3's indexes during the d3 write sample.
+export function measureWrites(sql: Sql, writer: string, repetitions: number, variant: 'd3'|'d3r') {
+  const table = variant === 'd3' ? 'search_terms' : 'search_terms_recent';
+  const unused = variant === 'd3' ? 'search_terms_recent' : 'search_terms';
+  sql(`DROP TRIGGER ${unused}_remove ON public.messages;
+    DROP TRIGGER ${unused}_store ON public.messages;
+    DROP TABLE public.${unused};`);
+  // Each database keeps only the Message PK and the measured strategy's indexes.
   sql('DROP INDEX public.search_body, public.search_channel_recent; CHECKPOINT;');
   const id = 950001;
   const tenant = literal(org(1));
@@ -37,7 +50,7 @@ export function measureWrites(sql: Sql, writer: string, repetitions: number) {
   const snapshot = `BEGIN READ ONLY;\n${context}
     SELECT (SELECT count(*) FROM public.messages WHERE ${message}),
       (SELECT coalesce(sum(pg_column_size(m)),0) FROM public.messages m WHERE ${message}),
-      count(*),coalesce(sum(pg_column_size(t)),0) FROM public.search_terms t
+      count(*),coalesce(sum(pg_column_size(t)),0) FROM public.${table} t
     WHERE organization_id=${tenant} AND message_id=${id};
     COMMIT;\n`;
   const write = (statement: string) => snapshot

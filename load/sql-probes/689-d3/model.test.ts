@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { channel, member } from '../../search-engines/seed.ts';
-import { planFacts, ratios, scaledBytes, summarize } from './evidence.ts';
+import { earlyStop, planFacts, possibleLeak, ratios, scaledBytes, summarize } from './evidence.ts';
+import type { Explain } from './evidence.ts';
 import {
   decoy, foreignClasses, foreignRange, foreignSeed, normalizeSql, pairedArms, query, seedGram, visible,
 } from './model.ts';
@@ -24,6 +25,11 @@ test('search SQL scopes the key to visible Channels and escapes the LIKE recheck
   assert.ok(d3.endsWith('ORDER BY hit.created_at DESC, hit.id DESC LIMIT 20'));
   assert.match(query('d4','麒麟'), /ORDER BY m.created_at DESC, m.id DESC LIMIT 20/);
   assert.doesNotMatch(query('d4','麒麟',2,false), /LIMIT/);
+  const d3r = query('d3r', "x%_\\'z", 3);
+  assert.ok(d3r.includes(visible(3)));
+  assert.match(d3r, /m\.channel_id = v\.id[\s\S]*LIKE .*\n[\s\S]*t\.channel_id = v\.id AND t\.term = 'x%_'[\s\S]*ORDER BY t\.created_at DESC, t\.message_id DESC LIMIT 20/);
+  assert.ok(d3r.endsWith('ORDER BY hit.created_at DESC, hit.id DESC LIMIT 20'));
+  assert.doesNotMatch(query('d3r','麒麟',2,false), /LIMIT/);
   // Replace callbacks must preserve the dollar patterns recognized by String.replace.
   assert.ok(query('d3', '$&').includes("|| '$&'"));
   assert.match(normalizeSql('  か\u3099  '), /'か\u3099'/);
@@ -67,4 +73,32 @@ test('statistics retain sample counts and scale size linearly', () => {
   assert.deepEqual(ratios(few,summarize([2,4,6,8,10])),{p50:2,p95:2});
   assert.deepEqual(scaledBytes(150,15000),{bytes:150,per10k:100,linearAt1M:10000});
   assert.throws(()=>summarize([]),/Invalid samples/);
+});
+
+test('timing flags require both percentiles to cross the same fixed boundary', () => {
+  for (const p of [1.10,0.91]) assert.ok(possibleLeak({p50:p,p95:p}));
+  for (const [p50,p95] of [[1.09,1.2],[0.9,0.92],[1.11,0.9],[null,2]] as const) {
+    assert.equal(possibleLeak({p50,p95}),false);
+  }
+});
+
+test('early stop requires an ordered scope walk and rejects a node consuming all visible hits', () => {
+  type Plan = Explain[0]['Plan'];
+  const node = (type: string, rows: number, loops: number, children: Plan[] = []): Plan =>
+    ({'Node Type':type,'Actual Rows':rows,'Actual Loops':loops,Plans:children});
+  const explain = (loops: number, mergeRows = 20 * loops): Explain => {
+    const terms = {...node('Index Only Scan',25,loops),'Index Name':'search_terms_recent_key',
+      'Scan Direction':'Forward','Index Cond':'(organization_id = org AND channel_id = v.id AND term = word)'};
+    const messages = {...node('Index Scan',0.8,25 * loops),'Index Name':'messages_pkey',
+      Filter:'(m.normalized_body ~~ pattern)','Rows Removed by Filter':0.2};
+    const limit = node('Limit',20,loops,[node('Nested Loop',20,loops,[terms,messages])]);
+    const merge = node('Nested Loop',mergeRows,1,[node('CTE Scan',loops,1),limit]);
+    return [{Plan:node('Limit',20,1,[node('Sort',20,1,[merge])]),'Execution Time':1}];
+  };
+  const scopes = Object.fromEntries(['a','b','c','d','e'].map(scope=>[scope,explain(1)]));
+  assert.ok(earlyStop(explain(5),scopes,500).pass);
+  assert.equal(earlyStop(explain(5,101),scopes,500).pass,false);
+  assert.equal(earlyStop(explain(5),scopes,125).pass,false);
+  scopes.a = [{Plan:node('Seq Scan',200,1),'Execution Time':1}];
+  assert.equal(earlyStop(explain(5),scopes,500).pass,false);
 });

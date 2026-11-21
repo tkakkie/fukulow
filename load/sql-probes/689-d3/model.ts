@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { b1Begin, b1Query } from '../../search-engines/b1.ts';
+import { b1Query } from '../../search-engines/b1.ts';
 import { pattern } from '../../search-engines/queries.ts';
 import { channel, literal, member, org, trimQuery } from '../../search-engines/seed.ts';
 
@@ -7,8 +7,8 @@ export const read = (name: string) => readFileSync(new URL(name, import.meta.url
 const shape = b1Query().match(/^(WITH visible AS MATERIALIZED \([\s\S]+?\n\))\nSELECT [\s\S]+?(  AND m\.created_at[\s\S]+?)\nORDER BY /);
 if (!shape) throw new Error('B1 visibility or date window changed');
 const [, visibility, dateWindow] = shape;
-const templates = {d3: read('d3-query.sql'), d4: read('d4-query.sql')};
-export const variants = ['d3', 'd4', 'b1'] as const;
+const templates = {d3: read('d3-query.sql'), d3r: read('d3r-query.sql'), d4: read('d4-query.sql')};
+export const variants = ['d3', 'd3r', 'd4'] as const;
 export type Variant = typeof variants[number];
 export type Arm = 'few' | 'many';
 export const seedGram = (normalized: string) => [...normalized].slice(0, 3).join('');
@@ -18,20 +18,22 @@ const orderBy = (alias: string, page: boolean) => page
   : `ORDER BY ${alias}.id`;
 const range = dateWindow.trim();
 export const context = `SET LOCAL fukulow.organization_id = ${literal(org(1))};\n`;
-export const transaction = (q?: string) => q === undefined
-  ? `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\nSELECT set_config('fukulow.organization_id',${literal(org(1))},true);\n`
-  : b1Begin(q);
+export const transaction = () =>
+  `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\nSELECT set_config('fukulow.organization_id',${literal(org(1))},true);\n`;
 
-export function query(variant: Variant, normalized: string, actor = 2, page = true) {
+export function query(variant: Variant, normalized: string, actor = 2, page = true,
+  {parameterized = false, scope}: {parameterized?: boolean; scope?: string} = {}) {
   if (!normalized) throw new Error('Expected a nonempty normalized query');
-  if (variant === 'b1') return b1Query(member(1, actor), page);
-  // The empty concatenation keeps B1's text index out of the d3/d4 LIKE recheck.
+  // The empty concatenation keeps B1's text index out of the LIKE recheck.
+  const scopeOrder = variant === 'd3r' ? 'ORDER BY t.created_at DESC, t.message_id DESC LIMIT 20'
+    : orderBy('m', true);
   return templates[variant].replace('{{visibility}}', () => visible(actor))
     .replace('{{columns}}', () => page ? 'hit.id, hit.created_at, hit.body' : 'hit.id')
-    .replace('{{gram}}', () => literal(seedGram(normalized)))
-    .replace('{{matches}}', () => `(m.normalized_body || '') COLLATE "C" LIKE ${literal(pattern(normalized))}
+    .replace('{{gram}}', () => parameterized ? '$2' : literal(seedGram(normalized)))
+    .replace('{{matches}}', () => `(m.normalized_body || '') COLLATE "C" LIKE ${parameterized ? '$1' : literal(pattern(normalized))}
       ESCAPE chr(92) ${range}`)
-    .replace('{{scopeLimit}}', () => page ? orderBy('m', true) : '')
+    .replace('{{scopeLimit}}', () => page ? scopeOrder : '')
+    .replace('{{scopeFilter}}', () => scope ? `WHERE v.id = ${literal(scope)}::uuid` : '')
     .replace('{{order}}', () => orderBy('hit', page)).trim();
 }
 
@@ -58,6 +60,7 @@ export const latencyClasses = [
   ['percent-only', '%'], ['underscore-only', '_'], ['backslash-only', '\\'],
   ['astral', '🦉'], ['miss', '不存在'], ['time-window', '境界'],
 ] as const;
+export const edgeCases = [['ties','tiemark'], ['recheck-heavy','rqzneedle']] as const;
 
 export const foreignClasses = [
   {name: 'other-organization', key:'zetaorgtoken', org: 2, channel: 1},
