@@ -4,6 +4,8 @@ import { checkCoreBundle } from './scripts/core-bundle.ts'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { defineConfig } from 'vitest/config'
 
+const PERF_TESTS = 'src/**/*.perf.test.ts'
+
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const test = mode === 'test'
@@ -34,6 +36,14 @@ export default defineConfig(({ mode }) => {
     ],
     // Same reason for the runtime: resolve svelte's browser build (it needs no DOM) instead of its server build.
     ssr: { resolve: { conditions: test ? ['browser', 'module', 'node', 'development|production'] : undefined } },
-    test: { setupFiles: ['./scripts/init-wasm.ts'], exclude: ['e2e/**', 'e2e-compose/**', 'node_modules/**'] },
+    test: {
+      setupFiles: ['./scripts/init-wasm.ts'],
+      // Timing-ratio tests run after every other file, one file at a time: other test files running
+      // in parallel inflate their ratios (#753).
+      projects: [
+        { extends: true, test: { name: 'unit', exclude: ['e2e/**', 'e2e-compose/**', 'node_modules/**', PERF_TESTS], sequence: { groupOrder: 0 } } },
+        { extends: true, test: { name: 'perf', include: [PERF_TESTS], fileParallelism: false, sequence: { groupOrder: 1 } } },
+      ],
+    },
   }
 })
