@@ -8,16 +8,12 @@
   import type { MentionName } from './mentions'
   import { senderName } from './authors'
   import type { Channel, DmDiscovery, Identity, Message } from './api'
-  import DmList from './DmList.svelte'
   import DmSendStatus from './DmSendStatus.svelte'
   import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
-  import ArchivedChannelList from './ArchivedChannelList.svelte'
-  import ChannelList from './ChannelList.svelte'
   import ChannelOverview from './ChannelOverview.svelte'
   import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
-  import CreateChannelForm from './CreateChannelForm.svelte'
   import {
     createTopicSummaryFocusController,
     focusAfterPanelClose,
@@ -29,7 +25,6 @@
     resolveSkipLinkTargetId,
     type SkipLinkTargetId,
   } from './focus-management'
-  import Members from './MemberList.svelte'
   import ChannelMembers from './ChannelMembers.svelte'
   import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
@@ -42,6 +37,7 @@
   import Timeline from './Timeline.svelte'
   import TopicList from './TopicList.svelte'
   import TopicView from './TopicView.svelte'
+  import WorkspaceChannelColumn from './WorkspaceChannelColumn.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import Panel, { type PanelTabId } from './ui/Panel.svelte'
@@ -122,6 +118,8 @@
   const selectedChannelUnreadState = $derived(selectedChannelUnread ? selectedChannelUnread.state : null)
   const channelUnreadCount = (id: string): number | null =>
     session.unread?.(id).state.unreadCount ?? null
+  const channelMentionUnreadCount = (id: string): number | null =>
+    session.unread?.(id).state.mentionUnreadCount ?? null
   const activeReplyMessageId = $derived(route?.panel?.startsWith('reply:') ? route.panel.slice(6) : null)
   const searchResult = $derived(route?.organizationId === currentOrganizationId ? nav.state.searchResult : undefined)
   const searchRead = $derived(session.searchAnchor?.state)
@@ -811,121 +809,68 @@
   </nav>
 
   <nav id="channel-content" class="channel-column" aria-labelledby="channel-list-heading" tabindex="-1">
-    <div class="channel-column__header">
-      {#if organizations.length > 1 && onselectorganization}
-        <label class="org-switcher">
-          <span class="org-switcher__label">組織</span>
-          <select
-            class="org-switcher__select"
-            value={currentOrganizationId}
-            onchange={(e) => onselectorganization(e.currentTarget.value)}
-          >
-            {#each organizations as org (org.organization_id)}
-              <option value={org.organization_id}>{org.name}</option>
-            {/each}
-          </select>
-        </label>
-      {/if}
-      {#if organization}
-        <p class="member-summary">{organization.organization.name} / {organization.member.name} さん</p>
-      {/if}
-      <h2
-        bind:this={channelListHeadingRef}
-        id="channel-list-heading"
-        class="channel-column__heading"
-        tabindex="-1"
-      >
-        チャンネル
-      </h2>
-      {#if viewportWidth < MOBILE_BREAKPOINT_PX && effectiveMobileLevel === 'channels' && searchModel && searchState}
-        <div class="channel-column__search mobile-only">
-          <SearchBar
-            value={searchState.input}
-            open={searchOpen}
-            disabled={organizationUnavailable || !currentOrganizationId}
-            bind:inputRef={channelListSearchInputRef}
-            oninput={(value) => searchModel.setInput(value)}
-            onsubmit={(value) => handleSubmitSearch(value, 'channel-list')}
-          />
-        </div>
-      {/if}
-    </div>
-
-    <div class="channel-column__scroll">
-      {#if !organizationUnavailable && (s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut))}
-        <StatusBanner
-          tone="danger"
-          role="alert"
-          message="チャンネルを読み込めませんでした。"
-          detail="通信状況を確認して、もう一度お試しください。"
-          actionLabel={sectionsState?.reconnecting ? undefined : '再試行'}
-          onaction={sectionsState?.reconnecting
-            ? undefined
-            : () => {
-                announcementController.resetChannelListTimeout()
-                void channels.load()
-              }}
-        />
-      {:else if !organizationUnavailable && !sectionsState?.reconnecting && s.status === 'loading' && s.channels.length === 0}
-        <Skeleton rows={3} label="チャンネルを読み込み中" />
-      {/if}
-
-      <ChannelList
-        channels={s.channels}
-        selectedId={s.selectedId}
-        activeTopicId={route?.channelId === s.selectedId ? (route?.topicId ?? null) : null}
-        topics={currentTopicsState && selected?.id === s.selectedId ? currentTopicsState.topics : []}
-        allTopicsKnown={selected?.id === s.selectedId ? allTopicsKnown : false}
-        {channelUnreadCount}
-        channelMentionUnreadCount={(id) => session.unread?.(id).state.mentionUnreadCount ?? null}
-        topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
-        sections={session.sections}
-        disabled={organizationUnavailable}
-        channelListHeading={channelListHeadingRef}
-        onselect={handleSelectChannel}
-        onselecttopic={handleSelectTopic}
-        onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}
-      />
-      {#if !organizationUnavailable && (canCreateChannels ?? creationAllowed)}
-        <CreateChannelForm oncreate={handleCreateChannel} draft={channelCreation} disabled={canCreateChannels !== true} />
-      {/if}
-      <ArchivedChannelList
-        list={s.archivedList}
-        selectedId={s.selectedId}
-        disabled={organizationUnavailable}
-        onhold={() => channels.holdArchived()}
-        onretry={() => channels.retryArchived()}
-        onselect={handleSelectChannel}
-      />
-      {#if dmState && session.dms}
-        <DmList rows={dmState.rows} selectedId={s.selectedId} loading={dmState.status === 'loading'}
-          error={dmState.status === 'error'} message={dmState.message} busy={dmState.busy}
-          canOpen={Boolean(organization && organization.member.role !== 'guest')}
-          more={!dmState.lanes.browse.done} unread={channelUnreadCount}
-          mentions={(id) => session.unread?.(id).state.mentionUnreadCount ?? null} onselect={handleSelectChannel}
-          onmore={() => session.dms?.browse()} onretry={() => session.dms?.refresh()} />
-      {/if}
-      {#if !organizationUnavailable && members && organization}
-        <Members
-          model={members}
-          identity={organization}
-          onopen={() => { void members?.load() }}
-          onopendm={session.dms ? (member) => { void handleOpenDm(member) } : undefined}
-          dmBusy={dmState?.busy ?? false}
-          onchanged={(id) => {
-            if (id === organization.member.id && currentOrganizationId) {
-              onselectorganization?.(currentOrganizationId)
-            }
-          }}
-        />
-      {/if}
-    </div>
-
-    {#if authError}
-      <div class="channel-column__footer">
-        <StatusBanner tone="danger" role="alert" message={authError} />
-      </div>
-    {/if}
+    <WorkspaceChannelColumn
+      {organizations}
+      {currentOrganizationId}
+      {organization}
+      {organizationUnavailable}
+      showMobileSearch={viewportWidth < MOBILE_BREAKPOINT_PX && effectiveMobileLevel === 'channels' && Boolean(searchModel && searchState)}
+      searchInput={searchState?.input ?? ''}
+      {searchOpen}
+      searchDisabled={organizationUnavailable || !currentOrganizationId}
+      channelListStatus={s.status}
+      channelListTimedOut={announcementView.channelListTimedOut}
+      sectionsReconnecting={Boolean(sectionsState?.reconnecting)}
+      channels={s.channels}
+      selectedId={s.selectedId}
+      activeTopicId={route?.channelId === s.selectedId ? (route?.topicId ?? null) : null}
+      topics={currentTopicsState && selected?.id === s.selectedId ? currentTopicsState.topics : []}
+      allTopicsKnown={selected?.id === s.selectedId ? allTopicsKnown : false}
+      {channelUnreadCount}
+      {channelMentionUnreadCount}
+      topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
+      sections={session.sections}
+      showCreateChannel={Boolean(canCreateChannels ?? creationAllowed)}
+      createChannelDisabled={canCreateChannels !== true}
+      createChannelDraft={channelCreation}
+      archivedList={s.archivedList}
+      dms={dmState && session.dms
+        ? {
+            rows: dmState.rows,
+            loading: dmState.status === 'loading',
+            error: dmState.status === 'error',
+            message: dmState.message,
+            busy: dmState.busy,
+            more: !dmState.lanes.browse.done,
+          }
+        : null}
+      {members}
+      {authError}
+      bind:headingRef={channelListHeadingRef}
+      bind:searchInputRef={channelListSearchInputRef}
+      {onselectorganization}
+      onsearchinput={(value) => searchModel?.setInput(value)}
+      onsearchsubmit={(value) => handleSubmitSearch(value, 'channel-list')}
+      onretrychannels={() => {
+        announcementController.resetChannelListTimeout()
+        void channels.load()
+      }}
+      onselectchannel={handleSelectChannel}
+      onselecttopic={handleSelectTopic}
+      onopenalltopics={(opener) => nav.navigate({ type: 'tab', tab: 'topics' }, opener)}
+      oncreatechannel={handleCreateChannel}
+      onholdarchived={() => channels.holdArchived()}
+      onretryarchived={() => channels.retryArchived()}
+      ondmmore={() => session.dms?.browse()}
+      ondmretry={() => session.dms?.refresh()}
+      onopenmembers={() => { void members?.load() }}
+      onopendm={session.dms ? (member) => { void handleOpenDm(member) } : undefined}
+      onmemberchanged={(id) => {
+        if (organization && id === organization.member.id && currentOrganizationId) {
+          onselectorganization?.(currentOrganizationId)
+        }
+      }}
+    />
   </nav>
 
   <main id="main-content" class="main-card" tabindex="-1">
@@ -1310,71 +1255,6 @@
     min-height: 0;
     min-width: 0;
     overflow: hidden;
-  }
-
-  .channel-column__header {
-    display: grid;
-    gap: var(--space-8);
-    min-width: 0;
-  }
-
-  .channel-column__scroll {
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-12);
-    min-height: 0;
-    min-width: 0;
-  }
-
-  .channel-column__footer {
-    min-width: 0;
-  }
-
-  .org-switcher {
-    display: grid;
-    gap: var(--space-4);
-    min-width: 0;
-  }
-
-  .org-switcher__label {
-    font-size: var(--font-size-12);
-    font-weight: var(--font-weight-medium);
-    color: var(--text2);
-  }
-
-  .org-switcher__select {
-    width: 100%;
-    min-width: 0;
-    min-height: var(--touch-target);
-    padding: var(--space-4) var(--space-8);
-    background-color: var(--surface);
-    color: var(--text);
-    border: 1px solid var(--border-input);
-    border-radius: var(--radius-8);
-    font-family: var(--font-sans);
-    font-size: var(--font-size-14);
-  }
-
-  .member-summary {
-    margin: 0;
-    font-size: var(--font-size-13);
-    font-weight: var(--font-weight-medium);
-    color: var(--text2);
-    overflow-wrap: anywhere;
-  }
-
-  .channel-column__heading {
-    margin: 0;
-    border-radius: var(--radius-8);
-    font-size: var(--font-size-13);
-    font-weight: var(--font-weight-semibold);
-    color: var(--text2);
-  }
-
-  .channel-column__search {
-    min-width: 0;
-    width: 100%;
   }
 
   .main-card {
