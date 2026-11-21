@@ -5,7 +5,7 @@ Keep only the latest baseline per scenario, the decision or open acceptance it s
 Measurements are evidence only and establish no performance, capacity or latency guarantee.
 Compare runs only at the same send-limit settings and publishing Member count.
 
-Raw logs, artifact directories and local paths outside Git may be gone. Checked 2026-11-18 on the maintainer's Mac: gone for #137, #142, #151, #160 (except `i160-smoke-fix`), #195 send-drain logs, #196 B, #314 step 5 before-run, #469 smoke; still present for #153, #195 storms, #303, #314 step 5, #356, #409, #466, #486; Actions artifact `proxy-measure-43844208337-1` (#469) not yet expired. See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
+Raw logs, artifact directories and local paths outside Git may be gone ([2026-11-18 check](../load/measurements-archive.md#raw-data-check-2026-11-18)). See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
 
 ## Topic projection paging (#137)
 
@@ -151,23 +151,22 @@ Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSO
 
 ## Revocation hold retry bursts (#592)
 
-2026-11-19 JST, `6a9bfa9`, PR #588 as is. 256/1,024/4,096 sockets, 128 removals, ~3.8 s recheck-only/whole-DB fault, 3 runs each. Pre-registered: 256 PASS, 1,024/4,096 FAIL, one `outage` run each (pre-fault notice arrived 0–2 ms in); maintainer: both PASS. ≤ 4 holds, all fenced; no retry burst or pool timeout. Backoff acceptable for these paths and load, unproven for many holds; no jitter now. Arrival rule: #622.
+2026-11-21 JST, `2bad2c7d`, send time (#622): `recheck` 4,096 ×3 PASS, 24/24 sends matched, 0 in the fault. 2026-11-20 4096 FAIL kept. Maintainer: backoff acceptable (≤ 4 holds; high counts: #668), no jitter.
 
-Run `node load/revocation-burst.ts --out <new dir>`. [Record and limits](../load/measurements-archive.md#revocation-hold-retry-bursts-592-2026-11-19-jst-mac)
+Run `node load/revocation-burst.ts --out <dir>`. [Record](../load/measurements-archive.md#revocation-hold-send-time-rerun-592-2026-11-21-jst-mac)
 
 ## Archived only
 
 - [Load harness methods](../load/measurements-archive.md#load-harness-methods-20-57) — procedures for `make load` and `load/record.ts`. [Load decisions](decisions/load.md#load-testing-and-measurement)
 - [Earlier reconnect runs](../load/measurements-archive.md#graceful-shutdown-and-reconnect-storm-195-2026-11-11-jst) — superseded by the pinned repeat.
 - [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
-- [Search preliminary engine comparison](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) — superseded by frozen-manifest runs.
-- [Search preliminary quality comparison](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) — frozen rerun reproduced the scores.
+- Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs (quality scores reproduced).
 - [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
 - [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
 - [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
 - [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
 - Channel log [smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) (functional only) and [full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) (INVALID for the gate).
-- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending. Send workloads use one publishing Member and burst/refill raised to 1,000,000. See `load/proxy-compare.ts`.
+- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending.
 - [Earlier wasm first display](../load/measurements-archive.md#first-display-345-conditions-re-measured-at-d2fc5ea-45-runscell-across-9-interleaved-rounds-median-of-round-p50--p95-ms) — superseded by the startup fix.
 - [Pool before and after PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac) — superseded by the post-PR #511 comparison.
 - [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17) — superseded by HTTP and SQL evidence.

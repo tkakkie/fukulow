@@ -14,6 +14,10 @@ Rules for new records: keep results that affect a design decision, performance c
 
 Record text is copied verbatim from its source line(s) (values and conditions unchanged). Raw logs, artifact directories and `/private/tmp` paths named in records were kept outside Git; they are not in this repository and may no longer exist, so they cannot be restored from here.
 
+## Raw data check (2026-11-18)
+
+Moved verbatim from the `docs/measurements.md` header: Checked 2026-11-18 on the maintainer's Mac: gone for #137, #142, #151, #160 (except `i160-smoke-fix`), #195 send-drain logs, #196 B, #314 step 5 before-run, #469 smoke; still present for #153, #195 storms, #303, #314 step 5, #356, #409, #466, #486; Actions artifact `proxy-measure-43844208337-1` (#469) not yet expired.
+
 ## Moved records (#442, 2026-11-15)
 
 - Subscription context round trips (#314 step 3b, 2026-11-13): moved to #314 (intermediate step; the decision lists the statement counts).
@@ -903,6 +907,8 @@ Method: `node load/hot-plans/fanout.ts <container> <database> <out>` exports the
 
 ## Proxy comparison harness (#469 part 3) — results pending
 
+Moved from `docs/measurements.md`: Send workloads use one publishing Member and burst/refill raised to 1,000,000. See `load/proxy-compare.ts`.
+
 Method fixed by the approved #469 plan; this section records no comparison results. Dispatch `proxy-measure.yml` with `preset=full` and `scenarios=1,2,3,4,5,6`. Each scenario runs in its own GitHub-hosted `ubuntu-latest` job (one job cannot hold all scenarios within 6 h); both proxies run sequentially on that runner using one app image, PostgreSQL 18.6, and a fresh database per run (per step for connections). Each scenario discards one warm-up per proxy, then measures five runs each in alternating ABBA blocks: C N N C, N C C N, C N. The default proxy remains Caddy pending maintainer review.
 
 Harness fixes after full run 43844208337 (all inconclusive; approved on #469 2026-11-17): (A) sockets are spread over separate Accounts, never more than 32 per Account (#196 A `per_account`, unchanged): socket i belongs to Account ⌊i/32⌋, each Account has one Account Session, Account 0 is the Owner and the rest are invited Members of the same Organization; before measuring, every Account's Organization membership and read access to each Channel its sockets subscribe to are checked. 1,000/5,000/10,000 sockets use 32/157/313 Accounts; the same count and allocation apply to both proxies and are recorded per run in `summary.json` `conditions`. (B) every record run has a hard deadline (k6 setup + scenario + teardown limits plus 600 s for Compose; first display 1,800 s + 600 s); on expiry the run gets SIGTERM, SIGKILL for its whole process group after 180 s, then removal of its Compose project's containers, network and volumes and its named k6 container, and is recorded invalid with the reason; job limits are 90/240/355 min for smoke/preflight/full (smoke needs room for the fixed 2,580 s first-display bound), and a run whose budget plus grace would end later than the job limit minus 600 s is not started and is recorded invalid (`conditions[].skipped`), so a scenario whose runs exceed the job is inconclusive rather than cancelled midway. (C) `preset=preflight` runs one full-size discarded warm-up per proxy per scenario, stops at the first invalid run or a ladder whose first step fails, and is never counted among the five measured runs.
@@ -1322,6 +1328,106 @@ Harness fixes after the record (Copilot review of PR #623). The 18 runs above us
 - Every run had 121 pool samples bracketing the recovery window, so the missing-sample check (now explicit) could not have passed a run wrongly. `psql` ran without `ON_ERROR_STOP` and its stderr was discarded; all 39,440 direct probes recorded success, so no masked error is evident, but none can be ruled out.
 
 Limits: one Mac, client arrival timestamps, fault windows of about 3.8 s, at most 4 concurrent holds, and no measurement of the 8 MiB / 4,096-hold memory bound. Reproduce with `ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir` (add `--sizes`, `--kinds` or `--repeats` for a subset) from a release build. Raw run directories are outside Git.
+
+## Revocation hold retry bursts rerun (#592, 2026-11-20 JST, Mac)
+
+Verbatim from [the #592 results comment](https://github.com/tkakkie/fukulow/issues/592#issuecomment-7027823122), without its decision options. The maintainer chose option 2 (measure the server send time first) on 2026-11-20; that decision is below the 2026-11-21 record.
+
+Ran 2026-11-20 10:09–10:47 JST in the overnight chain, on harness commit `ee06465` (PR #623: the five review fixes plus the #622 boundary rule). The pre-registered matrix: 256, 1,024 and 4,096 connections × `recheck`, `outage` × 3 repeats = 18 runs, an unmodified release server and fresh PostgreSQL each time. Host: Apple Silicon, 10 CPUs, 32 GiB, with no other runs on the host. No control runs this time; controls were never part of the verdict. The script exited 0 and left no containers.
+
+**Pre-registered verdict: 256 PASS, 1024 PASS, 4096 FAIL.** 17 runs are clean PASS. No run is `PASS_WITH_BOUNDARY_EXCEPTION`. The single failure is `recheck` 4096 r2, with one reason: "a revocation was delivered while the failure was active". Every other criterion passed in all 18 runs.
+
+### The one failure
+In `recheck` 4096 r2, three notices arrived inside the fault window:
+
+| Socket | Removal returned 204 | Notice arrived at the client | Judged |
+|---|---|---|---|
+| 0 | 190 ms before the fault | 0.7 ms after the fault start | boundary exception (≤ 2 ms) |
+| 2 | 187 ms before the fault | 1.3 ms after | boundary exception (≤ 2 ms) |
+| 26 | 189 ms before the fault | **3.8 ms after** | **fail** (> 2 ms) |
+
+Context from the same run:
+- Two rechecks that started before the fault completed **successfully after** the fault start, at +1.3 ms and +4.7 ms. Statements already in flight when the relay starts the fault can still finish. The first recheck error completed at +0.8 ms.
+- Socket 26's notice arrived after the +1.3 ms success and before the next error-free completion. That fits a notice authorized by a recheck that was already running when the fault began, then delivered under 4,096-connection load.
+- The relay timings carry no Member or Channel identity, so the harness cannot prove which recheck authorized socket 26. This is consistent with the boundary class #622 describes, but it is not proven. The server send time is still not observable without a server change, which is why #622 used the 2 ms arrival allowance.
+
+The pre-registered rule says FAIL, and I am not changing it.
+
+### Everything else
+- **Holds:** 0–4 per run, every one ended `fenced`. There were no delivered-after-hold, timeout or retries retirements, and no hold refusals. Again no synchronized retry burst formed.
+- **Recheck QPS (executed only), peak sliding 1 s during the fault:** about 165–180/s at 256, 440–500/s at 1024, and 660–820/s at 4096 (`recheck` kind). In recovery it was 0, except in `recheck` 4096 r1 (45/s) and r3 (220/s), where the removal burst outlasted the fault window.
+- **Database:** no failed direct probes. Probe p99 was at most 12.8 ms during the fault and 6.2 ms in recovery. Pool acquire timeouts were 0. The most waiters at once was 61.
+- **HTTP in recovery:** no failures and no 5xx. p99 was at most 24.6 ms.
+- **Memory:** RSS grew by 17–18 MiB at 256, 26–32 MiB at 1024 and 89–188 MiB at 4096.
+- **Lost notices** without a revocation (allowed by O5): 26–52 at 256, 50–83 at 1024, 47–59 at 4096.
+
+<details><summary>All 18 runs</summary>
+
+| Kind | Size | Run | Verdict | Holds (fenced) | Recheck QPS peak, fault / recovery | DB probe p99 fault / recovery (ms) | HTTP p99 recovery (ms) | Pool timeouts | Max pool waiting | RSS delta (MiB) | Lost without notice |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| recheck | 256 | 1 | PASS | 2 (2) | 168 / 0 | 3.2 / 3.0 | 9.0 | 0 | 1 | 17 | 29 |
+| outage | 256 | 1 | PASS | 0 (0) | 0 / 0 | 2.8 / 2.9 | 9.4 | 0 | 0 | 17 | 51 |
+| outage | 256 | 2 | PASS | 0 (0) | 0 / 0 | 2.9 / 2.8 | 10.2 | 0 | 0 | 17 | 52 |
+| recheck | 256 | 2 | PASS | 4 (4) | 179 / 0 | 3.4 / 3.0 | 7.4 | 0 | 46 | 18 | 31 |
+| recheck | 256 | 3 | PASS | 0 (0) | 165 / 0 | 3.8 / 4.7 | 7.4 | 0 | 46 | 18 | 26 |
+| outage | 256 | 3 | PASS | 0 (0) | 0 / 0 | 2.8 / 2.8 | 9.6 | 0 | 1 | 17 | 45 |
+| recheck | 1024 | 1 | PASS | 3 (3) | 503 / 0 | 6.1 / 2.9 | 9.0 | 0 | 55 | 29 | 52 |
+| outage | 1024 | 1 | PASS | 0 (0) | 0 / 0 | 4.0 / 2.9 | 9.9 | 0 | 0 | 29 | 82 |
+| outage | 1024 | 2 | PASS | 1 (1) | 0 / 0 | 5.8 / 3.4 | 10.0 | 0 | 1 | 26 | 83 |
+| recheck | 1024 | 2 | PASS | 0 (0) | 439 / 0 | 3.1 / 2.7 | 9.4 | 0 | 46 | 32 | 53 |
+| recheck | 1024 | 3 | PASS | 0 (0) | 498 / 0 | 4.1 / 3.3 | 8.3 | 0 | 46 | 32 | 50 |
+| outage | 1024 | 3 | PASS | 2 (2) | 0 / 0 | 2.8 / 2.8 | 9.4 | 0 | 0 | 30 | 83 |
+| recheck | 4096 | 1 | PASS | 0 (0) | 730 / 45 | 12.8 / 2.8 | 15.2 | 0 | 61 | 159 | 50 |
+| outage | 4096 | 1 | PASS | 0 (0) | 0 / 0 | 4.2 / 3.0 | 9.9 | 0 | 0 | 89 | 48 |
+| outage | 4096 | 2 | PASS | 0 (0) | 0 / 0 | 5.2 / 3.8 | 9.4 | 0 | 0 | 89 | 47 |
+| recheck | 4096 | 2 | **FAIL** | 0 (0) | 657 / 0 | 9.3 / 2.9 | 10.4 | 0 | 55 | 148 | 59 |
+| recheck | 4096 | 3 | PASS | 1 (1) | 823 / 220 | 11.8 / 6.2 | 24.6 | 0 | 58 | 188 | 52 |
+| outage | 4096 | 3 | PASS | 0 (0) | 0 / 0 | 5.1 / 5.7 | 8.1 | 0 | 0 | 124 | 53 |
+
+</details>
+
+The few holds again say nothing about safety at high hold counts (one WebSocket per Member in this fixture), as stated in the maintainer's 2026-11-19 decision above.
+
+## Revocation hold send-time rerun (#592, 2026-11-21 JST, Mac)
+
+Verbatim from [the #592 results comment](https://github.com/tkakkie/fukulow/issues/592#issuecomment-7053649060), without its decision options. Run with `ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir --kinds recheck --sizes 4096 --repeats 3` from a release build of `2bad2c7d`. Raw run directories are outside Git.
+
+This is step 3 of the maintainer's 2026-11-20 decision (option 2). It ran in the overnight chain with harness commit `2bad2c7d` (the #622 change on PR #623's head). The server change is measurement-only: it records each notice's server send time on the same clock as the fault start, with no change to notice behaviour or authorization. The settings are unchanged from the 2026-11-20 rerun:
+- 128 removals at concurrency 64, fault lead 300 ms, recovery 3.5 s after the pass;
+- the same thresholds, 3 repeats, Node 26.13.1, the same host;
+- no other runs on the host.
+
+The script exited 0 and left no containers.
+
+**The pre-registered 2026-11-20 FAIL is unchanged.** These results are recorded separately, as the decision asked, and the verdict on them is the maintainer's.
+
+### Result
+| Repeat | Per-run verdict | Server send records matched | Indeterminate | Clock uncertainty | Boundary exceptions | Lost with / without notice | Holds (fenced) | Recheck errors (client) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | PASS | 24/24 | 0 | 0.22 ms | 0 | 11 / 53 | 2 (2) | 2,408 |
+| 2 | PASS | 24/24 | 0 | 0.09 ms | 0 | 10 / 54 | 0 (0) | 1,674 |
+| 3 | PASS | 24/24 | 0 | 0.17 ms | 0 | 13 / 51 | 0 (0) | 1,746 |
+
+- **No notice was sent while the failure was active, in any repeat.** Every server send record was matched to a client notice, and none was indeterminate. Because the send time is now measured directly, no run needed the 2 ms arrival allowance.
+- **Other criteria:**
+  - no notices after recovery, no resets and no server closes;
+  - DB probes had 0 failures; recovery p99 was at most 12.8 ms;
+  - HTTP recovery had no failures and no 5xx; p99 was at most 23.1 ms;
+  - 0 pool timeouts; at most 53 waiting during the fault;
+  - RSS delta 151–199 MiB.
+- **Holds:** at most 2, all fenced, with no delivered-after-hold, timeout, retries or cap retirements. Backoff safety at high hold counts is still unverified, as before; that is #668.
+- The summary's `bySize` reads `NOT EVALUATED` for all sizes. That is expected: this run covered only `recheck` at 4096. The script judges each run, not a size. **No size-level verdict is claimed here.**
+
+### What this suggests (not a verdict)
+The earlier socket 26 arrival at +3.8 ms is consistent with a notice sent before the fault and delivered late under load. That was the boundary class #622 described. These three repeats show no send inside the fault window when the send time is measured directly. They cannot retroactively prove what happened in the 2026-11-20 r2 run.
+
+### Verdict (maintainer decisions, 2026-11-20 and 2026-11-21)
+
+- **2026-11-20, option 2:** the 2026-11-20 4096 FAIL stands. Make the server send time measurable (measurement-only, #622), put it on the fault clock, rerun `recheck` at 4,096 ×3, and record the results separately.
+- **2026-11-21, accepted:** the 2026-11-20 pre-registered FAIL is kept unchanged as a record. The 2026-11-21 send-time rerun is a separate result: all 3 repeats PASS, every server send record matched, 0 indeterminate, 0 server sends inside the fault window.
+- **Backoff:** acceptable at the low hold counts covered here (256, 1,024 and 4,096 connections, at most 4 concurrent holds). Safety at high hold counts is still unverified and stays open in #668; this verdict does not extend to it.
+- **The earlier +3.8 ms arrival** (2026-11-20 `recheck` 4096 r2, socket 26) is consistent with a notice sent before the fault and delivered late under load. No earlier individual FAIL is rewritten as PASS.
+- **Jitter:** not needed now.
 
 ## Invite cleanup (#223, 2026-11-20 JST)
 
