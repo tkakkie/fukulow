@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticValidity, hasAppFailure, poolStatsCapability, validityResult } from './pool-before-after-diagnostic-results.ts';
+import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticValidity, hasAppFailure, hostSettle, poolStatsCapability, settleHostLoad, validityResult } from './pool-before-after-diagnostic-results.ts';
 import { generatorConfig } from './pool-before-after-config.ts';
 import { parseActivity } from './pool-before-after-db.ts';
 import { activityWindow, generatorStats, generatorWindow } from './pool-before-after-sampling.ts';
@@ -375,4 +375,15 @@ test('diagnosticAppEvidence counts unparseable app lines on both log paths and k
   const legacy = diagnosticAppEvidence(`1970-01-01T00:00:00.999000000Z ${broken}`, 1000, 71000, undefined, { startedAt: 71001, uninterrupted: true });
   assert.equal(legacy.unparseableLineCount, 1);
   assert.doesNotMatch(JSON.stringify(legacy), /3f2b8c1e/);
+});
+
+test('pair start waits for post-build host load to settle, bounded, without changing the validity limit', async () => {
+  const loads = [3.4, 2.9, 2.1, 1.7];
+  let waits = 0;
+  const waited = await settleHostLoad(() => loads[waits] ?? 1, async () => { waits++; });
+  assert.equal(waits, 3);
+  assert.equal(waited, 3 * hostSettle.stepMs / 1000);
+  waits = 0;
+  assert.equal(await settleHostLoad(() => 5, async () => { waits++; }), hostSettle.maxSteps * hostSettle.stepMs / 1000);
+  assert.equal(waits, hostSettle.maxSteps);
 });

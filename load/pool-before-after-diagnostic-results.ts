@@ -10,6 +10,18 @@ export const diagnosticRule = {
   slowWithDrops: '2026-11-20: With valid B and invalid A, allow only dropped iterations and an offered-send mismatch reconciled by send-lane drops within 1% of schedule. A send p95 >= 100 ms or an app failure yields slow_with_drops; otherwise ambiguous. Other invalid pairs yield null. Valid pairs use classification.',
 } as const;
 
+// Image builds just before a pair raise the 1-minute load past the pair-start limit (2026-11-21 bisection
+// step 2). Before any sample, wait for it to fall below settleBelow; the pair-start validity rule is unchanged.
+export const hostSettle = { below: 2, stepMs: 15_000, maxSteps: 60 } as const;
+
+export async function settleHostLoad(read: () => number, wait: (ms: number) => Promise<unknown>, o = hostSettle) {
+  for (let step = 0; step < o.maxSteps; step++) {
+    if (read() < o.below) return step * o.stepMs / 1000;
+    await wait(o.stepMs);
+  }
+  return o.maxSteps * o.stepMs / 1000;
+}
+
 export type Validity = { valid: boolean; reasons: string[] };
 export const validityResult = (reasons: string[]): Validity => ({ valid: reasons.length === 0, reasons });
 const count = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;

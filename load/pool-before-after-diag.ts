@@ -9,7 +9,7 @@ import { outsideCheckout } from './proxy-target.ts';
 import { allowanceSeconds, diagnosticComposeOverride, diagnosticConfig, diagnosticLogBufferBytes, generatorConfig } from './pool-before-after-config.ts';
 import { activitySql, explainFixture, parseActivity, psqlArgs, scheduleExplain, topStatementsSql, untrackedSqlArgs } from './pool-before-after-db.ts';
 import { activityWindow, generatorProbe, generatorStats, generatorWindow, k6Address, processStats, sampler, sampleWindow } from './pool-before-after-sampling.ts';
-import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticRule, diagnosticValidity, hasAppFailure, poolStatsCapability, validityResult } from './pool-before-after-diagnostic-results.ts';
+import { appFailures, classifyPair, diagnosticAppEvidence, diagnosticRule, diagnosticValidity, hasAppFailure, poolStatsCapability, settleHostLoad, validityResult } from './pool-before-after-diagnostic-results.ts';
 import { pairs, settings, timeoutNote, type Run, type Arm, type Counts } from './pool-before-after-summary.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, ChannelList, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const exec=promisify(execFile);
@@ -48,7 +48,7 @@ const images:Partial<Record<Arm,string>>={};
 const sequence=pairs().slice(0,smoke?1:diagPairs).flatMap((arms,i)=>
   (smoke?(['B'] as const):arms).map(arm=>({scenario:'mixed' as const,pair:i+1,arm})));
 const runs=new Map<string, Parameters<typeof classifyPair>[0]>();
-const pairStarts=new Map<number, { at: number; hostLoad: number }>();
+const pairStarts=new Map<number, { at: number; hostLoad: number; settleWaitSeconds: number }>();
 const missingArm=(arm:Arm,reason='missing arm-run evidence')=>({...appCapabilities[arm],validity:validityResult([reason]),sendP95Ms:null,hasAppFailure:false});
 const pairResults=()=>Array.from({length:smoke?1:diagPairs},(_,index)=>{
   const pair=index+1;
@@ -120,7 +120,10 @@ try {
   save(`${output}/images.json`,{scope,commits,images,k6,k6Id});
   for(const cell of sequence) {
     check();
-    if(!pairStarts.has(cell.pair))pairStarts.set(cell.pair,{at:Date.now(),hostLoad:loadavg()[0]});
+    if(!pairStarts.has(cell.pair)) {
+      const settleWaitSeconds=await settleHostLoad(()=>loadavg()[0],delay);
+      pairStarts.set(cell.pair,{at:Date.now(),hostLoad:loadavg()[0],settleWaitSeconds});
+    }
     const id=`${cell.scenario}-${cell.pair}-${cell.arm}`;
     const config=configs[cell.arm];
     const vusLimit=config.lanes.reduce((sum,lane)=>sum+config.scenarios[lane.name].maxVUs,0);
