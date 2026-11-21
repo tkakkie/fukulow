@@ -28,7 +28,7 @@ function validEvidence(vus = 200, vus_max = 3200): Parameters<typeof diagnosticV
     lanes, expectedLanes: lanes.map(l => l.name),
     resources: { complete: true, samples: 71, maxSampleGapMs: 1000, maxInteriorGapMs: 1000, samplingErrors: 0 },
     generator, generatorRun: generator, cpuLimit: 8, vusLimit, vusPeak: 200, droppedIterations: 0, http5xx: 0, generatorExitCode: 0,
-    app: { complete: true, reasons: [], http5xx: 0, panics: 0, databaseFailures, unknownEvents: [], unparseableLines: [] }, statementsCaptured: true,
+    app: { complete: true, reasons: [], http5xx: 0, panics: 0, databaseFailures, unknownEvents: [], unparseableLineCount: 0 }, statementsCaptured: true,
   };
 }
 
@@ -365,11 +365,14 @@ test('collapsed: valid B and an A over 1 s with HTTP 5xx or client timeouts and 
   assert.equal(classifyPair(validArm, a([dropReason], 5000)).diagnosticClassification, 'slow_with_drops');
 });
 
-test('diagnosticAppEvidence returns redacted unparseable lines on both log paths', () => {
+test('diagnosticAppEvidence counts unparseable app lines on both log paths and keeps no line content', () => {
   const broken = '{"target":"fukulow","fields":{"event":"websocket_closed","id":"3f2b8c1e"';
-  const shape = '{"target":"fukulow","fields":{"event":"websocket_closed","id":"<8>"';
-  assert.deepEqual(diagnosticAppEvidence(broken, 1000, 71000).unparseableLines, [shape]);
-  // The legacy path strips Docker timestamps before capture.
+  const direct = diagnosticAppEvidence([broken, broken, 'plain text'].join('\n'), 1000, 71000);
+  assert.equal(direct.unparseableLineCount, 2);
+  assert.ok(direct.reasons.includes('unparseable app event line'));
+  assert.doesNotMatch(JSON.stringify(direct), /3f2b8c1e/);
+  // The legacy path strips Docker timestamps before counting.
   const legacy = diagnosticAppEvidence(`1970-01-01T00:00:00.999000000Z ${broken}`, 1000, 71000, undefined, { startedAt: 71001, uninterrupted: true });
-  assert.deepEqual(legacy.unparseableLines, [shape]);
+  assert.equal(legacy.unparseableLineCount, 1);
+  assert.doesNotMatch(JSON.stringify(legacy), /3f2b8c1e/);
 });

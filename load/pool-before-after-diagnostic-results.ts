@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { appEvidence, unparseableAppLines } from './app-evidence.ts';
+import { appEvidence, unparseableAppLineCount } from './app-evidence.ts';
 import type { generatorWindow } from './pool-before-after-sampling.ts';
 import type { Counts, Evidence } from './pool-before-after-summary.ts';
 
@@ -34,8 +34,8 @@ export function diagnosticAppEvidence(log: string, from: number, to: number, err
   }
   const { complete, reasons, databaseFailures, http5xx, panics: structuredPanics, unknownEvents } = appEvidence(log, from, to, error);
   const panics = structuredPanics + [...log.matchAll(/^thread '[^'\r\n]+'(?: \(\d+\))? panicked at /gm)].length;
-  const unparseableLines = unparseableAppLines(log);
-  if (!legacyRead) return { complete, reasons, databaseFailures, http5xx, panics, unknownEvents, unparseableLines };
+  const unparseableLineCount = unparseableAppLineCount(log);
+  if (!legacyRead) return { complete, reasons, databaseFailures, http5xx, panics, unknownEvents, unparseableLineCount };
 
   const legacyReasons = reasons.filter(reason => reason !== 'missing pool_stats');
   // A quiet app need not log at the end. A full read started after the window
@@ -43,7 +43,7 @@ export function diagnosticAppEvidence(log: string, from: number, to: number, err
   if (!hasPreWindowLog || !(legacyRead.startedAt >= to) || !legacyRead.uninterrupted) {
     legacyReasons.push('app log does not cover the generator window');
   }
-  return { complete: legacyReasons.length === 0, reasons: legacyReasons, databaseFailures, http5xx, panics, unknownEvents, unparseableLines };
+  return { complete: legacyReasons.length === 0, reasons: legacyReasons, databaseFailures, http5xx, panics, unknownEvents, unparseableLineCount };
 }
 
 export function appFailures(lanes: Counts[], http5xx: number | undefined, app: ReturnType<typeof diagnosticAppEvidence>) {

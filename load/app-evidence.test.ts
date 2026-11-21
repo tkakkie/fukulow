@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appEvidence, proxyEvidence, redactedShape, unparseableAppLines } from './app-evidence.ts';
+import { appEvidence, proxyEvidence, unparseableAppLineCount } from './app-evidence.ts';
 
 const t0 = Date.parse('2026-11-17T00:00:00Z');
 const at = (ms: number) => new Date(t0 + ms).toISOString().replace('Z', '123Z');
@@ -200,45 +200,9 @@ test('only error lines naming a proxy-internal limit become capacity markers', (
   assert.doesNotMatch(JSON.stringify(c), /accept4|443|deadline/);
 });
 
-test('unparseable app event lines are kept for diagnosis: redacted shape, at most 5, each at most 2 KiB', () => {
-  const bad = (n: number) => `{"fields":{"event":"websocket_closed","n":${n}`;
-  const long = `{"fields":{"event":"websocket_closed",${'"a":1,'.repeat(500)}`;
-  const log = [...pools(2), bad(1), 'plain text', '{"level":"ERROR","target":"fukulow","fields":{"event":"panic"}}', long,
-    bad(2), bad(3), bad(4), bad(5)].join('\n');
-  const lines = unparseableAppLines(log);
-  assert.deepEqual(lines.map(l => Buffer.byteLength(l)), [bad(1).length, 2048, bad(2).length, bad(3).length, bad(4).length]);
-  assert.equal(lines[0], bad(1));
-  assert.deepEqual(unparseableAppLines(pools(3).join('\n')), []);
-  // The cap counts UTF-8 bytes and never splits a character.
-  const [wide] = unparseableAppLines(`${'\u3000'.repeat(683)}pool_stats`);
-  assert.equal(wide, '\u3000'.repeat(682));
-  assert.ok(Buffer.byteLength(wide) <= 2048 && !wide.includes('\ufffd'));
-});
-
-test('unparseable app line capture never keeps non-constant values', () => {
-  const secrets = ['3f2b8c1e-9d4a-4e7b-8c2d-1a2b3c4d5e6f', 'a'.repeat(64).replace(/a/g, (_, i) => '0123456789abcdef'[i % 16]),
-    'secret-looking-token-123', '/api/v1/channels', 'user@example.com', 'db:5432', 'Bearer xyz'];
-  const quoted = `{"timestamp":"2026-11-21T03:28:07Z","target":"fukulow","fields":{"event":"websocket_closed","id":"${secrets[0]}",` +
-    `"token":"${secrets[1]}","esc":"a\\"${secrets[2]}","route":"${secrets[3]}"`;
-  const plain = `pool_stats ${secrets.slice(2).join(' ')}`;
-  const unterminated = `{"target":"fukulow","fields":{"event":"http_completed","path":"${secrets[3]}`;
-  const lines = unparseableAppLines([quoted, plain, unterminated].join('\n'));
-  assert.equal(lines.length, 3);
-  for (const l of lines) for (const secret of secrets) assert.ok(!l.includes(secret), `${secret} in ${l}`);
-  assert.equal(lines[0], '{"timestamp":"<20>","target":"fukulow","fields":{"event":"websocket_closed","id":"<36>","token":"<64>",' +
-    '"esc":"<27>","route":"<16>"');
-  assert.equal(lines[1], '<10> <24> <16> <16> <7> <6> <3>');
-  assert.equal(lines[2], `{"target":"fukulow","fields":{"event":"http_completed","path":"<unterminated ${secrets[3].length}>`);
-  assert.equal(redactedShape('{"a":"b c","n":12,"x":true}'), '{"a":"<3>","n":12,"x":true}');
-  // Constant-shaped values survive only under constant keys (and log levels).
-  const fake = ['tok', 'live', 'q7m4z9'].join('_'); // built at run time so the scanner never sees a key-shaped literal
-  assert.equal(redactedShape(`{"target":"fukulow","level":"INFO","token":"${fake}","fields":{"event":"websocket_closed","kind":"pool_timeout"}`),
-    '{"target":"fukulow","level":"INFO","token":"<15>","fields":{"event":"websocket_closed","kind":"pool_timeout"}');
-  assert.equal(redactedShape('{"level":"Bearer","event":"Tok_1"'), '{"level":"<6>","event":"<5>"');
-  // A constant key's exception never carries past another token (round-2 finding).
-  assert.equal(redactedShape(`{"target":"fukulow","event":null,"${fake}"}`), '{"target":"fukulow","event":null,"<15>"}');
-  assert.equal(redactedShape(`{"event":"x","${fake}"`), '{"event":"x","<15>"');
-  assert.equal(redactedShape('pool_stats host:5432 :12 12:30'), '<10> <9> :12 <5>');
-  assert.equal(redactedShape('{"target":"fukulow","values":[1,2,true,null,-3.5,x9]'), '{"target":"fukulow","values":[1,2,true,null,-3.5,<2>]');
-  assert.equal(redactedShape(`"${'deadbeef'.repeat(2)}" ${'f'.repeat(16)} "deadbeef"`), '"<16>" <16> "<8>"');
+test('unparseable app line count skips blank, panic, parseable and non-app lines', () => {
+  const bad = '{"target":"fukulow","fields":{"event":"websocket_closed"';
+  const log = [...pools(2), bad, '', 'plain text', '{"level":"ERROR","target":"fukulow","fields":{"event":"panic"', 'pool_stats truncated', bad].join('\n');
+  assert.equal(unparseableAppLineCount(log), 3);
+  assert.equal(unparseableAppLineCount(pools(3).join('\n')), 0);
 });

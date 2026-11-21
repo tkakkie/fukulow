@@ -56,56 +56,11 @@ function parse(line: string): Row | undefined {
 }
 const appEventHint = /"target":"fukulow"|pool_stats|database_failure|websocket_|http_completed/;
 
-// The unknown-kind shape, minus hex runs that could be tokens.
-const constantShape = (text: string) => /^[a-z][a-z0-9_]{0,31}$/.test(text) && !/^[0-9a-f]{16,}$/.test(text);
-// Values kept verbatim only under keys whose values the server writes as code constants.
-const constantKeys = new Set(['target', 'event', 'kind', 'code', 'operation', 'coverage']);
-// A word between strings keeps only a leading ':' and a number or literal; host:port and the like become lengths.
-const plainWord = (w: string) => /^:?(?:-?\d+(?:\.\d+)?|true|false|null)?$/.test(w) ? w : `<${w.length}>`;
-
-/** Keeps a line's JSON shape: punctuation, numbers, literals, constant-shaped keys and constant values; the rest as lengths. */
-export function redactedShape(line: string): string {
-  let out = '', key: string | undefined;
-  for (let i = 0; i < line.length;) {
-    const quote = line.indexOf('"', i);
-    const between = quote < 0 ? line.slice(i) : line.slice(i, quote);
-    out += between.replace(/[^\s{}[\],]+/g, plainWord);
-    // A value counts as the key's only when nothing but ':' separates them.
-    if (!/^\s*:\s*$/.test(between)) key = undefined;
-    if (quote < 0) break;
-    let end = quote + 1;
-    while (end < line.length && line[end] !== '"') end += line[end] === '\\' ? 2 : 1;
-    if (end >= line.length) { out += `"<unterminated ${line.length - quote - 1}>`; break; }
-    const text = line.slice(quote + 1, end);
-    const isKey = /^\s*:/.test(line.slice(end + 1));
-    const keep = isKey ? constantShape(text)
-      : key === 'level' ? (logLevels as readonly string[]).includes(text) : key !== undefined && constantKeys.has(key) && constantShape(text);
-    out += keep ? `"${text}"` : `"<${text.length}>"`;
-    key = isKey ? text : undefined;
-    i = end + 1;
-  }
-  return out;
-}
-
-function capBytes(text: string, maxBytes: number) {
-  let out = '', bytes = 0;
-  for (const char of text) {
-    bytes += Buffer.byteLength(char);
-    if (bytes > maxBytes) break;
-    out += char;
-  }
-  return out;
-}
-
-/** #519: the first unparseable app event lines, redacted to their shape and capped, for local diagnosis only. */
-export function unparseableAppLines(log: string, limit = 5, maxBytes = 2048): string[] {
-  const lines: string[] = [];
-  for (const line of log.split('\n')) {
-    if (lines.length >= limit) break;
-    if (!line.trim() || /"event":"panic"/.test(line) || parse(line) || !appEventHint.test(line)) continue;
-    lines.push(capBytes(redactedShape(line), maxBytes));
-  }
-  return lines;
+/** #519: how many app event lines could not be parsed. Counts only; no line content is kept. */
+export function unparseableAppLineCount(log: string): number {
+  let n = 0;
+  for (const line of log.split('\n')) if (line.trim() && !/"event":"panic"/.test(line) && !parse(line) && appEventHint.test(line)) n++;
+  return n;
 }
 
 const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : NaN;
