@@ -31,8 +31,16 @@
   import WorkspaceChannelColumn from './WorkspaceChannelColumn.svelte'
   import WorkspaceMainView from './WorkspaceMainView.svelte'
   import WorkspacePanelContent from './WorkspacePanelContent.svelte'
+  import {
+    createChannelSelection,
+    parsePanelTab,
+    parseReplyMessageId,
+    resolveMobileLevel,
+    resolveReplyAnchor,
+    shouldClosePanelForDm,
+  } from './workspace-routing'
   import Button from './ui/Button.svelte'
-  import Panel, { type PanelTabId } from './ui/Panel.svelte'
+  import Panel from './ui/Panel.svelte'
 
   // The session's controllers outlive this component: unmounting it never closes the connection.
   let {
@@ -110,7 +118,7 @@
     session.unread?.(id).state.unreadCount ?? null
   const channelMentionUnreadCount = (id: string): number | null =>
     session.unread?.(id).state.mentionUnreadCount ?? null
-  const activeReplyMessageId = $derived(route?.panel?.startsWith('reply:') ? route.panel.slice(6) : null)
+  const activeReplyMessageId = $derived(parseReplyMessageId(route?.panel))
   const searchResult = $derived(route?.organizationId === currentOrganizationId ? nav.state.searchResult : undefined)
   const searchRead = $derived(session.searchAnchor?.state)
   const searchView = $derived(searchRead?.target === searchResult ? searchRead : undefined)
@@ -120,25 +128,17 @@
     : undefined)
   const searchReply = $derived(Boolean(searchResult?.replyRootId))
   let lastOpenedAnchor = $state<Message | null>(null)
-  const inMemoryReplyAnchor = $derived.by(() => {
-    if (!activeReplyMessageId || !selected) return null
-    if (lastOpenedAnchor?.id === activeReplyMessageId && lastOpenedAnchor.channel_id === selected.id) {
-      return lastOpenedAnchor
-    }
-    const fromTimeline = currentTimeline?.messages.find((m) => m.id === activeReplyMessageId)
-    if (fromTimeline) return fromTimeline
-    for (const line of currentTopicsState?.lines ?? []) {
-      if (line.kind === 'message' && line.message.id === activeReplyMessageId) return line.message
-    }
-    if (route?.topicId && currentTopicsState) {
-      const fromTopic = currentTopicsState.topic(route.topicId).messages.find((m) => m.id === activeReplyMessageId)
-      if (fromTopic) return fromTopic
-    }
-    if (currentRepliesState?.anchor?.id === activeReplyMessageId) return currentRepliesState.anchor
-    const fromReplies = currentRepliesState?.messages.find((m) => m.id === activeReplyMessageId)
-    if (fromReplies) return fromReplies
-    return null
-  })
+  const inMemoryReplyAnchor = $derived(
+    resolveReplyAnchor({
+      activeReplyMessageId,
+      selectedChannelId: selected?.id,
+      lastOpenedAnchor: () => lastOpenedAnchor,
+      timelineMessages: () => currentTimeline?.messages,
+      topicLines: () => currentTopicsState?.lines,
+      routedTopicMessages: () => (route?.topicId && currentTopicsState ? currentTopicsState.topic(route.topicId).messages : undefined),
+      replies: () => currentRepliesState,
+    }),
+  )
   const replyTargetState = $derived(
     searchReply
       ? { status: searchView?.status === 'missing' ? 'unavailable' as const : searchView?.status ?? 'loading' as const,
@@ -180,9 +180,9 @@
 
   let drawerOpen = $state(false)
   const panelOpen = $derived(!!route?.panel)
-  const activePanelTab = $derived<PanelTabId>(route?.panel && !route.panel.startsWith('reply:') ? route.panel as PanelTabId : 'topics')
+  const activePanelTab = $derived(parsePanelTab(route?.panel))
   $effect(() => {
-    if (selected?.kind === 'dm' && route?.panel && !route.panel.startsWith('reply:')) nav.navigate({ type: 'close' })
+    if (shouldClosePanelForDm(selected?.kind, () => route?.panel)) nav.navigate({ type: 'close' })
   })
   let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280)
 
@@ -215,10 +215,7 @@
   )
   const searchState = $derived(searchModel?.state)
   const searchOpen = $derived(Boolean(searchState?.open && !organizationUnavailable))
-  const mobileLevel = $derived(!route?.channelId ? 'channels' : route.panel ? 'panel' : 'view')
-  const effectiveMobileLevel = $derived<'channels' | 'view' | 'panel'>(
-    mobileLevel === 'channels' && searchOpen ? 'view' : mobileLevel,
-  )
+  const effectiveMobileLevel = $derived(resolveMobileLevel(route, () => searchOpen))
   const mainViewSelected = $derived(
     viewportWidth >= MOBILE_BREAKPOINT_PX || effectiveMobileLevel === 'view',
   )
@@ -549,26 +546,17 @@
     })
   })
 
-  function handleSelectChannel(id: string, result?: SearchTarget) {
-    const same = id === s.selectedId
-    if (same) members?.authors.retry()
-    const navigated = result
-      ? nav.openSearchResult(currentOrganizationId, result)
-      : nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
-    if (result || same || navigated === false) {
-      if (dmState?.rows.some(row => row.identity.id === id)) session.dms?.select(id)
-      else channels.select(id)
-      if (
-        (navigated === false || (same && result?.replyRootId && !result.topicId)) &&
-        typeof currentUnread !== 'undefined' &&
-        currentUnread &&
-        (currentUnread.state.stopped || currentUnread.state.main.stopped)
-      ) {
-        void currentUnread.enter(null)
-      }
-    }
-    drawerOpen = false
-  }
+  const handleSelectChannel = createChannelSelection({
+    getOrganizationId: () => currentOrganizationId,
+    getSelectedId: () => s.selectedId,
+    getNavigation: () => nav,
+    selectChannel: (id) => channels.select(id),
+    isDm: (id) => Boolean(dmState?.rows.some((row) => row.identity.id === id)),
+    selectDm: (id) => session.dms?.select(id),
+    retryAuthors: () => { members?.authors.retry() },
+    getCurrentUnread: () => currentUnread,
+    onCloseDrawer: () => { drawerOpen = false },
+  })
 
   async function handleOpenDm(member: string, renew = false) {
     await session.dms?.open(member, renew)
