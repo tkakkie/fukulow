@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { stages } from '../../harness-core/stages.ts';
 import { replayPosition } from '../../slice5/config.ts';
 import { describePlan, pgbenchScript, pgbenchTimings, position, quantiles, sections, timings } from './measure.ts';
 import { execute, expand, literal, pgbenchExecute, prepare, type Bindings, type Statement } from './sql.ts';
@@ -74,4 +78,15 @@ test('plan summary retains root buffer totals, index bounds and child loops', ()
   assert.equal(scan.sharedRead, 5);
   assert.equal(scan.tempWritten, 2);
   assert.throws(() => describePlan(plan, 50), /Unexpected rows/);
+});
+
+test('non-finite or negative latency samples fail the summary, and status.json is still recorded', () => {
+  for (const bad of [[Number.NaN], [-1], [Number.POSITIVE_INFINITY], []]) {
+    const out = mkdtempSync(join(tmpdir(), 'fk515d-'));
+    const run = stages(out, 'recorded');
+    run.startSampling();
+    const status = run.finish(() => { quantiles(bad); }, { failed: false, interrupted: false });
+    assert.equal(status.summaryFailed, true);
+    assert.equal(JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')).outcome, 'result-failure');
+  }
 });
