@@ -123,7 +123,7 @@ describe('createDefaultSearchSource', () => {
     })
     expect(await source.search({ q: 'テスト', cursor: 'bad' })).toEqual({
       ok: false,
-      failure: { kind: 'error', retryable: false },
+      failure: { kind: 'invalid_cursor' },
     })
     expect(await source.search({ q: 'テスト', channel_id: 'hidden' })).toEqual({
       ok: false,
@@ -500,6 +500,116 @@ describe('createSearchController', () => {
     expect(ctrl.get().submittedQuery).toBe('新しいクエリ')
     expect(ctrl.get().items.map((item) => item.message.id)).toEqual(['msg-200'])
     expect(ctrl.get().nextCursor).toBeNull()
+    ctrl.destroy()
+  })
+
+  it('clears nextCursor on invalid_cursor and lets retry restart the submitted query from page one', async () => {
+    const calls: SearchRequest[] = []
+    let step = 0
+    const source: SearchSource = {
+      async search(req) {
+        calls.push(req)
+        step += 1
+        if (step === 1) {
+          return {
+            ok: true,
+            page: { hits: [makeSearchHit(1, { body: 'ページ1' })], next_cursor: 'stale-cur' },
+          }
+        }
+        if (step === 2) {
+          return { ok: false, failure: { kind: 'invalid_cursor' } }
+        }
+        return {
+          ok: true,
+          page: { hits: [makeSearchHit(2, { body: '再検索ページ1' })], next_cursor: null },
+        }
+      },
+    }
+
+    const ctrl = createSearchController({ source })
+    await ctrl.submit('検索語')
+    expect(ctrl.get().nextCursor).toBe('stale-cur')
+
+    await ctrl.loadMore()
+    expect(ctrl.get().status).toBe('results')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['msg-1'])
+    expect(ctrl.get().nextCursor).toBeNull()
+    expect(ctrl.get().loadMoreError).toBe('invalid_cursor')
+    expect(ctrl.get().retryable).toBe(true)
+
+    // Further loadMore is a no-op once the invalid cursor is cleared.
+    await ctrl.loadMore()
+    expect(calls).toHaveLength(2)
+
+    // retry() restarts the submitted query from page 1 with no cursor.
+    await ctrl.retry()
+    expect(calls).toHaveLength(3)
+    expect(calls[2]).toMatchObject({ q: '検索語' })
+    expect(calls[2].cursor).toBeUndefined()
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['msg-2'])
+    expect(ctrl.get().loadMoreError).toBeNull()
+    ctrl.destroy()
+  })
+
+  it('removes revoked Channel hits immediately and drops them from delayed pages in the same search', async () => {
+    const delayedMore = deferred<SearchResponse>()
+    let step = 0
+    const source: SearchSource = {
+      search() {
+        step += 1
+        if (step === 1) {
+          return Promise.resolve({
+            ok: true,
+            page: {
+              hits: [
+                makeSearchHit(1, { id: 'rev-1', channel_id: 'ch-revoked', body: '機密 1' }),
+                makeSearchHit(2, { id: 'keep-1', channel_id: 'ch-keep', body: '機密 2' }),
+              ],
+              next_cursor: 'cur-1',
+            },
+          })
+        }
+        if (step === 2) return delayedMore.promise
+        return Promise.resolve({
+          ok: true,
+          page: {
+            hits: [makeSearchHit(5, { id: 'rev-new', channel_id: 'ch-revoked', body: '再取得' })],
+            next_cursor: null,
+          },
+        })
+      },
+    }
+
+    const ctrl = createSearchController({ source })
+    await ctrl.submit('機密')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['rev-1', 'keep-1'])
+
+    const pendingMore = ctrl.loadMore()
+    ctrl.revokeChannel('ch-revoked')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['keep-1'])
+
+    // Delayed page started before the revoke resolves afterwards: revoked Channel hit is dropped, other stays.
+    delayedMore.resolve({
+      ok: true,
+      page: {
+        hits: [
+          makeSearchHit(3, { id: 'rev-2', channel_id: 'ch-revoked', body: '機密 3' }),
+          makeSearchHit(4, { id: 'keep-2', channel_id: 'ch-keep', body: '機密 4' }),
+        ],
+        next_cursor: null,
+      },
+    })
+    await pendingMore
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['keep-1', 'keep-2'])
+
+    // Revoking the last remaining Channel transitions to empty when no nextCursor remains.
+    ctrl.revokeChannel('ch-keep')
+    expect(ctrl.get().items).toHaveLength(0)
+    expect(ctrl.get().status).toBe('empty')
+
+    // A fresh submit resets the per-search revocation fence.
+    await ctrl.submit('再取得')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['rev-new'])
     ctrl.destroy()
   })
 })

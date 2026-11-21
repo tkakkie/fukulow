@@ -13,6 +13,7 @@ export type SearchRequest = SearchQuery & {
 
 export type SearchFailure =
   | { kind: 'too_short'; minLength?: number }
+  | { kind: 'invalid_cursor' }
   | { kind: 'unavailable' }
   | { kind: 'timeout' }
   | { kind: 'error'; retryable: boolean }
@@ -62,6 +63,9 @@ export function createDefaultSearchSource(
       }
       if (result.status === 400 && result.error === 'search_query_too_short') {
         return { ok: false, failure: { kind: 'too_short', minLength: SEARCH_MIN_SCALARS } }
+      }
+      if (result.status === 400 && result.error === 'invalid_cursor') {
+        return { ok: false, failure: { kind: 'invalid_cursor' } }
       }
       if (result.status === 401) {
         options.onEnded?.()

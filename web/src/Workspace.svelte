@@ -238,9 +238,11 @@
       onOpenResult: (target) => handleOpenSearchResult(orgId, target),
       onAnnounce: (message) => onannounce?.(message),
     })
+    const stopRevoke = session.onChannelRevoked?.((channelId) => controller.revokeChannel(channelId))
     const entry = { organizationId: orgId, source: providedSource, controller }
     activeSearch = entry
     return () => {
+      stopRevoke?.()
       controller.destroy()
       if (activeSearch === entry) activeSearch = undefined
     }
@@ -561,6 +563,12 @@
       : nav.navigate({ type: 'channel', organizationId: currentOrganizationId, channelId: id })
     if (result || same || navigated === false) {
       if (dmState?.rows.some(row => row.identity.id === id)) session.dms?.select(id)
+      else if (
+        result &&
+        !s.channels.some((c) => c.id === id) &&
+        !s.archivedList?.channels.some((c) => c.id === id) &&
+        s.openChannel?.id !== id
+      ) channels.selectHint(id)
       else channels.select(id)
       if (
         (navigated === false || (same && result?.replyRootId && !result.topicId)) &&
@@ -697,7 +705,7 @@
       s.archivedList?.channels.some((c) => c.id === target.channelId) ||
       s.openChannel?.id === target.channelId,
     )
-    if (!hasChannel) return false
+    if (!hasChannel && target.channelKind !== 'channel') return false
     if (!target.topicId) return true
     if (isDm) return false
     const topicsState = session.topics(target.channelId).state

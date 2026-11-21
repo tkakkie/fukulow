@@ -11,6 +11,7 @@ const SEARCH_OPEN_FAILED_NOTICE = 'この検索結果は現在開けません。
 
 export type SearchTarget = {
   channelId: string
+  channelKind?: SearchHit['channel_kind']
   topicId?: string | null
   replyRootId?: string | null
   messageId: string
@@ -37,7 +38,7 @@ export type SearchState = {
   nextCursor: string | null
   minLength: number | null
   retryable: boolean
-  loadMoreError: 'timeout' | 'error' | null
+  loadMoreError: 'timeout' | 'invalid_cursor' | 'error' | null
   openNotice: string | null
 }
 
@@ -82,6 +83,7 @@ export function createSearchController(options: SearchControllerOptions) {
   let generation = 0
   let destroyed = false
   let inFlight: AbortController | null = null
+  const revokedChannels = new Set<string>()
   const listeners = new Set<() => void>()
 
   const publish = (next: SearchState) => {
@@ -150,6 +152,7 @@ export function createSearchController(options: SearchControllerOptions) {
     }
 
     abortInFlight()
+    revokedChannels.clear()
     const controller = new AbortController()
     inFlight = controller
     const gen = ++generation
@@ -174,10 +177,11 @@ export function createSearchController(options: SearchControllerOptions) {
 
     if (response.ok) {
       const { hits, next_cursor } = response.page
+      const visible = hits.filter((h) => !revokedChannels.has(h.message.channel_id))
       publish({
         ...state,
-        status: hits.length > 0 || next_cursor !== null ? 'results' : 'empty',
-        items: [...hits],
+        status: visible.length > 0 || next_cursor !== null ? 'results' : 'empty',
+        items: visible,
         nextCursor: next_cursor,
         minLength: null,
         retryable: false,
@@ -206,6 +210,13 @@ export function createSearchController(options: SearchControllerOptions) {
       publish({
         ...state,
         status: 'timeout',
+        retryable: true,
+      })
+    } else if (failure.kind === 'invalid_cursor') {
+      publish({
+        ...state,
+        status: 'error',
+        nextCursor: null,
         retryable: true,
       })
     } else {
@@ -250,7 +261,10 @@ export function createSearchController(options: SearchControllerOptions) {
     if (response.ok) {
       const { hits, next_cursor } = response.page
       const seen = new Set(state.items.map((h) => h.message.id))
-      const merged = [...state.items, ...hits.filter((h) => !seen.has(h.message.id))]
+      const merged = [
+        ...state.items,
+        ...hits.filter((h) => !revokedChannels.has(h.message.channel_id) && !seen.has(h.message.id)),
+      ]
       publish({
         ...state,
         status: merged.length > 0 || next_cursor !== null ? 'results' : 'empty',
@@ -263,6 +277,16 @@ export function createSearchController(options: SearchControllerOptions) {
     }
 
     const { failure } = response
+    if (failure.kind === 'invalid_cursor') {
+      publish({
+        ...state,
+        status: 'results',
+        nextCursor: null,
+        loadMoreError: 'invalid_cursor',
+        retryable: true,
+      })
+      return
+    }
     publish({
       ...state,
       status: 'results',
@@ -302,8 +326,27 @@ export function createSearchController(options: SearchControllerOptions) {
   function clear(): void {
     if (destroyed) return
     abortInFlight()
+    revokedChannels.clear()
     generation++
     publish(initialState())
+  }
+
+  function revokeChannel(channelId: string): void {
+    if (destroyed) return
+    revokedChannels.add(channelId)
+    const items = state.items.filter((h) => h.message.channel_id !== channelId)
+    if (items.length === state.items.length) return
+    const nextStatus: SearchStatus =
+      state.status === 'results'
+        ? items.length > 0 || state.nextCursor !== null || state.loadMoreError !== null
+          ? 'results'
+          : 'empty'
+        : state.status
+    publish({
+      ...state,
+      status: nextStatus,
+      items,
+    })
   }
 
   function openSearchResult(target: SearchTarget): void {
@@ -336,11 +379,13 @@ export function createSearchController(options: SearchControllerOptions) {
     loadMore,
     retry,
     openSearchResult,
+    revokeChannel,
     close,
     clear,
     destroy(): void {
       destroyed = true
       abortInFlight()
+      revokedChannels.clear()
       listeners.clear()
     },
   }

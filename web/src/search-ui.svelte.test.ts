@@ -438,6 +438,23 @@ describe('SearchResults a11y, states, and result opening', () => {
       expect(host.querySelector('[data-testid="search-open-notice"]')?.textContent).toContain('開けません')
       expect(host.querySelector('[role="status"]')).toBeNull()
 
+      // invalid_cursor load-more error: clears load-more button and retries from page one via onretry
+      onretry.mockClear()
+      props.state = baseState({
+        status: 'results',
+        items: [makeSearchHit(1, { body: '既存ヒット' })],
+        nextCursor: null,
+        loadMoreError: 'invalid_cursor',
+        retryable: true,
+      })
+      flushSync()
+      expect(host.querySelector('[role="alert"]')?.textContent).toContain('検索結果の続きを読み込めませんでした')
+      expect(host.textContent).toContain('最初から検索し直してください')
+      expect(host.querySelectorAll('button').some((b) => b.textContent.trim() === 'さらに読み込む')).toBe(false)
+      const retryBtn = host.querySelectorAll('button').find((b) => b.textContent.trim() === '再試行')!
+      retryBtn.click()
+      expect(onretry).toHaveBeenCalledTimes(1)
+
       await unmount(inst)
     })
   })
@@ -503,6 +520,7 @@ describe('SearchResults a11y, states, and result opening', () => {
       host.querySelectorAll('button')[0].click()
       expect(onopenresult).toHaveBeenCalledWith({
         channelId: 'ch-general',
+        channelKind: 'channel',
         topicId: 'top-1',
         replyRootId: 'root-1',
         messageId: 'm-1',

@@ -31,6 +31,7 @@
   function handleOpen(hit: SearchHit) {
     onopenresult({
       channelId: hit.message.channel_id,
+      channelKind: hit.channel_kind,
       topicId: hit.message.topic_id,
       replyRootId: hit.message.reply_root_id,
       messageId: hit.message.id,
@@ -124,6 +125,15 @@
         detail="もう一度お試しください。"
         actionLabel="再試行"
         onaction={onloadmore}
+      />
+    {:else if state.loadMoreError === 'invalid_cursor'}
+      <StatusBanner
+        tone="danger"
+        role="alert"
+        message="検索結果の続きを読み込めませんでした。"
+        detail="検索結果が更新された可能性があります。最初から検索し直してください。"
+        actionLabel="再試行"
+        onaction={onretry}
       />
     {:else if state.loadMoreError === 'error'}
       <StatusBanner

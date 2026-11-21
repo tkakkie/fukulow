@@ -71,6 +71,7 @@ export function createSession(options: SessionOptions) {
     } else if (result.ok && epoch !== undefined && epoch !== history?.get().historyEpoch) return { ok: false, kind: 'network' }
     return result
   }
+  const channelRevokeListeners = new Set<(channelId: string) => void>()
   const activity = createActivity({
     kind: id => isDm(id) ? 'dm' : channels.isOrdinary(id) ? 'channel' : undefined,
     watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
@@ -84,7 +85,10 @@ export function createSession(options: SessionOptions) {
       }
       return false
     },
-    revoke: id => { sections.hideChannel(id); dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable() },
+    revoke: id => {
+      sections.hideChannel(id); dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable()
+      for (const listener of [...channelRevokeListeners]) listener(id)
+    },
     access: id => { dms?.access(id); unread.activityAccess(id); topics.activityAccess(id) },
     reconcile: () => unread.activityReconcile(),
     random: options.sync?.random,
@@ -353,6 +357,10 @@ export function createSession(options: SessionOptions) {
   return {
     sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets, searchAnchor, searchSource,
     memberListAccess,
+    onChannelRevoked(listener: (channelId: string) => void) {
+      channelRevokeListeners.add(listener)
+      return () => { channelRevokeListeners.delete(listener) }
+    },
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
       memberControllers.get(channel)?.controller.close()
@@ -391,6 +399,7 @@ export function createSession(options: SessionOptions) {
       stopFollowing(); stopSync(); stopMemberAccess()
       for (const { controller } of [...memberControllers.values()]) controller.close()
       memberControllers.clear()
+      channelRevokeListeners.clear()
       channels.close()
       sections.close()
       dms?.close()

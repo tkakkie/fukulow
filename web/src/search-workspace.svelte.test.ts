@@ -10,12 +10,13 @@ import { membersAdapter } from './members.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
 import { repliesAdapter } from './replies.svelte'
 import { searchAnchorAdapter } from './search-anchor.svelte'
-import { createDefaultSearchSource, type SearchSource } from './search-source'
+import { createDefaultSearchSource, type SearchResponse, type SearchSource } from './search-source'
 import { createMockSearchSource, makeSearchHit } from './search-test-helpers'
 import { createSession, type SessionOptions } from './session'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import { unreadAdapter } from './unread.svelte'
+import { deferred } from './unread-test-helpers'
 import Workspace from './Workspace.svelte'
 import { replyPage } from './topic-test-helpers'
 import { installMiniDom, MiniDomEvent, MiniElement, queryAll } from './svelte-dom-test-helpers'
@@ -110,6 +111,7 @@ describe('Workspace search integration (#153)', () => {
           dms: opts.dmsApi && dmsAdapter(raw.dms),
           unread: (id: string) => unreadAdapter(raw.unread, id),
           searchAnchor: searchAnchorAdapter(raw.searchAnchor),
+          onChannelRevoked: raw.onChannelRevoked,
           close: raw.close,
         },
       },
@@ -432,7 +434,9 @@ describe('Workspace search integration (#153)', () => {
   })
 
   it('keeps the current view and shows an inline notice when selecting a hit whose Channel cannot be opened', async () => {
-    const ctx = await mountSearchWorkspace()
+    const ctx = await mountSearchWorkspace({
+      searchSource: hitSource({ ...record(37, DM_ID), body: 'リリース' }, 'dm'),
+    })
     try {
       const routeBefore = ctx.navigation.get().target
       const form = ctx.host.querySelector('#main-content [role="search"]')!
@@ -443,7 +447,7 @@ describe('Workspace search integration (#153)', () => {
       form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
       await settle()
 
-      // Default mock hit has channelId 'general' which is not in the user's loaded UUID channels.
+      // DM hit is absent from loaded DM rows and cannot be opened locally.
       const hitButton = ctx.host.querySelector('#main-content ol button')!
       hitButton.click()
       await settle()
@@ -451,6 +455,112 @@ describe('Workspace search integration (#153)', () => {
       expect(ctx.navigation.get().target).toEqual(routeBefore)
       expect(ctx.host.querySelector('#main-content h1')?.textContent.trim()).toBe('検索結果')
       expect(ctx.host.querySelector('[data-testid="search-open-notice"]')?.textContent).toContain('開けません')
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('opens a readable hit in an accessible archived Channel even when absent from loaded Channel lists', async () => {
+    vi.useFakeTimers()
+    const ARCHIVED_CH_ID = '00000000-0000-4000-8000-000000000099'
+    const archivedChannel = { ...channel(ARCHIVED_CH_ID, 'legacy-archive'), archived: true }
+    const hit = { ...record(37, ARCHIVED_CH_ID), id: 'archived-hit', body: 'リリースアーカイブ' }
+    const getChannel = vi.fn(async (id: string) =>
+      id === ARCHIVED_CH_ID ? ok(archivedChannel) : ({ ok: false as const, kind: 'http' as const, status: 404, error: 'channel not found' }),
+    )
+    const ctx = await mountSearchWorkspace({
+      channelRows: [channel(CH_ID, 'general')],
+      searchSource: hitSource(hit, 'channel'),
+      setupNet(net, options) {
+        net.pages[ARCHIVED_CH_ID] = messagePage([hit])
+        options.channelsApi!.getChannel = getChannel
+      },
+    })
+    try {
+      expect(ctx.raw.channels.get().channels.some((c) => c.id === ARCHIVED_CH_ID)).toBe(false)
+      expect(ctx.raw.channels.get().archivedList).toBeUndefined()
+      expect(ctx.raw.channels.get().openChannel).toBeUndefined()
+
+      await submitSearch(ctx.host, 'リリースアーカイブ')
+      ctx.host.querySelector('#main-content ol button')!.click()
+      await vi.advanceTimersByTimeAsync(1000)
+      await settle()
+
+      expect(ctx.location.href).toBe(`/o/${ORG_ID}/c/${ARCHIVED_CH_ID}`)
+      expect(ctx.raw.channels.get().selectedId).toBe(ARCHIVED_CH_ID)
+      expect(getChannel).toHaveBeenCalledWith(ARCHIVED_CH_ID, expect.anything())
+      expect(ctx.raw.channels.get().openChannel?.id).toBe(ARCHIVED_CH_ID)
+      expect(ctx.host.querySelector('#main-content .ui-message-row--search-match')
+        ?.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe(hit.id)
+      const composer = ctx.host.querySelector('#main-content textarea')!
+      expect(composer.disabled).toBe(true)
+    } finally {
+      await ctx.close()
+      vi.useRealTimers()
+    }
+  })
+
+  it('removes revoked Channel hits from search and drops them from an in-flight page that resolves later', async () => {
+    const delayedMore = deferred<SearchResponse>()
+    let step = 0
+    const ctx = await mountSearchWorkspace({
+      channelRows: [channel(CH_ID, 'general'), channel(OTHER_CH_ID, 'secret')],
+      searchSource: {
+        search() {
+          step += 1
+          if (step === 1) {
+            return Promise.resolve({
+              ok: true,
+              page: {
+                hits: [
+                  makeSearchHit(1, { id: 'sec-1', channel_id: OTHER_CH_ID, body: '機密 1' }),
+                  makeSearchHit(2, { id: 'gen-1', channel_id: CH_ID, body: '機密 2' }),
+                ],
+                next_cursor: 'cur-1',
+              },
+            })
+          }
+          return delayedMore.promise
+        },
+      },
+    })
+    try {
+      await submitSearch(ctx.host, '機密')
+      expect(queryAll(ctx.host, '#main-content ol article').map((a) => a.textContent)).toEqual([
+        expect.stringContaining('機密 1'),
+        expect.stringContaining('機密 2'),
+      ])
+
+      const loadMoreBtn = queryAll(ctx.host, '#main-content button').find((b) => b.textContent.trim() === 'さらに読み込む')!
+      loadMoreBtn.click()
+      await settle()
+
+      // Channel access is revoked while page 2 is still in flight.
+      ctx.net.socket.onEvent({ type: 'channel_access_revoked', channel_id: OTHER_CH_ID })
+      await settle()
+
+      expect(queryAll(ctx.host, '#main-content ol article').map((a) => a.textContent)).toEqual([
+        expect.stringContaining('機密 2'),
+      ])
+
+      delayedMore.resolve({
+        ok: true,
+        page: {
+          hits: [
+            makeSearchHit(3, { id: 'sec-2', channel_id: OTHER_CH_ID, body: '機密 3' }),
+            makeSearchHit(4, { id: 'gen-2', channel_id: CH_ID, body: '機密 4' }),
+          ],
+          next_cursor: null,
+        },
+      })
+      await settle()
+
+      const texts = queryAll(ctx.host, '#main-content ol article').map((a) => a.textContent)
+      expect(texts).toHaveLength(2)
+      expect(texts[0]).toContain('機密 2')
+      expect(texts[1]).toContain('機密 4')
+      expect(texts.join(' ')).not.toContain('機密 1')
+      expect(texts.join(' ')).not.toContain('機密 3')
     } finally {
       await ctx.close()
     }
@@ -829,6 +939,7 @@ describe('Workspace search integration (#153)', () => {
 
     const mockAnnouncements: string[] = []
     const mockCtx = await mountSearchWorkspace({
+      searchSource: hitSource({ ...record(37, DM_ID), body: 'リリース' }, 'dm'),
       onannounce: (msg) => mockAnnouncements.push(msg),
     })
     try {

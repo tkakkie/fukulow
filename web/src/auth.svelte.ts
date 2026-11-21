@@ -42,6 +42,7 @@ export type SessionModel = {
   channelMembers?(id: string): ReturnType<typeof createChannelMembers>
   memberListAccess?(): MemberListAccess
   onMemberListRefresh?(listener: (reason: 'access' | 'refresh') => void): () => void
+  onChannelRevoked?(listener: (channelId: string) => void): () => void
   close(): void
 }
 export type AuthDeps = {
@@ -70,6 +71,7 @@ const defaults: AuthDeps = {
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
       searchAnchor: searchAnchorAdapter(session.searchAnchor),
       searchSource: session.searchSource,
+      onChannelRevoked: session.onChannelRevoked,
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
       sections: sectionsAdapter(session.sections),

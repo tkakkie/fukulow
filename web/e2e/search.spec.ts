@@ -25,7 +25,8 @@ test('searches Messages, loads the next page by cursor, and opens a hit at the M
   const channel = await createChannel(page.request, org, `search-${suffix}`)
   const keyword = `srch${suffix}`
 
-  // Post 23 matching Messages sequentially so created_at/id order is deterministic across pages.
+  // Post 23 multi-line matching Messages sequentially so created_at/id order is deterministic across pages
+  // and the oldest Message starts outside the initial bottom-pinned viewport.
   const messages: Message[] = []
   for (let i = 1; i <= 23; i++) {
     messages.push(
@@ -33,7 +34,7 @@ test('searches Messages, loads the next page by cursor, and opens a hit at the M
         page.request,
         org,
         channel.id,
-        `${keyword} item ${String(i).padStart(2, '0')}`,
+        `${keyword} item ${String(i).padStart(2, '0')}\nscroll filler line 2\nscroll filler line 3`,
       ),
     )
   }
@@ -69,10 +70,9 @@ test('searches Messages, loads the next page by cursor, and opens a hit at the M
   const matchedRow = main.locator('.ui-message-row--search-match')
   await expect(matchedRow).toBeVisible()
   await expect(matchedRow).toContainText(`${keyword} item 01`)
-  await expect(matchedRow.locator('xpath=ancestor::*[@data-message-id]')).toHaveAttribute(
-    'data-message-id',
-    messages[0].id,
-  )
+  const row = matchedRow.locator('xpath=ancestor::*[@data-message-id]')
+  await expect(row).toHaveAttribute('data-message-id', messages[0].id)
+  await expect(row).toBeInViewport()
 })
 
 test('private-Channel non-member gets no hit while the member sees it', async ({ page, browser }) => {
