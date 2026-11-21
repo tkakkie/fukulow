@@ -1,0 +1,442 @@
+--- a/server/src/database/stats.rs
++++ b/server/src/database/stats.rs
+@@ -95,7 +95,7 @@
+             start: Instant::now(),
+             completed: false,
+         };
+-        let result = pool.acquire().await;
++        let result = crate::move_diagnostic::timed("pool_acquire", pool.acquire()).await;
+         let counter = match &result {
+             Ok(_) => &self.success,
+             Err(sqlx::Error::PoolTimedOut) => &self.timeout,
+--- a/server/src/lib.rs
++++ b/server/src/lib.rs
+@@ -2,6 +2,7 @@
+ pub mod channels;
+ pub mod database;
+ pub mod messages;
++mod move_diagnostic;
+ pub mod observability;
+ pub mod openapi;
+ pub mod realtime;
+@@ -275,6 +276,7 @@
+     next: Next,
+ ) -> axum::response::Response {
+     if shutdown.is_stopped() {
++        crate::move_diagnostic::rejection("shutdown");
+         return (
+             axum::http::StatusCode::SERVICE_UNAVAILABLE,
+             [
+--- a/server/src/messages/admission.rs
++++ b/server/src/messages/admission.rs
+@@ -145,6 +145,10 @@
+             None
+         };
+         if let Some(scope) = scope {
++            crate::move_diagnostic::rejection(match scope {
++                Rejection::SendGlobalQueue => "global_queue_full",
++                _ => "channel_queue_full",
++            });
+             admission(scope);
+             return Err(super::MessageError::AdmissionRejected);
+         }
+@@ -213,7 +217,11 @@
+         } else {
+             Rejection::WatermarkChannel
+         };
+-        let channel_permit = acquire(&semaphore, deadline, channel_rejection).await;
++        let channel_permit = crate::move_diagnostic::timed(
++            "channel_admission_wait",
++            acquire(&semaphore, deadline, channel_rejection),
++        )
++        .await;
+         #[cfg(test)]
+         if !send && channel_permit.is_err() {
+             self.record_watermark_event(organization, channel, "channel_rejection");
+@@ -225,7 +233,11 @@
+         } else {
+             Rejection::WatermarkGlobal
+         };
+-        let global_permit = acquire(global, deadline, global_rejection).await;
++        let global_permit = crate::move_diagnostic::timed(
++            "global_admission_wait",
++            acquire(global, deadline, global_rejection),
++        )
++        .await;
+         #[cfg(test)]
+         if !send && global_permit.is_err() {
+             self.record_watermark_event(organization, channel, "global_rejection");
+@@ -242,7 +254,17 @@
+ ) -> Result<OwnedSemaphorePermit, sqlx::Error> {
+     match tokio::time::timeout_at(deadline, semaphore.clone().acquire_owned()).await {
+         Ok(Ok(permit)) => Ok(permit),
+-        _ => {
++        failure => {
++            let reason = match (rejection, failure.is_err()) {
++                (Rejection::SendChannel, true) => Some("channel_admission_timeout"),
++                (Rejection::SendGlobal, true) => Some("global_admission_timeout"),
++                (Rejection::SendChannel, false) => Some("channel_admission_closed"),
++                (Rejection::SendGlobal, false) => Some("global_admission_closed"),
++                _ => None,
++            };
++            if let Some(reason) = reason {
++                crate::move_diagnostic::rejection(reason);
++            }
+             admission(rejection);
+             Err(sqlx::Error::Io(std::io::Error::new(
+                 std::io::ErrorKind::WouldBlock,
+--- a/server/src/messages/commit.rs
++++ b/server/src/messages/commit.rs
+@@ -24,7 +24,10 @@
+         organization: Option<Uuid>,
+     ) -> Result<Self, sqlx::Error> {
+         let mut tx = Self {
+-            connection: Some(crate::database::acquire(pool).await?),
++            connection: Some(
++                crate::move_diagnostic::timed("write_pool_acquire", crate::database::acquire(pool))
++                    .await?,
++            ),
+             _permit: permit,
+         };
+         tx.connection()?.execute(sql).await?;
+@@ -35,7 +38,7 @@
+     }
+ 
+     pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
+-        self.connection()?.execute("COMMIT").await?;
++        crate::move_diagnostic::timed("commit_sql", self.connection()?.execute("COMMIT")).await?;
+         drop(self.connection.take());
+         Ok(())
+     }
+@@ -83,11 +86,14 @@
+     } else {
+         sql.to_owned()
+     };
+-    sqlx::query(&sql)
+-        .bind(organization)
+-        .bind(channel)
+-        .execute(&mut *tx)
+-        .await?;
++    crate::move_diagnostic::timed(
++        "channel_advisory_sql",
++        sqlx::query(&sql)
++            .bind(organization)
++            .bind(channel)
++            .execute(&mut *tx),
++    )
++    .await?;
+     Ok(())
+ }
+ 
+--- a/server/src/messages/limiter.rs
++++ b/server/src/messages/limiter.rs
+@@ -216,6 +216,7 @@
+         let marker = match inner.pending.get(&key) {
+             Some(Pending::InFlight(sender, leader)) => {
+                 if sender.receiver_count() >= MAX_WAITERS {
++                    crate::move_diagnostic::rejection("limiter_duplicate_waiters_cap");
+                     return Err(Refusal::Saturated);
+                 }
+                 return Ok(Begin::Wait(sender.subscribe(), *leader == intent));
+@@ -230,6 +231,7 @@
+                 |_, pending| !matches!(pending, Pending::Unknown(until, _) if *until <= now),
+             );
+             if inner.pending.len() >= MAX_PENDING {
++                crate::move_diagnostic::rejection("limiter_pending_cap");
+                 return Err(Refusal::Saturated);
+             }
+         }
+@@ -260,6 +262,7 @@
+             // Only a full bucket equals a fresh one, so only those are reclaimed.
+             inner.buckets.retain(|_, bucket| !bucket.full(now, limit));
+             if inner.buckets.len() >= MAX_BUCKETS {
++                crate::move_diagnostic::rejection("limiter_member_buckets_cap");
+                 return Err(Refusal::Saturated);
+             }
+         }
+--- a/server/src/messages/move_topic.rs
++++ b/server/src/messages/move_topic.rs
+@@ -124,20 +124,22 @@
+         input,
+     };
+     require_visible_scoped(&state.pool, request.organization, request.member, channel).await?;
++    crate::move_diagnostic::before_admission();
+     let waiter = state
+         .message_delivery
+         .admission(&state.pool)
+         .reserve_send(request.organization, channel)?;
+     let work = state.message_delivery.work.enter();
+-    let outcome = tokio::spawn(async move {
++    let outcome = tokio::spawn(crate::move_diagnostic::inherit(async move {
+         let _work = work;
+         let permit = waiter.acquire().await?;
+-        tokio::time::timeout(admission::WORK_TIMEOUT, persist(&state, &request, permit))
+-            .await
+-            .map_err(|_| {
+-                MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))
+-            })?
+-    })
++        tokio::time::timeout(
++            admission::WORK_TIMEOUT,
++            crate::move_diagnostic::timed("admitted_work", persist(&state, &request, permit)),
++        )
++        .await
++        .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
++    }))
+     .await
+     .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
+     Ok(([(header::CACHE_CONTROL, "no-store")], Json(outcome)).into_response())
+@@ -329,18 +331,24 @@
+ async fn prepare(tx: &mut PgConnection, request: &Move) -> Result<Prepared, MessageError> {
+     let org = request.organization;
+     let channel = request.channel;
+-    let (actor, resource) =
+-        match channels::lock_move_access(tx, org, request.member, channel).await? {
+-            channels::MoveAccess::OrganizationUnavailable => {
+-                return Err(MessageError::OrganizationUnavailable);
+-            }
+-            channels::MoveAccess::ChannelUnavailable => return Err(MessageError::NotFound),
+-            channels::MoveAccess::Visible(actor, resource) => (actor, resource),
+-        };
++    let (actor, resource) = match crate::move_diagnostic::timed(
++        "move_access_sql",
++        channels::lock_move_access(tx, org, request.member, channel),
++    )
++    .await?
++    {
++        channels::MoveAccess::OrganizationUnavailable => {
++            return Err(MessageError::OrganizationUnavailable);
++        }
++        channels::MoveAccess::ChannelUnavailable => return Err(MessageError::NotFound),
++        channels::MoveAccess::Visible(actor, resource) => (actor, resource),
++    };
+     commit::lock(tx, org, channel, false).await?;
+     let generation =
+         history::validate(tx, org, channel, request.input.history_generation, None).await?;
+-    let chain = chain(tx, request, actor, resource).await?;
++    let chain =
++        crate::move_diagnostic::timed("move_chain_lookup", chain(tx, request, actor, resource))
++            .await?;
+     let operation = request.operation();
+     match receipts::resolve(tx, org, &operation).await? {
+         receipts::Resolution::Committed(outcome) => {
+@@ -423,7 +431,11 @@
+         operation_id: operation.operation_id,
+     });
+     if let Some(event) = &event {
+-        apply_move(tx, org, operation.actor, &chain, event).await?;
++        crate::move_diagnostic::timed(
++            "move_apply",
++            apply_move(tx, org, operation.actor, &chain, event),
++        )
++        .await?;
+     }
+     Ok(Prepared::Write(
+         MoveChainResponse {
+--- a/server/src/messages.rs
++++ b/server/src/messages.rs
+@@ -266,6 +266,7 @@
+     #[cfg(test)]
+     limiter::charged(input.client_message_id).await;
+     let admission = state.message_delivery.admission(&state.pool);
++    crate::move_diagnostic::before_admission();
+     let waiter = match admission.reserve_send(organization_id, channel_id) {
+         Ok(waiter) => waiter,
+         Err(refusal) => {
+@@ -276,7 +277,7 @@
+     };
+     // Finish persistence even if the HTTP caller disconnects; notification is detached.
+     let work = state.message_delivery.work.enter();
+-    let message = tokio::spawn(async move {
++    let message = tokio::spawn(crate::move_diagnostic::inherit(async move {
+         let _work = work;
+         lead.executing();
+         let result = persist(
+@@ -294,7 +295,7 @@
+         let unknown = matches!(failure, Some(MessageError::Database(error)) if !commit::definitely_rolled_back(error));
+         lead.settle(unknown, failure.map(MessageError::replay));
+         result
+-    })
++    }))
+     .await
+     .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
+     Ok(created(message))
+@@ -638,14 +639,17 @@
+     let _permit = waiter.acquire().await?;
+     tokio::time::timeout(
+         admission::WORK_TIMEOUT,
+-        persist_admitted(
+-            pool,
+-            delivery,
+-            organization_id,
+-            sender,
+-            channel_id,
+-            input,
+-            _permit,
++        crate::move_diagnostic::timed(
++            "admitted_work",
++            persist_admitted(
++                pool,
++                delivery,
++                organization_id,
++                sender,
++                channel_id,
++                input,
++                _permit,
++            ),
+         ),
+     )
+     .await
+@@ -712,12 +716,15 @@
+             .await?;
+         accepted
+     } else {
+-        let (visible, accepted) = channels::authorize_send_targets(
+-            tx.connection()?,
+-            organization_id,
+-            member,
+-            channel_id,
+-            &targets,
++        let (visible, accepted) = crate::move_diagnostic::timed(
++            "send_access_sql",
++            channels::authorize_send_targets(
++                tx.connection()?,
++                organization_id,
++                member,
++                channel_id,
++                &targets,
++            ),
+         )
+         .await?;
+         match visible {
+--- /dev/null
++++ b/server/src/move_diagnostic.rs
+@@ -0,0 +1,101 @@
++use axum::response::Response;
++use std::{
++    future::Future,
++    sync::{
++        Arc, OnceLock,
++        atomic::{AtomicU64, Ordering::Relaxed},
++    },
++    time::Instant,
++};
++
++tokio::task_local! {
++    static WRITE: Write;
++}
++
++static SEND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
++
++#[derive(Clone)]
++struct Write {
++    lane: &'static str,
++    started: Instant,
++    sampled: bool,
++    reason: Arc<OnceLock<&'static str>>,
++}
++
++pub(crate) async fn request(
++    lane: &'static str,
++    future: impl Future<Output = Response>,
++) -> Response {
++    let write = Write {
++        lane,
++        started: Instant::now(),
++        sampled: lane == "move" || SEND_SEQUENCE.fetch_add(1, Relaxed) % 32 == 0,
++        reason: Arc::default(),
++    };
++    let reason = write.reason.clone();
++    let response = WRITE.scope(write, future).await;
++    if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE {
++        let reason = reason.get().copied().unwrap_or("unclassified");
++        tracing::info!(target: "fukulow", event = "move_diag_503", lane, reason);
++    }
++    response
++}
++
++pub(crate) fn inherit<F: Future>(future: F) -> impl Future<Output = F::Output> {
++    let write = WRITE.try_with(Clone::clone).ok();
++    async move {
++        match write {
++            Some(write) => WRITE.scope(write, future).await,
++            None => future.await,
++        }
++    }
++}
++
++pub(crate) fn rejection(reason: &'static str) {
++    let _ = WRITE.try_with(|write| write.reason.set(reason));
++}
++
++pub(crate) fn before_admission() {
++    let _ = WRITE.try_with(|write| {
++        if write.sampled {
++            record(write.lane, "before_admission", write.started, false);
++        }
++    });
++}
++
++pub(crate) async fn timed<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
++    let mut timer = WRITE
++        .try_with(|write| {
++            write.sampled.then(|| Timer {
++                lane: write.lane,
++                phase,
++                started: Instant::now(),
++                interrupted: true,
++            })
++        })
++        .ok()
++        .flatten();
++    let result = future.await;
++    if let Some(timer) = &mut timer {
++        timer.interrupted = false;
++    }
++    result
++}
++
++struct Timer {
++    lane: &'static str,
++    phase: &'static str,
++    started: Instant,
++    interrupted: bool,
++}
++
++impl Drop for Timer {
++    fn drop(&mut self) {
++        record(self.lane, self.phase, self.started, self.interrupted);
++    }
++}
++
++fn record(lane: &'static str, phase: &'static str, started: Instant, interrupted: bool) {
++    tracing::info!(target: "fukulow", event = "move_diag_timing", lane, phase,
++        us = started.elapsed().as_secs_f64() * 1_000_000.0, interrupted);
++}
+--- a/server/src/observability.rs
++++ b/server/src/observability.rs
+@@ -56,7 +56,23 @@
+         status = tracing::field::Empty, duration_ms = tracing::field::Empty);
+     async move {
+         let started = Instant::now();
+-        let response = next.run(request).await;
++        let lane = match (
++            request.method().as_str(),
++            request
++                .extensions()
++                .get::<MatchedPath>()
++                .map(MatchedPath::as_str),
++        ) {
++            ("POST", Some("/api/v1/orgs/{org}/channels/{id}/messages")) => Some("send"),
++            ("POST", Some("/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move")) => {
++                Some("move")
++            }
++            _ => None,
++        };
++        let response = match lane {
++            Some(lane) => crate::move_diagnostic::request(lane, next.run(request)).await,
++            None => next.run(request).await,
++        };
+         let span = tracing::Span::current();
+         span.record("status", response.status().as_u16());
+         span.record("duration_ms", started.elapsed().as_secs_f64() * 1000.0);
