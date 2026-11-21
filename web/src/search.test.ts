@@ -1,37 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { searchMessages, type SearchPage } from './api'
 import {
   createSearchController,
   prepareSearchQuery,
-  SEARCH_PAGE_SIZE,
   SEARCH_TIMEOUT_MS,
   type SearchTarget,
 } from './search'
 import {
   createDefaultSearchSource,
-  createMockSearchSource,
-  SEARCH_RANGE_DAYS,
   type SearchRequest,
   type SearchResponse,
-  type SearchResultItem,
   type SearchSource,
 } from './search-source'
+import { createMockSearchSource, makeSearchHit } from './search-test-helpers'
 import { createSync } from './sync'
 import { deferred } from './unread-test-helpers'
 
-function makeItem(index: number, overrides: Partial<SearchResultItem> = {}): SearchResultItem {
-  return {
-    messageId: `msg-${index}`,
-    createdSeq: index + 1,
-    channelId: 'ch-1',
-    topicId: null,
-    replyRootId: null,
-    context: { kind: 'channel', channelId: 'ch-1', channelName: 'general' },
-    authorName: '田中 美咲',
-    authorActive: true,
-    createdAt: `2026-11-${String(20 - (index % 19)).padStart(2, '0')}T10:00:00.000Z`,
-    excerpt: `検索テスト本文 ${index}`,
-    ...overrides,
-  }
+function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  })
 }
 
 describe('prepareSearchQuery', () => {
@@ -52,6 +41,110 @@ describe('prepareSearchQuery', () => {
   })
 })
 
+describe('createDefaultSearchSource', () => {
+  it('calls GET /api/v1/orgs/{org}/search with query, channel_id, cursor, and signal and returns the SearchPage', async () => {
+    const calls: { url: string; init?: RequestInit }[] = []
+    const page: SearchPage = {
+      hits: [makeSearchHit(1, { body: 'リリース手順' })],
+      next_cursor: 'opaque-cursor-1',
+    }
+    const fakeFetch: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init })
+      return jsonResponse(200, page)
+    }
+    const source = createDefaultSearchSource('org-1', {
+      searchApi: (org, query, _f, signal) => searchMessages(org, query, fakeFetch, signal),
+    })
+
+    const ac = new AbortController()
+    const res = await source.search({
+      q: 'リリース 100%',
+      channel_id: 'ch-1',
+      cursor: 'opaque-cursor-0',
+      signal: ac.signal,
+    })
+
+    expect(res).toEqual({ ok: true, page })
+    expect(calls).toHaveLength(1)
+    const parsed = new URL(calls[0].url, 'http://localhost')
+    expect(parsed.pathname).toBe('/api/v1/orgs/org-1/search')
+    expect(parsed.searchParams.get('q')).toBe('リリース 100%')
+    expect(parsed.searchParams.get('channel_id')).toBe('ch-1')
+    expect(parsed.searchParams.get('cursor')).toBe('opaque-cursor-0')
+    expect(calls[0].init?.signal).toBe(ac.signal)
+    expect(calls[0].init?.cache).toBe('no-store')
+  })
+
+  it('maps unavailable, too_short, timeout, rate_limited, shutting_down, invalid_cursor, too_long, 404, and 401', async () => {
+    const onEnded = vi.fn()
+    const onUnavailable = vi.fn()
+    const responses: Response[] = [
+      jsonResponse(503, { error: 'search_unavailable' }),
+      jsonResponse(400, { error: 'search_query_too_short' }),
+      jsonResponse(503, { error: 'search_timeout' }),
+      jsonResponse(429, { error: 'search_rate_limited' }),
+      jsonResponse(503, { error: 'shutting_down' }, { 'Retry-After': '2' }),
+      jsonResponse(400, { error: 'search_query_too_long' }),
+      jsonResponse(400, { error: 'invalid_cursor' }),
+      jsonResponse(404, { error: 'channel_not_found' }),
+      jsonResponse(404, { error: 'organization_unavailable' }),
+      jsonResponse(401, { error: 'unauthorized' }),
+    ]
+    const fakeFetch: typeof fetch = async () => responses.shift()!
+    const source = createDefaultSearchSource('org-1', {
+      searchApi: (org, query, _f, signal) => searchMessages(org, query, fakeFetch, signal),
+      onEnded,
+      onUnavailable,
+    })
+
+    expect(await source.search({ q: 'テスト' })).toEqual({
+      ok: false,
+      failure: { kind: 'unavailable' },
+    })
+    expect(await source.search({ q: 'あ' })).toEqual({
+      ok: false,
+      failure: { kind: 'too_short', minLength: 2 },
+    })
+    expect(await source.search({ q: '重い' })).toEqual({
+      ok: false,
+      failure: { kind: 'timeout' },
+    })
+    expect(await source.search({ q: '連続' })).toEqual({
+      ok: false,
+      failure: { kind: 'error', retryable: true },
+    })
+    expect(await source.search({ q: '停止中' })).toEqual({
+      ok: false,
+      failure: { kind: 'error', retryable: true },
+    })
+    expect(await source.search({ q: '長すぎ' })).toEqual({
+      ok: false,
+      failure: { kind: 'error', retryable: false },
+    })
+    expect(await source.search({ q: 'テスト', cursor: 'bad' })).toEqual({
+      ok: false,
+      failure: { kind: 'invalid_cursor' },
+    })
+    expect(await source.search({ q: 'テスト', channel_id: 'hidden' })).toEqual({
+      ok: false,
+      failure: { kind: 'error', retryable: false },
+    })
+    expect(onUnavailable).not.toHaveBeenCalled()
+
+    expect(await source.search({ q: 'テスト' })).toEqual({
+      ok: false,
+      failure: { kind: 'error', retryable: false },
+    })
+    expect(onUnavailable).toHaveBeenCalledTimes(1)
+
+    expect(await source.search({ q: 'テスト' })).toEqual({
+      ok: false,
+      failure: { kind: 'error', retryable: false },
+    })
+    expect(onEnded).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('createSearchController', () => {
   it('submits trimmed query without mutating internal whitespace or %, _, \\ and ignores whitespace-only queries', async () => {
     const requests: SearchRequest[] = []
@@ -60,7 +153,7 @@ describe('createSearchController', () => {
         requests.push(req)
         return {
           ok: true,
-          page: { items: [], nextCursor: null, rangeDays: 180, rangeStart: '2026-05-24T00:00:00.000Z' },
+          page: { hits: [], next_cursor: null },
         }
       },
     }
@@ -72,16 +165,15 @@ describe('createSearchController', () => {
 
     await ctrl.submit('  100%   _a_\\b  ')
     expect(requests).toHaveLength(1)
-    expect(requests[0].query).toBe('100%   _a_\\b')
-    expect(requests[0].limit).toBe(SEARCH_PAGE_SIZE)
+    expect(requests[0].q).toBe('100%   _a_\\b')
     expect(requests[0].cursor).toBeUndefined()
     expect(ctrl.get().submittedQuery).toBe('100%   _a_\\b')
     ctrl.destroy()
   })
 
-  it('pages 20 results at a time using an opaque cursor and preserves loaded items on loadMore failure', async () => {
-    const items = Array.from({ length: 25 }, (_, i) => makeItem(i + 1, { excerpt: `共通キーワード ${i + 1}` }))
-    const mock = createMockSearchSource({ items, rangeStart: '2026-05-24T00:00:00.000Z' })
+  it('pages results using an opaque cursor, never treats a short page with next_cursor as the end, and preserves loaded items on loadMore failure', async () => {
+    const hits = Array.from({ length: 25 }, (_, i) => makeSearchHit(i + 1, { body: `共通キーワード ${i + 1}` }))
+    const mock = createMockSearchSource({ hits })
     const calls: SearchRequest[] = []
     let failNextLoadMore: SearchResponse | null = null
     const source: SearchSource = {
@@ -101,9 +193,8 @@ describe('createSearchController', () => {
 
     expect(ctrl.get().status).toBe('results')
     expect(ctrl.get().items).toHaveLength(20)
-    expect(ctrl.get().items[0].messageId).toBe('msg-1')
+    expect(ctrl.get().items[0].message.id).toBe('msg-1')
     expect(ctrl.get().nextCursor).toBe('mock:20')
-    expect(ctrl.get().rangeStart).toBe('2026-05-24T00:00:00.000Z')
 
     // Load-more timeout preserves already loaded items and keeps cursor for retry.
     failNextLoadMore = { ok: false, failure: { kind: 'timeout' } }
@@ -118,7 +209,7 @@ describe('createSearchController', () => {
     expect(calls[calls.length - 1].cursor).toBe('mock:20')
     expect(ctrl.get().status).toBe('results')
     expect(ctrl.get().items).toHaveLength(25)
-    expect(ctrl.get().items[24].messageId).toBe('msg-25')
+    expect(ctrl.get().items[24].message.id).toBe('msg-25')
     expect(ctrl.get().nextCursor).toBeNull()
     expect(ctrl.get().loadMoreError).toBeNull()
 
@@ -129,7 +220,40 @@ describe('createSearchController', () => {
     ctrl.destroy()
   })
 
-  it('transitions cleanly through loading, empty, too-short, timeout, and error states and drops stale responses', async () => {
+  it('keeps loading by cursor when a page has fewer than 20 hits (even 0) with a non-null next_cursor', async () => {
+    const pages: SearchPage[] = [
+      { hits: [], next_cursor: 'cur-1' },
+      { hits: [makeSearchHit(1, { body: '短いページ' })], next_cursor: 'cur-2' },
+      { hits: [makeSearchHit(2, { body: '最終ページ' })], next_cursor: null },
+    ]
+    const cursors: (string | undefined)[] = []
+    const source: SearchSource = {
+      async search(req) {
+        cursors.push(req.cursor)
+        return { ok: true, page: pages.shift()! }
+      },
+    }
+
+    const ctrl = createSearchController({ source })
+    await ctrl.submit('ページ')
+    expect(ctrl.get().status).toBe('results')
+    expect(ctrl.get().items).toHaveLength(0)
+    expect(ctrl.get().nextCursor).toBe('cur-1')
+
+    await ctrl.loadMore()
+    expect(ctrl.get().status).toBe('results')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['msg-1'])
+    expect(ctrl.get().nextCursor).toBe('cur-2')
+
+    await ctrl.loadMore()
+    expect(ctrl.get().status).toBe('results')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['msg-1', 'msg-2'])
+    expect(ctrl.get().nextCursor).toBeNull()
+    expect(cursors).toEqual([undefined, 'cur-1', 'cur-2'])
+    ctrl.destroy()
+  })
+
+  it('transitions cleanly through loading, empty, too-short, timeout, unavailable, and error states and drops stale responses', async () => {
     const first = deferred<SearchResponse>()
     const second = deferred<SearchResponse>()
     const queue = [
@@ -138,6 +262,7 @@ describe('createSearchController', () => {
       async (): Promise<SearchResponse> => ({ ok: false, failure: { kind: 'too_short', minLength: 2 } }),
       async (): Promise<SearchResponse> => ({ ok: false, failure: { kind: 'timeout' } }),
       async (): Promise<SearchResponse> => ({ ok: false, failure: { kind: 'error', retryable: true } }),
+      async (): Promise<SearchResponse> => ({ ok: false, failure: { kind: 'unavailable' } }),
     ]
     const source: SearchSource = {
       search: () => queue.shift()!(),
@@ -152,7 +277,7 @@ describe('createSearchController', () => {
     const p2 = ctrl.submit('次の検索')
     first.resolve({
       ok: true,
-      page: { items: [makeItem(99)], nextCursor: null, rangeDays: 180, rangeStart: '2026-05-24T00:00:00.000Z' },
+      page: { hits: [makeSearchHit(99)], next_cursor: null },
     })
     await p1
     // Stale response must be ignored while second is still loading.
@@ -161,11 +286,10 @@ describe('createSearchController', () => {
 
     second.resolve({
       ok: true,
-      page: { items: [], nextCursor: null, rangeDays: 180, rangeStart: '2026-05-24T00:00:00.000Z' },
+      page: { hits: [], next_cursor: null },
     })
     await p2
     expect(ctrl.get().status).toBe('empty')
-    expect(ctrl.get().rangeStart).toBe('2026-05-24T00:00:00.000Z')
 
     await ctrl.submit('あ')
     expect(ctrl.get().status).toBe('too-short')
@@ -179,6 +303,10 @@ describe('createSearchController', () => {
     await ctrl.retry()
     expect(ctrl.get().status).toBe('error')
     expect(ctrl.get().retryable).toBe(true)
+
+    await ctrl.submit('無効検索')
+    expect(ctrl.get().status).toBe('unavailable')
+    expect(ctrl.get().retryable).toBe(false)
     ctrl.destroy()
   })
 
@@ -199,6 +327,28 @@ describe('createSearchController', () => {
     expect(ctrl.get().open).toBe(false)
     expect(onOpenResult).toHaveBeenCalledTimes(1)
     expect(onOpenResult).toHaveBeenCalledWith(target)
+    ctrl.destroy()
+  })
+
+  it('keeps search open with notice when onOpenResult declines', async () => {
+    const onOpenResult = vi.fn(() => false)
+    const ctrl = createSearchController({
+      source: createMockSearchSource(),
+      onOpenResult,
+    })
+    await ctrl.submit('リリース')
+    expect(ctrl.get().status).toBe('results')
+    const first = ctrl.get().items[0]
+    ctrl.openSearchResult({
+      channelId: first.message.channel_id,
+      topicId: first.message.topic_id,
+      replyRootId: first.message.reply_root_id,
+      messageId: first.message.id,
+      createdSeq: first.message.created_seq,
+    })
+    expect(onOpenResult).toHaveBeenCalledTimes(1)
+    expect(ctrl.get().open).toBe(true)
+    expect(ctrl.get().openNotice).toContain('開けません')
     ctrl.destroy()
   })
 
@@ -228,8 +378,8 @@ describe('createSearchController', () => {
     const syncNotified = vi.fn()
     sync.subscribe(syncNotified)
 
-    const items = Array.from({ length: 22 }, (_, i) => makeItem(i + 1, { channelId: 'ch-1', excerpt: `議事録 ${i + 1}` }))
-    const search = createSearchController({ source: createMockSearchSource({ items }) })
+    const hits = Array.from({ length: 22 }, (_, i) => makeSearchHit(i + 1, { channel_id: 'ch-1', body: `議事録 ${i + 1}` }))
+    const search = createSearchController({ source: createMockSearchSource({ hits }) })
     await search.submit('議事録')
     await search.loadMore()
 
@@ -243,92 +393,6 @@ describe('createSearchController', () => {
     await sync.close()
   })
 
-  it('returns an unavailable state in production default source and keeps search open with notice when onOpenResult declines', async () => {
-    const prodSource = createDefaultSearchSource('org-1', { isDev: false })
-    const prodCtrl = createSearchController({ source: prodSource })
-    await prodCtrl.submit('リリース')
-    expect(prodCtrl.get().open).toBe(true)
-    expect(prodCtrl.get().status).toBe('unavailable')
-    expect(prodCtrl.get().items).toHaveLength(0)
-    expect(prodCtrl.get().retryable).toBe(false)
-    prodCtrl.destroy()
-
-    const onOpenResult = vi.fn(() => false)
-    const devCtrl = createSearchController({
-      source: createDefaultSearchSource('org-1', { isDev: true }),
-      onOpenResult,
-    })
-    await devCtrl.submit('リリース')
-    expect(devCtrl.get().status).toBe('results')
-    const first = devCtrl.get().items[0]
-    devCtrl.openSearchResult({
-      channelId: first.channelId,
-      topicId: first.topicId,
-      replyRootId: first.replyRootId,
-      messageId: first.messageId,
-      createdSeq: first.createdSeq,
-    })
-    expect(onOpenResult).toHaveBeenCalledTimes(1)
-    expect(devCtrl.get().open).toBe(true)
-    expect(devCtrl.get().openNotice).toContain('開けません')
-    devCtrl.destroy()
-  })
-
-  it('computes mock rangeStart as now minus 180 days from injected clock and excludes older hits', async () => {
-    const DAY_MS = 24 * 60 * 60 * 1000
-    let nowMs = Date.parse('2026-11-20T12:00:00.000Z')
-    const exactCutoffIso = new Date(nowMs - SEARCH_RANGE_DAYS * DAY_MS).toISOString()
-    const items = [
-      makeItem(1, { createdAt: new Date(nowMs - 1 * DAY_MS).toISOString(), excerpt: '範囲内ヒット' }),
-      makeItem(2, { createdAt: exactCutoffIso, excerpt: '範囲内ヒット 境界' }),
-      makeItem(3, { createdAt: new Date(nowMs - SEARCH_RANGE_DAYS * DAY_MS - 1000).toISOString(), excerpt: '範囲内ヒット 期限切れ' }),
-    ]
-    const source = createMockSearchSource({ items, now: () => nowMs })
-
-    const first = await source.search({ query: '範囲内ヒット', limit: 20 })
-    expect(first.ok).toBe(true)
-    if (!first.ok) return
-    expect(first.page.rangeStart).toBe(exactCutoffIso)
-    expect(first.page.items.map((item) => item.messageId)).toEqual(['msg-1', 'msg-2'])
-
-    // Advance the clock by 10 days: rangeStart moves forward and the boundary item is now excluded.
-    nowMs += 10 * DAY_MS
-    const second = await source.search({ query: '範囲内ヒット', limit: 20 })
-    expect(second.ok).toBe(true)
-    if (!second.ok) return
-    expect(second.page.rangeStart).toBe(new Date(nowMs - SEARCH_RANGE_DAYS * DAY_MS).toISOString())
-    expect(second.page.items.map((item) => item.messageId)).toEqual(['msg-1'])
-  })
-
-  it('keeps mock pagination stable when the injected clock advances 1 ms past a boundary hit', async () => {
-    const DAY_MS = 24 * 60 * 60 * 1000
-    let nowMs = Date.parse('2026-11-20T12:00:00.000Z')
-    const exactCutoffIso = new Date(nowMs - SEARCH_RANGE_DAYS * DAY_MS).toISOString()
-    const items = [
-      makeItem(1, { createdAt: exactCutoffIso, excerpt: '境界ページング 1' }),
-      makeItem(2, { createdAt: new Date(nowMs - 1 * DAY_MS).toISOString(), excerpt: '境界ページング 2' }),
-    ]
-    const source = createMockSearchSource({ items, now: () => nowMs })
-
-    const page1 = await source.search({ query: '境界ページング', limit: 1 })
-    expect(page1.ok).toBe(true)
-    if (!page1.ok) return
-    expect(page1.page.items.map((item) => item.messageId)).toEqual(['msg-1'])
-    expect(page1.page.nextCursor).not.toBeNull()
-
-    // Advancing the clock by 1 ms expires msg-1 under a fresh cutoff, but paging must not skip msg-2.
-    nowMs += 1
-    const page2 = await source.search({
-      query: '境界ページング',
-      limit: 1,
-      cursor: page1.page.nextCursor!,
-    })
-    expect(page2.ok).toBe(true)
-    if (!page2.ok) return
-    expect(page2.page.items.map((item) => item.messageId)).toEqual(['msg-2'])
-    expect(page2.page.nextCursor).toBeNull()
-  })
-
   it('aborts and shows retryable timeout after 10 seconds for stalled initial and paging requests', async () => {
     vi.useFakeTimers()
     try {
@@ -339,21 +403,17 @@ describe('createSearchController', () => {
           callCount += 1
           if (req.signal) signals.push(req.signal)
           if (callCount === 1) {
-            // Stalled initial request: never settles.
             return new Promise<SearchResponse>(() => {})
           }
           if (callCount === 2) {
             return Promise.resolve({
               ok: true,
               page: {
-                items: [makeItem(1, { excerpt: 'ページ1' })],
-                nextCursor: 'cursor-1',
-                rangeDays: 180,
-                rangeStart: '2026-05-24T00:00:00.000Z',
+                hits: [makeSearchHit(1, { body: 'ページ1' })],
+                next_cursor: 'cursor-1',
               },
             })
           }
-          // Stalled loadMore request: never settles.
           return new Promise<SearchResponse>(() => {})
         },
       }
@@ -369,13 +429,11 @@ describe('createSearchController', () => {
       expect(ctrl.get().status).toBe('timeout')
       expect(ctrl.get().retryable).toBe(true)
 
-      // Retry succeeds with page 1 and nextCursor.
       await ctrl.retry()
       expect(ctrl.get().status).toBe('results')
       expect(ctrl.get().items).toHaveLength(1)
       expect(ctrl.get().nextCursor).toBe('cursor-1')
 
-      // Stalled loadMore times out after 10s, aborts, and keeps page 1 for retry.
       const pMore = ctrl.loadMore()
       expect(ctrl.get().status).toBe('loading-more')
       await vi.advanceTimersByTimeAsync(SEARCH_TIMEOUT_MS)
@@ -403,10 +461,8 @@ describe('createSearchController', () => {
           return Promise.resolve({
             ok: true,
             page: {
-              items: [makeItem(1, { excerpt: '古いクエリ 1' })],
-              nextCursor: 'cursor-old',
-              rangeDays: 180,
-              rangeStart: '2026-05-24T00:00:00.000Z',
+              hits: [makeSearchHit(1, { body: '古いクエリ 1' })],
+              next_cursor: 'cursor-old',
             },
           })
         }
@@ -417,7 +473,7 @@ describe('createSearchController', () => {
 
     const ctrl = createSearchController({ source })
     await ctrl.submit('古いクエリ')
-    expect(ctrl.get().items.map((item) => item.messageId)).toEqual(['msg-1'])
+    expect(ctrl.get().items.map((item) => item.message.id)).toEqual(['msg-1'])
 
     const pMore = ctrl.loadMore()
     const pNew = ctrl.submit('新しいクエリ')
@@ -425,29 +481,135 @@ describe('createSearchController', () => {
     nextSearch.resolve({
       ok: true,
       page: {
-        items: [makeItem(200, { excerpt: '新しいクエリ 1' })],
-        nextCursor: null,
-        rangeDays: 180,
-        rangeStart: '2026-05-24T00:00:00.000Z',
+        hits: [makeSearchHit(200, { body: '新しいクエリ 1' })],
+        next_cursor: null,
       },
     })
     await pNew
-    expect(ctrl.get().items.map((item) => item.messageId)).toEqual(['msg-200'])
+    expect(ctrl.get().items.map((item) => item.message.id)).toEqual(['msg-200'])
 
     staleMore.resolve({
       ok: true,
       page: {
-        items: [makeItem(2, { excerpt: '古いクエリ 2' })],
-        nextCursor: null,
-        rangeDays: 180,
-        rangeStart: '2026-05-24T00:00:00.000Z',
+        hits: [makeSearchHit(2, { body: '古いクエリ 2' })],
+        next_cursor: null,
       },
     })
     await pMore
 
     expect(ctrl.get().submittedQuery).toBe('新しいクエリ')
-    expect(ctrl.get().items.map((item) => item.messageId)).toEqual(['msg-200'])
+    expect(ctrl.get().items.map((item) => item.message.id)).toEqual(['msg-200'])
     expect(ctrl.get().nextCursor).toBeNull()
+    ctrl.destroy()
+  })
+
+  it('clears nextCursor on invalid_cursor and lets retry restart the submitted query from page one', async () => {
+    const calls: SearchRequest[] = []
+    let step = 0
+    const source: SearchSource = {
+      async search(req) {
+        calls.push(req)
+        step += 1
+        if (step === 1) {
+          return {
+            ok: true,
+            page: { hits: [makeSearchHit(1, { body: 'ページ1' })], next_cursor: 'stale-cur' },
+          }
+        }
+        if (step === 2) {
+          return { ok: false, failure: { kind: 'invalid_cursor' } }
+        }
+        return {
+          ok: true,
+          page: { hits: [makeSearchHit(2, { body: '再検索ページ1' })], next_cursor: null },
+        }
+      },
+    }
+
+    const ctrl = createSearchController({ source })
+    await ctrl.submit('検索語')
+    expect(ctrl.get().nextCursor).toBe('stale-cur')
+
+    await ctrl.loadMore()
+    expect(ctrl.get().status).toBe('results')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['msg-1'])
+    expect(ctrl.get().nextCursor).toBeNull()
+    expect(ctrl.get().loadMoreError).toBe('invalid_cursor')
+    expect(ctrl.get().retryable).toBe(true)
+
+    // Further loadMore is a no-op once the invalid cursor is cleared.
+    await ctrl.loadMore()
+    expect(calls).toHaveLength(2)
+
+    // retry() restarts the submitted query from page 1 with no cursor.
+    await ctrl.retry()
+    expect(calls).toHaveLength(3)
+    expect(calls[2]).toMatchObject({ q: '検索語' })
+    expect(calls[2].cursor).toBeUndefined()
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['msg-2'])
+    expect(ctrl.get().loadMoreError).toBeNull()
+    ctrl.destroy()
+  })
+
+  it('removes revoked Channel hits immediately and drops them from delayed pages in the same search', async () => {
+    const delayedMore = deferred<SearchResponse>()
+    let step = 0
+    const source: SearchSource = {
+      search() {
+        step += 1
+        if (step === 1) {
+          return Promise.resolve({
+            ok: true,
+            page: {
+              hits: [
+                makeSearchHit(1, { id: 'rev-1', channel_id: 'ch-revoked', body: '機密 1' }),
+                makeSearchHit(2, { id: 'keep-1', channel_id: 'ch-keep', body: '機密 2' }),
+              ],
+              next_cursor: 'cur-1',
+            },
+          })
+        }
+        if (step === 2) return delayedMore.promise
+        return Promise.resolve({
+          ok: true,
+          page: {
+            hits: [makeSearchHit(5, { id: 'rev-new', channel_id: 'ch-revoked', body: '再取得' })],
+            next_cursor: null,
+          },
+        })
+      },
+    }
+
+    const ctrl = createSearchController({ source })
+    await ctrl.submit('機密')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['rev-1', 'keep-1'])
+
+    const pendingMore = ctrl.loadMore()
+    ctrl.revokeChannel('ch-revoked')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['keep-1'])
+
+    // Delayed page started before the revoke resolves afterwards: revoked Channel hit is dropped, other stays.
+    delayedMore.resolve({
+      ok: true,
+      page: {
+        hits: [
+          makeSearchHit(3, { id: 'rev-2', channel_id: 'ch-revoked', body: '機密 3' }),
+          makeSearchHit(4, { id: 'keep-2', channel_id: 'ch-keep', body: '機密 4' }),
+        ],
+        next_cursor: null,
+      },
+    })
+    await pendingMore
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['keep-1', 'keep-2'])
+
+    // Revoking the last remaining Channel transitions to empty when no nextCursor remains.
+    ctrl.revokeChannel('ch-keep')
+    expect(ctrl.get().items).toHaveLength(0)
+    expect(ctrl.get().status).toBe('empty')
+
+    // A fresh submit resets the per-search revocation fence.
+    await ctrl.submit('再取得')
+    expect(ctrl.get().items.map((h) => h.message.id)).toEqual(['rev-new'])
     ctrl.destroy()
   })
 })

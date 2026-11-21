@@ -1,11 +1,12 @@
 import { flushSync, mount, unmount } from 'svelte'
 import { parse, type AST } from 'svelte/compiler'
 import { describe, expect, it, vi } from 'vitest'
+import type { SearchHit } from './api'
 import SearchBar from './SearchBar.svelte'
 import SearchResults from './SearchResults.svelte'
 import { createSearchController, type SearchState, type SearchTarget } from './search'
 import { searchAdapter } from './search.svelte'
-import { createMockSearchSource, type SearchResultItem } from './search-source'
+import { createMockSearchSource, makeSearchHit } from './search-test-helpers'
 
 type Listener = (ev: MiniEvent) => void
 
@@ -239,7 +240,6 @@ function matches(el: MiniEl, sel: string): boolean {
   if (sel === '[role="alert"]') return el.getAttribute('role') === 'alert'
   if (sel === '[role="status"]') return el.getAttribute('role') === 'status'
   if (sel === '[aria-busy="true"]') return el.getAttribute('aria-busy') === 'true'
-  if (sel === '[data-testid="search-range-note"]') return el.getAttribute('data-testid') === 'search-range-note'
   if (sel === '[data-testid="search-open-notice"]') return el.getAttribute('data-testid') === 'search-open-notice'
   return el.localName === sel
 }
@@ -293,8 +293,6 @@ function baseState(overrides: Partial<SearchState> = {}): SearchState {
     status: 'results',
     items: [],
     nextCursor: null,
-    rangeDays: 180,
-    rangeStart: '2026-05-24T00:00:00.000Z',
     minLength: null,
     retryable: false,
     loadMoreError: null,
@@ -378,17 +376,19 @@ describe('SearchBar a11y and keyboard behaviour', () => {
 })
 
 describe('SearchResults a11y, states, and result opening', () => {
-  it('renders distinct loading, empty, too-short, timeout, and error states plus the 180-day range note', async () => {
+  it('renders distinct loading, empty, too-short, timeout, unavailable, and error states without any 180-day range claim', async () => {
     await withDom(async (doc) => {
       const host = doc.createElement('div')
       doc.body.appendChild(host)
       const onretry = vi.fn()
-      const props = $state<{ state: SearchState }>({ state: baseState({ status: 'loading', rangeStart: null }) })
+      const props = $state<{ state: SearchState }>({ state: baseState({ status: 'loading' }) })
 
       const inst = mount(SearchResults, {
         target: host as unknown as Element,
         props: {
           get state() { return props.state },
+          resolveContext: () => '# general',
+          resolveSender: () => 'メンバー',
           onopenresult: vi.fn(),
           onloadmore: vi.fn(),
           onretry,
@@ -396,9 +396,9 @@ describe('SearchResults a11y, states, and result opening', () => {
       })
       flushSync()
 
-      // Loading: aria-busy skeleton + 180-day note
+      // Loading: aria-busy skeleton, no 180-day range note
       expect(host.querySelector('[aria-busy="true"]')).not.toBeNull()
-      expect(host.querySelector('[data-testid="search-range-note"]')?.textContent).toContain('直近180日間')
+      expect(host.textContent).not.toContain('180')
 
       // Too-short: alert, no retry button
       props.state = baseState({ status: 'too-short', minLength: 2, retryable: false })
@@ -420,18 +420,15 @@ describe('SearchResults a11y, states, and result opening', () => {
       expect(host.querySelector('[role="alert"]')?.textContent).toContain('検索に失敗しました')
       expect(host.querySelector('button')?.textContent.trim()).toBe('再試行')
 
-      const rangeStart = '2026-05-24T12:34:56.000Z'
-      props.state = baseState({ status: 'empty', rangeStart })
+      props.state = baseState({ status: 'empty' })
       flushSync()
       expect(host.textContent).toContain('一致するメッセージが見つかりませんでした')
-      expect(host.querySelector('[data-testid="search-range-note"]')?.textContent)
-        .toContain(`${new Date(rangeStart).toLocaleString('ja-JP')} 以降`)
+      expect(host.textContent).not.toContain('180')
 
-      // Unavailable (production default before server search lands): polite copy, no retry, no live region
-      props.state = baseState({ status: 'unavailable', retryable: false, rangeStart: null })
+      // Unavailable: polite copy, no retry, no live region
+      props.state = baseState({ status: 'unavailable', retryable: false })
       flushSync()
       expect(host.textContent).toContain('メッセージ検索は現在準備中です。')
-      expect(host.querySelector('[data-testid="search-range-note"]')).toBeNull()
       expect(host.querySelectorAll('button')).toHaveLength(0)
       expect(host.querySelector('[role="status"]')).toBeNull()
 
@@ -441,6 +438,23 @@ describe('SearchResults a11y, states, and result opening', () => {
       expect(host.querySelector('[data-testid="search-open-notice"]')?.textContent).toContain('開けません')
       expect(host.querySelector('[role="status"]')).toBeNull()
 
+      // invalid_cursor load-more error: clears load-more button and retries from page one via onretry
+      onretry.mockClear()
+      props.state = baseState({
+        status: 'results',
+        items: [makeSearchHit(1, { body: '既存ヒット' })],
+        nextCursor: null,
+        loadMoreError: 'invalid_cursor',
+        retryable: true,
+      })
+      flushSync()
+      expect(host.querySelector('[role="alert"]')?.textContent).toContain('検索結果の続きを読み込めませんでした')
+      expect(host.textContent).toContain('最初から検索し直してください')
+      expect(host.querySelectorAll('button').some((b) => b.textContent.trim() === 'さらに読み込む')).toBe(false)
+      const retryBtn = host.querySelectorAll('button').find((b) => b.textContent.trim() === '再試行')!
+      retryBtn.click()
+      expect(onretry).toHaveBeenCalledTimes(1)
+
       await unmount(inst)
     })
   })
@@ -449,31 +463,31 @@ describe('SearchResults a11y, states, and result opening', () => {
     await withDom(async (doc) => {
       const host = doc.createElement('div')
       doc.body.appendChild(host)
-      const items: SearchResultItem[] = [
-        {
-          messageId: 'm-1',
-          createdSeq: 37,
-          channelId: 'ch-general',
-          topicId: 'top-1',
-          replyRootId: 'root-1',
-          context: { kind: 'channel', channelId: 'ch-general', channelName: 'general', topicId: 'top-1', topicName: 'リリース' },
-          authorName: '田中 美咲',
-          authorActive: false,
-          createdAt: '2026-11-19T09:30:00.000Z',
-          excerpt: '手順書を更新しました。',
-        },
-        {
-          messageId: 'm-2',
-          createdSeq: 12,
-          channelId: 'dm-1',
-          topicId: null,
-          replyRootId: null,
-          context: { kind: 'dm', channelId: 'dm-1', peerName: '鈴木 花子', peerActive: true },
-          authorName: '鈴木 花子',
-          authorActive: true,
-          createdAt: '2026-11-18T11:00:00.000Z',
-          excerpt: '定例ミーティングの件です。',
-        },
+      const items: SearchHit[] = [
+        makeSearchHit(1, {
+          id: 'm-1',
+          created_seq: 37,
+          channel_id: 'ch-general',
+          topic_id: 'top-1',
+          reply_root_id: 'root-1',
+          sender: 'author-1',
+          created_at: '2026-11-19T09:30:00.000Z',
+          body: '手順書を更新しました。',
+        }),
+        makeSearchHit(
+          2,
+          {
+            id: 'm-2',
+            created_seq: 12,
+            channel_id: 'dm-1',
+            topic_id: null,
+            reply_root_id: null,
+            sender: 'author-2',
+            created_at: '2026-11-18T11:00:00.000Z',
+            body: '定例ミーティングの件です。',
+          },
+          'dm',
+        ),
       ]
       const onopenresult = vi.fn<(target: SearchTarget) => void>()
       const onloadmore = vi.fn()
@@ -482,6 +496,9 @@ describe('SearchResults a11y, states, and result opening', () => {
         target: host as unknown as Element,
         props: {
           state: baseState({ status: 'results', items, nextCursor: 'mock:20' }),
+          resolveContext: (hit) =>
+            hit.channel_kind === 'dm' ? 'ダイレクトメッセージ: 鈴木 花子' : '# general › リリース',
+          resolveSender: (id) => (id === 'author-1' ? '田中 美咲（無効）' : '鈴木 花子'),
           onopenresult,
           onloadmore,
           onretry: vi.fn(),
@@ -503,6 +520,7 @@ describe('SearchResults a11y, states, and result opening', () => {
       host.querySelectorAll('button')[0].click()
       expect(onopenresult).toHaveBeenCalledWith({
         channelId: 'ch-general',
+        channelKind: 'channel',
         topicId: 'top-1',
         replyRootId: 'root-1',
         messageId: 'm-1',
@@ -533,11 +551,11 @@ describe('SearchResults a11y, states, and result opening', () => {
     expect(adapter.state.items.length).toBeGreaterThan(0)
     const first = adapter.state.items[0]
     adapter.openSearchResult({
-      channelId: first.channelId,
-      topicId: first.topicId,
-      replyRootId: first.replyRootId,
-      messageId: first.messageId,
-      createdSeq: first.createdSeq,
+      channelId: first.message.channel_id,
+      topicId: first.message.topic_id,
+      replyRootId: first.message.reply_root_id,
+      messageId: first.message.id,
+      createdSeq: first.message.created_seq,
     })
     expect(onOpenResult).toHaveBeenCalledTimes(1)
     expect(adapter.state.open).toBe(false)

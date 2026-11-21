@@ -88,6 +88,9 @@ type ChannelSelectionDeps = {
   getSelectedId: () => string | null
   getNavigation: () => ChannelSelectionNavigation
   selectChannel: (id: string) => void
+  /** Search hits may name a Channel absent from the loaded lists; it is opened via a hint. */
+  isKnownChannel?: (id: string) => boolean
+  selectChannelHint?: (id: string) => void
   isDm: (id: string) => boolean
   selectDm: (id: string) => void
   retryAuthors: () => void
@@ -110,7 +113,9 @@ export function createChannelSelection(deps: ChannelSelectionDeps) {
       : navigation.navigate({ type: 'channel', organizationId, channelId: id })
     if (result || same || navigated === false) {
       if (deps.isDm(id)) deps.selectDm(id)
-      else deps.selectChannel(id)
+      else if (result && deps.selectChannelHint && deps.isKnownChannel && !deps.isKnownChannel(id)) {
+        deps.selectChannelHint(id)
+      } else deps.selectChannel(id)
       if (navigated === false || (same && result?.replyRootId && !result.topicId)) {
         const currentUnread = deps.getCurrentUnread()
         if (currentUnread && (currentUnread.state.stopped || currentUnread.state.main.stopped)) {

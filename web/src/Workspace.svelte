@@ -7,7 +7,7 @@
   import { createAnnouncementController } from './announcements'
   import type { MentionName } from './mentions'
   import { senderName } from './authors'
-  import type { Channel, DmDiscovery, Identity, Message } from './api'
+  import type { Channel, DmDiscovery, Identity, Message, SearchHit } from './api'
   import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
@@ -206,10 +206,11 @@
     source: SearchSource | undefined
     controller: ReturnType<typeof createSearchController>
   } | undefined>(undefined)
+  const resolvedSearchSource = $derived(searchSource ?? session.searchSource)
   const searchModel = $derived(
     activeSearch &&
       activeSearch.organizationId === currentOrganizationId &&
-      activeSearch.source === searchSource
+      activeSearch.source === resolvedSearchSource
       ? searchAdapter(activeSearch.controller)
       : undefined,
   )
@@ -228,15 +229,17 @@
   )
   $effect(() => {
     const orgId = currentOrganizationId
-    const providedSource = searchSource
+    const providedSource = resolvedSearchSource
     const controller = createSearchController({
       source: providedSource ?? createDefaultSearchSource(orgId),
       onOpenResult: (target) => handleOpenSearchResult(orgId, target),
       onAnnounce: (message) => onannounce?.(message),
     })
+    const stopRevoke = session.onChannelRevoked?.((channelId) => controller.revokeChannel(channelId))
     const entry = { organizationId: orgId, source: providedSource, controller }
     activeSearch = entry
     return () => {
+      stopRevoke?.()
       controller.destroy()
       if (activeSearch === entry) activeSearch = undefined
     }
@@ -309,6 +312,9 @@
     }
     for (const message of currentRepliesState?.messages ?? []) ids.push(message.sender)
     for (const message of searchView?.messages ?? []) ids.push(message.sender)
+    if (searchOpen && searchState) {
+      for (const hit of searchState.items) ids.push(hit.message.sender)
+    }
     if (resolvedReplyAnchor) ids.push(resolvedReplyAnchor.sender)
     members?.authors.watch(ids)
   })
@@ -551,6 +557,11 @@
     getSelectedId: () => s.selectedId,
     getNavigation: () => nav,
     selectChannel: (id) => channels.select(id),
+    isKnownChannel: (id) =>
+      s.channels.some((c) => c.id === id) ||
+      Boolean(s.archivedList?.channels.some((c) => c.id === id)) ||
+      s.openChannel?.id === id,
+    selectChannelHint: (id) => channels.selectHint(id),
     isDm: (id) => Boolean(dmState?.rows.some((row) => row.identity.id === id)),
     selectDm: (id) => session.dms?.select(id),
     retryAuthors: () => { members?.authors.retry() },
@@ -654,6 +665,25 @@
     })
   }
 
+  function resolveSearchContext(hit: SearchHit): string {
+    const channelId = hit.message.channel_id
+    if (hit.channel_kind === 'dm') {
+      const peer = dmState?.rows.find((row) => row.identity.id === channelId)?.identity.peer
+      if (!peer) return 'ダイレクトメッセージ'
+      return `ダイレクトメッセージ: ${peer.name}${peer.active ? '' : '（無効）'}`
+    }
+    const channelName =
+      s.channels.find((c) => c.id === channelId)?.name ??
+      s.archivedList?.channels.find((c) => c.id === channelId)?.name ??
+      (s.openChannel?.id === channelId ? s.openChannel.name : undefined)
+    const base = channelName ? `# ${channelName}` : 'チャンネル'
+    const topicId = hit.message.topic_id
+    if (!topicId) return base
+    const topicName = session.topics(channelId).state.topics
+      .find((t) => t.topicId === topicId)?.baseline?.summary.name
+    return topicName ? `${base} › ${topicName}` : base
+  }
+
   function canOpenSearchTarget(target: SearchTarget): boolean {
     const isDm = Boolean(dmState?.rows.some((row) => row.identity.id === target.channelId))
     const hasChannel = Boolean(
@@ -662,9 +692,11 @@
       s.archivedList?.channels.some((c) => c.id === target.channelId) ||
       s.openChannel?.id === target.channelId,
     )
-    if (!hasChannel) return false
+    // A hit's kind comes from the server, which only returns readable Messages; an unloaded
+    // Channel or DM opens through the unknown-kind hint and the server decides availability.
+    if (!hasChannel && !target.channelKind) return false
     if (!target.topicId) return true
-    if (isDm) return false
+    if (isDm || target.channelKind === 'dm') return false
     const topicsState = session.topics(target.channelId).state
     if (topicsState.topic(target.topicId).notFound) return false
     if (topicsState.topics.some((t) => t.topicId === target.topicId)) return true
@@ -883,6 +915,7 @@
       {mainViewSelected}
       members={members?.state.members ?? []}
       resolveSenderName={resolveSender}
+      {resolveSearchContext}
       {resolveMentionName}
       bind:searchInputRef={searchInputRef}
       bind:searchResultsHeadingRef={searchResultsHeadingRef}

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Channel, DmDiscovery, Member, Message } from './api'
+  import type { Channel, DmDiscovery, Member, Message, SearchHit } from './api'
   import DmSendStatus from './DmSendStatus.svelte'
   import type { MentionName } from './mentions'
   import type { RepliesAdapter } from './replies.svelte'
@@ -48,6 +48,7 @@
     mainViewSelected = true,
     members = [],
     resolveSenderName,
+    resolveSearchContext = () => '',
     resolveMentionName,
     searchInputRef = $bindable<HTMLInputElement | HTMLTextAreaElement | null>(null),
     searchResultsHeadingRef = $bindable<HTMLElement | null>(null),
@@ -103,6 +104,7 @@
     mainViewSelected?: boolean
     members?: readonly Member[]
     resolveSenderName?: (senderId: string) => string
+    resolveSearchContext?: (hit: SearchHit) => string
     resolveMentionName?: MentionName
     searchInputRef?: HTMLInputElement | HTMLTextAreaElement | null
     searchResultsHeadingRef?: HTMLElement | null
@@ -215,6 +217,8 @@
   <div class="main-card__body">
     <SearchResults
       state={searchState}
+      resolveContext={resolveSearchContext}
+      resolveSender={resolveSenderName ?? ((id) => id)}
       onopenresult={onopensearchresult}
       onloadmore={onloadmoresearch}
       onretry={onretrysearch}

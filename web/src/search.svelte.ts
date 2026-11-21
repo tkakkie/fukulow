@@ -16,6 +16,7 @@ export function searchAdapter(controller: SearchController) {
     loadMore: () => controller.loadMore(),
     retry: () => controller.retry(),
     openSearchResult: (target: SearchTarget) => controller.openSearchResult(target),
+    revokeChannel: (channelId: string) => controller.revokeChannel(channelId),
     close: () => controller.close(),
     clear: () => controller.clear(),
   }

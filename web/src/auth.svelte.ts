@@ -23,6 +23,7 @@ import { sectionsAdapter, type SectionsAdapter } from './sections.svelte'
 import type { MoveDestination, MoveResult } from './move-chain'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
+import type { SearchSource } from './search-source'
 
 export type { AuthState } from './auth'
 export type SessionModel = {
@@ -30,6 +31,7 @@ export type SessionModel = {
   dms?: DmsAdapter
   navigationTargets?: ReturnType<typeof navigationTargetsAdapter>
   searchAnchor?: SearchAnchorAdapter
+  searchSource?: SearchSource
   channels: ChannelsAdapter
   sections?: SectionsAdapter
   sync: SyncAdapter
@@ -40,6 +42,7 @@ export type SessionModel = {
   channelMembers?(id: string): ReturnType<typeof createChannelMembers>
   memberListAccess?(): MemberListAccess
   onMemberListRefresh?(listener: (reason: 'access' | 'refresh') => void): () => void
+  onChannelRevoked?(listener: (channelId: string) => void): () => void
   close(): void
 }
 export type AuthDeps = {
@@ -67,6 +70,8 @@ const defaults: AuthDeps = {
       memberListAccess: session.memberListAccess,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
       searchAnchor: searchAnchorAdapter(session.searchAnchor),
+      searchSource: session.searchSource,
+      onChannelRevoked: session.onChannelRevoked,
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
       sections: sectionsAdapter(session.sections),

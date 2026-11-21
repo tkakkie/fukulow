@@ -349,3 +349,41 @@ describe('panel route parsing', () => {
     expect(panelSpy).not.toHaveBeenCalled()
   })
 })
+
+describe('createChannelSelection search hits on unknown Channels', () => {
+  function handler(known: boolean) {
+    const selectChannel = vi.fn()
+    const selectChannelHint = vi.fn()
+    const handle = createChannelSelection({
+      getOrganizationId: () => 'org',
+      getSelectedId: () => null,
+      getNavigation: () => ({ navigate: vi.fn(() => true), openSearchResult: vi.fn(() => true) }),
+      selectChannel,
+      isKnownChannel: () => known,
+      selectChannelHint,
+      isDm: () => false,
+      selectDm: vi.fn(),
+      retryAuthors: vi.fn(),
+      getCurrentUnread: () => null,
+      onCloseDrawer: vi.fn(),
+    })
+    return { handle, selectChannel, selectChannelHint }
+  }
+
+  it('opens a search hit in a Channel absent from the loaded lists through a hint', () => {
+    const h = handler(false)
+    h.handle('X', { channelId: 'X', messageId: 'm', topicId: null, replyRootId: null, channelKind: 'channel', createdSeq: 1 })
+    expect(h.selectChannelHint).toHaveBeenCalledWith('X')
+    expect(h.selectChannel).not.toHaveBeenCalled()
+  })
+
+  it('selects a known Channel normally and never hints without a search hit', () => {
+    const known = handler(true)
+    known.handle('A', { channelId: 'A', messageId: 'm', topicId: null, replyRootId: null, channelKind: 'channel', createdSeq: 1 })
+    expect(known.selectChannel).toHaveBeenCalledWith('A')
+    expect(known.selectChannelHint).not.toHaveBeenCalled()
+    const plain = handler(false)
+    plain.handle('Y')
+    expect(plain.selectChannelHint).not.toHaveBeenCalled()
+  })
+})

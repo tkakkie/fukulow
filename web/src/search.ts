@@ -1,18 +1,17 @@
-import {
-  SEARCH_RANGE_DAYS,
-  type SearchRequest,
-  type SearchResponse,
-  type SearchResultItem,
-  type SearchSource,
+import type { SearchHit } from './api'
+import type {
+  SearchRequest,
+  SearchResponse,
+  SearchSource,
 } from './search-source'
 
-export const SEARCH_PAGE_SIZE = 20
 export const SEARCH_TIMEOUT_MS = 10_000
 const SEARCH_UNAVAILABLE_NOTICE = 'メッセージ検索は現在準備中です。'
 const SEARCH_OPEN_FAILED_NOTICE = 'この検索結果は現在開けません。'
 
 export type SearchTarget = {
   channelId: string
+  channelKind?: SearchHit['channel_kind']
   topicId?: string | null
   replyRootId?: string | null
   messageId: string
@@ -35,13 +34,11 @@ export type SearchState = {
   input: string
   submittedQuery: string
   status: SearchStatus
-  items: readonly SearchResultItem[]
+  items: readonly SearchHit[]
   nextCursor: string | null
-  rangeDays: number
-  rangeStart: string | null
   minLength: number | null
   retryable: boolean
-  loadMoreError: 'timeout' | 'error' | null
+  loadMoreError: 'timeout' | 'invalid_cursor' | 'error' | null
   openNotice: string | null
 }
 
@@ -73,8 +70,6 @@ function initialState(): SearchState {
     status: 'idle',
     items: [],
     nextCursor: null,
-    rangeDays: SEARCH_RANGE_DAYS,
-    rangeStart: null,
     minLength: null,
     retryable: false,
     loadMoreError: null,
@@ -88,6 +83,7 @@ export function createSearchController(options: SearchControllerOptions) {
   let generation = 0
   let destroyed = false
   let inFlight: AbortController | null = null
+  const revokedChannels = new Set<string>()
   const listeners = new Set<() => void>()
 
   const publish = (next: SearchState) => {
@@ -156,6 +152,7 @@ export function createSearchController(options: SearchControllerOptions) {
     }
 
     abortInFlight()
+    revokedChannels.clear()
     const controller = new AbortController()
     inFlight = controller
     const gen = ++generation
@@ -168,26 +165,24 @@ export function createSearchController(options: SearchControllerOptions) {
       status: 'loading',
       items: [],
       nextCursor: null,
-      rangeStart: null,
       minLength: null,
       retryable: false,
       loadMoreError: null,
       openNotice: null,
     })
 
-    const response = await runWithTimeout({ query, limit: SEARCH_PAGE_SIZE }, controller)
+    const response = await runWithTimeout({ q: query }, controller)
     if (destroyed || gen !== generation || response === 'aborted') return
     inFlight = null
 
     if (response.ok) {
-      const { items, nextCursor, rangeDays, rangeStart } = response.page
+      const { hits, next_cursor } = response.page
+      const visible = hits.filter((h) => !revokedChannels.has(h.message.channel_id))
       publish({
         ...state,
-        status: items.length > 0 ? 'results' : 'empty',
-        items: [...items],
-        nextCursor,
-        rangeDays,
-        rangeStart,
+        status: visible.length > 0 || next_cursor !== null ? 'results' : 'empty',
+        items: visible,
+        nextCursor: next_cursor,
         minLength: null,
         retryable: false,
         loadMoreError: null,
@@ -215,6 +210,13 @@ export function createSearchController(options: SearchControllerOptions) {
       publish({
         ...state,
         status: 'timeout',
+        retryable: true,
+      })
+    } else if (failure.kind === 'invalid_cursor') {
+      publish({
+        ...state,
+        status: 'error',
+        nextCursor: null,
         retryable: true,
       })
     } else {
@@ -252,19 +254,22 @@ export function createSearchController(options: SearchControllerOptions) {
       openNotice: null,
     })
 
-    const response = await runWithTimeout({ query, limit: SEARCH_PAGE_SIZE, cursor }, controller)
+    const response = await runWithTimeout({ q: query, cursor }, controller)
     if (destroyed || gen !== generation || response === 'aborted') return
     inFlight = null
 
     if (response.ok) {
-      const { items, nextCursor, rangeDays, rangeStart } = response.page
+      const { hits, next_cursor } = response.page
+      const seen = new Set(state.items.map((h) => h.message.id))
+      const merged = [
+        ...state.items,
+        ...hits.filter((h) => !revokedChannels.has(h.message.channel_id) && !seen.has(h.message.id)),
+      ]
       publish({
         ...state,
-        status: 'results',
-        items: [...state.items, ...items],
-        nextCursor,
-        rangeDays,
-        rangeStart,
+        status: merged.length > 0 || next_cursor !== null ? 'results' : 'empty',
+        items: merged,
+        nextCursor: next_cursor,
         loadMoreError: null,
         retryable: false,
       })
@@ -272,6 +277,16 @@ export function createSearchController(options: SearchControllerOptions) {
     }
 
     const { failure } = response
+    if (failure.kind === 'invalid_cursor') {
+      publish({
+        ...state,
+        status: 'results',
+        nextCursor: null,
+        loadMoreError: 'invalid_cursor',
+        retryable: true,
+      })
+      return
+    }
     publish({
       ...state,
       status: 'results',
@@ -281,7 +296,7 @@ export function createSearchController(options: SearchControllerOptions) {
   }
 
   async function retry(): Promise<void> {
-    if (state.items.length > 0 && state.loadMoreError !== null && state.nextCursor !== null) {
+    if (state.loadMoreError !== null && state.nextCursor !== null) {
       await loadMore()
       return
     }
@@ -311,8 +326,27 @@ export function createSearchController(options: SearchControllerOptions) {
   function clear(): void {
     if (destroyed) return
     abortInFlight()
+    revokedChannels.clear()
     generation++
     publish(initialState())
+  }
+
+  function revokeChannel(channelId: string): void {
+    if (destroyed) return
+    revokedChannels.add(channelId)
+    const items = state.items.filter((h) => h.message.channel_id !== channelId)
+    if (items.length === state.items.length) return
+    const nextStatus: SearchStatus =
+      state.status === 'results'
+        ? items.length > 0 || state.nextCursor !== null || state.loadMoreError !== null
+          ? 'results'
+          : 'empty'
+        : state.status
+    publish({
+      ...state,
+      status: nextStatus,
+      items,
+    })
   }
 
   function openSearchResult(target: SearchTarget): void {
@@ -345,11 +379,13 @@ export function createSearchController(options: SearchControllerOptions) {
     loadMore,
     retry,
     openSearchResult,
+    revokeChannel,
     close,
     clear,
     destroy(): void {
       destroyed = true
       abortInFlight()
+      revokedChannels.clear()
       listeners.clear()
     },
   }
