@@ -12,3 +12,6 @@ c4b4b0c537687e5e2a4982403bb0819034a9606d:load/search-engines/manifest-v1.json:ge
 # the next commit generates them at run time.
 8b0b593df02ab2ab64f99bef0f16bcbf2e7474e0:load/reply-counts-run.ts:generic-api-key:127
 8b0b593df02ab2ab64f99bef0f16bcbf2e7474e0:load/reply-counts-run.ts:generic-api-key:133
+# Fake token in a #519 redaction test (commit 19a02c4), not a secret;
+# the next commit builds it at run time.
+19a02c43e671d356ea23a7a11b314ab5daa442ce:load/app-evidence.test.ts:generic-api-key:234

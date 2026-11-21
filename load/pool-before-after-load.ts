@@ -5,16 +5,16 @@ import { Counter, Trend } from 'k6/metrics';
 import type { Options } from 'k6/options';
 import type { SendMessageRequest, SignInRequest } from '../web/src/api-schema.d.ts';
 import { uuid } from './seed.ts';
-import { plan, settings, scope, timeoutNote, type Counts } from './pool-before-after-summary.ts';
-import { generatorConfig } from './pool-before-after-config.ts';
+import { settings, scope, timeoutNote, type Counts } from './pool-before-after-summary.ts';
+import { diagnosticRates, generatorConfig, generatorVersion } from './pool-before-after-config.ts';
 const fixture=JSON.parse(open('/fixture/data.json')) as {organization:string;otherOrganization:string;reader:string;channels:string[];password:string};
 const tokens=new SharedArray<string>('members',()=>JSON.parse(open('/fixture/tokens.json')));
-const steps=plan(__ENV.POOL_SMOKE==='1');
 const mixed=__ENV.POOL_SCENARIO==='mixed';
 const countNames=['attempted','accepted','rejected429','rejected503','otherErrors','clientTimeouts','transportErrors'] as const;
 const counts=Object.fromEntries(countNames.map(n=>[n,new Counter(`pool_${n}`)]));
+const http5xx=__ENV.POOL_DIAGNOSTIC==='1'?new Counter('pool_http5xx'):undefined;
 const latency=new Trend('pool_success_ms',true);
-const {lanes,duration,scenarios}=generatorConfig(__ENV.POOL_SMOKE==='1',mixed);
+const {steps,lanes,duration,scenarios}=generatorConfig(__ENV.POOL_SMOKE==='1',mixed,generatorVersion(__ENV.POOL_GENERATOR),diagnosticRates(__ENV.DIAG_RATES));
 export const options:Options={
   scenarios,
   summaryTrendStats:['p(95)','p(99)'],systemTags:['scenario','status','name'],
@@ -23,6 +23,7 @@ export const options:Options={
 };
 for(const kind of ['send','reads','signin']) for(const [metric,threshold] of [...countNames.map(n=>[`pool_${n}`,'count>=0']),['pool_success_ms','max>=0']])
   options.thresholds![`${metric}{scenario:run_${kind}}`]=[threshold];
+if(http5xx) options.thresholds!.pool_http5xx=['count>=0'];
 const base=__ENV.BASE_URL;
 function request(kind:'send'|'reads'|'signin'|'reader') {
   const index=execution.scenario.iterationInTest;
@@ -39,6 +40,7 @@ function request(kind:'send'|'reads'|'signin'|'reader') {
   counts.attempted.add(1);
   const r=http.request(kind==='send'||kind==='signin'?'POST':'GET',base+path,kind==='send'||kind==='signin'?JSON.stringify(body):null,
     {headers,timeout:'10s',redirects:0,tags:{name:kind}});
+  http5xx?.add(Number(r.status>=500&&r.status<600));
   const outcome=r.error_code===1050?'clientTimeouts':r.status>=200&&r.status<300?'accepted':r.status===429?'rejected429':r.status===503?'rejected503':
     r.status===0?(r.error_code===1050?'clientTimeouts':'transportErrors'):'otherErrors';
   for(const name of countNames.filter(n=>n!=='attempted')) counts[name].add(Number(outcome===name));
@@ -84,5 +86,7 @@ export function handleSummary(data:unknown) {
     continuousReaderComplete:readerTotals.droppedIterations===0&&readerTotals.attempted>=2*duration*settings.minimumOfferedFraction,
     runMetrics:Object.fromEntries(['send',...(mixed?['reads','signin']:[]),'reader'].map(kind=>[kind,kind==='reader'?readerTotals:{...row(`run_${kind}`),
       droppedIterations:steps.reduce((sum,s)=>sum+row(`${s.name}_${kind}`).droppedIterations,0)}])),
-    lanes:lanes.map(l=>({...l,...row(l.name)})),poolAcquireTimeouts:'NOT EVALUATED'})+'\n'};
+    lanes:lanes.map(l=>({...l,...row(l.name)})),poolAcquireTimeouts:'NOT EVALUATED',
+    ...(http5xx?{diagnosticMetrics:{http5xx:metrics.pool_http5xx?.values.count,
+      droppedIterations:metrics.dropped_iterations?.values.count??0,vusPeak:metrics.vus?.values.max}}:{})})+'\n'};
 }

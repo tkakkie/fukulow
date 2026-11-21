@@ -1,6 +1,7 @@
 // #469: per-step app-side evidence from the app's existing structured events (server/src/observability.rs,
-// server/src/database/stats.rs). Only allowlisted aggregates leave this module: never a raw line, request
-// path, Account, credential or Message body. Missing or broken evidence is reported as incomplete.
+// server/src/database/stats.rs). Retains allowlisted aggregates and up to 20 redacted unknown events.
+// Unknown events retain log metadata, identifier-shaped keys, and a constant-shaped kind/code or its type and length.
+// Raw lines, request paths, IDs, Accounts, credentials and Message bodies are excluded.
 const poolCounters = ['acquire_success', 'acquire_timeout', 'acquire_closed', 'acquire_io', 'acquire_database', 'acquire_other',
   'acquire_cancelled', 'wait_le_1000000_us', 'wait_count'] as const;
 const failureKinds = ['pool_timeout', 'pool_closed', 'deadline', 'io', 'database', 'other'] as const;
@@ -8,8 +9,24 @@ const failureKinds = ['pool_timeout', 'pool_closed', 'deadline', 'io', 'database
 const closeCodes = ['1001', '1011', '4001', '4003', '4008', '4029', 'other', 'peer_or_transport'] as const;
 const sampleSlackMs = 2000;
 const seriesLimit = 900;
+const unknownEventLimit = 20;
+const logLevels = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR'] as const;
+const logNamePattern = /^[a-z0-9_]{1,64}$/;
+const unknownValuePatterns = { kind: /^[a-z][a-z0-9_]{0,31}$/, code: /^(?:\d{1,5}|[a-z][a-z0-9_]{0,31})$/ };
 
 type Close = { count: number; firstMs: number | null; lastMs: number | null; perSecond: [number, number][] };
+type UnknownValue = string | { type: 'missing' } |
+  { type: 'string' | 'number' | 'boolean' | 'null' | 'array' | 'object'; length: number };
+type UnknownEvent = {
+  timestamp: string;
+  level: (typeof logLevels)[number] | null;
+  target: 'fukulow';
+  fields: { event: 'database_failure'; kind: UnknownValue } | { event: 'websocket_closed'; code: UnknownValue };
+  otherFieldNames: string[];
+  droppedFieldNames: number;
+  spanNames: string[];
+  droppedSpanNames: number;
+};
 export type AppEvidence = {
   complete: boolean; reasons: string[]; windowMs: number;
   pool: { samples: number; maxInUse: number; minIdle: number; maxWaiting: number;
@@ -23,6 +40,7 @@ export type AppEvidence = {
   panics: number;
   /** Other WARN/ERROR app events in the window, by event name (code constants, never data). */
   otherWarnings: Record<string, number>;
+  unknownEvents: UnknownEvent[];
 };
 
 type Row = { at: number; level: unknown; fields: Record<string, unknown>; span?: Record<string, unknown> };
@@ -31,10 +49,49 @@ function parse(line: string): Row | undefined {
     const row = JSON.parse(line);
     const at = Date.parse(row?.timestamp);
     if (row?.target !== 'fukulow' || typeof row.fields?.event !== 'string' || !Number.isFinite(at)) return;
-    return { at, level: row.level, fields: row.fields, span: row.span };
+    const span: unknown = row.span;
+    return { at, level: row.level, fields: row.fields,
+      span: span !== null && typeof span === 'object' && !Array.isArray(span) ? span as Record<string, unknown> : undefined };
   } catch { return; }
 }
+const appEventHint = /"target":"fukulow"|pool_stats|database_failure|websocket_|http_completed/;
+
+/** #519: how many app event lines could not be parsed. Counts only; no line content is kept. */
+export function unparseableAppLineCount(log: string): number {
+  let n = 0;
+  for (const line of log.split('\n')) if (line.trim() && !/"event":"panic"/.test(line) && !parse(line) && appEventHint.test(line)) n++;
+  return n;
+}
+
 const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : NaN;
+
+function redactUnknownValue(value: unknown, pattern: RegExp): UnknownValue {
+  if (typeof value === 'string') return pattern.test(value) ? value : { type: 'string', length: value.length };
+  if (value === undefined) return { type: 'missing' };
+  if (value === null) return { type: 'null', length: 4 };
+  if (Array.isArray(value)) return { type: 'array', length: value.length };
+  if (typeof value === 'object') return { type: 'object', length: Object.keys(value).length };
+  return { type: typeof value === 'boolean' ? 'boolean' : 'number', length: String(value).length };
+}
+
+function retainUnknownEvent(events: UnknownEvent[], row: Row, key: 'kind' | 'code') {
+  if (events.length >= unknownEventLimit) return;
+  const value = redactUnknownValue(row.fields[key], unknownValuePatterns[key]);
+  const fieldKeys = Object.keys(row.fields).filter(name => name !== 'event' && name !== key);
+  const spanKeys = Object.keys(row.span ?? {});
+  const otherFieldNames = fieldKeys.filter(name => logNamePattern.test(name)).sort();
+  const spanNames = spanKeys.filter(name => logNamePattern.test(name)).sort();
+  events.push({
+    timestamp: new Date(row.at).toISOString(),
+    level: logLevels.find(level => level === row.level) ?? null,
+    target: 'fukulow',
+    fields: key === 'kind' ? { event: 'database_failure', kind: value } : { event: 'websocket_closed', code: value },
+    otherFieldNames,
+    droppedFieldNames: fieldKeys.length - otherFieldNames.length,
+    spanNames,
+    droppedSpanNames: spanKeys.length - spanNames.length,
+  });
+}
 
 export function appEvidence(log: string, startedAt: number, endedAt: number, readError?: string): AppEvidence {
   const reasons: string[] = readError ? [readError] : [];
@@ -42,6 +99,7 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
   const opened: number[] = [];
   const closeTimes = Object.fromEntries(closeCodes.map(code => [code, [] as number[]])) as Record<(typeof closeCodes)[number], number[]>;
   const otherWarnings: Record<string, number> = {};
+  const unknownEvents: UnknownEvent[] = [];
   let active = 0, activeAtStart = 0, peakConcurrent = 0, disconnected = 0, http5xx = 0, panics = 0;
   const samples: Row[] = [];
   if (!(endedAt > startedAt)) reasons.push('invalid generator window');
@@ -51,7 +109,7 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
     if (/"event":"panic"/.test(line)) { panics++; continue; }
     const row = parse(line);
     // Other targets are disabled in the app; an unreadable app line may be lost evidence.
-    if (!row) { if (/"target":"fukulow"|pool_stats|database_failure|websocket_|http_completed/.test(line)) reasons.push('unparseable app event line'); continue; }
+    if (!row) { if (appEventHint.test(line)) reasons.push('unparseable app event line'); continue; }
     const event = row.fields.event as string;
     if (event === 'pool_stats') { samples.push(row); continue; }
     // Process-wide concurrency includes sockets opened before the window; count every transition.
@@ -66,12 +124,14 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
     else if (event === 'websocket_disconnected') { active--; disconnected++; }
     else if (event === 'websocket_closed') {
       const code = closeCodes.find(code => code === row.fields.code);
-      if (code) closeTimes[code].push(row.at - startedAt); else reasons.push('unknown websocket_closed code');
+      if (code) closeTimes[code].push(row.at - startedAt);
+      else { reasons.push('unknown websocket_closed code'); retainUnknownEvent(unknownEvents, row, 'code'); }
     } else if (event === 'database_failure') {
       const kind = failureKinds.find(kind => kind === row.fields.kind);
-      if (kind) databaseFailures[kind]++; else reasons.push('unknown database_failure kind');
+      if (kind) databaseFailures[kind]++;
+      else { reasons.push('unknown database_failure kind'); retainUnknownEvent(unknownEvents, row, 'kind'); }
     } else if (event === 'http_completed') { if (Number(row.span?.status) >= 500) http5xx++; }
-    else if ((row.level === 'WARN' || row.level === 'ERROR') && /^[a-z0-9_]{1,64}$/.test(event)) otherWarnings[event] = (otherWarnings[event] ?? 0) + 1;
+    else if ((row.level === 'WARN' || row.level === 'ERROR') && logNamePattern.test(event)) otherWarnings[event] = (otherWarnings[event] ?? 0) + 1;
     else if (row.level === 'WARN' || row.level === 'ERROR') reasons.push('unrecognised app warning event');
   }
   // Worker threads format timestamps before taking the stderr lock: lines can be slightly out of order.
@@ -87,7 +147,7 @@ export function appEvidence(log: string, startedAt: number, endedAt: number, rea
   return { complete: reasons.length === 0, reasons: [...new Set(reasons)], windowMs: endedAt - startedAt, pool, databaseFailures, closes,
     sockets: { opened: opened.length, disconnected, peakConcurrent: Math.max(peakConcurrent, activeAtStart), peakOpenedPerSecond,
       openedPerSecond: span > 0 ? Math.round(opened.length / (span / 1000)) : null },
-    http5xx, panics, otherWarnings };
+    http5xx, panics, otherWarnings, unknownEvents };
 }
 
 function closeSeries(times: number[], reasons: string[]): Close {
