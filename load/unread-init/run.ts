@@ -1,9 +1,9 @@
 /**
  * #403 runbook — measurement-only; never changes production persistence.
  * Tomorrow, from this worktree root (idle Mac, Docker running):
- *   mise exec node@26.13.0 -- node load/unread-init/run.ts --full --out /private/tmp/fukulow-403-full
+ *   mise exec node@26.13.1 -- node load/unread-init/run.ts --full --out /private/tmp/fukulow-403-full
  * Today / harness validation only:
- *   mise exec node@26.13.0 -- node load/unread-init/run.ts --pilot --out /private/tmp/fukulow-403-pilot
+ *   mise exec node@26.13.1 -- node load/unread-init/run.ts --pilot --out /private/tmp/fukulow-403-pilot
  * Prerequisites: mise with repo-pinned Node (.node-version), Docker, sqlx CLI supporting --no-dotenv (validated: 0.9.0). No app build, credentials, .env or shared DB required.
  * Uses the exact PostgreSQL digest in load/compose.yml, loopback ephemeral port,
  * own container, migrations via sqlx, production role/grants, fresh DB per repeat.
@@ -33,8 +33,9 @@ import { resolve,sep } from 'node:path';
 import { tmpdir,cpus,arch,platform,release,totalmem } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { Database,docker,image } from './database.ts';
-import { matrix,integers,estimate,equal,summary,type Sample } from './model.ts';
+import { matrix,integers,estimate,equal,oracleDigest,summary,type Sample } from './model.ts';
 import { fixture } from './sql.ts';
 import { measure } from './measure.ts';
 const argv=process.argv.slice(2);
@@ -56,6 +57,12 @@ if(out===root||out.startsWith(root+sep))throw new Error('output must be outside 
 mkdirSync(out,{recursive:true});const actualOut=realpathSync(out);
 if(actualOut===root||actualOut.startsWith(root+sep))throw new Error('output must be outside repository');
 const save=(file:string,value:unknown)=>writeFileSync(resolve(out,file),JSON.stringify(value,null,2)+'\n');
+// The oracle (full count/projection rows) reaches ~10M Topics at the largest point and overflowed results.json
+// (V8 string limit) on the 2026-11-21 rehearsal. Keep each one gzipped in its own file; results.json keeps its digest.
+mkdirSync(resolve(out,'oracle'),{recursive:true});
+const oracleFile=<T extends {oracle:unknown}>(m:T,label:string)=>{const {text,...digest}=oracleDigest(m.oracle),file=`oracle/${label}.json.gz`;
+  writeFileSync(resolve(out,file),gzipSync(text));
+  return {...m,oracle:{file,...digest}};};
 const command=(name:string,...args:string[])=>execFileSync(name,args,{encoding:'utf8'}).trim();
 const db=new Database();let interrupted=false;process.on('SIGINT',()=>{interrupted=true;});process.on('SIGTERM',()=>{interrupted=true;});
 const check=()=>{if(interrupted)throw new Error('interrupted');};
@@ -84,7 +91,7 @@ try {
         const pair:Record<string,Awaited<ReturnType<typeof measure>>>={};
         for(const variant of repeat%2?['lazy','eager']:['eager','lazy']) {
           check();db.clone('trial',`seed_${variant}`);
-          try{pair[variant]=await measure(db,'trial',p,variant,repeat);raw.push(pair[variant]);save('results.json',result);}finally{db.drop('trial');}
+          try{pair[variant]=await measure(db,'trial',p,variant,repeat);raw.push(oracleFile(pair[variant],`${index+1}-${p.operation}-t${p.topics}-m${p.members}-r${repeat}-${variant}`));save('results.json',result);}finally{db.drop('trial');}
         }
         equal(pair.eager.oracle,pair.lazy.oracle,`${JSON.stringify(p)}/repeat ${repeat}`);
         result.equalityChecks++;samples.push(pair.eager.sample,pair.lazy.sample);save('results.json',result);
