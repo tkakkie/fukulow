@@ -581,7 +581,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn retry_limit_retires_revocation() {
-        let reg = registration(Arc::new(Capacity::new(1)));
+        let capacity = Arc::new(Capacity {
+            measure: false,
+            ..Capacity::new(1)
+        });
+        let reg = registration(capacity.clone());
         let (pool, capture) = failed_handoff(&reg).await;
         for (attempt, millis) in [250, 500, 1000, 2000, 4000].into_iter().enumerate() {
             let mut next = std::pin::pin!(reg.next());
@@ -616,6 +620,9 @@ mod tests {
         );
         assert_eq!(metric(&reg, RevocationMetric::Retries), 1);
         assert_eq!(metric(&reg, RevocationMetric::Timeout), 0);
+        // Without the measurement flag, holds and retries leave no measurement trace.
+        let counts = capacity.sample();
+        assert_eq!((counts.high_water_mark, counts.retry_attempts), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]
