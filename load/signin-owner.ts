@@ -126,6 +126,8 @@ try {
   const phaseOf = (ms: number): Phase => ms < startAt.B1 ? 'B0' : ms < startAt.B2 ? 'B1' : 'B2';
   sampler = spawn('docker', [...compose, 'exec', '-T', '-e', `Q=${lockQuery}`, 'db', 'sh', '-c',
     'while :; do psql -X -U fukulow -d fukulow -At -F "|" -c "$Q" || exit 1; sleep 0.2; done'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+  let samplerExited = false;
+  sampler.on('exit', () => { samplerExited = true; });
   let partial = '';
   sampler.stdout?.on('data', chunk => {
     const lines = (partial + String(chunk)).split('\n'); partial = lines.pop() ?? '';
@@ -160,7 +162,7 @@ try {
         owner.push({ kind: due, phase: at, status: r.status, ms: r.ms, endMs: r.end - t0 });
       })().finally(() => { ownerBusy = false; }));
     }
-    while (now >= nextAttack && nextAttack < startAt.B2) {
+    while (now >= nextAttack && nextAttack < startAt.B2 && now < startAt.B2) {
       nextAttack += 1000 / attackRate;
       if (attackActive >= attackInFlight) { skipped.attack++; continue; }
       attackActive++;
@@ -184,6 +186,8 @@ try {
   }
   await Promise.all(pending);
   const endMs = performance.now() - t0;
+  // A sampler that stopped early would leave a phase with too few lock and connection samples.
+  if (samplerExited) throw new Error('sampler exited');
   sampler.kill(); sampler = undefined;
   if (controller.signal.aborted) throw new Error('interrupted');
   await pause(2500);
@@ -191,7 +195,7 @@ try {
   const evidence = appEvidence(logs, wallStart, wallStart + endMs);
   const poolTimeouts = (evidence.pool?.deltas.acquire_timeout ?? 0) + evidence.databaseFailures.pool_timeout;
   judgment = judge({ owner, attack, reads, locks, phaseStartMs: startAt, endMs, poolMax: POOL_MAX,
-    server: { poolTimeouts, complete: evidence.pool !== null } });
+    server: { poolTimeouts, panics: evidence.panics, complete: evidence.complete } });
   writeFileSync(`${output}/server-evidence.json`, JSON.stringify({ pool: evidence.pool, databaseFailures: evidence.databaseFailures,
     http5xx: evidence.http5xx, panics: evidence.panics, reasons: evidence.reasons }, null, 2));
   console.log('SIGNIN_OWNER_JUDGMENT ' + JSON.stringify({ formal: false, allPass: judgment.allPass, incomplete: judgment.incomplete,

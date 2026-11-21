@@ -16,7 +16,7 @@ function run(): Run {
   return { owner, attack: [{ phase: 'B1', status: 401, ms: 50, endMs: 35_000 }, { phase: 'B1', status: 429, ms: 1, endMs: 36_000 }],
     reads: [{ phase: 'B0', status: 200, ms: 5 }, { phase: 'B1', status: 200, ms: 9 }, { phase: 'B2', status: 200, ms: 5 }],
     locks, phaseStartMs: { B0: 0, B1: 30_000, B2: 90_000 }, endMs: 160_000, poolMax: 20,
-    server: { poolTimeouts: 0, complete: true } };
+    server: { poolTimeouts: 0, panics: 0, complete: true } };
 }
 const fails = (r: Run) => Object.entries(judge(r).checks).filter(([, c]) => !c.pass).map(([k]) => k);
 
@@ -36,11 +36,15 @@ test('each criterion fails on its own violation', () => {
     ['B2', r => { r.owner.find(o => o.phase === 'B2')!.status = 429; }],
     ['B2', r => { for (const o of r.owner) if (o.phase === 'B2') o.ms = 121; }],
     ['B3', r => { r.locks[6].waiters = 8; }],
+    ['B3', r => { r.locks[12].waiters = 8; }],
     ['B3', r => { r.locks[6].connections = 11; }],
     ['B3', r => { r.poolMax = 9; }],
     ['B4', r => { r.reads[1].status = 503; }],
     ['B4', r => { r.reads[1].ms = 12.9; }],
+    ['B4', r => { r.reads[2].ms = 12.9; }],
     ['B5', r => { r.server.poolTimeouts = 1; }],
+    ['B5', r => { r.server.panics = 1; }],
+    ['B2', r => { r.owner.find(o => o.phase === 'B2')!.status = 403; }],
   ];
   for (const [check, mutate] of cases) {
     const r = run(); mutate(r);
@@ -53,9 +57,13 @@ test('B2 counts 429 only when later than 60 s after the last counted attacker fa
   allowed.owner.find(o => o.phase === 'B2')!.status = 429;
   allowed.owner.find(o => o.phase === 'B2')!.endMs = 95_000;
   assert.ok(judge(allowed).checks.B2.detail.includes('0 late 429'));
+  assert.equal(judge(allowed).checks.B2.pass, true);
+  assert.equal(judge(allowed).b2Strict, false);
+  assert.equal(judge(run()).b2Strict, true);
   const late = run();
   late.owner.find(o => o.phase === 'B2')!.status = 429;
   assert.ok(judge(late).checks.B2.detail.includes('1 late 429'));
+  assert.equal(judge(late).checks.B2.pass, false);
 });
 
 test('client timeouts and non-admission 5xx fail B5 on any route', () => {
@@ -73,4 +81,10 @@ test('missing baseline or samples make the run incomplete, not a pass', () => {
   assert.equal(judge(s).allPass, false);
   const e = run(); e.server.complete = false;
   assert.equal(judge(e).allPass, false);
+  const a = run(); a.attack = [];
+  assert.equal(judge(a).incomplete, true);
+  for (const phase of ['B0', 'B1', 'B2']) {
+    const m = run(); m.reads = m.reads.filter(x => x.phase !== phase);
+    assert.equal(judge(m).incomplete, true, `${phase} reads missing`);
+  }
 });
