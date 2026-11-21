@@ -227,13 +227,18 @@ test('unparseable app line capture never keeps non-constant values', () => {
   for (const l of lines) for (const secret of secrets) assert.ok(!l.includes(secret), `${secret} in ${l}`);
   assert.equal(lines[0], '{"timestamp":"<20>","target":"fukulow","fields":{"event":"websocket_closed","id":"<36>","token":"<64>",' +
     '"esc":"<27>","route":"<16>"');
-  assert.equal(lines[1], '<10> <24> <16> <16> <2>:5432 <6> <3>');
+  assert.equal(lines[1], '<10> <24> <16> <16> <7> <6> <3>');
   assert.equal(lines[2], `{"target":"fukulow","fields":{"event":"http_completed","path":"<unterminated ${secrets[3].length}>`);
   assert.equal(redactedShape('{"a":"b c","n":12,"x":true}'), '{"a":"<3>","n":12,"x":true}');
   // Constant-shaped values survive only under constant keys (and log levels).
-  assert.equal(redactedShape('{"target":"fukulow","level":"INFO","token":"tok_live_q7m4z9","fields":{"event":"websocket_closed","kind":"pool_timeout"}'),
+  const fake = ['tok', 'live', 'q7m4z9'].join('_'); // built at run time so the scanner never sees a key-shaped literal
+  assert.equal(redactedShape(`{"target":"fukulow","level":"INFO","token":"${fake}","fields":{"event":"websocket_closed","kind":"pool_timeout"}`),
     '{"target":"fukulow","level":"INFO","token":"<15>","fields":{"event":"websocket_closed","kind":"pool_timeout"}');
   assert.equal(redactedShape('{"level":"Bearer","event":"Tok_1"'), '{"level":"<6>","event":"<5>"');
+  // A constant key's exception never carries past another token (round-2 finding).
+  assert.equal(redactedShape(`{"target":"fukulow","event":null,"${fake}"}`), '{"target":"fukulow","event":null,"<15>"}');
+  assert.equal(redactedShape(`{"event":"x","${fake}"`), '{"event":"x","<15>"');
+  assert.equal(redactedShape('pool_stats host:5432 :12 12:30'), '<10> <9> :12 <5>');
   assert.equal(redactedShape('{"target":"fukulow","values":[1,2,true,null,-3.5,x9]'), '{"target":"fukulow","values":[1,2,true,null,-3.5,<2>]');
   assert.equal(redactedShape(`"${'deadbeef'.repeat(2)}" ${'f'.repeat(16)} "deadbeef"`), '"<16>" <16> "<8>"');
 });

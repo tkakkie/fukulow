@@ -60,14 +60,18 @@ const appEventHint = /"target":"fukulow"|pool_stats|database_failure|websocket_|
 const constantShape = (text: string) => /^[a-z][a-z0-9_]{0,31}$/.test(text) && !/^[0-9a-f]{16,}$/.test(text);
 // Values kept verbatim only under keys whose values the server writes as code constants.
 const constantKeys = new Set(['target', 'event', 'kind', 'code', 'operation', 'coverage']);
-const plainWord = (w: string) => /^(?:-?\d+(?:\.\d+)?|true|false|null)$/.test(w) ? w : `<${w.length}>`;
+// A word between strings keeps only a leading ':' and a number or literal; host:port and the like become lengths.
+const plainWord = (w: string) => /^:?(?:-?\d+(?:\.\d+)?|true|false|null)?$/.test(w) ? w : `<${w.length}>`;
 
 /** Keeps a line's JSON shape: punctuation, numbers, literals, constant-shaped keys and constant values; the rest as lengths. */
 export function redactedShape(line: string): string {
   let out = '', key: string | undefined;
   for (let i = 0; i < line.length;) {
     const quote = line.indexOf('"', i);
-    out += (quote < 0 ? line.slice(i) : line.slice(i, quote)).replace(/[^\s{}[\]:,]+/g, plainWord);
+    const between = quote < 0 ? line.slice(i) : line.slice(i, quote);
+    out += between.replace(/[^\s{}[\],]+/g, plainWord);
+    // A value counts as the key's only when nothing but ':' separates them.
+    if (!/^\s*:\s*$/.test(between)) key = undefined;
     if (quote < 0) break;
     let end = quote + 1;
     while (end < line.length && line[end] !== '"') end += line[end] === '\\' ? 2 : 1;
