@@ -355,8 +355,11 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
 
     const workspaceSrc = readFileSync(join(webDir, 'src/Workspace.svelte'), 'utf8')
     expect(workspaceSrc).toContain('session.sync.hasUnsavedChanges()')
-    expect(workspaceSrc).toContain('<Members')
+    expect(workspaceSrc).toContain('<WorkspaceChannelColumn')
     expect(workspaceSrc).toContain('メンバー資格を再確認')
+
+    const channelColumnSrc = readFileSync(join(webDir, 'src/WorkspaceChannelColumn.svelte'), 'utf8')
+    expect(channelColumnSrc).toContain('<Members')
   })
 })
 
