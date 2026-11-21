@@ -11,7 +11,6 @@
   import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
-  import ChannelOverview from './ChannelOverview.svelte'
   import { shouldCloseOnEscape, shouldTogglePanelShortcut } from './composer-keys'
   import {
     createTopicSummaryFocusController,
@@ -24,21 +23,16 @@
     resolveSkipLinkTargetId,
     type SkipLinkTargetId,
   } from './focus-management'
-  import ChannelMembers from './ChannelMembers.svelte'
   import { channelMembersAdapter } from './channel-members.svelte'
   import type { membersAdapter } from './members.svelte'
-  import ReplyPanel from './ReplyPanel.svelte'
   import { createSearchController, type SearchTarget } from './search'
   import { searchAdapter } from './search.svelte'
   import { createDefaultSearchSource, type SearchSource } from './search-source'
-  import TopicList from './TopicList.svelte'
   import WorkspaceChannelColumn from './WorkspaceChannelColumn.svelte'
   import WorkspaceMainView from './WorkspaceMainView.svelte'
+  import WorkspacePanelContent from './WorkspacePanelContent.svelte'
   import Button from './ui/Button.svelte'
-  import EmptyState from './ui/EmptyState.svelte'
   import Panel, { type PanelTabId } from './ui/Panel.svelte'
-  import Skeleton from './ui/Skeleton.svelte'
-  import StatusBanner from './ui/StatusBanner.svelte'
 
   // The session's controllers outlive this component: unmounting it never closes the connection.
   let {
@@ -947,81 +941,51 @@
         }}
         onclose={closePanel}
       >
-        {#if route?.panel?.startsWith('reply:')}
-          {#if currentReplies && currentChannel && selected && activeReplyMessageId}
-            <ReplyPanel
-              channel={currentChannel}
-              replies={currentReplies}
-              topics={currentTopics}
-              moveChain={session.moveChain}
-              onannounce={onannounce}
-              channelId={selected.id}
-              anchorMessageId={activeReplyMessageId}
-              resolvedAnchor={resolvedReplyAnchor}
-              replyTargetStatus={replyTargetState.status}
-              {searchReply}
-              searchVisit={searchReply ? searchView?.visit : undefined}
-              selfId={organization?.member.id ?? ''}
-              {organizationUnavailable}
-              {sendDisabled}
-              archived={selectedArchived}
-              bind:composerRef={replyComposerRef}
-              resolveSenderName={resolveSender}
-              {resolveMentionName}
-              members={members?.state.members ?? []}
-              onmentionrequest={() => { void members?.load() }}
-              onopenreplies={handleOpenReplies}
-              onretrytarget={() => {
-                if (searchReply) void session.searchAnchor?.retry()
-                else if (route) void session.navigationTargets?.load(route, true)
-              }}
-              ongoToChannelList={goToChannelList}
-              onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
-              onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
-            />
-          {:else if replyTargetState.status === 'loading'}
-            <Skeleton rows={3} label="返信のつながりを読み込み中" />
-          {:else if replyTargetState.status === 'error'}
-            <StatusBanner tone="danger" role="alert" message="返信のつながりを読み込めませんでした。" actionLabel="再試行" onaction={() => { if (route) void session.navigationTargets?.load(route, true) }} />
-          {:else}
-            <EmptyState title={replyTargetState.status === 'unavailable' ? 'この返信のつながりは利用できません。' : '返信のつながりの表示は準備中です。'} />
-          {/if}
-        {:else if activePanelTab === 'topics'}
-          {#if currentTopics && selected}
-            <TopicList
-              {resolveMentionName}
-              topics={currentTopics}
-              unread={currentUnread}
-              channelId={selected.id}
-              activeTopicId={route?.topicId ?? null}
-              unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
-              onselecttopic={handleSelectTopic}
-              onstartnewtopic={organizationUnavailable || currentTimeline?.status === 'unavailable' || sendDisabled ? undefined : handleStartNewTopic}
-            />
-          {:else}
-            <EmptyState title="チャンネルを選んでください。" />
-          {/if}
-        {:else if activePanelTab === 'overview'}
-          {#if selected?.kind === 'channel'}
-            <ChannelOverview
-              channel={selected}
-              unavailable={organizationUnavailable || currentTimeline?.status === 'unavailable'}
-              pending={archiveStatePending}
-              onrename={(name) => channels.rename(selected.id, name)}
-              onarchive={() => channels.archive(selected.id)}
-              onrestore={() => channels.restore(selected.id)}
-              {onannounce}
-            />
-          {:else}
-            <EmptyState title="チャンネルを選んでください。" />
-          {/if}
-        {:else}
-          {#if channelMemberModel && selected?.kind === 'channel' && organization}
-            <ChannelMembers model={channelMemberModel} channel={selected} self={organization.member.id} candidates={members?.state.members ?? []} />
-          {:else}
-            <EmptyState title="チャンネルを選んでください。" />
-          {/if}
-        {/if}
+        <WorkspacePanelContent
+          mode={route?.panel?.startsWith('reply:') ? 'reply' : 'tabs'}
+          activeTab={activePanelTab}
+          {selected}
+          {currentChannel}
+          {currentTopics}
+          {currentReplies}
+          {currentUnread}
+          {channelMemberModel}
+          moveChain={session.moveChain}
+          activeTopicId={route?.topicId ?? null}
+          {activeReplyMessageId}
+          {resolvedReplyAnchor}
+          replyTargetStatus={replyTargetState.status}
+          {searchReply}
+          searchVisit={searchReply ? searchView?.visit : undefined}
+          selfId={organization?.member.id}
+          {organizationUnavailable}
+          currentTimelineUnavailable={currentTimeline?.status === 'unavailable'}
+          {sendDisabled}
+          {selectedArchived}
+          {archiveStatePending}
+          members={members?.state.members ?? []}
+          resolveSenderName={resolveSender}
+          {resolveMentionName}
+          bind:replyComposerRef={replyComposerRef}
+          {onannounce}
+          onmentionrequest={() => { void members?.load() }}
+          onopenreplies={handleOpenReplies}
+          onretrytarget={() => {
+            if (searchReply) void session.searchAnchor?.retry()
+            else if (route) void session.navigationTargets?.load(route, true)
+          }}
+          onretryreplyload={() => {
+            if (route) void session.navigationTargets?.load(route, true)
+          }}
+          ongoToChannelList={goToChannelList}
+          onrecheckmembership={onselectorganization && currentOrganizationId ? () => { if (currentOrganizationId) onselectorganization(currentOrganizationId) } : undefined}
+          onswitchorganization={otherOrg && onselectorganization ? () => { if (otherOrg) onselectorganization(otherOrg.organization_id) } : undefined}
+          onselecttopic={handleSelectTopic}
+          onstartnewtopic={handleStartNewTopic}
+          onrename={(name) => (selected?.kind === 'channel' ? channels.rename(selected.id, name) : Promise.resolve(null))}
+          onarchive={() => (selected?.kind === 'channel' ? channels.archive(selected.id) : Promise.resolve(null))}
+          onrestore={() => (selected?.kind === 'channel' ? channels.restore(selected.id) : Promise.resolve(null))}
+        />
       </Panel>
     </div>
   {/if}
