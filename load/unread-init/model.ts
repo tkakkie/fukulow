@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 export const operations = ['private-grant','guest-grant','public','reactivate','regrant','join'] as const;
 export type Operation = typeof operations[number];
@@ -21,6 +22,11 @@ export function estimate(points:Point[],repeats:number,channels:number) {
 }
 export function equal(eager:unknown,lazy:unknown,label:string) {
   if(!isDeepStrictEqual(eager,lazy)) throw new Error(`eager/lazy mismatch: ${label}`);
+}
+// results.json keeps only this digest; the rows go to a gzipped file (they overflow one JSON string at 10k Topics × 1k Members).
+export function oracleDigest(oracle:unknown) {
+  const text=JSON.stringify(oracle);
+  return {text,bytes:Buffer.byteLength(text),sha256:createHash('sha256').update(text).digest('hex')};
 }
 export function percentile(values:number[],p:number) {
   if(!values.length) throw new Error('empty distribution');
