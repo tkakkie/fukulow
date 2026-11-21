@@ -17,12 +17,12 @@ BEGIN
     END IF;
     IF position('WITH inserted AS' in definition) > 0 THEN
       replaced := regexp_replace(definition, 'WITH inserted AS \(\s*INSERT INTO channel_read_positions', 'INSERT INTO channel_read_positions');
-      replaced := regexp_replace(replaced, '\s*RETURNING [^()]+\)\s*INSERT INTO topic_read_positions[^;]+;',
-        '; -- measurement-only: inherit Channel initial_seq until explicitly read.');
+      replaced := regexp_replace(replaced, '\s*RETURNING [^();]+\)\s*INSERT INTO topic_read_positions[^;]+;',
+        '; /* measurement-only: inherit Channel initial_seq until explicitly read. */');
     ELSE
-      replaced := regexp_replace(definition, 'INSERT INTO topic_read_positions[^;]+;', '-- measurement-only: inherit Channel initial_seq until explicitly read.');
+      replaced := regexp_replace(definition, 'INSERT INTO topic_read_positions[^;]+;', '/* measurement-only: inherit Channel initial_seq until explicitly read. */');
     END IF;
-    locks := CASE WHEN signature LIKE 'unread_channel_access%' THEN ARRAY['142','135'] ELSE ARRAY['135'] END;
+    locks := CASE WHEN signature LIKE 'unread_channel_access%' THEN ARRAY[', 142))',', 135))'] ELSE ARRAY[', 135))'] END;
     IF replaced = definition OR position('topic_read_positions' in replaced) > 0
        OR position('WITH inserted' in replaced) > 0 OR position('RETURNING' in replaced) > 0
        OR position('INSERT INTO channel_read_positions' in replaced) = 0
