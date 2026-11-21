@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   buildMoveDestinations,
@@ -66,6 +68,32 @@ describe('buildMoveDestinations', () => {
     // Every visible/accessible label is unique.
     expect(new Set(duplicateOptions.map(o => o.label)).size).toBe(duplicateOptions.length)
   })
+
+  it('guarantees unique labels even when raw names collide with generated disambiguation suffixes', () => {
+    const reviewCase = buildMoveDestinations([
+      { id: 's1', name: '開発（1番目）' },
+      { id: 's2', name: '開発（3番目のセクション）' },
+      { id: 's3', name: '開発' },
+      { id: 's4', name: '開発' },
+    ])
+    expect(reviewCase.map(o => o.id)).toEqual(['s1', 's2', 's3', 's4', null])
+    expect(new Set(reviewCase.map(o => o.label)).size).toBe(reviewCase.length)
+    expect(reviewCase[0]!.label).toBe('開発（1番目）')
+    expect(reviewCase[1]!.label).toBe('開発（3番目のセクション）')
+    expect(reviewCase[4]!.label).toBe(IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL)
+
+    // Also handles a raw name appearing later in the list that matches an early generated suffix,
+    // and a custom section literally named like the implicit destination label.
+    const reverseAndImplicitCase = buildMoveDestinations([
+      { id: 'a1', name: '開発' },
+      { id: 'a2', name: '開発' },
+      { id: 'a3', name: '開発（1番目）' },
+      { id: 'a4', name: IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL },
+    ])
+    expect(new Set(reverseAndImplicitCase.map(o => o.label)).size).toBe(reverseAndImplicitCase.length)
+    expect(reverseAndImplicitCase[2]!.label).toBe('開発（1番目）')
+    expect(reverseAndImplicitCase[4]!.label).toBe(IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL)
+  })
 })
 
 describe('sectionWriteError', () => {
@@ -111,23 +139,41 @@ describe('reorderList', () => {
 })
 
 describe('resolveDeleteFocusTargets', () => {
-  it('orders next section heading, Other Channels if visible, previous section heading, then Channel-list heading using current visible order', () => {
-    expect(resolveDeleteFocusTargets(['s1', 's3'], 1, true)).toEqual([
-      { kind: 'section', id: 's3' },
-      { kind: 'other' },
-      { kind: 'section', id: 's1' },
-      { kind: 'channel-list' },
-    ])
-    expect(resolveDeleteFocusTargets(['s1'], 1, false)).toEqual([
-      { kind: 'section', id: 's1' },
-      { kind: 'channel-list' },
-    ])
-    expect(resolveDeleteFocusTargets([], 0, true)).toEqual([
+  it('resolves the first surviving next neighbor, Other Channels if visible, previous neighbor, then Channel-list heading', () => {
+    // [A, B, C, D]: B deleted here (next=[C, D], prev=[A]) and A deleted elsewhere -> focus C, not D.
+    expect(resolveDeleteFocusTargets(['C', 'D'], ['C', 'D'], ['A'], true)).toEqual([
+      { kind: 'section', id: 'C' },
+      { kind: 'section', id: 'D' },
       { kind: 'other' },
       { kind: 'channel-list' },
     ])
-    expect(resolveDeleteFocusTargets([], 0, false)).toEqual([
+    // Next neighbor C also deleted -> falls through to surviving next D.
+    expect(resolveDeleteFocusTargets(['A', 'D'], ['C', 'D'], ['A'], false)).toEqual([
+      { kind: 'section', id: 'D' },
+      { kind: 'section', id: 'A' },
       { kind: 'channel-list' },
     ])
+    // All next neighbors gone and Other Channels hidden -> first surviving previous neighbor.
+    expect(resolveDeleteFocusTargets(['A'], ['C', 'D'], ['A'], false)).toEqual([
+      { kind: 'section', id: 'A' },
+      { kind: 'channel-list' },
+    ])
+    expect(resolveDeleteFocusTargets([], [], [], true)).toEqual([
+      { kind: 'other' },
+      { kind: 'channel-list' },
+    ])
+    expect(resolveDeleteFocusTargets([], [], [], false)).toEqual([
+      { kind: 'channel-list' },
+    ])
+  })
+})
+
+describe('Dialog scroll body focus outline clearance', () => {
+  it('insets .ui-dialog__body by at least the 4px focus outline + offset so full-width controls are not clipped', () => {
+    const dialogSrc = readFileSync(resolve(import.meta.dirname, 'ui/Dialog.svelte'), 'utf8')
+    const bodyRule = dialogSrc.match(/\.ui-dialog__body\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(bodyRule).toContain('overflow-y: auto;')
+    expect(bodyRule).toContain('padding: var(--space-4);')
+    expect(bodyRule).toContain('margin: calc(-1 * var(--space-4));')
   })
 })

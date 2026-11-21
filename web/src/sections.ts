@@ -35,6 +35,7 @@ export type SectionResult<T> = api.Result<T> | LocalRefusal
 export type SectionsState = {
   groups: readonly SectionGroup[]
   generation?: string
+  layoutRevision: number
   error?: Failure
   writing: boolean
   reconnecting: boolean
@@ -42,7 +43,7 @@ export type SectionsState = {
 
 const inactive = { ok: false, kind: 'inactive' } as const
 const network = { ok: false, kind: 'network' } as const
-const empty = (): SectionsState => ({ groups: [{ id: null, channels: [] }], writing: false, reconnecting: false })
+const empty = (): SectionsState => ({ groups: [{ id: null, channels: [] }], layoutRevision: 0, writing: false, reconnecting: false })
 
 export function createSections(options: {
   api: SectionsApi
@@ -110,7 +111,7 @@ export function createSections(options: {
     layout = value
     layoutCurrent = true
     if (recovery !== 'channels') recovery = undefined
-    state = { ...state, error: undefined }
+    state = { ...state, error: undefined, layoutRevision: state.layoutRevision + 1 }
     // A later reappearance needs Channel-list authority from after the omission.
     if (omitted) {
       access++

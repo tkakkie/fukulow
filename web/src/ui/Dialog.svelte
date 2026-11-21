@@ -179,6 +179,8 @@
     min-height: 0;
     flex: 1 1 auto;
     overflow-y: auto;
+    padding: var(--space-4);
+    margin: calc(-1 * var(--space-4));
   }
 
   .ui-dialog__actions {

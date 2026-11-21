@@ -703,4 +703,221 @@ describe('personal sections adapter & UI', () => {
     await settle()
     expect(c.sectionsApi.moveChannel).toHaveBeenLastCalledWith('A', { section_id: null }, expect.anything())
   })
+
+  it('ties post-write focus to the accepted layout (ignoring intermediate Channel-list renders), records focus changes during the write, cancels on unmount, and falls back to a visible control when targets disappear', async () => {
+    vi.useFakeTimers()
+    const db = database()
+    db.layout = {
+      generation: '1',
+      sections: [
+        { id: 's1', name: '一', channel_ids: ['A'] },
+        { id: 's2', name: '二', channel_ids: [] },
+      ],
+      other_channel_ids: ['B'],
+    }
+    db.rows = [row('A', { name: 'alpha' }), row('B', { name: 'beta' })]
+    const c = client(db)
+    cleanups.push(() => c.session.close())
+    await vi.advanceTimersByTimeAsync(0)
+    await c.ready()
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const inst = mount(ChannelList, {
+      target: host as unknown as Element,
+      props: { channels: db.rows, selectedId: null, sections: sectionsAdapter(c.sections), onselect: vi.fn() },
+    })
+    cleanups.push(() => unmount(inst))
+    await settle()
+
+    // 1. Move Channel A from s1 to s2, but while the post-write layout is still pending, an unrelated
+    // Channel-list update rebuilds `groups`. Pending focus must wait for the accepted post-write layout
+    // and then focus Channel A in its new group s2.
+    const delayedLayout = deferred<Result<SectionLayout>>()
+    c.getLayout.mockReturnValueOnce(delayedLayout.promise)
+    c.sectionsApi.moveChannel.mockResolvedValueOnce(ok(undefined))
+    host.querySelector('[data-channel-id="A"] button[aria-label="チャンネルを移動"]')!.click()
+    await settle()
+    const radioS2 = queryAll(host, 'input[name="section_move_destination"]').find(el => el.value === 's2')!
+    radioS2.checked = true
+    radioS2.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    buttonsByText(host, '移動する')[0]!.click()
+    await settle()
+
+    // Intermediate Channel-list update rebuilds groups without accepting a new section layout.
+    db.rows = [row('A', { name: 'alpha-renamed' }), row('B', { name: 'beta' })]
+    c.event({ type: 'channel_list_changed' })
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(host.querySelector('[data-section-id="s1"] [data-channel-id="A"]')).not.toBeNull()
+    expect(dom.doc.activeElement).not.toBe(host.querySelector('[data-section-id="s1"] [data-channel-id="A"] .ui-list-row'))
+
+    // Now the accepted post-write layout arrives with A in s2 -> focus lands on A in s2.
+    delayedLayout.resolve(ok({
+      generation: '2',
+      sections: [
+        { id: 's1', name: '一', channel_ids: [] },
+        { id: 's2', name: '二', channel_ids: ['A'] },
+      ],
+      other_channel_ids: ['B'],
+    }))
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(dom.doc.activeElement).toBe(host.querySelector('[data-section-id="s2"] [data-channel-id="A"] .ui-list-row'))
+
+    // 2. Focus change DURING the write cancels pending focus even if that newly focused control later
+    // disappears (leaving activeElement on body) before reconciliation.
+    const pendingWrite = deferred<Result<undefined>>()
+    c.sectionsApi.moveChannel.mockReturnValueOnce(pendingWrite.promise)
+    const externalBtn = dom.doc.createElement('button')
+    externalBtn.textContent = '外部'
+    dom.doc.body.appendChild(externalBtn)
+
+    host.querySelector('[data-channel-id="A"] button[aria-label="チャンネルを移動"]')!.click()
+    await settle()
+    const radioS1 = queryAll(host, 'input[name="section_move_destination"]').find(el => el.value === 's1')!
+    radioS1.checked = true
+    radioS1.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    buttonsByText(host, '移動する')[0]!.click()
+    await settle()
+
+    // User moves focus to externalBtn while write is in flight, then externalBtn is removed -> body.
+    externalBtn.focus()
+    expect(dom.doc.activeElement).toBe(externalBtn)
+    externalBtn.remove()
+    dom.doc.activeElement = dom.doc.body
+
+    db.layout = {
+      generation: '3',
+      sections: [
+        { id: 's1', name: '一', channel_ids: ['A'] },
+        { id: 's2', name: '二', channel_ids: [] },
+      ],
+      other_channel_ids: ['B'],
+    }
+    pendingWrite.resolve(ok(undefined))
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(dom.doc.activeElement).not.toBe(host.querySelector('[data-channel-id="A"] .ui-list-row'))
+
+    // 3. Target disappears before reconciliation (moved channel revoked and destination deleted, and no
+    // channelListHeading prop) -> falls back to a visible control, never body.
+    c.sectionsApi.moveChannel.mockImplementationOnce(async () => {
+      db.rows = []
+      db.layout = { generation: '4', sections: [], other_channel_ids: [] }
+      return ok(undefined)
+    })
+    host.querySelector('[data-channel-id="A"] button[aria-label="チャンネルを移動"]')!.click()
+    await settle()
+    const radioS2Again = queryAll(host, 'input[name="section_move_destination"]').find(el => el.value === 's2')!
+    radioS2Again.checked = true
+    radioS2Again.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    buttonsByText(host, '移動する')[0]!.click()
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(dom.doc.activeElement).not.toBe(dom.doc.body)
+    expect(dom.doc.activeElement).toBe(buttonsByText(host, 'セクションを作成')[0])
+  })
+
+  it('cancels pending focus restoration on unmount', async () => {
+    vi.useFakeTimers()
+    const db = database()
+    db.layout = {
+      generation: '1',
+      sections: [
+        { id: 's1', name: '一', channel_ids: [] },
+        { id: 's2', name: '二', channel_ids: [] },
+      ],
+      other_channel_ids: [],
+    }
+    db.rows = []
+    const c = client(db)
+    cleanups.push(() => c.session.close())
+    await vi.advanceTimersByTimeAsync(0)
+    await c.ready()
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const outsideBtn = dom.doc.createElement('button')
+    outsideBtn.textContent = '外'
+    dom.doc.body.appendChild(outsideBtn)
+
+    const inst = mount(ChannelList, {
+      target: host as unknown as Element,
+      props: { channels: [], selectedId: null, sections: sectionsAdapter(c.sections), onselect: vi.fn() },
+    })
+    await settle()
+
+    const delayed = deferred<Result<SectionLayout>>()
+    c.getLayout.mockReturnValueOnce(delayed.promise)
+    c.sectionsApi.reorder.mockResolvedValueOnce(ok(undefined))
+    host.querySelector('[data-testid="section-move-up-s2"]')!.click()
+    await settle()
+
+    outsideBtn.focus()
+    await unmount(inst)
+    delayed.resolve(ok({
+      generation: '2',
+      sections: [
+        { id: 's2', name: '二', channel_ids: [] },
+        { id: 's1', name: '一', channel_ids: [] },
+      ],
+      other_channel_ids: [],
+    }))
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(dom.doc.activeElement).toBe(outsideBtn)
+  })
+
+  it('focuses C (not D) when deleting B in [A, B, C, D] while another tab concurrently deletes A', async () => {
+    vi.useFakeTimers()
+    const db = database()
+    db.layout = {
+      generation: '1',
+      sections: [
+        { id: 'A', name: 'A', channel_ids: [] },
+        { id: 'B', name: 'B', channel_ids: [] },
+        { id: 'C', name: 'C', channel_ids: [] },
+        { id: 'D', name: 'D', channel_ids: [] },
+      ],
+      other_channel_ids: [],
+    }
+    db.rows = []
+    const c = client(db)
+    cleanups.push(() => c.session.close())
+    await vi.advanceTimersByTimeAsync(0)
+    await c.ready()
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const inst = mount(ChannelList, {
+      target: host as unknown as Element,
+      props: { channels: [], selectedId: null, sections: sectionsAdapter(c.sections), onselect: vi.fn() },
+    })
+    cleanups.push(() => unmount(inst))
+    await settle()
+
+    // Delete B locally while another tab concurrently deletes A -> reconciled layout is [C, D].
+    c.sectionsApi.delete.mockImplementationOnce(async () => {
+      db.layout = {
+        generation: '2',
+        sections: [
+          { id: 'C', name: 'C', channel_ids: [] },
+          { id: 'D', name: 'D', channel_ids: [] },
+        ],
+        other_channel_ids: [],
+      }
+      return ok(undefined)
+    })
+    host.querySelector('[data-section-id="B"] button[aria-label="セクションを削除"]')!.click()
+    await settle()
+    buttonsByText(host, '削除する')[0]!.click()
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+
+    expect(dom.doc.activeElement).toBe(host.querySelector('[data-section-heading="C"]'))
+  })
 })

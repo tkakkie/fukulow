@@ -52,19 +52,25 @@ export function buildMoveDestinations(
   for (const s of customSections) {
     counts.set(s.name, (counts.get(s.name) ?? 0) + 1)
   }
-  const seen = new Map<string, number>()
-  const used = new Set<string>([IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL])
-  const options: MoveDestinationOption[] = customSections.map((s, idx) => {
-    let label = s.name
-    if ((counts.get(s.name) ?? 0) > 1 || used.has(label)) {
-      const occ = (seen.get(s.name) ?? 0) + 1
-      seen.set(s.name, occ)
-      label = `${s.name}（${occ}番目）`
-      if (used.has(label)) {
-        label = `${s.name}（${idx + 1}番目のセクション）`
-      }
+  const taken = new Set<string>([OTHER_CHANNELS_LABEL, IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL])
+  for (const s of customSections) {
+    if ((counts.get(s.name) ?? 0) === 1) {
+      taken.add(s.name)
     }
-    used.add(label)
+  }
+  const seen = new Map<string, number>()
+  const options: MoveDestinationOption[] = customSections.map((s) => {
+    if ((counts.get(s.name) ?? 0) === 1) {
+      return { id: s.id, label: s.name }
+    }
+    let occ = (seen.get(s.name) ?? 0) + 1
+    let label = `${s.name}（${occ}番目）`
+    while (taken.has(label)) {
+      occ++
+      label = `${s.name}（${occ}番目）`
+    }
+    seen.set(s.name, occ)
+    taken.add(label)
     return { id: s.id, label }
   })
   options.push({ id: null, label: IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL })
@@ -146,26 +152,33 @@ export type DeleteFocusTarget =
   | { kind: 'channel-list' }
 
 /**
- * Computes the ordered focus fallback targets after a section at `deletedIndex` is removed,
- * using the current visible custom-section order after reconciliation (`docs/spec/sections.md`):
- * next section heading (including Other Channels when visible), then previous section heading,
- * then the Channel-list heading.
+ * Computes the ordered focus fallback targets after a section is deleted, resolving the first
+ * surviving next neighbor, then Other Channels (when visible), then the first surviving previous
+ * neighbor, then the Channel-list heading against the reconciled layout (`docs/spec/sections.md`).
  */
 export function resolveDeleteFocusTargets(
   currentCustomIds: readonly string[],
-  deletedIndex: number,
+  nextSectionIds: readonly string[],
+  prevSectionIds: readonly string[],
   otherIsVisible: boolean,
 ): DeleteFocusTarget[] {
-  const split = Math.max(0, Math.min(deletedIndex, currentCustomIds.length))
+  const surviving = new Set(currentCustomIds)
+  const seen = new Set<string>()
   const targets: DeleteFocusTarget[] = []
-  for (let i = split; i < currentCustomIds.length; i++) {
-    targets.push({ kind: 'section', id: currentCustomIds[i] })
+  for (const id of nextSectionIds) {
+    if (surviving.has(id) && !seen.has(id)) {
+      seen.add(id)
+      targets.push({ kind: 'section', id })
+    }
   }
   if (otherIsVisible) {
     targets.push({ kind: 'other' })
   }
-  for (let i = split - 1; i >= 0; i--) {
-    targets.push({ kind: 'section', id: currentCustomIds[i] })
+  for (const id of prevSectionIds) {
+    if (surviving.has(id) && !seen.has(id)) {
+      seen.add(id)
+      targets.push({ kind: 'section', id })
+    }
   }
   targets.push({ kind: 'channel-list' })
   return targets

@@ -527,7 +527,11 @@ export class MiniElement extends MiniNode {
 
   focus(): void {
     if (this.disabled || !this.isConnected || !this.ownerDocument) return
+    const changed = this.ownerDocument.activeElement !== this
     this.ownerDocument.activeElement = this
+    if (changed) {
+      this.dispatchEvent(new MiniDomEvent('focusin', { bubbles: true }))
+    }
   }
 
   click(): void {

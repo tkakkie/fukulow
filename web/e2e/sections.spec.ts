@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import type { components } from '../src/api-schema.d.ts'
 import { createChannel, secretSafe, signInOwner } from './helpers.ts'
 
@@ -20,18 +20,53 @@ async function createSectionViaApi(
   createdIds: Set<string>,
 ): Promise<string> {
   const body: CreateSection = { id: crypto.randomUUID(), name }
+  createdIds.add(body.id)
   const res = await secretSafe(() => page.request.post(`/api/v1/orgs/${orgId}/me/sections`, { data: body }))
   expect(res.ok()).toBe(true)
   const created = (await secretSafe(() => res.json())) as CreatedSection
-  createdIds.add(created.id)
   return created.id
 }
 
-async function trackSectionId(sectionLocator: Locator, createdIds: Set<string>): Promise<string> {
-  const id = await sectionLocator.getAttribute('data-section-id')
-  expect(id).toBeTruthy()
-  createdIds.add(id!)
-  return id!
+async function captureCreatedSectionId(
+  page: Page,
+  orgId: string,
+  createdIds: Set<string>,
+  submit: () => Promise<void>,
+): Promise<string> {
+  const layoutPath = `/api/v1/orgs/${orgId}/me/sections`
+  const reqPromise = page.waitForRequest(
+    req => req.method() === 'POST' && new URL(req.url()).pathname === layoutPath,
+  )
+  const resPromise = page.waitForResponse(
+    res => res.request().method() === 'POST' && new URL(res.url()).pathname === layoutPath,
+  )
+  await submit()
+  const req = await reqPromise
+  const body = req.postDataJSON() as Partial<CreateSection> | null
+  expect(body?.id).toBeTruthy()
+  createdIds.add(body!.id!)
+  const res = await resPromise
+  expect(res.ok()).toBe(true)
+  return body!.id!
+}
+
+function trackLayoutReads(page: Page, layoutPath: string) {
+  const state = { completed: 0, inFlight: 0 }
+  const isLayoutGet = (url: string, method: string) =>
+    method === 'GET' && new URL(url).pathname === layoutPath
+  page.on('request', (req) => {
+    if (isLayoutGet(req.url(), req.method())) state.inFlight++
+  })
+  page.on('requestfinished', async (req) => {
+    if (!isLayoutGet(req.url(), req.method())) return
+    state.inFlight = Math.max(0, state.inFlight - 1)
+    const res = await req.response().catch(() => null)
+    if (res && res.status() === 200) state.completed++
+  })
+  page.on('requestfailed', (req) => {
+    if (isLayoutGet(req.url(), req.method())) state.inFlight = Math.max(0, state.inFlight - 1)
+  })
+  return state
 }
 
 async function fetchLayout(page: Page, orgId: string): Promise<SectionLayout> {
@@ -55,22 +90,24 @@ test('sections lifecycle: create, rename, move in and back, reorder, collapse, d
     await expect(leftCol.getByRole('button', { name: 'セクションを作成', exact: true })).toBeEnabled()
     await expect(leftCol.getByRole('button', { name: 'その他のチャンネル' })).toHaveAttribute('aria-expanded', 'true')
 
-    // Create two sections.
+    // Create two sections; record each client-generated ID at request time before waiting for rendering.
     const name1 = `開発-${suffix}`
     const name2 = `運用-${suffix}`
     await leftCol.getByRole('button', { name: 'セクションを作成', exact: true }).click()
     await page.getByRole('dialog').getByLabel('セクション名', { exact: true }).fill(name1)
-    await page.getByRole('dialog').getByRole('button', { name: '作成する', exact: true }).click()
-    const sec1 = leftCol.locator(`section[aria-label="${name1}"]`)
+    const sec1Id = await captureCreatedSectionId(page, orgId, createdIds, () =>
+      page.getByRole('dialog').getByRole('button', { name: '作成する', exact: true }).click(),
+    )
+    const sec1 = leftCol.locator(`section[data-section-id="${sec1Id}"]`)
     await expect(sec1).toBeVisible()
-    const sec1Id = await trackSectionId(sec1, createdIds)
 
     await leftCol.getByRole('button', { name: 'セクションを作成', exact: true }).click()
     await page.getByRole('dialog').getByLabel('セクション名', { exact: true }).fill(name2)
-    await page.getByRole('dialog').getByRole('button', { name: '作成する', exact: true }).click()
-    const sec2 = leftCol.locator(`section[aria-label="${name2}"]`)
+    const sec2Id = await captureCreatedSectionId(page, orgId, createdIds, () =>
+      page.getByRole('dialog').getByRole('button', { name: '作成する', exact: true }).click(),
+    )
+    const sec2 = leftCol.locator(`section[data-section-id="${sec2Id}"]`)
     await expect(sec2).toBeVisible()
-    const sec2Id = await trackSectionId(sec2, createdIds)
 
     // Rename first section.
     const renamed1 = `設計-${suffix}`
@@ -159,6 +196,21 @@ test('sections lifecycle: create, rename, move in and back, reorder, collapse, d
     expect(createBtnBox!.x).toBeGreaterThanOrEqual(0)
     expect(createBtnBox!.x + createBtnBox!.width).toBeLessThanOrEqual(320)
 
+    // Verify full-width input inside Dialog scroll body keeps clearance for focus outline + offset (4px).
+    await leftCol.getByRole('button', { name: 'セクションを作成', exact: true }).click()
+    const createDialog = page.getByRole('dialog')
+    await expect(createDialog).toBeVisible()
+    const createBodyBox = await createDialog.locator('.ui-dialog__body').boundingBox()
+    const createInputBox = await createDialog.getByLabel('セクション名', { exact: true }).boundingBox()
+    expect(createBodyBox).not.toBeNull()
+    expect(createInputBox).not.toBeNull()
+    expect(createInputBox!.x - createBodyBox!.x).toBeGreaterThanOrEqual(4)
+    expect(createBodyBox!.x + createBodyBox!.width - (createInputBox!.x + createInputBox!.width)).toBeGreaterThanOrEqual(4)
+    expect(createInputBox!.y - createBodyBox!.y).toBeGreaterThanOrEqual(4)
+    expect(createBodyBox!.y + createBodyBox!.height - (createInputBox!.y + createInputBox!.height)).toBeGreaterThanOrEqual(4)
+    await createDialog.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(createDialog).toHaveCount(0)
+
     await leftCol.locator(`[data-channel-id="${chA.id}"]`).getByRole('button', { name: 'チャンネルを移動', exact: true }).click()
     const dialog = page.getByRole('dialog')
     await expect(dialog).toBeVisible()
@@ -204,7 +256,7 @@ test('keyboard-only flow: create, collapse, cancel Escape, rename, move, reorder
     const createBtn = leftCol.getByRole('button', { name: 'セクションを作成', exact: true })
     await expect(createBtn).toBeEnabled()
 
-    // 1. Create two sections via keyboard Enter.
+    // 1. Create two sections via keyboard Enter; capture each ID at request time before rendering.
     const sec1Name = `キーボード一-${suffix}`
     const sec2Name = `キーボード二-${suffix}`
     await createBtn.focus()
@@ -212,19 +264,21 @@ test('keyboard-only flow: create, collapse, cancel Escape, rename, move, reorder
     const nameInput = page.getByRole('dialog').getByLabel('セクション名', { exact: true })
     await expect(nameInput).toBeFocused()
     await page.keyboard.type(sec1Name)
-    await page.keyboard.press('Enter')
-    const sec1 = leftCol.locator(`section[aria-label="${sec1Name}"]`)
+    const sec1Id = await captureCreatedSectionId(page, orgId, createdIds, () =>
+      page.keyboard.press('Enter'),
+    )
+    const sec1 = leftCol.locator(`section[data-section-id="${sec1Id}"]`)
     await expect(sec1).toBeVisible()
-    const sec1Id = await trackSectionId(sec1, createdIds)
 
     await createBtn.focus()
     await page.keyboard.press('Enter')
     await expect(nameInput).toBeFocused()
     await page.keyboard.type(sec2Name)
-    await page.keyboard.press('Enter')
-    const sec2 = leftCol.locator(`section[aria-label="${sec2Name}"]`)
+    const sec2Id = await captureCreatedSectionId(page, orgId, createdIds, () =>
+      page.keyboard.press('Enter'),
+    )
+    const sec2 = leftCol.locator(`section[data-section-id="${sec2Id}"]`)
     await expect(sec2).toBeVisible()
-    const sec2Id = await trackSectionId(sec2, createdIds)
 
     // 2. Collapse & expand heading via keyboard Space.
     const heading1 = sec1.locator('[data-section-heading]')
@@ -331,9 +385,17 @@ test('two-tab convergence without reload', async ({ page, context }) => {
   const suffix = crypto.randomUUID().slice(0, 8)
   const ch = await createChannel(page.request, orgId, `sec-sync-${suffix}`)
   const secName = `同期-${suffix}`
+  const layoutPath = `/api/v1/orgs/${orgId}/me/sections`
   const tab2 = await context.newPage()
 
   try {
+    // Keep periodic recovery (~29.7s) out of this test window so tab 2's refresh proves notice-driven convergence.
+    await tab2.addInitScript(() => {
+      Math.random = () => 0.99
+    })
+    const tab1Reads = trackLayoutReads(page, layoutPath)
+    const tab2Reads = trackLayoutReads(tab2, layoutPath)
+
     await page.setViewportSize({ width: 1280, height: 800 })
     await tab2.setViewportSize({ width: 1280, height: 800 })
     await Promise.all([
@@ -341,22 +403,33 @@ test('two-tab convergence without reload', async ({ page, context }) => {
       tab2.goto(`/o/${orgId}/c/${ch.id}`),
     ])
 
-    // Establish Ready state and pre-write rendered layout in BOTH tabs before the first mutation
-    // so convergence proves notice-driven updates rather than initial or Ready-triggered reads.
-    for (const tab of [page, tab2]) {
+    // Fence the mutation on completion of BOTH tabs' initial and Ready-triggered /me/sections reads
+    // so convergence proves notice-driven refresh rather than initial or Ready recovery.
+    for (const [tab, reads] of [
+      [page, tab1Reads],
+      [tab2, tab2Reads],
+    ] as const) {
       await expect(tab.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
       await expect(tab.locator('#channel-content').getByRole('button', { name: 'セクションを作成', exact: true })).toBeEnabled()
       await expect(tab.locator(`#channel-content section[aria-label="その他のチャンネル"] [data-channel-id="${ch.id}"]`)).toBeVisible()
       await expect(tab.locator(`#channel-content section[aria-label="${secName}"]`)).toHaveCount(0)
+      await expect.poll(() => reads.completed >= 2 && reads.inFlight === 0).toBe(true)
     }
 
-    // Create section in tab 1 -> tab 2 converges without reload.
+    // Create section in tab 1 -> tab 2 issues a new /me/sections read after the write commits and renders the section.
     await page.locator('#channel-content').getByRole('button', { name: 'セクションを作成', exact: true }).click()
     await page.getByRole('dialog').getByLabel('セクション名', { exact: true }).fill(secName)
-    await page.getByRole('dialog').getByRole('button', { name: '作成する', exact: true }).click()
-    const tab1Sec = page.locator(`#channel-content section[aria-label="${secName}"]`)
+    const tab2ReadsBeforeCreate = tab2Reads.completed
+    const tab2CreateRefresh = tab2.waitForResponse(
+      res => res.request().method() === 'GET' && new URL(res.url()).pathname === layoutPath && res.status() === 200,
+    )
+    const secId = await captureCreatedSectionId(page, orgId, createdIds, () =>
+      page.getByRole('dialog').getByRole('button', { name: '作成する', exact: true }).click(),
+    )
+    const tab1Sec = page.locator(`#channel-content section[data-section-id="${secId}"]`)
     await expect(tab1Sec).toBeVisible()
-    const secId = await trackSectionId(tab1Sec, createdIds)
+    await tab2CreateRefresh
+    await expect.poll(() => tab2Reads.completed).toBeGreaterThan(tab2ReadsBeforeCreate)
     await expect(tab2.locator(`#channel-content section[data-section-id="${secId}"]`)).toBeVisible()
 
     // Move channel in tab 1 -> tab 2 converges without reload.
