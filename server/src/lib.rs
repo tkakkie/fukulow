@@ -659,9 +659,10 @@ mod tests {
             .with_subscriber(normal.subscriber())
             .await;
         assert_eq!(response.status(), StatusCode::OK);
+        let events = normal.events();
+        assert!(!events.is_empty(), "expected a normal health event");
         assert!(
-            normal
-                .events()
+            events
                 .iter()
                 .all(|event| { event["fields"]["event"] != "revocation_clock_sample" })
         );

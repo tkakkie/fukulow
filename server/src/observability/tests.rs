@@ -151,12 +151,12 @@ fn revocation_measurement_is_off_by_default_and_with_zero() {
         return;
     }
 
-    for value in [None, Some("0")] {
+    for value in [None, Some("0"), Some("1")] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", TEST, "--nocapture"])
             .env(CHILD, "1")
-            .env_remove("FUKULOW_REVOCATION_MEASUREMENT");
+            .env_remove(FLAG);
         if let Some(value) = value {
             command.env(FLAG, value);
         }
@@ -168,8 +168,19 @@ fn revocation_measurement_is_off_by_default_and_with_zero() {
             "{FLAG}={value:?}: {stdout}{stderr}"
         );
         assert!(stdout.contains(TEST), "{stdout}");
-        assert!(stderr.is_empty(), "{FLAG}={value:?}: {stderr}");
         assert!(!stdout.contains("measurement_test"), "{stdout}");
+        if value == Some("1") {
+            assert!(
+                serde_json::from_str::<Value>(&stderr).is_ok_and(|event| {
+                    event["level"] == "TRACE"
+                        && event["target"] == REVOCATION_MEASUREMENT_TARGET
+                        && event["fields"]["event"] == "measurement_test"
+                }),
+                "expected a measurement trace: {stderr}"
+            );
+        } else {
+            assert!(stderr.is_empty(), "{FLAG}={value:?}: {stderr}");
+        }
     }
 }
 
