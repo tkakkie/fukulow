@@ -323,3 +323,9 @@ export const listInvites = (org: string, cursor?: string, f: typeof fetch = fetc
   call<InvitePage>(f, `${orgPath(org)}/invites${querySuffix({ cursor })}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 export const revokeInvite = (org: string, id: string, f: typeof fetch = fetch) =>
   call<undefined>(f, `${orgPath(org)}/invites/${encodeURIComponent(id)}`, { method: 'DELETE' }, false, 204)
+
+export type SearchHit = components['schemas']['SearchHit']
+export type SearchPage = components['schemas']['SearchPage']
+export type SearchQuery = import('./api-schema').operations['search']['parameters']['query']
+export const searchMessages = (organizationId: string, query: SearchQuery, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<SearchPage>(f, `${orgPath(organizationId)}/search${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)

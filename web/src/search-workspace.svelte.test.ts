@@ -1,7 +1,7 @@
 import { flushSync, mount, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
-import type { ListMessagesQuery, Message } from './api'
+import type { ListMessagesQuery, Message, SearchHit } from './api'
 import { channelsAdapter } from './channels.svelte'
 import { dm } from './dm-test-helpers'
 import { dmsAdapter } from './dms.svelte'
@@ -10,7 +10,8 @@ import { membersAdapter } from './members.svelte'
 import { createNavigation, type NavigationBrowser } from './navigation'
 import { repliesAdapter } from './replies.svelte'
 import { searchAnchorAdapter } from './search-anchor.svelte'
-import { createDefaultSearchSource, createMockSearchSource, type SearchResultContext, type SearchSource } from './search-source'
+import { createDefaultSearchSource, type SearchSource } from './search-source'
+import { createMockSearchSource, makeSearchHit } from './search-test-helpers'
 import { createSession, type SessionOptions } from './session'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
@@ -41,16 +42,11 @@ describe('Workspace search integration (#153)', () => {
   const historyGeneration = record(1).history_generation
   const messagePage = (messages: Message[]) =>
     ok({ history_generation: historyGeneration, as_of_seq: 80, messages, has_more: false })
-  function hitSource(message: Message, context: SearchResultContext = {
-    kind: 'channel', channelId: message.channel_id, channelName: 'general',
-  }) {
-    return createMockSearchSource({ items: [{
-      channelId: message.channel_id, messageId: message.id, createdSeq: message.created_seq,
-      topicId: message.topic_id, replyRootId: message.reply_root_id,
-      context, authorName: '田中 美咲', authorActive: true, createdAt: new Date().toISOString(), excerpt: 'リリース',
-    }] })
+  function hitSource(message: Message, channelKind: SearchHit['channel_kind'] = 'channel') {
+    return createMockSearchSource({
+      hits: [{ channel_kind: channelKind, message: { ...message, body: message.body ?? 'リリース' } }],
+    })
   }
-  const dmContext: SearchResultContext = { kind: 'dm', channelId: DM_ID, peerName: 'Peer', peerActive: true }
 
   function dmSource(peer = dm(DM_ID)): SessionOptions['dmsApi'] {
     return {
@@ -189,17 +185,13 @@ describe('Workspace search integration (#153)', () => {
       href: replyRootId ? `/o/${ORG_ID}/c/${CH_ID}?panel=topics` : undefined,
       channelRows: [{ ...channel(CH_ID, 'general'), archived }, channel(OTHER_CH_ID, 'other')],
       searchSource: createMockSearchSource({
-        now: () => Date.parse('2026-11-20T12:00:00.000Z'),
-        items: [{
-          ...searchResult,
-          context: {
-            kind: 'channel', channelId: id, channelName: id === CH_ID ? 'general' : 'other',
-            topicId: topicId ?? undefined, topicName: hit.topic_name ?? undefined,
+        hits: [{
+          channel_kind: 'channel',
+          message: {
+            ...hit,
+            created_at: '2026-11-19T09:30:00.000Z',
+            body: 'リリース手順書を更新しました。',
           },
-          authorName: '田中 美咲',
-          authorActive: true,
-          createdAt: '2026-11-19T09:30:00.000Z',
-          excerpt: 'リリース手順書を更新しました。',
         }],
       }),
       setupNet(net, options) {
@@ -276,7 +268,7 @@ describe('Workspace search integration (#153)', () => {
     const hit = record(37, DM_ID)
     const ctx = await mountSearchWorkspace({
       href, width, channelList: status,
-      searchSource: hitSource(hit, dmContext),
+      searchSource: hitSource({ ...hit, body: 'リリース' }, 'dm'),
       dmsApi: dmSource(dm(DM_ID, { peer: { id: 'peer', name: 'Peer', active } })),
       setupNet(net) { net.pages[DM_ID] = messagePage([hit]) },
     })
@@ -325,7 +317,7 @@ describe('Workspace search integration (#153)', () => {
     const ctx = await mountSearchWorkspace({
       width, href: width < 600 ? `/o/${ORG_ID}` : undefined,
       dmsApi: scope === 'DM' ? dmSource() : undefined,
-      searchSource: hitSource(hit, scope === 'DM' ? dmContext : undefined),
+      searchSource: hitSource({ ...hit, body: 'リリース' }, scope === 'DM' ? 'dm' : 'channel'),
       setupNet(net) { net.pages[id] = messagePage([hit]) },
     })
     try {
@@ -366,7 +358,7 @@ describe('Workspace search integration (#153)', () => {
       lookupAuthors, baseUrl: () => 'http://localhost',
     })
     const ctx = await mountSearchWorkspace({
-      members, searchSource: hitSource(hit),
+      members, searchSource: hitSource({ ...hit, body: 'リリース' }),
       setupNet(net) { net.pages[CH_ID] = messagePage([hit]) },
     })
     try {
@@ -397,7 +389,7 @@ describe('Workspace search integration (#153)', () => {
       channelList: 'loading',
       href: `/o/${ORG_ID}/c/${DM_ID}`,
       dmsApi: dmSource(conversation),
-      searchSource: hitSource(reply, dmContext),
+      searchSource: hitSource({ ...reply, body: 'リリース' }, 'dm'),
       setupNet(net) {
         net.unreadListResult = ok({ history_generation: historyGeneration, channels: [] })
         net.pages[DM_ID] = ok({ history_generation: historyGeneration, as_of_seq: 2, messages: [root, reply], has_more: false })
@@ -809,10 +801,12 @@ describe('Workspace search integration (#153)', () => {
     }
   })
 
-  it('announces production unavailable search and unopenable hits through the existing page live region without adding new live regions', async () => {
+  it('announces unavailable search and unopenable hits through the existing page live region without adding new live regions', async () => {
     const prodAnnouncements: string[] = []
     const prodCtx = await mountSearchWorkspace({
-      searchSource: createDefaultSearchSource(ORG_ID, { isDev: false }),
+      searchSource: createDefaultSearchSource(ORG_ID, {
+        searchApi: async () => ({ ok: false, kind: 'network', error: 'search_unavailable' }),
+      }),
       onannounce: (msg) => prodAnnouncements.push(msg),
     })
     try {
@@ -865,25 +859,15 @@ describe('Workspace search integration (#153)', () => {
     const ctx = await mountSearchWorkspace({
       onannounce: (msg) => announcements.push(msg),
       searchSource: createMockSearchSource({
-        items: [
-          {
-            messageId: 'msg-missing-topic',
-            createdSeq: 37,
-            channelId: CH_ID,
-            topicId: missingTopicId,
-            replyRootId: null,
-            context: {
-              kind: 'channel',
-              channelId: CH_ID,
-              channelName: 'general',
-              topicId: missingTopicId,
-              topicName: '存在しないトピック',
-            },
-            authorName: '田中 美咲',
-            authorActive: true,
-            createdAt: new Date().toISOString(),
-            excerpt: '存在しないトピックの検索ヒット',
-          },
+        hits: [
+          makeSearchHit(37, {
+            id: 'msg-missing-topic',
+            created_seq: 37,
+            channel_id: CH_ID,
+            topic_id: missingTopicId,
+            reply_root_id: null,
+            body: '存在しないトピックの検索ヒット',
+          }),
         ],
       }),
     })
@@ -906,6 +890,92 @@ describe('Workspace search integration (#153)', () => {
       expect(announcements).toContain('この検索結果は現在開けません。')
     } finally {
       await ctx.close()
+    }
+  })
+
+  it('resolves Channel, already-loaded Topic, DM peer, and message-authors names without N+1 topic fetches', async () => {
+    vi.useFakeTimers()
+    const unloadedTopicId = '00000000-0000-4000-8000-000000000021'
+    const senderA = '00000000-0000-4000-8000-000000000101'
+    const senderB = '00000000-0000-4000-8000-000000000102'
+    const lookupAuthors = vi.fn<typeof import('./api').lookupAuthors>(async (_org, body) =>
+      ok({
+        identities: body.ids.map((id) =>
+          id === senderA
+            ? { id, name: '田中 美咲', deactivated: true }
+            : { id, name: '佐藤 健', deactivated: false },
+        ),
+      }),
+    )
+    const getTopicSummary = vi.fn(async () => ({ ok: false as const, kind: 'network' as const }))
+    const failure = async () => ({ ok: false, kind: 'network' } as const)
+    const members = createMembers(ORG_ID, vi.fn(), vi.fn(), {
+      listMembers: failure, changeRole: failure, deactivateMember: failure, createInvite: failure,
+      lookupAuthors, baseUrl: () => 'http://localhost',
+    })
+    const topicMsg = {
+      ...record(1, CH_ID),
+      topic_id: TOPIC_ID,
+      body: 'ロード済みトピック',
+    }
+    const ctx = await mountSearchWorkspace({
+      members,
+      channelRows: [channel(CH_ID, 'general'), channel(OTHER_CH_ID, 'dev')],
+      dmsApi: dmSource(dm(DM_ID, { peer: { id: 'peer-1', name: '鈴木 花子', active: false } })),
+      searchSource: createMockSearchSource({
+        hits: [
+          makeSearchHit(1, { id: 'h-loaded-topic', channel_id: CH_ID, topic_id: TOPIC_ID, sender: senderA, body: '検索ヒット トピックあり' }),
+          makeSearchHit(2, { id: 'h-unloaded-topic', channel_id: OTHER_CH_ID, topic_id: unloadedTopicId, sender: senderB, body: '検索ヒット トピック未ロード' }),
+          makeSearchHit(3, { id: 'h-dm', channel_id: DM_ID, sender: senderB, body: '検索ヒット DM' }, 'dm'),
+        ],
+      }),
+      setupNet(net, options) {
+        net.topicSummaries[`${CH_ID}:${TOPIC_ID}`] = ok({
+          history_generation: historyGeneration,
+          as_of_seq: 1,
+          topic: {
+            mention_unread_count: 0,
+            id: TOPIC_ID,
+            name: 'リリース準備',
+            first_seq: 1,
+            last_seq: 1,
+            message_count: 1,
+            latest_message: topicMsg,
+            read_seq: 1,
+            unread_count: 0,
+          },
+        })
+        const origSummary = options.topicsApi!.getTopicSummary
+        options.topicsApi!.getTopicSummary = (c, t, signal) => {
+          if (c === OTHER_CH_ID) return getTopicSummary()
+          return origSummary(c, t, signal)
+        }
+      },
+    })
+    try {
+      ctx.net.socket.onEvent({ type: 'activity_ready' })
+      await vi.advanceTimersByTimeAsync(1000)
+      await ctx.raw.topics.loadSummary(CH_ID, TOPIC_ID)
+      await settle()
+      lookupAuthors.mockClear()
+
+      await submitSearch(ctx.host, '検索ヒット')
+      await settle()
+
+      const buttons = queryAll(ctx.host, '#main-content ol button')
+      expect(buttons).toHaveLength(3)
+      expect(buttons[0].textContent).toContain('# general › リリース準備')
+      expect(buttons[0].textContent).toContain('田中 美咲（無効）')
+      expect(buttons[1].textContent).toContain('# dev')
+      expect(buttons[1].textContent).not.toContain('›')
+      expect(buttons[1].textContent).toContain('佐藤 健')
+      expect(buttons[2].textContent).toContain('ダイレクトメッセージ: 鈴木 花子（無効）')
+      expect(getTopicSummary).not.toHaveBeenCalled()
+      expect(lookupAuthors).toHaveBeenCalledTimes(1)
+      expect(new Set(lookupAuthors.mock.calls[0][1].ids)).toEqual(new Set([senderA, senderB]))
+    } finally {
+      await ctx.close()
+      vi.useRealTimers()
     }
   })
 })

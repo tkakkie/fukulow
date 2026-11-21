@@ -1,6 +1,6 @@
 <script lang="ts">
+  import type { SearchHit } from './api'
   import type { SearchState, SearchTarget } from './search'
-  import type { SearchResultItem } from './search-source'
   import Button from './ui/Button.svelte'
   import Chip from './ui/Chip.svelte'
   import EmptyState from './ui/EmptyState.svelte'
@@ -9,11 +9,15 @@
 
   let {
     state,
+    resolveContext,
+    resolveSender,
     onopenresult,
     onloadmore,
     onretry,
   }: {
     state: SearchState
+    resolveContext: (hit: SearchHit) => string
+    resolveSender: (senderId: string) => string
     onopenresult: (target: SearchTarget) => void
     onloadmore: () => void
     onretry: () => void
@@ -24,42 +28,18 @@
     return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString('ja-JP')
   }
 
-  function formatContext(item: SearchResultItem): string {
-    if (item.context.kind === 'dm') {
-      const peer = `${item.context.peerName}${item.context.peerActive ? '' : '（無効）'}`
-      return `ダイレクトメッセージ: ${peer}`
-    }
-    const base = `# ${item.context.channelName}`
-    return item.context.topicName ? `${base} › ${item.context.topicName}` : base
-  }
-
-  function formatAuthor(item: SearchResultItem): string {
-    if (!item.authorName) return 'メンバー'
-    return item.authorActive ? item.authorName : `${item.authorName}（無効）`
-  }
-
-  function handleOpen(item: SearchResultItem) {
+  function handleOpen(hit: SearchHit) {
     onopenresult({
-      channelId: item.channelId,
-      topicId: item.topicId,
-      replyRootId: item.replyRootId,
-      messageId: item.messageId,
-      createdSeq: item.createdSeq,
+      channelId: hit.message.channel_id,
+      topicId: hit.message.topic_id,
+      replyRootId: hit.message.reply_root_id,
+      messageId: hit.message.id,
+      createdSeq: hit.message.created_seq,
     })
   }
-
-  const rangeNote = $derived(
-    state.rangeStart
-      ? `直近${state.rangeDays}日間（${formatTimestamp(state.rangeStart)} 以降）のメッセージのみ検索対象です。これより前のメッセージは検索されません。`
-      : `直近${state.rangeDays}日間のメッセージのみ検索対象です。これより前のメッセージは検索されません。`,
-  )
 </script>
 
 <section class="search-results" aria-label="検索結果">
-  {#if state.status !== 'unavailable'}
-    <p class="search-results__range" data-testid="search-range-note">{rangeNote}</p>
-  {/if}
-
   {#if state.openNotice}
     <div data-testid="search-open-notice">
       <StatusBanner tone="info" message={state.openNotice} />
@@ -105,34 +85,36 @@
       title="一致するメッセージが見つかりませんでした。"
       description="別のキーワードでお試しください。"
     />
-  {:else if state.items.length > 0}
-    <ol class="search-results__list" aria-label="検索結果一覧">
-      {#each state.items as item (item.messageId)}
-        <li class="search-results__item">
-          <article class="search-result">
-            <button
-              type="button"
-              class="search-result__button"
-              onclick={() => handleOpen(item)}
-            >
-              <span class="search-result__context-row">
-                <span class="search-result__context">{formatContext(item)}</span>
-                {#if item.replyRootId}
-                  <Chip>返信のつながり</Chip>
-                {/if}
-              </span>
-              <span class="search-result__meta">
-                <span class="search-result__author">{formatAuthor(item)}</span>
-                <time class="search-result__time" datetime={item.createdAt}>
-                  {formatTimestamp(item.createdAt)}
-                </time>
-              </span>
-              <span class="search-result__excerpt">{item.excerpt}</span>
-            </button>
-          </article>
-        </li>
-      {/each}
-    </ol>
+  {:else if state.status === 'results' || state.status === 'loading-more'}
+    {#if state.items.length > 0}
+      <ol class="search-results__list" aria-label="検索結果一覧">
+        {#each state.items as hit (hit.message.id)}
+          <li class="search-results__item">
+            <article class="search-result">
+              <button
+                type="button"
+                class="search-result__button"
+                onclick={() => handleOpen(hit)}
+              >
+                <span class="search-result__context-row">
+                  <span class="search-result__context">{resolveContext(hit)}</span>
+                  {#if hit.message.reply_root_id}
+                    <Chip>返信のつながり</Chip>
+                  {/if}
+                </span>
+                <span class="search-result__meta">
+                  <span class="search-result__author">{resolveSender(hit.message.sender)}</span>
+                  <time class="search-result__time" datetime={hit.message.created_at}>
+                    {formatTimestamp(hit.message.created_at)}
+                  </time>
+                </span>
+                <span class="search-result__excerpt">{hit.message.body ?? ''}</span>
+              </button>
+            </article>
+          </li>
+        {/each}
+      </ol>
+    {/if}
 
     {#if state.loadMoreError === 'timeout'}
       <StatusBanner
@@ -182,16 +164,6 @@
     min-width: 0;
     overflow-y: auto;
     padding: var(--space-12) var(--space-16) var(--space-24);
-  }
-
-  .search-results__range {
-    margin: 0;
-    padding: var(--space-8) var(--space-12);
-    border-radius: var(--radius-10);
-    background-color: var(--info-bg);
-    color: var(--on-info);
-    font-size: var(--font-size-13);
-    overflow-wrap: anywhere;
   }
 
   .search-results__list {

@@ -2,6 +2,7 @@ import { completeCountFields } from './unread-counts'
 import { createActivity, createActivityTarget, type ActivityTarget } from './activity'
 import { createNavigationTargets } from './navigation-targets'
 import { createSearchAnchor, SEARCH_WINDOW_LIMIT } from './search-anchor'
+import { createDefaultSearchSource } from './search-source'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
@@ -342,11 +343,15 @@ export function createSession(options: SessionOptions) {
     dms?.trackSelection(id)
     if (id !== null) void sync.watch(id)
   })
+  const searchSource = createDefaultSearchSource(organizationId, {
+    onEnded: notifyEnded,
+    onUnavailable: () => { if (!closed) terminate() },
+  })
   void sync.start()
   void channels.load()
   sections.hold()
   return {
-    sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets, searchAnchor,
+    sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets, searchAnchor, searchSource,
     memberListAccess,
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {

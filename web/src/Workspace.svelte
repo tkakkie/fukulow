@@ -7,7 +7,7 @@
   import { createAnnouncementController } from './announcements'
   import type { MentionName } from './mentions'
   import { senderName } from './authors'
-  import type { Channel, DmDiscovery, Identity, Message } from './api'
+  import type { Channel, DmDiscovery, Identity, Message, SearchHit } from './api'
   import DmSendStatus from './DmSendStatus.svelte'
   import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
@@ -216,10 +216,11 @@
     source: SearchSource | undefined
     controller: ReturnType<typeof createSearchController>
   } | undefined>(undefined)
+  const resolvedSearchSource = $derived(searchSource ?? session.searchSource)
   const searchModel = $derived(
     activeSearch &&
       activeSearch.organizationId === currentOrganizationId &&
-      activeSearch.source === searchSource
+      activeSearch.source === resolvedSearchSource
       ? searchAdapter(activeSearch.controller)
       : undefined,
   )
@@ -241,7 +242,7 @@
   )
   $effect(() => {
     const orgId = currentOrganizationId
-    const providedSource = searchSource
+    const providedSource = resolvedSearchSource
     const controller = createSearchController({
       source: providedSource ?? createDefaultSearchSource(orgId),
       onOpenResult: (target) => handleOpenSearchResult(orgId, target),
@@ -322,6 +323,9 @@
     }
     for (const message of currentRepliesState?.messages ?? []) ids.push(message.sender)
     for (const message of searchView?.messages ?? []) ids.push(message.sender)
+    if (searchOpen && searchState) {
+      for (const hit of searchState.items) ids.push(hit.message.sender)
+    }
     if (resolvedReplyAnchor) ids.push(resolvedReplyAnchor.sender)
     members?.authors.watch(ids)
   })
@@ -676,6 +680,25 @@
     })
   }
 
+  function resolveSearchContext(hit: SearchHit): string {
+    const channelId = hit.message.channel_id
+    if (hit.channel_kind === 'dm') {
+      const peer = dmState?.rows.find((row) => row.identity.id === channelId)?.identity.peer
+      if (!peer) return 'ダイレクトメッセージ'
+      return `ダイレクトメッセージ: ${peer.name}${peer.active ? '' : '（無効）'}`
+    }
+    const channelName =
+      s.channels.find((c) => c.id === channelId)?.name ??
+      s.archivedList?.channels.find((c) => c.id === channelId)?.name ??
+      (s.openChannel?.id === channelId ? s.openChannel.name : undefined)
+    const base = channelName ? `# ${channelName}` : 'チャンネル'
+    const topicId = hit.message.topic_id
+    if (!topicId) return base
+    const topicName = session.topics(channelId).state.topics
+      .find((t) => t.topicId === topicId)?.baseline?.summary.name
+    return topicName ? `${base} › ${topicName}` : base
+  }
+
   function canOpenSearchTarget(target: SearchTarget): boolean {
     const isDm = Boolean(dmState?.rows.some((row) => row.identity.id === target.channelId))
     const hasChannel = Boolean(
@@ -991,6 +1014,8 @@
       <div class="main-card__body">
         <SearchResults
           state={searchState}
+          resolveContext={resolveSearchContext}
+          {resolveSender}
           onopenresult={(target) => searchModel.openSearchResult(target)}
           onloadmore={() => { void searchModel.loadMore() }}
           onretry={() => { void searchModel.retry() }}

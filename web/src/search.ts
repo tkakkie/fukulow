@@ -1,12 +1,10 @@
-import {
-  SEARCH_RANGE_DAYS,
-  type SearchRequest,
-  type SearchResponse,
-  type SearchResultItem,
-  type SearchSource,
+import type { SearchHit } from './api'
+import type {
+  SearchRequest,
+  SearchResponse,
+  SearchSource,
 } from './search-source'
 
-export const SEARCH_PAGE_SIZE = 20
 export const SEARCH_TIMEOUT_MS = 10_000
 const SEARCH_UNAVAILABLE_NOTICE = 'メッセージ検索は現在準備中です。'
 const SEARCH_OPEN_FAILED_NOTICE = 'この検索結果は現在開けません。'
@@ -35,10 +33,8 @@ export type SearchState = {
   input: string
   submittedQuery: string
   status: SearchStatus
-  items: readonly SearchResultItem[]
+  items: readonly SearchHit[]
   nextCursor: string | null
-  rangeDays: number
-  rangeStart: string | null
   minLength: number | null
   retryable: boolean
   loadMoreError: 'timeout' | 'error' | null
@@ -73,8 +69,6 @@ function initialState(): SearchState {
     status: 'idle',
     items: [],
     nextCursor: null,
-    rangeDays: SEARCH_RANGE_DAYS,
-    rangeStart: null,
     minLength: null,
     retryable: false,
     loadMoreError: null,
@@ -168,26 +162,23 @@ export function createSearchController(options: SearchControllerOptions) {
       status: 'loading',
       items: [],
       nextCursor: null,
-      rangeStart: null,
       minLength: null,
       retryable: false,
       loadMoreError: null,
       openNotice: null,
     })
 
-    const response = await runWithTimeout({ query, limit: SEARCH_PAGE_SIZE }, controller)
+    const response = await runWithTimeout({ q: query }, controller)
     if (destroyed || gen !== generation || response === 'aborted') return
     inFlight = null
 
     if (response.ok) {
-      const { items, nextCursor, rangeDays, rangeStart } = response.page
+      const { hits, next_cursor } = response.page
       publish({
         ...state,
-        status: items.length > 0 ? 'results' : 'empty',
-        items: [...items],
-        nextCursor,
-        rangeDays,
-        rangeStart,
+        status: hits.length > 0 || next_cursor !== null ? 'results' : 'empty',
+        items: [...hits],
+        nextCursor: next_cursor,
         minLength: null,
         retryable: false,
         loadMoreError: null,
@@ -252,19 +243,19 @@ export function createSearchController(options: SearchControllerOptions) {
       openNotice: null,
     })
 
-    const response = await runWithTimeout({ query, limit: SEARCH_PAGE_SIZE, cursor }, controller)
+    const response = await runWithTimeout({ q: query, cursor }, controller)
     if (destroyed || gen !== generation || response === 'aborted') return
     inFlight = null
 
     if (response.ok) {
-      const { items, nextCursor, rangeDays, rangeStart } = response.page
+      const { hits, next_cursor } = response.page
+      const seen = new Set(state.items.map((h) => h.message.id))
+      const merged = [...state.items, ...hits.filter((h) => !seen.has(h.message.id))]
       publish({
         ...state,
-        status: 'results',
-        items: [...state.items, ...items],
-        nextCursor,
-        rangeDays,
-        rangeStart,
+        status: merged.length > 0 || next_cursor !== null ? 'results' : 'empty',
+        items: merged,
+        nextCursor: next_cursor,
         loadMoreError: null,
         retryable: false,
       })
@@ -281,7 +272,7 @@ export function createSearchController(options: SearchControllerOptions) {
   }
 
   async function retry(): Promise<void> {
-    if (state.items.length > 0 && state.loadMoreError !== null && state.nextCursor !== null) {
+    if (state.loadMoreError !== null && state.nextCursor !== null) {
       await loadMore()
       return
     }
