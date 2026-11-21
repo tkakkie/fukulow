@@ -835,17 +835,19 @@
     </div>
 
     <div class="channel-column__scroll">
-      {#if !organizationUnavailable && !sectionsState?.reconnecting && (s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut))}
+      {#if !organizationUnavailable && (s.status === 'error' || (s.status === 'loading' && s.channels.length === 0 && announcementView.channelListTimedOut))}
         <StatusBanner
           tone="danger"
           role="alert"
           message="チャンネルを読み込めませんでした。"
           detail="通信状況を確認して、もう一度お試しください。"
-          actionLabel="再試行"
-          onaction={() => {
-            announcementController.resetChannelListTimeout()
-            void channels.load()
-          }}
+          actionLabel={sectionsState?.reconnecting ? undefined : '再試行'}
+          onaction={sectionsState?.reconnecting
+            ? undefined
+            : () => {
+                announcementController.resetChannelListTimeout()
+                void channels.load()
+              }}
         />
       {:else if !organizationUnavailable && !sectionsState?.reconnecting && s.status === 'loading' && s.channels.length === 0}
         <Skeleton rows={3} label="チャンネルを読み込み中" />

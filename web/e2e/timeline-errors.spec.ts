@@ -541,7 +541,10 @@ test('single-Channel C9 チャンネル一覧へ focuses the empty list and re-g
     const nav = guestPage.getByRole('navigation', { name: 'チャンネル' })
     const channelNavById = guestPage.locator('#channel-content')
     const channelListHeading = guestPage.locator('#channel-list-heading')
-    const singleChannelButton = channelNavById.locator('.channel-list button')
+    const channelRows = channelNavById.locator('.channel-list > li[data-channel-id]')
+    const singleChannelButton = channelNavById.locator(
+      `li[data-channel-id="${singleChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
+    )
     const timeline = guestPage.getByRole('region', { name: 'タイムライン' })
     const composer = timeline.getByRole('textbox', { name: 'メッセージ' })
     const goToListButton = timeline.getByRole('button', { name: 'チャンネル一覧へ', exact: true })
@@ -555,6 +558,7 @@ test('single-Channel C9 チャンネル一覧へ focuses the empty list and re-g
 
       expect(await channelNavById.getAttribute('aria-labelledby')).toBe('channel-list-heading')
       expect(await channelNavById.getAttribute('aria-label')).toBeNull()
+      await expect(channelRows).toHaveCount(1)
       await expect(singleChannelButton).toHaveCount(1)
 
       if (width === 1280) {
@@ -622,6 +626,7 @@ test('single-Channel C9 チャンネル一覧へ focuses the empty list and re-g
 
       // Re-granting does not auto-retry C9; reselecting the same single Channel recovers with one retry
       await grantGuest()
+      await expect(channelRows).toHaveCount(1)
       await expect(singleChannelButton).toHaveCount(1)
       await guestPage.waitForTimeout(300)
       expect(subscribeAttempts).toBe(beforeRecovery)

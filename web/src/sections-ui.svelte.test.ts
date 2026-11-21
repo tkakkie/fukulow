@@ -73,13 +73,15 @@ describe('personal sections adapter & UI', () => {
     expect(c.sections.get().groups[0]).toMatchObject({ id: 's1', name: '開発チーム' })
   })
 
-  it('shows 再接続中 in the left column without a retry button while disconnected, then recovers on activity_ready', async () => {
+  it('keeps Channel-list failure visible while hiding retry during reconnect, then restores retry on activity_ready if error persists', async () => {
     vi.useFakeTimers()
     const db = database()
     db.layout = { generation: '1', sections: [{ id: 's1', name: '開発', channel_ids: ['A'] }], other_channel_ids: [] }
     db.rows = [row('A', { name: 'general' })]
-    const c = client(db)
+    const c = client(db, { initialList: Promise.resolve(http(503, 'service unavailable')) })
     cleanups.push(() => c.session.close())
+    // Keep Channel-list failing with 503 so the retry guard is actively exercised across reconnect.
+    c.list.mockResolvedValue(http(503, 'service unavailable'))
     await vi.advanceTimersByTimeAsync(0)
     await c.ready()
 
@@ -94,25 +96,37 @@ describe('personal sections adapter & UI', () => {
     cleanups.push(() => unmount(inst))
     await settle()
 
-    expect(host.textContent).toContain('開発')
-    expect(host.textContent).not.toContain('再接続中')
+    const leftCol = host.querySelector('#channel-content')!
+    expect(leftCol.textContent).toContain('チャンネルを読み込めませんでした。')
+    expect(buttonsByText(leftCol, '再試行')).toHaveLength(1)
+    expect(leftCol.textContent).not.toContain('再接続中')
 
-    // Simulate disconnect while waiting for activity_ready.
+    // Simulate disconnect while waiting for activity_ready: keep error text visible, suppress non-functional retry.
     c.socket().onclose?.({ code: 1006 })
     await vi.advanceTimersByTimeAsync(0)
     await settle()
 
     expect(c.sections.get().reconnecting).toBe(true)
-    const leftCol = host.querySelector('#channel-content')!
     expect(leftCol.textContent).toContain('再接続中')
+    expect(leftCol.textContent).toContain('チャンネルを読み込めませんでした。')
     expect(buttonsByText(leftCol, '再試行')).toHaveLength(0)
 
-    // Reconnect and receive activity_ready.
+    // Reconnect and receive activity_ready while 503 still persists -> retry button returns.
     await vi.advanceTimersByTimeAsync(2_000)
     await c.ready()
     await settle()
     expect(c.sections.get().reconnecting).toBe(false)
     expect(leftCol.textContent).not.toContain('再接続中')
+    expect(leftCol.textContent).toContain('チャンネルを読み込めませんでした。')
+    expect(buttonsByText(leftCol, '再試行')).toHaveLength(1)
+
+    // Recover Channel list via retry button.
+    c.list.mockResolvedValue(ok({ channels: db.rows }))
+    buttonsByText(leftCol, '再試行')[0]!.click()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await settle()
+    expect(leftCol.textContent).toContain('開発')
+    expect(leftCol.textContent).not.toContain('チャンネルを読み込めませんでした。')
   })
 
   it('renders custom sections in order then Other Channels (hidden when empty), preserves Topic accordions and Unread badges, and collapses in memory only', async () => {
@@ -211,7 +225,7 @@ describe('personal sections adapter & UI', () => {
     expect(nextHeadings.map(h => h.textContent?.trim())).toEqual(['▾ 運用', '▾ 開発'])
   })
 
-  it('keeps empty custom sections visible, editable and deletable after Channel access loss', async () => {
+  it('closes an open move dialog without retaining revoked Channel details, restores fallback focus, and keeps empty custom sections editable', async () => {
     vi.useFakeTimers()
     const db = database()
     db.layout = { generation: '1', sections: [{ id: 's1', name: '限定', channel_ids: ['A'] }], other_channel_ids: [] }
@@ -221,22 +235,43 @@ describe('personal sections adapter & UI', () => {
     await vi.advanceTimersByTimeAsync(0)
     await c.ready()
 
+    const heading = dom.doc.createElement('h2')
+    heading.tabIndex = -1
+    dom.doc.body.appendChild(heading)
     const host = dom.doc.createElement('div')
     dom.doc.body.appendChild(host)
     const inst = mount(ChannelList, {
       target: host as unknown as Element,
-      props: { channels: db.rows, selectedId: null, sections: sectionsAdapter(c.sections), onselect: vi.fn() },
+      props: {
+        channels: db.rows,
+        selectedId: null,
+        sections: sectionsAdapter(c.sections),
+        channelListHeading: heading as unknown as HTMLElement,
+        onselect: vi.fn(),
+      },
     })
     cleanups.push(() => unmount(inst))
     await settle()
 
-    // Revoke access to Channel A.
+    // Open move dialog for Channel A before revoking access.
+    host.querySelector('[data-channel-id="A"] button[aria-label="チャンネルを移動"]')!.click()
+    await settle()
+    expect(host.querySelector('[role="dialog"]')).not.toBeNull()
+    expect(host.textContent).toContain('secret')
+    expect(buttonsByText(host, '移動する')).toHaveLength(1)
+
+    // Revoke access to Channel A while the move dialog is open.
     db.rows = []
     c.event({ type: 'channel_access_revoked', channel_id: 'A' })
     await vi.advanceTimersByTimeAsync(200)
     await settle()
 
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
     expect(host.querySelector('[data-channel-id="A"]')).toBeNull()
+    expect(host.textContent).not.toContain('secret')
+    expect(buttonsByText(host, '移動する')).toHaveLength(0)
+    expect(dom.doc.activeElement).toBe(heading)
+
     const sec = host.querySelector('[data-section-id="s1"]')!
     expect(sec).not.toBeNull()
     expect(sec.querySelector('button[aria-label="名前を変更"]')?.disabled).toBe(false)
@@ -519,5 +554,153 @@ describe('personal sections adapter & UI', () => {
     await vi.advanceTimersByTimeAsync(200)
     await settle()
     expect(dom.doc.activeElement).toBe(host.querySelector('[data-section-heading="s1"]'))
+  })
+
+  it('restores post-move focus by item ID across concurrent order changes and cancels when the user moves focus elsewhere', async () => {
+    vi.useFakeTimers()
+    const db = database()
+    db.layout = {
+      generation: '1',
+      sections: [
+        { id: 's1', name: '一', channel_ids: [] },
+        { id: 's2', name: '二', channel_ids: [] },
+        { id: 's3', name: '三', channel_ids: ['A'] },
+      ],
+      other_channel_ids: [],
+    }
+    db.rows = [row('A', { name: 'alpha' })]
+    const c = client(db)
+    cleanups.push(() => c.session.close())
+    await vi.advanceTimersByTimeAsync(0)
+    await c.ready()
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const inst = mount(ChannelList, {
+      target: host as unknown as Element,
+      props: { channels: db.rows, selectedId: null, sections: sectionsAdapter(c.sections), onselect: vi.fn() },
+    })
+    cleanups.push(() => unmount(inst))
+    await settle()
+
+    // 1. Move s3 up (predicted index 1), but another tab deletes s1 before the delayed snapshot lands -> s3 settles at index 0.
+    const delayed1 = deferred<Result<SectionLayout>>()
+    c.getLayout.mockReturnValueOnce(delayed1.promise)
+    c.sectionsApi.reorder.mockResolvedValueOnce(ok(undefined))
+    host.querySelector('[data-testid="section-move-up-s3"]')!.click()
+    await settle()
+
+    // Authoritative snapshot arrives with s1 deleted concurrently; s3 is at index 0 instead of 1.
+    delayed1.resolve(ok({
+      generation: '2',
+      sections: [
+        { id: 's3', name: '三', channel_ids: ['A'] },
+        { id: 's2', name: '二', channel_ids: [] },
+      ],
+      other_channel_ids: [],
+    }))
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(dom.doc.activeElement).toBe(host.querySelector('[data-section-heading="s3"]'))
+
+    // 2. Move s3 down with a delayed snapshot, and move focus to セクションを作成 before snapshot lands -> focus is not stolen.
+    const delayed2 = deferred<Result<SectionLayout>>()
+    c.getLayout.mockReturnValueOnce(delayed2.promise)
+    c.sectionsApi.reorder.mockResolvedValueOnce(ok(undefined))
+    host.querySelector('[data-testid="section-move-down-s3"]')!.click()
+    await settle()
+
+    const createBtn = buttonsByText(host, 'セクションを作成')[0]!
+    createBtn.focus()
+    expect(dom.doc.activeElement).toBe(createBtn)
+
+    delayed2.resolve(ok({
+      generation: '3',
+      sections: [
+        { id: 's2', name: '二', channel_ids: [] },
+        { id: 's3', name: '三', channel_ids: ['A'] },
+      ],
+      other_channel_ids: [],
+    }))
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(dom.doc.activeElement).toBe(createBtn)
+  })
+
+  it('disambiguates duplicate section names including その他のチャンネル and selects destinations by section ID', async () => {
+    vi.useFakeTimers()
+    const db = database()
+    db.layout = {
+      generation: '1',
+      sections: [
+        { id: 's1', name: '開発', channel_ids: [] },
+        { id: 's2', name: 'その他のチャンネル', channel_ids: [] },
+        { id: 's3', name: '開発', channel_ids: [] },
+      ],
+      other_channel_ids: ['A'],
+    }
+    db.rows = [row('A', { name: 'alpha' })]
+    const c = client(db)
+    cleanups.push(() => c.session.close())
+    await vi.advanceTimersByTimeAsync(0)
+    await c.ready()
+
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const inst = mount(ChannelList, {
+      target: host as unknown as Element,
+      props: { channels: db.rows, selectedId: null, sections: sectionsAdapter(c.sections), onselect: vi.fn() },
+    })
+    cleanups.push(() => unmount(inst))
+    await settle()
+
+    host.querySelector('[data-channel-id="A"] button[aria-label="チャンネルを移動"]')!.click()
+    await settle()
+
+    const labels = queryAll(host, '.section-dialog__option-label').map(el => el.textContent?.trim())
+    expect(labels).toEqual([
+      '開発（1番目）',
+      'その他のチャンネル（1番目）',
+      '開発（2番目）',
+      'その他のチャンネル（既定）',
+    ])
+
+    // Select the custom section named その他のチャンネル (id: 's2') and confirm.
+    c.sectionsApi.moveChannel.mockImplementationOnce(async (ch, { section_id }) => {
+      db.layout = {
+        generation: '2',
+        sections: db.layout.sections.map(s => (s.id === section_id ? { ...s, channel_ids: [ch] } : s)),
+        other_channel_ids: [],
+      }
+      return ok(undefined)
+    })
+    const customOtherRadio = queryAll(host, 'input[name="section_move_destination"]').find(el => el.value === 's2')!
+    customOtherRadio.checked = true
+    customOtherRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    buttonsByText(host, '移動する')[0]!.click()
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(c.sectionsApi.moveChannel).toHaveBeenLastCalledWith('A', { section_id: 's2' }, expect.anything())
+
+    // Move back to the implicit その他のチャンネル（既定） (id: null).
+    c.sectionsApi.moveChannel.mockImplementationOnce(async (ch) => {
+      db.layout = {
+        generation: '3',
+        sections: db.layout.sections.map(s => ({ ...s, channel_ids: s.channel_ids.filter(id => id !== ch) })),
+        other_channel_ids: [ch],
+      }
+      return ok(undefined)
+    })
+    host.querySelector('[data-channel-id="A"] button[aria-label="チャンネルを移動"]')!.click()
+    await settle()
+    const implicitRadio = queryAll(host, 'input[name="section_move_destination"]').find(el => el.value === '')!
+    implicitRadio.checked = true
+    implicitRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+    await settle()
+    buttonsByText(host, '移動する')[0]!.click()
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(c.sectionsApi.moveChannel).toHaveBeenLastCalledWith('A', { section_id: null }, expect.anything())
   })
 })

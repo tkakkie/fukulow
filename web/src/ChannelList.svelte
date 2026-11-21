@@ -21,11 +21,42 @@
   const RECENT_TOPICS_MAX = 5
   const OTHER_KEY = '__other__'
 
+  type DialogIntent =
+    | { kind: 'create' }
+    | { kind: 'rename'; sectionId: string; currentName: string }
+    | { kind: 'delete'; sectionId: string; sectionName: string }
+    | { kind: 'move'; channelId: string }
+    | null
+
   type PendingFocus =
-    | { kind: 'section-move'; sectionId: string; direction: 'up' | 'down'; expectedIndex: number }
-    | { kind: 'channel-move-order'; channelId: string; groupKey: string; direction: 'up' | 'down'; expectedIndex: number }
-    | { kind: 'channel-move-group'; channelId: string; destinationKey: string }
-    | { kind: 'section-delete'; deletedId: string; targets: readonly DeleteFocusTarget[] }
+    | {
+        kind: 'section-move'
+        sectionId: string
+        direction: 'up' | 'down'
+        baselineGroups: readonly SectionGroup[]
+        allowedActive: ReadonlySet<unknown>
+      }
+    | {
+        kind: 'channel-move-order'
+        channelId: string
+        direction: 'up' | 'down'
+        baselineGroups: readonly SectionGroup[]
+        allowedActive: ReadonlySet<unknown>
+      }
+    | {
+        kind: 'channel-move-group'
+        channelId: string
+        destinationKey: string
+        baselineGroups: readonly SectionGroup[]
+        allowedActive: ReadonlySet<unknown>
+      }
+    | {
+        kind: 'section-delete'
+        deletedId: string
+        deletedIndex: number
+        baselineGroups: readonly SectionGroup[]
+        allowedActive: ReadonlySet<unknown>
+      }
 
   let {
     channels,
@@ -85,15 +116,79 @@
 
   // Collapse state is local memory only: no synchronization or web storage (docs/spec/sections.md).
   let collapsed = $state<Record<string, boolean>>({})
-  let dialogMode = $state<SectionDialogMode>(null)
+  let dialogMode = $state<DialogIntent>(null)
   let dialogError = $state('')
   let inlineError = $state('')
   let pendingCreateId = ''
   let pendingCreateName = ''
-  let pendingFocus = $state<PendingFocus | null>(null)
+  let pendingFocus = $state.raw<PendingFocus | null>(null)
+  let dialogOpener: unknown = null
+  let applyingFocus = false
+
+  function findAuthorizedChannel(channelId: string): { channel: Channel; sectionId: string | null } | null {
+    for (const g of groups) {
+      const ch = g.channels.find((c) => c.id === channelId)
+      if (ch) return { channel: ch, sectionId: g.id }
+    }
+    return null
+  }
+
+  const resolvedDialogMode = $derived.by<SectionDialogMode>(() => {
+    if (!dialogMode) return null
+    if (dialogMode.kind === 'move') {
+      const entry = findAuthorizedChannel(dialogMode.channelId)
+      if (!entry) return null
+      return {
+        kind: 'move',
+        channelId: entry.channel.id,
+        channelName: entry.channel.name,
+        currentSectionId: entry.sectionId,
+      }
+    }
+    return dialogMode
+  })
+
+  const dialogFocusFallback = $derived.by<FocusableTarget | null>(() => {
+    if (channelListHeading) return channelListHeading
+    return containerEl?.querySelector<HTMLElement>('[data-section-heading]') ?? null
+  })
+
+  $effect(() => {
+    if (dialogMode?.kind === 'move' && !findAuthorizedChannel(dialogMode.channelId)) {
+      dialogMode = null
+      dialogError = ''
+    }
+  })
 
   function groupKeyOf(id: string | null): string {
     return id ?? OTHER_KEY
+  }
+
+  function isResetOrDisconnected(el: unknown): boolean {
+    if (!el) return true
+    if (typeof document !== 'undefined' && (el === document.body || el === document.documentElement)) {
+      return true
+    }
+    if (typeof el === 'object' && 'isConnected' in el && (el as { isConnected?: boolean }).isConnected === false) {
+      return true
+    }
+    return false
+  }
+
+  function hasUserMovedFocus(p: PendingFocus): boolean {
+    if (typeof document === 'undefined') return false
+    const active = document.activeElement
+    if (isResetOrDisconnected(active)) return false
+    return !p.allowedActive.has(active)
+  }
+
+  function applyFocus(target: FocusableTarget | null | undefined): boolean {
+    applyingFocus = true
+    try {
+      return focusTarget(target)
+    } finally {
+      applyingFocus = false
+    }
   }
 
   function toggleCollapse(key: string) {
@@ -104,6 +199,7 @@
     if (controlsDisabled) return
     inlineError = ''
     dialogError = ''
+    dialogOpener = typeof document !== 'undefined' ? document.activeElement : null
     pendingCreateId = crypto.randomUUID()
     pendingCreateName = ''
     dialogMode = { kind: 'create' }
@@ -113,6 +209,7 @@
     if (controlsDisabled) return
     inlineError = ''
     dialogError = ''
+    dialogOpener = typeof document !== 'undefined' ? document.activeElement : null
     dialogMode = { kind: 'rename', sectionId: section.id, currentName: section.name }
   }
 
@@ -120,19 +217,16 @@
     if (controlsDisabled) return
     inlineError = ''
     dialogError = ''
+    dialogOpener = typeof document !== 'undefined' ? document.activeElement : null
     dialogMode = { kind: 'delete', sectionId: section.id, sectionName: section.name }
   }
 
-  function openMoveDialog(channel: Channel, currentSectionId: string | null) {
+  function openMoveDialog(channelId: string) {
     if (controlsDisabled) return
     inlineError = ''
     dialogError = ''
-    dialogMode = {
-      kind: 'move',
-      channelId: channel.id,
-      channelName: channel.name,
-      currentSectionId,
-    }
+    dialogOpener = typeof document !== 'undefined' ? document.activeElement : null
+    dialogMode = { kind: 'move', channelId }
   }
 
   function closeDialog() {
@@ -175,20 +269,23 @@
   async function handleDeleteSection(sectionId: string) {
     if (!sections || controlsDisabled) return
     dialogError = ''
-    const section = customGroups.find((g) => g.id === sectionId)
-    const otherWillBeVisible =
-      (otherGroup?.channels.length ?? 0) > 0 || (section?.channels.length ?? 0) > 0
-    const targets = resolveDeleteFocusTargets(
-      customGroups.map((g) => g.id),
-      sectionId,
-      otherWillBeVisible,
-    )
+    const baselineGroups = groups
+    const deletedIndex = Math.max(0, customGroups.findIndex((g) => g.id === sectionId))
+    const baselineActive = typeof document !== 'undefined' ? document.activeElement : null
+    const fallback = dialogFocusFallback
+    const opener = dialogOpener
     const result = await sections.delete(sectionId)
     if (!result.ok) {
       dialogError = sectionWriteError(result)
       return
     }
-    pendingFocus = { kind: 'section-delete', deletedId: sectionId, targets }
+    pendingFocus = {
+      kind: 'section-delete',
+      deletedId: sectionId,
+      deletedIndex,
+      baselineGroups,
+      allowedActive: new Set([baselineActive, opener, fallback]),
+    }
     dialogMode = null
   }
 
@@ -196,13 +293,23 @@
     if (!sections || controlsDisabled) return
     dialogError = ''
     const destinationKey = groupKeyOf(destinationId)
+    const baselineGroups = groups
+    const baselineActive = typeof document !== 'undefined' ? document.activeElement : null
+    const fallback = dialogFocusFallback
+    const opener = dialogOpener
     const result = await sections.moveChannel(channelId, { section_id: destinationId })
     if (!result.ok) {
       dialogError = sectionWriteError(result)
       return
     }
     if (collapsed[destinationKey]) collapsed[destinationKey] = false
-    pendingFocus = { kind: 'channel-move-group', channelId, destinationKey }
+    pendingFocus = {
+      kind: 'channel-move-group',
+      channelId,
+      destinationKey,
+      baselineGroups,
+      allowedActive: new Set([baselineActive, opener, fallback]),
+    }
     dialogMode = null
   }
 
@@ -212,13 +319,20 @@
     const ids = customGroups.map((g) => g.id)
     const next = reorderList(ids, index, direction)
     if (!next) return
-    const expectedIndex = direction === 'up' ? index - 1 : index + 1
+    const baselineGroups = groups
+    const baselineActive = typeof document !== 'undefined' ? document.activeElement : null
     const result = await sections.reorder({ section_ids: next })
     if (!result.ok) {
       inlineError = sectionWriteError(result)
       return
     }
-    pendingFocus = { kind: 'section-move', sectionId, direction, expectedIndex }
+    pendingFocus = {
+      kind: 'section-move',
+      sectionId,
+      direction,
+      baselineGroups,
+      allowedActive: new Set([baselineActive]),
+    }
   }
 
   async function handleReorderChannel(
@@ -233,7 +347,8 @@
     const next = reorderList(ids, index, direction)
     if (!next) return
     const channelId = ids[index]
-    const expectedIndex = direction === 'up' ? index - 1 : index + 1
+    const baselineGroups = groups
+    const baselineActive = typeof document !== 'undefined' ? document.activeElement : null
     const result = await sections.reorderChannels({ section_id: sectionId, channel_ids: next })
     if (!result.ok) {
       inlineError = sectionWriteError(result)
@@ -242,9 +357,9 @@
     pendingFocus = {
       kind: 'channel-move-order',
       channelId,
-      groupKey: groupKeyOf(sectionId),
       direction,
-      expectedIndex,
+      baselineGroups,
+      allowedActive: new Set([baselineActive]),
     }
   }
 
@@ -254,13 +369,13 @@
         const el = containerEl?.querySelector<HTMLElement>(
           `[data-section-heading="${CSS.escape(target.id)}"]`,
         )
-        if (focusTarget(el)) return
+        if (applyFocus(el)) return
       } else if (target.kind === 'other') {
         const el = containerEl?.querySelector<HTMLElement>(
           `[data-section-heading="${OTHER_KEY}"]`,
         )
-        if (focusTarget(el)) return
-      } else if (focusTarget(channelListHeading)) {
+        if (applyFocus(el)) return
+      } else if (applyFocus(channelListHeading)) {
         return
       }
     }
@@ -268,66 +383,90 @@
 
   $effect(() => {
     const p = pendingFocus
-    if (!p || writing || dialogMode !== null) return
-    if (p.kind === 'section-move') {
-      if (customGroups.findIndex((g) => g.id === p.sectionId) !== p.expectedIndex) return
+    if (!p || typeof document === 'undefined') return
+    const onFocusIn = (e: FocusEvent) => {
+      if (applyingFocus || !pendingFocus) return
+      const target = e.target
+      if (isResetOrDisconnected(target) || pendingFocus.allowedActive.has(target)) return
       pendingFocus = null
+    }
+    document.addEventListener('focusin', onFocusIn, true)
+    return () => {
+      document.removeEventListener('focusin', onFocusIn, true)
+    }
+  })
+
+  $effect(() => {
+    const p = pendingFocus
+    if (!p || writing || resolvedDialogMode !== null) return
+    if (hasUserMovedFocus(p)) {
+      pendingFocus = null
+      return
+    }
+    if (groups === p.baselineGroups) return
+    if (p.kind === 'section-delete') {
+      if (customGroups.some((g) => g.id === p.deletedId)) return
+      pendingFocus = null
+      const targets = resolveDeleteFocusTargets(
+        customGroups.map((g) => g.id),
+        p.deletedIndex,
+        Boolean(otherGroup && otherGroup.channels.length > 0),
+      )
+      void tick()
+        .then(() => tick())
+        .then(() => {
+          if (hasUserMovedFocus(p)) return
+          focusDeleteTargets(targets)
+        })
+      return
+    }
+    pendingFocus = null
+    if (p.kind === 'section-move') {
       void tick().then(() => {
+        if (hasUserMovedFocus(p)) return
         const btn = containerEl?.querySelector<HTMLElement>(
           `[data-testid="section-move-${p.direction}-${CSS.escape(p.sectionId)}"]`,
         )
-        if (!focusTarget(btn)) {
+        if (!applyFocus(btn)) {
           const heading = containerEl?.querySelector<HTMLElement>(
             `[data-section-heading="${CSS.escape(p.sectionId)}"]`,
           )
-          focusTarget(heading)
+          if (!applyFocus(heading)) applyFocus(dialogFocusFallback)
         }
       })
       return
     }
     if (p.kind === 'channel-move-order') {
-      const group = groups.find((g) => groupKeyOf(g.id) === p.groupKey)
-      if (!group || group.channels.findIndex((c) => c.id === p.channelId) !== p.expectedIndex) return
-      pendingFocus = null
       void tick().then(() => {
+        if (hasUserMovedFocus(p)) return
         const btn = containerEl?.querySelector<HTMLElement>(
           `[data-testid="channel-move-${p.direction}-${CSS.escape(p.channelId)}"]`,
         )
-        if (!focusTarget(btn)) {
+        if (!applyFocus(btn)) {
           const row = containerEl?.querySelector<HTMLElement>(
             `[data-channel-id="${CSS.escape(p.channelId)}"] .ui-list-row`,
           )
-          focusTarget(row)
+          if (!applyFocus(row)) applyFocus(dialogFocusFallback)
         }
       })
       return
     }
     if (p.kind === 'channel-move-group') {
-      const group = groups.find((g) => groupKeyOf(g.id) === p.destinationKey)
-      if (!group || !group.channels.some((c) => c.id === p.channelId)) return
-      pendingFocus = null
       // Wait two ticks so this runs after Dialog's close focus restoration.
       void tick()
         .then(() => tick())
         .then(() => {
+          if (hasUserMovedFocus(p)) return
           const row = containerEl?.querySelector<HTMLElement>(
             `[data-channel-id="${CSS.escape(p.channelId)}"] .ui-list-row`,
           )
-          if (!focusTarget(row)) {
+          if (!applyFocus(row)) {
             const heading = containerEl?.querySelector<HTMLElement>(
               `[data-section-heading="${CSS.escape(p.destinationKey)}"]`,
             )
-            focusTarget(heading)
+            if (!applyFocus(heading)) applyFocus(dialogFocusFallback)
           }
         })
-      return
-    }
-    if (p.kind === 'section-delete') {
-      if (customGroups.some((g) => g.id === p.deletedId)) return
-      pendingFocus = null
-      void tick()
-        .then(() => tick())
-        .then(() => focusDeleteTargets(p.targets))
     }
   })
 </script>
@@ -499,7 +638,7 @@
                             variant="icon"
                             ariaLabel="チャンネルを移動"
                             disabled={controlsDisabled}
-                            onclick={() => openMoveDialog(c, group.id)}
+                            onclick={() => openMoveDialog(c.id)}
                           >
                             ⇄
                           </Button>
@@ -516,11 +655,11 @@
     {/if}
 
     <SectionDialogs
-      mode={dialogMode}
+      mode={resolvedDialogMode}
       busy={writing}
       error={dialogError}
       customSections={customGroups}
-      returnFocusFallback={channelListHeading}
+      returnFocusFallback={dialogFocusFallback}
       oncreate={handleCreateSection}
       onrename={handleRenameSection}
       ondelete={handleDeleteSection}

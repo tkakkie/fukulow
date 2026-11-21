@@ -4,16 +4,23 @@ import type { SectionResult } from './sections'
 export const SECTION_NAME_MAX = 60
 
 export const OTHER_CHANNELS_LABEL = 'その他のチャンネル'
+export const IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL = `${OTHER_CHANNELS_LABEL}（既定）`
+
+// Rust `str::trim()` strips Unicode `White_Space` (`char::is_whitespace`), which includes U+0085 (NEL)
+// and excludes U+FEFF (BOM), unlike JS `String.prototype.trim()`.
+const RUST_WHITESPACE_ONLY = /^\p{White_Space}+$/u
+const RUST_SURROUNDING_WHITESPACE = /^\p{White_Space}|\p{White_Space}$/u
 
 /**
  * Validates a personal section name against spec R1 without trimming or normalizing:
- * 1..=60 decoded Unicode scalars, no NUL, no surrounding whitespace, at least one non-whitespace scalar.
+ * 1..=60 decoded Unicode scalars, no NUL, no surrounding Rust `str::trim()` whitespace,
+ * and at least one non-whitespace scalar.
  */
 export function validateSectionName(name: string): string | null {
-  if (name.length === 0 || name.trim().length === 0) {
+  if (name.length === 0 || RUST_WHITESPACE_ONLY.test(name)) {
     return 'セクション名を入力してください。'
   }
-  if (name !== name.trim()) {
+  if (RUST_SURROUNDING_WHITESPACE.test(name)) {
     return 'セクション名の前後に空白は入れられません。空白を取り除いて入力してください。'
   }
   if (name.includes('\0')) {
@@ -23,6 +30,45 @@ export function validateSectionName(name: string): string | null {
     return `セクション名は${SECTION_NAME_MAX}文字以内で入力してください。`
   }
   return null
+}
+
+export type MoveDestinationOption = {
+  id: string | null
+  label: string
+}
+
+/**
+ * Builds distinguishable visible and accessible labels for move destinations (`docs/spec/sections.md` Q2).
+ * Always identifies the implicit Other Channels group and disambiguates duplicate custom names
+ * (including a custom section named `その他のチャンネル`).
+ */
+export function buildMoveDestinations(
+  customSections: readonly { id: string; name: string }[],
+): MoveDestinationOption[] {
+  const counts = new Map<string, number>([
+    [OTHER_CHANNELS_LABEL, 1],
+    [IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL, 1],
+  ])
+  for (const s of customSections) {
+    counts.set(s.name, (counts.get(s.name) ?? 0) + 1)
+  }
+  const seen = new Map<string, number>()
+  const used = new Set<string>([IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL])
+  const options: MoveDestinationOption[] = customSections.map((s, idx) => {
+    let label = s.name
+    if ((counts.get(s.name) ?? 0) > 1 || used.has(label)) {
+      const occ = (seen.get(s.name) ?? 0) + 1
+      seen.set(s.name, occ)
+      label = `${s.name}（${occ}番目）`
+      if (used.has(label)) {
+        label = `${s.name}（${idx + 1}番目のセクション）`
+      }
+    }
+    used.add(label)
+    return { id: s.id, label }
+  })
+  options.push({ id: null, label: IMPLICIT_OTHER_CHANNELS_DESTINATION_LABEL })
+  return options
 }
 
 /** Polite Japanese message with a recovery step for a failed section mutation (`docs/ui.md` §10, `docs/spec/sections.md`). */
@@ -40,7 +86,7 @@ export function sectionWriteError(result: Extract<SectionResult<unknown>, { ok: 
     if (result.error === 'lock_contention') {
       return '他の更新と重なったため完了できませんでした。少し待ってからもう一度お試しください。'
     }
-    return 'サーバーに接続できませんでした。通信状況を確認して、もう一度お試しください。'
+    return '更新を確認できませんでした。最新のセクション一覧を確認してから、必要に応じてやり直してください。'
   }
   if (result.kind !== 'http') {
     return 'セクションを更新できませんでした。少し待ってからもう一度お試しください。'
@@ -100,29 +146,26 @@ export type DeleteFocusTarget =
   | { kind: 'channel-list' }
 
 /**
- * Computes the ordered focus fallback targets after deleting `deletedId` (`docs/spec/sections.md`):
+ * Computes the ordered focus fallback targets after a section at `deletedIndex` is removed,
+ * using the current visible custom-section order after reconciliation (`docs/spec/sections.md`):
  * next section heading (including Other Channels when visible), then previous section heading,
  * then the Channel-list heading.
  */
 export function resolveDeleteFocusTargets(
-  customSectionIds: readonly string[],
-  deletedId: string,
-  otherWillBeVisible: boolean,
+  currentCustomIds: readonly string[],
+  deletedIndex: number,
+  otherIsVisible: boolean,
 ): DeleteFocusTarget[] {
-  const idx = customSectionIds.indexOf(deletedId)
+  const split = Math.max(0, Math.min(deletedIndex, currentCustomIds.length))
   const targets: DeleteFocusTarget[] = []
-  if (idx !== -1) {
-    for (let i = idx + 1; i < customSectionIds.length; i++) {
-      targets.push({ kind: 'section', id: customSectionIds[i] })
-    }
-    if (otherWillBeVisible) {
-      targets.push({ kind: 'other' })
-    }
-    for (let i = idx - 1; i >= 0; i--) {
-      targets.push({ kind: 'section', id: customSectionIds[i] })
-    }
-  } else if (otherWillBeVisible) {
+  for (let i = split; i < currentCustomIds.length; i++) {
+    targets.push({ kind: 'section', id: currentCustomIds[i] })
+  }
+  if (otherIsVisible) {
     targets.push({ kind: 'other' })
+  }
+  for (let i = split - 1; i >= 0; i--) {
+    targets.push({ kind: 'section', id: currentCustomIds[i] })
   }
   targets.push({ kind: 'channel-list' })
   return targets

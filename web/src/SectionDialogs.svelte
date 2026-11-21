@@ -1,7 +1,7 @@
 <script lang="ts">
   import { isImeComposing } from './composer-keys'
   import type { FocusableTarget } from './focus-management'
-  import { OTHER_CHANNELS_LABEL, validateSectionName } from './section-ui'
+  import { buildMoveDestinations, OTHER_CHANNELS_LABEL, validateSectionName } from './section-ui'
   import Dialog from './ui/Dialog.svelte'
   import Input from './ui/Input.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
@@ -42,11 +42,22 @@
   let nameDraft = $state('')
   let validationError = $state('')
   let moveTarget = $state<string | null>(null)
-  let trackedMode = $state<SectionDialogMode>(null)
+  let trackedKey = $state<string | null>(null)
+
+  const moveDestinations = $derived(buildMoveDestinations(customSections))
+
+  function modeKey(m: SectionDialogMode): string | null {
+    if (!m) return null
+    if (m.kind === 'create') return 'create'
+    if (m.kind === 'rename') return `rename:${m.sectionId}`
+    if (m.kind === 'delete') return `delete:${m.sectionId}`
+    return `move:${m.channelId}`
+  }
 
   $effect(() => {
-    if (mode === trackedMode) return
-    trackedMode = mode
+    const key = modeKey(mode)
+    if (key === trackedKey) return
+    trackedKey = key
     validationError = ''
     if (mode?.kind === 'create') {
       nameDraft = ''
@@ -141,28 +152,18 @@
     {:else if mode?.kind === 'move'}
       <fieldset class="section-dialog__choices" disabled={busy}>
         <legend class="section-dialog__legend">移動先</legend>
-        {#each customSections as section (section.id)}
+        {#each moveDestinations as option (option.id ?? '__other__')}
           <label class="section-dialog__option">
             <input
               type="radio"
               name="section_move_destination"
-              value={section.id}
-              checked={moveTarget === section.id}
-              onchange={() => { moveTarget = section.id }}
+              value={option.id ?? ''}
+              checked={moveTarget === option.id}
+              onchange={() => { moveTarget = option.id }}
             />
-            <span class="section-dialog__option-label">{section.name}</span>
+            <span class="section-dialog__option-label">{option.label}</span>
           </label>
         {/each}
-        <label class="section-dialog__option">
-          <input
-            type="radio"
-            name="section_move_destination"
-            value=""
-            checked={moveTarget === null}
-            onchange={() => { moveTarget = null }}
-          />
-          <span class="section-dialog__option-label">{OTHER_CHANNELS_LABEL}</span>
-        </label>
       </fieldset>
     {/if}
 

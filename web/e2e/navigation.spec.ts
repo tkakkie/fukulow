@@ -295,7 +295,10 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
     await guestPage.setViewportSize({ width: 375, height: 667 })
 
     const heading = guestPage.locator('#channel-list-heading')
-    const singleChannelBtn = guestPage.locator('#channel-content .channel-list button')
+    const channelRows = guestPage.locator('#channel-content .channel-list > li[data-channel-id]')
+    const singleChannelBtn = guestPage.locator(
+      `#channel-content li[data-channel-id="${singleChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
+    )
     const backToListBtn = guestPage.getByRole('button', { name: 'チャンネル一覧へ戻る', exact: true }).first()
 
     // 1. Direct link to Channel view -> phone `list` intent replaces URL to /o/{org}, adds no extra entry, and focuses #channel-list-heading
@@ -308,6 +311,7 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
     await backToListBtn.click()
     await expect(guestPage).toHaveURL(`/o/${org}`)
     await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(channelRows).toHaveCount(1)
     await expect(singleChannelBtn).toHaveCount(1)
     await expect(heading).toBeVisible()
     await expect(heading).toBeFocused()
@@ -320,6 +324,7 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
     await guestPage.goForward()
     await expect(guestPage).toHaveURL(`/o/${org}`)
     await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(channelRows).toHaveCount(1)
     await expect(singleChannelBtn).toHaveCount(1)
     expect(await guestPage.evaluate(() => history.length)).toBe(directLen)
 
@@ -407,6 +412,9 @@ test('beforeunload warns for a draft in an Organization that is not selected, in
     if (path.endsWith('/me')) return route.fulfill(unavailable
       ? { status: 404, json: { error: 'organization_unavailable' } }
       : { json: { ...member, organization: otherOrganization } })
+    if (path.endsWith('/me/sections')) return route.fulfill(unavailable
+      ? { status: 404, json: { error: 'organization_unavailable' } }
+      : { json: { generation: '0', sections: [], other_channel_ids: [] } satisfies import('../src/api-schema.d.ts').components['schemas']['SectionLayout'] })
     if (path.endsWith('/channels')) return route.fulfill({ json: { history_generation: '00000000-0000-4000-8000-000000000515', channels: [] } })
     if (path.endsWith('/members')) return route.fulfill({ json: { members: [] } })
     return route.continue()
