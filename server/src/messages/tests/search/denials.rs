@@ -301,7 +301,6 @@ async fn search_body_fetch_rechecks_visibility_and_deletion_independently_of_can
                 .map(|item| (id(item), item["created_at"].as_str().unwrap().to_owned()))
                 .collect(),
             next_cursor: Some("next".to_owned()),
-            range_start: "2000-01-01T00:00:00.000000Z".to_owned(),
         };
         fetch_hits(tx, f.org, (actor, auth.membership_revision), None, &page)
             .await

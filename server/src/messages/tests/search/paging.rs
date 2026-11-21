@@ -2,7 +2,7 @@ use super::*;
 use sqlx::PgConnection;
 
 #[fukulow_test::test]
-async fn search_pages_match_brute_force_at_cross_channel_ties_and_skip_false_candidates(
+async fn search_pages_match_full_history_brute_force_at_ties_and_skip_false_candidates(
     pool: PgPool,
 ) {
     let f = Fixture::new(pool).await;
@@ -16,56 +16,37 @@ async fn search_pages_match_brute_force_at_cross_channel_ties_and_skip_false_can
         .unwrap();
     for channel in [f.public, private, archived] {
         bulk(&f, channel, 1..=32, "the NEEDLE trip", "10 minutes", false).await;
-        bulk(
-            &f,
-            channel,
-            33..=35,
-            "the needle trip",
-            "179 days 23 hours",
-            false,
-        )
-        .await;
-        bulk(
-            &f,
-            channel,
-            36..=50,
-            "the needle trip",
-            "180 days 1 hour",
-            false,
-        )
-        .await;
+        bulk(&f, channel, 33..=35, "the needle trip", "1 day", false).await;
+        bulk(&f, channel, 36..=50, "the needle trip", "400 days", false).await;
         bulk(&f, channel, 51..=52, "the needle trip", "2 minutes", true).await;
     }
     bulk(&f, private, 53..=82, "needle checking", "1 minute", false).await;
 
     let mut current = page(&f, &f.token, "needle trip", None, None).await;
-    let range_start = current["range_start"].as_str().unwrap().to_owned();
     let expected = crate::database::organization_read_only(
         &f.pools.app,
         f.org,
         async |tx: &mut PgConnection| {
             sqlx::query_scalar::<_, Uuid>(
                 "SELECT id FROM messages WHERE organization_id=$1 AND NOT deleted
-                 AND created_at >= $2::text::timestamptz AND strpos(lower(body), 'needle') > 0 AND strpos(lower(body), 'trip') > 0
+                 AND strpos(lower(body), 'needle') > 0 AND strpos(lower(body), 'trip') > 0
                  ORDER BY created_at DESC, id DESC",
             )
             .bind(f.org)
-            .bind(&range_start)
             .fetch_all(tx)
             .await
         },
     )
     .await
     .unwrap();
-    assert_eq!(expected.len(), 105);
+    assert_eq!(expected.len(), 150);
 
     let mut actual = Vec::new();
-    for page_number in 0..6 {
-        assert_eq!(current["range_start"], range_start);
+    for page_number in 0..8 {
         let page_ids = ids(&current);
-        assert_eq!(page_ids.len(), if page_number < 5 { 20 } else { 5 });
+        assert_eq!(page_ids.len(), if page_number < 7 { 20 } else { 10 });
         actual.extend(page_ids);
-        if page_number < 5 {
+        if page_number < 7 {
             current = page(
                 &f,
                 &f.token,
@@ -151,10 +132,15 @@ async fn search_plan_limits_each_scope_and_uses_term_and_message_indexes(pool: P
             .await?;
             let sql = format!(
                 "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE search_explain(
-                    '{}', '{{{},{second}}}', 'nee', '{{needle,matching}}', '-infinity', 'infinity', '{}', 20)",
-                f.org, f.public, Uuid::max(),
+                    '{}', '{{{},{second}}}', 'nee', '{{needle,matching}}', 'infinity', '{}', 20)",
+                f.org,
+                f.public,
+                Uuid::max(),
             );
-            let plan = sqlx::query_scalar(&sql).persistent(false).fetch_one(&mut *tx).await?;
+            let plan = sqlx::query_scalar(&sql)
+                .persistent(false)
+                .fetch_one(&mut *tx)
+                .await?;
             sqlx::query("DEALLOCATE search_explain").execute(tx).await?;
             Ok::<_, sqlx::Error>(plan)
         },

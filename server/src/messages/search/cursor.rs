@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Position {
-    pub range_start: String,
     pub created_at: String,
     pub id: Uuid,
 }

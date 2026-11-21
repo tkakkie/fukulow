@@ -6969,7 +6969,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Page of matching Messages from the fixed 180-day range. A page can have fewer than 20 hits and still have a next cursor.",
+            "description": "Page of matching Messages from the full history, newest first. A page can have fewer than 20 hits and still have a next cursor.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9463,9 +9463,7 @@
         "type": "object",
         "required": [
           "hits",
-          "next_cursor",
-          "range_days",
-          "range_start"
+          "next_cursor"
         ],
         "properties": {
           "hits": {
@@ -9480,18 +9478,7 @@
               "string",
               "null"
             ],
-            "description": "Null when there are no more hits in the range."
-          },
-          "range_days": {
-            "type": "integer",
-            "format": "int32",
-            "maximum": 180,
-            "minimum": 180
-          },
-          "range_start": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Inclusive cutoff fixed on the first page."
+            "description": "Null when there are no more hits."
           }
         }
       },

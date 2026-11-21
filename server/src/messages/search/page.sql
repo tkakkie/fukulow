@@ -19,10 +19,9 @@ CROSS JOIN LATERAL (
     ) matched
     WHERE t.organization_id = $1 AND t.channel_id = scope.channel_id
         AND t.term = $3 COLLATE pg_catalog."C"
-        AND t.created_at >= $5::text::timestamptz
-        AND (t.created_at, t.message_id) < ($6::text::timestamptz, $7::uuid)
+        AND (t.created_at, t.message_id) < ($5::text::timestamptz, $6::uuid)
     ORDER BY t.created_at DESC, t.message_id DESC
-    LIMIT $8 + 1
+    LIMIT $7 + 1
 ) hit
 ORDER BY hit.created_at DESC, hit.message_id DESC
-LIMIT $8 + 1;
+LIMIT $7 + 1;

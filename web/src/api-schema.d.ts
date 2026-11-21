@@ -1385,15 +1385,8 @@ export interface components {
         };
         SearchPage: {
             hits: components["schemas"]["SearchHit"][];
-            /** @description Null when there are no more hits in the range. */
+            /** @description Null when there are no more hits. */
             next_cursor: string | null;
-            /** Format: int32 */
-            range_days: number;
-            /**
-             * Format: date-time
-             * @description Inclusive cutoff fixed on the first page.
-             */
-            range_start: string;
         };
         Section: {
             channel_ids: string[];
@@ -6078,7 +6071,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Page of matching Messages from the fixed 180-day range. A page can have fewer than 20 hits and still have a next cursor. */
+            /** @description Page of matching Messages from the full history, newest first. A page can have fewer than 20 hits and still have a next cursor. */
             200: {
                 headers: {
                     [name: string]: unknown;

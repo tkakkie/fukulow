@@ -9,7 +9,6 @@ pub(super) mod d3r;
 pub use d3r::D3rEngine;
 
 const PAGE_SIZE: usize = 20;
-const RANGE_DAYS: u16 = 180;
 
 #[derive(Clone, Copy, Default)]
 pub enum SearchEngine {
@@ -60,14 +59,12 @@ struct EngineQuery<'a> {
     raw: &'a str,
     cursor: Option<&'a str>,
     secret: &'a str,
-    range_start: &'a str,
     page_size: usize,
 }
 
 pub(super) struct CandidatePage {
     pub(super) candidates: Vec<(Uuid, String)>,
     pub(super) next_cursor: Option<String>,
-    pub(super) range_start: String,
 }
 
 #[derive(Deserialize)]
@@ -81,14 +78,9 @@ pub struct SearchQuery {
 pub struct SearchPage {
     #[schema(max_items = 20)]
     hits: Vec<SearchHit>,
-    /// Null when there are no more hits in the range.
+    /// Null when there are no more hits.
     #[schema(required = true)]
     next_cursor: Option<String>,
-    #[schema(minimum = 180, maximum = 180)]
-    range_days: u16,
-    /// Inclusive cutoff fixed on the first page.
-    #[schema(format = DateTime)]
-    range_start: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -106,7 +98,7 @@ pub struct SearchHit {
         ("channel_id" = Option<Uuid>, Query, description = "Limit to one visible Channel or DM"),
         ("cursor" = Option<String>, Query, description = "Opaque next_cursor from this search")),
     security(("cookie" = []), ("bearer" = [])),
-    responses((status = 200, description = "Page of matching Messages from the fixed 180-day range. A page can have fewer than 20 hits and still have a next cursor.", body = SearchPage),
+    responses((status = 200, description = "Page of matching Messages from the full history, newest first. A page can have fewer than 20 hits and still have a next cursor.", body = SearchPage),
         (status = 400, description = "search_query_too_short, search_query_too_long, invalid_cursor, or malformed input", body = ErrorBody),
         (status = 401, description = "Missing, invalid, expired, or revoked Account Session credential", body = ErrorBody),
         (status = 404, description = "organization_unavailable or channel not found for an inaccessible or unknown Channel", body = ErrorBody),
@@ -161,13 +153,6 @@ async fn search_page(
     let filter = input.channel_id.as_ref().map(std::slice::from_ref);
     let scopes = visible_scopes(tx, organization, member, filter).await?;
     let ids: Vec<_> = scopes.iter().map(|(id, _)| *id).collect();
-    let range_start: String = sqlx::query_scalar(
-        "SELECT to_char((transaction_timestamp() - $1::int * interval '24 hours') AT TIME ZONE 'UTC',
-         'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
-    )
-    .bind(i32::from(RANGE_DAYS))
-    .fetch_one(&mut *tx)
-    .await?;
     let page = engine
         .candidates(
             tx,
@@ -179,7 +164,6 @@ async fn search_page(
                 raw,
                 cursor: input.cursor.as_deref(),
                 secret,
-                range_start: &range_start,
                 page_size: PAGE_SIZE,
             },
         )
@@ -188,8 +172,6 @@ async fn search_page(
     Ok(SearchPage {
         hits,
         next_cursor: page.next_cursor,
-        range_days: RANGE_DAYS,
-        range_start: page.range_start,
     })
 }
 
@@ -236,7 +218,7 @@ pub(super) async fn fetch_hits(
              FROM messages m
              WHERE m.organization_id=$1 AND m.id=candidate.id
                  AND m.created_at=candidate.created_at::timestamptz AND NOT m.deleted
-                 AND m.channel_id=ANY($4) AND m.created_at >= $5::text::timestamptz
+                 AND m.channel_id=ANY($4)
              OFFSET 0
          ) m",
         "p.ordinal",
@@ -246,7 +228,6 @@ pub(super) async fn fetch_hits(
         .bind(ids)
         .bind(times)
         .bind(visible)
-        .bind(&page.range_start)
         .fetch_all(tx)
         .await?;
     rows.iter()

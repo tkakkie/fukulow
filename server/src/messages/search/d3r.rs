@@ -39,13 +39,9 @@ impl D3rEngine {
             .cursor
             .map(|token| scope.decode(request.secret, token))
             .transpose()?;
-        let (range_start, before_at, before_id) = match position.as_ref() {
-            Some(position) => (
-                position.range_start.as_str(),
-                position.created_at.as_str(),
-                position.id,
-            ),
-            None => (request.range_start, "infinity", Uuid::max()),
+        let (before_at, before_id) = match position.as_ref() {
+            Some(position) => (position.created_at.as_str(), position.id),
+            None => ("infinity", Uuid::max()),
         };
 
         let mut candidates: Vec<(Uuid, String)> = if scopes.is_empty() {
@@ -56,7 +52,6 @@ impl D3rEngine {
                 .bind(scopes)
                 .bind(term)
                 .bind(tokens)
-                .bind(range_start)
                 .bind(before_at)
                 .bind(before_id)
                 .bind(request.page_size as i64)
@@ -71,7 +66,6 @@ impl D3rEngine {
                     scope.encode(
                         request.secret,
                         &cursor::Position {
-                            range_start: range_start.to_owned(),
                             created_at: created_at.clone(),
                             id: *id,
                         },
@@ -84,7 +78,6 @@ impl D3rEngine {
         Ok(CandidatePage {
             candidates,
             next_cursor,
-            range_start: range_start.to_owned(),
         })
     }
 

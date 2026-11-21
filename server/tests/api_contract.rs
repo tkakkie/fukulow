@@ -173,9 +173,6 @@ fn search_contract_requires_query_and_documents_results_and_errors() {
     let page = &schemas["SearchPage"]["properties"];
     assert_eq!(page["hits"]["maxItems"], 20);
     assert_eq!(page["next_cursor"]["type"], json!(["string", "null"]));
-    assert_eq!(page["range_days"]["minimum"], 180);
-    assert_eq!(page["range_days"]["maximum"], 180);
-    assert_eq!(page["range_start"]["format"], "date-time");
     assert_eq!(
         schemas["SearchHit"]["properties"]["message"]["$ref"],
         "#/components/schemas/Message"

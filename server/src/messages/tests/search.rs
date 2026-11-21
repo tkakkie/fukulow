@@ -89,7 +89,6 @@ async fn page(
     let status = response.status();
     let value = body(response).await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    assert_eq!(value["range_days"], 180);
     value
 }
 
