@@ -24,6 +24,7 @@ const preAllocatedVUs = positiveInteger(__ENV.THROUGHPUT_VUS, 100);
 const maxVUs = positiveInteger(__ENV.THROUGHPUT_MAX_VUS, 2000);
 if (maxVUs < preAllocatedVUs) throw new Error('THROUGHPUT_MAX_VUS must be at least THROUGHPUT_VUS');
 const bodyPath = __ENV.THROUGHPUT_BODIES;
+const recordAcceptedIds = __ENV.THROUGHPUT_RECORD_ACCEPTED_IDS === '1';
 const bodies = bodyPath === undefined ? undefined : new SharedArray('throughput bodies', () => {
   const source = open(bodyPath);
   const values: unknown = JSON.parse(source);
@@ -94,6 +95,7 @@ export function setup(): Setup {
       requireStatus(session, 200, 'sign_in');
       data.tokens.push((session.json() as NativeSessionResponse).token);
     }
+    if (recordAcceptedIds) console.log('LOAD_S1_ORGANIZATION ' + data.organizationId);
     console.log('LOAD_MEASUREMENT_START');
     sleep(1); // Same recorder SQL boundary as the delivery scenario; setup is excluded.
     return data;
@@ -129,6 +131,7 @@ export default function(data: Setup): void {
   if (outcome.outcome === 'accepted') latency.add(Date.now() - started);
   if ((outcome.outcome === 'rejected429' || outcome.outcome === 'rejected503') && !outcome.invalidRetryAfter) retry.add(Number(response.headers['Retry-After']));
   completionOffset.add(elapsed);
+  if (recordAcceptedIds && outcome.outcome === 'accepted') console.log('LOAD_S1_ACCEPTED ' + body.client_message_id);
 }
 
 export function teardown(data: Setup): void {
