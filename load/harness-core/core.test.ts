@@ -99,3 +99,11 @@ test('a harness at another commit or with local edits is refused', () => {
   assert.throws(() => assertPinned(git({ 'rev-parse': 'def', status: '' }), 'abc'), /pinned commit/);
   assert.throws(() => assertPinned(git({ 'rev-parse': 'abc', status: ' M run.ts' }), 'abc'), /dirty/);
 });
+
+test('status.json carries the run identity only when one is given', () => {
+  const out = mkdtempSync(join(tmpdir(), 'harness-core-'));
+  stages(out, 'recorded', 'run-1').write({ failed: false, interrupted: false });
+  assert.equal(JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')).runId, 'run-1');
+  stages(out, 'recorded').write({ failed: false, interrupted: false });
+  assert.equal('runId' in JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')), false);
+});

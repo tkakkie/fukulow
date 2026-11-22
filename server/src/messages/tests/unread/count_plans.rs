@@ -106,6 +106,8 @@ async fn unread_mentions_probe_work_is_bounded_by_mentions_not_unread(pool: PgPo
         for table in [
             "messages",
             "message_mentions",
+            "message_append_counts",
+            "message_count_corrections",
             "topics",
             "channel_read_positions",
             "topic_read_positions",
@@ -324,9 +326,13 @@ async fn unread_topic_mentions_scan_channel_set_once(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(flags, (false, false));
+    // Autoanalyze can update the append counters alone. Analyze the empty
+    // corrections table too so each scope skips probing its empty index.
     for table in [
         "messages",
         "message_mentions",
+        "message_append_counts",
+        "message_count_corrections",
         "topics",
         "channel_read_positions",
         "topic_read_positions",

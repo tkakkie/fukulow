@@ -1,5 +1,229 @@
+diff --git a/server/src/channels.rs b/server/src/channels.rs
+index e67e76e8..1e0c6e24 100644
+--- a/server/src/channels.rs
++++ b/server/src/channels.rs
+@@ -540,18 +540,22 @@ pub(crate) async fn authorize_send_targets(
+     channel: Uuid,
+     targets: &[Uuid],
+ ) -> Result<(Option<bool>, bool, Vec<Uuid>), sqlx::Error> {
+-    let channel_state: Option<(bool, bool)> = sqlx::query_as(
++    let channel_state: Option<(bool, bool)> = crate::move_diagnostic::send_timed("send_access_channel_sql", sqlx::query_as(
+         "SELECT visibility='public', archived_at IS NOT NULL FROM channels WHERE organization_id=$1 AND id=$2 AND kind='channel' FOR SHARE",
+     )
+     .bind(organization)
+     .bind(channel)
+-    .fetch_optional(&mut *connection)
++    .fetch_optional(&mut *connection))
+     .await?;
+     let mut ids = targets.to_vec();
+     ids.push(sender.0);
+     ids.sort_unstable();
+     ids.dedup();
+-    let members = auth::members::lock_send_members(connection, organization, &ids).await?;
++    let members = crate::move_diagnostic::send_timed(
++        "send_access_members_sql",
++        auth::members::lock_send_members(connection, organization, &ids),
++    )
++    .await?;
+     if !members
+         .iter()
+         .any(|&(id, revision, _)| (id, revision) == sender)
+@@ -561,9 +565,9 @@ pub(crate) async fn authorize_send_targets(
+     let Some((public, archived)) = channel_state else {
+         return Ok((Some(false), false, Vec::new()));
+     };
+-    let grants: Vec<(Uuid, i64)> = sqlx::query_as(
++    let grants: Vec<(Uuid, i64)> = crate::move_diagnostic::send_timed("send_access_grants_sql", sqlx::query_as(
+         "SELECT member_id,membership_revision FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=ANY($3) ORDER BY member_id FOR SHARE",
+-    ).bind(organization).bind(channel).bind(&ids).fetch_all(connection).await?;
++    ).bind(organization).bind(channel).bind(&ids).fetch_all(connection)).await?;
+     let mut accepted = Vec::new();
+     let mut sender_visible = false;
+     for (id, revision, role) in members {
+diff --git a/server/src/channels/dms.rs b/server/src/channels/dms.rs
+index 2bf7f6ca..79ee5ab5 100644
+--- a/server/src/channels/dms.rs
++++ b/server/src/channels/dms.rs
+@@ -273,41 +273,53 @@ pub(crate) async fn send_locks(
+     channel: Uuid,
+     targets: &[Uuid],
+ ) -> Result<Option<(Vec<(Uuid, i64, Uuid)>, Vec<Uuid>)>, ApiError> {
+-    let Some((a, b)) = pair(connection, org, channel).await? else {
++    let Some((a, b)) =
++        crate::move_diagnostic::send_timed("send_dm_pair_sql", pair(connection, org, channel))
++            .await?
++    else {
+         return Ok(None);
+     };
+     if ![a, b].contains(&sender.0) {
+         return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
+     }
+-    let mut ids = targets.to_vec();
+-    ids.extend([a, b]);
+-    ids.sort_unstable();
+-    ids.dedup();
+-    let members = auth::members::participants(connection, org, &ids, true).await?;
++    let ids = crate::move_diagnostic::send_sync("send_dm_prepare_members", || {
++        let mut ids = targets.to_vec();
++        ids.extend([a, b]);
++        ids.sort_unstable();
++        ids.dedup();
++        ids
++    });
++    let members = crate::move_diagnostic::send_timed(
++        "send_dm_members_sql",
++        auth::members::participants(connection, org, &ids, true),
++    )
++    .await?;
+     let actor = members
+         .iter()
+         .find(|m| m.id == sender.0 && m.active && m.membership_revision == sender.1)
+         .ok_or_else(ApiError::organization_unavailable)?;
+-    let grants:Vec<(Uuid,i64,Uuid)>=sqlx::query_as("SELECT member_id,membership_revision,grant_id FROM channel_members WHERE organization_id=$1 AND channel_id=$2 ORDER BY member_id FOR SHARE")
+-        .bind(org).bind(channel).fetch_all(&mut *connection).await?;
++    let grants:Vec<(Uuid,i64,Uuid)>=crate::move_diagnostic::send_timed("send_dm_grants_sql", sqlx::query_as("SELECT member_id,membership_revision,grant_id FROM channel_members WHERE organization_id=$1 AND channel_id=$2 ORDER BY member_id FOR SHARE")
++        .bind(org).bind(channel).fetch_all(&mut *connection)).await?;
+     if !grants
+         .iter()
+         .any(|g| g.0 == actor.id && g.1 == actor.membership_revision)
+     {
+         return Err(ApiError(StatusCode::NOT_FOUND, "channel not found", None));
+     }
+-    let accepted = members
+-        .into_iter()
+-        .filter(|m| {
+-            m.active
+-                && [a, b].contains(&m.id)
+-                && targets.contains(&m.id)
+-                && grants
+-                    .iter()
+-                    .any(|g| g.0 == m.id && g.1 == m.membership_revision)
+-        })
+-        .map(|m| m.id)
+-        .collect();
++    let accepted = crate::move_diagnostic::send_sync("send_dm_accept_mentions", || {
++        members
++            .into_iter()
++            .filter(|m| {
++                m.active
++                    && [a, b].contains(&m.id)
++                    && targets.contains(&m.id)
++                    && grants
++                        .iter()
++                        .any(|g| g.0 == m.id && g.1 == m.membership_revision)
++            })
++            .map(|m| m.id)
++            .collect()
++    });
+     Ok(Some((grants, accepted)))
+ }
+
+@@ -323,7 +335,11 @@ pub(crate) async fn eligible_peer(
+         .map(|g| g.0)
+         .filter(|id| *id != sender)
+         .collect::<Vec<_>>();
+-    let peers = auth::members::participants(connection, org, &ids, false).await?;
++    let peers = crate::move_diagnostic::send_timed(
++        "send_dm_peer_sql",
++        auth::members::participants(connection, org, &ids, false),
++    )
++    .await?;
+     let peer = peers.first().filter(|p| p.active).ok_or(ApiError(
+         StatusCode::CONFLICT,
+         "dm_peer_deactivated",
+diff --git a/server/src/channels/dms/discovery.rs b/server/src/channels/dms/discovery.rs
+index e957e2c9..45695d4a 100644
+--- a/server/src/channels/dms/discovery.rs
++++ b/server/src/channels/dms/discovery.rs
+@@ -17,12 +17,12 @@ pub(crate) async fn bump(
+     let lifetimes = grants.iter().map(|g| g.2).collect::<Vec<_>>();
+     // ORDER BY preserves the Member counter lock order in one batched statement.
+     // Acquire every counter before any discovery row, as on the single-row path.
+-    let mut positions: Vec<(i64, Uuid)> = sqlx::query_as("INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) SELECT $1,m,r,1 FROM unnest($2::uuid[],$3::bigint[]) v(m,r) ORDER BY m ON CONFLICT(organization_id,member_id,membership_revision) DO UPDATE SET position=dm_discovery_counters.position+1 RETURNING position,member_id")
+-        .bind(org).bind(&members).bind(&revisions).fetch_all(&mut *connection).await?;
++    let mut positions: Vec<(i64, Uuid)> = crate::move_diagnostic::send_timed("send_dm_discovery_counters_sql", sqlx::query_as("INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) SELECT $1,m,r,1 FROM unnest($2::uuid[],$3::bigint[]) v(m,r) ORDER BY m ON CONFLICT(organization_id,member_id,membership_revision) DO UPDATE SET position=dm_discovery_counters.position+1 RETURNING position,member_id")
++        .bind(org).bind(&members).bind(&revisions).fetch_all(&mut *connection)).await?;
+     positions.sort_by_key(|p| p.1);
+     let positions = positions.into_iter().map(|p| p.0).collect::<Vec<_>>();
+-    sqlx::query("INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_id,grant_id,birth_position,latest_position) SELECT $1,m,r,$2,g,p,p FROM unnest($3::uuid[],$4::bigint[],$5::uuid[],$6::bigint[]) v(m,r,g,p) ORDER BY m ON CONFLICT(organization_id,member_id,membership_revision,channel_id) DO UPDATE SET latest_position=EXCLUDED.latest_position,grant_id=EXCLUDED.grant_id")
+-        .bind(org).bind(channel).bind(&members).bind(&revisions).bind(&lifetimes).bind(&positions).execute(&mut *connection).await?;
++    crate::move_diagnostic::send_timed("send_dm_discovery_sql", sqlx::query("INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_id,grant_id,birth_position,latest_position) SELECT $1,m,r,$2,g,p,p FROM unnest($3::uuid[],$4::bigint[],$5::uuid[],$6::bigint[]) v(m,r,g,p) ORDER BY m ON CONFLICT(organization_id,member_id,membership_revision,channel_id) DO UPDATE SET latest_position=EXCLUDED.latest_position,grant_id=EXCLUDED.grant_id")
++        .bind(org).bind(channel).bind(&members).bind(&revisions).bind(&lifetimes).bind(&positions).execute(&mut *connection)).await?;
+     Ok(())
+ }
+
+diff --git a/server/src/database.rs b/server/src/database.rs
+index 5d1a8b24..032208d3 100644
+--- a/server/src/database.rs
++++ b/server/src/database.rs
+@@ -91,18 +91,25 @@ where
+         finished: false,
+         discard,
+     };
+-    let connection = guard
+-        .connection
+-        .insert(crate::database::acquire(pool).await?);
++    let connection = guard.connection.insert(
++        crate::move_diagnostic::send_timed(
++            "send_receipt_pool_acquire",
++            crate::database::acquire(pool),
++        )
++        .await?,
++    );
+     // SQLx 0.8.6 records transaction depth only after BEGIN's response, so its
+     // rollback-on-drop cannot recover a BEGIN cancelled before that response.
+-    sqlx::Executor::execute(
+-        &mut **connection,
+-        if read_only {
+-            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+-        } else {
+-            "BEGIN"
+-        },
++    crate::move_diagnostic::send_timed(
++        "send_receipt_begin_sql",
++        sqlx::Executor::execute(
++            &mut **connection,
++            if read_only {
++                "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
++            } else {
++                "BEGIN"
++            },
++        ),
+     )
+     .await?;
+     let result = body(connection).await;
+@@ -112,7 +119,11 @@ where
+     } else {
+         "ROLLBACK"
+     };
+-    let finished = sqlx::Executor::execute(&mut **connection, end).await;
++    let finished = crate::move_diagnostic::send_timed(
++        "send_receipt_end_sql",
++        sqlx::Executor::execute(&mut **connection, end),
++    )
++    .await;
+     guard.finished = finished.is_ok();
+     // Preserve body errors unless the caller requires a confirmed rollback for
+     // that error. The armed guard discards the connection on cleanup failure.
+diff --git a/server/src/database/context.rs b/server/src/database/context.rs
+index 595746fc..8f044b9d 100644
+--- a/server/src/database/context.rs
++++ b/server/src/database/context.rs
+@@ -201,7 +201,11 @@ where
+         confirm_rollback,
+         async |connection: &mut PgConnection| {
+             if organization {
+-                set_organization(connection, id).await?;
++                crate::move_diagnostic::send_timed(
++                    "send_receipt_set_organization_sql",
++                    set_organization(connection, id),
++                )
++                .await?;
+             } else {
+                 sqlx::query("SELECT set_config('fukulow.account_id', $1, true)")
+                     .bind(id.to_string())
 diff --git a/server/src/database/stats.rs b/server/src/database/stats.rs
-index 1e68196..4951481 100644
+index 1e681968..49514816 100644
 --- a/server/src/database/stats.rs
 +++ b/server/src/database/stats.rs
 @@ -95,7 +95,7 @@ impl Stats {
@@ -12,7 +236,7 @@ index 1e68196..4951481 100644
              Ok(_) => &self.success,
              Err(sqlx::Error::PoolTimedOut) => &self.timeout,
 diff --git a/server/src/lib.rs b/server/src/lib.rs
-index 0c5b544..54763cf 100644
+index 5d673359..6c95e0b6 100644
 --- a/server/src/lib.rs
 +++ b/server/src/lib.rs
 @@ -2,6 +2,7 @@ pub mod auth;
@@ -23,7 +247,7 @@ index 0c5b544..54763cf 100644
  pub mod observability;
  pub mod openapi;
  pub mod realtime;
-@@ -294,6 +295,7 @@ pub(crate) async fn reject_new_requests(
+@@ -296,6 +297,7 @@ pub(crate) async fn reject_new_requests(
      next: Next,
  ) -> axum::response::Response {
      if shutdown.is_stopped() {
@@ -32,7 +256,7 @@ index 0c5b544..54763cf 100644
              axum::http::StatusCode::SERVICE_UNAVAILABLE,
              [
 diff --git a/server/src/messages.rs b/server/src/messages.rs
-index ba76164..a90c684 100644
+index ba761648..444f0d43 100644
 --- a/server/src/messages.rs
 +++ b/server/src/messages.rs
 @@ -272,6 +272,7 @@ pub async fn send_message(
@@ -61,33 +285,126 @@ index ba76164..a90c684 100644
      .await
      .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
      Ok(created(message))
-@@ -654,14 +655,17 @@ async fn persist(
+@@ -339,22 +340,33 @@ async fn committed(
+         pool,
+         organization_id,
+         async |tx: &mut sqlx::PgConnection| {
+-            let archived = channels::visible_archive_state(tx, organization_id, sender, channel_id)
+-                .await?
+-                .ok_or(MessageError::OrganizationUnavailable)?
+-                .ok_or(MessageError::NotFound)?;
++            let archived = crate::move_diagnostic::send_timed(
++                "send_receipt_access_sql",
++                channels::visible_archive_state(tx, organization_id, sender, channel_id),
++            )
++            .await?
++            .ok_or(MessageError::OrganizationUnavailable)?
++            .ok_or(MessageError::NotFound)?;
+             if input.history_generation.is_some() {
+-                history::validate(
+-                    tx,
+-                    organization_id,
+-                    channel_id,
+-                    input.history_generation,
+-                    None,
++                crate::move_diagnostic::send_timed(
++                    "send_receipt_history_sql",
++                    history::validate(
++                        tx,
++                        organization_id,
++                        channel_id,
++                        input.history_generation,
++                        None,
++                    ),
+                 )
+                 .await?;
+             }
+             // The receipt query supplies the generation for a canonical retry.
+-            match receipt(&mut *tx, organization_id, sender.0, channel_id, input).await? {
++            match crate::move_diagnostic::send_timed(
++                "send_receipt_lookup_sql",
++                receipt(&mut *tx, organization_id, sender.0, channel_id, input),
++            )
++            .await?
++            {
+                 Some((message, true)) => Ok(Some(message)),
+                 Some((_, false)) => Err(MessageError::Conflict),
+                 None if archived => Err(MessageError::ChannelArchived),
+@@ -654,7 +666,7 @@ async fn persist(
      let _permit = waiter.acquire().await?;
      tokio::time::timeout(
          admission::WORK_TIMEOUT,
 -        persist_admitted(
--            pool,
--            delivery,
--            organization_id,
--            sender,
--            channel_id,
--            input,
--            _permit,
-+        crate::move_diagnostic::timed(
-+            "admitted_work",
-+            persist_admitted(
-+                pool,
-+                delivery,
-+                organization_id,
-+                sender,
-+                channel_id,
-+                input,
-+                _permit,
-+            ),
-         ),
++        crate::move_diagnostic::send_admitted(persist_admitted(
+             pool,
+             delivery,
+             organization_id,
+@@ -662,7 +674,7 @@ async fn persist(
+             channel_id,
+             input,
+             _permit,
+-        ),
++        )),
      )
      .await
-@@ -728,12 +732,15 @@ async fn persist_admitted(
+     .map_err(|_| {
+@@ -681,22 +693,32 @@ async fn persist_admitted(
+     permit: admission::Permit,
+ ) -> Result<Message, MessageError> {
+     let mut tx = commit::Transaction::begin(pool, permit, "BEGIN", Some(organization_id)).await?;
+-    require_visible(tx.connection()?, organization_id, sender, channel_id).await?;
+-    let history_generation = history::validate(
+-        tx.connection()?,
+-        organization_id,
+-        channel_id,
+-        input.history_generation,
+-        None,
++    crate::move_diagnostic::send_timed(
++        "send_visibility_sql",
++        require_visible(tx.connection()?, organization_id, sender, channel_id),
++    )
++    .await?;
++    let history_generation = crate::move_diagnostic::send_timed(
++        "send_history_sql",
++        history::validate(
++            tx.connection()?,
++            organization_id,
++            channel_id,
++            input.history_generation,
++            None,
++        ),
+     )
+     .await?;
+     let member = sender;
+     let sender = sender.0;
+-    if existing(
+-        tx.connection()?,
+-        organization_id,
+-        sender,
+-        input.client_message_id,
++    if crate::move_diagnostic::send_timed(
++        "send_existing_sql",
++        existing(
++            tx.connection()?,
++            organization_id,
++            sender,
++            input.client_message_id,
++        ),
+     )
+     .await?
+     .is_some()
+@@ -707,7 +729,9 @@ async fn persist_admitted(
+             .await?
+             .ok_or(MessageError::Database(sqlx::Error::RowNotFound));
+     }
+-    let targets = mentions::extract(&input.body);
++    let targets = crate::move_diagnostic::send_sync("send_mention_extract", || {
++        mentions::extract(&input.body)
++    });
+     let accepted = if let Some((grants, accepted)) = channels::dms::send_locks(
+         tx.connection()?,
+         organization_id,
+@@ -728,12 +752,15 @@ async fn persist_admitted(
              .await?;
          accepted
      } else {
@@ -109,8 +426,146 @@ index ba76164..a90c684 100644
          )
          .await?;
          match visible {
+@@ -744,12 +771,15 @@ async fn persist_admitted(
+         if archived {
+             // Another send can commit before our Channel lock is granted.
+             // Resolve its receipt in the locked state before refusing new work.
+-            let canonical = receipt(
+-                tx.connection()?,
+-                organization_id,
+-                sender,
+-                channel_id,
+-                &input,
++            let canonical = crate::move_diagnostic::send_timed(
++                "send_archived_receipt_sql",
++                receipt(
++                    tx.connection()?,
++                    organization_id,
++                    sender,
++                    channel_id,
++                    &input,
++                ),
+             )
+             .await?;
+             tx.rollback().await?;
+@@ -765,11 +795,14 @@ async fn persist_admitted(
+     tests::removal::pause(input.client_message_id).await;
+     // Read before waiting for the Channel barrier: an uncommitted parent is absent,
+     // never a foreign-key wait or an implicitly accepted optimistic client id.
+-    replies::parent_location(
+-        tx.connection()?,
+-        organization_id,
+-        channel_id,
+-        input.reply_to,
++    crate::move_diagnostic::send_timed(
++        "send_reply_parent_before",
++        replies::parent_location(
++            tx.connection()?,
++            organization_id,
++            channel_id,
++            input.reply_to,
++        ),
+     )
+     .await?;
+     #[cfg(test)]
+@@ -777,14 +810,21 @@ async fn persist_admitted(
+     // Bound every subsequent lock wait, including the counter and idempotency key.
+     commit::lock(tx.connection()?, organization_id, channel_id, false).await?;
+     // A committed parent may have moved while this Reply waited for the writer.
+-    let parent = replies::parent_location(
+-        tx.connection()?,
+-        organization_id,
+-        channel_id,
+-        input.reply_to,
++    let parent = crate::move_diagnostic::send_timed(
++        "send_reply_parent_after",
++        replies::parent_location(
++            tx.connection()?,
++            organization_id,
++            channel_id,
++            input.reply_to,
++        ),
++    )
++    .await?;
++    let seq = crate::move_diagnostic::send_timed(
++        "send_sequence_sql",
++        log::allocate(tx.connection()?, organization_id, channel_id),
+     )
+     .await?;
+-    let seq = log::allocate(tx.connection()?, organization_id, channel_id).await?;
+     let topic_id = if let Some((topic, _)) = parent {
+         topic
+     } else {
+@@ -798,7 +838,8 @@ async fn persist_admitted(
+         .await?
+     };
+     let reply_root_id = parent.map(|(_, root)| root);
+-    let message = sqlx::query(
++    let message = crate::move_diagnostic::send_timed("send_message_insert_sql", async {
++        sqlx::query(
+         "INSERT INTO messages (organization_id, id, channel_id, seq, sender, client_message_id, body, topic_id, reply_to_id, reply_root_id) \
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+          ON CONFLICT (organization_id, sender, client_message_id) DO NOTHING \
+@@ -806,30 +847,44 @@ async fn persist_admitted(
+          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, '[]'::text AS mentions, $11::uuid AS history_generation",
+     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
+         .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).bind(history_generation).try_map(|row| message_from_row(&row))
+-        .fetch_optional(tx.connection()?).await?;
++        .fetch_optional(tx.connection()?).await
++    }).await?;
+     if let Some(mut message) = message {
+         search::SearchEngine::index_send(&mut tx, organization_id, message.id).await?;
+-        log::create(tx.connection()?, organization_id, &message).await?;
++        crate::move_diagnostic::send_timed(
++            "send_channel_log_sql",
++            log::create(tx.connection()?, organization_id, &message),
++        )
++        .await?;
+         mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
+-        topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
++        crate::move_diagnostic::send_timed(
++            "send_topic_record",
++            topics::record(tx.connection()?, organization_id, topic_id, seq),
++        )
++        .await?;
+         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
+         // connected subscribers silently missing a possibly committed message.
+-        let mut notification =
+-            delivery.notification(organization_id, channel_id, message.created_seq);
++        let mut notification = crate::move_diagnostic::send_sync("send_notification_arm", || {
++            delivery.notification(organization_id, channel_id, message.created_seq)
++        });
+         if let Err(error) = commit::finish(tx, input.client_message_id).await {
+             if commit::definitely_rolled_back(&error) {
+                 notification.complete();
+             }
+             return Err(error.into());
+         }
+-        delivery.channel_access.activity.message(
+-            pool.clone(),
+-            organization_id,
+-            channel_id,
+-            sender,
+-            message.created_seq,
+-        );
+-        notification.spawn(pool.clone(), message.clone());
++        crate::move_diagnostic::send_sync("send_activity_schedule", || {
++            delivery.channel_access.activity.message(
++                pool.clone(),
++                organization_id,
++                channel_id,
++                sender,
++                message.created_seq,
++            );
++        });
++        crate::move_diagnostic::send_sync("send_notification_schedule", || {
++            notification.spawn(pool.clone(), message.clone());
++        });
+         return Ok(message);
+     }
+     tx.rollback().await?;
 diff --git a/server/src/messages/admission.rs b/server/src/messages/admission.rs
-index 1a396b8..15e30ba 100644
+index 1a396b84..15e30ba9 100644
 --- a/server/src/messages/admission.rs
 +++ b/server/src/messages/admission.rs
 @@ -145,6 +145,10 @@ impl Admission {
@@ -174,10 +629,10 @@ index 1a396b8..15e30ba 100644
              Err(sqlx::Error::Io(std::io::Error::new(
                  std::io::ErrorKind::WouldBlock,
 diff --git a/server/src/messages/commit.rs b/server/src/messages/commit.rs
-index fdf4f86..6fd8702 100644
+index fdf4f866..28facec1 100644
 --- a/server/src/messages/commit.rs
 +++ b/server/src/messages/commit.rs
-@@ -24,7 +24,10 @@ impl Transaction {
+@@ -24,25 +24,40 @@ impl Transaction {
          organization: Option<Uuid>,
      ) -> Result<Self, sqlx::Error> {
          let mut tx = Self {
@@ -188,17 +643,44 @@ index fdf4f86..6fd8702 100644
 +            ),
              _permit: permit,
          };
-         tx.connection()?.execute(sql).await?;
-@@ -35,7 +38,7 @@ impl Transaction {
+-        tx.connection()?.execute(sql).await?;
++        crate::move_diagnostic::send_timed("send_begin_sql", tx.connection()?.execute(sql)).await?;
+         if let Some(organization) = organization {
+-            crate::database::set_organization(tx.connection()?, organization).await?;
++            crate::move_diagnostic::send_timed(
++                "send_set_organization_sql",
++                crate::database::set_organization(tx.connection()?, organization),
++            )
++            .await?;
+         }
+         Ok(tx)
      }
 
      pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
 -        self.connection()?.execute("COMMIT").await?;
+-        drop(self.connection.take());
 +        crate::move_diagnostic::timed("commit_sql", self.connection()?.execute("COMMIT")).await?;
-         drop(self.connection.take());
++        crate::move_diagnostic::send_sync("send_commit_connection_return", || {
++            drop(self.connection.take())
++        });
          Ok(())
      }
-@@ -83,11 +86,14 @@ pub(super) async fn lock(
+
+     pub(crate) async fn rollback(mut self) -> Result<(), sqlx::Error> {
+-        self.connection()?.execute("ROLLBACK").await?;
+-        drop(self.connection.take());
++        crate::move_diagnostic::send_timed(
++            "send_rollback_sql",
++            self.connection()?.execute("ROLLBACK"),
++        )
++        .await?;
++        crate::move_diagnostic::send_sync("send_rollback_connection_return", || {
++            drop(self.connection.take())
++        });
+         Ok(())
+     }
+ }
+@@ -83,11 +98,14 @@ pub(super) async fn lock(
      } else {
          sql.to_owned()
      };
@@ -219,7 +701,7 @@ index fdf4f86..6fd8702 100644
  }
 
 diff --git a/server/src/messages/limiter.rs b/server/src/messages/limiter.rs
-index fdaf348..087793e 100644
+index fdaf348e..087793ee 100644
 --- a/server/src/messages/limiter.rs
 +++ b/server/src/messages/limiter.rs
 @@ -216,6 +216,7 @@ impl SendLimiter {
@@ -246,8 +728,51 @@ index fdaf348..087793e 100644
                  return Err(Refusal::Saturated);
              }
          }
+diff --git a/server/src/messages/mentions.rs b/server/src/messages/mentions.rs
+index c559474f..c603515c 100644
+--- a/server/src/messages/mentions.rs
++++ b/server/src/messages/mentions.rs
+@@ -50,19 +50,26 @@ pub(super) async fn store(
+     message: &mut Message,
+     targets: &[Uuid],
+ ) -> Result<(), sqlx::Error> {
+-    sqlx::query("INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id) SELECT $1,$2,$3,unnest($4::uuid[])")
++    crate::move_diagnostic::send_timed("send_mention_insert_sql", sqlx::query("INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id) SELECT $1,$2,$3,unnest($4::uuid[])")
+         .bind(organization).bind(message.channel_id).bind(message.id).bind(targets)
+-        .execute(&mut *tx).await?;
+-    let identities = crate::auth::members::display_identities(tx, organization, targets).await?;
+-    message.mentions = Some(
+-        identities
+-            .into_iter()
+-            .map(|identity| Mention {
+-                member_id: identity.id,
+-                name: identity.name,
+-            })
+-            .collect(),
+-    );
++        .execute(&mut *tx)).await?;
++    let identities = crate::move_diagnostic::send_timed(
++        "send_mention_identities_sql",
++        crate::auth::members::display_identities(tx, organization, targets),
++    )
++    .await?;
++    message.mentions = Some(crate::move_diagnostic::send_sync(
++        "send_mention_hydrate",
++        || {
++            identities
++                .into_iter()
++                .map(|identity| Mention {
++                    member_id: identity.id,
++                    name: identity.name,
++                })
++                .collect()
++        },
++    ));
+     Ok(())
+ }
+
 diff --git a/server/src/messages/move_topic.rs b/server/src/messages/move_topic.rs
-index 2711754..d32c31b 100644
+index 27117545..d32c31b2 100644
 --- a/server/src/messages/move_topic.rs
 +++ b/server/src/messages/move_topic.rs
 @@ -124,20 +124,22 @@ pub async fn move_chain(
@@ -326,8 +851,52 @@ index 2711754..d32c31b 100644
      }
      Ok(Prepared::Write(
          MoveChainResponse {
+diff --git a/server/src/messages/search/d3r.rs b/server/src/messages/search/d3r.rs
+index 640ad418..87001407 100644
+--- a/server/src/messages/search/d3r.rs
++++ b/server/src/messages/search/d3r.rs
+@@ -101,7 +101,7 @@ impl D3rEngine {
+         organization: Uuid,
+         messages: &[Uuid],
+     ) -> Result<(), sqlx::Error> {
+-        sqlx::query(
++        crate::move_diagnostic::send_timed("send_search_terms_sql", sqlx::query(
+             "INSERT INTO message_search_terms (organization_id, channel_id, term, created_at, message_id)
+              SELECT m.organization_id, m.channel_id, term, m.created_at, m.id
+              FROM messages m CROSS JOIN LATERAL public.fukulow_search_terms(m.body) AS terms(term)
+@@ -109,7 +109,7 @@ impl D3rEngine {
+         )
+         .bind(organization)
+         .bind(messages)
+-        .execute(tx)
++        .execute(tx))
+         .await?;
+         Ok(())
+     }
+diff --git a/server/src/messages/topics.rs b/server/src/messages/topics.rs
+index 4e31a92a..36d37f1d 100644
+--- a/server/src/messages/topics.rs
++++ b/server/src/messages/topics.rs
+@@ -118,13 +118,13 @@ pub(super) async fn join(
+     name: Option<&str>,
+ ) -> Result<Option<Uuid>, sqlx::Error> {
+     let Some(name) = name else { return Ok(None) };
+-    sqlx::query(
++    crate::move_diagnostic::send_timed("send_topic_insert_sql", async { sqlx::query(
+         "INSERT INTO topics (organization_id, channel_id, id, name, first_seq, last_seq, message_count) \
+          VALUES ($1, $2, $3, $4, $5, $5, CASE WHEN $5::bigint IS NULL THEN 0 ELSE 1 END) ON CONFLICT (organization_id, channel_id, name_key) DO NOTHING",
+     ).bind(organization).bind(channel).bind(Uuid::new_v4()).bind(name).bind(seq)
+-        .execute(&mut *connection).await?;
+-    sqlx::query_scalar("SELECT id FROM topics WHERE organization_id = $1 AND channel_id = $2 AND name_key = lower($3 COLLATE \"C\")")
+-        .bind(organization).bind(channel).bind(name).fetch_one(connection).await.map(Some)
++        .execute(&mut *connection).await }).await?;
++    crate::move_diagnostic::send_timed("send_topic_lookup_sql", sqlx::query_scalar("SELECT id FROM topics WHERE organization_id = $1 AND channel_id = $2 AND name_key = lower($3 COLLATE \"C\")")
++        .bind(organization).bind(channel).bind(name).fetch_one(connection)).await.map(Some)
+ }
+
+ pub(super) async fn record(
 diff --git a/server/src/messages/topics/projection.rs b/server/src/messages/topics/projection.rs
-index 1c111c6..8006aa8 100644
+index 1c111c61..8006aa80 100644
 --- a/server/src/messages/topics/projection.rs
 +++ b/server/src/messages/topics/projection.rs
 @@ -75,20 +75,31 @@ async fn read(
@@ -399,7 +968,7 @@ index 1c111c6..8006aa8 100644
          match first.try_get::<Option<bool>, _>("visible")? {
              None => return Err(MessageError::OrganizationUnavailable),
 diff --git a/server/src/messages/unread.rs b/server/src/messages/unread.rs
-index e245339..5315901 100644
+index e2453398..53159014 100644
 --- a/server/src/messages/unread.rs
 +++ b/server/src/messages/unread.rs
 @@ -143,31 +143,36 @@ pub async fn list_channels(
@@ -463,23 +1032,25 @@ index e245339..5315901 100644
  #[utoipa::path(put, path = "/api/v1/orgs/{org}/channels/{id}/read", request_body = MarkReadRequest,
 diff --git a/server/src/move_diagnostic.rs b/server/src/move_diagnostic.rs
 new file mode 100644
-index 0000000..d5e111d
+index 0000000..0e3361d
 --- /dev/null
 +++ b/server/src/move_diagnostic.rs
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,262 @@
 +use axum::response::Response;
 +use std::{
++    cell::RefCell,
 +    future::Future,
 +    sync::{
 +        Arc, OnceLock,
 +        atomic::{AtomicU64, Ordering::Relaxed},
 +    },
-+    time::Instant,
++    time::{Duration, Instant},
 +};
 +use uuid::Uuid;
 +
 +tokio::task_local! {
 +    static WRITE: Write;
++    static SEND_TIMINGS: RefCell<SendTimings>;
 +}
 +
 +static SEND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -504,14 +1075,20 @@ index 0000000..d5e111d
 +}
 +
 +// Move always, sends 1 in 32, Part D reads 1 in FUKULOW_MOVE_DIAG_READ_EVERY.
-+fn sampled(lane: &'static str) -> bool {
++fn sample(lane: &'static str) -> (bool, Option<u64>) {
 +    let (sequence, every) = match lane {
-+        "move" => return true,
-+        "send" => (&SEND_SEQUENCE, Some(32)),
++        "move" => return (true, None),
++        "send" => {
++            let sequence = SEND_SEQUENCE.fetch_add(1, Relaxed);
++            return (sequence % 32 == 0, Some(sequence));
++        }
 +        "channels" => (&CHANNELS_SEQUENCE, read_every()),
 +        _ => (&TOPICS_SEQUENCE, read_every()),
 +    };
-+    every.is_some_and(|every| sequence.fetch_add(1, Relaxed) % every == 0)
++    (
++        every.is_some_and(|every| sequence.fetch_add(1, Relaxed) % every == 0),
++        None,
++    )
 +}
 +
 +#[derive(Clone)]
@@ -521,6 +1098,7 @@ index 0000000..d5e111d
 +    organization: Option<Uuid>,
 +    started: Instant,
 +    sampled: bool,
++    request_id: Option<u64>,
 +    reason: Arc<OnceLock<&'static str>>,
 +}
 +
@@ -529,11 +1107,14 @@ index 0000000..d5e111d
 +    organization: Option<Uuid>,
 +    future: impl Future<Output = Response>,
 +) -> Response {
++    let started = Instant::now();
++    let (sampled, request_id) = sample(lane);
 +    let write = Write {
 +        lane,
 +        organization,
-+        started: Instant::now(),
-+        sampled: sampled(lane),
++        started,
++        sampled,
++        request_id,
 +        reason: Arc::default(),
 +    };
 +    let reason = write.reason.clone();
@@ -566,28 +1147,66 @@ index 0000000..d5e111d
 +            record(
 +                write.lane,
 +                write.organization,
-+                "before_admission",
-+                write.started,
-+                false,
++                PhaseTiming {
++                    phase: "before_admission",
++                    elapsed: write.started.elapsed(),
++                    interrupted: false,
++                },
++                None,
++                None,
 +            );
 +        }
 +    });
 +}
 +
 +pub(crate) async fn timed<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
-+    let mut timer = WRITE
-+        .try_with(|write| {
-+            write.sampled.then(|| Timer {
-+                lane: write.lane,
-+                organization: write.organization,
-+                phase,
-+                started: Instant::now(),
-+                interrupted: true,
-+            })
-+        })
++    let mut timer = Timer::start(phase);
++    let result = future.await;
++    if let Some(timer) = &mut timer {
++        timer.interrupted = false;
++    }
++    result
++}
++
++// Scope the send-only hooks to the sampled admitted future. In particular, the
++// canonical receipt snapshot can also run before admission.
++pub(crate) async fn send_admitted<T>(future: impl Future<Output = T>) -> T {
++    let request_id = WRITE
++        .try_with(|write| write.request_id.filter(|_| write.sampled))
 +        .ok()
 +        .flatten();
-+    let result = future.await;
++    if let Some(request_id) = request_id {
++        // The task-local value drops after the scoped future, including on timeout.
++        // That lets the timers capture elapsed time and the work release its permit
++        // and transaction before any of these records are formatted or written.
++        SEND_TIMINGS
++            .scope(
++                RefCell::new(SendTimings {
++                    request_id,
++                    phases: Vec::with_capacity(48),
++                }),
++                timed("admitted_work", future),
++            )
++            .await
++    } else {
++        timed("admitted_work", future).await
++    }
++}
++
++pub(crate) async fn send_timed<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
++    if SEND_TIMINGS.try_with(|_| ()).is_ok() {
++        timed(phase, future).await
++    } else {
++        future.await
++    }
++}
++
++pub(crate) fn send_sync<T>(phase: &'static str, work: impl FnOnce() -> T) -> T {
++    let mut timer = SEND_TIMINGS
++        .try_with(|_| Timer::start(phase))
++        .ok()
++        .flatten();
++    let result = work();
 +    if let Some(timer) = &mut timer {
 +        timer.interrupted = false;
 +    }
@@ -602,31 +1221,85 @@ index 0000000..d5e111d
 +    interrupted: bool,
 +}
 +
++impl Timer {
++    fn start(phase: &'static str) -> Option<Self> {
++        WRITE
++            .try_with(|write| {
++                write.sampled.then(|| Self {
++                    lane: write.lane,
++                    organization: write.organization,
++                    phase,
++                    started: Instant::now(),
++                    interrupted: true,
++                })
++            })
++            .ok()
++            .flatten()
++    }
++}
++
 +impl Drop for Timer {
 +    fn drop(&mut self) {
-+        record(
-+            self.lane,
-+            self.organization,
-+            self.phase,
-+            self.started,
-+            self.interrupted,
-+        );
++        let timing = PhaseTiming {
++            phase: self.phase,
++            elapsed: self.started.elapsed(),
++            interrupted: self.interrupted,
++        };
++        if SEND_TIMINGS
++            .try_with(|timings| timings.borrow_mut().phases.push(timing))
++            .is_err()
++        {
++            record(self.lane, self.organization, timing, None, None);
++        }
++    }
++}
++
++#[derive(Clone, Copy)]
++struct PhaseTiming {
++    phase: &'static str,
++    elapsed: Duration,
++    interrupted: bool,
++}
++
++struct SendTimings {
++    request_id: u64,
++    phases: Vec<PhaseTiming>,
++}
++
++impl Drop for SendTimings {
++    fn drop(&mut self) {
++        // The parent counts nested access details too. The shared pool timing
++        // overlaps the write and receipt acquisition phases.
++        let children = self
++            .phases
++            .iter()
++            .filter(|timing| !matches!(timing.phase, "admitted_work" | "pool_acquire"))
++            .count();
++        for &timing in &self.phases {
++            record(
++                "send",
++                None,
++                timing,
++                Some(self.request_id),
++                (timing.phase == "admitted_work").then_some(children),
++            );
++        }
 +    }
 +}
 +
 +fn record(
 +    lane: &'static str,
 +    organization: Option<Uuid>,
-+    phase: &'static str,
-+    started: Instant,
-+    interrupted: bool,
++    timing: PhaseTiming,
++    request_id: Option<u64>,
++    send_children: Option<usize>,
 +) {
 +    let organization = organization.map(|id| id.to_string()).unwrap_or_default();
-+    tracing::info!(target: "fukulow", event = "move_diag_timing", lane, organization, phase,
-+        us = started.elapsed().as_secs_f64() * 1_000_000.0, interrupted);
++    tracing::info!(target: "fukulow", event = "move_diag_timing", lane, organization, phase = timing.phase,
++        us = timing.elapsed.as_secs_f64() * 1_000_000.0, interrupted = timing.interrupted, request_id, send_children);
 +}
 diff --git a/server/src/observability.rs b/server/src/observability.rs
-index 4a356be..e380ac6 100644
+index 4a356bed..e380ac63 100644
 --- a/server/src/observability.rs
 +++ b/server/src/observability.rs
 @@ -110,7 +110,32 @@ pub(crate) async fn request(request: Request, next: Next) -> Response {
