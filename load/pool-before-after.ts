@@ -51,6 +51,8 @@ let rehearsalClean=false;
 const postgresImage=/image: (postgres:\S+)/.exec(readFileSync('load/compose.yml','utf8'))?.[1];
 if(!postgresImage) throw new Error('No Postgres image in load/compose.yml');
 try {
+  // Compose pulls this pinned image anyway; make it present first so the probe (--pull never) works on a cold cache.
+  try { docker('image','inspect',postgresImage); } catch { docker('pull',postgresImage); }
   const headroom=assertDockerHeadroom(postgresImage,(smoke?5:20)*1024**3);
   const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-config.ts','load/pool-before-after-summary.ts','load/pool-before-after-analyze.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
   save(`${output}/metadata.json`,{scope,harnessCondition:condition,timeoutNote,commits,settings,smoke,rehearsal,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
