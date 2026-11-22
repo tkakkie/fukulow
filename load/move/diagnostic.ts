@@ -7,27 +7,29 @@ import { promisify } from 'node:util';
 import { createGunzip } from 'node:zlib';
 import { command, docker, type Stack } from '../slice5/stack.ts';
 import { appEvidence, cgroupSample, dbEvidence, dbSampleIntervalMs, k6Evidence, parseDbSample, parseStatements,
-  type DbSample } from './diagnostic-evidence.ts';
-import { diagnosticCommit, diagnosticLabel } from './diagnostic-mode.ts';
+  statementGroupSql, type DbSample } from './diagnostic-evidence.ts';
+import { diagnosticLabel } from './diagnostic-mode.ts';
 
 const exec = promisify(execFile);
+const topStatementTexts = 25;
 
-export async function diagnosticImage(repo: string, scratch: string, tag: string, signal: AbortSignal) {
+export async function diagnosticImage(repo: string, scratch: string, tag: string, signal: AbortSignal,
+  target: { commit: string; patch: string }) {
   const source = join(scratch, 'source');
   const archive = join(scratch, 'source.tar');
-  const patch = join(repo, 'load/move/diagnostic.patch');
+  const patch = join(repo, target.patch);
   mkdirSync(source);
-  command('git', ['-C', repo, 'archive', '--format=tar', `--output=${archive}`, diagnosticCommit]);
+  command('git', ['-C', repo, 'archive', '--format=tar', `--output=${archive}`, target.commit]);
   command('tar', ['-xf', archive, '-C', source]);
   rmSync(archive);
   command('git', ['-C', source, 'apply', '--whitespace=error', patch]);
   signal.throwIfAborted();
   await exec('docker', ['buildx', 'build', '--load', '--tag', tag, '--label', `${diagnosticLabel}=true`,
-    '--label', `org.opencontainers.image.revision=${diagnosticCommit}`, source],
+    '--label', `org.opencontainers.image.revision=${target.commit}`, source],
   { signal, maxBuffer: 16 * 1024 * 1024 });
   const id = docker('image', 'inspect', '--format', '{{.Id}}', tag);
   if (!/^sha256:[a-f0-9]{64}$/.test(id)) throw new Error('Invalid DIAGNOSTIC image ID');
-  return { id, revision: diagnosticCommit, patchSha256: createHash('sha256').update(readFileSync(patch)).digest('hex') };
+  return { id, revision: target.commit, patch: target.patch, patchSha256: createHash('sha256').update(readFileSync(patch)).digest('hex') };
 }
 
 const activitySql = `SELECT json_build_object('at', floor(extract(epoch FROM clock_timestamp()) * 1000),
@@ -36,16 +38,15 @@ FROM (SELECT query_id, coalesce(wait_event_type, 'running') AS kind, coalesce(wa
   FROM pg_stat_activity WHERE datname = current_database() AND usename = 'fukulow_app' AND state = 'active'
   GROUP BY 1, 2, 3) AS activity`;
 
-const statementsSql = `SELECT json_build_object('id', queryid::text, 'calls', calls, 'execMs', total_exec_time, 'group', CASE
-  WHEN query LIKE '%pg_advisory_xact_lock_shared(%' THEN 'channel_advisory_read'
-  WHEN query LIKE '%pg_advisory_xact_lock(%' THEN 'channel_advisory_write'
-  WHEN query LIKE '%UPDATE messages SET topic_id=%' THEN 'move_update'
-  WHEN query LIKE '%UNION ALL (SELECT id, reply_to_id, seq, version, sender, topic_id FROM messages%' THEN 'move_chain_lookup'
-  WHEN query LIKE 'INSERT INTO messages %' THEN 'send_insert'
-  WHEN query ~* 'FOR (NO KEY UPDATE|KEY SHARE|UPDATE|SHARE)' THEN 'row_lock_sql'
-  ELSE 'other' END)
-FROM pg_stat_statements WHERE toplevel AND userid = 'fukulow_app'::regrole AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-ORDER BY total_exec_time DESC, queryid`;
+// Text is kept for the top statements only, and only for DML: normalized $n placeholders carry no values.
+const statementsSql = `SELECT json_build_object('id', queryid::text, 'calls', calls, 'execMs', total_exec_time,
+  'group', ${statementGroupSql()},
+  'text', CASE WHEN rank <= ${topStatementTexts} AND query ~* '^[[:space:]]*(SELECT|WITH|INSERT|UPDATE|DELETE)[[:space:]]'
+    THEN left(query, 200) END)
+FROM (SELECT queryid, calls, total_exec_time, query, row_number() OVER (ORDER BY total_exec_time DESC, queryid) AS rank
+  FROM pg_stat_statements WHERE toplevel AND userid = 'fukulow_app'::regrole
+    AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database())) AS ranked
+ORDER BY rank`;
 
 function samplePostgres(stack: Stack) {
   const child = spawn('docker', ['exec', '-i', stack.db, 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1',

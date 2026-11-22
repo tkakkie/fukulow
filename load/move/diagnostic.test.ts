@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { appEvidence, cgroupSample, dbEvidence, k6CeilingWarnings, k6Evidence, parseDbSample, parseStatements } from './diagnostic-evidence.ts';
-import { diagnosticSelection, rejectDiagnosticImage } from './diagnostic-mode.ts';
+import { readFileSync } from 'node:fs';
+import { appEvidence, cgroupSample, dbEvidence, k6CeilingWarnings, k6Evidence, parseDbSample, parseStatements,
+  statementGroup, statementGroupSql } from './diagnostic-evidence.ts';
+import { attributionLabel, diagnosticCommit, diagnosticSelection, diagnosticTargets, rejectDiagnosticImage } from './diagnostic-mode.ts';
 import { judge } from './judge.ts';
 import { plan, type Step } from './plan.ts';
 
@@ -88,8 +90,92 @@ test('PostgreSQL aggregation keeps query IDs precise and leaves sampling gaps un
   assert.equal(evidence.coveredMs, 100);
   assert.deepEqual(evidence.waits.map(row => [row.event, row.observations, row.estimatedBackendMs]), [['advisory', 4, 200], ['WALSync', 2, 100]]);
   assert.deepEqual(evidence.statements[0], { queryId: id, group: 'channel_advisory_write', calls: 3,
-    execMs: 250, estimatedLockMs: 200, estimatedExecExcludingLockMs: 50 });
+    execMs: 250, text: null, estimatedLockMs: 200, estimatedExecExcludingLockMs: 50 });
   assert.equal(dbEvidence([sample(100), sample(200)], [{ ...stats[0], execMs: 50 }]).statements[0].estimatedExecExcludingLockMs, null);
   assert.equal(dbEvidence([], stats).statements[0].estimatedExecExcludingLockMs, null);
   assert.throws(() => parseStatements(JSON.stringify({ id: 10, group: 'other', calls: 3, execMs: 4 })), /Invalid PostgreSQL statement/);
+});
+
+const mainCommit = 'd655a3ad2795530c4a18587b7c589e58180d6ffb';
+
+test('diagnostic commit and read lanes are pinned choices recorded with the selection', () => {
+  const pinned = diagnosticSelection({ diagnostic: true })!;
+  assert.deepEqual([pinned.commit, pinned.patch, pinned.readTimingSampleEvery, pinned.readLanes],
+    [diagnosticCommit, 'load/move/diagnostic.patch', null, 'all']);
+  const main = diagnosticSelection({ diagnostic: true, commit: mainCommit, 'read-lanes': 'topics' })!;
+  assert.deepEqual([main.commit, main.patch, main.readTimingSampleEvery, main.readLanes],
+    [mainCommit, 'load/move/diagnostic-d655a3a.patch', 8, 'topics']);
+  assert.deepEqual(main.steps, pinned.steps);
+  assert.throws(() => diagnosticSelection({ diagnostic: true, commit: 'a'.repeat(40) }), /pinned Part D commit/);
+  assert.throws(() => diagnosticSelection({ diagnostic: true, commit: mainCommit.slice(0, 7) }), /pinned Part D commit/);
+  assert.throws(() => diagnosticSelection({ diagnostic: true, 'read-lanes': 'reader' }), /--read-lanes all/);
+  assert.throws(() => diagnosticSelection({ 'read-lanes': 'all' }), /require --diagnostic/);
+  assert.equal(attributionLabel('all'), undefined);
+  assert.match(attributionLabel('channels')!, /^ATTRIBUTION RUN .*channels only.*not the Part D Done-when load$/);
+});
+
+test('the main patch ports every hook of the pinned patch and adds the read-lane phases', () => {
+  const hooks = (file: string) => new Set([...readFileSync(new URL('../../' + file, import.meta.url), 'utf8')
+    .split('\n').filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n')
+    .matchAll(/(?:timed|rejection)\(\s*"(\w+)"|Some\("(\w+)"\)|"(before_admission)"/g)].map(match => match[1] ?? match[2] ?? match[3]));
+  const pinned = hooks(diagnosticTargets[diagnosticCommit].patch);
+  const main = hooks(diagnosticTargets[mainCommit].patch);
+  assert.ok(pinned.size >= 20);
+  assert.deepEqual([...pinned].filter(hook => !main.has(hook)), []);
+  for (const phase of ['topic_visible_scoped', 'topic_dm_check', 'topic_barrier', 'topic_page_tx', 'topic_page_sql',
+    'channel_list_total', 'channel_visible_sql', 'channel_history_sql', 'channel_counts_sql', 'watermark_channel_timeout'])
+    assert.ok(main.has(phase), phase);
+});
+
+test('server parsing keeps Part D read lanes apart from the write-lane 503 accounting', () => {
+  const event = (fields: object) => JSON.stringify({ timestamp: '2026-11-20T00:00:01Z', fields });
+  const timing = (lane: string, phase: string, us: number) => event({ event: 'move_diag_timing', lane, phase, us, interrupted: false });
+  const app = appEvidence([timing('topics', 'topic_page_sql', 40), timing('topics', 'topic_barrier', 7),
+    timing('topics', 'channel_advisory_sql', 3), timing('channels', 'channel_counts_sql', 9), timing('channels', 'not_a_phase', 1),
+    timing('reader', 'channel_list_total', 1),
+    event({ event: 'move_diag_503', lane: 'topics', reason: 'watermark_channel_timeout' }),
+    event({ event: 'move_diag_503', lane: 'send', reason: 'channel_queue_full' })].join('\n'));
+  assert.equal(app.byLane.topics.phasesUs.topic_page_sql.p50, 40);
+  assert.equal(app.byLane.topics.phasesUs.channel_advisory_sql.count, 1);
+  assert.deepEqual(Object.keys(app.byLane.channels.phasesUs), ['channel_counts_sql']);
+  assert.equal(app.byLane.topics.reasons.watermark_channel_timeout, 1);
+  assert.equal(app.timing.length, 4);
+  assert.deepEqual([app.unavailable.length, app.writeUnavailable], [2, 1]);
+});
+
+test('statement groups keep the write groups first and identify the Part D read statements', () => {
+  assert.ok(statementGroupSql().startsWith(`CASE WHEN query LIKE '%pg_advisory_xact_lock_shared(%' THEN 'channel_advisory_read'
+  WHEN query LIKE '%pg_advisory_xact_lock(%' THEN 'channel_advisory_write'
+  WHEN query LIKE '%UPDATE messages SET topic_id=%' THEN 'move_update'
+  WHEN query LIKE '%UNION ALL (SELECT id, reply_to_id, seq, version, sender, topic_id FROM messages%' THEN 'move_chain_lookup'
+  WHEN query LIKE 'INSERT INTO messages %' THEN 'send_insert'
+  WHEN query ~* 'FOR (NO KEY UPDATE|KEY SHARE|UPDATE|SHARE)' THEN 'row_lock_sql'
+  WHEN `));
+  assert.match(statementGroupSql(), / ELSE 'other' END$/);
+  const cases: [string, string][] = [
+    ['\nWITH unread_topics AS MATERIALIZED (\n    SELECT t.organization_id FROM topics t WHERE t.channel_id = ANY($4)\n) SELECT c.channel_id', 'channel_list_counts'],
+    ["SELECT c.id FROM (x) u LEFT JOIN channels c ON c.organization_id = $2 AND (c.kind=$5 AND ($6::bool IS NULL OR (c.archived_at IS NOT NULL)=$6)) AND (v)", 'channel_list_visible'],
+    ['SELECT visible FROM (SELECT u.id, u.membership_revision, EXISTS (SELECT $1 FROM channels c WHERE c.organization_id = $2', 'member_visibility'],
+    ['SELECT s.account_id, u.id, u.name, u.role FROM account_sessions s LEFT JOIN users u ON true', 'auth_session'],
+    ['SELECT history_generation FROM organizations WHERE organization_id=$1', 'organization_history'],
+    ['WITH mention_page AS MATERIALIZED (\nWITH access AS MATERIALIZED (SELECT (v) AS visible),\npositions AS (SELECT 1 FROM messages m LEFT JOIN topic_read_positions tr ON true),\ncandidates AS (\n    SELECT * FROM positions)', 'topic_page'],
+    ['WITH expired AS (SELECT id FROM invites), candidates AS (SELECT id FROM expired) DELETE FROM invites', 'other'],
+    ['SELECT EXISTS (SELECT $3 FROM channels WHERE organization_id=$1 AND id=$2 AND kind=$4)', 'dm_check'],
+    ['SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $2', 'watermark_seq'],
+    ['SELECT seq, mutation_seq FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2', 'history_page_seq'],
+    ['SELECT seq + $3 FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2', 'other'],
+    ['SELECT pg_advisory_xact_lock_shared($1, $2)', 'channel_advisory_read'],
+    ['INSERT INTO messages (id) VALUES ($1)', 'send_insert'],
+    ['WITH unread_topics AS MATERIALIZED (SELECT 1) SELECT 1 FOR SHARE', 'row_lock_sql'],
+  ];
+  assert.deepEqual(cases.map(([query]) => statementGroup(query)), cases.map(([, group]) => group));
+});
+
+test('statement summaries accept bounded normalized text only', () => {
+  const row = { id: '1', group: 'topic_page', calls: 1, execMs: 2 };
+  assert.equal(parseStatements(JSON.stringify({ ...row, text: 'SELECT $1' }))[0].text, 'SELECT $1');
+  assert.equal(parseStatements(JSON.stringify({ ...row, text: null }))[0].text, null);
+  assert.throws(() => parseStatements(JSON.stringify({ ...row, text: 'x'.repeat(201) })), /Invalid PostgreSQL statement/);
+  assert.throws(() => parseStatements(JSON.stringify({ ...row, text: 3 })), /Invalid PostgreSQL statement/);
+  assert.throws(() => parseStatements(JSON.stringify({ ...row, group: 'unknown' })), /Invalid PostgreSQL statement/);
 });

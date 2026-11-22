@@ -23,32 +23,39 @@ export function distributions(numbers: number[]) {
 }
 
 const lanes = ['send', 'move'] as const;
+// The server tags the Part D read routes too; the reader lane shares the Channel-list route.
+const serverLanes = [...lanes, 'channels', 'topics'] as const;
 const scenarios = [...lanes, 'reader', 'channels', 'topic0', 'topic1', 'topic2', 'topic3'] as const;
 type Lane = typeof lanes[number];
+type ServerLane = typeof serverLanes[number];
 type Scenario = typeof scenarios[number];
 const phases = ['before_admission', 'channel_admission_wait', 'global_admission_wait', 'admitted_work', 'pool_acquire',
-  'write_pool_acquire', 'send_access_sql', 'move_access_sql', 'channel_advisory_sql', 'commit_sql', 'move_chain_lookup', 'move_apply'] as const;
+  'write_pool_acquire', 'send_access_sql', 'move_access_sql', 'channel_advisory_sql', 'commit_sql', 'move_chain_lookup', 'move_apply',
+  'topic_visible_scoped', 'topic_dm_check', 'topic_barrier', 'topic_page_tx', 'topic_page_sql',
+  'channel_list_total', 'channel_visible_sql', 'channel_history_sql', 'channel_counts_sql'] as const;
 const reasons = ['global_queue_full', 'channel_queue_full', 'channel_admission_timeout', 'global_admission_timeout',
-  'channel_admission_closed', 'global_admission_closed',
+  'channel_admission_closed', 'global_admission_closed', 'watermark_channel_timeout', 'watermark_global_timeout',
+  'watermark_channel_closed', 'watermark_global_closed',
   'limiter_duplicate_waiters_cap', 'limiter_pending_cap', 'limiter_member_buckets_cap', 'shutdown', 'unclassified'] as const;
 const member = <T extends string>(list: readonly T[], input: unknown): input is T => list.includes(input as T);
 
 export function appEvidence(log: string) {
-  const timing: { at: number; lane: Lane; phase: typeof phases[number]; us: number; interrupted: boolean }[] = [];
-  const unavailable: { at: number; lane: Lane; reason: typeof reasons[number] }[] = [];
+  const timing: { at: number; lane: ServerLane; phase: typeof phases[number]; us: number; interrupted: boolean }[] = [];
+  const unavailable: { at: number; lane: ServerLane; reason: typeof reasons[number] }[] = [];
   for (const line of log.split('\n')) {
     if (!line.includes('move_diag_')) continue;
     const { timestamp, fields } = parseLine(line);
     const at = time(timestamp);
     const { event, lane, phase, us, interrupted, reason } = object(fields);
-    if (!Number.isFinite(at) || !member(lanes, lane)) continue;
+    if (!Number.isFinite(at) || !member(serverLanes, lane)) continue;
     if (event === 'move_diag_timing' && member(phases, phase) && nonnegative(us) && typeof interrupted === 'boolean')
       timing.push({ at, lane, phase, us, interrupted });
     if (event === 'move_diag_503' && member(reasons, reason)) unavailable.push({ at, lane, reason });
   }
   return {
     timing, unavailable,
-    byLane: Object.fromEntries(lanes.map(lane => [lane, {
+    writeUnavailable: unavailable.filter(sample => member(lanes, sample.lane)).length,
+    byLane: Object.fromEntries(serverLanes.map(lane => [lane, {
       reasons: Object.fromEntries(reasons.map(reason => [reason, unavailable.filter(sample => sample.lane === lane && sample.reason === reason).length])),
       phasesUs: Object.fromEntries(phases.flatMap(phase => {
         const points = timing.filter(sample => sample.lane === lane && sample.phase === phase);
@@ -110,9 +117,43 @@ export async function k6Evidence(lines: AsyncIterable<string>) {
 const queryId = (id: unknown): id is string => typeof id === 'string' && /^-?\d{1,20}$/.test(id);
 export const dbSampleIntervalMs = 100;
 export type DbSample = { at: number; waits: { queryId: string | null; type: string; event: string; count: number }[] };
-export type Statement = { queryId: string; group: string; calls: number; execMs: number };
+export type Statement = { queryId: string; group: string; calls: number; execMs: number; text: string | null };
 const waitTypes = ['Lock', 'LWLock', 'IO', 'BufferPin', 'Client', 'IPC', 'Timeout', 'Extension', 'Activity', 'running'] as const;
-const queryGroups = ['channel_advisory_read', 'channel_advisory_write', 'move_chain_lookup', 'move_update', 'send_insert', 'row_lock_sql', 'other'] as const;
+// First match wins. Read-lane groups follow the write groups so those keep their membership;
+// markers avoid literals and $n numbers: pg_stat_statements replaces literals with $n and may renumber.
+export const statementGroups: readonly { group: string; like?: readonly string[]; regex?: string }[] = [
+  { group: 'channel_advisory_read', like: ['%pg_advisory_xact_lock_shared(%'] },
+  { group: 'channel_advisory_write', like: ['%pg_advisory_xact_lock(%'] },
+  { group: 'move_update', like: ['%UPDATE messages SET topic_id=%'] },
+  { group: 'move_chain_lookup', like: ['%UNION ALL (SELECT id, reply_to_id, seq, version, sender, topic_id FROM messages%'] },
+  { group: 'send_insert', like: ['INSERT INTO messages %'] },
+  { group: 'row_lock_sql', regex: 'FOR (NO KEY UPDATE|KEY SHARE|UPDATE|SHARE)' },
+  { group: 'channel_list_counts', like: ['%unread_topics AS MATERIALIZED (%'] },
+  { group: 'channel_list_visible', like: ['%::bool IS NULL OR (c.archived_at IS NOT NULL)=%'] },
+  { group: 'topic_page', like: ['%candidates AS (%', '%topic_read_positions%'] },
+  { group: 'dm_check', like: ['SELECT EXISTS (SELECT % FROM channels WHERE organization_id=% AND id=% AND kind=%'] },
+  { group: 'watermark_seq', like: ['SELECT seq FROM channel_message_sequences WHERE organization_id = % AND channel_id = %'] },
+  { group: 'history_page_seq', like: ['SELECT seq, mutation_seq FROM channel_message_sequences WHERE organization_id=% AND channel_id=%'] },
+  // Shared by many routes (Topic-list pre-checks, Move pre-check, auth on every request).
+  { group: 'member_visibility', like: ['%SELECT visible FROM (SELECT u.id, u.membership_revision, EXISTS (SELECT %'] },
+  { group: 'auth_session', like: ['SELECT s.account_id, u.id, %FROM account_sessions s %'] },
+  { group: 'organization_history', like: ['SELECT history_generation FROM organizations WHERE %'] },
+];
+const queryGroups = [...statementGroups.map(rule => rule.group), 'other'];
+const condition = (rule: typeof statementGroups[number]) =>
+  rule.regex ? `query ~* '${rule.regex}'` : rule.like!.map(pattern => `query LIKE '${pattern}'`).join(' AND ');
+
+export function statementGroupSql() {
+  return `CASE ${statementGroups.map(rule => `WHEN ${condition(rule)} THEN '${rule.group}'`).join('\n  ')} ELSE 'other' END`;
+}
+
+// The same rules as statementGroupSql, for tests against normalized statement text.
+export function statementGroup(query: string) {
+  const like = (pattern: string) => new RegExp('^' + [...pattern].map(c => c === '%' ? '[\\s\\S]*' : c === '_' ? '[\\s\\S]'
+    : c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('') + '$');
+  return statementGroups.find(rule => rule.regex ? new RegExp(rule.regex, 'i').test(query)
+    : rule.like!.every(pattern => like(pattern).test(query)))?.group ?? 'other';
+}
 
 export function parseDbSample(line: string): DbSample {
   const { at, waits } = parseLine(line);
@@ -128,10 +169,11 @@ export function parseDbSample(line: string): DbSample {
 
 export function parseStatements(raw: string): Statement[] {
   return raw ? raw.split('\n').map(line => {
-    const { id, group, calls, execMs } = parseLine(line);
-    if (!queryId(id) || !member(queryGroups, group) || !integer(calls) || !nonnegative(execMs))
+    const { id, group, calls, execMs, text = null } = parseLine(line);
+    if (!queryId(id) || !member(queryGroups, group) || !integer(calls) || !nonnegative(execMs) ||
+        !(text === null || (typeof text === 'string' && [...text].length <= 200)))
       throw new Error('Invalid PostgreSQL statement summary');
-    return { queryId: id, group, calls, execMs };
+    return { queryId: id, group, calls, execMs, text };
   }) : [];
 }
 

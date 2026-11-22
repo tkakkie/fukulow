@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { k6CeilingWarnings } from './diagnostic-evidence.ts';
 import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnostic.ts';
-import { diagnosticCommit, diagnosticLabel, diagnosticMode, diagnosticSelection, rejectDiagnosticImage } from './diagnostic-mode.ts';
+import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, rejectDiagnosticImage, type ReadLanes } from './diagnostic-mode.ts';
 import { buildFixture, committedMoves, head, type Seeded } from './fixture.ts';
 import { infrastructureFailure, type Attempt, type Measurement, type Result } from './judge.ts';
 import { latency, storage } from './measure.ts';
@@ -51,7 +51,7 @@ function cleanup(project: string, step?: string) {
   }
 }
 
-async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir: string, labels: Record<string, string>, k6: string, signal: AbortSignal, diagnosticRun = false) {
+async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir: string, labels: Record<string, string>, k6: string, signal: AbortSignal, diagnosticRun = false, readLanes: ReadLanes = 'all') {
   save(join(dir, 'data.json'), seeded.data);
   save(join(dir, 'tokens.json'), seeded.tokens);
   const name = `${stack.env.LOAD_PROJECT}-k6`;
@@ -61,7 +61,8 @@ async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir:
     ...Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]),
     '-v', `${repo}:/work:ro`, '-v', `${dir}:/fixture:ro`, '-w', '/work',
     '-e', 'BASE_URL=http://app:8080', '-e', 'REQUEST_TIMEOUT_SECONDS=10', '-e', `MOVE_STEP=${JSON.stringify(step)}`,
-    '-e', `MOVE_SMOKE=${Number(p.smoke)}`, ...(output?.dockerArgs ?? []),
+    '-e', `MOVE_SMOKE=${Number(p.smoke)}`, ...(readLanes === 'all' ? [] : ['-e', `MOVE_READ_LANES=${readLanes}`]),
+    ...(output?.dockerArgs ?? []),
     k6, 'run', '--quiet', ...(output?.k6Args ?? []), 'load/move/workload-k6.ts'];
   const prior = head(stack, seeded.data);
   const resources = diagnosticRun ? undefined : sampler(stack, () => name);
@@ -110,13 +111,12 @@ async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir:
 async function main() {
   const { values } = parseArgs({ options: { commit: { type: 'string' }, image: { type: 'string' },
     out: { type: 'string' }, smoke: { type: 'boolean' }, diagnostic: { type: 'boolean' },
-    sizes: { type: 'string' }, round: { type: 'string' } } });
+    sizes: { type: 'string' }, round: { type: 'string' }, 'read-lanes': { type: 'string' } } });
   const selection = diagnosticSelection(values);
   if (!values.out || (!selection && (!values.commit || !values.image)))
-    throw new Error('Usage: node load/move/run.ts --out NEW_DIRECTORY [--commit FULL_SHA --image IMAGE | --diagnostic [--sizes 100,1000] [--round 1]] [--smoke]');
-  if (selection && values.commit !== undefined && values.commit !== diagnosticCommit)
-    throw new Error('DIAGNOSTIC requires the pinned Part D commit');
-  const commit = selection ? diagnosticCommit : values.commit!;
+    throw new Error('Usage: node load/move/run.ts --out NEW_DIRECTORY [--commit FULL_SHA --image IMAGE | --diagnostic [--commit PINNED_SHA] [--sizes 100,1000] [--round 1] [--read-lanes all|channels|topics]] [--smoke]');
+  const commit = selection ? selection.commit : values.commit!;
+  const attribution = selection && attributionLabel(selection.readLanes);
   const p = selection?.plan ?? plan(values.smoke ?? false);
   const orderedSteps = selection?.steps ?? steps(p);
   let image: { id: string; revision: string; patchSha256?: string } | undefined;
@@ -150,17 +150,18 @@ async function main() {
   const cleanupIssues: string[] = [];
   try {
     if (selection) {
-      console.log('DIAGNOSTIC: building the instrumented Part D image');
-      image = await diagnosticImage(repo, scratch, tag, abort.signal);
+      console.log('DIAGNOSTIC: building the instrumented Part D image' + (attribution ? ` (${attribution})` : ''));
+      image = await diagnosticImage(repo, scratch, tag, abort.signal, selection);
     }
     if (!image) throw new Error('Missing app image');
     const harnessFiles = command('git', ['-C', repo, 'ls-files', '--cached', '--others', '--exclude-standard', '--', 'load/move'])
-      .split('\n').filter(file => file.endsWith('.ts') || (selection && file === 'load/move/diagnostic.patch'));
+      .split('\n').filter(file => file.endsWith('.ts') || (selection && file === selection.patch));
     const tracked = ['load/seed.ts', 'load/events.ts', 'load/compose.yml', 'load/channel-log.sql', 'load/slice5/stack.ts',
       'load/slice5/fixture.ts', 'load/slice5/judge.ts', 'load/pool-before-after-summary.ts', ...harnessFiles];
     save(join(output, selection ? 'DIAGNOSTIC-metadata.json' : 'metadata.json'), {
       // Formal metadata keeps its pre-diagnostic key order.
-      ...(selection ? { mode: diagnosticMode, sendTimingSampleEvery: 32, commit, image, k6, k6Id, project, plan: p }
+      ...(selection ? { mode: diagnosticMode, sendTimingSampleEvery: 32, readTimingSampleEvery: selection.readTimingSampleEvery,
+        readLanes: selection.readLanes, attribution, commit, image, k6, k6Id, project, plan: p }
         : { commit, image, k6, k6Id, project, plan: p, thresholds: { ...thresholds, moveP95Ms: moveLimits } }),
       orderedSteps,
       harnessCommit: command('git', ['-C', repo, 'rev-parse', 'HEAD']),
@@ -194,7 +195,7 @@ async function main() {
           stage = 'measurement';
           const measured = step.part === 'A' ? await latency(stack, seeded, p, abort.signal)
             : step.part === 'F' ? await storage(stack, seeded, p, step, abort.signal)
-            : await generator(stack, seeded, p, step, dir, labels, k6, abort.signal, Boolean(selection));
+            : await generator(stack, seeded, p, step, dir, labels, k6, abort.signal, Boolean(selection), selection?.readLanes);
           attempt.measurement = measured.measurement;
           if ('problem' in measured) attempt.problem = measured.problem;
           artifacts = measured;
@@ -203,13 +204,17 @@ async function main() {
             const { app, k6: generator, postgres, containers } = measured.extra;
             const missing = [
               ...(!app?.byLane.send.phasesUs.before_admission ? ['send timings'] : []),
+              ...(selection.readTimingSampleEvery && selection.readLanes !== 'topics' && !app?.byLane.channels.phasesUs.channel_list_total
+                ? ['Channel-list timings'] : []),
+              ...(selection.readTimingSampleEvery && selection.readLanes !== 'channels' && !app?.byLane.topics.phasesUs.topic_page_sql
+                ? ['Topic-list timings'] : []),
               ...(!generator?.vus.some(point => point.active !== undefined && point.allocated !== undefined) ? ['k6 VU gauges'] : []),
               ...(!postgres.statementsAvailable ? ['PostgreSQL execution statistics'] : []),
               ...(!postgres.samples.length ? ['PostgreSQL wait samples'] : []),
               // A starved sampler (one query in flight) still yields samples; require half the window covered.
               ...(postgres.coveredMs < 500 * (step.part === 'E' ? p.replaySeconds : p.seconds) ? ['PostgreSQL wait sample coverage'] : []),
               // Log rotation can drop early events: the app must account for every 503 k6 saw on write lanes.
-              ...(app && generator && app.unavailable.length < generator.completed503.send + generator.completed503.move
+              ...(app && generator && app.writeUnavailable < generator.completed503.send + generator.completed503.move
                 ? ['app 503 reasons (log incomplete)'] : []),
               ...Object.entries(containers.summary).filter(([, container]) => !container.samples).map(([name]) => name + ' cgroup samples'),
               ...(p.smoke && step.arm === 'move' && (!measured.measurement?.moveVerified || !app?.byLane.move.phasesUs.move_apply)
@@ -226,7 +231,7 @@ async function main() {
           try { cleanup(project, id); stepCleaned = true; } catch { cleanupIssues.push(`${id}: step cleanup failed`); }
           if (selection) {
             const capture = captured?.extra;
-            const arm = { mode: diagnosticMode, step, problem: attempt.problem,
+            const arm = { mode: diagnosticMode, readLanes: selection.readLanes, attribution, step, problem: attempt.problem,
               started: captured?.started,
               workload: attempt.measurement && { ...attempt.measurement, mode: diagnosticMode }, server: capture?.app?.byLane };
             diagnosticArms.push(arm);
@@ -261,8 +266,9 @@ async function main() {
     const finished = complete && cleaned && !abort.signal.aborted;
     if (selection) {
       const captured = finished && cleanupIssues.length === 0 && results.every(result => !result.attempts[0]?.problem);
-      save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, complete: captured, cleanupIssues, arms: diagnosticArms });
-      console.log(`DIAGNOSTIC capture ${captured ? 'complete' : 'incomplete'}`);
+      save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, readLanes: selection.readLanes, attribution,
+        complete: captured, cleanupIssues, arms: diagnosticArms });
+      console.log(`DIAGNOSTIC capture ${captured ? 'complete' : 'incomplete'}` + (attribution ? ` · ${attribution}` : ''));
       if (!captured) process.exitCode = 1;
     } else {
       const report = render(p, results, finished);

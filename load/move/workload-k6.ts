@@ -43,10 +43,14 @@ if (step.part === 'E') {
     // One writer carries the chain version and destination from one committed Move to the next.
     scenarios.move = scenario(1, `${moveInterval(step.size)}s`, seconds, 1, 1, 'move');
   }
-  if (step.part === 'D') {
+  // DIAGNOSTIC attribution runs may keep one Part D read lane; unset means both, as in the formal load.
+  const readLanes = __ENV.MOVE_READ_LANES ?? 'all';
+  if (step.part === 'D' && readLanes !== 'topics') {
     lanes.add('channels');
-    lanes.add('topics');
     scenarios.channels = scenario(p.channelRate, '1s', seconds, p.smoke ? 2 : 500, p.smoke ? 8 : 2000, 'channels');
+  }
+  if (step.part === 'D' && readLanes !== 'channels') {
+    lanes.add('topics');
     for (let i = 0; i < p.topicReaders; i++) {
       const name = `topic${i}`;
       topicScenarios.push(name);
