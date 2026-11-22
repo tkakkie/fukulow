@@ -38,6 +38,9 @@ test('a recorded run is evidence only once sampling started and it was not inter
   sampled.startSampling();
   assert.deepEqual([sampled.write({ failed: true, interrupted: false }).evidence,
     sampled.write({ failed: false, interrupted: true }).evidence], [true, false]);
+  const invalid = sampled.finish(() => {}, { failed: true, interrupted: false, invalidEvidence: true });
+  assert.deepEqual([invalid.outcome, invalid.evidence], ['result-failure', false]);
+  assert.equal(JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')).evidence, false);
   assert.equal(stages(out, 'rehearsal').write({ failed: false, interrupted: false }).evidence, false);
 });
 

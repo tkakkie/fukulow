@@ -1,20 +1,21 @@
 diff --git a/Dockerfile b/Dockerfile
-index bfa52f3..6f71181 100644
+index bfa52f3..91c441c 100644
 --- a/Dockerfile
 +++ b/Dockerfile
-@@ -43,7 +43,9 @@ COPY client-core/ client-core/
+@@ -43,7 +43,10 @@ COPY client-core/ client-core/
  COPY deploy/db-*.sql deploy/
  RUN find server/src api-types/src client-core/src -name "*.rs" -exec touch {} +
  COPY --from=web /app/web/dist web/dist
 -RUN cargo build --locked --release -p fukulow-server
 +COPY fk515-sqlx-core/ fk515-sqlx-core/
++COPY fk515-sqlx-postgres/ fk515-sqlx-postgres/
 +COPY fk515-Cargo.lock Cargo.lock
-+RUN cargo --config 'patch.crates-io.sqlx-core.path="/app/fk515-sqlx-core"' build --locked --release -p fukulow-server
++RUN cargo --config 'patch.crates-io.sqlx-core.path="/app/fk515-sqlx-core"' --config 'patch.crates-io.sqlx-postgres.path="/app/fk515-sqlx-postgres"' build --locked --release -p fukulow-server
  
  FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
  RUN groupadd --gid 10001 fukulow \
 diff --git a/server/src/auth.rs b/server/src/auth.rs
-index ba1f32c..5ebe9be 100644
+index ba1f32c..b097d86 100644
 --- a/server/src/auth.rs
 +++ b/server/src/auth.rs
 @@ -676,7 +676,7 @@ impl FromRequestParts<AppState> for Auth {
@@ -22,7 +23,7 @@ index ba1f32c..5ebe9be 100644
              organization,
              async |tx: &mut sqlx::PgConnection| {
 -                sqlx::query_as::<
-+                sqlx::pool::fk515::observe("session", sqlx::query_as::<
++                sqlx::pool::fk515::query("session", sqlx::query_as::<
                      _,
                      (
                          Uuid,
@@ -37,7 +38,7 @@ index ba1f32c..5ebe9be 100644
          )
          .await?
 diff --git a/server/src/channels.rs b/server/src/channels.rs
-index ac9f07e..2ff83bb 100644
+index ac9f07e..7b4d92c 100644
 --- a/server/src/channels.rs
 +++ b/server/src/channels.rs
 @@ -581,13 +581,12 @@ pub(crate) async fn is_visible_scoped(
@@ -45,7 +46,7 @@ index ac9f07e..2ff83bb 100644
          &member_visibility_sql(false),
          async |connection: &mut sqlx::PgConnection, sql: &str| {
 -            sqlx::query_scalar(sql)
-+            sqlx::pool::fk515::observe("visibility", sqlx::query_scalar(sql)
++            sqlx::pool::fk515::query("visibility", sqlx::query_scalar(sql)
                  .bind(organization)
                  .bind(member.0)
                  .bind(member.1)
@@ -56,24 +57,8 @@ index ac9f07e..2ff83bb 100644
          },
      )
      .await
-diff --git a/server/src/database/context.rs b/server/src/database/context.rs
-index 9c2725e..d91dfe8 100644
---- a/server/src/database/context.rs
-+++ b/server/src/database/context.rs
-@@ -157,9 +157,8 @@ pub(crate) async fn set_organization(
-     connection: &mut PgConnection,
-     organization: Uuid,
- ) -> Result<(), sqlx::Error> {
--    sqlx::query("SELECT set_config('fukulow.organization_id', $1, true)")
-+    sqlx::pool::fk515::observe("snapshot_context", sqlx::query("SELECT set_config('fukulow.organization_id', $1, true)")
-         .bind(organization.to_string())
--        .execute(connection)
--        .await?;
-+        .execute(connection)).await?;
-     Ok(())
- }
 diff --git a/server/src/database.rs b/server/src/database.rs
-index 820eb1b..4ccd4a5 100644
+index 820eb1b..6f6e82d 100644
 --- a/server/src/database.rs
 +++ b/server/src/database.rs
 @@ -94,14 +94,14 @@ where
@@ -81,7 +66,7 @@ index 820eb1b..4ccd4a5 100644
      // SQLx 0.8.6 records transaction depth only after BEGIN's response, so its
      // rollback-on-drop cannot recover a BEGIN cancelled before that response.
 -    sqlx::Executor::execute(
-+    sqlx::pool::fk515::observe("snapshot_begin", sqlx::Executor::execute(
++    sqlx::pool::fk515::query("snapshot_begin", sqlx::Executor::execute(
          &mut **connection,
          if read_only {
              "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
@@ -98,20 +83,97 @@ index 820eb1b..4ccd4a5 100644
          "ROLLBACK"
      };
 -    let finished = sqlx::Executor::execute(&mut **connection, end).await;
-+    let finished = sqlx::pool::fk515::observe("snapshot_end", sqlx::Executor::execute(&mut **connection, end)).await;
++    let finished = sqlx::pool::fk515::query("snapshot_end", sqlx::Executor::execute(&mut **connection, end)).await;
      guard.finished = finished.is_ok();
      // A body error (e.g. 404) outranks a cleanup failure; the armed guard still discards.
      let value = result?;
+diff --git a/server/src/database/context.rs b/server/src/database/context.rs
+index 9c2725e..e566e40 100644
+--- a/server/src/database/context.rs
++++ b/server/src/database/context.rs
+@@ -157,9 +157,8 @@ pub(crate) async fn set_organization(
+     connection: &mut PgConnection,
+     organization: Uuid,
+ ) -> Result<(), sqlx::Error> {
+-    sqlx::query("SELECT set_config('fukulow.organization_id', $1, true)")
++    sqlx::pool::fk515::query("snapshot_context", sqlx::query("SELECT set_config('fukulow.organization_id', $1, true)")
+         .bind(organization.to_string())
+-        .execute(connection)
+-        .await?;
++        .execute(connection)).await?;
+     Ok(())
+ }
 diff --git a/server/src/fk515.rs b/server/src/fk515.rs
 new file mode 100644
-index 0000000..8d27437
+index 0000000..a66dc67
 --- /dev/null
 +++ b/server/src/fk515.rs
-@@ -0,0 +1,32 @@
-+use axum::{extract::Request, http::Method, middleware::Next, response::Response};
-+use sqlx::pool::fk515::{Trace, scope};
+@@ -0,0 +1,93 @@
++use std::{
++    fs::OpenOptions,
++    io::Write,
++    sync::{
++        Arc,
++        atomic::{AtomicUsize, Ordering::Relaxed},
++        mpsc::{RecvTimeoutError, SyncSender, sync_channel},
++    },
++    time::Duration,
++};
 +
-+pub async fn request(req: Request, next: Next) -> Response {
++use axum::{
++    extract::{Request, State},
++    http::Method,
++    middleware::Next,
++    response::Response,
++};
++use sqlx::pool::fk515::{Event, Trace, scope};
++
++#[derive(Clone)]
++pub struct TraceSink {
++    sender: SyncSender<(u64, Vec<Event>)>,
++    dropped: Arc<AtomicUsize>,
++}
++
++impl TraceSink {
++    pub fn start() -> Self {
++        let (sender, receiver) = sync_channel::<(u64, Vec<Event>)>(128);
++        let dropped = Arc::new(AtomicUsize::new(0));
++        let count = dropped.clone();
++        let _ = std::thread::Builder::new()
++            .name("fk515-traces".into())
++            .spawn(move || {
++                let Ok(mut output) = OpenOptions::new()
++                    .write(true)
++                    .create_new(true)
++                    .open("/tmp/fk515-app-traces.log")
++                else {
++                    return;
++                };
++                let mut reported = 0;
++                loop {
++                    let next = receiver.recv_timeout(Duration::from_millis(200));
++                    if let Ok(trace) = &next {
++                        let written = serde_json::to_string(trace)
++                            .is_ok_and(|json| writeln!(output, "FK515_APP {json}").is_ok());
++                        if !written {
++                            count.fetch_add(1, Relaxed);
++                        }
++                    }
++                    // A full queue produces no message to wake an idle receiver.
++                    let lost = count.load(Relaxed);
++                    if lost != reported && writeln!(output, "FK515_APP_DROPPED {lost}").is_ok() {
++                        reported = lost;
++                    }
++                    if matches!(next, Err(RecvTimeoutError::Disconnected)) {
++                        break;
++                    }
++                }
++            });
++        Self { sender, dropped }
++    }
++}
++
++pub async fn request(State(sink): State<TraceSink>, req: Request, next: Next) -> Response {
 +    let id = req
 +        .headers()
 +        .get("x-fk515-sample")
@@ -128,8 +190,8 @@ index 0000000..8d27437
 +        return next.run(req).await;
 +    };
 +    let trace = Trace::new(move |spans| {
-+        if let Ok(json) = serde_json::to_string(&(id, spans)) {
-+            println!("FK515_APP {json}");
++        if sink.sender.try_send((id, spans)).is_err() {
++            sink.dropped.fetch_add(1, Relaxed);
 +        }
 +    });
 +    let timer = trace.span("request", None);
@@ -141,7 +203,7 @@ index 0000000..8d27437
 +    response
 +}
 diff --git a/server/src/lib.rs b/server/src/lib.rs
-index f262aaa..b06979c 100644
+index f262aaa..2835314 100644
 --- a/server/src/lib.rs
 +++ b/server/src/lib.rs
 @@ -1,3 +1,4 @@
@@ -149,17 +211,37 @@ index f262aaa..b06979c 100644
  pub mod auth;
  pub mod channels;
  pub mod database;
-@@ -216,7 +217,7 @@ pub fn app(state: AppState) -> Router {
+@@ -216,7 +217,9 @@ pub fn app(state: AppState) -> Router {
          )
          .route(
              "/api/v1/orgs/{org}/channels/{id}/events",
 -            get(messages::list_channel_events),
-+            get(messages::list_channel_events).layer(axum::middleware::from_fn(fk515::request)),
++            get(messages::list_channel_events).layer(
++                axum::middleware::from_fn_with_state(fk515::TraceSink::start(), fk515::request),
++            ),
          )
          .route(
              "/api/v1/orgs/{org}/channels/{id}/messages",
+diff --git a/server/src/messages.rs b/server/src/messages.rs
+index 335e569..a8a3a1a 100644
+--- a/server/src/messages.rs
++++ b/server/src/messages.rs
+@@ -853,11 +853,10 @@ async fn latest_seq(
+     commit::lock(tx.connection()?, organization, channel, true).await?;
+     let sql = "SELECT seq FROM channel_message_sequences \
+                    WHERE organization_id = $1 AND channel_id = $2";
+-    let seq = sqlx::query_scalar::<_, i64>(sql)
++    let seq = sqlx::pool::fk515::query("watermark", sqlx::query_scalar::<_, i64>(sql)
+         .bind(organization)
+         .bind(channel)
+-        .fetch_optional(tx.connection()?)
+-        .await?
++        .fetch_optional(tx.connection()?)).await?
+         .unwrap_or(0);
+     tx.commit().await?;
+     Ok(seq)
 diff --git a/server/src/messages/commit.rs b/server/src/messages/commit.rs
-index fdf4f86..f9ffa95 100644
+index fdf4f86..4efb68b 100644
 --- a/server/src/messages/commit.rs
 +++ b/server/src/messages/commit.rs
 @@ -27,7 +27,7 @@ impl Transaction {
@@ -167,7 +249,7 @@ index fdf4f86..f9ffa95 100644
              _permit: permit,
          };
 -        tx.connection()?.execute(sql).await?;
-+        sqlx::pool::fk515::observe("watermark_begin", tx.connection()?.execute(sql)).await?;
++        sqlx::pool::fk515::query("watermark_begin", tx.connection()?.execute(sql)).await?;
          if let Some(organization) = organization {
              crate::database::set_organization(tx.connection()?, organization).await?;
          }
@@ -176,7 +258,7 @@ index fdf4f86..f9ffa95 100644
  
      pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
 -        self.connection()?.execute("COMMIT").await?;
-+        sqlx::pool::fk515::observe("watermark_commit", self.connection()?.execute("COMMIT")).await?;
++        sqlx::pool::fk515::query("watermark_commit", self.connection()?.execute("COMMIT")).await?;
          drop(self.connection.take());
          Ok(())
      }
@@ -185,7 +267,7 @@ index fdf4f86..f9ffa95 100644
          sql.to_owned()
      };
 -    sqlx::query(&sql)
-+    sqlx::pool::fk515::observe("barrier", sqlx::query(&sql)
++    sqlx::pool::fk515::query("barrier", sqlx::query(&sql)
          .bind(organization)
          .bind(channel)
 -        .execute(&mut *tx)
@@ -195,7 +277,7 @@ index fdf4f86..f9ffa95 100644
  }
  
 diff --git a/server/src/messages/log.rs b/server/src/messages/log.rs
-index db3a096..bf16707 100644
+index db3a096..0866b14 100644
 --- a/server/src/messages/log.rs
 +++ b/server/src/messages/log.rs
 @@ -286,7 +286,7 @@ async fn authorized_page(
@@ -203,7 +285,7 @@ index db3a096..bf16707 100644
          async |tx: &mut PgConnection, sql: &str| {
              let sql = format!("{sql} ORDER BY event_seq");
 -            sqlx::query(&sql)
-+            sqlx::pool::fk515::observe("page", sqlx::query(&sql)
++            sqlx::pool::fk515::query("page", sqlx::query(&sql)
                  .bind(organization)
                  .bind(member.0)
                  .bind(member.1)
@@ -245,21 +327,3 @@ index db3a096..bf16707 100644
      let has_more = events.len() > usize::from(limit);
      events.truncate(usize::from(limit));
      let events = events.into_iter().map(ChannelEvent::into_wire).collect();
-diff --git a/server/src/messages.rs b/server/src/messages.rs
-index 335e569..07ebd23 100644
---- a/server/src/messages.rs
-+++ b/server/src/messages.rs
-@@ -853,11 +853,10 @@ async fn latest_seq(
-     commit::lock(tx.connection()?, organization, channel, true).await?;
-     let sql = "SELECT seq FROM channel_message_sequences \
-                    WHERE organization_id = $1 AND channel_id = $2";
--    let seq = sqlx::query_scalar::<_, i64>(sql)
-+    let seq = sqlx::pool::fk515::observe("watermark", sqlx::query_scalar::<_, i64>(sql)
-         .bind(organization)
-         .bind(channel)
--        .fetch_optional(tx.connection()?)
--        .await?
-+        .fetch_optional(tx.connection()?)).await?
-         .unwrap_or(0);
-     tx.commit().await?;
-     Ok(seq)

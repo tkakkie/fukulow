@@ -8,9 +8,10 @@ import type { Arm } from '../../slice5/config.ts';
 
 const patchDir = fileURLToPath(new URL('.', import.meta.url));
 const version = '0.8.6';
-const checksum = 'ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6';
-const lockEntry = `name = "sqlx-core"\nversion = "${version}"\n`;
-const registry = `source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "${checksum}"\n`;
+const checksums = {
+  'sqlx-core': 'ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6',
+  'sqlx-postgres': 'db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46',
+};
 export const variants = ['patched', 'control'] as const;
 export type Variant = typeof variants[number];
 const sha256 = (data: Buffer) => createHash('sha256').update(data).digest('hex');
@@ -25,27 +26,36 @@ export function archive(commit: string, work: string, arm: Arm) {
 }
 
 export async function prepareDriver(work: string) {
-  const response = await fetch(`https://static.crates.io/crates/sqlx-core/sqlx-core-${version}.crate`, { signal: AbortSignal.timeout(60_000) });
-  if (!response.ok) throw new Error('Could not download the locked SQLx crate');
-  const data = Buffer.from(await response.arrayBuffer());
-  if (sha256(data) !== checksum) throw new Error('SQLx crate checksum mismatch');
-  const tar = join(work, 'sqlx-core.crate');
-  const driver = join(work, 'sqlx-core');
-  mkdirSync(driver);
-  writeFileSync(tar, data);
-  cmd('tar', ['-xf', tar, '--strip-components=1', '-C', driver]);
-  const patch = join(patchDir, 'patch-sqlx-core.diff');
-  cmd('git', ['-C', driver, 'apply', '--whitespace=error', patch]);
-  return { driver, sha256: sha256(readFileSync(patch)) };
+  const crates = await Promise.all(Object.entries(checksums).map(async ([name, checksum]) => {
+    const response = await fetch(`https://static.crates.io/crates/${name}/${name}-${version}.crate`, { signal: AbortSignal.timeout(60_000) });
+    if (!response.ok) throw new Error('Could not download the locked ' + name + ' crate');
+    const data = Buffer.from(await response.arrayBuffer());
+    if (sha256(data) !== checksum) throw new Error(name + ' crate checksum mismatch');
+    const tar = join(work, name + '.crate');
+    const path = join(work, name);
+    mkdirSync(path);
+    writeFileSync(tar, data);
+    cmd('tar', ['-xf', tar, '--strip-components=1', '-C', path]);
+    const patch = join(patchDir, `patch-${name}.diff`);
+    cmd('git', ['-C', path, 'apply', '--whitespace=error', patch]);
+    return { name, checksum, path, patchHash: sha256(readFileSync(patch)) };
+  }));
+  const hash = sha256(Buffer.from(JSON.stringify(crates.map(({ name, patchHash }) => [name, patchHash]))));
+  return { crates, sha256: hash };
 }
 
 export function applyArmPatch(source: string, arm: Arm, driver: Awaited<ReturnType<typeof prepareDriver>>) {
   const patch = join(patchDir, `patch-${arm}.diff`);
-  const lock = readFileSync(join(source, 'Cargo.lock'), 'utf8');
-  if (lock.split(lockEntry + registry).length !== 2) throw new Error('Arm does not use the expected locked SQLx crate');
+  let lock = readFileSync(join(source, 'Cargo.lock'), 'utf8');
+  for (const { name, checksum, path } of driver.crates) {
+    const entry = `name = "${name}"\nversion = "${version}"\n`;
+    const registry = `source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "${checksum}"\n`;
+    if (lock.split(entry + registry).length !== 2) throw new Error('Arm does not use the expected locked ' + name + ' crate');
+    lock = lock.replace(entry + registry, entry);
+    cpSync(path, join(source, 'fk515-' + name), { recursive: true });
+  }
   // Keep the original lock for the dependency and WASM Docker layers.
-  writeFileSync(join(source, 'fk515-Cargo.lock'), lock.replace(lockEntry + registry, lockEntry));
-  cpSync(driver.driver, join(source, 'fk515-sqlx-core'), { recursive: true });
+  writeFileSync(join(source, 'fk515-Cargo.lock'), lock);
   cmd('git', ['-C', source, 'apply', '--whitespace=error', patch]);
   return { arm: sha256(readFileSync(patch)), driver: driver.sha256 };
 }

@@ -46,7 +46,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { 
 function stopIfInterrupted() {
   if (interrupted) throw new Error('Interrupted');
 }
-type Instance = { db: Stack; app: ReturnType<Stack['startApp']>; generation: string | null; traceIds: Set<number> };
+type Instance = { db: Stack; app: ReturnType<Stack['startApp']>; generation: string | null; traceIds: Set<number>; dropped: number };
 const instances = new Map<string, Instance>();
 const cleanup: Stack[] = [];
 const blocks: Block[] = [];
@@ -97,10 +97,13 @@ async function request(instance: Instance, arm: Arm, cell: Cell, index: number, 
 async function readBlock(instance: Instance, variant: Variant, stem: string, client: ClientSample[]) {
   const expected = new Set([...instance.traceIds, ...client.map(s => s.id)]);
   // A return check can finish after the client receives the response. Read
-  // logs outside the timing block and allow Docker to deliver the last line.
+  // outside the timing block and wait for the writer to finish the last line.
   for (let attempt = 0; attempt < 10; attempt++) {
-    const log = instance.app.logs();
-    const traces = parseTraces(log);
+    const raw = instance.app.traceLog();
+    const log = raw.slice(0, raw.lastIndexOf('\n') + 1);
+    const { traces, dropped } = parseTraces(log);
+    instance.dropped = dropped;
+    if (dropped > 0) throw new Error(`Diagnostic writer reported ${dropped} dropped traces`);
     if (variant === 'control') {
       if (traces.size !== 0) throw new Error('Unpatched app emitted diagnostic traces');
       return traces;
@@ -148,7 +151,7 @@ try {
   const commits = Object.fromEntries(arms.map(arm => [arm, cmd('git', ['rev-parse', nights[3].commits[arm] + '^{commit}'])])) as Record<Arm, string>;
   const harness = cmd('git', ['rev-parse', 'HEAD']);
   const inputs = fileURLToPath(new URL('.', import.meta.url));
-  const harnessHashes = Object.fromEntries(['run.ts', 'images.ts', 'results.ts', 'patch-A.diff', 'patch-B.diff', 'patch-sqlx-core.diff']
+  const harnessHashes = Object.fromEntries(['run.ts', 'images.ts', 'results.ts', 'patch-A.diff', 'patch-B.diff', 'patch-sqlx-core.diff', 'patch-sqlx-postgres.diff']
     .map(name => [name, createHash('sha256').update(readFileSync(join(inputs, name))).digest('hex')]));
   const setup: Record<string, unknown> = {};
   const metadata = { project, mode, commits, harness, harnessHashes, node: process.version, pgOptions,
@@ -189,7 +192,7 @@ try {
       if (checksum !== seeded.checksum) throw new Error('Fixture checksums differ');
       const role = runtimeCheck(db, arm);
       const app = db.startApp();
-      instances.set(key, { db, app, generation: seeded.generation, traceIds: new Set() });
+      instances.set(key, { db, app, generation: seeded.generation, traceIds: new Set(), dropped: 0 });
       setup[key] = { image, migration, seeded, role };
       save('metadata', metadata);
     }
@@ -221,8 +224,9 @@ try {
     }
   }
   if (work) rmSync(work, { recursive: true, force: true });
-  const status = run.finish(() => writeFileSync(join(out, 'summary.md'), summary(mode, blocks, complete) + '\n'),
-    { failed: Boolean(process.exitCode), interrupted });
+  const dropped = [...instances.values()].reduce((total, instance) => total + instance.dropped, 0);
+  const status = run.finish(() => writeFileSync(join(out, 'summary.md'), summary(mode, blocks, complete, dropped) + '\n'),
+    { failed: Boolean(process.exitCode) || dropped > 0, interrupted, invalidEvidence: !complete || dropped > 0 });
   if (status.summaryFailed || interrupted) process.exitCode = 1;
   console.log(`fk515a ${status.outcome} — ${out}`);
 }

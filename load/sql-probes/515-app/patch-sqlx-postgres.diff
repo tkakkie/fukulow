@@ -1,0 +1,77 @@
+diff --git a/src/connection/executor.rs b/src/connection/executor.rs
+index 3fe4f40..4059b68 100644
+--- a/src/connection/executor.rs
++++ b/src/connection/executor.rs
+@@ -17,6 +17,7 @@ use futures_core::stream::BoxStream;
+ use futures_core::Stream;
+ use futures_util::TryStreamExt;
+ use sqlx_core::arguments::Arguments;
++use sqlx_core::pool::fk515::{sql_measure, sql_span};
+ use sqlx_core::Either;
+ use std::{borrow::Cow, pin::pin, sync::Arc};
+
+@@ -175,9 +176,11 @@ impl PgConnection {
+         metadata: Option<Arc<PgStatementMetadata>>,
+     ) -> Result<(StatementId, Arc<PgStatementMetadata>), Error> {
+         if let Some(statement) = self.inner.cache_statement.get_mut(sql) {
++            let _cache_hit = sql_span("cache_hit");
+             return Ok((*statement).clone());
+         }
+
++        let _prepare = sql_span("prepare");
+         let statement = prepare(self, sql, parameters, metadata, persistent).await?;
+
+         if persistent && self.inner.cache_statement.is_enabled() {
+@@ -209,6 +212,7 @@ impl PgConnection {
+
+         let mut metadata: Arc<PgStatementMetadata>;
+
++        let execute;
+         let format = if let Some(mut arguments) = arguments {
+             // Check this before we write anything to the stream.
+             //
+@@ -237,6 +241,7 @@ impl PgConnection {
+             // consume messages till `ReadyForQuery` before bind and execute
+             self.wait_until_ready().await?;
+
++            execute = sql_span("execute_prepared");
+             // bind to attach the arguments to the statement and create a portal
+             self.inner.stream.write_msg(Bind {
+                 portal: PortalId::UNNAMED,
+@@ -278,6 +283,7 @@ impl PgConnection {
+             // prepared statements are binary
+             PgValueFormat::Binary
+         } else {
++            execute = sql_span("execute_simple");
+             // Query will trigger a ReadyForQuery
+             self.inner.stream.write_msg(Query(query))?;
+             self.inner.pending_ready_for_query_count += 1;
+@@ -292,6 +298,7 @@ impl PgConnection {
+         self.inner.stream.flush().await?;
+
+         Ok(try_stream! {
++            let _execute = execute;
+             loop {
+                 let message = self.inner.stream.recv().await?;
+
+@@ -347,12 +354,14 @@ impl PgConnection {
+                         logger.increment_rows_returned();
+
+                         // one of the set of rows returned by a SELECT, FETCH, etc query
+-                        let data: DataRow = message.decode()?;
+-                        let row = PgRow {
+-                            data,
+-                            format,
+-                            metadata: Arc::clone(&metadata),
+-                        };
++                        let row = sql_measure("data_row", || {
++                            let data: DataRow = message.decode()?;
++                            Ok::<_, Error>(PgRow {
++                                data,
++                                format,
++                                metadata: Arc::clone(&metadata),
++                            })
++                        })?;
+
+                         r#yield!(Either::Right(row));
+                     }

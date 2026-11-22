@@ -1,9 +1,10 @@
-import type { Arm } from '../../slice5/config.ts';
+import { partC, type Arm } from '../../slice5/config.ts';
 import type { Mode } from '../../harness-core/stages.ts';
 import { quantiles } from '../515-replay/measure.ts';
 import type { Variant } from './images.ts';
 
 export const prefix = 'FK515_APP ';
+const droppedPrefix = 'FK515_APP_DROPPED ';
 type Span = { label: string; index: number | null; start: number; end: number };
 export const sqlLabels = {
   A: ['auth_begin', 'auth_context', 'session', 'auth_rollback', 'visibility',
@@ -14,12 +15,22 @@ export const sqlLabels = {
 const acquireLabels = { A: ['auth', 'visibility', 'watermark', 'page'], B: ['auth', 'history'] };
 const snapshotLabels = ['snapshot_begin', 'snapshot_context', 'snapshot_end'];
 const authLabels = new Set<string>(sqlLabels.A.slice(0, 4));
-const auxLabels = ['acquire', 'permit', 'connect', 'checkout', 'return', 'decode', 'page_decode', 'request', 'handler', 'response'];
+const phases = ['prepare', 'cache_hit', 'execute_simple', 'execute_prepared', 'data_row', 'decode'];
+const auxLabels = ['acquire', 'permit', 'connect', 'reuse', 'checkout', 'return', 'page_decode', 'request', 'handler', 'response', ...phases];
 const observedLabels = new Set([...sqlLabels.A, ...sqlLabels.B, ...snapshotLabels, ...auxLabels]);
+const simpleSql = new Set(['auth_begin', 'auth_rollback', 'watermark_begin', 'watermark_commit', 'history_begin', 'history_rollback']);
+type CacheState = 'simple' | 'cold' | 'warm';
 
 export function parseTraces(log: string) {
   const traces = new Map<number, Span[]>();
+  let dropped = 0;
   for (const line of log.split('\n')) {
+    if (line.startsWith(droppedPrefix)) {
+      const count = Number(line.slice(droppedPrefix.length));
+      if (!natural(count) || count <= dropped) throw new Error('Invalid dropped-trace counter');
+      dropped = count;
+      continue;
+    }
     if (!line.startsWith(prefix)) continue;
     const raw: unknown = JSON.parse(line.slice(prefix.length));
     if (!Array.isArray(raw) || raw.length !== 2 || !natural(raw[0]) || traces.has(raw[0]) || !Array.isArray(raw[1])) {
@@ -35,7 +46,7 @@ export function parseTraces(log: string) {
     });
     traces.set(raw[0], events);
   }
-  return traces;
+  return { traces, dropped };
 }
 
 function natural(n: unknown): n is number {
@@ -72,7 +83,8 @@ export function components(arm: Arm, spans: Span[], httpMs: number) {
   const acquires = all('acquire'), returns = all('return');
   const sql = sorted(spans.filter(s => !auxLabels.includes(s.label)));
   const checkout = all('checkout'), permits = all('permit'), connections = all('connect');
-  const pageDecode = all('page_decode'), decode = all('decode');
+  const reuse = all('reuse'), pageDecode = all('page_decode');
+  const sqlPhases = spans.filter(s => phases.includes(s.label));
   const names = sqlLabels[arm];
   const rawNames = names.map(name => ['auth', 'history'].includes(name.split('_')[0])
     ? name.endsWith('_begin') ? 'snapshot_begin' : name.endsWith('_context') ? 'snapshot_context' : 'snapshot_end'
@@ -86,9 +98,9 @@ export function components(arm: Arm, spans: Span[], httpMs: number) {
   if (!contains(request, handler) || !contains(handler, response) ||
     [...acquires, ...sql, ...pageDecode, response].some(s => !contains(request, s)) ||
     !disjoint([...acquires, ...sql, ...pageDecode, response]) ||
-    [...checkout, ...permits, ...connections].some(s => !acquires.some(a => contains(a, s))) ||
-    !disjoint([...checkout, ...permits, ...connections]) ||
-    decode.some(s => !sql.some(q => contains(q, s))) || !disjoint(decode) ||
+    [...checkout, ...permits, ...connections, ...reuse].some(s => !acquires.some(a => contains(a, s))) ||
+    !disjoint([...permits, ...connections, ...reuse]) ||
+    sqlPhases.some(s => !sql.some(q => contains(q, s))) ||
     pageDecode.length !== (arm === 'A' ? 1 : 0) ||
     !Number.isFinite(httpMs) || httpMs < duration(request) / 1e6) throw new Error('Inconsistent latency spans');
 
@@ -97,6 +109,10 @@ export function components(arm: Arm, spans: Span[], httpMs: number) {
   acquires.forEach((a, i) => {
     const name = paths[i];
     const owned = (items: Span[]) => items.filter(s => contains(a, s));
+    const waits = owned(permits), opens = owned(connections), reused = owned(reuse), checks = owned(checkout);
+    if (waits.length !== 1 || opens.length + reused.length !== 1 ||
+      checks.length !== reused.length || checks.some(s => !contains(reused[0], s)) ||
+      waits[0].end > (opens[0] ?? reused[0]).start) throw new Error('Incomplete acquire path: ' + name);
     const ns = (items: Span[]) => sum(owned(items).map(duration));
     const checkNs = ns(checkout);
     put('acquire.' + name, duration(a));
@@ -109,24 +125,52 @@ export function components(arm: Arm, spans: Span[], httpMs: number) {
   });
   let nonPageSql = 0;
   let sqlNs = 0;
+  let prepareNs = 0;
+  let otherSqlNs = 0;
+  let decodeNs = sum(pageDecode.map(duration));
+  const cache: Record<string, CacheState> = {};
   sql.forEach((s, i) => {
     const name = names[i];
-    const decodeNs = sum(decode.filter(d => contains(s, d)).map(duration));
-    const wireNs = duration(s) - decodeNs;
-    put('sql.' + name, wireNs);
-    put('decode.' + name, decodeNs + (name === 'page' ? sum(pageDecode.map(duration)) : 0));
-    sqlNs += wireNs;
-    if (name !== 'page' && !authLabels.has(name)) nonPageSql += wireNs;
+    const owned = (label: string) => sqlPhases.filter(p => p.label === label && contains(s, p));
+    const simple = simpleSql.has(name);
+    const execution = owned(simple ? 'execute_simple' : 'execute_prepared');
+    const prepare = owned('prepare'), hit = owned('cache_hit');
+    const rows = owned('data_row'), mapped = owned('decode');
+    const rustDecode = name === 'session' || name === 'visibility' || name === 'watermark' || (name === 'page' && arm === 'B');
+    // A successful fixture page has has_more, and each other prepared query returns one row.
+    const expectedRows = simple ? 0 : name === 'page' ? partC.limit + 1 : 1;
+    if (execution.length !== 1 || owned(simple ? 'execute_prepared' : 'execute_simple').length ||
+      prepare.length + hit.length !== (simple ? 0 : 1) ||
+      [...prepare, ...hit].some(p => p.end > execution[0].start) ||
+      rows.length !== expectedRows ||
+      rows.some(r => !contains(execution[0], r)) || mapped.length !== (rustDecode ? rows.length : 0) ||
+      !disjoint([...prepare, ...hit, ...rows, ...mapped])) throw new Error('Incomplete SQL phases: ' + name);
+    cache[name] = simple ? 'simple' : prepare.length ? 'cold' : 'warm';
+    const decoding = [...rows, ...mapped];
+    const decoded = sum(decoding.map(duration));
+    const execute = duration(execution[0]) - overlap(execution[0], decoding);
+    const prepared = sum(prepare.map(duration));
+    const other = duration(s) - execute - prepared - decoded;
+    put('sql.' + name, execute);
+    put('prepare.' + name, prepared);
+    put('sql_other.' + name, other);
+    put('decode.' + name, decoded + (name === 'page' ? sum(pageDecode.map(duration)) : 0));
+    sqlNs += execute;
+    prepareNs += prepared;
+    otherSqlNs += other;
+    decodeNs += decoded;
+    if (name !== 'page' && !authLabels.has(name)) nonPageSql += execute;
   });
   const acquireNs = sum(acquires.map(duration));
   const checkNs = sum(checkout.map(duration));
-  const decodeNs = sum([...decode, ...pageDecode].map(duration));
-  const accounted = acquireNs + sqlNs + decodeNs + duration(response);
+  const accounted = acquireNs + sqlNs + prepareNs + otherSqlNs + decodeNs + duration(response);
   put('pool_acquire_total', acquireNs);
   put('pool_acquire_without_checks', acquireNs - checkNs);
   put('pool_permit_total', sum(permits.map(duration)));
   put('pool_checkout_total', checkNs);
   put('sql_total', sqlNs);
+  put('prepare_total', prepareNs);
+  put('sql_other_total', otherSqlNs);
   put('replay_nonpage_sql', nonPageSql);
   put('sync_check_and_nonpage_sql', checkNs + nonPageSql);
   put('decode_total', decodeNs);
@@ -140,7 +184,7 @@ export function components(arm: Arm, spans: Span[], httpMs: number) {
   put('async_return_overlap_permits', sum(permits.map(p => overlap(p, returns))));
   out.http = httpMs;
   out.unexplained = httpMs - out.component_sum;
-  return { values: out, counts: { sql: sql.length, checkout: checkout.length, return: returns.length, connect: connections.length } };
+  return { values: out, cache, counts: { sql: sql.length, checkout: checkout.length, return: returns.length, connect: connections.length } };
 }
 
 export type ClientSample = { id: number; after: number; warmup: boolean; httpMs: number };
@@ -155,17 +199,21 @@ function atHttpRank(samples: Sample[], rank: number) {
   return rows[Math.ceil(rows.length * rank) - 1];
 }
 
-export function summary(mode: Mode, blocks: Block[], complete: boolean) {
+export function summary(mode: Mode, blocks: Block[], complete: boolean, dropped = 0) {
   const lines = ['# #515 REST replay app-path diagnostic', '',
     mode === 'recorded' ? '**Recorded diagnostic.**' : `**${mode.toUpperCase()} validation only. Never evidence.**`,
     '', 'This diagnostic gives no PASS/FAIL and changes neither the night 3 result (3 FAIL, 1 INVALID) nor any threshold.',
     '', 'Night 3 observed an HTTP p95 gap of about 0.8–1.1 ms. The settled fixture here has one sequential reader and no writer.',
-    'SQL time excludes observed Rust decoding. Pool acquire time includes checkout checks and may include connection establishment. Permit wait is contained within acquire time.',
+    'SQL execution is client-side elapsed time from writing Bind/Execute or simple Query through consuming the result stream, less observed DataRow and Rust decoding. It includes protocol framing, network, server work and stream handling, which these timers cannot split.',
+    'Cold SQLx cache misses have a separate prepare interval that includes Parse/Describe, type or metadata work and any cache eviction traffic. Warm queries use the connection-local prepared statement. Simple queries have no separately observable parse or plan phase. These states do not describe PostgreSQL generic/custom plans.',
+    'Other SQL time includes pre-execution protocol drain, argument patching and executor overhead. Decode includes driver DataRow parsing and observed Rust conversion or hydration. Pool acquire includes the permit wait and either an idle checkout check or a connection open.',
     'The synchronous trip comparison combines checkout checks with replay SQL other than the page. This contrasts five A statements with four B statements, plus the checkout checks in both arms. It is a measured group difference that includes statement execution.',
     'Asynchronous return checks retain their existing SQLx scheduling. Their elapsed time and overlap with the same request and its pool permit waits are shown separately. Their causal contribution to HTTP latency is not identified.',
-    'Individual component percentiles are marginal. The component sum is calculated within each request from SQL, pool acquire, decoding and response generation.',
-    'The unexplained remainder is not identified.', ''];
-  if (!complete) return [...lines, 'Run incomplete. See status.json and raw block files for completed observations.', ''].join('\n');
+    'Individual component percentiles are marginal. The component sum is calculated within each request from execution, preparation, other SQL time, pool acquire, decoding and response generation.',
+    'The unexplained remainder is not identified.', '',
+    `Dropped traces reported by diagnostic writers: ${dropped}.`, ''];
+  if (dropped > 0) return [...lines, '**Invalid run. Never evidence.** A trace was dropped.', ''].join('\n');
+  if (!complete) return [...lines, '**Run incomplete. Never evidence.** See status.json and raw block files for completed observations.', ''].join('\n');
   if (!blocks.length) throw new Error('No timing blocks');
   const cells = [...new Set(blocks.map(b => b.cell))];
   for (const cell of cells) {
@@ -191,6 +239,22 @@ export function summary(mode: Mode, blocks: Block[], complete: boolean) {
     add('http (unpatched control)', ca.map(s => s.httpMs), cb.map(s => s.httpMs));
     lines.push('', 'Missing arm-specific statement or acquire slots are shown as zero.',
       'The patched and control runs use independent stacks; their HTTP gap shift is an empirical overhead check that includes run-to-run variation.', '');
+    lines.push('Execution percentiles by SQLx cache state exclude warmups. Cold sample IDs are listed for each prepared statement. The other measured samples for that statement were warm. The block components JSON records cache state for every patched sample, including warmups and simple queries.', '',
+      '| Arm | Statement | Cold n (p50 / p95 ms) | Warm n (p50 / p95 ms) | Cold sample IDs |',
+      '|---|---|---:|---:|---|');
+    for (const [arm, samples] of [['A', a], ['B', b]] as const) {
+      for (const name of sqlLabels[arm].filter(name => !simpleSql.has(name))) {
+        const cold = samples.filter(s => s.trace!.cache[name] === 'cold');
+        const warm = samples.filter(s => s.trace!.cache[name] === 'warm');
+        const group = (rows: Sample[]) => {
+          if (!rows.length) return '0';
+          const q = quantiles(rows.map(s => s.trace!.values['sql.' + name]));
+          return `${rows.length} (${fixed(q.p50)} / ${fixed(q.p95)})`;
+        };
+        lines.push(`| ${arm} | ${name} | ${group(cold)} | ${group(warm)} | ${cold.map(s => s.id).join(', ') || '—'} |`);
+      }
+    }
+    lines.push('');
     for (const [name, patched, control] of [['A', a, ca], ['B', b, cb]] as const) {
       const p = quantiles(patched.map(s => s.httpMs)), c = quantiles(control.map(s => s.httpMs));
       const paths = new Set(patched.map(s => JSON.stringify(s.trace!.counts)));

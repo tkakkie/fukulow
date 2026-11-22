@@ -8,7 +8,7 @@ import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillS
 import { setupOptions, sqlState, sqlStateMeaning, tcpReadinessArgs, waitReady } from '../../harness-core/postgres.ts';
 
 const locale = { LC_ALL: 'C' };
-export function cmd(file: string, args: string[], input?: string, env = { ...process.env, ...locale }) {
+export function cmd(file: string, args: string[], input?: string, env = { ...process.env, ...locale }, rawOutput = false) {
   const child = spawnSync(file, args, {
     input, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 15 * 60_000, stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -18,7 +18,7 @@ export function cmd(file: string, args: string[], input?: string, env = { ...pro
     if (benchError) throw new Error(benchError.replace(/["'][^"']*["']/g, '<quoted>'));
     throw new Error(`${file} failed (${state ? state + (sqlStateMeaning[state] ? ': ' + sqlStateMeaning[state] : '') : (child.error as NodeJS.ErrnoException | undefined)?.code ?? child.signal ?? child.status})`);
   }
-  return child.stdout.trim();
+  return rawOutput ? child.stdout : child.stdout.trim();
 }
 
 export const runtime = 'fukulow_app';
@@ -37,7 +37,7 @@ export function stack(source: string, work: string, arm: Arm, commit: string, pr
     LOAD_DB_PASSWORD: randomUUID(), LOAD_APP_PASSWORD: randomUUID(), LOAD_SETUP_TOKEN: randomUUID() };
   const override = work + '/' + arm + '-compose.json';
   writeFileSync(override, JSON.stringify({ services: { db: { command: dbCommand() },
-    ...(appImage && { app: { logging: { options: { 'max-size': '64m' } } } }) } }), { mode: 0o600 });
+    ...(appImage && { app: { tmpfs: ['/tmp:rw,noexec,nosuid,nodev,mode=1777,size=64m'] } }) } }), { mode: 0o600 });
   const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', composeFile, '-f', override];
   const dc = (args: string[], input?: string) => cmd('docker', [...compose, ...args], input, env);
   if (cmd('docker', ['ps', '-aq', '--filter', 'label=com.docker.compose.project=' + project])) {
@@ -87,7 +87,9 @@ export function stack(source: string, work: string, arm: Arm, commit: string, pr
     dc(['up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '90', 'app']);
     const base = 'http://' + dc(['port', 'app', '8080']);
     const id = dc(['ps', '-q', 'app']);
-    return { base, logs: () => cmd('docker', ['logs', id]) };
+    const traceLog = () => cmd('docker', ['exec', id, 'sh', '-ec',
+      'if [ -f /tmp/fk515-app-traces.log ]; then cat /tmp/fk515-app-traces.log; fi'], undefined, undefined, true);
+    return { base, traceLog };
   };
   return { start, stop, psql, setup, pgbench, pgImage: pg, startApp };
 }
