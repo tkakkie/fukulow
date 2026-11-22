@@ -141,6 +141,8 @@ test('#196 rule 2: a B generator shortfall is NOT EVALUATED, never REPORT ONLY, 
 test('#196 rule 1: B saturated on valid load is REPORT ONLY whatever the A generator did',()=>{
   const r=runs();for(const b of r.filter(c=>c.arm==='B')){b.steps[0].send.accepted=14000;b.steps[0].send.rejected503=1000;}
   dropA(r);assert.equal(judge(r,'send',250).status,'REPORT ONLY');
+  const ev=runs();for(const b of ev.filter(c=>c.arm==='B')){b.steps[0].send.accepted=14000;b.steps[0].send.rejected503=1000;}
+  dropA(ev,'send',l=>{l.accepted-=10;l.rejected503=10;});assert.equal(judge(ev,'send',250).status,'REPORT ONLY');
 });
 test('#196 rule 3: an A-only shortfall fails only with server evidence on every short lane',()=>{
   for(const edit of [(l:Lane)=>{l.accepted-=10;l.rejected503=10;},(l:Lane)=>{l.accepted-=10;l.otherErrors=10;},(l:Lane)=>{l.accepted-=10;l.clientTimeouts=10;},(l:Lane)=>{l.p95=11.01;l.p99=30;}]) {
@@ -195,4 +197,16 @@ test('#196 decision b: a rehearsal load shortfall is a forecast, not a rehearsal
   for(const j of judgeAll(all,true)) assert.equal(j.status,'NOT EVALUATED');
   const broken=all.map(r=>r);delete broken[2].steps[1].signin;
   assert.deepEqual(rehearsalChecks(broken)[2].problems,['500/s: settings mismatch']);
+});
+test('#196 review: excess load stays a hard invalidation; saturation never precedes hard evidence; 429s are not server evidence',()=>{
+  const over=runs();const l=over.find(c=>c.arm==='A')!.steps[0].send;l.attempted=15002;l.accepted=15001;l.rejected503=1;
+  assert.deepEqual(validity(over.find(c=>c.arm==='A')!.steps[0]),['send: more load than planned']);
+  assert.equal(judge(over,'send',250).pairs[0].status,'NOT EVALUATED');
+  for(const b of over.filter(c=>c.arm==='B')){b.steps[0].send.accepted=14000;b.steps[0].send.rejected503=1000;}
+  assert.equal(judge(over,'send',250).pairs[0].status,'NOT EVALUATED');
+  const sat=()=>{const r=runs();for(const b of r.filter(c=>c.arm==='B')){b.steps[0].send.accepted=14000;b.steps[0].send.rejected503=1000;}return r;};
+  const ev=sat();ev[0].steps[0].evidence.samples=0;assert.equal(judge(ev,'send',250).pairs[0].status,'NOT EVALUATED');
+  const lim=sat();lim[0].steps[0].send.rejected429=1;lim[0].steps[0].send.rejected503--;assert.equal(judge(lim,'send',250).pairs[0].status,'NOT EVALUATED');
+  for(const name of ['reads','signin'] as const){const m=mixedRuns();dropA(m,name,x=>{x.accepted-=5;x.rejected429=5;});
+    assert.equal(judge(m,'mixed',250).status,'NOT EVALUATED');}
 });

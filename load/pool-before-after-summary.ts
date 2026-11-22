@@ -33,7 +33,9 @@ export function validity(row:Row) {
     if (!lane) { if(name==='send'||name==='reader')reasons.push(`${name}: missing lane`);continue; }
     const counts=[lane.attempted,lane.accepted,lane.rejected429,lane.rejected503,lane.otherErrors,lane.clientTimeouts,lane.transportErrors,lane.droppedIterations];
     if (!counts.every(n=>Number.isFinite(n)&&n>=0&&Number.isInteger(n)) || lane.attempted !== lane.accepted+lane.rejected429+lane.rejected503+lane.otherErrors+lane.clientTimeouts+lane.transportErrors) reasons.push(`${name}: incomplete outcomes`);
-    if (lane.droppedIterations || lane.attempted < lane.rate*lane.seconds*settings.minimumOfferedFraction || lane.attempted > lane.rate*lane.seconds+1) reasons.push(`${name}: target load not generated`);
+    if (lane.droppedIterations || lane.attempted < lane.rate*lane.seconds*settings.minimumOfferedFraction) reasons.push(`${name}: target load not generated`);
+    // Excess load is a generator fault, never a shortfall that rules 2 and 3 classify (#196).
+    if (lane.attempted > lane.rate*lane.seconds+1) reasons.push(`${name}: more load than planned`);
     if (lane.accepted && (lane.p95 === null || lane.p99 === null || !Number.isFinite(lane.p95) || !Number.isFinite(lane.p99) || lane.p95 < 0 || lane.p99 < lane.p95)) reasons.push(`${name}: missing success latency`);
   }
   if (row.send.rejected429) reasons.push('send limit interfered (429)');
