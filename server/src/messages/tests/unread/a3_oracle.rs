@@ -5,6 +5,8 @@ use super::{
 };
 use sqlx::Row;
 
+mod projection;
+
 // Deterministic so a failing seed reproduces; no dependency for a test-only PRNG.
 struct Rng(u64);
 
@@ -165,14 +167,16 @@ async fn counts(
         .collect()
 }
 
-/// Direct SQL steps bypass the Topic summary writers; restore a summary that
-/// satisfies `topics_live_summary` so later API Moves see a consistent row.
+/// Direct SQL mutations bypass the Topic summary writer and the mutation floor.
+/// Repair both before comparing a projection at a reconstructible W.
 async fn resync_topics(pool: &PgPool, org: Uuid, channel: Uuid) {
     sqlx::query("UPDATE topics t SET message_count=s.n, first_seq=s.first, last_seq=s.last \
         FROM (SELECT t2.id, count(m.id) AS n, min(m.seq) AS first, max(m.seq) AS last FROM topics t2 \
               LEFT JOIN messages m ON m.organization_id=t2.organization_id AND m.channel_id=t2.channel_id AND m.topic_id=t2.id AND NOT m.deleted \
               WHERE t2.organization_id=$1 AND t2.channel_id=$2 GROUP BY t2.id) s \
         WHERE t.organization_id=$1 AND t.channel_id=$2 AND t.id=s.id")
+        .bind(org).bind(channel).execute(pool).await.unwrap();
+    sqlx::query("UPDATE channel_message_sequences SET mutation_seq=seq WHERE organization_id=$1 AND channel_id=$2")
         .bind(org).bind(channel).execute(pool).await.unwrap();
 }
 
