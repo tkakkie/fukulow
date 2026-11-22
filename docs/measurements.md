@@ -147,7 +147,7 @@ Run `node load/revocation-burst.ts --out <dir>`. [Record](../load/measurements-a
 
 2026-11-22 JST, `c1456d91`, 3 runs: B1–B5 held ×3, **not a formal Part B PASS** (no multi-IP attack). B2 window reading PASS ×3, `b2Strict` false ×3. One IP's 5 wrong passwords locked the owner out ~58 s, password change included (#757). Lock barely exercised, 0 waiters at a 233 ms poll (#756).
 
-Run `node load/signin-owner.ts`; judge with `load/signin-owner-judgment.ts`. [Record](../load/measurements-archive.md#sign-in-flood-owner-impact-part-b-alternative-method-359-2026-11-22-jst-mac)
+Run `node load/signin-owner.ts` (judged by `load/signin-owner-judgment.ts`). [Record](../load/measurements-archive.md#sign-in-flood-owner-impact-part-b-alternative-method-359-2026-11-22-jst-mac)
 
 ## Archived only
 
