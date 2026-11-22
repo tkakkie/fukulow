@@ -46,6 +46,9 @@ async fn baselines(
         .await?;
     let mut counts = std::collections::HashMap::new();
     for row in rows {
+        if row.try_get::<bool, _>("count_drift")? {
+            tracing::error!(target: "fukulow", event = "unread_count_drift");
+        }
         counts.insert(
             row.try_get::<Uuid, _>("channel_id")?,
             (

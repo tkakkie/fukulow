@@ -323,6 +323,7 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
     );
 }
 
+mod a3_oracle;
 mod access;
 mod concurrency;
 mod context;

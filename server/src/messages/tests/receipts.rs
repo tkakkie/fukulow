@@ -205,6 +205,16 @@ async fn send_receipt_migration_backfills_version_and_digest(pool: PgPool) {
     .bind(org).bind(channel).bind(sender).bind(root).bind(reply).bind(main).bind(topic)
     .bind(main_reply)
     .execute(&pool).await.unwrap();
+    // Sends commit the counter with the Message; #519's backfill check requires it.
+    sqlx::query(
+        "INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1,$2,4) \
+        ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = 4",
+    )
+    .bind(org)
+    .bind(channel)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::raw_sql(
         &std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
