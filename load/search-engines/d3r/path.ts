@@ -89,8 +89,21 @@ export function normalization(raw: string) {
 
 // pgbench uses bound psql variables in prepared mode. Its tokenization uses
 // the same scalar whitespace set and last-longest tie break as the Rust path.
+// pgbench in prepared mode turns every `:name`, even inside a string literal,
+// into a parameter, so the page's to_char format (HH24:MI:SS) would gain
+// untyped parameters. Spell its colons as chr(58): the constant folds at plan
+// time, so the executed statement does the same work.
+export const pgbenchFormat = (page: string) => {
+  const format = `'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'`;
+  assert.equal(page.split(format).length - 1, 1, 'Page SQL timestamp format changed');
+  const bound = page.replace(format, `('YYYY-MM-DD"T"HH24' || chr(58) || 'MI' || chr(58) || 'SS.US"Z"')`);
+  const literals = bound.match(/'(?:[^']|'')*'/g) ?? [];
+  assert.ok(!literals.some(text => /:[A-Za-z_]/.test(text)), 'Page SQL has a pgbench variable inside a string literal');
+  return bound;
+};
+
 export function benchmarkScript(page: string, raw: string, recordOutcome = false) {
-  const boundPage = page.replace(/\$([1-7])\b/g, (_, n: string) =>
+  const boundPage = pgbenchFormat(page).replace(/\$([1-7])\b/g, (_, n: string) =>
     [':organization', ':scopes', ':term', ':tokens', ':before_at', ':before_id', ':size::bigint'][Number(n) - 1]);
   return `${begin}
 ${scopeContext(1)}

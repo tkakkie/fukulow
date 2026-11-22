@@ -17,7 +17,7 @@ import { accepts, completeness, denialExpectation, denials, judge, shortIds, typ
 import { expectedTerms, insertSql, verifyTerms } from './d3r/backfill.ts';
 import { allPages, planFacts, prepare } from './d3r/engine.ts';
 import { argumentsForPostgres, loadManifest, removedSettings } from './d3r/manifest.ts';
-import { actors, benchmarkScript, pageSize, productionPath, readSource, sources, term, tokens } from './d3r/path.ts';
+import { actors, benchmarkScript, pageSize, pgbenchFormat, productionPath, readSource, sources, term, tokens } from './d3r/path.ts';
 import { options, outputPath, resetMeasured, warmup } from './d3r/run.ts';
 import { directRls, directRlsExpected, searchTables, verifyRls } from './d3r/rls.ts';
 import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFile, snapshotIdentity, snapshotLaunch } from './d3r/snapshot.ts';
@@ -567,4 +567,14 @@ if (args[2] === 'tar') process.stdout.write('physical archive');
   const calls: string[][] = readFileSync(log, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(calls.map(args => args[2]), ['pg_basebackup', 'pg_verifybackup', 'pg_basebackup', 'pg_verifybackup', 'tar']);
   assert.deepEqual(calls[2], ['exec', 'owned', 'pg_basebackup', '-U', 'fukulow', '-D', '/tmp/backfill', '-X', 'stream']);
+});
+
+test('pgbench script keeps no variable-like colon inside string literals', () => {
+  const page = productionPath().page;
+  const bound = pgbenchFormat(page);
+  assert.ok(page.includes(`'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'`));
+  assert.ok(bound.includes(`('YYYY-MM-DD"T"HH24' || chr(58) || 'MI' || chr(58) || 'SS.US"Z"')`));
+  for (const literal of benchmarkScript(page, '開発 API', true).match(/'(?:[^']|'')*'/g) ?? [])
+    assert.doesNotMatch(literal, /:[A-Za-z_]/, literal);
+  assert.throws(() => pgbenchFormat(page.replace(`'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'`, `'HH24:MI'`)), /format changed/);
 });
