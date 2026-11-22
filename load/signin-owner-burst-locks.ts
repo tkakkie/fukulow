@@ -19,6 +19,7 @@ export type Wait = { pid: number; lock: 'tuple' | 'transaction'; tuple: string; 
   waitedMs: number; outcome: 'acquired' | 'failed'; statementKind?: StatementKind };
 export type WaitInterval = { pid: number; startDbMs: number; endDbMs: number; waitedMs: number; parts: Wait['lock'][];
   tuples: string[]; outcome: Wait['outcome']; statementKind?: StatementKind };
+// maxWaitMs: the longest-running waiting X-row statement (from query_start), an upper bound on its lock wait.
 export type SamplerRow = { dbMs: number; nodeMs: number; connections: number; waiting: { pid: number; kind: 'owner' | 'signin' }[];
   maxWaitMs: number; ctid: string | null };
 

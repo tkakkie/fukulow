@@ -15,14 +15,14 @@ import { appEvidence } from './app-evidence.ts';
 import { assertDockerHeadroom, assertNewOutput, assertPinned } from './harness-core/host.ts';
 import { stages } from './harness-core/stages.ts';
 import { outsideCheckout } from './proxy-target.ts';
-import { admissionRejected, errorCode, type Phase } from './signin-owner-judgment.ts';
+import { admissionRejected, errorCode } from './signin-owner-judgment.ts';
 import { ATTACKER_IP, BURST, EVIDENCE, LOCK_LOG_SETTINGS, LOGGING_NOTE, OWNER_EMAIL, OWNER_IP, POOL_MAX, READER_IP, SAMPLER, SCHEDULE,
-  TIMEOUT_MS, burstAdmission, disposableOverride, ownerDecision, parseBurstArgs, parseBurstEnv, resolveServer } from './signin-owner-burst-config.ts';
+  TIMEOUT_MS, disposableOverride, parseBurstArgs, parseBurstEnv, resolveServer } from './signin-owner-burst-config.ts';
 import { attribute, clockOffset, mergeWaits, parseLockLog, parseSamplerLine, samplerIntervals, samplerQuery, xWaits,
   type SamplerRow } from './signin-owner-burst-locks.ts';
-import { aggregate, burstWindows, judgeBurst, type Burst, type BurstAttackOp, type BurstOwnerOp, type BurstReadOp, type BurstRun,
-  type OwnerKind, type XWait } from './signin-owner-burst-judgment.ts';
+import { aggregate, burstWindows, judgeBurst, type BurstRun, type XWait } from './signin-owner-burst-judgment.ts';
 import { report } from './signin-owner-burst-report.ts';
+import { runWorkload } from './signin-owner-burst-workload.ts';
 import type { NativeSessionResponse, SetupRequest } from '../web/src/api-schema.d.ts';
 
 // Harness-generated reasons only; child-process errors can carry environment or SQL and are never printed.
@@ -58,8 +58,7 @@ const controller = new AbortController();
 const interrupt = () => controller.abort();
 process.on('SIGINT', interrupt); process.on('SIGTERM', interrupt);
 
-const owner: BurstOwnerOp[] = [], attack: BurstAttackOp[] = [], reads: BurstReadOp[] = [], bursts: Burst[] = [], samples: SamplerRow[] = [];
-const skipped: BurstRun['skipped'] = { web_signin: 0, native_signin: 0, password: 0, revoke: 0, reads: 0 };
+const samples: SamplerRow[] = [];
 const meta: Record<string, unknown> = { project, mode, evidenceEligible: mode === 'recorded', plan, burst: BURST, schedule: SCHEDULE,
   sampler: SAMPLER, evidenceTolerances: EVIDENCE, attackerIp: ATTACKER_IP, ownerIp: OWNER_IP, poolMax: POOL_MAX, port, node: process.version, serverRef,
   harnessCommit, lockLogSettings: LOCK_LOG_SETTINGS, loggingNote: LOGGING_NOTE, platform: platform(), arch: arch(),
@@ -72,7 +71,7 @@ try {
   run.enter('source');
   if (mode === 'recorded') assertPinned(args => command('git', args), harnessCommit!);
   meta.harness = Object.fromEntries(['load/signin-owner-burst.ts', 'load/signin-owner-burst-config.ts', 'load/signin-owner-burst-locks.ts',
-    'load/signin-owner-burst-judgment.ts', 'load/signin-owner-burst-report.ts', 'load/signin-owner-judgment.ts', 'load/signin-summary.ts',
+    'load/signin-owner-burst-judgment.ts', 'load/signin-owner-burst-report.ts', 'load/signin-owner-burst-workload.ts', 'load/signin-owner-judgment.ts', 'load/signin-summary.ts',
     'load/signin-owner-burst-aggregate.ts', 'load/app-evidence.ts', 'load/proxy-target.ts', 'load/compose.yml',
     'load/harness-core/stages.ts', 'load/harness-core/host.ts']
     .map(path => [path, createHash('sha256').update(readFileSync(path)).digest('hex')]));
@@ -189,13 +188,15 @@ try {
   samples.length = 0; samplerMalformed = 0;
   t0 = performance.now();
   const wallStart = Date.now(), now = () => performance.now() - t0;
-  const until = async (ms: number) => { while (now() < ms && !controller.signal.aborted) await pause(Math.min(2, Math.max(0, ms - now()))); };
-  const pending = new Set<Promise<unknown>>();
-  const track = <T>(task: Promise<T>) => { pending.add(task); task.finally(() => pending.delete(task)); return task; };
-  let ownerBusy = false, ownerSentAt = -Infinity, current = 0, readActive = 0;
-  const ownerOp = (kind: OwnerKind, burst?: number, dueMs?: number) => {
-    ownerBusy = true; ownerSentAt = now();
-    track((async () => {
+  let current = 0;
+  const answer = (r: Awaited<ReturnType<typeof request>>) => ({ status: r.status, start: r.start - t0, end: r.end - t0, error: r.error });
+  const work = await runWorkload(plan, {
+    now, sleep: ms => pause(ms), aborted: () => controller.signal.aborted,
+    sampler: () => ({ exited: samplerExited, medianMs: samplerIntervals(samples).medianMs }),
+    attack: () => request('/api/v1/native/session', { method: 'POST', headers: json(ATTACKER_IP),
+      body: JSON.stringify({ email: OWNER_EMAIL, password: wrong }) }).then(answer),
+    read: () => request(`/api/v1/orgs/${organization}/channels`, { method: 'GET', headers: { Authorization: `Bearer ${readerBody.token}` } }).then(answer),
+    owner: async kind => {
       const target = 1 - current;
       const r = kind === 'web_signin' || kind === 'native_signin'
         ? await request(kind === 'web_signin' ? '/api/v1/session' : '/api/v1/native/session', { method: 'POST', headers: json(OWNER_IP),
@@ -206,101 +207,11 @@ try {
           : await request('/api/v1/me/sessions/revoke-others', { method: 'POST', headers: json(OWNER_IP, s0Token),
             body: JSON.stringify({ current_password: passwords[current] }) });
       if (kind === 'password' && r.status === 204) current = target;
-      owner.push({ kind, sentMs: r.start - t0, endMs: r.end - t0, ms: r.end - r.start, status: r.status, error: r.error,
-        ...(burst === undefined ? {} : { burst }), ...(dueMs === undefined ? {} : { dueMs }) });
-    })().finally(() => { ownerBusy = false; }));
-  };
-  const sendBurst = async (index: number) => {
-    const burst: Burst = { index, sends: [], admittedSend: null, ownerOp: 'missing', ownerOpSend: null };
-    bursts.push(burst);
-    for (let send = 0; send <= BURST.maxResends && !controller.signal.aborted; send++) {
-      if (send) await until(burst.sends[send - 1].sentMs + BURST.resendMs);
-      const sentMs = now(), statuses: number[] = [];
-      burst.sends.push({ sentMs, statuses });
-      const responses = Array.from({ length: BURST.size }, () => request('/api/v1/native/session', { method: 'POST',
-        headers: json(ATTACKER_IP), body: JSON.stringify({ email: OWNER_EMAIL, password: wrong }) }).then(r => {
-        statuses.push(r.status);
-        attack.push({ burst: index, send, sentMs: r.start - t0, endMs: r.end - t0, ms: r.end - r.start, status: r.status, error: r.error });
-      }));
-      if (burst.ownerOp === 'missing' || burst.ownerOp === 'undecided') {
-        // Fire on the admitted send only (ownerDecision): a 401 fires at once from +10 ms; 11 refusals with
-        // 5 still out fire only at the last poll inside the approved +10..+15 ms; 16 refusals never fire.
-        await until(sentMs + BURST.ownerOffsetMs);
-        let decision = ownerDecision(burstAdmission(statuses), now() - sentMs);
-        while (decision === 'wait' && !controller.signal.aborted) {
-          await pause(1); decision = ownerDecision(burstAdmission(statuses), now() - sentMs);
-        }
-        if (decision === 'fire') {
-          burst.ownerOpSend = send;
-          if (ownerBusy) burst.ownerOp = 'skipped';
-          else { burst.ownerOp = 'sent'; ownerOp(index % 2 ? 'password' : 'revoke', index); }
-        } else if (decision === 'undecided') burst.ownerOp = 'undecided';
-      }
-      await Promise.all(responses);
-      // Admission is a 401 (pre-registration). Only an all-429 send is re-sent; anything else ends the burst.
-      if (statuses.includes(401)) { burst.admittedSend = send; return sentMs; }
-      if (!statuses.every(s => s === 429)) break;
-    }
-    return burst.sends.at(-1)?.sentMs ?? now();
-  };
-  const phaseStartMs: Record<Phase, number> = { B0: 0, B1: plan.b0Ms, B2: Infinity };
-  let nextSignin: number = SCHEDULE.signinFirstMs, signins = 0, nextAuth: number = SCHEDULE.authFirstMs, auths = 0, nextRead = 0;
-  let nextBurst: number | null = plan.b0Ms, burstsSent = 0, burstRunning = false, endAt = Infinity, b0Checked = !plan.failFast, scheduleEndMs = 0;
-  while (!controller.signal.aborted && now() < endAt) {
-    const t = now();
-    // Fail fast after the first measured block (B0) on the pre-registered INVALID/INCONCLUSIVE conditions.
-    // The checkpoint always completes before burst 1 is offered. If a B0 owner operation is still in
-    // flight, the B0 sample counts are not known yet: they are left to the final judgment (which applies
-    // the same rule), so unfinished is never reported as insufficient and the burst is never delayed.
-    if (!b0Checked && t >= plan.b0Ms) {
-      b0Checked = true; meta.b0CheckAtMs = t;
-      const unfinished = ownerBusy && ownerSentAt < plan.b0Ms;
-      meta.b0Checkpoint = unfinished ? 'sampler checked; B0 counts left to the final judgment (a B0 owner operation was in flight)' : 'complete';
-      const b0 = (k: OwnerKind) => owner.filter(o => o.kind === k && o.sentMs < plan.b0Ms && o.status === 204).length;
-      const median = samplerIntervals(samples).medianMs;
-      if (samplerExited || median === null || median > SAMPLER.medianMaxMs) stoppedEarly = `invalid: sampler median ${median} ms`;
-      else if (unfinished) { /* counts are judged at the end */ }
-      else if (b0('password') < 4 || b0('revoke') < 4)
-        stoppedEarly = `inconclusive: B0 finished with too few successes (password ${b0('password')}, revoke ${b0('revoke')})`;
-      else if (!owner.some(o => (o.kind === 'web_signin' || o.kind === 'native_signin') && o.sentMs < plan.b0Ms && o.status === 200))
-        stoppedEarly = 'inconclusive: no B0 owner sign-in success (V undefined)';
-      if (stoppedEarly) break;
-    }
-    if (nextBurst !== null && t >= nextBurst && !burstRunning && b0Checked) {
-      const index = ++burstsSent;
-      nextBurst = null; burstRunning = true;
-      track(sendBurst(index).then(admittedAt => {
-        burstRunning = false;
-        if (index < plan.bursts) { nextBurst = admittedAt + BURST.gapMs; return; }
-        const last = attack.filter(a => a.burst === index && a.status === 401).map(a => a.endMs);
-        const all = attack.filter(a => a.burst === index).map(a => a.endMs);
-        phaseStartMs.B2 = Math.max(...(last.length ? last : all.length ? all : [now()])) + plan.b1TailMs;
-        endAt = phaseStartMs.B2 + plan.b2Ms;
-      }));
-    }
-    for (const due of ['signin', 'auth'] as const) {
-      if (t < (due === 'signin' ? nextSignin : nextAuth)) continue;
-      const kind: OwnerKind = due === 'signin' ? (signins++ % 2 ? 'native_signin' : 'web_signin') : (auths++ % 2 ? 'revoke' : 'password');
-      if (due === 'signin') nextSignin += SCHEDULE.signinEveryMs; else nextAuth += SCHEDULE.authEveryMs;
-      const dueMs = (due === 'signin' ? nextSignin : nextAuth);
-      if (due === 'signin') nextSignin += SCHEDULE.signinEveryMs; else nextAuth += SCHEDULE.authEveryMs;
-      if (ownerBusy) { skipped[kind]++; continue; }
-      ownerOp(kind, undefined, dueMs);
-    }
-    while (t >= nextRead) {
-      const dueMs = nextRead;
-      nextRead += SCHEDULE.readEveryMs;
-      if (readActive >= SCHEDULE.readInFlight) { skipped.reads++; continue; }
-      readActive++;
-      track(request(`/api/v1/orgs/${organization}/channels`, { method: 'GET', headers: { Authorization: `Bearer ${readerBody.token}` } })
-        .then(r => { reads.push({ sentMs: r.start - t0, status: r.status, ms: r.end - r.start, error: r.error, dueMs }); })
-        .finally(() => { readActive--; }));
-    }
-    scheduleEndMs = t;
-    await pause(2);
-  }
-  while (pending.size) await Promise.all([...pending]);
-  const endMs = now();
+      return answer(r);
+    },
+  });
+  const { owner, attack, reads, bursts, skipped, phaseStartMs, scheduleEndMs, endMs } = work;
+  stoppedEarly = work.stoppedEarly; meta.b0Checkpoint = work.b0Checkpoint; meta.b0CheckAtMs = work.b0CheckAtMs;
   if (samplerExited) throw new Stop('sampler exited');
   sampler.kill(); sampler = undefined;
   if (controller.signal.aborted) throw new Stop('interrupted');
@@ -316,7 +227,8 @@ try {
   const reasons = [parsed.unparsed && `${parsed.unparsed} unparsed lock lines`, x.unparsed && `${x.unparsed} waits that cannot be placed`,
     x.unmatched && `${x.unmatched} unmatched waits`,
     x.foreign && `${x.foreign} accounts waits off X's known tuples`, offsetMs === null && 'no clock offset'].filter(Boolean) as string[];
-  const burstRun: BurstRun = { owner, attack, reads, bursts, samples, samplerMalformed, skipped: { ...skipped }, scheduleEndMs, offsetMs, waits: waits.filter(w => w.startMs >= 0),
+  const burstRun: BurstRun = { owner, attack, reads, bursts, samples, samplerMalformed, skipped: { ...skipped }, scheduleEndMs, offsetMs,
+    plan: { b0Ms: plan.b0Ms, bursts: plan.bursts, b1TailMs: plan.b1TailMs, b2Ms: plan.b2Ms }, waits: waits.filter(w => w.startMs >= 0),
     lockLog: { complete: !reasons.length, reasons }, phaseStartMs, endMs, poolMax: POOL_MAX,
     server: { poolTimeouts: (evidence.pool?.deltas.acquire_timeout ?? 0) + evidence.databaseFailures.pool_timeout, panics: evidence.panics,
       complete: evidence.complete && admissions.complete } };

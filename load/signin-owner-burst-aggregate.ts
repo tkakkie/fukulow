@@ -2,11 +2,12 @@
 //   node load/signin-owner-burst-aggregate.ts RUN_DIR_1 RUN_DIR_2 RUN_DIR_3
 // A run is evidence only when its status.json, results.json and metadata.json are one completed
 // recorded run: the same run identity in all three, a successful recorded status that is evidence,
-// complete results with a recorded harness and server commit, and a stored verdict that the stored
+// complete results with a recorded harness and server commit, the pre-registered recorded plan, and a stored verdict that the stored
 // samples reproduce (which includes the workload-completeness check). Smoke and rehearsal outputs, repeated directories and repeated run identities
 // are never evidence. Fewer than 3 valid runs is INCONCLUSIVE.
 import { readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
+import { PLANS } from './signin-owner-burst-config.ts';
 import { aggregate, judgeBurst, type AggregateRun, type BurstRun, type Verdict } from './signin-owner-burst-judgment.ts';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -33,6 +34,9 @@ export function readRun(dir: string): AggregateRun & { dir: string; harnessCommi
     return reject('results are not a complete recorded evidence run');
   if (!SHA.test(String(meta.harnessCommit)) || meta.harnessCommit !== results.harnessCommit
     || !SHA.test(String(meta.serverCommit)) || meta.serverCommit !== results.serverCommit) return reject('harness or server commit not recorded');
+  const planned = PLANS.recorded, plan = results.plan;
+  if (!plan || plan.b0Ms !== planned.b0Ms || plan.bursts !== planned.bursts || plan.b1TailMs !== planned.b1TailMs || plan.b2Ms !== planned.b2Ms)
+    return reject('results were not produced with the pre-registered recorded plan');
   let recomputed: Verdict | null = null;
   try { recomputed = judgeBurst(results as BurstRun).verdict; } catch { recomputed = null; }
   if (recomputed === null || recomputed !== verdict) return reject('stored verdict is not reproduced from the stored run');

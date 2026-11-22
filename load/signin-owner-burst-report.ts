@@ -40,7 +40,7 @@ export function report(run: BurstRun) {
   const windows = burstWindows(run);
   const bursts = run.bursts.map((b, i) => {
     const attack = run.attack.filter(a => a.burst === b.index);
-    const ownerOp = run.owner.find(o => o.burst === b.index) ?? null;
+    const ownerOp = run.owner.find(o => o.burst === b.index && o.burstSend === b.admittedSend) ?? null;
     const window = windows[i].window;
     const waits = window ? run.waits.filter(w => w.startMs >= window.startMs && w.startMs < window.endMs) : [];
     return { burst: b.index, sends: b.sends.map(s => s.sentMs), resends: b.sends.length - 1, admittedSend: b.admittedSend,
@@ -51,8 +51,9 @@ export function report(run: BurstRun) {
       sampler: samplerPeaks(samplesIn(run, window)),
       lockLog: { count: waits.length, waitsMs: waits.map(w => w.waitedMs), owner: waits.filter(w => w.who === 'owner').map(w => w.waitedMs),
         over1s: waits.filter(w => w.waitedMs > 1_000).length },
-      // Waits longer than 1 s: lock-log waits above, sampler rows with a waiter over 1 s, and operations of this burst.
-      samplerOver1s: samplesIn(run, window).filter(s => s.maxWaitMs > 1_000).length,
+      // Waits longer than 1 s: lock-log waits above (exact), sampler rows whose X-row statement has run over
+      // 1 s (an upper bound: the sampler times from query_start, not the lock wait start), and operations of this burst.
+      samplerOver1sUpperBound: samplesIn(run, window).filter(s => s.maxWaitMs > 1_000).length,
       operationsOver1s: [...attack, ...run.owner.filter(o => o.burst === b.index)].filter(o => o.ms > 1_000).length,
       poolTimeouts: run.server.burstPoolTimeouts?.[i] ?? null };
   });
