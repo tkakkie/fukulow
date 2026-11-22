@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { createLog } from './channel-log.ts';
 import { checkMessageBatch, checkOrganization, dbBatchClock, messageBatchBaselineMs, seed } from './dms-formal-seed.ts';
+import { batchServerStatements } from './dms-formal-seed-diagnostic.ts';
+import { batchSummaryFailures, seedBatchSummary, seedShape } from './dms-formal-seed-samplers.ts';
 
 test('Message batch baseline excludes the first batch and uses the median', () => {
   assert.equal(messageBatchBaselineMs([50_000]), undefined);
@@ -43,7 +45,7 @@ function assertOriginBatch(input: string) {
 }
 
 for (const [scenario, diagnostic] of [
-  ['healthy', false], ['slow batch', false], ['slow Organization', false],
+  ['healthy', false], ['slow batch', false], ['slow Organization', false], ['healthy', true],
   ['slow batch', true], ['slow Organization', true], ['SQL failure', true],
 ] as const) test(`${diagnostic ? 'diagnostic' : 'formal'} seed records timing and handles ${scenario}`, t => {
   const output = mkdtempSync(join(tmpdir(), 'dm-formal-seed-test-'));
@@ -75,6 +77,8 @@ for (const [scenario, diagnostic] of [
     if (timed) {
       assert.deepEqual(args, [...originPsql, '-q', '-A', '-t']);
       assert.ok(raw.endsWith("\nSELECT 'db-end', round(extract(epoch FROM clock_timestamp()) * 1000, 3);"));
+      // Every statement of the batch session logs one duration line; the DB log join expects exactly these.
+      assert.equal(raw.match(/;\s*(?=\n|$)/g)?.length, batchServerStatements.max);
     } else {
       // Formal (and every non-batch) call is the origin/main command: same psql arguments, stdout ignored, same SQL.
       assert.deepEqual([args, stdio], [originPsql, ['pipe', 'ignore', 'inherit']]);
@@ -109,7 +113,7 @@ for (const [scenario, diagnostic] of [
     if (scenario === 'slow batch') assert.throws(() => seed(diagnostic), /Organization 1 Message batch 1 took 6001 ms \(limit 6000 ms\)/);
     else if (scenario === 'slow Organization') assert.throws(() => seed(diagnostic), /Organization 1 total through Message batch 199 .* took \d+ ms \(limit \d+ ms\)/);
     else if (scenario === 'SQL failure') assert.throws(() => seed(diagnostic), /private-token/);
-    else seed();
+    else seed(diagnostic);
   } finally {
     docker.mock.restore();
     syncBuiltinESMExports();
@@ -132,6 +136,16 @@ for (const [scenario, diagnostic] of [
   assert.deepEqual(totals.map(row => row.organization), Array.from({length: completed}, (_, i) => i));
   assert.equal(log.mock.callCount(), completed);
   assert.equal(rows.length, completed * 201 + (scenario === 'slow batch' ? 2 : scenario === 'SQL failure' ? 1 : 0));
+  // The seed writes exactly the rows the batch summary requires, in the shape of its arm.
+  // The formal seed writes no seed-stop.json: the runner records any failure as seed-failure.
+  const stop = scenario === 'healthy' ? undefined : diagnostic ? JSON.parse(readFileSync(join(output, 'seed-stop.json'), 'utf8')) : { rule: 'seed-failure' };
+  const timing = seedBatchSummary(readFileSync(path, 'utf8'), undefined, { shape: seedShape('main', 3), stop, arm: diagnostic ? 'instrumented' : 'baseline' });
+  assert.deepEqual([timing.malformedLines, timing.missingRows, timing.unexpectedRows, timing.expectedRows], [0, 0, 0, rows.length]);
+  if (!diagnostic) assert.deepEqual(batchSummaryFailures(timing), []);
+  if (diagnostic && scenario === 'healthy') {
+    assert.equal(timing.dbClockMissing, 0);
+    return;
+  }
   if (diagnostic) {
     const raw = readFileSync(join(output, 'seed-stop.json'), 'utf8');
     assert.doesNotMatch(raw, /private-token|INSERT INTO/);

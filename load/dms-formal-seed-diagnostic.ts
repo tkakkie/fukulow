@@ -65,12 +65,20 @@ export function serverDurations(dbLog: string) {
   return byPid;
 }
 
+// Duration lines one diagnostic batch session logs inside its clock window: the start clock query, the Message INSERT
+// and the three Channel log statements (PREPARE, EXECUTE, DEALLOCATE) always; the SET before the start clock and the
+// end clock query only when their whole-millisecond log time falls on a window edge. The seed test checks the count
+// against the batch SQL.
+export const batchServerStatements = { min: 5, max: 7 } as const;
+
 // The server-reported time of one batch: the summed durations of its session's statements logged between the two
-// clock rows (the Message INSERT and the channel log statements, plus the sub-millisecond start clock query and, at
-// whole-millisecond log resolution, possibly the end clock query). Client time between statements is not in it.
+// clock rows. Client time between statements is not in it. With fewer or more duration lines than the batch's
+// statements (a line lost, or a line of another session), serverMs is null: the time is not the batch's.
 export function batchServerMs(durations: ReturnType<typeof serverDurations>, pid: number, startMs: number, endMs: number) {
   const lines = (durations.get(pid) ?? []).filter(row => row.atMs >= Math.floor(startMs) && row.atMs <= endMs + 1);
-  return lines.length ? { serverMs: Math.round(lines.reduce((sum, row) => sum + row.ms, 0) * 1000) / 1000, serverStatements: lines.length } : null;
+  if (!lines.length) return null;
+  const complete = lines.length >= batchServerStatements.min && lines.length <= batchServerStatements.max;
+  return { serverMs: complete ? Math.round(lines.reduce((sum, row) => sum + row.ms, 0) * 1000) / 1000 : null, serverStatements: lines.length };
 }
 
 export async function saveSeedDbLogs(exec: Executor, container: string, path: string, timeoutMs = 30_000) {

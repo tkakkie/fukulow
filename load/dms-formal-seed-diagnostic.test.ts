@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { batchServerMs, postgresCommand, redactSeedDbLogs, serverDurations } from './dms-formal-seed-diagnostic.ts';
+import { batchServerMs, batchServerStatements, postgresCommand, redactSeedDbLogs, serverDurations } from './dms-formal-seed-diagnostic.ts';
 
 const formal = '["postgres","-c","shared_preload_libraries=pg_stat_statements","-c","pg_stat_statements.track=all","-c","max_connections=64"]';
 test('formal DB command keeps the existing bytes', () => {
@@ -70,18 +70,34 @@ test('DB log keeps checkpoint frequency warnings and checkpoint write/sync timin
 
 test('DB log keeps statement-free log_duration lines, which give each batch session its server-reported time', () => {
   const ts = '2026-11-22T00:00:01.000000000Z ';
+  // The start clock query, the Message INSERT, PREPARE, EXECUTE and DEALLOCATE of one batch session, then a later line.
   const raw = [
     ts + '2026-11-22 00:00:01.000 UTC [42] LOG:  duration: 0.041 ms',
-    ts + '2026-11-22 00:00:01.900 UTC [42] LOG:  duration: 899.500 ms',
+    ts + '2026-11-22 00:00:01.700 UTC [42] LOG:  duration: 699.500 ms',
+    ts + '2026-11-22 00:00:01.701 UTC [42] LOG:  duration: 0.100 ms',
+    ts + '2026-11-22 00:00:01.899 UTC [42] LOG:  duration: 198.000 ms',
+    ts + '2026-11-22 00:00:01.900 UTC [42] LOG:  duration: 0.020 ms',
     ts + '2026-11-22 00:00:01.950 UTC [42] LOG:  duration: 12.250 ms  statement: INSERT secret',
     ts + '2026-11-22 00:00:02.500 UTC [42] LOG:  duration: 3.000 ms',
     ts + '2026-11-22 00:00:01.500 CET [43] LOG:  duration: 1.000 ms',
   ].join('\n');
   const kept = redactSeedDbLogs(raw).split('\n');
-  assert.deepEqual(kept, [raw.split('\n')[0], raw.split('\n')[1], raw.split('\n')[3], raw.split('\n')[4]], 'a duration line with statement text is dropped');
+  assert.deepEqual(kept, raw.split('\n').filter(line => !line.includes('statement:')), 'a duration line with statement text is dropped');
   const durations = serverDurations(kept.join('\n'));
   const startMs = Date.parse('2026-11-22T00:00:01.000Z') + 0.7, endMs = Date.parse('2026-11-22T00:00:01.900Z') + 0.3;
-  assert.deepEqual(batchServerMs(durations, 42, startMs, endMs), { serverMs: 899.541, serverStatements: 2 }, 'whole-millisecond log times are compared with the clock window');
+  assert.deepEqual(batchServerMs(durations, 42, startMs, endMs), { serverMs: 897.661, serverStatements: 5 }, 'whole-millisecond log times are compared with the clock window');
   assert.equal(batchServerMs(durations, 43, startMs, endMs), null, 'a non-UTC log time is not read');
   assert.equal(batchServerMs(durations, 44, startMs, endMs), null);
+});
+
+test('a batch whose Message INSERT and Channel log durations are missing has no server time, even with its clock query', () => {
+  const line = (time: string, ms: string) => `2026-11-22T00:00:01.000000000Z 2026-11-22 00:00:${time} UTC [42] LOG:  duration: ${ms} ms`;
+  const startMs = Date.parse('2026-11-22T00:00:01.000Z') + 0.7, endMs = Date.parse('2026-11-22T00:00:01.900Z') + 0.3;
+  // Only the opening clock query survived: one line where the batch logs at least batchServerStatements.min.
+  assert.deepEqual(batchServerMs(serverDurations(line('01.000', '0.041')), 42, startMs, endMs), { serverMs: null, serverStatements: 1 });
+  const four = ['01.000', '01.700', '01.701', '01.899'].map(time => line(time, '1.000')).join('\n');
+  assert.equal(batchServerMs(serverDurations(four), 42, startMs, endMs)!.serverMs, null, 'one statement short');
+  const eight = ['01.000', '01.000', '01.100', '01.200', '01.300', '01.400', '01.500', '01.900'].map(time => line(time, '1.000')).join('\n');
+  assert.equal(batchServerMs(serverDurations(eight), 42, startMs, endMs)!.serverMs, null, 'more lines than the batch has statements');
+  assert.deepEqual(batchServerStatements, { min: 5, max: 7 });
 });

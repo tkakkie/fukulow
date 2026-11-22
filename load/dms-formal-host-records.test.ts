@@ -90,7 +90,7 @@ test('a host sample row that cannot be written is a write failure, so the covera
 test('Docker VM log copy keeps only console and init logs changed during the run, redacted', () => {
   const root = mkdtempSync(join(tmpdir(), 'vm-logs-')), source = join(root, 'vm'), destination = join(root, 'out');
   mkdirSync(source);
-  writeFileSync(join(source, 'console.log'), 'kernel: hung_task ' + secret);
+  writeFileSync(join(source, 'console.log'), '1970-01-01T00:00:05Z kernel: hung_task ' + secret);
   writeFileSync(join(source, 'console.log.0'), 'old');
   writeFileSync(join(source, 'init.log'), '1970-01-01T00:00:05Z init /Users/someone/x');
   writeFileSync(join(source, 'other.log'), 'ignored');
@@ -98,7 +98,7 @@ test('Docker VM log copy keeps only console and init logs changed during the run
   const record = copyDockerVmLogs(source, destination, 10_000, redact);
   assert.deepEqual(record, { status: 'complete', files: ['console.log', 'init.log'], skippedOlder: 1, truncated: [] });
   assert.deepEqual(readdirSync(destination).sort(), ['console.log', 'init.log']);
-  assert.equal(readFileSync(join(destination, 'console.log'), 'utf8'), 'kernel: hung_task [redacted]');
+  assert.equal(readFileSync(join(destination, 'console.log'), 'utf8'), '1970-01-01T00:00:05Z kernel: hung_task [redacted]');
   assert.equal(readFileSync(join(destination, 'init.log'), 'utf8'), '1970-01-01T00:00:05Z init ~/x');
   assert.equal(copyDockerVmLogs(join(root, 'absent'), destination, 0, redact).status, 'missing');
   const locked = join(root, 'locked');
@@ -126,27 +126,72 @@ test('a VM log cut to its last 32 MiB is complete only if the kept part reaches 
   assert.equal(firstTimestampMs('no timestamps here'), null);
 });
 
-test('every copied VM log set must reach back to the run start, not only cut files', () => {
+test('every copied VM log set must reach back to the run start through an unbroken rotation chain', () => {
   const root = mkdtempSync(join(tmpdir(), 'vm-logs-rotated-')), source = join(root, 'vm');
   mkdirSync(source);
-  const runStart = Date.parse('2026-11-22T03:00:00Z');
+  const runStart = Date.parse('2026-11-22T03:00:00Z'), at = (iso: string) => new Date(iso);
+  const file = (name: string, text: string, mtime: string) => { writeFileSync(join(source, name), text); utimesSync(join(source, name), at(mtime), at(mtime)); };
+  const status = (dir: string) => copyDockerVmLogs(source, join(root, dir), runStart, redact);
   // Rotation removed the earlier files: the only console log is small and starts 15 minutes into the seed.
-  writeFileSync(join(source, 'console.log'), '2026-11-22T03:15:00.000Z kernel: ok\n2026-11-22T03:20:00.000Z kernel: ok\n');
-  const lost = copyDockerVmLogs(source, join(root, 'a'), runStart, redact);
+  file('console.log', '2026-11-22T03:15:00.000Z kernel: ok\n2026-11-22T03:20:00.000Z kernel: ok\n', '2026-11-22T03:20:00Z');
+  const lost = status('a');
   assert.deepEqual([lost.status, lost.truncated, lost.files], ['partial', [], ['console.log']]);
   assert.match(lost.reason!, /console/);
-  // An entry at or before the start covers the set, in any of its copied files.
-  writeFileSync(join(source, 'console.log.0'), '2026-11-22T02:59:00.000Z kernel: earlier\n');
-  assert.equal(copyDockerVmLogs(source, join(root, 'b'), runStart, redact).status, 'complete');
+  // An entry at or before the start in the next older copied file, which the newer one continues, covers the set.
+  file('console.log.0', '2026-11-22T02:59:00.000Z kernel: earlier\n2026-11-22T03:14:50.000Z kernel: last\n', '2026-11-22T03:14:50Z');
+  assert.equal(status('b').status, 'complete');
   rmSync(join(source, 'console.log.0'));
-  // A set file last written before the start (skipped) shows the copied ones continue it.
-  writeFileSync(join(source, 'console.log.1'), '2026-11-22T02:00:00.000Z kernel: old\n');
-  utimesSync(join(source, 'console.log.1'), new Date(runStart - 60_000), new Date(runStart - 60_000));
-  assert.equal(copyDockerVmLogs(source, join(root, 'c'), runStart, redact).status, 'complete');
+  // A pre-seed file does not show continuity when the copied file starts long after its last write: the rotation in
+  // between is missing (here .0 is gone and console.log starts 15 minutes into the seed).
+  file('console.log.1', '2026-11-22T02:00:00.000Z kernel: old\n', '2026-11-22T02:59:00Z');
+  assert.equal(status('c').status, 'partial', 'a pre-seed file with a 16-minute gap is not continuous coverage');
+  file('console.log.2', '2026-11-22T01:00:00.000Z kernel: older\n', '2026-11-22T02:00:00Z');
+  rmSync(join(source, 'console.log.1'));
+  assert.equal(status('c2').status, 'partial', 'console.log then console.log.2: the numbering has a gap');
+  // A file last written before the start that the live file continues within the rotation gap covers the set.
+  rmSync(join(source, 'console.log.2'));
+  file('console.log', '2026-11-22T03:00:20.000Z kernel: rotated\n', '2026-11-22T03:20:00Z');
+  file('console.log.0', '2026-11-22T02:00:00.000Z kernel: old\n', '2026-11-22T02:59:50Z');
+  assert.equal(status('d').status, 'complete');
+  // The chain may pass through several copied files, each continuing the next older one.
+  file('console.log', '2026-11-22T03:10:00.500Z kernel: newest\n', '2026-11-22T03:20:00Z');
+  file('console.log.0', '2026-11-22T03:05:00.000Z kernel: middle\n2026-11-22T03:10:00.000Z kernel: x\n', '2026-11-22T03:10:00Z');
+  file('console.log.1', '2026-11-22T02:00:00.000Z kernel: old\n', '2026-11-22T03:04:59Z');
+  assert.equal(status('e').status, 'complete');
+  rmSync(join(source, 'console.log.0'));
+  assert.equal(status('f').status, 'partial', 'the middle rotation is missing');
+  rmSync(join(source, 'console.log.1'));
+  file('console.log', '2026-11-22T02:59:00.000Z kernel: covers\n', '2026-11-22T03:20:00Z');
   // Each set is checked on its own: an init log without any entry at the start is partial, too.
   writeFileSync(join(source, 'init.log'), 'no timestamp');
-  const init = copyDockerVmLogs(source, join(root, 'd'), runStart, redact);
+  const init = status('g');
   assert.deepEqual([init.status, /init/.test(init.reason!), /console/.test(init.reason!)], ['partial', true, false]);
+});
+
+test('a VM log cut to its last 32 MiB starts at a line boundary, so a credential at the cut is still redacted', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vm-logs-cut-')), source = join(root, 'vm');
+  mkdirSync(source);
+  const line = `2026-11-22T02:00:00.000Z kernel: ok ${'x'.repeat(200)}\n`;
+  const kept = line.repeat(Math.ceil(32 * 1024 * 1024 / line.length));
+  // The last 32 MiB start right after `password="`: the value without its key would survive a redaction after the cut.
+  const tailPart = 'hunter2pw" rest\n' + kept.slice(0, 32 * 1024 * 1024 - 'hunter2pw" rest\n'.length);
+  writeFileSync(join(source, 'console.log'), line.repeat(10) + '2026-11-22T02:00:00.000Z env password="' + tailPart);
+  const record = copyDockerVmLogs(source, join(root, 'out'), 0, redact);
+  assert.deepEqual(record.truncated, ['console.log']);
+  const saved = readFileSync(join(root, 'out', 'console.log'), 'utf8');
+  assert.ok(!saved.includes('hunter2pw'), 'the partial first line is dropped before the redaction');
+  assert.ok(saved.startsWith('2026-11-22T02:00:00.000Z kernel: ok'));
+});
+
+test('the VM log copy stops when no time is left before cleanup and records it as failed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vm-logs-late-')), source = join(root, 'vm');
+  mkdirSync(source);
+  writeFileSync(join(source, 'console.log'), '1970-01-01T00:00:00Z kernel: ok\n');
+  const record = copyDockerVmLogs(source, join(root, 'out'), 0, redact, { untilMs: Date.now() + 1_000 });
+  assert.deepEqual([record.status, record.files], ['failed', []]);
+  assert.match(record.reason!, /no time left/);
+  assert.deepEqual(readdirSync(join(root, 'out')), [], 'nothing was read or written');
+  assert.equal(copyDockerVmLogs(source, join(root, 'out2'), 0, redact, { untilMs: Date.now() + 60_000 }).status, 'complete');
 });
 
 test('host log covers the run window with a minute of margin and records a failure', async () => {

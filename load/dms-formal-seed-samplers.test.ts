@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Command } from './dms-formal-exec.ts';
-import { kernelFiles, killLoop, kernelLoop, loopCpuSeconds, parseKernelSamples, parsePostgresSamples, postgresLoop, seedBatchSummary,
-  snapshotSql, snapshotsPerSession, startSeedSamplers, stopFile, stopTiming, summarizeSamplers } from './dms-formal-seed-samplers.ts';
+import { batchSummaryFailures, kernelFiles, killLoop, kernelLoop, loopCpuSeconds, parseKernelSamples, parsePostgresSamples, postgresLoop, seedBatchSummary,
+  seedShape, snapshotSql, snapshotsPerSession, startSeedSamplers, stopFile, stopTiming, summarizeSamplers } from './dms-formal-seed-samplers.ts';
 
 const self = '77 (sh) S 0 77 77 0 -1 4194560 100 0 0 0 30 20 140 60 20 0 1 0 100 4000000 200';
 const snapshot = (atMs: number) => JSON.stringify({ atMs, checkpointer: {}, bgwriter: {}, wal: {}, io: [], waitEvents: [], vacuum: [] });
@@ -191,6 +191,31 @@ test('a failed redacted write leaves no raw sampler output anywhere', async () =
   assert.deepEqual([readdirSync(join(dir, 'out', 'k.txt')), readdirSync(join(dir, 'out', 'p.txt'))], [[], []]);
 });
 
+test('raw sampler output that cannot be removed from the private scratch is a collection failure', { skip: process.getuid?.() === 0 }, async () => {
+  const dir = scratch();
+  let release: () => void = () => {};
+  const stopped = new Promise<void>(resolve => { release = resolve; });
+  const exec = async (command: Command) => {
+    if (command.args.includes('touch')) { release(); return { code: 0, stdout: '' }; }
+    const script = command.args[command.args.indexOf('-c') + 1];
+    writeFileSync(command.log!, script === postgresLoop
+      ? ['--- pid 40', '--- clk_tck 100', ...session(41, 1), '--- self ' + self, '--- stopped'].join('\n')
+      : ['--- pid 30', '--- clk_tck 100', ...frame('1.0'), '--- self ' + self, '--- stopped'].join('\n'));
+    await stopped;
+    return { code: 0, stdout: '' };
+  };
+  const stop = startSeedSamplers(exec, 'stub-db', { kernel: join(dir, 'out', 'k.txt'), postgres: join(dir, 'out', 'p.txt') }, join(dir, 'raw'));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  // The scratch directory refuses deletion (EACCES); the redacted copies are written elsewhere and succeed.
+  chmodSync(join(dir, 'raw'), 0o500);
+  try {
+    const record = await stop();
+    assert.ok(record.failures.includes('kernel: raw output not removed from the private scratch'), record.failures.join('; '));
+    assert.ok(record.failures.includes('postgres: raw output not removed from the private scratch'));
+    assert.ok(existsSync(join(dir, 'out', 'k.txt')) && existsSync(join(dir, 'out', 'p.txt')));
+  } finally { chmodSync(join(dir, 'raw'), 0o700); }
+});
+
 test('a loop that died before stop, or that ignores the stop file, is a recorded collection failure', async () => {
   const dir = scratch();
   const kills: string[][] = [];
@@ -273,34 +298,81 @@ test('an interrupt that arrives after a normal stop began shortens the grace, sk
   assert.ok(none.failures.includes('kernel: stop command skipped'));
 });
 
+const at = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', ' UTC');
+const durationLine = (ms: number, pid: number, durationMs: string) => `2026-11-22T00:00:00.000000000Z ${at(ms)} [${pid}] LOG:  duration: ${durationMs} ms`;
+const clock = (startMs: number, spanMs: number, pid: number) => ({ dbClockStartMs: startMs, dbClockEndMs: startMs + spanMs, dbClockSpanMs: spanMs, dbBackendPid: pid });
+// Instrumented rows, exactly as the diagnostic seed writes them.
+const batch = (organization: number, batchIndex: number, durationMs: number, extra: object = { dbClock: 'missing' }, recorderMs = 0.5) =>
+  ({ kind: 'batch', organization, batchIndex, durationMs, startedAtMs: 1, endedAtMs: 1 + durationMs, ...extra, recorderMs });
+const organizationRow = (organization: number) => ({ kind: 'organization', organization, durationMs: 30_000, startedAtMs: 1, endedAtMs: 30_001 });
+const jsonl = (rows: unknown[]) => rows.map(row => typeof row === 'string' ? row : JSON.stringify(row)).join('\n') + '\n';
+
 test('batch summary separates PostgreSQL time from docker exec/psql cost and excludes batch 0 from the medians only', () => {
-  const clock = (startMs: number, spanMs: number, pid: number) => ({ dbClockStartMs: startMs, dbClockEndMs: startMs + spanMs, dbClockSpanMs: spanMs, dbBackendPid: pid });
   const rows = [
-    { kind: 'batch', organization: 0, batchIndex: 0, durationMs: 20_000, ...clock(1_000, 19_900, 10), recorderMs: 9 },
-    { kind: 'batch', organization: 0, batchIndex: 1, durationMs: 900, ...clock(30_000, 850, 11), recorderMs: 0.25 },
-    { kind: 'batch', organization: 0, batchIndex: 2, durationMs: 1_000, ...clock(40_000, 930, 12), recorderMs: 0.75 },
-    { kind: 'batch', organization: 1, batchIndex: 1, durationMs: 12_000, dbClock: 'missing' },
-    { kind: 'organization', organization: 0, durationMs: 30_000 },
+    batch(0, 0, 20_000, clock(1_000, 19_900, 10), 9), batch(0, 1, 900, clock(30_000, 850, 11), 0.25),
+    batch(0, 2, 1_000, clock(40_000, 930, 12), 0.75), batch(0, 3, 12_000), organizationRow(0),
   ];
-  const at = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', ' UTC');
-  const log = (ms: number, pid: number, durationMs: string) => `2026-11-22T00:00:00.000000000Z ${at(ms)} [${pid}] LOG:  duration: ${durationMs} ms`;
-  const dbLog = [log(1_000, 10, '0.050'), log(20_000, 10, '19000.000'), log(30_100, 11, '700.000'), log(30_850, 11, '100.500'),
-    log(29_999, 11, '5.000'), log(30_200, 99, '900.000'), log(40_900, 12, '800.000')].join('\n');
-  const { perBatch, ...summary } = seedBatchSummary(rows.map(row => JSON.stringify(row)).join('\n') + '\n', dbLog);
-  assert.deepEqual(summary, { batches: 4, medianBatches: 3, malformedLines: 0, dbClockMissing: 1, serverMissing: 1,
-    medianMs: 1_000, medianDbClockSpanMs: 890, medianOutsideDbClockSpanMs: 60, medianServerMs: 800.25, medianOutsideServerMs: 149.75,
-    recorderMs: { median: 0.75, max: 9, total: 10 } });
-  assert.deepEqual(perBatch.map(row => [row.batchIndex, row.serverMs, row.serverStatements]), [[0, 19000.05, 2], [1, 800.5, 2], [2, 800, 1], [1, null, 0]],
-    'joined by backend PID inside the clock window: the line before the window and the other PID are left out');
+  // Five statements per batch inside its clock window: start clock, Message INSERT, PREPARE, EXECUTE, DEALLOCATE.
+  const dbLog = [durationLine(1_000, 10, '0.050'), durationLine(15_000, 10, '1.000'), durationLine(15_001, 10, '1.000'), durationLine(20_000, 10, '19000.000'),
+    durationLine(20_001, 10, '0.000'),
+    durationLine(29_999, 11, '5.000'), durationLine(30_000, 11, '0.100'), durationLine(30_100, 11, '700.000'), durationLine(30_101, 11, '0.100'),
+    durationLine(30_849, 11, '100.300'), durationLine(30_850, 11, '0.000'), durationLine(30_200, 99, '900.000'),
+    durationLine(40_900, 12, '800.000')].join('\n');
+  const { perBatch, ...summary } = seedBatchSummary(jsonl(rows), dbLog, { shape: { organizations: 1, batchesPerOrganization: 4 }, arm: 'instrumented' });
+  assert.deepEqual(summary, { arm: 'instrumented', batches: 4, medianBatches: 3, malformedLines: 0, expectedRows: 5, missingRows: 0, unexpectedRows: 0,
+    dbClockMissing: 1, serverMissing: 2, medianMs: 1_000, medianDbClockSpanMs: 890, medianOutsideDbClockSpanMs: 60, medianServerMs: 800.5,
+    medianOutsideServerMs: 99.5, recorderMs: { median: 0.625, max: 9, total: 10.5 } });
+  assert.deepEqual(perBatch.map(row => [row.batchIndex, row.serverMs, row.serverStatements]), [[0, 19002.05, 5], [1, 800.5, 5], [2, null, 1], [3, null, 0]],
+    'joined by backend PID inside the clock window: the line before the window and the other PID are left out; one line is not a batch');
+  assert.deepEqual(batchSummaryFailures(summary), ['seed-timing.jsonl: dbClock missing on 1 of 4 batches', 'db.log: server duration missing or incomplete on 2 of 4 batches']);
 });
 
 test('batch clock coverage includes batch 0, and malformed timing lines are failures, not dropped', () => {
-  const row = (batchIndex: number, extra: object) => JSON.stringify({ kind: 'batch', organization: 0, batchIndex, durationMs: 900, ...extra });
-  const timed = { dbClockStartMs: 1, dbClockEndMs: 2, dbClockSpanMs: 1, dbBackendPid: 7 };
-  const batch0Missing = seedBatchSummary([row(0, { dbClock: 'missing' }), row(1, timed), row(2, timed)].join('\n'));
+  const timed = clock(1, 1, 7), shape = { organizations: 1, batchesPerOrganization: 3 };
+  const batch0Missing = seedBatchSummary(jsonl([batch(0, 0, 900), batch(0, 1, 900, timed), batch(0, 2, 900, timed), organizationRow(0)]), undefined, { shape, arm: 'instrumented' });
   assert.deepEqual([batch0Missing.batches, batch0Missing.dbClockMissing, batch0Missing.medianBatches, batch0Missing.medianDbClockSpanMs], [3, 1, 2, 1],
     'batch 0 has no clock: missing, though it stays out of the median');
-  const malformed = seedBatchSummary([row(1, timed), 'not json', '{"kind":"batch","organization":0}', '{"kind":"batch"'].join('\n'));
+  const malformed = seedBatchSummary(jsonl([batch(0, 0, 900, timed), 'not json', '{"kind":"batch","organization":0}', '{"kind":"batch"']), undefined, { shape, arm: 'instrumented', stop: { rule: 'seed-failure' } as never });
   assert.deepEqual([malformed.batches, malformed.malformedLines], [1, 3]);
-  assert.equal(seedBatchSummary(row(1, timed)).serverMissing, 1, 'without the DB log every server duration is missing');
+  assert.equal(seedBatchSummary(jsonl([batch(0, 0, 900, timed)]), undefined, { shape, arm: 'instrumented', stop: { rule: 'seed-failure' } as never }).serverMissing, 1,
+    'without the DB log every server duration is missing');
+});
+
+test('the timing file must hold every expected row in order and in full, or the batch summary reports a collection failure', () => {
+  const shape = { organizations: 2, batchesPerOrganization: 3 };
+  const complete = [0, 1].flatMap(o => [batch(o, 0, 900), batch(o, 1, 900), batch(o, 2, 900), organizationRow(o)]);
+  const summary = (rows: unknown[], stop?: object, arm: 'instrumented' | 'baseline' = 'instrumented') => {
+    const { perBatch: _, ...rest } = seedBatchSummary(jsonl(rows), undefined, { shape, stop: stop as never, arm });
+    return rest;
+  };
+  const counts = (rows: unknown[], stop?: object, arm?: 'instrumented' | 'baseline') => {
+    const result = summary(rows, stop, arm);
+    return [result.expectedRows, result.missingRows, result.unexpectedRows, result.malformedLines];
+  };
+  assert.deepEqual(counts(complete), [8, 0, 0, 0]);
+  // An empty timing file after a completed seed is eight missing rows, not zero failures.
+  assert.deepEqual(counts([]), [8, 8, 0, 0]);
+  assert.deepEqual(batchSummaryFailures(summary([])).slice(0, 1), ['seed-timing.jsonl: 8 of 8 expected rows missing']);
+  // A whole batch row lost in the middle: one missing, and every later row is out of place.
+  assert.deepEqual(counts(complete.filter((_, i) => i !== 1)), [8, 1, 6, 0]);
+  // Rows that do not have the shape the arm writes are malformed.
+  for (const bad of ['{"kind":"organization"}', JSON.stringify({ ...organizationRow(0), extra: 1 }), JSON.stringify({ kind: 'batch', organization: 0, batchIndex: 0, durationMs: 900 }),
+    JSON.stringify({ ...batch(0, 0, 900), batchIndex: -1 }), JSON.stringify({ ...batch(0, 0, 900), durationMs: 'slow' }), JSON.stringify({ ...batch(0, 0, 900, { ...clock(1, 1, 7), dbClock: 'missing' }) }),
+    JSON.stringify((({ recorderMs: _, ...row }) => row)(batch(0, 0, 900))), '[]', 'null'])
+    assert.equal(summary([bad, ...complete.slice(1)]).malformedLines, 1, bad);
+  // After a stop rule the rows run exactly through the stopping batch or Organization row.
+  const messageStop = { rule: 'message-batch', organization: 1, batchIndex: 1 };
+  assert.deepEqual(counts(complete.slice(0, 6), messageStop), [6, 0, 0, 0]);
+  assert.deepEqual(counts(complete.slice(0, 5), messageStop), [6, 1, 0, 0]);
+  assert.deepEqual(counts(complete.slice(0, 8), { rule: 'organization-total', organization: 1, batchIndex: 2 }), [8, 0, 0, 0]);
+  assert.deepEqual(counts(complete.slice(0, 7), { rule: 'organization-total', organization: 1, batchIndex: 2 }), [8, 1, 0, 0]);
+  // After another seed failure any prefix is complete, but a gap is still out of place.
+  assert.deepEqual(counts(complete.slice(0, 3), { rule: 'seed-failure' }), [3, 0, 0, 0]);
+  assert.deepEqual(counts([complete[0], complete[2]], { rule: 'seed-failure' }), [2, 0, 1, 0]);
+  // The baseline arm (the formal seed) writes the origin/main fields exactly, and has no clocks or server times by design.
+  const formal = [0, 1].flatMap(o => [0, 1, 2].map(b => ({ kind: 'batch', organization: o, batchIndex: b, durationMs: 900 })).concat([{ kind: 'organization', organization: o, durationMs: 30_000 } as never]));
+  assert.deepEqual(counts(formal, undefined, 'baseline'), [8, 0, 0, 0]);
+  assert.deepEqual(batchSummaryFailures(summary(formal, undefined, 'baseline')), []);
+  assert.deepEqual(counts(complete, undefined, 'baseline'), [8, 8, 0, 8], 'instrumented rows are not baseline rows');
+  assert.deepEqual(seedShape('main'), { organizations: 10, batchesPerOrganization: 200 });
 });

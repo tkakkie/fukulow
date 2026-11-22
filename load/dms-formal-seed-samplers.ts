@@ -3,7 +3,8 @@
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Executor } from './dms-formal-exec.ts';
-import { batchServerMs, serverDurations } from './dms-formal-seed-diagnostic.ts';
+import { batchServerMs, serverDurations, type SeedStop } from './dms-formal-seed-diagnostic.ts';
+import { fixturePairs, type MixedScenario } from './dms-formal-scenarios.ts';
 
 export const kernelFiles = [
   '/proc/diskstats', '/proc/pressure/io', '/proc/pressure/memory', '/proc/pressure/cpu', '/proc/meminfo', '/proc/vmstat',
@@ -241,6 +242,13 @@ export function startSeedSamplers(exec: Executor, container: string, paths: { ke
   };
   const kernel = loop(kernelLoop, [...kernelFiles], paths.kernel);
   const postgres = loop(postgresLoop, [snapshotSql], paths.postgres, ['PGOPTIONS=-c statement_timeout=2000', 'PGCONNECT_TIMEOUT=2']);
+  // The raw output can hold unredacted text; it never outlives stop(), whatever failed. A raw file left behind is a
+  // collection failure of its loop.
+  const removeRaw = (record?: SeedSamplerRecord) => {
+    for (const [name, path] of [['kernel', paths.kernel], ['postgres', paths.postgres]] as const) for (const file of [rawPath(path), rawPath(path) + '-retention.json']) {
+      try { rmSync(file, { force: true }); } catch { record?.failures.push(`${name}: raw output not removed from the private scratch`); }
+    }
+  };
   return async ({ hurry, untilMs }: StopOptions = {}): Promise<SeedSamplerRecord> => {
     const fast = () => hurry?.aborted === true;
     const left = () => (untilMs?.() ?? Infinity) - Date.now();
@@ -285,13 +293,9 @@ export function startSeedSamplers(exec: Executor, container: string, paths: { ke
         postgresRaw === undefined ? null : parsePostgresSamples(postgresRaw), postgresOutcome, dockerExecs, stopCommand, inContainerKill);
       if (!saved(paths.kernel, kernelRaw)) record.failures.push('kernel: redacted file not saved');
       if (!saved(paths.postgres, postgresRaw)) record.failures.push('postgres: redacted file not saved');
+      removeRaw(record);
       return record;
-    } finally {
-      // The raw output can hold unredacted text; it never outlives stop(), whatever failed.
-      for (const path of [paths.kernel, paths.postgres]) for (const file of [rawPath(path), rawPath(path) + '-retention.json']) {
-        try { rmSync(file, { force: true }); } catch { /* Recorded by the missing redacted file, if any. */ }
-      }
-    }
+    } catch (error) { removeRaw(); throw error; }
   };
 }
 
@@ -344,8 +348,8 @@ export function summarizeSamplers(kernel: KernelCoverage | null, kernelOutcome: 
   return { kernel, kernelOutcome, postgres, postgresOutcome, stopCommand, inContainerKill, dockerExecs, failures, missing };
 }
 
-type BatchRow = { kind?: string; organization?: number; batchIndex?: number; durationMs?: number; dbClockStartMs?: number; dbClockEndMs?: number;
-  dbClockSpanMs?: number; dbBackendPid?: number; recorderMs?: number };
+type BatchRow = { kind: 'batch' | 'organization'; organization: number; batchIndex?: number; durationMs: number; dbClockStartMs?: number;
+  dbClockEndMs?: number; dbClockSpanMs?: number; dbBackendPid?: number; recorderMs?: number };
 const median = (values: number[]) => {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b), middle = Math.floor(sorted.length / 2);
@@ -353,34 +357,78 @@ const median = (values: number[]) => {
 };
 export type BatchServerRow = { organization: number | null; batchIndex: number; durationMs: number; dbClockSpanMs: number | null;
   serverMs: number | null; serverStatements: number };
+// The seed writes, per Organization, one row per Message batch (batchIndex 0, 1, ...) and then the Organization row.
+export type SeedShape = { organizations: number; batchesPerOrganization: number };
+// instrumented: the diagnostic seed (`--seed-diagnostic`), whose rows carry wall clocks, the DB clock and recorderMs.
+// baseline: the formal seed, whose rows keep the origin/main fields exactly.
+export type SeedArm = 'instrumented' | 'baseline';
+// The formal Message batch is 250 DM pairs; the seed diagnostic always seeds 10 formal Organizations.
+export const seedShape = (scenario: MixedScenario, organizations = 10): SeedShape =>
+  ({ organizations, batchesPerOrganization: Math.ceil(fixturePairs(scenario).historical.length / 250) });
+
+const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+const time = (value: unknown) => typeof value === 'number' && Number.isFinite(value);
+const keys = (row: object, expected: string[]) => Object.keys(row).sort().join() === [...expected].sort().join();
+// A row has exactly the fields its arm writes, each of the right type; anything else is malformed.
+function timingRow(row: unknown, arm: SeedArm): row is BatchRow {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  const r = row as Record<string, unknown>, wall = arm === 'instrumented' ? ['startedAtMs', 'endedAtMs'] : [];
+  if (!count(r.organization) || !time(r.durationMs) || (r.durationMs as number) < 0 || !wall.every(key => time(r[key]))) return false;
+  if (r.kind === 'organization') return keys(r, ['kind', 'organization', 'durationMs', ...wall]);
+  if (r.kind !== 'batch' || !count(r.batchIndex)) return false;
+  if (arm === 'baseline') return keys(r, ['kind', 'organization', 'batchIndex', 'durationMs']);
+  const base = ['kind', 'organization', 'batchIndex', 'durationMs', ...wall, 'recorderMs'];
+  if (!time(r.recorderMs)) return false;
+  if (r.dbClock === 'missing') return keys(r, [...base, 'dbClock']);
+  return keys(r, [...base, 'dbClockStartMs', 'dbClockEndMs', 'dbClockSpanMs', 'dbBackendPid'])
+    && time(r.dbClockStartMs) && time(r.dbClockEndMs) && time(r.dbClockSpanMs) && count(r.dbBackendPid);
+}
+
+// The rows the seed must have written, in order, up to where it ended: every row after a completed seed; through the
+// stopping batch or Organization row after a stop rule; any prefix after another seed failure (its failing batch
+// writes no row).
+function expectedRows(shape: SeedShape, stop: SeedStop | undefined, written: number) {
+  const order = Array.from({ length: shape.organizations }, (_, o) => [
+    ...Array.from({ length: shape.batchesPerOrganization }, (_, b) => `batch ${o}/${b}`), `organization ${o}`]).flat();
+  const through = (key: string) => order.indexOf(key) + 1;
+  const end = !stop ? order.length : stop.rule === 'message-batch' ? through(`batch ${stop.organization}/${stop.batchIndex}`)
+    : stop.rule === 'organization-total' ? through(`organization ${stop.organization}`) : Math.min(written, order.length);
+  return order.slice(0, end);
+}
 
 // Per Message batch: the batch time, the DB clock span (an upper bound on PostgreSQL time) and the server-reported
 // statement time from the DB log (log_duration, joined by backend PID and the clock window). Coverage counts every
-// batch, batch 0 included; the medians exclude batch 0, as the stop rule does. A line that is not a JSON timing row
-// is malformed, a collection failure. None of this is the instrumentation's effect on the seed: that needs a matched
-// seed without it. recorderMs is the per-batch parse cost the diagnostic adds after the batch timer.
-export function seedBatchSummary(jsonl: string, dbLog?: string) {
+// batch, batch 0 included; the medians exclude batch 0, as the stop rule does. A line that is not a timing row of the
+// arm is malformed; a missing expected row or a row out of place is counted. Each is a collection failure. None of
+// this is the instrumentation's effect on the seed: that is the matched comparison (dms-formal-seed-effect.ts).
+// recorderMs is the per-batch parse cost the diagnostic adds after the batch timer.
+export function seedBatchSummary(jsonl: string, dbLog: string | undefined, { shape, stop, arm }: { shape: SeedShape; stop?: SeedStop; arm: SeedArm }) {
   let malformedLines = 0;
-  const rows = jsonl.split('\n').filter(line => line.trim()).flatMap(line => {
+  const all = jsonl.split('\n').filter(line => line.trim()).flatMap(line => {
     try {
-      const row = JSON.parse(line) as BatchRow;
-      if (row && typeof row === 'object' && (row.kind === 'organization' || (row.kind === 'batch' && typeof row.batchIndex === 'number' && typeof row.durationMs === 'number'))) return [row];
+      const row: unknown = JSON.parse(line);
+      if (timingRow(row, arm)) return [row];
     } catch { /* Counted below. */ }
     malformedLines++;
     return [];
-  }).filter(row => row.kind === 'batch');
+  });
+  const expected = expectedRows(shape, stop, all.length);
+  const key = (row: BatchRow) => row.kind === 'batch' ? `batch ${row.organization}/${row.batchIndex}` : `organization ${row.organization}`;
+  const unexpectedRows = all.filter((row, i) => key(row) !== expected[i]).length;
+  const missingRows = Math.max(0, expected.length - all.length);
+  const rows = all.filter(row => row.kind === 'batch');
   const durations = dbLog === undefined ? undefined : serverDurations(dbLog);
   const perBatch: BatchServerRow[] = rows.map(row => {
     const clock = typeof row.dbClockSpanMs === 'number' && typeof row.dbClockStartMs === 'number' && typeof row.dbClockEndMs === 'number' && typeof row.dbBackendPid === 'number';
     const server = clock && durations ? batchServerMs(durations, row.dbBackendPid!, row.dbClockStartMs!, row.dbClockEndMs!) : null;
-    return { organization: row.organization ?? null, batchIndex: row.batchIndex!, durationMs: row.durationMs!, dbClockSpanMs: clock ? row.dbClockSpanMs! : null,
+    return { organization: row.organization, batchIndex: row.batchIndex!, durationMs: row.durationMs, dbClockSpanMs: clock ? row.dbClockSpanMs! : null,
       serverMs: server?.serverMs ?? null, serverStatements: server?.serverStatements ?? 0 };
   });
   const judged = perBatch.filter(row => row.batchIndex !== 0), timed = judged.filter(row => row.dbClockSpanMs !== null);
   const served = judged.filter(row => row.serverMs !== null);
   const recorder = rows.flatMap(row => typeof row.recorderMs === 'number' ? [row.recorderMs] : []);
   return {
-    batches: perBatch.length, medianBatches: judged.length, malformedLines,
+    arm, batches: perBatch.length, medianBatches: judged.length, malformedLines, expectedRows: expected.length, missingRows, unexpectedRows,
     dbClockMissing: perBatch.filter(row => row.dbClockSpanMs === null).length,
     serverMissing: perBatch.filter(row => row.serverMs === null).length,
     medianMs: median(judged.map(row => row.durationMs)),
@@ -391,4 +439,16 @@ export function seedBatchSummary(jsonl: string, dbLog?: string) {
     recorderMs: recorder.length ? { median: median(recorder), max: Math.max(...recorder), total: Math.round(recorder.reduce((a, b) => a + b, 0) * 1000) / 1000 } : null,
     perBatch,
   };
+}
+
+// The collection failures of a batch summary. The baseline arm has no clocks or server durations by design.
+export function batchSummaryFailures(summary: Omit<ReturnType<typeof seedBatchSummary>, 'perBatch'>) {
+  const failures: string[] = [];
+  if (summary.malformedLines) failures.push(`seed-timing.jsonl: ${summary.malformedLines} malformed lines`);
+  if (summary.missingRows) failures.push(`seed-timing.jsonl: ${summary.missingRows} of ${summary.expectedRows} expected rows missing`);
+  if (summary.unexpectedRows) failures.push(`seed-timing.jsonl: ${summary.unexpectedRows} rows out of place`);
+  if (summary.arm === 'baseline') return failures;
+  if (summary.dbClockMissing) failures.push(`seed-timing.jsonl: dbClock missing on ${summary.dbClockMissing} of ${summary.batches} batches`);
+  if (summary.serverMissing) failures.push(`db.log: server duration missing or incomplete on ${summary.serverMissing} of ${summary.batches} batches`);
+  return failures;
 }

@@ -4,7 +4,7 @@ import { scaledLoad, localLimits, type LocalLimits } from './dms-formal-local.ts
 import { outsideCheckout } from './dms-workload.ts';
 import { requiredScenarios, deferredNames, type Scenario } from './dms-formal-scenarios.ts';
 
-export type Config = { app: string; db: string; generator: string; sha: string; output: string; scenario: Scenario; attempts: number; mode: 'formal' | 'smoke'; deadline?: number; reviewedPatchSha256?:string; downloadRaw?: boolean; target?: 'ssh'|'local'; loadScale?:string; limits?:LocalLimits; pilot?:boolean; seedDiagnostic?:boolean; pilotSeconds?:number;pilotImage?:string };
+export type Config = { app: string; db: string; generator: string; sha: string; output: string; scenario: Scenario; attempts: number; mode: 'formal' | 'smoke'; deadline?: number; reviewedPatchSha256?:string; downloadRaw?: boolean; target?: 'ssh'|'local'; loadScale?:string; limits?:LocalLimits; pilot?:boolean; seedDiagnostic?:boolean; seedBaseline?:boolean; pilotSeconds?:number;pilotImage?:string };
 export const quote = (s: string) => "'" + s.replaceAll("'", "'\\''") + "'";
 export function external(path: string, checkout: string): string {
   if (!isAbsolute(path)) throw new Error('Paths must be absolute');
@@ -14,10 +14,13 @@ export function external(path: string, checkout: string): string {
 }
 export function readRunConfig(args: string[], checkout: string): Config {
   const [path = '', option] = args;
-  if (args.length > 2 || (option !== undefined && option !== '--pilot' && option !== '--seed-diagnostic')) {
-    throw new Error('Expected <config> [--pilot | --seed-diagnostic]');
+  if (args.length > 2 || (option !== undefined && option !== '--pilot' && option !== '--seed-diagnostic' && option !== '--seed-diagnostic-baseline')) {
+    throw new Error('Expected <config> [--pilot | --seed-diagnostic | --seed-diagnostic-baseline]');
   }
-  return readConfig(path, checkout, option === '--pilot', option === '--seed-diagnostic');
+  // The baseline arm is the seed diagnostic run with every instrumentation off: the formal seed, the formal DB command,
+  // no samplers. It gives the matched seed time the instrumented arm is compared with (dms-formal-seed-effect.ts).
+  const config = readConfig(path, checkout, option === '--pilot', option === '--seed-diagnostic' || option === '--seed-diagnostic-baseline');
+  return option === '--seed-diagnostic-baseline' ? { ...config, seedBaseline: true } : config;
 }
 
 export function requireSeedDiagnostic(config: Pick<Config, 'target'|'scenario'|'mode'|'pilot'>, scale: string) {
