@@ -146,11 +146,18 @@ function reportStatus(report: Report): Status {
 const isHash = (value: string) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const validRejection = (value: string | null) => value === null || typeof value === 'string';
 
-// A rehearsal has one formal-size round. Its evidence is complete when the formal checks would
-// accept it with that round in every slot. Only this boolean leaves the function.
+// The formal judge classifies an aborted short-query benchmark (SQL error) as FAIL, not NOT EVALUATED,
+// so a rehearsal checks the sample counts itself: every query must have all its samples.
+const fullySampled = (l?: Sample) => l !== undefined && l !== null && !('sqlError' in l) && 'n' in l &&
+  l.n === criteria.samplesPerQueryRound && (accepts(l.query) || l.outcomes?.length === criteria.samplesPerQueryRound);
+
+// A rehearsal has one formal-size round. Its evidence is complete when every query is fully sampled and
+// the formal checks would accept it with that round in every slot. Only this boolean leaves the function.
 export function rehearsalComplete(e: Evidence) {
+  if (!Array.isArray(e.rounds) || e.rounds.length !== 1) return false;
   const [round] = e.rounds;
-  if (e.rounds.length !== 1 || round?.round !== 1) return false;
+  if (round?.round !== 1 || !Array.isArray(round.latencies) || round.latencies.length !== queries.length ||
+    !round.latencies.every(fullySampled)) return false;
   return judge({...e, formal: true, rounds: [1, 2, 3].map(n => ({...round, round: n}))}) !== 'NOT EVALUATED';
 }
 

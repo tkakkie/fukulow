@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { arch, cpus, totalmem } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,14 +43,35 @@ export function options(argv: string[]) {
   return {mode, output, fromBackfill};
 }
 
-export function outputPath(path: string, repository = root) {
+function outsideGit(path: string, repository: string) {
   const absolute = resolve(path);
   const out = resolve(realpathSync(dirname(absolute)), basename(absolute));
   const gitRoot = realpathSync(repository);
   assert.ok(out !== gitRoot && !out.startsWith(gitRoot + '/'), 'Artifacts must be outside Git');
+  return out;
+}
+
+export function outputPath(path: string, repository = root) {
+  const out = outsideGit(path, repository);
   const existing = lstatSync(out, {throwIfNoEntry: false});
   assert.ok(!existing, 'Artifact destination already exists');
   return out;
+}
+
+// Worker variables can be inherited from a shell, so the worker re-checks what options() and
+// outputPath() enforce: no cleanup, a backfill source only for formal, and the supervisor's
+// fresh, still empty output directory (never an earlier run's artifacts).
+export function workerOptions(env: NodeJS.ProcessEnv, repository = root) {
+  const mode = env.SEARCH_D3R_MODE as Mode;
+  const fromBackfill = env.SEARCH_D3R_FROM || undefined;
+  assert.ok(['smoke', 'rehearsal', 'backfill-only', 'formal'].includes(mode), 'Invalid worker mode');
+  assert.ok(Boolean(fromBackfill) === (mode === 'formal'), 'Only a formal worker reads a verified backfill');
+  assert.ok(env.SEARCH_D3R_OUT, 'Missing worker output directory');
+  const out = outsideGit(env.SEARCH_D3R_OUT, repository);
+  const stats = lstatSync(out, {throwIfNoEntry: false});
+  assert.ok(stats?.isDirectory() && readdirSync(out).length === 0,
+    'Worker output must be the fresh, empty directory created by its supervisor');
+  return {mode, output: out, fromBackfill};
 }
 
 async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<typeof loadManifest>,
@@ -63,7 +84,7 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   const app = (db: string, text: string) => sql(container, db, text, 'fukulow_app');
   const path = productionPath();
   const conditions = mode === 'smoke' ? {...frozen.performance, ...frozen.smoke.performance}
-    : mode === 'rehearsal' ? {...frozen.performance, rounds: 1} : frozen.performance;
+    : mode === 'rehearsal' ? {...frozen.performance, ...frozen.rehearsal.performance} : frozen.performance;
   const phase = (name: string, event: string) => note(`${runLabel(mode) ? runLabel(mode) + ' ' : ''}${name} ${event}`);
   phase('run', 'started');
   try {
@@ -308,8 +329,7 @@ export async function warmup(page: string, querySet: readonly (readonly [string,
 
 async function main() {
   const isWorker = process.env.SEARCH_WORKER === '1';
-  const args = isWorker ? {mode: process.env.SEARCH_D3R_MODE as Mode, output: process.env.SEARCH_D3R_OUT,
-    fromBackfill: process.env.SEARCH_D3R_FROM} : options(process.argv.slice(2));
+  const args = isWorker ? workerOptions(process.env) : options(process.argv.slice(2));
   assert.ok(['smoke', 'rehearsal', 'backfill-only', 'formal', 'cleanup'].includes(args.mode));
   const manifest = loadManifest();
   const {rows, restoreRows} = manifest.frozen.performance;

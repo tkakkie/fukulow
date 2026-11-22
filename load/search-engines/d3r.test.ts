@@ -18,7 +18,7 @@ import { expectedTerms, insertSql, verifyTerms } from './d3r/backfill.ts';
 import { allPages, planFacts, prepare } from './d3r/engine.ts';
 import { argumentsForPostgres, loadManifest, removedSettings } from './d3r/manifest.ts';
 import { actors, benchmarkScript, pageSize, pgbenchFormat, productionPath, readSource, sources, term, tokens } from './d3r/path.ts';
-import { options, outputPath, resetMeasured, warmup } from './d3r/run.ts';
+import { options, outputPath, resetMeasured, warmup, workerOptions } from './d3r/run.ts';
 import { directRls, directRlsExpected, searchTables, verifyRls } from './d3r/rls.ts';
 import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFile, snapshotIdentity, snapshotLaunch } from './d3r/snapshot.ts';
 import { timeQuery } from './d3r/timing.ts';
@@ -47,6 +47,32 @@ test('v15 freezes the approved settings and every production migration while pre
   for (const [path, digest] of Object.entries(productionPath().hashes)) {
     assert.equal(frozen.sourceHashes.find(source => source.path === path)?.sha256, digest);
   }
+});
+
+test('v14 stays pinned and v15 differs from it only by the rehearsal, the new migration and its sources', () => {
+  const v14Text = readFileSync(new URL('./manifest-v14.json', import.meta.url), 'utf8');
+  assert.equal(hash(v14Text), '602128371da4975e4a56f2a9e0a5838b0c2a14c4b3f8cd680f3a559ad1b9addd');
+  const v14 = JSON.parse(v14Text);
+  assert.equal(v14.sha256, 'a7210a32e53b9adacc5fd6951520167ad2171d6f8a6a5b07d3210bdb0f4ba9c5');
+  assert.equal(v14.sha256, hash(JSON.stringify(v14.frozen)));
+  const {frozen} = loadManifest();
+  const keys = [...new Set([...Object.keys(v14.frozen), ...Object.keys(frozen)])];
+  const changed = keys.filter(key => JSON.stringify(v14.frozen[key]) !== JSON.stringify((frozen as Record<string, unknown>)[key]));
+  assert.deepEqual(changed.sort(), ['migrations', 'rehearsal', 'sourceHashes', 'version']);
+  for (const key of ['generator', 'node', 'image', 'shmBytes', 'settings', 'removedSettings', 'sessionPolicy', 'setup',
+    'queryPath', 'performance', 'smoke', 'timing', 'criteria']) assert.deepEqual((frozen as Record<string, unknown>)[key], v14.frozen[key], key);
+  assert.equal(v14.frozen.version, 14);
+  assert.equal(frozen.version, 15);
+  assert.equal(v14.frozen.rehearsal, undefined);
+  assert.deepEqual(frozen.rehearsal, {label: 'REHEARSAL / NON-EVALUATION', performance: {rounds: 1},
+    evidence: 'never; only completeness against the formal checks is recorded'});
+  const added = 'server/migrations/202611221100_unread_counts.sql';
+  assert.deepEqual(frozen.migrations, [...v14.frozen.migrations, added].sort());
+  const before = new Map<string, string>(v14.frozen.sourceHashes.map((s: {path: string; sha256: string}) => [s.path, s.sha256]));
+  assert.ok([...before.keys()].every(path => frozen.sourceHashes.some(source => source.path === path)));
+  assert.deepEqual(frozen.sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path), [
+    'load/search-engines/d3r/acceptance.ts', 'load/search-engines/d3r/labels.ts', 'load/search-engines/d3r/manifest.ts',
+    'load/search-engines/d3r/run.ts', added]);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {
@@ -290,6 +316,68 @@ test('rehearsal completeness uses the formal checks on one round and never repor
   assert.equal(rehearsalComplete(short), false);
   assert.equal(rehearsalComplete({...one, restore: undefined} as unknown as Evidence), false);
   assert.equal(rehearsalComplete({...one, valid: false}), false);
+});
+
+test('a rehearsal with an aborted or under-sampled benchmark is incomplete; a slow full one is complete', () => {
+  const one = (): Evidence => ({...evidence(), formal: false, rounds: [structuredClone(evidence().rounds[0])]});
+  const slow = one();
+  for (const latency of slow.rounds[0].latencies) if ('p95' in latency) latency.p95 = latency.p99 = 5000;
+  assert.equal(rehearsalComplete(slow), true);
+  const aborted = one();
+  const at = aborted.rounds[0].latencies.findIndex(l => l.query === 'ja1-frequent');
+  aborted.rounds[0].latencies[at] = {query: 'ja1-frequent', outcomes: [], sqlError: 'ERROR: canceling statement'};
+  assert.equal(judge({...aborted, formal: true, rounds: [1, 2, 3].map(round => ({...aborted.rounds[0], round}))}), 'FAIL',
+    'the formal judge counts this abort as a FAIL, so the rehearsal must check samples itself');
+  assert.equal(rehearsalComplete(aborted), false);
+  const acceptedAbort = one();
+  const accepted = acceptedAbort.rounds[0].latencies.findIndex(l => accepts(l.query));
+  acceptedAbort.rounds[0].latencies[accepted] = {query: acceptedAbort.rounds[0].latencies[accepted].query, outcomes: [],
+    sqlError: 'ERROR: canceling statement'};
+  assert.equal(rehearsalComplete(acceptedAbort), false);
+  const fewer = one();
+  const sample = fewer.rounds[0].latencies.find(l => accepts(l.query))!;
+  assert.ok('n' in sample);
+  sample.n = 99;
+  assert.equal(rehearsalComplete(fewer), false);
+  const fewerOutcomes = one();
+  const rejected = fewerOutcomes.rounds[0].latencies.find(l => !accepts(l.query))!;
+  rejected.outcomes!.pop();
+  assert.equal(rehearsalComplete(fewerOutcomes), false);
+  assert.equal(rehearsalComplete({...one(), rounds: undefined} as unknown as Evidence), false);
+});
+
+test('worker startup refuses inherited variables that options() and outputPath() would refuse', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-worker-test-'));
+  const repository = mkdtempSync(join(tmpdir(), 'd3r-worker-repo-'));
+  try {
+    const fresh = join(dir, 'fresh');
+    mkdirSync(fresh);
+    const env = (mode: string, from?: string, out = fresh) =>
+      ({SEARCH_WORKER: '1', SEARCH_D3R_MODE: mode, SEARCH_D3R_OUT: out, ...(from ? {SEARCH_D3R_FROM: from} : {})});
+    for (const mode of ['smoke', 'rehearsal', 'backfill-only']) {
+      assert.equal(workerOptions(env(mode), repository).mode, mode);
+      assert.throws(() => workerOptions(env(mode, '/tmp/formal-backfill'), repository), /formal worker/);
+    }
+    assert.equal(workerOptions(env('formal', '/tmp/source'), repository).fromBackfill, '/tmp/source');
+    assert.throws(() => workerOptions(env('formal'), repository), /formal worker/);
+    assert.throws(() => workerOptions(env('cleanup', '/tmp/source'), repository), /Invalid worker mode/);
+    assert.throws(() => workerOptions(env('evaluation'), repository), /Invalid worker mode/);
+    assert.throws(() => workerOptions({SEARCH_D3R_MODE: 'rehearsal'}, repository), /output directory/);
+    const formal = join(dir, 'formal');
+    mkdirSync(formal);
+    writeFileSync(join(formal, 'image.json'), '{}');
+    assert.throws(() => workerOptions(env('rehearsal', undefined, formal), repository), /fresh, empty/);
+    assert.throws(() => workerOptions(env('rehearsal', undefined, join(dir, 'missing')), repository), /fresh, empty/);
+    const link = join(dir, 'link');
+    symlinkSync(fresh, link);
+    assert.throws(() => workerOptions(env('rehearsal', undefined, link), repository), /fresh, empty/);
+    const inside = join(repository, 'out');
+    mkdirSync(inside);
+    assert.throws(() => workerOptions(env('rehearsal', undefined, inside), repository), /outside Git/);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+    rmSync(repository, {recursive: true, force: true});
+  }
 });
 
 test('five modes and output preflight can be checked without Docker', () => {
