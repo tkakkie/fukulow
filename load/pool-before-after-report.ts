@@ -12,11 +12,11 @@ for(const scenario of scenarios) for(const [i,arms] of pairs().entries()) for(co
   if(run.arm!==arm||run.pair!==i+1||run.scenario!==scenario){missing.push(`mismatched identity: ${path}`);continue;}
   runs.push(run);
 }
-// The runner's own record decides completeness: interrupted, failed, smoke or uncleaned runs never yield a verdict.
+// The runner's own record decides completeness: interrupted, failed, smoke, rehearsal or uncleaned runs never yield a verdict.
 const summaryPath=`${dir}/summary.json`;
-const summary=existsSync(summaryPath)?JSON.parse(readFileSync(summaryPath,'utf8')) as {complete?:unknown;smoke?:unknown;cleanupErrors?:unknown}:undefined;
+const summary=existsSync(summaryPath)?JSON.parse(readFileSync(summaryPath,'utf8')) as {complete?:unknown;smoke?:unknown;rehearsal?:unknown;cleanupErrors?:unknown}:undefined;
 if(!summary)missing.push(summaryPath);
-const complete=summary?.complete===true&&summary.smoke===false&&Array.isArray(summary.cleanupErrors)&&summary.cleanupErrors.length===0&&missing.length===0;
+const complete=summary?.complete===true&&summary.smoke===false&&summary.rehearsal!==true&&Array.isArray(summary.cleanupErrors)&&summary.cleanupErrors.length===0&&missing.length===0;
 const report={scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',complete,missing,judgement:judgeAll(runs,complete)};
 writeFileSync(`${dir}/judgement.json`,JSON.stringify(report,null,2));
 console.log(JSON.stringify(report,null,2));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { judge, judgeAll, validity, pairs, plan, scope, type Row, type Run, type Lane } from './pool-before-after-summary.ts';
+import { judge, judgeAll, validity, pairs, plan, scope, sequence, type Row, type Run, type Lane } from './pool-before-after-summary.ts';
 const lane=(rate=250):Lane=>({rate,seconds:60,attempted:rate*60,accepted:rate*60,rejected429:0,rejected503:0,otherErrors:0,clientTimeouts:0,transportErrors:0,droppedIterations:0,p95:10,p99:20});
 const row=():Row=>({rate:250,seconds:60,send:lane(),reader:lane(2),evidence:{complete:true,samples:60,maxSampleGapMs:1000,samplingErrors:0}});
 const runs=():Run[]=>pairs().flatMap((arms,i)=>arms.map(arm=>({scope,pair:i+1,arm,scenario:'send',smoke:false,steps:[row()],reader:{...lane(2),seconds:284,attempted:568,accepted:568}})));
@@ -101,4 +101,16 @@ test('mixed reads and sign-ins are judged like sends; their loss never passes',(
     assert.equal(judge(sat,'mixed',250).status,'REPORT ONLY');
     sat[0].steps=[{...row(),reads:lane(500),signin:lane(20)}];assert.equal(judge(sat,'mixed',250).status,'NOT EVALUATED');
   }
+});
+
+test('#769 rehearsal: one B and one A run per scenario on the formal plan; formal and smoke sequences unchanged',()=>{
+  assert.deepEqual(sequence('rehearsal'),[{scenario:'send',pair:1,arm:'B'},{scenario:'send',pair:1,arm:'A'},{scenario:'mixed',pair:1,arm:'B'},{scenario:'mixed',pair:1,arm:'A'}]);
+  assert.deepEqual(sequence('smoke'),[{scenario:'send',pair:1,arm:'B'}]);
+  assert.deepEqual(sequence('formal'),['send','mixed'].flatMap(scenario=>[['B','A'],['A','B'],['B','A']].flatMap((arms,i)=>arms.map(arm=>({scenario,pair:i+1,arm})))));
+});
+test('#769 rehearsal runs never yield a verdict, even when marked complete',()=>{
+  const rehearsed=runs().map(r=>({...r,rehearsal:true}));
+  for (const j of judgeAll(rehearsed,true)) assert.equal(j.status,'NOT EVALUATED');
+  assert.deepEqual(judge(rehearsed,'send',250).pairs.map(p=>p.reason),['missing or duplicate arm','missing or duplicate arm','missing or duplicate arm']);
+  assert.notEqual(judge(runs(),'send',250).pairs[0].reason,'missing or duplicate arm');
 });

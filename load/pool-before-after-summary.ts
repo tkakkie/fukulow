@@ -10,6 +10,13 @@ export const scenarios = ['send', 'mixed'] as const;
 export type Scenario = typeof scenarios[number];
 export type Arm = 'B' | 'A';
 export function pairs() { return [['B','A'],['A','B'],['B','A']] as const; }
+export type Mode = 'formal' | 'smoke' | 'rehearsal';
+// Rehearsal (#769): the formal plan and generator, one run per scenario and arm, all validity checks; never evidence.
+export function sequence(mode:Mode) {
+  if (mode==='smoke') return [{scenario:'send' as Scenario,pair:1,arm:'B' as Arm}];
+  if (mode==='rehearsal') return scenarios.flatMap(scenario=>(['B','A'] as const).map(arm=>({scenario,pair:1,arm})));
+  return scenarios.flatMap(scenario=>pairs().flatMap((arms,i)=>arms.map(arm=>({scenario,pair:i+1,arm}))));
+}
 export function plan(smoke = false) { return throughputPlan(smoke ? '50' : settings.rates.join(','), smoke ? '10' : '60',10); }
 export type Counts = { attempted:number; accepted:number; rejected429:number; rejected503:number;
   otherErrors:number; clientTimeouts:number; transportErrors:number; droppedIterations:number;
@@ -17,7 +24,7 @@ export type Counts = { attempted:number; accepted:number; rejected429:number; re
 export type Lane = Counts & { rate:number; seconds:number };
 export type Evidence = { complete:boolean; samples:number; maxSampleGapMs:number; samplingErrors:number };
 export type Row = { rate:number; seconds:number; send:Lane; reader:Lane; reads?:Lane; signin?:Lane; evidence:Evidence };
-export type Run = { scope:string; pair:number; arm:Arm; scenario:Scenario; smoke:boolean; steps:Row[]; reader:Lane };
+export type Run = { scope:string; pair:number; arm:Arm; scenario:Scenario; smoke:boolean; rehearsal?:boolean; steps:Row[]; reader:Lane };
 export function validity(row:Row) {
   const reasons:string[]=[];
   if (!row.evidence?.complete || !Number.isInteger(row.evidence.samples) || row.evidence.samples<=0 || row.evidence.samplingErrors!==0 ||
@@ -34,7 +41,7 @@ export function validity(row:Row) {
 }
 export function judge(runs:Run[], scenario:Scenario, rate:number) {
   const cells=pairs().map((_,index)=> {
-    const get=(arm:Arm)=>runs.filter(r=>r.scope===scope && !r.smoke && r.scenario===scenario && r.pair===index+1 && r.arm===arm);
+    const get=(arm:Arm)=>runs.filter(r=>r.scope===scope && !r.smoke && !r.rehearsal && r.scenario===scenario && r.pair===index+1 && r.arm===arm);
     const bs=get('B'), as=get('A');
     if(bs.length!==1 || as.length!==1) return {pair:index+1,status:'NOT EVALUATED',reason:'missing or duplicate arm'};
     const bRows=bs[0].steps.filter(r=>r.rate===rate),aRows=as[0].steps.filter(r=>r.rate===rate);
@@ -71,10 +78,10 @@ export function judge(runs:Run[], scenario:Scenario, rate:number) {
     cells.some(c=>c.status==='REPORT ONLY')?'NOT EVALUATED':cells.some(c=>c.status==='FAIL')?'FAIL':'PASS';
   return {scope,scenario,rate,status,pairs:cells,poolAcquireTimeouts:'NOT EVALUATED',timeoutNote};
 }
-// An interrupted, failed, smoke or uncleaned run, or one with missing results, never yields a verdict.
+// An interrupted, failed, smoke, rehearsal or uncleaned run, or one with missing results, never yields a verdict.
 export function judgeAll(runs:Run[], complete:boolean) {
   return scenarios.flatMap(s=>settings.rates.map(rate=>{
     const j=judge(runs,s,rate);
-    return complete ? j : {...j,status:'NOT EVALUATED',reason:'run incomplete, interrupted, smoke, missing results or cleanup failed'};
+    return complete ? j : {...j,status:'NOT EVALUATED',reason:'run incomplete, interrupted, smoke, rehearsal, missing results or cleanup failed'};
   }));
 }

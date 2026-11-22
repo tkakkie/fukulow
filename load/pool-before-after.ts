@@ -7,20 +7,23 @@ import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
 import { allowanceSeconds, generatorConfig } from './pool-before-after-config.ts';
 import { condition, minimumRows, planQuery, planReasons, statsQuery, statsReasons } from './pool-before-after-analyze.ts';
-import { plan, pairs, settings, scenarios, scope, timeoutNote, judgeAll, validity, type Run, type Scenario, type Arm, type Counts } from './pool-before-after-summary.ts';
+import { plan, sequence as runSequence, settings, scope, timeoutNote, judgeAll, validity, type Run, type Arm, type Counts } from './pool-before-after-summary.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const exec=promisify(execFile);
 if(process.argv.includes('--help')) {
-  console.log(`${scope}\nUsage: node load/pool-before-after.ts --out /absolute/new/external/directory [--smoke]\nFull: 12 fresh runs, sends and mixed; three B/A, A/B, B/A pairs per scenario.\nSmoke: B only, sends only, 50/s for 10 s; never comparison evidence.`);
+  console.log(`${scope}\nUsage: node load/pool-before-after.ts --out /absolute/new/external/directory [--smoke | --rehearsal]\nFull: 12 fresh runs, sends and mixed; three B/A, A/B, B/A pairs per scenario.\nSmoke: B only, sends only, 50/s for 10 s; never comparison evidence.\nRehearsal: the full plan, one B and one A run per scenario with every validity check; never evidence.`);
   process.exit(0);
 }
 const args=process.argv.slice(2);
 const outIndex=args.indexOf('--out');
-if(outIndex<0||!args[outIndex+1]||args.some((arg,i)=>i!==outIndex+1&&!['--out','--smoke'].includes(arg))) throw new Error('Use --out /absolute/new/external/directory [--smoke]');
+if(outIndex<0||!args[outIndex+1]||args.some((arg,i)=>i!==outIndex+1&&!['--out','--smoke','--rehearsal'].includes(arg))
+  ||(args.includes('--smoke')&&args.includes('--rehearsal'))) throw new Error('Use --out /absolute/new/external/directory [--smoke | --rehearsal]');
 const output=outsideCheckout(args[outIndex+1]);
 if(existsSync(output)) throw new Error('Output directory already exists');
 if(process.version!=='v26.13.1') throw new Error('Use Node 26.13.1');
 const smoke=args.includes('--smoke');
+const rehearsal=args.includes('--rehearsal');
+const mode=smoke?'smoke':rehearsal?'rehearsal':'formal';
 mkdirSync(output,{recursive:true});
 const scratch=mkdtempSync(`${tmpdir()}/pool196-`);
 const project=`pool196-${Date.now()}-${randomUUID().slice(0,8)}`;
@@ -39,12 +42,12 @@ let interrupted=false;
 const stop=()=>{interrupted=true;generator?.kill('SIGTERM'); if(generatorName) {try{docker('rm','-f',generatorName);}catch{/* finally retries */}}};
 process.on('SIGINT',stop);process.on('SIGTERM',stop);
 const check=()=>{if(interrupted)throw new Error('Interrupted');};
-const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,runs,
-  judgement:judgeAll(runs,complete&&!smoke),cleanupErrors});
+const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,rehearsal,...(rehearsal?{evidence:false}:{}),runs,
+  judgement:judgeAll(runs,complete&&mode==='formal'),cleanupErrors});
 let failed=false;
 try {
   const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-config.ts','load/pool-before-after-summary.ts','load/pool-before-after-analyze.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
-  save(`${output}/metadata.json`,{scope,harnessCondition:condition,timeoutNote,commits,settings,smoke,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
+  save(`${output}/metadata.json`,{scope,harnessCondition:condition,timeoutNote,commits,settings,smoke,rehearsal,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
     memberArithmetic:'4000 Members; max 2000 sends/s / 4000 = 0.5 sends/s/Member; round robin returns every 2 s; default bucket burst 10, refill 1/s unchanged.',
     poolTimeouts:'Both: SQLx PoolTimedOut -> ApiError::from -> HTTP 500, ErrorBody.error="internal error"; stderr database operation failed: pool timed out while waiting for an open connection. Logs have no request ID, include background/late failures: per-request counts NOT EVALUATED. No server patches.',
     workload:'THROUGHPUT_SCENARIO=many equivalent: 200 public Channels, index % 200; Member index % 4000; no subscribers. Open arrival k6, each send step 60 s, 11 s drains; reader 2/s continuous including drains. Success latency includes drain, successful requests only.',
@@ -79,7 +82,7 @@ try {
   docker('pull',k6);
   const k6Id=docker('image','inspect','--format','{{.Id}}',k6);
   save(`${output}/images.json`,{scope,commits,images,k6,k6Id});
-  const sequence=smoke?[{scenario:'send' as Scenario,pair:1,arm:'B' as Arm}]:scenarios.flatMap(scenario=>pairs().flatMap((arms,i)=>arms.map(arm=>({scenario,pair:i+1,arm}))));
+  const sequence=runSequence(mode);
   for(const cell of sequence) {
     check();
     const id=`${cell.scenario}-${cell.pair}-${cell.arm}`;
@@ -160,7 +163,7 @@ try {
       }
       save(`${privateDir}/data.json`,{organization,otherOrganization,reader:reader.token,channels,password});
       save(`${privateDir}/tokens.json`,tokens);
-      save(`${dir}/metadata.json`,{scope,harnessCondition:condition,...cell,commit:commits[cell.arm],appImage:docker('inspect','--format','{{.Image}}',app),dbImage:docker('inspect','--format','{{.Image}}',db),settings,smoke,
+      save(`${dir}/metadata.json`,{scope,harnessCondition:condition,...cell,commit:commits[cell.arm],appImage:docker('inspect','--format','{{.Image}}',app),dbImage:docker('inspect','--format','{{.Image}}',db),settings,smoke,rehearsal,
         dbSettings:sql("SELECT name||'='||setting FROM pg_settings WHERE name IN ('max_connections','shared_buffers','statement_timeout','lock_timeout') ORDER BY name"),
         roleSettings:sql("SELECT rolname,rolconfig FROM pg_roles WHERE rolname IN ('fukulow','fukulow_app')"),started:new Date().toISOString()});
       const sample=()=> {
@@ -209,7 +212,7 @@ try {
         return {...r,resources:stats,evidence:{complete:result!.continuousReaderComplete,samples:stats.samples,maxSampleGapMs:stats.maxSampleGapMs,samplingErrors:sampleErrorTimes.filter(t=>t>=startMs!+step.startSeconds*1000&&t<startMs!+(step.startSeconds+step.seconds)*1000).length}};
       });
       const last=plan(smoke).at(-1)!;
-      const run:Run={scope,...cell,smoke,steps,reader:{...result.runMetrics.reader,rate:2,seconds:last.startSeconds+last.seconds+11}};
+      const run:Run={scope,...cell,smoke,...(rehearsal?{rehearsal}:{}),steps,reader:{...result.runMetrics.reader,rate:2,seconds:last.startSeconds+last.seconds+11}};
       const logs=dc('logs','--no-color','--timestamps','app');
       // Only this exact SQLx Display text is counted. Never infer from HTTP statuses.
       const events=logs.split('\n').filter(l=>/database operation failed: pool timed out while waiting for an open connection\s*$/.test(l)).map(l=>Date.parse(l.match(/\d{4}-\d\d-\d\dT\S+/)?.[0]??'')).filter(Number.isFinite);
@@ -236,7 +239,7 @@ try {
   if(activeCompose){try{command('docker',[...activeCompose,'down','--volumes','--remove-orphans'],undefined,activeEnv);}catch{cleanupErrors.push('Final Compose cleanup failed');}}
   for(const arm of ['B','A']) {try{const tag=`${project}-${arm.toLowerCase()}`;if(docker('image','ls','-q',tag))docker('image','rm',tag);}catch{cleanupErrors.push(`${arm}: image cleanup failed`);}}
   rmSync(scratch,{recursive:true,force:true});
-  const complete=!failed&&!interrupted&&!cleanupErrors.length&&(smoke||runs.length===scenarios.length*pairs().length*2);
+  const complete=!failed&&!interrupted&&!cleanupErrors.length&&runs.length===runSequence(mode).length;
   save(`${output}/summary.json`,{...summary(complete),complete});
   process.off('SIGINT',stop);process.off('SIGTERM',stop);
 }
