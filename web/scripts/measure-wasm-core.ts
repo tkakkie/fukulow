@@ -2,6 +2,7 @@
 // Usage:
 //   node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --out <dir> [--round <n>] [--smoke]
 //   node web/scripts/measure-wasm-core.ts --aggregate --out <dir>
+//   node web/scripts/aggregate-receive-path.ts <dir>   (#727 A1/A2 split and start criteria)
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
@@ -306,9 +307,18 @@ async function main() {
   const outFile = join(outDir, `round-${round}-${coreKind}.jsonl`)
 
   const syncCoreTargetUrl = pathToFileURL(resolve(webDir, 'src/core-wasm.ts')).href
+  // #727 A1/A2 load `?prod` and `?probe` copies of core-wasm.ts and sync.ts with production core-values; the
+  // existing sections above keep the test translator. `?probe` also swaps in the timestamping wasm glue.
+  const variantOf = (url: string | undefined) => url?.endsWith('?prod') ? 'prod' : url?.endsWith('?probe') ? 'probe' : undefined
 
   registerHooks({
     resolve(specifier, context, nextResolve) {
+      const variant = variantOf(context.parentURL)
+      if (variant && specifier === './core-values') return { url: pathToFileURL(resolve(webDir, 'src/core-values.ts')).href, shortCircuit: true }
+      if (variant && specifier === '#sync-core') {
+        return { url: variant === 'probe' ? pathToFileURL(resolve(webDir, 'scripts/receive-probe-core.ts')).href : `${syncCoreTargetUrl}?prod`, shortCircuit: true }
+      }
+      if (variant === 'probe' && specifier === '../wasm/fukulow_client_core') return { url: pathToFileURL(resolve(webDir, 'scripts/receive-probe-wasm.ts')).href, shortCircuit: true }
       if (specifier === './core-values') return { url: pathToFileURL(resolve(webDir, 'scripts/core-test-values.ts')).href, shortCircuit: true }
       if (specifier === '#sync-core') return { url: syncCoreTargetUrl, shortCircuit: true }
       if ((specifier.startsWith('./') || specifier.startsWith('../')) && context.parentURL) {
@@ -711,10 +721,11 @@ async function main() {
 
   // 3. Bulk Message Receipt (§5.4 Row 3)
   // Only core.step() is timed; get() returns the cached view, and the G3 scans run between steps outside the timer.
-  const timed = <T>(acc: { ms: number }, fn: () => T): T => { const t0 = performance.now(), r = fn(); acc.ms += performance.now() - t0; return r }
+  const timedPlain = <T>(acc: { ms: number }, fn: () => T): T => { const t0 = performance.now(), r = fn(); acc.ms += performance.now() - t0; return r }
   const bulkWarmup = smoke ? 3 : 30, bulkReps = smoke ? 5 : 100, bulkC0 = fixtureUuid('bulk-C0')
-  function runBulkHistory8x50(): number {
-    const core = createSelectedCore(SELF_UUID)
+  type BulkTimer = <T>(acc: { ms: number }, fn: () => T) => T
+  function runBulkHistory8x50(create = createSelectedCore, timed: BulkTimer = timedPlain): number {
+    const core = create(SELF_UUID)
     const connId = (core.step({ type: 'session_start', selfId: SELF_UUID }).effects.find((e) => e.type === 'connect') as { id: number }).id
     core.step({ type: 'connection_ready', connection: connId })
     const latestId = (core.step({ type: 'watch', channel: bulkC0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
@@ -731,8 +742,8 @@ async function main() {
     if (core.get().channels[bulkC0].messages.length !== MAIN_MESSAGE_LIMIT) throw new Error('Expected 400 messages after 8x50')
     g3CompletionAssertions++; return Number(elapsed.toFixed(4))
   }
-  function runBulkHistory2x200(): number {
-    const core = createSelectedCore(SELF_UUID)
+  function runBulkHistory2x200(create = createSelectedCore, timed: BulkTimer = timedPlain): number {
+    const core = create(SELF_UUID)
     const connId = (core.step({ type: 'session_start', selfId: SELF_UUID }).effects.find((e) => e.type === 'connect') as { id: number }).id
     core.step({ type: 'connection_ready', connection: connId })
     const latestId = (core.step({ type: 'watch', channel: bulkC0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id
@@ -744,8 +755,8 @@ async function main() {
     const elapsed = acc.ms; assertG3CatchUpComplete(core.get(), bulkC0, 400, MAIN_MESSAGE_LIMIT)
     return Number(elapsed.toFixed(4))
   }
-  function runBulkCatchup(totalMessages: 250 | 1000): number {
-    const core = createSelectedCore(SELF_UUID)
+  function runBulkCatchup(totalMessages: 250 | 1000, create = createSelectedCore, timed: BulkTimer = timedPlain): number {
+    const core = create(SELF_UUID)
     const conn1 = (core.step({ type: 'session_start', selfId: SELF_UUID }).effects.find((e) => e.type === 'connect') as { id: number }).id
     core.step({ type: 'connection_ready', connection: conn1 })
     const latestId = (core.step({ type: 'watch', channel: bulkC0 }).effects.find((e) => e.type === 'fetch_history') as { id: number }).id, baseCursor = 100
@@ -784,6 +795,121 @@ async function main() {
     const samples: number[] = []
     for (let r = 0; r < bulkReps; r++) { samples.push(fn()); await releaseCores() }
     emit({ type: 'bulk_receipt', arm, core: coreKind, round, subCase, repetitions: bulkReps, unit: 'ms', samples, ...summarizeSamples(samples) })
+  }
+
+  // 5. Receive-path split (#727 A1/A2), report-only. Runs last so every section above keeps its #487 conditions.
+  // Both arms use production core-values; uninstrumented (plain) and instrumented (probed) trials alternate.
+  const receiveProbe = (await import(pathToFileURL(resolve(webDir, 'scripts/receive-probe-core.ts')).href)) as typeof import('./receive-probe-core.ts')
+  const variant = async <T>(path: string, name: 'prod' | 'probe') => (await import(`${pathToFileURL(resolve(webDir, path)).href}?${name}`)) as T
+  const createProdCore = (await variant<{ createCore: (selfId: string) => SyncCore }>('src/core-wasm.ts', 'prod')).createCore
+  const timedProbe = <T>(acc: { ms: number }, fn: () => T): T => {
+    receiveProbe.probe.armed = true
+    const t0 = performance.now(), r = fn(); acc.ms += performance.now() - t0
+    receiveProbe.probe.armed = false
+    return r
+  }
+  type CoreFactory = (selfId: string) => SyncCore
+  const a1Cases = [
+    ['history_8x50', (create: CoreFactory, time: BulkTimer) => runBulkHistory8x50(create, time)],
+    ['history_2x200', (create: CoreFactory, time: BulkTimer) => runBulkHistory2x200(create, time)],
+    ['catchup_250', (create: CoreFactory, time: BulkTimer) => runBulkCatchup(250, create, time)],
+    ['catchup_1000', (create: CoreFactory, time: BulkTimer) => runBulkCatchup(1000, create, time)],
+  ] as const
+  for (const [subCase, fn] of a1Cases) {
+    const plain: number[] = [], probed: Array<{ total: number; input: number; wasm: number; output: number; steps: number }> = []
+    for (let r = 0; r < bulkWarmup + bulkReps; r++) {
+      const plainMs = fn(createProdCore, timedPlain); await releaseCores()
+      receiveProbe.resetParts()
+      const total = fn(receiveProbe.createCore, timedProbe), { input, wasm, output, steps } = receiveProbe.parts
+      await releaseCores()
+      if (steps === 0) throw new Error(`A1 ${subCase}: no probed step`)
+      if (r >= bulkWarmup) { plain.push(plainMs); probed.push({ total, input, wasm, output, steps }) }
+    }
+    emit({ type: 'receive_a1', arm, core: coreKind, round, subCase, repetitions: bulkReps, unit: 'ms', plain, probed })
+  }
+
+  type RealtimeHandlers = { onReady(): void; onEvent(event: unknown): void; onClose(code: number): void }
+  type ReplaySocket = { send(data: string): void; close(): void; onopen: (() => void) | null; onmessage: ((e: { data: unknown }) => void) | null; onclose: ((e: { code: number }) => void) | null }
+  type ReplaySyncFn = (opts: {
+    selfId: string; newId?: () => string
+    api: Parameters<CreateSyncFn>[0]['api'] & { listChannelEvents(ch: string, q: unknown): Promise<OkResult<components['schemas']['ChannelEventPage']>> }
+    connect(h: RealtimeHandlers): { send(message: unknown): void; close(): void }
+  }) => Omit<SyncInstance, 'getTimeline'> & { getTimeline(ch: string): { subscribe(listener: () => void): () => void } }
+  const { connectRealtime } = (await import(pathToFileURL(resolve(webDir, 'src/realtime.ts')).href)) as {
+    connectRealtime(handlers: RealtimeHandlers, open: () => ReplaySocket): { send(message: unknown): void; close(): void }
+  }
+  const createProdSync = (await variant<{ createSync: ReplaySyncFn }>('src/sync.ts', 'prod')).createSync
+  const createProbeSync = (await variant<{ createSync: ReplaySyncFn }>('src/sync.ts', 'probe')).createSync
+  const realParse = JSON.parse
+  type ReplayParts = { total: number; parse: number; validate: number; stepInput: number; wasm: number; output: number; controller: number; steps: number }
+  // One trial: the Channel's base page, then `frameCount` replayed Create frames and `subscribed`, in the S3 order.
+  async function runReplay(frameCount: 250 | 1000, probed: boolean): Promise<ReplayParts | number> {
+    const ch = fixtureUuid('replay-C0'), baseSeq = 100, generation = '00000000-0000-4000-8000-000000000515'
+    let socket: ReplaySocket | undefined, sendSeq = 0, tEvent = 0, events = 0
+    const sent: string[] = []
+    const sync = (probed ? createProbeSync : createProdSync)({
+      selfId: SELF_UUID, newId: () => fixtureUuid(`replay-cid-${++sendSeq}`),
+      api: {
+        async listChannelEvents() { return { ok: true, data: { history_generation: generation, events: [], has_more: false } } },
+        async listMessages() { return { ok: true, data: { history_generation: generation, as_of_seq: baseSeq, messages: Array.from({ length: baseSeq }, (_, m) => makeMessage(m + 1, ch)), has_more: false } } },
+        async sendMessage() { return { ok: false, kind: 'network' } },
+      },
+      connect: h => connectRealtime(probed ? { ...h, onEvent(event) { tEvent = performance.now(); events++; h.onEvent(event) } } : h,
+        () => (socket = { send: d => { sent.push(d) }, close() {}, onopen: null, onmessage: null, onclose: null })),
+    })
+    await sync.start(); socket!.onopen!(); await sync.watch(ch); await delay(0)
+    const subscribe = sent.map((d) => realParse(d) as { type: string; channel_id?: string; after_seq?: number }).find((m) => m.type === 'subscribe' && m.channel_id === ch)
+    if (subscribe?.after_seq !== baseSeq) throw new Error(`A2: expected subscribe after_seq ${baseSeq}, sent ${JSON.stringify(sent)}`)
+    const frames = Array.from({ length: frameCount }, (_, k) => {
+      const message = makeMessage(baseSeq + 1 + k, ch)
+      return JSON.stringify({ type: 'message', kind: 'create', seq: message.created_seq, message })
+    })
+    frames.push(JSON.stringify({ history_generation: generation, type: 'subscribed', channel_id: ch, caught_up_seq: baseSeq + frameCount }))
+    let lastNotify = 0, notifications = 0, parse = 0, validate = 0, armParse = false
+    const unsubscribe = sync.getTimeline(ch).subscribe(() => { lastNotify = performance.now(); notifications++ })
+    // Only the frame's own JSON.parse in realtime.ts is timed: it is the first parse of each onmessage call.
+    const timedParse = ((text: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+      if (!armParse) return realParse(text, reviver)
+      armParse = false
+      const p0 = performance.now(), value: unknown = realParse(text, reviver); parse += performance.now() - p0
+      return value
+    }) as typeof JSON.parse
+    if (probed) { JSON.parse = timedParse; receiveProbe.resetParts(); receiveProbe.probe.armed = true }
+    const last = frames[frames.length - 1]
+    let beforeLast = -1
+    const t0 = performance.now()
+    try {
+      for (const data of frames) {
+        if (data === last) beforeLast = notifications
+        if (!probed) { socket!.onmessage!({ data }); continue }
+        const f0 = performance.now(), parsedBefore = parse
+        armParse = true; socket!.onmessage!({ data })
+        validate += tEvent - f0 - (parse - parsedBefore)
+      }
+    } finally {
+      receiveProbe.probe.armed = false; JSON.parse = realParse
+    }
+    const total = lastNotify - t0
+    const view = sync.get().channels[ch]
+    if (view?.cursor !== baseSeq + frameCount) throw new Error(`A2: cursor ${view?.cursor} !== ${baseSeq + frameCount}`)
+    assertG3Step(sync.get()); g3CompletionAssertions++
+    // total ends at the last notification, so the final frame must notify or total would miss it.
+    if (notifications <= beforeLast || total <= 0) throw new Error('A2: the final frame sent no view notification')
+    if (probed && events !== frames.length) throw new Error(`A2: ${events} events reached the controller, expected ${frames.length}`)
+    const { input: stepInput, wasm, output, steps } = receiveProbe.parts
+    unsubscribe(); await sync.close()
+    if (!probed) return total
+    return { total, parse, validate, stepInput, wasm, output, controller: total - parse - validate - stepInput - wasm - output, steps }
+  }
+  for (const frameCount of [250, 1000] as const) {
+    const plain: number[] = [], probed: ReplayParts[] = []
+    for (let r = 0; r < bulkWarmup + bulkReps; r++) {
+      const plainMs = await runReplay(frameCount, false); await releaseCores()
+      const parts = await runReplay(frameCount, true); await releaseCores()
+      if (typeof plainMs !== 'number' || typeof parts === 'number') throw new Error('A2: trial kind mismatch')
+      if (r >= bulkWarmup) { plain.push(plainMs); probed.push(parts) }
+    }
+    emit({ type: 'receive_a2', arm, core: coreKind, round, frames: frameCount, repetitions: bulkReps, unit: 'ms', plain, probed })
   }
 
   {
