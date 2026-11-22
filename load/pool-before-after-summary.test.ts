@@ -195,6 +195,8 @@ test('#196 decision b: a rehearsal load shortfall is a forecast, not a rehearsal
   assert.equal(f.find(x=>x.scenario==='mixed'&&x.rate===250)!.status,'FAIL');
   assert.equal(f.find(x=>x.scenario==='send'&&x.rate===250)!.status,'PASS');
   for(const j of judgeAll(all,true)) assert.equal(j.status,'NOT EVALUATED');
+  const extra=sequence('rehearsal').map(c=>full(c.scenario,c.arm));const x=extra[1].steps[0].send;x.attempted=15002;x.accepted=15002;
+  assert.deepEqual(rehearsalChecks(extra)[1],{scenario:'send',arm:'A',problems:['250/s: send: more load than planned'],loadNotGenerated:[]});
   const broken=all.map(r=>r);delete broken[2].steps[1].signin;
   assert.deepEqual(rehearsalChecks(broken)[2].problems,['500/s: settings mismatch']);
 });
