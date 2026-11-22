@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -13,17 +13,20 @@ import { denialCases, probe } from './definer.ts';
 import { appSessionSettings, hash, settings, snapshot as v13 } from './manifest.ts';
 import { queries } from './queries.ts';
 import { channel, epoch, generate, org, uuid } from './seed.ts';
-import { accepts, completeness, denialExpectation, denials, judge, shortIds, type Evidence } from './d3r/acceptance.ts';
+import { accepts, completeness, denialExpectation, denials, judge, rehearsalComplete, shortIds, type Evidence, type Sample } from './d3r/acceptance.ts';
 import { expectedTerms, insertSql, verifyTerms } from './d3r/backfill.ts';
 import { allPages, planFacts, prepare } from './d3r/engine.ts';
 import { argumentsForPostgres, loadManifest, removedSettings } from './d3r/manifest.ts';
 import { actors, benchmarkScript, pageSize, pgbenchFormat, productionPath, readSource, sources, term, tokens } from './d3r/path.ts';
-import { options, outputPath, resetMeasured, warmup } from './d3r/run.ts';
+import { claimFile, cleanUpRun, completeRun, discardRehearsalSnapshot, launchFile, measureBlocks, options, outputPath, processStart,
+  recordedWarmup, rehearsalHandoff, resetMeasured, stagingDirectory, stopUnlessWhole, warmup, workerOptions, writeLaunch,
+  type HandoffSteps } from './d3r/run.ts';
 import { directRls, directRlsExpected, searchTables, verifyRls } from './d3r/rls.ts';
-import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFile, snapshotIdentity, snapshotLaunch } from './d3r/snapshot.ts';
+import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFile, snapshotIdentity, snapshotLaunch, stageSnapshot } from './d3r/snapshot.ts';
 import { timeQuery } from './d3r/timing.ts';
+import { assertHeadroom, dfBytes, dockerDiskArgs, headroomSampler, outputDisk, projectHeadroom, type Disk } from './d3r/headroom.ts';
 
-test('v14 freezes the approved settings and every production migration while preserving v13', () => {
+test('v15 freezes the approved settings and every production migration while preserving v13', () => {
   const {sha256, frozen} = loadManifest();
   const baseline = v13();
   assert.equal(sha256, hash(JSON.stringify(frozen)));
@@ -47,6 +50,33 @@ test('v14 freezes the approved settings and every production migration while pre
   for (const [path, digest] of Object.entries(productionPath().hashes)) {
     assert.equal(frozen.sourceHashes.find(source => source.path === path)?.sha256, digest);
   }
+});
+
+test('v14 stays pinned and v15 differs from it only by the rehearsal, the new migration and its sources', () => {
+  const v14Text = readFileSync(new URL('./manifest-v14.json', import.meta.url), 'utf8');
+  assert.equal(hash(v14Text), '602128371da4975e4a56f2a9e0a5838b0c2a14c4b3f8cd680f3a559ad1b9addd');
+  const v14 = JSON.parse(v14Text);
+  assert.equal(v14.sha256, 'a7210a32e53b9adacc5fd6951520167ad2171d6f8a6a5b07d3210bdb0f4ba9c5');
+  assert.equal(v14.sha256, hash(JSON.stringify(v14.frozen)));
+  const {frozen} = loadManifest();
+  const keys = [...new Set([...Object.keys(v14.frozen), ...Object.keys(frozen)])];
+  const changed = keys.filter(key => JSON.stringify(v14.frozen[key]) !== JSON.stringify((frozen as Record<string, unknown>)[key]));
+  assert.deepEqual(changed.sort(), ['migrations', 'rehearsal', 'sourceHashes', 'version']);
+  for (const key of ['generator', 'node', 'image', 'shmBytes', 'settings', 'removedSettings', 'sessionPolicy', 'setup',
+    'queryPath', 'performance', 'smoke', 'timing', 'criteria']) assert.deepEqual((frozen as Record<string, unknown>)[key], v14.frozen[key], key);
+  assert.equal(v14.frozen.version, 14);
+  assert.equal(frozen.version, 15);
+  assert.equal(v14.frozen.rehearsal, undefined);
+  assert.deepEqual(frozen.rehearsal, {label: 'REHEARSAL / NON-EVALUATION', performance: {rounds: 1},
+    evidence: 'never; only completeness against the formal checks is recorded'});
+  const added = 'server/migrations/202611221100_unread_counts.sql';
+  assert.deepEqual(frozen.migrations, [...v14.frozen.migrations, added].sort());
+  const before = new Map<string, string>(v14.frozen.sourceHashes.map((s: {path: string; sha256: string}) => [s.path, s.sha256]));
+  assert.ok([...before.keys()].every(path => frozen.sourceHashes.some(source => source.path === path)));
+  assert.deepEqual(frozen.sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path), [
+    'load/search-engines/d3r/acceptance.ts', 'load/search-engines/d3r/headroom.ts', 'load/search-engines/d3r/labels.ts',
+    'load/search-engines/d3r/manifest.ts',
+    'load/search-engines/d3r/run.ts', 'load/search-engines/d3r/snapshot.ts', added]);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {
@@ -276,7 +306,420 @@ test('formal verdict requires complete evidence, including restore and each acce
   assert.equal(judge(badRestore), 'FAIL');
 });
 
-test('four modes and output preflight can be checked without Docker', () => {
+test('rehearsal completeness uses the formal checks on one round and never reports a verdict', () => {
+  const one = {...evidence(), formal: false, rounds: [evidence().rounds[0]]};
+  assert.equal(rehearsalComplete(one), true);
+  const failing = {...one, rounds: [structuredClone(one.rounds[0])]};
+  const latency = failing.rounds[0].latencies.find(l => accepts(l.query))!;
+  assert.ok('p95' in latency);
+  latency.p95 = 501;
+  assert.equal(rehearsalComplete(failing), true, 'a slow rehearsal is complete, not judged');
+  assert.equal(rehearsalComplete({...one, rounds: evidence().rounds}), false);
+  const short = {...one, rounds: [structuredClone(one.rounds[0])]};
+  short.rounds[0].latencies.pop();
+  assert.equal(rehearsalComplete(short), false);
+  assert.equal(rehearsalComplete({...one, restore: undefined} as unknown as Evidence), false);
+  assert.equal(rehearsalComplete({...one, valid: false}), false);
+});
+
+test('a rehearsal with an aborted or under-sampled benchmark is incomplete; a slow full one is complete', () => {
+  const one = (): Evidence => ({...evidence(), formal: false, rounds: [structuredClone(evidence().rounds[0])]});
+  const slow = one();
+  for (const latency of slow.rounds[0].latencies) if ('p95' in latency) latency.p95 = latency.p99 = 5000;
+  assert.equal(rehearsalComplete(slow), true);
+  const aborted = one();
+  const at = aborted.rounds[0].latencies.findIndex(l => l.query === 'ja1-frequent');
+  aborted.rounds[0].latencies[at] = {query: 'ja1-frequent', outcomes: [], sqlError: 'ERROR: canceling statement'};
+  assert.equal(judge({...aborted, formal: true, rounds: [1, 2, 3].map(round => ({...aborted.rounds[0], round}))}), 'FAIL',
+    'the formal judge counts this abort as a FAIL, so the rehearsal must check samples itself');
+  assert.equal(rehearsalComplete(aborted), false);
+  const acceptedAbort = one();
+  const accepted = acceptedAbort.rounds[0].latencies.findIndex(l => accepts(l.query));
+  acceptedAbort.rounds[0].latencies[accepted] = {query: acceptedAbort.rounds[0].latencies[accepted].query, outcomes: [],
+    sqlError: 'ERROR: canceling statement'};
+  assert.equal(rehearsalComplete(acceptedAbort), false);
+  const fewer = one();
+  const sample = fewer.rounds[0].latencies.find(l => accepts(l.query))!;
+  assert.ok('n' in sample);
+  sample.n = 99;
+  assert.equal(rehearsalComplete(fewer), false);
+  const fewerOutcomes = one();
+  const rejected = fewerOutcomes.rounds[0].latencies.find(l => !accepts(l.query))!;
+  rejected.outcomes!.pop();
+  assert.equal(rehearsalComplete(fewerOutcomes), false);
+  assert.equal(rehearsalComplete({...one(), rounds: undefined} as unknown as Evidence), false);
+});
+
+test('rehearsal completeness requires whole evidence: no pagination error, hole or missing item', () => {
+  const one = (): Evidence => ({...evidence(), formal: false, rounds: [structuredClone(evidence().rounds[0])]});
+  assert.equal(rehearsalComplete(one()), true);
+  const paged = one();
+  paged.complete = structuredClone(paged.complete);
+  Object.assign(paged.complete[3].actors[0], {paginationError: 'Search repeated a Message or moved its cursor backwards',
+    equal: false, actualRows: 0});
+  assert.equal(judge({...paged, formal: true, rounds: [1, 2, 3].map(round => ({...paged.rounds[0], round}))}), 'FAIL',
+    'the formal judge counts a partial pagination as a FAIL, so the rehearsal must reject it itself');
+  assert.equal(rehearsalComplete(paged), false);
+  const restorePaged = one();
+  restorePaged.restore = {...restorePaged.restore, complete: structuredClone(restorePaged.restore.complete)};
+  restorePaged.restore.complete[0].actors[1].paginationError = 'Search exceeded its page limit';
+  assert.equal(rehearsalComplete(restorePaged), false);
+  const denialPaged = one();
+  denialPaged.denials = structuredClone(denialPaged.denials);
+  denialPaged.denials.checks[0].paginationError = 'Search rejected a continuation';
+  assert.equal(rehearsalComplete(denialPaged), false);
+  const hole = one();
+  delete (hole.rounds[0].latencies as unknown[])[5];
+  assert.equal(hole.rounds[0].latencies.length, queries.length);
+  assert.equal(rehearsalComplete(hole), false);
+  const planHole = one();
+  planHole.plans = [...planHole.plans];
+  delete (planHole.plans as unknown[])[0];
+  assert.equal(rehearsalComplete(planHole), false);
+  const missing = one();
+  (missing.denials.checks as unknown[])[0] = undefined;
+  assert.equal(rehearsalComplete(missing), false);
+});
+
+test('the formal judge treats holes as missing evidence and keeps its verdicts for dense evidence', () => {
+  assert.equal(judge(evidence()), 'PASS');
+  const formalHole = evidence();
+  delete (formalHole.rounds[1].latencies as unknown[])[0];
+  assert.equal(judge(formalHole), 'NOT EVALUATED');
+  const rowHole = evidence();
+  delete (rowHole.complete[0].actors as unknown[])[0];
+  assert.equal(judge(rowHole), 'NOT EVALUATED');
+  const checkHole = evidence();
+  delete (checkHole.denials.checks as unknown[])[0];
+  assert.equal(judge(checkHole), 'NOT EVALUATED');
+  const fromJson = JSON.parse(JSON.stringify(evidence()));
+  assert.equal(judge(fromJson), 'PASS', 'evidence read from evidence.json is always dense');
+});
+
+test('a rehearsal stops at the first query block that is not fully sampled; the formal run keeps measuring', async () => {
+  const sample = (query: string): Sample => ({query, n: 100, p50: 1, p95: 2, p99: 3,
+    ...(accepts(query) ? {} : {outcomes: Array<string>(100).fill('search_query_too_short')})});
+  const abortFirst = async (query: string) => query === 'ja1-frequent'
+    ? {query, outcomes: [], sqlError: 'ERROR: canceling statement'} : sample(query);
+  assert.equal(queries[0][0], 'ja1-frequent');
+  let timed: string[] = [];
+  const time = (fn: (query: string) => Promise<Sample>) => async (query: string) => { timed.push(query); return fn(query); };
+  await assert.rejects(measureBlocks(queries, time(abortFirst), () => {}, true), /REHEARSAL \/ NON-EVALUATION INVALID: ja1-frequent/);
+  assert.deepEqual(timed, ['ja1-frequent']);
+  timed = [];
+  const formal = await measureBlocks(queries, time(abortFirst), () => {}, false);
+  assert.equal(formal.length, queries.length);
+  assert.equal(timed.length, queries.length);
+  timed = [];
+  const slow = async (query: string) => ({...sample(query), p95: 5000, p99: 6000});
+  assert.equal((await measureBlocks(queries, time(slow), () => {}, true)).length, queries.length);
+  timed = [];
+  const fewer = async (query: string) => query === queries[2][0] ? {...sample(query), n: 99} : sample(query);
+  await assert.rejects(measureBlocks(queries, time(fewer), () => {}, true), /not fully sampled/);
+  assert.equal(timed.length, 3);
+});
+
+test('the rehearsal handoff keeps both archives on success, as the formal run does, and deletes them on failure', async () => {
+  const identity = {file: snapshotFile, systemIdentifier: '42', sha256: 'a'.repeat(64), bytes: 10} as const;
+  const run = async (override: Partial<HandoffSteps> = {}, restored = '42') => {
+    const calls: string[] = [];
+    let started = false;
+    const steps: HandoffSteps = {
+      systemIdentifier: () => { calls.push('identity'); return started ? restored : '42'; },
+      preserve: async id => { calls.push(`preserve ${id}`); return identity; },
+      stop: () => { calls.push('stop'); },
+      stage: async got => { calls.push(`stage ${got.sha256 === identity.sha256}`); return '/staged'; },
+      start: async directory => { calls.push(`start ${directory}`); started = true; },
+      discard: () => { calls.push('discard'); },
+      ...override,
+    };
+    try {
+      return {calls, result: await rehearsalHandoff(steps)};
+    } catch (error) {
+      return {calls, error};
+    }
+  };
+  const ok = await run();
+  assert.deepEqual(ok.result, identity);
+  assert.deepEqual(ok.calls, ['identity', 'preserve 42', 'stop', 'stage true', 'start /staged', 'identity'],
+    'the archives stay through the measured round; the worker deletes them before completing');
+  const fail = (step: string) => async () => { throw new Error(`${step} failed`); };
+  const verify = await run({preserve: fail('pg_verifybackup')});
+  assert.match(String(verify.error), /pg_verifybackup failed/);
+  assert.deepEqual(verify.calls, ['identity', 'discard']);
+  const staging = await run({stage: fail('staging')});
+  assert.match(String(staging.error), /staging failed/);
+  assert.deepEqual(staging.calls.slice(-2), ['stop', 'discard']);
+  const startup = await run({start: fail('restored startup')});
+  assert.match(String(startup.error), /restored startup failed/);
+  assert.equal(startup.calls.at(-1), 'discard');
+  const other = await run({}, '43');
+  assert.match(String(other.error), /Restored cluster identity differs/);
+  assert.equal(other.calls.at(-1), 'discard');
+  const both = await run({start: fail('restored startup'), discard: () => { throw new Error('unlink failed'); }});
+  assert.ok(both.error instanceof AggregateError);
+  assert.deepEqual(both.error.errors.map(String), ['Error: restored startup failed', 'Error: unlink failed']);
+});
+
+test('archive deletion attempts each copy on its own and reports every failure', {skip: process.getuid?.() === 0}, t => {
+  const out = mkdtempSync(join(tmpdir(), 'd3r-discard-test-'));
+  const staging = join(out, stagingDirectory);
+  t.after(() => {
+    chmodSync(out, 0o700);
+    chmodSync(staging, 0o700);
+    rmSync(out, {recursive: true, force: true});
+  });
+  mkdirSync(staging);
+  writeFileSync(join(out, snapshotFile), 'original');
+  writeFileSync(join(staging, snapshotFile), 'staged');
+  chmodSync(out, 0o500);
+  assert.throws(() => discardRehearsalSnapshot(out), error => error instanceof AggregateError && error.errors.length === 1 &&
+    error.message.includes(join(out, snapshotFile)));
+  assert.equal(existsSync(join(staging, snapshotFile)), false, 'the staged copy is deleted although the original failed');
+  assert.equal(existsSync(join(out, snapshotFile)), true);
+  writeFileSync(join(staging, snapshotFile), 'staged');
+  chmodSync(staging, 0o500);
+  assert.throws(() => discardRehearsalSnapshot(out), error => error instanceof AggregateError && error.errors.length === 2 &&
+    error.message.includes(join(out, snapshotFile)) && error.message.includes(join(staging, snapshotFile)));
+  chmodSync(out, 0o700);
+  chmodSync(staging, 0o700);
+  discardRehearsalSnapshot(out);
+  assert.deepEqual(readdirSync(staging), []);
+});
+
+const undeletable = [
+  {name: 'staged copy in a read-only directory', lock: (out: string) => chmodSync(join(out, stagingDirectory), 0o500),
+    unlock: (out: string) => chmodSync(join(out, stagingDirectory), 0o700)},
+  ...(process.platform === 'darwin' ? [{name: 'immutable source archive',
+    lock: (out: string) => { execFileSync('chflags', ['uchg', join(out, snapshotFile)]); },
+    unlock: (out: string) => { if (existsSync(join(out, snapshotFile))) execFileSync('chflags', ['nouchg', join(out, snapshotFile)]); }}] : []),
+];
+const archiveFixture = (prefix: string) => {
+  const out = mkdtempSync(join(tmpdir(), prefix));
+  mkdirSync(join(out, stagingDirectory));
+  writeFileSync(join(out, snapshotFile), 'original');
+  writeFileSync(join(out, stagingDirectory, snapshotFile), 'staged');
+  return out;
+};
+
+test('a rehearsal deletes its archives before writing completed.json; a failed deletion fails the worker',
+  {skip: process.getuid?.() === 0}, t => {
+  const one = {...evidence(), formal: false, rounds: [evidence().rounds[0]]};
+  const completion = {manifestHash: 'm', runKind: 'rehearsal'};
+  const ok = archiveFixture('d3r-complete-test-');
+  t.after(() => rmSync(ok, {recursive: true, force: true}));
+  completeRun(ok, 'rehearsal', one, completion);
+  assert.equal(existsSync(join(ok, snapshotFile)), false);
+  assert.equal(existsSync(join(ok, stagingDirectory, snapshotFile)), false);
+  assert.deepEqual(JSON.parse(readFileSync(join(ok, 'completed.json'), 'utf8')), completion);
+  for (const {name, lock, unlock} of undeletable) {
+    const out = archiveFixture('d3r-complete-test-');
+    t.after(() => { unlock(out); rmSync(out, {recursive: true, force: true}); });
+    lock(out);
+    assert.throws(() => completeRun(out, 'rehearsal', one, completion), AggregateError, name);
+    assert.equal(existsSync(join(out, 'completed.json')), false, `${name}: no completion, so the supervisor records the run invalid`);
+  }
+});
+
+test('if the CLI still cannot delete a rehearsal archive, the published status never says valid or cleanupVerified',
+  {skip: process.getuid?.() === 0}, t => {
+  for (const {name, lock, unlock} of undeletable) {
+    const out = archiveFixture('d3r-cleanup-test-');
+    t.after(() => { unlock(out); rmSync(out, {recursive: true, force: true}); });
+    writeFileSync(join(out, 'run-status.json'), JSON.stringify({manifestHash: 'm', valid: true, cleanupVerified: true, exitCode: 0}));
+    writeFileSync(join(out, 'finished.json'), '{}');
+    writeFileSync(join(out, 'summary.json'), '{}');
+    lock(out);
+    let clean: boolean | undefined;
+    try {
+      clean = cleanUpRun(out, 'rehearsal', false);
+    } catch {
+      // Removing the locked staging directory also fails; the status is already rewritten.
+    }
+    assert.notEqual(clean, true, name);
+    assert.deepEqual(JSON.parse(readFileSync(join(out, 'run-status.json'), 'utf8')),
+      {manifestHash: 'm', valid: false, cleanupVerified: false, exitCode: 1}, name);
+    assert.equal(existsSync(join(out, 'finished.json')), false, name);
+    assert.equal(existsSync(join(out, 'summary.json')), false, name);
+  }
+  const ok = archiveFixture('d3r-cleanup-test-');
+  t.after(() => rmSync(ok, {recursive: true, force: true}));
+  const status = JSON.stringify({manifestHash: 'm', valid: true, cleanupVerified: true, exitCode: 0});
+  writeFileSync(join(ok, 'run-status.json'), status);
+  assert.equal(cleanUpRun(ok, 'rehearsal', false), true);
+  assert.deepEqual(readdirSync(ok), ['run-status.json']);
+  assert.equal(readFileSync(join(ok, 'run-status.json'), 'utf8'), status);
+});
+
+test('rehearsal staging checks the extracted copy, deletes only archives and is never a formal backfill', async t => {
+  const out = mkdtempSync(join(tmpdir(), 'd3r-rehearsal-stage-test-'));
+  t.after(() => rmSync(out, {recursive: true, force: true}));
+  const archive = join(out, snapshotFile);
+  writeFileSync(archive, 'physical archive');
+  const identity = await snapshotIdentity(archive);
+  const staging = join(out, stagingDirectory);
+  mkdirSync(staging);
+  assert.equal(await stageSnapshot(archive, identity, staging), staging);
+  assert.equal(readFileSync(join(staging, snapshotFile), 'utf8'), 'physical archive');
+  await assert.rejects(stageSnapshot(archive, {...identity, sha256: 'b'.repeat(64)}, staging), /snapshot identity mismatch/);
+  await assert.rejects(stageSnapshot(archive, {...identity, bytes: identity.bytes + 1}, staging), /snapshot identity mismatch/);
+  const {sha256: manifestHash} = loadManifest();
+  writeFileSync(join(out, 'rehearsal-handoff.json'), JSON.stringify({label: 'REHEARSAL / NON-EVALUATION',
+    snapshot: {file: snapshotFile, systemIdentifier: '42', ...identity}}));
+  writeFileSync(join(out, 'finished.json'), JSON.stringify({manifestHash, runKind: 'rehearsal'}));
+  writeFileSync(join(out, 'run-status.json'), JSON.stringify({manifestHash, valid: true, cleanupVerified: true}));
+  await assert.rejects(loadBackfill(out, manifestHash, 1_000_000, 1000), /ENOENT/);
+  discardRehearsalSnapshot(out);
+  assert.equal(existsSync(archive), false);
+  assert.equal(existsSync(join(staging, snapshotFile)), false);
+  assert.deepEqual(readdirSync(staging), [], 'the bind-mounted staging directory stays for docker restart');
+  discardRehearsalSnapshot(out);
+});
+
+test('a worker runs only for its own supervisor launch; inherited variables never pick its mode, source or output', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-worker-test-'));
+  const repository = mkdtempSync(join(tmpdir(), 'd3r-worker-repo-'));
+  let n = 0;
+  const launched = (mode: Parameters<typeof writeLaunch>[1], from?: string) => {
+    const out = join(dir, `out-${n++}`);
+    mkdirSync(out);
+    const {token} = writeLaunch(out, mode, from);
+    return {out, env: {SEARCH_WORKER: '1', SEARCH_D3R_MODE: mode, SEARCH_D3R_OUT: out, SEARCH_D3R_LAUNCH: token,
+      ...(from ? {SEARCH_D3R_FROM: from} : {})} as NodeJS.ProcessEnv};
+  };
+  const check = (env: NodeJS.ProcessEnv, argv: string[] = [], pid = process.pid) => workerOptions(env, argv, pid, repository);
+  try {
+    for (const mode of ['smoke', 'rehearsal', 'backfill-only'] as const) assert.equal(check(launched(mode).env).mode, mode);
+    assert.equal(check(launched('formal', '/tmp/source').env).fromBackfill, '/tmp/source');
+    const rehearsal = launched('rehearsal');
+    assert.equal(JSON.parse(readFileSync(join(rehearsal.out, launchFile), 'utf8')).label, 'REHEARSAL / NON-EVALUATION');
+    assert.throws(() => check(rehearsal.env, ['--rehearsal']), /CLI arguments/);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_MODE: 'formal', SEARCH_D3R_FROM: '/tmp/formal'}), /disagree/);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_FROM: '/tmp/formal'}), /disagree/);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_LAUNCH: 'stale'}), /own supervisor/);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_LAUNCH: undefined}), /own supervisor/);
+    assert.throws(() => check(rehearsal.env, [], process.pid + 1), /own supervisor/);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_OUT: undefined}), /output directory/);
+    const crowded = launched('rehearsal');
+    writeFileSync(join(crowded.out, 'image.json'), '{}');
+    assert.throws(() => check(crowded.env), /own supervisor/);
+    const unmarked = join(dir, 'unmarked');
+    mkdirSync(unmarked);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_OUT: unmarked}), /own supervisor/);
+    const link = join(dir, 'link');
+    symlinkSync(rehearsal.out, link);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_OUT: link}), /own supervisor/);
+    const nested = join(dir, 'formal-artifact');
+    mkdirSync(nested);
+    writeFileSync(join(nested, 'run-status.json'), '{}');
+    const child = join(nested, 'child');
+    mkdirSync(child);
+    const {token} = writeLaunch(child, 'rehearsal', undefined);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_OUT: child, SEARCH_D3R_LAUNCH: token}), /inside another run/);
+    const inGit = join(repository, 'out');
+    mkdirSync(inGit);
+    assert.throws(() => check({...rehearsal.env, SEARCH_D3R_OUT: inGit}), /outside Git/);
+    const forged = (mode: string, fromBackfill: string | null) => {
+      const out = join(dir, `forged-${n++}`);
+      mkdirSync(out);
+      writeFileSync(join(out, launchFile), JSON.stringify({mode, label: null, fromBackfill, token: 't', supervisorPid: process.pid,
+        supervisorStart: processStart(process.pid)}));
+      return {SEARCH_D3R_MODE: mode, SEARCH_D3R_OUT: out, SEARCH_D3R_LAUNCH: 't', ...(fromBackfill ? {SEARCH_D3R_FROM: fromBackfill} : {})};
+    };
+    assert.throws(() => check(forged('cleanup', '/tmp/source')), /Invalid worker mode/);
+    assert.throws(() => check(forged('rehearsal', '/tmp/formal')), /formal worker/);
+    assert.throws(() => check(forged('formal', null)), /formal worker/);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+    rmSync(repository, {recursive: true, force: true});
+  }
+});
+
+test('a stale launch cannot be replayed: the worker claims it once and checks the supervisor start time', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-claim-test-'));
+  const repository = mkdtempSync(join(tmpdir(), 'd3r-claim-repo-'));
+  t.after(() => {
+    rmSync(dir, {recursive: true, force: true});
+    rmSync(repository, {recursive: true, force: true});
+  });
+  let n = 0;
+  const launched = (startOf = processStart) => {
+    const out = join(dir, `out-${n++}`);
+    mkdirSync(out);
+    const {token} = writeLaunch(out, 'formal', '/tmp/source', startOf);
+    return {out, env: {SEARCH_WORKER: '1', SEARCH_D3R_MODE: 'formal', SEARCH_D3R_OUT: out, SEARCH_D3R_LAUNCH: token,
+      SEARCH_D3R_FROM: '/tmp/source'} as NodeJS.ProcessEnv};
+  };
+  const first = launched();
+  assert.equal(workerOptions(first.env, [], process.pid, repository).fromBackfill, '/tmp/source');
+  assert.equal(JSON.parse(readFileSync(join(first.out, claimFile), 'utf8')).workerPid, process.pid);
+  assert.throws(() => workerOptions(first.env, [], process.pid, repository), /own supervisor/,
+    'a captured worker environment cannot start a second worker on the same launch');
+  const raced = launched();
+  writeFileSync(join(raced.out, claimFile), '{}', {flag: 'wx'});
+  assert.throws(() => workerOptions(raced.env, [], process.pid, repository), /own supervisor/);
+  const reused = launched(() => 'Sun Nov 22 01:00:00 2026');
+  assert.throws(() => workerOptions(reused.env, [], process.pid, repository), /own supervisor/,
+    'the same PID with another start time is a reused PID, not the supervisor');
+  assert.throws(() => workerOptions(reused.env, [], process.pid, repository, () => ''), /own supervisor/);
+  assert.equal(existsSync(join(reused.out, claimFile)), false);
+});
+
+test('inherited worker variables cannot turn --rehearsal into a formal worker inside a formal artifact', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-inherited-test-'));
+  t.after(() => rmSync(dir, {recursive: true, force: true}));
+  const formal = join(dir, 'formal');
+  const source = join(dir, 'backfill');
+  mkdirSync(formal);
+  mkdirSync(source);
+  for (const file of ['image.json', 'manifest.json', 'run-status.json']) writeFileSync(join(formal, file), '{}');
+  writeFileSync(join(source, receiptFile), '{}');
+  const child = join(formal, 'empty');
+  mkdirSync(child);
+  const before = readdirSync(formal).sort();
+  for (const argv of [['--rehearsal'], []]) {
+    const run = spawn(process.execPath, [fileURLToPath(new URL('./d3r/run.ts', import.meta.url)), ...argv],
+      {env: {...process.env, SEARCH_WORKER: '1', SEARCH_D3R_MODE: 'formal', SEARCH_D3R_FROM: source, SEARCH_D3R_OUT: child},
+        stdio: ['ignore', 'pipe', 'pipe']});
+    let stderr = '';
+    run.stderr.on('data', data => { stderr += String(data); });
+    const [code] = await once(run, 'close');
+    assert.notEqual(code, 0);
+    assert.match(stderr, argv.length ? /CLI arguments/ : /own supervisor/);
+  }
+  assert.deepEqual(readdirSync(child), []);
+  assert.deepEqual(readdirSync(formal).sort(), before);
+});
+
+test('a failed rehearsal leaves its REHEARSAL launch marker and never a summary', {timeout: 20_000}, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-rehearsal-fail-test-'));
+  t.after(() => rmSync(dir, {recursive: true, force: true}));
+  const out = join(dir, 'results');
+  const calls = join(dir, 'calls');
+  writeFileSync(join(dir, 'docker'), `#!${process.execPath}
+import { appendFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
+if (args[0] === 'image' || args[0] === 'pull') process.exit(1);
+`, {mode: 0o700});
+  const run = spawn(process.execPath, [fileURLToPath(new URL('./d3r/run.ts', import.meta.url)), '--rehearsal', `--out=${out}`],
+    {env: {...process.env, PATH: `${dir}:${process.env.PATH}`, SEARCH_WORKER: '', SEARCH_D3R_MODE: 'formal'},
+      stdio: ['ignore', 'pipe', 'pipe']});
+  let stderr = '';
+  run.stderr.on('data', data => { stderr += String(data); });
+  const [code] = await once(run, 'close');
+  assert.equal(code, 1, stderr);
+  const launch = JSON.parse(readFileSync(join(out, launchFile), 'utf8'));
+  assert.equal(launch.mode, 'rehearsal');
+  assert.equal(launch.label, 'REHEARSAL / NON-EVALUATION');
+  assert.equal(launch.fromBackfill, null);
+  assert.equal(JSON.parse(readFileSync(join(out, 'run-status.json'), 'utf8')).valid, false);
+  assert.equal(existsSync(join(out, 'summary.json')), false);
+  assert.equal(existsSync(join(out, 'finished.json')), false);
+  assert.ok(readFileSync(calls, 'utf8').includes('"pull"'), 'the worker started, so the launch marker admitted it');
+});
+
+test('five modes and output preflight can be checked without Docker', () => {
   assert.throws(() => options([]), /--from-backfill/);
   assert.deepEqual(options(['--from-backfill=/tmp/source', '--out=/tmp/next']),
     {mode: 'formal', output: '/tmp/next', fromBackfill: '/tmp/source'});
@@ -285,6 +728,9 @@ test('four modes and output preflight can be checked without Docker', () => {
   assert.throws(() => options(['--backfill-only', '--from-backfill=/tmp/source']));
   assert.equal(options(['--smoke']).mode, 'smoke');
   assert.equal(options(['--backfill-only']).mode, 'backfill-only');
+  assert.equal(options(['--rehearsal']).mode, 'rehearsal');
+  assert.throws(() => options(['--rehearsal', '--from-backfill=/tmp/source']));
+  assert.throws(() => options(['--rehearsal', '--smoke']));
   assert.throws(() => options(['--smoke', '--backfill-only']));
   const dir = mkdtempSync(join(tmpdir(), 'd3r-output-test-'));
   try {
@@ -295,6 +741,11 @@ test('four modes and output preflight can be checked without Docker', () => {
     const broken = join(dir, 'broken');
     symlinkSync(join(dir, 'missing'), broken);
     assert.throws(() => outputPath(broken), /already exists/);
+    const artifact = join(dir, 'artifact');
+    mkdirSync(join(artifact, 'sub'), {recursive: true});
+    writeFileSync(join(artifact, 'completed.json'), '{}');
+    assert.throws(() => outputPath(join(artifact, 'sub', 'next')), /inside another run/);
+    assert.throws(() => outputPath(join(artifact, 'next')), /inside another run/);
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }
@@ -422,6 +873,175 @@ test('each round creates a database from base before restart and warms each quer
     assert.ok(calls[1].includes(i % 2 === 0 ? "'開'" : "'開発'"));
     assert.equal(calls[2], 'COMMIT;');
   }
+});
+
+test('a warm-up pagination abort stops a rehearsal at that query; the formal run records it and keeps warming', async () => {
+  const at = '2026-01-01T00:00:00.000000Z';
+  let sessions: string[] = [];
+  const open = async (body: (sql: (text: string) => Promise<string>) => Promise<void>) => {
+    let query = '';
+    await body(async sql => {
+      if (sql.startsWith('BEGIN')) {
+        query = sql.includes("'開発'") ? 'b' : 'a';
+        sessions.push(query);
+        return [org(1), JSON.stringify([[channel(1, 0)], true]), JSON.stringify('開発 API')].join('\n');
+      }
+      return sql.startsWith('EXECUTE') && query === 'a' ? `${uuid(2)}|${at}\n${uuid(2)}|${at}` : '';
+    });
+  };
+  const querySet = [['a', '開'], ['b', '開発']] as const;
+  await assert.rejects(warmup(productionPath().page, querySet, 2, open, true),
+    /REHEARSAL \/ NON-EVALUATION INVALID: warm-up a: Search repeated a Message/);
+  assert.deepEqual(sessions, ['a']);
+  sessions = [];
+  assert.deepEqual(await warmup(productionPath().page, querySet, 2, open),
+    [1, 2].map(sweep => ({sweep, query: 'a', paginationError: 'Search repeated a Message or moved its cursor backwards'})));
+  assert.deepEqual(sessions, ['a', 'b', 'a', 'b']);
+});
+
+test('a stopped rehearsal still writes its warm-up records, including the failing one', async t => {
+  const at = '2026-01-01T00:00:00.000000Z';
+  const open = async (body: (sql: (text: string) => Promise<string>) => Promise<void>) => {
+    let query = '';
+    await body(async sql => {
+      if (sql.startsWith('BEGIN')) {
+        query = sql.includes("'開発'") ? 'b' : 'a';
+        return [org(1), JSON.stringify([[channel(1, 0)], true]), JSON.stringify('開発 API')].join('\n');
+      }
+      return sql.startsWith('EXECUTE') && query === 'b' ? `${uuid(2)}|${at}\n${uuid(2)}|${at}` : '';
+    });
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-warmup-test-'));
+  t.after(() => rmSync(dir, {recursive: true, force: true}));
+  const querySet = [['a', '開'], ['b', '開発']] as const;
+  const stopped = join(dir, 'stopped.json');
+  await assert.rejects(recordedWarmup(stopped, productionPath().page, querySet, 2, open, true), /INVALID: warm-up b/);
+  assert.deepEqual(JSON.parse(readFileSync(stopped, 'utf8')),
+    [{sweep: 1, query: 'b', paginationError: 'Search repeated a Message or moved its cursor backwards'}]);
+  const formal = join(dir, 'formal.json');
+  const errors = await recordedWarmup(formal, productionPath().page, querySet, 2, open, false);
+  assert.equal(errors.length, 2);
+  assert.deepEqual(JSON.parse(readFileSync(formal, 'utf8')), errors);
+});
+
+const GB = 1e9;
+// Injected probe readings, one per sample: [docker free, docker used, output free, output used] in GB.
+const headroomRun = (readings: (readonly number[] | Error)[]) => {
+  const {frozen} = loadManifest();
+  const formalRounds = frozen.performance.rounds, rehearsalRounds = frozen.rehearsal.performance.rounds;
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-headroom-test-'));
+  const saved = new Map<string, unknown>();
+  const save = (path: string, value: unknown) => { saved.set(path, JSON.parse(JSON.stringify(value))); };
+  let i = 0, current: readonly number[] | Error = [];
+  const disk = (offset: number): Disk => {
+    if (current instanceof Error) throw current;
+    return {free: current[offset] * GB, used: current[offset + 1] * GB};
+  };
+  let error: unknown;
+  try {
+    const sampler = headroomSampler(true, {docker: () => { current = readings[i++]; return disk(0); }, output: () => disk(2)},
+      samples => assertHeadroom(dir, samples, formalRounds, rehearsalRounds, save));
+    for (const [n] of readings.entries()) sampler.sample(`sample ${n}`);
+    assertHeadroom(dir, sampler.samples, formalRounds, rehearsalRounds, save);
+  } catch (caught) {
+    error = caught;
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+  return {error, formalRounds, rehearsalRounds,
+    report: saved.get(join(dir, 'rehearsal-headroom.json')) as ReturnType<typeof projectHeadroom> | undefined};
+};
+
+test('rehearsal headroom projects the measured round onto the formal rounds from the manifest and passes with space', () => {
+  const {error, report, formalRounds, rehearsalRounds} = headroomRun([[100, 50, 40, 10], [80, 70, 35, 12], [95, 55, 36, 14]]);
+  assert.equal(error, undefined);
+  assert.ok(formalRounds > rehearsalRounds);
+  assert.equal(report?.label, 'REHEARSAL / NON-EVALUATION');
+  assert.equal(report?.ok, true);
+  assert.deepEqual(report?.projection?.docker, {start: {free: 100 * GB, used: 50 * GB}, end: {free: 95 * GB, used: 55 * GB},
+    minFree: 80 * GB, roundGrowth: 5 * GB, required: (formalRounds - rehearsalRounds) * 5 * GB,
+    margin: 80 * GB - (formalRounds - rehearsalRounds) * 5 * GB, ok: true});
+  assert.equal(report?.projection?.output.roundGrowth, 4 * GB);
+  assert.equal(report?.projection?.output.minFree, 35 * GB);
+  const shrinking = headroomRun([[10, 50, 10, 10], [10, 40, 10, 5]]);
+  assert.equal(shrinking.error, undefined, 'growth is clamped at zero');
+  assert.equal(shrinking.report?.projection?.docker.required, 0);
+});
+
+test('rehearsal headroom fails when the projection is negative on the Docker disk or the output filesystem alone', () => {
+  for (const [fs, readings] of [
+    ['docker', [[100, 50, 400, 10], [20, 130, 390, 12], [30, 120, 395, 14]]],
+    ['output', [[400, 50, 100, 10], [390, 60, 20, 90], [395, 55, 30, 80]]],
+  ] as const) {
+    const {error, report} = headroomRun(readings as unknown as number[][]);
+    assert.match(String(error), new RegExp(`REHEARSAL / NON-EVALUATION INVALID: disk headroom.*${fs} margin -`), fs);
+    assert.equal(report?.ok, false, fs);
+    assert.equal(report?.projection?.[fs].ok, false, fs);
+    assert.equal(report?.projection?.[fs === 'docker' ? 'output' : 'docker'].ok, true, fs);
+  }
+});
+
+test('rehearsal headroom fails at once when a measurement fails and when one is missing', () => {
+  const failed = headroomRun([[100, 50, 40, 10], new Error('Docker disk probe failed'), [95, 55, 36, 14]]);
+  assert.match(String(failed.error), /INVALID: disk headroom.*sample 1: Error: Docker disk probe failed/);
+  assert.equal(failed.report?.samples.length, 2, 'stops at the failed sample');
+  assert.equal(failed.report?.projection, undefined);
+  const nan = headroomRun([[100, 50, 40, 10], [80, Number.NaN, 35, 12]]);
+  assert.match(String(nan.error), /sample 1: docker measurement missing/);
+  const one = headroomRun([[100, 50, 40, 10]]);
+  assert.match(String(one.error), /fewer than a start and an end sample/);
+  const {frozen} = loadManifest();
+  const partial = projectHeadroom([{at: 'start', docker: {free: GB, used: GB}, output: {free: GB, used: GB}},
+    {at: 'end', docker: {free: GB, used: GB}}], frozen.performance.rounds, frozen.rehearsal.performance.rounds);
+  assert.equal(partial.ok, false);
+  assert.deepEqual(partial.problems, ['end: output measurement missing']);
+});
+
+test('headroom is never probed outside a rehearsal and measures both filesystems the documented way', () => {
+  let probes = 0;
+  const sampler = headroomSampler(false, {docker: () => { probes++; return {free: 0, used: 0}; },
+    output: () => { probes++; return {free: 0, used: 0}; }}, () => assert.fail('no failure outside a rehearsal'));
+  sampler.sample('round 1 start');
+  sampler.sample('round 1 end');
+  assert.equal(probes, 0);
+  assert.deepEqual(sampler.samples, []);
+  assert.deepEqual(dfBytes('Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000 300 700 30% /\n'),
+    {free: 700 * 1024, used: 300 * 1024});
+  assert.throws(() => dfBytes('garbage'), /Unreadable df output/);
+  assert.deepEqual(dockerDiskArgs('sha256:x', 'label=1'), ['run', '--rm', '--pull', 'never', '--network', 'none', '--read-only',
+    '--label', 'label=1', '--entrypoint', 'df', 'sha256:x', '-Pk', '/']);
+  const disk = outputDisk(tmpdir());
+  assert.ok(Number.isSafeInteger(disk.free) && disk.free > 0 && Number.isSafeInteger(disk.used) && disk.used > 0);
+});
+
+test('a rehearsal stops at a restore drill or denial check that recorded a pagination error', () => {
+  const e = evidence();
+  stopUnlessWhole('restore drill', e.restore);
+  stopUnlessWhole('denial checks', e.denials);
+  const restore = evidence().restore;
+  restore.complete[3].actors[1].paginationError = 'Search repeated a Message or moved its cursor backwards';
+  assert.throws(() => stopUnlessWhole('restore drill', restore), /REHEARSAL \/ NON-EVALUATION INVALID: restore drill/);
+  const checks = evidence().denials;
+  checks.checks[2].paginationError = 'Search rejected a continuation';
+  assert.throws(() => stopUnlessWhole('denial checks', checks), /denial checks recorded an error/);
+  delete (checks.checks as unknown[])[2];
+  assert.throws(() => stopUnlessWhole('denial checks', checks), /denial checks/);
+  const source = readFileSync(new URL('./d3r/run.ts', import.meta.url), 'utf8');
+  const worker = source.slice(source.indexOf('const restore = await restoreDrill'), source.indexOf('const {querySet} = conditions'));
+  assert.match(worker, /restoreDrill\(records\.small\.termRows\);\n\s*if \(mode === 'rehearsal'\) stopUnlessWhole\('restore drill', restore\);/);
+  assert.match(worker, /\}\);\n\s*if \(mode === 'rehearsal'\) stopUnlessWhole\('denial checks', accessChecks\);/);
+});
+
+test('the formal judge treats a hole in short-query outcomes as missing, as after a JSON round trip', () => {
+  const short = evidence();
+  const i = queries.findIndex(([id]) => !accepts(id));
+  const sample = short.rounds[0].latencies[i];
+  assert.ok(sample.outcomes);
+  delete (sample.outcomes as unknown[])[50];
+  assert.equal(sample.outcomes.length, 100);
+  assert.equal(judge(short), 'NOT EVALUATED');
+  assert.equal(judge(JSON.parse(JSON.stringify(short))), 'NOT EVALUATED');
+  assert.equal(judge(evidence()), 'PASS');
 });
 
 test('formal startup requires the completed backfill receipt and exact snapshot; cleanup deletes only the archive', async t => {
