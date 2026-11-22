@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
 import { allowanceSeconds, generatorConfig } from './pool-before-after-config.ts';
+import { condition, minimumRows, planQuery, planReasons, statsQuery, statsReasons } from './pool-before-after-analyze.ts';
 import { plan, pairs, settings, scenarios, scope, timeoutNote, judgeAll, validity, type Run, type Scenario, type Arm, type Counts } from './pool-before-after-summary.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const exec=promisify(execFile);
@@ -42,8 +43,8 @@ const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVA
   judgement:judgeAll(runs,complete&&!smoke),cleanupErrors});
 let failed=false;
 try {
-  const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-config.ts','load/pool-before-after-summary.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
-  save(`${output}/metadata.json`,{scope,timeoutNote,commits,settings,smoke,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
+  const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-config.ts','load/pool-before-after-summary.ts','load/pool-before-after-analyze.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
+  save(`${output}/metadata.json`,{scope,harnessCondition:condition,timeoutNote,commits,settings,smoke,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
     memberArithmetic:'4000 Members; max 2000 sends/s / 4000 = 0.5 sends/s/Member; round robin returns every 2 s; default bucket burst 10, refill 1/s unchanged.',
     poolTimeouts:'Both: SQLx PoolTimedOut -> ApiError::from -> HTTP 500, ErrorBody.error="internal error"; stderr database operation failed: pool timed out while waiting for an open connection. Logs have no request ID, include background/late failures: per-request counts NOT EVALUATED. No server patches.',
     workload:'THROUGHPUT_SCENARIO=many equivalent: 200 public Channels, index % 200; Member index % 4000; no subscribers. Open arrival k6, each send step 60 s, 11 s drains; reader 2/s continuous including drains. Success latency includes drain, successful requests only.',
@@ -92,7 +93,7 @@ try {
     const compose=['compose','--env-file','/dev/null','-p',env.LOAD_PROJECT!,'-f',resolve('load/compose.yml'),'-f',override];
     activeCompose=compose;activeEnv=env;
     const dc=(...args:string[])=>command('docker',[...compose,...args],undefined,env);
-    const sql=(query:string)=>command('docker',[...compose,'exec','-T','db','psql','-X','-v','ON_ERROR_STOP=1','-U','fukulow','-d','fukulow','-At'],query,env);
+    const sql=(query:string,user='fukulow')=>command('docker',[...compose,'exec','-T','db','psql','-X','-q','-v','ON_ERROR_STOP=1','-U',user,'-d','fukulow','-At'],query,env);
     let timer:ReturnType<typeof setInterval>|undefined;
     let pending:Promise<void>|undefined;
     const samples:{at:number;cpuTicks:number;rssKiB:number;connections:number;active:number;cpuPercent:number|null}[]=[];
@@ -132,13 +133,22 @@ try {
         const body:CreateChannelRequest={name:`load-${i}`,visibility:'public'};
         channels.push((await post(`/api/v1/orgs/${organization}/channels`,body,201,owner.token) as Channel).id);
       }
+      // #519: the same step on both arms, after every seed write has committed and before any load.
+      const vacuumStarted=sql('SELECT clock_timestamp()');
+      sql('VACUUM (ANALYZE);');
+      const tableStats=JSON.parse(sql(statsQuery));
+      const statsFailures=statsReasons(tableStats,vacuumStarted,minimumRows(settings.members,settings.channels));
+      const plans=Object.fromEntries((['force_custom_plan','force_generic_plan'] as const).map(mode=>[mode,JSON.parse(sql(planQuery(organization,tokens[0],mode),'fukulow_app'))]));
+      const planFailures=Object.entries(plans).flatMap(([mode,p])=>planReasons(p).map(r=>`${mode}: ${r}`));
+      save(`${dir}/seed-statistics.json`,{condition,vacuumStarted,tables:tableStats,plans,statsFailures,planFailures});
+      if(statsFailures.length||planFailures.length)throw new Error('Seed statistics check failed');
       for(const [org,token] of [[organization,tokens[0]],[otherOrganization,reader.token]]) {
         const r=await fetch(`${base}/api/v1/orgs/${org}/channels`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(10000)});
         if(r.status!==200)throw new Error('Fixture preflight failed');await r.arrayBuffer();
       }
       save(`${privateDir}/data.json`,{organization,otherOrganization,reader:reader.token,channels,password});
       save(`${privateDir}/tokens.json`,tokens);
-      save(`${dir}/metadata.json`,{scope,...cell,commit:commits[cell.arm],appImage:docker('inspect','--format','{{.Image}}',app),dbImage:docker('inspect','--format','{{.Image}}',db),settings,smoke,
+      save(`${dir}/metadata.json`,{scope,harnessCondition:condition,...cell,commit:commits[cell.arm],appImage:docker('inspect','--format','{{.Image}}',app),dbImage:docker('inspect','--format','{{.Image}}',db),settings,smoke,
         dbSettings:sql("SELECT name||'='||setting FROM pg_settings WHERE name IN ('max_connections','shared_buffers','statement_timeout','lock_timeout') ORDER BY name"),
         roleSettings:sql("SELECT rolname,rolconfig FROM pg_roles WHERE rolname IN ('fukulow','fukulow_app')"),started:new Date().toISOString()});
       const sample=()=> {
