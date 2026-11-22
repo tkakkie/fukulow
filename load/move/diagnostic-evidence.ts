@@ -134,7 +134,7 @@ function sendBreakdown(timing: Timing[]) {
   return { ...distributions(residuals), interrupted, incomplete };
 }
 
-// A few incomplete requests (for example a duplicate-key reread) are reported, not fatal; more than 1% makes the
+// A few incomplete requests (for example a cancelled or interrupted child) are reported, not fatal; more than 1% makes the
 // breakdown unusable because the residual would describe a selected subset.
 export function sendTimingProblems(app: ReturnType<typeof appEvidence> | null | undefined) {
   const breakdown = app?.byLane.send.phasesUs.send_unattributed;

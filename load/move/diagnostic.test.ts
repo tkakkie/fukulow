@@ -97,10 +97,25 @@ test('a missing send child is excluded and counted; more than 1% incomplete inva
   assert.deepEqual(sendTimingProblems(twoMissing), ['send admitted-work breakdown']);
 });
 
+test('duplicate children, children longer than the parent and missing ids are incomplete', () => {
+  const app = appEvidence([
+    sendTiming(0, 'send_begin_sql', 10), sendTiming(0, 'send_begin_sql', 10), sendTiming(0, 'admitted_work', 100, 2),
+    sendTiming(1, 'send_begin_sql', 150), sendTiming(1, 'admitted_work', 100, 1),
+    sendTiming(2, 'send_begin_sql', 10),
+    sendTiming(3, 'send_begin_sql', 10), sendTiming(3, 'admitted_work', 50, 1),
+    JSON.stringify({ timestamp: '2026-11-20T00:00:01Z', fields: { event: 'move_diag_timing', lane: 'send', phase: 'send_begin_sql', us: 5, interrupted: false } }),
+  ].join('\n'));
+  const residual = app.byLane.send.phasesUs.send_unattributed;
+  assert.equal(residual.count, 1);
+  assert.equal(residual.p50, 40);
+  assert.equal(residual.incomplete, 4);
+});
+
 test('every send hook in the diagnostic patch is included in the parser and child count', () => {
   const patch = readFileSync(new URL('./diagnostic-d655a3a.patch', import.meta.url), 'utf8');
   const added = patch.split('\n').filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n');
   const phases = [...added.matchAll(/::send_(?:timed|sync)\(\s*"(send_[a-z_]+)"/g)].map(match => match[1]);
+  for (const phase of ['write_pool_acquire', 'send_access_sql', 'channel_advisory_sql', 'commit_sql']) assert.ok(patch.includes(`"${phase}"`), phase);
   assert.ok(phases.includes('send_search_terms_sql'));
   const app = appEvidence([
     ...phases.map(phase => sendTiming(0, phase, 1)), sendTiming(0, 'admitted_work', 100, phases.length),
