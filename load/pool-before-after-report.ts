@@ -16,7 +16,7 @@ for(const scenario of scenarios) for(const [i,arms] of pairs().entries()) for(co
 const summaryPath=`${dir}/summary.json`;
 const summary=existsSync(summaryPath)?JSON.parse(readFileSync(summaryPath,'utf8')) as {complete?:unknown;smoke?:unknown;rehearsal?:unknown;cleanupErrors?:unknown}:undefined;
 if(!summary)missing.push(summaryPath);
-const complete=summary?.complete===true&&summary.smoke===false&&summary.rehearsal!==true&&Array.isArray(summary.cleanupErrors)&&summary.cleanupErrors.length===0&&missing.length===0;
+const complete=summary?.complete===true&&summary.smoke===false&&(summary.rehearsal===false||summary.rehearsal===undefined)&&Array.isArray(summary.cleanupErrors)&&summary.cleanupErrors.length===0&&missing.length===0;
 const report={scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',complete,missing,judgement:judgeAll(runs,complete)};
 writeFileSync(`${dir}/judgement.json`,JSON.stringify(report,null,2));
 console.log(JSON.stringify(report,null,2));

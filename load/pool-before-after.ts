@@ -7,7 +7,8 @@ import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
 import { allowanceSeconds, generatorConfig } from './pool-before-after-config.ts';
 import { condition, minimumRows, planQuery, planReasons, statsQuery, statsReasons } from './pool-before-after-analyze.ts';
-import { plan, sequence as runSequence, settings, scope, timeoutNote, judgeAll, validity, type Run, type Arm, type Counts } from './pool-before-after-summary.ts';
+import { plan, sequence as runSequence, settings, scope, timeoutNote, judgeAll, rehearsalChecks, validity, type Run, type Arm, type Counts } from './pool-before-after-summary.ts';
+import { assertDockerHeadroom } from './harness-core/host.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const exec=promisify(execFile);
 if(process.argv.includes('--help')) {
@@ -42,10 +43,15 @@ let interrupted=false;
 const stop=()=>{interrupted=true;generator?.kill('SIGTERM'); if(generatorName) {try{docker('rm','-f',generatorName);}catch{/* finally retries */}}};
 process.on('SIGINT',stop);process.on('SIGTERM',stop);
 const check=()=>{if(interrupted)throw new Error('Interrupted');};
-const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,rehearsal,...(rehearsal?{evidence:false}:{}),runs,
+const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,rehearsal,...(rehearsal?{evidence:false,checks:rehearsalChecks(runs)}:{}),runs,
   judgement:judgeAll(runs,complete&&mode==='formal'),cleanupErrors});
 let failed=false;
+let rehearsalClean=false;
+// Docker Desktop volumes live in its VM; probe that disk before building (load/harness-core/README.md).
+const postgresImage=/image: (postgres:\S+)/.exec(readFileSync('load/compose.yml','utf8'))?.[1];
+if(!postgresImage) throw new Error('No Postgres image in load/compose.yml');
 try {
+  const headroom=assertDockerHeadroom(postgresImage,(smoke?5:20)*1024**3);
   const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-config.ts','load/pool-before-after-summary.ts','load/pool-before-after-analyze.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
   save(`${output}/metadata.json`,{scope,harnessCondition:condition,timeoutNote,commits,settings,smoke,rehearsal,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
     memberArithmetic:'4000 Members; max 2000 sends/s / 4000 = 0.5 sends/s/Member; round robin returns every 2 s; default bucket burst 10, refill 1/s unchanged.',
@@ -55,6 +61,7 @@ try {
       send:generatorConfig(smoke,false).scenarios,mixed:generatorConfig(smoke,true).scenarios},
     sampling:'1 s /proc/1/stat CPU ticks (100 Hz, 100%=one core), /proc/1/status RSS; pg_stat_activity app-role client connections including idle and active separately; sampler excluded. Gaps >2.5 s or sampling errors invalidate.',
     node:process.version,machine:{platform:platform(),arch:arch(),release:release(),hostname:hostname(),cpus:cpus(),memory:totalmem()},
+    dockerHeadroom:headroom,
     docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
     harnessCommit:command('git',['rev-parse','HEAD']),dirty:command('git',['status','--porcelain']),
     harnessHashes:Object.fromEntries(harnessFiles.map(p=>[p,createHash('sha256').update(readFileSync(p)).digest('hex')]))});
@@ -240,8 +247,11 @@ try {
   for(const arm of ['B','A']) {try{const tag=`${project}-${arm.toLowerCase()}`;if(docker('image','ls','-q',tag))docker('image','rm',tag);}catch{cleanupErrors.push(`${arm}: image cleanup failed`);}}
   rmSync(scratch,{recursive:true,force:true});
   const complete=!failed&&!interrupted&&!cleanupErrors.length&&runs.length===runSequence(mode).length;
-  save(`${output}/summary.json`,{...summary(complete),complete});
+  const final=summary(complete);
+  // A rehearsal is clean only when it completed and every run passes every evidence check; never a verdict.
+  rehearsalClean=rehearsal&&complete&&(final.checks??[]).every(c=>!c.problems.length);
+  save(`${output}/summary.json`,{...final,complete,...(rehearsal?{rehearsalClean}:{})});
   process.off('SIGINT',stop);process.off('SIGTERM',stop);
 }
 console.log(`${scope}: artifacts ${output}`);
-process.exitCode=failed||interrupted||cleanupErrors.length?1:0;
+process.exitCode=failed||interrupted||cleanupErrors.length||(rehearsal&&!rehearsalClean)?1:0;

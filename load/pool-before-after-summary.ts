@@ -39,6 +39,35 @@ export function validity(row:Row) {
   if (row.send.rejected429) reasons.push('send limit interfered (429)');
   return reasons;
 }
+// Whole-run other-Organization reader: continuous 2/s across all steps and drains.
+const readerInvalid=(r:Lane|undefined)=>!r || r.rate!==2 || r.seconds!==284 || r.attempted<r.rate*r.seconds*settings.minimumOfferedFraction ||
+  r.droppedIterations!==0 || ![r.attempted,r.accepted,r.rejected429,r.rejected503,r.otherErrors,r.clientTimeouts,r.transportErrors].every(n=>Number.isInteger(n)&&n>=0) ||
+  (r.accepted>0 && (r.p95===null||r.p99===null||!Number.isFinite(r.p95)||!Number.isFinite(r.p99)||r.p95<0||r.p99<r.p95)) ||
+  r.attempted!==r.accepted+r.rejected429+r.rejected503+r.otherErrors+r.clientTimeouts+r.transportErrors;
+const settingsMismatch=(r:Row,scenario:Scenario,rate:number)=>r.seconds!==60 || r.send.rate!==rate || r.send.seconds!==60 ||
+  r.reader.rate!==2||r.reader.seconds!==60 || (scenario==='mixed' ? r.reads?.rate!==500||r.signin?.rate!==20||r.reads.seconds!==60||r.signin.seconds!==60 : !!r.reads||!!r.signin);
+// Every per-run evidence check judge() applies, for one run without pairing it (#771 rehearsal). Not a verdict.
+export function runProblems(run:Run):string[] {
+  const problems:string[]=[];
+  if(readerInvalid(run.reader)) problems.push('missing continuous other-Organization evidence');
+  for(const rate of settings.rates) {
+    const rows=run.steps.filter(r=>r.rate===rate);
+    if(rows.length!==1) { problems.push(`${rate}/s: missing or duplicate step`); continue; }
+    const r=rows[0];
+    if(!r.send||!r.reader||!r.evidence) { problems.push(`${rate}/s: missing step evidence`); continue; }
+    if(settingsMismatch(r,run.scenario,rate)) problems.push(`${rate}/s: settings mismatch`);
+    problems.push(...validity(r).map(reason=>`${rate}/s: ${reason}`));
+  }
+  if(run.steps.length!==settings.rates.length) problems.push(`${run.steps.length} steps, expected ${settings.rates.length}`);
+  return problems;
+}
+// Rehearsal is clean only if every planned run exists once and has no problem.
+export function rehearsalChecks(runs:Run[]) {
+  return sequence('rehearsal').map(({scenario,arm})=>{
+    const found=runs.filter(r=>r.scenario===scenario&&r.arm===arm);
+    return {scenario,arm,problems:found.length===1?runProblems(found[0]):[`${found.length} runs, expected 1`]};
+  });
+}
 export function judge(runs:Run[], scenario:Scenario, rate:number) {
   const cells=pairs().map((_,index)=> {
     const get=(arm:Arm)=>runs.filter(r=>r.scope===scope && !r.smoke && !r.rehearsal && r.scenario===scenario && r.pair===index+1 && r.arm===arm);
@@ -49,13 +78,9 @@ export function judge(runs:Run[], scenario:Scenario, rate:number) {
     const b=bRows[0],a=aRows[0];
     if([b,a].some(r=>!r.send||!r.reader||!r.evidence))return {pair:index+1,status:'NOT EVALUATED',reason:'missing step evidence'};
     const readers=[bs[0].reader,as[0].reader];
-    if(readers.some(r=>!r || r.rate!==2 || r.seconds!==284 || r.attempted<r.rate*r.seconds*settings.minimumOfferedFraction ||
-      r.droppedIterations!==0 || ![r.attempted,r.accepted,r.rejected429,r.rejected503,r.otherErrors,r.clientTimeouts,r.transportErrors].every(n=>Number.isInteger(n)&&n>=0) ||
-      (r.accepted>0 && (r.p95===null||r.p99===null||!Number.isFinite(r.p95)||!Number.isFinite(r.p99)||r.p95<0||r.p99<r.p95)) ||
-      r.attempted!==r.accepted+r.rejected429+r.rejected503+r.otherErrors+r.clientTimeouts+r.transportErrors))
+    if(readers.some(readerInvalid))
       return {pair:index+1,status:'NOT EVALUATED',reason:'missing continuous other-Organization evidence'};
-    if(b.seconds!==60||a.seconds!==60 || b.send.rate!==rate||a.send.rate!==rate || b.send.seconds!==60||a.send.seconds!==60 ||
-      [b,a].some(r=>r.reader.rate!==2||r.reader.seconds!==60 || (scenario==='mixed' ? r.reads?.rate!==500||r.signin?.rate!==20||r.reads.seconds!==60||r.signin.seconds!==60 : !!r.reads||!!r.signin))) return {pair:index+1,status:'NOT EVALUATED',reason:'settings mismatch'};
+    if([b,a].some(r=>settingsMismatch(r,scenario,rate))) return {pair:index+1,status:'NOT EVALUATED',reason:'settings mismatch'};
     const invalid=[...validity(b),...validity(a)];
     if(invalid.length) return {pair:index+1,status:'NOT EVALUATED',reason:invalid.join('; ')};
     // Mixed contention lanes are judged like sends: losing them would remove the DB pressure the scenario exists for.
@@ -78,10 +103,10 @@ export function judge(runs:Run[], scenario:Scenario, rate:number) {
     cells.some(c=>c.status==='REPORT ONLY')?'NOT EVALUATED':cells.some(c=>c.status==='FAIL')?'FAIL':'PASS';
   return {scope,scenario,rate,status,pairs:cells,poolAcquireTimeouts:'NOT EVALUATED',timeoutNote};
 }
-// An interrupted, failed, smoke, rehearsal or uncleaned run, or one with missing results, never yields a verdict.
+// An interrupted, failed, smoke or uncleaned run, or one with missing results, never yields a verdict (a rehearsal passes complete=false).
 export function judgeAll(runs:Run[], complete:boolean) {
   return scenarios.flatMap(s=>settings.rates.map(rate=>{
     const j=judge(runs,s,rate);
-    return complete ? j : {...j,status:'NOT EVALUATED',reason:'run incomplete, interrupted, smoke, rehearsal, missing results or cleanup failed'};
+    return complete ? j : {...j,status:'NOT EVALUATED',reason:'run incomplete, interrupted, smoke, missing results or cleanup failed'};
   }));
 }
