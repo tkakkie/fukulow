@@ -43,6 +43,7 @@
 - #304 PUT /api/v1/me/password takes the current password as does revoke-others. Keep the current Session so users can secure an Account without losing access.
 - #304 wrong current password is 403 current_password_incorrect because clients end their Session on 401.
 - #304 recheck current Session/password under locks. One admitted worker verifies and hashes the replacement, avoiding a second queue admission while holding the Account lock. Lock Account before sign-in verification so it cannot escape revocation. Detach the transaction and post-COMMIT signals so HTTP cancellation cannot lose 4001.
+- #757 (decided 2026-11-22, not yet implemented): password change and revoke-others, which both verify the current password, leave the sign-in IP/email budgets for their own per-Session and per-Account failure budgets (Account: provisional 5 per 60 s). Third-party sign-in failures can then no longer block an authenticated owner. Trade-off: guesses per Account rise from 5 to 5 (sign-in) + 5 (authenticated) per window, and a stolen Session's failures still use the Account budget, so its holder (not an unauthenticated attacker) can block the owner for a window. Argon2 admission, error bodies and the lock/revocation rules above are unchanged. Denial tests: same IP, multiple and stolen Sessions, cross-Organization, revoked Session.
 
 ## Sessions and revocation
 
