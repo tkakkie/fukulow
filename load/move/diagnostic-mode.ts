@@ -4,9 +4,11 @@ export const diagnosticMode = 'DIAGNOSTIC';
 export const diagnosticLabel = 'io.fukulow.move.diagnostic';
 export const diagnosticCommit = '3d86c8945e316fc4ef993fc9e5db6736e9e7c067';
 // Each pinned app commit has exactly one instrumentation patch; only the newer one times Part D reads.
-export const diagnosticTargets: Record<string, { patch: string; readTimingSampleEvery: number | null }> = {
+export const diagnosticTargets: Record<string, { patch: string; readTimingSampleEvery: number | null; sendBreakdown?: true }> = {
   [diagnosticCommit]: { patch: 'load/move/diagnostic.patch', readTimingSampleEvery: null },
-  d655a3ad2795530c4a18587b7c589e58180d6ffb: { patch: 'load/move/diagnostic-d655a3a.patch', readTimingSampleEvery: 8 },
+  d655a3ad2795530c4a18587b7c589e58180d6ffb: {
+    patch: 'load/move/diagnostic-d655a3a.patch', readTimingSampleEvery: 8, sendBreakdown: true,
+  },
 };
 export const readLaneChoices = ['all', 'channels', 'topics'] as const;
 export type ReadLanes = typeof readLaneChoices[number];
@@ -53,6 +55,7 @@ export function diagnosticSelection(values: { diagnostic?: boolean; smoke?: bool
   const target = diagnosticTargets[commit];
   return { plan: p, commit, patch: target.patch, readLanes: readLanes as ReadLanes,
     readTimingSampleEvery: target.readTimingSampleEvery && (p.smoke ? 1 : target.readTimingSampleEvery),
+    sendBreakdown: target.sendBreakdown,
     steps: steps(p).filter(step => step.part === 'D' && selected.includes(step.size) && step.round === Number(round)) };
 }
 
