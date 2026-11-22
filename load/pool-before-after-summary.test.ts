@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { judge, judgeAll, validity, pairs, plan, scope, type Row, type Run, type Lane } from './pool-before-after-summary.ts';
+import { judge, judgeAll, rehearsalChecks, runProblems, settings, validity, pairs, plan, scope, sequence, type Row, type Run, type Lane } from './pool-before-after-summary.ts';
 const lane=(rate=250):Lane=>({rate,seconds:60,attempted:rate*60,accepted:rate*60,rejected429:0,rejected503:0,otherErrors:0,clientTimeouts:0,transportErrors:0,droppedIterations:0,p95:10,p99:20});
 const row=():Row=>({rate:250,seconds:60,send:lane(),reader:lane(2),evidence:{complete:true,samples:60,maxSampleGapMs:1000,samplingErrors:0}});
 const runs=():Run[]=>pairs().flatMap((arms,i)=>arms.map(arm=>({scope,pair:i+1,arm,scenario:'send',smoke:false,steps:[row()],reader:{...lane(2),seconds:284,attempted:568,accepted:568}})));
@@ -101,4 +101,32 @@ test('mixed reads and sign-ins are judged like sends; their loss never passes',(
     assert.equal(judge(sat,'mixed',250).status,'REPORT ONLY');
     sat[0].steps=[{...row(),reads:lane(500),signin:lane(20)}];assert.equal(judge(sat,'mixed',250).status,'NOT EVALUATED');
   }
+});
+
+test('#769 rehearsal: one B and one A run per scenario on the formal plan; formal and smoke sequences unchanged',()=>{
+  assert.deepEqual(sequence('rehearsal'),[{scenario:'send',pair:1,arm:'B'},{scenario:'send',pair:1,arm:'A'},{scenario:'mixed',pair:1,arm:'B'},{scenario:'mixed',pair:1,arm:'A'}]);
+  assert.deepEqual(sequence('smoke'),[{scenario:'send',pair:1,arm:'B'}]);
+  assert.deepEqual(sequence('formal'),['send','mixed'].flatMap(scenario=>[['B','A'],['A','B'],['B','A']].flatMap((arms,i)=>arms.map(arm=>({scenario,pair:i+1,arm})))));
+});
+test('#769 rehearsal runs never yield a verdict, even when marked complete',()=>{
+  const rehearsed=runs().map(r=>({...r,rehearsal:true}));
+  for (const j of judgeAll(rehearsed,true)) assert.equal(j.status,'NOT EVALUATED');
+  assert.deepEqual(judge(rehearsed,'send',250).pairs.map(p=>p.reason),['missing or duplicate arm','missing or duplicate arm','missing or duplicate arm']);
+  assert.notEqual(judge(runs(),'send',250).pairs[0].reason,'missing or duplicate arm');
+});
+test('#771 rehearsal applies every per-run evidence check judge() uses, without pairing',()=>{
+  const full=(scenario:'send'|'mixed',arm:'B'|'A'):Run=>({scope,pair:1,arm,scenario,smoke:false,rehearsal:true,reader:{...lane(2),seconds:284,attempted:568,accepted:568},
+    steps:settings.rates.map(rate=>({...row(),rate,send:lane(rate),...(scenario==='mixed'?{reads:lane(500),signin:lane(20)}:{})}))});
+  const all=()=>sequence('rehearsal').map(c=>full(c.scenario,c.arm));
+  assert.ok(rehearsalChecks(all()).every(c=>c.problems.length===0));
+  const noSignin=all();delete noSignin[2].steps[1].signin;
+  assert.deepEqual(rehearsalChecks(noSignin)[2].problems,['500/s: settings mismatch']);
+  const missingStep=all();missingStep[0].steps.pop();
+  assert.deepEqual(runProblems(missingStep[0]),['2000/s: missing or duplicate step','3 steps, expected 4']);
+  const reader=all();reader[1].reader.droppedIterations=1;
+  assert.deepEqual(runProblems(reader[1]),['missing continuous other-Organization evidence']);
+  const drop=all();drop[3].steps[0].send.droppedIterations=1;
+  assert.deepEqual(runProblems(drop[3]),['250/s: send: target load not generated']);
+  assert.deepEqual(rehearsalChecks(all().slice(1))[0].problems,['0 runs, expected 1']);
+  for(const j of judgeAll(all(),false)) assert.equal('reason' in j && j.reason,'run incomplete, interrupted, smoke, missing results or cleanup failed');
 });
