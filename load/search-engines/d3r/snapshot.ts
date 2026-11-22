@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, createReadStream, lstatSync, openSync, readFileSync, realpathSync, unlinkSync } from 'node:fs';
+import { copyFile } from 'node:fs/promises';
 import { boundedCommand } from '../bench.ts';
 import { hash } from '../manifest.ts';
 import { timeouts } from '../runtime.ts';
@@ -50,7 +51,7 @@ export async function preserveSnapshot(container: string, out: string, systemIde
   return {file: snapshotFile, systemIdentifier, ...await snapshotIdentity(path)} as const;
 }
 
-export async function loadBackfill(dir: string, manifestHash: string, rows: number, restoreRows: number, verifyContents = true) {
+export async function loadBackfill(dir: string, manifestHash: string, rows: number, restoreRows: number, restoreDirectory?: string) {
   const directory = realpathSync(dir);
   const read = (file: string) => JSON.parse(readFileSync(`${directory}/${file}`, 'utf8'));
   const receipt: BackfillReceipt = read(receiptFile);
@@ -65,9 +66,11 @@ export async function loadBackfill(dir: string, manifestHash: string, rows: numb
     'Invalid backfill snapshot identity');
   const archive = `${directory}/${snapshotFile}`;
   assert.equal(snapshotSize(archive), receipt.snapshot.bytes, 'Backfill snapshot identity mismatch');
-  if (verifyContents) assert.equal((await snapshotIdentity(archive)).sha256, receipt.snapshot.sha256,
+  const verifiedArchive = restoreDirectory ? `${restoreDirectory}/${snapshotFile}` : archive;
+  if (restoreDirectory) await copyFile(archive, verifiedArchive);
+  assert.deepEqual(await snapshotIdentity(verifiedArchive), {sha256: receipt.snapshot.sha256, bytes: receipt.snapshot.bytes},
     'Backfill snapshot identity mismatch');
-  return {directory, receipt};
+  return {directory, snapshotDirectory: restoreDirectory ?? directory, receipt};
 }
 
 export function snapshotLaunch(directory: string) {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { benchmark } from '../bench.ts';
 import type { Sample } from './acceptance.ts';
 import { benchmarkScript } from './path.ts';
@@ -21,11 +21,12 @@ export async function timeQuery(container: string, db: string, page: string, que
   try {
     metrics = await measure(container, db, script, dest, transactions, clients);
   } catch (error) {
-    if (recordOutcome && existsSync(dest + '.txt')) {
-      const output = readFileSync(dest + '.txt', 'utf8');
-      const sqlError = queryError(output);
-      if (sqlError) return {query, outcomes: timedOutcomes(output), sqlError};
-    }
+    // The shared benchmark writes the transcript before raising this pgbench
+    // failure. Timeouts, command failures and invalid samples propagate as-is.
+    if (!recordOutcome || !(error instanceof Error) || error.message !== 'docker pgbench failed; entire run invalid') throw error;
+    const output = readFileSync(dest + '.txt', 'utf8');
+    const sqlError = queryError(output);
+    if (sqlError) return {query, outcomes: timedOutcomes(output), sqlError};
     throw error;
   }
   return {query, ...metrics, ...(recordOutcome ? {outcomes: timedOutcomes(readFileSync(dest + '.txt', 'utf8'))} : {})};

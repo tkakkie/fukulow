@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setTimeout } from 'node:timers/promises';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { CommandTimeoutError, SqlStatementTimeoutError } from './bench.ts';
 import { denialCases, probe } from './definer.ts';
 import { appSessionSettings, hash, settings, snapshot as v13 } from './manifest.ts';
 import { queries } from './queries.ts';
@@ -373,7 +378,7 @@ test('the timed short-query path distinguishes actual rejection, acceptance, SQL
         const sqlError = outcome.startsWith('ERROR:');
         writeFileSync(dest + '.txt', sqlError ? `pgbench: error: client 0 script 0 aborted in command 7 query 0: ${outcome}\n`
           : outcome ? `d3r-outcome ${outcome}\n`.repeat(100) : '');
-        if (sqlError) throw new Error('pgbench failed');
+        if (sqlError) throw new Error('docker pgbench failed; entire run invalid');
         return metrics;
       });
     const recorded = evidence();
@@ -383,8 +388,16 @@ test('the timed short-query path distinguishes actual rejection, acceptance, SQL
   await assert.rejects(timeQuery('unused', 'measured', productionPath().page, 'ja1-frequent', '開', true, dest, 20, 5,
     async () => {
       writeFileSync(dest + '.txt', 'pgbench: error: could not connect to server\n');
-      throw new Error('pgbench failed');
+      throw new Error('docker pgbench failed; entire run invalid');
     }), /pgbench failed/);
+  for (const error of [new SqlStatementTimeoutError('SQL statement_timeout'), new CommandTimeoutError('docker cp timed out'),
+    new Error('docker pgbench timed out'), new Error('Invalid benchmark samples')]) {
+    await assert.rejects(timeQuery('unused', 'measured', productionPath().page, 'ja1-frequent', '開', true, dest, 20, 5,
+      async () => {
+        writeFileSync(dest + '.txt', 'pgbench: error: client 0 script 0 aborted in command 7 query 0: ERROR: canceling statement due to statement timeout\n');
+        throw error;
+      }), actual => actual === error);
+  }
 });
 
 test('each round creates a database from base before restart and warms each query in a fresh session', async () => {
@@ -446,6 +459,88 @@ test('formal startup requires the completed backfill receipt and exact snapshot;
   await assert.rejects(load, /ENOENT/);
   assert.equal(JSON.parse(readFileSync(join(dir, receiptFile), 'utf8')).manifestHash, manifestHash);
 });
+
+for (const scenario of ['changed-before-hash', 'interrupted-during-hash', 'changed-after-hash'] as const) {
+  test(`formal startup records invalid status and cleans staging when ${scenario}`, {timeout: 10_000}, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'd3r-formal-test-'));
+    t.after(() => rmSync(dir, {recursive: true, force: true}));
+    const source = join(dir, 'preserved');
+    const archive = join(source, snapshotFile);
+    const out = join(dir, 'results');
+    const staged = join(out, 'restore-snapshot');
+    const extracting = join(dir, 'extraction-input');
+    const hashing = join(dir, 'hashing');
+    const preload = join(dir, 'hash-hook.mjs');
+    const {sha256: manifestHash, frozen: {image, performance: {rows, restoreRows}}} = loadManifest();
+    mkdirSync(source);
+    writeFileSync(archive, 'original tar');
+    const receipt = {manifestHash, snapshot: {file: snapshotFile, systemIdentifier: '123', ...await snapshotIdentity(archive)},
+      records: {base: backfillRecord(rows), small: backfillRecord(restoreRows), denial: backfillRecord(20_011)}, rls: rlsRecord()};
+    writeFileSync(join(source, receiptFile), JSON.stringify(receipt));
+    writeFileSync(join(source, 'finished.json'), JSON.stringify({manifestHash, runKind: 'backfill-only',
+      backfillReceiptHash: hash(JSON.stringify(receipt))}));
+    writeFileSync(join(source, 'run-status.json'), JSON.stringify({manifestHash, valid: true, cleanupVerified: true}));
+    if (scenario === 'changed-before-hash') writeFileSync(archive, 'modified tar');
+    if (scenario === 'interrupted-during-hash') writeFileSync(preload, `
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { PassThrough } from 'node:stream';
+fs.createReadStream = () => {
+  fs.writeFileSync(${JSON.stringify(hashing)}, '');
+  setInterval(() => {}, 1000);
+  return new PassThrough();
+};
+syncBuiltinESMExports();
+`);
+    writeFileSync(join(dir, 'docker'), `#!${process.execPath}
+import { readFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+if (args[0] === 'image') {
+  writeFileSync(${JSON.stringify(archive)}, 'modified tar');
+  console.log('sha256:' + 'a'.repeat(64));
+}
+if (args[0] === 'run') {
+  const mount = args.find(arg => arg.endsWith(',target=/backfill,readonly'));
+  const directory = /^type=bind,"source=(.+)",target=/.exec(mount)[1];
+  writeFileSync(${JSON.stringify(extracting)}, readFileSync(directory + '/${snapshotFile}'));
+  process.exit(1);
+}
+`, {mode: 0o700});
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./d3r/run.ts', import.meta.url)),
+      `--from-backfill=${source}`, `--out=${out}`], {env: {...process.env, PATH: `${dir}:${process.env.PATH}`,
+      ...(scenario === 'interrupted-during-hash' ? {NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`} : {})},
+      stdio: ['ignore', 'pipe', 'pipe']});
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
+    const closed = once(child, 'close');
+    let stdout = '', stderr = '';
+    child.stdout.on('data', data => { stdout += String(data); });
+    child.stderr.on('data', data => { stderr += String(data); });
+    if (scenario === 'interrupted-during-hash') {
+      while (!existsSync(hashing)) {
+        t.signal.throwIfAborted();
+        assert.equal(child.exitCode, null, stderr);
+        await setTimeout(10);
+      }
+      assert.ok(existsSync(out));
+      assert.ok(child.kill('SIGTERM'));
+    }
+    const exitCode = scenario === 'interrupted-during-hash' ? 143 : 1;
+    assert.deepEqual(await closed, [exitCode, null], stderr);
+    assert.match(stdout, /NOT EVALUATED/);
+    const status = JSON.parse(readFileSync(join(out, 'run-status.json'), 'utf8'));
+    assert.deepEqual(status, {manifestHash, valid: false, cleanupVerified: true, exitCode,
+      ...(scenario === 'changed-after-hash' ? {image: {reference: image, id: 'sha256:' + 'a'.repeat(64)}} : {})});
+    assert.equal(existsSync(staged), false);
+    assert.equal(existsSync(join(out, 'summary.json')), false);
+    if (scenario === 'changed-after-hash') {
+      assert.equal(readFileSync(archive, 'utf8'), 'modified tar');
+      assert.equal(readFileSync(extracting, 'utf8'), 'original tar');
+    } else {
+      assert.equal(existsSync(extracting), false);
+      if (scenario === 'changed-before-hash') assert.match(stderr, /Backfill snapshot identity mismatch/);
+    }
+  });
+}
 
 test('snapshot creation verifies the physical backup before publishing the archive', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'd3r-snapshot-create-test-'));

@@ -1,5 +1,5 @@
 {
-  "sha256": "17cab9d337a24aa50ed193d89622dd88030ec85afe84eb8417a3797e7b1635c8",
+  "sha256": "d8db6f2dba1d603de4281a493899e79f0204efcef2de8d335bdf6b4206813b3f",
   "frozen": {
     "version": 14,
     "date": "2026-11-22",
@@ -136,7 +136,7 @@
       },
       {
         "path": "load/search-engines/d3r/run.ts",
-        "sha256": "430ace98eb1d79e47a8c3f2f489e9ba9a4f77be062dc8915e094b1de2c1b42bb"
+        "sha256": "cb16000ec170dfeea276237b888437a4a4bc5d256b16abaed5e95eea71afb446"
       },
       {
         "path": "load/search-engines/d3r/session.ts",
@@ -144,11 +144,11 @@
       },
       {
         "path": "load/search-engines/d3r/snapshot.ts",
-        "sha256": "bd4767231ce844176dede0c7cae65d2af94992a57d6778d123609c32731a33df"
+        "sha256": "62393243391c15c0bf685b694a9cde0aad8c72af933e8e336d89e24b3daa485d"
       },
       {
         "path": "load/search-engines/d3r/timing.ts",
-        "sha256": "f7256fb15772a15baab950fc7c1d8a90e3ded6a819336f9ef05fcb58ec1e8e32"
+        "sha256": "f00f68151b632e735e63a593dd85371fab3f97f2730be106565f8f66f08e28ec"
       },
       {
         "path": "load/search-engines/definer.sql",

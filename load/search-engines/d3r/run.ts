@@ -53,7 +53,6 @@ export function outputPath(path: string, repository = root) {
 async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<typeof loadManifest>,
   source: Awaited<ReturnType<typeof loadBackfill>> | undefined) {
   assert.ok(mode !== 'formal' || source, 'Formal evaluation requires a verified backfill');
-  mkdirSync(out, {mode: 0o700});
   const container = ownedContainer();
   const volume = ownedVolume();
   assert.ok(container && volume, 'Missing supervised Docker resources');
@@ -73,7 +72,7 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   const image = {reference: frozen.image, id};
   save(`${out}/image.json`, image);
   save(`${out}/manifest.json`, {frozen, sha256});
-  const launch = source ? snapshotLaunch(source.directory) : {options: [], args: []};
+  const launch = source ? snapshotLaunch(source.snapshotDirectory) : {options: [], args: []};
   docker('volume', 'create', '--label', ownershipLabel, volume);
   command('docker', ['run', '-d', '--label', ownershipLabel, '--name', container, '--network=none',
     `--shm-size=${frozen.shmBytes}`, '--mount', `type=volume,source=${volume},target=/var/lib/postgresql`,
@@ -305,36 +304,49 @@ async function main() {
   assert.ok(['smoke', 'backfill-only', 'formal', 'cleanup'].includes(args.mode));
   const manifest = loadManifest();
   const {rows, restoreRows} = manifest.frozen.performance;
-  const source = args.fromBackfill
-    ? await loadBackfill(args.fromBackfill, manifest.sha256, rows, restoreRows, isWorker || args.mode === 'cleanup')
-    : undefined;
   if (args.mode === 'cleanup') {
-    assert.ok(source);
+    assert.ok(args.fromBackfill);
+    const source = await loadBackfill(args.fromBackfill, manifest.sha256, rows, restoreRows);
     removeSnapshot(source.directory);
     note(`Removed preserved backfill snapshot from ${source.directory}`);
     return;
   }
-  const out = outputPath(args.output ?? `/private/tmp/fukulow-d3r-689-${Date.now()}`);
+  const out = isWorker ? args.output : outputPath(args.output ?? `/private/tmp/fukulow-d3r-689-${Date.now()}`);
+  assert.ok(out);
+  const restoreDirectory = `${out}/restore-snapshot`;
+  const fromBackfill = args.fromBackfill && resolve(args.fromBackfill);
   process.chdir(root);
-  if (!isWorker) {
-    if (args.mode === 'smoke') process.env.SEARCH_SMOKE = '1';
-    else delete process.env.SEARCH_SMOKE;
-    refuseLeftovers(docker);
+  if (isWorker) {
+    let source;
+    if (fromBackfill) {
+      mkdirSync(restoreDirectory, {mode: 0o700});
+      source = await loadBackfill(fromBackfill, manifest.sha256, rows, restoreRows, restoreDirectory);
+    }
+    await worker(args.mode, out, manifest, source);
+    return;
   }
+  if (args.mode === 'smoke') process.env.SEARCH_SMOKE = '1';
+  else delete process.env.SEARCH_SMOKE;
+  refuseLeftovers(docker);
+  mkdirSync(out, {mode: 0o700});
   process.env.SEARCH_D3R_MODE = args.mode;
   process.env.SEARCH_D3R_OUT = out;
-  if (source) process.env.SEARCH_D3R_FROM = source.directory;
+  if (fromBackfill) process.env.SEARCH_D3R_FROM = fromBackfill;
   else delete process.env.SEARCH_D3R_FROM;
-  if (await supervise(import.meta.url, out, manifest.sha256, () => {
-    const run = JSON.parse(readFileSync(`${out}/run-status.json`, 'utf8'));
-    assert.ok(run.valid && run.cleanupVerified && run.manifestHash === manifest.sha256);
-    const status = args.mode === 'formal'
-      ? judge(JSON.parse(readFileSync(`${out}/evidence.json`, 'utf8'))) : 'NOT EVALUATED';
-    save(`${out}/summary.json`, {status, mode: args.mode, manifestHash: manifest.sha256,
-      label: args.mode === 'smoke' ? smokeLabel : undefined});
-    note(`${status} (${out}/summary.json)`);
-  })) await worker(args.mode, out, manifest, source);
-  else if (process.exitCode) note('NOT EVALUATED (run or cleanup incomplete)');
+  try {
+    await supervise(import.meta.url, out, manifest.sha256, () => {
+      const run = JSON.parse(readFileSync(`${out}/run-status.json`, 'utf8'));
+      assert.ok(run.valid && run.cleanupVerified && run.manifestHash === manifest.sha256);
+      const status = args.mode === 'formal'
+        ? judge(JSON.parse(readFileSync(`${out}/evidence.json`, 'utf8'))) : 'NOT EVALUATED';
+      save(`${out}/summary.json`, {status, mode: args.mode, manifestHash: manifest.sha256,
+        label: args.mode === 'smoke' ? smokeLabel : undefined});
+      note(`${status} (${out}/summary.json)`);
+    });
+  } finally {
+    if (fromBackfill) rmSync(restoreDirectory, {recursive: true, force: true});
+  }
+  if (process.exitCode) note('NOT EVALUATED (run or cleanup incomplete)');
 }
 
 if (import.meta.main) await main();
