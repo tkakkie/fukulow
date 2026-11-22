@@ -38,21 +38,22 @@ export function checkOrganization(organization: number, lastBatchIndex: number, 
   }
 }
 
-export const dbClockSql = (label: 'db-start' | 'db-end') => `SELECT '${label}', round(extract(epoch FROM clock_timestamp()) * 1000, 3);`;
+// The start row also names the backend PID, which joins the session's server-reported statement durations
+// (log_duration, set for the diagnostic batch session only) in the DB log to this batch.
+export const dbClockSql = (label: 'db-start' | 'db-end') =>
+  `SELECT '${label}', round(extract(epoch FROM clock_timestamp()) * 1000, 3)${label === 'db-start' ? ', pg_backend_pid()' : ''};`;
+export const diagnosticSessionSql = 'SET log_duration = on;';
 // The server clock span between the two clock rows of one psql session. It covers PostgreSQL execution and also any
 // psql client time between the statements (descheduling, pipe I/O), so it is an upper bound on PostgreSQL time.
-export type DbBatchClock = { dbClockStartMs: number; dbClockEndMs: number; dbClockSpanMs: number } | { dbClock: 'missing' };
+export type DbBatchClock = { dbClockStartMs: number; dbClockEndMs: number; dbClockSpanMs: number; dbBackendPid: number } | { dbClock: 'missing' };
 
 // Reads the two clock rows from psql -qAt output; anything else on stdout is ignored.
 export function dbBatchClock(stdout: Buffer | string | null | undefined): DbBatchClock {
   const text = stdout?.toString() ?? '';
-  const read = (label: string) => {
-    const match = new RegExp(`^${label}\\|(\\d+(?:\\.\\d+)?)$`, 'm').exec(text);
-    return match ? Number(match[1]) : undefined;
-  };
-  const dbClockStartMs = read('db-start'), dbClockEndMs = read('db-end');
-  if (dbClockStartMs === undefined || dbClockEndMs === undefined || dbClockEndMs < dbClockStartMs) return { dbClock: 'missing' };
-  return { dbClockStartMs, dbClockEndMs, dbClockSpanMs: Math.round((dbClockEndMs - dbClockStartMs) * 1000) / 1000 };
+  const start = /^db-start\|(\d+(?:\.\d+)?)\|(\d+)$/m.exec(text), end = /^db-end\|(\d+(?:\.\d+)?)$/m.exec(text);
+  const dbClockStartMs = Number(start?.[1]), dbClockEndMs = Number(end?.[1]), dbBackendPid = Number(start?.[2]);
+  if (!start || !end || dbClockEndMs < dbClockStartMs) return { dbClock: 'missing' };
+  return { dbClockStartMs, dbClockEndMs, dbClockSpanMs: Math.round((dbClockEndMs - dbClockStartMs) * 1000) / 1000, dbBackendPid };
 }
 
 export function seed(diagnostic = false) {
@@ -83,9 +84,10 @@ function seedFixture(output: string, container: string, trace?: SeedStop) {
   const uuid = (label: string) => { const s = createHash('md5').update(`dm151-formal:${label}`).digest('hex'); return `${s.slice(0,8)}-${s.slice(8,12)}-${s.slice(12,16)}-${s.slice(16,20)}-${s.slice(20)}`; };
   const sql = (input: string) => execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'], { input, stdio: ['pipe','ignore','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 });
   // Chosen once, outside every timed region: formal seeds call the origin/main `sql` itself for Message batches.
-  // The diagnostic adds the server clock rows in the same psql call and keeps the raw stdout; it is parsed after the batch timer stops.
+  // The diagnostic adds log_duration and the server clock rows in the same psql call and keeps the raw stdout; it is
+  // parsed after the batch timer stops.
   let clockStdout: Buffer | undefined;
-  const batchSql = trace ? (input: string) => { clockStdout = execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1','-q','-A','-t'], { input: `${dbClockSql('db-start')}\n${input}\n${dbClockSql('db-end')}`, stdio: ['pipe','pipe','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 }); } : sql;
+  const batchSql = trace ? (input: string) => { clockStdout = execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1','-q','-A','-t'], { input: `${diagnosticSessionSql}\n${dbClockSql('db-start')}\n${input}\n${dbClockSql('db-end')}`, stdio: ['pipe','pipe','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 }); } : sql;
   const scenario=process.env.DM_FORMAL_SCENARIO || 'main';
   if(scenario!=='main' && scenario!=='held200')throw new Error('Seed requires main or held200 scenario');
   const {historical:pairs,supplemental:extraPairs}=fixturePairs(scenario);

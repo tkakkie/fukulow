@@ -3,7 +3,7 @@ import { mkdirSync, copyFileSync, readFileSync, writeFileSync, chmodSync, rename
 import { resolve } from 'node:path';
 import { isIP } from 'node:net';
 import { readRunConfig, requireSeedDiagnostic, quote, type Config } from './dms-formal-config.ts';
-import { execute, checked, transferImage, type Executor } from './dms-formal-exec.ts';
+import { execute, checked, transferImage, CommandFailure, type Executor } from './dms-formal-exec.ts';
 import { requireHeadroom, GiB, summaryLimit } from './dms-formal-storage.ts';
 import { poolOverheadDesign, judgeOverhead, type OverheadArm } from './dms-formal-overhead.ts';
 import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
@@ -11,14 +11,25 @@ import { scaledLoad, localLimits, localCopy } from './dms-formal-local.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
 import { failureDetails, writeDiagnostic } from './dms-formal-diagnostics.ts';
 import { redactSeedDbLogs, saveSeedDbLogs, seedFailure, type SeedStop } from './dms-formal-seed-diagnostic.ts';
-import { seedBatchSummary, startSeedSamplers, type SeedSamplerRecord } from './dms-formal-seed-samplers.ts';
-import { copyDockerVmLogs, dockerVmLogDirectory, redactHostText, saveHostLog, startHostSampler, type HostSampleCoverage } from './dms-formal-host-records.ts';
+import { seedBatchSummary, startSeedSamplers, type SeedSamplerRecord, type StopOptions } from './dms-formal-seed-samplers.ts';
+import { copyDockerVmLogs, dockerVmLogDirectory, hostCommandTimeoutMs, redactHostText, saveHostLog, startHostSampler, type HostSampleCoverage } from './dms-formal-host-records.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
 export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; vmLogDirectory?:string };
 const defaultRuntime:Runtime={exec:execute,transfer:transferImage,on:(s,f)=>process.on(s,f),off:(s,f)=>process.off(s,f)};
 export const cleanupReserveMs=10*60*1000;
+export const localCleanupMs=190_000;
 // The DB log save before cleanup fits the reserve's slack over the three sequential 190 s local cleanups (checked by a test).
 export const dbLogTimeoutMs=10_000;
+// Seed diagnostic collection after an interrupt or the deadline: the sampler stop, the host sampler stop and the DB
+// log all end within collectionSlackMs of it, so the three local cleanups keep their allowances (checked by a test).
+export const collectionSlackMs=cleanupReserveMs-3*localCleanupMs;
+export const seedDbLogMs={normal:30_000,fast:15_000};
+// The host sampler's last tick (two parallel commands) and the executor's teardown after an aborted sampler exec.
+export const hostStopMaxMs=hostCommandTimeoutMs+1_000, abortSettleMs=1_000;
+// Wall-clock end of the collection: the cleanup allowances before the deadline, and the slack after an interrupt.
+export const collectionEndMs=(deadline:number|undefined,interruptedAtMs:number|undefined)=>
+  Math.min(deadline===undefined?Infinity:deadline-3*localCleanupMs,interruptedAtMs===undefined?Infinity:interruptedAtMs+collectionSlackMs);
+export const samplerStopEndMs=(end:number)=>end-seedDbLogMs.fast-hostStopMaxMs-abortSettleMs;
 export const attemptBudgetMs=(mode:'formal'|'smoke')=>mode==='formal'?150*60*1000:30*60*1000;
 export const canStartAttempt=(config:Config,now=Date.now())=>config.deadline===undefined || config.deadline-now>=(config.pilot?(30+(config.pilotSeconds ?? 60)+90+120)*1000:attemptBudgetMs(config.mode))+cleanupReserveMs;
 export async function run(config:Config, runtime:Runtime=defaultRuntime) {
@@ -43,7 +54,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   const roleRoot=(host:string)=>local?root+'/'+host:root;
   const json=(name:string,value:unknown)=>{const path=`${config.output}/${name}`,temp=path+'.tmp';writeFileSync(temp,JSON.stringify(Array.isArray(value)?value:{scenario:config.scenario,...value as object,label},null,2),{mode:0o600});renameSync(temp,path);};
   let seedStop:SeedStop|undefined;
-  let phase='initializing', attempt=0, lastError:string|null=null, interrupted=false;
+  let phase='initializing', attempt=0, lastError:string|null=null, interrupted=false, interruptedAtMs:number|undefined;
   const start=new Date().toISOString();
   let operation='initializing',outcome='running',infrastructureFailure=false,statusWriteFailed=false;
   const status=()=>{try {json('status.json',{id,label,phase,operation,outcome,attempt:Math.min(attempt,totalArms),started:start,updated:new Date().toISOString(),lastError,...(diagnostic?{status:'NOT EVALUATED',seedStop}:{})});}catch {statusWriteFailed=true;console.error('Status write failed; cleanup remains active');}};
@@ -66,13 +77,16 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   };
   // Every run keeps the redacted DB log before cleanup removes the container, bounded by dbLogTimeoutMs (also on the
   // remote host) so container removal keeps its allowances; a failed or timed-out save is recorded and changes no result.
+  // Exit 3 means no such container (missing); a timeout or other error with the container present is failed.
   const saveRunDbLog=async()=>{
     try {
-      const logs=`docker logs --timestamps ${quote(id+'-db-1')} 2>&1`;
+      const logs=`sh -c 'docker container inspect "$1" >/dev/null 2>&1 || exit 3; exec docker logs --timestamps "$1" 2>&1' db-log ${quote(id+'-db-1')}`;
       const raw=await remote(config.db,local?logs:`timeout --signal=KILL ${dbLogTimeoutMs/1000-2}s ${logs}`,dbLogTimeoutMs);
       writeFileSync(`${config.output}/db.log`,redactSeedDbLogs(raw)+'\n',{mode:0o600});
-    } catch {
-      try {json('db-log-missing.json',{collection:'db.log',status:'missing',reason:'docker logs failed, timed out or the DB container did not exist'});} catch {/* Output directory unavailable. */}
+    } catch(error) {
+      const missing=error instanceof CommandFailure && error.exitCode===3;
+      try {json('db-log-collection.json',{collection:'db.log',status:missing?'missing':'failed',
+        reason:missing?'The DB container did not exist (or the Docker daemon did not answer)':'docker logs failed or timed out with the DB container present'});} catch {/* Output directory unavailable. */}
     }
   };
   let cleanupPromise:Promise<void>|undefined;
@@ -95,7 +109,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     json('cleanup.json',failures.map((result,index)=>({role:['app','db','generator'][index],ok:result.status==='fulfilled',retained:result.status==='fulfilled'?'Private scratch/raw evidence and shared base images/cache (if bootstrapped)':'Removal failed; inspect host cleanup log'})));
     if (failures.some(result=>result.status==='rejected')) throw new Error('Remote cleanup incomplete; see cleanup.json and private state');
   })();
-  const signal=()=>{interrupted=true;abort.abort();lastError='Interrupted by signal';status();if(!diagnostic || phase!=='seed')void cleanup().catch(()=>{});};
+  const signal=()=>{interrupted=true;interruptedAtMs ??= Date.now();abort.abort();lastError='Interrupted by signal';status();if(!diagnostic || phase!=='seed')void cleanup().catch(()=>{});};
   // Registered before the first remote directory, image, container or volume exists.
   runtime.on('SIGINT',signal);runtime.on('SIGTERM',signal);
   const heartbeat=setInterval(status,15000);
@@ -172,13 +186,15 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       operation='seed';
       const directory=`${config.output}/formal`, scratch=roleRoot(config.db)+'/formal', container=id+'-db-1';
       const startedAtMs=Date.now();
-      let stopSamplers:((fast?:boolean)=>Promise<SeedSamplerRecord>)|undefined, stopHost:(()=>Promise<HostSampleCoverage>)|undefined, seedError:unknown;
+      let stopSamplers:((options?:StopOptions)=>Promise<SeedSamplerRecord>)|undefined, stopHost:(()=>Promise<HostSampleCoverage>)|undefined, seedError:unknown;
       let samplers:SeedSamplerRecord|undefined, host:HostSampleCoverage|undefined;
       const collectionFailures:string[]=[];
       const redact=(text:string)=>redactHostText(text,{secrets:[common.dbPassword,common.appPassword,common.setupToken]});
       try {
         mkdirSync(directory,{mode:0o700});
-        stopSamplers=startSeedSamplers(runtime.exec,container,{kernel:directory+'/db-kernel.txt',postgres:directory+'/db-samples.txt'},redact);
+        // Raw sampler output stays in the private run scratch, outside the artifact directory.
+        const raw=roleRoot(config.db)+'/sampler-raw';mkdirSync(raw,{recursive:true,mode:0o700});
+        stopSamplers=startSeedSamplers(runtime.exec,container,{kernel:directory+'/db-kernel.txt',postgres:directory+'/db-samples.txt'},raw,redact);
         stopHost=startHostSampler(runtime.exec,directory+'/host-samples.jsonl');
         await worker(config.db,'seed',0,0,90000000);
         checkpoint();
@@ -189,19 +205,30 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         status();
       }
       const endedAtMs=Date.now();
-      // After an interrupt or the deadline, collection is cut short so container removal keeps the cleanup reserve.
-      try {samplers=await stopSamplers?.(interrupted);} catch {samplers=undefined;}
+      // After an interrupt or the deadline, also one that arrives during the stop, collection is cut short so
+      // container removal keeps its allowances: every step ends by collectionEnd().
+      const collectionEnd=()=>collectionEndMs(config.deadline,interruptedAtMs);
+      try {samplers=await stopSamplers?.({hurry:abort.signal,untilMs:()=>samplerStopEndMs(collectionEnd())});} catch {samplers=undefined;}
       try {host=await stopHost?.();} catch {host=undefined;}
       if(!samplers)collectionFailures.push('db-kernel.txt','db-samples.txt');
       else collectionFailures.push(...samplers.failures.map(reason=>(reason.startsWith('kernel')?'db-kernel.txt: ':'db-samples.txt: ')+reason));
       if(!host?.complete)collectionFailures.push('host-samples.jsonl');
-      let batches:ReturnType<typeof seedBatchSummary>|null=null;
-      try {copyFileSync(scratch+'/seed-timing.jsonl',directory+'/seed-timing.jsonl');batches=seedBatchSummary(readFileSync(directory+'/seed-timing.jsonl','utf8'));}
-      catch {collectionFailures.push('seed-timing.jsonl');}
-      // Every recorded Message batch carries its clock rows; any row without them is a collection failure.
-      if(batches?.dbClockMissing)collectionFailures.push(`seed-timing.jsonl: dbClock missing on ${batches.dbClockMissing} of ${batches.batches} batches`);
-      try {await saveSeedDbLogs(runtime.exec,container,directory+'/db.log',interrupted?15_000:30_000);}
+      const dbLogMs=Math.min(interrupted?seedDbLogMs.fast:seedDbLogMs.normal,collectionEnd()-Date.now());
+      let dbLog:string|undefined;
+      if(dbLogMs<1_000)collectionFailures.push('db.log: skipped, no time left before cleanup');
+      else try {await saveSeedDbLogs(runtime.exec,container,directory+'/db.log',dbLogMs);dbLog=readFileSync(directory+'/db.log','utf8');}
       catch {collectionFailures.push('db.log');}
+      let batches:Omit<ReturnType<typeof seedBatchSummary>,'perBatch'>|null=null;
+      try {
+        copyFileSync(scratch+'/seed-timing.jsonl',directory+'/seed-timing.jsonl');
+        const {perBatch,...summary}=seedBatchSummary(readFileSync(directory+'/seed-timing.jsonl','utf8'),dbLog);batches=summary;
+        writeFileSync(directory+'/seed-batch-server.jsonl',perBatch.map(row=>JSON.stringify(row)+'\n').join(''),{mode:0o600});
+      } catch {collectionFailures.push('seed-timing.jsonl');}
+      // Every recorded Message batch (batch 0 included) carries its clock rows and its server-reported time; a row
+      // without them, or a line that is not a timing row, is a collection failure.
+      if(batches?.malformedLines)collectionFailures.push(`seed-timing.jsonl: ${batches.malformedLines} malformed lines`);
+      if(batches?.dbClockMissing)collectionFailures.push(`seed-timing.jsonl: dbClock missing on ${batches.dbClockMissing} of ${batches.batches} batches`);
+      if(batches?.serverMissing)collectionFailures.push(`db.log: server duration missing on ${batches.serverMissing} of ${batches.batches} batches`);
       // Right after the seed, before the Docker VM logs rotate. Missing, partial, failed or skipped copies are recorded.
       const vmLogs=copyDockerVmLogs(runtime.vmLogDirectory ?? dockerVmLogDirectory(),directory+'/docker-vm',startedAtMs,redact);
       const hostLog=await saveHostLog(runtime.exec,directory+'/host.log',startedAtMs,endedAtMs,redact,{timeoutMs:bounded(600000),signal:abort.signal,skip:interrupted});
@@ -210,6 +237,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         instrumentationEffect:'unevaluated',
         instrumentationEffectNote:'No matched seed without the instrumentation exists: every figure here is measured with it on, against nothing. Its effect on the seed is evaluated only by a matched comparison.',
         dbClockSpanNote:'medianDbClockSpanMs is the server clock span between the two clock rows of each batch: PostgreSQL time plus any psql client time between the statements (descheduling, pipe I/O). It is an upper bound on PostgreSQL time, not PostgreSQL time alone.',
+        serverNote:'medianServerMs is the server-reported time of each batch: the summed log_duration of its session statements between the clock rows, joined from db.log by backend PID (per batch in seed-batch-server.jsonl). A gap between it and the clock span is time outside statement execution. log_duration is set for the diagnostic batch sessions only and adds one log line per statement.',
         dockerExecs:samplers?.dockerExecs ?? null,kernelLoopCpuSeconds:samplers?.kernel?.loopCpuSeconds ?? null,
         postgresLoopCpuSeconds:samplers?.postgres?.loopCpuSeconds ?? null,postgresSnapshotQueryMs:samplers?.postgres?.queryMs ?? null,
         hostCommands:host?.commands ?? null,hostSampleMs:host?.sampleMs ?? null,seedSeconds:(endedAtMs-startedAtMs)/1000,

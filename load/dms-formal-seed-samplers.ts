@@ -1,7 +1,9 @@
 // Seed diagnostic samplers (#426). Each in-container sampler is ONE long-lived docker exec that loops inside
 // the DB container, so sampling adds no docker exec per second next to the seed's own one exec per batch.
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import type { Executor } from './dms-formal-exec.ts';
+import { batchServerMs, serverDurations } from './dms-formal-seed-diagnostic.ts';
 
 export const kernelFiles = [
   '/proc/diskstats', '/proc/pressure/io', '/proc/pressure/memory', '/proc/pressure/cpu', '/proc/meminfo', '/proc/vmstat',
@@ -27,14 +29,15 @@ read -r self < /proc/$$/stat && echo "--- self $self"
 echo "--- stopped"`;
 
 // One psql session repeats the snapshot every second (\watch on the query buffer, so the SQL has no semicolon) and
-// restarts every 3 samples to see the stop file: with PGCONNECT_TIMEOUT=2 and statement_timeout=2000 one session
+// restarts every snapshotsPerSession samples to see the stop file: with PGCONNECT_TIMEOUT=2 and statement_timeout=2000 one session
 // lasts at most about 2 + 3 x 2 + 2 x 1 = 10 s, inside the 15 s stop grace. printf %s keeps the backslash commands
 // literal. psql runs as a child whose PID is printed, so a loop that misses the grace can be killed and checked.
+export const snapshotsPerSession = 3;
 export const postgresLoop = `stop=$1; sql=$2
 echo "--- pid $$"
 echo "--- clk_tck $(getconf CLK_TCK 2>/dev/null || echo unknown)"
 while [ ! -e "$stop" ]; do
-  printf '%s\\n' '\\timing on' "$sql" '\\watch i=1 c=3' | psql -X -q -At -U fukulow -d fukulow -v ON_ERROR_STOP=1 2>&1 &
+  printf '%s\\n' '\\timing on' "$sql" '\\watch i=1 c=${snapshotsPerSession}' | psql -X -q -At -U fukulow -d fukulow -v ON_ERROR_STOP=1 2>&1 &
   child=$!
   echo "--- child $child" || exit 1
   wait "$child"
@@ -157,24 +160,27 @@ export function parseKernelSamples(raw: string, intervalMs = 1_000): KernelCover
 
 export type PostgresCoverage = Gaps & {
   samples: number; firstAtMs: number | null; lastAtMs: number | null; sessions: number; failedSessions: number; unterminatedSessions: number;
-  untimedSamples: number; unexpectedLines: number; stopped: boolean; queryMs: { count: number; total: number; max: number } | null; loopCpuSeconds: number | null;
+  shortSessions: number; untimedSamples: number; unexpectedLines: number; stopped: boolean; queryMs: { count: number; total: number; max: number } | null; loopCpuSeconds: number | null;
 };
 
 // The raw lines are statistics JSON, psql timing lines and loop markers; psql error text is only counted.
-// Every sample needs its timing line, and every session its exit footer; a cut-off session is a failure.
+// Every sample needs its timing line, and every session its exit footer; a cut-off session is a failure. The stop
+// file is checked only between sessions, so a session that exits 0 printed exactly snapshotsPerSession samples;
+// any other count (none included) is a short session, a failure.
 export function parsePostgresSamples(raw: string, intervalMs = 1_000): PostgresCoverage {
   const times: number[] = [], query = { count: 0, total: 0, max: 0 };
   let sessions = 0, failedSessions = 0, unexpectedLines = 0, untimedSamples = 0, stopped = false, clockTicks: number | null = null, self: string | undefined;
-  let open = false, awaitingTiming = false;
+  let open = false, awaitingTiming = false, sessionSamples = 0, shortSessions = 0;
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     if (line.startsWith('--- clk_tck ')) { clockTicks = clockTicksOf(line); continue; }
     if (line.startsWith('--- self ')) { self = line.slice(9); continue; }
-    if (/^--- (?:pid|child) \d+$/.test(line)) { if (line.startsWith('--- child')) open = true; continue; }
+    if (/^--- (?:pid|child) \d+$/.test(line)) { if (line.startsWith('--- child')) { open = true; sessionSamples = 0; } continue; }
     const exit = /^--- psql-exit (\d+)$/.exec(line);
     if (exit) {
       if (awaitingTiming) untimedSamples++;
-      awaitingTiming = false; open = false; sessions++; if (exit[1] !== '0') failedSessions++; continue;
+      if (exit[1] === '0' && sessionSamples !== snapshotsPerSession) shortSessions++;
+      awaitingTiming = false; open = false; sessionSamples = 0; sessions++; if (exit[1] !== '0') failedSessions++; continue;
     }
     if (line === '--- stopped') { stopped = true; continue; }
     // psql prints "Time: 1234.567 ms (00:01.235)" from one second on.
@@ -189,90 +195,134 @@ export function parsePostgresSamples(raw: string, intervalMs = 1_000): PostgresC
       if (typeof row.atMs !== 'number' || !row.checkpointer || !row.wal || !Array.isArray(row.io)) throw new Error('incomplete');
       if (awaitingTiming) untimedSamples++;
       awaitingTiming = true;
+      sessionSamples++;
       times.push(row.atMs);
     } catch { unexpectedLines++; }
   }
   if (awaitingTiming) untimedSamples++;
   return { samples: times.length, firstAtMs: times[0] ?? null, lastAtMs: times.at(-1) ?? null, ...gaps(times, intervalMs),
-    sessions, failedSessions, unterminatedSessions: open ? 1 : 0, untimedSamples, unexpectedLines, stopped,
+    sessions, failedSessions, unterminatedSessions: open ? 1 : 0, shortSessions, untimedSamples, unexpectedLines, stopped,
     queryMs: query.count ? { count: query.count, total: Math.round(query.total * 1000) / 1000, max: query.max } : null,
     loopCpuSeconds: loopCpuSeconds(self, clockTicks) };
 }
 
 export type SamplerOutcome = 'stopped' | 'exited-early' | 'aborted';
+// Per loop: not-needed (it stopped by itself), killed (its own shell PID was captured, killed and checked gone),
+// unverified (no PID captured, or the kill or its check failed) or skipped (no time left: container removal ends it).
 export type KillResult = 'not-needed' | 'killed' | 'unverified' | 'skipped';
+export type LoopKill = { kernel: KillResult; postgres: KillResult };
 export type SeedSamplerRecord = {
   kernel: KernelCoverage | null; kernelOutcome: SamplerOutcome; postgres: PostgresCoverage | null; postgresOutcome: SamplerOutcome;
-  stopCommand: 'ok' | 'failed'; inContainerKill: KillResult; dockerExecs: number; failures: string[]; missing: string[];
+  stopCommand: 'ok' | 'failed' | 'skipped'; inContainerKill: LoopKill; dockerExecs: number; failures: string[]; missing: string[];
 };
+// hurry fires on an interrupt or the deadline, also while stop() is running; untilMs is the wall-clock time by
+// which stop() must be done. Every wait is cut to the time left, so stop() never runs past untilMs.
+export type StopOptions = { hurry?: AbortSignal; untilMs?: () => number };
+export const stopTiming = { stopCommandMs: 10_000, fastStopCommandMs: 5_000, fastGraceMs: 2_000, killMs: 10_000, minStepMs: 1_000 };
 
-// Starts both long-lived loops. The raw output goes to <path>.partial and is saved redacted at <path> after the loops
-// end. stop() touches the stop file once and checks that it worked, waits for both loops, and kills a loop that did
-// not stop inside the container, checking that it is gone. fast (after an interrupt or the deadline) shortens the
-// stop command and the grace and skips the kill: container removal, which follows at once, ends the loops.
-export function startSeedSamplers(exec: Executor, container: string, paths: { kernel: string; postgres: string },
+// Starts both long-lived loops. The raw output goes to rawDirectory (outside the artifact directory) and is saved
+// redacted at the artifact path after the loops end; the raw file is removed on every path. stop() touches the stop
+// file once and checks that it worked, waits for both loops, and kills a loop that did not stop inside the container,
+// checking that it is gone. Once hurried, the stop command and the grace are short and the kill is skipped:
+// container removal, which follows at once, ends the loops.
+export function startSeedSamplers(exec: Executor, container: string, paths: { kernel: string; postgres: string }, rawDirectory: string,
   redact: (text: string) => string = text => text, graceMs = 15_000) {
   let dockerExecs = 0;
+  const rawPath = (path: string) => join(rawDirectory, basename(path) + '.raw');
   const loop = (script: string, args: string[], path: string, env: string[] = []) => {
     const abort = new AbortController();
     let exited = false;
     dockerExecs++;
     const done = exec({ program: 'docker', args: ['exec', ...env.flatMap(value => ['-e', value]), container, 'sh', '-c', script, 'fukulow-sampler', stopFile, ...args],
-      log: path + '.partial', timeout: 24 * 60 * 60 * 1000, signal: abort.signal })
+      log: rawPath(path), timeout: 24 * 60 * 60 * 1000, signal: abort.signal })
       .then(result => result.code === 0, () => false)
       .finally(() => { exited = true; });
     return { abort, done, exited: () => exited };
   };
   const kernel = loop(kernelLoop, [...kernelFiles], paths.kernel);
   const postgres = loop(postgresLoop, [snapshotSql], paths.postgres, ['PGOPTIONS=-c statement_timeout=2000', 'PGCONNECT_TIMEOUT=2']);
-  return async (fast = false): Promise<SeedSamplerRecord> => {
-    const early = { kernel: kernel.exited(), postgres: postgres.exited() };
-    dockerExecs++;
-    const stopCommand = await exec({ program: 'docker', args: ['exec', container, 'touch', stopFile], timeout: fast ? 5_000 : 10_000 })
-      .then(result => result.code === 0 ? 'ok' as const : 'failed' as const, () => 'failed' as const);
-    // Without the stop file the loops cannot end by themselves: no grace, straight to the kill.
-    const outcome = async (running: typeof kernel, exitedEarly: boolean): Promise<SamplerOutcome> => {
-      if (exitedEarly) return 'exited-early';
-      const timer = setTimeout(() => running.abort.abort(), stopCommand !== 'ok' ? 0 : fast ? Math.min(graceMs, 2_000) : graceMs);
-      const ok = await running.done;
-      clearTimeout(timer);
-      return ok && !running.abort.signal.aborted ? 'stopped' : 'aborted';
-    };
-    const [kernelOutcome, postgresOutcome] = await Promise.all([outcome(kernel, early.kernel), outcome(postgres, early.postgres)]);
-    const read = (path: string) => { try { return readFileSync(path + '.partial', 'utf8'); } catch { return undefined; } };
-    const kernelRaw = read(paths.kernel), postgresRaw = read(paths.postgres);
-    let inContainerKill: KillResult = 'not-needed';
-    if ((kernelOutcome !== 'stopped' || postgresOutcome !== 'stopped') && fast) inContainerKill = 'skipped';
-    else if (kernelOutcome !== 'stopped' || postgresOutcome !== 'stopped') {
-      // Killing the host docker CLI leaves the in-container shell and psql running; end them by PID and verify.
-      const targets = [...(kernelOutcome === 'stopped' ? [] : pids(kernelRaw ?? '', 'pid')),
-        ...(postgresOutcome === 'stopped' ? [] : [...pids(postgresRaw ?? '', 'pid'), ...pids(postgresRaw ?? '', 'child').slice(-1)])];
-      dockerExecs++;
-      inContainerKill = targets.length === 0 ? 'unverified' : await exec({ program: 'docker', args: ['exec', container, 'sh', '-c', killLoop, 'fukulow-kill', ...targets], timeout: 10_000 })
-        .then(result => result.code === 0 ? 'killed' as const : 'unverified' as const, () => 'unverified' as const);
+  return async ({ hurry, untilMs }: StopOptions = {}): Promise<SeedSamplerRecord> => {
+    const fast = () => hurry?.aborted === true;
+    const left = () => (untilMs?.() ?? Infinity) - Date.now();
+    try {
+      const early = { kernel: kernel.exited(), postgres: postgres.exited() };
+      let stopCommand: SeedSamplerRecord['stopCommand'] = 'skipped';
+      const stopMs = Math.min(fast() ? stopTiming.fastStopCommandMs : stopTiming.stopCommandMs, left());
+      if (stopMs >= stopTiming.minStepMs) {
+        dockerExecs++;
+        stopCommand = await exec({ program: 'docker', args: ['exec', container, 'touch', stopFile], timeout: stopMs })
+          .then(result => result.code === 0 ? 'ok' as const : 'failed' as const, () => 'failed' as const);
+      }
+      // Without the stop file the loops cannot end by themselves: no grace. A hurry during the grace shortens it.
+      const outcome = (running: typeof kernel, exitedEarly: boolean) => exitedEarly ? Promise.resolve<SamplerOutcome>('exited-early') : new Promise<SamplerOutcome>(resolve => {
+        const started = Date.now();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const arm = () => {
+          clearTimeout(timer);
+          const now = Date.now();
+          const end = stopCommand !== 'ok' ? now : Math.min(started + graceMs, fast() ? now + stopTiming.fastGraceMs : Infinity, now + left());
+          timer = setTimeout(() => running.abort.abort(), Math.max(0, end - now));
+        };
+        hurry?.addEventListener('abort', arm, { once: true });
+        arm();
+        void running.done.then(ok => {
+          clearTimeout(timer);
+          hurry?.removeEventListener('abort', arm);
+          resolve(ok && !running.abort.signal.aborted ? 'stopped' : 'aborted');
+        });
+      });
+      const [kernelOutcome, postgresOutcome] = await Promise.all([outcome(kernel, early.kernel), outcome(postgres, early.postgres)]);
+      const read = (path: string) => { try { return readFileSync(rawPath(path), 'utf8'); } catch { return undefined; } };
+      const kernelRaw = read(paths.kernel), postgresRaw = read(paths.postgres);
+      const inContainerKill = await killLoops(exec, container, { kernel: kernelOutcome !== 'stopped', postgres: postgresOutcome !== 'stopped' },
+        { kernel: pids(kernelRaw ?? '', 'pid'), postgres: pids(postgresRaw ?? '', 'pid') }, pids(postgresRaw ?? '', 'child').slice(-1),
+        fast() ? 0 : Math.min(stopTiming.killMs, left()), () => { dockerExecs++; });
+      const saved = (path: string, raw: string | undefined) => {
+        if (raw === undefined) return false;
+        try { writeFileSync(path, redact(raw), { mode: 0o600 }); return true; } catch { return false; }
+      };
+      const record = summarizeSamplers(kernelRaw === undefined ? null : parseKernelSamples(kernelRaw), kernelOutcome,
+        postgresRaw === undefined ? null : parsePostgresSamples(postgresRaw), postgresOutcome, dockerExecs, stopCommand, inContainerKill);
+      if (!saved(paths.kernel, kernelRaw)) record.failures.push('kernel: redacted file not saved');
+      if (!saved(paths.postgres, postgresRaw)) record.failures.push('postgres: redacted file not saved');
+      return record;
+    } finally {
+      // The raw output can hold unredacted text; it never outlives stop(), whatever failed.
+      for (const path of [paths.kernel, paths.postgres]) for (const file of [rawPath(path), rawPath(path) + '-retention.json']) {
+        try { rmSync(file, { force: true }); } catch { /* Recorded by the missing redacted file, if any. */ }
+      }
     }
-    const saved = (path: string, raw: string | undefined) => {
-      if (raw === undefined) return false;
-      try { writeFileSync(path, redact(raw), { mode: 0o600 }); rmSync(path + '.partial', { force: true }); return true; } catch { return false; }
-    };
-    const record = summarizeSamplers(kernelRaw === undefined ? null : parseKernelSamples(kernelRaw), kernelOutcome,
-      postgresRaw === undefined ? null : parsePostgresSamples(postgresRaw), postgresOutcome, dockerExecs, stopCommand, inContainerKill);
-    if (!saved(paths.kernel, kernelRaw)) record.failures.push('kernel: redacted file not saved');
-    if (!saved(paths.postgres, postgresRaw)) record.failures.push('postgres: redacted file not saved');
-    return record;
   };
+}
+
+// Kills each loop that did not stop, by its own shell PID (and the current psql child for the PostgreSQL loop), in
+// one docker exec. A loop is killed only if its shell PID was captured and the check found it gone; a loop without
+// a captured PID is unverified whatever happened to the other.
+async function killLoops(exec: Executor, container: string, needed: { kernel: boolean; postgres: boolean },
+  shells: { kernel: string[]; postgres: string[] }, children: string[], timeoutMs: number, counted: () => void): Promise<LoopKill> {
+  const result: LoopKill = { kernel: 'not-needed', postgres: 'not-needed' };
+  const loops = (['kernel', 'postgres'] as const).filter(name => needed[name]);
+  if (loops.length === 0) return result;
+  if (timeoutMs < stopTiming.minStepMs) { for (const name of loops) result[name] = 'skipped'; return result; }
+  for (const name of loops) result[name] = 'unverified';
+  const targets = loops.flatMap(name => shells[name].length ? [...shells[name], ...(name === 'postgres' ? children : [])] : []);
+  if (targets.length === 0) return result;
+  counted();
+  const ok = await exec({ program: 'docker', args: ['exec', container, 'sh', '-c', killLoop, 'fukulow-kill', ...targets], timeout: timeoutMs })
+    .then(outcome => outcome.code === 0, () => false);
+  if (ok) for (const name of loops) if (shells[name].length) result[name] = 'killed';
+  return result;
 }
 
 // failures: the collection broke (no data, loop died or was cut off, read errors). missing: a file this kernel does not provide.
 export function summarizeSamplers(kernel: KernelCoverage | null, kernelOutcome: SamplerOutcome,
   postgres: PostgresCoverage | null, postgresOutcome: SamplerOutcome, dockerExecs: number,
-  stopCommand: 'ok' | 'failed' = 'ok', inContainerKill: KillResult = 'not-needed'): SeedSamplerRecord {
+  stopCommand: SeedSamplerRecord['stopCommand'] = 'ok', inContainerKill: LoopKill = { kernel: 'not-needed', postgres: 'not-needed' }): SeedSamplerRecord {
   const failures: string[] = [];
-  if (stopCommand !== 'ok') failures.push('kernel: stop command failed', 'postgres: stop command failed');
-  for (const [name, outcome] of [['kernel', kernelOutcome], ['postgres', postgresOutcome]] as const) {
-    if (outcome === 'stopped') continue;
-    if (inContainerKill === 'skipped') failures.push(name + ': in-container loop left to container removal');
-    if (inContainerKill === 'unverified') failures.push(name + ': in-container loop not verified stopped');
+  if (stopCommand !== 'ok') failures.push(`kernel: stop command ${stopCommand}`, `postgres: stop command ${stopCommand}`);
+  for (const name of ['kernel', 'postgres'] as const) {
+    if (inContainerKill[name] === 'skipped') failures.push(name + ': in-container loop left to container removal');
+    if (inContainerKill[name] === 'unverified') failures.push(name + ': in-container loop not verified stopped');
   }
   if (!kernel || kernel.samples === 0) failures.push('kernel: no samples');
   if (kernelOutcome !== 'stopped') failures.push('kernel: ' + kernelOutcome);
@@ -285,6 +335,7 @@ export function summarizeSamplers(kernel: KernelCoverage | null, kernelOutcome: 
   if (postgres && !postgres.stopped) failures.push('postgres: no stop marker');
   if (postgres && postgres.sessions === 0) failures.push('postgres: no session footer');
   if (postgres?.unterminatedSessions) failures.push('postgres: session cut off');
+  if (postgres?.shortSessions) failures.push(`postgres: ${postgres.shortSessions} sessions without ${snapshotsPerSession} snapshots`);
   if (postgres?.untimedSamples) failures.push('postgres: sample timing missing');
   if (postgres && postgres.loopCpuSeconds === null) failures.push('postgres: loop CPU missing');
   if (postgres?.failedSessions) failures.push('postgres: failed psql sessions');
@@ -293,26 +344,51 @@ export function summarizeSamplers(kernel: KernelCoverage | null, kernelOutcome: 
   return { kernel, kernelOutcome, postgres, postgresOutcome, stopCommand, inContainerKill, dockerExecs, failures, missing };
 }
 
-type BatchRow = { kind?: string; organization?: number; batchIndex?: number; durationMs?: number; dbClockSpanMs?: number; recorderMs?: number };
+type BatchRow = { kind?: string; organization?: number; batchIndex?: number; durationMs?: number; dbClockStartMs?: number; dbClockEndMs?: number;
+  dbClockSpanMs?: number; dbBackendPid?: number; recorderMs?: number };
 const median = (values: number[]) => {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b), middle = Math.floor(sorted.length / 2);
   return (sorted[middle]! + sorted[Math.floor((sorted.length - 1) / 2)]!) / 2;
 };
-// Message batch medians with the instrumentation on (batch 0 excluded, as in the stop rule). The clock span is an
-// upper bound on PostgreSQL time (it includes psql client time between the statements, e.g. descheduling); the
-// remainder is docker exec/psql start-up and transfer. recorderMs is the per-batch parse cost the diagnostic adds
-// after the batch timer. None of this is the instrumentation's effect on the seed: that needs a matched seed without it.
-export function seedBatchSummary(jsonl: string) {
-  const rows = jsonl.split('\n').filter(Boolean).flatMap(line => { try { return [JSON.parse(line) as BatchRow]; } catch { return []; } })
-    .filter(row => row.kind === 'batch' && row.batchIndex !== 0 && typeof row.durationMs === 'number');
-  const timed = rows.filter(row => typeof row.dbClockSpanMs === 'number');
+export type BatchServerRow = { organization: number | null; batchIndex: number; durationMs: number; dbClockSpanMs: number | null;
+  serverMs: number | null; serverStatements: number };
+
+// Per Message batch: the batch time, the DB clock span (an upper bound on PostgreSQL time) and the server-reported
+// statement time from the DB log (log_duration, joined by backend PID and the clock window). Coverage counts every
+// batch, batch 0 included; the medians exclude batch 0, as the stop rule does. A line that is not a JSON timing row
+// is malformed, a collection failure. None of this is the instrumentation's effect on the seed: that needs a matched
+// seed without it. recorderMs is the per-batch parse cost the diagnostic adds after the batch timer.
+export function seedBatchSummary(jsonl: string, dbLog?: string) {
+  let malformedLines = 0;
+  const rows = jsonl.split('\n').filter(line => line.trim()).flatMap(line => {
+    try {
+      const row = JSON.parse(line) as BatchRow;
+      if (row && typeof row === 'object' && (row.kind === 'organization' || (row.kind === 'batch' && typeof row.batchIndex === 'number' && typeof row.durationMs === 'number'))) return [row];
+    } catch { /* Counted below. */ }
+    malformedLines++;
+    return [];
+  }).filter(row => row.kind === 'batch');
+  const durations = dbLog === undefined ? undefined : serverDurations(dbLog);
+  const perBatch: BatchServerRow[] = rows.map(row => {
+    const clock = typeof row.dbClockSpanMs === 'number' && typeof row.dbClockStartMs === 'number' && typeof row.dbClockEndMs === 'number' && typeof row.dbBackendPid === 'number';
+    const server = clock && durations ? batchServerMs(durations, row.dbBackendPid!, row.dbClockStartMs!, row.dbClockEndMs!) : null;
+    return { organization: row.organization ?? null, batchIndex: row.batchIndex!, durationMs: row.durationMs!, dbClockSpanMs: clock ? row.dbClockSpanMs! : null,
+      serverMs: server?.serverMs ?? null, serverStatements: server?.serverStatements ?? 0 };
+  });
+  const judged = perBatch.filter(row => row.batchIndex !== 0), timed = judged.filter(row => row.dbClockSpanMs !== null);
+  const served = judged.filter(row => row.serverMs !== null);
   const recorder = rows.flatMap(row => typeof row.recorderMs === 'number' ? [row.recorderMs] : []);
   return {
-    batches: rows.length, dbClockMissing: rows.length - timed.length,
-    medianMs: median(rows.map(row => row.durationMs!)),
+    batches: perBatch.length, medianBatches: judged.length, malformedLines,
+    dbClockMissing: perBatch.filter(row => row.dbClockSpanMs === null).length,
+    serverMissing: perBatch.filter(row => row.serverMs === null).length,
+    medianMs: median(judged.map(row => row.durationMs)),
     medianDbClockSpanMs: median(timed.map(row => row.dbClockSpanMs!)),
-    medianOutsideDbClockSpanMs: median(timed.map(row => row.durationMs! - row.dbClockSpanMs!)),
+    medianOutsideDbClockSpanMs: median(timed.map(row => row.durationMs - row.dbClockSpanMs!)),
+    medianServerMs: median(served.map(row => row.serverMs!)),
+    medianOutsideServerMs: median(served.map(row => row.durationMs - row.serverMs!)),
     recorderMs: recorder.length ? { median: median(recorder), max: Math.max(...recorder), total: Math.round(recorder.reduce((a, b) => a + b, 0) * 1000) / 1000 } : null,
+    perBatch,
   };
 }

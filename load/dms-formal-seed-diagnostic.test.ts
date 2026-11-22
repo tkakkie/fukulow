@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { postgresCommand, redactSeedDbLogs } from './dms-formal-seed-diagnostic.ts';
+import { batchServerMs, postgresCommand, redactSeedDbLogs, serverDurations } from './dms-formal-seed-diagnostic.ts';
 
 const formal = '["postgres","-c","shared_preload_libraries=pg_stat_statements","-c","pg_stat_statements.track=all","-c","max_connections=64"]';
 test('formal DB command keeps the existing bytes', () => {
@@ -66,4 +66,22 @@ test('DB log keeps checkpoint frequency warnings and checkpoint write/sync timin
   const raw = [kept[0], prefix + 'HINT:  Consider increasing the configuration parameter "max_wal_size".', kept[1], kept[2],
     prefix + 'LOG:  checkpoints are occurring too frequently (24 seconds apart) secret'].join('\n');
   assert.deepEqual(redactSeedDbLogs(raw).split('\n'), kept);
+});
+
+test('DB log keeps statement-free log_duration lines, which give each batch session its server-reported time', () => {
+  const ts = '2026-11-22T00:00:01.000000000Z ';
+  const raw = [
+    ts + '2026-11-22 00:00:01.000 UTC [42] LOG:  duration: 0.041 ms',
+    ts + '2026-11-22 00:00:01.900 UTC [42] LOG:  duration: 899.500 ms',
+    ts + '2026-11-22 00:00:01.950 UTC [42] LOG:  duration: 12.250 ms  statement: INSERT secret',
+    ts + '2026-11-22 00:00:02.500 UTC [42] LOG:  duration: 3.000 ms',
+    ts + '2026-11-22 00:00:01.500 CET [43] LOG:  duration: 1.000 ms',
+  ].join('\n');
+  const kept = redactSeedDbLogs(raw).split('\n');
+  assert.deepEqual(kept, [raw.split('\n')[0], raw.split('\n')[1], raw.split('\n')[3], raw.split('\n')[4]], 'a duration line with statement text is dropped');
+  const durations = serverDurations(kept.join('\n'));
+  const startMs = Date.parse('2026-11-22T00:00:01.000Z') + 0.7, endMs = Date.parse('2026-11-22T00:00:01.900Z') + 0.3;
+  assert.deepEqual(batchServerMs(durations, 42, startMs, endMs), { serverMs: 899.541, serverStatements: 2 }, 'whole-millisecond log times are compared with the clock window');
+  assert.equal(batchServerMs(durations, 43, startMs, endMs), null, 'a non-UTC log time is not read');
+  assert.equal(batchServerMs(durations, 44, startMs, endMs), null);
 });

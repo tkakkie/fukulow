@@ -41,6 +41,17 @@ test('host text redaction handles short secrets in underscored keys, headers, UR
   assert.equal(redact('blk_update_request: I/O error, dev vda'), 'blk_update_request: I/O error, dev vda');
 });
 
+test('a quoted credential value is redacted to its unescaped closing quote, or to the end of the line', () => {
+  // An escaped quote inside the value used to end the match early and leave the rest of the password.
+  assert.equal(redact('{"password":"ab\\"cd-suffix","next":1}'), '{"password":[redacted],"next":1}');
+  assert.equal(redact("{'db_password':'ab\\'cd-suffix'} tail"), "{'db_password':[redacted]} tail");
+  assert.equal(redact('password="unterminated rest of line\nnext line'), 'password=[redacted]\nnext line');
+  // A doubly escaped JSON value is redacted to the end of its line.
+  const doubled = redact('{\\"db_password\\":\\"ab\\\\\\"cd-tail\\"}\nnext');
+  assert.ok(!doubled.includes('cd-tail') && !doubled.includes('ab'), doubled);
+  assert.match(doubled, /\nnext$/);
+});
+
 test('host sampler records cumulative iostat and vm_stat each tick and marks a failed or empty command as failed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'host-sampler-'));
   const programs: string[] = [];
@@ -81,14 +92,14 @@ test('Docker VM log copy keeps only console and init logs changed during the run
   mkdirSync(source);
   writeFileSync(join(source, 'console.log'), 'kernel: hung_task ' + secret);
   writeFileSync(join(source, 'console.log.0'), 'old');
-  writeFileSync(join(source, 'init.log'), 'init /Users/someone/x');
+  writeFileSync(join(source, 'init.log'), '1970-01-01T00:00:05Z init /Users/someone/x');
   writeFileSync(join(source, 'other.log'), 'ignored');
   utimesSync(join(source, 'console.log.0'), 1, 1);
   const record = copyDockerVmLogs(source, destination, 10_000, redact);
   assert.deepEqual(record, { status: 'complete', files: ['console.log', 'init.log'], skippedOlder: 1, truncated: [] });
   assert.deepEqual(readdirSync(destination).sort(), ['console.log', 'init.log']);
   assert.equal(readFileSync(join(destination, 'console.log'), 'utf8'), 'kernel: hung_task [redacted]');
-  assert.equal(readFileSync(join(destination, 'init.log'), 'utf8'), 'init ~/x');
+  assert.equal(readFileSync(join(destination, 'init.log'), 'utf8'), '1970-01-01T00:00:05Z init ~/x');
   assert.equal(copyDockerVmLogs(join(root, 'absent'), destination, 0, redact).status, 'missing');
   const locked = join(root, 'locked');
   mkdirSync(locked);
@@ -113,6 +124,29 @@ test('a VM log cut to its last 32 MiB is complete only if the kept part reaches 
   assert.deepEqual([lost.status, lost.truncated], ['partial', ['console.log']], 'the seed start was cut off');
   assert.ok(readFileSync(join(root, 'b', 'console.log')).length <= 32 * 1024 * 1024);
   assert.equal(firstTimestampMs('no timestamps here'), null);
+});
+
+test('every copied VM log set must reach back to the run start, not only cut files', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vm-logs-rotated-')), source = join(root, 'vm');
+  mkdirSync(source);
+  const runStart = Date.parse('2026-11-22T03:00:00Z');
+  // Rotation removed the earlier files: the only console log is small and starts 15 minutes into the seed.
+  writeFileSync(join(source, 'console.log'), '2026-11-22T03:15:00.000Z kernel: ok\n2026-11-22T03:20:00.000Z kernel: ok\n');
+  const lost = copyDockerVmLogs(source, join(root, 'a'), runStart, redact);
+  assert.deepEqual([lost.status, lost.truncated, lost.files], ['partial', [], ['console.log']]);
+  assert.match(lost.reason!, /console/);
+  // An entry at or before the start covers the set, in any of its copied files.
+  writeFileSync(join(source, 'console.log.0'), '2026-11-22T02:59:00.000Z kernel: earlier\n');
+  assert.equal(copyDockerVmLogs(source, join(root, 'b'), runStart, redact).status, 'complete');
+  rmSync(join(source, 'console.log.0'));
+  // A set file last written before the start (skipped) shows the copied ones continue it.
+  writeFileSync(join(source, 'console.log.1'), '2026-11-22T02:00:00.000Z kernel: old\n');
+  utimesSync(join(source, 'console.log.1'), new Date(runStart - 60_000), new Date(runStart - 60_000));
+  assert.equal(copyDockerVmLogs(source, join(root, 'c'), runStart, redact).status, 'complete');
+  // Each set is checked on its own: an init log without any entry at the start is partial, too.
+  writeFileSync(join(source, 'init.log'), 'no timestamp');
+  const init = copyDockerVmLogs(source, join(root, 'd'), runStart, redact);
+  assert.deepEqual([init.status, /init/.test(init.reason!), /console/.test(init.reason!)], ['partial', true, false]);
 });
 
 test('host log covers the run window with a minute of margin and records a failure', async () => {

@@ -69,8 +69,8 @@ for (const [scenario, diagnostic] of [
   const events: string[] = [];
   const docker = t.mock.method(childProcess, 'execFileSync', (program: string, args: string[], { input: raw, stdio }: { input: string; stdio: string[] }) => {
     assert.equal(program, 'docker');
-    // Diagnostic Message batches run between two server clock rows in the same psql call.
-    const timed = raw.startsWith("SELECT 'db-start', round(extract(epoch FROM clock_timestamp()) * 1000, 3);\n");
+    // Diagnostic Message batches set log_duration for their own session and run between two server clock rows in the same psql call.
+    const timed = raw.startsWith("SET log_duration = on;\nSELECT 'db-start', round(extract(epoch FROM clock_timestamp()) * 1000, 3), pg_backend_pid();\n");
     assert.equal(timed, diagnostic && raw.includes('INSERT INTO messages(') && !raw.includes("'seed'"));
     if (timed) {
       assert.deepEqual(args, [...originPsql, '-q', '-A', '-t']);
@@ -80,7 +80,7 @@ for (const [scenario, diagnostic] of [
       assert.deepEqual([args, stdio], [originPsql, ['pipe', 'ignore', 'inherit']]);
       if (raw.startsWith('INSERT INTO messages(') && !raw.includes("'seed'")) assertOriginBatch(raw);
     }
-    const input = timed ? raw.split('\n').slice(1, -1).join('\n') : raw;
+    const input = timed ? raw.split('\n').slice(2, -1).join('\n') : raw;
     const before = now;
     if (input.startsWith('INSERT INTO organizations(')) {
       organizationIndex++;
@@ -102,7 +102,7 @@ for (const [scenario, diagnostic] of [
     }
     if (input === 'VACUUM(ANALYZE);') events.push(input);
     // The DB side takes all but 5 ms of the batch. Formal calls ignore stdout, as on origin/main.
-    return timed ? Buffer.from(`db-start|${epoch + before}.000\nINSERT 0 1\ndb-end|${epoch + now - 5}.500\n`) : undefined;
+    return timed ? Buffer.from(`db-start|${epoch + before}.000|4242\nINSERT 0 1\ndb-end|${epoch + now - 5}.500\n`) : undefined;
   });
   syncBuiltinESMExports();
   try {
@@ -149,7 +149,7 @@ for (const [scenario, diagnostic] of [
     assert.ok(rows[0].startedAtMs >= epoch);
     assert.equal(rows[0].endedAtMs - rows[0].startedAtMs, rows[0].durationMs);
     const batch = rows.find(row => row.kind === 'batch' && row.batchIndex === 1);
-    assert.deepEqual([batch.dbClockStartMs, batch.dbClockSpanMs, batch.recorderMs], [batch.startedAtMs, batch.durationMs - 4.5, 0]);
+    assert.deepEqual([batch.dbClockStartMs, batch.dbClockSpanMs, batch.dbBackendPid, batch.recorderMs], [batch.startedAtMs, batch.durationMs - 4.5, 4242, 0]);
     return;
   }
   // Formal rows keep the origin/main fields exactly.
@@ -163,8 +163,8 @@ for (const [scenario, diagnostic] of [
 });
 
 test('DB batch clock reads only the two clock rows and marks anything else missing', () => {
-  assert.deepEqual(dbBatchClock('db-start|1000.250\nINSERT 0 1\ndb-end|1840.750\n'), { dbClockStartMs: 1000.25, dbClockEndMs: 1840.75, dbClockSpanMs: 840.5 });
-  for (const stdout of [undefined, null, '', 'db-start|1000\n', 'db-start|2000\ndb-end|1000\n', 'db-start|x\ndb-end|1\n']) {
+  assert.deepEqual(dbBatchClock('db-start|1000.250|77\nINSERT 0 1\ndb-end|1840.750\n'), { dbClockStartMs: 1000.25, dbClockEndMs: 1840.75, dbClockSpanMs: 840.5, dbBackendPid: 77 });
+  for (const stdout of [undefined, null, '', 'db-start|1000|7\n', 'db-start|2000|7\ndb-end|1000\n', 'db-start|x|7\ndb-end|1\n', 'db-start|1000\ndb-end|1001\n']) {
     assert.deepEqual(dbBatchClock(stdout), { dbClock: 'missing' });
   }
 });

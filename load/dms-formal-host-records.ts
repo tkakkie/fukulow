@@ -8,8 +8,9 @@ import { checked, type Executor } from './dms-formal-exec.ts';
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Removes run secrets; credential headers (to the end of the line), Bearer tokens, URI user info and credential
-// key=value pairs (also underscored keys such as POSTGRES_PASSWORD); long hex or token-like runs; Docker socket paths;
-// and the home path, user name and host name in any letter case.
+// key=value pairs (also underscored keys such as POSTGRES_PASSWORD; a quoted value ends at its unescaped closing
+// quote, an unterminated or doubly escaped one at the end of the line); long hex or token-like runs; Docker socket
+// paths; and the home path, user name and host name in any letter case.
 export function redactHostText(text: string, { secrets = [], home = homedir(), user = userInfo().username, host = hostname() }:
   { secrets?: string[]; home?: string; user?: string; host?: string } = {}) {
   let out = text;
@@ -17,7 +18,7 @@ export function redactHostText(text: string, { secrets = [], home = homedir(), u
   out = out.replace(/\b((?:proxy-)?authorization|(?:set-)?cookie|x-api-key)(["']?\s*[=:]\s*)[^\r\n]*/gi, '$1$2[redacted]');
   out = out.replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]');
   out = out.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]*@/gi, '$1[redacted]@');
-  out = out.replace(/([A-Za-z0-9_-]*(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)[A-Za-z0-9_-]*)(["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',;&]+)/gi, '$1$2[redacted]');
+  out = out.replace(/([A-Za-z0-9_-]*(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)[A-Za-z0-9_-]*)(\\?["']?\s*[=:]\s*)(\\"[^\r\n]*|"(?:[^"\\\r\n]|\\.)*"?|'(?:[^'\\\r\n]|\\.)*'?|[^\s"',;&]+)/gi, '$1$2[redacted]');
   out = out.replace(/(?:unix:\/\/)?\/?[^\s'"]*docker[^\s'"]*\.sock\b/gi, '[docker socket]');
   if (home.length > 1) out = out.replace(new RegExp(escape(home), 'gi'), '~');
   out = out.replace(/\/(Users|home)\/[^/\s'"]+/gi, '/$1/[user]');
@@ -28,6 +29,7 @@ export function redactHostText(text: string, { secrets = [], home = homedir(), u
   return out.replace(/[A-Za-z0-9_-]{40,}/g, '[token redacted]');
 }
 
+export const hostCommandTimeoutMs = 3_000;
 export type HostSampleCoverage = { attempted: number; iostatFailed: number; vmStatFailed: number; writeFailures: number; commands: number; sampleMs: number; complete: boolean };
 
 // Cumulative counters each second (iostat -I totals since boot, vm_stat page counts): a missed tick loses no
@@ -37,7 +39,7 @@ export function startHostSampler(exec: Executor, path: string, intervalMs = 1_00
   const coverage: HostSampleCoverage = { attempted: 0, iostatFailed: 0, vmStatFailed: 0, writeFailures: 0, commands: 0, sampleMs: 0, complete: false };
   let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, current: Promise<void> = Promise.resolve();
   // A failed command and one that printed nothing are both failed samples (null in the row).
-  const read = (program: string, args: string[]) => { coverage.commands++; return checked(exec, { program, args, timeout: 3_000 }).then(out => out || null, () => null); };
+  const read = (program: string, args: string[]) => { coverage.commands++; return checked(exec, { program, args, timeout: hostCommandTimeoutMs }).then(out => out || null, () => null); };
   const tick = () => {
     const atMs = now();
     coverage.attempted++;
@@ -74,7 +76,9 @@ export function firstTimestampMs(text: string) {
 }
 
 // Copies console.log* and init.log* changed since the run started; a file larger than the limit keeps its last 32 MiB.
-// A cut file is complete only if its kept part starts at or before the run start; otherwise the record is partial.
+// Each copied set (console, init) must reach back to the run start: one of its copied entries is at or before the
+// start, or the set has an older file last written before the start (rotation keeps the rest of the set after it).
+// A cut file whose kept part starts after the run start lost entries of the run. Either way the record is partial.
 export function copyDockerVmLogs(source: string, destination: string, sinceMs: number, redact: (text: string) => string): CopyRecord {
   let names: string[];
   try { names = readdirSync(source).filter(name => /^(?:console|init)\.log/.test(name)).sort(); }
@@ -83,12 +87,13 @@ export function copyDockerVmLogs(source: string, destination: string, sinceMs: n
     return { status: absent ? 'missing' : 'failed', files: [], skippedOlder: 0, truncated: [], reason: absent ? 'No Docker VM log directory' : 'Docker VM log directory not readable' };
   }
   const record: CopyRecord = { status: 'complete', files: [], skippedOlder: 0, truncated: [] };
-  let uncovered = false;
+  const sets = new Map<string, { firstMs: number | null; older: boolean; cut: boolean }>();
+  const set = (name: string) => { const key = name.replace(/\.log.*$/, ''); if (!sets.has(key)) sets.set(key, { firstMs: null, older: false, cut: false }); return sets.get(key)!; };
   try {
     mkdirSync(destination, { recursive: true, mode: 0o700 });
     for (const name of names) {
       const stat = statSync(join(source, name));
-      if (!stat.isFile() || stat.mtimeMs < sinceMs) { record.skippedOlder++; continue; }
+      if (!stat.isFile() || stat.mtimeMs < sinceMs) { record.skippedOlder++; if (stat.isFile()) set(name).older = true; continue; }
       let raw: Buffer;
       if (stat.size > fileLimit) {
         raw = Buffer.alloc(fileLimit);
@@ -96,14 +101,19 @@ export function copyDockerVmLogs(source: string, destination: string, sinceMs: n
         try { raw = raw.subarray(0, readSync(fd, raw, 0, fileLimit, stat.size - fileLimit)); } finally { closeSync(fd); }
         record.truncated.push(name);
         const firstMs = firstTimestampMs(raw.toString('utf8'));
-        if (firstMs === null || firstMs > sinceMs) uncovered = true;
+        if (firstMs === null || firstMs > sinceMs) set(name).cut = true;
       } else raw = readFileSync(join(source, name));
+      const firstMs = firstTimestampMs(raw.toString('utf8')), entry = set(name);
+      entry.firstMs = firstMs === null ? entry.firstMs : Math.min(entry.firstMs ?? firstMs, firstMs);
       writeFileSync(join(destination, name.replace(/[^\w.-]/g, '_')), redact(raw.toString('utf8')), { mode: 0o600 });
       record.files.push(name);
     }
   } catch { return { ...record, status: 'failed', reason: 'Docker VM log copy failed' }; }
   if (record.files.length === 0) return { ...record, status: 'missing', reason: 'No Docker VM log changed during the run' };
-  if (uncovered) return { ...record, status: 'partial', reason: 'A cut log does not reach back to the run start' };
+  const copied = new Set(record.files.map(name => name.replace(/\.log.*$/, '')));
+  const uncovered = [...sets].filter(([key, entry]) => copied.has(key)
+    && (entry.cut || !(entry.older || (entry.firstMs !== null && entry.firstMs <= sinceMs)))).map(([key]) => key);
+  if (uncovered.length) return { ...record, status: 'partial', reason: `No retained ${uncovered.join(' and ')} log entry reaches back to the run start` };
   return record;
 }
 

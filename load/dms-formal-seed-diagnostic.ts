@@ -41,12 +41,36 @@ export function redactSeedDbLogs(raw: string) {
     if (/^automatic (?:aggressive )?(?:vacuum|analyze) of table /.test(match[2])) inAutovacuum = true;
     const [, header, message] = match;
     if (/^checkpoints are occurring too frequently \(\d+ seconds? apart\)$/.test(message)) return [line];
+    // log_duration lines (diagnostic batch sessions only) carry no statement text.
+    if (/^duration: \d+(?:\.\d+)? ms$/.test(message)) return [line];
     if (/^(checkpoint (?:starting|complete):|automatic (?:aggressive )?(?:vacuum|analyze) of table "[\w.]+":|temporary file: path "base\/pgsql_tmp\/pgsql_tmp[\d.]+", size \d+$)/.test(message)) return [line];
     const lock = /^(process \d+ (?:still waiting for|acquired) \w+Lock) on .+ (after \d+(?:\.\d+)? ms)$/.exec(message);
     if (lock) return [header + lock[1] + ' ' + lock[2]];
     if (/(?:ERROR|FATAL|PANIC):\s+$/.test(header)) return [header + '[detail redacted]'];
     return [];
   }).join('\n');
+}
+
+// Server-reported statement durations (log_duration) by backend PID, at the PostgreSQL log time (%m, UTC, whole
+// milliseconds, written when the statement ends). Lines in another time zone are not read, so they count as missing.
+export function serverDurations(dbLog: string) {
+  const byPid = new Map<number, { atMs: number; ms: number }[]>();
+  for (const line of dbLog.split('\n')) {
+    const match = /^\S+ (\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d\.\d+) (?:UTC|GMT) \[(\d+)\] LOG: +duration: (\d+(?:\.\d+)?) ms$/.exec(line);
+    if (!match) continue;
+    const atMs = Date.parse(`${match[1]}T${match[2]}Z`), pid = Number(match[3]);
+    if (!Number.isFinite(atMs)) continue;
+    byPid.set(pid, [...byPid.get(pid) ?? [], { atMs, ms: Number(match[4]) }]);
+  }
+  return byPid;
+}
+
+// The server-reported time of one batch: the summed durations of its session's statements logged between the two
+// clock rows (the Message INSERT and the channel log statements, plus the sub-millisecond start clock query and, at
+// whole-millisecond log resolution, possibly the end clock query). Client time between statements is not in it.
+export function batchServerMs(durations: ReturnType<typeof serverDurations>, pid: number, startMs: number, endMs: number) {
+  const lines = (durations.get(pid) ?? []).filter(row => row.atMs >= Math.floor(startMs) && row.atMs <= endMs + 1);
+  return lines.length ? { serverMs: Math.round(lines.reduce((sum, row) => sum + row.ms, 0) * 1000) / 1000, serverStatements: lines.length } : null;
 }
 
 export async function saveSeedDbLogs(exec: Executor, container: string, path: string, timeoutMs = 30_000) {
