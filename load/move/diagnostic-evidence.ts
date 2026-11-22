@@ -101,22 +101,25 @@ export function appEvidence(log: string, organizations?: Organizations) {
 function sendBreakdown(timing: Timing[]) {
   const groups = new Map<number, { parents: Timing[]; children: Timing[] }>();
   let incomplete = 0, interrupted = 0;
-  let hasBreakdown = false;
   for (const sample of timing) {
-    if (sample.lane !== 'send' || (sample.phase !== 'admitted_work' && !member(sendChildren, sample.phase))) continue;
+    if (sample.lane !== 'send') continue;
+    const parent = sample.phase === 'admitted_work';
+    const child = member(sendChildren, sample.phase);
+    // A shared pool timing can identify a sample even if the rest of its records are missing.
+    if (!parent && !child && !(sample.phase === 'pool_acquire' && sample.requestId !== undefined)) continue;
     if (sample.requestId === undefined) {
       incomplete++;
       continue;
     }
-    hasBreakdown = true;
     const group = groups.get(sample.requestId) ?? { parents: [], children: [] };
     groups.set(sample.requestId, group);
-    (sample.phase === 'admitted_work' ? group.parents : group.children).push(sample);
+    if (parent) group.parents.push(sample);
+    if (child) group.children.push(sample);
   }
-  if (!hasBreakdown) return undefined;
+  if (groups.size === 0) return undefined;
   const residuals: number[] = [];
   for (const { parents, children } of groups.values()) {
-    if (parents.length === 1 && parents[0].interrupted) {
+    if (parents.length === 0 || (parents.length === 1 && parents[0].interrupted)) {
       interrupted++;
       continue;
     }
@@ -134,11 +137,13 @@ function sendBreakdown(timing: Timing[]) {
   return { ...distributions(residuals), interrupted, incomplete };
 }
 
-// A few incomplete requests (for example a cancelled or interrupted child) are reported, not fatal; more than 1% makes the
-// breakdown unusable because the residual would describe a selected subset.
+// More than 1% incomplete or interrupted samples makes the residual describe a selected subset.
 export function sendTimingProblems(app: ReturnType<typeof appEvidence> | null | undefined) {
   const breakdown = app?.byLane.send.phasesUs.send_unattributed;
-  return breakdown?.count && (breakdown.incomplete ?? 0) <= breakdown.count * 0.01 ? [] : ['send admitted-work breakdown'];
+  if (!breakdown?.count) return ['send admitted-work breakdown'];
+  const unusable = (breakdown.incomplete ?? 0) + breakdown.interrupted;
+  const sampled = breakdown.count + unusable;
+  return unusable * 100 <= sampled ? [] : ['send admitted-work breakdown'];
 }
 
 // Every phase of an enabled Part D read lane needs finished (non-interrupted) samples.

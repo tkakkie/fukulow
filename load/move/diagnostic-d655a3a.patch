@@ -1032,25 +1032,25 @@ index e2453398..53159014 100644
  #[utoipa::path(put, path = "/api/v1/orgs/{org}/channels/{id}/read", request_body = MarkReadRequest,
 diff --git a/server/src/move_diagnostic.rs b/server/src/move_diagnostic.rs
 new file mode 100644
-index 00000000..20d88d6c
+index 0000000..0e3361d
 --- /dev/null
 +++ b/server/src/move_diagnostic.rs
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,262 @@
 +use axum::response::Response;
 +use std::{
-+    cell::Cell,
++    cell::RefCell,
 +    future::Future,
 +    sync::{
 +        Arc, OnceLock,
 +        atomic::{AtomicU64, Ordering::Relaxed},
 +    },
-+    time::Instant,
++    time::{Duration, Instant},
 +};
 +use uuid::Uuid;
 +
 +tokio::task_local! {
 +    static WRITE: Write;
-+    static SEND_CHILDREN: Cell<u32>;
++    static SEND_TIMINGS: RefCell<SendTimings>;
 +}
 +
 +static SEND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1147,9 +1147,11 @@ index 00000000..20d88d6c
 +            record(
 +                write.lane,
 +                write.organization,
-+                "before_admission",
-+                write.started,
-+                false,
++                PhaseTiming {
++                    phase: "before_admission",
++                    elapsed: write.started.elapsed(),
++                    interrupted: false,
++                },
 +                None,
 +                None,
 +            );
@@ -1169,9 +1171,22 @@ index 00000000..20d88d6c
 +// Scope the send-only hooks to the sampled admitted future. In particular, the
 +// canonical receipt snapshot can also run before admission.
 +pub(crate) async fn send_admitted<T>(future: impl Future<Output = T>) -> T {
-+    if WRITE.try_with(|write| write.sampled && write.request_id.is_some()) == Ok(true) {
-+        SEND_CHILDREN
-+            .scope(Cell::new(0), timed("admitted_work", future))
++    let request_id = WRITE
++        .try_with(|write| write.request_id.filter(|_| write.sampled))
++        .ok()
++        .flatten();
++    if let Some(request_id) = request_id {
++        // The task-local value drops after the scoped future, including on timeout.
++        // That lets the timers capture elapsed time and the work release its permit
++        // and transaction before any of these records are formatted or written.
++        SEND_TIMINGS
++            .scope(
++                RefCell::new(SendTimings {
++                    request_id,
++                    phases: Vec::with_capacity(48),
++                }),
++                timed("admitted_work", future),
++            )
 +            .await
 +    } else {
 +        timed("admitted_work", future).await
@@ -1179,7 +1194,7 @@ index 00000000..20d88d6c
 +}
 +
 +pub(crate) async fn send_timed<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
-+    if SEND_CHILDREN.try_with(|_| ()).is_ok() {
++    if SEND_TIMINGS.try_with(|_| ()).is_ok() {
 +        timed(phase, future).await
 +    } else {
 +        future.await
@@ -1187,7 +1202,7 @@ index 00000000..20d88d6c
 +}
 +
 +pub(crate) fn send_sync<T>(phase: &'static str, work: impl FnOnce() -> T) -> T {
-+    let mut timer = SEND_CHILDREN
++    let mut timer = SEND_TIMINGS
 +        .try_with(|_| Timer::start(phase))
 +        .ok()
 +        .flatten();
@@ -1204,7 +1219,6 @@ index 00000000..20d88d6c
 +    phase: &'static str,
 +    started: Instant,
 +    interrupted: bool,
-+    request_id: Option<u64>,
 +}
 +
 +impl Timer {
@@ -1217,9 +1231,6 @@ index 00000000..20d88d6c
 +                    phase,
 +                    started: Instant::now(),
 +                    interrupted: true,
-+                    request_id: write
-+                        .request_id
-+                        .filter(|_| SEND_CHILDREN.try_with(|_| ()).is_ok()),
 +                })
 +            })
 +            .ok()
@@ -1229,48 +1240,63 @@ index 00000000..20d88d6c
 +
 +impl Drop for Timer {
 +    fn drop(&mut self) {
-+        // A finished parent advertises how many records its executed path emitted,
-+        // including nested access details. Pool timings are already covered by
-+        // the write and receipt acquisition phases.
-+        let send_children = self.request_id.and_then(|_| {
-+            SEND_CHILDREN
-+                .try_with(|children| {
-+                    if self.phase == "admitted_work" {
-+                        Some(children.get())
-+                    } else {
-+                        if self.phase != "pool_acquire" {
-+                            children.set(children.get() + 1);
-+                        }
-+                        None
-+                    }
-+                })
-+                .ok()
-+                .flatten()
-+        });
-+        record(
-+            self.lane,
-+            self.organization,
-+            self.phase,
-+            self.started,
-+            self.interrupted,
-+            self.request_id,
-+            send_children,
-+        );
++        let timing = PhaseTiming {
++            phase: self.phase,
++            elapsed: self.started.elapsed(),
++            interrupted: self.interrupted,
++        };
++        if SEND_TIMINGS
++            .try_with(|timings| timings.borrow_mut().phases.push(timing))
++            .is_err()
++        {
++            record(self.lane, self.organization, timing, None, None);
++        }
++    }
++}
++
++#[derive(Clone, Copy)]
++struct PhaseTiming {
++    phase: &'static str,
++    elapsed: Duration,
++    interrupted: bool,
++}
++
++struct SendTimings {
++    request_id: u64,
++    phases: Vec<PhaseTiming>,
++}
++
++impl Drop for SendTimings {
++    fn drop(&mut self) {
++        // The parent counts nested access details too. The shared pool timing
++        // overlaps the write and receipt acquisition phases.
++        let children = self
++            .phases
++            .iter()
++            .filter(|timing| !matches!(timing.phase, "admitted_work" | "pool_acquire"))
++            .count();
++        for &timing in &self.phases {
++            record(
++                "send",
++                None,
++                timing,
++                Some(self.request_id),
++                (timing.phase == "admitted_work").then_some(children),
++            );
++        }
 +    }
 +}
 +
 +fn record(
 +    lane: &'static str,
 +    organization: Option<Uuid>,
-+    phase: &'static str,
-+    started: Instant,
-+    interrupted: bool,
++    timing: PhaseTiming,
 +    request_id: Option<u64>,
-+    send_children: Option<u32>,
++    send_children: Option<usize>,
 +) {
 +    let organization = organization.map(|id| id.to_string()).unwrap_or_default();
-+    tracing::info!(target: "fukulow", event = "move_diag_timing", lane, organization, phase,
-+        us = started.elapsed().as_secs_f64() * 1_000_000.0, interrupted, request_id, send_children);
++    tracing::info!(target: "fukulow", event = "move_diag_timing", lane, organization, phase = timing.phase,
++        us = timing.elapsed.as_secs_f64() * 1_000_000.0, interrupted = timing.interrupted, request_id, send_children);
 +}
 diff --git a/server/src/observability.rs b/server/src/observability.rs
 index 4a356bed..e380ac63 100644
