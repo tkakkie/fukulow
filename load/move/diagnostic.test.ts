@@ -207,6 +207,17 @@ test('diagnostic commit and read lanes are pinned choices recorded with the sele
   assert.match(attributionLabel('channels')!, /^ATTRIBUTION RUN .*channels only.*not the Part D Done-when load$/);
 });
 
+test('the #783 D0 pair uses the d655a3a target unchanged in both arms', () => {
+  const pair = ['9cb1f78c938b72657fe91177f43ca34f65015857', '4e4b4b8b4d6c65446231c9e439950d2dde7d604e'];
+  assert.deepEqual(Object.keys(diagnosticTargets).sort(), [diagnosticCommit, mainCommit, ...pair].sort());
+  const main = diagnosticSelection({ diagnostic: true, commit: mainCommit })!;
+  for (const commit of pair) {
+    assert.deepEqual(diagnosticTargets[commit], diagnosticTargets[mainCommit]);
+    const selected = diagnosticSelection({ diagnostic: true, commit })!;
+    assert.deepEqual({ ...selected, commit: mainCommit }, main);
+  }
+});
+
 test('the main patch ports every hook of the pinned patch and adds the read-lane phases', () => {
   const hooks = (file: string) => new Set([...readFileSync(new URL('../../' + file, import.meta.url), 'utf8')
     .split('\n').filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n')
