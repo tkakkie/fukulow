@@ -23,9 +23,9 @@ SELECT json_build_object(
       sum(fsyncs) AS fsyncs, sum(fsync_time) AS fsync_time, max(stats_reset) AS stats_reset
     FROM pg_stat_io GROUP BY GROUPING SETS ((), (object, backend_type, context))
   ) AS s),
-  'waitEvents', (SELECT coalesce(json_agg(s ORDER BY wait_event_type, wait_event), '[]') FROM (
-    SELECT wait_event_type, wait_event, count(*) FROM pg_stat_activity
-    WHERE pid <> pg_backend_pid() GROUP BY wait_event_type, wait_event
+  'waitEvents', (SELECT coalesce(json_agg(s ORDER BY backend_type, state, wait_event_type, wait_event), '[]') FROM (
+    SELECT backend_type, state, wait_event_type, wait_event, count(*) FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid() GROUP BY backend_type, state, wait_event_type, wait_event
   ) AS s),
   'vacuum', (SELECT coalesce(json_agg(s ORDER BY pid), '[]') FROM (
     SELECT pid, datid, relid, phase, heap_blks_total, heap_blks_scanned, heap_blks_vacuumed,
@@ -39,7 +39,8 @@ export async function seedDiagnosticSample(exec: Executor, container: string, no
   const docker = (args: string[], input?: string) =>
     checked(exec, { program: 'docker', args, input, timeout: 3_000 });
   const [postgres, containerStats] = await Promise.allSettled([
-    docker(['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1','-At'], snapshotSql)
+    // A server-side limit cancels a stalled sample inside PostgreSQL before the 3 s client kill.
+    docker(['exec','-i','-e','PGOPTIONS=-c statement_timeout=2000',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1','-At'], snapshotSql)
       .then(raw => {
         const { checkpointer, bgwriter, wal, io, waitEvents, vacuum } = JSON.parse(raw);
         if (!checkpointer || !bgwriter || !wal || !Array.isArray(io) || !Array.isArray(waitEvents) || !Array.isArray(vacuum)) {
@@ -60,26 +61,30 @@ export async function seedDiagnosticSample(exec: Executor, container: string, no
   };
 }
 
-export function startSeedSampler(exec: Executor, container: string, path: string) {
+// Samples run one after another: an overlapping tick would add Docker and DB load during the stall being observed.
+export function startSeedSampler(exec: Executor, container: string, path: string, intervalMs = 1_000) {
   writeFileSync(path, '', { mode: 0o600 });
-  const pending = new Set<Promise<void>>();
-  let writeFailed = false, hasPostgres = false, hasDocker = false;
+  let stopped = false, writeFailed = false, hasPostgres = false, hasDocker = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let current: Promise<void> = Promise.resolve();
   const tick = () => {
-    const sample = seedDiagnosticSample(exec, container)
+    const startedAt = Date.now();
+    current = seedDiagnosticSample(exec, container)
       .then(row => {
         appendFileSync(path, JSON.stringify(row) + '\n');
         hasPostgres ||= row.postgres !== null;
         hasDocker ||= row.docker !== null;
       })
       .catch(() => { writeFailed = true; })
-      .finally(() => pending.delete(sample));
-    pending.add(sample);
+      .finally(() => {
+        if (!stopped) timer = setTimeout(tick, Math.max(0, intervalMs - (Date.now() - startedAt)));
+      });
   };
   tick();
-  const timer = setInterval(tick, 1_000);
   return async () => {
-    clearInterval(timer);
-    await Promise.all(pending);
+    stopped = true;
+    clearTimeout(timer);
+    await current;
     if (writeFailed || !hasPostgres || !hasDocker) throw new Error('Database samples are incomplete');
   };
 }
@@ -104,9 +109,15 @@ export function seedFailure(startedAtMs: number, endedAtMs: number): SeedStop {
 // Retain only server-generated event lines with known formats.
 export function redactSeedDbLogs(raw: string) {
   const prefix = /^(\S+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ [A-Z]+ \[\d+\] (?:LOG|ERROR|FATAL|PANIC): +)(.*)$/;
+  // Autovacuum and autoanalyze statistics follow their header on tab-indented lines; keep only strict numeric forms.
+  const stats = /^\S+ \t(?:system usage: CPU: user: \d+\.\d+ s, system: \d+\.\d+ s, elapsed: \d+\.\d+ s|avg read rate: \d+\.\d+ MB\/s, avg write rate: \d+\.\d+ MB\/s|buffer usage: \d+ hits, \d+ reads, \d+ dirtied|WAL usage: \d+ records, \d+ full page images, \d+ bytes(?:, \d+ buffers full)?)$/;
+  let inAutovacuum = false;
   return raw.split('\n').flatMap(line => {
+    if (stats.test(line)) return inAutovacuum ? [line] : [];
     const match = prefix.exec(line);
+    inAutovacuum = false;
     if (!match) return [];
+    if (/^automatic (?:aggressive )?(?:vacuum|analyze) of table /.test(match[2])) inAutovacuum = true;
     const [, header, message] = match;
     if (/^(checkpoint (?:starting|complete):|automatic (?:aggressive )?(?:vacuum|analyze) of table "[\w.]+":|temporary file: path "base\/pgsql_tmp\/pgsql_tmp[\d.]+", size \d+$)/.test(message)) return [line];
     const lock = /^(process \d+ (?:still waiting for|acquired) \w+Lock) on .+ (after \d+(?:\.\d+)? ms)$/.exec(message);
