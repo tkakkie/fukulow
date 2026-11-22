@@ -22,7 +22,7 @@ export function readSampleEnvironment(every: number | null) {
 // #769 fail fast: one arm with missing evidence already makes the capture incomplete,
 // so the remaining arms (each a full stack, fixture and load window) are skipped.
 export function remainingArmsSkipped(diagnostic: boolean, problem: string | undefined) {
-  return diagnostic && problem !== undefined;
+  return diagnostic && Boolean(problem);
 }
 
 export function attributionLabel(readLanes: ReadLanes) {

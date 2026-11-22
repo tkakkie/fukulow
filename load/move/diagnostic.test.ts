@@ -224,5 +224,6 @@ test('statement summaries accept bounded normalized text only', () => {
 test('#769: a DIAGNOSTIC arm with missing evidence skips the remaining arms; formal runs never do', () => {
   assert.equal(remainingArmsSkipped(true, 'Missing DIAGNOSTIC evidence (Topic-list timings (topic_barrier))'), true);
   assert.equal(remainingArmsSkipped(true, undefined), false);
+  assert.equal(remainingArmsSkipped(true, ''), false);
   assert.equal(remainingArmsSkipped(false, 'stack launch failed (Error)'), false);
 });

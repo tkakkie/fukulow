@@ -252,7 +252,7 @@ async function main() {
         abort.signal.throwIfAborted();
         cleanup(project);
       }
-      if (remainingArmsSkipped(Boolean(selection), row.attempts[0]?.problem)) {
+      if (remainingArmsSkipped(Boolean(selection), row.attempts[0]?.problem) && results.length < orderedSteps.length) {
         console.log(`DIAGNOSTIC stopped after ${stepId(step)}: ${row.attempts[0]?.problem}`);
         break;
       }
@@ -269,7 +269,8 @@ async function main() {
     process.removeListener('SIGTERM', stop);
     const finished = complete && cleaned && !abort.signal.aborted;
     if (selection) {
-      const captured = finished && cleanupIssues.length === 0 && results.every(result => !result.attempts[0]?.problem);
+      const captured = finished && cleanupIssues.length === 0 && results.length === orderedSteps.length
+        && results.every(result => !result.attempts[0]?.problem);
       save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, readLanes: selection.readLanes, attribution,
         complete: captured, cleanupIssues, arms: diagnosticArms,
         skipped: orderedSteps.slice(results.length).map(stepId) });
