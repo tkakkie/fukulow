@@ -57,6 +57,8 @@ async fn channel_list_mention_scans_are_bounded_by_channel_count(pool: PgPool) {
     for table in [
         "messages",
         "message_mentions",
+        "message_append_counts",
+        "message_count_corrections",
         "topics",
         "channel_read_positions",
         "topic_read_positions",
@@ -148,6 +150,8 @@ async fn mention_count_query_plans(pool: PgPool) {
     for table in [
         "messages",
         "message_mentions",
+        "message_append_counts",
+        "message_count_corrections",
         "topics",
         "channel_read_positions",
         "topic_read_positions",

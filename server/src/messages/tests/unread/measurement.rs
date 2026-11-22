@@ -102,6 +102,7 @@ async fn unread_list_count_buffers_do_not_grow_with_unread(pool: PgPool) {
         "channel_read_positions",
         "topic_read_positions",
         "message_append_counts",
+        "message_count_corrections",
     ] {
         sqlx::query(&format!("ANALYZE {table}"))
             .execute(&pool)
@@ -501,6 +502,8 @@ async fn measure_unread_list_read_position_ranges(pool: PgPool) {
         "channel_read_positions",
         "topic_read_positions",
         "channel_message_sequences",
+        "message_append_counts",
+        "message_count_corrections",
     ] {
         sqlx::query(&format!("ANALYZE {table}"))
             .execute(&pool)
