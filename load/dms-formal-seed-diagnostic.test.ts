@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { postgresCommand, redactSeedDbLogs, seedDiagnosticSample, startSeedSampler } from './dms-formal-seed-diagnostic.ts';
-import { mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { batchServerMs, batchServerStatements, postgresCommand, redactSeedDbLogs, serverDurations } from './dms-formal-seed-diagnostic.ts';
 
 const formal = '["postgres","-c","shared_preload_libraries=pg_stat_statements","-c","pg_stat_statements.track=all","-c","max_connections=64"]';
 test('formal DB command keeps the existing bytes', () => {
@@ -16,36 +13,6 @@ test('diagnostic DB command appends only the six requested flags', () => {
     '-c','log_checkpoints=on','-c','log_autovacuum_min_duration=0','-c','track_io_timing=on',
     '-c','track_wal_io_timing=on','-c','log_lock_waits=on','-c','log_temp_files=0',
   ]);
-});
-
-test('sampler records PostgreSQL and Docker stats with the seed wall clock', async () => {
-  const stats = {
-    checkpointer: { num_timed: 1 }, bgwriter: { buffers_clean: 2 }, wal: { wal_bytes: 8192 },
-    io: [{ object: null, reads: 3, write_time: 4 }], vacuum: [{ relid: 20, phase: 'scanning heap' }],
-    waitEvents: [{ wait_event_type: 'IO', wait_event: 'WALSync', count: 1 }],
-  };
-  let now = 1760000000000;
-  const row = await seedDiagnosticSample(async command => {
-    assert.equal(command.program, 'docker');
-    if (command.args[0] === 'exec') {
-      for (const view of ['checkpointer', 'bgwriter', 'wal', 'io', 'activity', 'progress_vacuum']) {
-        assert.match(command.input!, new RegExp('FROM pg_stat_' + view + '\\b'));
-      }
-      assert.match(command.input!, /GROUP BY backend_type, state, wait_event_type, wait_event/);
-      assert.deepEqual(command.args.slice(0, 4), ['exec','-i','-e','PGOPTIONS=-c statement_timeout=2000']);
-      assert.match(command.input!, /sum\(fsync_time\)/);
-      assert.doesNotMatch(command.input!, /\b(query|query_id|usename)\b/);
-      return { code: 0, stdout: JSON.stringify(stats) };
-    }
-    assert.deepEqual(command.args, ['stats','--no-stream','--format','{{.CPUPerc}}|{{.MemUsage}}|{{.BlockIO}}','stub-db']);
-    return { code: 0, stdout: '75.00%|3.2GiB / 4GiB|12MB / 18MB' };
-  }, 'stub-db', () => now++);
-  assert.deepEqual(row, {
-    startedAtMs: 1760000000000, postgres: { atMs: 1760000000001, stats },
-    docker: { atMs: 1760000000002, cpuPercent: '75.00%', memoryUsage: '3.2GiB / 4GiB', blockIo: '12MB / 18MB' },
-  });
-  const missing = await seedDiagnosticSample(async () => ({ code: 1, stdout: 'private error' }), 'stub-db', () => 3);
-  assert.deepEqual(missing, { startedAtMs: 3, postgres: null, docker: null });
 });
 
 test('DB log retention keeps diagnostic events and discards SQL, details and credentials', () => {
@@ -70,57 +37,6 @@ test('DB log retention keeps diagnostic events and discards SQL, details and cre
   ]);
 });
 
-test('sampler never overlaps a slow sample and fails when samples are incomplete', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'seed-sampler-'));
-  let active = 0, maxActive = 0, calls = 0;
-  const slow = async (command: { args: string[] }) => {
-    active++; maxActive = Math.max(maxActive, active); calls++;
-    await new Promise(resolve => setTimeout(resolve, 30));
-    active--;
-    if (command.args[0] === 'exec') return { code: 0, stdout: JSON.stringify({ checkpointer: {}, bgwriter: {}, wal: {}, io: [], waitEvents: [], vacuum: [] }) };
-    return { code: 0, stdout: '1.00%|1MiB / 2MiB|1kB / 2kB' };
-  };
-  const stop = startSeedSampler(slow as never, 'stub-db', join(dir, 'ok.jsonl'), 5);
-  await new Promise(resolve => setTimeout(resolve, 150));
-  const coverage = await stop();
-  assert.equal(coverage.complete, true);
-  assert.equal(coverage.attempted, calls / 2);
-  assert.deepEqual([coverage.postgresMissing, coverage.dockerMissing, coverage.writeFailures, coverage.missingAtMs], [0, 0, 0, []]);
-  assert.equal(maxActive, 2, 'only the two commands of one sample run at once');
-  const rows = readFileSync(join(dir, 'ok.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  assert.ok(rows.length >= 2 && rows.length === calls / 2);
-  for (let i = 1; i < rows.length; i++) assert.ok(rows[i].startedAtMs >= rows[i - 1].startedAtMs);
-  const failing = startSeedSampler((async () => ({ code: 1, stdout: '' })) as never, 'stub-db', join(dir, 'bad.jsonl'), 5);
-  await new Promise(resolve => setTimeout(resolve, 20));
-  const bad = await failing();
-  assert.equal(bad.complete, false);
-  assert.ok(bad.attempted >= 1 && bad.postgresMissing === bad.attempted && bad.dockerMissing === bad.attempted);
-  assert.equal(bad.missingAtMs.length, bad.attempted, 'one entry per sample, not per missing part');
-});
-
-test('a sample that fails after the first success makes the collection incomplete and is recorded', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'seed-sampler-'));
-  let ticks = 0;
-  const flaky = async (command: { args: string[] }) => {
-    if (command.args[0] === 'exec') {
-      ticks++;
-      return ticks === 3 ? { code: 1, stdout: '' } : { code: 0, stdout: JSON.stringify({ checkpointer: {}, bgwriter: {}, wal: {}, io: [], waitEvents: [], vacuum: [] }) };
-    }
-    return { code: 0, stdout: '1.00%|1MiB / 2MiB|1kB / 2kB' };
-  };
-  const stop = startSeedSampler(flaky as never, 'stub-db', join(dir, 'flaky.jsonl'), 5);
-  while (ticks < 5) await new Promise(resolve => setTimeout(resolve, 5));
-  const coverage = await stop();
-  const rows = readFileSync(join(dir, 'flaky.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  assert.equal(coverage.complete, false);
-  assert.equal(coverage.postgresMissing, 1);
-  assert.equal(coverage.dockerMissing, 0);
-  assert.equal(coverage.writeFailures, 0);
-  assert.deepEqual(coverage.missingAtMs, [rows[2].startedAtMs]);
-  assert.equal(rows[2].postgres, null, 'the gap stays visible in db-samples.jsonl');
-  assert.equal(coverage.attempted, rows.length);
-});
-
 test('autovacuum statistics lines are kept only after an autovacuum header and in strict numeric form', () => {
   const ts = '2026-11-22T00:00:00.000000000Z ';
   const header = ts + '2026-11-22 00:00:00.000 UTC [42] LOG:  automatic vacuum of table "fukulow.public.messages": index scans: 1';
@@ -138,4 +54,50 @@ test('autovacuum statistics lines are kept only after an autovacuum header and i
   assert.deepEqual(redactSeedDbLogs(raw).split('\n'), [
     header, ...stats, ts + '2026-11-22 00:00:01.000 UTC [43] ERROR:  [detail redacted]',
   ]);
+});
+
+test('DB log keeps checkpoint frequency warnings and checkpoint write/sync timings, not their hints', () => {
+  const prefix = '2026-11-22T00:00:00.000000000Z 2026-11-22 00:00:00.000 UTC [7] ';
+  const kept = [
+    'LOG:  checkpoints are occurring too frequently (24 seconds apart)',
+    'LOG:  checkpoint starting: wal',
+    'LOG:  checkpoint complete: wrote 16384 buffers (100.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=26.912 s, sync=9.204 s, total=36.301 s; sync files=41, longest=8.771 s, average=0.225 s; distance=540672 kB, estimate=540672 kB; lsn=4/1A000000, redo lsn=4/10000028',
+  ].map(line => prefix + line);
+  const raw = [kept[0], prefix + 'HINT:  Consider increasing the configuration parameter "max_wal_size".', kept[1], kept[2],
+    prefix + 'LOG:  checkpoints are occurring too frequently (24 seconds apart) secret'].join('\n');
+  assert.deepEqual(redactSeedDbLogs(raw).split('\n'), kept);
+});
+
+test('DB log keeps statement-free log_duration lines, which give each batch session its server-reported time', () => {
+  const ts = '2026-11-22T00:00:01.000000000Z ';
+  // The start clock query, the Message INSERT, PREPARE, EXECUTE and DEALLOCATE of one batch session, then a later line.
+  const raw = [
+    ts + '2026-11-22 00:00:01.000 UTC [42] LOG:  duration: 0.041 ms',
+    ts + '2026-11-22 00:00:01.700 UTC [42] LOG:  duration: 699.500 ms',
+    ts + '2026-11-22 00:00:01.701 UTC [42] LOG:  duration: 0.100 ms',
+    ts + '2026-11-22 00:00:01.899 UTC [42] LOG:  duration: 198.000 ms',
+    ts + '2026-11-22 00:00:01.900 UTC [42] LOG:  duration: 0.020 ms',
+    ts + '2026-11-22 00:00:01.950 UTC [42] LOG:  duration: 12.250 ms  statement: INSERT secret',
+    ts + '2026-11-22 00:00:02.500 UTC [42] LOG:  duration: 3.000 ms',
+    ts + '2026-11-22 00:00:01.500 CET [43] LOG:  duration: 1.000 ms',
+  ].join('\n');
+  const kept = redactSeedDbLogs(raw).split('\n');
+  assert.deepEqual(kept, raw.split('\n').filter(line => !line.includes('statement:')), 'a duration line with statement text is dropped');
+  const durations = serverDurations(kept.join('\n'));
+  const startMs = Date.parse('2026-11-22T00:00:01.000Z') + 0.7, endMs = Date.parse('2026-11-22T00:00:01.900Z') + 0.3;
+  assert.deepEqual(batchServerMs(durations, 42, startMs, endMs), { serverMs: 897.661, serverStatements: 5 }, 'whole-millisecond log times are compared with the clock window');
+  assert.equal(batchServerMs(durations, 43, startMs, endMs), null, 'a non-UTC log time is not read');
+  assert.equal(batchServerMs(durations, 44, startMs, endMs), null);
+});
+
+test('a batch whose Message INSERT and Channel log durations are missing has no server time, even with its clock query', () => {
+  const line = (time: string, ms: string) => `2026-11-22T00:00:01.000000000Z 2026-11-22 00:00:${time} UTC [42] LOG:  duration: ${ms} ms`;
+  const startMs = Date.parse('2026-11-22T00:00:01.000Z') + 0.7, endMs = Date.parse('2026-11-22T00:00:01.900Z') + 0.3;
+  // Only the opening clock query survived: one line where the batch logs at least batchServerStatements.min.
+  assert.deepEqual(batchServerMs(serverDurations(line('01.000', '0.041')), 42, startMs, endMs), { serverMs: null, serverStatements: 1 });
+  const four = ['01.000', '01.700', '01.701', '01.899'].map(time => line(time, '1.000')).join('\n');
+  assert.equal(batchServerMs(serverDurations(four), 42, startMs, endMs)!.serverMs, null, 'one statement short');
+  const eight = ['01.000', '01.000', '01.100', '01.200', '01.300', '01.400', '01.500', '01.900'].map(time => line(time, '1.000')).join('\n');
+  assert.equal(batchServerMs(serverDurations(eight), 42, startMs, endMs)!.serverMs, null, 'more lines than the batch has statements');
+  assert.deepEqual(batchServerStatements, { min: 5, max: 7 });
 });
