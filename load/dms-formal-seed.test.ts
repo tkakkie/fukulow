@@ -5,6 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { createLog } from './channel-log.ts';
 import { checkMessageBatch, checkOrganization, dbBatchClock, messageBatchBaselineMs, seed } from './dms-formal-seed.ts';
 
 test('Message batch baseline excludes the first batch and uses the median', () => {
@@ -31,6 +32,16 @@ test('Organization guard uses a strict 2x total-time limit', () => {
   assert.throws(() => checkOrganization(2, 199, 50_001, 25_000), /Organization 2 total through Message batch 199 and final setup took 50001 ms \(limit 50000 ms\)/);
 });
 
+const originPsql = ['exec','-i','stub','psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'];
+// The origin/main Message batch: one INSERT ... SELECT, then the channel log statements, nothing else.
+function assertOriginBatch(input: string) {
+  const match = /^INSERT INTO messages\(organization_id,id,channel_id,seq,sender,client_message_id,body\) SELECT '([0-9a-f-]{36})',gen_random_uuid\(\),c\.id,n,CASE WHEN n%2=0 THEN c\.lower_member_id ELSE c\.higher_member_id END,gen_random_uuid\(\),repeat\('x',1024\) FROM channels c CROSS JOIN generate_series\(1,100\) n WHERE c\.organization_id='\1' AND c\.id=ANY\(ARRAY\[((?:'[0-9a-f-]{36}'::uuid,?)+)\]\);\n([\s\S]*)$/.exec(input);
+  assert.ok(match, 'formal batch SQL differs from origin/main');
+  const ids = [...match[2]!.matchAll(/'([0-9a-f-]{36})'::uuid/g)].map(id => id[1]!);
+  assert.equal(match[3], createLog(match[1]!, ids));
+  assert.doesNotMatch(input, /clock_timestamp/);
+}
+
 for (const [scenario, diagnostic] of [
   ['healthy', false], ['slow batch', false], ['slow Organization', false],
   ['slow batch', true], ['slow Organization', true], ['SQL failure', true],
@@ -56,14 +67,18 @@ for (const [scenario, diagnostic] of [
   const epoch = 1760000000000;
   t.mock.method(Date, 'now', () => epoch + now);
   const events: string[] = [];
-  const docker = t.mock.method(childProcess, 'execFileSync', (program: string, args: string[], { input: raw }: { input: string }) => {
+  const docker = t.mock.method(childProcess, 'execFileSync', (program: string, args: string[], { input: raw, stdio }: { input: string; stdio: string[] }) => {
     assert.equal(program, 'docker');
-    // Message batches run between two server clock rows in the same psql call.
+    // Diagnostic Message batches run between two server clock rows in the same psql call.
     const timed = raw.startsWith("SELECT 'db-start', round(extract(epoch FROM clock_timestamp()) * 1000, 3);\n");
-    assert.equal(timed, raw.includes('INSERT INTO messages(') && !raw.includes("'seed'"));
+    assert.equal(timed, diagnostic && raw.includes('INSERT INTO messages(') && !raw.includes("'seed'"));
     if (timed) {
-      assert.deepEqual(args.slice(-3), ['-q', '-A', '-t']);
+      assert.deepEqual(args, [...originPsql, '-q', '-A', '-t']);
       assert.ok(raw.endsWith("\nSELECT 'db-end', round(extract(epoch FROM clock_timestamp()) * 1000, 3);"));
+    } else {
+      // Formal (and every non-batch) call is the origin/main command: same psql arguments, stdout ignored, same SQL.
+      assert.deepEqual([args, stdio], [originPsql, ['pipe', 'ignore', 'inherit']]);
+      if (raw.startsWith('INSERT INTO messages(') && !raw.includes("'seed'")) assertOriginBatch(raw);
     }
     const input = timed ? raw.split('\n').slice(1, -1).join('\n') : raw;
     const before = now;
@@ -86,7 +101,7 @@ for (const [scenario, diagnostic] of [
       events.push(statement[0]);
     }
     if (input === 'VACUUM(ANALYZE);') events.push(input);
-    // The DB side takes all but 5 ms of the batch.
+    // The DB side takes all but 5 ms of the batch. Formal calls ignore stdout, as on origin/main.
     return timed ? Buffer.from(`db-start|${epoch + before}.000\nINSERT 0 1\ndb-end|${epoch + now - 5}.500\n`) : undefined;
   });
   syncBuiltinESMExports();
@@ -133,14 +148,14 @@ for (const [scenario, diagnostic] of [
     });
     assert.ok(rows[0].startedAtMs >= epoch);
     assert.equal(rows[0].endedAtMs - rows[0].startedAtMs, rows[0].durationMs);
+    const batch = rows.find(row => row.kind === 'batch' && row.batchIndex === 1);
+    assert.deepEqual([batch.dbStartedAtMs, batch.dbDurationMs], [batch.startedAtMs, batch.durationMs - 4.5]);
     return;
   }
-  const clock = (startedAtMs: number, durationMs: number) => ({ startedAtMs, endedAtMs: startedAtMs + durationMs,
-    dbStartedAtMs: startedAtMs, dbEndedAtMs: startedAtMs + durationMs - 4.5, dbDurationMs: durationMs - 4.5 });
-  assert.deepEqual(rows[0], { kind: 'batch', organization: 0, batchIndex: 0, durationMs: 20_000, ...clock(rows[0].startedAtMs, 20_000) });
-  assert.ok(rows[0].startedAtMs >= epoch);
+  // Formal rows keep the origin/main fields exactly.
+  assert.deepEqual(rows[0], { kind: 'batch', organization: 0, batchIndex: 0, durationMs: 20_000 });
   if (scenario === 'slow batch') {
-    assert.deepEqual(rows.at(-1), { kind: 'batch', organization: 1, batchIndex: 1, durationMs: 6_001, ...clock(rows.at(-1).startedAtMs, 6_001) });
+    assert.deepEqual(rows.at(-1), { kind: 'batch', organization: 1, batchIndex: 1, durationMs: 6_001 });
   } else if (scenario === 'slow Organization') {
     assert.ok(totals[1].durationMs > 2 * totals[0].durationMs);
     assert.deepEqual(rows.at(-1), totals[1]);
