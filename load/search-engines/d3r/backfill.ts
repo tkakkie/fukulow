@@ -113,3 +113,24 @@ COMMIT;`);
   return { durationMs, walBytes, inserted, ...stats,
     verification: {...verification, durationMs: performance.now() - verifyStart, equal: verification.equal && inserted === stats.termRows} };
 }
+
+export type BackfillRecord = Awaited<ReturnType<typeof backfill>>;
+type TermVerification = Awaited<ReturnType<typeof verifyTerms>>;
+
+export function termEvidence(record: Partial<TermVerification> | undefined) {
+  return record && typeof record.equal === 'boolean' &&
+    [record.checked, record.expectedTermRows, record.mismatches].every(n => Number.isSafeInteger(n) && n! >= 0);
+}
+
+export function termsMatch(record: TermVerification, messages: number, termRows: number) {
+  return record.equal && record.checked === messages && record.expectedTermRows === termRows && record.mismatches === 0;
+}
+
+const indexes = ['message_search_terms_lookup', 'message_search_terms_maintenance'];
+export function verifiedBackfill(record: Partial<BackfillRecord> | undefined, messages: number) {
+  return record && Number.isFinite(record.durationMs) && record.durationMs! >= 0 &&
+    [record.walBytes, record.tableBytes, record.termRows, record.inserted,
+      ...indexes.map(name => record.indexes?.[name])].every(n => Number.isSafeInteger(n) && n! > 0) &&
+    record.inserted === record.termRows && termEvidence(record.verification) &&
+    termsMatch(record.verification!, messages, record.termRows!);
+}

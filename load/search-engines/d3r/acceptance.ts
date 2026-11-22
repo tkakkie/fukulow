@@ -4,6 +4,8 @@ import { denialCases, probe } from '../definer.ts';
 import { queries } from '../queries.ts';
 import { channel, epoch, org, literal } from '../seed.ts';
 import { hash } from '../manifest.ts';
+import { termEvidence, termsMatch, verifiedBackfill, type BackfillRecord, type verifyTerms } from './backfill.ts';
+import { directRlsExpected, directRlsRecorded, validRls, type verifyRls } from './rls.ts';
 import { allPages, explainPage, type Sql } from './engine.ts';
 import { actors, begin, normalization, scopeContext, shortError, tokens } from './path.ts';
 
@@ -85,18 +87,21 @@ export async function completeness(app: Sql) {
   return report;
 }
 
+export function denialExpectation(c: typeof denialCases[number]) {
+  // Probe 4 becomes visible under full history.
+  const expected = c.query === 'denialprobe' && c.expect.includes(1) ? [...c.expect, 4] : c.expect;
+  const expectedRejection = c.query === '' ? shortError
+    : c.context !== c.actor[0] || c.actor[1] === 6 ? 'organization_unavailable' : null;
+  return {expected: expected.map(probe).sort(), expectedRejection};
+}
+
 export async function denials(app: Sql) {
   const checks = [];
   for (const c of denialCases) {
-    // Probe 4 is still in the fixture and becomes visible under full history.
-    const expected = [...c.expect];
-    if (c.query === 'denialprobe' && expected.includes(1)) expected.push(4);
-    const wanted = expected.map(probe).sort();
+    const {expected: wanted, expectedRejection} = denialExpectation(c);
     for (const forced of [false, true]) {
       const result = await allPages(app, c.actor, c.query, {context: c.context, forced});
       const found = result.ids.sort();
-      const expectedRejection = c.query === '' ? shortError
-        : c.context !== c.actor[0] || c.actor[1] === 6 ? 'organization_unavailable' : null;
       checks.push({case: c.name, forced, found, expected: wanted, rejection: result.rejection, expectedRejection,
         paginationError: result.paginationError,
         equal: !result.paginationError && JSON.stringify(found) === JSON.stringify(wanted) && result.rejection === expectedRejection});
@@ -110,14 +115,21 @@ type Report = Awaited<ReturnType<typeof completeness>>;
 type Denials = Awaited<ReturnType<typeof denials>>;
 type Plan = Pick<Awaited<ReturnType<typeof explainPage>>, 'searchIndex' | 'seqScanMessages'>;
 type Latency = {n: number; p50: number; p95: number; p99: number};
-export type Round = {round: number; latencies: {query: string; n: number; p50: number; p95: number; p99: number}[]};
+export type Sample = {query: string} & (Latency & {outcomes?: string[]} | {outcomes: string[]; sqlError: string});
+export type Round = {round: number; latencies: Sample[]};
+type RlsRecord = ReturnType<typeof verifyRls>;
 export type Evidence = {
-  valid: boolean; formal: boolean; backfill: boolean;
+  valid: boolean; formal: boolean; backfill: BackfillRecord;
   rounds: Round[];
   plans: (Plan & {query: string})[];
   complete: Report;
-  denials: Denials;
-  restore: {checksumEqual: boolean; termsEqual: boolean; complete: Report};
+  denials: Denials & {measuredRls: string};
+  restore: {
+    before: string; after: string; restoreMs: number; termRows: number; expectedTermRows: number;
+    terms: Awaited<ReturnType<typeof verifyTerms>>;
+    rls: {settings: RlsRecord; cleanup: string};
+    complete: Report;
+  };
 };
 
 function reportStatus(report: Report): Status {
@@ -135,33 +147,51 @@ const isHash = (value: string) => typeof value === 'string' && /^[a-f0-9]{64}$/.
 const validRejection = (value: string | null) => value === null || typeof value === 'string';
 
 export function judge(e: Partial<Evidence>): Status {
-  if (e.valid !== true || e.formal !== true || e.backfill !== true || !Array.isArray(e.rounds) || !Array.isArray(e.plans) ||
+  if (e.valid !== true || e.formal !== true || !verifiedBackfill(e.backfill, 1_000_000) || !Array.isArray(e.rounds) || !Array.isArray(e.plans) ||
     !Array.isArray(e.complete) || !e.restore || !Array.isArray(e.restore.complete) ||
     !e.denials || !Array.isArray(e.denials.checks) || !e.denials.plan) return 'NOT EVALUATED';
   const ids = queries.map(([id]) => id);
   const accepted = ids.filter(accepts);
-  if (e.rounds.length !== 3 || e.rounds.some((round, index) => round.round !== index + 1 ||
-    round.latencies.length !== ids.length || round.latencies.some((l, i) => l.query !== ids[i] || !latencyValid(l)))) return 'NOT EVALUATED';
+  if (e.rounds.length !== 3 || e.rounds.some((round, index) => round?.round !== index + 1 ||
+    !Array.isArray(round.latencies) || round.latencies.length !== ids.length ||
+    round.latencies.some((l, i) => l?.query !== ids[i] || !sampleValid(l)))) return 'NOT EVALUATED';
   if (e.plans.length !== accepted.length || e.plans.some((plan, i) => plan.query !== accepted[i] ||
     typeof plan.searchIndex !== 'boolean' || typeof plan.seqScanMessages !== 'boolean')) return 'NOT EVALUATED';
   const complete = reportStatus(e.complete);
   const restored = reportStatus(e.restore.complete);
   if (complete === 'NOT EVALUATED' || restored === 'NOT EVALUATED' ||
     !e.complete.some(q => q.actors.some(actor => actor.expectedOlderThan180Days > 0)) ||
-    typeof e.restore.checksumEqual !== 'boolean' || typeof e.restore.termsEqual !== 'boolean' ||
+    !Number.isFinite(e.restore.restoreMs) || e.restore.restoreMs < 0 ||
+    ![e.restore.before, e.restore.after].every(value => typeof value === 'string' && /^\d+\|[a-f0-9]{32}$/.test(value)) ||
+    ![e.restore.termRows, e.restore.expectedTermRows].every(n => Number.isSafeInteger(n) && n >= 0) ||
+    !termEvidence(e.restore.terms) || !validRls(e.restore.rls?.settings) ||
+    !directRlsRecorded(e.restore.rls?.cleanup) || !directRlsRecorded(e.denials.measuredRls) ||
     typeof e.denials.plan.searchIndex !== 'boolean' ||
-    e.denials.checks.length !== denialCases.length * 2 || e.denials.checks.some((c, i) =>
-      c.case !== denialCases[Math.floor(i / 2)].name || c.forced !== Boolean(i % 2) ||
-      typeof c.equal !== 'boolean' || !Array.isArray(c.found) || !Array.isArray(c.expected) ||
-      !validRejection(c.rejection) || !validRejection(c.expectedRejection))) return 'NOT EVALUATED';
-  return e.rounds.some(r => r.latencies.some(l => accepts(l.query) && l.p95 > criteria.p95LimitMs)) ||
+    e.denials.checks.length !== denialCases.length * 2 || e.denials.checks.some((c, i) => {
+      const fixture = denialCases[Math.floor(i / 2)];
+      const {expected, expectedRejection} = denialExpectation(fixture);
+      return c?.case !== fixture.name || c.forced !== Boolean(i % 2) || typeof c.equal !== 'boolean' ||
+        !Array.isArray(c.found) || !Array.isArray(c.expected) || JSON.stringify(c.expected) !== JSON.stringify(expected) ||
+        !validRejection(c.rejection) || c.expectedRejection !== expectedRejection;
+    })) return 'NOT EVALUATED';
+  return e.rounds.some(r => r.latencies.some(l => accepts(l.query)
+    ? 'p95' in l && l.p95 > criteria.p95LimitMs
+    : 'sqlError' in l || l.outcomes?.some(outcome => outcome !== shortError))) ||
     e.plans.some(p => p.seqScanMessages || !p.searchIndex) || complete === 'FAIL' || restored === 'FAIL' ||
-    !e.restore.checksumEqual || !e.restore.termsEqual ||
+    !e.restore.before.startsWith('1000|') || e.restore.before !== e.restore.after ||
+    e.restore.termRows !== e.restore.expectedTermRows || !termsMatch(e.restore.terms, 1000, e.restore.termRows) ||
+    e.restore.rls.cleanup !== directRlsExpected || e.denials.measuredRls !== directRlsExpected ||
     e.denials.checks.some(c => !c.equal || c.rejection !== c.expectedRejection || c.paginationError ||
       JSON.stringify(c.found) !== JSON.stringify(c.expected)) || !e.denials.plan.searchIndex ? 'FAIL' : 'PASS';
 }
 
-function latencyValid(l: Latency) {
+function sampleValid(l: Sample) {
+  if (!accepts(l.query)) {
+    if (!Array.isArray(l.outcomes) || !l.outcomes.every(outcome => typeof outcome === 'string' && outcome.length > 0)) return false;
+    if ('sqlError' in l) return typeof l.sqlError === 'string' && l.sqlError.length > 0;
+    if (l.outcomes.length !== criteria.samplesPerQueryRound) return false;
+  }
+  if (!('n' in l)) return false;
   return l.n === criteria.samplesPerQueryRound &&
     [l.p50, l.p95, l.p99].every(n => Number.isFinite(n) && n >= 0) && l.p50 <= l.p95 && l.p95 <= l.p99;
 }

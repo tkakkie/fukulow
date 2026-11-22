@@ -4,6 +4,7 @@ import { hash, postgresArguments, smokeLabel, snapshot as v13 } from '../manifes
 import { criteria } from '../summarize.ts';
 import { pageSize, readSource, sources } from './path.ts';
 import { shortIds } from './acceptance.ts';
+import { forceSearchRls } from './rls.ts';
 
 const directory = 'load/search-engines/d3r';
 const root = new URL('../../../', import.meta.url);
@@ -33,10 +34,12 @@ export function snapshot() {
     settings: Object.fromEntries(Object.entries(base.settings).filter(([name]) => !(name in removedSettings))),
     removedSettings, sessionPolicy,
     sourceHashes: [...new Set(files)].sort().map(path => ({path, sha256: hash(readSource(path))})), migrations,
+    setup: {forceSearchRls, backfill: 'Verified physical PostgreSQL snapshot of the base, restore and denial fixtures',
+      round: 'Create measured from the restored base template, restart PostgreSQL, then warm each query in a fresh psql session'},
     queryPath: {sources, role: 'fukulow_app', pageSize, history: 'full',
       context: 'REPEATABLE READ READ ONLY with transaction-local Organization context',
       plan: 'force_generic_plan on the production d3r page statement', statementTimeout: '2s',
-      rls: 'forced on message_search_terms; production policies active on all search tables'},
+      rls: 'forced and active on all five search tables'},
     performance, smoke: {label: smokeLabel, performance: {rows: 1000, clients: 1, transactions: 1, rounds: 1}}, timing,
     criteria: {p95LimitMs: criteria.p95LimitMs, samplesPerQueryRound: criteria.samplesPerQueryRound, shortIds,
       shortRejection: 'search_query_too_short', index: 'All accepted first-round plans execute the term lookup index and have no Messages Seq Scan.',

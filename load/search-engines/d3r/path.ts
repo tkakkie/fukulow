@@ -24,7 +24,8 @@ const searchSource = readSource(sources.search);
 const channelsSource = readSource(sources.channels);
 const authSource = readSource(sources.auth);
 export const pageSize = Number(required(/const PAGE_SIZE: usize = (\d+);/, searchSource));
-export const shortError = 'search_query_too_short';
+export const shortError = required(/fn query_too_short\(\)[\s\S]*?ApiError\(StatusCode::BAD_REQUEST, "([^"]+)"/, searchSource);
+const minimumScalars = Number(required(/\.filter\(\|token\| token\.chars\(\)\.count\(\) >= (\d+)\)/, engineSource));
 export const actors = [1, 2, 3, 4, 5, 6] as const;
 export const firstPosition = ['infinity', 'ffffffff-ffff-ffff-ffff-ffffffffffff'] as const;
 export type Position = readonly [at: string, id: string];
@@ -49,7 +50,7 @@ export function term(words: string[]) {
     // Rust Iterator::max_by_key takes the last tied maximum.
     if (scalars.length >= longest.length) longest = scalars;
   }
-  return longest.length < 2 ? null : longest.slice(0, 3).join('');
+  return longest.length < minimumScalars ? null : longest.slice(0, 3).join('');
 }
 
 const whitespaces = Array.from({length: 0x3001}, (_, i) => String.fromCodePoint(i))
@@ -88,7 +89,7 @@ export function normalization(raw: string) {
 
 // pgbench uses bound psql variables in prepared mode. Its tokenization uses
 // the same scalar whitespace set and last-longest tie break as the Rust path.
-export function benchmarkScript(page: string, raw: string, expectedAcceptance: boolean) {
+export function benchmarkScript(page: string, raw: string, recordOutcome = false) {
   const boundPage = page.replace(/\$([1-7])\b/g, (_, n: string) =>
     [':organization', ':scopes', ':term', ':tokens', ':before_at', ':before_id', ':size::bigint'][Number(n) - 1]);
   return `${begin}
@@ -107,14 +108,17 @@ WITH normalized AS MATERIALIZED (
 ), longest AS (
   SELECT token FROM words ORDER BY char_length(token) DESC, position DESC LIMIT 1
 )
-SELECT coalesce((SELECT char_length(token) >= 2 FROM longest), false)::int AS accepted,
-  1 / (:current_member::int * (coalesce((SELECT char_length(token) >= 2 FROM longest), false) = ${expectedAcceptance})::int) AS guard,
+SELECT (:current_member::int = 1 AND cardinality(:scopes::uuid[]) > 0
+    AND coalesce((SELECT char_length(token) >= ${minimumScalars} FROM longest), false))::int AS run_page,
+  CASE WHEN :current_member::int = 0 THEN 'organization_unavailable'
+       WHEN NOT coalesce((SELECT char_length(token) >= ${minimumScalars} FROM longest), false) THEN '${shortError}'
+       ELSE 'accepted' END AS outcome,
   coalesce((SELECT left(token, 3) FROM longest), '') AS term,
   ARRAY(SELECT token FROM words ORDER BY position) AS tokens,
   '${org(1)}' AS organization, '${firstPosition[0]}' AS before_at,
   '${firstPosition[1]}' AS before_id, ${pageSize} AS size \\gset
-\\if :accepted
+\\if :run_page
 ${boundPage};
 \\endif
-COMMIT;`;
+COMMIT;${recordOutcome ? '\n\\shell echo d3r-outcome :outcome' : ''}`;
 }

@@ -1,5 +1,5 @@
 {
-  "sha256": "fad751fb8a28e52362c6c1fcbffcbf4c30774838520baeec7e31693360b053af",
+  "sha256": "17cab9d337a24aa50ed193d89622dd88030ec85afe84eb8417a3797e7b1635c8",
   "frozen": {
     "version": 14,
     "date": "2026-11-22",
@@ -112,11 +112,11 @@
       },
       {
         "path": "load/search-engines/d3r/acceptance.ts",
-        "sha256": "9ba438312dc5a9c7a30dc3320bc2174cc4c8a18a198cee598ce2b1e391236813"
+        "sha256": "22bf20014832c0e4ac5243302647deec14cb092a79c41dd574ef9187786e20bf"
       },
       {
         "path": "load/search-engines/d3r/backfill.ts",
-        "sha256": "edb81ee17068011fd21ef9c4067572465e021674e0f33c7a82eab008252d0edd"
+        "sha256": "c9f02b604163327a1a9bfcaf91d6638f538e54c2b529027dcd0726a2585f96e5"
       },
       {
         "path": "load/search-engines/d3r/engine.ts",
@@ -124,19 +124,31 @@
       },
       {
         "path": "load/search-engines/d3r/manifest.ts",
-        "sha256": "030330bb8c1430982a179b6bb0807904d83c1afb208e92b9b1eee69bdc2b38a6"
+        "sha256": "198330b228cecba479034f0f11c71dd239da3e63f61ed9ed2cfd833e69ad1639"
       },
       {
         "path": "load/search-engines/d3r/path.ts",
-        "sha256": "b86c465fcc9a74d3a8aad540c344e867c642cf1a4b53cd226bece1f3cfd277a8"
+        "sha256": "79361fe8b7b2b502b9f171b840a8164a3c5f0f87d3cb88d74aac3b192679a18b"
+      },
+      {
+        "path": "load/search-engines/d3r/rls.ts",
+        "sha256": "71473667b6204847a96fe6aeced87214faa5028259bf4902935ee87c85ff52c8"
       },
       {
         "path": "load/search-engines/d3r/run.ts",
-        "sha256": "de36f748262ec26f6b1b6cf0fe8ab1bf3a9d6de94b7075b5103e6ed4d42424ae"
+        "sha256": "430ace98eb1d79e47a8c3f2f489e9ba9a4f77be062dc8915e094b1de2c1b42bb"
       },
       {
         "path": "load/search-engines/d3r/session.ts",
         "sha256": "e0035a6f57e8687cdbe9f95b0bb08c3c7e7d2845ffa8d263ed16be006ffa22b1"
+      },
+      {
+        "path": "load/search-engines/d3r/snapshot.ts",
+        "sha256": "bd4767231ce844176dede0c7cae65d2af94992a57d6778d123609c32731a33df"
+      },
+      {
+        "path": "load/search-engines/d3r/timing.ts",
+        "sha256": "f7256fb15772a15baab950fc7c1d8a90e3ded6a819336f9ef05fcb58ec1e8e32"
       },
       {
         "path": "load/search-engines/definer.sql",
@@ -427,6 +439,11 @@
       "server/migrations/202611200654_section_placement_channel_lookup.sql",
       "server/migrations/202611210725_message_search.sql"
     ],
+    "setup": {
+      "forceSearchRls": "ALTER TABLE public.messages FORCE ROW LEVEL SECURITY;\nALTER TABLE public.message_search_terms FORCE ROW LEVEL SECURITY;\nALTER TABLE public.users FORCE ROW LEVEL SECURITY;\nALTER TABLE public.channels FORCE ROW LEVEL SECURITY;\nALTER TABLE public.channel_members FORCE ROW LEVEL SECURITY;",
+      "backfill": "Verified physical PostgreSQL snapshot of the base, restore and denial fixtures",
+      "round": "Create measured from the restored base template, restart PostgreSQL, then warm each query in a fresh psql session"
+    },
     "queryPath": {
       "sources": {
         "engine": "server/src/messages/search/d3r.rs",
@@ -443,7 +460,7 @@
       "context": "REPEATABLE READ READ ONLY with transaction-local Organization context",
       "plan": "force_generic_plan on the production d3r page statement",
       "statementTimeout": "2s",
-      "rls": "forced on message_search_terms; production policies active on all search tables"
+      "rls": "forced and active on all five search tables"
     },
     "performance": {
       "querySet": [

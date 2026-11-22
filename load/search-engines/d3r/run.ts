@@ -4,31 +4,40 @@ import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:f
 import { arch, cpus, totalmem } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmark, command, CommandTimeoutError, docker, save, sql } from '../bench.ts';
+import { boundedCommand, command, CommandTimeoutError, docker, save, sql } from '../bench.ts';
 import { probeSql } from '../definer.ts';
-import { resolveImage, smokeLabel, verifySession } from '../manifest.ts';
-import { ownedContainer, ownedVolume, ownershipLabel, refuseLeftovers, supervise } from '../runtime.ts';
-import { copySql, finishSql, fixtureSql, generate, literal, member, org } from '../seed.ts';
+import { hash, resolveImage, smokeLabel } from '../manifest.ts';
+import { ownedContainer, ownedVolume, ownershipLabel, refuseLeftovers, supervise, timeouts } from '../runtime.ts';
+import { copySql, finishSql, fixtureSql, generate, literal } from '../seed.ts';
 import { accepts, completeness, denials, judge, type Evidence, type Round } from './acceptance.ts';
-import { backfill, verifyTerms } from './backfill.ts';
-import { allPages, explainPage, prepare } from './engine.ts';
+import { backfill, verifiedBackfill, verifyTerms } from './backfill.ts';
+import { allPages, explainPage, prepare, type Sql } from './engine.ts';
 import { argumentsForPostgres, loadManifest } from './manifest.ts';
-import { benchmarkScript, productionPath, readSource, sources } from './path.ts';
+import { productionPath, readSource, sources } from './path.ts';
 import { withSession } from './session.ts';
+import { directRls, verifyRls } from './rls.ts';
+import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotLaunch, type BackfillReceipt } from './snapshot.ts';
+import { timeQuery } from './timing.ts';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url)).replace(/\/$/, '');
 const note = (message: string) => console.log(`${new Date().toISOString()} ${message}`);
-type Mode = 'smoke' | 'backfill-only' | 'formal';
+type Mode = 'smoke' | 'backfill-only' | 'formal' | 'cleanup';
 
 export function options(argv: string[]) {
   let mode: Mode = 'formal';
   let output: string | undefined;
+  let fromBackfill: string | undefined;
+  const sourceOption = '--from-backfill=';
   for (const arg of argv) {
-    if ((arg === '--smoke' || arg === '--backfill-only') && mode === 'formal') mode = arg.slice(2) as Mode;
+    if ((arg === '--smoke' || arg === '--backfill-only' || arg === '--cleanup') && mode === 'formal') mode = arg.slice(2) as Mode;
     else if (arg.startsWith('--out=') && !output && arg.length > 6) output = arg.slice(6);
-    else throw new Error(`Unexpected or duplicate argument ${arg}. Use [--smoke | --backfill-only] [--out=PATH].`);
+    else if (arg.startsWith(sourceOption) && !fromBackfill && arg.length > sourceOption.length) fromBackfill = arg.slice(sourceOption.length);
+    else throw new Error(`Unexpected or duplicate argument ${arg}`);
   }
-  return {mode, output};
+  assert.ok(Boolean(fromBackfill) === (mode === 'formal' || mode === 'cleanup'),
+    'Use --smoke, --backfill-only, --from-backfill=DIR, or --cleanup --from-backfill=DIR');
+  assert.ok(mode !== 'cleanup' || !output, 'Cleanup takes --from-backfill=DIR only');
+  return {mode, output, fromBackfill};
 }
 
 export function outputPath(path: string, repository = root) {
@@ -41,7 +50,9 @@ export function outputPath(path: string, repository = root) {
   return out;
 }
 
-async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<typeof loadManifest>) {
+async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<typeof loadManifest>,
+  source: Awaited<ReturnType<typeof loadBackfill>> | undefined) {
+  assert.ok(mode !== 'formal' || source, 'Formal evaluation requires a verified backfill');
   mkdirSync(out, {mode: 0o700});
   const container = ownedContainer();
   const volume = ownedVolume();
@@ -61,17 +72,25 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   const {id} = resolveImage(docker, frozen.image, true);
   const image = {reference: frozen.image, id};
   save(`${out}/image.json`, image);
+  save(`${out}/manifest.json`, {frozen, sha256});
+  const launch = source ? snapshotLaunch(source.directory) : {options: [], args: []};
   docker('volume', 'create', '--label', ownershipLabel, volume);
   command('docker', ['run', '-d', '--label', ownershipLabel, '--name', container, '--network=none',
     `--shm-size=${frozen.shmBytes}`, '--mount', `type=volume,source=${volume},target=/var/lib/postgresql`,
-    '-e', 'POSTGRES_PASSWORD', '-e', 'POSTGRES_USER=fukulow', '-e', 'POSTGRES_DB=postgres', id, ...argumentsForPostgres],
+    ...launch.options, '-e', 'POSTGRES_PASSWORD', '-e', 'POSTGRES_USER=fukulow', '-e', 'POSTGRES_DB=postgres',
+    id, ...launch.args, ...argumentsForPostgres],
   undefined, {...process.env, POSTGRES_PASSWORD: randomUUID()});
+
+  if (source) {
+    boundedCommand('docker', ['exec', container, 'sh', '-ec',
+      'until test -e /tmp/backfill-extracted; do sleep 1; done'], timeouts.psql);
+  }
 
   async function awaitReady() {
     for (let i = 0; i < frozen.timing.startupAttempts; i++) {
       try {
         docker('exec', container, 'pg_isready', '-h', '127.0.0.1', '-U', 'fukulow', '-d', 'postgres');
-        return;
+        if (owner('postgres', 'SELECT NOT pg_is_in_recovery();') === 't') return;
       } catch (error) {
         if (error instanceof CommandTimeoutError) throw error;
       }
@@ -94,33 +113,27 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     docker: JSON.parse(docker('info', '--format', '{"version":{{json .ServerVersion}},"cpus":{{.NCPU}},"memory":{{.MemTotal}}}')),
     database: owner('postgres', 'SELECT version(); SHOW lc_collate; SHOW lc_ctype;'),
   });
+  const currentSystemIdentifier = () => owner('postgres', 'SELECT system_identifier FROM pg_control_system();');
+  if (source) {
+    assert.equal(currentSystemIdentifier(), source.receipt.snapshot.systemIdentifier, 'Restored cluster identity differs');
+    save(`${out}/${receiptFile}`, source.receipt);
+  }
   const role = readSource('deploy/db-roles.sql');
   const roleSettings = readSource('deploy/db-role-settings.sql');
   const grants = readSource('deploy/db-grants.sql');
-  owner('postgres', `BEGIN;\n${roleSettings}\nSET LOCAL fukulow.app_password = '${randomUUID()}';\n${role}\nCOMMIT;`);
+  if (!source) owner('postgres', `BEGIN;\n${roleSettings}\nSET LOCAL fukulow.app_password = '${randomUUID()}';\n${role}\nCOMMIT;`);
   const engine = readSource(sources.engine);
   const openApp = <T>(db: string, body: Parameters<typeof withSession<T>>[3]) => withSession(container, db, true, body);
   const openOwner = <T>(db: string, body: Parameters<typeof withSession<T>>[3]) => withSession(container, db, false, body);
 
-  function verifyRls(db: string) {
-    const session = verifySession(text => app(db, text), 'app', frozen.sessionPolicy.appSettings);
-    const facts = app(db, `SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user;
-      SELECT count(*) FROM pg_auth_members WHERE member=current_user::regrole;
-      SELECT count(*) FROM pg_class c WHERE c.oid IN
-        ('messages'::regclass, 'message_search_terms'::regclass, 'users'::regclass,
-        'channels'::regclass, 'channel_members'::regclass) AND row_security_active(c.oid);
-      SELECT relforcerowsecurity FROM pg_class WHERE oid = 'message_search_terms'::regclass;
-      SELECT count(*) FROM pg_proc WHERE oid IN ('public.fukulow_search_terms(text)'::regprocedure,
-        'public.fukulow_search_normalize(text)'::regprocedure) AND prosecdef;`);
-    assert.equal(facts, 'fukulow_app|f|f\n0\n5\nt\n0', 'd3r app role or RLS settings differ');
-    return {session, facts};
-  }
+  const rlsFor = (db: string) => verifyRls(text => app(db, text), frozen.sessionPolicy.appSettings);
 
   function create(db: string) {
     owner('postgres', `CREATE DATABASE ${db} TEMPLATE template0;`);
     for (const migration of frozen.migrations) owner(db, `BEGIN;\n${readSource(migration)}\nCOMMIT;`);
+    owner(db, frozen.setup.forceSearchRls);
     owner(db, grants);
-    const verification = verifyRls(db);
+    const verification = rlsFor(db);
     owner(db, fixtureSql());
     return verification;
   }
@@ -143,7 +156,8 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     const record = await openOwner(db, own => openApp(db, search => backfill(own, search, engine, count)));
     save(`${out}/${db}-backfill.json`, {phase: 'backfill', database: db, ...record});
     phase('backfill', `finished (${db}, ${record.inserted} term rows, verified=${record.verification.equal})`);
-    assert.ok(record.verification.equal, 'INVALID: backfill verification mismatch');
+    assert.ok(verifiedBackfill(record, count), 'INVALID: backfill verification mismatch or missing evidence');
+    owner(db, 'VACUUM ANALYZE public.message_search_terms;');
     return record;
   }
 
@@ -154,12 +168,8 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     });
   }
 
-  async function restoreDrill() {
+  async function restoreDrill(expectedTermRows: number) {
     phase('restore', 'started');
-    create('small');
-    seedDb('small', conditions.restoreRows);
-    const indexed = await fill('small', conditions.restoreRows);
-    owner('small', 'VACUUM ANALYZE public.message_search_terms;');
     const checksum = (db: string) => owner(db,
       "SELECT count(*), md5(string_agg(id::text || body, '|' ORDER BY id)) FROM messages;");
     const before = checksum('small');
@@ -171,12 +181,11 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
       '--exit-on-error', '--no-owner', '--no-acl', '/tmp/drill.dump');
     const restoreMs = performance.now() - start;
     owner('restored', grants);
-    const rls = {settings: verifyRls('restored'), cleanup: rlsCleanup('restored')};
+    const rls = {settings: rlsFor('restored'), cleanup: directRls(text => app('restored', text))};
     const after = checksum('restored');
     const restoredTermRows = Number(owner('restored', 'SELECT count(*) FROM public.message_search_terms;'));
     const terms = await openOwner('restored', own => verifyTerms(own, conditions.restoreRows, restoredTermRows));
-    const evidence = {restoreMs, before, after, rls, terms, checksumEqual: before === after,
-      termsEqual: terms.equal && restoredTermRows === indexed.termRows,
+    const evidence = {restoreMs, before, after, rls, terms, termRows: restoredTermRows, expectedTermRows,
       complete: await complete('restored')};
     save(`${out}/restore.json`, evidence);
     owner('postgres', 'DROP DATABASE restored; DROP DATABASE small;');
@@ -184,71 +193,65 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     return evidence;
   }
 
-  function rlsCleanup(db: string) {
-    const present = (where = '') => `SELECT EXISTS (SELECT 1 FROM messages ${where}),
-      EXISTS (SELECT 1 FROM message_search_terms ${where});`;
-    const facts = app(db, `BEGIN;
-      SELECT set_config('fukulow.organization_id', '${org(1)}', true);
-      ${present()}
-      ${present(`WHERE organization_id = '${org(2)}'`)}
-      COMMIT;
-      ${present()}
-      BEGIN;
-      SELECT set_config('fukulow.account_id', '${member(1, 2)}', true);
-      ${present()}
-      COMMIT;
-      ${present()}`);
-    assert.equal(facts, [org(1), 't|t', 'f|f', 'f|f', member(1, 2), 'f|f', 'f|f'].join('\n'));
-    return facts;
-  }
-
-  const rls = create('measured');
-  seedDb('measured', conditions.rows);
-  await fill('measured', conditions.rows);
   const completion = {manifestHash: sha256, runKind: mode, at: new Date().toISOString(),
     label: mode === 'smoke' ? smokeLabel : undefined};
+  let records: BackfillReceipt['records'];
+  let rls: BackfillReceipt['rls'];
+  if (source) {
+    records = source.receipt.records;
+    rls = rlsFor('base');
+    assert.deepEqual(rls, source.receipt.rls);
+  } else {
+    rls = create('base');
+    seedDb('base', conditions.rows);
+    const base = await fill('base', conditions.rows);
+    create('small');
+    seedDb('small', conditions.restoreRows);
+    const small = await fill('small', conditions.restoreRows);
+    create('denial');
+    owner('denial', probeSql);
+    const denial = await fill('denial', 20_011);
+    records = {base, small, denial};
+  }
+  save(`${out}/rls.json`, rls);
   if (mode === 'backfill-only') {
-    save(`${out}/completed.json`, completion);
+    const snapshot = await preserveSnapshot(container, out, currentSystemIdentifier());
+    const receipt: BackfillReceipt = {manifestHash: sha256, snapshot, records, rls};
+    save(`${out}/${receiptFile}`, receipt);
+    save(`${out}/completed.json`, {...completion, backfillReceiptHash: hash(JSON.stringify(receipt))});
     return;
   }
 
-  owner('measured', 'VACUUM ANALYZE public.message_search_terms;');
-  save(`${out}/rls.json`, rls);
-  const restore = await restoreDrill();
-  create('denial');
-  owner('denial', probeSql);
-  await fill('denial', 20_011);
-  owner('denial', 'VACUUM ANALYZE public.message_search_terms;');
-  const denialReport = await openApp('denial', async search => {
+  const restore = await restoreDrill(records.small.termRows);
+  rlsFor('denial');
+  const accessChecks = await openApp('denial', async search => {
     await search(prepare(path.page));
     return denials(search);
   });
-  save(`${out}/denials.json`, denialReport);
   owner('postgres', 'DROP DATABASE denial;');
 
   const {querySet} = conditions;
   const rounds: Round[] = [];
   const plans: Evidence['plans'] = [];
   let found: Evidence['complete'] = [];
+  let measuredRls = '';
   for (let round = 1; round <= conditions.rounds; round++) {
     const dest = `${out}/round-${round}`;
     mkdirSync(dest);
-    docker('restart', container);
-    await awaitReady();
-    verifyRls('measured');
-    phase(`round ${round}`, 'started');
-    await openApp('measured', async search => {
-      await search(prepare(path.page));
-      for (let sweep = 0; sweep < conditions.warmupSweeps; sweep++) {
-        for (const [, raw] of querySet) await allPages(search, [1, 2], raw, {}, true);
-      }
+    await resetMeasured(text => owner('postgres', text), async () => {
+      docker('restart', container);
+      await awaitReady();
     });
+    save(`${dest}/rls.json`, rlsFor('measured'));
+    phase(`round ${round}`, 'started');
+    if (round === 1) measuredRls = directRls(text => app('measured', text));
+    await warmup(path.page, querySet, conditions.warmupSweeps, body => openApp('measured', body));
     const latencies = [];
     for (const [query, raw] of querySet) {
-      const result = await benchmark(container, 'measured', benchmarkScript(path.page, raw, accepts(query)), `${dest}/${query}`,
+      const result = await timeQuery(container, 'measured', path.page, query, raw, !accepts(query), `${dest}/${query}`,
         conditions.transactions, conditions.clients);
-      latencies.push({query, ...result});
-      phase(`round ${round}`, `${query} p95=${result.p95.toFixed(3)} ms`);
+      latencies.push(result);
+      phase(`round ${round}`, 'p95' in result ? `${query} p95=${result.p95.toFixed(3)} ms` : `${query} ${result.sqlError}`);
     }
     rounds.push({round, latencies});
     save(`${dest}/latencies.json`, latencies);
@@ -266,23 +269,53 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
       save(`${out}/completeness.json`, found);
       phase('completeness', 'finished');
     }
+    owner('postgres', 'DROP DATABASE measured;');
     phase(`round ${round}`, 'finished');
   }
-  const evidence: Evidence = {valid: true, formal: mode === 'formal', backfill: true, rounds, plans, complete: found,
+  const denialReport = {...accessChecks, measuredRls};
+  save(`${out}/denials.json`, denialReport);
+  const evidence: Evidence = {valid: true, formal: mode === 'formal', backfill: records.base, rounds, plans, complete: found,
     denials: denialReport, restore};
   save(`${out}/evidence.json`, evidence);
   save(`${out}/completed.json`, completion);
   phase('run', 'completed');
 }
 
+export async function resetMeasured(owner: (text: string) => string, restart: () => Promise<void>) {
+  owner('CREATE DATABASE measured TEMPLATE base;');
+  await restart();
+}
+
+export async function warmup(page: string, querySet: readonly (readonly [string, string])[], sweeps: number,
+  open: (body: (sql: Sql) => Promise<void>) => Promise<void>) {
+  for (let sweep = 0; sweep < sweeps; sweep++) {
+    for (const [, raw] of querySet) {
+      await open(async search => {
+        await search(prepare(page));
+        await allPages(search, [1, 2], raw, {}, true);
+      });
+    }
+  }
+}
+
 async function main() {
   const isWorker = process.env.SEARCH_WORKER === '1';
-  const args = isWorker ? { mode: process.env.SEARCH_D3R_MODE as Mode, output: process.env.SEARCH_D3R_OUT }
-    : options(process.argv.slice(2));
-  assert.ok(['smoke', 'backfill-only', 'formal'].includes(args.mode));
+  const args = isWorker ? {mode: process.env.SEARCH_D3R_MODE as Mode, output: process.env.SEARCH_D3R_OUT,
+    fromBackfill: process.env.SEARCH_D3R_FROM} : options(process.argv.slice(2));
+  assert.ok(['smoke', 'backfill-only', 'formal', 'cleanup'].includes(args.mode));
+  const manifest = loadManifest();
+  const {rows, restoreRows} = manifest.frozen.performance;
+  const source = args.fromBackfill
+    ? await loadBackfill(args.fromBackfill, manifest.sha256, rows, restoreRows, isWorker || args.mode === 'cleanup')
+    : undefined;
+  if (args.mode === 'cleanup') {
+    assert.ok(source);
+    removeSnapshot(source.directory);
+    note(`Removed preserved backfill snapshot from ${source.directory}`);
+    return;
+  }
   const out = outputPath(args.output ?? `/private/tmp/fukulow-d3r-689-${Date.now()}`);
   process.chdir(root);
-  const manifest = loadManifest();
   if (!isWorker) {
     if (args.mode === 'smoke') process.env.SEARCH_SMOKE = '1';
     else delete process.env.SEARCH_SMOKE;
@@ -290,6 +323,8 @@ async function main() {
   }
   process.env.SEARCH_D3R_MODE = args.mode;
   process.env.SEARCH_D3R_OUT = out;
+  if (source) process.env.SEARCH_D3R_FROM = source.directory;
+  else delete process.env.SEARCH_D3R_FROM;
   if (await supervise(import.meta.url, out, manifest.sha256, () => {
     const run = JSON.parse(readFileSync(`${out}/run-status.json`, 'utf8'));
     assert.ok(run.valid && run.cleanupVerified && run.manifestHash === manifest.sha256);
@@ -298,7 +333,7 @@ async function main() {
     save(`${out}/summary.json`, {status, mode: args.mode, manifestHash: manifest.sha256,
       label: args.mode === 'smoke' ? smokeLabel : undefined});
     note(`${status} (${out}/summary.json)`);
-  })) await worker(args.mode, out, manifest);
+  })) await worker(args.mode, out, manifest, source);
   else if (process.exitCode) note('NOT EVALUATED (run or cleanup incomplete)');
 }
 
