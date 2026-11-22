@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
 import { allowanceSeconds, generatorConfig } from './pool-before-after-config.ts';
 import { condition, minimumRows, planQuery, planReasons, statsQuery, statsReasons } from './pool-before-after-analyze.ts';
-import { plan, sequence as runSequence, settings, scope, timeoutNote, judgeAll, rehearsalChecks, validity, type Run, type Arm, type Counts } from './pool-before-after-summary.ts';
+import { plan, sequence as runSequence, settings, scope, timeoutNote, judgeAll, overall, rehearsalChecks, rehearsalForecast, validity, type Run, type Arm, type Counts } from './pool-before-after-summary.ts';
 import { assertDockerHeadroom } from './harness-core/host.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 const exec=promisify(execFile);
@@ -43,8 +43,9 @@ let interrupted=false;
 const stop=()=>{interrupted=true;generator?.kill('SIGTERM'); if(generatorName) {try{docker('rm','-f',generatorName);}catch{/* finally retries */}}};
 process.on('SIGINT',stop);process.on('SIGTERM',stop);
 const check=()=>{if(interrupted)throw new Error('Interrupted');};
-const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,rehearsal,...(rehearsal?{evidence:false,checks:rehearsalChecks(runs)}:{}),runs,
-  judgement:judgeAll(runs,complete&&mode==='formal'),cleanupErrors});
+const summary=(complete=false)=>{const judgement=judgeAll(runs,complete&&mode==='formal');
+  return {scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,rehearsal,...(rehearsal?{evidence:false,checks:rehearsalChecks(runs),forecast:rehearsalForecast(runs)}:{}),runs,
+  judgement,overall:overall(judgement),cleanupErrors};};
 let failed=false;
 let rehearsalClean=false;
 // Docker Desktop volumes live in its VM; probe that disk before building (load/harness-core/README.md).
@@ -250,7 +251,7 @@ try {
   rmSync(scratch,{recursive:true,force:true});
   const complete=!failed&&!interrupted&&!cleanupErrors.length&&runs.length===runSequence(mode).length;
   const final=summary(complete);
-  // A rehearsal is clean only when it completed and every run passes every evidence check; never a verdict.
+  // A rehearsal is clean only when it completed and every run passes every check except load generation, which is forecast (#196 decision b); never a verdict.
   rehearsalClean=rehearsal&&complete&&(final.checks??[]).every(c=>!c.problems.length);
   save(`${output}/summary.json`,{...final,complete,...(rehearsal?{rehearsalClean}:{})});
   process.off('SIGINT',stop);process.off('SIGTERM',stop);

@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { judgeAll, scenarios, scope, timeoutNote, pairs, type Run } from './pool-before-after-summary.ts';
+import { judgeAll, overall, scenarios, scope, timeoutNote, pairs, type Run } from './pool-before-after-summary.ts';
 const dir=resolve(process.argv[2]??'');
 if(!process.argv[2])throw new Error('Usage: node load/pool-before-after-report.ts /external/comparison-directory');
 const runs:Run[]=[];
@@ -17,6 +17,7 @@ const summaryPath=`${dir}/summary.json`;
 const summary=existsSync(summaryPath)?JSON.parse(readFileSync(summaryPath,'utf8')) as {complete?:unknown;smoke?:unknown;rehearsal?:unknown;cleanupErrors?:unknown}:undefined;
 if(!summary)missing.push(summaryPath);
 const complete=summary?.complete===true&&summary.smoke===false&&(summary.rehearsal===false||summary.rehearsal===undefined)&&Array.isArray(summary.cleanupErrors)&&summary.cleanupErrors.length===0&&missing.length===0;
-const report={scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',complete,missing,judgement:judgeAll(runs,complete)};
+const judgement=judgeAll(runs,complete);
+const report={scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',complete,missing,judgement,overall:overall(judgement)};
 writeFileSync(`${dir}/judgement.json`,JSON.stringify(report,null,2));
 console.log(JSON.stringify(report,null,2));
