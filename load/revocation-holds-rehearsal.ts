@@ -26,7 +26,7 @@ export function rehearsalCounts(run: HoldsRun) {
       bystander: run.bystanderCloses,
       server: run.serverCloses.length,
     },
-    highWaterMarkAtHoldsEnd: end[0]?.highWaterMark ?? null,
+    highWaterMarkAtHoldsEnd: { lowest: end[0]?.highWaterMark ?? null, highest: end.at(-1)?.highWaterMark ?? null },
     retriesInFault: retriesWithin(samples, e.certainFrom, e.certainTo).retries,
     counters,
     gate: { on: run.times.gateOn, off: run.times.gateOff, onMs: run.times.gateOn[1] - run.times.gateOn[0], offMs: run.times.gateOff[1] - run.times.gateOff[0] },

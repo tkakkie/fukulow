@@ -34,22 +34,47 @@ export function memoryVerdict(faults: { deltaKb: number; hwm: number }[], contro
   return { result: 'upper bound only (never PASS)', dKb, nKb, bKb, upperBoundKb: Math.max(0, dKb + nKb) };
 }
 
-export type MemoryEntry = { kind: 'fault' | 'control'; cell: Cell; duration?: Duration; verdict: HoldsVerdict; hwm: number | undefined; deltaKb: Partial<Record<Duration, number>> };
-/** RSS deltas of one run: a fault run for its own duration, a control for each nominal recovery. */
+// Each delta is [earliest cutoff, latest cutoff]: the release lies somewhere in the gate-off band.
+export type MemoryEntry = { kind: 'fault' | 'control'; cell: Cell; duration?: Duration; verdict: HoldsVerdict; hwm: number | undefined; deltaKb: Partial<Record<Duration, [number, number]>> };
+/**
+ * RSS deltas of one run: a fault run for its own duration at both ends of its gate-off band, a
+ * control at each nominal recovery (a control has no gate, so both ends agree). `hwm` is the
+ * lowest candidate holds-end HWM, the smallest bound.
+ */
 export function memoryEntry(run: HoldsRun, verdict: HoldsVerdict, hwm: number | undefined): MemoryEntry {
-  const recoveries: Partial<Record<Duration, number>> = run.kind === 'fault' && run.duration ? { [run.duration]: run.times.gateOff[1] } : run.times.nominalRecovery;
-  const deltaKb = Object.fromEntries(Object.entries(recoveries).map(([duration, recovery]) => [duration, rssDeltaKb(run, recovery)]));
+  const recoveries: Partial<Record<Duration, [number, number]>> = run.kind === 'fault' && run.duration ? { [run.duration]: run.times.gateOff }
+    : Object.fromEntries(Object.entries(run.times.nominalRecovery).map(([d, t]) => [d, [t, t]]));
+  const deltaKb = Object.fromEntries(Object.entries(recoveries).map(([duration, [early, late]]) => [duration, [rssDeltaKb(run, early), rssDeltaKb(run, late)]]));
   return { kind: run.kind, cell: run.cell, duration: run.duration, verdict, hwm, deltaKb };
+}
+
+const rank = (m: MemoryResult) => m.result === 'NOT EVALUATED' ? 3 : m.result === 'FAIL' ? 2 : m.result === 'upper bound only (never PASS)' ? 1 : 0;
+/** The less favourable of two results: NOT EVALUATED, then FAIL, then the larger upper bound. */
+export function lessFavourable(a: MemoryResult, b: MemoryResult) {
+  if (rank(a) !== rank(b)) return rank(a) > rank(b) ? a : b;
+  return (b.upperBoundKb ?? -Infinity) > (a.upperBoundKb ?? -Infinity) ? b : a;
+}
+
+/** Every choice of cutoff per run: each run's release is independent within its band. */
+function choices(pairs: [number, number][]): number[][] {
+  return pairs.reduce<number[][]>((all, [early, late]) => all.flatMap(c => early === late ? [[...c, early]] : [[...c, early], [...c, late]]), [[]]);
 }
 
 /** Groups per cell x duration: the first three valid fault runs against the first three valid controls of the cell. */
 export function memoryByCell(entries: MemoryEntry[]) {
   const groups: Record<string, MemoryResult> = {};
+  const missing: [number, number] = [NaN, NaN];
   for (const cell of CELL_NAMES) for (const duration of ['short', 'long'] as Duration[]) {
     const valid = entries.filter(e => e.cell === cell && e.verdict !== 'INVALID');
-    const faults = valid.filter(e => e.kind === 'fault' && e.duration === duration).slice(0, REPEATS).map(e => ({ deltaKb: e.deltaKb[duration] ?? NaN, hwm: e.hwm ?? NaN }));
-    const controls = valid.filter(e => e.kind === 'control').slice(0, REPEATS).map(e => e.deltaKb[duration] ?? NaN);
-    groups[`${cell}/${duration}`] = memoryVerdict(faults, controls);
+    const faults = valid.filter(e => e.kind === 'fault' && e.duration === duration).slice(0, REPEATS);
+    const controls = valid.filter(e => e.kind === 'control').slice(0, REPEATS).map(e => e.deltaKb[duration] ?? missing);
+    const hwms = faults.map(e => e.hwm ?? NaN);
+    let worst: MemoryResult | undefined;
+    for (const f of choices(faults.map(e => e.deltaKb[duration] ?? missing))) for (const c of choices(controls)) {
+      const result = memoryVerdict(f.map((deltaKb, i) => ({ deltaKb, hwm: hwms[i] })), c);
+      worst = worst ? lessFavourable(worst, result) : result;
+    }
+    groups[`${cell}/${duration}`] = worst ?? { result: 'NOT EVALUATED' };
   }
   return groups;
 }

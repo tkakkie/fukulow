@@ -1,5 +1,6 @@
 // #668 holds samples on the harness clock. Each 250 ms sample carries the server's monotonic
 // time; the calibrated offset bounds turn it into [low, high] on the harness clock.
+import type { PoolSample } from './revocation-burst-judgment.ts';
 import { TIMELINE } from './revocation-holds-plan.ts';
 import type { HoldsRun, HoldsSample } from './revocation-holds-judgment.ts';
 
@@ -44,4 +45,22 @@ export function retryPeakPerSecond(samples: TimedSample[], from: number, to: num
     peak = Math.max(peak, inside[j].retryAttempts - inside[i].retryAttempts);
   }
   return peak;
+}
+
+/** A server tracing timestamp as [low, high] on the harness clock; undefined without calibration. */
+export function wallInterval(run: Pick<HoldsRun, 'wallOffsetBoundsMs'>, wallMs: number | undefined): [number, number] | undefined {
+  if (!run.wallOffsetBoundsMs || wallMs === undefined || !Number.isFinite(wallMs)) return undefined;
+  return [wallMs + run.wallOffsetBoundsMs[0], wallMs + run.wallOffsetBoundsMs[1]];
+}
+
+/**
+ * The pool samples that certainly bracket [from, to] by server sample time: the last certainly at
+ * or before `from` and the first certainly at or after `to`. They are returned re-timed to `from`
+ * and `to`, so the #592 poolWindow over them gives exactly this delta. Empty when either is missing.
+ */
+export function poolBrackets(run: Pick<HoldsRun, 'pool' | 'wallOffsetBoundsMs'>, from: number, to: number): PoolSample[] {
+  const timed = run.pool.map(s => ({ s, t: wallInterval(run, s.wallMs) })).filter(x => x.t && Number.isFinite(x.s.fields.acquire_timeout));
+  const before = timed.filter(x => x.t![1] <= from).at(-1), after = timed.find(x => x.t![0] >= to);
+  if (!before || !after || !(from < to)) return [];
+  return [{ at: from, fields: before.s.fields }, { at: to, fields: after.s.fields }];
 }

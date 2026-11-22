@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { connect, createServer, type AddressInfo, type Socket } from 'node:net';
 import { test } from 'node:test';
-import { emptyLog, readLogLine } from './revocation-holds-log.ts';
+import { emptyLog, readLogLine, wallMs } from './revocation-holds-log.ts';
 import { CELL_NAMES, checkStall, parseOptions, planRuns, potentialHolds, restoreAccount, runId, socketAccount, stallBody, STALL_DEFAULT, targetSockets } from './revocation-holds-plan.ts';
 import { holdsEndSamples, retriesWithin, retryPeakPerSecond, timedSamples } from './revocation-holds-samples.ts';
 import { bytesBetween, StallProxy } from './revocation-holds-stall.ts';
@@ -63,16 +63,22 @@ test('the log reader keeps holds samples, send records, clock samples and 60 s e
   readLogLine(log, line(measurement, { event: 'revocation_holds_sample', server_ms: 13, active_holds: 'x', high_water_mark: 9, retry_attempts: 40 }), 1);
   readLogLine(log, line(measurement, { event: 'channel_access_revoked_sent', channel_id: 'c', before_ms: 5, after_ms: 6, after_hold: true }), 1);
   readLogLine(log, line(measurement, { event: 'channel_access_revoked_sent', channel_id: 'c', before_ms: 7, after_ms: 6 }), 1);
-  readLogLine(log, line(measurement, { event: 'revocation_clock_sample', server_ms: 4 }), 1);
+  readLogLine(log, JSON.stringify({ timestamp: '2026-11-22T00:00:01.123456Z', target: measurement, fields: { event: 'revocation_clock_sample', server_ms: 4 } }), 1);
   readLogLine(log, line('fukulow', { event: 'metrics', revocation_held: 2, label: 'x' }), 7);
-  readLogLine(log, line('fukulow', { event: 'pool_stats', waiting: 1 }), 8);
+  readLogLine(log, JSON.stringify({ timestamp: '2026-11-22T00:00:02.5Z', target: 'fukulow', fields: { event: 'pool_stats', waiting: 1 } }), 8);
   readLogLine(log, line('fukulow', { event: 'websocket_closed', reason: 'revoked' }), 8.5);
   readLogLine(log, 'not json', 9);
   assert.deepEqual(log, {
-    clock: [4], sends: [{ channelId: 'c', beforeMs: 5, afterMs: 6, afterHold: true }],
+    clock: [4], clockWall: [Date.parse('2026-11-22T00:00:01Z') + 123.456], sends: [{ channelId: 'c', beforeMs: 5, afterMs: 6, afterHold: true }],
     holds: [{ serverMs: 12.5, activeHolds: 3, highWaterMark: 9, retryAttempts: 40 }],
-    pool: [{ at: 8, fields: { waiting: 1 } }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [8.5],
+    pool: [{ at: 8, fields: { waiting: 1 }, wallMs: Date.parse('2026-11-22T00:00:02.500Z') }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [{ at: 8.5, wallMs: undefined }],
   });
+});
+
+test('tracing timestamps parse to epoch ms with microseconds', () => {
+  assert.equal(wallMs('2026-11-22T10:20:30.000001Z'), Date.parse('2026-11-22T10:20:30Z') + 0.001);
+  assert.equal(wallMs('2026-11-22T10:20:30Z'), Date.parse('2026-11-22T10:20:30Z'));
+  for (const bad of [undefined, 5, '2026-11-22 10:20:30Z', '2026-11-22T10:20:30.5+09:00', 'x']) assert.equal(wallMs(bad), undefined);
 });
 
 test('samples convert to the harness clock and bracket windows conservatively', () => {

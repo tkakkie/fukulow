@@ -1,9 +1,12 @@
 // Test fixture for #668 judgement: a clean H512 short run on a synthetic clock (offset ±1 ms).
+// Server wall timestamps equal harness time here, with the same ±1 ms calibration.
 import { SOCKETS_PER_ACCOUNT } from './revocation-holds-plan.ts';
 import type { HoldsRun, HoldsSample, TargetSocket } from './revocation-holds-judgment.ts';
 
 export const TIMES = { pass: 40_000, stall: 36_000, revoke: 37_000, resume: 40_100, end: 80_000 };
 export const GATE_ON = 39_700, GATE_OFF = 43_500;
+// A pool sample logged at harness time `at`, received `lag` ms later.
+export const poolSample = (at: number, lag = 0) => ({ at: at + lag, wallMs: at, fields: { wait_count: 0, acquire_timeout: 0 } as Record<string, number> });
 export const CHANNELS = Array.from({ length: 16 }, (_, i) => `c${i}`);
 
 const retriesAt = (t: number) => t >= 41_800 ? 1536 : t >= 40_800 ? 1024 : t >= 40_300 ? 512 : 0;
@@ -22,12 +25,12 @@ export function holdsFixture(): HoldsRun {
   const sockets = 32;
   const notices = Array.from({ length: sockets }, (_, socket) => CHANNELS.map((channelId, i) => ({ socket, channelId, at: 44_100 + i }))).flat();
   const probes = (ms: number) => Array.from({ length: 1600 }, (_, i) => ({ at: i * 50, ms, ok: true, status: 200 }));
-  const poolSample = (at: number) => ({ at, fields: { wait_count: 0, acquire_timeout: 0 } });
+  
   return {
     kind: 'fault', cell: 'H512', duration: 'short', repeat: 1,
     times: { ...TIMES, gateOn: [GATE_ON, GATE_ON], gateOff: [GATE_OFF, GATE_OFF], nominalRecovery: { short: GATE_OFF } },
     setup: { bystanders: 1024, bystandersReadyAtStall: 1024, targetsReadyAtStall: sockets, calibrationErrors: [], stallPostFailures: 0 },
-    serverCloses: [],
+    serverCloses: [], wallOffsetBoundsMs: [-1, 1],
     revokedChannels: [...CHANNELS],
     accounts: [{ revokeStartedAt: 37_000, revokedAt: 37_100, revokeStatus: 200 }],
     targets: Array.from({ length: sockets }, (_, i) => target(i)),

@@ -54,7 +54,7 @@ try {
       const judged = judgeHolds(run);
       const correctness = run.kind === 'fault' ? noticeCorrectness(run).details : undefined;
       results.push({ ...base, ...judged, correctness });
-      memory.push(memoryEntry(run, judged.verdict, judged.floors.hwm));
+      memory.push(memoryEntry(run, judged.verdict, judged.floors.hwmLowest));
     } catch (error) {
       if (options.rehearsal) { rehearsal.push({ id, error: (error as Error).message }); await cleanup(active); console.log(JSON.stringify(rehearsal.at(-1))); write(); continue; }
       // A run that could not complete its setup is below floor 1.

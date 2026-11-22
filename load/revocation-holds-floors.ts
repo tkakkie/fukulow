@@ -1,16 +1,10 @@
 // #668 validity floor. A run below it is INVALID, never PASS or FAIL. A missing input never
 // clears a floor or a gate: it fails the floor here.
-import { THRESHOLDS, within, type PoolSample } from './revocation-burst-judgment.ts';
+import { THRESHOLDS, within } from './revocation-burst-judgment.ts';
 import { bytesBetween } from './revocation-holds-stall.ts';
-import { holdsEndSamples, retriesWithin, timedSamples } from './revocation-holds-samples.ts';
+import { holdsEndSamples, poolBrackets, retriesWithin, timedSamples, wallInterval } from './revocation-holds-samples.ts';
 import { baselineWindow, BYSTANDERS, CELLS, edges, GLOBAL_CAP, potentialHolds, restoreAccount, SOCKETS_PER_ACCOUNT, targetSockets, TIMELINE } from './revocation-holds-plan.ts';
 import { REQUIRED_COUNTERS, type HoldsRun } from './revocation-holds-judgment.ts';
-
-/** A cumulative pool counter needs a sample at or before `from` and one at or after `to`. */
-export function poolBracketed(samples: PoolSample[], from: number, to: number) {
-  const before = [...samples].reverse().find(s => s.at <= from), after = samples.find(s => s.at >= to);
-  return !!before && !!after && before.at < after.at && Number.isFinite(before.fields.acquire_timeout) && Number.isFinite(after.fields.acquire_timeout);
-}
 
 function restoreReasons(run: HoldsRun) {
   const restored = restoreAccount(run.cell);
@@ -33,7 +27,7 @@ export function setupReasons(run: HoldsRun) {
   const [from, to] = baselineWindow(run);
   // At least one successful probe of each kind keeps the baseline p99 finite.
   if (!within(run.dbProbe, from, to).some(p => p.ok) || !within(run.httpProbe, from, to).some(p => p.ok)) reasons.push('missing successful baseline probes');
-  if (run.setup.calibrationErrors.length || !run.sendTiming) reasons.push('a clock calibration is invalid');
+  if (run.setup.calibrationErrors.length || !run.sendTiming || !run.wallOffsetBoundsMs) reasons.push('a clock calibration is invalid');
   const samples = timedSamples(run);
   const windows: [string, number, number][] = [['baseline', from, to], ['fault', e.certainFrom, e.certainTo], ['recovery', e.recoveryEarliest, e.recoveryEarliest + TIMELINE.holdsEndAfterRecovery]];
   for (const [name, start, end] of windows) if (!samples.some(s => s.at >= start && s.at < end)) reasons.push(`no holds sample in the ${name} window`);
@@ -43,8 +37,9 @@ export function setupReasons(run: HoldsRun) {
     if (!m) reasons.push('no metrics event after the drain');
     else for (const key of REQUIRED_COUNTERS) if (!Number.isFinite(m[key])) reasons.push(`missing counter ${key}`);
     const recoveryEnd = e.recoveryLatest + THRESHOLDS.recoveryWindowSeconds * 1000;
-    if (!poolBracketed(run.pool, e.healthFrom, e.healthTo)) reasons.push('pool samples do not bracket the fault window');
-    if (!poolBracketed(run.pool, e.recoveryEarliest, recoveryEnd)) reasons.push('pool samples do not bracket the recovery window');
+    // By server sample time: a sample is a bracket only if it is certainly on its side.
+    if (!poolBrackets(run, e.healthFrom, e.healthTo).length) reasons.push('pool samples do not bracket the fault window');
+    if (!poolBrackets(run, e.recoveryEarliest, recoveryEnd).length) reasons.push('pool samples do not bracket the recovery window');
   }
   return reasons;
 }
@@ -55,8 +50,10 @@ export function setupReasons(run: HoldsRun) {
  *     received at least one stall Message, so a backlog existed through the pause;
  * (b) no revoked-Channel send record lies certainly before the gate-on statement: an unblocked
  *     socket loop would have sent the queued notice right after the revoke;
- * (c) no close evidence before resume + 1.5 s: a target close seen by the client or the proxy,
- *     or any server `websocket_closed` event (it carries no socket identity, so any counts).
+ * (c) no close evidence before resume + 1.5 s: a target close seen by the client or the proxy
+ *     (harness receipt time), or any server `websocket_closed` event that may have been logged
+ *     before it by its server timestamp (it has no socket identity, so any counts; an untimed
+ *     one counts too).
  */
 export function stallReasons(run: HoldsRun) {
   const reasons: string[] = [];
@@ -79,7 +76,8 @@ export function stallReasons(run: HoldsRun) {
     return (t.close && t.close.at < before) || t.stall.closes.some(c => c.at < before);
   });
   if (targetClosed) reasons.push('a target socket closed before resume + 1.5 s');
-  if (run.serverCloses.some(at => at < limit(run.times.resume))) reasons.push('the server closed a socket before resume + 1.5 s');
+  const serverLimit = limit(run.times.resume);
+  if (run.serverCloses.some(c => { const t = wallInterval(run, c.wallMs); return !t || t[0] < serverLimit; })) reasons.push('the server closed a socket before resume + 1.5 s');
   return reasons;
 }
 
@@ -89,12 +87,14 @@ export function holdsValues(run: HoldsRun) {
   const m = run.metrics;
   const restored = restoreAccount(run.cell);
   const T = potentialHolds(run.cell);
-  // The earliest candidate holds-end sample: HWM is monotone, so this is the lowest reading.
-  const hwm: number | undefined = holdsEndSamples(samples, e.recoveryEarliest, e.recoveryLatest)[0]?.highWaterMark;
+  // Floors use the highest candidate holds-end HWM (the strictest floors); the memory bound uses
+  // the lowest (the smallest bound). HWM is monotone, so these are the last and first candidates.
+  const ends = holdsEndSamples(samples, e.recoveryEarliest, e.recoveryLatest);
+  const hwm: number | undefined = ends.at(-1)?.highWaterMark, hwmLowest: number | undefined = ends[0]?.highWaterMark;
   const retries = retriesWithin(samples, e.certainFrom, e.certainTo);
   const fenced = m?.revocation_retired_fenced;
   return {
-    potentialHolds: T, hwm, hwmFloor: 0.75 * Math.min(T, GLOBAL_CAP),
+    potentialHolds: T, hwm, hwmLowest, hwmFloor: 0.75 * Math.min(T, GLOBAL_CAP),
     globalCapFloor: T > GLOBAL_CAP ? 0.5 * (T - GLOBAL_CAP) : undefined, globalCap: m?.revocation_retired_global_cap,
     fencedFloor: restored === undefined ? undefined : 0.5 * SOCKETS_PER_ACCOUNT * CELLS[run.cell].channels, fenced,
     retriesInFault: retries.retries, retryWindowServerMs: retries.start && retries.end ? [retries.start.serverMs, retries.end.serverMs] : null,

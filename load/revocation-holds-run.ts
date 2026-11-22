@@ -45,9 +45,11 @@ async function pool<T>(items: T[], limit: number, work: (item: T) => Promise<voi
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => { while (next < items.length) await work(items[next++]); }));
 }
 
-async function calibrateClock(base: string, samples: number[]): Promise<[number, number]> {
-  // Same serial health-request brackets as load/revocation-burst.ts.
-  const brackets: ClockSample[] = [];
+type Calibration = { server: [number, number]; wall: [number, number] };
+async function calibrateClock(base: string, samples: number[], walls: (number | undefined)[]): Promise<Calibration> {
+  // Same serial health-request brackets as load/revocation-burst.ts. The same log line's tracing
+  // timestamp calibrates the server wall clock for events without server_ms.
+  const brackets: ClockSample[] = [], wallBrackets: ClockSample[] = [];
   for (let i = 0; i < 8; i++) {
     const index = samples.length, before = now();
     const response = await fetch(`${base}/api/v1/health`, { signal: AbortSignal.timeout(5_000) });
@@ -56,8 +58,9 @@ async function calibrateClock(base: string, samples: number[]): Promise<[number,
     for (let attempt = 0; samples.length === index && attempt < 100; attempt++) await sleep(20);
     if (samples.length !== index + 1) throw new Error('missing or ambiguous server clock sample');
     brackets.push({ beforeMs: before, afterMs: after, serverMs: samples[index] });
+    wallBrackets.push({ beforeMs: before, afterMs: after, serverMs: walls[index] ?? NaN });
   }
-  return intersectClockBrackets(brackets);
+  return { server: intersectClockBrackets(brackets), wall: intersectClockBrackets(wallBrackets) };
 }
 
 type Context = { binary: string; output: string; stall: Stall; active: Active; interrupted: () => boolean };
@@ -216,7 +219,7 @@ export async function measure(ctx: Context, run: PlannedRun): Promise<HoldsRun> 
     await sleep(100);
   }
   const calibrationErrors: string[] = [];
-  const calibrate = () => calibrateClock(base, log.clock).catch(error => { calibrationErrors.push((error as Error).message); return undefined; });
+  const calibrate = () => calibrateClock(base, log.clock, log.clockWall).catch(error => { calibrationErrors.push((error as Error).message); return undefined; });
   const clockStart = await calibrate();
   const probes = startProbes(db, fixture.request, fixture.org, fixture.owner.token);
   const control = new Session(db);
@@ -260,13 +263,14 @@ export async function measure(ctx: Context, run: PlannedRun): Promise<HoldsRun> 
   const clockEnd = await calibrate();
   await cleanup(ctx.active);
   await started.logsClosed;
-  const offsetBoundsMs = clockStart && clockEnd ? encloseClockBrackets(clockStart, clockEnd) : undefined;
+  const offsetBoundsMs = clockStart && clockEnd ? encloseClockBrackets(clockStart.server, clockEnd.server) : undefined;
+  const wallOffsetBoundsMs = clockStart && clockEnd ? encloseClockBrackets(clockStart.wall, clockEnd.wall) : undefined;
   const nominalRecovery = run.kind === 'fault' ? { [run.duration]: gateOff[1] } : { short: pass + DURATIONS.short, long: gateOff[1] };
   const result: HoldsRun = {
     kind: run.kind, cell: run.cell, duration: run.kind === 'fault' ? run.duration : undefined, repeat: run.repeat,
     times: { pass, stall: stalled.time, revoke: revokeTime, gateOn, gateOff, resume, restore, end, nominalRecovery },
     setup: { bystanders: BYSTANDERS, bystandersReadyAtStall: stalled.bystandersReady, targetsReadyAtStall: stalled.targetsReady, calibrationErrors, stallPostFailures: stalled.failures },
-    serverCloses: log.closes,
+    serverCloses: log.closes, wallOffsetBoundsMs,
     revokedChannels: fixture.revoked, accounts, targets: sockets.targets, notices: sockets.notices,
     bystanderNotices: sockets.state.bystanderNotices, bystanderCloses: sockets.state.bystanderCloses,
     sendTiming: offsetBoundsMs && { offsetBoundsMs, uncertaintyMs: runUncertaintyMs(offsetBoundsMs, log.sends), records: log.sends },
