@@ -9,7 +9,7 @@ import { probeSql } from '../definer.ts';
 import { hash, resolveImage, smokeLabel } from '../manifest.ts';
 import { ownedContainer, ownedVolume, ownershipLabel, refuseLeftovers, supervise, timeouts } from '../runtime.ts';
 import { copySql, finishSql, fixtureSql, generate, literal } from '../seed.ts';
-import { accepts, completeness, denials, judge, type Evidence, type Round } from './acceptance.ts';
+import { accepts, completeness, denials, judge, rehearsalComplete, type Evidence, type Round } from './acceptance.ts';
 import { backfill, verifiedBackfill, verifyTerms } from './backfill.ts';
 import { allPages, explainPage, prepare, type Sql } from './engine.ts';
 import { argumentsForPostgres, loadManifest } from './manifest.ts';
@@ -18,10 +18,13 @@ import { withSession } from './session.ts';
 import { directRls, verifyRls } from './rls.ts';
 import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotLaunch, type BackfillReceipt } from './snapshot.ts';
 import { timeQuery } from './timing.ts';
+import { rehearsalLabel } from './labels.ts';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url)).replace(/\/$/, '');
 const note = (message: string) => console.log(`${new Date().toISOString()} ${message}`);
-type Mode = 'smoke' | 'backfill-only' | 'formal' | 'cleanup';
+type Mode = 'smoke' | 'rehearsal' | 'backfill-only' | 'formal' | 'cleanup';
+// Rehearsal: full-size setup (seed, backfill, restore drill, denials) and one formal-size round; never evidence.
+const runLabel = (mode: Mode) => mode === 'smoke' ? smokeLabel : mode === 'rehearsal' ? rehearsalLabel : undefined;
 
 export function options(argv: string[]) {
   let mode: Mode = 'formal';
@@ -29,13 +32,13 @@ export function options(argv: string[]) {
   let fromBackfill: string | undefined;
   const sourceOption = '--from-backfill=';
   for (const arg of argv) {
-    if ((arg === '--smoke' || arg === '--backfill-only' || arg === '--cleanup') && mode === 'formal') mode = arg.slice(2) as Mode;
+    if ((arg === '--smoke' || arg === '--rehearsal' || arg === '--backfill-only' || arg === '--cleanup') && mode === 'formal') mode = arg.slice(2) as Mode;
     else if (arg.startsWith('--out=') && !output && arg.length > 6) output = arg.slice(6);
     else if (arg.startsWith(sourceOption) && !fromBackfill && arg.length > sourceOption.length) fromBackfill = arg.slice(sourceOption.length);
     else throw new Error(`Unexpected or duplicate argument ${arg}`);
   }
   assert.ok(Boolean(fromBackfill) === (mode === 'formal' || mode === 'cleanup'),
-    'Use --smoke, --backfill-only, --from-backfill=DIR, or --cleanup --from-backfill=DIR');
+    'Use --smoke, --rehearsal, --backfill-only, --from-backfill=DIR, or --cleanup --from-backfill=DIR');
   assert.ok(mode !== 'cleanup' || !output, 'Cleanup takes --from-backfill=DIR only');
   return {mode, output, fromBackfill};
 }
@@ -59,8 +62,9 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   const owner = (db: string, text: string) => sql(container, db, text);
   const app = (db: string, text: string) => sql(container, db, text, 'fukulow_app');
   const path = productionPath();
-  const conditions = mode === 'smoke' ? {...frozen.performance, ...frozen.smoke.performance} : frozen.performance;
-  const phase = (name: string, event: string) => note(`${mode === 'smoke' ? smokeLabel + ' ' : ''}${name} ${event}`);
+  const conditions = mode === 'smoke' ? {...frozen.performance, ...frozen.smoke.performance}
+    : mode === 'rehearsal' ? {...frozen.performance, rounds: 1} : frozen.performance;
+  const phase = (name: string, event: string) => note(`${runLabel(mode) ? runLabel(mode) + ' ' : ''}${name} ${event}`);
   phase('run', 'started');
   try {
     resolveImage(docker, frozen.image, true);
@@ -104,7 +108,7 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   const settings = JSON.parse(owner('postgres', `SELECT json_object_agg(name,setting) FROM pg_settings
     WHERE name IN (${Object.keys(frozen.settings).map(literal).join(',')});`));
   assert.deepEqual(settings, frozen.settings);
-  save(`${out}/metadata.json`, {manifestHash: sha256, mode, label: mode === 'smoke' ? smokeLabel : undefined,
+  save(`${out}/metadata.json`, {manifestHash: sha256, mode, label: runLabel(mode),
     at: new Date().toISOString(), node: process.version, source: command('git', ['rev-parse', 'HEAD']),
     worktreeStatus: command('git', ['status', '--porcelain']),
     image, settings, sessionPolicy: frozen.sessionPolicy, serverSqlHashes: path.hashes, conditions,
@@ -192,8 +196,7 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     return evidence;
   }
 
-  const completion = {manifestHash: sha256, runKind: mode, at: new Date().toISOString(),
-    label: mode === 'smoke' ? smokeLabel : undefined};
+  const completion = {manifestHash: sha256, runKind: mode, at: new Date().toISOString(), label: runLabel(mode)};
   let records: BackfillReceipt['records'];
   let rls: BackfillReceipt['rls'];
   if (source) {
@@ -276,6 +279,12 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   const evidence: Evidence = {valid: true, formal: mode === 'formal', backfill: records.base, rounds, plans, complete: found,
     denials: denialReport, restore};
   save(`${out}/evidence.json`, evidence);
+  if (mode === 'rehearsal') {
+    // Only completeness is kept; the formal judgement of rehearsal data is never computed or reported.
+    const aggregationComplete = rehearsalComplete(evidence);
+    save(`${out}/rehearsal.json`, {label: rehearsalLabel, aggregationComplete});
+    assert.ok(aggregationComplete, 'Rehearsal evidence is incomplete for the formal aggregation');
+  }
   save(`${out}/completed.json`, completion);
   phase('run', 'completed');
 }
@@ -301,7 +310,7 @@ async function main() {
   const isWorker = process.env.SEARCH_WORKER === '1';
   const args = isWorker ? {mode: process.env.SEARCH_D3R_MODE as Mode, output: process.env.SEARCH_D3R_OUT,
     fromBackfill: process.env.SEARCH_D3R_FROM} : options(process.argv.slice(2));
-  assert.ok(['smoke', 'backfill-only', 'formal', 'cleanup'].includes(args.mode));
+  assert.ok(['smoke', 'rehearsal', 'backfill-only', 'formal', 'cleanup'].includes(args.mode));
   const manifest = loadManifest();
   const {rows, restoreRows} = manifest.frozen.performance;
   if (args.mode === 'cleanup') {
@@ -339,8 +348,7 @@ async function main() {
       assert.ok(run.valid && run.cleanupVerified && run.manifestHash === manifest.sha256);
       const status = args.mode === 'formal'
         ? judge(JSON.parse(readFileSync(`${out}/evidence.json`, 'utf8'))) : 'NOT EVALUATED';
-      save(`${out}/summary.json`, {status, mode: args.mode, manifestHash: manifest.sha256,
-        label: args.mode === 'smoke' ? smokeLabel : undefined});
+      save(`${out}/summary.json`, {status, mode: args.mode, manifestHash: manifest.sha256, label: runLabel(args.mode)});
       note(`${status} (${out}/summary.json)`);
     });
   } finally {

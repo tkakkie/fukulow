@@ -13,7 +13,7 @@ import { denialCases, probe } from './definer.ts';
 import { appSessionSettings, hash, settings, snapshot as v13 } from './manifest.ts';
 import { queries } from './queries.ts';
 import { channel, epoch, generate, org, uuid } from './seed.ts';
-import { accepts, completeness, denialExpectation, denials, judge, shortIds, type Evidence } from './d3r/acceptance.ts';
+import { accepts, completeness, denialExpectation, denials, judge, rehearsalComplete, shortIds, type Evidence } from './d3r/acceptance.ts';
 import { expectedTerms, insertSql, verifyTerms } from './d3r/backfill.ts';
 import { allPages, planFacts, prepare } from './d3r/engine.ts';
 import { argumentsForPostgres, loadManifest, removedSettings } from './d3r/manifest.ts';
@@ -23,7 +23,7 @@ import { directRls, directRlsExpected, searchTables, verifyRls } from './d3r/rls
 import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFile, snapshotIdentity, snapshotLaunch } from './d3r/snapshot.ts';
 import { timeQuery } from './d3r/timing.ts';
 
-test('v14 freezes the approved settings and every production migration while preserving v13', () => {
+test('v15 freezes the approved settings and every production migration while preserving v13', () => {
   const {sha256, frozen} = loadManifest();
   const baseline = v13();
   assert.equal(sha256, hash(JSON.stringify(frozen)));
@@ -276,7 +276,23 @@ test('formal verdict requires complete evidence, including restore and each acce
   assert.equal(judge(badRestore), 'FAIL');
 });
 
-test('four modes and output preflight can be checked without Docker', () => {
+test('rehearsal completeness uses the formal checks on one round and never reports a verdict', () => {
+  const one = {...evidence(), formal: false, rounds: [evidence().rounds[0]]};
+  assert.equal(rehearsalComplete(one), true);
+  const failing = {...one, rounds: [structuredClone(one.rounds[0])]};
+  const latency = failing.rounds[0].latencies.find(l => accepts(l.query))!;
+  assert.ok('p95' in latency);
+  latency.p95 = 501;
+  assert.equal(rehearsalComplete(failing), true, 'a slow rehearsal is complete, not judged');
+  assert.equal(rehearsalComplete({...one, rounds: evidence().rounds}), false);
+  const short = {...one, rounds: [structuredClone(one.rounds[0])]};
+  short.rounds[0].latencies.pop();
+  assert.equal(rehearsalComplete(short), false);
+  assert.equal(rehearsalComplete({...one, restore: undefined} as unknown as Evidence), false);
+  assert.equal(rehearsalComplete({...one, valid: false}), false);
+});
+
+test('five modes and output preflight can be checked without Docker', () => {
   assert.throws(() => options([]), /--from-backfill/);
   assert.deepEqual(options(['--from-backfill=/tmp/source', '--out=/tmp/next']),
     {mode: 'formal', output: '/tmp/next', fromBackfill: '/tmp/source'});
@@ -285,6 +301,9 @@ test('four modes and output preflight can be checked without Docker', () => {
   assert.throws(() => options(['--backfill-only', '--from-backfill=/tmp/source']));
   assert.equal(options(['--smoke']).mode, 'smoke');
   assert.equal(options(['--backfill-only']).mode, 'backfill-only');
+  assert.equal(options(['--rehearsal']).mode, 'rehearsal');
+  assert.throws(() => options(['--rehearsal', '--from-backfill=/tmp/source']));
+  assert.throws(() => options(['--rehearsal', '--smoke']));
   assert.throws(() => options(['--smoke', '--backfill-only']));
   const dir = mkdtempSync(join(tmpdir(), 'd3r-output-test-'));
   try {

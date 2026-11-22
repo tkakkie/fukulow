@@ -146,6 +146,14 @@ function reportStatus(report: Report): Status {
 const isHash = (value: string) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const validRejection = (value: string | null) => value === null || typeof value === 'string';
 
+// A rehearsal has one formal-size round. Its evidence is complete when the formal checks would
+// accept it with that round in every slot. Only this boolean leaves the function.
+export function rehearsalComplete(e: Evidence) {
+  const [round] = e.rounds;
+  if (e.rounds.length !== 1 || round?.round !== 1) return false;
+  return judge({...e, formal: true, rounds: [1, 2, 3].map(n => ({...round, round: n}))}) !== 'NOT EVALUATED';
+}
+
 export function judge(e: Partial<Evidence>): Status {
   if (e.valid !== true || e.formal !== true || !verifiedBackfill(e.backfill, 1_000_000) || !Array.isArray(e.rounds) || !Array.isArray(e.plans) ||
     !Array.isArray(e.complete) || !e.restore || !Array.isArray(e.restore.complete) ||
