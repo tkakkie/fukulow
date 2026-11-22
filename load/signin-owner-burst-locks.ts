@@ -225,9 +225,48 @@ export function samplerIntegrity(rows: readonly SamplerRow[], malformed: number)
   return { malformed, duplicate, backward, ok: malformed === 0 && duplicate === 0 && backward === 0 };
 }
 
-/** Database clock to harness clock: the smallest (arrival - database time); pipe latency only adds. */
+/**
+ * Database clock to harness clock as a point estimate: the smallest (arrival - database time). Used only
+ * for sampler coverage, the report and the stored harness-clock wait times, never for A0 (clockBound).
+ */
 export function clockOffset(rows: readonly SamplerRow[]) {
   return rows.length ? Math.min(...rows.map(r => r.nodeMs - r.dbMs)) : null;
+}
+
+// log_line_prefix %m (LOCK_LOG_SETTINGS) prints milliseconds, truncated: a logged instant lies in
+// [stamp, stamp + LOG_STAMP_MS). This is the resolution of the pre-registered log format, not a tolerance.
+export const LOG_STAMP_MS = 1;
+/**
+ * One clock bracket: the harness read its monotonic clock (nodeSentMs), asked PostgreSQL for
+ * clock_timestamp() (dbMs) and read its clock again when the answer arrived (nodeReceivedMs). The database
+ * read happened between the two harness reads, so (harness - database) at that instant lies in
+ * [nodeSentMs - dbMs, nodeReceivedMs - dbMs]: a guaranteed bound, half a round trip either way.
+ */
+export type ClockBracket = { nodeSentMs: number; dbMs: number; nodeReceivedMs: number };
+export const CLOCK_QUERY = 'SELECT round((extract(epoch FROM clock_timestamp())*1000)::numeric, 3);';
+
+/** Malformed brackets, or brackets that overlap or go backwards on either clock (a clock step), are evidence gaps. */
+export function bracketGaps(brackets: unknown): string[] {
+  if (!Array.isArray(brackets)) return ['no clock brackets recorded'];
+  const fin = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x);
+  const bad = brackets.filter(b => !b || !fin(b.nodeSentMs) || !fin(b.dbMs) || !fin(b.nodeReceivedMs) || b.nodeReceivedMs < b.nodeSentMs).length;
+  if (bad) return [`${bad} malformed clock brackets`];
+  const list = brackets as ClockBracket[];
+  const order = list.slice(1).filter((b, i) => b.nodeSentMs < list[i].nodeReceivedMs || b.dbMs <= list[i].dbMs).length;
+  return order ? [`${order} clock brackets out of order (overlapping, or a clock going backwards)`] : [];
+}
+
+/**
+ * Guaranteed (harness - database) bound over the harness interval [startMs, endMs]: the last bracket
+ * answered at or before startMs, the first sent at or after endMs, and every bracket in between. With no
+ * clock step between them (bracketGaps), the offset moves monotonically from the first to the last, so at
+ * every instant of the interval it lies in [lo, hi], the hull of their bounds. Missing either side: null.
+ */
+export function clockBound(brackets: readonly ClockBracket[], startMs: number, endMs: number) {
+  const before = brackets.filter(b => b.nodeReceivedMs <= startMs).at(-1), after = brackets.find(b => b.nodeSentMs >= endMs);
+  if (!before || !after) return null;
+  const used = brackets.filter(b => b.nodeSentMs >= before.nodeSentMs && b.nodeSentMs <= after.nodeSentMs);
+  return { lo: Math.min(...used.map(b => b.nodeSentMs - b.dbMs)), hi: Math.max(...used.map(b => b.nodeReceivedMs - b.dbMs)), brackets: used.length };
 }
 
 /**

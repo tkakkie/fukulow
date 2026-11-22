@@ -2,7 +2,9 @@
 // over an injected clock and request functions, so the real loop runs under unit tests on a virtual
 // clock. load/signin-owner-burst.ts supplies the HTTP requests, the sampler state and the abort signal.
 import { BURST, SAMPLER, SCHEDULE, burstAdmission, ownerDecision, type Plan } from './signin-owner-burst-config.ts';
-import { burstOwnerKind, type Burst, type BurstAttackOp, type BurstOwnerOp, type BurstReadOp, type BurstRun, type OwnerKind } from './signin-owner-burst-judgment.ts';
+import { burstOwnerKind, type Burst, type BurstAttackOp, type BurstOwnerOp, type BurstReadOp, type BurstRun, type OwnerKind,
+  type SendDecision, type SkippedSlot } from './signin-owner-burst-judgment.ts';
+import type { ClockBracket } from './signin-owner-burst-locks.ts';
 import type { Phase } from './signin-owner-judgment.ts';
 
 // Times are harness milliseconds (the same clock as `now`).
@@ -11,6 +13,8 @@ export type WorkloadIo = {
   now(): number; sleep(ms: number): Promise<void>; aborted(): boolean;
   attack(): Promise<Answer>; owner(kind: OwnerKind): Promise<Answer>; read(): Promise<Answer>;
   sampler(): { exited: boolean; medianMs: number | null };
+  // One database clock read bracketed by harness clock reads; null when the clock session is busy or broken.
+  bracket(): Promise<ClockBracket | null>;
 };
 // The harness scheduler polls every 2 ms (a decision timing, not an evidence threshold).
 const TICK_MS = 2;
@@ -19,6 +23,16 @@ const C2_MIN_B0 = 4;
 export async function runWorkload(plan: Plan, io: WorkloadIo) {
   const owner: BurstOwnerOp[] = [], attack: BurstAttackOp[] = [], reads: BurstReadOp[] = [], bursts: Burst[] = [];
   const skipped: BurstRun['skipped'] = { web_signin: 0, native_signin: 0, password: 0, revoke: 0, reads: 0 };
+  const skippedSlots: SkippedSlot[] = [], clockBrackets: ClockBracket[] = [];
+  const skip = (kind: SkippedSlot['kind'], dueMs: number) => { skipped[kind]++; skippedSlots.push({ kind, dueMs, atMs: now() }); };
+  // Clock brackets go one at a time, at every Organization B read slot (so every burst has one before and
+  // after it), and are never awaited by the schedule: a stuck clock session only leaves bursts unbounded.
+  let bracketing = false;
+  const bracket = () => {
+    if (bracketing) return;
+    bracketing = true;
+    void io.bracket().then(b => { if (b) clockBrackets.push(b); }, () => undefined).finally(() => { bracketing = false; });
+  };
   const { now, sleep } = io;
   const until = async (ms: number) => { while (now() < ms && !io.aborted()) await sleep(Math.min(TICK_MS, Math.max(0, ms - now()))); };
   const pending = new Set<Promise<unknown>>();
@@ -36,8 +50,8 @@ export async function runWorkload(plan: Plan, io: WorkloadIo) {
     bursts.push(burst);
     for (let send = 0; send <= BURST.maxResends && !io.aborted(); send++) {
       if (send) await until(burst.sends[send - 1].sentMs + BURST.resendMs);
-      const sentMs = now(), statuses: number[] = [];
-      burst.sends.push({ sentMs, statuses });
+      const sentMs = now(), statuses: number[] = [], owner: SendDecision = { decision: 'none', atMs: null };
+      burst.sends.push({ sentMs, statuses, owner });
       const responses = Array.from({ length: BURST.size }, () => io.attack().then(r => {
         statuses.push(r.status);
         attack.push({ burst: index, send, sentMs: r.start, endMs: r.end, ms: r.end - r.start, status: r.status, error: r.error });
@@ -46,8 +60,10 @@ export async function runWorkload(plan: Plan, io: WorkloadIo) {
         // Fire on the admitted send only (ownerDecision): a 401 fires at once from +10 ms; 11 refusals with
         // 5 still out fire only at the last poll inside the approved +10..+15 ms; 16 refusals never fire.
         await until(sentMs + BURST.ownerOffsetMs);
-        let decision = ownerDecision(burstAdmission(statuses), now() - sentMs);
-        while (decision === 'wait' && !io.aborted()) { await sleep(1); decision = ownerDecision(burstAdmission(statuses), now() - sentMs); }
+        // The decision and the harness time it was taken on are recorded per send (judged against the answers).
+        let atMs = now(), decision = ownerDecision(burstAdmission(statuses), atMs - sentMs);
+        while (decision === 'wait' && !io.aborted()) { await sleep(1); atMs = now(); decision = ownerDecision(burstAdmission(statuses), atMs - sentMs); }
+        if (decision !== 'wait') { owner.atMs = atMs; owner.decision = decision === 'fire' && inFlight ? 'skipped' : decision; }
         if (decision === 'fire') {
           burst.ownerOpSend = send;
           if (inFlight) burst.ownerOp = 'skipped';
@@ -79,14 +95,15 @@ export async function runWorkload(plan: Plan, io: WorkloadIo) {
         const dueMs = due === 'signin' ? nextSignin : nextAuth;
         const kind: OwnerKind = due === 'signin' ? (signins++ % 2 ? 'native_signin' : 'web_signin') : (auths++ % 2 ? 'revoke' : 'password');
         if (due === 'signin') nextSignin += SCHEDULE.signinEveryMs; else nextAuth += SCHEDULE.authEveryMs;
-        if (inFlight) { skipped[kind]++; continue; }
+        if (inFlight) { skip(kind, dueMs); continue; }
         ownerOp(kind, { dueMs });
       }
     }
     while (isDue(nextRead)) {
       const dueMs = nextRead;
       nextRead += SCHEDULE.readEveryMs;
-      if (readActive >= SCHEDULE.readInFlight) { skipped.reads++; continue; }
+      bracket();
+      if (readActive >= SCHEDULE.readInFlight) { skip('reads', dueMs); continue; }
       readActive++;
       track(io.read().then(r => { reads.push({ sentMs: r.start, status: r.status, ms: r.end - r.start, error: r.error, dueMs }); })
         .finally(() => { readActive--; }));
@@ -136,6 +153,6 @@ export async function runWorkload(plan: Plan, io: WorkloadIo) {
   // Slots due in the last tick before the end of B2 are still dispatched, so the schedule covers [0, endAt).
   if (completed) schedule(slot => slot < endAt);
   while (pending.size) await Promise.all([...pending]);
-  return { owner, attack, reads, bursts, skipped, phaseStartMs, scheduleEndMs: completed ? endAt : now(), endMs: now(),
+  return { owner, attack, reads, bursts, skipped, skippedSlots, clockBrackets, phaseStartMs, scheduleEndMs: completed ? endAt : now(), endMs: now(),
     stoppedEarly, b0Checkpoint, b0CheckAtMs, completed };
 }

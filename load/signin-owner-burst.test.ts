@@ -124,34 +124,55 @@ test('sampler rows: database-clock intervals, clock offset and pid attribution',
 });
 
 // A run that meets every pre-registered criterion. V = 50 ms; B0 p95 per authenticated kind 80 ms;
-// C2 bound 80 + 5 * 50 = 330 ms. Database clock = harness clock + 1e6 ms.
+// C2 bound 80 + 5 * 50 = 330 ms. Database clock = harness clock + 1e6 ms. Clock brackets every 500 ms
+// put the database read mid-way through a 1 ms round trip, so the offset is known to +-0.5 ms.
 const OFFSET = -1_000_000, SENDS = [60_000, 120_200, 180_400];
-function run(): BurstRun {
+const brackets = (endMs: number, offset = OFFSET, rttMs = 1) => Array.from({ length: Math.ceil(endMs / 500) + 1 }, (_, i) =>
+  ({ nodeSentMs: i * 500, dbMs: i * 500 + rttMs / 2 - offset, nodeReceivedMs: i * 500 + rttMs }));
+/** `retry`: that burst's first send is refused (16 x 429 back at +12 ms) and its re-send 250 ms later is admitted. */
+function run(opts: { retry?: number } = {}): BurstRun {
+  const sends: number[][] = [];
+  for (let i = 0, due = 60_000; i < 3; i++) { const list = opts.retry === i + 1 ? [due, due + 250] : [due]; sends.push(list); due = list.at(-1)! + 60_200; }
+  const admitted = sends.map(l => l.at(-1)!), b2 = admitted[2] + 300 + 61_000, end = b2 + 70_000;
+  const inB1 = (t: number) => t >= 60_000 && t < b2;
   const owner: BurstOwnerOp[] = [];
   const op = (kind: OwnerKind, sentMs: number, status: number, ms: number, burst?: number) =>
-    owner.push({ kind, sentMs, endMs: sentMs + ms, ms, status, ...(burst ? { burst, burstSend: 0 } : { dueMs: sentMs }) });
-  for (let t = 1_000, i = 0; t < 311_700; t += 2_000, i++) op(i % 2 ? 'native_signin' : 'web_signin', t, t >= 60_000 && t < 241_700 ? 429 : 200, t >= 60_000 && t < 241_700 ? 2 : 50);
-  for (let t = 2_500, i = 0; t < 311_700; t += 5_000, i++) op(i % 2 ? 'revoke' : 'password', t, 204, t >= 60_000 && t < 241_700 ? 200 : 80);
-  SENDS.forEach((s, i) => op(i % 2 ? 'revoke' : 'password', s + 10, 204, 300, i + 1));
-  const attack: BurstRun['attack'] = SENDS.flatMap((s, i) => Array.from({ length: 16 }, (_, k) => ({ burst: i + 1, send: 0, sentMs: s, status: k < 5 ? 401 : 429,
-    ms: k < 5 ? 300 : 2, endMs: s + (k < 5 ? 300 : 2) })));
-  const reads = Array.from({ length: 624 }, (_, i) => ({ sentMs: i * 500, status: 200, ms: 5, dueMs: i * 500 }));
+    owner.push({ kind, sentMs, endMs: sentMs + ms, ms, status, ...(burst ? { burst, burstSend: sends[burst - 1].length - 1 } : { dueMs: sentMs }) });
+  for (let t = 1_000, i = 0; t < end; t += 2_000, i++) op(i % 2 ? 'native_signin' : 'web_signin', t, inB1(t) ? 429 : 200, inB1(t) ? 2 : 50);
+  for (let t = 2_500, i = 0; t < end; t += 5_000, i++) op(i % 2 ? 'revoke' : 'password', t, 204, inB1(t) ? 200 : 80);
+  admitted.forEach((s, i) => op(i % 2 ? 'revoke' : 'password', s + 13, 204, 300, i + 1));
+  const attack: BurstRun['attack'] = sends.flatMap((list, i) => list.flatMap((s, j) => Array.from({ length: 16 }, (_, k) => {
+    const refused = j < list.length - 1, status = refused || k >= 5 ? 429 : 401, ms = refused ? 12 : k < 5 ? 300 : 2;
+    return { burst: i + 1, send: j, sentMs: s, status, ms, endMs: s + ms };
+  })));
+  const reads = Array.from({ length: Math.ceil(end / 500) }, (_, i) => ({ sentMs: i * 500, status: 200, ms: 5, dueMs: i * 500 }));
   const samples: SamplerRow[] = [];
-  for (let t = 0; t < 311_700; t += 20) {
-    const inBurst = SENDS.some(s => t >= s + 40 && t < s + 200);
+  for (let t = 0; t < end; t += 20) {
+    const inBurst = admitted.some(s => t >= s + 40 && t < s + 200);
     samples.push({ dbMs: t - OFFSET, nodeMs: t, connections: inBurst ? 7 : 4, maxWaitMs: 0, ctid: '(0,1)',
       waiting: inBurst ? [{ pid: 101, kind: 'signin' }, { pid: 102, kind: 'signin' }] : [] });
   }
-  const waits = SENDS.flatMap(s => [[101, 50, 110], [102, 55, 150], [103, 60, 200]].map(([pid, a, b]) => ({ pid,
+  // Sign-in waits 101 and 102 are seen by the sampler; the owner wait 103 is attributed by its STATEMENT line.
+  const waits = admitted.flatMap(s => [[101, 50, 110], [102, 55, 150], [103, 60, 200]].map(([pid, a, b]) => ({ pid,
     startDbMs: s + a - OFFSET, endDbMs: s + b - OFFSET, waitedMs: b - a, parts: ['transaction' as const], tuples: ['(0,1)'],
-    outcome: 'acquired' as const, startMs: s + a, endMs: s + b, who: pid === 103 ? 'owner' as const : 'signin' as const })));
+    outcome: 'acquired' as const, startMs: s + a, endMs: s + b, statementKind: pid === 103 ? 'owner' as const : 'signin' as const,
+    who: pid === 103 ? 'owner' as const : 'signin' as const, whoSource: pid === 103 ? 'statement' as const : 'sampler' as const })));
   return { owner, attack, reads, samples, samplerMalformed: 0, skipped: { reads: 0, web_signin: 0, native_signin: 0, password: 0, revoke: 0 },
-    offsetMs: OFFSET, waits, lockLog: { complete: true, reasons: [] },
-    bursts: SENDS.map((s, i) => ({ index: i + 1, sends: [{ sentMs: s, statuses: attack.filter(a => a.burst === i + 1).map(a => a.status) }],
-      admittedSend: 0, ownerOp: 'sent' as const, ownerOpSend: 0, wastedOwnerOpSends: [] })),
-    phaseStartMs: { B0: 0, B1: 60_000, B2: 241_700 }, endMs: 311_700, scheduleEndMs: 311_700, poolMax: 20,
+    skippedSlots: [], offsetMs: OFFSET, waits, lockLog: { complete: true, reasons: [] }, clockBrackets: brackets(end),
+    bursts: sends.map((list, i) => ({ index: i + 1,
+      sends: list.map((s, j) => ({ sentMs: s, statuses: attack.filter(a => a.burst === i + 1 && a.send === j).map(a => a.status),
+        owner: j < list.length - 1 ? { decision: 'refused' as const, atMs: s + 12 } : { decision: 'fire' as const, atMs: s + 13 } })),
+      admittedSend: list.length - 1, ownerOp: 'sent' as const, ownerOpSend: list.length - 1, wastedOwnerOpSends: [] })),
+    phaseStartMs: { B0: 0, B1: 60_000, B2: b2 }, endMs: end, scheduleEndMs: end, poolMax: 20,
     plan: { b0Ms: 60_000, bursts: 3, b1TailMs: 61_000, b2Ms: 70_000 }, server: { poolTimeouts: 0, panics: 0, complete: true } };
 }
+/** Sets each wait's stored attribution to what the stored sampler rows and STATEMENT kind give (a consistent artifact). */
+const reattribute = (r: BurstRun) => { for (const w of r.waits) { const a = attribute(w, r.samples); w.who = a.who; w.whoSource = a.source; } };
+/** Moves waits by `ms` on both clocks, keeping the stored record consistent. */
+const shiftWaits = (r: BurstRun, ms: number, pick: (w: BurstRun['waits'][number]) => boolean = () => true) => {
+  for (const w of r.waits.filter(pick)) { w.startMs += ms; w.endMs += ms; w.startDbMs += ms; w.endDbMs += ms; }
+  reattribute(r);
+};
 // Records keep `ms === endMs - sentMs`, as the harness writes them.
 const setMs = (o: { sentMs: number; endMs: number; ms: number }, ms: number) => { o.ms = ms; o.endMs = o.sentMs + ms; };
 const moveTo = (o: { sentMs: number; endMs: number; ms: number }, sentMs: number) => { o.sentMs = sentMs; o.endMs = sentMs + o.ms; };
@@ -176,7 +197,7 @@ test('C1, C2 and B1-B5 failures in a valid run are `fails`', () => {
     ['C1', r => { r.owner.find(o => o.burst === 2)!.status = 503; }],
     ['C2', r => { setMs(b1Auth(r), 331); }],
     ['C2', r => { setMs(r.owner.find(o => o.burst === 1)!, 331); }],
-    ['B3', r => { for (const pid of [104, 105, 106, 107, 108]) r.waits.push({ ...r.waits[0], pid }); }],
+    ['B3', r => { for (const pid of [104, 105, 106, 107, 108]) r.waits.push({ ...r.waits[0], pid }); reattribute(r); }],
     ['B3', r => { r.samples[3_100].connections = 20; }],
     ['B4', r => { r.reads[300].status = 500; }],
   ];
@@ -323,18 +344,11 @@ test('recorded runs test origin/main at run time; a prebuilt image or another SE
 });
 
 test('burst timing: the owner operation belongs to the admitted send after a 429 retry, and must leave on time', () => {
-  const retried = () => {
-    const r = run(), s = SENDS[1];
-    r.bursts[1] = { index: 2, sends: [{ sentMs: s - 250, statuses: Array(16).fill(429) }, { sentMs: s, statuses: r.bursts[1].sends[0].statuses }],
-      admittedSend: 1, ownerOp: 'sent', ownerOpSend: 1, wastedOwnerOpSends: [] };
-    r.owner.find(o => o.burst === 2)!.burstSend = 1;
-    for (const a of r.attack.filter(a => a.burst === 2)) a.send = 1;
-    r.attack.push(...Array.from({ length: 16 }, () => ({ burst: 2, send: 0, sentMs: s - 250, endMs: s - 238, ms: 12, status: 429 })));
-    return r;
-  };
+  const retried = () => run({ retry: 2 });
   assert.equal(judgeBurst(retried()).verdict, 'holds');
+  assert.deepEqual(retried().owner.filter(o => o.burst === 2).map(o => o.burstSend), [1]);
   const late = retried();
-  moveTo(late.owner.find(o => o.burst === 2)!, SENDS[1] + 40);
+  moveTo(late.owner.find(o => o.burst === 2)!, SENDS[1] + 250 + 40);
   const result = judgeBurst(late);
   assert.equal(result.verdict, 'inconclusive');
   assert.equal(result.evidence.checks.ownerOpTiming.pass, false);
@@ -353,7 +367,7 @@ test('overlap evidence is bound to each burst window; recovery waits never count
   const r = run();
   // Burst 2 loses its overlap; burst 3's overlapping waits move into B2 recovery.
   r.waits = r.waits.filter(w => !(w.startMs > 100_000 && w.startMs < 130_000 && w.pid !== 101));
-  for (const w of r.waits.filter(w => w.startMs > 170_000)) { w.startMs += 65_000; w.endMs += 65_000; w.startDbMs += 65_000; w.endDbMs += 65_000; }
+  shiftWaits(r, 65_000, w => w.startMs > 170_000);
   const result = judgeBurst(r);
   assert.deepEqual([result.verdict, result.a0.checks.lockOverlap.pass, result.a0.locks.map(l => l.peakPids)], ['inconclusive', false, [3, 1, 0]]);
 });
@@ -389,7 +403,7 @@ test('invalid takes precedence over inconclusive and fails together', () => {
 test('per-burst report carries the sampler peaks and the owner operation offset', () => {
   const r = report(run());
   assert.deepEqual(r.bursts.map(b => [b.sampler.peakWaiters, b.sampler.peakConnections, b.sampler.waitingShareAtPeak, b.ownerOp?.afterAdmittedSendMs]),
-    [[2, 7, 2 / 7, 10], [2, 7, 2 / 7, 10], [2, 7, 2 / 7, 10]]);
+    [[2, 7, 2 / 7, 13], [2, 7, 2 / 7, 13], [2, 7, 2 / 7, 13]]);
 });
 
 test('aggregate reader: only three distinct, self-consistent, completed recorded runs count', () => {
@@ -400,7 +414,7 @@ test('aggregate reader: only three distinct, self-consistent, completed recorded
     writeFileSync(join(dir, 'status.json'), JSON.stringify({ runId: name, mode: 'recorded', evidence: true, outcome: 'success', ...o.status }));
     if (o.results !== null) writeFileSync(join(dir, 'results.json'), JSON.stringify({ runId: name, mode: 'recorded', evidence: true, complete: true,
       stoppedEarly: null, harnessCommit: SHA, serverCommit: SHA, ...r, judgment, ...o.results }));
-    writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ project: name, harnessCommit: SHA, serverCommit: SHA, ...o.meta }));
+    writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ project: name, mode: 'recorded', evidenceEligible: true, plan: PLANS.recorded, harnessCommit: SHA, serverCommit: SHA, ...o.meta }));
     return dir;
   };
   const [a, b, c] = ['a', 'b', 'c'].map(n => write(n));
@@ -454,21 +468,24 @@ test('round 2: owner decision never fires on 11 refusals at +10 ms whose last 5 
 test('condition a: a lock wait unrelated to the burst inside the +-1 s window is never A0 evidence', () => {
   // The sol fixture: every interval 500 ms later, so all begin after the last attack and owner answers.
   const shifted = run();
-  for (const w of shifted.waits) { w.startMs += 500; w.endMs += 500; w.startDbMs += 500; w.endDbMs += 500; }
+  shiftWaits(shifted, 500);
   const result = judgeBurst(shifted);
   assert.notEqual(result.verdict, 'holds');
   assert.deepEqual([result.a0.checks.lockOverlap.pass, result.a0.locks.map(l => l.peakPids)], [false, [0, 0, 0]]);
   // Overlapping waits just before the admitted send, inside the padded window, are not evidence either.
   const before = run();
-  for (const w of before.waits) { w.startMs -= 300; w.endMs -= 300; }
+  shiftWaits(before, -300);
   assert.equal(judgeBurst(before).a0.checks.lockOverlap.pass, false);
-  // Inside the span but with unknown attribution: not evidence.
+  // Inside the span but with unknown attribution (no sampler row, no STATEMENT kind): not evidence.
   const unknown = run();
-  for (const w of unknown.waits) w.who = 'unknown';
+  for (const w of unknown.waits) delete w.statementKind;
+  for (const s of unknown.samples) s.waiting = [];
+  reattribute(unknown);
   assert.equal(judgeBurst(unknown).a0.checks.lockOverlap.pass, false);
   // A wait that runs past the end of every request of the burst has no link to one: it never counts.
   const edge = run();
-  edge.waits = edge.waits.filter(w => w.pid !== 103).map(w => w.pid === 102 ? { ...w, startMs: w.startMs + 300, endMs: w.endMs + 300 } : w);
+  edge.waits = edge.waits.filter(w => w.pid !== 103);
+  shiftWaits(edge, 300, w => w.pid === 102);
   assert.deepEqual(judgeBurst(edge).a0.locks.map(l => l.peakPids), [1, 1, 1]);
 });
 
@@ -534,7 +551,7 @@ test('condition b: the 3 runs must share the server commit as well as the harnes
     writeFileSync(join(dir, 'status.json'), JSON.stringify({ runId: name, mode: 'recorded', evidence: true, outcome: 'success' }));
     writeFileSync(join(dir, 'results.json'), JSON.stringify({ runId: name, mode: 'recorded', evidence: true, complete: true, stoppedEarly: null,
       harnessCommit: SHA, serverCommit, ...r, judgment: judgeBurst(r) }));
-    writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ project: name, harnessCommit: SHA, serverCommit }));
+    writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ project: name, mode: 'recorded', evidenceEligible: true, plan: PLANS.recorded, harnessCommit: SHA, serverCommit }));
     return dir;
   };
   const same = ['a', 'b', 'c'].map(n => write(n, SHA));
@@ -547,17 +564,21 @@ test('condition b: the 3 runs must share the server commit as well as the harnes
 // Round 3. A virtual clock drives the real scheduler loop (runWorkload): timers fire in time order, and
 // every promise chain settles before the clock moves on.
 type Reply = { status: number; ms: number };
-function virtual(script: { attack?: (call: number) => Reply; owner?: (kind: OwnerKind, t: number) => Reply; stopAt?: number }) {
+function virtual(script: { attack?: (call: number) => Reply; owner?: (kind: OwnerKind, t: number) => Reply; stopAt?: number;
+  stall?: { from: number; until: number } }) {
   let t = 0, seq = 0, calls = 0;
   const timers: { at: number; seq: number; fire: () => void }[] = [];
   const after = <T>(ms: number, value: () => T) => new Promise<T>(resolve => timers.push({ at: t + ms, seq: seq++, fire: () => resolve(value()) }));
   const reply = ({ status, ms }: Reply) => { const start = t; return after<Answer>(ms, () => ({ status, start, end: start + ms })); };
   const io: WorkloadIo = {
-    now: () => t, sleep: ms => after(ms, () => undefined), aborted: () => script.stopAt !== undefined && t >= script.stopAt,
+    // A stall holds the scheduler (not the requests in flight) until `until`.
+    now: () => t, sleep: ms => after(script.stall && t >= script.stall.from && t < script.stall.until ? script.stall.until - t : ms, () => undefined),
+    aborted: () => script.stopAt !== undefined && t >= script.stopAt,
     attack: () => reply(script.attack?.(calls++) ?? (calls++ % 16 < 5 ? { status: 401, ms: 300 } : { status: 429, ms: 2 })),
     owner: kind => reply(script.owner?.(kind, t) ?? { status: kind === 'web_signin' || kind === 'native_signin' ? 200 : 204, ms: 50 }),
     read: () => reply({ status: 200, ms: 5 }),
     sampler: () => ({ exited: false, medianMs: 20 }),
+    bracket: () => { const start = t; return after(1, () => ({ nodeSentMs: start, dbMs: start + 0.5 - OFFSET, nodeReceivedMs: start + 1 })); },
   };
   const drive = async <T>(work: Promise<T>) => {
     let done = false;
@@ -600,6 +621,15 @@ test('round 3: the real scheduler loop runs the pre-registered cadence once per 
     [['password', 13, 0], ['revoke', 13, 0], ['password', 13, 0]]);
 });
 
+/** Burst 1's refused send got its owner operation (11 x 429 back at +13 ms, the last five at +14 ms); the re-send is admitted. */
+function wastedRun() {
+  const r = run({ retry: 1 }), s = SENDS[0];
+  r.attack.filter(a => a.burst === 1 && a.send === 0).forEach((a, k) => setMs(a, k < 11 ? 13 : 14));
+  r.bursts[0].sends[0].owner = { decision: 'fire', atMs: s + 13 };
+  r.bursts[0].wastedOwnerOpSends = [0];
+  r.owner.push({ kind: 'password', burst: 1, burstSend: 0, sentMs: s + 13, endMs: s + 63, ms: 50, status: 204 });
+  return r;
+}
 test('round 3: a send refused after its owner operation fired never credits it; the retry decides afresh', async () => {
   // The sol case on burst 1: 11 x 429 at +13 ms (provisional: the owner operation fires), the last five 429s at +14 ms.
   const { io, drive } = virtual({ stopAt: 70_000, attack: n => n < 16 ? { status: 429, ms: n < 11 ? 13 : 14 }
@@ -609,17 +639,10 @@ test('round 3: a send refused after its owner operation fired never credits it; 
   assert.deepEqual([b.sends.length, b.admittedSend, b.wastedOwnerOpSends, b.ownerOp, b.ownerOpSend], [2, 1, [0], 'sent', 1]);
   assert.deepEqual(w.owner.filter(o => o.burst === 1).map(o => [o.burstSend, o.sentMs - b.sends[o.burstSend!].sentMs]), [[0, 13], [1, 13]]);
   // The judgment: never credited, A0 fails, so the run can only be INCONCLUSIVE (never PASS).
-  const r = run();
-  r.bursts[0] = { index: 1, sends: [{ sentMs: SENDS[0] - 250, statuses: Array(16).fill(429) }, { sentMs: SENDS[0], statuses: r.bursts[0].sends[0].statuses }],
-    admittedSend: 1, ownerOp: 'sent', ownerOpSend: 1, wastedOwnerOpSends: [0] };
-  for (const a of r.attack.filter(a => a.burst === 1)) a.send = 1;
-  r.attack.push(...Array.from({ length: 16 }, (_, k) => ({ burst: 1, send: 0, sentMs: SENDS[0] - 250, endMs: SENDS[0] - 250 + (k < 11 ? 13 : 14),
-    ms: k < 11 ? 13 : 14, status: 429 })));
-  r.owner.find(o => o.burst === 1)!.burstSend = 1;
-  r.owner.push({ kind: 'password', burst: 1, burstSend: 0, sentMs: SENDS[0] - 237, endMs: SENDS[0] - 187, ms: 50, status: 204 });
+  const r = wastedRun();
   const result = judgeBurst(r);
   assert.deepEqual([result.verdict, result.a0.checks.ownerOps.pass, result.evidence.checks.workloadComplete.pass], ['inconclusive', false, true]);
-  assert.equal(report(r).bursts[0].ownerOp?.afterAdmittedSendMs, 10);
+  assert.equal(report(r).bursts[0].ownerOp?.afterAdmittedSendMs, 13);
   // Dropping the wasted list, or claiming the wasted operation as the credited one, is a workload gap.
   const stripped = structuredClone(r); stripped.bursts[0].wastedOwnerOpSends = [];
   assert.equal(judgeBurst(stripped).evidence.checks.workloadComplete.pass, false);
@@ -630,12 +653,13 @@ test('round 3: A0 needs a recorded link to a request of that burst; unrelated or
   const early = run();
   early.waits = SENDS.flatMap(s => [201, 202].map(pid => ({ ...early.waits[0], pid, startMs: s - 25, endMs: s + 5,
     startDbMs: s - 25 - OFFSET, endDbMs: s + 5 - OFFSET, waitedMs: 30, who: 'signin' as const })));
+  reattribute(early);
   const unlinked = judgeBurst(early);
   assert.deepEqual([unlinked.verdict, unlinked.a0.checks.lockOverlap.pass, unlinked.a0.locks.map(l => l.peakPids)], ['inconclusive', false, [0, 0, 0]]);
-  // A missing `who` never counts.
+  // A missing `who` contradicts the stored evidence: never holds.
   const missing = run();
   for (const w of missing.waits) delete (w as Partial<typeof w>).who;
-  assert.deepEqual([judgeBurst(missing).verdict, judgeBurst(missing).a0.checks.lockOverlap.pass], ['inconclusive', false]);
+  assert.deepEqual([judgeBurst(missing).verdict, judgeBurst(missing).evidence.checks.lockEvidence.pass], ['inconclusive', false]);
   // A sign-in wait that an owner sign-in outside the burst could explain is ambiguous: not counted.
   const ambiguous = run();
   const signin = ambiguous.owner.find(o => o.kind === 'web_signin' && o.dueMs === 61_000)!;
@@ -647,13 +671,13 @@ test('round 3: A0 needs a recorded link to a request of that burst; unrelated or
 
 const runsDir = mkdtempSync(join(tmpdir(), 'burst-round3-'));
 let runCount = 0;
-function writeRun(name: string, r: BurstRun) {
+function writeRun(name: string, r: BurstRun, meta: object = {}) {
   const dir = join(runsDir, `${name}-${runCount++}`), id = `run-${runCount}`;
   mkdirSync(dir);
   writeFileSync(join(dir, 'status.json'), JSON.stringify({ runId: id, mode: 'recorded', evidence: true, outcome: 'success' }));
   writeFileSync(join(dir, 'results.json'), JSON.stringify({ runId: id, mode: 'recorded', evidence: true, complete: true, stoppedEarly: null,
     harnessCommit: SHA, serverCommit: SHA, ...r, judgment: judgeBurst(r) }));
-  writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ project: id, harnessCommit: SHA, serverCommit: SHA }));
+  writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ project: id, mode: 'recorded', evidenceEligible: true, plan: PLANS.recorded, harnessCommit: SHA, serverCommit: SHA, ...meta }));
   return dir;
 }
 
@@ -717,4 +741,174 @@ test('round 3: the B0 checkpoint stops before burst 1 when B0 provably cannot re
   const noV = virtual({ owner: kind => ({ status: kind.endsWith('signin') ? 401 : 204, ms: 50 }) });
   const v = await noV.drive(runWorkload(PLANS.recorded, noV.io));
   assert.deepEqual([v.stoppedEarly, v.attack.length], ['inconclusive: no B0 owner sign-in success (V undefined)', 0]);
+});
+
+// Round 4.
+const threeRuns = (r: BurstRun | (() => BurstRun), meta: object = {}) =>
+  aggregate(readRuns(['x', 'y', 'z'].map(n => writeRun(n, typeof r === 'function' ? r() : structuredClone(r), meta)))).outcome;
+
+/**
+ * sol's round-4 fixture, from raw database times plus clock brackets. The sampler rows arrive 30 ms after
+ * their database time, so the point offset (and the stored harness times) are 30 ms late. In bursts 1 and
+ * 2 a periodic owner sign-in ran from -40 to +12 ms and waited from -11 to +1 ms; a burst sign-in waited
+ * from +0 to +22 ms. Shifted 30 ms late, both waits look as if they lay inside the burst's own requests.
+ */
+function biasedRun() {
+  const r = run(), bias = 30;
+  for (const s of r.samples) s.nodeMs += bias;
+  r.offsetMs = OFFSET + bias;
+  ([[0, 59_000], [1, 119_000]] as const).forEach(([i, due]) => {
+    const s = SENDS[i], signin = r.owner.find(o => o.burst === undefined && o.dueMs === due)!;
+    moveTo(signin, s - 40); setMs(signin, 52);
+    r.waits = r.waits.filter(w => !(w.startDbMs > s - OFFSET && w.startDbMs < s + 1_000 - OFFSET));
+    for (const [pid, a, b] of [[301, -11, 1], [302, 0, 22]]) r.waits.push({ pid, startDbMs: s + a - OFFSET, endDbMs: s + b - OFFSET, waitedMs: b - a,
+      parts: ['transaction'], tuples: ['(0,1)'], outcome: 'acquired', statementKind: 'signin', startMs: 0, endMs: 0, who: 'signin', whoSource: 'statement' });
+  });
+  // The stored harness times, converted with the late point offset as the runner does.
+  for (const w of r.waits) { w.startMs = w.startDbMs + r.offsetMs; w.endMs = w.endDbMs + r.offsetMs; }
+  reattribute(r);
+  return r;
+}
+
+test('round 4 B1: A0 converts database times through guaranteed clock brackets, never the late point offset', () => {
+  const biased = biasedRun();
+  const result = judgeBurst(biased);
+  // Bursts 1 and 2 lose their waits (the first overlaps the periodic sign-in, the second may start before the request); burst 3 keeps 3.
+  assert.deepEqual([result.verdict, result.a0.checks.lockOverlap.pass, result.a0.locks.map(l => l.peakPids)], ['inconclusive', false, [0, 0, 3]]);
+  assert.deepEqual(result.a0.locks.map(l => l.clock?.uncertaintyMs), [0.5, 0.5, 0.5]);
+  assert.deepEqual(result.evidence.checks.lockEvidence.pass, true);
+  assert.equal(threeRuns(biased), 'INCONCLUSIVE');
+  // The same bias with the true waits inside the burst requests still holds: the brackets, not the sampler arrival, place them.
+  const honest = run();
+  for (const s of honest.samples) s.nodeMs += 30;
+  honest.offsetMs = OFFSET + 30;
+  for (const w of honest.waits) { w.startMs = w.startDbMs + honest.offsetMs; w.endMs = w.endDbMs + honest.offsetMs; }
+  assert.equal(judgeBurst(honest).verdict, 'holds');
+  // No bracket before burst 1 (the clock session answered late): burst 1 is unbounded, A0 is INCONCLUSIVE although bursts 2 and 3 overlap.
+  const unbracketed = run();
+  unbracketed.clockBrackets = unbracketed.clockBrackets.filter(b => b.nodeReceivedMs > 60_000);
+  const gap = judgeBurst(unbracketed);
+  assert.deepEqual([gap.verdict, gap.a0.locks.map(l => l.clock === null), gap.a0.locks.map(l => l.peakPids)], ['inconclusive', [true, false, false], [0, 3, 3]]);
+  assert.equal(threeRuns(unbracketed), 'INCONCLUSIVE');
+  // A wide bound (400 ms round trips): no wait fits inside a request, A0 simply fails.
+  const wide = run(); wide.clockBrackets = brackets(wide.endMs, OFFSET, 400);
+  assert.deepEqual([judgeBurst(wide).verdict, judgeBurst(wide).a0.locks.map(l => l.peakPids)], ['inconclusive', [0, 0, 0]]);
+  // Brackets missing, malformed or going backwards (a clock step) are never evidence.
+  for (const mutate of [(r: BurstRun) => { delete (r as Partial<BurstRun>).clockBrackets; },
+    (r: BurstRun) => { r.clockBrackets[300].dbMs = r.clockBrackets[299].dbMs - 1; },
+    (r: BurstRun) => { r.clockBrackets[300].nodeReceivedMs = r.clockBrackets[300].nodeSentMs - 1; }]) {
+    const r = run(); mutate(r);
+    assert.deepEqual([judgeBurst(r).verdict, judgeBurst(r).evidence.checks.lockEvidence.pass], ['inconclusive', false]);
+  }
+});
+
+test('round 4 B2: operations dispatched at or after their next slot are missed slots, in the real loop and in stored runs', async () => {
+  // sol's case: a 1.5 s scheduler stall at 90 s; the reads due before 91.5 s go out together at 91.5 s with nothing skipped.
+  const { io, drive } = virtual({ stall: { from: 90_000, until: 91_500 } });
+  const w = await drive(runWorkload(PLANS.recorded, io));
+  assert.equal(w.skipped.reads, 0);
+  assert.ok(w.reads.some(r => r.dueMs === 90_500 && r.sentMs === 91_500));
+  assert.ok(workloadGaps(asRun(w)).some(g => /^Organization B reads: \d+ sent off their slot$/.test(g)), workloadGaps(asRun(w)).join('; '));
+  // The same in a stored run, through the aggregate reader.
+  const stalled = run();
+  for (const r of stalled.reads.filter(r => r.dueMs >= 90_000 && r.dueMs <= 91_500)) r.sentMs = 91_500;
+  assert.deepEqual([judgeBurst(stalled).verdict, threeRuns(stalled)], ['inconclusive', 'INCONCLUSIVE']);
+  // A periodic owner operation at its next slot is late too; one inside its own period is on time.
+  const signinLate = run(); moveTo(signinLate.owner.find(o => o.dueMs === 61_000)!, 63_000);
+  assert.equal(judgeBurst(signinLate).evidence.checks.workloadComplete.pass, false);
+  const signinOk = run(); moveTo(signinOk.owner.find(o => o.dueMs === 61_000)!, 62_999);
+  assert.equal(judgeBurst(signinOk).verdict, 'holds');
+  // Burst 2 sent 5 s late (with everything of it moved along): off the pre-registered burst time.
+  const late = run();
+  const b2 = late.bursts[1];
+  for (const send of b2.sends) { send.sentMs += 5_000; send.owner.atMs! += 5_000; }
+  for (const a of late.attack.filter(a => a.burst === 2)) moveTo(a, a.sentMs + 5_000);
+  moveTo(late.owner.find(o => o.burst === 2)!, SENDS[1] + 13 + 5_000);
+  shiftWaits(late, 5_000, w => w.startMs > 120_000 && w.startMs < 121_000);
+  assert.ok(workloadGaps(late).includes('burst 2 send 0 at 125200 ms, due at 120200 ms'), workloadGaps(late).join('; '));
+  assert.deepEqual([judgeBurst(late).verdict, threeRuns(late)], ['inconclusive', 'INCONCLUSIVE']);
+  // A re-send at or after 250 ms past its due time is late as well.
+  const resend = run({ retry: 2 });
+  resend.bursts[1].sends[1].sentMs += 250;
+  assert.equal(judgeBurst(resend).evidence.checks.workloadComplete.pass, false);
+});
+
+test('round 4 B3: owner operations are bound to their slot, skips to slots of their kind, and sends to the operations they fired', () => {
+  const slot = (r: BurstRun) => r.owner.find(o => o.burst === undefined && o.kind === 'password' && o.dueMs === 62_500)!;
+  const control = run(); slot(control).status = 429;
+  assert.equal(judgeBurst(control).verdict, 'fails');
+  const cases: [string, (r: BurstRun) => void][] = [
+    // sol: the 429 password change moved into B0 with its B1 slot and duration kept.
+    ['429 moved into B0', r => { const o = slot(r); o.status = 429; moveTo(o, 57_000); }],
+    // sol: the 429 password change deleted and counted as a skipped revoke-others.
+    ['deleted, counted as a skipped revoke', r => { const o = slot(r); o.status = 429; r.owner.splice(r.owner.indexOf(o), 1); r.skipped.revoke++; }],
+    ['deleted, a revoke slot claimed skipped', r => { const o = slot(r); r.owner.splice(r.owner.indexOf(o), 1); r.skipped.revoke++;
+      r.skippedSlots.push({ kind: 'revoke', dueMs: 62_500, atMs: 62_500 }); }],
+    ['deleted, a password skip with nothing in flight', r => { const o = slot(r); r.owner.splice(r.owner.indexOf(o), 1); r.skipped.password++;
+      r.skippedSlots.push({ kind: 'password', dueMs: 62_500, atMs: 62_500 }); }],
+    // sol (and Neon round 4): negative owner latency.
+    ['negative owner latency', r => { const o = slot(r); o.endMs = o.sentMs - 5; o.ms = -5; }],
+    ['negative attack latency', r => { const a = r.attack[0]; a.endMs = a.sentMs - 1; a.ms = -1; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const r = run(); mutate(r);
+    assert.deepEqual([judgeBurst(r).verdict, judgeBurst(r).evidence.checks.workloadComplete.pass], ['inconclusive', false], name);
+    assert.equal(threeRuns(r), 'INCONCLUSIVE', name);
+  }
+  // A real skip, bound to its slot and kind, with an owner operation in flight, is complete.
+  const skipped = run(); const o = slot(skipped);
+  skipped.owner.splice(skipped.owner.indexOf(o), 1); skipped.skipped.password++;
+  skipped.skippedSlots.push({ kind: 'password', dueMs: 62_500, atMs: 62_501 });
+  skipped.owner.push({ kind: 'web_signin', sentMs: 62_400, endMs: 62_700, ms: 300, status: 429, dueMs: 61_000 });
+  skipped.owner.splice(skipped.owner.findIndex(x => x.dueMs === 61_000 && x.sentMs === 61_000), 1);
+  assert.equal(judgeBurst(skipped).evidence.checks.workloadComplete.pass, true, workloadGaps(skipped).join('; '));
+  // sol: the refused-send retry with both the wasted operation and its wastedOwnerOpSends entry removed.
+  const stripped = wastedRun();
+  stripped.owner = stripped.owner.filter(x => !(x.burst === 1 && x.burstSend === 0)); stripped.bursts[0].wastedOwnerOpSends = [];
+  assert.deepEqual([judgeBurst(stripped).verdict, judgeBurst(stripped).evidence.checks.workloadComplete.pass], ['inconclusive', false]);
+  assert.equal(threeRuns(stripped), 'INCONCLUSIVE');
+  // A decision the send's answers contradict: `refused` at +12 ms when only 11 refusals were back.
+  const contradicted = wastedRun();
+  contradicted.owner = contradicted.owner.filter(x => !(x.burst === 1 && x.burstSend === 0)); contradicted.bursts[0].wastedOwnerOpSends = [];
+  contradicted.bursts[0].sends[0].owner = { decision: 'refused', atMs: SENDS[0] + 13 };
+  assert.ok(workloadGaps(contradicted).some(g => /contradicts the answers/.test(g)));
+  // A send without a decision record, or an operation on a send that did not fire.
+  const noDecision = run(); delete (noDecision.bursts[1].sends[0] as Partial<BurstRun['bursts'][number]['sends'][number]>).owner;
+  assert.equal(judgeBurst(noDecision).evidence.checks.workloadComplete.pass, false);
+});
+
+test('round 4 B4: re-judging re-derives lock-wait attribution from the stored evidence and rejects contradictions', () => {
+  // sol: every wait's STATEMENT kind `other`, source `statement`, the sampler's waiting lists cleared, the derived `who` kept.
+  const relabelled = run();
+  for (const w of relabelled.waits) { w.statementKind = 'other'; w.whoSource = 'statement'; }
+  for (const s of relabelled.samples) s.waiting = [];
+  const result = judgeBurst(relabelled);
+  assert.deepEqual([result.verdict, result.evidence.checks.lockEvidence.pass, result.a0.checks.lockOverlap.pass], ['inconclusive', false, false]);
+  assert.equal(threeRuns(relabelled), 'INCONCLUSIVE');
+  // sol: waits stripped to pid, harness times and who.
+  const stripped = run();
+  stripped.waits = stripped.waits.map(w => ({ pid: w.pid, startMs: w.startMs, endMs: w.endMs, who: w.who }) as BurstRun['waits'][number]);
+  assert.deepEqual([judgeBurst(stripped).verdict, judgeBurst(stripped).evidence.checks.lockEvidence.pass], ['inconclusive', false]);
+  assert.equal(threeRuns(stripped), 'INCONCLUSIVE');
+  // Harness times that are not the database times plus the stored offset, or a source the evidence does not give.
+  const moved = run(); moved.waits[0].startMs -= 40;
+  assert.equal(judgeBurst(moved).evidence.checks.lockEvidence.pass, false);
+  const source = run(); source.waits[0].whoSource = 'statement';
+  assert.equal(judgeBurst(source).evidence.checks.lockEvidence.pass, false);
+});
+
+test('round 4 B5: status, results and metadata must agree on mode, evidence eligibility and plan', () => {
+  assert.equal(threeRuns(run), 'PASS');
+  // sol: metadata of a rehearsal next to valid recorded status and results.
+  assert.equal(threeRuns(run, { mode: 'rehearsal', evidenceEligible: false, plan: PLANS.rehearsal }), 'INCONCLUSIVE');
+  for (const meta of [{ mode: 'rehearsal' }, { evidenceEligible: false }, { plan: PLANS.rehearsal }, { plan: { ...PLANS.recorded, failFast: false } },
+    { mode: undefined }, { plan: undefined }]) assert.equal(threeRuns(run, meta), 'INCONCLUSIVE', JSON.stringify(meta));
+});
+
+test('round 4 n1: the per-phase sampler statement age is labelled as an upper bound, not a lock wait', () => {
+  const phases = judgeBurst(run()).phases;
+  for (const phase of ['B0', 'B1', 'B2'] as const) {
+    assert.equal('peakWaitMs' in phases[phase], false, phase);
+    assert.equal(phases[phase].samplerStatementAgeUpperBoundMs, 0, phase);
+  }
 });

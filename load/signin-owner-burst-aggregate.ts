@@ -2,6 +2,7 @@
 //   node load/signin-owner-burst-aggregate.ts RUN_DIR_1 RUN_DIR_2 RUN_DIR_3
 // A run is evidence only when its status.json, results.json and metadata.json are one completed
 // recorded run: the same run identity in all three, a successful recorded status that is evidence,
+// metadata that agrees on the mode, evidence eligibility and the whole plan,
 // complete results with a recorded harness and server commit, the pre-registered recorded plan, and a stored verdict that the stored
 // samples reproduce (which includes the workload-completeness check). Smoke and rehearsal outputs, repeated directories and repeated run identities
 // are never evidence. Fewer than 3 valid runs is INCONCLUSIVE.
@@ -14,7 +15,7 @@ const SHA = /^[0-9a-f]{40}$/;
 type Status = { runId?: unknown; mode?: unknown; evidence?: unknown; outcome?: unknown };
 type Results = Partial<BurstRun> & { runId?: unknown; mode?: unknown; evidence?: unknown; complete?: unknown; stoppedEarly?: unknown;
   harnessCommit?: unknown; serverCommit?: unknown; judgment?: { verdict?: Verdict } };
-type Meta = { project?: unknown; harnessCommit?: unknown; serverCommit?: unknown };
+type Meta = { project?: unknown; mode?: unknown; evidenceEligible?: unknown; plan?: Record<string, unknown>; harnessCommit?: unknown; serverCommit?: unknown };
 
 const read = <T>(dir: string, name: string): T | null => {
   try { return JSON.parse(readFileSync(join(dir, name), 'utf8')) as T; } catch { return null; }
@@ -37,6 +38,12 @@ export function readRun(dir: string): AggregateRun & { dir: string; harnessCommi
   const planned = PLANS.recorded, plan = results.plan;
   if (!plan || plan.b0Ms !== planned.b0Ms || plan.bursts !== planned.bursts || plan.b1TailMs !== planned.b1TailMs || plan.b2Ms !== planned.b2Ms)
     return reject('results were not produced with the pre-registered recorded plan');
+  // metadata.json says the same: a recorded, evidence-eligible run with the whole pre-registered recorded plan.
+  const metaPlan = meta.plan;
+  if (meta.mode !== 'recorded' || meta.evidenceEligible !== true || !metaPlan || typeof metaPlan !== 'object'
+    || Object.keys(metaPlan).length !== Object.keys(planned).length
+    || Object.entries(planned).some(([key, value]) => metaPlan[key] !== value))
+    return reject('metadata does not describe a recorded evidence run with the pre-registered recorded plan');
   let recomputed: Verdict | null = null;
   try { recomputed = judgeBurst(results as BurstRun).verdict; } catch { recomputed = null; }
   if (recomputed === null || recomputed !== verdict) return reject('stored verdict is not reproduced from the stored run');

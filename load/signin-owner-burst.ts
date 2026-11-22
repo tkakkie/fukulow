@@ -18,8 +18,8 @@ import { outsideCheckout } from './proxy-target.ts';
 import { admissionRejected, errorCode } from './signin-owner-judgment.ts';
 import { ATTACKER_IP, BURST, EVIDENCE, LOCK_LOG_SETTINGS, LOGGING_NOTE, OWNER_EMAIL, OWNER_IP, POOL_MAX, READER_IP, SAMPLER, SCHEDULE,
   TIMEOUT_MS, disposableOverride, parseBurstArgs, parseBurstEnv, resolveServer } from './signin-owner-burst-config.ts';
-import { attribute, clockOffset, mergeWaits, parseLockLog, parseSamplerLine, samplerIntervals, samplerQuery, xWaits,
-  type SamplerRow } from './signin-owner-burst-locks.ts';
+import { CLOCK_QUERY, attribute, clockOffset, mergeWaits, parseLockLog, parseSamplerLine, samplerIntervals, samplerQuery, xWaits,
+  type ClockBracket, type SamplerRow } from './signin-owner-burst-locks.ts';
 import { aggregate, burstWindows, judgeBurst, type BurstRun, type XWait } from './signin-owner-burst-judgment.ts';
 import { report } from './signin-owner-burst-report.ts';
 import { runWorkload } from './signin-owner-burst-workload.ts';
@@ -65,7 +65,7 @@ const meta: Record<string, unknown> = { project, mode, evidenceEligible: mode ==
   hostCpus: cpus().length, hostMemory: totalmem() };
 const saveMeta = () => writeFileSync(`${output}/metadata.json`, JSON.stringify(meta, null, 2) + '\n');
 let results: Record<string, unknown> = {};
-let failed = false, sampler: ReturnType<typeof spawn> | undefined, stoppedEarly: string | null = null;
+let failed = false, sampler: ReturnType<typeof spawn> | undefined, clockSession: ReturnType<typeof spawn> | undefined, stoppedEarly: string | null = null;
 const cleanupErrors: string[] = [];
 try {
   run.enter('source');
@@ -181,6 +181,36 @@ try {
     if (samplerExited || i > 200) throw new Stop('sampler produced no rows');
     await pause(50);
   }
+  // The clock session: one long-lived psql that answers CLOCK_QUERY with clock_timestamp(), bracketed by
+  // harness clock reads (A0's guaranteed database-to-harness clock bound). One query in flight at a time.
+  clockSession = spawn('docker', [...compose, 'exec', '-T', 'db', 'psql', '-XAt', '-P', 'pager=off', '-U', 'fukulow', '-d', 'fukulow'],
+    { env, stdio: ['pipe', 'pipe', 'ignore'] });
+  // Harness clock as in the workload (t0 is reset when the workload starts).
+  const clockNow = () => performance.now() - t0;
+  let clockPartial = '', clockAnswer: ((line: string | null) => void) | null = null, clockExited = false;
+  clockSession.on('exit', () => { clockExited = true; clockAnswer?.(null); clockAnswer = null; });
+  clockSession.stdout?.on('data', chunk => {
+    const lines = (clockPartial + String(chunk)).split('\n');
+    clockPartial = lines.pop() ?? '';
+    for (const line of lines) { const answer = clockAnswer; clockAnswer = null; answer?.(line.trim()); }
+  });
+  const bracket = () => new Promise<ClockBracket | null>(resolve => {
+    if (clockExited || clockAnswer || !clockSession?.stdin) { resolve(null); return; }
+    const nodeSentMs = clockNow();
+    clockAnswer = line => {
+      const nodeReceivedMs = clockNow();
+      resolve(line !== null && /^\d+(?:\.\d+)?$/.test(line) ? { nodeSentMs, dbMs: Number(line), nodeReceivedMs } : null);
+    };
+    clockSession.stdin.write(`${CLOCK_QUERY}\n`);
+  });
+  // The first bracket must arrive within the sampler's own start-up allowance above.
+  let firstBracket: ClockBracket | null | undefined;
+  void bracket().then(b => { firstBracket = b; });
+  for (let i = 0; firstBracket === undefined; i++) {
+    if (clockExited || i > 200) throw new Stop('clock session did not answer');
+    await pause(50);
+  }
+  if (!firstBracket) throw new Stop('clock session did not answer');
 
   run.enter('workload');
   meta.started = new Date().toISOString(); saveMeta();
@@ -192,7 +222,7 @@ try {
   const answer = (r: Awaited<ReturnType<typeof request>>) => ({ status: r.status, start: r.start - t0, end: r.end - t0, error: r.error });
   const work = await runWorkload(plan, {
     now, sleep: ms => pause(ms), aborted: () => controller.signal.aborted,
-    sampler: () => ({ exited: samplerExited, medianMs: samplerIntervals(samples).medianMs }),
+    sampler: () => ({ exited: samplerExited, medianMs: samplerIntervals(samples).medianMs }), bracket,
     attack: () => request('/api/v1/native/session', { method: 'POST', headers: json(ATTACKER_IP),
       body: JSON.stringify({ email: OWNER_EMAIL, password: wrong }) }).then(answer),
     read: () => request(`/api/v1/orgs/${organization}/channels`, { method: 'GET', headers: { Authorization: `Bearer ${readerBody.token}` } }).then(answer),
@@ -210,10 +240,11 @@ try {
       return answer(r);
     },
   });
-  const { owner, attack, reads, bursts, skipped, phaseStartMs, scheduleEndMs, endMs } = work;
+  const { owner, attack, reads, bursts, skipped, skippedSlots, clockBrackets, phaseStartMs, scheduleEndMs, endMs } = work;
   stoppedEarly = work.stoppedEarly; meta.b0Checkpoint = work.b0Checkpoint; meta.b0CheckAtMs = work.b0CheckAtMs;
   if (samplerExited) throw new Stop('sampler exited');
   sampler.kill(); sampler = undefined;
+  clockSession.kill(); clockSession = undefined;
   if (controller.signal.aborted) throw new Stop('interrupted');
   await pause(2500);
   run.enter('aggregation');
@@ -227,7 +258,8 @@ try {
   const reasons = [parsed.unparsed && `${parsed.unparsed} unparsed lock lines`, x.unparsed && `${x.unparsed} waits that cannot be placed`,
     x.unmatched && `${x.unmatched} unmatched waits`,
     x.foreign && `${x.foreign} accounts waits off X's known tuples`, offsetMs === null && 'no clock offset'].filter(Boolean) as string[];
-  const burstRun: BurstRun = { owner, attack, reads, bursts, samples, samplerMalformed, skipped: { ...skipped }, scheduleEndMs, offsetMs,
+  const burstRun: BurstRun = { owner, attack, reads, bursts, samples, samplerMalformed, skipped: { ...skipped }, skippedSlots, clockBrackets: [...clockBrackets],
+    scheduleEndMs, offsetMs,
     plan: { b0Ms: plan.b0Ms, bursts: plan.bursts, b1TailMs: plan.b1TailMs, b2Ms: plan.b2Ms }, waits: waits.filter(w => w.startMs >= 0),
     lockLog: { complete: !reasons.length, reasons }, phaseStartMs, endMs, poolMax: POOL_MAX,
     server: { poolTimeouts: (evidence.pool?.deltas.acquire_timeout ?? 0) + evidence.databaseFailures.pool_timeout, panics: evidence.panics,
@@ -256,7 +288,7 @@ try {
   failed = true;
   console.error(`Sign-in burst measurement failed during ${run.stage}: ${error instanceof Stop ? error.message : 'details suppressed'}`);
 } finally {
-  sampler?.kill();
+  sampler?.kill(); clockSession?.kill();
   try { docker(...compose, 'down', '--volumes'); } catch { cleanupErrors.push('Compose cleanup failed'); }
   if (!appImage) {
     try { if (docker('image', 'ls', '-q', env.LOAD_APP_IMAGE)) docker('image', 'rm', env.LOAD_APP_IMAGE); }
