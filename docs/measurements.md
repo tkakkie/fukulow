@@ -119,12 +119,6 @@ Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-pl
 
 Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`; `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --arm B|W --out <dir> --round <n>`, then `--aggregate`. Mac, Node 26.13.1. [Record](../load/measurements-archive.md#rustwasm-sync-core-typed-deltas-487-2026-11-21-jst-mac)
 
-## Precompressed web assets (#486)
-
-2026-11-17 JST, `41248ff` plus patch. Same release image’s wasm 131,573 → 103,813 bytes via Caddy and 159,174 → 103,813 via nginx. Evidence for [Brotli sidecars](decisions/auth.md#auth-accounts-and-tenancy).
-
-Byte comparison used external `node /private/tmp/fk486-transfer.ts`. For candidate checks, `docker build -t fk486-app .`, then `CHECK_COMPOSE_PROJECT=fukulow-security-486 CHECK_COMPOSE_IMAGE=fk486-app CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts`. Static TLS, transfer only. [Full record](../load/measurements-archive.md#precompressed-web-asset-transfer-486-2026-11-17-jst)
-
 ## Pool before and after PR #511 (#196 B)
 
 2026-11-17 JST, `956f91e` vs `fa1790b`. Three Mac pairs, 200 public Channels, 4,000 Members, burst 10 and refill 1/s, 60 s steps, no subscribers. Send-only 250 and 500/s failed latency with 100% accepted. At 250/s pair 2 p95/p99 was 2.11/3.70 → 12.13/18.71 ms. Higher send steps and mixed steps were NOT EVALUATED. Follow-up to the [pool timeout decision](decisions/realtime.md#admission-and-timeouts). Cause investigation in #519.
@@ -137,12 +131,6 @@ Run `node load/pool-before-after.ts --out <dir>` at `ee36849` with the external 
 
 Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal4-409`. Warm loopback on shared Mac, no writes, subscribers or proxy/TLS. [Full record](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst)
 
-## Watermark subscription admission (#478)
-
-2026-11-17 JST (PR #531). All 4,617 reproduced closes in 31 valid matrix runs matched watermark admission rejection. Evidence for splitting delivery tests from capacity under the [admission policy](decisions/realtime.md#admission-and-timeouts).
-
-At `4fa2ba0^`, run `cargo test --locked -p fukulow-server --lib simultaneous_normal_subscriptions_have_no_internal_error_closes`. Matrix used extra hooks on a shared Mac. Five excluded handshake timeouts. Manual harness in #530. [Full record](../load/measurements-archive.md#watermark-subscription-admission-investigation-478-2026-11-17-jst)
-
 ## Unread Topic-count index bound under RLS (#356)
 
 2026-11-17 JST, `4fa2ba0` vs the materialized-bound rewrite. At 25 unread/Topic across 20 Topics, rows examined 50,500 → 500 in all modes and Generic median 32.470 → 1.419 ms. Evidence for restoring the lower Index Cond under the [Unread rules](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
@@ -154,6 +142,12 @@ Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSO
 2026-11-21 JST, `2bad2c7d`, send time (#622): `recheck` 4,096 ×3 PASS, 24/24 sends matched each, 0 in fault. 2026-11-20 4096 FAIL kept. Maintainer: backoff acceptable (≤ 4 holds; high counts: #668), no jitter.
 
 Run `node load/revocation-burst.ts --out <dir>`. [Record](../load/measurements-archive.md#revocation-hold-send-time-rerun-592-2026-11-21-jst-mac)
+
+## Sign-in flood owner impact (#359 Part B alternative)
+
+2026-11-22 JST, `c1456d91`, 3 runs: B1–B5 held ×3, **not a formal Part B PASS** (no multi-IP attack). B2 window reading PASS ×3, `b2Strict` false ×3. One IP's 5 wrong passwords locked the owner out ~58 s, password change included (#757). Lock barely exercised, 0 waiters at a 233 ms poll (#756).
+
+Run `node load/signin-owner.ts`; judge with `load/signin-owner-judgment.ts`. [Record](../load/measurements-archive.md#sign-in-flood-owner-impact-part-b-alternative-method-359-2026-11-22-jst-mac)
 
 ## Archived only
 
@@ -171,3 +165,5 @@ Run `node load/revocation-burst.ts --out <dir>`. [Record](../load/measurements-a
 - [Pool before and after PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac) — superseded by the post-PR #511 comparison.
 - [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17) — superseded by HTTP and SQL evidence.
 - [Reply count HTTP runs 1–3 and pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, superseded or pilot only; reasons in the record.
+- [Watermark subscription admission](../load/measurements-archive.md#watermark-subscription-admission-investigation-478-2026-11-17-jst) — investigation evidence for the [admission policy](decisions/realtime.md#admission-and-timeouts).
+- [Precompressed web assets](../load/measurements-archive.md#precompressed-web-asset-transfer-486-2026-11-17-jst) — wasm 131,573 → 103,813 bytes, evidence for [Brotli sidecars](decisions/auth.md#auth-accounts-and-tenancy).

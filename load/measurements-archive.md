@@ -1554,3 +1554,92 @@ Results are medians of rounds with [min–max]. Each change is against B; W and 
 - **Development numbers from phase 1** (not formal; ranges overlapped for 100 msg/s): append p95 86.04 → 39.00 µs, send_ack 82.50 → 34.58 µs, and a Brotli wasm asset of 125,751 → 122,780 bytes. serde-wasm-bindgen was measured and not adopted.
 
 Raw round files, logs and the relabelled copy are in the maintainer's local run directory and are not in Git.
+
+## Summaries moved from docs/measurements.md (2026-11-22, budget for #359)
+
+Verbatim (links rebased to this file), as they stood in `docs/measurements.md` before the move.
+
+### Precompressed web assets (#486)
+
+2026-11-17 JST, `41248ff` plus patch. Same release image’s wasm 131,573 → 103,813 bytes via Caddy and 159,174 → 103,813 via nginx. Evidence for [Brotli sidecars](../docs/decisions/auth.md#auth-accounts-and-tenancy).
+
+Byte comparison used external `node /private/tmp/fk486-transfer.ts`. For candidate checks, `docker build -t fk486-app .`, then `CHECK_COMPOSE_PROJECT=fukulow-security-486 CHECK_COMPOSE_IMAGE=fk486-app CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts`. Static TLS, transfer only. [Full record](#precompressed-web-asset-transfer-486-2026-11-17-jst)
+
+### Watermark subscription admission (#478)
+
+2026-11-17 JST (PR #531). All 4,617 reproduced closes in 31 valid matrix runs matched watermark admission rejection. Evidence for splitting delivery tests from capacity under the [admission policy](../docs/decisions/realtime.md#admission-and-timeouts).
+
+At `4fa2ba0^`, run `cargo test --locked -p fukulow-server --lib simultaneous_normal_subscriptions_have_no_internal_error_closes`. Matrix used extra hooks on a shared Mac. Five excluded handshake timeouts. Manual harness in #530. [Full record](#watermark-subscription-admission-investigation-478-2026-11-17-jst)
+
+## Sign-in flood owner impact, Part B alternative method (#359, 2026-11-22 JST, Mac)
+
+These are the 3 runs pre-registered in [comment 7061468527](https://github.com/tkakkie/fukulow/issues/359#issuecomment-7061468527). The B1–B5 criteria are the ones pre-registered in [comment 6979633120](https://github.com/tkakkie/fukulow/issues/359#issuecomment-6979633120) and were not changed.
+
+- **Code:** server `c1456d91` (main at run time, clean tree). The harness is `load/signin-owner.ts` and `load/signin-owner-judgment.ts`, from #722 and #724. Both merged before the runs, and all 3 runs used the same harness hashes.
+- **Stack:** a fresh disposable stack per run, pool max 20. The app image was rebuilt from the same commit each run, so the digests differ (`bb6991…`, `836434…`, `d4b7a8…`).
+- **Timing:** the runs went one at a time, 02:35–02:44 JST, after the host-idle gate. Each ended with exit 0 and `complete: true`, with no skipped operations.
+
+**Verdict: all of B1–B5 hold in all 3 runs. This is not a formal Part B PASS:** the judgment reports `formal: false` by design, because the original 50/s multi-IP attack was not run. One more qualification on B2 follows below.
+
+### What the owner saw (identical shape in all 3 runs)
+- **Attacker:** native sign-in, 10/s from one IP. Only the first 5 wrong passwords reached verification (401, 14–35 ms each, at 30.04–30.42 s). The other 595 got 429 in about 2 ms (max 7.5 ms), without verification.
+- **Owner:**
+  - B1 started with one correct web sign-in that succeeded at 30.06 s (53.9–54.3 ms).
+  - Every owner operation after that got 429 "too many sign-in attempts" until 90.0 s. That is 29 sign-ins and **all 6 password changes made with a valid Session**.
+  - The first B2 operation (90.0 s, still inside the 60 s window that ends at about 90.42 s) also got 429.
+  - From 92.0 s on, every owner operation succeeded.
+- **Lockout:** the owner was locked out for about 58 s, one email-budget window. That is the targeted lockout the throttle already allows (#196). It is not additional Account-row-lock interference.
+
+### Per-run results
+
+| | Run 1 | Run 2 | Run 3 | Criterion |
+|---|---|---|---|---|
+| B0 owner p50 / p95 (sign-in p50 = V) | 30.2 / 58.5 ms (V 29.7) | 30.5 / 53.4 ms (V 30.2) | 31.0 / 45.0 ms (V 31.0) | |
+| **B1** owner statuses | 1×200, 35×429 | 1×200, 35×429 | 1×200, 35×429 | only 200/204/429/503 |
+| B1 owner success latency / bound (B0 p95 + 5V) | 53.9 / 206.8 ms | 54.3 / 204.2 ms | 54.3 / 200.0 ms | 0 interfered: **pass ×3** |
+| B1 attacker statuses | 5×401, 595×429 | 5×401, 595×429 | 5×401, 595×429 | |
+| **B2** owner statuses | 34×200, 7×204, 1×429 | 34×200, 7×204, 1×429 | 34×200, 7×204, 1×429 | no 429 > 60 s after last counted failure |
+| B2 owner p95 vs 2× B0 p95 | 50.7 vs 116.9 ms | 52.7 vs 106.7 ms | 51.0 vs 90.0 ms | **pass ×3** (strict reading: see below) |
+| B2 sign-in p95 / password change p95 | 34.7 / 52.4 ms | 34.8 / 52.8 ms | 34.8 / 52.3 ms | |
+| **B3** peak waiters on X's row B0/B1/B2 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | ≤ 7 |
+| B3 peak app-role DB connections B0/B1/B2 | 4 / 4 / 4 | 3 / 4 / 4 | 3 / 4 / 4 | ≤ B0 + 7 and < 20: **pass ×3** |
+| Pool (app counters): max in use, acquires, acquire timeouts, waits > 1 s | 1, 1,138, 0, 0 | 1, 1,138, 0, 0 | 1, 1,138, 0, 0 | |
+| **B4** Organization B reads | 320/320 | 320/320 | 320/320 | 100% |
+| B4 reads p95 B0 / B1 / B2 vs bound | 8.9 / 7.0 / 7.2 vs 17.8 ms | 8.3 / 6.7 / 7.3 vs 16.7 ms | 9.1 / 7.0 / 7.4 vs 18.3 ms | **pass ×3** |
+| **B5** client timeouts, 5xx, pool timeouts, panics, DB failures | 0, 0, 0, 0, 0 | 0, 0, 0, 0, 0 | 0, 0, 0, 0, 0 | **pass ×3** |
+
+### B2 qualification (reported, not re-judged)
+The pre-registered B2 wording admits two readings: "all succeed" and "no 429 more than 60 s after the last counted failure". The judgment code was fixed before the runs. It applies the second reading in the B2 check and reports the first as `b2Strict`.
+- **Window reading (the B2 check):** pass in all 3 runs. The single B2 429 ended at 90.0 s, while the window ran until about 90.42 s.
+- **Strict reading (`b2Strict`):** false in all 3 runs, because of that same 429.
+
+The cause is the phase timing, not the lock. B2 starts 60 s after B1 starts, but the last counted failure came 0.42 s into B1.
+
+### Not tested by this method, and limits
+- **The 50/s multi-IP attack**, where the per-IP budget never binds, was not run (maintainer decision: no IP-evading tool). The per-IP budget did not bind here either: the email budget (5) stopped the attacker first.
+- **The Account row lock was barely exercised.**
+  - The 5 counted attempts arrived about 100 ms apart and each took 14–35 ms, so they did not overlap one another.
+  - In-flight concurrency at the lock was about 1, not the 5 that the email reservation allows, nor 16.
+  - Peak waiters = 0 therefore does not test the B3 waiter bound of ≤ 7.
+- **Lock waits can be missed between samples.** The lock/connection sampler ran every 233 ms (median; max 243 ms; target 200 ms), so a wait shorter than that can fall between samples. The one owner sign-in that overlapped the first attacker verification took about 54 ms vs a B0 sign-in p50 of about 30 ms. That is consistent with one queued verification, but no waiter was observed (inference, not verified).
+- **Not exercised:**
+  - password admission 503 (none occurred);
+  - revoke-others;
+  - native sign-in by the owner (the owner used web sign-in; the attacker used native, so cross-route sharing of the email budget was exercised).
+- **Mac-relative:** the stack trusts a client-IP header that only the test stack trusts. These are not production results.
+- **Supporting evidence:** the PR #624 deterministic race tests cover the concurrent interleavings this load does not reach. Their DB connection peak is polled, so it is a lower bound.
+
+### Remaining risks
+1. **A cheap, sustained owner lockout.** Five wrong passwords per 60 s from a single IP lock the owner out of web sign-in and out of password change, even from an existing Session. The attacker can renew this indefinitely. #196 accepts a one-window lockout, but these runs show it costs the attacker almost nothing to repeat, and it also blocks the owner's own recovery action.
+2. **Concurrent verification on one Account is unmeasured under load.** This method does not show how long the owner waits and how many connections are held when up to 5 reserved attempts verify concurrently behind the row lock. Only PR #624's tests cover it.
+3. **Pool use under concentrated attack.** Part A (spread over 1,000 Accounts) peaked at 8–9 of 20 connections. Many Accounts each under concurrent attempts, which is the multi-IP case, is untested.
+
+### Proposed further checks (no server change in this Issue)
+- **A. Single-IP burst at window open.** Send 16 concurrent wrong passwords for X from one IP at the moment the email window reopens, while the owner signs in. This needs no IP evasion and puts up to 5 reserved attempts on the row lock at once. That tests the B3 waiter bound and the B1 latency bound.
+- **B. Exact lock-wait measurement.** For A, record lock waits server-side, for example Postgres `log_lock_waits = on` with a low `deadlock_timeout` in the disposable stack only, or sample at ≤ 20 ms. Use this instead of the 233 ms poll.
+- **C. Owner mix.** Add native sign-in and revoke-others for the owner, so that every operation sharing the budget is covered.
+- **D. Decision review.** Decide whether password change from a valid Session should keep sharing the email failure budget (risk 1). If not, that is a spec/decision change in its own Issue.
+
+### Verdict (maintainer decision, 2026-11-22)
+Recorded as non-formal Part B alternative evidence, not a formal Part B PASS. Both B2 readings stand: the window reading passes in all 3 runs and `b2Strict` is false in all 3. Further checks A–C: #756. Decision D (password change sharing the email budget): #757. #359 stays open until #756 is reviewed.
+
