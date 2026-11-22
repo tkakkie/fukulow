@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, createReadStream, lstatSync, openSync, readFileSync, realpathSync, unlinkSync } from 'node:fs';
 import { copyFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { boundedCommand } from '../bench.ts';
 import { hash } from '../manifest.ts';
 import { timeouts } from '../runtime.ts';
@@ -64,13 +65,18 @@ export async function loadBackfill(dir: string, manifestHash: string, rows: numb
     verifiedBackfill(receipt.records?.denial, 20_011) && validRls(receipt.rls), 'Invalid backfill verification record');
   assert.ok(receipt.snapshot?.file === snapshotFile && /^\d+$/.test(receipt.snapshot.systemIdentifier),
     'Invalid backfill snapshot identity');
-  const archive = `${directory}/${snapshotFile}`;
-  assert.equal(snapshotSize(archive), receipt.snapshot.bytes, 'Backfill snapshot identity mismatch');
+  const snapshotDirectory = await stageSnapshot(`${directory}/${snapshotFile}`, receipt.snapshot, restoreDirectory);
+  return {directory, snapshotDirectory, receipt};
+}
+
+// Copies the archive into the staging directory, if one is given, and checks the copy that will be extracted.
+export async function stageSnapshot(archive: string, identity: {sha256: string; bytes: number}, restoreDirectory?: string) {
+  assert.equal(snapshotSize(archive), identity.bytes, 'Backfill snapshot identity mismatch');
   const verifiedArchive = restoreDirectory ? `${restoreDirectory}/${snapshotFile}` : archive;
   if (restoreDirectory) await copyFile(archive, verifiedArchive);
-  assert.deepEqual(await snapshotIdentity(verifiedArchive), {sha256: receipt.snapshot.sha256, bytes: receipt.snapshot.bytes},
+  assert.deepEqual(await snapshotIdentity(verifiedArchive), {sha256: identity.sha256, bytes: identity.bytes},
     'Backfill snapshot identity mismatch');
-  return {directory, snapshotDirectory: restoreDirectory ?? directory, receipt};
+  return restoreDirectory ?? dirname(archive);
 }
 
 export function snapshotLaunch(directory: string) {
