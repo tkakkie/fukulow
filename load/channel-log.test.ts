@@ -6,9 +6,9 @@ import { createLog } from './channel-log.ts';
 
 const root = import.meta.dirname;
 // Direct Message inserts that never reach a replaying WebSocket client: SQL
-// plan/engine probes; reply-counts-seed.sql is an HTTP-only static read probe;
+// plan/engine probes (including the 519 counts probe); reply-counts-seed.sql is an HTTP-only static read probe;
 // log-compare builds its own channel_log rows.
-const noReplay = ['hot-plans/', 'unread-init/', 'search-engines/', 'log-compare/', 'reply-counts-seed.sql'];
+const noReplay = ['hot-plans/', 'unread-init/', 'sql-probes/519-unread-counts/', 'search-engines/', 'log-compare/', 'reply-counts-seed.sql'];
 const files = (dir: string): string[] => readdirSync(dir).flatMap(name => {
   const path = join(dir, name);
   if (name === 'node_modules') return [];
