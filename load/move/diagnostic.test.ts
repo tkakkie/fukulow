@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { appEvidence, cgroupSample, dbEvidence, k6CeilingWarnings, k6Evidence, parseDbSample, parseStatements,
-  statementGroup, statementGroupSql } from './diagnostic-evidence.ts';
+  readTimingProblems, requiredReadPhases, statementGroup, statementGroupSql } from './diagnostic-evidence.ts';
 import { attributionLabel, diagnosticCommit, diagnosticSelection, diagnosticTargets, rejectDiagnosticImage } from './diagnostic-mode.ts';
 import { judge } from './judge.ts';
 import { plan, type Step } from './plan.ts';
@@ -127,20 +127,55 @@ test('the main patch ports every hook of the pinned patch and adds the read-lane
     assert.ok(main.has(phase), phase);
 });
 
+const organizations = { partD: '00000000-0000-4000-8000-00000000000d', reader: '00000000-0000-4000-8000-00000000000e' };
+const diagEvent = (fields: object) => JSON.stringify({ timestamp: '2026-11-20T00:00:01Z', fields });
+const diagTiming = (lane: string, phase: string, us: number, organization = '', interrupted = false) =>
+  diagEvent({ event: 'move_diag_timing', lane, organization, phase, us, interrupted });
+
 test('server parsing keeps Part D read lanes apart from the write-lane 503 accounting', () => {
-  const event = (fields: object) => JSON.stringify({ timestamp: '2026-11-20T00:00:01Z', fields });
-  const timing = (lane: string, phase: string, us: number) => event({ event: 'move_diag_timing', lane, phase, us, interrupted: false });
-  const app = appEvidence([timing('topics', 'topic_page_sql', 40), timing('topics', 'topic_barrier', 7),
-    timing('topics', 'channel_advisory_sql', 3), timing('channels', 'channel_counts_sql', 9), timing('channels', 'not_a_phase', 1),
-    timing('reader', 'channel_list_total', 1),
-    event({ event: 'move_diag_503', lane: 'topics', reason: 'watermark_channel_timeout' }),
-    event({ event: 'move_diag_503', lane: 'send', reason: 'channel_queue_full' })].join('\n'));
+  const app = appEvidence([diagTiming('topics', 'topic_page_sql', 40), diagTiming('topics', 'topic_barrier', 7),
+    diagTiming('topics', 'channel_advisory_sql', 3), diagTiming('channels', 'channel_counts_sql', 9, organizations.partD),
+    diagTiming('channels', 'not_a_phase', 1, organizations.partD), diagTiming('reader', 'channel_list_total', 1),
+    diagEvent({ event: 'move_diag_503', lane: 'topics', reason: 'watermark_channel_timeout' }),
+    diagEvent({ event: 'move_diag_503', lane: 'send', reason: 'channel_queue_full' })].join('\n'), organizations);
   assert.equal(app.byLane.topics.phasesUs.topic_page_sql.p50, 40);
   assert.equal(app.byLane.topics.phasesUs.channel_advisory_sql.count, 1);
   assert.deepEqual(Object.keys(app.byLane.channels.phasesUs), ['channel_counts_sql']);
+  assert.deepEqual(Object.keys(app.byLane.reader.phasesUs), []);
   assert.equal(app.byLane.topics.reasons.watermark_channel_timeout, 1);
   assert.equal(app.timing.length, 4);
   assert.deepEqual([app.unavailable.length, app.writeUnavailable], [2, 1]);
+});
+
+test('Channel-list events are attributed by Organization and never mix the reader into the Part D lane', () => {
+  const app = appEvidence([diagTiming('channels', 'channel_list_total', 5, organizations.reader),
+    diagTiming('channels', 'channel_list_total', 6, organizations.partD),
+    diagTiming('channels', 'channel_list_total', 7), diagTiming('channels', 'channel_list_total', 8, 'not-a-fixture-org'),
+    diagEvent({ event: 'move_diag_503', lane: 'channels', organization: organizations.reader, reason: 'unclassified' })].join('\n'), organizations);
+  assert.deepEqual([app.byLane.channels.phasesUs.channel_list_total.max, app.byLane.reader.phasesUs.channel_list_total.max], [6, 5]);
+  assert.equal(app.byLane.reader.reasons.unclassified, 1);
+  assert.equal(app.timing.length, 2);
+  assert.doesNotMatch(JSON.stringify(app), /0000-4000/);
+  assert.equal(appEvidence(diagTiming('channels', 'channel_list_total', 6, organizations.partD)).timing.length, 0);
+});
+
+test('read-lane completeness requires finished samples for every phase of each enabled lane', () => {
+  const lines = (lane: string, organization = '', interrupted = false, skip = '') =>
+    requiredReadPhases[lane as keyof typeof requiredReadPhases].filter(phase => phase !== skip)
+      .map(phase => diagTiming(lane, phase, 4, organization, interrupted));
+  const complete = [...lines('channels', organizations.partD), ...lines('topics')];
+  assert.deepEqual(readTimingProblems(appEvidence(complete.join('\n'), organizations).byLane, 'all'), []);
+  const check = (log: string[], readLanes = 'all') => readTimingProblems(appEvidence(log.join('\n'), organizations).byLane, readLanes);
+  assert.deepEqual(check([...lines('channels', organizations.partD), ...lines('topics', '', true)]),
+    ['Topic-list timings (topic_visible_scoped, topic_dm_check, topic_barrier, topic_page_tx, topic_page_sql)']);
+  assert.deepEqual(check([...lines('channels', organizations.partD, false, 'channel_counts_sql'), ...lines('topics')]),
+    ['Channel-list timings (channel_counts_sql)']);
+  assert.deepEqual(check([...lines('channels', organizations.reader), ...lines('topics')]),
+    ['Channel-list timings (channel_list_total, channel_visible_sql, channel_history_sql, channel_counts_sql)']);
+  assert.deepEqual(check(lines('topics'), 'topics'), []);
+  assert.deepEqual(check(lines('channels', organizations.partD), 'channels'), []);
+  assert.equal(check(lines('channels', organizations.partD), 'topics').length, 1);
+  assert.equal(readTimingProblems(undefined, 'all').length, 2);
 });
 
 test('statement groups keep the write groups first and identify the Part D read statements', () => {

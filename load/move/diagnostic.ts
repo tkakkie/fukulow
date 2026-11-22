@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { createGunzip } from 'node:zlib';
 import { command, docker, type Stack } from '../slice5/stack.ts';
 import { appEvidence, cgroupSample, dbEvidence, dbSampleIntervalMs, k6Evidence, parseDbSample, parseStatements,
-  statementGroupSql, type DbSample } from './diagnostic-evidence.ts';
+  statementGroupSql, type DbSample, type Organizations } from './diagnostic-evidence.ts';
 import { diagnosticLabel } from './diagnostic-mode.ts';
 
 const exec = promisify(execFile);
@@ -130,7 +130,7 @@ export function diagnosticOutput(dir: string) {
     file: join(metricsDir, 'k6.json.gz') };
 }
 
-export function captureDiagnostic(stack: Stack, name: string, metricsFile: string) {
+export function captureDiagnostic(stack: Stack, name: string, metricsFile: string, organizations: Organizations) {
   stack.sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT pg_stat_statements_reset();');
   const since = new Date().toISOString();
   const db = samplePostgres(stack);
@@ -139,7 +139,7 @@ export function captureDiagnostic(stack: Stack, name: string, metricsFile: strin
     const [postgres, containers] = await Promise.all([db.stop(), resources.stop()]);
     const [app, generator, statements] = await Promise.allSettled([
       exec('docker', ['logs', '--since', since, stack.app], { timeout: 15000, maxBuffer: 128 * 1024 * 1024 })
-        .then(result => appEvidence(result.stderr)),
+        .then(result => appEvidence(result.stderr, organizations)),
       readK6(metricsFile),
       exec('docker', ['exec', stack.db, 'psql', '-XAtq', '-v', 'ON_ERROR_STOP=1', '-U', 'fukulow', '-d', 'fukulow',
         '-c', statementsSql], { timeout: 5000 }).then(result => parseStatements(result.stdout.trim())),

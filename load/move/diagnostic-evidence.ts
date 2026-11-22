@@ -23,8 +23,9 @@ export function distributions(numbers: number[]) {
 }
 
 const lanes = ['send', 'move'] as const;
-// The server tags the Part D read routes too; the reader lane shares the Channel-list route.
-const serverLanes = [...lanes, 'channels', 'topics'] as const;
+// The server tags the Part D read routes too. The second-Organization reader shares the
+// Channel-list route, so Channel-list events are split by their Organization.
+const serverLanes = [...lanes, 'channels', 'topics', 'reader'] as const;
 const scenarios = [...lanes, 'reader', 'channels', 'topic0', 'topic1', 'topic2', 'topic3'] as const;
 type Lane = typeof lanes[number];
 type ServerLane = typeof serverLanes[number];
@@ -39,15 +40,25 @@ const reasons = ['global_queue_full', 'channel_queue_full', 'channel_admission_t
   'limiter_duplicate_waiters_cap', 'limiter_pending_cap', 'limiter_member_buckets_cap', 'shutdown', 'unclassified'] as const;
 const member = <T extends string>(list: readonly T[], input: unknown): input is T => list.includes(input as T);
 
-export function appEvidence(log: string) {
+export type Organizations = { partD: string; reader: string };
+
+function serverLane(lane: unknown, organization: unknown, organizations?: Organizations): ServerLane | undefined {
+  if (lane !== 'channels') return member(serverLanes, lane) && lane !== 'reader' ? lane : undefined;
+  if (organizations && organization === organizations.partD) return 'channels';
+  if (organizations && organization === organizations.reader) return 'reader';
+  return undefined;
+}
+
+export function appEvidence(log: string, organizations?: Organizations) {
   const timing: { at: number; lane: ServerLane; phase: typeof phases[number]; us: number; interrupted: boolean }[] = [];
   const unavailable: { at: number; lane: ServerLane; reason: typeof reasons[number] }[] = [];
   for (const line of log.split('\n')) {
     if (!line.includes('move_diag_')) continue;
     const { timestamp, fields } = parseLine(line);
     const at = time(timestamp);
-    const { event, lane, phase, us, interrupted, reason } = object(fields);
-    if (!Number.isFinite(at) || !member(serverLanes, lane)) continue;
+    const { event, lane: tagged, organization, phase, us, interrupted, reason } = object(fields);
+    const lane = serverLane(tagged, organization, organizations);
+    if (!Number.isFinite(at) || !lane) continue;
     if (event === 'move_diag_timing' && member(phases, phase) && nonnegative(us) && typeof interrupted === 'boolean')
       timing.push({ at, lane, phase, us, interrupted });
     if (event === 'move_diag_503' && member(reasons, reason)) unavailable.push({ at, lane, reason });
@@ -64,6 +75,20 @@ export function appEvidence(log: string) {
       })),
     }])),
   };
+}
+
+// Every phase of an enabled Part D read lane needs finished (non-interrupted) samples.
+export const requiredReadPhases = {
+  channels: ['channel_list_total', 'channel_visible_sql', 'channel_history_sql', 'channel_counts_sql'],
+  topics: ['topic_visible_scoped', 'topic_dm_check', 'topic_barrier', 'topic_page_tx', 'topic_page_sql'],
+} as const;
+
+export function readTimingProblems(byLane: Partial<Record<string, { phasesUs: Record<string, { count: number }> }>> | undefined,
+  readLanes: string) {
+  return (['channels', 'topics'] as const).filter(lane => readLanes === 'all' || readLanes === lane).flatMap(lane => {
+    const absent = requiredReadPhases[lane].filter(phase => (byLane?.[lane]?.phasesUs[phase]?.count ?? 0) === 0);
+    return absent.length ? [`${lane === 'channels' ? 'Channel-list' : 'Topic-list'} timings (${absent.join(', ')})`] : [];
+  });
 }
 
 export function k6CeilingWarnings(stderr: string) {

@@ -5,7 +5,7 @@ import { arch, cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:o
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
-import { k6CeilingWarnings } from './diagnostic-evidence.ts';
+import { k6CeilingWarnings, readTimingProblems } from './diagnostic-evidence.ts';
 import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnostic.ts';
 import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, rejectDiagnosticImage, type ReadLanes } from './diagnostic-mode.ts';
 import { buildFixture, committedMoves, head, type Seeded } from './fixture.ts';
@@ -66,7 +66,8 @@ async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir:
     k6, 'run', '--quiet', ...(output?.k6Args ?? []), 'load/move/workload-k6.ts'];
   const prior = head(stack, seeded.data);
   const resources = diagnosticRun ? undefined : sampler(stack, () => name);
-  const capture = output ? captureDiagnostic(stack, name, output.file) : undefined;
+  const capture = output ? captureDiagnostic(stack, name, output.file,
+    { partD: seeded.data.organization, reader: seeded.data.otherOrganization }) : undefined;
   const seconds = step.part === 'E' ? p.replaySeconds : p.seconds;
   let stdout = '', stderr = '';
   let problem: string | undefined;
@@ -204,10 +205,7 @@ async function main() {
             const { app, k6: generator, postgres, containers } = measured.extra;
             const missing = [
               ...(!app?.byLane.send.phasesUs.before_admission ? ['send timings'] : []),
-              ...(selection.readTimingSampleEvery && selection.readLanes !== 'topics' && !app?.byLane.channels.phasesUs.channel_list_total
-                ? ['Channel-list timings'] : []),
-              ...(selection.readTimingSampleEvery && selection.readLanes !== 'channels' && !app?.byLane.topics.phasesUs.topic_page_sql
-                ? ['Topic-list timings'] : []),
+              ...(selection.readTimingSampleEvery ? readTimingProblems(app?.byLane, selection.readLanes) : []),
               ...(!generator?.vus.some(point => point.active !== undefined && point.allocated !== undefined) ? ['k6 VU gauges'] : []),
               ...(!postgres.statementsAvailable ? ['PostgreSQL execution statistics'] : []),
               ...(!postgres.samples.length ? ['PostgreSQL wait samples'] : []),

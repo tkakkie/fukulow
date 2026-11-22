@@ -191,7 +191,7 @@ index fdf4f86..6fd8702 100644
          tx.connection()?.execute(sql).await?;
 @@ -35,7 +38,7 @@ impl Transaction {
      }
- 
+
      pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
 -        self.connection()?.execute("COMMIT").await?;
 +        crate::move_diagnostic::timed("commit_sql", self.connection()?.execute("COMMIT")).await?;
@@ -217,7 +217,7 @@ index fdf4f86..6fd8702 100644
 +    .await?;
      Ok(())
  }
- 
+
 diff --git a/server/src/messages/limiter.rs b/server/src/messages/limiter.rs
 index fdaf348..087793e 100644
 --- a/server/src/messages/limiter.rs
@@ -459,14 +459,14 @@ index e245339..5315901 100644
 +    );
 +    crate::move_diagnostic::timed("channel_list_total", list).await
  }
- 
+
  #[utoipa::path(put, path = "/api/v1/orgs/{org}/channels/{id}/read", request_body = MarkReadRequest,
 diff --git a/server/src/move_diagnostic.rs b/server/src/move_diagnostic.rs
 new file mode 100644
-index 0000000..a5f1748
+index 0000000..5b48f25
 --- /dev/null
 +++ b/server/src/move_diagnostic.rs
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,141 @@
 +use axum::response::Response;
 +use std::{
 +    future::Future,
@@ -476,6 +476,7 @@ index 0000000..a5f1748
 +    },
 +    time::Instant,
 +};
++use uuid::Uuid;
 +
 +tokio::task_local! {
 +    static WRITE: Write;
@@ -499,6 +500,8 @@ index 0000000..a5f1748
 +#[derive(Clone)]
 +struct Write {
 +    lane: &'static str,
++    // Set for the Channel-list route only: two workloads share it in separate Organizations.
++    organization: Option<Uuid>,
 +    started: Instant,
 +    sampled: bool,
 +    reason: Arc<OnceLock<&'static str>>,
@@ -506,10 +509,12 @@ index 0000000..a5f1748
 +
 +pub(crate) async fn request(
 +    lane: &'static str,
++    organization: Option<Uuid>,
 +    future: impl Future<Output = Response>,
 +) -> Response {
 +    let write = Write {
 +        lane,
++        organization,
 +        started: Instant::now(),
 +        sampled: sampled(lane),
 +        reason: Arc::default(),
@@ -518,7 +523,8 @@ index 0000000..a5f1748
 +    let response = WRITE.scope(write, future).await;
 +    if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE {
 +        let reason = reason.get().copied().unwrap_or("unclassified");
-+        tracing::info!(target: "fukulow", event = "move_diag_503", lane, reason);
++        let organization = organization.map(|id| id.to_string()).unwrap_or_default();
++        tracing::info!(target: "fukulow", event = "move_diag_503", lane, organization, reason);
 +    }
 +    response
 +}
@@ -540,7 +546,13 @@ index 0000000..a5f1748
 +pub(crate) fn before_admission() {
 +    let _ = WRITE.try_with(|write| {
 +        if write.sampled {
-+            record(write.lane, "before_admission", write.started, false);
++            record(
++                write.lane,
++                write.organization,
++                "before_admission",
++                write.started,
++                false,
++            );
 +        }
 +    });
 +}
@@ -550,6 +562,7 @@ index 0000000..a5f1748
 +        .try_with(|write| {
 +            write.sampled.then(|| Timer {
 +                lane: write.lane,
++                organization: write.organization,
 +                phase,
 +                started: Instant::now(),
 +                interrupted: true,
@@ -566,6 +579,7 @@ index 0000000..a5f1748
 +
 +struct Timer {
 +    lane: &'static str,
++    organization: Option<Uuid>,
 +    phase: &'static str,
 +    started: Instant,
 +    interrupted: bool,
@@ -573,19 +587,32 @@ index 0000000..a5f1748
 +
 +impl Drop for Timer {
 +    fn drop(&mut self) {
-+        record(self.lane, self.phase, self.started, self.interrupted);
++        record(
++            self.lane,
++            self.organization,
++            self.phase,
++            self.started,
++            self.interrupted,
++        );
 +    }
 +}
 +
-+fn record(lane: &'static str, phase: &'static str, started: Instant, interrupted: bool) {
-+    tracing::info!(target: "fukulow", event = "move_diag_timing", lane, phase,
++fn record(
++    lane: &'static str,
++    organization: Option<Uuid>,
++    phase: &'static str,
++    started: Instant,
++    interrupted: bool,
++) {
++    let organization = organization.map(|id| id.to_string()).unwrap_or_default();
++    tracing::info!(target: "fukulow", event = "move_diag_timing", lane, organization, phase,
 +        us = started.elapsed().as_secs_f64() * 1_000_000.0, interrupted);
 +}
 diff --git a/server/src/observability.rs b/server/src/observability.rs
-index 4a356be..1231feb 100644
+index 4a356be..e380ac6 100644
 --- a/server/src/observability.rs
 +++ b/server/src/observability.rs
-@@ -110,7 +110,25 @@ pub(crate) async fn request(request: Request, next: Next) -> Response {
+@@ -110,7 +110,32 @@ pub(crate) async fn request(request: Request, next: Next) -> Response {
          status = tracing::field::Empty, duration_ms = tracing::field::Empty);
      async move {
          let started = Instant::now();
@@ -605,8 +632,15 @@ index 4a356be..1231feb 100644
 +            ("GET", Some("/api/v1/orgs/{org}/channels/{id}/topics")) => Some("topics"),
 +            _ => None,
 +        };
++        // The Organization separates the Part D Channel list from the second-Organization reader.
++        let organization = (lane == Some("channels"))
++            .then(|| request.uri().path().split('/').nth(4))
++            .flatten()
++            .and_then(|id| uuid::Uuid::parse_str(id).ok());
 +        let response = match lane {
-+            Some(lane) => crate::move_diagnostic::request(lane, next.run(request)).await,
++            Some(lane) => {
++                crate::move_diagnostic::request(lane, organization, next.run(request)).await
++            }
 +            None => next.run(request).await,
 +        };
          let span = tracing::Span::current();
