@@ -26,7 +26,7 @@ import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFi
 import { timeQuery } from './d3r/timing.ts';
 import { assertHeadroom, dfBytes, dockerDiskArgs, headroomSampler, outputDisk, projectHeadroom, type Disk } from './d3r/headroom.ts';
 
-test('v15 freezes the approved settings and every production migration while preserving v13', () => {
+test('v16 freezes the approved settings and every production migration while preserving v13', () => {
   const {sha256, frozen} = loadManifest();
   const baseline = v13();
   assert.equal(sha256, hash(JSON.stringify(frozen)));
@@ -58,7 +58,7 @@ test('v14 stays pinned and v15 differs from it only by the rehearsal, the new mi
   const v14 = JSON.parse(v14Text);
   assert.equal(v14.sha256, 'a7210a32e53b9adacc5fd6951520167ad2171d6f8a6a5b07d3210bdb0f4ba9c5');
   assert.equal(v14.sha256, hash(JSON.stringify(v14.frozen)));
-  const {frozen} = loadManifest();
+  const {frozen} = pinnedV15();
   const keys = [...new Set([...Object.keys(v14.frozen), ...Object.keys(frozen)])];
   const changed = keys.filter(key => JSON.stringify(v14.frozen[key]) !== JSON.stringify((frozen as Record<string, unknown>)[key]));
   assert.deepEqual(changed.sort(), ['migrations', 'rehearsal', 'sourceHashes', 'version']);
@@ -77,6 +77,31 @@ test('v14 stays pinned and v15 differs from it only by the rehearsal, the new mi
     'load/search-engines/d3r/acceptance.ts', 'load/search-engines/d3r/headroom.ts', 'load/search-engines/d3r/labels.ts',
     'load/search-engines/d3r/manifest.ts',
     'load/search-engines/d3r/run.ts', 'load/search-engines/d3r/snapshot.ts', added]);
+});
+
+function pinnedV15(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v15.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), '1130166b3d772080a2db37da3c03b9c1f71586a39550e78b52f740e35600c1cd');
+  const v15 = JSON.parse(text);
+  assert.equal(v15.sha256, 'e28d1b584f2e27544ab967ee21f1dd0e0f42c0d3a1c51fbb5c8a92a7b51e1b66');
+  assert.equal(v15.sha256, hash(JSON.stringify(v15.frozen)));
+  return v15;
+}
+
+test('v15 stays pinned and v16 differs from it only by the date, the new migration and its sources', () => {
+  const v15 = pinnedV15();
+  const {frozen} = loadManifest();
+  const keys = [...new Set([...Object.keys(v15.frozen), ...Object.keys(frozen)])];
+  const changed = keys.filter(key => JSON.stringify((v15.frozen as Record<string, unknown>)[key]) !== JSON.stringify((frozen as Record<string, unknown>)[key]));
+  assert.deepEqual(changed.sort(), ['date', 'migrations', 'sourceHashes', 'version']);
+  assert.equal(v15.frozen.version, 15);
+  assert.equal(frozen.version, 16);
+  const added = 'server/migrations/202611221101_topics_page.sql';
+  assert.deepEqual(frozen.migrations, [...v15.frozen.migrations, added].sort());
+  const before = new Map<string, string>(v15.frozen.sourceHashes.map((s: {path: string; sha256: string}) => [s.path, s.sha256]));
+  assert.ok([...before.keys()].every(path => frozen.sourceHashes.some(source => source.path === path)));
+  assert.deepEqual(frozen.sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', added]);
 });
 
 test('production d3r steps and SQL bind order have an independent source guard', () => {

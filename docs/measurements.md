@@ -9,7 +9,7 @@ Raw logs, artifact directories and local paths outside Git may be gone ([2026-11
 
 ## Topic projection paging (#137)
 
-2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. The [prefix aggregation decision](decisions/messages.md#topics-137-138) calls for remeasurement at ~649k (a proportional projection).
+2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. A proportional projection put the prefix query's 100 ms read p95 at ~649k Messages.
 
 Run `MEASURE_TOPICS=10000 cargo test --release -p fukulow-server --lib measure_topic_projection_pages -- --ignored --nocapture` against test PostgreSQL. Shared Mac, warm in-process HTTP, no TCP/proxy/TLS. [Full record](../load/measurements-archive.md#137-round-1-mixed-timeline-and-concurrent-send-remeasurement-2026-11-11)
 

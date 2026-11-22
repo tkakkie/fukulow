@@ -43,9 +43,9 @@ async fn timeline_and_single_topic_never_cache_a_generic_plan(pool: PgPool) {
         }
         let (same, cached): (i32, i64) = sqlx::query_as(
             "SELECT pg_backend_pid(), count(*) FROM pg_prepared_statements \
-             WHERE statement LIKE $1",
+             WHERE statement = $1",
         )
-        .bind("%positions AS (%")
+        .bind(crate::messages::topics::projection::page_sql())
         .fetch_one(&single)
         .await
         .unwrap();

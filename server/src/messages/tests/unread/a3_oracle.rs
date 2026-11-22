@@ -5,6 +5,11 @@ use super::{
 };
 use sqlx::Row;
 
+mod projection;
+
+const SEEDS: [u64; 3] = [0x0051_9519, 0xa3a3_a3a3, 0x0dd5_eed5];
+const STEPS: usize = 160;
+
 // Deterministic so a failing seed reproduces; no dependency for a test-only PRNG.
 struct Rng(u64);
 
@@ -165,14 +170,37 @@ async fn counts(
         .collect()
 }
 
-/// Direct SQL steps bypass the Topic summary writers; restore a summary that
-/// satisfies `topics_live_summary` so later API Moves see a consistent row.
+async fn assert_topic_summaries(pool: &PgPool, org: Uuid, channel: Uuid, context: &str) {
+    let mismatches: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT t.id FROM topics t
+         LEFT JOIN messages m ON m.organization_id=t.organization_id AND m.channel_id=t.channel_id
+             AND m.topic_id=t.id AND NOT m.deleted
+         WHERE t.organization_id=$1 AND t.channel_id=$2
+         GROUP BY t.organization_id,t.id
+         HAVING (t.message_count,t.first_seq,t.last_seq)
+             IS DISTINCT FROM (count(m.id),min(m.seq),max(m.seq))",
+    )
+    .bind(org)
+    .bind(channel)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert!(
+        mismatches.is_empty(),
+        "{context}: Topic summary drift in {mismatches:?}"
+    );
+}
+
+/// Direct SQL mutations bypass the Topic summary writer and the mutation floor.
+/// Repair both before comparing a projection at a reconstructible W.
 async fn resync_topics(pool: &PgPool, org: Uuid, channel: Uuid) {
     sqlx::query("UPDATE topics t SET message_count=s.n, first_seq=s.first, last_seq=s.last \
         FROM (SELECT t2.id, count(m.id) AS n, min(m.seq) AS first, max(m.seq) AS last FROM topics t2 \
               LEFT JOIN messages m ON m.organization_id=t2.organization_id AND m.channel_id=t2.channel_id AND m.topic_id=t2.id AND NOT m.deleted \
               WHERE t2.organization_id=$1 AND t2.channel_id=$2 GROUP BY t2.id) s \
         WHERE t.organization_id=$1 AND t.channel_id=$2 AND t.id=s.id")
+        .bind(org).bind(channel).execute(pool).await.unwrap();
+    sqlx::query("UPDATE channel_message_sequences SET mutation_seq=seq WHERE organization_id=$1 AND channel_id=$2")
         .bind(org).bind(channel).execute(pool).await.unwrap();
 }
 
@@ -205,6 +233,7 @@ async fn step(
                 .status();
             assert!(status.is_success(), "send {status}");
             sent_keys.push((actor, channel, key, value));
+            assert_topic_summaries(pool, org, channel, "after send").await;
             format!("send {actor} {topic}")
         }
         5 => {
@@ -227,7 +256,7 @@ async fn step(
                 .bind(org).bind(channel).fetch_one(pool).await.unwrap();
             let seq = rng.below(top as usize + 3) as i64;
             let topic: Option<Uuid> = if rng.below(2) == 0 {
-                sqlx::query_scalar("SELECT id FROM topics WHERE organization_id=$1 AND channel_id=$2 ORDER BY id OFFSET $3 LIMIT 1")
+                sqlx::query_scalar("SELECT id FROM topics WHERE organization_id=$1 AND channel_id=$2 ORDER BY name_key OFFSET $3 LIMIT 1")
                     .bind(org).bind(channel).bind(rng.below(4) as i64).fetch_optional(pool).await.unwrap()
             } else {
                 None
@@ -244,7 +273,7 @@ async fn step(
         }
         8 => {
             // The pre-A3 writer form: the trigger computes the ordinals, not the writer.
-            let topic: Option<Uuid> = sqlx::query_scalar("SELECT id FROM topics WHERE organization_id=$1 AND channel_id=$2 ORDER BY id LIMIT 1")
+            let topic: Option<Uuid> = sqlx::query_scalar("SELECT id FROM topics WHERE organization_id=$1 AND channel_id=$2 ORDER BY name_key LIMIT 1")
                 .bind(org).bind(channel).fetch_optional(pool).await.unwrap();
             let Some(topic) = topic else {
                 return "upsert skipped".into();
@@ -258,7 +287,7 @@ async fn step(
             format!("upsert {actor} {seq}")
         }
         9 => {
-            let root: Option<(Uuid, i64)> = sqlx::query_as("SELECT id,version FROM messages WHERE organization_id=$1 AND channel_id=$2 AND reply_to_id IS NULL ORDER BY id OFFSET $3 LIMIT 1")
+            let root: Option<(Uuid, i64)> = sqlx::query_as("SELECT id,version FROM messages WHERE organization_id=$1 AND channel_id=$2 AND reply_to_id IS NULL ORDER BY seq OFFSET $3 LIMIT 1")
                 .bind(org).bind(channel).bind(rng.below(8) as i64).fetch_optional(pool).await.unwrap();
             let Some((root, version)) = root else {
                 return "move skipped".into();
@@ -279,22 +308,31 @@ async fn step(
                 json!({"operation_id":Uuid::new_v4(),"expected_version":version,"topic_name":name}),
             )
             .await;
-            assert!(
-                !response.status().is_server_error(),
-                "move {}",
-                response.status()
-            );
-            format!("move {root} {name} {}", response.status())
+            let status = response.status();
+            assert!(!status.is_server_error(), "move {status}");
+            if status.is_success() {
+                if let Some(seq) = body(response).await["move_seq"].as_i64() {
+                    let floor: i64 = sqlx::query_scalar(
+                        "SELECT mutation_seq FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2",
+                    )
+                    .bind(org).bind(channel).fetch_one(pool).await.unwrap();
+                    assert_eq!(floor, seq, "Move must advance the floor");
+                }
+                assert_topic_summaries(pool, org, channel, "after Move").await;
+            }
+            format!("move {root} {name} {status}")
         }
         10 => {
             // Topic to main timeline is not an API operation; exercise the trigger directly.
-            let n = sqlx::query("UPDATE messages SET topic_id=NULL WHERE organization_id=$1 AND channel_id=$2 AND id=(SELECT id FROM messages WHERE organization_id=$1 AND channel_id=$2 AND topic_id IS NOT NULL ORDER BY id OFFSET $3 LIMIT 1)")
+            assert_topic_summaries(pool, org, channel, "before Topic to main").await;
+            let n = sqlx::query("UPDATE messages SET topic_id=NULL WHERE organization_id=$1 AND channel_id=$2 AND id=(SELECT id FROM messages WHERE organization_id=$1 AND channel_id=$2 AND topic_id IS NOT NULL ORDER BY seq OFFSET $3 LIMIT 1)")
                 .bind(org).bind(channel).bind(rng.below(5) as i64).execute(pool).await.unwrap().rows_affected();
             resync_topics(pool, org, channel).await;
             format!("to main {n}")
         }
         11 => {
-            let n = sqlx::query("UPDATE messages SET deleted=NOT deleted WHERE organization_id=$1 AND channel_id=$2 AND id=(SELECT id FROM messages WHERE organization_id=$1 AND channel_id=$2 ORDER BY id OFFSET $3 LIMIT 1)")
+            assert_topic_summaries(pool, org, channel, "before delete toggle").await;
+            let n = sqlx::query("UPDATE messages SET deleted=NOT deleted WHERE organization_id=$1 AND channel_id=$2 AND id=(SELECT id FROM messages WHERE organization_id=$1 AND channel_id=$2 ORDER BY seq OFFSET $3 LIMIT 1)")
                 .bind(org).bind(channel).bind(rng.below(10) as i64).execute(pool).await.unwrap().rows_affected();
             resync_topics(pool, org, channel).await;
             format!("delete toggle {n}")
@@ -370,12 +408,12 @@ impl World {
 // the exact pre-A3 query and the full-recount check.
 #[fukulow_test::test]
 async fn a3_counts_equal_the_pre_a3_query_after_every_random_step(pool: PgPool) {
-    for seed in [0x0051_9519_u64, 0xa3a3_a3a3, 0x0dd5_eed5] {
+    for seed in SEEDS {
         let world = World::new(&pool).await;
         let mut rng = Rng(seed);
         let mut keys = Vec::new();
         world.assert_oracle(&pool, "start").await;
-        for n in 0..160 {
+        for n in 0..STEPS {
             let what = step(&world, &pool, &mut rng, &mut keys).await;
             world
                 .assert_oracle(&pool, &format!("seed {seed:x} step {n}: {what}"))
