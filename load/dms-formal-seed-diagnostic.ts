@@ -115,8 +115,9 @@ export function redactSeedDbLogs(raw: string) {
   return raw.split('\n').flatMap(line => {
     if (stats.test(line)) return inAutovacuum ? [line] : [];
     const match = prefix.exec(line);
-    inAutovacuum = false;
+    // Other continuation lines (pages, tuples) do not end the autovacuum entry; only a new log entry does.
     if (!match) return [];
+    inAutovacuum = false;
     if (/^automatic (?:aggressive )?(?:vacuum|analyze) of table /.test(match[2])) inAutovacuum = true;
     const [, header, message] = match;
     if (/^(checkpoint (?:starting|complete):|automatic (?:aggressive )?(?:vacuum|analyze) of table "[\w.]+":|temporary file: path "base\/pgsql_tmp\/pgsql_tmp[\d.]+", size \d+$)/.test(message)) return [line];

@@ -102,7 +102,7 @@ test('autovacuum statistics lines are kept only after an autovacuum header and i
     ts + '\tsystem usage: CPU: user: 0.01 s, system: 0.00 s, elapsed: 1.25 s',
   ];
   const raw = [
-    header, ...stats, ts + '\tsecret continuation token',
+    header, ts + '\tpages: 0 removed, 10 remain', ts + '\ttuples: 0 removed, 5 remain', ...stats, ts + '\tsecret continuation token',
     ts + '2026-11-22 00:00:01.000 UTC [43] ERROR:  duplicate key secret',
     stats[3],
   ].join('\n');
