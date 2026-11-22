@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { judge, judgeAll, rehearsalChecks, runProblems, settings, validity, pairs, plan, scope, sequence, type Row, type Run, type Lane } from './pool-before-after-summary.ts';
+import { judge, judgeAll, overall, rehearsalChecks, rehearsalForecast, runProblems, settings, validity, pairs, plan, scope, sequence, type Row, type Run, type Lane } from './pool-before-after-summary.ts';
 const lane=(rate=250):Lane=>({rate,seconds:60,attempted:rate*60,accepted:rate*60,rejected429:0,rejected503:0,otherErrors:0,clientTimeouts:0,transportErrors:0,droppedIterations:0,p95:10,p99:20});
 const row=():Row=>({rate:250,seconds:60,send:lane(),reader:lane(2),evidence:{complete:true,samples:60,maxSampleGapMs:1000,samplingErrors:0}});
 const runs=():Run[]=>pairs().flatMap((arms,i)=>arms.map(arm=>({scope,pair:i+1,arm,scenario:'send',smoke:false,steps:[row()],reader:{...lane(2),seconds:284,attempted:568,accepted:568}})));
@@ -129,4 +129,70 @@ test('#771 rehearsal applies every per-run evidence check judge() uses, without 
   assert.deepEqual(runProblems(drop[3]),['250/s: send: target load not generated']);
   assert.deepEqual(rehearsalChecks(all().slice(1))[0].problems,['0 runs, expected 1']);
   for(const j of judgeAll(all(),false)) assert.equal('reason' in j && j.reason,'run incomplete, interrupted, smoke, missing results or cleanup failed');
+});
+
+// #196 B rules pre-registered on 2026-11-22: rule 2 (B generator), rule 1 (B saturation), rule 3 (A generator).
+const dropA=(r:Run[],name:'send'|'reads'|'signin'='send',edit:(l:Lane)=>void=()=>{})=>{for(const run of r.filter(c=>c.arm==='A')){const l=run.steps[0][name]!;l.droppedIterations=100;l.attempted-=100;l.accepted-=100;edit(l);}};
+test('#196 rule 2: a B generator shortfall is NOT EVALUATED, never REPORT ONLY, even when B is also saturated',()=>{
+  const r=runs();for(const b of r.filter(c=>c.arm==='B')){const l=b.steps[0].send;l.droppedIterations=100;l.attempted=14900;l.accepted=14000;l.rejected503=900;}
+  const j=judge(r,'send',250);assert.equal(j.status,'NOT EVALUATED');
+  for(const p of j.pairs){assert.equal(p.status,'NOT EVALUATED');assert.match(p.reason!,/^B generator: send: target load not generated/);}
+});
+test('#196 rule 1: B saturated on valid load is REPORT ONLY whatever the A generator did',()=>{
+  const r=runs();for(const b of r.filter(c=>c.arm==='B')){b.steps[0].send.accepted=14000;b.steps[0].send.rejected503=1000;}
+  dropA(r);assert.equal(judge(r,'send',250).status,'REPORT ONLY');
+});
+test('#196 rule 3: an A-only shortfall fails only with server evidence on every short lane',()=>{
+  for(const edit of [(l:Lane)=>{l.accepted-=10;l.rejected503=10;},(l:Lane)=>{l.accepted-=10;l.otherErrors=10;},(l:Lane)=>{l.accepted-=10;l.clientTimeouts=10;},(l:Lane)=>{l.p95=11.01;l.p99=30;}]) {
+    const r=runs();dropA(r,'send',edit);const j=judge(r,'send',250);
+    assert.equal(j.status,'FAIL');assert.ok(j.pairs.every(p=>p.reason==='A capacity, server evidence (send)'));
+  }
+  for(const edit of [()=>{},(l:Lane)=>{l.accepted-=10;l.transportErrors=10;},(l:Lane)=>{l.p95=11;l.p99=30;}]) {
+    const r=runs();dropA(r,'send',edit);const j=judge(r,'send',250);
+    assert.equal(j.status,'NOT EVALUATED');assert.ok(j.pairs.every(p=>p.reason?.startsWith('A generator without server evidence: ')));
+  }
+  // Two short lanes: evidence on one only is not enough.
+  const m=mixedRuns();dropA(m,'send',l=>{l.accepted-=10;l.rejected503=10;});dropA(m,'reads');
+  assert.equal(judge(m,'mixed',250).status,'NOT EVALUATED');
+  const both=mixedRuns();dropA(both,'send',l=>{l.accepted-=10;l.rejected503=10;});dropA(both,'reads',l=>{l.accepted-=5;l.clientTimeouts=5;});
+  assert.equal(judge(both,'mixed',250).status,'FAIL');
+});
+test('#196 rule 3 never overrides other invalid evidence',()=>{
+  const r=runs();dropA(r,'send',l=>{l.accepted-=10;l.rejected503=10;});r.find(c=>c.arm==='A')!.steps[0].evidence.samples=0;
+  assert.equal(judge(r,'send',250).pairs[0].status,'NOT EVALUATED');
+  const b=runs();dropA(b,'send',l=>{l.accepted-=10;l.rejected503=10;});b[0].steps[0].send.p95=null;
+  assert.equal(judge(b,'send',250).pairs[0].status,'NOT EVALUATED');
+});
+test('#196 overall: any FAIL fails; PASS needs every step PASS or REPORT ONLY and one PASS',()=>{
+  const s=(...x:string[])=>x.map(status=>({status}));
+  assert.equal(overall(s('PASS','NOT EVALUATED','FAIL')),'FAIL');
+  assert.equal(overall(s('PASS','REPORT ONLY')),'PASS');
+  assert.equal(overall(s('PASS','NOT EVALUATED')),'NOT EVALUATED');
+  assert.equal(overall(s('REPORT ONLY','REPORT ONLY')),'NOT EVALUATED');
+  assert.equal(overall(s()),'NOT EVALUATED');
+  const mixed=mixedRuns().map(r=>({...r,steps:settings.rates.map(rate=>({...row(),rate,send:lane(rate),reads:lane(500),signin:lane(20)}))}));
+  const send=runs().map(r=>({...r,steps:settings.rates.map(rate=>({...row(),rate,send:lane(rate)}))}));
+  assert.equal(overall(judgeAll([...send,...mixed],true)),'PASS');
+  assert.equal(overall(judgeAll([...send,...mixed],false)),'NOT EVALUATED');
+  send.find(c=>c.arm==='A')!.steps[3].send.p95=11.01;
+  for(const b of mixed.filter(c=>c.arm==='B')){const l=b.steps[1].send;l.droppedIterations=1;}
+  assert.equal(overall(judgeAll([...send,...mixed],true)),'FAIL');
+});
+test('#196 decision b: a rehearsal load shortfall is a forecast, not a rehearsal problem',()=>{
+  const full=(scenario:'send'|'mixed',arm:'B'|'A'):Run=>({scope,pair:1,arm,scenario,smoke:false,rehearsal:true,reader:{...lane(2),seconds:284,attempted:568,accepted:568},
+    steps:settings.rates.map(rate=>({...row(),rate,send:lane(rate),...(scenario==='mixed'?{reads:lane(500),signin:lane(20)}:{})}))});
+  const all=sequence('rehearsal').map(c=>full(c.scenario,c.arm));
+  const mb=all[2].steps[1].send;mb.droppedIterations=50;mb.attempted-=50;mb.accepted-=50;
+  const ma=all[3].steps[0].send;ma.droppedIterations=50;ma.attempted-=50;ma.accepted-=60;ma.rejected503=10;
+  const checks=rehearsalChecks(all);
+  assert.ok(checks.every(c=>c.problems.length===0));
+  assert.deepEqual(checks[2].loadNotGenerated,['500/s: send: target load not generated']);
+  const f=rehearsalForecast(all);
+  assert.ok(f.every(x=>x.evidence===false));
+  assert.equal(f.find(x=>x.scenario==='mixed'&&x.rate===500)!.status,'NOT EVALUATED');
+  assert.equal(f.find(x=>x.scenario==='mixed'&&x.rate===250)!.status,'FAIL');
+  assert.equal(f.find(x=>x.scenario==='send'&&x.rate===250)!.status,'PASS');
+  for(const j of judgeAll(all,true)) assert.equal(j.status,'NOT EVALUATED');
+  const broken=all.map(r=>r);delete broken[2].steps[1].signin;
+  assert.deepEqual(rehearsalChecks(broken)[2].problems,['500/s: settings mismatch']);
 });
