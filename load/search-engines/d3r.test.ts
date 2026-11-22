@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -18,8 +18,8 @@ import { expectedTerms, insertSql, verifyTerms } from './d3r/backfill.ts';
 import { allPages, planFacts, prepare } from './d3r/engine.ts';
 import { argumentsForPostgres, loadManifest, removedSettings } from './d3r/manifest.ts';
 import { actors, benchmarkScript, pageSize, pgbenchFormat, productionPath, readSource, sources, term, tokens } from './d3r/path.ts';
-import { discardRehearsalSnapshot, launchFile, measureBlocks, options, outputPath, rehearsalHandoff, resetMeasured, stagingDirectory,
-  warmup, workerOptions, writeLaunch, type HandoffSteps } from './d3r/run.ts';
+import { claimFile, discardRehearsalSnapshot, launchFile, measureBlocks, options, outputPath, processStart, rehearsalHandoff,
+  resetMeasured, stagingDirectory, stopUnlessWhole, warmup, workerOptions, writeLaunch, type HandoffSteps } from './d3r/run.ts';
 import { directRls, directRlsExpected, searchTables, verifyRls } from './d3r/rls.ts';
 import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFile, snapshotIdentity, snapshotLaunch, stageSnapshot } from './d3r/snapshot.ts';
 import { timeQuery } from './d3r/timing.ts';
@@ -416,7 +416,7 @@ test('a rehearsal stops at the first query block that is not fully sampled; the 
   assert.equal(timed.length, 3);
 });
 
-test('the rehearsal runs the physical handoff in the formal order and always deletes its archives', async () => {
+test('the rehearsal handoff keeps both archives on success, as the formal run does, and deletes them on failure', async () => {
   const identity = {file: snapshotFile, systemIdentifier: '42', sha256: 'a'.repeat(64), bytes: 10} as const;
   const run = async (override: Partial<HandoffSteps> = {}, restored = '42') => {
     const calls: string[] = [];
@@ -438,7 +438,8 @@ test('the rehearsal runs the physical handoff in the formal order and always del
   };
   const ok = await run();
   assert.deepEqual(ok.result, identity);
-  assert.deepEqual(ok.calls, ['identity', 'preserve 42', 'stop', 'stage true', 'start /staged', 'identity', 'discard']);
+  assert.deepEqual(ok.calls, ['identity', 'preserve 42', 'stop', 'stage true', 'start /staged', 'identity'],
+    'the archives stay through the first measured clone; the supervisor deletes them at the end');
   const fail = (step: string) => async () => { throw new Error(`${step} failed`); };
   const verify = await run({preserve: fail('pg_verifybackup')});
   assert.match(String(verify.error), /pg_verifybackup failed/);
@@ -452,6 +453,35 @@ test('the rehearsal runs the physical handoff in the formal order and always del
   const other = await run({}, '43');
   assert.match(String(other.error), /Restored cluster identity differs/);
   assert.equal(other.calls.at(-1), 'discard');
+  const both = await run({start: fail('restored startup'), discard: () => { throw new Error('unlink failed'); }});
+  assert.ok(both.error instanceof AggregateError);
+  assert.deepEqual(both.error.errors.map(String), ['Error: restored startup failed', 'Error: unlink failed']);
+});
+
+test('archive deletion attempts each copy on its own and reports every failure', {skip: process.getuid?.() === 0}, t => {
+  const out = mkdtempSync(join(tmpdir(), 'd3r-discard-test-'));
+  const staging = join(out, stagingDirectory);
+  t.after(() => {
+    chmodSync(out, 0o700);
+    chmodSync(staging, 0o700);
+    rmSync(out, {recursive: true, force: true});
+  });
+  mkdirSync(staging);
+  writeFileSync(join(out, snapshotFile), 'original');
+  writeFileSync(join(staging, snapshotFile), 'staged');
+  chmodSync(out, 0o500);
+  assert.throws(() => discardRehearsalSnapshot(out), error => error instanceof AggregateError && error.errors.length === 1 &&
+    error.message.includes(join(out, snapshotFile)));
+  assert.equal(existsSync(join(staging, snapshotFile)), false, 'the staged copy is deleted although the original failed');
+  assert.equal(existsSync(join(out, snapshotFile)), true);
+  writeFileSync(join(staging, snapshotFile), 'staged');
+  chmodSync(staging, 0o500);
+  assert.throws(() => discardRehearsalSnapshot(out), error => error instanceof AggregateError && error.errors.length === 2 &&
+    error.message.includes(join(out, snapshotFile)) && error.message.includes(join(staging, snapshotFile)));
+  chmodSync(out, 0o700);
+  chmodSync(staging, 0o700);
+  discardRehearsalSnapshot(out);
+  assert.deepEqual(readdirSync(staging), []);
 });
 
 test('rehearsal staging checks the extracted copy, deletes only archives and is never a formal backfill', async t => {
@@ -525,7 +555,8 @@ test('a worker runs only for its own supervisor launch; inherited variables neve
     const forged = (mode: string, fromBackfill: string | null) => {
       const out = join(dir, `forged-${n++}`);
       mkdirSync(out);
-      writeFileSync(join(out, launchFile), JSON.stringify({mode, label: null, fromBackfill, token: 't', supervisorPid: process.pid}));
+      writeFileSync(join(out, launchFile), JSON.stringify({mode, label: null, fromBackfill, token: 't', supervisorPid: process.pid,
+        supervisorStart: processStart(process.pid)}));
       return {SEARCH_D3R_MODE: mode, SEARCH_D3R_OUT: out, SEARCH_D3R_LAUNCH: 't', ...(fromBackfill ? {SEARCH_D3R_FROM: fromBackfill} : {})};
     };
     assert.throws(() => check(forged('cleanup', '/tmp/source')), /Invalid worker mode/);
@@ -535,6 +566,36 @@ test('a worker runs only for its own supervisor launch; inherited variables neve
     rmSync(dir, {recursive: true, force: true});
     rmSync(repository, {recursive: true, force: true});
   }
+});
+
+test('a stale launch cannot be replayed: the worker claims it once and checks the supervisor start time', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-claim-test-'));
+  const repository = mkdtempSync(join(tmpdir(), 'd3r-claim-repo-'));
+  t.after(() => {
+    rmSync(dir, {recursive: true, force: true});
+    rmSync(repository, {recursive: true, force: true});
+  });
+  let n = 0;
+  const launched = (startOf = processStart) => {
+    const out = join(dir, `out-${n++}`);
+    mkdirSync(out);
+    const {token} = writeLaunch(out, 'formal', '/tmp/source', startOf);
+    return {out, env: {SEARCH_WORKER: '1', SEARCH_D3R_MODE: 'formal', SEARCH_D3R_OUT: out, SEARCH_D3R_LAUNCH: token,
+      SEARCH_D3R_FROM: '/tmp/source'} as NodeJS.ProcessEnv};
+  };
+  const first = launched();
+  assert.equal(workerOptions(first.env, [], process.pid, repository).fromBackfill, '/tmp/source');
+  assert.equal(JSON.parse(readFileSync(join(first.out, claimFile), 'utf8')).workerPid, process.pid);
+  assert.throws(() => workerOptions(first.env, [], process.pid, repository), /own supervisor/,
+    'a captured worker environment cannot start a second worker on the same launch');
+  const raced = launched();
+  writeFileSync(join(raced.out, claimFile), '{}', {flag: 'wx'});
+  assert.throws(() => workerOptions(raced.env, [], process.pid, repository), /own supervisor/);
+  const reused = launched(() => 'Sun Nov 22 01:00:00 2026');
+  assert.throws(() => workerOptions(reused.env, [], process.pid, repository), /own supervisor/,
+    'the same PID with another start time is a reused PID, not the supervisor');
+  assert.throws(() => workerOptions(reused.env, [], process.pid, repository, () => ''), /own supervisor/);
+  assert.equal(existsSync(join(reused.out, claimFile)), false);
 });
 
 test('inherited worker variables cannot turn --rehearsal into a formal worker inside a formal artifact', async t => {
@@ -745,6 +806,60 @@ test('each round creates a database from base before restart and warms each quer
     assert.ok(calls[1].includes(i % 2 === 0 ? "'開'" : "'開発'"));
     assert.equal(calls[2], 'COMMIT;');
   }
+});
+
+test('a warm-up pagination abort stops a rehearsal at that query; the formal run records it and keeps warming', async () => {
+  const at = '2026-01-01T00:00:00.000000Z';
+  let sessions: string[] = [];
+  const open = async (body: (sql: (text: string) => Promise<string>) => Promise<void>) => {
+    let query = '';
+    await body(async sql => {
+      if (sql.startsWith('BEGIN')) {
+        query = sql.includes("'開発'") ? 'b' : 'a';
+        sessions.push(query);
+        return [org(1), JSON.stringify([[channel(1, 0)], true]), JSON.stringify('開発 API')].join('\n');
+      }
+      return sql.startsWith('EXECUTE') && query === 'a' ? `${uuid(2)}|${at}\n${uuid(2)}|${at}` : '';
+    });
+  };
+  const querySet = [['a', '開'], ['b', '開発']] as const;
+  await assert.rejects(warmup(productionPath().page, querySet, 2, open, true),
+    /REHEARSAL \/ NON-EVALUATION INVALID: warm-up a: Search repeated a Message/);
+  assert.deepEqual(sessions, ['a']);
+  sessions = [];
+  assert.deepEqual(await warmup(productionPath().page, querySet, 2, open),
+    [1, 2].map(sweep => ({sweep, query: 'a', paginationError: 'Search repeated a Message or moved its cursor backwards'})));
+  assert.deepEqual(sessions, ['a', 'b', 'a', 'b']);
+});
+
+test('a rehearsal stops at a restore drill or denial check that recorded a pagination error', () => {
+  const e = evidence();
+  stopUnlessWhole('restore drill', e.restore);
+  stopUnlessWhole('denial checks', e.denials);
+  const restore = evidence().restore;
+  restore.complete[3].actors[1].paginationError = 'Search repeated a Message or moved its cursor backwards';
+  assert.throws(() => stopUnlessWhole('restore drill', restore), /REHEARSAL \/ NON-EVALUATION INVALID: restore drill/);
+  const checks = evidence().denials;
+  checks.checks[2].paginationError = 'Search rejected a continuation';
+  assert.throws(() => stopUnlessWhole('denial checks', checks), /denial checks recorded an error/);
+  delete (checks.checks as unknown[])[2];
+  assert.throws(() => stopUnlessWhole('denial checks', checks), /denial checks/);
+  const source = readFileSync(new URL('./d3r/run.ts', import.meta.url), 'utf8');
+  const worker = source.slice(source.indexOf('const restore = await restoreDrill'), source.indexOf('const {querySet} = conditions'));
+  assert.match(worker, /restoreDrill\(records\.small\.termRows\);\n\s*if \(mode === 'rehearsal'\) stopUnlessWhole\('restore drill', restore\);/);
+  assert.match(worker, /\}\);\n\s*if \(mode === 'rehearsal'\) stopUnlessWhole\('denial checks', accessChecks\);/);
+});
+
+test('the formal judge treats a hole in short-query outcomes as missing, as after a JSON round trip', () => {
+  const short = evidence();
+  const i = queries.findIndex(([id]) => !accepts(id));
+  const sample = short.rounds[0].latencies[i];
+  assert.ok(sample.outcomes);
+  delete (sample.outcomes as unknown[])[50];
+  assert.equal(sample.outcomes.length, 100);
+  assert.equal(judge(short), 'NOT EVALUATED');
+  assert.equal(judge(JSON.parse(JSON.stringify(short))), 'NOT EVALUATED');
+  assert.equal(judge(evidence()), 'PASS');
 });
 
 test('formal startup requires the completed backfill receipt and exact snapshot; cleanup deletes only the archive', async t => {

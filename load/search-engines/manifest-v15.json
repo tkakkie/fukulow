@@ -1,5 +1,5 @@
 {
-  "sha256": "e9528261b61711da66c6f7b143db8be975ab5c42ed0ee283052851a736612757",
+  "sha256": "c83beecfe3bbc79e27facb764882252bb804c594b8e41929005497cb0e672f2f",
   "frozen": {
     "version": 15,
     "date": "2026-11-22",
@@ -112,7 +112,7 @@
       },
       {
         "path": "load/search-engines/d3r/acceptance.ts",
-        "sha256": "66371e76e3c0d813d34b49d1bd569201270a5dc61f478fda3afc9dd0eb737aa8"
+        "sha256": "085e3647c286e4db94f194ee2710737c9a48bd50616ce257aa251c77578caf37"
       },
       {
         "path": "load/search-engines/d3r/backfill.ts",
@@ -140,7 +140,7 @@
       },
       {
         "path": "load/search-engines/d3r/run.ts",
-        "sha256": "d9d1f860b692aca3787b4187c5437fb9d5c9366177467bfd396c86795e275ed8"
+        "sha256": "6cb35abe6828856beec46ad2c455b7e37eeab1ab019ecab4b48a624b6419fe06"
       },
       {
         "path": "load/search-engines/d3r/session.ts",

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, cpus, totalmem } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,8 @@ import { probeSql } from '../definer.ts';
 import { hash, resolveImage, smokeLabel } from '../manifest.ts';
 import { ownedContainer, ownedVolume, ownershipLabel, refuseLeftovers, supervise, timeouts } from '../runtime.ts';
 import { copySql, finishSql, fixtureSql, generate, literal } from '../seed.ts';
-import { accepts, completeness, denials, fullySampled, judge, rehearsalComplete, type Evidence, type Round, type Sample } from './acceptance.ts';
+import { accepts, completeness, denials, fullySampled, judge, rehearsalComplete, whole, type Evidence, type Round,
+  type Sample } from './acceptance.ts';
 import { backfill, verifiedBackfill, verifyTerms } from './backfill.ts';
 import { allPages, explainPage, prepare, type Sql } from './engine.ts';
 import { argumentsForPostgres, loadManifest } from './manifest.ts';
@@ -26,6 +27,7 @@ const note = (message: string) => console.log(`${new Date().toISOString()} ${mes
 type Mode = 'smoke' | 'rehearsal' | 'backfill-only' | 'formal' | 'cleanup';
 // Rehearsal: full-size setup (seed, backfill, restore drill, denials) and one formal-size round; never evidence.
 export const launchFile = 'launch.json';
+export const claimFile = 'launch-claimed.json';
 export const stagingDirectory = 'restore-snapshot';
 const runLabel = (mode: Mode) => mode === 'smoke' ? smokeLabel : mode === 'rehearsal' ? rehearsalLabel : undefined;
 
@@ -55,7 +57,7 @@ function outsideGit(path: string, repository: string) {
 }
 
 // Files any harness run writes into its output directory. A new output must not be inside one.
-const artifactFiles = [launchFile, 'run-status.json', 'completed.json', 'finished.json', 'summary.json', 'image.json',
+const artifactFiles = [launchFile, claimFile, 'run-status.json', 'completed.json', 'finished.json', 'summary.json', 'image.json',
   'manifest.json', 'metadata.json', 'evidence.json', receiptFile, snapshotFile];
 
 function outsideArtifacts(out: string) {
@@ -74,20 +76,26 @@ export function outputPath(path: string, repository = root) {
   return out;
 }
 
-export type Launch = {mode: Mode; label: string | null; fromBackfill: string | null; token: string; supervisorPid: number};
+export type Launch = {mode: Mode; label: string | null; fromBackfill: string | null; token: string; supervisorPid: number;
+  supervisorStart: string};
+
+// Process start time; with the PID it identifies the supervisor even after the PID is reused.
+export const processStart = (pid: number) => command('ps', ['-o', 'lstart=', '-p', String(pid)]).trim();
 
 // Written by the CLI process before supervise(): the run's identity marker, also left by a failed run.
-export function writeLaunch(out: string, mode: Mode, fromBackfill: string | undefined) {
+export function writeLaunch(out: string, mode: Mode, fromBackfill: string | undefined, startOf = processStart) {
   const launch: Launch = {mode, label: runLabel(mode) ?? null, fromBackfill: fromBackfill ?? null, token: randomUUID(),
-    supervisorPid: process.pid};
+    supervisorPid: process.pid, supervisorStart: startOf(process.pid)};
   save(`${out}/${launchFile}`, launch);
   return launch;
 }
 
 // Worker variables can be inherited from a shell. Only a worker that its own supervisor launched
-// (no CLI arguments, the launch token and supervisor PID of the marker in a directory holding nothing
-// else) runs, and the mode and source are the CLI's, recorded in that marker.
-export function workerOptions(env: NodeJS.ProcessEnv, argv: string[], parentPid: number, repository = root) {
+// (no CLI arguments, the launch token, supervisor PID and supervisor start time of the marker in a
+// directory holding nothing else) runs, and the mode and source are the CLI's, recorded in that marker.
+// The worker claims the launch exclusively, so a captured token never admits a second worker.
+export function workerOptions(env: NodeJS.ProcessEnv, argv: string[], parentPid: number, repository = root,
+  startOf = processStart) {
   assert.equal(argv.length, 0, 'SEARCH_WORKER is set but CLI arguments were given; unset the inherited worker variables');
   assert.ok(env.SEARCH_D3R_OUT, 'Missing worker output directory');
   const out = outsideGit(env.SEARCH_D3R_OUT, repository);
@@ -97,13 +105,21 @@ export function workerOptions(env: NodeJS.ProcessEnv, argv: string[], parentPid:
   outsideArtifacts(out);
   const launch: Launch = JSON.parse(readFileSync(join(out, launchFile), 'utf8'));
   assert.ok(typeof env.SEARCH_D3R_LAUNCH === 'string' && env.SEARCH_D3R_LAUNCH.length > 0 &&
-    launch.token === env.SEARCH_D3R_LAUNCH && launch.supervisorPid === parentPid, fresh);
+    launch.token === env.SEARCH_D3R_LAUNCH && launch.supervisorPid === parentPid &&
+    typeof launch.supervisorStart === 'string' && launch.supervisorStart.length > 0 &&
+    launch.supervisorStart === startOf(parentPid), fresh);
   assert.ok(launch.mode === env.SEARCH_D3R_MODE && launch.fromBackfill === (env.SEARCH_D3R_FROM || null),
     'Worker variables disagree with the launch');
   const {mode} = launch;
   const fromBackfill = launch.fromBackfill ?? undefined;
   assert.ok(['smoke', 'rehearsal', 'backfill-only', 'formal'].includes(mode), 'Invalid worker mode');
   assert.ok(Boolean(fromBackfill) === (mode === 'formal'), 'Only a formal worker reads a verified backfill');
+  try {
+    writeFileSync(join(out, claimFile), JSON.stringify({token: launch.token, workerPid: process.pid}) + '\n',
+      {flag: 'wx', mode: 0o600});
+  } catch {
+    assert.fail(`${fresh}; the launch was already claimed`);
+  }
   return {mode, output: out, fromBackfill};
 }
 
@@ -275,7 +291,8 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   }
   if (mode === 'rehearsal') {
     // The formal physical handoff, on a rehearsal-owned snapshot: create, verify and archive, stop the
-    // seeded cluster, stage and checksum, start the restored cluster, then delete both archive copies.
+    // seeded cluster, stage and checksum, start the restored cluster. Both archive copies stay until the
+    // supervisor ends, as in a formal run, so the disk peak is at least the formal one.
     // Its receipt is never written as a backfill receipt, so a formal run cannot load it.
     const staging = `${out}/${stagingDirectory}`;
     phase('handoff', 'started');
@@ -307,11 +324,13 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   }
 
   const restore = await restoreDrill(records.small.termRows);
+  if (mode === 'rehearsal') stopUnlessWhole('restore drill', restore);
   rlsFor('denial');
   const accessChecks = await openApp('denial', async search => {
     await search(prepare(path.page));
     return denials(search);
   });
+  if (mode === 'rehearsal') stopUnlessWhole('denial checks', accessChecks);
   owner('postgres', 'DROP DATABASE denial;');
 
   const {querySet} = conditions;
@@ -329,7 +348,9 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     save(`${dest}/rls.json`, rlsFor('measured'));
     phase(`round ${round}`, 'started');
     if (round === 1) measuredRls = directRls(text => app('measured', text));
-    await warmup(path.page, querySet, conditions.warmupSweeps, body => openApp('measured', body));
+    const warmupErrors = await warmup(path.page, querySet, conditions.warmupSweeps, body => openApp('measured', body),
+      mode === 'rehearsal');
+    save(`${dest}/warmup.json`, warmupErrors);
     const latencies = await measureBlocks(querySet, (query, raw) => timeQuery(container, 'measured', path.page, query, raw,
       !accepts(query), `${dest}/${query}`, conditions.transactions, conditions.clients), result =>
       phase(`round ${round}`, 'p95' in result ? `${result.query} p95=${result.p95.toFixed(3)} ms` : `${result.query} ${result.sqlError}`),
@@ -368,6 +389,12 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   phase('run', 'completed');
 }
 
+// A rehearsal stops as soon as a recorded check is not whole (a pagination error, a hole), instead of
+// after all benchmarks; rehearsalComplete would reject the same evidence at the end.
+export function stopUnlessWhole(step: string, value: unknown) {
+  if (!whole(value)) throw new Error(`${rehearsalLabel} INVALID: ${step} recorded an error or missing item; stopping`);
+}
+
 // A rehearsal stops at the first query block that is not fully sampled (PR #781 fail fast). The formal
 // run keeps measuring, because the frozen judge counts a short-query SQL abort as a result.
 export async function measureBlocks(querySet: readonly (readonly [string, string])[],
@@ -392,6 +419,8 @@ export type HandoffSteps = {
 };
 
 // The order keeps peak disk at the formal handoff's: the seeded cluster is removed before staging.
+// On success both archive copies stay, as the formal run keeps its source and staged archives through
+// the measured rounds; the supervisor deletes them at the end. A failed handoff ends the run and deletes them.
 export async function rehearsalHandoff(steps: HandoffSteps) {
   try {
     const snapshot = await steps.preserve(steps.systemIdentifier());
@@ -399,16 +428,29 @@ export async function rehearsalHandoff(steps: HandoffSteps) {
     await steps.start(await steps.stage(snapshot));
     assert.equal(steps.systemIdentifier(), snapshot.systemIdentifier, 'Restored cluster identity differs');
     return snapshot;
-  } finally {
-    steps.discard();
+  } catch (error) {
+    try {
+      steps.discard();
+    } catch (discardError) {
+      throw new AggregateError([error, discardError], 'Rehearsal handoff failed and its archives were not all deleted');
+    }
+    throw error;
   }
 }
 
-// Deletes only the archive copies. The staging directory stays while the container runs, because it
-// is the container's bind mount and docker restart needs it; the supervisor removes it at the end.
+// Deletes only the archive copies, each attempted on its own, and reports every failure. The staging
+// directory stays while the container runs, because it is the container's bind mount and docker restart
+// needs it; the supervisor removes it at the end.
 export function discardRehearsalSnapshot(out: string) {
-  rmSync(`${out}/${snapshotFile}`, {force: true});
-  rmSync(`${out}/${stagingDirectory}/${snapshotFile}`, {force: true});
+  const failures: unknown[] = [];
+  for (const archive of [`${out}/${snapshotFile}`, `${out}/${stagingDirectory}/${snapshotFile}`]) {
+    try {
+      rmSync(archive, {force: true});
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, `Could not delete rehearsal archives: ${failures.join('; ')}`);
 }
 
 export async function resetMeasured(owner: (text: string) => string, restart: () => Promise<void>) {
@@ -416,16 +458,24 @@ export async function resetMeasured(owner: (text: string) => string, restart: ()
   await restart();
 }
 
+// Returns the warm-up pagination errors, which the worker records. A rehearsal stops at the first one;
+// the formal run keeps going, because no frozen check reads the warm-up.
 export async function warmup(page: string, querySet: readonly (readonly [string, string])[], sweeps: number,
-  open: (body: (sql: Sql) => Promise<void>) => Promise<void>) {
-  for (let sweep = 0; sweep < sweeps; sweep++) {
-    for (const [, raw] of querySet) {
+  open: (body: (sql: Sql) => Promise<void>) => Promise<void>, gate = false) {
+  const errors: {sweep: number; query: string; paginationError: string}[] = [];
+  for (let sweep = 1; sweep <= sweeps; sweep++) {
+    for (const [query, raw] of querySet) {
       await open(async search => {
         await search(prepare(page));
-        await allPages(search, [1, 2], raw, {}, true);
+        const {paginationError} = await allPages(search, [1, 2], raw, {}, true);
+        if (paginationError) errors.push({sweep, query, paginationError});
       });
+      if (gate && errors.length) {
+        throw new Error(`${rehearsalLabel} INVALID: warm-up ${query}: ${errors[0].paginationError}; stopping`);
+      }
     }
   }
+  return errors;
 }
 
 async function main() {
@@ -474,8 +524,11 @@ async function main() {
       note(`${status} (${out}/summary.json)`);
     });
   } finally {
-    if (args.mode === 'rehearsal') discardRehearsalSnapshot(out);
-    if (fromBackfill || args.mode === 'rehearsal') rmSync(restoreDirectory, {recursive: true, force: true});
+    try {
+      if (args.mode === 'rehearsal') discardRehearsalSnapshot(out);
+    } finally {
+      if (fromBackfill || args.mode === 'rehearsal') rmSync(restoreDirectory, {recursive: true, force: true});
+    }
   }
   if (process.exitCode) note('NOT EVALUATED (run or cleanup incomplete)');
 }

@@ -155,7 +155,7 @@ export const fullySampled = (l?: Sample) => l !== undefined && l !== null && !('
 export const dense = (list: unknown[]) => Array.from({length: list.length}, (_, i) => i).every(i => i in list &&
   list[i] !== undefined && list[i] !== null);
 
-function whole(value: unknown): boolean {
+export function whole(value: unknown): boolean {
   if (Array.isArray(value)) return dense(value) && value.every(whole);
   if (value === null || typeof value !== 'object') return true;
   return Object.entries(value).every(([key, item]) => (!/error$/i.test(key) || item === undefined || item === null) && whole(item));
@@ -213,7 +213,8 @@ export function judge(e: Partial<Evidence>): Status {
 
 function sampleValid(l: Sample) {
   if (!accepts(l.query)) {
-    if (!Array.isArray(l.outcomes) || !l.outcomes.every(outcome => typeof outcome === 'string' && outcome.length > 0)) return false;
+    if (!Array.isArray(l.outcomes) || !dense(l.outcomes) ||
+      !l.outcomes.every(outcome => typeof outcome === 'string' && outcome.length > 0)) return false;
     if ('sqlError' in l) return typeof l.sqlError === 'string' && l.sqlError.length > 0;
     if (l.outcomes.length !== criteria.samplesPerQueryRound) return false;
   }
