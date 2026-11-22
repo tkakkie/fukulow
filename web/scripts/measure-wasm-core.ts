@@ -875,9 +875,12 @@ async function main() {
       return value
     }) as typeof JSON.parse
     if (probed) { JSON.parse = timedParse; receiveProbe.resetParts(); receiveProbe.probe.armed = true }
+    const last = frames[frames.length - 1]
+    let beforeLast = -1
     const t0 = performance.now()
     try {
       for (const data of frames) {
+        if (data === last) beforeLast = notifications
         if (!probed) { socket!.onmessage!({ data }); continue }
         const f0 = performance.now(), parsedBefore = parse
         armParse = true; socket!.onmessage!({ data })
@@ -890,7 +893,8 @@ async function main() {
     const view = sync.get().channels[ch]
     if (view?.cursor !== baseSeq + frameCount) throw new Error(`A2: cursor ${view?.cursor} !== ${baseSeq + frameCount}`)
     assertG3Step(sync.get()); g3CompletionAssertions++
-    if (notifications === 0 || total <= 0) throw new Error('A2: no view notification')
+    // total ends at the last notification, so the final frame must notify or total would miss it.
+    if (notifications <= beforeLast || total <= 0) throw new Error('A2: the final frame sent no view notification')
     if (probed && events !== frames.length) throw new Error(`A2: ${events} events reached the controller, expected ${frames.length}`)
     const { input: stepInput, wasm, output, steps } = receiveProbe.parts
     unsubscribe(); await sync.close()

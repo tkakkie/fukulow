@@ -42,8 +42,12 @@ function scenario(file: string, label: string, plain: unknown, probed: unknown, 
     throw new Error(`${file}: ${label} needs ${REPETITIONS} plain and ${REPETITIONS} probed trials`)
   }
   const trials = probed as Record<string, number>[]
-  for (const t of trials) for (const [k, v] of Object.entries(t)) finite(file, `${label}.${k}`, v)
+  for (const t of trials) {
+    for (const [k, v] of Object.entries(t)) finite(file, `${label}.${k}`, v)
+    finite(file, `${label}.total`, t.total); finite(file, `${label}.I`, input(t))
+  }
   const totals = trials.map((t) => t.total), inputs = trials.map(input), sumTotal = totals.reduce((a, b) => a + b, 0)
+  if (!(sumTotal > 0)) throw new Error(`${file}: ${label} total sums to ${sumTotal}`)
   const parts = Object.fromEntries(Object.keys(trials[0]).filter((k) => k !== 'steps').map((k) => [k, nearestRank(trials.map((t) => t[k]), 95)]))
   return {
     plainP95: nearestRank(plain.map((v, i) => finite(file, `${label}.plain[${i}]`, v)), 95), totalP95: nearestRank(totals, 95),
