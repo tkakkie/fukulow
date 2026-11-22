@@ -30,8 +30,23 @@ const scenarios = [...lanes, 'reader', 'channels', 'topic0', 'topic1', 'topic2',
 type Lane = typeof lanes[number];
 type ServerLane = typeof serverLanes[number];
 type Scenario = typeof scenarios[number];
+const sendAccessDetails = ['send_access_channel_sql', 'send_access_members_sql', 'send_access_grants_sql'] as const;
+const sendChildren = [
+  'write_pool_acquire', 'send_begin_sql', 'send_set_organization_sql', 'send_visibility_sql', 'send_history_sql',
+  'send_existing_sql', 'send_rollback_sql', 'send_rollback_connection_return', 'send_receipt_pool_acquire',
+  'send_receipt_begin_sql', 'send_receipt_set_organization_sql', 'send_receipt_access_sql', 'send_receipt_history_sql',
+  'send_receipt_lookup_sql', 'send_receipt_end_sql', 'send_mention_extract', 'send_dm_pair_sql',
+  'send_dm_prepare_members', 'send_dm_members_sql', 'send_dm_grants_sql', 'send_dm_accept_mentions',
+  'send_dm_peer_sql', 'send_dm_discovery_counters_sql', 'send_dm_discovery_sql',
+  'send_access_sql', ...sendAccessDetails, 'send_archived_receipt_sql',
+  'send_reply_parent_before', 'channel_advisory_sql', 'send_reply_parent_after', 'send_sequence_sql',
+  'send_topic_insert_sql', 'send_topic_lookup_sql', 'send_message_insert_sql', 'send_search_terms_sql',
+  'send_channel_log_sql', 'send_mention_insert_sql', 'send_mention_identities_sql', 'send_mention_hydrate',
+  'send_topic_record', 'send_notification_arm', 'commit_sql', 'send_commit_connection_return',
+  'send_activity_schedule', 'send_notification_schedule',
+] as const;
 const phases = ['before_admission', 'channel_admission_wait', 'global_admission_wait', 'admitted_work', 'pool_acquire',
-  'write_pool_acquire', 'send_access_sql', 'move_access_sql', 'channel_advisory_sql', 'commit_sql', 'move_chain_lookup', 'move_apply',
+  ...sendChildren, 'move_access_sql', 'move_chain_lookup', 'move_apply',
   'topic_visible_scoped', 'topic_dm_check', 'topic_barrier', 'topic_page_tx', 'topic_page_sql',
   'channel_list_total', 'channel_visible_sql', 'channel_history_sql', 'channel_counts_sql'] as const;
 const reasons = ['global_queue_full', 'channel_queue_full', 'channel_admission_timeout', 'global_admission_timeout',
@@ -41,6 +56,9 @@ const reasons = ['global_queue_full', 'channel_queue_full', 'channel_admission_t
 const member = <T extends string>(list: readonly T[], input: unknown): input is T => list.includes(input as T);
 
 export type Organizations = { partD: string; reader: string };
+type Timing = { at: number; lane: ServerLane; phase: typeof phases[number]; us: number; interrupted: boolean;
+  requestId?: number; sendChildren?: number };
+type PhaseSummary = ReturnType<typeof distributions> & { interrupted: number; incomplete?: number };
 
 function serverLane(lane: unknown, organization: unknown, organizations?: Organizations): ServerLane | undefined {
   if (lane !== 'channels') return member(serverLanes, lane) && lane !== 'reader' ? lane : undefined;
@@ -50,31 +68,77 @@ function serverLane(lane: unknown, organization: unknown, organizations?: Organi
 }
 
 export function appEvidence(log: string, organizations?: Organizations) {
-  const timing: { at: number; lane: ServerLane; phase: typeof phases[number]; us: number; interrupted: boolean }[] = [];
+  const timing: Timing[] = [];
   const unavailable: { at: number; lane: ServerLane; reason: typeof reasons[number] }[] = [];
   for (const line of log.split('\n')) {
     if (!line.includes('move_diag_')) continue;
     const { timestamp, fields } = parseLine(line);
     const at = time(timestamp);
-    const { event, lane: tagged, organization, phase, us, interrupted, reason } = object(fields);
+    const { event, lane: tagged, organization, phase, us, interrupted, reason, request_id, send_children } = object(fields);
     const lane = serverLane(tagged, organization, organizations);
     if (!Number.isFinite(at) || !lane) continue;
     if (event === 'move_diag_timing' && member(phases, phase) && nonnegative(us) && typeof interrupted === 'boolean')
-      timing.push({ at, lane, phase, us, interrupted });
+      timing.push({ at, lane, phase, us, interrupted, requestId: integer(request_id) ? request_id : undefined,
+        sendChildren: integer(send_children) ? send_children : undefined });
     if (event === 'move_diag_503' && member(reasons, reason)) unavailable.push({ at, lane, reason });
   }
+  const byLane = Object.fromEntries(serverLanes.map(lane => [lane, {
+    reasons: Object.fromEntries(reasons.map(reason => [reason, unavailable.filter(sample => sample.lane === lane && sample.reason === reason).length])),
+    phasesUs: Object.fromEntries<PhaseSummary>(phases.flatMap(phase => {
+      const points = timing.filter(sample => sample.lane === lane && sample.phase === phase);
+      return points.length ? [[phase, { ...distributions(points.filter(sample => !sample.interrupted).map(sample => sample.us)),
+        interrupted: points.filter(sample => sample.interrupted).length }]] : [];
+    })),
+  }]));
+  const send = sendBreakdown(timing);
+  if (send) byLane.send.phasesUs.send_unattributed = send;
   return {
-    timing, unavailable,
+    timing, unavailable, byLane,
     writeUnavailable: unavailable.filter(sample => member(lanes, sample.lane)).length,
-    byLane: Object.fromEntries(serverLanes.map(lane => [lane, {
-      reasons: Object.fromEntries(reasons.map(reason => [reason, unavailable.filter(sample => sample.lane === lane && sample.reason === reason).length])),
-      phasesUs: Object.fromEntries(phases.flatMap(phase => {
-        const points = timing.filter(sample => sample.lane === lane && sample.phase === phase);
-        return points.length ? [[phase, { ...distributions(points.filter(sample => !sample.interrupted).map(sample => sample.us)),
-          interrupted: points.filter(sample => sample.interrupted).length }]] : [];
-      })),
-    }])),
   };
+}
+
+function sendBreakdown(timing: Timing[]) {
+  const groups = new Map<number, { parents: Timing[]; children: Timing[] }>();
+  let incomplete = 0, interrupted = 0;
+  let hasBreakdown = false;
+  for (const sample of timing) {
+    if (sample.lane !== 'send' || (sample.phase !== 'admitted_work' && !member(sendChildren, sample.phase))) continue;
+    if (sample.requestId === undefined) {
+      incomplete++;
+      continue;
+    }
+    hasBreakdown = true;
+    const group = groups.get(sample.requestId) ?? { parents: [], children: [] };
+    groups.set(sample.requestId, group);
+    (sample.phase === 'admitted_work' ? group.parents : group.children).push(sample);
+  }
+  if (!hasBreakdown) return undefined;
+  const residuals: number[] = [];
+  for (const { parents, children } of groups.values()) {
+    if (parents.length === 1 && parents[0].interrupted) {
+      interrupted++;
+      continue;
+    }
+    const parent = parents[0];
+    const childUs = children.reduce((sum, child) => member(sendAccessDetails, child.phase) ? sum : sum + child.us, 0);
+    // Access details overlap send_access_sql; pool_acquire overlaps the acquisition phases.
+    if (parents.length !== 1 || children.length === 0 || parent.sendChildren !== children.length ||
+        new Set(children.map(child => child.phase)).size !== children.length ||
+        children.some(child => child.interrupted) || childUs > parent.us) {
+      incomplete++;
+      continue;
+    }
+    residuals.push(parent.us - childUs);
+  }
+  return { ...distributions(residuals), interrupted, incomplete };
+}
+
+// A few incomplete requests (for example a duplicate-key reread) are reported, not fatal; more than 1% makes the
+// breakdown unusable because the residual would describe a selected subset.
+export function sendTimingProblems(app: ReturnType<typeof appEvidence> | null | undefined) {
+  const breakdown = app?.byLane.send.phasesUs.send_unattributed;
+  return breakdown?.count && (breakdown.incomplete ?? 0) <= breakdown.count * 0.01 ? [] : ['send admitted-work breakdown'];
 }
 
 // Every phase of an enabled Part D read lane needs finished (non-interrupted) samples.
