@@ -1,0 +1,191 @@
+diff --git a/Dockerfile b/Dockerfile
+index 54bbd1e..7f4d17c 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -46,7 +46,9 @@ COPY client-core/ client-core/
+ COPY deploy/db-*.sql deploy/
+ RUN find server/src api-types/src client-core/src -name "*.rs" -exec touch {} +
+ COPY --from=web /app/web/dist web/dist
+-RUN cargo build --locked --release -p fukulow-server
++COPY fk515-sqlx-core/ fk515-sqlx-core/
++COPY fk515-Cargo.lock Cargo.lock
++RUN cargo --config 'patch.crates-io.sqlx-core.path="/app/fk515-sqlx-core"' build --locked --release -p fukulow-server
+ 
+ FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+ RUN groupadd --gid 10001 fukulow \
+diff --git a/server/src/auth.rs b/server/src/auth.rs
+index 8c67076..c13fc9d 100644
+--- a/server/src/auth.rs
++++ b/server/src/auth.rs
+@@ -650,7 +650,7 @@ impl FromRequestParts<AppState> for Auth {
+             &state.pool,
+             organization,
+             async |tx: &mut sqlx::PgConnection| {
+-                sqlx::query_as::<
++                sqlx::pool::fk515::observe("session", sqlx::query_as::<
+                     _,
+                     (
+                         Uuid,
+@@ -669,8 +669,7 @@ impl FromRequestParts<AppState> for Auth {
+                 )
+                 .bind(&token_hash)
+                 .bind(organization)
+-                .fetch_optional(tx)
+-                .await
++                .fetch_optional(tx)).await
+             },
+         )
+         .await?
+diff --git a/server/src/channels.rs b/server/src/channels.rs
+index 1bebe86..e6e44d6 100644
+--- a/server/src/channels.rs
++++ b/server/src/channels.rs
+@@ -443,13 +443,12 @@ async fn member_visibility<'e, E: sqlx::PgExecutor<'e>>(
+     lock: bool,
+ ) -> Result<Option<bool>, sqlx::Error> {
+     let sql = member_visibility_sql(lock);
+-    sqlx::query_scalar(&sql)
++    sqlx::pool::fk515::observe("visibility", sqlx::query_scalar(&sql)
+         .bind(organization_id)
+         .bind(member.0)
+         .bind(member.1)
+         .bind(channel_id)
+-        .fetch_optional(executor)
+-        .await
++        .fetch_optional(executor)).await
+ }
+ 
+ // Projection reads compose this predicate with their data in one fresh snapshot
+diff --git a/server/src/database/context.rs b/server/src/database/context.rs
+index 2fd7df4..6e5a18c 100644
+--- a/server/src/database/context.rs
++++ b/server/src/database/context.rs
+@@ -137,9 +137,8 @@ pub(crate) async fn set_organization(
+     connection: &mut PgConnection,
+     organization: Uuid,
+ ) -> Result<(), sqlx::Error> {
+-    sqlx::query("SELECT set_config('fukulow.organization_id', $1, true)")
++    sqlx::pool::fk515::observe("snapshot_context", sqlx::query("SELECT set_config('fukulow.organization_id', $1, true)")
+         .bind(organization.to_string())
+-        .execute(connection)
+-        .await?;
++        .execute(connection)).await?;
+     Ok(())
+ }
+diff --git a/server/src/database.rs b/server/src/database.rs
+index df014f3..c063920 100644
+--- a/server/src/database.rs
++++ b/server/src/database.rs
+@@ -93,14 +93,14 @@ where
+         .insert(crate::database::acquire(pool).await?);
+     // SQLx 0.8.6 records transaction depth only after BEGIN's response, so its
+     // rollback-on-drop cannot recover a BEGIN cancelled before that response.
+-    sqlx::Executor::execute(
++    sqlx::pool::fk515::observe("snapshot_begin", sqlx::Executor::execute(
+         &mut **connection,
+         if read_only {
+             "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+         } else {
+             "BEGIN"
+         },
+-    )
++    ))
+     .await?;
+     let result = body(connection).await;
+     // Read snapshots always roll back; writes commit only a successful body.
+@@ -109,7 +109,7 @@ where
+     } else {
+         "ROLLBACK"
+     };
+-    let finished = sqlx::Executor::execute(&mut **connection, end).await;
++    let finished = sqlx::pool::fk515::observe("snapshot_end", sqlx::Executor::execute(&mut **connection, end)).await;
+     guard.finished = finished.is_ok();
+     // A body error (e.g. 404) outranks a cleanup failure; the armed guard still discards.
+     let value = result?;
+diff --git a/server/src/fk515.rs b/server/src/fk515.rs
+new file mode 100644
+index 0000000..8d27437
+--- /dev/null
++++ b/server/src/fk515.rs
+@@ -0,0 +1,32 @@
++use axum::{extract::Request, http::Method, middleware::Next, response::Response};
++use sqlx::pool::fk515::{Trace, scope};
++
++pub async fn request(req: Request, next: Next) -> Response {
++    let id = req
++        .headers()
++        .get("x-fk515-sample")
++        .and_then(|value| value.to_str().ok())
++        .and_then(|value| value.parse::<u64>().ok());
++    let Some(id) = id.filter(|_| {
++        req.method() == Method::GET
++            && req.uri().query().is_some_and(|query| {
++                query
++                    .split('&')
++                    .any(|param| param.starts_with("after_seq="))
++            })
++    }) else {
++        return next.run(req).await;
++    };
++    let trace = Trace::new(move |spans| {
++        if let Ok(json) = serde_json::to_string(&(id, spans)) {
++            println!("FK515_APP {json}");
++        }
++    });
++    let timer = trace.span("request", None);
++    let response = scope(trace.clone(), next.run(req)).await;
++    drop(timer);
++    if response.status().is_success() {
++        trace.success();
++    }
++    response
++}
+diff --git a/server/src/lib.rs b/server/src/lib.rs
+index a9c3f9e..4470069 100644
+--- a/server/src/lib.rs
++++ b/server/src/lib.rs
+@@ -1,3 +1,4 @@
++mod fk515;
+ pub mod auth;
+ pub mod channels;
+ pub mod database;
+@@ -207,7 +208,7 @@ pub fn app(state: AppState) -> Router {
+         )
+         .route(
+             "/api/v1/orgs/{org}/channels/{id}/messages",
+-            get(messages::list_messages)
++            get(messages::list_messages).layer(axum::middleware::from_fn(fk515::request))
+                 .post(messages::send_message)
+                 // 4000 control characters escape to 6 bytes each in JSON, so the global 16 KiB would reject valid bodies.
+                 .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+diff --git a/server/src/messages.rs b/server/src/messages.rs
+index d35224d..ebce506 100644
+--- a/server/src/messages.rs
++++ b/server/src/messages.rs
+@@ -90,6 +90,7 @@ pub async fn list_messages(
+     path: Result<Path<(Uuid, Uuid)>, PathRejection>,
+     query: Result<Query<ListMessagesQuery>, QueryRejection>,
+ ) -> Result<Response, MessageError> {
++    let _handler = sqlx::pool::fk515::span("handler");
+     let Path((_, channel_id)) = path.map_err(|_| MessageError::InvalidInput)?;
+     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
+     let limit = query.validate()?;
+@@ -128,14 +129,14 @@ pub async fn list_messages(
+             query.before_seq.map(|seq| seq - 1).unwrap_or(i64::MAX)
+         };
+         let sql = mentions::page_sql(sql, if ascending { "p.seq ASC" } else { "p.seq DESC" });
+-        let mut messages = sqlx::query(&sql)
++        let mut messages = sqlx::pool::fk515::observe("page", sqlx::query(&sql)
+             .bind(organization_id)
+             .bind(channel_id)
+             .bind(cursor)
+             .bind(i64::from(limit) + 1)
+-            .try_map(|row| message_from_row(&row))
+-            .fetch_all(&mut *tx)
+-            .await?;
++            .try_map(|row| sqlx::pool::fk515::measure("decode", || message_from_row(&row)))
++            .fetch_all(&mut *tx)).await?;
++        let _response = sqlx::pool::fk515::span("response");
+         let has_more = messages.len() > usize::from(limit);
+         messages.truncate(usize::from(limit));
+         if !ascending {

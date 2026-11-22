@@ -1,0 +1,265 @@
+diff --git a/Dockerfile b/Dockerfile
+index bfa52f3..6f71181 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -43,7 +43,9 @@ COPY client-core/ client-core/
+ COPY deploy/db-*.sql deploy/
+ RUN find server/src api-types/src client-core/src -name "*.rs" -exec touch {} +
+ COPY --from=web /app/web/dist web/dist
+-RUN cargo build --locked --release -p fukulow-server
++COPY fk515-sqlx-core/ fk515-sqlx-core/
++COPY fk515-Cargo.lock Cargo.lock
++RUN cargo --config 'patch.crates-io.sqlx-core.path="/app/fk515-sqlx-core"' build --locked --release -p fukulow-server
+ 
+ FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+ RUN groupadd --gid 10001 fukulow \
+diff --git a/server/src/auth.rs b/server/src/auth.rs
+index ba1f32c..5ebe9be 100644
+--- a/server/src/auth.rs
++++ b/server/src/auth.rs
+@@ -676,7 +676,7 @@ impl FromRequestParts<AppState> for Auth {
+             &state.pool,
+             organization,
+             async |tx: &mut sqlx::PgConnection| {
+-                sqlx::query_as::<
++                sqlx::pool::fk515::observe("session", sqlx::query_as::<
+                     _,
+                     (
+                         Uuid,
+@@ -695,8 +695,7 @@ impl FromRequestParts<AppState> for Auth {
+                 )
+                 .bind(&token_hash)
+                 .bind(organization)
+-                .fetch_optional(tx)
+-                .await
++                .fetch_optional(tx)).await
+             },
+         )
+         .await?
+diff --git a/server/src/channels.rs b/server/src/channels.rs
+index ac9f07e..2ff83bb 100644
+--- a/server/src/channels.rs
++++ b/server/src/channels.rs
+@@ -581,13 +581,12 @@ pub(crate) async fn is_visible_scoped(
+         pool,
+         &member_visibility_sql(false),
+         async |connection: &mut sqlx::PgConnection, sql: &str| {
+-            sqlx::query_scalar(sql)
++            sqlx::pool::fk515::observe("visibility", sqlx::query_scalar(sql)
+                 .bind(organization)
+                 .bind(member.0)
+                 .bind(member.1)
+                 .bind(channel)
+-                .fetch_optional(connection)
+-                .await
++                .fetch_optional(connection)).await
+         },
+     )
+     .await
+diff --git a/server/src/database/context.rs b/server/src/database/context.rs
+index 9c2725e..d91dfe8 100644
+--- a/server/src/database/context.rs
++++ b/server/src/database/context.rs
+@@ -157,9 +157,8 @@ pub(crate) async fn set_organization(
+     connection: &mut PgConnection,
+     organization: Uuid,
+ ) -> Result<(), sqlx::Error> {
+-    sqlx::query("SELECT set_config('fukulow.organization_id', $1, true)")
++    sqlx::pool::fk515::observe("snapshot_context", sqlx::query("SELECT set_config('fukulow.organization_id', $1, true)")
+         .bind(organization.to_string())
+-        .execute(connection)
+-        .await?;
++        .execute(connection)).await?;
+     Ok(())
+ }
+diff --git a/server/src/database.rs b/server/src/database.rs
+index 820eb1b..4ccd4a5 100644
+--- a/server/src/database.rs
++++ b/server/src/database.rs
+@@ -94,14 +94,14 @@ where
+         .insert(crate::database::acquire(pool).await?);
+     // SQLx 0.8.6 records transaction depth only after BEGIN's response, so its
+     // rollback-on-drop cannot recover a BEGIN cancelled before that response.
+-    sqlx::Executor::execute(
++    sqlx::pool::fk515::observe("snapshot_begin", sqlx::Executor::execute(
+         &mut **connection,
+         if read_only {
+             "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+         } else {
+             "BEGIN"
+         },
+-    )
++    ))
+     .await?;
+     let result = body(connection).await;
+     // Read snapshots always roll back; writes commit only a successful body.
+@@ -110,7 +110,7 @@ where
+     } else {
+         "ROLLBACK"
+     };
+-    let finished = sqlx::Executor::execute(&mut **connection, end).await;
++    let finished = sqlx::pool::fk515::observe("snapshot_end", sqlx::Executor::execute(&mut **connection, end)).await;
+     guard.finished = finished.is_ok();
+     // A body error (e.g. 404) outranks a cleanup failure; the armed guard still discards.
+     let value = result?;
+diff --git a/server/src/fk515.rs b/server/src/fk515.rs
+new file mode 100644
+index 0000000..8d27437
+--- /dev/null
++++ b/server/src/fk515.rs
+@@ -0,0 +1,32 @@
++use axum::{extract::Request, http::Method, middleware::Next, response::Response};
++use sqlx::pool::fk515::{Trace, scope};
++
++pub async fn request(req: Request, next: Next) -> Response {
++    let id = req
++        .headers()
++        .get("x-fk515-sample")
++        .and_then(|value| value.to_str().ok())
++        .and_then(|value| value.parse::<u64>().ok());
++    let Some(id) = id.filter(|_| {
++        req.method() == Method::GET
++            && req.uri().query().is_some_and(|query| {
++                query
++                    .split('&')
++                    .any(|param| param.starts_with("after_seq="))
++            })
++    }) else {
++        return next.run(req).await;
++    };
++    let trace = Trace::new(move |spans| {
++        if let Ok(json) = serde_json::to_string(&(id, spans)) {
++            println!("FK515_APP {json}");
++        }
++    });
++    let timer = trace.span("request", None);
++    let response = scope(trace.clone(), next.run(req)).await;
++    drop(timer);
++    if response.status().is_success() {
++        trace.success();
++    }
++    response
++}
+diff --git a/server/src/lib.rs b/server/src/lib.rs
+index f262aaa..b06979c 100644
+--- a/server/src/lib.rs
++++ b/server/src/lib.rs
+@@ -1,3 +1,4 @@
++mod fk515;
+ pub mod auth;
+ pub mod channels;
+ pub mod database;
+@@ -216,7 +217,7 @@ pub fn app(state: AppState) -> Router {
+         )
+         .route(
+             "/api/v1/orgs/{org}/channels/{id}/events",
+-            get(messages::list_channel_events),
++            get(messages::list_channel_events).layer(axum::middleware::from_fn(fk515::request)),
+         )
+         .route(
+             "/api/v1/orgs/{org}/channels/{id}/messages",
+diff --git a/server/src/messages/commit.rs b/server/src/messages/commit.rs
+index fdf4f86..f9ffa95 100644
+--- a/server/src/messages/commit.rs
++++ b/server/src/messages/commit.rs
+@@ -27,7 +27,7 @@ impl Transaction {
+             connection: Some(crate::database::acquire(pool).await?),
+             _permit: permit,
+         };
+-        tx.connection()?.execute(sql).await?;
++        sqlx::pool::fk515::observe("watermark_begin", tx.connection()?.execute(sql)).await?;
+         if let Some(organization) = organization {
+             crate::database::set_organization(tx.connection()?, organization).await?;
+         }
+@@ -35,7 +35,7 @@ impl Transaction {
+     }
+ 
+     pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
+-        self.connection()?.execute("COMMIT").await?;
++        sqlx::pool::fk515::observe("watermark_commit", self.connection()?.execute("COMMIT")).await?;
+         drop(self.connection.take());
+         Ok(())
+     }
+@@ -83,11 +83,10 @@ pub(super) async fn lock(
+     } else {
+         sql.to_owned()
+     };
+-    sqlx::query(&sql)
++    sqlx::pool::fk515::observe("barrier", sqlx::query(&sql)
+         .bind(organization)
+         .bind(channel)
+-        .execute(&mut *tx)
+-        .await?;
++        .execute(&mut *tx)).await?;
+     Ok(())
+ }
+ 
+diff --git a/server/src/messages/log.rs b/server/src/messages/log.rs
+index db3a096..bf16707 100644
+--- a/server/src/messages/log.rs
++++ b/server/src/messages/log.rs
+@@ -286,7 +286,7 @@ async fn authorized_page(
+         &sql,
+         async |tx: &mut PgConnection, sql: &str| {
+             let sql = format!("{sql} ORDER BY event_seq");
+-            sqlx::query(&sql)
++            sqlx::pool::fk515::observe("page", sqlx::query(&sql)
+                 .bind(organization)
+                 .bind(member.0)
+                 .bind(member.1)
+@@ -294,11 +294,11 @@ async fn authorized_page(
+                 .bind(after)
+                 .bind(through)
+                 .bind(limit)
+-                .fetch_all(tx)
+-                .await
++                .fetch_all(tx)).await
+         },
+     )
+     .await?;
++    sqlx::pool::fk515::measure("page_decode", || {
+     match rows
+         .first()
+         .ok_or(sqlx::Error::RowNotFound)?
+@@ -316,6 +316,7 @@ async fn authorized_page(
+         return Err(MessageError::HistoryGenerationChanged);
+     }
+     Ok((history_generation, hydrate(rows, after)?))
++    })
+ }
+ 
+ /// Read event positions for C3 gap recovery. Auth extraction and query validation
+@@ -340,6 +341,7 @@ pub async fn list_channel_events(
+     >,
+ ) -> Result<axum::response::Response, MessageError> {
+     use axum::response::IntoResponse;
++    let _handler = sqlx::pool::fk515::span("handler");
+     let axum::extract::Path((_, channel)) = path.map_err(|_| MessageError::InvalidInput)?;
+     let axum::extract::Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
+     let limit = query.limit.unwrap_or(50);
+@@ -360,6 +362,7 @@ pub async fn list_channel_events(
+         query.history_generation,
+     )
+     .await?;
++    let _response = sqlx::pool::fk515::span("response");
+     let has_more = events.len() > usize::from(limit);
+     events.truncate(usize::from(limit));
+     let events = events.into_iter().map(ChannelEvent::into_wire).collect();
+diff --git a/server/src/messages.rs b/server/src/messages.rs
+index 335e569..07ebd23 100644
+--- a/server/src/messages.rs
++++ b/server/src/messages.rs
+@@ -853,11 +853,10 @@ async fn latest_seq(
+     commit::lock(tx.connection()?, organization, channel, true).await?;
+     let sql = "SELECT seq FROM channel_message_sequences \
+                    WHERE organization_id = $1 AND channel_id = $2";
+-    let seq = sqlx::query_scalar::<_, i64>(sql)
++    let seq = sqlx::pool::fk515::observe("watermark", sqlx::query_scalar::<_, i64>(sql)
+         .bind(organization)
+         .bind(channel)
+-        .fetch_optional(tx.connection()?)
+-        .await?
++        .fetch_optional(tx.connection()?)).await?
+         .unwrap_or(0);
+     tx.commit().await?;
+     Ok(seq)

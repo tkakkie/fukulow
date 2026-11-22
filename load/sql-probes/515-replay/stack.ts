@@ -25,8 +25,8 @@ export const runtime = 'fukulow_app';
 export const owner = 'fukulow';
 export const pgOptions = '-c statement_timeout=10s -c jit=off';
 
-export function stack(source: string, work: string, arm: Arm, commit: string, project: string) {
-  const image = `fukulow-slice5:${arm.toLowerCase()}-${commit.slice(0, 12)}`;
+export function stack(source: string, work: string, arm: Arm, commit: string, project: string, appImage?: string) {
+  const image = appImage ?? `fukulow-slice5:${arm.toLowerCase()}-${commit.slice(0, 12)}`;
   const revision = cmd('docker', ['image', 'inspect', '--format', '{{index .Config.Labels "org.opencontainers.image.revision"}}', image]);
   if (revision !== commit) throw new Error('Slice 5 migration image revision mismatch');
   const composeFile = source + '/load/compose.yml';
@@ -36,7 +36,8 @@ export function stack(source: string, work: string, arm: Arm, commit: string, pr
     DOCKER_CONTEXT: process.env.DOCKER_CONTEXT, LOAD_PROJECT: project, LOAD_PORT: '0', LOAD_APP_IMAGE: image,
     LOAD_DB_PASSWORD: randomUUID(), LOAD_APP_PASSWORD: randomUUID(), LOAD_SETUP_TOKEN: randomUUID() };
   const override = work + '/' + arm + '-compose.json';
-  writeFileSync(override, JSON.stringify({ services: { db: { command: dbCommand() } } }));
+  writeFileSync(override, JSON.stringify({ services: { db: { command: dbCommand() },
+    ...(appImage && { app: { logging: { options: { 'max-size': '64m' } } } }) } }), { mode: 0o600 });
   const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', composeFile, '-f', override];
   const dc = (args: string[], input?: string) => cmd('docker', [...compose, ...args], input, env);
   if (cmd('docker', ['ps', '-aq', '--filter', 'label=com.docker.compose.project=' + project])) {
@@ -81,7 +82,14 @@ export function stack(source: string, work: string, arm: Arm, commit: string, pr
     return { report, log };
   };
   const stop = () => dc(['down', '--volumes']);
-  return { start, stop, psql, setup, pgbench, pgImage: pg };
+  // The caller has already run and verified the one-shot migration container.
+  const startApp = () => {
+    dc(['up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '90', 'app']);
+    const base = 'http://' + dc(['port', 'app', '8080']);
+    const id = dc(['ps', '-q', 'app']);
+    return { base, logs: () => cmd('docker', ['logs', id]) };
+  };
+  return { start, stop, psql, setup, pgbench, pgImage: pg, startApp };
 }
 
 export type Stack = ReturnType<typeof stack>;
@@ -93,7 +101,10 @@ export const member = id('3', 0);
 // These are synthetic bytea keys with no matching bearer token or cookie.
 export const token = '\\x' + '0'.repeat(64);
 
-export function seed(db: Stack, arm: Arm, sizes: readonly number[]) {
+export function seed(db: Stack, arm: Arm, sizes: readonly number[], readerHash?: string) {
+  if (readerHash !== undefined && !/^[0-9a-f]{64}$/.test(readerHash)) throw new Error('Invalid fixture Session hash');
+  const sessionHash = "decode(lpad(to_hex(n),64,'0'),'hex')";
+  const hash = readerHash === undefined ? sessionHash : `CASE WHEN n = 0 THEN decode('${readerHash}','hex') ELSE ${sessionHash} END`;
   const channels = Array.from({ length: fixture.channels }, (_, i) => channel(i));
   db.setup(`BEGIN;
     INSERT INTO organizations (organization_id,name) VALUES ('${organization}','Organization A');
@@ -105,7 +116,7 @@ export function seed(db: Stack, arm: Arm, sizes: readonly number[]) {
         md5('fk515d/account/' || n)::uuid, 'Load Member', 'member'
       FROM generate_series(0,${fixture.members - 1}) n;
     INSERT INTO account_sessions (token_hash,account_id)
-      SELECT decode(lpad(to_hex(n),64,'0'),'hex'),md5('fk515d/account/' || n)::uuid
+      SELECT ${hash},md5('fk515d/account/' || n)::uuid
       FROM generate_series(0,${fixture.members - 1}) n;
     INSERT INTO channels (organization_id,id,name,visibility)
       VALUES ${channels.map((channelId, i) => `('${organization}','${channelId}','load-${i}','public')`).join(',')};
