@@ -29,23 +29,25 @@ export function stages(out: string, mode: Mode) {
     // Call immediately before the first measured sample is taken.
     startSampling() { sampling = true; },
     done(name: string) { complete.push(name); },
-    write(o: { failed: boolean; interrupted: boolean; summaryFailed?: boolean }) {
+    write(o: { failed: boolean; interrupted: boolean; summaryFailed?: boolean; invalidEvidence?: boolean }) {
       const result = outcome({ ...o, sampling });
-      // Only a recorded run that reached sampling and was not interrupted is evidence (pass or fail).
-      const evidence = mode === 'recorded' && (result === 'success' || result === 'result-failure');
+      // After sampling, recorded failures can be evidence unless the caller flags invalid data.
+      const evidence = !o.invalidEvidence && mode === 'recorded' && (result === 'success' || result === 'result-failure');
       const status = { mode, evidence, outcome: result, sampling, lastStage: stage, complete,
         summaryFailed: o.summaryFailed ?? false, finished: new Date().toISOString() };
       writeFileSync(join(out, 'status.json'), JSON.stringify(status, null, 2) + '\n');
       return status;
     },
     // Aggregation errors (for example invalid samples) must never stop status.json from being written.
-    finish(summarize: () => void, o: { failed: boolean; interrupted: boolean }) {
+    // summaryInvalidates: a rejected summary means the samples are invalid, so the run is never evidence.
+    finish(summarize: () => void, o: { failed: boolean; interrupted: boolean; invalidEvidence?: boolean; summaryInvalidates?: boolean }) {
       let summaryFailed = false;
       try { summarize(); } catch (error) {
         summaryFailed = true;
         console.error(`summary failed (${error instanceof Error ? error.name : 'unknown error'})`);
       }
-      return this.write({ failed: o.failed || summaryFailed, interrupted: o.interrupted, summaryFailed });
+      const invalidEvidence = o.invalidEvidence || (summaryFailed && o.summaryInvalidates === true);
+      return this.write({ failed: o.failed || summaryFailed, interrupted: o.interrupted, summaryFailed, invalidEvidence });
     },
   };
 }

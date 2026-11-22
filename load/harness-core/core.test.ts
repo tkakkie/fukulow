@@ -38,6 +38,9 @@ test('a recorded run is evidence only once sampling started and it was not inter
   sampled.startSampling();
   assert.deepEqual([sampled.write({ failed: true, interrupted: false }).evidence,
     sampled.write({ failed: false, interrupted: true }).evidence], [true, false]);
+  const invalid = sampled.finish(() => {}, { failed: true, interrupted: false, invalidEvidence: true });
+  assert.deepEqual([invalid.outcome, invalid.evidence], ['result-failure', false]);
+  assert.equal(JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')).evidence, false);
   assert.equal(stages(out, 'rehearsal').write({ failed: false, interrupted: false }).evidence, false);
 });
 
@@ -48,6 +51,12 @@ test('status.json is written even when the summary throws', () => {
   const status = s.finish(() => { throw new Error('Invalid latency samples'); }, { failed: false, interrupted: false });
   const saved = JSON.parse(readFileSync(join(out, 'status.json'), 'utf8'));
   assert.deepEqual([status.summaryFailed, saved.summaryFailed, saved.outcome], [true, true, 'result-failure']);
+  assert.equal(saved.evidence, true);
+  const strict = stages(out, 'recorded');
+  strict.startSampling();
+  const rejected = strict.finish(() => { throw new Error('cursor schedule mismatch'); }, { failed: false, interrupted: false, invalidEvidence: false, summaryInvalidates: true });
+  assert.deepEqual([rejected.outcome, rejected.evidence], ['result-failure', false]);
+  assert.equal(JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')).evidence, false);
 });
 
 test('exactly one mode flag is accepted', () => {
