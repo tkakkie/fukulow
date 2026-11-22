@@ -21,6 +21,7 @@ import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFi
   type BackfillReceipt } from './snapshot.ts';
 import { timeQuery } from './timing.ts';
 import { rehearsalLabel } from './labels.ts';
+import { assertHeadroom, dfBytes, dockerDiskArgs, headroomSampler, outputDisk } from './headroom.ts';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url)).replace(/\/$/, '');
 const note = (message: string) => console.log(`${new Date().toISOString()} ${message}`);
@@ -338,8 +339,15 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   const plans: Evidence['plans'] = [];
   let found: Evidence['complete'] = [];
   let measuredRls = '';
+  // Rehearsal only: disk use through the measured round, projected onto the formal run's remaining rounds.
+  const formalRounds = frozen.performance.rounds;
+  const headroom = headroomSampler(mode === 'rehearsal', {
+    docker: () => dfBytes(docker(...dockerDiskArgs(id, ownershipLabel))),
+    output: () => outputDisk(out),
+  }, samples => assertHeadroom(out, samples, formalRounds, conditions.rounds, save));
   for (let round = 1; round <= conditions.rounds; round++) {
     const dest = `${out}/round-${round}`;
+    headroom.sample(`round ${round} start`);
     mkdirSync(dest);
     await resetMeasured(text => owner('postgres', text), async () => {
       docker('restart', container);
@@ -350,10 +358,12 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     if (round === 1) measuredRls = directRls(text => app('measured', text));
     await recordedWarmup(`${dest}/warmup.json`, path.page, querySet, conditions.warmupSweeps,
       body => openApp('measured', body), mode === 'rehearsal');
+    headroom.sample(`round ${round} after warm-up`);
     const latencies = await measureBlocks(querySet, (query, raw) => timeQuery(container, 'measured', path.page, query, raw,
-      !accepts(query), `${dest}/${query}`, conditions.transactions, conditions.clients), result =>
-      phase(`round ${round}`, 'p95' in result ? `${result.query} p95=${result.p95.toFixed(3)} ms` : `${result.query} ${result.sqlError}`),
-    mode === 'rehearsal');
+      !accepts(query), `${dest}/${query}`, conditions.transactions, conditions.clients), result => {
+      phase(`round ${round}`, 'p95' in result ? `${result.query} p95=${result.p95.toFixed(3)} ms` : `${result.query} ${result.sqlError}`);
+      headroom.sample(`round ${round} after ${result.query}`);
+    }, mode === 'rehearsal');
     rounds.push({round, latencies});
     save(`${dest}/latencies.json`, latencies);
     if (round === 1) {
@@ -370,9 +380,12 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
       save(`${out}/completeness.json`, found);
       phase('completeness', 'finished');
     }
+    headroom.sample(`round ${round} before dropping measured`);
     owner('postgres', 'DROP DATABASE measured;');
+    headroom.sample(`round ${round} end`);
     phase(`round ${round}`, 'finished');
   }
+  if (mode === 'rehearsal') assertHeadroom(out, headroom.samples, formalRounds, conditions.rounds, save);
   const denialReport = {...accessChecks, measuredRls};
   save(`${out}/denials.json`, denialReport);
   const evidence: Evidence = {valid: true, formal: mode === 'formal', backfill: records.base, rounds, plans, complete: found,

@@ -24,6 +24,7 @@ import { claimFile, cleanUpRun, completeRun, discardRehearsalSnapshot, launchFil
 import { directRls, directRlsExpected, searchTables, verifyRls } from './d3r/rls.ts';
 import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFile, snapshotIdentity, snapshotLaunch, stageSnapshot } from './d3r/snapshot.ts';
 import { timeQuery } from './d3r/timing.ts';
+import { assertHeadroom, dfBytes, dockerDiskArgs, headroomSampler, outputDisk, projectHeadroom, type Disk } from './d3r/headroom.ts';
 
 test('v15 freezes the approved settings and every production migration while preserving v13', () => {
   const {sha256, frozen} = loadManifest();
@@ -73,7 +74,8 @@ test('v14 stays pinned and v15 differs from it only by the rehearsal, the new mi
   const before = new Map<string, string>(v14.frozen.sourceHashes.map((s: {path: string; sha256: string}) => [s.path, s.sha256]));
   assert.ok([...before.keys()].every(path => frozen.sourceHashes.some(source => source.path === path)));
   assert.deepEqual(frozen.sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path), [
-    'load/search-engines/d3r/acceptance.ts', 'load/search-engines/d3r/labels.ts', 'load/search-engines/d3r/manifest.ts',
+    'load/search-engines/d3r/acceptance.ts', 'load/search-engines/d3r/headroom.ts', 'load/search-engines/d3r/labels.ts',
+    'load/search-engines/d3r/manifest.ts',
     'load/search-engines/d3r/run.ts', 'load/search-engines/d3r/snapshot.ts', added]);
 });
 
@@ -920,6 +922,96 @@ test('a stopped rehearsal still writes its warm-up records, including the failin
   const errors = await recordedWarmup(formal, productionPath().page, querySet, 2, open, false);
   assert.equal(errors.length, 2);
   assert.deepEqual(JSON.parse(readFileSync(formal, 'utf8')), errors);
+});
+
+const GB = 1e9;
+// Injected probe readings, one per sample: [docker free, docker used, output free, output used] in GB.
+const headroomRun = (readings: (readonly number[] | Error)[]) => {
+  const {frozen} = loadManifest();
+  const formalRounds = frozen.performance.rounds, rehearsalRounds = frozen.rehearsal.performance.rounds;
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-headroom-test-'));
+  const saved = new Map<string, unknown>();
+  const save = (path: string, value: unknown) => { saved.set(path, JSON.parse(JSON.stringify(value))); };
+  let i = 0, current: readonly number[] | Error = [];
+  const disk = (offset: number): Disk => {
+    if (current instanceof Error) throw current;
+    return {free: current[offset] * GB, used: current[offset + 1] * GB};
+  };
+  let error: unknown;
+  try {
+    const sampler = headroomSampler(true, {docker: () => { current = readings[i++]; return disk(0); }, output: () => disk(2)},
+      samples => assertHeadroom(dir, samples, formalRounds, rehearsalRounds, save));
+    for (const [n] of readings.entries()) sampler.sample(`sample ${n}`);
+    assertHeadroom(dir, sampler.samples, formalRounds, rehearsalRounds, save);
+  } catch (caught) {
+    error = caught;
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+  return {error, formalRounds, rehearsalRounds,
+    report: saved.get(join(dir, 'rehearsal-headroom.json')) as ReturnType<typeof projectHeadroom> | undefined};
+};
+
+test('rehearsal headroom projects the measured round onto the formal rounds from the manifest and passes with space', () => {
+  const {error, report, formalRounds, rehearsalRounds} = headroomRun([[100, 50, 40, 10], [80, 70, 35, 12], [95, 55, 36, 14]]);
+  assert.equal(error, undefined);
+  assert.ok(formalRounds > rehearsalRounds);
+  assert.equal(report?.label, 'REHEARSAL / NON-EVALUATION');
+  assert.equal(report?.ok, true);
+  assert.deepEqual(report?.projection?.docker, {start: {free: 100 * GB, used: 50 * GB}, end: {free: 95 * GB, used: 55 * GB},
+    minFree: 80 * GB, roundGrowth: 5 * GB, required: (formalRounds - rehearsalRounds) * 5 * GB,
+    margin: 80 * GB - (formalRounds - rehearsalRounds) * 5 * GB, ok: true});
+  assert.equal(report?.projection?.output.roundGrowth, 4 * GB);
+  assert.equal(report?.projection?.output.minFree, 35 * GB);
+  const shrinking = headroomRun([[10, 50, 10, 10], [10, 40, 10, 5]]);
+  assert.equal(shrinking.error, undefined, 'growth is clamped at zero');
+  assert.equal(shrinking.report?.projection?.docker.required, 0);
+});
+
+test('rehearsal headroom fails when the projection is negative on the Docker disk or the output filesystem alone', () => {
+  for (const [fs, readings] of [
+    ['docker', [[100, 50, 400, 10], [20, 130, 390, 12], [30, 120, 395, 14]]],
+    ['output', [[400, 50, 100, 10], [390, 60, 20, 90], [395, 55, 30, 80]]],
+  ] as const) {
+    const {error, report} = headroomRun(readings as unknown as number[][]);
+    assert.match(String(error), new RegExp(`REHEARSAL / NON-EVALUATION INVALID: disk headroom.*${fs} margin -`), fs);
+    assert.equal(report?.ok, false, fs);
+    assert.equal(report?.projection?.[fs].ok, false, fs);
+    assert.equal(report?.projection?.[fs === 'docker' ? 'output' : 'docker'].ok, true, fs);
+  }
+});
+
+test('rehearsal headroom fails at once when a measurement fails and when one is missing', () => {
+  const failed = headroomRun([[100, 50, 40, 10], new Error('Docker disk probe failed'), [95, 55, 36, 14]]);
+  assert.match(String(failed.error), /INVALID: disk headroom.*sample 1: Error: Docker disk probe failed/);
+  assert.equal(failed.report?.samples.length, 2, 'stops at the failed sample');
+  assert.equal(failed.report?.projection, undefined);
+  const nan = headroomRun([[100, 50, 40, 10], [80, Number.NaN, 35, 12]]);
+  assert.match(String(nan.error), /sample 1: docker measurement missing/);
+  const one = headroomRun([[100, 50, 40, 10]]);
+  assert.match(String(one.error), /fewer than a start and an end sample/);
+  const {frozen} = loadManifest();
+  const partial = projectHeadroom([{at: 'start', docker: {free: GB, used: GB}, output: {free: GB, used: GB}},
+    {at: 'end', docker: {free: GB, used: GB}}], frozen.performance.rounds, frozen.rehearsal.performance.rounds);
+  assert.equal(partial.ok, false);
+  assert.deepEqual(partial.problems, ['end: output measurement missing']);
+});
+
+test('headroom is never probed outside a rehearsal and measures both filesystems the documented way', () => {
+  let probes = 0;
+  const sampler = headroomSampler(false, {docker: () => { probes++; return {free: 0, used: 0}; },
+    output: () => { probes++; return {free: 0, used: 0}; }}, () => assert.fail('no failure outside a rehearsal'));
+  sampler.sample('round 1 start');
+  sampler.sample('round 1 end');
+  assert.equal(probes, 0);
+  assert.deepEqual(sampler.samples, []);
+  assert.deepEqual(dfBytes('Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000 300 700 30% /\n'),
+    {free: 700 * 1024, used: 300 * 1024});
+  assert.throws(() => dfBytes('garbage'), /Unreadable df output/);
+  assert.deepEqual(dockerDiskArgs('sha256:x', 'label=1'), ['run', '--rm', '--pull', 'never', '--network', 'none', '--read-only',
+    '--label', 'label=1', '--entrypoint', 'df', 'sha256:x', '-Pk', '/']);
+  const disk = outputDisk(tmpdir());
+  assert.ok(Number.isSafeInteger(disk.free) && disk.free > 0 && Number.isSafeInteger(disk.used) && disk.used > 0);
 });
 
 test('a rehearsal stops at a restore drill or denial check that recorded a pagination error', () => {
