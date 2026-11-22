@@ -49,24 +49,23 @@ pub struct ReadPosition {
     pub read_seq: i64,
 }
 
-// Count Mentions separately from Unread. A correlated, OFFSET 0-fenced
-// Mention subquery in the Unread join can be probed once per unread Message.
-// Materialize the Member's Mention IDs to bound the scan to once per Channel
-// per scope. Share the unread IDs between both counts so each Message range
-// is read once. Both ID sets already have the same Organization and Channel.
-// The Topic range fence preserves parameterized seq scans.
-// Unread Messages use parameterized index ranges from persisted positions.
-// Fully read Topics never touch Messages; a missing position suppresses only
-// that Channel's Unread at its snapshot's committed counter, without persisting.
-// The counter and Messages commit atomically, so this snapshot's counts are
-// exactly bounded by its counter, including own and already-read Messages.
+// #519 A3: no count reads `messages`. Per scope, Unread in (read_seq, S] is
+// (appended - own appended) - (read_ordinal - read_own_ordinal) + other senders'
+// corrections in the range (migration 202611221100 has the identity). Mentions
+// are a range on the counted partial index. The counter and the counts commit
+// atomically, so this snapshot's counts are exactly bounded by its counter.
+// A Topic with last_seq at or below its position has no live Message above it;
+// a missing Topic position is ordinals 0 at initial_seq. Each scope is clamped at
+// 0 and count_drift reports a negative raw value, which the identity rules out.
 // Materialize the Member's unread Topic candidates once, rather than rescan
 // every Topic under RLS per Channel. Carry the lower bound as a column: PostgreSQL
 // does not recognise COALESCE as leakproof, so it stays out of RLS index quals.
 pub(super) const LIST_COUNTS_SQL: &str = r#"
 WITH unread_topics AS MATERIALIZED (
     SELECT t.organization_id, t.channel_id, t.id, t.last_seq,
-        COALESCE(tr.read_seq, p.initial_seq) AS read_seq
+        COALESCE(tr.read_seq, p.initial_seq) AS read_seq,
+        COALESCE(tr.read_ordinal, 0) AS read_ordinal,
+        COALESCE(tr.read_own_ordinal, 0) AS read_own_ordinal
     FROM topics t
     JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $2
         AND p.membership_revision = $3 AND p.channel_id = t.channel_id
@@ -78,49 +77,59 @@ WITH unread_topics AS MATERIALIZED (
 SELECT c.channel_id, COALESCE(s.seq, 0) AS as_of_seq,
     COALESCE(p.read_seq, s.seq, 0) AS read_seq,
     p.channel_id IS NULL AS missing_position,
-    main.unread_count AS main_unread_count,
-    main.unread_count + topic.unread_count AS unread_count,
+    GREATEST(main.unread_count, 0) AS main_unread_count,
+    GREATEST(main.unread_count, 0) + topic.unread_count AS unread_count,
     main.mention_unread_count AS main_mention_unread_count,
-    main.mention_unread_count + topic.mention_unread_count AS mention_unread_count
+    main.mention_unread_count + topic.mention_unread_count AS mention_unread_count,
+    main.unread_count < 0 OR topic.drift AS count_drift
 FROM unnest($4::uuid[]) c(channel_id)
 LEFT JOIN channel_read_positions p ON p.organization_id = $1 AND p.member_id = $2
     AND p.membership_revision = $3 AND p.channel_id = c.channel_id
 LEFT JOIN channel_message_sequences s ON s.organization_id = $1 AND s.channel_id = c.channel_id
 CROSS JOIN LATERAL (
-    WITH unread AS MATERIALIZED (
-        SELECT m.id FROM messages m
-        WHERE p.channel_id IS NOT NULL AND m.organization_id = $1 AND m.channel_id = c.channel_id
-            AND m.topic_id IS NULL AND NOT m.deleted AND m.seq > p.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
-    ),
-    member_mentions AS MATERIALIZED (
-        SELECT message_id FROM message_mentions
-        WHERE organization_id = $1 AND member_id = $2 AND channel_id = c.channel_id
-            AND p.channel_id IS NOT NULL
-    )
-    SELECT (SELECT count(*) FROM unread) AS unread_count, (
-        SELECT count(*) FROM member_mentions mm JOIN unread m ON m.id = mm.message_id
-    ) AS mention_unread_count
+    SELECT CASE WHEN p.channel_id IS NULL OR COALESCE(s.seq, 0) <= p.read_seq THEN 0 ELSE
+        (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
+              - COALESCE(sum(k.appended) FILTER (WHERE k.member_id = $2), 0))::bigint
+         FROM message_append_counts k WHERE k.organization_id = $1 AND k.channel_id = c.channel_id
+            AND k.scope_id = '00000000-0000-0000-0000-000000000000'
+            AND k.member_id IN ('00000000-0000-0000-0000-000000000000', $2))
+        - p.read_ordinal + p.read_own_ordinal
+        + (SELECT COALESCE(sum(x.delta), 0) FROM message_count_corrections x
+           WHERE x.organization_id = $1 AND x.channel_id = c.channel_id
+             AND x.scope_id = '00000000-0000-0000-0000-000000000000'
+             AND x.seq > p.read_seq AND x.seq <= s.seq AND x.sender <> $2)
+    END AS unread_count,
+    CASE WHEN p.channel_id IS NULL OR COALESCE(s.seq, 0) <= p.read_seq THEN 0 ELSE
+        (SELECT count(*) FROM message_mentions mm
+         WHERE mm.organization_id = $1 AND mm.member_id = $2 AND mm.channel_id = c.channel_id
+           AND mm.topic_id IS NULL AND mm.seq > p.read_seq AND mm.seq <= s.seq AND mm.counted)
+    END AS mention_unread_count
+    OFFSET 0
 ) main
 CROSS JOIN LATERAL (
-    WITH unread AS MATERIALIZED (
-        SELECT m.id FROM unread_topics t
-        CROSS JOIN LATERAL (
-            SELECT m.id FROM messages m
-            WHERE m.organization_id = $1 AND m.channel_id = c.channel_id AND m.topic_id = t.id
-                AND NOT m.deleted AND m.seq > t.read_seq AND m.seq <= COALESCE(s.seq,0) AND m.sender <> $2
-            OFFSET 0
-        ) m
-        WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
-            AND t.last_seq > t.read_seq
-    ),
-    member_mentions AS MATERIALIZED (
-        SELECT message_id FROM message_mentions
-        WHERE organization_id = $1 AND member_id = $2 AND channel_id = c.channel_id
-            AND p.channel_id IS NOT NULL
-    )
-    SELECT (SELECT count(*) FROM unread) AS unread_count, (
-        SELECT count(*) FROM member_mentions mm JOIN unread m ON m.id = mm.message_id
-    ) AS mention_unread_count
+    SELECT COALESCE(sum(GREATEST(tc.unread_count, 0)), 0)::bigint AS unread_count,
+        COALESCE(sum(tc.mention_unread_count), 0)::bigint AS mention_unread_count,
+        COALESCE(bool_or(tc.unread_count < 0), false) AS drift
+    FROM unread_topics t
+    CROSS JOIN LATERAL (
+        SELECT
+            (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
+                  - COALESCE(sum(k.appended) FILTER (WHERE k.member_id = $2), 0))::bigint
+             FROM message_append_counts k WHERE k.organization_id = $1 AND k.channel_id = c.channel_id
+                AND k.scope_id = t.id AND k.member_id IN ('00000000-0000-0000-0000-000000000000', $2))
+            - t.read_ordinal + t.read_own_ordinal
+            + (SELECT COALESCE(sum(x.delta), 0) FROM message_count_corrections x
+               WHERE x.organization_id = $1 AND x.channel_id = c.channel_id AND x.scope_id = t.id
+                 AND x.seq > t.read_seq AND x.seq <= s.seq AND x.sender <> $2)
+            AS unread_count,
+            (SELECT count(*) FROM message_mentions mm
+             WHERE mm.organization_id = $1 AND mm.member_id = $2 AND mm.channel_id = c.channel_id
+               AND mm.topic_id = t.id AND mm.seq > t.read_seq AND mm.seq <= s.seq AND mm.counted)
+            AS mention_unread_count
+        OFFSET 0
+    ) tc
+    WHERE p.channel_id IS NOT NULL AND t.organization_id = $1 AND t.channel_id = c.channel_id
+        AND COALESCE(s.seq, 0) > t.read_seq
 ) topic
 "#;
 
@@ -172,6 +181,9 @@ pub async fn list_channels(
             for row in rows {
                 if row.try_get::<bool, _>("missing_position")? {
                     tracing::error!(target: "fukulow", event = "missing_unread_position");
+                }
+                if row.try_get::<bool, _>("count_drift")? {
+                    tracing::error!(target: "fukulow", event = "unread_count_drift");
                 }
                 counts.insert(
                     row.try_get::<Uuid, _>("channel_id")?,
@@ -328,9 +340,16 @@ async fn mark_inner(
             if !exists {
                 return Err(MessageError::TopicNotFound);
             }
-            sqlx::query_scalar("INSERT INTO topic_read_positions (organization_id,channel_id,member_id,topic_id,read_seq) VALUES ($1,$2,$3,$4,$5) \
-                ON CONFLICT (organization_id,channel_id,member_id,topic_id) DO UPDATE SET read_seq=GREATEST(topic_read_positions.read_seq,EXCLUDED.read_seq) RETURNING read_seq")
-                .bind(organization).bind(channel).bind(member.0).bind(topic).bind(requested).fetch_one(&mut *tx).await?
+            // Update first: an upsert would also run the BEFORE INSERT ordinal trigger
+            // for the proposed row. Rows are created on access, so the insert is rare.
+            let updated: Option<i64> = sqlx::query_scalar("UPDATE topic_read_positions SET read_seq=GREATEST(read_seq,$5) WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 AND topic_id=$4 RETURNING read_seq")
+                .bind(organization).bind(channel).bind(member.0).bind(topic).bind(requested).fetch_optional(&mut *tx).await?;
+            match updated {
+                Some(read_seq) => read_seq,
+                None => sqlx::query_scalar("INSERT INTO topic_read_positions (organization_id,channel_id,member_id,topic_id,read_seq) VALUES ($1,$2,$3,$4,$5) \
+                    ON CONFLICT (organization_id,channel_id,member_id,topic_id) DO UPDATE SET read_seq=GREATEST(topic_read_positions.read_seq,EXCLUDED.read_seq) RETURNING read_seq")
+                    .bind(organization).bind(channel).bind(member.0).bind(topic).bind(requested).fetch_one(&mut *tx).await?,
+            }
         } else {
             sqlx::query_scalar("UPDATE channel_read_positions SET read_seq=GREATEST(read_seq,$4) WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3 RETURNING read_seq")
                 .bind(organization).bind(channel).bind(member.0).bind(requested).fetch_one(&mut *tx).await?
