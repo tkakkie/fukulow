@@ -32,7 +32,7 @@ mod session;
 mod throttle;
 pub use cleanup::SessionCleanup;
 pub use session::{SessionChanges, SubscriptionRecheck, SubscriptionScope};
-pub use throttle::SignInThrottle;
+pub use throttle::{AccountSecurityThrottle, SignInThrottle};
 
 static PASSWORD_WORKERS: PasswordWorkers = PasswordWorkers::new();
 

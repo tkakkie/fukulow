@@ -314,6 +314,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
         cookie_secure: true,
         setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
+        account_security_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
@@ -962,6 +963,7 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
         cookie_secure: true,
         setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
+        account_security_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
@@ -1509,6 +1511,9 @@ fn account_security_contract_records_paths_errors_and_account_lock_order() {
                     .contains("current_password_incorrect")
             );
             assert!(responses["429"]["headers"]["Retry-After"].is_object());
+            assert!(responses["429"]["description"].as_str().unwrap().starts_with(
+                "too many sign-in attempts; per-Session and per-Account failure and reservation budgets"
+            ));
             for status in ["400", "401", "403", "413", "415", "429", "500", "503"] {
                 assert_eq!(
                     responses[status]["content"]["application/json"]["schema"]["$ref"],

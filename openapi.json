@@ -201,7 +201,7 @@
             }
           },
           "429": {
-            "description": "too many sign-in attempts; shared IP/email failure and reservation budgets with web/native sign-in and revoke-others",
+            "description": "too many sign-in attempts; per-Session and per-Account failure and reservation budgets shared with revoke-others",
             "headers": {
               "Retry-After": {
                 "schema": {
@@ -339,7 +339,7 @@
             }
           },
           "429": {
-            "description": "too many sign-in attempts; shared IP/email failure and reservation budgets with web/native sign-in and password change",
+            "description": "too many sign-in attempts; per-Session and per-Account failure and reservation budgets shared with password change",
             "headers": {
               "Retry-After": {
                 "schema": {

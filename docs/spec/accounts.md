@@ -11,7 +11,7 @@
 ## Password and Account Session security (#304)
 
 - Wrong current password gives 403 `current_password_incorrect` and keeps Settings and Session usable. 401 means a missing/invalid/expired/revoked Session, including loss while waiting for the Account lock. Invalid new length gives 400 `invalid_new_password`. Malformed input or empty/oversized current password gives 400 `invalid input`. Setup and password change share Argon2 and length rules.
-- Shared sign-in IP/email budgets deny 429 `too many sign-in attempts` with `Retry-After` before Argon2 admission (503 `password admission unavailable`). Only incorrect passwords count. Refusals preserve all passwords and Sessions.
+- Per-Session/Account budgets, separate from sign-in's, deny 429 `too many sign-in attempts` with `Retry-After` before Argon2 admission (503 `password admission unavailable`). Only incorrect passwords count. Refusals preserve all passwords and Sessions.
 - Password change and revoke-others keep the current Session and sockets. Atomic cross-Organization revocation includes earlier serialized cookie/bearer sign-ins. HTTP cancellation cannot interrupt commit and 4001 signals ([S4](realtime.md#real-time-sync-contract)). Settings prompts for the current password and confirms other-Session logout. Owner-led recovery is out of scope.
 
 ## Members, Roles and Invites
