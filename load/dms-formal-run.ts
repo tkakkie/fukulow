@@ -10,9 +10,11 @@ import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
 import { scaledLoad, localLimits, localCopy } from './dms-formal-local.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
 import { failureDetails, writeDiagnostic } from './dms-formal-diagnostics.ts';
-import { saveSeedDbLogs, seedFailure, startSeedSampler, type SeedSampleCoverage, type SeedStop } from './dms-formal-seed-diagnostic.ts';
+import { redactSeedDbLogs, saveSeedDbLogs, seedFailure, type SeedStop } from './dms-formal-seed-diagnostic.ts';
+import { seedBatchSummary, startSeedSamplers, type SeedSamplerRecord } from './dms-formal-seed-samplers.ts';
+import { copyDockerVmLogs, dockerVmLogDirectory, redactHostText, saveHostLog, startHostSampler, type HostSampleCoverage } from './dms-formal-host-records.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
-export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void };
+export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; vmLogDirectory?:string };
 const defaultRuntime:Runtime={exec:execute,transfer:transferImage,on:(s,f)=>process.on(s,f),off:(s,f)=>process.off(s,f)};
 export const cleanupReserveMs=10*60*1000;
 export const attemptBudgetMs=(mode:'formal'|'smoke')=>mode==='formal'?150*60*1000:30*60*1000;
@@ -60,9 +62,19 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       throw error;
     }
   };
+  // Every run keeps the redacted DB log before cleanup removes the container; a failed save is recorded and changes no result.
+  const saveRunDbLog=async()=>{
+    try {
+      const raw=await remote(config.db,`docker logs --timestamps ${quote(id+'-db-1')} 2>&1`,60000);
+      writeFileSync(`${config.output}/db.log`,redactSeedDbLogs(raw)+'\n',{mode:0o600});
+    } catch {
+      try {json('db-log-missing.json',{collection:'db.log',status:'failed',reason:'docker logs failed or the DB container did not exist'});} catch {/* Output directory unavailable. */}
+    }
+  };
   let cleanupPromise:Promise<void>|undefined;
   const cleanup=()=>cleanupPromise ??= (async()=>{
     phase='cleanup';status();
+    if(!diagnostic)await saveRunDbLog();
     // Local roles share one daemon: cleanup is sequential to avoid racing the
     // same run-owned containers, networks, volumes and image tags.
     const localCleanup=async()=>{
@@ -156,11 +168,13 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       operation='seed';
       const directory=`${config.output}/formal`, scratch=roleRoot(config.db)+'/formal', container=id+'-db-1';
       const startedAtMs=Date.now();
-      let stopSampler:(()=>Promise<SeedSampleCoverage>)|undefined, seedError:unknown, sampleCoverage:SeedSampleCoverage|undefined;
+      let stopSamplers:(()=>Promise<SeedSamplerRecord>)|undefined, stopHost:(()=>Promise<HostSampleCoverage>)|undefined, seedError:unknown;
+      let samplers:SeedSamplerRecord|undefined, host:HostSampleCoverage|undefined;
       const collectionFailures:string[]=[];
       try {
         mkdirSync(directory,{mode:0o700});
-        stopSampler=startSeedSampler(runtime.exec,container,directory+'/db-samples.jsonl');
+        stopSamplers=startSeedSamplers(runtime.exec,container,{kernel:directory+'/db-kernel.txt',postgres:directory+'/db-samples.txt'});
+        stopHost=startHostSampler(runtime.exec,directory+'/host-samples.jsonl');
         await worker(config.db,'seed',0,0,90000000);
         checkpoint();
       } catch(error) {
@@ -169,14 +183,28 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         catch {seedStop=seedFailure(startedAtMs,Date.now());}
         status();
       }
-      try {sampleCoverage=await stopSampler?.();} catch {sampleCoverage=undefined;}
-      if(!sampleCoverage?.complete)collectionFailures.push('db-samples.jsonl');
-      try {copyFileSync(scratch+'/seed-timing.jsonl',directory+'/seed-timing.jsonl');}
+      const endedAtMs=Date.now();
+      try {samplers=await stopSamplers?.();} catch {samplers=undefined;}
+      try {host=await stopHost?.();} catch {host=undefined;}
+      if(!samplers)collectionFailures.push('db-kernel.txt','db-samples.txt');
+      else collectionFailures.push(...samplers.failures.map(reason=>(reason.startsWith('kernel')?'db-kernel.txt: ':'db-samples.txt: ')+reason));
+      if(!host?.complete)collectionFailures.push('host-samples.jsonl');
+      let batches:ReturnType<typeof seedBatchSummary>|null=null;
+      try {copyFileSync(scratch+'/seed-timing.jsonl',directory+'/seed-timing.jsonl');batches=seedBatchSummary(readFileSync(directory+'/seed-timing.jsonl','utf8'));}
       catch {collectionFailures.push('seed-timing.jsonl');}
       try {await saveSeedDbLogs(runtime.exec,container,directory+'/db.log');}
       catch {collectionFailures.push('db.log');}
+      // Right after the seed, before the Docker VM logs rotate. Missing or failed copies are recorded, never skipped.
+      const redact=(text:string)=>redactHostText(text,{secrets:[common.dbPassword,common.appPassword,common.setupToken]});
+      const vmLogs=copyDockerVmLogs(runtime.vmLogDirectory ?? dockerVmLogDirectory(),directory+'/docker-vm',startedAtMs,redact);
+      const hostLog=await saveHostLog(runtime.exec,directory+'/host.log',startedAtMs,endedAtMs,redact);
+      for(const [name,record] of [['docker-vm',vmLogs],['host.log',hostLog]] as const)if(record.status!=='complete')collectionFailures.push(`${name}: ${record.status}`);
+      const overhead={dockerExecs:samplers?.dockerExecs ?? null,kernelLoopCpuSeconds:samplers?.kernel?.loopCpuSeconds ?? null,
+        postgresLoopCpuSeconds:samplers?.postgres?.loopCpuSeconds ?? null,postgresSnapshotQueryMs:samplers?.postgres?.queryMs ?? null,
+        hostCommands:host?.commands ?? null,hostSampleMs:host?.sampleMs ?? null,seedSeconds:(endedAtMs-startedAtMs)/1000,batches};
       json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[],load,
-        infrastructureFailure:interrupted || !!seedStop || collectionFailures.length>0,seedStop,collectionFailures,sampleCoverage:sampleCoverage??null});
+        infrastructureFailure:interrupted || !!seedStop || collectionFailures.length>0,seedStop,collectionFailures,
+        collectionMissing:samplers?.missing ?? [],samplers:samplers??null,hostSamples:host??null,vmLogs,hostLog,overhead});
       if(seedStop)throw seedError;
       checkpoint();
       if(collectionFailures.length)throw new Error('Seed diagnostic record collection failed');

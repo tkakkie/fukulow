@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { checkMessageBatch, checkOrganization, messageBatchBaselineMs, seed } from './dms-formal-seed.ts';
+import { checkMessageBatch, checkOrganization, dbBatchClock, messageBatchBaselineMs, seed } from './dms-formal-seed.ts';
 
 test('Message batch baseline excludes the first batch and uses the median', () => {
   assert.equal(messageBatchBaselineMs([50_000]), undefined);
@@ -56,8 +56,17 @@ for (const [scenario, diagnostic] of [
   const epoch = 1760000000000;
   t.mock.method(Date, 'now', () => epoch + now);
   const events: string[] = [];
-  const docker = t.mock.method(childProcess, 'execFileSync', (program: string, _args: string[], { input }: { input: string }) => {
+  const docker = t.mock.method(childProcess, 'execFileSync', (program: string, args: string[], { input: raw }: { input: string }) => {
     assert.equal(program, 'docker');
+    // Message batches run between two server clock rows in the same psql call.
+    const timed = raw.startsWith("SELECT 'db-start', round(extract(epoch FROM clock_timestamp()) * 1000, 3);\n");
+    assert.equal(timed, raw.includes('INSERT INTO messages(') && !raw.includes("'seed'"));
+    if (timed) {
+      assert.deepEqual(args.slice(-3), ['-q', '-A', '-t']);
+      assert.ok(raw.endsWith("\nSELECT 'db-end', round(extract(epoch FROM clock_timestamp()) * 1000, 3);"));
+    }
+    const input = timed ? raw.split('\n').slice(1, -1).join('\n') : raw;
+    const before = now;
     if (input.startsWith('INSERT INTO organizations(')) {
       organizationIndex++;
       batchIndex = 0;
@@ -77,6 +86,8 @@ for (const [scenario, diagnostic] of [
       events.push(statement[0]);
     }
     if (input === 'VACUUM(ANALYZE);') events.push(input);
+    // The DB side takes all but 5 ms of the batch.
+    return timed ? Buffer.from(`db-start|${epoch + before}.000\nINSERT 0 1\ndb-end|${epoch + now - 5}.500\n`) : undefined;
   });
   syncBuiltinESMExports();
   try {
@@ -124,11 +135,21 @@ for (const [scenario, diagnostic] of [
     assert.equal(rows[0].endedAtMs - rows[0].startedAtMs, rows[0].durationMs);
     return;
   }
-  assert.deepEqual(rows[0], { kind: 'batch', organization: 0, batchIndex: 0, durationMs: 20_000 });
+  const clock = (startedAtMs: number, durationMs: number) => ({ startedAtMs, endedAtMs: startedAtMs + durationMs,
+    dbStartedAtMs: startedAtMs, dbEndedAtMs: startedAtMs + durationMs - 4.5, dbDurationMs: durationMs - 4.5 });
+  assert.deepEqual(rows[0], { kind: 'batch', organization: 0, batchIndex: 0, durationMs: 20_000, ...clock(rows[0].startedAtMs, 20_000) });
+  assert.ok(rows[0].startedAtMs >= epoch);
   if (scenario === 'slow batch') {
-    assert.deepEqual(rows.at(-1), { kind: 'batch', organization: 1, batchIndex: 1, durationMs: 6_001 });
+    assert.deepEqual(rows.at(-1), { kind: 'batch', organization: 1, batchIndex: 1, durationMs: 6_001, ...clock(rows.at(-1).startedAtMs, 6_001) });
   } else if (scenario === 'slow Organization') {
     assert.ok(totals[1].durationMs > 2 * totals[0].durationMs);
     assert.deepEqual(rows.at(-1), totals[1]);
+  }
+});
+
+test('DB batch clock reads only the two clock rows and marks anything else missing', () => {
+  assert.deepEqual(dbBatchClock('db-start|1000.250\nINSERT 0 1\ndb-end|1840.750\n'), { dbStartedAtMs: 1000.25, dbEndedAtMs: 1840.75, dbDurationMs: 840.5 });
+  for (const stdout of [undefined, null, '', 'db-start|1000\n', 'db-start|2000\ndb-end|1000\n', 'db-start|x\ndb-end|1\n']) {
+    assert.deepEqual(dbBatchClock(stdout), { dbClock: 'missing' });
   }
 });

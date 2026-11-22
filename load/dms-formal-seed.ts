@@ -38,6 +38,21 @@ export function checkOrganization(organization: number, lastBatchIndex: number, 
   }
 }
 
+export const dbClockSql = (label: 'db-start' | 'db-end') => `SELECT '${label}', round(extract(epoch FROM clock_timestamp()) * 1000, 3);`;
+export type DbBatchClock = { dbStartedAtMs: number; dbEndedAtMs: number; dbDurationMs: number } | { dbClock: 'missing' };
+
+// Reads the two clock rows from psql -qAt output; anything else on stdout is ignored.
+export function dbBatchClock(stdout: Buffer | string | null | undefined): DbBatchClock {
+  const text = stdout?.toString() ?? '';
+  const read = (label: string) => {
+    const match = new RegExp(`^${label}\\|(\\d+(?:\\.\\d+)?)$`, 'm').exec(text);
+    return match ? Number(match[1]) : undefined;
+  };
+  const dbStartedAtMs = read('db-start'), dbEndedAtMs = read('db-end');
+  if (dbStartedAtMs === undefined || dbEndedAtMs === undefined || dbEndedAtMs < dbStartedAtMs) return { dbClock: 'missing' };
+  return { dbStartedAtMs, dbEndedAtMs, dbDurationMs: Math.round((dbEndedAtMs - dbStartedAtMs) * 1000) / 1000 };
+}
+
 export function seed(diagnostic = false) {
   if (process.env.DM_FORMAL_SEED !== '1') throw new Error('Set DM_FORMAL_SEED=1 only on the dedicated disposable DB host (50M Messages)');
   const output = resolve(process.env.DM_FORMAL_OUT || '');
@@ -64,21 +79,24 @@ export function seed(diagnostic = false) {
 
 function seedFixture(output: string, container: string, trace?: SeedStop) {
   const uuid = (label: string) => { const s = createHash('md5').update(`dm151-formal:${label}`).digest('hex'); return `${s.slice(0,8)}-${s.slice(8,12)}-${s.slice(12,16)}-${s.slice(16,20)}-${s.slice(20)}`; };
-  const sql = (input: string) => execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'], { input, stdio: ['pipe','ignore','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 });
+  const psql = ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'];
+  const sql = (input: string) => execFileSync('docker', psql, { input, stdio: ['pipe','ignore','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 });
+  // The server clock around the batch SQL, in the same psql call, separates PostgreSQL time from docker exec/psql cost.
+  const timedSql = (input: string) => dbBatchClock(execFileSync('docker', [...psql,'-q','-A','-t'], { input: `${dbClockSql('db-start')}\n${input}\n${dbClockSql('db-end')}`, stdio: ['pipe','pipe','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 }));
   const scenario=process.env.DM_FORMAL_SCENARIO || 'main';
   if(scenario!=='main' && scenario!=='held200')throw new Error('Seed requires main or held200 scenario');
   const {historical:pairs,supplemental:extraPairs}=fixturePairs(scenario);
   const smoke = process.env.DM_FORMAL_SMOKE === '1';
   const history = smoke ? 1 : 100;
   const timingPath = `${output}/seed-timing.jsonl`;
-  const recordTiming = (row: { organization: number; durationMs: number; startedAtMs?: number; endedAtMs?: number } & ({ kind: 'batch'; batchIndex: number } | { kind: 'organization' })) =>
+  const recordTiming = (row: { organization: number; durationMs: number; startedAtMs: number; endedAtMs: number } & ({ kind: 'batch'; batchIndex: number } & DbBatchClock | { kind: 'organization' })) =>
     appendFileSync(timingPath, JSON.stringify(row) + '\n', { mode: 0o600, flush: true });
   const firstOrganizationBatches: number[] = [];
   let batchBaselineMs: number | undefined;
   let organizationBaselineMs: number | undefined;
   for (let o = 0; o < (Number(process.env.DM_FORMAL_SEED_ORGS || 0) || (smoke ? 1 : 10)); o++) {
     const organizationStart = performance.now();
-    const organizationStartedAtMs = trace ? Date.now() : 0;
+    const organizationStartedAtMs = Date.now();
     if (trace) Object.assign(trace, { organization: o, batchIndex: null, baselineMs: organizationBaselineMs ?? null, startedAtMs: organizationStartedAtMs });
     const org = uuid(`org:${o}`), ordinary = uuid(`ordinary:${o}`), topic = uuid(`topic:${o}`);
     const channelId = (a: number, b: number) => uuid(`pair:${o}:${Math.min(a,b)}:${Math.max(a,b)}`);
@@ -114,14 +132,14 @@ INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${
     for (let start = 0; start < pairs.length; start += 250) {
       const batchStart = performance.now();
       const batchIndex = start / 250;
-      const startedAtMs = trace ? Date.now() : 0;
+      const startedAtMs = Date.now();
       if (trace) Object.assign(trace, { batchIndex, baselineMs: batchBaselineMs ?? null, startedAtMs });
       const ids = pairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
-      sql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
+      const dbClock = timedSql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
 ${createLog(org, ids)}`);
       const durationMs = performance.now() - batchStart;
-      const endedAtMs = trace ? Date.now() : 0;
-      recordTiming({ kind: 'batch', organization: o, batchIndex, durationMs, ...(trace ? { startedAtMs, endedAtMs } : {}) });
+      const endedAtMs = Date.now();
+      recordTiming({ kind: 'batch', organization: o, batchIndex, durationMs, startedAtMs, endedAtMs, ...dbClock });
       if (o === 0) firstOrganizationBatches.push(durationMs);
       checkMessageBatch(o, batchIndex, durationMs, batchBaselineMs, trace && (limitMs => {
         Object.assign(trace, { rule: 'message-batch', durationMs, limitMs, endedAtMs });
@@ -134,8 +152,8 @@ ${createLog(org, ids)}`);
 ${createLog(org, [ordinary])}`);
     writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals, supplementalEmptyPairs:extraPairs.length, scenario, heldAssignment:heldCohorts(scenario as MixedScenario), fixture:{pairs:pairs.length+extraPairs.length,historicalPairs:pairs.length,messages:pairs.length*history} }), { mode: 0o600 });
     const durationMs = performance.now() - organizationStart;
-    const endedAtMs = trace ? Date.now() : 0;
-    recordTiming({ kind: 'organization', organization: o, durationMs, ...(trace ? { startedAtMs: organizationStartedAtMs, endedAtMs } : {}) });
+    const endedAtMs = Date.now();
+    recordTiming({ kind: 'organization', organization: o, durationMs, startedAtMs: organizationStartedAtMs, endedAtMs });
     console.log(`${smoke ? 'SMOKE ONLY' : 'Formal'} scenario=${scenario} Organization ${o}: 1,000 Members (100 Guests), 1,100 Sessions, ${pairs.length+extraPairs.length} DMs (${extraPairs.length} supplemental empty pairs), ${50000*history} Messages; current revision 1, ${2*(pairs.length+extraPairs.length)-10000} usable + 10,000 old-revision grants, read_seq 0, alternating senders, zero Mentions; 10,000 prepared renewals; seeded in ${durationMs.toFixed(0)} ms`);
     const lastBatchIndex = Math.ceil(pairs.length / 250) - 1;
     checkOrganization(o, lastBatchIndex, durationMs, organizationBaselineMs, trace && (limitMs => {
