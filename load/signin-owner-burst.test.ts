@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BASE_DB_FLAGS, LOCK_LOG_SETTINGS, PLANS, disposableOverride, parseBurstArgs, parseBurstEnv } from './signin-owner-burst-config.ts';
-import { attribute, clockOffset, mergeWaits, parseLockLog, parseSamplerLine, peakSimultaneous, samplerIntervals, xWaits,
-  type SamplerRow } from './signin-owner-burst-locks.ts';
+import { BASE_DB_FLAGS, LOCK_LOG_SETTINGS, PLANS, burstAdmission, disposableOverride, parseBurstArgs, parseBurstEnv,
+  resolveServer } from './signin-owner-burst-config.ts';
+import { attribute, clockOffset, mergeWaits, parseLockLog, parseSamplerLine, peakSimultaneous, samplerIntegrity, samplerIntervals,
+  samplerQuery, xWaits, type SamplerRow, type Wait } from './signin-owner-burst-locks.ts';
 import { aggregate, judgeBurst, type BurstOwnerOp, type BurstRun, type OwnerKind } from './signin-owner-burst-judgment.ts';
+import { readRuns } from './signin-owner-burst-aggregate.ts';
 import { report } from './signin-owner-burst-report.ts';
 
 const root = new URL('../', import.meta.url).pathname;
@@ -99,14 +102,23 @@ test('lock log: unknown tuples, unmatched waits and unparseable wait lines are r
 });
 
 test('sampler rows: database-clock intervals, clock offset and pid attribution', () => {
-  const rows = ['1000.000|4||0|(0,1)', '1020.500|5|201s,202o|12|(0,1)', '1041.000|5|202o|30|(0,2)', 'garbage', '']
-    .map((line, i) => parseSamplerLine(line, 5 + i * 30)).filter((r): r is SamplerRow => r !== null);
+  const parsed = ['1000.000|4||0|(0,1)', '1020.500|5|201s,202o|12|(0,1)', '1041.000|5|202o|30|(0,2)', 'garbage', '']
+    .map((line, i) => parseSamplerLine(line, 5 + i * 30));
+  assert.deepEqual(parsed.slice(3), ['malformed', null]);
+  const rows = parsed.filter((r): r is SamplerRow => r !== null && r !== 'malformed');
   assert.equal(rows.length, 3);
   assert.deepEqual(rows[1].waiting, [{ pid: 201, kind: 'signin' }, { pid: 202, kind: 'owner' }]);
   assert.deepEqual(samplerIntervals(rows), { count: 3, medianMs: 20.5, maxMs: 20.5 });
   assert.equal(clockOffset(rows), -995);
   const wait = { pid: 202, startDbMs: 1010, endDbMs: 1030, waitedMs: 20, parts: ['tuple' as const], tuples: ['(0,1)'], outcome: 'acquired' as const };
   assert.deepEqual(attribute(wait, rows), { who: 'owner', source: 'sampler' });
+  // Half-open: a sample at the exclusive end (the pid's next operation) is not used.
+  const next = [{ ...rows[0], dbMs: 1030, waiting: [{ pid: 202, kind: 'signin' as const }] }];
+  assert.deepEqual(attribute({ ...wait, statementKind: 'owner' }, next), { who: 'owner', source: 'statement' });
+  // Disagreeing evidence is unknown, never a guess.
+  assert.deepEqual(attribute({ ...wait, statementKind: 'signin' }, rows), { who: 'unknown', source: 'conflict' });
+  const mixed = [rows[1], { ...rows[2], dbMs: 1025, waiting: [{ pid: 202, kind: 'signin' as const }] }];
+  assert.equal(attribute(wait, mixed).who, 'unknown');
 });
 
 // A run that meets every pre-registered criterion. V = 50 ms; B0 p95 per authenticated kind 80 ms;
@@ -119,7 +131,7 @@ function run(): BurstRun {
   for (let t = 1_000, i = 0; t < 310_000; t += 2_000, i++) op(i % 2 ? 'native_signin' : 'web_signin', t, t >= 60_000 && t < 241_700 ? 429 : 200, t >= 60_000 && t < 241_700 ? 2 : 50);
   for (let t = 2_500, i = 0; t < 310_000; t += 5_000, i++) op(i % 2 ? 'revoke' : 'password', t, 204, t >= 60_000 && t < 241_700 ? 200 : 80);
   SENDS.forEach((s, i) => op(i % 2 ? 'revoke' : 'password', s + 10, 204, 300, i + 1));
-  const attack = SENDS.flatMap((s, i) => Array.from({ length: 16 }, (_, k) => ({ burst: i + 1, send: 0, sentMs: s, status: k < 5 ? 401 : 429,
+  const attack: BurstRun['attack'] = SENDS.flatMap((s, i) => Array.from({ length: 16 }, (_, k) => ({ burst: i + 1, send: 0, sentMs: s, status: k < 5 ? 401 : 429,
     ms: k < 5 ? 300 : 2, endMs: s + (k < 5 ? 300 : 2) })));
   const reads = Array.from({ length: 620 }, (_, i) => ({ sentMs: i * 500, status: 200, ms: 5 }));
   const samples: SamplerRow[] = [];
@@ -131,7 +143,7 @@ function run(): BurstRun {
   const waits = SENDS.flatMap(s => [[101, 50, 110], [102, 55, 150], [103, 60, 200]].map(([pid, a, b]) => ({ pid,
     startDbMs: s + a - OFFSET, endDbMs: s + b - OFFSET, waitedMs: b - a, parts: ['transaction' as const], tuples: ['(0,1)'],
     outcome: 'acquired' as const, startMs: s + a, endMs: s + b, who: pid === 103 ? 'owner' as const : 'signin' as const })));
-  return { owner, attack, reads, samples, offsetMs: OFFSET, waits, lockLog: { complete: true, reasons: [] },
+  return { owner, attack, reads, samples, samplerMalformed: 0, skipped: { reads: 0 }, offsetMs: OFFSET, waits, lockLog: { complete: true, reasons: [] },
     bursts: SENDS.map((s, i) => ({ index: i + 1, sends: [{ sentMs: s, statuses: [] }], admittedSend: 0, ownerOp: 'sent' as const, ownerOpSend: 0 })),
     phaseStartMs: { B0: 0, B1: 60_000, B2: 241_700 }, endMs: 311_700, poolMax: 20, server: { poolTimeouts: 0, panics: 0, complete: true } };
 }
@@ -190,14 +202,213 @@ test('A0, sample-count and evidence gaps are inconclusive, and a bad sampler is 
   assert.deepEqual([judgeBurst(slow).verdict, judgeBurst(slow).sampler.medianMs], ['invalid', 40]);
 });
 
-test('aggregate: PASS only for 3 evidence runs that hold', () => {
-  const holds = { evidence: true, verdict: 'holds' as const };
-  assert.equal(aggregate([holds, holds, holds]).outcome, 'PASS');
-  assert.equal(aggregate([holds, holds, { evidence: true, verdict: 'fails' }]).outcome, 'FAIL');
-  assert.equal(aggregate([holds, holds, { evidence: true, verdict: 'inconclusive' }]).outcome, 'INCONCLUSIVE');
-  assert.equal(aggregate([holds, holds, { evidence: true, verdict: 'invalid' }]).outcome, 'INCONCLUSIVE');
-  assert.equal(aggregate([holds, holds, { evidence: false, verdict: 'holds' }]).outcome, 'INCONCLUSIVE');
-  assert.equal(aggregate([holds, holds, { evidence: true, verdict: null }]).outcome, 'INCONCLUSIVE');
-  assert.throws(() => aggregate([holds, holds]));
-  assert.throws(() => aggregate([holds, holds, holds, holds]));
+test('aggregate: PASS only for 3 distinct valid runs that hold; fewer than 3 valid is INCONCLUSIVE even with a fail', () => {
+  const run = (id: string, verdict: 'holds' | 'fails' | 'inconclusive' | 'invalid' | null, evidence = true) => ({ id, evidence, verdict });
+  assert.equal(aggregate([run('a', 'holds'), run('b', 'holds'), run('c', 'holds')]).outcome, 'PASS');
+  assert.deepEqual(aggregate([run('a', 'holds'), run('b', 'holds'), run('c', 'fails')]), { outcome: 'FAIL', valid: 3, failures: ['c'],
+    verdicts: ['holds', 'holds', 'fails'] });
+  // The approved rule: fewer than 3 valid runs is INCONCLUSIVE; the individual failure stays listed.
+  const mixed = aggregate([run('a', 'fails'), run('b', 'holds'), run('c', 'invalid')]);
+  assert.deepEqual([mixed.outcome, mixed.valid, mixed.failures], ['INCONCLUSIVE', 2, ['a']]);
+  assert.equal(aggregate([run('a', 'holds'), run('b', 'holds'), run('c', 'inconclusive')]).outcome, 'INCONCLUSIVE');
+  assert.equal(aggregate([run('a', 'holds'), run('b', 'holds'), run('c', 'holds', false)]).outcome, 'INCONCLUSIVE');
+  assert.equal(aggregate([run('a', 'holds'), run('b', 'holds'), run('c', null)]).outcome, 'INCONCLUSIVE');
+  // One run three times is one run.
+  const same = aggregate([run('a', 'holds'), run('a', 'holds'), run('a', 'holds')]);
+  assert.deepEqual([same.outcome, same.valid], ['INCONCLUSIVE', 1]);
+  assert.equal(aggregate([{ id: null, evidence: true, verdict: 'holds' }, run('b', 'holds'), run('c', 'holds')]).outcome, 'INCONCLUSIVE');
+  assert.throws(() => aggregate([run('a', 'holds'), run('b', 'holds')]));
+  assert.throws(() => aggregate([run('a', 'holds'), run('b', 'holds'), run('c', 'holds'), run('d', 'holds')]));
+});
+
+test('lock log: every PostgreSQL tuple CONTEXT form on accounts is parsed; anything else about accounts is unparsed', () => {
+  const ctx = (pid: number, ms: number, context: string) => [
+    `${at(ms)} [${pid}] LOG:  process ${pid} acquired ShareLock on transaction 9${pid} after 20.000 ms`,
+    `${at(ms)} [${pid}] CONTEXT:  ${context}`].join('\n');
+  const forms = ['while locking updated version (0,2) of tuple in relation "accounts"', 'while updating tuple (0,2) in relation "accounts"',
+    'while deleting tuple (0,2) in relation "accounts"', 'while rechecking updated tuple (0,2) in relation "accounts"'];
+  const parsed = parseLockLog(forms.map((f, i) => ctx(400 + i, 100 + i * 50, f)).join('\n'));
+  assert.equal(parsed.unparsed, 0);
+  const x = xWaits(parsed.events, { ...X, ctids: new Set(['(0,1)', '(0,2)']) });
+  assert.deepEqual([x.waits.length, x.unparsed, x.other, x.foreign], [4, 0, 0, 0]);
+  // An updated version that is not one of X's known tuples is foreign (incomplete), never other.
+  assert.equal(xWaits(parsed.events, X).foreign, 4);
+  // An accounts CONTEXT in an unknown form.
+  const odd = parseLockLog(ctx(410, 100, 'while frobbing row 7 of relation "accounts"'));
+  assert.equal(odd.unparsed, 1);
+  assert.deepEqual([xWaits(odd.events, X).unparsed, xWaits(odd.events, X).other], [1, 0]);
+  // A still-waiting line whose CONTEXT and completion are both missing.
+  const lost = parseLockLog([`${at(10)} [411] LOG:  process 411 still waiting for ShareLock on transaction 5 after 10.020 ms`,
+    `${at(10)} [411] STATEMENT:  SELECT id, password_hash FROM accounts WHERE email = $1 FOR UPDATE`].join('\n'));
+  assert.deepEqual([xWaits(lost.events, X).unparsed, xWaits(lost.events, X).unmatched, xWaits(lost.events, X).other], [1, 0, 0]);
+  // A completed transaction wait without any CONTEXT cannot be placed either.
+  const bare = parseLockLog(`${at(10)} [412] LOG:  process 412 acquired ShareLock on transaction 5 after 30.000 ms`);
+  assert.equal(xWaits(bare.events, X).unparsed, 1);
+  // Malformed tuple or transaction targets, and a zero wait, are unparsed lines.
+  for (const target of ['tuple (0,1) of relation 16400', 'tuple (0,x) of relation 16400 of database 16384', 'transaction abc'])
+    assert.equal(parseLockLog(`${at(10)} [413] LOG:  process 413 acquired AccessExclusiveLock on ${target} after 20.000 ms`).unparsed, 1, target);
+  assert.equal(parseLockLog(`${at(10)} [414] LOG:  process 414 acquired AccessExclusiveLock on tuple (0,1) of relation 16400 of database 16384 after 0.000 ms`).unparsed, 1);
+  // Raw STATEMENT text is never kept, only its kind.
+  assert.equal(JSON.stringify(parseLockLog(LOG).events).includes('FOR UPDATE'), false);
+});
+
+test('lock intervals: merge only one lock attempt; half-open and empty intervals never overlap', () => {
+  const w = (o: Partial<Wait>): Wait => ({ pid: 1, lock: 'tuple', tuple: '(0,1)', startDbMs: 0, endDbMs: 50, waitedMs: 50, outcome: 'acquired',
+    statementKind: 'signin', ...o });
+  const tx = (startDbMs: number, o: Partial<Wait> = {}) => w({ lock: 'transaction', startDbMs, endDbMs: startDbMs + 40, waitedMs: 40, ...o });
+  assert.equal(mergeWaits([w({}), tx(52)]).length, 1);
+  assert.equal(mergeWaits([w({}), tx(48)]).length, 1);
+  assert.equal(mergeWaits([w({}), tx(53)]).length, 2);
+  // PID reuse: a failed tuple wait, then a new transaction wait on another tuple 2 ms later.
+  const reused = mergeWaits([w({ outcome: 'failed' }), tx(52, { tuple: '(0,2)' })]);
+  assert.deepEqual(reused.map(r => [r.parts, r.outcome]), [[['tuple'], 'failed'], [['transaction'], 'acquired']]);
+  assert.equal(mergeWaits([w({ outcome: 'failed' }), tx(52)]).length, 2);
+  assert.equal(mergeWaits([w({}), tx(52, { tuple: '(0,2)' })]).length, 2);
+  assert.equal(mergeWaits([w({}), tx(52, { statementKind: 'owner' })]).length, 2);
+  // transaction -> tuple is never one attempt.
+  assert.equal(mergeWaits([w({ lock: 'transaction' }), w({ startDbMs: 51, endDbMs: 90 })]).length, 2);
+  // Empty intervals are dropped and never counted as active.
+  assert.equal(mergeWaits([w({ startDbMs: 10, endDbMs: 10, waitedMs: 0 })]).length, 0);
+  assert.equal(peakSimultaneous([{ pid: 1, startDbMs: 10, endDbMs: 10 }, { pid: 2, startDbMs: 5, endDbMs: 15 }]).peak, 1);
+  assert.equal(peakSimultaneous([{ pid: 1, startDbMs: 10, endDbMs: 10 }]).peak, 0);
+});
+
+test('sampler: integrity counts malformed rows and repeated or backward database timestamps; query checks pg_locks', () => {
+  const row = (dbMs: number): SamplerRow => ({ dbMs, nodeMs: 0, connections: 1, waiting: [], maxWaitMs: 0, ctid: null });
+  assert.equal(samplerIntegrity([row(0), row(20), row(40)], 0).ok, true);
+  assert.deepEqual(samplerIntegrity([row(0), row(20), row(20), row(10)], 1), { malformed: 1, duplicate: 1, backward: 1, ok: false });
+  const q = samplerQuery('owner@example.invalid');
+  assert.match(q, /FROM pg_locks l WHERE l\.pid = a\.pid AND NOT l\.granted/);
+  assert.match(q, /wait_event IN \('tuple', 'transactionid'\)/);
+  assert.match(q, /l\.locktype = 'tuple' AND l\.relation = 'accounts'::regclass/);
+});
+
+test('burst admission: fire only on a send that shows admission; an all-429 send answered late is refused', () => {
+  const n = (count: number, status = 429) => Array.from({ length: count }, () => status);
+  assert.equal(burstAdmission(n(15)), 'pending');
+  assert.equal(burstAdmission(n(16)), 'refused');
+  assert.equal(burstAdmission(n(11)), 'admitted');
+  assert.equal(burstAdmission([...n(11), 401]), 'admitted');
+  assert.equal(burstAdmission(n(12)), 'pending');
+  assert.equal(burstAdmission(n(9)), 'pending');
+  assert.equal(burstAdmission([...n(11), 503]), 'pending');
+});
+
+test('recorded runs test origin/main at run time; a prebuilt image or another SERVER_REF is rejected', () => {
+  const MAIN = 'b'.repeat(40), OTHER = 'c'.repeat(40);
+  const calls: string[][] = [];
+  const git = (args: string[]) => { calls.push(args); return args[0] === 'fetch' ? '' : args.at(-1) === 'origin/main^{commit}' ? MAIN
+    : args.at(-1) === 'main^{commit}' ? MAIN : args[1] === 'HEAD' ? OTHER : OTHER; };
+  assert.deepEqual(resolveServer('recorded', { serverRef: null, appImage: null }, git), { serverCommit: MAIN, archive: true, source: 'origin/main' });
+  assert.deepEqual(calls[0], ['fetch', '--quiet', 'origin', 'main']);
+  assert.equal(resolveServer('recorded', { serverRef: 'main', appImage: null }, git).serverCommit, MAIN);
+  assert.throws(() => resolveServer('recorded', { serverRef: 'topic', appImage: null }, git), /origin\/main/);
+  assert.throws(() => resolveServer('recorded', { serverRef: null, appImage: 'local:tag' }, git), /LOAD_APP_IMAGE/);
+  assert.deepEqual(resolveServer('rehearsal', { serverRef: null, appImage: 'local:tag' }, git), { serverCommit: null, archive: false, source: 'LOAD_APP_IMAGE' });
+  assert.equal(resolveServer('smoke', { serverRef: null, appImage: null }, git).source, 'checkout');
+});
+
+test('burst timing: the owner operation belongs to the admitted send after a 429 retry, and must leave on time', () => {
+  const retried = () => {
+    const r = run(), s = SENDS[1];
+    r.bursts[1] = { index: 2, sends: [{ sentMs: s - 250, statuses: [] }, { sentMs: s, statuses: [] }], admittedSend: 1, ownerOp: 'sent', ownerOpSend: 1 };
+    for (const a of r.attack.filter(a => a.burst === 2)) a.send = 1;
+    r.attack.push(...Array.from({ length: 16 }, () => ({ burst: 2, send: 0, sentMs: s - 250, endMs: s - 238, ms: 12, status: 429 })));
+    return r;
+  };
+  assert.equal(judgeBurst(retried()).verdict, 'holds');
+  const late = retried();
+  late.owner.find(o => o.burst === 2)!.sentMs = SENDS[1] + 40;
+  const result = judgeBurst(late);
+  assert.equal(result.verdict, 'inconclusive');
+  assert.equal(result.evidence.checks.ownerOpTiming.pass, false);
+  const early = run(); early.owner.find(o => o.burst === 1)!.sentMs = SENDS[0] + 5;
+  assert.equal(judgeBurst(early).verdict, 'inconclusive');
+  const undecided = run(); undecided.bursts[0].ownerOp = 'undecided';
+  assert.equal(judgeBurst(undecided).verdict, 'inconclusive');
+});
+
+test('overlap evidence is bound to each burst window; recovery waits never count', () => {
+  const r = run();
+  // Burst 2 loses its overlap; burst 3's overlapping waits move into B2 recovery.
+  r.waits = r.waits.filter(w => !(w.startMs > 100_000 && w.startMs < 130_000 && w.pid !== 101));
+  for (const w of r.waits.filter(w => w.startMs > 170_000)) { w.startMs += 65_000; w.endMs += 65_000; w.startDbMs += 65_000; w.endDbMs += 65_000; }
+  const result = judgeBurst(r);
+  assert.deepEqual([result.verdict, result.a0.checks.lockOverlap.pass, result.a0.locks.map(l => l.peakPids)], ['inconclusive', false, [3, 1, 0]]);
+});
+
+test('sampler loss around the bursts, malformed rows, bad timestamps and skipped reads are inconclusive', () => {
+  const cases: [string, (r: BurstRun) => void][] = [
+    ['no samples within 2 s of any burst', r => { r.samples = r.samples.filter(s => SENDS.every(b => Math.abs(s.dbMs + OFFSET - b) > 2_000)); }],
+    ['a 300 ms hole inside a burst', r => { r.samples = r.samples.filter(s => !(s.dbMs + OFFSET > SENDS[0] && s.dbMs + OFFSET < SENDS[0] + 300)); }],
+    ['malformed sampler rows', r => { r.samplerMalformed = 1; }],
+    ['duplicate database timestamp', r => { r.samples[5].dbMs = r.samples[4].dbMs; }],
+    ['backward database timestamp', r => { r.samples[5].dbMs = r.samples[4].dbMs - 1; }],
+    ['skipped Organization B reads', r => { r.skipped.reads = 1; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const r = run(); mutate(r);
+    const result = judgeBurst(r);
+    assert.equal(result.verdict, 'inconclusive', name);
+    assert.ok(result.sampler.valid, name);
+  }
+  // The legacy B4 calculation itself is unchanged by skipped reads.
+  const skipped = run(); skipped.skipped.reads = 1;
+  assert.equal(judgeBurst(skipped).checks.B4.pass, true);
+});
+
+test('invalid takes precedence over inconclusive and fails together', () => {
+  const r = run();
+  r.samples = r.samples.filter((_, i) => i % 2 === 0);
+  r.bursts[0].ownerOp = 'skipped';
+  b1Auth(r).status = 429;
+  assert.equal(judgeBurst(r).verdict, 'invalid');
+});
+
+test('per-burst report carries the sampler peaks and the owner operation offset', () => {
+  const r = report(run());
+  assert.deepEqual(r.bursts.map(b => [b.sampler.peakWaiters, b.sampler.peakConnections, b.sampler.waitingShareAtPeak, b.ownerOp?.afterAdmittedSendMs]),
+    [[2, 7, 2 / 7, 10], [2, 7, 2 / 7, 10], [2, 7, 2 / 7, 10]]);
+});
+
+test('aggregate reader: only three distinct, self-consistent, completed recorded runs count', () => {
+  const base = mkdtempSync(join(tmpdir(), 'burst-aggregate-'));
+  const write = (name: string, o: { status?: object; results?: object | null; meta?: object } = {}) => {
+    const dir = join(base, name), r = run(), judgment = judgeBurst(r);
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'status.json'), JSON.stringify({ runId: name, mode: 'recorded', evidence: true, outcome: 'success', ...o.status }));
+    if (o.results !== null) writeFileSync(join(dir, 'results.json'), JSON.stringify({ runId: name, mode: 'recorded', evidence: true, complete: true,
+      stoppedEarly: null, harnessCommit: SHA, serverCommit: SHA, ...r, judgment, ...o.results }));
+    writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ project: name, harnessCommit: SHA, serverCommit: SHA, ...o.meta }));
+    return dir;
+  };
+  const [a, b, c] = ['a', 'b', 'c'].map(n => write(n));
+  const outcome = (dirs: string[]) => aggregate(readRuns(dirs)).outcome;
+  assert.equal(outcome([a, b, c]), 'PASS');
+  assert.equal(outcome([a, a, a]), 'INCONCLUSIVE');
+  assert.equal(outcome([a, b, join(base, 'b', '.')]), 'INCONCLUSIVE');
+  const problems: [string, Parameters<typeof write>[1]][] = [
+    ['verdict only', { results: { judgment: { verdict: 'holds' }, owner: undefined, samples: undefined } }],
+    ['forged verdict', { results: { judgment: { verdict: 'holds' }, skipped: { reads: 3 } } }],
+    ['other run results', { results: { runId: 'zzz' } }],
+    ['other run metadata', { meta: { project: 'zzz' } }],
+    ['rehearsal', { status: { mode: 'rehearsal' } }],
+    ['not evidence', { status: { evidence: false } }],
+    ['result failure', { status: { outcome: 'result-failure' } }],
+    ['stopped early', { results: { stoppedEarly: 'inconclusive: B0' } }],
+    ['results evidence false', { results: { evidence: false } }],
+    ['missing results', { results: null }],
+    ['no server commit', { meta: { serverCommit: null } }],
+  ];
+  for (const [name, o] of problems) {
+    const dir = write(name.replace(/ /g, '-'), o);
+    const runs = readRuns([a, b, dir]);
+    assert.equal(runs[2].evidence, false, name);
+    assert.equal(aggregate(runs).outcome, 'INCONCLUSIVE', name);
+  }
+  // A failing third run is FAIL only when all three are valid.
+  const failing = write('failing', { results: { judgment: { verdict: 'fails' } } });
+  assert.equal(readRuns([a, b, failing])[2].evidence, false, 'a stored verdict the samples do not reproduce');
+  const other = write('other-harness', { meta: { harnessCommit: 'd'.repeat(40) }, results: { harnessCommit: 'd'.repeat(40) } });
+  assert.equal(outcome([a, b, other]), 'INCONCLUSIVE');
 });

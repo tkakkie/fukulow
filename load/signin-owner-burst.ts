@@ -16,8 +16,8 @@ import { assertDockerHeadroom, assertNewOutput, assertPinned } from './harness-c
 import { stages } from './harness-core/stages.ts';
 import { outsideCheckout } from './proxy-target.ts';
 import { admissionRejected, errorCode, type Phase } from './signin-owner-judgment.ts';
-import { ATTACKER_IP, BURST, LOCK_LOG_SETTINGS, LOGGING_NOTE, OWNER_EMAIL, OWNER_IP, POOL_MAX, READER_IP, SAMPLER, SCHEDULE,
-  TIMEOUT_MS, disposableOverride, parseBurstArgs, parseBurstEnv } from './signin-owner-burst-config.ts';
+import { ATTACKER_IP, BURST, EVIDENCE, LOCK_LOG_SETTINGS, LOGGING_NOTE, OWNER_EMAIL, OWNER_IP, POOL_MAX, READER_IP, SAMPLER, SCHEDULE,
+  TIMEOUT_MS, burstAdmission, disposableOverride, parseBurstArgs, parseBurstEnv, resolveServer } from './signin-owner-burst-config.ts';
 import { attribute, clockOffset, mergeWaits, parseLockLog, parseSamplerLine, samplerIntervals, samplerQuery, xWaits,
   type SamplerRow } from './signin-owner-burst-locks.ts';
 import { aggregate, judgeBurst, type Burst, type BurstAttackOp, type BurstOwnerOp, type BurstReadOp, type BurstRun,
@@ -33,8 +33,9 @@ const { port, serverRef, appImage } = parseBurstEnv(process.env);
 const output = outsideCheckout(out);
 assertNewOutput(output);
 mkdirSync(output, { recursive: true, mode: 0o700 });
-const run = stages(output, mode);
 const project = `fukulow-signin-burst-${Date.now()}-${randomUUID().slice(0, 8)}`;
+// The run identity binds status.json, results.json and metadata.json of this run for the aggregate.
+const run = stages(output, mode, project);
 const scratch = mkdtempSync(`${tmpdir()}/${project}-`);
 const passwords = [randomUUID(), randomUUID()], wrong = `${passwords[0]}-wrong`;
 const env = { ...process.env, LOAD_PROJECT: project, LOAD_PORT: String(port), LOAD_DB_PASSWORD: randomUUID(),
@@ -60,7 +61,7 @@ process.on('SIGINT', interrupt); process.on('SIGTERM', interrupt);
 const owner: BurstOwnerOp[] = [], attack: BurstAttackOp[] = [], reads: BurstReadOp[] = [], bursts: Burst[] = [], samples: SamplerRow[] = [];
 const skipped: Record<string, number> = { web_signin: 0, native_signin: 0, password: 0, revoke: 0, reads: 0 };
 const meta: Record<string, unknown> = { project, mode, evidenceEligible: mode === 'recorded', plan, burst: BURST, schedule: SCHEDULE,
-  sampler: SAMPLER, attackerIp: ATTACKER_IP, ownerIp: OWNER_IP, poolMax: POOL_MAX, port, node: process.version, serverRef,
+  sampler: SAMPLER, evidenceTolerances: EVIDENCE, attackerIp: ATTACKER_IP, ownerIp: OWNER_IP, poolMax: POOL_MAX, port, node: process.version, serverRef,
   harnessCommit, lockLogSettings: LOCK_LOG_SETTINGS, loggingNote: LOGGING_NOTE, platform: platform(), arch: arch(),
   hostCpus: cpus().length, hostMemory: totalmem() };
 const saveMeta = () => writeFileSync(`${output}/metadata.json`, JSON.stringify(meta, null, 2) + '\n');
@@ -72,18 +73,19 @@ try {
   if (mode === 'recorded') assertPinned(args => command('git', args), harnessCommit!);
   meta.harness = Object.fromEntries(['load/signin-owner-burst.ts', 'load/signin-owner-burst-config.ts', 'load/signin-owner-burst-locks.ts',
     'load/signin-owner-burst-judgment.ts', 'load/signin-owner-burst-report.ts', 'load/signin-owner-judgment.ts', 'load/signin-summary.ts',
-    'load/app-evidence.ts', 'load/compose.yml', 'load/harness-core/stages.ts', 'load/harness-core/host.ts']
+    'load/signin-owner-burst-aggregate.ts', 'load/app-evidence.ts', 'load/proxy-target.ts', 'load/compose.yml',
+    'load/harness-core/stages.ts', 'load/harness-core/host.ts']
     .map(path => [path, createHash('sha256').update(readFileSync(path)).digest('hex')]));
-  if (serverRef) {
-    meta.serverCommit = command('git', ['rev-parse', '--verify', `${serverRef}^{commit}`]);
-    command('git', ['archive', '--format=tar', `--output=${scratch}/source.tar`, String(meta.serverCommit)]);
+  let server: ReturnType<typeof resolveServer>;
+  try { server = resolveServer(mode, { serverRef, appImage }, args => command('git', args)); }
+  catch (error) { throw new Stop(error instanceof Error && !('status' in error) ? error.message : 'server commit not resolved'); }
+  meta.serverCommit = server.serverCommit; meta.serverSource = server.source;
+  if (server.archive) {
+    command('git', ['archive', '--format=tar', `--output=${scratch}/source.tar`, String(server.serverCommit)]);
     mkdirSync(`${scratch}/source`);
     command('tar', ['-xf', `${scratch}/source.tar`, '-C', `${scratch}/source`]);
     env.LOAD_SERVER_SOURCE = `${scratch}/source`;
-  } else if (!appImage) {
-    meta.serverCommit = command('git', ['rev-parse', 'HEAD']);
-    meta.serverDirty = command('git', ['status', '--porcelain']) !== '';
-  }
+  } else if (!appImage) meta.serverDirty = command('git', ['status', '--porcelain']) !== '';
   saveMeta();
   run.enter('build/start');
   docker(...compose, 'up', '-d', ...(appImage ? ['--no-build'] : ['--build']), '--wait');
@@ -153,23 +155,26 @@ try {
   sql(`SELECT 1 FROM accounts WHERE email = '${OWNER_EMAIL}' FOR UPDATE;`);
   if (await holderDone !== 0) throw new Stop('lock probe holder failed');
   await pause(500);
-  const probe = xWaits(parseLockLog(dbLog()).events, { accountsOid, databaseOid, ctids });
-  meta.lockProbe = { waits: probe.waits.map(w => ({ lock: w.lock, waitedMs: w.waitedMs })), unmatched: probe.unmatched, foreign: probe.foreign };
-  if (!probe.waits.some(w => w.lock === 'transaction' && w.waitedMs > 10) || probe.unmatched || probe.foreign) throw new Stop('lock probe wait not parsed');
+  const probeLog = parseLockLog(dbLog()), probe = xWaits(probeLog.events, { accountsOid, databaseOid, ctids });
+  meta.lockProbe = { waits: probe.waits.map(w => ({ lock: w.lock, waitedMs: w.waitedMs })), unmatched: probe.unmatched, foreign: probe.foreign,
+    unparsedLines: probeLog.unparsed, unparsedWaits: probe.unparsed };
+  if (!probe.waits.some(w => w.lock === 'transaction' && w.waitedMs > 10) || probe.unmatched || probe.foreign || probe.unparsed
+    || probeLog.unparsed) throw new Stop('lock probe wait not parsed');
   saveMeta();
 
   run.enter('sampler start');
   const clock = performance.now();
   sampler = spawn('docker', [...compose, 'exec', '-T', 'db', 'psql', '-XAt', '-P', 'pager=off', '-P', 'footer=off', '-F', '|',
     '-U', 'fukulow', '-d', 'fukulow'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
-  let samplerExited = false, partial = '', t0 = clock;
+  let samplerExited = false, partial = '', t0 = clock, samplerMalformed = 0;
   sampler.on('exit', () => { samplerExited = true; });
   sampler.stdout?.on('data', chunk => {
     const at = performance.now() - t0, lines = (partial + String(chunk)).split('\n');
     partial = lines.pop() ?? '';
     for (const line of lines) {
       const row = parseSamplerLine(line, at);
-      if (row) { samples.push(row); if (row.ctid) ctids.add(row.ctid); }
+      if (row === 'malformed') samplerMalformed++;
+      else if (row) { samples.push(row); if (row.ctid) ctids.add(row.ctid); }
     }
   });
   sampler.stdin?.end(`${samplerQuery(OWNER_EMAIL)}\n\\watch ${SAMPLER.watchSeconds}\n`);
@@ -181,15 +186,15 @@ try {
   run.enter('workload');
   meta.started = new Date().toISOString(); saveMeta();
   run.startSampling();
-  samples.length = 0;
+  samples.length = 0; samplerMalformed = 0;
   t0 = performance.now();
   const wallStart = Date.now(), now = () => performance.now() - t0;
   const until = async (ms: number) => { while (now() < ms && !controller.signal.aborted) await pause(Math.min(2, Math.max(0, ms - now()))); };
   const pending = new Set<Promise<unknown>>();
   const track = <T>(task: Promise<T>) => { pending.add(task); task.finally(() => pending.delete(task)); return task; };
-  let ownerBusy = false, current = 0, readActive = 0;
+  let ownerBusy = false, ownerSentAt = -Infinity, current = 0, readActive = 0;
   const ownerOp = (kind: OwnerKind, burst?: number) => {
-    ownerBusy = true;
+    ownerBusy = true; ownerSentAt = now();
     track((async () => {
       const target = 1 - current;
       const r = kind === 'web_signin' || kind === 'native_signin'
@@ -217,17 +222,24 @@ try {
         statuses.push(r.status);
         attack.push({ burst: index, send, sentMs: r.start - t0, endMs: r.end - t0, ms: r.end - r.start, status: r.status, error: r.error });
       }));
-      if (burst.ownerOp === 'missing') {
+      if (burst.ownerOp === 'missing' || burst.ownerOp === 'undecided') {
+        // Fire on the admitted send only: wait for the planned offset, then at most ownerLateMs more for
+        // the answers to show admission (11 refusals back, 5 still verifying) or refusal (16 x 429).
         await until(sentMs + BURST.ownerOffsetMs);
-        // A send whose 16 answers are all back as 429 by now admitted nothing; any other send is admitted.
-        if (!(statuses.length === BURST.size && statuses.every(s => s === 429))) {
+        let state = burstAdmission(statuses);
+        while (state === 'pending' && now() < sentMs + BURST.ownerOffsetMs + EVIDENCE.ownerLateMs && !controller.signal.aborted) {
+          await pause(1); state = burstAdmission(statuses);
+        }
+        if (state === 'admitted') {
           burst.ownerOpSend = send;
           if (ownerBusy) burst.ownerOp = 'skipped';
           else { burst.ownerOp = 'sent'; ownerOp(index % 2 ? 'password' : 'revoke', index); }
-        }
+        } else if (state === 'pending') burst.ownerOp = 'undecided';
       }
       await Promise.all(responses);
-      if (!statuses.every(s => s === 429)) { burst.admittedSend = send; return sentMs; }
+      // Admission is a 401 (pre-registration). Only an all-429 send is re-sent; anything else ends the burst.
+      if (statuses.includes(401)) { burst.admittedSend = send; return sentMs; }
+      if (!statuses.every(s => s === 429)) break;
     }
     return burst.sends.at(-1)?.sentMs ?? now();
   };
@@ -237,12 +249,14 @@ try {
   while (!controller.signal.aborted && now() < endAt) {
     const t = now();
     // Fail fast after the first measured block (B0) on the pre-registered INVALID/INCONCLUSIVE conditions.
-    if (!b0Checked && t >= plan.b0Ms) {
-      b0Checked = true;
+    // A B0 owner operation still in flight is waited for, so unfinished is never reported as insufficient.
+    if (!b0Checked && t >= plan.b0Ms && !(ownerBusy && ownerSentAt < plan.b0Ms)) {
+      b0Checked = true; meta.b0CheckAtMs = t;
       const b0 = (k: OwnerKind) => owner.filter(o => o.kind === k && o.sentMs < plan.b0Ms && o.status === 204).length;
       const median = samplerIntervals(samples).medianMs;
       if (samplerExited || median === null || median > SAMPLER.medianMaxMs) stoppedEarly = `invalid: sampler median ${median} ms`;
-      else if (b0('password') < 4 || b0('revoke') < 4) stoppedEarly = `inconclusive: B0 successes password ${b0('password')}, revoke ${b0('revoke')}`;
+      else if (b0('password') < 4 || b0('revoke') < 4)
+        stoppedEarly = `inconclusive: B0 finished with too few successes (password ${b0('password')}, revoke ${b0('revoke')})`;
       else if (!owner.some(o => (o.kind === 'web_signin' || o.kind === 'native_signin') && o.sentMs < plan.b0Ms && o.status === 200))
         stoppedEarly = 'inconclusive: no B0 owner sign-in success (V undefined)';
       if (stoppedEarly) break;
@@ -290,25 +304,28 @@ try {
   const offsetMs = clockOffset(samples);
   const waits: XWait[] = offsetMs === null ? [] : mergeWaits(x.waits).map(w => ({ ...w, startMs: w.startDbMs + offsetMs,
     endMs: w.endDbMs + offsetMs, who: attribute(w, samples).who }));
-  const reasons = [parsed.unparsed && `${parsed.unparsed} unparsed lock lines`, x.unmatched && `${x.unmatched} unmatched waits`,
+  const reasons = [parsed.unparsed && `${parsed.unparsed} unparsed lock lines`, x.unparsed && `${x.unparsed} waits that cannot be placed`,
+    x.unmatched && `${x.unmatched} unmatched waits`,
     x.foreign && `${x.foreign} accounts waits off X's known tuples`, offsetMs === null && 'no clock offset'].filter(Boolean) as string[];
-  const burstRun: BurstRun = { owner, attack, reads, bursts, samples, offsetMs, waits: waits.filter(w => w.startMs >= 0),
+  const burstRun: BurstRun = { owner, attack, reads, bursts, samples, samplerMalformed, skipped: { reads: skipped.reads }, offsetMs, waits: waits.filter(w => w.startMs >= 0),
     lockLog: { complete: !reasons.length, reasons }, phaseStartMs, endMs, poolMax: POOL_MAX,
     server: { poolTimeouts: (evidence.pool?.deltas.acquire_timeout ?? 0) + evidence.databaseFailures.pool_timeout, panics: evidence.panics,
       complete: evidence.complete && admissions.complete } };
   const lockEvents = parsed.events.filter(e => offsetMs !== null && e.atDbMs + offsetMs >= 0);
   const logging = { settings: meta.pgSettings, note: LOGGING_NOTE, dbLogLines: parsed.lines, dbLogBytes: Buffer.byteLength(lockText),
     deadlockChecks: lockEvents.filter(e => e.kind === 'waiting').length, acquiredMessages: lockEvents.filter(e => e.kind === 'acquired').length,
-    failedMessages: lockEvents.filter(e => e.kind === 'failed').length, deadlockMessages: parsed.deadlockMessages, otherLockWaits: x.other };
+    failedMessages: lockEvents.filter(e => e.kind === 'failed').length, deadlockMessages: parsed.deadlockMessages, otherLockWaits: x.other,
+    unparsedLines: parsed.unparsed, unparsedWaits: x.unparsed };
   writeFileSync(`${output}/server-evidence.json`, JSON.stringify({ pool: evidence.pool, databaseFailures: evidence.databaseFailures,
     http5xx: evidence.http5xx, panics: evidence.panics, otherWarnings: evidence.otherWarnings, complete: evidence.complete,
     reasons: evidence.reasons, admissionRejected: admissions }, null, 2) + '\n');
   const judgment = judgeBurst(burstRun);
-  results = { ...burstRun, waitsBeforeWorkload: waits.length - burstRun.waits.length, skipped, logging, judgment, report: report(burstRun),
+  results = { ...burstRun, waitsBeforeWorkload: waits.length - burstRun.waits.length, skippedByKind: skipped, logging, judgment,
+    report: report(burstRun),
     // Short cells are never evidence; this runs the 3-run aggregation path on this run alone.
-    aggregatePreview: mode === 'recorded' ? null : aggregate([{ evidence: false, verdict: judgment.verdict },
-      { evidence: false, verdict: null }, { evidence: false, verdict: null }]) };
-  console.log('SIGNIN_BURST_JUDGMENT ' + JSON.stringify({ mode, evidence: mode === 'recorded', verdict: judgment.verdict,
+    aggregatePreview: mode === 'recorded' ? null : aggregate([{ id: project, evidence: false, verdict: judgment.verdict },
+      { id: null, evidence: false, verdict: null }, { id: null, evidence: false, verdict: null }]) };
+  console.log('SIGNIN_BURST_JUDGMENT ' + JSON.stringify({ mode, evidence: mode === 'recorded' && !stoppedEarly, verdict: judgment.verdict,
     reasons: judgment.reasons, a0: judgment.a0.checks, checks: judgment.checks, skipped }));
   if (stoppedEarly) throw new Stop(`stopped after B0: ${stoppedEarly}`);
 } catch (error) {
@@ -323,9 +340,12 @@ try {
   }
   rmSync(scratch, { recursive: true, force: true });
   process.off('SIGINT', interrupt); process.off('SIGTERM', interrupt);
-  const status = run.finish(() => writeFileSync(`${output}/results.json`, JSON.stringify({ mode, evidence: mode === 'recorded',
-    complete: !failed, stoppedEarly, ...results }, null, 2) + '\n'),
-  { failed: failed || cleanupErrors.length > 0, interrupted: controller.signal.aborted, invalidEvidence: Boolean(stoppedEarly) || failed });
+  // results.json and status.json agree on evidence: a failed, stopped, interrupted or uncleaned run is not.
+  const invalidEvidence = Boolean(stoppedEarly) || failed || cleanupErrors.length > 0 || controller.signal.aborted;
+  const status = run.finish(() => writeFileSync(`${output}/results.json`, JSON.stringify({ runId: project, mode,
+    evidence: mode === 'recorded' && !invalidEvidence, complete: !failed, stoppedEarly, harnessCommit, serverCommit: meta.serverCommit ?? null,
+    ...results }, null, 2) + '\n'),
+  { failed: failed || cleanupErrors.length > 0, interrupted: controller.signal.aborted, invalidEvidence, summaryInvalidates: true });
   if (cleanupErrors.length) console.error(cleanupErrors.join('; '));
   console.log(`Sign-in burst ${status.outcome} (${mode}, evidence ${status.evidence}): ${output}`);
   process.exitCode = failed || cleanupErrors.length || status.summaryFailed ? 1 : 0;

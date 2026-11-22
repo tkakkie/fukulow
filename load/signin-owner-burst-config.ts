@@ -10,12 +10,20 @@ export const OWNER_EMAIL = 'owner@example.invalid';
 // Pre-registered load: 16 wrong passwords per burst; the email budget admits 5. A burst with no
 // admitted attempt is re-sent after 250 ms, at most 4 times. The next burst goes 60.2 s after the
 // previous burst's admitted send. The burst-time owner operation goes 10 ms after the admitted send.
+export const BURST_ADMITS = 5;
 export const BURST = { size: 16, resendMs: 250, maxResends: 4, gapMs: 60_200, ownerOffsetMs: 10 } as const;
 // Owner sign-ins at odd whole seconds (web/native alternating), authenticated operations every 5 s from
 // 2.5 s (password change/revoke-others alternating), Organization B reads every 500 ms.
 export const SCHEDULE = { signinFirstMs: 1_000, signinEveryMs: 2_000, authFirstMs: 2_500, authEveryMs: 5_000,
   readEveryMs: 500, readInFlight: 4 } as const;
 export const SAMPLER = { watchSeconds: 0.02, medianMaxMs: 25 } as const;
+// Not pre-registered (no bound exists there); they only ever make a run INCONCLUSIVE, never PASS:
+// - ownerLateMs: the burst-time owner operation must go out within ownerOffsetMs + ownerLateMs of the
+//   admitted send; a later one (timer stall, or admission still undecided) is not the planned load.
+// - clockMs: tolerance for the database-to-harness clock offset when placing waits and samples in a
+//   burst's window [admitted send - clockMs, last answer of that send or its owner operation + clockMs).
+// - burstMaxGapMs: largest database-clock gap between samples inside a burst window.
+export const EVIDENCE = { ownerLateMs: 5, clockMs: 1_000, burstMaxGapMs: 100 } as const;
 
 export type Plan = { b0Ms: number; bursts: number; b1TailMs: number; b2Ms: number; headroom: boolean; failFast: boolean };
 // recorded: B0 60 s, 3 bursts, B1 until 61 s after the last counted failure, B2 70 s.
@@ -28,6 +36,18 @@ export const PLANS: Record<Mode, Plan> = {
   smoke: { b0Ms: 10_000, bursts: 1, b1TailMs: 3_000, b2Ms: 3_000, headroom: false, failFast: false },
 };
 export const RECORDED_BURSTS = PLANS.recorded.bursts;
+
+/**
+ * What a burst send's answers so far say about admission (a 401; the email budget admits 5 of 16).
+ * `refused`: all 16 are back as 429. `admitted`: a 401 is back, or exactly the 11 refusals are back
+ * and the 5 admitted attempts are still verifying. Anything else is `pending`.
+ */
+export function burstAdmission(statuses: readonly number[]): 'admitted' | 'refused' | 'pending' {
+  if (statuses.includes(401)) return 'admitted';
+  if (statuses.length === BURST.size && statuses.every(s => s === 429)) return 'refused';
+  if (statuses.length === BURST.size - BURST_ADMITS && statuses.every(s => s === 429)) return 'admitted';
+  return 'pending';
+}
 
 export const usage = 'node load/signin-owner-burst.ts (--smoke | --rehearsal | --recorded --harness-commit SHA) --out NEW_ABSOLUTE_DIR_OUTSIDE_CHECKOUT';
 
@@ -51,6 +71,26 @@ export function parseBurstEnv(env: Record<string, string | undefined>) {
     throw new Error('Use a non-default unprivileged LOAD_PORT');
   if (env.SERVER_REF && env.LOAD_APP_IMAGE) throw new Error('Choose SERVER_REF or LOAD_APP_IMAGE');
   return { port: Number(port), serverRef: env.SERVER_REF || null, appImage: env.LOAD_APP_IMAGE || null };
+}
+
+/**
+ * The server under test. Recorded runs test `origin/main` at run time (pre-registration "Code under
+ * test"): it is fetched and resolved, SERVER_REF must resolve to the same commit, and the image is
+ * always built from that commit's archive, because a prebuilt LOAD_APP_IMAGE cannot be verified.
+ */
+export function resolveServer(mode: Mode, env: { serverRef: string | null; appImage: string | null }, git: (args: string[]) => string) {
+  if (mode !== 'recorded') {
+    if (env.serverRef) return { serverCommit: git(['rev-parse', '--verify', `${env.serverRef}^{commit}`]), archive: true, source: 'SERVER_REF' };
+    if (env.appImage) return { serverCommit: null, archive: false, source: 'LOAD_APP_IMAGE' };
+    return { serverCommit: git(['rev-parse', 'HEAD']), archive: false, source: 'checkout' };
+  }
+  if (env.appImage) throw new Error('--recorded builds origin/main itself; LOAD_APP_IMAGE cannot be verified');
+  git(['fetch', '--quiet', 'origin', 'main']);
+  const main = git(['rev-parse', '--verify', 'origin/main^{commit}']);
+  if (!/^[0-9a-f]{40}$/.test(main)) throw new Error('origin/main did not resolve');
+  if (env.serverRef && git(['rev-parse', '--verify', `${env.serverRef}^{commit}`]) !== main)
+    throw new Error('--recorded tests origin/main at run time; SERVER_REF resolves elsewhere');
+  return { serverCommit: main, archive: true, source: 'origin/main' };
 }
 
 // The approved lock-wait logging (maintainer, 2026-11-22) exists ONLY in this disposable stack's
