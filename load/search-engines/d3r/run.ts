@@ -110,7 +110,7 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     image, settings, sessionPolicy: frozen.sessionPolicy, serverSqlHashes: path.hashes, conditions,
     architecture: arch(), os: process.platform, cpu: cpus()[0]?.model, cpus: cpus().length, memory: totalmem(),
     docker: JSON.parse(docker('info', '--format', '{"version":{{json .ServerVersion}},"cpus":{{.NCPU}},"memory":{{.MemTotal}}}')),
-    database: owner('postgres', 'SELECT version(); SHOW lc_collate; SHOW lc_ctype;'),
+    database: owner('postgres', 'SELECT version(); SELECT datcollate, datctype FROM pg_database WHERE datname = current_database();'),
   });
   const currentSystemIdentifier = () => owner('postgres', 'SELECT system_identifier FROM pg_control_system();');
   if (source) {
