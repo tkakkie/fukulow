@@ -79,7 +79,7 @@ export const percentile = (values: number[], p: number) => {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
 };
-const within = <T extends { at: number }>(items: T[], from: number, to: number) => items.filter(i => i.at >= from && i.at < to);
+export const within = <T extends { at: number }>(items: T[], from: number, to: number) => items.filter(i => i.at >= from && i.at < to);
 
 /** Peak statements per second: the largest 100 ms bucket x10 and the largest sliding 1 s count. */
 export function peaks(times: number[]) {
@@ -183,6 +183,34 @@ function summarize(run: Run, members: MemberNotices[]) {
   };
 }
 
+export type RecoveryInput = { recovery: number; dbProbe: Probe[]; httpProbe: Probe[]; pool: PoolSample[]; dbBaselineP99Ms: number; httpBaselineP99Ms: number };
+/** The approved #592 recovery rules: database probes, HTTP first success and p99, pool timeouts. */
+export function recoveryReasons({ recovery, dbProbe, httpProbe, pool, dbBaselineP99Ms, httpBaselineP99Ms }: RecoveryInput) {
+  const reasons: string[] = [];
+  const windowEnd = recovery + THRESHOLDS.recoveryWindowSeconds * 1000;
+  const db = within(dbProbe, recovery, windowEnd);
+  const dbP99 = percentile(db.filter(p => p.ok).map(p => p.ms), 99);
+  const dbLimit = Math.max(THRESHOLDS.dbProbeP99Factor * dbBaselineP99Ms, THRESHOLDS.dbProbeP99FloorMs);
+  const dbFailures = db.filter(p => !p.ok).length;
+  if (!(db.length > 0)) reasons.push('no database probe in the recovery window');
+  if (dbFailures) reasons.push(`${dbFailures} database probe failures after recovery`);
+  if (dbP99 > dbLimit) reasons.push(`database probe p99 ${dbP99.toFixed(2)} ms > ${dbLimit.toFixed(2)} ms`);
+  const http = httpProbe.filter(p => p.at >= recovery);
+  const firstOk = http.find(p => p.ok);
+  if (!firstOk || firstOk.at > recovery + THRESHOLDS.httpFirstSuccessSeconds * 1000) reasons.push('no successful HTTP probe within the first-success limit');
+  else {
+    const after = http.filter(p => p.at >= firstOk.at && p.at < windowEnd);
+    const httpLimit = Math.max(THRESHOLDS.httpProbeP99Factor * httpBaselineP99Ms, THRESHOLDS.httpProbeP99FloorMs);
+    const p99 = percentile(after.filter(p => p.ok).map(p => p.ms), 99);
+    if (after.some(p => !p.ok)) reasons.push(`${after.filter(p => !p.ok).length} HTTP probe failures after the first recovery success`);
+    if (p99 > httpLimit) reasons.push(`HTTP probe p99 ${p99.toFixed(2)} ms > ${httpLimit.toFixed(2)} ms`);
+  }
+  const poolRecovery = poolWindow(pool, recovery, windowEnd);
+  if (!poolRecovery) reasons.push('pool acquire timeouts unavailable in the recovery window');
+  else if (poolRecovery.timeouts) reasons.push(`${poolRecovery.timeouts} pool acquire timeouts after recovery`);
+  return reasons;
+}
+
 export function judge(run: Run) {
   const reasons: string[] = [];
   const { fault, recovery } = run.times;
@@ -268,23 +296,11 @@ export function judge(run: Run) {
   // Recovery.
   const drainLimit = recovery + THRESHOLDS.drainSeconds * 1000;
   if (members.some(member => member.revoked.some(at => at > drainLimit))) reasons.push('a revocation arrived after the drain limit');
+  reasons.push(...recoveryReasons({
+    recovery, dbProbe: run.dbProbe, httpProbe: run.httpProbe, pool: run.pool,
+    dbBaselineP99Ms: s.dbProbe.baseline.p99Ms, httpBaselineP99Ms: s.httpProbe.baseline.p99Ms,
+  }));
   const db = s.dbProbe;
-  const dbLimit = Math.max(THRESHOLDS.dbProbeP99Factor * db.baseline.p99Ms, THRESHOLDS.dbProbeP99FloorMs);
-  if (!(db.recovery.count > 0)) reasons.push('no database probe in the recovery window');
-  if (db.recovery.failures) reasons.push(`${db.recovery.failures} database probe failures after recovery`);
-  if (db.recovery.p99Ms > dbLimit) reasons.push(`database probe p99 ${db.recovery.p99Ms.toFixed(2)} ms > ${dbLimit.toFixed(2)} ms`);
-  const http = run.httpProbe.filter(p => p.at >= recovery);
-  const firstOk = http.find(p => p.ok);
-  if (!firstOk || firstOk.at > recovery + THRESHOLDS.httpFirstSuccessSeconds * 1000) reasons.push('no successful HTTP probe within the first-success limit');
-  else {
-    const after = http.filter(p => p.at >= firstOk.at && p.at < recovery + THRESHOLDS.recoveryWindowSeconds * 1000);
-    const httpLimit = Math.max(THRESHOLDS.httpProbeP99Factor * s.httpProbe.baseline.p99Ms, THRESHOLDS.httpProbeP99FloorMs);
-    const p99 = percentile(after.filter(p => p.ok).map(p => p.ms), 99);
-    if (after.some(p => !p.ok)) reasons.push(`${after.filter(p => !p.ok).length} HTTP probe failures after the first recovery success`);
-    if (p99 > httpLimit) reasons.push(`HTTP probe p99 ${p99.toFixed(2)} ms > ${httpLimit.toFixed(2)} ms`);
-  }
-  if (!s.pool.recovery) reasons.push('pool acquire timeouts unavailable in the recovery window');
-  else if (s.pool.recovery.timeouts) reasons.push(`${s.pool.recovery.timeouts} pool acquire timeouts after recovery`);
   if (!(s.httpProbe.baseline.count > 0) || !(db.baseline.count > 0)) reasons.push('missing baseline probes');
   const verdict: RunVerdict = reasons.length ? 'FAIL' : boundaryExceptions.length ? 'PASS_WITH_BOUNDARY_EXCEPTION' : 'PASS';
   // pass means a clean PASS; read verdict for the boundary exception.
