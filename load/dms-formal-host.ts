@@ -20,7 +20,8 @@ import { scaledLoad, localIdentity, localCopy, sha256File, dockerfileBases, harn
 import { reportPilot } from './dms-formal-pilot.ts';
 import { reportAttempt } from './dms-formal-results.ts';
 import { failureDetails, restoreSpace, workerLog, writeDiagnostic, type DiagnosticWriter, type ProbeDocker } from './dms-formal-diagnostics.ts';
-export type HostState = { target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
+import { postgresCommand } from './dms-formal-seed-diagnostic.ts';
+export type HostState = { seedDiagnostic?:boolean; target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
 const root = resolve(import.meta.dirname,'../..');
 const statePath = `${root}/state.json`;
 let cleaning = false;
@@ -35,6 +36,8 @@ const docker = (args: string[], input?: string, timeout = 120000) => {
 };
 const command = (program: string, args: string[], timeout = 120000) => checked(execute, { program,args,timeout,captureStderr:true });
 const save = (path: string, value: unknown) => writeFileSync(path, typeof value === 'string' ? value : JSON.stringify(value,null,2), { mode: 0o600 });
+// The seed diagnostic stops after the seed, so it never starts the baseline arm.
+export const buildsBaseline = (s: Pick<HostState,'overhead'|'pilot'|'seedDiagnostic'>) => !!s.overhead && !s.pilot && !s.seedDiagnostic;
 function state(): HostState { return JSON.parse(readFileSync(statePath,'utf8')); }
 const image = (s: HostState) => `${s.id}:release`;
 const compose = (s: HostState) => ['compose','--env-file',`${root}/compose.env`,'-p',s.id,'-f',`${root}/source/load/compose.yml`,'-f',`${root}/db.json`];
@@ -48,7 +51,10 @@ async function preflight(s: HostState) {
     const node=await command('node',['--version']);
     if(node!==`v${s.nodeVersion}`||!info.CgroupVersion)throw new Error('Pinned Node and Docker resource enforcement required');
     for(const pin of [s.postgres,s.k6,s.caddy])await docker(['image','inspect',pin]);
-    const record={...localIdentity(),docker:info,node,label:'MAC-RELATIVE',limits:s.limits,load:scaledLoad(s.loadScale)};save(root+'/preflight.json',record);return record;
+    const report = s.seedDiagnostic
+      ? { CgroupVersion:info.CgroupVersion, NCPU:info.NCPU, MemTotal:info.MemTotal, Driver:info.Driver, ServerVersion:info.ServerVersion }
+      : info;
+    const record={...localIdentity(),docker:report,node,label:s.seedDiagnostic?'DIAGNOSTIC':'MAC-RELATIVE',limits:s.limits,load:scaledLoad(s.loadScale)};save(root+'/preflight.json',record);return record;
   }
   const machine = await command('cat',['/etc/machine-id']);
   const memory = Number((await command('cat',['/proc/meminfo'])).match(/MemTotal:\s+(\d+)/)?.[1])*1024;
@@ -95,7 +101,7 @@ async function database(s: HostState) {
   const local=s.target==='local';
   if(local)await docker(['network','create','--label',`dm-formal=${s.id}`,`${s.id}-edge`]);
   const memory = local?s.limits.dbMemory:s.mode === 'smoke' ? '2g' : '32g';
-  save(`${root}/db.json`,{ services:{ db:{ ...(local?{image:s.postgres.replace(/:[^/:@]+@/,'@'),pull_policy:'never'}:{}), cpus:local?s.limits.dbCpu:s.mode === 'smoke' ? 1 : 8, mem_limit:memory, ...(local?{}:{ports:['5432:5432']}), volumes:[`${s.id}-data:/var/lib/postgresql`], command:['postgres','-c','shared_preload_libraries=pg_stat_statements','-c','pg_stat_statements.track=all','-c','max_connections=64'] } }, ...(local?{networks:{default:{external:true,name:s.id+'-edge'}}}:{}), volumes:{ [`${s.id}-data`]:{name:`${s.id}-data`,labels:{'dm-formal':s.id}} } });
+  save(`${root}/db.json`,{ services:{ db:{ ...(local?{image:s.postgres.replace(/:[^/:@]+@/,'@'),pull_policy:'never'}:{}), cpus:local?s.limits.dbCpu:s.mode === 'smoke' ? 1 : 8, mem_limit:memory, ...(local?{}:{ports:['5432:5432']}), volumes:[`${s.id}-data:/var/lib/postgresql`], command:postgresCommand(s.seedDiagnostic) } }, ...(local?{networks:{default:{external:true,name:s.id+'-edge'}}}:{}), volumes:{ [`${s.id}-data`]:{name:`${s.id}-data`,labels:{'dm-formal':s.id}} } });
   await docker([...compose(s),'up','-d','--no-build',...(s.target==='local'?['--pull','never']:[]),'--wait','db'],undefined,180000);
   await docker([...compose(s),'run','--rm',...(s.target==='local'?['--pull','never']:[]),'migrate'],undefined,600000);
   await sql(s,'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;');
@@ -134,7 +140,7 @@ async function seed(s: HostState) {
   const env = { ...process.env, DM_DB_CONTAINER:`${s.id}-db-1`, DM_FORMAL_SEED:'1', DM_FORMAL_SCENARIO:s.scenario, DM_FORMAL_SMOKE:s.mode === 'smoke'||s.pilot ? '1' : '0', DM_FORMAL_SEED_ORGS:s.pilot?'10':'', DM_FORMAL_OUT:`${root}/formal`, DM_SEED_OUT:`${root}/deep.json`, DM_OUTPUT:root, BASE_URL:`https://${s.appAddress}`, NODE_EXTRA_CA_CERTS:`${root}/ca.crt`, DM_QUERY_SOURCE:`${root}/source`, DM_PROBE_SAMPLES:'1', DM_SEND_PROBE_SAMPLES:'1' };
   const run = async (script: string) => {
     // Spawned seed/probe children inherit only this private configuration; their output is private.
-    await checked(execute,{program:process.execPath,args:[`${root}/harness/load/${script}.ts`],env,timeout:24*60*60*1000,log:`${root}/${script}.log`});
+    await checked(execute,{program:process.execPath,args:[`${root}/harness/load/${script}.ts`,...(s.seedDiagnostic && script==='dms-formal-seed' ? ['--seed-diagnostic'] : [])],env,timeout:24*60*60*1000,log:s.seedDiagnostic?undefined:`${root}/${script}.log`});
   };
   await run('dms-formal-seed'); await run('dms-seed'); await run('dms-probe');
   const checks=[];
@@ -163,6 +169,7 @@ async function seed(s: HostState) {
   if(Object.entries(expected).some(([key,value])=>actual[key]!==value))throw new Error('Seed row counts differ from the explicit fixture/probe additions');
   save(`${root}/seed-counts.json`,seeded);
   save(`${root}/seed-duration.json`,{ms:Date.now()-started});
+  if(s.seedDiagnostic)return;
   await docker([...compose(s),'stop','db']);
   await docker(['volume','create','--label',`dm-formal=${s.id}`,`${s.id}-snapshot`]);
   await copyVolume(execute,s.id,0,s.id+'-data',s.id+'-snapshot',s.target==='local'?s.postgres.replace(/:[^/:@]+@/,'@'):s.postgres,false,s.target==='local');
@@ -333,7 +340,7 @@ async function main() {
         await docker(['tag',s.pilotImage,image(s)]);
       } else await docker(['build',...(s.target==='local'?['--network=none','--pull=false','--force-rm']:[]),'--label',`dm-formal=${s.id}`,'--label',`org.opencontainers.image.revision=${s.sha}`,'-t',image(s),`${root}/source`],undefined,7200000); save(`${root}/image.json`,await docker(['image','inspect',image(s)]));
       if(s.overhead)await recordBuildToolchains();
-      if(s.overhead && !s.pilot) {
+      if(buildsBaseline(s)) {
         const patch=root+'/harness/load/pool-overhead-baseline.patch';
         if(createHash('sha256').update(readFileSync(patch)).digest('hex')!==s.patchSha256)throw new Error('Reviewed patch digest mismatch');
         const originals=await Promise.all(baselinePaths.map(p=>command('git',['-C',root+'/source','show','HEAD:'+p])));

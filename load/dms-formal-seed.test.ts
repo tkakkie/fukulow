@@ -31,7 +31,10 @@ test('Organization guard uses a strict 2x total-time limit', () => {
   assert.throws(() => checkOrganization(2, 199, 50_001, 25_000), /Organization 2 total through Message batch 199 and final setup took 50001 ms \(limit 50000 ms\)/);
 });
 
-for (const scenario of ['healthy', 'slow batch', 'slow Organization']) test(`formal seed records timing and handles ${scenario}`, t => {
+for (const [scenario, diagnostic] of [
+  ['healthy', false], ['slow batch', false], ['slow Organization', false],
+  ['slow batch', true], ['slow Organization', true], ['SQL failure', true],
+] as const) test(`${diagnostic ? 'diagnostic' : 'formal'} seed records timing and handles ${scenario}`, t => {
   const output = mkdtempSync(join(tmpdir(), 'dm-formal-seed-test-'));
   t.after(() => rmSync(output, { recursive: true, force: true }));
   const log = t.mock.method(console, 'log', () => {});
@@ -50,6 +53,8 @@ for (const scenario of ['healthy', 'slow batch', 'slow Organization']) test(`for
 
   let now = 0, organizationIndex = -1, batchIndex = 0;
   t.mock.method(performance, 'now', () => now);
+  const epoch = 1760000000000;
+  t.mock.method(Date, 'now', () => epoch + now);
   const events: string[] = [];
   const docker = t.mock.method(childProcess, 'execFileSync', (program: string, _args: string[], { input }: { input: string }) => {
     assert.equal(program, 'docker');
@@ -59,6 +64,9 @@ for (const scenario of ['healthy', 'slow batch', 'slow Organization']) test(`for
     }
     if (input.startsWith('INSERT INTO messages(')) {
       now += batchIndex === 0 ? 20_000 : scenario === 'slow batch' && organizationIndex === 1 && batchIndex === 1 ? 6_001 : 2_000;
+      if (scenario === 'SQL failure' && organizationIndex === 1 && batchIndex === 1) {
+        throw new Error('INSERT INTO account_sessions private-token');
+      }
       batchIndex++;
     } else if (scenario === 'slow Organization' && organizationIndex === 1 && input.startsWith('INSERT INTO channel_message_sequences VALUES')) {
       now += 500_000;
@@ -72,8 +80,9 @@ for (const scenario of ['healthy', 'slow batch', 'slow Organization']) test(`for
   });
   syncBuiltinESMExports();
   try {
-    if (scenario === 'slow batch') assert.throws(seed, /Organization 1 Message batch 1 took 6001 ms \(limit 6000 ms\)/);
-    else if (scenario === 'slow Organization') assert.throws(seed, /Organization 1 total through Message batch 199 .* took \d+ ms \(limit \d+ ms\)/);
+    if (scenario === 'slow batch') assert.throws(() => seed(diagnostic), /Organization 1 Message batch 1 took 6001 ms \(limit 6000 ms\)/);
+    else if (scenario === 'slow Organization') assert.throws(() => seed(diagnostic), /Organization 1 total through Message batch 199 .* took \d+ ms \(limit \d+ ms\)/);
+    else if (scenario === 'SQL failure') assert.throws(() => seed(diagnostic), /private-token/);
     else seed();
   } finally {
     docker.mock.restore();
@@ -86,17 +95,35 @@ for (const scenario of ['healthy', 'slow batch', 'slow Organization']) test(`for
     ...Array.from({ length: 200 }, () => batch).flat(),
   ];
   const expected = scenario === 'healthy' ? [...organization, ...organization, ...organization, 'VACUUM(ANALYZE);']
-    : [...organization, ...(scenario === 'slow batch' ? organization.slice(0, 6) : organization)];
+    : [...organization, ...(scenario === 'slow batch' ? organization.slice(0, 6) : scenario === 'SQL failure' ? organization.slice(0, 4) : organization)];
   assert.deepEqual(events, expected);
 
   const path = join(output, 'seed-timing.jsonl');
   assert.equal(statSync(path).mode & 0o777, 0o600);
   const rows = readFileSync(path, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
   const totals = rows.filter(row => row.kind === 'organization');
-  const completed = scenario === 'healthy' ? 3 : scenario === 'slow batch' ? 1 : 2;
+  const completed = scenario === 'healthy' ? 3 : scenario === 'slow batch' || scenario === 'SQL failure' ? 1 : 2;
   assert.deepEqual(totals.map(row => row.organization), Array.from({length: completed}, (_, i) => i));
   assert.equal(log.mock.callCount(), completed);
-  assert.equal(rows.length, completed * 201 + (scenario === 'slow batch' ? 2 : 0));
+  assert.equal(rows.length, completed * 201 + (scenario === 'slow batch' ? 2 : scenario === 'SQL failure' ? 1 : 0));
+  if (diagnostic) {
+    const raw = readFileSync(join(output, 'seed-stop.json'), 'utf8');
+    assert.doesNotMatch(raw, /private-token|INSERT INTO/);
+    const stop = JSON.parse(raw);
+    const last = rows.at(-1);
+    const baselineMs = scenario === 'slow Organization' ? totals[0].durationMs : 2_000;
+    assert.deepEqual(stop, {
+      organization: 1, batchIndex: scenario === 'slow Organization' ? 199 : 1,
+      durationMs: scenario === 'SQL failure' ? 2_000 : last.durationMs, baselineMs,
+      rule: scenario === 'slow Organization' ? 'organization-total' : scenario === 'SQL failure' ? 'seed-failure' : 'message-batch',
+      limitMs: scenario === 'slow Organization' ? baselineMs * 2 : scenario === 'slow batch' ? 6_000 : null,
+      startedAtMs: scenario === 'SQL failure' ? last.endedAtMs + 1 : last.startedAtMs,
+      endedAtMs: scenario === 'SQL failure' ? last.endedAtMs + 2_001 : last.endedAtMs,
+    });
+    assert.ok(rows[0].startedAtMs >= epoch);
+    assert.equal(rows[0].endedAtMs - rows[0].startedAtMs, rows[0].durationMs);
+    return;
+  }
   assert.deepEqual(rows[0], { kind: 'batch', organization: 0, batchIndex: 0, durationMs: 20_000 });
   if (scenario === 'slow batch') {
     assert.deepEqual(rows.at(-1), { kind: 'batch', organization: 1, batchIndex: 1, durationMs: 6_001 });
