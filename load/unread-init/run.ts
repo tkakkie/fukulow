@@ -63,6 +63,12 @@ mkdirSync(resolve(out,'oracle'),{recursive:true});
 const oracleFile=<T extends {oracle:unknown}>(m:T,label:string)=>{const {text,...digest}=oracleDigest(m.oracle),file=`oracle/${label}.json.gz`;
   writeFileSync(resolve(out,file),gzipSync(text));
   return {...m,oracle:{file,...digest}};};
+// Lock samples (pg_locks every 10 ms during the grant) grow with trial length and left ~28% V8 string
+// headroom at the 2026-11-22 formal run (#403); keep them per trial like the oracle.
+mkdirSync(resolve(out,'locks'),{recursive:true});
+const lockFile=<T extends {lockSamples:unknown[]}>(m:T,label:string)=>{const {text,...digest}=oracleDigest(m.lockSamples),file=`locks/${label}.json.gz`;
+  writeFileSync(resolve(out,file),gzipSync(text));
+  return {...m,lockSamples:{file,count:m.lockSamples.length,...digest}};};
 const command=(name:string,...args:string[])=>execFileSync(name,args,{encoding:'utf8'}).trim();
 const db=new Database();let interrupted=false;process.on('SIGINT',()=>{interrupted=true;});process.on('SIGTERM',()=>{interrupted=true;});
 const check=()=>{if(interrupted)throw new Error('interrupted');};
@@ -91,7 +97,7 @@ try {
         const pair:Record<string,Awaited<ReturnType<typeof measure>>>={};
         for(const variant of repeat%2?['lazy','eager']:['eager','lazy']) {
           check();db.clone('trial',`seed_${variant}`);
-          try{pair[variant]=await measure(db,'trial',p,variant,repeat);raw.push(oracleFile(pair[variant],`${index+1}-${p.operation}-t${p.topics}-m${p.members}-r${repeat}-${variant}`));save('results.json',result);}finally{db.drop('trial');}
+          try{pair[variant]=await measure(db,'trial',p,variant,repeat);const label=`${index+1}-${p.operation}-t${p.topics}-m${p.members}-r${repeat}-${variant}`;raw.push(lockFile(oracleFile(pair[variant],label),label));save('results.json',result);}finally{db.drop('trial');}
         }
         equal(pair.eager.oracle,pair.lazy.oracle,`${JSON.stringify(p)}/repeat ${repeat}`);
         result.equalityChecks++;samples.push(pair.eager.sample,pair.lazy.sample);save('results.json',result);
