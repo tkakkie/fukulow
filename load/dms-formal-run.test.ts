@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, cpSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, cpSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { readConfig, type Config } from './dms-formal-config.ts';
+import { readConfig, readRunConfig, type Config } from './dms-formal-config.ts';
 import { budgets, commonWindow, judge, reconcile } from './dms-formal-judgment.ts';
 import { run, type Runtime } from './dms-formal-run.ts';
 import { checked, execute, type Command } from './dms-formal-exec.ts';
@@ -477,4 +477,98 @@ test('executor marks timed out log capture incomplete',async t=>{
   const manifest=JSON.parse(readFileSync(path+'-retention.json','utf8'));
   assert.equal(manifest.complete,false);
   assert.equal(manifest.bytes,readFileSync(path).length);
+});
+
+test('seed diagnostic CLI accepts only local pool-overhead at pair scale with a formal fixture', t => {
+  const path=temporary(t), file=path+'/config.env';
+  const patch='DM_FORMAL_REVIEWED_PATCH_SHA256='+'a'.repeat(64)+'\n';
+  const overhead='DM_FORMAL_SCENARIO=pool-overhead\n'+patch;
+  const local='DM_FORMAL_TARGET=local\n';
+  writeFileSync(file,env(path,local+overhead),{mode:0o600});
+  assert.equal(readRunConfig([file],checkout).seedDiagnostic,undefined);
+  assert.equal(readRunConfig([file,'--pilot'],checkout).pilot,true);
+  const diagnostic=readRunConfig([file,'--seed-diagnostic'],checkout);
+  assert.equal(diagnostic.seedDiagnostic,true);
+  assert.equal(diagnostic.pilot,false);
+  assert.equal(diagnostic.loadScale,'1/25');
+  assert.throws(()=>readRunConfig([file,'--pilot','--seed-diagnostic'],checkout),/Expected/);
+  for (const extra of [overhead,local+'DM_FORMAL_SCENARIO=smoke\nDM_FORMAL_MODE=smoke\n',
+    local+overhead+'DM_FORMAL_LOAD_SCALE=1/10\n',local+overhead+'DM_FORMAL_MODE=smoke\n']) {
+    writeFileSync(file,env(path,extra));
+    assert.throws(()=>readRunConfig([file,'--seed-diagnostic'],checkout),/requires/);
+  }
+});
+
+for (const outcome of ['success','stop-rule','interrupted']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
+  const path=temporary(t), events:string[]=[], listeners=new Map<string,()=>void>();
+  const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',
+    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,
+    reviewedPatchSha256:createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex')};
+  const stop={organization:6,batchIndex:124,durationMs:12166,baselineMs:983.941,rule:'message-batch',
+    limitMs:2951.823,startedAtMs:100,endedAtMs:12266};
+  const timing=JSON.stringify({kind:'batch',...stop})+'\n';
+  const runtime:Runtime={on:(signal,listener)=>{listeners.set(signal,listener);},off:()=>{},transfer:async()=>{},
+    exec:async command=>{
+      const text=command.args.join(' ');
+      if(command.program==='tar')writeFileSync(command.args[2],'archive');
+      if(command.program==='cp')cpSync(command.args[1]!,command.args[2]!);
+      if(command.args[0]?.endsWith('dms-formal-local.ts'))return {code:0,stdout:'1'};
+      if(command.program==='docker')return {code:0,stdout:command.args[0]==='exec'?'{"checkpointer":{},"bgwriter":{},"wal":{},"io":[],"waitEvents":[],"vacuum":[]}':'1.00%|1GiB / 4GiB|0B / 1MB'};
+      if(text.includes('docker logs --timestamps')) {
+        events.push('db logs');
+        return {code:0,stdout:'2026-11-22T00:00:00.000000000Z 2026-11-22 00:00:00.000 UTC [42] LOG:  checkpoint starting: time'};
+      }
+      const roleRoot=/'([^']+\/dm-formal-[a-f0-9-]+\/(?:db|app|generator))\//.exec(text)?.[1];
+      if(command.program==='sh' && roleRoot) {
+        if(text.includes('umask 077')) {
+          mkdirSync(roleRoot+'/harness',{recursive:true});
+          t.after(()=>rmSync(resolve(roleRoot,'..'),{recursive:true,force:true}));
+        }
+        if(text.includes("'preflight'"))writeFileSync(roleRoot+'/preflight.json','{"machine":"local"}');
+        if(text.includes("'app'") || text.includes("'database'"))writeFileSync(roleRoot+'/image.json','[{"Id":"stub"}]');
+        if(text.includes("'app'"))writeFileSync(roleRoot+'/ca.crt','cert');
+        if(text.includes("'seed'")) {
+          events.push('seed');
+          const workerState=JSON.parse(readFileSync(roleRoot+'/state.json','utf8'));
+          assert.equal(workerState.seedDiagnostic,true);
+          assert.equal(workerState.pilot,false);
+          assert.equal(workerState.loadScale,'1/25');
+          mkdirSync(roleRoot+'/formal');
+          writeFileSync(roleRoot+'/formal/seed-timing.jsonl',timing,{mode:0o600});
+          if(outcome==='stop-rule')writeFileSync(roleRoot+'/formal/seed-stop.json',JSON.stringify(stop));
+          if(outcome==='interrupted')listeners.get('SIGINT')!();
+          return {code:outcome==='success'?0:1,stdout:''};
+        }
+        if(text.includes("'cleanup'")) {
+          assert.match(readFileSync(config.output+'/formal/db.log','utf8'),/checkpoint starting/);
+          events.push('cleanup');
+        }
+        assert.doesNotMatch(text,/'(?:restore|overhead-arm|generators|reduce)'/);
+      }
+      return {code:0,stdout:''};
+    }};
+  if(outcome==='success')assert.equal((await run(config,runtime)).infrastructureFailure,false);
+  else await assert.rejects(run(config,runtime),/sh failed/);
+  assert.deepEqual(events,['seed','db logs','cleanup','cleanup','cleanup']);
+  assert.equal(readFileSync(config.output+'/formal/seed-timing.jsonl','utf8'),timing);
+  assert.ok(!existsSync(config.output+'/private-state.json'));
+  assert.ok(!existsSync(config.output+'/host-state.json'));
+  assert.ok(!existsSync(config.output+'/overhead-comparison.json'));
+  const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
+  const status=JSON.parse(readFileSync(config.output+'/status.json','utf8'));
+  for(const record of [summary,status]) {
+    assert.equal(record.label,'DIAGNOSTIC');
+    assert.equal(record.status,'NOT EVALUATED');
+  }
+  assert.deepEqual(summary.attempts,[]);
+  if(outcome!=='success') {
+    const failure=JSON.parse(readFileSync(config.output+'/failure.json','utf8'));
+    assert.deepEqual(status.seedStop,failure.seedStop);
+    if(outcome==='stop-rule')assert.deepEqual(failure.seedStop,stop);
+    else {
+      assert.equal(failure.seedStop.rule,'seed-failure');
+      assert.equal(failure.seedStop.organization,null);
+      assert.ok(failure.seedStop.endedAtMs>=failure.seedStop.startedAtMs);
+    }
+  }
 });
