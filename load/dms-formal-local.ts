@@ -27,8 +27,8 @@ export function apparentBytes(path:string,seen=new Set<string>()):number {
   return stat.size+(stat.isDirectory()?readdirSync(path).reduce((n,name)=>n+apparentBytes(path+'/'+name,seen),0):0);
 }
 
-export async function localCopy(exec:Executor,source:string,destination:string,timeout:number,signal?:AbortSignal,log?:string) {
-  await checked(exec,{program:'cp',args:['-pR',source,destination],timeout,signal,log});
+export async function localCopy(exec:Executor,source:string,destination:string,timeout:number,signal?:AbortSignal,log?:string,redactLog?:(text:string)=>string) {
+  await checked(exec,{program:'cp',args:['-pR',source,destination],timeout,signal,log,...(redactLog?{redactLog}:{})});
 }
 
 // Base images a Dockerfile pulls; a FROM naming an earlier stage (FROM rust-base AS wasm) is not an image.
