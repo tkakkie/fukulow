@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { appEvidence, cgroupSample, dbEvidence, k6CeilingWarnings, k6Evidence, parseDbSample, parseStatements,
   readTimingProblems, requiredReadPhases, statementGroup, statementGroupSql } from './diagnostic-evidence.ts';
-import { attributionLabel, diagnosticCommit, diagnosticSelection, diagnosticTargets, readSampleEnvironment,
+import { attributionLabel, diagnosticCommit, diagnosticSelection, diagnosticTargets, readSampleEnvironment, remainingArmsSkipped,
   rejectDiagnosticImage } from './diagnostic-mode.ts';
 import { judge } from './judge.ts';
 import { plan, type Step } from './plan.ts';
@@ -219,4 +219,11 @@ test('statement summaries accept bounded normalized text only', () => {
   assert.throws(() => parseStatements(JSON.stringify({ ...row, text: 'x'.repeat(201) })), /Invalid PostgreSQL statement/);
   assert.throws(() => parseStatements(JSON.stringify({ ...row, text: 3 })), /Invalid PostgreSQL statement/);
   assert.throws(() => parseStatements(JSON.stringify({ ...row, group: 'unknown' })), /Invalid PostgreSQL statement/);
+});
+
+test('#769: a DIAGNOSTIC arm with missing evidence skips the remaining arms; formal runs never do', () => {
+  assert.equal(remainingArmsSkipped(true, 'Missing DIAGNOSTIC evidence (Topic-list timings (topic_barrier))'), true);
+  assert.equal(remainingArmsSkipped(true, undefined), false);
+  assert.equal(remainingArmsSkipped(true, ''), false);
+  assert.equal(remainingArmsSkipped(false, 'stack launch failed (Error)'), false);
 });

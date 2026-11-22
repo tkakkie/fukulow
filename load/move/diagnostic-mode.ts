@@ -19,6 +19,12 @@ export function readSampleEnvironment(every: number | null) {
   return { FUKULOW_MOVE_DIAG_READ_EVERY: String(every) };
 }
 
+// #769 fail fast: one arm with missing evidence already makes the capture incomplete,
+// so the remaining arms (each a full stack, fixture and load window) are skipped.
+export function remainingArmsSkipped(diagnostic: boolean, problem: string | undefined) {
+  return diagnostic && Boolean(problem);
+}
+
 export function attributionLabel(readLanes: ReadLanes) {
   return readLanes === 'all' ? undefined
     : `ATTRIBUTION RUN (Part D read lanes: ${readLanes} only); not the Part D Done-when load`;
