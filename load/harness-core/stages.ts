@@ -18,7 +18,8 @@ export function modeOf(flags: { smoke?: boolean; rehearsal?: boolean; recorded?:
   return set[0];
 }
 
-export function stages(out: string, mode: Mode) {
+// runId (optional) is written into status.json so a reader can bind it to the run's other artifacts.
+export function stages(out: string, mode: Mode, runId?: string) {
   let stage = 'initialization';
   let sampling = false;
   const complete: string[] = [];
@@ -33,7 +34,7 @@ export function stages(out: string, mode: Mode) {
       const result = outcome({ ...o, sampling });
       // After sampling, recorded failures can be evidence unless the caller flags invalid data.
       const evidence = !o.invalidEvidence && mode === 'recorded' && (result === 'success' || result === 'result-failure');
-      const status = { mode, evidence, outcome: result, sampling, lastStage: stage, complete,
+      const status = { ...(runId === undefined ? {} : { runId }), mode, evidence, outcome: result, sampling, lastStage: stage, complete,
         summaryFailed: o.summaryFailed ?? false, finished: new Date().toISOString() };
       writeFileSync(join(out, 'status.json'), JSON.stringify(status, null, 2) + '\n');
       return status;
