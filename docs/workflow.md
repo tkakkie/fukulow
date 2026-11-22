@@ -128,7 +128,7 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 
 ## 9. Parallel orchestration
 - Before launch list each task's files. One worktree per AI/branch (`/private/tmp/<topic>`, from `origin/main`). Split by module or file set and serialise overlaps. Rebase or merge `origin/main` before marking ready.
-- Measurements: any time, only on the maintainer's go in chat, one at a time on an idle host; rehearse at full size first ([rules](../load/harness-core/README.md)). Criteria unchanged.
+- Measurements: any time, only on the maintainer's go in chat, one at a time on an idle host; pass the pre-run gates first ([rules](../load/harness-core/README.md)). Criteria unchanged.
 - Before finishing, set the next actor's status and comment what was done, CI state and the next step and actor.
 
 ## 10. Merge (only when the maintainer explicitly says so)
