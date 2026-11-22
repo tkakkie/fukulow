@@ -49,7 +49,12 @@ export function report(run: BurstRun) {
         afterAdmittedSendMs: b.admittedSend === null ? null : ownerOp.sentMs - b.sends[b.admittedSend].sentMs },
       ownerOpState: b.ownerOp, window,
       sampler: samplerPeaks(samplesIn(run, window)),
-      lockLog: { count: waits.length, waitsMs: waits.map(w => w.waitedMs), owner: waits.filter(w => w.who === 'owner').map(w => w.waitedMs) } };
+      lockLog: { count: waits.length, waitsMs: waits.map(w => w.waitedMs), owner: waits.filter(w => w.who === 'owner').map(w => w.waitedMs),
+        over1s: waits.filter(w => w.waitedMs > 1_000).length },
+      // Waits longer than 1 s: lock-log waits above, sampler rows with a waiter over 1 s, and operations of this burst.
+      samplerOver1s: samplesIn(run, window).filter(s => s.maxWaitMs > 1_000).length,
+      operationsOver1s: [...attack, ...run.owner.filter(o => o.burst === b.index)].filter(o => o.ms > 1_000).length,
+      poolTimeouts: run.server.burstPoolTimeouts?.[i] ?? null };
   });
   return { phases, bursts };
 }

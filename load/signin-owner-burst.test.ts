@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BASE_DB_FLAGS, LOCK_LOG_SETTINGS, PLANS, burstAdmission, disposableOverride, parseBurstArgs, parseBurstEnv,
+import { BASE_DB_FLAGS, LOCK_LOG_SETTINGS, PLANS, burstAdmission, disposableOverride, ownerDecision, parseBurstArgs, parseBurstEnv,
   resolveServer } from './signin-owner-burst-config.ts';
 import { attribute, clockOffset, mergeWaits, parseLockLog, parseSamplerLine, peakSimultaneous, samplerIntegrity, samplerIntervals,
   samplerQuery, xWaits, type SamplerRow, type Wait } from './signin-owner-burst-locks.ts';
@@ -66,6 +66,7 @@ const LOG = [
   `${at(150)} [202] LOG:  process 202 acquired AccessExclusiveLock on tuple (0,1) of relation 16400 of database 16384 after 55.000 ms`,
   `${at(200)} [202] LOG:  process 202 acquired ShareLock on transaction 901 after 49.500 ms`,
   `${at(200)} [202] CONTEXT:  while locking tuple (0,1) in relation "accounts"`,
+  `${at(200)} [202] STATEMENT:  SELECT password_hash FROM accounts WHERE id = $1 FOR UPDATE`,
   // Not X's row: another relation, and an accounts tuple outside X's versions.
   `${at(300)} [203] LOG:  process 203 acquired ShareLock on transaction 902 after 20.000 ms`,
   `${at(300)} [203] CONTEXT:  while locking tuple (3,4) in relation "channels"`,
@@ -127,13 +128,13 @@ const OFFSET = -1_000_000, SENDS = [60_000, 120_200, 180_400];
 function run(): BurstRun {
   const owner: BurstOwnerOp[] = [];
   const op = (kind: OwnerKind, sentMs: number, status: number, ms: number, burst?: number) =>
-    owner.push({ kind, sentMs, endMs: sentMs + ms, ms, status, ...(burst ? { burst } : {}) });
+    owner.push({ kind, sentMs, endMs: sentMs + ms, ms, status, ...(burst ? { burst } : { dueMs: sentMs }) });
   for (let t = 1_000, i = 0; t < 310_000; t += 2_000, i++) op(i % 2 ? 'native_signin' : 'web_signin', t, t >= 60_000 && t < 241_700 ? 429 : 200, t >= 60_000 && t < 241_700 ? 2 : 50);
   for (let t = 2_500, i = 0; t < 310_000; t += 5_000, i++) op(i % 2 ? 'revoke' : 'password', t, 204, t >= 60_000 && t < 241_700 ? 200 : 80);
   SENDS.forEach((s, i) => op(i % 2 ? 'revoke' : 'password', s + 10, 204, 300, i + 1));
   const attack: BurstRun['attack'] = SENDS.flatMap((s, i) => Array.from({ length: 16 }, (_, k) => ({ burst: i + 1, send: 0, sentMs: s, status: k < 5 ? 401 : 429,
     ms: k < 5 ? 300 : 2, endMs: s + (k < 5 ? 300 : 2) })));
-  const reads = Array.from({ length: 620 }, (_, i) => ({ sentMs: i * 500, status: 200, ms: 5 }));
+  const reads = Array.from({ length: 620 }, (_, i) => ({ sentMs: i * 500, status: 200, ms: 5, dueMs: i * 500 }));
   const samples: SamplerRow[] = [];
   for (let t = 0; t < 311_700; t += 20) {
     const inBurst = SENDS.some(s => t >= s + 40 && t < s + 200);
@@ -143,9 +144,11 @@ function run(): BurstRun {
   const waits = SENDS.flatMap(s => [[101, 50, 110], [102, 55, 150], [103, 60, 200]].map(([pid, a, b]) => ({ pid,
     startDbMs: s + a - OFFSET, endDbMs: s + b - OFFSET, waitedMs: b - a, parts: ['transaction' as const], tuples: ['(0,1)'],
     outcome: 'acquired' as const, startMs: s + a, endMs: s + b, who: pid === 103 ? 'owner' as const : 'signin' as const })));
-  return { owner, attack, reads, samples, samplerMalformed: 0, skipped: { reads: 0 }, offsetMs: OFFSET, waits, lockLog: { complete: true, reasons: [] },
-    bursts: SENDS.map((s, i) => ({ index: i + 1, sends: [{ sentMs: s, statuses: [] }], admittedSend: 0, ownerOp: 'sent' as const, ownerOpSend: 0 })),
-    phaseStartMs: { B0: 0, B1: 60_000, B2: 241_700 }, endMs: 311_700, poolMax: 20, server: { poolTimeouts: 0, panics: 0, complete: true } };
+  return { owner, attack, reads, samples, samplerMalformed: 0, skipped: { reads: 0, web_signin: 0, native_signin: 0, password: 0, revoke: 0 },
+    offsetMs: OFFSET, waits, lockLog: { complete: true, reasons: [] },
+    bursts: SENDS.map((s, i) => ({ index: i + 1, sends: [{ sentMs: s, statuses: attack.filter(a => a.burst === i + 1).map(a => a.status) }],
+      admittedSend: 0, ownerOp: 'sent' as const, ownerOpSend: 0 })),
+    phaseStartMs: { B0: 0, B1: 60_000, B2: 241_700 }, endMs: 311_700, scheduleEndMs: 309_999, poolMax: 20, server: { poolTimeouts: 0, panics: 0, complete: true } };
 }
 const failing = (r: BurstRun) => Object.entries(judgeBurst(r).checks).filter(([, c]) => !c.pass).map(([k]) => k);
 const b1Auth = (r: BurstRun) => r.owner.find(o => o.kind === 'password' && o.sentMs > 60_000 && o.sentMs < 241_700 && o.burst === undefined)!;
@@ -287,7 +290,7 @@ test('burst admission: fire only on a send that shows admission; an all-429 send
   const n = (count: number, status = 429) => Array.from({ length: count }, () => status);
   assert.equal(burstAdmission(n(15)), 'pending');
   assert.equal(burstAdmission(n(16)), 'refused');
-  assert.equal(burstAdmission(n(11)), 'admitted');
+  assert.equal(burstAdmission(n(11)), 'provisional');
   assert.equal(burstAdmission([...n(11), 401]), 'admitted');
   assert.equal(burstAdmission(n(12)), 'pending');
   assert.equal(burstAdmission(n(9)), 'pending');
@@ -297,10 +300,16 @@ test('burst admission: fire only on a send that shows admission; an all-429 send
 test('recorded runs test origin/main at run time; a prebuilt image or another SERVER_REF is rejected', () => {
   const MAIN = 'b'.repeat(40), OTHER = 'c'.repeat(40);
   const calls: string[][] = [];
-  const git = (args: string[]) => { calls.push(args); return args[0] === 'fetch' ? '' : args.at(-1) === 'origin/main^{commit}' ? MAIN
-    : args.at(-1) === 'main^{commit}' ? MAIN : args[1] === 'HEAD' ? OTHER : OTHER; };
+  let fetched = MAIN;
+  const git = (args: string[]) => { calls.push(args); return args[0] === 'fetch' ? '' : args.at(-1) === 'refs/remotes/origin/main^{commit}' ? MAIN
+    : args.at(-1) === 'FETCH_HEAD^{commit}' ? fetched : args.at(-1) === 'main^{commit}' ? MAIN : OTHER; };
   assert.deepEqual(resolveServer('recorded', { serverRef: null, appImage: null }, git), { serverCommit: MAIN, archive: true, source: 'origin/main' });
-  assert.deepEqual(calls[0], ['fetch', '--quiet', 'origin', 'main']);
+  // An explicit forced refspec, whatever the checkout's own fetch refspec tracks.
+  assert.deepEqual(calls[0], ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main']);
+  // A remote-tracking ref that is not the fetched tip (stale) is refused.
+  fetched = OTHER;
+  assert.throws(() => resolveServer('recorded', { serverRef: null, appImage: null }, git), /fetched tip/);
+  fetched = MAIN;
   assert.equal(resolveServer('recorded', { serverRef: 'main', appImage: null }, git).serverCommit, MAIN);
   assert.throws(() => resolveServer('recorded', { serverRef: 'topic', appImage: null }, git), /origin\/main/);
   assert.throws(() => resolveServer('recorded', { serverRef: null, appImage: 'local:tag' }, git), /LOAD_APP_IMAGE/);
@@ -311,7 +320,8 @@ test('recorded runs test origin/main at run time; a prebuilt image or another SE
 test('burst timing: the owner operation belongs to the admitted send after a 429 retry, and must leave on time', () => {
   const retried = () => {
     const r = run(), s = SENDS[1];
-    r.bursts[1] = { index: 2, sends: [{ sentMs: s - 250, statuses: [] }, { sentMs: s, statuses: [] }], admittedSend: 1, ownerOp: 'sent', ownerOpSend: 1 };
+    r.bursts[1] = { index: 2, sends: [{ sentMs: s - 250, statuses: Array(16).fill(429) }, { sentMs: s, statuses: r.bursts[1].sends[0].statuses }],
+      admittedSend: 1, ownerOp: 'sent', ownerOpSend: 1 };
     for (const a of r.attack.filter(a => a.burst === 2)) a.send = 1;
     r.attack.push(...Array.from({ length: 16 }, () => ({ burst: 2, send: 0, sentMs: s - 250, endMs: s - 238, ms: 12, status: 429 })));
     return r;
@@ -322,6 +332,11 @@ test('burst timing: the owner operation belongs to the admitted send after a 429
   const result = judgeBurst(late);
   assert.equal(result.verdict, 'inconclusive');
   assert.equal(result.evidence.checks.ownerOpTiming.pass, false);
+  // +14 ms is inside the approved 5 ms owner lateness (maintainer, 2026-11-22); +16 ms is not.
+  const at14 = run(); at14.owner.find(o => o.burst === 1)!.sentMs = SENDS[0] + 14;
+  assert.equal(judgeBurst(at14).verdict, 'holds');
+  const at16 = run(); at16.owner.find(o => o.burst === 1)!.sentMs = SENDS[0] + 16;
+  assert.equal(judgeBurst(at16).verdict, 'inconclusive');
   const early = run(); early.owner.find(o => o.burst === 1)!.sentMs = SENDS[0] + 5;
   assert.equal(judgeBurst(early).verdict, 'inconclusive');
   const undecided = run(); undecided.bursts[0].ownerOp = 'undecided';
@@ -411,4 +426,114 @@ test('aggregate reader: only three distinct, self-consistent, completed recorded
   assert.equal(readRuns([a, b, failing])[2].evidence, false, 'a stored verdict the samples do not reproduce');
   const other = write('other-harness', { meta: { harnessCommit: 'd'.repeat(40) }, results: { harnessCommit: 'd'.repeat(40) } });
   assert.equal(outcome([a, b, other]), 'INCONCLUSIVE');
+});
+
+test('round 2: owner decision never fires on 11 refusals at +10 ms whose last 5 are 429s at +12 ms', () => {
+  const n = (count: number, status = 429) => Array.from({ length: count }, () => status);
+  // The sol case: 11 x 429 back at +10 ms, the other five 429s at +12 ms.
+  assert.equal(ownerDecision(burstAdmission(n(11)), 10), 'wait');
+  assert.equal(ownerDecision(burstAdmission(n(11)), 11.9), 'wait');
+  assert.equal(ownerDecision(burstAdmission(n(16)), 12), 'refused');
+  // An admitted send: 11 refusals, 5 still verifying, trusted only at the last poll inside +10..+15 ms.
+  assert.equal(ownerDecision(burstAdmission(n(11)), 13), 'fire');
+  assert.equal(ownerDecision(burstAdmission(n(11)), 15), 'fire');
+  assert.equal(ownerDecision(burstAdmission(n(11)), 15.1), 'undecided');
+  // A 401 is proof: fire at once from +10 ms, never before.
+  assert.equal(ownerDecision(burstAdmission([...n(11), 401]), 9), 'wait');
+  assert.equal(ownerDecision(burstAdmission([...n(11), 401]), 10), 'fire');
+  assert.equal(ownerDecision(burstAdmission(n(12)), 14), 'wait');
+  assert.equal(ownerDecision(burstAdmission(n(12)), 16), 'undecided');
+});
+
+test('condition a: a lock wait unrelated to the burst inside the +-1 s window is never A0 evidence', () => {
+  // The sol fixture: every interval 500 ms later, so all begin after the last attack and owner answers.
+  const shifted = run();
+  for (const w of shifted.waits) { w.startMs += 500; w.endMs += 500; w.startDbMs += 500; w.endDbMs += 500; }
+  const result = judgeBurst(shifted);
+  assert.notEqual(result.verdict, 'holds');
+  assert.deepEqual([result.a0.checks.lockOverlap.pass, result.a0.locks.map(l => l.peakPids)], [false, [0, 0, 0]]);
+  // Overlapping waits just before the admitted send, inside the padded window, are not evidence either.
+  const before = run();
+  for (const w of before.waits) { w.startMs -= 300; w.endMs -= 300; }
+  assert.equal(judgeBurst(before).a0.checks.lockOverlap.pass, false);
+  // Inside the span but with unknown attribution: not evidence.
+  const unknown = run();
+  for (const w of unknown.waits) w.who = 'unknown';
+  assert.equal(judgeBurst(unknown).a0.checks.lockOverlap.pass, false);
+  // A wait that only straddles the span edge counts only for its part inside the span.
+  const edge = run();
+  edge.waits = edge.waits.filter(w => w.pid !== 103).map(w => w.pid === 102 ? { ...w, startMs: w.startMs + 300, endMs: w.endMs + 300 } : w);
+  assert.deepEqual(judgeBurst(edge).a0.locks.map(l => l.peakPids), [1, 1, 1]);
+});
+
+test('round 2: a stripped workload record never holds, also through the aggregate reader', () => {
+  const cases: [string, (r: BurstRun) => void][] = [
+    ['refused attack answers removed', r => { r.attack = r.attack.filter(a => a.status !== 429); }],
+    ['one Organization B read per phase', r => { r.reads = [r.reads[0], r.reads[200], r.reads[500]]; }],
+    ['one owner sign-in slot missing', r => { r.owner.splice(r.owner.findIndex(o => o.kind === 'web_signin' && o.sentMs === 5_000), 1); }],
+    ['a read recorded twice', r => { r.reads[1] = { ...r.reads[0] }; }],
+    ['wrong kind in an authenticated slot', r => { r.owner.find(o => o.kind === 'password' && o.dueMs === 2_500)!.kind = 'revoke'; }],
+    ['burst-time owner operation missing', r => { r.owner = r.owner.filter(o => o.burst !== 2); }],
+    ['schedule ended before B2', r => { r.scheduleEndMs = 200_000; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const r = run(); mutate(r);
+    const result = judgeBurst(r);
+    assert.equal(result.verdict, 'inconclusive', name);
+    assert.equal(result.evidence.checks.workloadComplete.pass, false, name);
+  }
+});
+
+test('round 2: sampler gaps anywhere in the run are inconclusive', () => {
+  const r = run();
+  r.samples = r.samples.filter(s => !(s.dbMs + OFFSET > 250_000 && s.dbMs + OFFSET < 306_000));
+  const result = judgeBurst(r);
+  assert.deepEqual([result.verdict, result.sampler.valid, result.evidence.checks.samplerCoverage.pass,
+    result.evidence.checks.samplerRunCoverage.pass], ['inconclusive', true, true, false]);
+  const b0 = run(); b0.samples = b0.samples.filter(s => !(s.dbMs + OFFSET > 10_000 && s.dbMs + OFFSET < 10_200));
+  assert.equal(judgeBurst(b0).verdict, 'inconclusive');
+  // The approved 100 ms bound itself: a 100 ms gap is accepted.
+  const edge = run(); edge.samples = edge.samples.filter(s => !(s.dbMs + OFFSET > 10_000 && s.dbMs + OFFSET < 10_100));
+  assert.equal(judgeBurst(edge).verdict, 'holds');
+});
+
+test('round 2: a wait whose start and completion name different places is unparsed; a missing statement kind never merges', () => {
+  const log = [`${at(10)} [501] LOG:  process 501 still waiting for ShareLock on transaction 7 after 10.010 ms`,
+    `${at(10)} [501] CONTEXT:  while locking tuple (0,1) in relation "accounts"`,
+    `${at(40)} [501] LOG:  process 501 acquired ShareLock on transaction 7 after 40.000 ms`,
+    `${at(40)} [501] CONTEXT:  while locking tuple (0,1) in relation "account_sessions"`].join('\n');
+  const x = xWaits(parseLockLog(log).events, X);
+  assert.deepEqual([x.unparsed, x.unmatched, x.other, x.waits.length], [1, 0, 0, 0]);
+  const tuple: Wait = { pid: 1, lock: 'tuple', tuple: '(0,1)', startDbMs: 0, endDbMs: 100, waitedMs: 100, outcome: 'acquired' };
+  const tx: Wait = { ...tuple, lock: 'transaction', startDbMs: 102, endDbMs: 150, waitedMs: 48, statementKind: 'signin' };
+  assert.equal(mergeWaits([tuple, tx]).length, 2);
+  assert.equal(mergeWaits([{ ...tuple, statementKind: 'signin' }, { ...tx, statementKind: undefined }]).length, 2);
+  assert.equal(mergeWaits([{ ...tuple, statementKind: 'signin' }, tx]).length, 1);
+});
+
+test('report: per-burst pool timeouts and waits over 1 s', () => {
+  const r = run();
+  r.server.burstPoolTimeouts = [0, 2, null];
+  r.waits[3] = { ...r.waits[3], waitedMs: 1_200 };
+  r.attack.find(a => a.burst === 3 && a.status === 401)!.ms = 1_500;
+  const bursts = report(r).bursts;
+  assert.deepEqual(bursts.map(b => [b.poolTimeouts, b.lockLog.over1s, b.operationsOver1s]), [[0, 0, 0], [2, 1, 0], [null, 0, 1]]);
+});
+
+test('condition b: the 3 runs must share the server commit as well as the harness commit', () => {
+  const base = mkdtempSync(join(tmpdir(), 'burst-commits-'));
+  const write = (name: string, serverCommit: string) => {
+    const dir = join(base, name), r = run();
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'status.json'), JSON.stringify({ runId: name, mode: 'recorded', evidence: true, outcome: 'success' }));
+    writeFileSync(join(dir, 'results.json'), JSON.stringify({ runId: name, mode: 'recorded', evidence: true, complete: true, stoppedEarly: null,
+      harnessCommit: SHA, serverCommit, ...r, judgment: judgeBurst(r) }));
+    writeFileSync(join(dir, 'metadata.json'), JSON.stringify({ project: name, harnessCommit: SHA, serverCommit }));
+    return dir;
+  };
+  const same = ['a', 'b', 'c'].map(n => write(n, SHA));
+  assert.equal(aggregate(readRuns(same)).outcome, 'PASS');
+  const mixed = readRuns([same[0], same[1], write('d', 'e'.repeat(40))]);
+  assert.equal(aggregate(mixed).outcome, 'INCONCLUSIVE');
+  assert.ok(mixed.every(r => r.problem === 'runs tested different server commits'));
 });

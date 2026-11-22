@@ -110,6 +110,9 @@ export function xWaits(events: readonly LockEvent[], x: Target) {
     if (e.kind === 'waiting') { if (pending.has(key(e))) unmatched++; pending.set(key(e), e); continue; }
     const start = pending.get(key(e));
     pending.delete(key(e));
+    // The start and the completion of one wait must agree on where it waited; otherwise it cannot be placed.
+    if (start?.context && e.context && (start.context.relation !== e.context.relation
+      || tupleKey(start.context.tuple) !== tupleKey(e.context.tuple))) { unparsed++; continue; }
     const withContext: LockEvent = { ...e, context: e.context ?? start?.context,
       contextUnparsed: e.contextUnparsed || start?.contextUnparsed, statementKind: e.statementKind ?? start?.statementKind };
     const c = classify(withContext, x);
@@ -129,11 +132,14 @@ export function xWaits(events: readonly LockEvent[], x: Target) {
 // The log timestamp has 1 ms resolution, so a transaction wait that starts as the tuple wait ends can
 // appear up to ~1 ms early or late.
 export const MERGE_GAP_MS = 2;
-/** Same lock attempt: the tuple wait was acquired, then the same pid waited on the holder for that tuple. */
+/**
+ * Same lock attempt: the tuple wait was acquired, then the same pid waited on the holder for that tuple,
+ * running the same known statement kind. A missing statement kind never merges.
+ */
 function sameAttempt(last: WaitInterval, w: Wait) {
   return last.parts.at(-1) === 'tuple' && last.outcome === 'acquired' && w.lock === 'transaction'
     && w.tuple === last.tuples.at(-1) && Math.abs(w.startDbMs - last.endDbMs) <= MERGE_GAP_MS
-    && (last.statementKind === undefined || w.statementKind === undefined || last.statementKind === w.statementKind);
+    && last.statementKind !== undefined && last.statementKind === w.statementKind;
 }
 export function mergeWaits(waits: readonly Wait[]): WaitInterval[] {
   const out: WaitInterval[] = [];
@@ -144,7 +150,7 @@ export function mergeWaits(waits: readonly Wait[]): WaitInterval[] {
     for (const w of [...list].sort((a, b) => a.startDbMs - b.startDbMs)) {
       if (last && sameAttempt(last, w)) {
         last.endDbMs = Math.max(last.endDbMs, w.endDbMs); last.waitedMs = last.endDbMs - last.startDbMs;
-        last.parts.push(w.lock); last.tuples.push(w.tuple); last.outcome = w.outcome; last.statementKind ??= w.statementKind;
+        last.parts.push(w.lock); last.tuples.push(w.tuple); last.outcome = w.outcome;
         continue;
       }
       last = { pid, startDbMs: w.startDbMs, endDbMs: w.endDbMs, waitedMs: w.waitedMs, parts: [w.lock], tuples: [w.tuple],

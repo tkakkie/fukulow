@@ -17,12 +17,14 @@ export const BURST = { size: 16, resendMs: 250, maxResends: 4, gapMs: 60_200, ow
 export const SCHEDULE = { signinFirstMs: 1_000, signinEveryMs: 2_000, authFirstMs: 2_500, authEveryMs: 5_000,
   readEveryMs: 500, readInFlight: 4 } as const;
 export const SAMPLER = { watchSeconds: 0.02, medianMaxMs: 25 } as const;
-// Not pre-registered (no bound exists there); they only ever make a run INCONCLUSIVE, never PASS:
+// Evidence tolerances (maintainer approval, 2026-11-22; values fixed). They only ever make a run
+// INCONCLUSIVE, never PASS:
 // - ownerLateMs: the burst-time owner operation must go out within ownerOffsetMs + ownerLateMs of the
 //   admitted send; a later one (timer stall, or admission still undecided) is not the planned load.
-// - clockMs: tolerance for the database-to-harness clock offset when placing waits and samples in a
-//   burst's window [admitted send - clockMs, last answer of that send or its owner operation + clockMs).
-// - burstMaxGapMs: largest database-clock gap between samples inside a burst window.
+// - clockMs: padding of a burst's window [admitted send - clockMs, last answer of that send or its owner
+//   operation + clockMs) for sampler coverage and the report. A0 overlap uses the unpadded span.
+// - burstMaxGapMs: largest database-clock gap between samples inside a burst window and across the run.
+// - Same harness and server commit across the 3 recorded runs (signin-owner-burst-aggregate.ts).
 export const EVIDENCE = { ownerLateMs: 5, clockMs: 1_000, burstMaxGapMs: 100 } as const;
 
 export type Plan = { b0Ms: number; bursts: number; b1TailMs: number; b2Ms: number; headroom: boolean; failFast: boolean };
@@ -39,14 +41,29 @@ export const RECORDED_BURSTS = PLANS.recorded.bursts;
 
 /**
  * What a burst send's answers so far say about admission (a 401; the email budget admits 5 of 16).
- * `refused`: all 16 are back as 429. `admitted`: a 401 is back, or exactly the 11 refusals are back
- * and the 5 admitted attempts are still verifying. Anything else is `pending`.
+ * `refused`: all 16 are back as 429. `admitted`: a 401 is back. `provisional`: exactly the 11 refusals
+ * are back and 5 are still out, which is what an admitted send looks like before its verifications end,
+ * but also what a refused send looks like while its last 429s are in flight. Anything else is `pending`.
  */
-export function burstAdmission(statuses: readonly number[]): 'admitted' | 'refused' | 'pending' {
+export function burstAdmission(statuses: readonly number[]): 'admitted' | 'refused' | 'provisional' | 'pending' {
   if (statuses.includes(401)) return 'admitted';
   if (statuses.length === BURST.size && statuses.every(s => s === 429)) return 'refused';
-  if (statuses.length === BURST.size - BURST_ADMITS && statuses.every(s => s === 429)) return 'admitted';
+  if (statuses.length === BURST.size - BURST_ADMITS && statuses.every(s => s === 429)) return 'provisional';
   return 'pending';
+}
+// Scheduling margin (not an evidence tolerance): a `provisional` send is trusted only at the last poll
+// that still leaves the owner operation inside ownerOffsetMs + ownerLateMs, i.e. one 2 ms harness poll
+// step before that deadline, so a refused send's late 429s have the whole allowance to arrive.
+export const DECIDE_BEFORE_DEADLINE_MS = 2;
+/** Whether to dispatch the burst-time owner operation now, wait, or give up on this send. */
+export function ownerDecision(state: ReturnType<typeof burstAdmission>, sinceSendMs: number): 'fire' | 'wait' | 'refused' | 'undecided' {
+  const deadline = BURST.ownerOffsetMs + EVIDENCE.ownerLateMs;
+  if (state === 'refused') return 'refused';
+  if (sinceSendMs < BURST.ownerOffsetMs) return 'wait';
+  if (state === 'admitted') return sinceSendMs <= deadline ? 'fire' : 'undecided';
+  if (sinceSendMs > deadline) return 'undecided';
+  if (sinceSendMs < deadline - DECIDE_BEFORE_DEADLINE_MS) return 'wait';
+  return state === 'provisional' ? 'fire' : 'wait';
 }
 
 export const usage = 'node load/signin-owner-burst.ts (--smoke | --rehearsal | --recorded --harness-commit SHA) --out NEW_ABSOLUTE_DIR_OUTSIDE_CHECKOUT';
@@ -85,9 +102,12 @@ export function resolveServer(mode: Mode, env: { serverRef: string | null; appIm
     return { serverCommit: git(['rev-parse', 'HEAD']), archive: false, source: 'checkout' };
   }
   if (env.appImage) throw new Error('--recorded builds origin/main itself; LOAD_APP_IMAGE cannot be verified');
-  git(['fetch', '--quiet', 'origin', 'main']);
-  const main = git(['rev-parse', '--verify', 'origin/main^{commit}']);
-  if (!/^[0-9a-f]{40}$/.test(main)) throw new Error('origin/main did not resolve');
+  // An explicit forced refspec updates refs/remotes/origin/main whatever the checkout's fetch refspec is;
+  // the fetched tip (FETCH_HEAD) must be that same commit, so a stale ref is never built.
+  git(['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main']);
+  const main = git(['rev-parse', '--verify', 'refs/remotes/origin/main^{commit}']);
+  if (!/^[0-9a-f]{40}$/.test(main) || git(['rev-parse', '--verify', 'FETCH_HEAD^{commit}']) !== main)
+    throw new Error('origin/main did not resolve to the fetched tip');
   if (env.serverRef && git(['rev-parse', '--verify', `${env.serverRef}^{commit}`]) !== main)
     throw new Error('--recorded tests origin/main at run time; SERVER_REF resolves elsewhere');
   return { serverCommit: main, archive: true, source: 'origin/main' };

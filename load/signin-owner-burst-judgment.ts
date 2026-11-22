@@ -3,22 +3,27 @@
 // An INVALID or INCONCLUSIVE run is never a pass; only `holds` in 3 recorded runs is PASS.
 import { judge, type OwnerOp, type Phase } from './signin-owner-judgment.ts';
 import { distribution } from './signin-summary.ts';
-import { BURST, BURST_ADMITS, EVIDENCE, RECORDED_BURSTS, SAMPLER } from './signin-owner-burst-config.ts';
+import { BURST, BURST_ADMITS, EVIDENCE, RECORDED_BURSTS, SAMPLER, SCHEDULE } from './signin-owner-burst-config.ts';
 import { peakSimultaneous, samplerIntegrity, samplerIntervals, type SamplerRow, type WaitInterval } from './signin-owner-burst-locks.ts';
 
 export type OwnerKind = 'web_signin' | 'native_signin' | 'password' | 'revoke';
-export type BurstOwnerOp = { kind: OwnerKind; sentMs: number; endMs: number; ms: number; status: number; error?: string; burst?: number };
+// `dueMs`: the schedule slot of a periodic owner operation or a read (burst-time owner operations have none).
+export type BurstOwnerOp = { kind: OwnerKind; sentMs: number; endMs: number; ms: number; status: number; error?: string; burst?: number;
+  dueMs?: number };
 export type BurstAttackOp = { burst: number; send: number; sentMs: number; endMs: number; ms: number; status: number; error?: string };
-export type BurstReadOp = { sentMs: number; status: number; ms: number; error?: string };
+export type BurstReadOp = { sentMs: number; status: number; ms: number; error?: string; dueMs: number };
 // ownerOp `undecided`: admission was still unknown ownerLateMs after the planned offset, so nothing was sent.
 export type Burst = { index: number; sends: { sentMs: number; statuses: number[] }[]; admittedSend: number | null;
   ownerOp: 'sent' | 'skipped' | 'missing' | 'undecided'; ownerOpSend: number | null };
 // `waits` are X-row intervals with harness-clock times (`startMs`/`endMs`) next to the database times.
-export type XWait = WaitInterval & { startMs: number; endMs: number; who: 'owner' | 'signin' | 'unknown' };
+export type XWait = WaitInterval & { startMs: number; endMs: number; who: 'owner' | 'signin' | 'unknown';
+  whoSource?: 'sampler' | 'statement' | 'conflict' | 'none' };
 export type BurstRun = { owner: BurstOwnerOp[]; attack: BurstAttackOp[]; reads: BurstReadOp[]; bursts: Burst[];
   samples: SamplerRow[]; samplerMalformed: number; offsetMs: number | null; waits: XWait[]; lockLog: { complete: boolean; reasons: string[] };
-  phaseStartMs: Record<Phase, number>; endMs: number; poolMax: number; skipped: { reads: number };
-  server: { poolTimeouts: number; panics: number; complete: boolean } };
+  phaseStartMs: Record<Phase, number>; endMs: number; poolMax: number;
+  // scheduleEndMs: the last scheduler tick; every owner and read slot at or before it was due.
+  scheduleEndMs: number; skipped: Record<'reads' | OwnerKind, number>;
+  server: { poolTimeouts: number; panics: number; complete: boolean; burstPoolTimeouts?: (number | null)[] } };
 type Check = { pass: boolean; detail: string };
 export type Verdict = 'holds' | 'fails' | 'inconclusive' | 'invalid';
 
@@ -30,27 +35,40 @@ export function phaseAt(run: Pick<BurstRun, 'phaseStartMs'>, ms: number): Phase 
 }
 
 /**
- * Burst k's evidence window (harness clock, half-open): from its admitted send - clockMs to the last
- * answer of that send or of its burst-time owner operation + clockMs. No admitted send, no window.
+ * Burst k's padded window (harness clock, half-open): its span (below) widened by clockMs on both sides,
+ * for sampler coverage and the report. No admitted send, no window.
  */
 export function burstWindows(run: Pick<BurstRun, 'bursts' | 'attack' | 'owner'>) {
   return run.bursts.map(b => {
-    if (b.admittedSend === null || !b.sends[b.admittedSend]) return { burst: b.index, window: null };
-    const ends = [...run.attack.filter(a => a.burst === b.index && a.send === b.admittedSend).map(a => a.endMs),
-      ...run.owner.filter(o => o.burst === b.index).map(o => o.endMs)];
-    const sentMs = b.sends[b.admittedSend].sentMs;
-    return { burst: b.index, window: { startMs: sentMs - EVIDENCE.clockMs, endMs: Math.max(sentMs, ...ends) + EVIDENCE.clockMs } };
+    const span = burstSpan(run, b);
+    return { burst: b.index, window: span && { startMs: span.startMs - EVIDENCE.clockMs, endMs: span.endMs + EVIDENCE.clockMs } };
   });
 }
 const inWindow = (w: { startMs: number; endMs: number } | null, ms: number) => w !== null && ms >= w.startMs && ms < w.endMs;
 export const samplesIn = (run: Pick<BurstRun, 'samples' | 'offsetMs'>, w: { startMs: number; endMs: number } | null) =>
   run.offsetMs === null ? [] : run.samples.filter(s => inWindow(w, s.dbMs + run.offsetMs!));
 
+/** Burst k's own span (harness clock, half-open, unpadded): its admitted send to the last answer of that send or its owner operation. */
+export function burstSpan(run: Pick<BurstRun, 'bursts' | 'attack' | 'owner'>, b: Burst) {
+  if (b.admittedSend === null || !b.sends[b.admittedSend]) return null;
+  const sentMs = b.sends[b.admittedSend].sentMs;
+  const ends = [...run.attack.filter(a => a.burst === b.index && a.send === b.admittedSend).map(a => a.endMs),
+    ...run.owner.filter(o => o.burst === b.index).map(o => o.endMs)];
+  return { startMs: sentMs, endMs: Math.max(sentMs, ...ends) };
+}
+
+/**
+ * A0 overlap evidence: only waits attributed to a sign-in or owner operation that intersect the burst's
+ * own span (no clock padding), clipped to that span, so the simultaneous instant lies inside it. A wait
+ * merely inside the padded window, or with unknown attribution, is never evidence for A0.
+ */
 function waitsByBurst(run: BurstRun) {
-  return burstWindows(run).map(({ burst, window }) => {
-    const waits = run.waits.filter(w => inWindow(window, w.startMs));
-    const peak = peakSimultaneous(waits);
-    return { burst, window, count: waits.length, peakPids: peak.peak, peakAtDbMs: peak.atDbMs, pids: peak.pids,
+  return run.bursts.map(b => {
+    const span = burstSpan(run, b);
+    const waits = span ? run.waits.filter(w => w.who !== 'unknown' && w.startMs < span.endMs && w.endMs > span.startMs) : [];
+    const clipped = waits.map(w => ({ pid: w.pid, startDbMs: Math.max(w.startMs, span!.startMs), endDbMs: Math.min(w.endMs, span!.endMs) }));
+    const peak = peakSimultaneous(clipped);
+    return { burst: b.index, span, count: waits.length, peakPids: peak.peak, peakAtMs: peak.atDbMs, pids: peak.pids,
       maxWaitMs: waits.length ? Math.max(...waits.map(w => w.waitedMs)) : null,
       ownerWaits: waits.filter(w => w.who === 'owner').map(w => w.waitedMs), waitsMs: waits.map(w => w.waitedMs) };
   });
@@ -67,9 +85,59 @@ export function a0(run: BurstRun) {
         && run.bursts.every(b => b.ownerOp === 'sent' && b.ownerOpSend !== null && b.ownerOpSend === b.admittedSend),
       detail: run.bursts.map(b => `burst ${b.index}: ${b.ownerOp} on send ${b.ownerOpSend} (admitted ${b.admittedSend})`).join('; ') },
     lockOverlap: { pass: run.lockLog.complete && run.bursts.length === RECORDED_BURSTS && overlapping >= A0_BURSTS,
-      detail: `${overlapping} of ${run.bursts.length} bursts with >= ${A0_PIDS} pids waiting at once inside the burst window (peaks ${locks.map(l => l.peakPids).join(', ')}); lock log ${run.lockLog.complete ? 'complete' : 'incomplete: ' + run.lockLog.reasons.join(', ')}` },
+      detail: `${overlapping} of ${run.bursts.length} bursts with >= ${A0_PIDS} attributed pids waiting at once inside the burst's own span (peaks ${locks.map(l => l.peakPids).join(', ')}); lock log ${run.lockLog.complete ? 'complete' : 'incomplete: ' + run.lockLog.reasons.join(', ')}` },
   };
   return { pass: Object.values(checks).every(c => c.pass), checks, locks };
+}
+
+const slots = (first: number, every: number, last: number) => {
+  const out: number[] = [];
+  for (let t = first; t <= last; t += every) out.push(t);
+  return out;
+};
+/**
+ * The artifact holds the whole planned workload: all 16 answers of every burst send (matching the
+ * send's own status list, re-sends only after an all-429 send), exactly one burst-time owner operation
+ * per `sent` burst, and every owner and Organization B read slot up to the last scheduler tick either
+ * recorded once with the scheduled kind or counted as skipped. A stripped artifact never holds.
+ */
+export function workloadGaps(run: BurstRun) {
+  const gaps: string[] = [];
+  const sorted = (a: readonly number[]) => [...a].sort((x, y) => x - y).join(',');
+  for (const b of run.bursts) {
+    b.sends.forEach((send, j) => {
+      const answers = run.attack.filter(a => a.burst === b.index && a.send === j).map(a => a.status);
+      if (answers.length !== BURST.size || sorted(answers) !== sorted(send.statuses)) gaps.push(`burst ${b.index} send ${j}: ${answers.length}/${BURST.size} answers recorded`);
+      const last = j === b.sends.length - 1;
+      if (!last && !(send.statuses.length === BURST.size && send.statuses.every(s => s === 429))) gaps.push(`burst ${b.index} send ${j} re-sent without being refused`);
+    });
+    if (b.admittedSend !== null && b.admittedSend !== b.sends.length - 1) gaps.push(`burst ${b.index}: sends after the admitted send`);
+    const ops = run.owner.filter(o => o.burst === b.index).length;
+    if (ops !== (b.ownerOp === 'sent' ? 1 : 0)) gaps.push(`burst ${b.index}: ${ops} burst-time owner operations for state ${b.ownerOp}`);
+  }
+  if (run.attack.some(a => !run.bursts.some(b => b.index === a.burst && a.send >= 0 && a.send < b.sends.length))) gaps.push('attack answers outside any burst send');
+  const family = (due: number[], kinds: [OwnerKind, OwnerKind], label: string) => {
+    const ops = run.owner.filter(o => o.burst === undefined && kinds.includes(o.kind));
+    const expected = new Map(due.map((t, k) => [t, kinds[k % 2]]));
+    const seen = new Set<number>();
+    for (const o of ops) {
+      if (o.dueMs === undefined || expected.get(o.dueMs) !== o.kind || seen.has(o.dueMs)) { gaps.push(`${label}: unscheduled or repeated operation`); return; }
+      seen.add(o.dueMs);
+    }
+    const skipped = run.skipped[kinds[0]] + run.skipped[kinds[1]];
+    if (seen.size + skipped !== due.length) gaps.push(`${label}: ${seen.size} recorded + ${skipped} skipped of ${due.length} slots`);
+  };
+  family(slots(SCHEDULE.signinFirstMs, SCHEDULE.signinEveryMs, run.scheduleEndMs), ['web_signin', 'native_signin'], 'owner sign-ins');
+  family(slots(SCHEDULE.authFirstMs, SCHEDULE.authEveryMs, run.scheduleEndMs), ['password', 'revoke'], 'owner authenticated operations');
+  if (run.owner.some(o => o.burst !== undefined && o.dueMs !== undefined)) gaps.push('burst-time owner operation with a schedule slot');
+  const readSlots = new Set(slots(0, SCHEDULE.readEveryMs, run.scheduleEndMs)), readSeen = new Set<number>();
+  for (const r of run.reads) {
+    if (!readSlots.has(r.dueMs) || readSeen.has(r.dueMs)) { gaps.push('Organization B reads: unscheduled or repeated read'); break; }
+    readSeen.add(r.dueMs);
+  }
+  if (readSeen.size + run.skipped.reads !== readSlots.size) gaps.push(`Organization B reads: ${readSeen.size} recorded + ${run.skipped.reads} skipped of ${readSlots.size} slots`);
+  if (!(run.scheduleEndMs >= run.phaseStartMs.B2) || !(run.endMs >= run.scheduleEndMs)) gaps.push('schedule did not reach B2');
+  return gaps;
 }
 
 /**
@@ -92,14 +160,20 @@ export function evidence(run: BurstRun) {
     return { burst, samples: rows.length, medianMs: local.medianMs, maxGapMs,
       ok: local.medianMs !== null && local.medianMs <= SAMPLER.medianMaxMs && maxGapMs !== null && maxGapMs <= EVIDENCE.burstMaxGapMs };
   });
-  const checks: Record<'ownerOpTiming' | 'samplerIntegrity' | 'samplerCoverage' | 'readsComplete', Check> = {
+  const runTimes = run.offsetMs === null ? [] : [0, ...run.samples.map(s => s.dbMs + run.offsetMs!).filter(t => t >= 0 && t < run.endMs), run.endMs];
+  const runMaxGapMs = runTimes.length > 2 ? Math.max(...runTimes.slice(1).map((t, i) => t - runTimes[i])) : null;
+  const workload = workloadGaps(run);
+  const checks: Record<'ownerOpTiming' | 'samplerIntegrity' | 'samplerCoverage' | 'samplerRunCoverage' | 'readsComplete' | 'workloadComplete', Check> = {
     ownerOpTiming: { pass: timing.length > 0 && timing.every(t => t.offsetMs !== null && t.offsetMs >= BURST.ownerOffsetMs && t.offsetMs <= lateMax),
       detail: `burst-time owner operation after the admitted send: ${timing.map(t => `burst ${t.burst} ${t.offsetMs === null ? 'none' : t.offsetMs.toFixed(1) + ' ms'}`).join(', ')} (planned ${BURST.ownerOffsetMs}, at most ${lateMax} ms)` },
     samplerIntegrity: { pass: integrity.ok,
       detail: `malformed rows ${integrity.malformed}; duplicate database timestamps ${integrity.duplicate}; backward ${integrity.backward}` },
     samplerCoverage: { pass: coverage.length > 0 && coverage.every(c => c.ok),
       detail: coverage.map(c => `burst ${c.burst}: ${c.samples} samples, median ${c.medianMs} ms, max gap ${c.maxGapMs} ms`).join('; ') + ` (median <= ${SAMPLER.medianMaxMs}, gap <= ${EVIDENCE.burstMaxGapMs} ms)` },
+    samplerRunCoverage: { pass: runMaxGapMs !== null && runMaxGapMs <= EVIDENCE.burstMaxGapMs,
+      detail: `largest sampler gap over the whole run (B0-B2) ${runMaxGapMs} ms (<= ${EVIDENCE.burstMaxGapMs} ms)` },
     readsComplete: { pass: run.skipped.reads === 0, detail: `${run.skipped.reads} scheduled Organization B reads skipped` },
+    workloadComplete: { pass: workload.length === 0, detail: workload.length ? workload.join('; ') : 'every scheduled operation and every answer is recorded' },
   };
   return { pass: Object.values(checks).every(c => c.pass), checks, coverage, timing };
 }
