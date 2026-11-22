@@ -1,14 +1,15 @@
 use super::*;
 use crate::messages::topics::projection::{page_sql, reference};
 use sqlx::Connection;
+use tracing::instrument::WithSubscriber;
 
 async fn prepared(reader: &mut sqlx::PgConnection) {
     // to_jsonb compares every output column, including the latest Message,
     // serialized Mentions and history_generation, in SQL response order.
     sqlx::raw_sql(&format!(
         "SET jit=off;
-         PREPARE page_before AS SELECT to_jsonb(p) FROM ({}) p;
-         PREPARE page_after AS SELECT to_jsonb(p) FROM ({}) p;",
+         PREPARE page_before AS SELECT false AS rewritten, to_jsonb(p) AS payload FROM ({}) p;
+         PREPARE page_after AS SELECT true AS rewritten, to_jsonb(p) AS payload FROM ({}) p;",
         reference::page_sql(),
         page_sql()
     ))
@@ -18,27 +19,31 @@ async fn prepared(reader: &mut sqlx::PgConnection) {
 }
 
 async fn compare(tx: &mut sqlx::PgConnection, args: &str, context: &str) {
-    let before: Vec<Value> = sqlx::query_scalar(&format!("EXECUTE page_before{args}"))
-        .persistent(false)
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
-    let mut after: Vec<Value> = sqlx::query_scalar(&format!("EXECUTE page_after{args}"))
-        .persistent(false)
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
-    for row in &mut after {
-        let drift = row.as_object_mut().unwrap().remove("count_drift");
-        assert_eq!(drift, Some(Value::Bool(false)), "{context} {args}");
+    // Send both EXECUTEs in one round trip while keeping their plans independent.
+    let rows = sqlx::raw_sql(&format!(
+        "EXECUTE page_before{args}; EXECUTE page_after{args};"
+    ))
+    .fetch_all(tx)
+    .await
+    .unwrap();
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for row in rows {
+        let mut payload: Value = row.get("payload");
+        if row.get("rewritten") {
+            let drift = payload.as_object_mut().unwrap().remove("count_drift");
+            assert_eq!(drift, Some(Value::Bool(false)), "{context} {args}");
+            after.push(payload);
+        } else {
+            before.push(payload);
+        }
     }
     assert_eq!(before, after, "{context} {args}");
 }
 
 struct Window {
     channel: Uuid,
-    latest: i64,
-    floor: i64,
+    watermarks: Vec<(i64, Option<i64>)>,
     topics: Vec<Uuid>,
 }
 
@@ -48,14 +53,40 @@ impl Window {
             "SELECT seq, mutation_seq FROM channel_message_sequences WHERE organization_id=$1 AND channel_id=$2",
         )
         .bind(org).bind(channel).fetch_optional(&mut *tx).await.unwrap().unwrap_or((0, 0));
+        let mut samples = vec![
+            latest,
+            (latest - 1).max(floor),
+            floor + (latest - floor) / 2,
+            floor,
+        ];
+        samples.dedup();
+        let mut watermarks = Vec::new();
+        for w in samples {
+            let position = sqlx::query_scalar(
+                "SELECT max(seq) FROM messages
+                 WHERE organization_id=$1 AND channel_id=$2 AND topic_id IS NOT NULL
+                     AND NOT deleted AND seq <= $3
+                 GROUP BY topic_id ORDER BY max(seq) DESC OFFSET 1 LIMIT 1",
+            )
+            .bind(org)
+            .bind(channel)
+            .bind(w)
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap();
+            watermarks.push((w, position));
+        }
         let topics = sqlx::query_scalar(
-            "SELECT id FROM topics WHERE organization_id=$1 AND channel_id=$2 ORDER BY first_seq, id",
+            "SELECT id FROM topics WHERE organization_id=$1 AND channel_id=$2 ORDER BY name_key",
         )
-        .bind(org).bind(channel).fetch_all(tx).await.unwrap();
+        .bind(org)
+        .bind(channel)
+        .fetch_all(tx)
+        .await
+        .unwrap();
         Self {
             channel,
-            latest,
-            floor,
+            watermarks,
             topics,
         }
     }
@@ -97,31 +128,39 @@ async fn assert_pages(world: &World, reader: &mut sqlx::PgConnection, step: usiz
             .execute(&mut *tx)
             .await
             .unwrap();
-        let context = format!("step {step} ({action}), {mode}");
+        let context = format!("{action}, {mode}");
         for Window {
             channel,
-            latest,
-            floor,
+            watermarks,
             topics,
         } in &windows
         {
-            for (i, (member, revision)) in viewers.iter().enumerate() {
-                for (j, w) in [*latest, (latest - 1).max(*floor), *floor]
-                    .into_iter()
-                    .enumerate()
-                {
-                    // Rotate boundaries, filters and sizes across steps and viewers.
+            for (j, &(w, position)) in watermarks.iter().enumerate() {
+                for (i, (member, revision)) in viewers.iter().enumerate() {
+                    // Check the latest W for every viewer and rotate older W across viewers.
+                    if j > 0 && j != 1 + (step + i) % (watermarks.len() - 1) {
+                        continue;
+                    }
                     let k = step + i + j;
-                    let before = literal([None, Some(1), Some(w.max(1)), Some(w + 1)][k % 4]);
+                    let edge = [None, Some(1), Some(w.max(1)), Some(w + 1)][k % 4];
                     let limit = [1, 2, 200][k % 3] + 1;
-                    let filter = literal(topics.get(k % topics.len().max(1)));
+                    let args = |before, topics_only, topic: Option<&Uuid>| {
+                        let before = literal(before);
+                        let filter = literal(topic);
+                        format!(
+                            "('{org}','{member}',{revision},'{channel}',{w},{before},{limit},{topics_only},{filter})"
+                        )
+                    };
                     for topics_only in [false, true] {
-                        for filter in ["NULL", filter.as_str()] {
-                            let args = format!(
-                                "('{org}','{member}',{revision},'{channel}',{w},{before},{limit},{topics_only},{filter})"
-                            );
-                            compare(&mut tx, &args, &context).await;
-                        }
+                        let before = if topics_only == step.is_multiple_of(2) {
+                            position.or(edge)
+                        } else {
+                            edge
+                        };
+                        compare(&mut tx, &args(before, topics_only, None), &context).await;
+                    }
+                    if let Some(topic) = topics.get(k % topics.len().max(1)) {
+                        compare(&mut tx, &args(edge, true, Some(topic)), &context).await;
                     }
                 }
             }
@@ -132,7 +171,13 @@ async fn assert_pages(world: &World, reader: &mut sqlx::PgConnection, step: usiz
 
 #[fukulow_test::test]
 async fn topic_pages_equal_the_prefix_query_after_every_random_step(pool: PgPool) {
-    let world = World::new(&pool).await;
+    for seed in SEEDS {
+        assert_seed(&pool, seed).await;
+    }
+}
+
+async fn assert_seed(pool: &PgPool, seed: u64) {
+    let world = World::new(pool).await;
     let mut reader = world.reader.acquire().await.unwrap();
     prepared(&mut reader).await;
     let [public, _] = world.channels;
@@ -140,26 +185,30 @@ async fn topic_pages_equal_the_prefix_query_after_every_random_step(pool: PgPool
     let (viewer, viewer_token) = &world.members[1];
     let no_position = world.members[2].0;
     let guest = world.members[3].0;
-    let mut rng = Rng(0x0007_58a3);
+    let mut rng = Rng(seed);
     let mut keys = Vec::new();
 
     assert_pages(&world, &mut reader, 0, "empty Channels").await;
-    role(&pool, world.org, guest, "guest").await;
+    role(pool, world.org, guest, "guest").await;
     sqlx::query("DELETE FROM channel_read_positions WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
-        .bind(world.org).bind(public).bind(no_position).execute(&pool).await.unwrap();
-    let seed = [
+        .bind(world.org).bind(public).bind(no_position).execute(pool).await.unwrap();
+    let initial = [
         (owner_token, None, *viewer),
         (owner_token, Some("T1"), *viewer),
         (viewer_token, Some("T2"), *owner),
         (owner_token, Some("T1"), *viewer),
         (viewer_token, Some("T1"), *viewer),
         (owner_token, Some("T3"), no_position),
+        // At W=7, the boundary from T3 leaves both positioned T1 and unchanged T2.
+        (owner_token, Some("T4"), *viewer),
+        (owner_token, Some("T1"), *viewer),
     ];
-    for (i, (token, topic, target)) in seed.into_iter().enumerate() {
+    for (i, (token, topic, target)) in initial.into_iter().enumerate() {
         let value = json!({
             "client_message_id":Uuid::new_v4(), "topic_name":topic, "body":format!("@{{member:{target}}}")
         });
         let message = sent(&world.app, token, public, value.clone()).await;
+        assert_topic_summaries(pool, world.org, public, "seeded append").await;
         let who = usize::from(token == viewer_token);
         keys.push((
             who,
@@ -169,9 +218,10 @@ async fn topic_pages_equal_the_prefix_query_after_every_random_step(pool: PgPool
         ));
         assert_pages(&world, &mut reader, i + 1, "seeded append").await;
     }
-    for n in 0..100 {
-        let action = step(&world, &pool, &mut rng, &mut keys).await;
-        assert_pages(&world, &mut reader, n + 7, &action).await;
+    for n in 0..STEPS {
+        let action = step(&world, pool, &mut rng, &mut keys).await;
+        let context = format!("seed {seed:x} step {n}: {action}");
+        assert_pages(&world, &mut reader, n + initial.len() + 1, &context).await;
     }
     let plans: Vec<(i64, i64)> = sqlx::query_as(
         "SELECT custom_plans,generic_plans FROM pg_prepared_statements WHERE name IN ('page_before','page_after')",
@@ -183,4 +233,45 @@ async fn topic_pages_equal_the_prefix_query_after_every_random_step(pool: PgPool
             .iter()
             .all(|&(custom, generic)| custom > 0 && generic > 0)
     );
+    drop(reader);
+    world.reader.close().await;
+}
+
+#[fukulow_test::test]
+async fn topic_page_clamps_negative_unread_and_logs_drift(pool: PgPool) {
+    let (app, org, _, channel, owner) = fixture(&pool).await;
+    let viewer = member(&pool, org, Uuid::new_v4()).await;
+    let message = post(&app, &owner, channel, Some("Drift")).await;
+    let topic = Uuid::parse_str(message["topic_id"].as_str().unwrap()).unwrap();
+    post(&app, &owner, channel, Some("Drift")).await;
+
+    let suffix = "topics?as_of_seq=1";
+    let before = get_projection(&app, &viewer, channel, suffix).await;
+    assert_eq!(before["topics"][0]["unread_count"], 1);
+    // Zeroing the total leaves a raw count of -1 after the post-W append is subtracted.
+    let updated = sqlx::query(
+        "UPDATE message_append_counts SET appended=0
+         WHERE organization_id=$1 AND channel_id=$2 AND scope_id=$3 AND member_id=$4",
+    )
+    .bind(org)
+    .bind(channel)
+    .bind(topic)
+    .bind(Uuid::nil())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+
+    let capture = crate::observability::tests::Capture::default();
+    let page = get_projection(&app, &viewer, channel, suffix)
+        .with_subscriber(capture.subscriber())
+        .await;
+    assert_eq!(page["topics"][0]["unread_count"], 0);
+    let drift: Vec<_> = capture
+        .events()
+        .into_iter()
+        .filter(|event| event["fields"]["event"] == "unread_count_drift")
+        .collect();
+    assert_eq!(drift.len(), 1, "{drift:?}");
+    assert_eq!(drift[0]["level"], "ERROR");
 }
