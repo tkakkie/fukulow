@@ -60,17 +60,19 @@ export function collect(log: string, expected: Conditions, startMs: number | und
   const resources = (first: number, last: number, accepted: number, acceptedInWindow: number | undefined) => {
     const before = snapshots[first];
     const after = snapshots[last];
-    if ('missing' in before) return { resourcesMissing: before.missing };
-    if ('missing' in after) return { resourcesMissing: after.missing };
-    if (startMs === undefined) return { resourcesMissing: 'host scenario start marker missing' };
-    if (acceptedInWindow === undefined) return { resourcesMissing: 'in-window acceptance count missing or invalid' };
-    const window = samples.filter(sample =>
-      sample.at >= startMs + first * cycle * 1000 && sample.at <= after.completedMs);
-    if (!window.length) return { resourcesMissing: 'CPU samples missing' };
-    return { resources: { acceptedPerSecond: acceptedInWindow / ((last - first) * expected.seconds),
-      walBytesPerSend: accepted ? (after.walBytes - before.walBytes) / accepted : null,
-      appCpuPeakPercent: Math.max(...window.map(sample => sample.appCpu)),
-      dbCpuPeakPercent: Math.max(...window.map(sample => sample.dbCpu)), dbSizeGrowthBytes: after.dbBytes - before.dbBytes } };
+    const withSnapshots = !('missing' in before) && !('missing' in after);
+    const endOffset = ((last - 1) * cycle + expected.seconds + expected.requestTimeoutSeconds) * 1000;
+    const window = startMs === undefined ? [] : samples.filter(sample => sample.at >= startMs + first * cycle * 1000 &&
+      sample.at <= ('missing' in after ? startMs + endOffset : after.completedMs));
+    const resourcesMissing = 'missing' in before ? before.missing : 'missing' in after ? after.missing :
+      acceptedInWindow === undefined ? 'in-window acceptance count missing or invalid' : !window.length ? 'CPU samples missing' : undefined;
+    return { resourcesMissing, resources: {
+      acceptedPerSecond: acceptedInWindow === undefined ? null : acceptedInWindow / ((last - first) * expected.seconds),
+      walBytesPerSend: withSnapshots && accepted ? (after.walBytes - before.walBytes) / accepted : null,
+      appCpuPeakPercent: window.length ? Math.max(...window.map(sample => sample.appCpu)) : null,
+      dbCpuPeakPercent: window.length ? Math.max(...window.map(sample => sample.dbCpu)) : null,
+      dbSizeGrowthBytes: withSnapshots ? after.dbBytes - before.dbBytes : null,
+    } };
   };
   const inWindowCounts = data.steps.map(step => {
     const value = metrics[`throughput_accepted_in_window{scenario:${step.name}}`]?.values?.count;

@@ -5,12 +5,16 @@ import type { Arm } from './search-m1-report.ts';
 import { frozenPool, termsPerBody } from './search-s1-bodies.ts';
 
 export const overlayPath = 'load/search-s1-overlay.sql';
+export const s1ArmDirectory = (scenario: string, pair: number, arm: Arm) => `${scenario}-${pair}-${arm.toLowerCase()}`;
+// PostgreSQL 18.6 deparse of 202611210725_message_search.sql with a fixed search_path.
+export const originalTermsSha256 = 'd119c99973f6b3ac0420e3ac72e68dea85e3e64b9635fccda0890f2cb9646428';
 export function overlaySource() {
   const text = readFileSync(repoPath(overlayPath), 'utf8');
   return { text, sha256: sha256(text) };
 }
 
-const readTermsFunction = `SELECT json_build_object(
+const readTermsFunction = `SET search_path = pg_catalog;
+  SELECT json_build_object(
   'definition', pg_get_functiondef(oid), 'owner', pg_get_userbyid(proowner),
   'result', pg_get_function_result(oid), 'volatility', provolatile, 'strict', proisstrict, 'parallel', proparallel)
   FROM pg_proc WHERE oid = 'public.fukulow_search_terms(text)'::regprocedure`;
@@ -27,7 +31,7 @@ export async function termsFunctionHash(sql: (query: string) => Promise<string>)
   assert.equal(fn.volatility, 'i');
   assert.equal(fn.strict, true);
   assert.equal(fn.parallel, 's');
-  return { definition: fn.definition, hash: sha256(fn.definition) };
+  return sha256(fn.definition);
 }
 
 const normalizePoolSql = (bodies: string[]) => `CREATE TEMP TABLE s1_bodies (body text);
@@ -39,25 +43,21 @@ SELECT count(*) FROM s1_bodies WHERE char_length(body) = 4000
 `;
 
 export type S1Functions = {
-  overlay: ReturnType<typeof overlaySource>; originalTermsSha256?: string; overlaidTermsSha256?: string;
+  overlay: ReturnType<typeof overlaySource>; overlaidTermsSha256?: string;
 };
 
 export async function preflightS1(arm: Arm, functions: S1Functions, pool: ReturnType<typeof frozenPool>,
   sql: (query: string) => Promise<string>, sqlInput: (input: string) => Promise<string>) {
-  // Every arm starts from the archived commit's migrations. Keep the fingerprint
-  // of that definition before installing any overlay and compare across arms.
   const original = await termsFunctionHash(sql);
-  assert.match(original.definition, /fukulow_search_normalize\(/);
-  functions.originalTermsSha256 ??= original.hash;
-  assert.equal(original.hash, functions.originalTermsSha256, 'Migrated search terms function changed between arms');
+  assert.equal(original, originalTermsSha256, 'Search terms function differs from the pinned migration');
   if (arm === 'B') {
     assert.deepEqual(overlaySource(), functions.overlay, 'S1 overlay changed');
     await sql(functions.overlay.text);
     const overlaid = await termsFunctionHash(sql);
-    assert.notEqual(overlaid.hash, original.hash, 'S1 overlay did not replace the function');
+    assert.notEqual(overlaid, original, 'S1 overlay did not replace the function');
     assert.equal(await sql("SELECT count(*) FROM public.fukulow_search_terms('日本語')"), '0', 'S1 overlay returns terms');
-    functions.overlaidTermsSha256 ??= overlaid.hash;
-    assert.equal(overlaid.hash, functions.overlaidTermsSha256, 'Overlaid search terms function changed between arms');
+    functions.overlaidTermsSha256 ??= overlaid;
+    assert.equal(overlaid, functions.overlaidTermsSha256, 'Overlaid search terms function changed between arms');
   }
   const normalized = Number(await sqlInput(normalizePoolSql(pool.pool)));
   assert.equal(normalized, pool.count, 'S1 body pool changed under database normalization');
@@ -116,7 +116,9 @@ export function termCheck(ids: string[], raw: string, arm: Arm): TermCheck {
 
 export function validTermCheck(check: TermCheck | undefined, accepted: number, arm: Arm) {
   const expected = arm === 'A' ? termsPerBody : 0;
+  const rows = check?.rowsPerMessage;
   return check?.checked === accepted && check.expectedPerMessage === expected &&
-    Object.keys(check.rowsPerMessage).length === Number(accepted > 0) &&
-    (accepted === 0 || check.rowsPerMessage[String(expected)] === accepted);
+    rows !== null && typeof rows === 'object' && !Array.isArray(rows) &&
+    Object.keys(rows).length === Number(accepted > 0) &&
+    (accepted === 0 || rows[String(expected)] === accepted);
 }

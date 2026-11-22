@@ -26,8 +26,8 @@ export type Counts = {
 };
 export type Latency = { p50: number | null; p95: number | null; p99: number | null };
 export type Resources = {
-  acceptedPerSecond: number; walBytesPerSend: number | null; appCpuPeakPercent: number;
-  dbCpuPeakPercent: number; dbSizeGrowthBytes: number;
+  acceptedPerSecond: number | null; walBytesPerSend: number | null; appCpuPeakPercent: number | null;
+  dbCpuPeakPercent: number | null; dbSizeGrowthBytes: number | null;
 };
 type Evidence = Counts & { sendMs: Latency; sendSamples: number; resources?: Resources; resourcesMissing?: string };
 export type Step = Evidence & { rate: number; seconds: number };

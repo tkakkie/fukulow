@@ -18,7 +18,8 @@ import {
 } from './search-m1-report.ts';
 import { frozenPool } from './search-s1-bodies.ts';
 import {
-  acceptedMessages, overlayPath, overlaySource, preflightS1, termCheck, termCountsSql, termsFunctionHash,
+  acceptedMessages, originalTermsSha256, overlayPath, overlaySource, preflightS1, s1ArmDirectory, termCheck, termCountsSql,
+  termsFunctionHash,
 } from './search-s1-evidence.ts';
 import {
   expectedS1DbSettings, productCommit, s1DbSettings, s1Node, s1Orders, s1Scenarios, s1Workload, writeS1Report,
@@ -60,7 +61,7 @@ const call = async (file: string, args: string[], env = hostEnv, timeout = 120_0
 const docker = (...args: string[]) => call('docker', args);
 const imageId = (ref: string) => docker('image', 'inspect', '--format', '{{.Id}}', ref);
 const save = (path: string, value: unknown) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n');
-type ArmRun = Run<StackIdentity['overlay'] | S1Overlay> & Pick<S1Run, 'termCheck' | 'normalizedBodies'>;
+type ArmRun = Run<StackIdentity['overlay'] | S1Overlay> & Pick<S1Run, 'termCheck' | 'normalizedBodies' | 'termEvidence'>;
 const batch: Batch<ArmRun> = { runs: [], imageCleanupVerified: false, errors: [] };
 let metadata: Metadata | undefined;
 let s1Metadata: S1Metadata | undefined;
@@ -82,7 +83,7 @@ const pgroongaIndexDefinition = "CREATE INDEX search_body ON public.messages USI
 async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Metadata['expected'] | S1Metadata['expected'],
   harnessHashes: Record<string, string>, dbHashes: Record<string, string> = {}) {
   check();
-  const id = `${scenario}-${pair}-${arm.toLowerCase()}`;
+  const id = s1ArmDirectory(scenario, pair, arm);
   const project = `${root}-${id}`;
   const dir = `${output}/${id}`;
   mkdirSync(dir);
@@ -178,10 +179,10 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
       const base = { commit, appImage, dbImage, migrateImage,
         limiter: { LOAD_SEND_BURST: burst, LOAD_SEND_REFILL_PER_SECOND: refill } };
       if (s1Metadata) {
-        const [fn, settings, searchEngine] = await Promise.all([termsFunctionHash(sql), sql(readDbSettings),
+        const [definitionSha256, settings, searchEngine] = await Promise.all([termsFunctionHash(sql), sql(readDbSettings),
           inspect(app, '{{range .Config.Env}}{{if eq (index (split . "=") 0) "FUKULOW_SEARCH_ENGINE"}}{{index (split . "=") 1}}{{end}}{{end}}')]);
         return { ...base, dbSettings: JSON.parse(settings), overlay: { arm, searchEngine,
-          originalSha256: s1Metadata.originalTermsSha256!, definitionSha256: fn.hash,
+          originalSha256: originalTermsSha256, definitionSha256,
           overlaySha256: s1Metadata.overlay.sha256 } };
       }
       const settings = await sql(`DO $$ BEGIN PERFORM pgroonga_command('status'); END $$;
@@ -201,8 +202,8 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
     const stack = await inspectStack();
     const { k6Image, bodySha256, bodySeed, ...expectedStack } = expected;
     const expectedOverlay = s1Metadata ? { arm, searchEngine: 'disabled', overlaySha256: s1Metadata.overlay.sha256,
-      originalSha256: s1Metadata.originalTermsSha256,
-      definitionSha256: arm === 'A' ? s1Metadata.originalTermsSha256 : s1Metadata.overlaidTermsSha256 }
+      originalSha256: originalTermsSha256,
+      definitionSha256: arm === 'A' ? originalTermsSha256 : s1Metadata.overlaidTermsSha256 }
       : { storedBody: true, pgroongaIndex: arm === 'A' };
     assert.deepEqual(stack, { ...expectedStack, overlay: expectedOverlay });
     assert.equal(fileSha256(bodyPath), bodySha256);
@@ -269,12 +270,16 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
       run.totals = result.totals;
       run.identity = { ...stack, workload: result.workload, k6Image, bodySeed, bodySha256: result.bodySha256 };
       if (mode) {
-        const accepted = acceptedMessages(readFileSync(`${dir}/k6.log`, 'utf8'), result.totals.accepted);
+        const log = readFileSync(`${dir}/k6.log`);
+        const accepted = acceptedMessages(log.toString('utf8'), result.totals.accepted);
         const raw = await sqlInput(termCountsSql(accepted));
-        writeFileSync(`${dir}/term-counts.tsv`, raw ? raw + '\n' : '');
+        const counts = raw ? raw + '\n' : '';
+        writeFileSync(`${dir}/term-counts.tsv`, counts);
         run.termCheck = termCheck(accepted.ids, raw, arm);
+        run.termEvidence = { acceptedLogSha256: sha256(log), termCountsSha256: sha256(counts) };
       }
       run.finalStack = await inspectStack();
+      if (s1Metadata) assert.deepEqual(run.finalStack.overlay, expectedOverlay, 'S1 overlay changed during the run');
       assert.equal(fileSha256(bodyPath), bodySha256, 'Body file changed during the run');
     } finally {
       clearTimeout(timeout);
@@ -372,7 +377,7 @@ try {
   if (mode) {
     const k6Version = await docker('run', '--rm', k6Image, 'version');
     s1Metadata = { mode, node: process.version, k6Version, bodySize: bodies.count, overlay: overlaySource(),
-      expected: { ...images, dbSettings: expectedS1DbSettings } };
+      originalTermsSha256, expected: { ...images, dbSettings: expectedS1DbSettings } };
     const saveS1Metadata = () => save(`${output}/metadata.json`, { ...references, dbRef, ...s1Metadata });
     saveS1Metadata();
     try {

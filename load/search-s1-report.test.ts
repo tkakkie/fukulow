@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { sha256 } from './search-m1-bodies.ts';
 import { countKeys, limiter, type Batch, type Step } from './search-m1-report.ts';
-import { bodyCount, bodySeed, poolSha256, termsPerBody } from './search-s1-bodies.ts';
-import { overlaySource } from './search-s1-evidence.ts';
+import { bodyCount, bodySeed, frozenPool, poolSha256, termsPerBody } from './search-s1-bodies.ts';
+import { originalTermsSha256, overlaySource, s1ArmDirectory } from './search-s1-evidence.ts';
 import {
-  expectedS1DbSettings, productCommit, s1Node, s1Orders, s1Report, s1Scenarios, s1Workload,
+  expectedS1DbSettings, productCommit, s1Node, s1Orders, s1Report, s1Scenarios, s1Workload, writeS1Report,
   type S1Metadata, type S1Mode, type S1Run,
 } from './search-s1-report.ts';
 
@@ -21,7 +22,7 @@ const metadata = (mode: S1Mode): S1Metadata => ({
     dbImage: 'sha256:' + 'b'.repeat(64), k6Image: 'sha256:' + 'c'.repeat(64),
     limiter, dbSettings: expectedS1DbSettings, bodySha256: poolSha256, bodySeed,
   },
-  originalTermsSha256: 'd'.repeat(64), overlaidTermsSha256: 'e'.repeat(64),
+  originalTermsSha256, overlaidTermsSha256: 'e'.repeat(64),
 });
 
 type Cell = Pick<S1Run, 'arm' | 'scenario' | 'pair'> & { rate: number };
@@ -164,9 +165,23 @@ test('A generator-only shortfall is not evaluated and the offer boundary is 99%'
       }
     });
     assert.equal(result.judgement, expected);
+    assert.equal(result.scenarios[0].reason, expected === 'NOT EVALUATED' ?
+      'A had a generator-side shortfall at a comparison step' : undefined);
     assert.deepEqual(result.scenarios[0].comparisonRates, [50, 100, 250]);
     assert.equal(result.scenarios[1].judgement, 'PASS');
   }
+});
+
+test('a failed comparison takes precedence over a generator shortfall at another rate', () => {
+  const result = judge((cell, step) => {
+    if (cell.arm !== 'A' || cell.scenario !== 'many') return;
+    if (cell.rate === 50) step.droppedIterations++;
+    if (cell.rate === 100) step.sendMs.p95 = 30;
+  });
+  assert.deepEqual(result.scenarios[0].comparisons.map(step => step.judgement), ['NOT EVALUATED', 'FAIL', 'PASS']);
+  assert.equal(result.scenarios[0].reason, undefined);
+  assert.equal(result.scenarios[0].judgement, 'FAIL');
+  assert.equal(result.judgement, 'FAIL');
 });
 
 test('an unavailable recorded-only resource sample leaves the judgement unchanged', () => {
@@ -198,4 +213,60 @@ test('incomplete, mismatched, unclean or failed term evidence is invalid', () =>
   }
   const { meta, batch } = fixture('formal');
   assert.equal(s1Report(meta, batch, 'bad').judgement, 'NOT EVALUATED');
+});
+
+test('a matching but unpinned definition in metadata and every stack is invalid', () => {
+  const { meta, batch } = fixture('formal');
+  meta.originalTermsSha256 = 'a'.repeat(64);
+  for (const run of batch.runs) {
+    for (const stack of [run.identity!, run.finalStack!]) {
+      stack.overlay.originalSha256 = meta.originalTermsSha256;
+      if (run.arm === 'A') stack.overlay.definitionSha256 = meta.originalTermsSha256;
+    }
+  }
+  const result = s1Report(meta, batch, poolSha256);
+  assert.equal(result.judgement, 'NOT EVALUATED');
+  assert.equal(result.evidence, false);
+});
+
+test('report regeneration requires matching accepted IDs and term counts for each arm', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'search-s1-report-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { meta, batch } = fixture('smoke');
+  writeFileSync(join(dir, 'metadata.json'), JSON.stringify(meta));
+  writeFileSync(join(dir, 'bodies.json'), frozenPool().json);
+  const evidence = batch.runs.map(run => {
+    const armDir = join(dir, s1ArmDirectory(run.scenario, run.pair, run.arm));
+    mkdirSync(armDir);
+    const log = join(armDir, 'k6.log');
+    const counts = join(armDir, 'term-counts.tsv');
+    const ids = Array.from({ length: run.totals!.accepted }, (_, i) =>
+      `11111111-1111-4111-8111-${String(i).padStart(12, '0')}`);
+    const accepted = 'LOAD_S1_ORGANIZATION 22222222-2222-4222-8222-222222222222\n' +
+      ids.map(id => `LOAD_S1_ACCEPTED ${id}\n`).join('');
+    const rows = ids.map(id => `${id}\t${id}\t${run.termCheck!.expectedPerMessage}\n`).join('');
+    writeFileSync(log, accepted);
+    writeFileSync(counts, rows);
+    run.termEvidence = { acceptedLogSha256: sha256(accepted), termCountsSha256: sha256(rows) };
+    return { log, counts, accepted, rows };
+  });
+  const regenerate = () => {
+    writeFileSync(join(dir, 'runs.json'), JSON.stringify(batch));
+    return writeS1Report(dir).scenarios[0];
+  };
+  assert.deepEqual(regenerate().runs.map(run => run.problems), [[], []]);
+  for (const [i, { log, counts, accepted, rows }] of evidence.entries()) {
+    for (const [file, text] of [[log, accepted], [counts, rows]]) {
+      rmSync(file);
+      assert.match(regenerate().runs[i].problems[0], /Invalid per-Message evidence/);
+      writeFileSync(file, text.replace('11111111', '33333333'));
+      assert.match(regenerate().runs[i].problems[0], /differ from runs.json/);
+      writeFileSync(file, text);
+    }
+  }
+  const { counts, rows } = evidence[0];
+  const changedRows = rows.replace('11111111', '33333333');
+  writeFileSync(counts, changedRows);
+  batch.runs[0].termEvidence!.termCountsSha256 = sha256(changedRows);
+  assert.match(regenerate().runs[0].problems[0], /Unexpected or duplicate Message term count/);
 });
