@@ -118,6 +118,9 @@ function bench(db: string, label: string) {
   const output = run('docker', [...pgbenchArgs(measuredSeconds), '-l', `--log-prefix=${prefix}`, db]);
   const after = walStats(db);
   const log = run('docker', ['exec', container, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]);
+  // Read the checkpoint counter again after the log copy, so a checkpoint that started right before
+  // `after` but was not yet published there still fails the block.
+  const late = walStats(db);
   const latencies = logLatenciesMs(log);
   writeFileSync(join(out, `latency/${label}.txt`), latencies.join('\n') + '\n');
   const result = pgbench(output);
@@ -125,7 +128,7 @@ function bench(db: string, label: string) {
   const walBytes = Number(psql(db, `SELECT pg_wal_lsn_diff('${after.lsn}', '${before.lsn}');`).trim());
   const records = after.records - before.records;
   const fpi = after.fpi - before.fpi;
-  const checkpoints = { warm: before.checkpoints - start.checkpoints, measured: after.checkpoints - before.checkpoints };
+  const checkpoints = { warm: before.checkpoints - start.checkpoints, measured: late.checkpoints - before.checkpoints };
   if (checkpoints.warm !== 0 || checkpoints.measured !== 0) throw new Error(`${label}: checkpoint inside a send block ${JSON.stringify(checkpoints)}`);
   return { ...result, p95Ms: quantile(latencies, 0.95), p99Ms: quantile(latencies, 0.99), walBytes,
     walBytesPerSend: walBytes / result.transactions, statWalBytes: Number(after.bytes) - Number(before.bytes),
@@ -198,6 +201,7 @@ try {
     ...sends.map(s => `| ${s.pair} | ${s.arm} | ${s.tps.toFixed(0)} | ${s.p95Ms.toFixed(3)} | ${s.p99Ms.toFixed(3)} | ${s.walBytesPerSend.toFixed(0)} | ${s.imagesPerWalRecord.toFixed(4)} |`),
     '', '| pair | WAL/send ratio | tps ratio | breach |', '|---:|---:|---:|---|',
     ...verdict.ratios.map(r => `| ${r.pair} | ${r.walPerSend.toFixed(3)} | ${r.tps.toFixed(3)} | ${[r.walPerSend > 1.2 ? 'WAL' : '', r.tps < 0.9 ? 'tps' : ''].filter(Boolean).join(', ') || '-'} |`),
+    '', `HOST-BUSY marker: ${marker ?? '(none)'}`,
     '', `Stop rule (${verdict.limits}): median WAL/send ratio ${verdict.medianWalPerSend.toFixed(3)}, median tps ratio ${verdict.medianTps.toFixed(3)} -> ${verdict.stop ? 'STOP' : 'no stop'}`];
   writeFileSync(join(out, 'summary.md'), `# #519 §10 step 1 final-design probe (${metadata.status})\n\n${lines.join('\n')}\n`);
   console.log(lines.join('\n'));
