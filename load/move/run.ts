@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { k6CeilingWarnings, readTimingProblems } from './diagnostic-evidence.ts';
 import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnostic.ts';
-import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, readSampleEnvironment, rejectDiagnosticImage,
+import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, readSampleEnvironment, rejectDiagnosticImage, remainingArmsSkipped,
   type ReadLanes } from './diagnostic-mode.ts';
 import { buildFixture, committedMoves, head, type Seeded } from './fixture.ts';
 import { infrastructureFailure, type Attempt, type Measurement, type Result } from './judge.ts';
@@ -252,6 +252,10 @@ async function main() {
         abort.signal.throwIfAborted();
         cleanup(project);
       }
+      if (remainingArmsSkipped(Boolean(selection), row.attempts[0]?.problem)) {
+        console.log(`DIAGNOSTIC stopped after ${stepId(step)}: ${row.attempts[0]?.problem}`);
+        break;
+      }
     }
     complete = true;
   } finally {
@@ -267,7 +271,8 @@ async function main() {
     if (selection) {
       const captured = finished && cleanupIssues.length === 0 && results.every(result => !result.attempts[0]?.problem);
       save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, readLanes: selection.readLanes, attribution,
-        complete: captured, cleanupIssues, arms: diagnosticArms });
+        complete: captured, cleanupIssues, arms: diagnosticArms,
+        skipped: orderedSteps.slice(results.length).map(stepId) });
       console.log(`DIAGNOSTIC capture ${captured ? 'complete' : 'incomplete'}` + (attribution ? ` · ${attribution}` : ''));
       if (!captured) process.exitCode = 1;
     } else {
