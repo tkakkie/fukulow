@@ -561,6 +561,9 @@ for (const outcome of ['success','stop-rule','interrupted']) test('seed diagnost
     assert.equal(record.status,'NOT EVALUATED');
   }
   assert.deepEqual(summary.attempts,[]);
+  assert.equal(summary.sampleCoverage.complete,true);
+  assert.ok(summary.sampleCoverage.attempted>=1);
+  assert.deepEqual(summary.collectionFailures,[]);
   if(outcome!=='success') {
     const failure=JSON.parse(readFileSync(config.output+'/failure.json','utf8'));
     assert.deepEqual(status.seedStop,failure.seedStop);

@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { test, type TestContext } from 'node:test';
 import { checked, execute, type Executor } from './dms-formal-exec.ts';
-import { restoreVolumes, runWorkerStep } from './dms-formal-host.ts';
+import { buildsBaseline, restoreVolumes, runWorkerStep } from './dms-formal-host.ts';
 import { GiB } from './dms-formal-storage.ts';
 
 function fixture(t:TestContext) {
@@ -157,4 +157,11 @@ test('restore command stderr is captured without writing its contents to the wor
   },write),/failed \(exit 1\)/);
   assert.equal(records()[0].message,'No space left on device');
   assert.equal(records()[0].exitCode,1);
+});
+
+test('only formal pool-overhead runs build the baseline image; the seed diagnostic skips it', () => {
+  assert.equal(buildsBaseline({ overhead: true }), true);
+  assert.equal(buildsBaseline({ overhead: true, pilot: true }), false);
+  assert.equal(buildsBaseline({ overhead: true, seedDiagnostic: true }), false);
+  assert.equal(buildsBaseline({ overhead: false }), false);
 });

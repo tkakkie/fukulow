@@ -82,14 +82,43 @@ test('sampler never overlaps a slow sample and fails when samples are incomplete
   };
   const stop = startSeedSampler(slow as never, 'stub-db', join(dir, 'ok.jsonl'), 5);
   await new Promise(resolve => setTimeout(resolve, 150));
-  await stop();
+  const coverage = await stop();
+  assert.equal(coverage.complete, true);
+  assert.equal(coverage.attempted, calls / 2);
+  assert.deepEqual([coverage.postgresMissing, coverage.dockerMissing, coverage.writeFailures, coverage.missingAtMs], [0, 0, 0, []]);
   assert.equal(maxActive, 2, 'only the two commands of one sample run at once');
   const rows = readFileSync(join(dir, 'ok.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   assert.ok(rows.length >= 2 && rows.length === calls / 2);
   for (let i = 1; i < rows.length; i++) assert.ok(rows[i].startedAtMs >= rows[i - 1].startedAtMs);
   const failing = startSeedSampler((async () => ({ code: 1, stdout: '' })) as never, 'stub-db', join(dir, 'bad.jsonl'), 5);
   await new Promise(resolve => setTimeout(resolve, 20));
-  await assert.rejects(failing, /Database samples are incomplete/);
+  const bad = await failing();
+  assert.equal(bad.complete, false);
+  assert.ok(bad.attempted >= 1 && bad.postgresMissing === bad.attempted && bad.dockerMissing === bad.attempted);
+  assert.equal(bad.missingAtMs.length, bad.attempted, 'one entry per sample, not per missing part');
+});
+
+test('a sample that fails after the first success makes the collection incomplete and is recorded', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'seed-sampler-'));
+  let ticks = 0;
+  const flaky = async (command: { args: string[] }) => {
+    if (command.args[0] === 'exec') {
+      ticks++;
+      return ticks === 3 ? { code: 1, stdout: '' } : { code: 0, stdout: JSON.stringify({ checkpointer: {}, bgwriter: {}, wal: {}, io: [], waitEvents: [], vacuum: [] }) };
+    }
+    return { code: 0, stdout: '1.00%|1MiB / 2MiB|1kB / 2kB' };
+  };
+  const stop = startSeedSampler(flaky as never, 'stub-db', join(dir, 'flaky.jsonl'), 5);
+  while (ticks < 5) await new Promise(resolve => setTimeout(resolve, 5));
+  const coverage = await stop();
+  const rows = readFileSync(join(dir, 'flaky.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(coverage.complete, false);
+  assert.equal(coverage.postgresMissing, 1);
+  assert.equal(coverage.dockerMissing, 0);
+  assert.equal(coverage.writeFailures, 0);
+  assert.deepEqual(coverage.missingAtMs, [rows[2].startedAtMs]);
+  assert.equal(rows[2].postgres, null, 'the gap stays visible in db-samples.jsonl');
+  assert.equal(coverage.attempted, rows.length);
 });
 
 test('autovacuum statistics lines are kept only after an autovacuum header and in strict numeric form', () => {

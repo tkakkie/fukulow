@@ -36,6 +36,8 @@ const docker = (args: string[], input?: string, timeout = 120000) => {
 };
 const command = (program: string, args: string[], timeout = 120000) => checked(execute, { program,args,timeout,captureStderr:true });
 const save = (path: string, value: unknown) => writeFileSync(path, typeof value === 'string' ? value : JSON.stringify(value,null,2), { mode: 0o600 });
+// The seed diagnostic stops after the seed, so it never starts the baseline arm.
+export const buildsBaseline = (s: Pick<HostState,'overhead'|'pilot'|'seedDiagnostic'>) => !!s.overhead && !s.pilot && !s.seedDiagnostic;
 function state(): HostState { return JSON.parse(readFileSync(statePath,'utf8')); }
 const image = (s: HostState) => `${s.id}:release`;
 const compose = (s: HostState) => ['compose','--env-file',`${root}/compose.env`,'-p',s.id,'-f',`${root}/source/load/compose.yml`,'-f',`${root}/db.json`];
@@ -338,7 +340,7 @@ async function main() {
         await docker(['tag',s.pilotImage,image(s)]);
       } else await docker(['build',...(s.target==='local'?['--network=none','--pull=false','--force-rm']:[]),'--label',`dm-formal=${s.id}`,'--label',`org.opencontainers.image.revision=${s.sha}`,'-t',image(s),`${root}/source`],undefined,7200000); save(`${root}/image.json`,await docker(['image','inspect',image(s)]));
       if(s.overhead)await recordBuildToolchains();
-      if(s.overhead && !s.pilot) {
+      if(buildsBaseline(s)) {
         const patch=root+'/harness/load/pool-overhead-baseline.patch';
         if(createHash('sha256').update(readFileSync(patch)).digest('hex')!==s.patchSha256)throw new Error('Reviewed patch digest mismatch');
         const originals=await Promise.all(baselinePaths.map(p=>command('git',['-C',root+'/source','show','HEAD:'+p])));

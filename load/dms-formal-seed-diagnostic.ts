@@ -61,31 +61,54 @@ export async function seedDiagnosticSample(exec: Executor, container: string, no
   };
 }
 
+export type SeedSampleCoverage = {
+  attempted: number;
+  postgresMissing: number;
+  dockerMissing: number;
+  writeFailures: number;
+  // Start times of samples with a missing part, capped so a long outage cannot grow summary.json without bound.
+  missingAtMs: number[];
+  missingAtTruncated: boolean;
+  complete: boolean;
+};
+const missingAtLimit = 1_000;
+
 // Samples run one after another: an overlapping tick would add Docker and DB load during the stall being observed.
+// Every tick counts: the collection is complete only when every attempted sample has both parts and was written.
 export function startSeedSampler(exec: Executor, container: string, path: string, intervalMs = 1_000) {
   writeFileSync(path, '', { mode: 0o600 });
-  let stopped = false, writeFailed = false, hasPostgres = false, hasDocker = false;
+  let stopped = false;
+  const coverage: SeedSampleCoverage = { attempted: 0, postgresMissing: 0, dockerMissing: 0, writeFailures: 0,
+    missingAtMs: [], missingAtTruncated: false, complete: false };
+  const missing = (at: number) => {
+    if (coverage.missingAtMs.at(-1) === at) return;
+    if (coverage.missingAtMs.length < missingAtLimit) coverage.missingAtMs.push(at);
+    else coverage.missingAtTruncated = true;
+  };
   let timer: ReturnType<typeof setTimeout> | undefined;
   let current: Promise<void> = Promise.resolve();
   const tick = () => {
     const startedAt = Date.now();
+    coverage.attempted++;
     current = seedDiagnosticSample(exec, container)
       .then(row => {
+        if (row.postgres === null) { coverage.postgresMissing++; missing(row.startedAtMs); }
+        if (row.docker === null) { coverage.dockerMissing++; missing(row.startedAtMs); }
         appendFileSync(path, JSON.stringify(row) + '\n');
-        hasPostgres ||= row.postgres !== null;
-        hasDocker ||= row.docker !== null;
       })
-      .catch(() => { writeFailed = true; })
+      .catch(() => { coverage.writeFailures++; missing(startedAt); })
       .finally(() => {
         if (!stopped) timer = setTimeout(tick, Math.max(0, intervalMs - (Date.now() - startedAt)));
       });
   };
   tick();
-  return async () => {
+  return async (): Promise<SeedSampleCoverage> => {
     stopped = true;
     clearTimeout(timer);
     await current;
-    if (writeFailed || !hasPostgres || !hasDocker) throw new Error('Database samples are incomplete');
+    coverage.complete = coverage.attempted > 0 && coverage.postgresMissing === 0 && coverage.dockerMissing === 0
+      && coverage.writeFailures === 0;
+    return { ...coverage, missingAtMs: [...coverage.missingAtMs] };
   };
 }
 

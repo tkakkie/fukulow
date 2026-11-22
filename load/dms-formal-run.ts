@@ -10,7 +10,7 @@ import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
 import { scaledLoad, localLimits, localCopy } from './dms-formal-local.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
 import { failureDetails, writeDiagnostic } from './dms-formal-diagnostics.ts';
-import { saveSeedDbLogs, seedFailure, startSeedSampler, type SeedStop } from './dms-formal-seed-diagnostic.ts';
+import { saveSeedDbLogs, seedFailure, startSeedSampler, type SeedSampleCoverage, type SeedStop } from './dms-formal-seed-diagnostic.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
 export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void };
 const defaultRuntime:Runtime={exec:execute,transfer:transferImage,on:(s,f)=>process.on(s,f),off:(s,f)=>process.off(s,f)};
@@ -156,7 +156,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       operation='seed';
       const directory=`${config.output}/formal`, scratch=roleRoot(config.db)+'/formal', container=id+'-db-1';
       const startedAtMs=Date.now();
-      let stopSampler:(()=>Promise<void>)|undefined, seedError:unknown;
+      let stopSampler:(()=>Promise<SeedSampleCoverage>)|undefined, seedError:unknown, sampleCoverage:SeedSampleCoverage|undefined;
       const collectionFailures:string[]=[];
       try {
         mkdirSync(directory,{mode:0o700});
@@ -169,13 +169,14 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         catch {seedStop=seedFailure(startedAtMs,Date.now());}
         status();
       }
-      try {await stopSampler?.();} catch {collectionFailures.push('db-samples.jsonl');}
+      try {sampleCoverage=await stopSampler?.();} catch {sampleCoverage=undefined;}
+      if(!sampleCoverage?.complete)collectionFailures.push('db-samples.jsonl');
       try {copyFileSync(scratch+'/seed-timing.jsonl',directory+'/seed-timing.jsonl');}
       catch {collectionFailures.push('seed-timing.jsonl');}
       try {await saveSeedDbLogs(runtime.exec,container,directory+'/db.log');}
       catch {collectionFailures.push('db.log');}
       json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[],load,
-        infrastructureFailure:interrupted || !!seedStop || collectionFailures.length>0,seedStop,collectionFailures});
+        infrastructureFailure:interrupted || !!seedStop || collectionFailures.length>0,seedStop,collectionFailures,sampleCoverage:sampleCoverage??null});
       if(seedStop)throw seedError;
       checkpoint();
       if(collectionFailures.length)throw new Error('Seed diagnostic record collection failed');
