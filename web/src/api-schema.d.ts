@@ -1884,7 +1884,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description too many sign-in attempts; shared IP/email failure and reservation budgets with web/native sign-in and revoke-others */
+            /** @description too many sign-in attempts; per-Session and per-Account failure and reservation budgets shared with revoke-others */
             429: {
                 headers: {
                     /** @description Seconds until retry; at least 1 */
@@ -1984,7 +1984,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description too many sign-in attempts; shared IP/email failure and reservation budgets with web/native sign-in and password change */
+            /** @description too many sign-in attempts; per-Session and per-Account failure and reservation budgets shared with password change */
             429: {
                 headers: {
                     /** @description Seconds until retry; at least 1 */

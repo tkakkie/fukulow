@@ -122,6 +122,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             cookie_secure,
             setup_token,
             sign_in_throttle,
+            account_security_throttle: Default::default(),
             message_delivery: fukulow_server::messages::Delivery::with_send_limit(send_limit),
             session_changes: Default::default(),
             session_cleanup: Default::default(),

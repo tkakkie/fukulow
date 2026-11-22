@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    hash::Hash,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
@@ -10,10 +11,13 @@ use axum::{
     http::{HeaderMap, HeaderName},
 };
 use tokio::time::Instant;
+use uuid::Uuid;
 
 const WINDOW: Duration = Duration::from_secs(60);
 const IP_LIMIT: u32 = 20;
 const ACCOUNT_LIMIT: u32 = 5;
+pub(super) const SECURITY_SESSION_LIMIT: u32 = 3;
+pub(super) const SECURITY_ACCOUNT_LIMIT: u32 = 5;
 pub(super) const MAX_KEYS: usize = 10_000;
 
 type Account = String;
@@ -93,7 +97,7 @@ impl Bucket {
     }
 }
 
-fn reserve<K: Clone + Eq + std::hash::Hash>(
+fn reserve<K: Clone + Eq + Hash>(
     buckets: &mut HashMap<K, Bucket>,
     key: K,
     limit: u32,
@@ -258,28 +262,113 @@ impl Attempt {
 impl Drop for Attempt {
     fn drop(&mut self) {
         let mut buckets = self.throttle.lock();
-        if let Some(key) = &self.account
-            && let Some(bucket) = buckets.accounts.get_mut(key)
-        {
-            finish(bucket, self.failed);
-            if bucket.failures == 0 && bucket.pending == 0 {
-                buckets.accounts.remove(key);
-            }
+        if let Some(key) = &self.account {
+            release(&mut buckets.accounts, key, self.failed);
         }
-        if let Some(bucket) = buckets.ips.get_mut(&self.ip) {
-            finish(bucket, self.failed);
-            if bucket.failures == 0 && bucket.pending == 0 {
-                buckets.ips.remove(&self.ip);
-            }
+        release(&mut buckets.ips, &self.ip, self.failed);
+    }
+}
+
+fn release<K: Eq + Hash>(buckets: &mut HashMap<K, Bucket>, key: &K, failed: bool) {
+    if let Some(bucket) = buckets.get_mut(key) {
+        bucket.pending -= 1;
+        if failed {
+            bucket.refresh(Instant::now());
+            bucket.failures += 1;
+        }
+        if bucket.failures == 0 && bucket.pending == 0 {
+            buckets.remove(key);
         }
     }
 }
 
-fn finish(bucket: &mut Bucket, failed: bool) {
-    bucket.pending -= 1;
-    if failed {
-        bucket.refresh(Instant::now());
-        bucket.failures += 1;
+#[derive(Clone, Default)]
+pub struct AccountSecurityThrottle {
+    buckets: Arc<Mutex<SecurityBuckets>>,
+}
+
+#[derive(Default)]
+struct SecurityBuckets {
+    sessions: HashMap<Vec<u8>, Bucket>,
+    accounts: HashMap<Uuid, Bucket>,
+    last_prune: Option<Instant>,
+}
+
+impl AccountSecurityThrottle {
+    fn lock(&self) -> MutexGuard<'_, SecurityBuckets> {
+        self.buckets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    pub(super) fn begin(
+        &self,
+        session: Vec<u8>,
+        account: Uuid,
+    ) -> Result<SecurityAttempt, Duration> {
+        let mut buckets = self.lock();
+        let now = Instant::now();
+        if buckets
+            .last_prune
+            .is_none_or(|last| now.duration_since(last) >= WINDOW)
+        {
+            buckets
+                .sessions
+                .retain(|_, bucket| bucket.pending > 0 || bucket.expires > now);
+            buckets
+                .accounts
+                .retain(|_, bucket| bucket.pending > 0 || bucket.expires > now);
+            buckets.last_prune = Some(now);
+        }
+        reserve(
+            &mut buckets.sessions,
+            session.clone(),
+            SECURITY_SESSION_LIMIT,
+            now,
+        )?;
+        if let Err(retry) = reserve(&mut buckets.accounts, account, SECURITY_ACCOUNT_LIMIT, now) {
+            release(&mut buckets.sessions, &session, false);
+            return Err(retry);
+        }
+        Ok(SecurityAttempt {
+            throttle: self.clone(),
+            session,
+            account,
+            failed: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn counts(&self, session: &[u8], account: Uuid) -> ((u32, u32), (u32, u32)) {
+        let buckets = self.lock();
+        let counts = |bucket: Option<&Bucket>| {
+            bucket.map_or((0, 0), |bucket| (bucket.failures, bucket.pending))
+        };
+        (
+            counts(buckets.sessions.get(session)),
+            counts(buckets.accounts.get(&account)),
+        )
+    }
+}
+
+pub(super) struct SecurityAttempt {
+    throttle: AccountSecurityThrottle,
+    session: Vec<u8>,
+    account: Uuid,
+    failed: bool,
+}
+
+impl SecurityAttempt {
+    pub(super) fn failed(mut self) {
+        self.failed = true;
+    }
+}
+
+impl Drop for SecurityAttempt {
+    fn drop(&mut self) {
+        let mut buckets = self.throttle.lock();
+        release(&mut buckets.sessions, &self.session, self.failed);
+        release(&mut buckets.accounts, &self.account, self.failed);
     }
 }
 
@@ -289,6 +378,81 @@ mod tests {
 
     fn ip(n: u8) -> IpAddr {
         IpAddr::from([192, 0, 2, n])
+    }
+
+    fn security_keys(n: usize) -> (Vec<u8>, Uuid) {
+        let id = Uuid::from_u128(n as u128);
+        (id.as_bytes().repeat(2), id)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authenticated_maps_stay_bounded_evict_oldest_idle_and_prune_expired() {
+        let throttle = AccountSecurityThrottle::default();
+        let (pending_session, pending_account) = security_keys(0);
+        let pending = throttle
+            .begin(pending_session.clone(), pending_account)
+            .unwrap();
+        tokio::time::advance(WINDOW).await;
+        let (oldest_session, oldest_account) = security_keys(1);
+        throttle
+            .begin(oldest_session.clone(), oldest_account)
+            .unwrap()
+            .failed();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for n in 2..MAX_KEYS {
+            let (session, account) = security_keys(n);
+            throttle.begin(session, account).unwrap().failed();
+        }
+        let (session, account) = security_keys(MAX_KEYS);
+        let new = throttle.begin(session.clone(), account).unwrap();
+        {
+            let buckets = throttle.lock();
+            assert_eq!(buckets.sessions.len(), MAX_KEYS);
+            assert_eq!(buckets.accounts.len(), MAX_KEYS);
+            assert!(!buckets.sessions.contains_key(&oldest_session));
+            assert!(!buckets.accounts.contains_key(&oldest_account));
+        }
+        assert_eq!(
+            throttle.counts(&pending_session, pending_account),
+            ((0, 1), (0, 1))
+        );
+        pending.failed();
+        assert_eq!(
+            throttle.counts(&pending_session, pending_account),
+            ((1, 0), (1, 0))
+        );
+        drop(new);
+
+        tokio::time::advance(WINDOW).await;
+        let _new = throttle.begin(session, account).unwrap();
+        let buckets = throttle.lock();
+        assert_eq!(buckets.sessions.len(), 1);
+        assert_eq!(buckets.accounts.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authenticated_maps_keep_pending_at_capacity_until_drop() {
+        let throttle = AccountSecurityThrottle::default();
+        let mut pending: Vec<_> = (0..MAX_KEYS)
+            .map(|n| {
+                let (session, account) = security_keys(n);
+                throttle.begin(session, account).unwrap()
+            })
+            .collect();
+        tokio::time::advance(WINDOW).await;
+        let (session, account) = security_keys(MAX_KEYS);
+        assert_eq!(throttle.begin(session.clone(), account).err(), Some(WINDOW));
+        drop(pending.pop());
+        let new = throttle.begin(session, account).unwrap();
+        {
+            let buckets = throttle.lock();
+            assert_eq!(buckets.sessions.len(), MAX_KEYS);
+            assert_eq!(buckets.accounts.len(), MAX_KEYS);
+        }
+        drop((pending, new));
+        let buckets = throttle.lock();
+        assert!(buckets.sessions.is_empty());
+        assert!(buckets.accounts.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

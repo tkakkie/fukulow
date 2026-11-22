@@ -109,22 +109,29 @@ async fn check_password_with_hash(
     permit: PasswordPermit,
     dummy_hash: impl FnOnce(&[u8]) -> Result<String, ApiError> + Send + 'static,
 ) -> Result<bool, ApiError> {
-    verify_and_hash(password, stored, attempt, permit, None, dummy_hash)
-        .await
-        .map(|(valid, _)| valid)
+    verify_and_hash(
+        password,
+        stored,
+        move || attempt.failed(),
+        permit,
+        None,
+        dummy_hash,
+    )
+    .await
+    .map(|(valid, _)| valid)
 }
 
 pub(super) async fn check_and_hash_password(
     password: String,
     stored: String,
-    attempt: throttle::Attempt,
+    attempt: throttle::SecurityAttempt,
     permit: PasswordPermit,
     new_password: Option<String>,
 ) -> Result<(bool, Option<String>), ApiError> {
     verify_and_hash(
         password,
         Some(stored),
-        attempt,
+        move || attempt.failed(),
         permit,
         new_password,
         hash_password_sync,
@@ -135,7 +142,7 @@ pub(super) async fn check_and_hash_password(
 async fn verify_and_hash(
     password: String,
     stored: Option<String>,
-    attempt: throttle::Attempt,
+    record_failure: impl FnOnce() + Send + 'static,
     permit: PasswordPermit,
     new_password: Option<String>,
     dummy_hash: impl FnOnce(&[u8]) -> Result<String, ApiError> + Send + 'static,
@@ -160,9 +167,9 @@ async fn verify_and_hash(
         };
         // Keep the reservation and record failures even if the HTTP task was cancelled.
         if !valid {
-            attempt.failed();
+            record_failure();
         } else {
-            drop(attempt);
+            drop(record_failure);
         }
         let hash = if valid {
             new_password

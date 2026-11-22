@@ -120,9 +120,7 @@ async fn throttle_error(response: Response) {
 }
 
 #[fukulow_test::test]
-async fn full_email_budget_rejects_sign_ins_before_db_and_password_change_before_lock(
-    pool: PgPool,
-) {
+async fn full_email_budget_rejects_sign_ins_before_db_but_admits_password_change(pool: PgPool) {
     let f = fixture(&pool).await;
     let workers = Box::leak(Box::new(PasswordWorkers::new()));
     let queue_capacity = workers.waiting.available_permits();
@@ -154,30 +152,26 @@ async fn full_email_budget_rejects_sign_ins_before_db_and_password_change_before
         .await;
         assert_eq!(sign_in_acquires, 0);
 
-        let ((response, peak), change_acquires) = crate::database::test_acquisitions(
-            sample_pool_peak(&f.state.pool, owner_changes_password(&app, &f.current)),
-        )
-        .await;
-        throttle_error(response).await;
-        assert_eq!(change_acquires, 2);
-        assert_eq!(peak, 5);
+        let change = tokio::spawn({
+            let app = app.clone();
+            let token = f.current.clone();
+            async move { owner_changes_password(&app, &token).await }
+        });
+        while workers.waiting.available_permits() + 2 != queue_capacity {
+            assert!(!change.is_finished());
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(f.security_counts(&f.current), ((0, 1), (0, 1)));
         assert_eq!(account_waiters(&mut observer).await, (3, 0));
-        eprintln!(
-            "Full email budget: 3 Account waiters, 4 held connections, sampled pool peak {peak}"
-        );
 
         wrong.finish().await;
+        assert_eq!(change.await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(f.security_counts(&f.current), ((0, 0), (0, 0)));
         assert_eq!(f.state.sign_in_throttle.pending_counts(), (0, 0));
         assert_eq!(account_waiters(&mut observer).await, (0, 0));
-        throttle_error(owner_sign_in(&app, PASSWORD).await).await;
-        throttle_error(owner_changes_password(&app, &f.current).await).await;
+        throttle_error(owner_sign_in(&app, NEW_PASSWORD).await).await;
 
         tokio::time::advance(Duration::from_secs(60)).await;
-        assert_eq!(owner_sign_in(&app, PASSWORD).await.status(), StatusCode::OK);
-        assert_eq!(
-            owner_changes_password(&app, &f.current).await.status(),
-            StatusCode::NO_CONTENT
-        );
         assert_eq!(
             owner_sign_in(&app, NEW_PASSWORD).await.status(),
             StatusCode::OK
