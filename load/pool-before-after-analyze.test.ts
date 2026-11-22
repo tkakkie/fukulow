@@ -26,11 +26,23 @@ test('accepts an RLS policy SubPlan that also reads users through users_account_
   assert.deepEqual(planReasons(badPolicy), ['users read by Seq Scan', 'Seq Scan on users']);
 });
 
-test('rejects users_account_id walked without an account_id Index Cond', () => {
-  assert.deepEqual(planReasons(lookup(scan('Index Scan', 'users', 'users_account_id', undefined, ''))), ['users_account_id without an account_id Index Cond']);
-  assert.deepEqual(planReasons(lookup(scan('Index Only Scan', 'users', 'users_account_id', undefined, '(organization_id = $2)'))), ['users_account_id without an account_id Index Cond']);
-  assert.deepEqual(planReasons(lookup(scan('Bitmap Heap Scan', 'users', undefined, [scan('Bitmap Index Scan', undefined, 'users_account_id', undefined, '')]))),
-    ['users_account_id without an account_id Index Cond']);
+test('rejects users_account_id walked without the Session account bound', () => {
+  const unbounded = ['users_account_id not bounded by s.account_id'];
+  assert.deepEqual(planReasons(lookup(scan('Index Scan', 'users', 'users_account_id', undefined, ''))), unbounded);
+  assert.deepEqual(planReasons(lookup(scan('Index Only Scan', 'users', 'users_account_id', undefined, '(organization_id = $2)'))), unbounded);
+  assert.deepEqual(planReasons(lookup(scan('Index Scan', 'users', 'users_account_id', undefined, "(account_id = (NULLIF(current_setting('fukulow.account_id'::text, true), ''::text))::uuid)"))), unbounded);
+  assert.deepEqual(planReasons(lookup(scan('Bitmap Heap Scan', 'users', undefined, [scan('Bitmap Index Scan', undefined, 'users_account_id', undefined, '')]))), unbounded);
+});
+
+test('rejects a BitmapOr that pairs an account seek with a whole-Organization read', () => {
+  const policySeek = scan('Bitmap Index Scan', undefined, 'users_account_id', undefined, "(account_id = (NULLIF(current_setting('fukulow.account_id'::text, true), ''::text))::uuid)");
+  const orgRead = scan('Bitmap Index Scan', undefined, 'users_directory_order');
+  assert.deepEqual(planReasons(lookup(scan('Bitmap Heap Scan', 'users', undefined, [scan('BitmapOr', undefined, undefined, [policySeek, orgRead])]))),
+    ['users read by Bitmap Heap Scan']);
+  const orgSeek = scan('Bitmap Index Scan', undefined, 'users_account_id', undefined, '(organization_id = $2)');
+  assert.deepEqual(planReasons(lookup(scan('Bitmap Heap Scan', 'users', undefined, [scan('BitmapOr', undefined, undefined,
+    [scan('Bitmap Index Scan', undefined, 'users_account_id'), orgSeek])]))), ['users_account_id not bounded by s.account_id']);
+  assert.deepEqual(planReasons(lookup(scan('Bitmap Heap Scan', 'users', undefined, [scan('BitmapOr', undefined, undefined, [])]))), ['users read by Bitmap Heap Scan']);
 });
 
 test('rejects the #519 generic plan and other full Member scans', () => {

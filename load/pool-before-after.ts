@@ -134,10 +134,10 @@ try {
         channels.push((await post(`/api/v1/orgs/${organization}/channels`,body,201,owner.token) as Channel).id);
       }
       // #519: the same step on both arms, after every seed write has committed and before any load.
-      const vacuumStarted=sql('SELECT clock_timestamp()');
-      const seedCheck:{condition:string;vacuumStarted:string;tables?:unknown;plans?:Record<string,unknown>;statsFailures:string[];planFailures:string[];error?:string}=
-        {condition,vacuumStarted,statsFailures:[],planFailures:[]};
+      const seedCheck:{condition:string;vacuumStarted?:string;tables?:unknown;plans?:Record<string,unknown>;statsFailures:string[];planFailures:string[];error?:string}=
+        {condition,statsFailures:[],planFailures:[]};
       try {
+        const vacuumStarted=sql('SELECT clock_timestamp()');seedCheck.vacuumStarted=vacuumStarted;
         sql('VACUUM (ANALYZE);');
         const tableStats=JSON.parse(sql(statsQuery(vacuumStarted)));seedCheck.tables=tableStats;
         seedCheck.statsFailures=statsReasons(tableStats,minimumRows(settings.members,settings.channels));
@@ -146,7 +146,10 @@ try {
           const p=JSON.parse(sql(planQuery(organization,tokens[0],mode),'fukulow_app'));seedCheck.plans[mode]=p;
           seedCheck.planFailures.push(...planReasons(p).map(r=>`${mode}: ${r}`));
         }
-      } catch(error) { seedCheck.error=String(error).slice(0,2000); }
+      } catch(error) {
+        // The plan probe's SQL carries a Session token; keep it out of the artifact.
+        seedCheck.error=String(error).replaceAll(tokens[0],'<token>').replace(/[0-9a-f]{64}/g,'<hex64>').slice(0,2000);
+      }
       save(`${dir}/seed-statistics.json`,seedCheck);
       const {statsFailures,planFailures}=seedCheck;
       if(seedCheck.error)throw new Error('Seed statistics check failed');

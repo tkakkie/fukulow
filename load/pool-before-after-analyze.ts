@@ -74,15 +74,19 @@ export function planReasons(explain: unknown): string[] {
   const reasons: string[] = [];
   const joined = joinNodes(root).filter(n => n['Relation Name'] === 'users').length;
   if (joined !== 1) reasons.push(`users joined ${joined} times`);
-  // Every users read, including policy SubPlans, must use the account index.
-  const users = nodes.filter(n => n['Relation Name'] === 'users');
-  for (const n of users) {
-    // A bitmap scan names its index on the child; either way the index must seek on account_id,
-    // not walk the whole index with the equality left to the join.
-    const probe = n['Node Type'] === 'Bitmap Heap Scan' ? walk(n).find(c => c['Index Name']) : n;
-    const index = probe?.['Index Name'];
-    if (index !== 'users_account_id') reasons.push(`users read by ${n['Node Type']}${n['Index Name'] ? ' on ' + n['Index Name'] : ''}`);
-    else if (!/(^|[^a-z_.])(u\.)?account_id = /.test(probe?.['Index Cond'] ?? '')) reasons.push(`users_account_id without an account_id Index Cond`);
+  // Every users read must seek users_account_id. The join's read must be bounded by the Session's
+  // account (s.account_id); a policy SubPlan may seek any account_id. A bitmap scan is checked on
+  // every index leaf, so a BitmapOr cannot pair an account seek with a whole-Organization read.
+  const inJoin = new Set(joinNodes(root));
+  const joinCond = /(^|[^a-z_.])(u\.)?account_id = s\.account_id\b/, anyCond = /(^|[^a-z_.])(u\.)?account_id = /;
+  for (const n of nodes.filter(x => x['Relation Name'] === 'users')) {
+    const leaves = n['Node Type'] === 'Bitmap Heap Scan' ? walk(n).slice(1).filter(c => c['Node Type'] === 'Bitmap Index Scan') : [n];
+    const cond = inJoin.has(n) ? joinCond : anyCond;
+    if (!leaves.length || leaves.some(l => l['Index Name'] !== 'users_account_id')) {
+      reasons.push(`users read by ${n['Node Type']}${n['Index Name'] ? ' on ' + n['Index Name'] : ''}`);
+    } else if (leaves.some(l => !cond.test(l['Index Cond'] ?? ''))) {
+      reasons.push(inJoin.has(n) ? 'users_account_id not bounded by s.account_id' : 'users_account_id without an account_id Index Cond');
+    }
   }
   for (const n of nodes) {
     if (n['Node Type'] === 'Seq Scan' && ['users', 'account_sessions'].includes(n['Relation Name'] ?? '')) reasons.push(`Seq Scan on ${n['Relation Name']}`);
