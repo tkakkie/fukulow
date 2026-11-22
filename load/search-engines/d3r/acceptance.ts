@@ -134,7 +134,7 @@ export type Evidence = {
 
 function reportStatus(report: Report): Status {
   if (report.length !== queries.length || report.some(({query, actors: rows}, i) => query !== queries[i][0] ||
-    !Array.isArray(rows) || rows.length !== actors.length ||
+    !Array.isArray(rows) || rows.length !== actors.length || !dense(rows) ||
     rows.some((row, j) => row.actor !== actors[j] || typeof row.equal !== 'boolean' ||
       row.expectedRejection !== expectedRejection(query, row.actor) || !validRejection(row.rejection) ||
       ![row.actualRows, row.expectedRows, row.expectedOlderThan180Days].every(n => Number.isSafeInteger(n) && n >= 0) ||
@@ -146,17 +146,27 @@ function reportStatus(report: Report): Status {
 const isHash = (value: string) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const validRejection = (value: string | null) => value === null || typeof value === 'string';
 
-// The formal judge classifies an aborted short-query benchmark (SQL error) as FAIL, not NOT EVALUATED,
-// so a rehearsal checks the sample counts itself: every query must have all its samples.
-const fullySampled = (l?: Sample) => l !== undefined && l !== null && !('sqlError' in l) && 'n' in l &&
+// The formal judge classifies some aborted checks (a short-query SQL error, a pagination error) as FAIL,
+// not NOT EVALUATED. A rehearsal therefore requires its evidence to be whole instead of listing known
+// failure kinds: every array dense, no missing item, no recorded error, every query fully sampled.
+export const fullySampled = (l?: Sample) => l !== undefined && l !== null && !('sqlError' in l) && 'n' in l &&
   l.n === criteria.samplesPerQueryRound && (accepts(l.query) || l.outcomes?.length === criteria.samplesPerQueryRound);
 
-// A rehearsal has one formal-size round. Its evidence is complete when every query is fully sampled and
-// the formal checks would accept it with that round in every slot. Only this boolean leaves the function.
+export const dense = (list: unknown[]) => Array.from({length: list.length}, (_, i) => i).every(i => i in list &&
+  list[i] !== undefined && list[i] !== null);
+
+function whole(value: unknown): boolean {
+  if (Array.isArray(value)) return dense(value) && value.every(whole);
+  if (value === null || typeof value !== 'object') return true;
+  return Object.entries(value).every(([key, item]) => (!/error$/i.test(key) || item === undefined || item === null) && whole(item));
+}
+
+// A rehearsal has one formal-size round. Its evidence is complete when it is whole and the formal checks
+// would accept it with that round in every slot. Only this boolean leaves the function.
 export function rehearsalComplete(e: Evidence) {
-  if (!Array.isArray(e.rounds) || e.rounds.length !== 1) return false;
+  if (!Array.isArray(e.rounds) || e.rounds.length !== 1 || !whole(e)) return false;
   const [round] = e.rounds;
-  if (round?.round !== 1 || !Array.isArray(round.latencies) || round.latencies.length !== queries.length ||
+  if (round.round !== 1 || !Array.isArray(round.latencies) || round.latencies.length !== queries.length ||
     !round.latencies.every(fullySampled)) return false;
   return judge({...e, formal: true, rounds: [1, 2, 3].map(n => ({...round, round: n}))}) !== 'NOT EVALUATED';
 }
@@ -164,11 +174,12 @@ export function rehearsalComplete(e: Evidence) {
 export function judge(e: Partial<Evidence>): Status {
   if (e.valid !== true || e.formal !== true || !verifiedBackfill(e.backfill, 1_000_000) || !Array.isArray(e.rounds) || !Array.isArray(e.plans) ||
     !Array.isArray(e.complete) || !e.restore || !Array.isArray(e.restore.complete) ||
-    !e.denials || !Array.isArray(e.denials.checks) || !e.denials.plan) return 'NOT EVALUATED';
+    !e.denials || !Array.isArray(e.denials.checks) || !e.denials.plan ||
+    ![e.rounds, e.plans, e.complete, e.restore.complete, e.denials.checks].every(dense)) return 'NOT EVALUATED';
   const ids = queries.map(([id]) => id);
   const accepted = ids.filter(accepts);
   if (e.rounds.length !== 3 || e.rounds.some((round, index) => round?.round !== index + 1 ||
-    !Array.isArray(round.latencies) || round.latencies.length !== ids.length ||
+    !Array.isArray(round.latencies) || round.latencies.length !== ids.length || !dense(round.latencies) ||
     round.latencies.some((l, i) => l?.query !== ids[i] || !sampleValid(l)))) return 'NOT EVALUATED';
   if (e.plans.length !== accepted.length || e.plans.some((plan, i) => plan.query !== accepted[i] ||
     typeof plan.searchIndex !== 'boolean' || typeof plan.seqScanMessages !== 'boolean')) return 'NOT EVALUATED';
