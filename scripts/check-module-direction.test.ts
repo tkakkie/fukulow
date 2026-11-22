@@ -515,6 +515,8 @@ pub mod realtime {
     const body = `
 pub fn keep<T>(value: T) -> T { value }
 pub fn keep_array<T>(value: [T; 1]) -> [T; 1] { value }
+pub struct Pair { pub ids: [u8; 2] }
+pub enum Code { One = 1 }
 pub fn count<T: Count>(value: &T) -> u8 { value.count() }
 pub fn count_dyn(value: &dyn Count) -> u8 { value.count() }
 pub fn lower_fields(s: &crate::AppState) {

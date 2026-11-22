@@ -165,6 +165,17 @@ async fn counts(
         .collect()
 }
 
+/// Direct SQL steps bypass the Topic summary writers; restore a summary that
+/// satisfies `topics_live_summary` so later API Moves see a consistent row.
+async fn resync_topics(pool: &PgPool, org: Uuid, channel: Uuid) {
+    sqlx::query("UPDATE topics t SET message_count=s.n, first_seq=s.first, last_seq=s.last \
+        FROM (SELECT t2.id, count(m.id) AS n, min(m.seq) AS first, max(m.seq) AS last FROM topics t2 \
+              LEFT JOIN messages m ON m.organization_id=t2.organization_id AND m.channel_id=t2.channel_id AND m.topic_id=t2.id AND NOT m.deleted \
+              WHERE t2.organization_id=$1 AND t2.channel_id=$2 GROUP BY t2.id) s \
+        WHERE t.organization_id=$1 AND t.channel_id=$2 AND t.id=s.id")
+        .bind(org).bind(channel).execute(pool).await.unwrap();
+}
+
 async fn step(
     world: &World,
     pool: &PgPool,
@@ -252,6 +263,13 @@ async fn step(
             let Some((root, version)) = root else {
                 return "move skipped".into();
             };
+            // Move's Topic summary arithmetic counts every chain row; deleted rows only
+            // exist here through direct SQL until #287 adds a Delete writer.
+            let deleted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE organization_id=$1 AND channel_id=$2 AND (id=$3 OR reply_root_id=$3) AND deleted)")
+                .bind(org).bind(channel).bind(root).fetch_one(pool).await.unwrap();
+            if deleted {
+                return "move skipped: deleted chain".into();
+            }
             let name = ["T1", "T2", "T3", "T4"][rng.below(4)];
             let response = request(
                 &world.app,
@@ -272,11 +290,13 @@ async fn step(
             // Topic to main timeline is not an API operation; exercise the trigger directly.
             let n = sqlx::query("UPDATE messages SET topic_id=NULL WHERE organization_id=$1 AND channel_id=$2 AND id=(SELECT id FROM messages WHERE organization_id=$1 AND channel_id=$2 AND topic_id IS NOT NULL ORDER BY id OFFSET $3 LIMIT 1)")
                 .bind(org).bind(channel).bind(rng.below(5) as i64).execute(pool).await.unwrap().rows_affected();
+            resync_topics(pool, org, channel).await;
             format!("to main {n}")
         }
         11 => {
             let n = sqlx::query("UPDATE messages SET deleted=NOT deleted WHERE organization_id=$1 AND channel_id=$2 AND id=(SELECT id FROM messages WHERE organization_id=$1 AND channel_id=$2 ORDER BY id OFFSET $3 LIMIT 1)")
                 .bind(org).bind(channel).bind(rng.below(10) as i64).execute(pool).await.unwrap().rows_affected();
+            resync_topics(pool, org, channel).await;
             format!("delete toggle {n}")
         }
         12 => {
@@ -355,7 +375,7 @@ async fn a3_counts_equal_the_pre_a3_query_after_every_random_step(pool: PgPool) 
         let mut rng = Rng(seed);
         let mut keys = Vec::new();
         world.assert_oracle(&pool, "start").await;
-        for n in 0..120 {
+        for n in 0..160 {
             let what = step(&world, &pool, &mut rng, &mut keys).await;
             world
                 .assert_oracle(&pool, &format!("seed {seed:x} step {n}: {what}"))
