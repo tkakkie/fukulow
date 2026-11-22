@@ -296,6 +296,9 @@ mod tests {
     use super::*;
     use futures_util::FutureExt;
 
+    #[cfg(feature = "hold-heap-measure")]
+    mod heap;
+
     fn measured_capacity(limit: usize) -> Arc<Capacity> {
         Arc::new(Capacity {
             measure: true,
