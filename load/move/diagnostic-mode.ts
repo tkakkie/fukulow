@@ -11,6 +11,14 @@ export const diagnosticTargets: Record<string, { patch: string; readTimingSample
 export const readLaneChoices = ['all', 'channels', 'topics'] as const;
 export type ReadLanes = typeof readLaneChoices[number];
 
+// The read-hook patch samples Part D reads 1 in FUKULOW_MOVE_DIAG_READ_EVERY (#758): every read in smoke,
+// where both Channel-list workloads run at 2/s on one counter, 1 in 8 at full size.
+export function readSampleEnvironment(every: number | null) {
+  if (every === null) return undefined;
+  if (!Number.isSafeInteger(every) || every < 1 || every > 1024) throw new Error('Invalid DIAGNOSTIC read sample interval');
+  return { FUKULOW_MOVE_DIAG_READ_EVERY: String(every) };
+}
+
 export function attributionLabel(readLanes: ReadLanes) {
   return readLanes === 'all' ? undefined
     : `ATTRIBUTION RUN (Part D read lanes: ${readLanes} only); not the Part D Done-when load`;
@@ -36,7 +44,9 @@ export function diagnosticSelection(values: { diagnostic?: boolean; smoke?: bool
     throw new Error('Use --sizes 100, 1000 or 100,1000 and --round 1, 2 or 3');
   const p = { ...plan(values.smoke ?? false), mode: diagnosticMode };
   const selected: readonly number[] = p.smoke ? p.sizes : sizes.split(',').map(Number);
-  return { plan: p, commit, ...diagnosticTargets[commit], readLanes: readLanes as ReadLanes,
+  const target = diagnosticTargets[commit];
+  return { plan: p, commit, patch: target.patch, readLanes: readLanes as ReadLanes,
+    readTimingSampleEvery: target.readTimingSampleEvery && (p.smoke ? 1 : target.readTimingSampleEvery),
     steps: steps(p).filter(step => step.part === 'D' && selected.includes(step.size) && step.round === Number(round)) };
 }
 

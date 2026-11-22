@@ -25,14 +25,15 @@ export function dbCommand() {
 }
 
 export async function startStack(o: { arm?: Arm; id: string; project: string; source: string; image: string; privateDir: string;
-  burst: number; refill: number; labels?: Record<string, string>; port?: string; diagnostic?: boolean; }) {
+  burst: number; refill: number; labels?: Record<string, string>; port?: string; diagnostic?: boolean;
+  appEnvironment?: Record<string, string>; }) {
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME, DOCKER_HOST: process.env.DOCKER_HOST, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
     LOAD_PROJECT: `${o.project}-${o.id}`.toLowerCase(), LOAD_PORT: o.port ?? port, LOAD_DB_PASSWORD: randomUUID(), LOAD_APP_PASSWORD: randomUUID(),
     LOAD_SETUP_TOKEN: randomUUID(), LOAD_APP_IMAGE: o.image, LOAD_SERVER_SOURCE: o.source,
     LOAD_SEND_BURST: String(o.burst), LOAD_SEND_REFILL_PER_SECOND: String(o.refill) };
   const override = `${o.privateDir}/compose.json`;
   writeFileSync(override, JSON.stringify({ services: {
-    app: { labels: o.labels, ...(o.diagnostic && { logging: { options: { 'max-size': '40m' } } }), environment: { FUKULOW_CLIENT_IP_HEADER: 'x-load-client-ip', FUKULOW_TRUSTED_PROXIES: '0.0.0.0/0,::/0' } },
+    app: { labels: o.labels, ...(o.diagnostic && { logging: { options: { 'max-size': '40m' } } }), environment: { FUKULOW_CLIENT_IP_HEADER: 'x-load-client-ip', FUKULOW_TRUSTED_PROXIES: '0.0.0.0/0,::/0', ...o.appEnvironment } },
     migrate: { labels: o.labels },
     db: { labels: o.labels, command: dbCommand(), ...(o.labels && { volumes: ['db-data:/var/lib/postgresql'] }) },
   }, ...(o.labels && { networks: { default: { labels: o.labels } }, volumes: { 'db-data': { labels: o.labels } } }) }), { mode: 0o600 });

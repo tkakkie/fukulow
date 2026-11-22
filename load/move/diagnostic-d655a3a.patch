@@ -463,10 +463,10 @@ index e245339..5315901 100644
  #[utoipa::path(put, path = "/api/v1/orgs/{org}/channels/{id}/read", request_body = MarkReadRequest,
 diff --git a/server/src/move_diagnostic.rs b/server/src/move_diagnostic.rs
 new file mode 100644
-index 0000000..5b48f25
+index 0000000..d5e111d
 --- /dev/null
 +++ b/server/src/move_diagnostic.rs
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,158 @@
 +use axum::response::Response;
 +use std::{
 +    future::Future,
@@ -486,15 +486,32 @@ index 0000000..5b48f25
 +static CHANNELS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 +static TOPICS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 +
-+// Move always, sends 1 in 32, Part D reads 1 in 8.
++static READ_EVERY: OnceLock<Option<u64>> = OnceLock::new();
++
++// The harness sets the Part D read interval; without a valid one no read is sampled,
++// which the harness reports as missing read timings.
++fn read_every() -> Option<u64> {
++    *READ_EVERY.get_or_init(|| {
++        let every = std::env::var("FUKULOW_MOVE_DIAG_READ_EVERY")
++            .ok()
++            .and_then(|value| value.parse::<u64>().ok())
++            .filter(|every| (1..=1024).contains(every));
++        if every.is_none() {
++            tracing::warn!(target: "fukulow", event = "move_diag_read_every_invalid");
++        }
++        every
++    })
++}
++
++// Move always, sends 1 in 32, Part D reads 1 in FUKULOW_MOVE_DIAG_READ_EVERY.
 +fn sampled(lane: &'static str) -> bool {
 +    let (sequence, every) = match lane {
 +        "move" => return true,
-+        "send" => (&SEND_SEQUENCE, 32),
-+        "channels" => (&CHANNELS_SEQUENCE, 8),
-+        _ => (&TOPICS_SEQUENCE, 8),
++        "send" => (&SEND_SEQUENCE, Some(32)),
++        "channels" => (&CHANNELS_SEQUENCE, read_every()),
++        _ => (&TOPICS_SEQUENCE, read_every()),
 +    };
-+    sequence.fetch_add(1, Relaxed) % every == 0
++    every.is_some_and(|every| sequence.fetch_add(1, Relaxed) % every == 0)
 +}
 +
 +#[derive(Clone)]

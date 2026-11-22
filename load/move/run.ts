@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { k6CeilingWarnings, readTimingProblems } from './diagnostic-evidence.ts';
 import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnostic.ts';
-import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, rejectDiagnosticImage, type ReadLanes } from './diagnostic-mode.ts';
+import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, readSampleEnvironment, rejectDiagnosticImage,
+  type ReadLanes } from './diagnostic-mode.ts';
 import { buildFixture, committedMoves, head, type Seeded } from './fixture.ts';
 import { infrastructureFailure, type Attempt, type Measurement, type Result } from './judge.ts';
 import { latency, storage } from './measure.ts';
@@ -188,7 +189,8 @@ async function main() {
         console.log(selection ? `DIAGNOSTIC ${id}` : id);
         try {
           const stack = await startStack({ id, project, source: repo, image: image.id, privateDir: dir,
-            burst: p.burst, refill: p.refill, labels, port: '0', diagnostic: Boolean(selection) });
+            burst: p.burst, refill: p.refill, labels, port: '0', diagnostic: Boolean(selection),
+            appEnvironment: selection && readSampleEnvironment(selection.readTimingSampleEvery) });
           stage = 'app image check';
           if (docker('inspect', '--format', '{{.Image}}', stack.app) !== image.id) throw new Error('App image changed');
           stage = 'fixture';

@@ -3,7 +3,8 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { appEvidence, cgroupSample, dbEvidence, k6CeilingWarnings, k6Evidence, parseDbSample, parseStatements,
   readTimingProblems, requiredReadPhases, statementGroup, statementGroupSql } from './diagnostic-evidence.ts';
-import { attributionLabel, diagnosticCommit, diagnosticSelection, diagnosticTargets, rejectDiagnosticImage } from './diagnostic-mode.ts';
+import { attributionLabel, diagnosticCommit, diagnosticSelection, diagnosticTargets, readSampleEnvironment,
+  rejectDiagnosticImage } from './diagnostic-mode.ts';
 import { judge } from './judge.ts';
 import { plan, type Step } from './plan.ts';
 
@@ -106,6 +107,11 @@ test('diagnostic commit and read lanes are pinned choices recorded with the sele
   assert.deepEqual([main.commit, main.patch, main.readTimingSampleEvery, main.readLanes],
     [mainCommit, 'load/move/diagnostic-d655a3a.patch', 8, 'topics']);
   assert.deepEqual(main.steps, pinned.steps);
+  assert.equal(diagnosticSelection({ diagnostic: true, smoke: true, commit: mainCommit })!.readTimingSampleEvery, 1);
+  assert.equal(diagnosticSelection({ diagnostic: true, smoke: true })!.readTimingSampleEvery, null);
+  assert.deepEqual(readSampleEnvironment(8), { FUKULOW_MOVE_DIAG_READ_EVERY: '8' });
+  assert.equal(readSampleEnvironment(null), undefined);
+  for (const invalid of [0, -1, 1.5, 1025, Number.NaN]) assert.throws(() => readSampleEnvironment(invalid), /Invalid DIAGNOSTIC read sample/);
   assert.throws(() => diagnosticSelection({ diagnostic: true, commit: 'a'.repeat(40) }), /pinned Part D commit/);
   assert.throws(() => diagnosticSelection({ diagnostic: true, commit: mainCommit.slice(0, 7) }), /pinned Part D commit/);
   assert.throws(() => diagnosticSelection({ diagnostic: true, 'read-lanes': 'reader' }), /--read-lanes all/);
