@@ -25,7 +25,32 @@ export type Duration = keyof typeof DURATIONS;
 export const TIMELINE = {
   stall: -4_000, revoke: -3_000, fault: -300, resume: 100, restore: 2_000,
   holdsEndAfterRecovery: 10_000, baselineMs: 10_000,
+  // The Hfence restore must complete by P + 2.5 s: before the fourth retry wave (+3.75 s) and
+  // the short recovery (+3.5 s), so it fences parked holds inside the fault.
+  restoreDeadline: 2_500,
+  // A server close is logged, then the Close frame send may take up to 1 s (realtime.rs close());
+  // 0.5 s more covers scheduling and log delivery.
+  closeMargin: 1_500,
 } as const;
+
+export type GateTimes = { gateOn: [number, number]; gateOff: [number, number] };
+/**
+ * Each gate change is bounded by the time its statement was sent and the time it was
+ * acknowledged. Every edge is chosen so that the uncertainty can never turn a FAIL into a PASS
+ * or an INVALID run into a valid one.
+ */
+export function edges({ gateOn: [onBefore, onAfter], gateOff: [offBefore, offAfter] }: GateTimes) {
+  return {
+    // Health that must hold during the fault: the widest window the gate may have covered.
+    healthFrom: onBefore, healthTo: offAfter,
+    // Recovery rules are checked from both ends of the release interval.
+    recoveryEarliest: offBefore, recoveryLatest: offAfter,
+    // A revoked send is legal before the gate-on statement was sent or after the gate-off one was.
+    sendFrom: onBefore, sendTo: offBefore,
+    // Counted floors (retries) and window membership: where the gate was certainly on.
+    certainFrom: onAfter, certainTo: offBefore,
+  };
+}
 
 export const baselineWindow = (run: { times: { stall: number } }): [number, number] => [run.times.stall - TIMELINE.baselineMs, run.times.stall];
 export const restoreAccount = (cell: Cell): number | undefined => (CELLS[cell] as { restoreAccount?: number }).restoreAccount;
@@ -64,7 +89,8 @@ export function planRuns(cells: readonly Cell[], durations: readonly Duration[],
   return runs;
 }
 
-export type Options = { out: string; cells: Cell[]; durations: Duration[]; repeats: number; controls: boolean; stall: Stall };
+// A rehearsal reports counts only. A formal run is the registered 3 repeats with controls.
+export type Options = { out: string; cells: Cell[]; durations: Duration[]; repeats: number; controls: boolean; rehearsal: boolean; stall: Stall };
 export function parseOptions(args: readonly string[]): Options {
   const option = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
   const out = option('--out');
@@ -84,5 +110,7 @@ export function parseOptions(args: readonly string[]): Options {
     messages: number('--stall-messages', STALL_DEFAULT.messages),
     chars: number('--stall-chars', STALL_DEFAULT.chars),
   });
-  return { out, cells: list('--cells', CELL_NAMES), durations: list('--durations', ['short', 'long'] as const), repeats, controls: controls === 'on', stall };
+  const rehearsal = args.includes('--rehearsal');
+  if (!rehearsal && (repeats !== REPEATS || controls !== 'on')) throw new Error(`a formal run needs --repeats ${REPEATS} and --controls on; use --rehearsal for anything else`);
+  return { out, cells: list('--cells', CELL_NAMES), durations: list('--durations', ['short', 'long'] as const), repeats, controls: controls === 'on', rehearsal, stall };
 }

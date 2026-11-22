@@ -225,20 +225,31 @@ export async function measure(ctx: Context, run: PlannedRun): Promise<HoldsRun> 
   const pass = await findPass(relay);
   const restoreIndex = restoreAccount(run.cell);
   const accounts: AccountMutations[] = fixture.targets.map(() => ({}));
-  const gate = async (failing: boolean) => { if (run.kind === 'fault' && !await control.run(`UPDATE public.fk592_control SET failing = ${failing};`)) throw new Error(`gate did not ${failing ? 'engage' : 'release'}`); return now(); };
+  // [statement sent, ack]; a control has no gate, so both bounds are the nominal time.
+  const gate = async (failing: boolean): Promise<[number, number]> => {
+    const before = now();
+    if (run.kind === 'fault' && !await control.run(`UPDATE public.fk592_control SET failing = ${failing};`)) throw new Error(`gate did not ${failing ? 'engage' : 'release'}`);
+    return [before, run.kind === 'fault' ? now() : before];
+  };
   const recoveryAt = pass + (run.kind === 'fault' ? DURATIONS[run.duration] : DURATIONS.long);
   const steps = await Promise.all([
-    at(pass + TIMELINE.stall, async () => { const time = now(); proxies.forEach(p => p.pause()); return { time, failures: await postStall(fixture, ctx.stall) }; }),
+    at(pass + TIMELINE.stall, async () => {
+      const time = now();
+      const targetsReady = sockets.targets.filter(t => t.subscribed).length, bystandersReady = sockets.state.bystandersReady;
+      proxies.forEach(p => p.pause());
+      return { time, targetsReady, bystandersReady, failures: await postStall(fixture, ctx.stall) };
+    }),
     at(pass + TIMELINE.revoke, async () => { const time = now(); await pool([...fixture.targets.keys()], MUTATION_CONCURRENCY, async a => {
       const r = await changeRole(fixture, fixture.targets[a], 'guest'); Object.assign(accounts[a], { revokeStartedAt: r.startedAt, revokeStatus: r.status, revokedAt: r.doneAt });
     }); return time; }),
-    (async () => { const fault = await at(pass + TIMELINE.fault, () => gate(true)); const recovery = await at(recoveryAt, () => gate(false)); return { fault, recovery }; })(),
+    (async () => { const gateOn = await at(pass + TIMELINE.fault, () => gate(true)); const gateOff = await at(recoveryAt, () => gate(false)); return { gateOn, gateOff }; })(),
     at(pass + TIMELINE.resume, () => { const time = now(); proxies.forEach(p => p.resume()); return time; }),
     restoreIndex === undefined ? undefined : at(pass + TIMELINE.restore, async () => {
       const r = await changeRole(fixture, fixture.targets[restoreIndex], 'member'); Object.assign(accounts[restoreIndex], { restoreStartedAt: r.startedAt, restoreStatus: r.status, restoredAt: r.doneAt }); return r.startedAt;
     }),
   ]);
-  const [stalled, revokeTime, { fault, recovery }, resume, restore] = steps;
+  const [stalled, revokeTime, { gateOn, gateOff }, resume, restore] = steps;
+  const recovery = gateOff[1];
   // Wait for a metrics event emitted after the drain limit (60 s cadence).
   for (let i = 0; !log.metrics.some(m => m.at >= recovery + THRESHOLDS.drainSeconds * 1000); i++) { if (i > 800 || ctx.interrupted()) break; await sleep(100); }
   await sleep(1_500);
@@ -250,11 +261,12 @@ export async function measure(ctx: Context, run: PlannedRun): Promise<HoldsRun> 
   await cleanup(ctx.active);
   await started.logsClosed;
   const offsetBoundsMs = clockStart && clockEnd ? encloseClockBrackets(clockStart, clockEnd) : undefined;
-  const nominalRecovery = run.kind === 'fault' ? { [run.duration]: recovery } : { short: pass + DURATIONS.short, long: recovery };
+  const nominalRecovery = run.kind === 'fault' ? { [run.duration]: gateOff[1] } : { short: pass + DURATIONS.short, long: gateOff[1] };
   const result: HoldsRun = {
     kind: run.kind, cell: run.cell, duration: run.kind === 'fault' ? run.duration : undefined, repeat: run.repeat,
-    times: { pass, stall: stalled.time, revoke: revokeTime, fault, resume, restore, recovery, end, nominalRecovery },
-    setup: { bystanders: BYSTANDERS, bystandersReady: sockets.state.bystandersReady, calibrationErrors, stallPostFailures: stalled.failures },
+    times: { pass, stall: stalled.time, revoke: revokeTime, gateOn, gateOff, resume, restore, end, nominalRecovery },
+    setup: { bystanders: BYSTANDERS, bystandersReadyAtStall: stalled.bystandersReady, targetsReadyAtStall: stalled.targetsReady, calibrationErrors, stallPostFailures: stalled.failures },
+    serverCloses: log.closes,
     revokedChannels: fixture.revoked, accounts, targets: sockets.targets, notices: sockets.notices,
     bystanderNotices: sockets.state.bystanderNotices, bystanderCloses: sockets.state.bystanderCloses,
     sendTiming: offsetBoundsMs && { offsetBoundsMs, uncertaintyMs: runUncertaintyMs(offsetBoundsMs, log.sends), records: log.sends },

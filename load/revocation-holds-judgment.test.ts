@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CHANNELS, holdsFixture, sample, target, TIMES } from './revocation-holds-fixture.ts';
+import { CHANNELS, GATE_OFF, GATE_ON, holdsFixture, sample, target, TIMES } from './revocation-holds-fixture.ts';
 import { floors, holdsReasons, holdsValues, setupReasons, stallReasons } from './revocation-holds-floors.ts';
-import { faultWindowReasons, holdsEndReasons, judgeHolds, verdictByCell, type HoldsRun } from './revocation-holds-judgment.ts';
-import { memoryByCell, memoryEntry, memoryVerdict, rssDeltaKb } from './revocation-holds-memory.ts';
+import { faultWindowReasons, holdsEndReasons, informational, judgeHolds, recoveryGateReasons, verdictByCell, type HoldsRun } from './revocation-holds-judgment.ts';
+import { median, memoryByCell, memoryEntry, memoryVerdict, rssDeltaKb } from './revocation-holds-memory.ts';
 import { noticeCorrectness } from './revocation-holds-notices.ts';
+import { rehearsalCounts } from './revocation-holds-rehearsal.ts';
 
 const reasons = (run: HoldsRun) => { const j = judgeHolds(run); return [...j.floorReasons, ...j.reasons]; };
 
@@ -19,11 +20,18 @@ test('a clean H512 short run passes every floor and gate', () => {
 
 test('floor 1: sockets, mutations, restore, baseline probes, calibrations and samples', () => {
   const cases: [string, (run: HoldsRun) => void][] = [
-    ['not every socket was ready', run => { run.targets[3].subscribed = false; }],
-    ['not every socket was ready', run => { run.setup.bystandersReady = 1023; }],
+    ['not every socket was ready when the stall started', run => { run.setup.targetsReadyAtStall = 31; }],
+    ['not every socket was ready when the stall started', run => { run.setup.bystandersReadyAtStall = 1023; }],
     ['a revoke mutation failed or completed after the fault started', run => { run.accounts[0].revokeStatus = 409; }],
-    ['a revoke mutation failed or completed after the fault started', run => { run.accounts[0].revokedAt = TIMES.fault; }],
-    ['missing baseline probes', run => { run.httpProbe = run.httpProbe.filter(p => p.at < 26_000 || p.at >= 36_000); }],
+    ['a revoke mutation failed or completed after the fault started', run => { run.accounts[0].revokedAt = GATE_ON; }],
+    ['missing successful baseline probes', run => { run.httpProbe = run.httpProbe.filter(p => p.at < 26_000 || p.at >= 36_000); }],
+    ['missing successful baseline probes', run => { run.dbProbe = run.dbProbe.map(p => p.at >= 26_000 && p.at < 36_000 ? { ...p, ok: false } : p); }],
+    ['missing successful baseline probes', run => { run.httpProbe = run.httpProbe.map(p => p.at >= 26_000 && p.at < 36_000 ? { ...p, ok: false, status: 503 } : p); }],
+    ['no metrics event after the drain', run => { delete run.metrics; }],
+    ['missing counter revocation_retired_timeout', run => { delete run.metrics!.revocation_retired_timeout; }],
+    ['missing counter revocation_delivered_after_hold', run => { delete run.metrics!.revocation_delivered_after_hold; }],
+    ['pool samples do not bracket the fault window', run => { run.pool = run.pool.slice(2); }],
+    ['pool samples do not bracket the recovery window', run => { run.pool = run.pool.slice(0, 3); }],
     ['a clock calibration is invalid', run => { run.setup.calibrationErrors = ['missing or ambiguous server clock sample']; }],
     ['no holds sample in the baseline window', run => { run.samples = run.samples.filter(s => s.serverMs < 26_000 || s.serverMs >= 36_000); }],
     ['no holds sample in the fault window', run => { run.samples = run.samples.filter(s => s.serverMs < 39_700 || s.serverMs >= 43_500); }],
@@ -35,7 +43,7 @@ test('floor 1: sockets, mutations, restore, baseline probes, calibrations and sa
     assert.ok(setupReasons(run).includes(reason), reason);
     assert.equal(judgeHolds(run).verdict, 'INVALID');
   }
-  const edge = holdsFixture(); edge.accounts[0].revokedAt = TIMES.fault - 0.001;
+  const edge = holdsFixture(); edge.accounts[0].revokedAt = GATE_ON - 0.001;
   assert.deepEqual(setupReasons(edge), []);
   const fence = holdsFence();
   assert.deepEqual(setupReasons(fence), []);
@@ -58,12 +66,50 @@ test('floor 2: backlog after resume, no send before the fault, no close before r
   assert.deepEqual(stallReasons(early), ['1 revoked-Channel sends before the fault (socket loop not blocked)']);
   const edge = holdsFixture(); edge.sendTiming!.records[0] = { channelId: 'c0', beforeMs: 39_698, afterMs: 39_698 };
   assert.deepEqual(stallReasons(edge), []);
-  const closed = holdsFixture(); closed.targets[2].close = { at: TIMES.resume - 1, code: 1008 };
-  assert.deepEqual(stallReasons(closed), ['a target socket closed before resume']);
-  const proxyClosed = holdsFixture(); proxyClosed.targets[2].stall.closes = [{ at: TIMES.resume - 1, side: 'upstream' }];
-  assert.deepEqual(stallReasons(proxyClosed), ['a target socket closed before resume']);
-  const closedAfter = holdsFixture(); closedAfter.targets[2].close = { at: TIMES.resume, code: 1008 };
-  assert.deepEqual(stallReasons(closedAfter), []);
+});
+
+test('floor 2c: no close evidence before resume + 1.5 s from the client, the proxy or the server', () => {
+  const margin = TIMES.resume + 1_500;
+  const client = (at: number) => { const run = holdsFixture(); run.targets[2].close = { at, code: 1008 }; return stallReasons(run); };
+  assert.deepEqual(client(TIMES.resume), ['a target socket closed before resume + 1.5 s']);
+  assert.deepEqual(client(margin - 1), ['a target socket closed before resume + 1.5 s']);
+  assert.deepEqual(client(margin), []);
+  const proxy = (at: number) => { const run = holdsFixture(); run.targets[2].stall.closes = [{ at, side: 'upstream' }]; return stallReasons(run); };
+  assert.deepEqual(proxy(margin - 1), ['a target socket closed before resume + 1.5 s']);
+  assert.deepEqual(proxy(margin), []);
+  const server = (at: number) => { const run = holdsFixture(); run.serverCloses = [at]; return stallReasons(run); };
+  assert.deepEqual(server(margin - 1), ['the server closed a socket before resume + 1.5 s']);
+  assert.deepEqual(server(margin), []);
+  const judged = holdsFixture(); judged.serverCloses = [margin - 1];
+  assert.equal(judgeHolds(judged).verdict, 'INVALID');
+});
+
+test('floor 1: readiness counts at the stall, not later', () => {
+  const late = holdsFixture();
+  late.setup.targetsReadyAtStall = 31; // the 32nd subscribed only after the stall started
+  assert.ok(late.targets.every(t => t.subscribed));
+  assert.deepEqual(setupReasons(late), ['not every socket was ready when the stall started']);
+  const ready = holdsFixture(); ready.targets[3].subscribed = false; // the final flag alone does not count
+  assert.deepEqual(setupReasons(ready), []);
+});
+
+test('floor 1: the restore completes by P + 2.5 s and starts after the fault is certainly on', () => {
+  const restore = (kind: 'fault' | 'control', startedAt: number, doneAt: number, gateOn: [number, number] = [GATE_ON, GATE_ON]) => {
+    const run = holdsFence(); run.kind = kind; if (kind === 'control') run.duration = undefined;
+    run.times.gateOn = gateOn;
+    Object.assign(run.accounts[1], { restoreStartedAt: startedAt, restoredAt: doneAt });
+    return setupReasons(run);
+  };
+  assert.deepEqual(restore('fault', 42_000, 42_500), []);
+  assert.deepEqual(restore('fault', 42_000, 42_501), ['the restore did not complete by P + 2.5 s']);
+  assert.deepEqual(restore('control', 42_000, 42_500), []);
+  assert.deepEqual(restore('control', 42_000, 42_501), ['the restore did not complete by P + 2.5 s']);
+  // The gate-on acknowledgement bounds the certain fault: a restore before it is INVALID.
+  assert.deepEqual(restore('fault', 39_800, 40_000, [39_700, 39_800]), []);
+  assert.deepEqual(restore('fault', 39_799, 40_000, [39_700, 39_800]), ['the restore started before the fault was certainly on']);
+  assert.deepEqual(restore('control', 39_000, 40_000), []);
+  const missing = holdsFence(); delete missing.accounts[1].restoredAt;
+  assert.deepEqual(setupReasons(missing), ['the restore mutation failed']);
 });
 
 test('floor 3: the high-water mark reaches 0.75 x min(T, 4096)', () => {
@@ -89,6 +135,7 @@ function holdsFence(duration: 'short' | 'long' = 'short') {
   run.cell = 'Hfence'; run.duration = duration;
   run.revokedChannels = Array.from({ length: 64 }, (_, i) => `c${i}`);
   run.targets = Array.from({ length: 64 }, (_, i) => target(i));
+  run.setup.targetsReadyAtStall = 64;
   run.accounts = [run.accounts[0], { revokeStartedAt: 37_000, revokedAt: 37_200, revokeStatus: 200, restoreStartedAt: 42_000, restoredAt: 42_050, restoreStatus: 200 }];
   run.notices = []; run.sendTiming!.records = [];
   run.samples = run.samples.map(s => ({ ...s, highWaterMark: s.serverMs >= 39_750 ? 4096 : 0, retryAttempts: s.serverMs >= 41_800 ? 3 * 4096 : 0 }));
@@ -167,8 +214,10 @@ test('fault-window gates: probes healthy, HTTP all successful, no pool timeouts'
   assert.deepEqual(faultWindowReasons(late), []);
   const pool = holdsFixture(); pool.pool[2].fields.acquire_timeout = 2;
   assert.ok(faultWindowReasons(pool).includes('2 pool acquire timeouts in the fault window'));
+  // Missing pool brackets are floor 1 (INVALID), never a gate that silently passes.
   const noPool = holdsFixture(); noPool.pool = [];
-  assert.ok(faultWindowReasons(noPool).includes('pool acquire timeouts unavailable in the fault window'));
+  assert.equal(judgeHolds(noPool).verdict, 'INVALID');
+  assert.ok(judgeHolds(noPool).floorReasons.includes('pool samples do not bracket the fault window'));
   const none = holdsFixture(); none.dbProbe = none.dbProbe.filter(p => p.at < 39_700 || p.at >= 43_500);
   assert.deepEqual(faultWindowReasons(none), ['no database or HTTP probe in the fault window']);
 });
@@ -182,9 +231,14 @@ test('the #592 recovery rules still apply', () => {
 
 test('holds end: zero active holds, no timeouts, no bystander closes, residual >= 0', () => {
   assert.deepEqual(holdsEndReasons(holdsFixture()), []);
-  // The first sample certainly at or after 53_500 is 53_750 (low 53_749); 53_500 (low 53_499) is not.
-  const before = holdsFixture(); before.samples = before.samples.map(s => s.serverMs === 53_500 ? { ...s, activeHolds: 7 } : s);
+  // Offset ±1: 53_250 (high 53_251) is certainly before 53_500 and never counts; 53_500 (high 53_501)
+  // may be the first sample after it, so it counts; 53_750 is the first certainly after it.
+  const before = holdsFixture(); before.samples = before.samples.map(s => s.serverMs === 53_250 ? { ...s, activeHolds: 7 } : s);
   assert.deepEqual(holdsEndReasons(before), []);
+  const maybe = holdsFixture(); maybe.samples = maybe.samples.map(s => s.serverMs === 53_500 ? { ...s, activeHolds: 7 } : s);
+  assert.deepEqual(holdsEndReasons(maybe), ['7 active holds at recovery + 10 s']);
+  const later = holdsFixture(); later.samples = later.samples.map(s => s.serverMs === 54_000 ? { ...s, activeHolds: 7 } : s);
+  assert.deepEqual(holdsEndReasons(later), []);
   const active = holdsFixture(); active.samples = active.samples.map(s => s.serverMs === 53_750 ? { ...s, activeHolds: 1 } : s);
   assert.deepEqual(holdsEndReasons(active), ['1 active holds at recovery + 10 s']);
   const timeout = holdsFixture(); timeout.metrics!.revocation_retired_timeout = 1;
@@ -193,8 +247,6 @@ test('holds end: zero active holds, no timeouts, no bystander closes, residual >
   assert.deepEqual(holdsEndReasons(bystander), ['1 bystander sockets closed during the run']);
   const residual = holdsFixture(); residual.metrics!.revocation_held = 511;
   assert.ok(holdsEndReasons(residual).includes('hold residual -1 < 0'));
-  const missing = holdsFixture(); delete missing.metrics;
-  assert.deepEqual(holdsEndReasons(missing), ['no metrics event after the holds resolved']);
   const drain = holdsFixture(); drain.notices[0].at = 53_501;
   assert.ok(holdsEndReasons(drain).includes('a revocation arrived after the drain limit'));
   const delivered = holdsFixture(); delivered.notices[0].at = 43_000; delivered.sendTiming!.records[0] = { channelId: 'c0', beforeMs: 43_600, afterMs: 43_600 };
@@ -258,6 +310,9 @@ test('cell x duration verdict: three valid PASS repeats; any FAIL fails; INVALID
   assert.equal(verdictByCell([r('PASS'), r('PASS'), r('INVALID')])['H512/short'], 'NOT EVALUATED');
   assert.equal(verdictByCell([r('PASS'), r('PASS'), r('INVALID'), r('PASS')])['H512/short'], 'PASS');
   assert.equal(verdictByCell([r('PASS'), r('FAIL')])['H512/short'], 'FAIL');
+  // Exactly the first three valid repeats count: a fourth FAIL is ignored.
+  assert.equal(verdictByCell([r('PASS'), r('INVALID'), r('PASS'), r('PASS'), r('FAIL')])['H512/short'], 'PASS');
+  assert.equal(verdictByCell([r('PASS'), r('PASS'), r('FAIL'), r('PASS')])['H512/short'], 'FAIL');
   assert.equal(verdictByCell([r('PASS'), r('PASS'), r('PASS')])['H512/long'], 'NOT EVALUATED');
   assert.equal(verdictByCell([{ ...r('PASS'), kind: 'control' as const }])['H512/short'], 'NOT EVALUATED');
 });
@@ -282,8 +337,16 @@ test('memory: FAIL, measured within bound, upper bound only, NOT EVALUATED', () 
 test('RSS delta: peak in [fault, recovery + 10 s) minus the median 10 s before the stall', () => {
   const run = holdsFixture();
   run.rss = [{ at: 30_000, kb: 100 }, { at: 31_000, kb: 300 }, { at: 32_000, kb: 200 }, { at: 37_000, kb: 9_999 }, { at: 40_000, kb: 700 }, { at: 53_499, kb: 900 }, { at: 53_500, kb: 5_000 }];
-  assert.equal(rssDeltaKb(run, run.times.recovery), 700);
-  assert.ok(Number.isNaN(rssDeltaKb({ ...run, rss: [] }, run.times.recovery)));
+  assert.equal(rssDeltaKb(run, GATE_OFF), 700);
+  assert.ok(Number.isNaN(rssDeltaKb({ ...run, rss: [] }, GATE_OFF)));
+  // An even baseline count uses the mean of the two middle samples: 900 - 200.
+  run.rss = [{ at: 30_000, kb: 100 }, { at: 31_000, kb: 300 }, { at: 40_000, kb: 900 }];
+  assert.equal(rssDeltaKb(run, GATE_OFF), 700);
+  assert.deepEqual([median([3, 1, 2]), median([4, 1, 3, 2]), median([])], [2, 2.5, NaN]);
+  // The peak window opens when the gate-on statement was sent.
+  run.times.gateOn = [39_000, 39_700];
+  run.rss = [{ at: 30_000, kb: 100 }, { at: 39_000, kb: 2_100 }];
+  assert.equal(rssDeltaKb(run, GATE_OFF), 2_000);
 });
 
 test('memory groups use valid runs and each control at the matching nominal recovery', () => {
@@ -304,10 +367,70 @@ test('memory groups use valid runs and each control at the matching nominal reco
   assert.deepEqual(groups['H512/short'], { result: 'measured within bound', dKb: 4000, nKb: 0, bKb: 8192 });
   assert.equal(groups['H512/long'].result, 'NOT EVALUATED');
   assert.equal(memoryByCell(entries.slice(0, 6))['H512/short'].result, 'NOT EVALUATED');
+  // Exactly three of each: a fourth valid fault or control is ignored.
+  const extra = [...entries, memoryEntry(fault(100_000), 'PASS', 4096), memoryEntry(control(90_000, 0), 'CONTROL', 0)];
+  assert.deepEqual(memoryByCell(extra)['H512/short'], groups['H512/short']);
+  // A valid fault without a holds-end HWM cannot be evaluated.
+  const noHwm = [memoryEntry(fault(5000), 'PASS', undefined), ...entries.slice(1)];
+  assert.equal(memoryByCell(noHwm)['H512/short'].result, 'NOT EVALUATED');
 });
 
 test('the fixture uses every revoked Channel on every target socket', () => {
   const run = holdsFixture();
   assert.equal(run.notices.length, 32 * CHANNELS.length);
   assert.equal(sample(0).highWaterMark, 0);
+});
+
+test('gate bounds: health spans the widest interval, sends are judged against the certain one', () => {
+  const widened = () => { const run = holdsFixture(); run.times.gateOn = [39_700, 39_800]; run.times.gateOff = [43_500, 43_600]; return run; };
+  assert.equal(judgeHolds(widened()).verdict, 'PASS');
+  // A probe failure while the gate-on statement is in flight counts as a fault-window failure.
+  const onFlight = widened(); onFlight.dbProbe[795] = { ...onFlight.dbProbe[795], ok: false }; // at 39_750
+  assert.deepEqual(faultWindowReasons(onFlight), ['1 database probe failures in the fault window']);
+  const offFlight = widened(); offFlight.httpProbe[871] = { ...offFlight.httpProbe[871], ok: false, status: 503 }; // at 43_550
+  assert.ok(faultWindowReasons(offFlight).includes('1 HTTP probe failures in the fault window'));
+  // A send after the gate-off statement was sent may follow the release: not a FAIL.
+  const send = (ms: number) => { const run = widened(); run.sendTiming!.records[0] = { channelId: 'c0', beforeMs: ms, afterMs: ms }; return noticeCorrectness(run).reasons; };
+  assert.deepEqual(send(43_550), []);
+  assert.deepEqual(send(43_499), ['a revocation send time is indeterminate at a fault edge']);
+  assert.deepEqual(send(43_000), ['a revocation was sent while the failure was active']);
+  // A send before the gate-on statement was sent is a stall failure (floor 2b), not a gate.
+  const early = widened(); early.sendTiming!.records[0] = { channelId: 'c0', beforeMs: 39_697, afterMs: 39_697 };
+  assert.deepEqual(stallReasons(early), ['1 revoked-Channel sends before the fault (socket loop not blocked)']);
+  // The recovery rules hold at both release ends.
+  // The recovery rules hold at both release ends: [43_500, 53_500) and [43_600, 53_600).
+  const failAt = (index: number) => { const run = widened(); run.dbProbe[index] = { ...run.dbProbe[index], ok: false }; return recoveryGateReasons(run); };
+  assert.deepEqual(failAt(1071), ['1 database probe failures after recovery']); // 53_550: latest end only
+  assert.deepEqual(failAt(871), ['1 database probe failures after recovery']); // 43_550: earliest end only
+  assert.deepEqual(failAt(1073), []); // 53_650: neither
+});
+
+test('an HTTP failure at the release instant is caught only by the after-recovery rule', () => {
+  const run = holdsFixture();
+  run.httpProbe[870] = { ...run.httpProbe[870], ok: false, status: 503 }; // at 43_500, before the first recovery success
+  assert.deepEqual(recoveryGateReasons(run), []);
+  assert.deepEqual(faultWindowReasons(run), ['1 HTTP probe failures in the 10 s after recovery']);
+  assert.deepEqual(judgeHolds(run).reasons, ['1 HTTP probe failures in the 10 s after recovery']);
+});
+
+test('the retry peak is reported per phase as a sampled lower bound', () => {
+  const run = holdsFixture();
+  // Fault: 0 at 40_000 to 1024 at 41_000, 1 s apart. Recovery: +300 between 50_000 and 50_250.
+  run.samples = run.samples.map(s => ({ ...s, retryAttempts: s.serverMs >= 50_250 ? 1836 : s.serverMs >= 41_800 ? 1536 : s.serverMs >= 40_800 ? 1024 : s.serverMs >= 40_300 ? 512 : 0 }));
+  assert.deepEqual(informational(run).retryAttemptPeakPerSecondLowerBound, { fault: 1024, recovery: 300 });
+});
+
+test('a rehearsal reports counts only, with no verdict', () => {
+  const run = holdsFixture(); run.serverCloses = [1]; run.targets[0].close = { at: 70_000, code: 1000 };
+  const counts = rehearsalCounts(run);
+  assert.deepEqual(counts.stallBytesAfterResume, { min: 64_000, median: 64_000, max: 64_000 });
+  assert.deepEqual(counts.stallMessagesAfterResume, { min: 1, median: 1, max: 1 });
+  assert.deepEqual(counts.closes, { targetClient: 1, proxy: 0, bystander: 0, server: 1 });
+  assert.equal(counts.highWaterMarkAtHoldsEnd, 512);
+  assert.equal(counts.retriesInFault, 1536);
+  assert.deepEqual(counts.gate, { on: [GATE_ON, GATE_ON], off: [GATE_OFF, GATE_OFF], onMs: 0, offMs: 0 });
+  assert.deepEqual(counts.mutationsMs.revoke, { min: 100, median: 100, max: 100 });
+  assert.equal(counts.mutationsMs.restore, null);
+  const text = JSON.stringify(counts);
+  for (const word of ['verdict', 'PASS', 'FAIL', 'INVALID', 'CONTROL', 'reasons', 'result']) assert.ok(!text.includes(word), word);
 });

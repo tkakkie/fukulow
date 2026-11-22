@@ -12,9 +12,17 @@ export function timedSamples(run: Pick<HoldsRun, 'samples' | 'sendTiming'>): Tim
     .sort((a, b) => a.serverMs - b.serverMs);
 }
 
-/** The first sample certainly at or after recovery + 10 s. */
-export const holdsEndSample = (samples: TimedSample[], recovery: number) =>
-  samples.find(s => s.low >= recovery + TIMELINE.holdsEndAfterRecovery);
+/**
+ * Every sample that may be the first at or after recovery + 10 s, for a release anywhere in
+ * [earliest, latest]: from the first that may lie after earliest + 10 s through the first that
+ * certainly lies after latest + 10 s. Empty when no sample certainly lies after it.
+ */
+export function holdsEndSamples(samples: TimedSample[], earliest: number, latest: number) {
+  const last = samples.findIndex(s => s.low >= latest + TIMELINE.holdsEndAfterRecovery);
+  if (last < 0) return [];
+  const first = samples.findIndex(s => s.high >= earliest + TIMELINE.holdsEndAfterRecovery);
+  return samples.slice(first, last + 1);
+}
 
 /**
  * Started retry rechecks inside [from, to), as a lower bound: the difference between the first

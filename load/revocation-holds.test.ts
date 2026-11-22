@@ -4,7 +4,7 @@ import { connect, createServer, type AddressInfo, type Socket } from 'node:net';
 import { test } from 'node:test';
 import { emptyLog, readLogLine } from './revocation-holds-log.ts';
 import { CELL_NAMES, checkStall, parseOptions, planRuns, potentialHolds, restoreAccount, runId, socketAccount, stallBody, STALL_DEFAULT, targetSockets } from './revocation-holds-plan.ts';
-import { holdsEndSample, retriesWithin, retryPeakPerSecond, timedSamples } from './revocation-holds-samples.ts';
+import { holdsEndSamples, retriesWithin, retryPeakPerSecond, timedSamples } from './revocation-holds-samples.ts';
 import { bytesBetween, StallProxy } from './revocation-holds-stall.ts';
 
 test('fixture shapes match the pre-registered matrix', () => {
@@ -28,8 +28,14 @@ test('the default plan has 30 fault runs and 15 controls, interleaved', () => {
 
 test('options validate cells, durations, repeats, controls and the stall', () => {
   const defaults = parseOptions(['--out', '/x']);
-  assert.deepEqual(defaults, { out: '/x', cells: CELL_NAMES, durations: ['short', 'long'], repeats: 3, controls: true, stall: STALL_DEFAULT });
-  assert.deepEqual(parseOptions(['--out', '/x', '--cells', 'H512,Hcap', '--durations', 'long', '--repeats', '1', '--controls', 'off']).cells, ['H512', 'Hcap']);
+  assert.deepEqual(defaults, { out: '/x', cells: CELL_NAMES, durations: ['short', 'long'], repeats: 3, controls: true, rehearsal: false, stall: STALL_DEFAULT });
+  const rehearsal = parseOptions(['--out', '/x', '--cells', 'H512,Hcap', '--durations', 'long', '--repeats', '1', '--controls', 'off', '--rehearsal']);
+  assert.deepEqual([rehearsal.cells, rehearsal.repeats, rehearsal.controls, rehearsal.rehearsal], [['H512', 'Hcap'], 1, false, true]);
+  // A formal run is the registered 3 repeats with controls; a subset of cells is a formal rerun.
+  assert.throws(() => parseOptions(['--out', '/x', '--repeats', '1']), /formal run/);
+  assert.throws(() => parseOptions(['--out', '/x', '--repeats', '4']), /formal run/);
+  assert.throws(() => parseOptions(['--out', '/x', '--controls', 'off']), /formal run/);
+  assert.equal(parseOptions(['--out', '/x', '--cells', 'Hcap', '--durations', 'long']).rehearsal, false);
   assert.throws(() => parseOptions([]), /--out/);
   assert.throws(() => parseOptions(['--out', '/x', '--cells', 'H9']), /--cells/);
   assert.throws(() => parseOptions(['--out', '/x', '--durations', 'medium']), /--durations/);
@@ -60,11 +66,12 @@ test('the log reader keeps holds samples, send records, clock samples and 60 s e
   readLogLine(log, line(measurement, { event: 'revocation_clock_sample', server_ms: 4 }), 1);
   readLogLine(log, line('fukulow', { event: 'metrics', revocation_held: 2, label: 'x' }), 7);
   readLogLine(log, line('fukulow', { event: 'pool_stats', waiting: 1 }), 8);
+  readLogLine(log, line('fukulow', { event: 'websocket_closed', reason: 'revoked' }), 8.5);
   readLogLine(log, 'not json', 9);
   assert.deepEqual(log, {
     clock: [4], sends: [{ channelId: 'c', beforeMs: 5, afterMs: 6, afterHold: true }],
     holds: [{ serverMs: 12.5, activeHolds: 3, highWaterMark: 9, retryAttempts: 40 }],
-    pool: [{ at: 8, fields: { waiting: 1 } }], metrics: [{ at: 7, fields: { revocation_held: 2 } }],
+    pool: [{ at: 8, fields: { waiting: 1 } }], metrics: [{ at: 7, fields: { revocation_held: 2 } }], closes: [8.5],
   });
 });
 
@@ -80,8 +87,14 @@ test('samples convert to the harness clock and bracket windows conservatively', 
   assert.equal(retriesWithin(samples, 1_100, 1_610).retries, 400);
   assert.equal(retriesWithin(samples, 1_101, 1_609).retries, 0);
   assert.equal(retriesWithin(samples, 1_101, 1_860).retries, 850);
-  assert.equal(holdsEndSample(samples, 1_350 - 10_000)?.serverMs, 1_250);
-  assert.equal(holdsEndSample(samples, 1_351 - 10_000)?.serverMs, 1_500);
+  const end = (earliest: number, latest: number) => holdsEndSamples(samples, earliest - 10_000, latest - 10_000).map(s => s.serverMs);
+  assert.deepEqual(end(1_350, 1_350), [1_250]);
+  // 1_250 (high 1_360) may lie after 1_351; 1_500 (low 1_600) certainly does.
+  assert.deepEqual(end(1_351, 1_351), [1_250, 1_500]);
+  assert.deepEqual(end(1_361, 1_361), [1_500]);
+  // A release anywhere in [1_100, 1_351]: every sample that may be the first after it.
+  assert.deepEqual(end(1_100, 1_351), [1_000, 1_250, 1_500]);
+  assert.deepEqual(end(1_100, 1_851), []);
   assert.equal(retryPeakPerSecond(samples, 0, 2_000), 900);
   assert.equal(retryPeakPerSecond(samples, 1_200, 2_000), 850);
   assert.deepEqual(timedSamples({ samples: [], sendTiming: undefined }), []);
@@ -123,16 +136,27 @@ test('the stall proxy stops reading upstream while paused and records the backlo
   assert.deepEqual([proxy.record.pausedAt, proxy.record.resumedAt], [[10], [20]]);
 });
 
-test('a paused proxy lets the server-side send buffer fill', { timeout: 10_000 }, async t => {
-  const { proxy, upstream } = await proxied(t);
-  proxy.pause();
+test('a paused proxy backs up into the kernel: the server-side write stays queued, then every byte arrives', { timeout: 15_000 }, async t => {
+  const { proxy, client, upstream, setNow } = await proxied(t);
+  let received = 0;
+  client.on('data', (chunk: Buffer) => { received += chunk.length; });
+  setNow(10); proxy.pause();
   const chunk = Buffer.alloc(64 * 1024);
   let written = 0;
-  while (upstream.write(chunk) && written < 256 * 1024 * 1024) { written += chunk.length; await new Promise(r => setImmediate(r)); }
-  assert.ok(upstream.writableNeedDrain, 'the server-side write must report backpressure');
-  const drained = once(upstream, 'drain');
-  proxy.resume();
-  await drained;
+  // Write until the bytes stay queued in user space after a pause of 200 ms: the kernel send and
+  // receive buffers are then full, because nothing reads the proxy's upstream socket.
+  for (let stuck = false; !stuck && written < 256 * 1024 * 1024;) {
+    upstream.write(chunk); written += chunk.length;
+    if (upstream.writableLength > 0) { await new Promise(r => setTimeout(r, 200)); stuck = upstream.writableLength > 0; }
+  }
+  assert.ok(upstream.writableLength > 0, 'the server-side write must stay queued while paused');
+  assert.equal(bytesBetween(proxy.record, 10, Infinity), 0, 'the proxy must not read while paused');
+  assert.equal(received, 0);
+  setNow(20); proxy.resume();
+  if (upstream.writableLength > 0) await once(upstream, 'drain');
+  while (received < written) await new Promise(r => setTimeout(r, 20));
+  assert.equal(received, written);
+  assert.equal(bytesBetween(proxy.record, 20, Infinity), written);
 });
 
 test('the stall proxy records closes and serves one WebSocket only', { timeout: 5000 }, async t => {

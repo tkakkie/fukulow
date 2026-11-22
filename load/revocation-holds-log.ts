@@ -2,8 +2,9 @@
 import type { PoolSample, SendRecord } from './revocation-burst-judgment.ts';
 import type { HoldsSample } from './revocation-holds-judgment.ts';
 
-export type ServerLog = { clock: number[]; sends: SendRecord[]; holds: HoldsSample[]; pool: PoolSample[]; metrics: PoolSample[] };
-export const emptyLog = (): ServerLog => ({ clock: [], sends: [], holds: [], pool: [], metrics: [] });
+// closes: harness arrival of each `websocket_closed` event, logged before the server sends Close.
+export type ServerLog = { clock: number[]; sends: SendRecord[]; holds: HoldsSample[]; pool: PoolSample[]; metrics: PoolSample[]; closes: number[] };
+export const emptyLog = (): ServerLog => ({ clock: [], sends: [], holds: [], pool: [], metrics: [], closes: [] });
 
 const finite = (...values: unknown[]): boolean => values.every(v => typeof v === 'number' && Number.isFinite(v));
 
@@ -25,4 +26,5 @@ export function readLogLine(log: ServerLog, line: string, at: number) {
   const numeric = Object.fromEntries(Object.entries(f).filter(([, v]) => typeof v === 'number')) as Record<string, number>;
   if (f.event === 'pool_stats') log.pool.push({ at, fields: numeric });
   if (f.event === 'metrics') log.metrics.push({ at, fields: numeric });
+  if (f.event === 'websocket_closed') log.closes.push(at);
 }

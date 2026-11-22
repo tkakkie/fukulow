@@ -1,25 +1,51 @@
-// #668 validity floor. A run below it is INVALID, never PASS or FAIL.
-import { within } from './revocation-burst-judgment.ts';
+// #668 validity floor. A run below it is INVALID, never PASS or FAIL. A missing input never
+// clears a floor or a gate: it fails the floor here.
+import { THRESHOLDS, within, type PoolSample } from './revocation-burst-judgment.ts';
 import { bytesBetween } from './revocation-holds-stall.ts';
-import { holdsEndSample, retriesWithin, timedSamples } from './revocation-holds-samples.ts';
-import { baselineWindow, CELLS, GLOBAL_CAP, potentialHolds, restoreAccount, SOCKETS_PER_ACCOUNT, TIMELINE } from './revocation-holds-plan.ts';
-import type { HoldsRun } from './revocation-holds-judgment.ts';
+import { holdsEndSamples, retriesWithin, timedSamples } from './revocation-holds-samples.ts';
+import { baselineWindow, BYSTANDERS, CELLS, edges, GLOBAL_CAP, potentialHolds, restoreAccount, SOCKETS_PER_ACCOUNT, targetSockets, TIMELINE } from './revocation-holds-plan.ts';
+import { REQUIRED_COUNTERS, type HoldsRun } from './revocation-holds-judgment.ts';
 
-/** Floor 1: sockets, mutations, baseline probes, clock calibrations and holds samples. */
+/** A cumulative pool counter needs a sample at or before `from` and one at or after `to`. */
+export function poolBracketed(samples: PoolSample[], from: number, to: number) {
+  const before = [...samples].reverse().find(s => s.at <= from), after = samples.find(s => s.at >= to);
+  return !!before && !!after && before.at < after.at && Number.isFinite(before.fields.acquire_timeout) && Number.isFinite(after.fields.acquire_timeout);
+}
+
+function restoreReasons(run: HoldsRun) {
+  const restored = restoreAccount(run.cell);
+  if (restored === undefined) return [];
+  const a = run.accounts[restored];
+  if (a?.restoreStatus !== 200 || a.restoredAt === undefined || a.restoreStartedAt === undefined) return ['the restore mutation failed'];
+  const reasons: string[] = [];
+  if (a.restoredAt > run.times.pass + TIMELINE.restoreDeadline) reasons.push('the restore did not complete by P + 2.5 s');
+  if (run.kind === 'fault' && a.restoreStartedAt < edges(run.times).certainFrom) reasons.push('the restore started before the fault was certainly on');
+  return reasons;
+}
+
+/** Floor 1: sockets, mutations, baseline probes, clock calibrations, samples, counters, pool brackets. */
 export function setupReasons(run: HoldsRun) {
   const reasons: string[] = [];
-  const { fault, recovery } = run.times;
-  if (!run.targets.every(t => t.ready && t.subscribed) || run.setup.bystandersReady < run.setup.bystanders) reasons.push('not every socket was ready');
-  if (run.accounts.some(a => a.revokeStatus !== 200 || a.revokedAt === undefined || !(a.revokedAt < fault))) reasons.push('a revoke mutation failed or completed after the fault started');
-  const restored = restoreAccount(run.cell);
-  if (restored !== undefined && run.accounts[restored]?.restoreStatus !== 200) reasons.push('the restore mutation failed');
+  const e = edges(run.times);
+  if (run.setup.targetsReadyAtStall < targetSockets(run.cell) || run.setup.bystandersReadyAtStall < BYSTANDERS) reasons.push('not every socket was ready when the stall started');
+  if (run.accounts.length !== CELLS[run.cell].accounts || run.accounts.some(a => a.revokeStatus !== 200 || a.revokedAt === undefined || !(a.revokedAt < e.healthFrom))) reasons.push('a revoke mutation failed or completed after the fault started');
+  reasons.push(...restoreReasons(run));
   const [from, to] = baselineWindow(run);
-  if (!within(run.dbProbe, from, to).length || !within(run.httpProbe, from, to).length) reasons.push('missing baseline probes');
+  // At least one successful probe of each kind keeps the baseline p99 finite.
+  if (!within(run.dbProbe, from, to).some(p => p.ok) || !within(run.httpProbe, from, to).some(p => p.ok)) reasons.push('missing successful baseline probes');
   if (run.setup.calibrationErrors.length || !run.sendTiming) reasons.push('a clock calibration is invalid');
   const samples = timedSamples(run);
-  const windows: [string, number, number][] = [['baseline', from, to], ['fault', fault, recovery], ['recovery', recovery, recovery + TIMELINE.holdsEndAfterRecovery]];
+  const windows: [string, number, number][] = [['baseline', from, to], ['fault', e.certainFrom, e.certainTo], ['recovery', e.recoveryEarliest, e.recoveryEarliest + TIMELINE.holdsEndAfterRecovery]];
   for (const [name, start, end] of windows) if (!samples.some(s => s.at >= start && s.at < end)) reasons.push(`no holds sample in the ${name} window`);
-  if (!holdsEndSample(samples, recovery)) reasons.push('no holds sample at or after recovery + 10 s');
+  if (!holdsEndSamples(samples, e.recoveryEarliest, e.recoveryLatest).length) reasons.push('no holds sample at or after recovery + 10 s');
+  if (run.kind === 'fault') {
+    const m = run.metrics;
+    if (!m) reasons.push('no metrics event after the drain');
+    else for (const key of REQUIRED_COUNTERS) if (!Number.isFinite(m[key])) reasons.push(`missing counter ${key}`);
+    const recoveryEnd = e.recoveryLatest + THRESHOLDS.recoveryWindowSeconds * 1000;
+    if (!poolBracketed(run.pool, e.healthFrom, e.healthTo)) reasons.push('pool samples do not bracket the fault window');
+    if (!poolBracketed(run.pool, e.recoveryEarliest, recoveryEnd)) reasons.push('pool samples do not bracket the recovery window');
+  }
   return reasons;
 }
 
@@ -27,13 +53,14 @@ export function setupReasons(run: HoldsRun) {
  * Floor 2, made measurable:
  * (a) after its resume, every target socket's proxy read server bytes and the client then
  *     received at least one stall Message, so a backlog existed through the pause;
- * (b) no revoked-Channel send record lies certainly before the fault: an unblocked socket loop
- *     would have sent the queued notice right after the revoke;
- * (c) no target socket (client or proxy side) closed before its resume.
+ * (b) no revoked-Channel send record lies certainly before the gate-on statement: an unblocked
+ *     socket loop would have sent the queued notice right after the revoke;
+ * (c) no close evidence before resume + 1.5 s: a target close seen by the client or the proxy,
+ *     or any server `websocket_closed` event (it carries no socket identity, so any counts).
  */
 export function stallReasons(run: HoldsRun) {
   const reasons: string[] = [];
-  const backlog = run.targets.every(t => {
+  const backlog = run.targets.length === targetSockets(run.cell) && run.targets.every(t => {
     const resumed = t.stall.resumedAt[0];
     return t.stall.pausedAt.length > 0 && resumed !== undefined &&
       bytesBetween(t.stall, resumed, Infinity) > 0 && t.stallMessagesAt.some(at => at >= resumed);
@@ -43,24 +70,28 @@ export function stallReasons(run: HoldsRun) {
   if (timing) {
     const offset = (timing.offsetBoundsMs[0] + timing.offsetBoundsMs[1]) / 2;
     const revoked = new Set(run.revokedChannels);
-    const early = timing.records.filter(r => revoked.has(r.channelId) && offset + (r.beforeMs + r.afterMs) / 2 + timing.uncertaintyMs < run.times.fault);
+    const early = timing.records.filter(r => revoked.has(r.channelId) && offset + (r.beforeMs + r.afterMs) / 2 + timing.uncertaintyMs < edges(run.times).sendFrom);
     if (early.length) reasons.push(`${early.length} revoked-Channel sends before the fault (socket loop not blocked)`);
   }
-  const closedEarly = run.targets.some(t => {
-    const resumed = t.stall.resumedAt[0] ?? Infinity;
-    return (t.close && t.close.at < resumed) || t.stall.closes.some(c => c.at < resumed);
+  const limit = (resumed: number | undefined) => (resumed ?? Infinity) + TIMELINE.closeMargin;
+  const targetClosed = run.targets.some(t => {
+    const before = limit(t.stall.resumedAt[0]);
+    return (t.close && t.close.at < before) || t.stall.closes.some(c => c.at < before);
   });
-  if (closedEarly) reasons.push('a target socket closed before resume');
+  if (targetClosed) reasons.push('a target socket closed before resume + 1.5 s');
+  if (run.serverCloses.some(at => at < limit(run.times.resume))) reasons.push('the server closed a socket before resume + 1.5 s');
   return reasons;
 }
 
 export function holdsValues(run: HoldsRun) {
   const samples = timedSamples(run);
+  const e = edges(run.times);
   const m = run.metrics;
   const restored = restoreAccount(run.cell);
   const T = potentialHolds(run.cell);
-  const hwm = holdsEndSample(samples, run.times.recovery)?.highWaterMark ?? 0;
-  const retries = retriesWithin(samples, run.times.fault, run.times.recovery);
+  // The earliest candidate holds-end sample: HWM is monotone, so this is the lowest reading.
+  const hwm: number | undefined = holdsEndSamples(samples, e.recoveryEarliest, e.recoveryLatest)[0]?.highWaterMark;
+  const retries = retriesWithin(samples, e.certainFrom, e.certainTo);
   const fenced = m?.revocation_retired_fenced;
   return {
     potentialHolds: T, hwm, hwmFloor: 0.75 * Math.min(T, GLOBAL_CAP),
@@ -69,18 +100,23 @@ export function holdsValues(run: HoldsRun) {
     retriesInFault: retries.retries, retryWindowServerMs: retries.start && retries.end ? [retries.start.serverMs, retries.end.serverMs] : null,
     retiredRetries: m?.revocation_retired_retries,
     // Floor 5's L: holds that can only end by retries.
-    longHolds: restored === undefined ? hwm : hwm - (fenced ?? 0),
+    longHolds: hwm === undefined ? undefined : restored === undefined ? hwm : fenced === undefined ? undefined : hwm - fenced,
   };
 }
 
-/** Floors 3 to 5: holds and retries exercised. */
+const below = (value: number | undefined, floor: number) => value === undefined || !Number.isFinite(value) || !(value >= floor);
+const show = (value: number | undefined) => value ?? 'missing';
+
+/** Floors 3 to 5: holds and retries exercised. Missing inputs fail. */
 export function holdsReasons(run: HoldsRun, v: ReturnType<typeof holdsValues>) {
   const reasons: string[] = [];
-  if (!(v.hwm >= v.hwmFloor)) reasons.push(`high-water mark ${v.hwm} < ${v.hwmFloor}`);
-  if (v.globalCapFloor !== undefined && !((v.globalCap ?? -1) >= v.globalCapFloor)) reasons.push(`global-cap refusals ${v.globalCap ?? 'missing'} < ${v.globalCapFloor}`);
-  if (v.fencedFloor !== undefined && !((v.fenced ?? -1) >= v.fencedFloor)) reasons.push(`fenced holds ${v.fenced ?? 'missing'} < ${v.fencedFloor}`);
-  if (run.duration === 'short' && !(v.retriesInFault >= 2 * v.hwm)) reasons.push(`retry attempts in the fault ${v.retriesInFault} < ${2 * v.hwm}`);
-  if (run.duration === 'long' && !((v.retiredRetries ?? -1) >= 0.75 * v.longHolds)) reasons.push(`retired by retries ${v.retiredRetries ?? 'missing'} < ${0.75 * v.longHolds}`);
+  if (below(v.hwm, v.hwmFloor)) reasons.push(`high-water mark ${show(v.hwm)} < ${v.hwmFloor}`);
+  if (v.globalCapFloor !== undefined && below(v.globalCap, v.globalCapFloor)) reasons.push(`global-cap refusals ${show(v.globalCap)} < ${v.globalCapFloor}`);
+  if (v.fencedFloor !== undefined && below(v.fenced, v.fencedFloor)) reasons.push(`fenced holds ${show(v.fenced)} < ${v.fencedFloor}`);
+  const retryFloor = v.hwm === undefined ? undefined : 2 * v.hwm;
+  if (run.duration === 'short' && (retryFloor === undefined || below(v.retriesInFault, retryFloor))) reasons.push(`retry attempts in the fault ${v.retriesInFault} < ${show(retryFloor)}`);
+  const retiredFloor = v.longHolds === undefined ? undefined : 0.75 * v.longHolds;
+  if (run.duration === 'long' && (retiredFloor === undefined || below(v.retiredRetries, retiredFloor))) reasons.push(`retired by retries ${show(v.retiredRetries)} < ${show(retiredFloor)}`);
   return reasons;
 }
 

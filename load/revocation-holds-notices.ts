@@ -1,6 +1,7 @@
 // #668 notice correctness with several sockets per Member. The send record has no socket
 // identity, so records are matched to client notices by count per Channel.
 import type { SendRecord } from './revocation-burst-judgment.ts';
+import { edges } from './revocation-holds-plan.ts';
 import type { HoldsRun } from './revocation-holds-judgment.ts';
 
 const count = (counts: Map<string, number>, key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -36,7 +37,8 @@ export function noticeCorrectness(run: HoldsRun) {
   if (!timing) reasons.push('no server send timing');
   else {
     const offset = (timing.offsetBoundsMs[0] + timing.offsetBoundsMs[1]) / 2, u = timing.uncertaintyMs;
-    const { fault, recovery } = run.times;
+    // The gate-on statement start and the gate-off statement start (plan.ts edges).
+    const { sendFrom: fault, sendTo: recovery } = edges(run.times);
     for (const record of timing.records) {
       if (!revoked.has(record.channelId)) { wrongRecords.push(record); continue; }
       count(serverCounts, record.channelId);
