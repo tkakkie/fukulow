@@ -49,8 +49,8 @@ export function redactSeedDbLogs(raw: string) {
   }).join('\n');
 }
 
-export async function saveSeedDbLogs(exec: Executor, container: string, path: string) {
+export async function saveSeedDbLogs(exec: Executor, container: string, path: string, timeoutMs = 30_000) {
   // docker logs emits PostgreSQL's stderr on the CLI's stderr even on success.
-  const raw = await checked(exec, { program: 'sh', args: ['-c','exec docker logs --timestamps "$1" 2>&1','db-logs',container], timeout: 30_000 });
+  const raw = await checked(exec, { program: 'sh', args: ['-c','exec docker logs --timestamps "$1" 2>&1','db-logs',container], timeout: timeoutMs });
   writeFileSync(path, redactSeedDbLogs(raw) + '\n', { mode: 0o600 });
 }

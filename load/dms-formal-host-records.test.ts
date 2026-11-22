@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, rmSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Command } from './dms-formal-exec.ts';
-import { copyDockerVmLogs, dockerVmLogDirectory, logShowTime, redactHostText, saveHostLog, startHostSampler } from './dms-formal-host-records.ts';
+import { copyDockerVmLogs, dockerVmLogDirectory, firstTimestampMs, logShowTime, redactHostText, saveHostLog, startHostSampler } from './dms-formal-host-records.ts';
 
 const secret = 'f'.repeat(64);
-const redact = (text: string) => redactHostText(text, { secrets: [secret], home: '/Users/someone', user: 'someone' });
+const redact = (text: string) => redactHostText(text, { secrets: [secret], home: '/Users/someone', user: 'someone', host: 'Someones-MacBook-Pro.local' });
 
 test('host text redaction removes run secrets, credentials, tokens, the home path and the user name', () => {
   const raw = [
@@ -23,7 +23,25 @@ test('host text redaction removes run secrets, credentials, tokens, the home pat
   assert.match(out, /\[user\] logged/);
 });
 
-test('host sampler records cumulative iostat and vm_stat each tick and marks a failed command as missing', async () => {
+test('host text redaction handles short secrets in underscored keys, headers, URIs, sockets and any letter case', () => {
+  const cases: [string, string][] = [
+    ['POSTGRES_PASSWORD=hunter2', 'hunter2'], ['DB_PASSWORD: my-pass', 'my-pass'], ['ACCESS_TOKEN=tok.123', 'tok.123'],
+    ['AWS_SECRET_KEY=ab+cd/ef==', 'ab+cd/ef=='], ['{"api_key":"k1"}', 'k1'],
+    ['Authorization: Basic dXNlcjpwYXNz', 'dXNlcjpwYXNz'], ['Cookie: a=1; session=secret123', 'session=secret123'],
+    ['Set-Cookie: sid=s3; Path=/', 'sid=s3'], ['proxy=http://dev:shortpw@proxy.invalid:3128', 'shortpw'],
+    ['postgres://fukulow:pw9@db/fukulow', 'pw9'], ['https://tok@host.invalid/x', 'tok@'],
+    ['Cannot connect to the Docker daemon at unix:///Users/someone/.docker/run/docker.sock', 'someone'],
+    ['dial unix /var/run/docker.sock: connect', 'docker.sock'],
+    ['/USERS/SOMEONE/Library', 'SOMEONE'], ['/home/someone/x', 'someone'], ['user Someone logged', 'Someone'],
+    ['host Someones-MacBook-Pro kernel', 'Someones'], ['someone_mbp', 'someone'],
+  ];
+  for (const [raw, leak] of cases) assert.ok(!redact(raw).includes(leak), `${raw} -> ${redact(raw)}`);
+  assert.equal(redact('Cookie: a=1; session=secret123'), 'Cookie: [redacted]');
+  assert.equal(redact('proxy=http://dev:shortpw@proxy.invalid'), 'proxy=http://[redacted]@proxy.invalid');
+  assert.equal(redact('blk_update_request: I/O error, dev vda'), 'blk_update_request: I/O error, dev vda');
+});
+
+test('host sampler records cumulative iostat and vm_stat each tick and marks a failed or empty command as failed', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'host-sampler-'));
   const programs: string[] = [];
   let ticks = 0;
@@ -31,6 +49,7 @@ test('host sampler records cumulative iostat and vm_stat each tick and marks a f
     programs.push(command.program + ' ' + command.args.join(' '));
     if (command.program === 'vm_stat') ticks++;
     if (command.program === 'iostat' && ticks === 0) return { code: 1, stdout: '' };
+    if (command.program === 'vm_stat' && ticks === 2) return { code: 0, stdout: '  \n' };
     return { code: 0, stdout: command.program === 'iostat' ? '  KB/t  xfrs   MB\n 20.00  100  2.00' : 'Pages free: 10.' };
   };
   const stop = startHostSampler(exec, join(dir, 'host.jsonl'), 5);
@@ -39,10 +58,22 @@ test('host sampler records cumulative iostat and vm_stat each tick and marks a f
   const rows = readFileSync(join(dir, 'host.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(new Set(programs), new Set(['iostat -I', 'vm_stat ']));
   assert.equal(rows.length, coverage.attempted);
-  assert.equal(rows[0].iostat, null, 'missing, not skipped');
-  assert.equal(rows[1].vmStat, 'Pages free: 10.');
-  assert.deepEqual([coverage.iostatMissing, coverage.vmStatMissing, coverage.complete, coverage.commands], [1, 0, false, coverage.attempted * 2]);
+  assert.equal(rows[0].iostat, null, 'failed, not skipped');
+  assert.equal(rows[0].vmStat, 'Pages free: 10.');
+  assert.equal(rows[1].vmStat, null, 'exit 0 with empty output is a failed sample');
+  assert.deepEqual([coverage.iostatFailed, coverage.vmStatFailed, coverage.complete, coverage.commands], [1, 1, false, coverage.attempted * 2]);
   for (let i = 1; i < rows.length; i++) assert.ok(rows[i].atMs >= rows[i - 1].atMs);
+});
+
+test('a host sample row that cannot be written is a write failure, so the coverage is not complete', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'host-sampler-gone-'));
+  let ticks = 0;
+  const stop = startHostSampler(async command => { if (command.program === 'vm_stat') ticks++; return { code: 0, stdout: 'x' }; }, join(dir, 'host.jsonl'), 5);
+  rmSync(dir, { recursive: true, force: true });
+  while (ticks < 2) await new Promise(resolve => setTimeout(resolve, 2));
+  const coverage = await stop();
+  assert.ok(coverage.writeFailures >= 1);
+  assert.equal(coverage.complete, false);
 });
 
 test('Docker VM log copy keeps only console and init logs changed during the run, redacted', () => {
@@ -59,8 +90,29 @@ test('Docker VM log copy keeps only console and init logs changed during the run
   assert.equal(readFileSync(join(destination, 'console.log'), 'utf8'), 'kernel: hung_task [redacted]');
   assert.equal(readFileSync(join(destination, 'init.log'), 'utf8'), 'init ~/x');
   assert.equal(copyDockerVmLogs(join(root, 'absent'), destination, 0, redact).status, 'missing');
+  const locked = join(root, 'locked');
+  mkdirSync(locked);
+  chmodSync(locked, 0);
+  try { assert.equal(copyDockerVmLogs(locked, destination, 0, redact).status, process.getuid?.() === 0 ? 'missing' : 'failed', 'EACCES is failed, not missing'); }
+  finally { chmodSync(locked, 0o700); }
   assert.equal(copyDockerVmLogs(source, destination, Date.now() + 60_000, redact).status, 'missing');
   assert.equal(dockerVmLogDirectory('/Users/x'), '/Users/x/Library/Containers/com.docker.docker/Data/log/vm');
+});
+
+test('a VM log cut to its last 32 MiB is complete only if the kept part reaches back to the run start', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vm-logs-big-')), source = join(root, 'vm');
+  mkdirSync(source);
+  const runStart = Date.parse('2026-11-22T03:00:00Z');
+  const line = (iso: string) => `${iso} kernel: ok ${'x'.repeat(200)}\n`;
+  const filler = (iso: string, bytes: number) => line(iso).repeat(Math.ceil(bytes / line(iso).length));
+  writeFileSync(join(source, 'console.log'), filler('2026-11-22T02:00:00.000Z', 33 * 1024 * 1024) + line('2026-11-22T03:30:00.000Z'));
+  const covered = copyDockerVmLogs(source, join(root, 'a'), runStart, redact);
+  assert.deepEqual([covered.status, covered.truncated], ['complete', ['console.log']]);
+  writeFileSync(join(source, 'console.log'), filler('2026-11-22T01:00:00.000Z', 2 * 1024 * 1024) + filler('2026-11-22T03:10:00.000Z', 33 * 1024 * 1024));
+  const lost = copyDockerVmLogs(source, join(root, 'b'), runStart, redact);
+  assert.deepEqual([lost.status, lost.truncated], ['partial', ['console.log']], 'the seed start was cut off');
+  assert.ok(readFileSync(join(root, 'b', 'console.log')).length <= 32 * 1024 * 1024);
+  assert.equal(firstTimestampMs('no timestamps here'), null);
 });
 
 test('host log covers the run window with a minute of margin and records a failure', async () => {
@@ -75,4 +127,10 @@ test('host log covers the run window with a minute of margin and records a failu
   assert.equal(readFileSync(join(dir, 'host.log'), 'utf8'), 'powerd: sleep [redacted]\n');
   const failed = await saveHostLog(async () => ({ code: 1, stdout: '' }), join(dir, 'failed.log'), start, end, redact);
   assert.equal(failed.status, 'failed');
+  let called = false;
+  const skipped = await saveHostLog(async () => { called = true; return { code: 0, stdout: '' }; }, join(dir, 'skipped.log'), start, end, redact, { skip: true });
+  assert.deepEqual([skipped.status, called], ['failed', false], 'after an interrupt the log is skipped and recorded, never collected');
+  let timeout = 0;
+  await saveHostLog(async command => { timeout = command.timeout!; return { code: 0, stdout: 'x' }; }, join(dir, 'bounded.log'), start, end, redact, { timeoutMs: 5_000 });
+  assert.equal(timeout, 5_000, 'the runner bounds it by the deadline budget');
 });

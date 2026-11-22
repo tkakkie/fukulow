@@ -39,7 +39,9 @@ export function checkOrganization(organization: number, lastBatchIndex: number, 
 }
 
 export const dbClockSql = (label: 'db-start' | 'db-end') => `SELECT '${label}', round(extract(epoch FROM clock_timestamp()) * 1000, 3);`;
-export type DbBatchClock = { dbStartedAtMs: number; dbEndedAtMs: number; dbDurationMs: number } | { dbClock: 'missing' };
+// The server clock span between the two clock rows of one psql session. It covers PostgreSQL execution and also any
+// psql client time between the statements (descheduling, pipe I/O), so it is an upper bound on PostgreSQL time.
+export type DbBatchClock = { dbClockStartMs: number; dbClockEndMs: number; dbClockSpanMs: number } | { dbClock: 'missing' };
 
 // Reads the two clock rows from psql -qAt output; anything else on stdout is ignored.
 export function dbBatchClock(stdout: Buffer | string | null | undefined): DbBatchClock {
@@ -48,9 +50,9 @@ export function dbBatchClock(stdout: Buffer | string | null | undefined): DbBatc
     const match = new RegExp(`^${label}\\|(\\d+(?:\\.\\d+)?)$`, 'm').exec(text);
     return match ? Number(match[1]) : undefined;
   };
-  const dbStartedAtMs = read('db-start'), dbEndedAtMs = read('db-end');
-  if (dbStartedAtMs === undefined || dbEndedAtMs === undefined || dbEndedAtMs < dbStartedAtMs) return { dbClock: 'missing' };
-  return { dbStartedAtMs, dbEndedAtMs, dbDurationMs: Math.round((dbEndedAtMs - dbStartedAtMs) * 1000) / 1000 };
+  const dbClockStartMs = read('db-start'), dbClockEndMs = read('db-end');
+  if (dbClockStartMs === undefined || dbClockEndMs === undefined || dbClockEndMs < dbClockStartMs) return { dbClock: 'missing' };
+  return { dbClockStartMs, dbClockEndMs, dbClockSpanMs: Math.round((dbClockEndMs - dbClockStartMs) * 1000) / 1000 };
 }
 
 export function seed(diagnostic = false) {
@@ -79,18 +81,26 @@ export function seed(diagnostic = false) {
 
 function seedFixture(output: string, container: string, trace?: SeedStop) {
   const uuid = (label: string) => { const s = createHash('md5').update(`dm151-formal:${label}`).digest('hex'); return `${s.slice(0,8)}-${s.slice(8,12)}-${s.slice(12,16)}-${s.slice(16,20)}-${s.slice(20)}`; };
-  const psql = ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'];
-  const sql = (input: string) => execFileSync('docker', psql, { input, stdio: ['pipe','ignore','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 });
-  // The server clock around the batch SQL, in the same psql call, separates PostgreSQL time from docker exec/psql cost.
-  const timedSql = (input: string) => dbBatchClock(execFileSync('docker', [...psql,'-q','-A','-t'], { input: `${dbClockSql('db-start')}\n${input}\n${dbClockSql('db-end')}`, stdio: ['pipe','pipe','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 }));
+  const sql = (input: string) => execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1'], { input, stdio: ['pipe','ignore','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 });
+  // Chosen once, outside every timed region: formal seeds call the origin/main `sql` itself for Message batches.
+  // The diagnostic adds the server clock rows in the same psql call and keeps the raw stdout; it is parsed after the batch timer stops.
+  let clockStdout: Buffer | undefined;
+  const batchSql = trace ? (input: string) => { clockStdout = execFileSync('docker', ['exec','-i',container,'psql','-X','-U','fukulow','-d','fukulow','-v','ON_ERROR_STOP=1','-q','-A','-t'], { input: `${dbClockSql('db-start')}\n${input}\n${dbClockSql('db-end')}`, stdio: ['pipe','pipe','inherit'], timeout: 3_600_000, maxBuffer: 64*1024*1024 }); } : sql;
   const scenario=process.env.DM_FORMAL_SCENARIO || 'main';
   if(scenario!=='main' && scenario!=='held200')throw new Error('Seed requires main or held200 scenario');
   const {historical:pairs,supplemental:extraPairs}=fixturePairs(scenario);
   const smoke = process.env.DM_FORMAL_SMOKE === '1';
   const history = smoke ? 1 : 100;
   const timingPath = `${output}/seed-timing.jsonl`;
-  const recordTiming = (row: { organization: number; durationMs: number; startedAtMs?: number; endedAtMs?: number } & ({ kind: 'batch'; batchIndex: number } & (DbBatchClock | Record<never, never>) | { kind: 'organization' })) =>
+  const recordTiming = (row: { organization: number; durationMs: number; startedAtMs?: number; endedAtMs?: number } & ({ kind: 'batch'; batchIndex: number } & (DbBatchClock & { recorderMs: number } | Record<never, never>) | { kind: 'organization' })) =>
     appendFileSync(timingPath, JSON.stringify(row) + '\n', { mode: 0o600, flush: true });
+  // Diagnostic only, after the batch timer: recorderMs is the parse cost this instrumentation adds per batch.
+  const diagnosticClock = () => {
+    const parseStart = performance.now();
+    const clock = dbBatchClock(clockStdout);
+    clockStdout = undefined;
+    return { ...clock, recorderMs: Math.round((performance.now() - parseStart) * 1000) / 1000 };
+  };
   const firstOrganizationBatches: number[] = [];
   let batchBaselineMs: number | undefined;
   let organizationBaselineMs: number | undefined;
@@ -135,12 +145,11 @@ INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${
       const startedAtMs = trace ? Date.now() : 0;
       if (trace) Object.assign(trace, { batchIndex, baselineMs: batchBaselineMs ?? null, startedAtMs });
       const ids = pairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
-      // Formal seeds send exactly the origin/main batch SQL; only the diagnostic adds the server clock rows.
-      const dbClock = (trace ? timedSql : sql)(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
+      batchSql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
 ${createLog(org, ids)}`);
       const durationMs = performance.now() - batchStart;
       const endedAtMs = trace ? Date.now() : 0;
-      recordTiming({ kind: 'batch', organization: o, batchIndex, durationMs, ...(trace ? { startedAtMs, endedAtMs, ...dbClock as DbBatchClock } : {}) });
+      recordTiming({ kind: 'batch', organization: o, batchIndex, durationMs, ...(trace ? { startedAtMs, endedAtMs, ...diagnosticClock() } : {}) });
       if (o === 0) firstOrganizationBatches.push(durationMs);
       checkMessageBatch(o, batchIndex, durationMs, batchBaselineMs, trace && (limitMs => {
         Object.assign(trace, { rule: 'message-batch', durationMs, limitMs, endedAtMs });

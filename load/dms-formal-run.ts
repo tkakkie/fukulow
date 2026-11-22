@@ -17,6 +17,8 @@ export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','Ser
 export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; vmLogDirectory?:string };
 const defaultRuntime:Runtime={exec:execute,transfer:transferImage,on:(s,f)=>process.on(s,f),off:(s,f)=>process.off(s,f)};
 export const cleanupReserveMs=10*60*1000;
+// The DB log save before cleanup fits the reserve's slack over the three sequential 190 s local cleanups (checked by a test).
+export const dbLogTimeoutMs=10_000;
 export const attemptBudgetMs=(mode:'formal'|'smoke')=>mode==='formal'?150*60*1000:30*60*1000;
 export const canStartAttempt=(config:Config,now=Date.now())=>config.deadline===undefined || config.deadline-now>=(config.pilot?(30+(config.pilotSeconds ?? 60)+90+120)*1000:attemptBudgetMs(config.mode))+cleanupReserveMs;
 export async function run(config:Config, runtime:Runtime=defaultRuntime) {
@@ -62,13 +64,15 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       throw error;
     }
   };
-  // Every run keeps the redacted DB log before cleanup removes the container; a failed save is recorded and changes no result.
+  // Every run keeps the redacted DB log before cleanup removes the container, bounded by dbLogTimeoutMs (also on the
+  // remote host) so container removal keeps its allowances; a failed or timed-out save is recorded and changes no result.
   const saveRunDbLog=async()=>{
     try {
-      const raw=await remote(config.db,`docker logs --timestamps ${quote(id+'-db-1')} 2>&1`,60000);
+      const logs=`docker logs --timestamps ${quote(id+'-db-1')} 2>&1`;
+      const raw=await remote(config.db,local?logs:`timeout --signal=KILL ${dbLogTimeoutMs/1000-2}s ${logs}`,dbLogTimeoutMs);
       writeFileSync(`${config.output}/db.log`,redactSeedDbLogs(raw)+'\n',{mode:0o600});
     } catch {
-      try {json('db-log-missing.json',{collection:'db.log',status:'failed',reason:'docker logs failed or the DB container did not exist'});} catch {/* Output directory unavailable. */}
+      try {json('db-log-missing.json',{collection:'db.log',status:'missing',reason:'docker logs failed, timed out or the DB container did not exist'});} catch {/* Output directory unavailable. */}
     }
   };
   let cleanupPromise:Promise<void>|undefined;
@@ -168,12 +172,13 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       operation='seed';
       const directory=`${config.output}/formal`, scratch=roleRoot(config.db)+'/formal', container=id+'-db-1';
       const startedAtMs=Date.now();
-      let stopSamplers:(()=>Promise<SeedSamplerRecord>)|undefined, stopHost:(()=>Promise<HostSampleCoverage>)|undefined, seedError:unknown;
+      let stopSamplers:((fast?:boolean)=>Promise<SeedSamplerRecord>)|undefined, stopHost:(()=>Promise<HostSampleCoverage>)|undefined, seedError:unknown;
       let samplers:SeedSamplerRecord|undefined, host:HostSampleCoverage|undefined;
       const collectionFailures:string[]=[];
+      const redact=(text:string)=>redactHostText(text,{secrets:[common.dbPassword,common.appPassword,common.setupToken]});
       try {
         mkdirSync(directory,{mode:0o700});
-        stopSamplers=startSeedSamplers(runtime.exec,container,{kernel:directory+'/db-kernel.txt',postgres:directory+'/db-samples.txt'});
+        stopSamplers=startSeedSamplers(runtime.exec,container,{kernel:directory+'/db-kernel.txt',postgres:directory+'/db-samples.txt'},redact);
         stopHost=startHostSampler(runtime.exec,directory+'/host-samples.jsonl');
         await worker(config.db,'seed',0,0,90000000);
         checkpoint();
@@ -184,7 +189,8 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         status();
       }
       const endedAtMs=Date.now();
-      try {samplers=await stopSamplers?.();} catch {samplers=undefined;}
+      // After an interrupt or the deadline, collection is cut short so container removal keeps the cleanup reserve.
+      try {samplers=await stopSamplers?.(interrupted);} catch {samplers=undefined;}
       try {host=await stopHost?.();} catch {host=undefined;}
       if(!samplers)collectionFailures.push('db-kernel.txt','db-samples.txt');
       else collectionFailures.push(...samplers.failures.map(reason=>(reason.startsWith('kernel')?'db-kernel.txt: ':'db-samples.txt: ')+reason));
@@ -192,16 +198,22 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       let batches:ReturnType<typeof seedBatchSummary>|null=null;
       try {copyFileSync(scratch+'/seed-timing.jsonl',directory+'/seed-timing.jsonl');batches=seedBatchSummary(readFileSync(directory+'/seed-timing.jsonl','utf8'));}
       catch {collectionFailures.push('seed-timing.jsonl');}
-      try {await saveSeedDbLogs(runtime.exec,container,directory+'/db.log');}
+      // Every recorded Message batch carries its clock rows; any row without them is a collection failure.
+      if(batches?.dbClockMissing)collectionFailures.push(`seed-timing.jsonl: dbClock missing on ${batches.dbClockMissing} of ${batches.batches} batches`);
+      try {await saveSeedDbLogs(runtime.exec,container,directory+'/db.log',interrupted?15_000:30_000);}
       catch {collectionFailures.push('db.log');}
-      // Right after the seed, before the Docker VM logs rotate. Missing or failed copies are recorded, never skipped.
-      const redact=(text:string)=>redactHostText(text,{secrets:[common.dbPassword,common.appPassword,common.setupToken]});
+      // Right after the seed, before the Docker VM logs rotate. Missing, partial, failed or skipped copies are recorded.
       const vmLogs=copyDockerVmLogs(runtime.vmLogDirectory ?? dockerVmLogDirectory(),directory+'/docker-vm',startedAtMs,redact);
-      const hostLog=await saveHostLog(runtime.exec,directory+'/host.log',startedAtMs,endedAtMs,redact);
+      const hostLog=await saveHostLog(runtime.exec,directory+'/host.log',startedAtMs,endedAtMs,redact,{timeoutMs:bounded(600000),signal:abort.signal,skip:interrupted});
       for(const [name,record] of [['docker-vm',vmLogs],['host.log',hostLog]] as const)if(record.status!=='complete')collectionFailures.push(`${name}: ${record.status}`);
-      const overhead={dockerExecs:samplers?.dockerExecs ?? null,kernelLoopCpuSeconds:samplers?.kernel?.loopCpuSeconds ?? null,
+      const overhead={
+        instrumentationEffect:'unevaluated',
+        instrumentationEffectNote:'No matched seed without the instrumentation exists: every figure here is measured with it on, against nothing. Its effect on the seed is evaluated only by a matched comparison.',
+        dbClockSpanNote:'medianDbClockSpanMs is the server clock span between the two clock rows of each batch: PostgreSQL time plus any psql client time between the statements (descheduling, pipe I/O). It is an upper bound on PostgreSQL time, not PostgreSQL time alone.',
+        dockerExecs:samplers?.dockerExecs ?? null,kernelLoopCpuSeconds:samplers?.kernel?.loopCpuSeconds ?? null,
         postgresLoopCpuSeconds:samplers?.postgres?.loopCpuSeconds ?? null,postgresSnapshotQueryMs:samplers?.postgres?.queryMs ?? null,
-        hostCommands:host?.commands ?? null,hostSampleMs:host?.sampleMs ?? null,seedSeconds:(endedAtMs-startedAtMs)/1000,batches};
+        hostCommands:host?.commands ?? null,hostSampleMs:host?.sampleMs ?? null,seedSeconds:(endedAtMs-startedAtMs)/1000,
+        recorderMs:batches?.recorderMs ?? null,batches};
       json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[],load,
         infrastructureFailure:interrupted || !!seedStop || collectionFailures.length>0,seedStop,collectionFailures,
         collectionMissing:samplers?.missing ?? [],samplers:samplers??null,hostSamples:host??null,vmLogs,hostLog,overhead});

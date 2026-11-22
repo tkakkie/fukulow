@@ -149,7 +149,7 @@ for (const [scenario, diagnostic] of [
     assert.ok(rows[0].startedAtMs >= epoch);
     assert.equal(rows[0].endedAtMs - rows[0].startedAtMs, rows[0].durationMs);
     const batch = rows.find(row => row.kind === 'batch' && row.batchIndex === 1);
-    assert.deepEqual([batch.dbStartedAtMs, batch.dbDurationMs], [batch.startedAtMs, batch.durationMs - 4.5]);
+    assert.deepEqual([batch.dbClockStartMs, batch.dbClockSpanMs, batch.recorderMs], [batch.startedAtMs, batch.durationMs - 4.5, 0]);
     return;
   }
   // Formal rows keep the origin/main fields exactly.
@@ -163,7 +163,7 @@ for (const [scenario, diagnostic] of [
 });
 
 test('DB batch clock reads only the two clock rows and marks anything else missing', () => {
-  assert.deepEqual(dbBatchClock('db-start|1000.250\nINSERT 0 1\ndb-end|1840.750\n'), { dbStartedAtMs: 1000.25, dbEndedAtMs: 1840.75, dbDurationMs: 840.5 });
+  assert.deepEqual(dbBatchClock('db-start|1000.250\nINSERT 0 1\ndb-end|1840.750\n'), { dbClockStartMs: 1000.25, dbClockEndMs: 1840.75, dbClockSpanMs: 840.5 });
   for (const stdout of [undefined, null, '', 'db-start|1000\n', 'db-start|2000\ndb-end|1000\n', 'db-start|x\ndb-end|1\n']) {
     assert.deepEqual(dbBatchClock(stdout), { dbClock: 'missing' });
   }
