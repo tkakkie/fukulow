@@ -1,5 +1,5 @@
 diff --git a/src/pool/connection.rs b/src/pool/connection.rs
-index c029fec..5dfca2c 100644
+index c029fec..ef829da 100644
 --- a/src/pool/connection.rs
 +++ b/src/pool/connection.rs
 @@ -20,6 +20,7 @@ const CLOSE_ON_DROP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -51,26 +51,29 @@ index c029fec..5dfca2c 100644
              tracing::warn!(
                  %error,
                  "error occurred while testing the connection on-release",
-@@ -324,7 +330,12 @@ impl<DB: Database> Floating<DB, Live<DB>> {
+@@ -324,7 +330,14 @@ impl<DB: Database> Floating<DB, Live<DB>> {
              // if the connection is still viable, release it to the pool
              self.release();
              true
 +        };
 +        // Publish the timing only after returning or closing the connection.
++        // A failed ping closes the connection; label it so the harness rejects the sample.
 +        if let (Some((trace, index)), Some(start), Some(end)) = (trace, start, end) {
-+            trace.record(("return", Some(index), start, end));
++            let label = if returned { "return" } else { "return_failed" };
++            trace.record((label, Some(index), start, end));
          }
 +        returned
      }
-
+ 
      pub async fn close(self) {
 diff --git a/src/pool/fk515.rs b/src/pool/fk515.rs
 new file mode 100644
-index 0000000..6b4b1cc
+index 0000000..b5fbf73
 --- /dev/null
 +++ b/src/pool/fk515.rs
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,141 @@
 +// Diagnostic-only instrumentation for the #515 REST replay.
++use crossbeam_queue::SegQueue;
 +use std::{
 +    future::Future,
 +    sync::{
@@ -90,7 +93,8 @@ index 0000000..6b4b1cc
 +    start: Instant,
 +    acquired: AtomicUsize,
 +    success: AtomicBool,
-+    events: Mutex<Vec<Event>>,
++    // Lock-free: a descheduled writer can never block the request worker.
++    events: SegQueue<Event>,
 +    emit: Mutex<Option<Emit>>,
 +}
 +
@@ -115,7 +119,7 @@ index 0000000..6b4b1cc
 +            start: Instant::now(),
 +            acquired: AtomicUsize::new(0),
 +            success: AtomicBool::new(false),
-+            events: Mutex::new(Vec::with_capacity(96)),
++            events: SegQueue::new(),
 +            emit: Mutex::new(Some(Box::new(emit))),
 +        }))
 +    }
@@ -138,9 +142,7 @@ index 0000000..6b4b1cc
 +    }
 +
 +    pub(super) fn record(&self, event: Event) {
-+        if let Ok(mut events) = self.0.events.lock() {
-+            events.push(event);
-+        }
++        self.0.events.push(event);
 +    }
 +
 +    pub(super) fn ns(&self) -> u64 {
@@ -153,10 +155,12 @@ index 0000000..6b4b1cc
 +        // Last owner may be an asynchronous SQLx return. Keep one log per
 +        // request without waiting for a return on the HTTP path.
 +        if self.success.load(Relaxed) {
-+            if let (Ok(events), Ok(Some(emit))) =
-+                (self.events.get_mut(), self.emit.get_mut().map(Option::take))
-+            {
-+                emit(std::mem::take(events));
++            if let Ok(Some(emit)) = self.emit.get_mut().map(Option::take) {
++                let mut events = Vec::with_capacity(self.events.len());
++                while let Some(event) = self.events.pop() {
++                    events.push(event);
++                }
++                emit(events);
 +            }
 +        }
 +    }
@@ -223,11 +227,11 @@ index 2066364..ba197c0 100644
  
                      // First attempt to pop a connection from the idle queue.
                      let guard = match self.pop_idle(permit) {
-
+ 
                          // Then, check that we can use it...
 -                        Ok(conn) => match check_idle_conn(conn, &self.options).await {
 +                        Ok(conn) => match super::fk515::observe("reuse", check_idle_conn(conn, &self.options)).await {
-
+ 
                              // All good!
                              Ok(live) => return Ok(live),
 @@ -285,7 +285,7 @@ impl<DB: Database> PoolInner<DB> {

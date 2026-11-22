@@ -39,13 +39,15 @@ export function stages(out: string, mode: Mode) {
       return status;
     },
     // Aggregation errors (for example invalid samples) must never stop status.json from being written.
-    finish(summarize: () => void, o: { failed: boolean; interrupted: boolean; invalidEvidence?: boolean }) {
+    // summaryInvalidates: a rejected summary means the samples are invalid, so the run is never evidence.
+    finish(summarize: () => void, o: { failed: boolean; interrupted: boolean; invalidEvidence?: boolean; summaryInvalidates?: boolean }) {
       let summaryFailed = false;
       try { summarize(); } catch (error) {
         summaryFailed = true;
         console.error(`summary failed (${error instanceof Error ? error.name : 'unknown error'})`);
       }
-      return this.write({ ...o, failed: o.failed || summaryFailed, summaryFailed });
+      const invalidEvidence = o.invalidEvidence || (summaryFailed && o.summaryInvalidates === true);
+      return this.write({ failed: o.failed || summaryFailed, interrupted: o.interrupted, summaryFailed, invalidEvidence });
     },
   };
 }

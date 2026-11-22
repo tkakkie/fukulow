@@ -226,7 +226,7 @@ try {
   if (work) rmSync(work, { recursive: true, force: true });
   const dropped = [...instances.values()].reduce((total, instance) => total + instance.dropped, 0);
   const status = run.finish(() => writeFileSync(join(out, 'summary.md'), summary(mode, blocks, complete, dropped) + '\n'),
-    { failed: Boolean(process.exitCode) || dropped > 0, interrupted, invalidEvidence: !complete || dropped > 0 });
+    { failed: Boolean(process.exitCode) || dropped > 0, interrupted, invalidEvidence: !complete || dropped > 0, summaryInvalidates: true });
   if (status.summaryFailed || interrupted) process.exitCode = 1;
   console.log(`fk515a ${status.outcome} — ${out}`);
 }

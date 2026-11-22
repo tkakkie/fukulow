@@ -16,7 +16,7 @@ const acquireLabels = { A: ['auth', 'visibility', 'watermark', 'page'], B: ['aut
 const snapshotLabels = ['snapshot_begin', 'snapshot_context', 'snapshot_end'];
 const authLabels = new Set<string>(sqlLabels.A.slice(0, 4));
 const phases = ['prepare', 'cache_hit', 'execute_simple', 'execute_prepared', 'data_row', 'decode'];
-const auxLabels = ['acquire', 'permit', 'connect', 'reuse', 'checkout', 'return', 'page_decode', 'request', 'handler', 'response', ...phases];
+const auxLabels = ['acquire', 'permit', 'connect', 'reuse', 'checkout', 'return', 'return_failed', 'page_decode', 'request', 'handler', 'response', ...phases];
 const observedLabels = new Set([...sqlLabels.A, ...sqlLabels.B, ...snapshotLabels, ...auxLabels]);
 const simpleSql = new Set(['auth_begin', 'auth_rollback', 'watermark_begin', 'watermark_commit', 'history_begin', 'history_rollback']);
 type CacheState = 'simple' | 'cold' | 'warm';
@@ -40,7 +40,7 @@ export function parseTraces(log: string) {
       if (!Array.isArray(event) || event.length !== 4) throw new Error('Invalid trace span');
       const [label, index, start, end] = event;
       if (!observedLabels.has(label)
-        || (label === 'return' ? !natural(index) : index !== null)
+        || (label === 'return' || label === 'return_failed' ? !natural(index) : index !== null)
         || !natural(start) || !natural(end) || end < start) throw new Error('Invalid trace span');
       return { label, index, start, end } as Span;
     });
@@ -81,6 +81,8 @@ export function components(arm: Arm, spans: Span[], httpMs: number) {
   };
   const request = one('request'), handler = one('handler'), response = one('response');
   const acquires = all('acquire'), returns = all('return');
+  // SQLx closed the connection after a failed return ping: not the successful fixture path.
+  if (all('return_failed').length) throw new Error('Failed return ping');
   const sql = sorted(spans.filter(s => !auxLabels.includes(s.label)));
   const checkout = all('checkout'), permits = all('permit'), connections = all('connect');
   const reuse = all('reuse'), pageDecode = all('page_decode');

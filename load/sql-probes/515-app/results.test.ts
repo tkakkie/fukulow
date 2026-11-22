@@ -120,6 +120,13 @@ test('rejects corrupt, duplicate, missing and inconsistent timings', () => {
   assert.throws(() => parseTraces(line(42, []) + '\n' + line(42, [])), /duplicate trace ID/);
   assert.throws(() => parseTraces(line(42, [['page', null, 2, 1]])), /Invalid trace span/);
   assert.throws(() => parseTraces(line(42, [['return', null, 1, 2]])), /Invalid trace span/);
+  const failed = events('A');
+  failed.find(s => s[0] === 'return')![0] = 'return_failed';
+  assert.throws(() => trace('A', failed), /Failed return ping/);
+  const extra = events('A');
+  const ok = extra.find(s => s[0] === 'return')!;
+  extra.push(['return_failed', ok[1], ok[2], ok[3]]);
+  assert.throws(() => trace('A', extra), /Failed return ping/);
   assert.throws(() => trace('A', events('B')), /Unexpected SQL or pool path/);
   assert.throws(() => trace('A', events('A').filter(s => s[0] !== 'return')), /Unexpected SQL or pool path/);
   const dupe = events('A');

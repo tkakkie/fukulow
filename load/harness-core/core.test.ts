@@ -51,6 +51,12 @@ test('status.json is written even when the summary throws', () => {
   const status = s.finish(() => { throw new Error('Invalid latency samples'); }, { failed: false, interrupted: false });
   const saved = JSON.parse(readFileSync(join(out, 'status.json'), 'utf8'));
   assert.deepEqual([status.summaryFailed, saved.summaryFailed, saved.outcome], [true, true, 'result-failure']);
+  assert.equal(saved.evidence, true);
+  const strict = stages(out, 'recorded');
+  strict.startSampling();
+  const rejected = strict.finish(() => { throw new Error('cursor schedule mismatch'); }, { failed: false, interrupted: false, invalidEvidence: false, summaryInvalidates: true });
+  assert.deepEqual([rejected.outcome, rejected.evidence], ['result-failure', false]);
+  assert.equal(JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')).evidence, false);
 });
 
 test('exactly one mode flag is accepted', () => {
