@@ -291,8 +291,8 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   }
   if (mode === 'rehearsal') {
     // The formal physical handoff, on a rehearsal-owned snapshot: create, verify and archive, stop the
-    // seeded cluster, stage and checksum, start the restored cluster. Both archive copies stay until the
-    // supervisor ends, as in a formal run, so the disk peak is at least the formal one.
+    // seeded cluster, stage and checksum, start the restored cluster. Both archive copies stay through the
+    // measured round, as in a formal run, so the disk peak is at least the formal one; completeRun deletes them.
     // Its receipt is never written as a backfill receipt, so a formal run cannot load it.
     const staging = `${out}/${stagingDirectory}`;
     phase('handoff', 'started');
@@ -348,9 +348,8 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
     save(`${dest}/rls.json`, rlsFor('measured'));
     phase(`round ${round}`, 'started');
     if (round === 1) measuredRls = directRls(text => app('measured', text));
-    const warmupErrors = await warmup(path.page, querySet, conditions.warmupSweeps, body => openApp('measured', body),
-      mode === 'rehearsal');
-    save(`${dest}/warmup.json`, warmupErrors);
+    await recordedWarmup(`${dest}/warmup.json`, path.page, querySet, conditions.warmupSweeps,
+      body => openApp('measured', body), mode === 'rehearsal');
     const latencies = await measureBlocks(querySet, (query, raw) => timeQuery(container, 'measured', path.page, query, raw,
       !accepts(query), `${dest}/${query}`, conditions.transactions, conditions.clients), result =>
       phase(`round ${round}`, 'p95' in result ? `${result.query} p95=${result.p95.toFixed(3)} ms` : `${result.query} ${result.sqlError}`),
@@ -379,14 +378,22 @@ async function worker(mode: Mode, out: string, {frozen, sha256}: ReturnType<type
   const evidence: Evidence = {valid: true, formal: mode === 'formal', backfill: records.base, rounds, plans, complete: found,
     denials: denialReport, restore};
   save(`${out}/evidence.json`, evidence);
+  completeRun(out, mode, evidence, completion);
+  phase('run', 'completed');
+}
+
+// completed.json is the worker's last write, and the supervisor publishes a valid status only after it.
+// A rehearsal first deletes its archives and verifies that they are gone (runtime.ts cannot), so a failed
+// deletion fails the worker and the supervisor records the run invalid, with no finished.json or summary.json.
+export function completeRun(out: string, mode: Mode, evidence: Evidence, completion: object) {
   if (mode === 'rehearsal') {
     // Only completeness is kept; the formal judgement of rehearsal data is never computed or reported.
     const aggregationComplete = rehearsalComplete(evidence);
     save(`${out}/rehearsal.json`, {label: rehearsalLabel, aggregationComplete});
     assert.ok(aggregationComplete, 'Rehearsal evidence is incomplete for the formal aggregation');
+    discardRehearsalSnapshot(out);
   }
   save(`${out}/completed.json`, completion);
-  phase('run', 'completed');
 }
 
 // A rehearsal stops as soon as a recorded check is not whole (a pagination error, a hole), instead of
@@ -420,7 +427,7 @@ export type HandoffSteps = {
 
 // The order keeps peak disk at the formal handoff's: the seeded cluster is removed before staging.
 // On success both archive copies stay, as the formal run keeps its source and staged archives through
-// the measured rounds; the supervisor deletes them at the end. A failed handoff ends the run and deletes them.
+// the measured rounds; the worker deletes them before completing. A failed handoff ends the run and deletes them.
 export async function rehearsalHandoff(steps: HandoffSteps) {
   try {
     const snapshot = await steps.preserve(steps.systemIdentifier());
@@ -438,14 +445,15 @@ export async function rehearsalHandoff(steps: HandoffSteps) {
   }
 }
 
-// Deletes only the archive copies, each attempted on its own, and reports every failure. The staging
-// directory stays while the container runs, because it is the container's bind mount and docker restart
-// needs it; the supervisor removes it at the end.
+// Deletes only the archive copies, each attempted on its own and checked to be gone, and reports every
+// failure. The staging directory stays while the container runs, because it is the container's bind
+// mount and docker restart needs it; the CLI removes it at the end.
 export function discardRehearsalSnapshot(out: string) {
   const failures: unknown[] = [];
   for (const archive of [`${out}/${snapshotFile}`, `${out}/${stagingDirectory}/${snapshotFile}`]) {
     try {
       rmSync(archive, {force: true});
+      if (lstatSync(archive, {throwIfNoEntry: false})) throw new Error(`${archive} still exists after deletion`);
     } catch (error) {
       failures.push(error);
     }
@@ -458,11 +466,11 @@ export async function resetMeasured(owner: (text: string) => string, restart: ()
   await restart();
 }
 
+export type WarmupError = {sweep: number; query: string; paginationError: string};
 // Returns the warm-up pagination errors, which the worker records. A rehearsal stops at the first one;
 // the formal run keeps going, because no frozen check reads the warm-up.
 export async function warmup(page: string, querySet: readonly (readonly [string, string])[], sweeps: number,
-  open: (body: (sql: Sql) => Promise<void>) => Promise<void>, gate = false) {
-  const errors: {sweep: number; query: string; paginationError: string}[] = [];
+  open: (body: (sql: Sql) => Promise<void>) => Promise<void>, gate = false, errors: WarmupError[] = []) {
   for (let sweep = 1; sweep <= sweeps; sweep++) {
     for (const [query, raw] of querySet) {
       await open(async search => {
@@ -476,6 +484,48 @@ export async function warmup(page: string, querySet: readonly (readonly [string,
     }
   }
   return errors;
+}
+
+// Writes the warm-up records to file even when the warm-up stops a rehearsal or fails, including the failing one.
+export async function recordedWarmup(file: string, ...args: Parameters<typeof warmup>) {
+  const [page, querySet, sweeps, open, gate] = args;
+  const errors: WarmupError[] = [];
+  try {
+    return await warmup(page, querySet, sweeps, open, gate, errors);
+  } finally {
+    save(file, errors);
+  }
+}
+
+// The supervisor has already written run-status.json. If the rehearsal archives are still on disk here
+// (the worker failed before deleting them, and this last attempt failed too), the status must not claim
+// a verified cleanup: mark it invalid and drop any finished.json or summary.json.
+export function invalidateUncleanRun(out: string) {
+  rmSync(`${out}/finished.json`, {force: true});
+  rmSync(`${out}/summary.json`, {force: true});
+  const file = `${out}/run-status.json`;
+  const status = lstatSync(file, {throwIfNoEntry: false}) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+  writeFileSync(file, JSON.stringify({...status, valid: false, cleanupVerified: false, exitCode: status.exitCode || 1}) + '\n');
+}
+
+// The CLI's last step: deletes the rehearsal archives again and always removes the staging directory.
+// Returns false when an archive could not be deleted; the run status is then already invalid.
+export function cleanUpRun(out: string, mode: Mode, staged: boolean) {
+  let clean = true;
+  try {
+    if (mode === 'rehearsal') {
+      try {
+        discardRehearsalSnapshot(out);
+      } catch (error) {
+        console.error(String(error));
+        invalidateUncleanRun(out);
+        clean = false;
+      }
+    }
+  } finally {
+    if (staged || mode === 'rehearsal') rmSync(`${out}/${stagingDirectory}`, {recursive: true, force: true});
+  }
+  return clean;
 }
 
 async function main() {
@@ -524,11 +574,7 @@ async function main() {
       note(`${status} (${out}/summary.json)`);
     });
   } finally {
-    try {
-      if (args.mode === 'rehearsal') discardRehearsalSnapshot(out);
-    } finally {
-      if (fromBackfill || args.mode === 'rehearsal') rmSync(restoreDirectory, {recursive: true, force: true});
-    }
+    if (!cleanUpRun(out, args.mode, Boolean(fromBackfill))) process.exitCode = 1;
   }
   if (process.exitCode) note('NOT EVALUATED (run or cleanup incomplete)');
 }

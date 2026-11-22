@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -18,8 +18,9 @@ import { expectedTerms, insertSql, verifyTerms } from './d3r/backfill.ts';
 import { allPages, planFacts, prepare } from './d3r/engine.ts';
 import { argumentsForPostgres, loadManifest, removedSettings } from './d3r/manifest.ts';
 import { actors, benchmarkScript, pageSize, pgbenchFormat, productionPath, readSource, sources, term, tokens } from './d3r/path.ts';
-import { claimFile, discardRehearsalSnapshot, launchFile, measureBlocks, options, outputPath, processStart, rehearsalHandoff,
-  resetMeasured, stagingDirectory, stopUnlessWhole, warmup, workerOptions, writeLaunch, type HandoffSteps } from './d3r/run.ts';
+import { claimFile, cleanUpRun, completeRun, discardRehearsalSnapshot, launchFile, measureBlocks, options, outputPath, processStart,
+  recordedWarmup, rehearsalHandoff, resetMeasured, stagingDirectory, stopUnlessWhole, warmup, workerOptions, writeLaunch,
+  type HandoffSteps } from './d3r/run.ts';
 import { directRls, directRlsExpected, searchTables, verifyRls } from './d3r/rls.ts';
 import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFile, snapshotIdentity, snapshotLaunch, stageSnapshot } from './d3r/snapshot.ts';
 import { timeQuery } from './d3r/timing.ts';
@@ -439,7 +440,7 @@ test('the rehearsal handoff keeps both archives on success, as the formal run do
   const ok = await run();
   assert.deepEqual(ok.result, identity);
   assert.deepEqual(ok.calls, ['identity', 'preserve 42', 'stop', 'stage true', 'start /staged', 'identity'],
-    'the archives stay through the first measured clone; the supervisor deletes them at the end');
+    'the archives stay through the measured round; the worker deletes them before completing');
   const fail = (step: string) => async () => { throw new Error(`${step} failed`); };
   const verify = await run({preserve: fail('pg_verifybackup')});
   assert.match(String(verify.error), /pg_verifybackup failed/);
@@ -482,6 +483,70 @@ test('archive deletion attempts each copy on its own and reports every failure',
   chmodSync(staging, 0o700);
   discardRehearsalSnapshot(out);
   assert.deepEqual(readdirSync(staging), []);
+});
+
+const undeletable = [
+  {name: 'staged copy in a read-only directory', lock: (out: string) => chmodSync(join(out, stagingDirectory), 0o500),
+    unlock: (out: string) => chmodSync(join(out, stagingDirectory), 0o700)},
+  ...(process.platform === 'darwin' ? [{name: 'immutable source archive',
+    lock: (out: string) => { execFileSync('chflags', ['uchg', join(out, snapshotFile)]); },
+    unlock: (out: string) => { if (existsSync(join(out, snapshotFile))) execFileSync('chflags', ['nouchg', join(out, snapshotFile)]); }}] : []),
+];
+const archiveFixture = (prefix: string) => {
+  const out = mkdtempSync(join(tmpdir(), prefix));
+  mkdirSync(join(out, stagingDirectory));
+  writeFileSync(join(out, snapshotFile), 'original');
+  writeFileSync(join(out, stagingDirectory, snapshotFile), 'staged');
+  return out;
+};
+
+test('a rehearsal deletes its archives before writing completed.json; a failed deletion fails the worker',
+  {skip: process.getuid?.() === 0}, t => {
+  const one = {...evidence(), formal: false, rounds: [evidence().rounds[0]]};
+  const completion = {manifestHash: 'm', runKind: 'rehearsal'};
+  const ok = archiveFixture('d3r-complete-test-');
+  t.after(() => rmSync(ok, {recursive: true, force: true}));
+  completeRun(ok, 'rehearsal', one, completion);
+  assert.equal(existsSync(join(ok, snapshotFile)), false);
+  assert.equal(existsSync(join(ok, stagingDirectory, snapshotFile)), false);
+  assert.deepEqual(JSON.parse(readFileSync(join(ok, 'completed.json'), 'utf8')), completion);
+  for (const {name, lock, unlock} of undeletable) {
+    const out = archiveFixture('d3r-complete-test-');
+    t.after(() => { unlock(out); rmSync(out, {recursive: true, force: true}); });
+    lock(out);
+    assert.throws(() => completeRun(out, 'rehearsal', one, completion), AggregateError, name);
+    assert.equal(existsSync(join(out, 'completed.json')), false, `${name}: no completion, so the supervisor records the run invalid`);
+  }
+});
+
+test('if the CLI still cannot delete a rehearsal archive, the published status never says valid or cleanupVerified',
+  {skip: process.getuid?.() === 0}, t => {
+  for (const {name, lock, unlock} of undeletable) {
+    const out = archiveFixture('d3r-cleanup-test-');
+    t.after(() => { unlock(out); rmSync(out, {recursive: true, force: true}); });
+    writeFileSync(join(out, 'run-status.json'), JSON.stringify({manifestHash: 'm', valid: true, cleanupVerified: true, exitCode: 0}));
+    writeFileSync(join(out, 'finished.json'), '{}');
+    writeFileSync(join(out, 'summary.json'), '{}');
+    lock(out);
+    let clean: boolean | undefined;
+    try {
+      clean = cleanUpRun(out, 'rehearsal', false);
+    } catch {
+      // Removing the locked staging directory also fails; the status is already rewritten.
+    }
+    assert.notEqual(clean, true, name);
+    assert.deepEqual(JSON.parse(readFileSync(join(out, 'run-status.json'), 'utf8')),
+      {manifestHash: 'm', valid: false, cleanupVerified: false, exitCode: 1}, name);
+    assert.equal(existsSync(join(out, 'finished.json')), false, name);
+    assert.equal(existsSync(join(out, 'summary.json')), false, name);
+  }
+  const ok = archiveFixture('d3r-cleanup-test-');
+  t.after(() => rmSync(ok, {recursive: true, force: true}));
+  const status = JSON.stringify({manifestHash: 'm', valid: true, cleanupVerified: true, exitCode: 0});
+  writeFileSync(join(ok, 'run-status.json'), status);
+  assert.equal(cleanUpRun(ok, 'rehearsal', false), true);
+  assert.deepEqual(readdirSync(ok), ['run-status.json']);
+  assert.equal(readFileSync(join(ok, 'run-status.json'), 'utf8'), status);
 });
 
 test('rehearsal staging checks the extracted copy, deletes only archives and is never a formal backfill', async t => {
@@ -830,6 +895,31 @@ test('a warm-up pagination abort stops a rehearsal at that query; the formal run
   assert.deepEqual(await warmup(productionPath().page, querySet, 2, open),
     [1, 2].map(sweep => ({sweep, query: 'a', paginationError: 'Search repeated a Message or moved its cursor backwards'})));
   assert.deepEqual(sessions, ['a', 'b', 'a', 'b']);
+});
+
+test('a stopped rehearsal still writes its warm-up records, including the failing one', async t => {
+  const at = '2026-01-01T00:00:00.000000Z';
+  const open = async (body: (sql: (text: string) => Promise<string>) => Promise<void>) => {
+    let query = '';
+    await body(async sql => {
+      if (sql.startsWith('BEGIN')) {
+        query = sql.includes("'開発'") ? 'b' : 'a';
+        return [org(1), JSON.stringify([[channel(1, 0)], true]), JSON.stringify('開発 API')].join('\n');
+      }
+      return sql.startsWith('EXECUTE') && query === 'b' ? `${uuid(2)}|${at}\n${uuid(2)}|${at}` : '';
+    });
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'd3r-warmup-test-'));
+  t.after(() => rmSync(dir, {recursive: true, force: true}));
+  const querySet = [['a', '開'], ['b', '開発']] as const;
+  const stopped = join(dir, 'stopped.json');
+  await assert.rejects(recordedWarmup(stopped, productionPath().page, querySet, 2, open, true), /INVALID: warm-up b/);
+  assert.deepEqual(JSON.parse(readFileSync(stopped, 'utf8')),
+    [{sweep: 1, query: 'b', paginationError: 'Search repeated a Message or moved its cursor backwards'}]);
+  const formal = join(dir, 'formal.json');
+  const errors = await recordedWarmup(formal, productionPath().page, querySet, 2, open, false);
+  assert.equal(errors.length, 2);
+  assert.deepEqual(JSON.parse(readFileSync(formal, 'utf8')), errors);
 });
 
 test('a rehearsal stops at a restore drill or denial check that recorded a pagination error', () => {

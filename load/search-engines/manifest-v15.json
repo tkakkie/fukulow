@@ -1,5 +1,5 @@
 {
-  "sha256": "c83beecfe3bbc79e27facb764882252bb804c594b8e41929005497cb0e672f2f",
+  "sha256": "85179ffe797f688943bf4fc6c375a77692e650e556f3fde48f10be59cc7ef371",
   "frozen": {
     "version": 15,
     "date": "2026-11-22",
@@ -140,7 +140,7 @@
       },
       {
         "path": "load/search-engines/d3r/run.ts",
-        "sha256": "6cb35abe6828856beec46ad2c455b7e37eeab1ab019ecab4b48a624b6419fe06"
+        "sha256": "582bbe8fc209eedd29cf038b136da10fe2a5fd6ffbb858d7d0d8692dd6f3463b"
       },
       {
         "path": "load/search-engines/d3r/session.ts",
