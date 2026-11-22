@@ -54,13 +54,17 @@ export function wallInterval(run: Pick<HoldsRun, 'wallOffsetBoundsMs'>, wallMs: 
 }
 
 /**
- * The pool samples that certainly bracket [from, to] by server sample time: the last certainly at
- * or before `from` and the first certainly at or after `to`. They are returned re-timed to `from`
+ * The pool samples that certainly bracket [from, to] by server read time: the last logged certainly at
+ * or before `from` and the one after the first logged certainly at or after `to`. They are returned re-timed to `from`
  * and `to`, so the #592 poolWindow over them gives exactly this delta. Empty when either is missing.
  */
 export function poolBrackets(run: Pick<HoldsRun, 'pool' | 'wallOffsetBoundsMs'>, from: number, to: number): PoolSample[] {
   const timed = run.pool.map(s => ({ s, t: wallInterval(run, s.wallMs) })).filter(x => x.t && Number.isFinite(x.s.fields.acquire_timeout));
-  const before = timed.filter(x => x.t![1] <= from).at(-1), after = timed.find(x => x.t![0] >= to);
+  // The server reads the counters before logging them, so a sample logged after `to` may hold a
+  // read from before it. The reporter is one sequential loop, so the next sample's read certainly
+  // follows that log line: it is the closing bracket.
+  const firstAfter = timed.findIndex(x => x.t![0] >= to);
+  const before = timed.filter(x => x.t![1] <= from).at(-1), after = firstAfter < 0 ? undefined : timed[firstAfter + 1];
   if (!before || !after || !(from < to)) return [];
   return [{ at: from, fields: before.s.fields }, { at: to, fields: after.s.fields }];
 }

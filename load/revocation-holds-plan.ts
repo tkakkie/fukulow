@@ -45,8 +45,8 @@ export function edges({ gateOn: [onBefore, onAfter], gateOff: [offBefore, offAft
     healthFrom: onBefore, healthTo: offAfter,
     // Recovery rules are checked from both ends of the release interval.
     recoveryEarliest: offBefore, recoveryLatest: offAfter,
-    // A revoked send is legal before the gate-on statement was sent or after the gate-off one was.
-    sendFrom: onBefore, sendTo: offBefore,
+    // A revoked send is legal only before the gate-on statement was sent (floor 2b, notices).
+    sendFrom: onBefore,
     // Counted floors (retries) and window membership: where the gate was certainly on.
     certainFrom: onAfter, certainTo: offBefore,
   };

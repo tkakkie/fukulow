@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CHANNELS, GATE_OFF, GATE_ON, holdsFixture, poolSample, sample, target, TIMES } from './revocation-holds-fixture.ts';
+import { CHANNELS, GATE_OFF, GATE_ON, holdsFixture, poolSample, sample, target, TIMES, timeoutsFrom } from './revocation-holds-fixture.ts';
 import { floors, holdsReasons, holdsValues, setupReasons, stallReasons } from './revocation-holds-floors.ts';
 import { faultWindowReasons, holdsEndReasons, informational, judgeHolds, recoveryGateReasons, verdictByCell, type HoldsRun } from './revocation-holds-judgment.ts';
 import { lessFavourable, median, memoryByCell, memoryEntry, memoryVerdict, rssDeltaKb } from './revocation-holds-memory.ts';
@@ -31,7 +31,7 @@ test('floor 1: sockets, mutations, restore, baseline probes, calibrations and sa
     ['missing counter revocation_retired_timeout', run => { delete run.metrics!.revocation_retired_timeout; }],
     ['missing counter revocation_delivered_after_hold', run => { delete run.metrics!.revocation_delivered_after_hold; }],
     ['pool samples do not bracket the fault window', run => { run.pool = run.pool.slice(2); }],
-    ['pool samples do not bracket the recovery window', run => { run.pool = run.pool.slice(0, 3); }],
+    ['pool samples do not bracket the recovery window', run => { run.pool = run.pool.slice(0, 5); }],
     ['a clock calibration is invalid', run => { run.setup.calibrationErrors = ['missing or ambiguous server clock sample']; }],
     ['no holds sample in the baseline window', run => { run.samples = run.samples.filter(s => s.serverMs < 26_000 || s.serverMs >= 36_000); }],
     ['no holds sample in the fault window', run => { run.samples = run.samples.filter(s => s.serverMs < 39_700 || s.serverMs >= 43_500); }],
@@ -221,7 +221,7 @@ test('fault-window gates: probes healthy, HTTP all successful, no pool timeouts'
   assert.deepEqual(faultWindowReasons(after), ['1 HTTP probe failures in the 10 s after recovery']);
   const late = holdsFixture(); late.httpProbe[1070] = { ...late.httpProbe[1070], ok: false, status: 503 }; // at 53_500
   assert.deepEqual(faultWindowReasons(late), []);
-  const pool = holdsFixture(); pool.pool[2].fields.acquire_timeout = 2;
+  const pool = holdsFixture(); timeoutsFrom(pool, 45_000, 2);
   assert.ok(faultWindowReasons(pool).includes('2 pool acquire timeouts in the fault window'));
   // Missing pool brackets are floor 1 (INVALID), never a gate that silently passes.
   const noPool = holdsFixture(); noPool.pool = [];
@@ -234,8 +234,9 @@ test('fault-window gates: probes healthy, HTTP all successful, no pool timeouts'
 test('the #592 recovery rules still apply', () => {
   const slow = holdsFixture(); slow.dbProbe = slow.dbProbe.map(p => p.at >= 43_500 && p.at < 53_500 ? { ...p, ms: 40 } : p);
   assert.ok(reasons(slow).some(r => r.startsWith('database probe p99')));
-  const pool = holdsFixture(); pool.pool[3].fields.acquire_timeout = 1;
+  const pool = holdsFixture(); timeoutsFrom(pool, 81_000, 1);
   assert.ok(reasons(pool).includes('1 pool acquire timeouts after recovery'));
+  assert.ok(!faultWindowReasons(pool).some(r => r.includes('pool')));
 });
 
 test('holds end: zero active holds, no timeouts, no bystander closes, residual >= 0', () => {
@@ -284,14 +285,25 @@ test('duplicates are per (socket, Channel), not per Channel', () => {
   assert.deepEqual(noticeCorrectness(run).reasons, ['duplicate revocation on a (socket, Channel)']);
 });
 
+const EDGE = '1 revoked-Channel sends indeterminate at a gate edge';
+/** The verdict and its reasons for the fixture with one send record moved to `ms`. */
+function sendAt(ms: number, gates?: { gateOn: [number, number]; gateOff: [number, number] }) {
+  const run = holdsFixture(); if (gates) Object.assign(run.times, gates);
+  run.sendTiming!.records[0] = { channelId: 'c0', beforeMs: ms, afterMs: ms };
+  const judged = judgeHolds(run);
+  return [judged.verdict, ...judged.floorReasons, ...judged.reasons];
+}
+const FAULT_SEND = ['FAIL', 'a revocation was sent while the failure was active'];
+
 test('every revoked-Channel send lies outside the fault with the run-level uncertainty', () => {
-  const send = (ms: number) => { const run = holdsFixture(); run.sendTiming!.records[0] = { channelId: 'c0', beforeMs: ms, afterMs: ms }; return noticeCorrectness(run).reasons; };
-  // fault 39_700, recovery 43_500, U = 2, offset 0.
-  assert.deepEqual(send(39_697.9), []);
-  assert.deepEqual(send(39_698), ['a revocation send time is indeterminate at a fault edge']);
-  assert.deepEqual(send(40_000), ['a revocation was sent while the failure was active']);
-  assert.deepEqual(send(43_501.9), ['a revocation send time is indeterminate at a fault edge']);
-  assert.deepEqual(send(43_502), []);
+  // gate on 39_700, gate off 43_500 (zero-width bands), U = 2, offset 0.
+  assert.deepEqual(sendAt(39_697.9), ['INVALID', '1 revoked-Channel sends before the fault (socket loop not blocked)']); // floor 2b
+  assert.deepEqual(sendAt(39_698), ['INVALID', EDGE]);
+  assert.deepEqual(sendAt(39_702), FAULT_SEND);
+  assert.deepEqual(sendAt(40_000), FAULT_SEND);
+  assert.deepEqual(sendAt(43_497.9), FAULT_SEND);
+  assert.deepEqual(sendAt(43_501.9), ['INVALID', EDGE]);
+  assert.deepEqual(sendAt(43_502), ['PASS']);
 });
 
 test('wrong, early and restored-registration notices fail', () => {
@@ -398,12 +410,11 @@ test('gate bounds: health spans the widest interval, sends are judged against th
   assert.deepEqual(faultWindowReasons(onFlight), ['1 database probe failures in the fault window']);
   const offFlight = widened(); offFlight.httpProbe[871] = { ...offFlight.httpProbe[871], ok: false, status: 503 }; // at 43_550
   assert.ok(faultWindowReasons(offFlight).includes('1 HTTP probe failures in the fault window'));
-  const send = (ms: number) => { const run = widened(); run.sendTiming!.records[0] = { channelId: 'c0', beforeMs: ms, afterMs: ms }; return noticeCorrectness(run).reasons; };
-  assert.deepEqual(send(43_499), ['a revocation send time is indeterminate at a fault edge']);
-  assert.deepEqual(send(43_000), ['a revocation was sent while the failure was active']);
-  // A send overlapping the gate-on band is already a FAIL (it may lie inside the fault).
-  assert.deepEqual(send(39_750), ['a revocation was sent while the failure was active']);
-  assert.deepEqual(send(39_699), ['a revocation send time is indeterminate at a fault edge']);
+  // Sends are a FAIL only when certainly in [39_800, 43_500); overlapping a band is ambiguous.
+  const gates = { gateOn: [39_700, 39_800] as [number, number], gateOff: [43_500, 43_600] as [number, number] };
+  assert.deepEqual(sendAt(43_000, gates), FAULT_SEND);
+  assert.deepEqual(sendAt(43_499, gates), ['INVALID', EDGE]);
+  assert.deepEqual(sendAt(39_699, gates), ['INVALID', EDGE]);
   // A send before the gate-on statement was sent is a stall failure (floor 2b), not a gate.
   const early = widened(); early.sendTiming!.records[0] = { channelId: 'c0', beforeMs: 39_697, afterMs: 39_697 };
   assert.deepEqual(stallReasons(early), ['1 revoked-Channel sends before the fault (socket loop not blocked)']);
@@ -414,47 +425,62 @@ test('gate bounds: health spans the widest interval, sends are judged against th
   assert.deepEqual(failAt(1073), []); // 53_650: neither
 });
 
-test('a send between the gate-off statement and its acknowledgement makes an otherwise PASS run INVALID', () => {
-  // Sol's case: gate off sent at 43_500 and acknowledged at 43_600; a send at 43_550 ± 2 ms.
-  const run = (ms: number) => {
-    const r = holdsFixture(); r.times.gateOff = [43_500, 43_600];
-    r.sendTiming!.records[0] = { channelId: 'c0', beforeMs: ms, afterMs: ms };
-    return r;
-  };
-  assert.deepEqual(noticeCorrectness(run(43_550)).reasons, []);
-  assert.deepEqual(judgeHolds(run(43_550)).floorReasons, ['1 indeterminate revoked-Channel sends near release']);
-  assert.equal(judgeHolds(run(43_550)).verdict, 'INVALID');
-  assert.equal(judgeHolds(run(43_597.9)).verdict, 'INVALID'); // low 43_595.9 < 43_600
-  assert.equal(judgeHolds(run(43_602)).verdict, 'PASS'); // certainly after the acknowledgement
-  // A FAIL stays a FAIL: the near-release rule only replaces a PASS.
-  const failing = run(43_550); failing.sendTiming!.records[1] = { channelId: 'c1', beforeMs: 42_000, afterMs: 42_000 };
-  assert.equal(judgeHolds(failing).verdict, 'FAIL');
-  // With a zero-width band (sent = acknowledged) nothing changes from before.
-  const instant = holdsFixture(); instant.sendTiming!.records[0] = { channelId: 'c0', beforeMs: 43_502, afterMs: 43_502 };
-  assert.equal(judgeHolds(instant).verdict, 'PASS');
+test('a send overlapping the gate-off band makes an otherwise PASS run INVALID', () => {
+  const gateOff: [number, number] = [43_500, 43_600], gates = { gateOn: [GATE_ON, GATE_ON] as [number, number], gateOff };
+  // Sol's cases: 43_550 ± 2 and 43_500 ± 2, with gate off sent at 43_500 and acknowledged at 43_600.
+  assert.deepEqual(sendAt(43_550, gates), ['INVALID', EDGE]);
+  assert.deepEqual(sendAt(43_500, gates), ['INVALID', EDGE]);
+  assert.deepEqual(sendAt(43_597.9, gates), ['INVALID', EDGE]); // low 43_595.9 < 43_600
+  // Both sides: certainly before the gate-off statement is a FAIL; certainly after the ack is legal.
+  assert.deepEqual(sendAt(43_497.9, gates), FAULT_SEND);
+  assert.deepEqual(sendAt(43_602, gates), ['PASS']);
+  const ambiguous = holdsFixture(); Object.assign(ambiguous.times, gates);
+  ambiguous.sendTiming!.records[0] = { channelId: 'c0', beforeMs: 43_500, afterMs: 43_500 };
+  assert.deepEqual(noticeCorrectness(ambiguous).reasons, []);
+  assert.equal(noticeCorrectness(ambiguous).details.ambiguous.length, 1);
+  // A FAIL stays a FAIL: the edge rule only replaces a PASS.
+  ambiguous.sendTiming!.records[1] = { channelId: 'c1', beforeMs: 42_000, afterMs: 42_000 };
+  assert.equal(judgeHolds(ambiguous).verdict, 'FAIL');
+});
+
+test('a send overlapping the gate-on band makes an otherwise PASS run INVALID', () => {
+  const gates = { gateOn: [39_700, 39_800] as [number, number], gateOff: [GATE_OFF, GATE_OFF] as [number, number] };
+  // Sol's case: 39_750 ± 2 with gate on sent at 39_700 and acknowledged at 39_800.
+  assert.deepEqual(sendAt(39_750, gates), ['INVALID', EDGE]);
+  assert.deepEqual(sendAt(39_801.9, gates), ['INVALID', EDGE]); // low 39_799.9 < 39_800
+  // Both sides: certainly after the ack is a FAIL; certainly before the statement is floor 2b.
+  assert.deepEqual(sendAt(39_802, gates), FAULT_SEND);
+  assert.deepEqual(sendAt(39_697, gates), ['INVALID', '1 revoked-Channel sends before the fault (socket loop not blocked)']);
 });
 
 test('pool brackets use the server sample time, not log receipt', () => {
-  // Sol's case: a sample taken 20 ms before the recovery window ends (53_500), received 10 ms after.
-  const late = holdsFixture(); late.pool = [poolSample(0), poolSample(39_000), poolSample(44_000), poolSample(53_480, 30)];
+  const base = [poolSample(0), poolSample(39_000), poolSample(44_000), poolSample(45_000)];
+  // Sol's round-2 case: a sample taken 20 ms before the recovery window ends (53_500), received 10 ms after.
+  const late = holdsFixture(); late.pool = [...base, poolSample(53_480, 30)];
   assert.ok(setupReasons(late).includes('pool samples do not bracket the recovery window'));
   assert.equal(judgeHolds(late).verdict, 'INVALID');
-  // With a later sample, the timeout logged in the final 20 ms is counted and fails the run.
-  const timeout = holdsFixture();
-  timeout.pool = [poolSample(0), poolSample(39_000), poolSample(44_000), poolSample(53_480, 30), poolSample(54_480)];
-  timeout.pool[4].fields.acquire_timeout = 1;
-  assert.deepEqual(setupReasons(timeout), []);
-  assert.ok(judgeHolds(timeout).reasons.includes('1 pool acquire timeouts after recovery'));
-  // A sample certainly after the end (low 53_500) closes the bracket.
-  const edge = holdsFixture(); edge.pool = [poolSample(0), poolSample(39_000), poolSample(44_000), poolSample(53_501)];
-  assert.deepEqual(setupReasons(edge), []);
+  // Sol's round-3 case: logged 10 ms after the end, its counters may have been read before it (a
+  // stale read). It never closes the bracket; only the next sample does.
+  const stale = holdsFixture(); stale.pool = [...base, poolSample(53_510)];
+  assert.ok(setupReasons(stale).includes('pool samples do not bracket the recovery window'));
+  const next = holdsFixture(); next.pool = [...base, poolSample(53_510), poolSample(54_510)];
+  timeoutsFrom(next, 54_510, 1); // the timeout in the final 20 ms shows only in the next read
+  assert.deepEqual(setupReasons(next), []);
+  assert.ok(judgeHolds(next).reasons.includes('1 pool acquire timeouts after recovery'));
+  const clean = holdsFixture(); clean.pool = [...base, poolSample(53_510), poolSample(54_510)];
+  assert.equal(judgeHolds(clean).verdict, 'PASS');
+  // 53_501 (low 53_500) is the first logged certainly after the end; 53_500 (low 53_499) is not.
+  const edge = (at: number) => { const run = holdsFixture(); run.pool = [...base, poolSample(at), poolSample(60_000)]; return setupReasons(run); };
+  assert.deepEqual(edge(53_501), []);
+  assert.deepEqual(edge(53_500), ['pool samples do not bracket the recovery window']);
   // The fault window [39_700, 43_500]: 39_700 (high 39_701) cannot open it; 39_699 (high 39_700) can.
-  const opener = (at: number) => { const run = holdsFixture(); run.pool = [poolSample(at), poolSample(44_000), poolSample(80_000)]; return setupReasons(run); };
+  const opener = (at: number) => { const run = holdsFixture(); run.pool = [poolSample(at), ...holdsFixture().pool.slice(2)]; return setupReasons(run); };
   assert.deepEqual(opener(39_700), ['pool samples do not bracket the fault window']);
   assert.deepEqual(opener(39_699), []);
-  // 43_500 (low 43_499) cannot close it, so a timeout first seen at 80_000 counts against the fault.
-  const closer = holdsFixture(); closer.pool = [poolSample(39_699), poolSample(43_500), poolSample(80_000)];
-  closer.pool[2].fields.acquire_timeout = 1;
+  // 43_500 (low 43_499) is not logged certainly after the fault, so 44_000 is the first and the
+  // closing bracket is the read after it: a timeout first seen there counts against the fault.
+  const closer = holdsFixture(); closer.pool = [poolSample(39_699), poolSample(43_500), poolSample(44_000), poolSample(45_000), poolSample(80_000), poolSample(81_000)];
+  timeoutsFrom(closer, 45_000, 1);
   assert.deepEqual(setupReasons(closer), []);
   assert.ok(faultWindowReasons(closer).includes('1 pool acquire timeouts in the fault window'));
   // An untimed sample never brackets.
@@ -488,7 +514,7 @@ test('recovery p99 holds at every candidate release in the gate-off band', () =>
   assert.deepEqual(recoveryGateReasons(run(25)), []);
 });
 
-test('floors 3 to 5 use the highest candidate holds-end HWM; memory uses the lowest', () => {
+test('floor 3 uses the lowest candidate holds-end HWM; floors 4, 5 and L the highest', () => {
   // Sol's case: the earliest candidate reads 400, the actual holds-end sample 500, 900 retries.
   const run = (retries: number) => {
     const r = holdsFixture(); r.times.gateOff = [43_500, 43_600];
@@ -499,6 +525,16 @@ test('floors 3 to 5 use the highest candidate holds-end HWM; memory uses the low
   assert.deepEqual([values.hwm, values.hwmLowest], [500, 400]);
   assert.deepEqual(holdsReasons(run(900), values), ['retry attempts in the fault 900 < 1000']);
   assert.deepEqual(holdsReasons(run(1000), holdsValues(run(1000))), []);
+  // Sol's round-3 case: H512 actual 380, later candidate 400, 900 retries (>= 2 x 400).
+  const floor3 = (actual: number) => {
+    const r = holdsFixture(); r.times.gateOff = [43_500, 43_600];
+    r.samples = r.samples.map(s => ({ ...s, highWaterMark: s.serverMs >= 53_750 ? 400 : s.serverMs >= 39_750 ? actual : 0, retryAttempts: s.serverMs >= 41_800 ? 900 : 0 }));
+    return r;
+  };
+  assert.deepEqual(holdsReasons(floor3(380), holdsValues(floor3(380))), ['high-water mark 380 < 384']);
+  assert.equal(judgeHolds(floor3(380)).verdict, 'INVALID');
+  assert.deepEqual(holdsReasons(floor3(384), holdsValues(floor3(384))), []);
+  assert.equal(judgeHolds(floor3(384)).verdict, 'PASS');
 });
 
 test('an HTTP failure at the release instant is caught only by the after-recovery rule', () => {

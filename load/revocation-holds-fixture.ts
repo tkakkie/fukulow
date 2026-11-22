@@ -7,6 +7,10 @@ export const TIMES = { pass: 40_000, stall: 36_000, revoke: 37_000, resume: 40_1
 export const GATE_ON = 39_700, GATE_OFF = 43_500;
 // A pool sample logged at harness time `at`, received `lag` ms later.
 export const poolSample = (at: number, lag = 0) => ({ at: at + lag, wallMs: at, fields: { wait_count: 0, acquire_timeout: 0 } as Record<string, number> });
+/** Sets the cumulative timeout counter to `n` on every pool sample logged at or after `from`. */
+export const timeoutsFrom = (run: { pool: { wallMs: number | undefined; fields: Record<string, number> }[] }, from: number, n: number) => {
+  for (const p of run.pool) if ((p.wallMs ?? -Infinity) >= from) p.fields.acquire_timeout = n;
+};
 export const CHANNELS = Array.from({ length: 16 }, (_, i) => `c${i}`);
 
 const retriesAt = (t: number) => t >= 41_800 ? 1536 : t >= 40_800 ? 1024 : t >= 40_300 ? 512 : 0;
@@ -42,7 +46,9 @@ export function holdsFixture(): HoldsRun {
     samples: Array.from({ length: 321 }, (_, i) => sample(i * 250)),
     statements: [], refused: [],
     dbProbe: probes(1), httpProbe: probes(5),
-    pool: [poolSample(0), poolSample(39_000), poolSample(44_000), poolSample(80_000)],
+    // Each closing bracket is the sample after the first logged certainly after the window end:
+    // 45_000 for the fault window (43_500), 81_000 for the recovery window (53_500).
+    pool: [poolSample(0), poolSample(39_000), poolSample(44_000), poolSample(45_000), poolSample(80_000), poolSample(81_000)],
     rss: Array.from({ length: 160 }, (_, i) => ({ at: i * 500, kb: 1000 })),
     metrics: { revocation_held: 512, revocation_delivered_after_hold: 512, revocation_retired_timeout: 0, revocation_retired_retries: 0, revocation_retired_fenced: 0, revocation_retired_global_cap: 0, revocation_retired_registration_cap: 0 },
   };

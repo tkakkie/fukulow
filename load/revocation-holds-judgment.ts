@@ -157,8 +157,8 @@ export function judgeHolds(run: HoldsRun) {
   const notices = noticeCorrectness(run);
   const reasons = [...recoveryGateReasons(run), ...faultWindowReasons(run), ...notices.reasons, ...holdsEndReasons(run)];
   // Only a run that would otherwise PASS becomes INVALID here, so this never hides a FAIL.
-  if (!reasons.length && notices.details.nearRelease.length) {
-    return { verdict: 'INVALID' as HoldsVerdict, floorReasons: [`${notices.details.nearRelease.length} indeterminate revoked-Channel sends near release`], reasons: [] as string[], floors: floor.values, informational: info };
+  if (!reasons.length && notices.details.ambiguous.length) {
+    return { verdict: 'INVALID' as HoldsVerdict, floorReasons: [`${notices.details.ambiguous.length} revoked-Channel sends indeterminate at a gate edge`], reasons: [] as string[], floors: floor.values, informational: info };
   }
   return { verdict: (reasons.length ? 'FAIL' : 'PASS') as HoldsVerdict, floorReasons: [] as string[], reasons, floors: floor.values, informational: info };
 }

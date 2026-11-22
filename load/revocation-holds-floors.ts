@@ -87,8 +87,8 @@ export function holdsValues(run: HoldsRun) {
   const m = run.metrics;
   const restored = restoreAccount(run.cell);
   const T = potentialHolds(run.cell);
-  // Floors use the highest candidate holds-end HWM (the strictest floors); the memory bound uses
-  // the lowest (the smallest bound). HWM is monotone, so these are the last and first candidates.
+  // The retry floors and L use the highest candidate holds-end HWM; floor 3's minimum and the
+  // memory bound use the lowest. HWM is monotone, so these are the last and first candidates.
   const ends = holdsEndSamples(samples, e.recoveryEarliest, e.recoveryLatest);
   const hwm: number | undefined = ends.at(-1)?.highWaterMark, hwmLowest: number | undefined = ends[0]?.highWaterMark;
   const retries = retriesWithin(samples, e.certainFrom, e.certainTo);
@@ -110,7 +110,8 @@ const show = (value: number | undefined) => value ?? 'missing';
 /** Floors 3 to 5: holds and retries exercised. Missing inputs fail. */
 export function holdsReasons(run: HoldsRun, v: ReturnType<typeof holdsValues>) {
   const reasons: string[] = [];
-  if (below(v.hwm, v.hwmFloor)) reasons.push(`high-water mark ${show(v.hwm)} < ${v.hwmFloor}`);
+  // Floor 3 is a minimum, so the lowest candidate; the retry floors and L use the highest.
+  if (below(v.hwmLowest, v.hwmFloor)) reasons.push(`high-water mark ${show(v.hwmLowest)} < ${v.hwmFloor}`);
   if (v.globalCapFloor !== undefined && below(v.globalCap, v.globalCapFloor)) reasons.push(`global-cap refusals ${show(v.globalCap)} < ${v.globalCapFloor}`);
   if (v.fencedFloor !== undefined && below(v.fenced, v.fencedFloor)) reasons.push(`fenced holds ${show(v.fenced)} < ${v.fencedFloor}`);
   const retryFloor = v.hwm === undefined ? undefined : 2 * v.hwm;

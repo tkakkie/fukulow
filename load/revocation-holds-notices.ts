@@ -33,28 +33,26 @@ export function noticeCorrectness(run: HoldsRun) {
   const clientCounts = new Map<string, number>(), serverCounts = new Map<string, number>();
   const reasons = clientReasons(run, revoked, clientCounts);
   const timing = run.sendTiming;
-  const faultSends: (SendRecord & { sentAt: number })[] = [], indeterminate: typeof faultSends = [], nearRelease: typeof faultSends = [], wrongRecords: SendRecord[] = [];
+  const faultSends: (SendRecord & { sentAt: number })[] = [], ambiguous: typeof faultSends = [], wrongRecords: SendRecord[] = [];
   if (!timing) reasons.push('no server send timing');
   else {
     const offset = (timing.offsetBoundsMs[0] + timing.offsetBoundsMs[1]) / 2, u = timing.uncertaintyMs;
-    // The gate-on statement start and the gate-off statement start (plan.ts edges).
-    const { sendFrom: fault, sendTo: recovery } = edges(run.times);
+    // Legal before the gate-on statement was sent or after the gate-off one was acknowledged; a FAIL
+    // only when certainly while the gate was on. Anything between is ambiguous: judgeHolds makes
+    // such a run INVALID only when it would otherwise PASS.
+    const { sendFrom, certainFrom, certainTo } = edges(run.times);
     const released = run.times.gateOff[1];
     for (const record of timing.records) {
       if (!revoked.has(record.channelId)) { wrongRecords.push(record); continue; }
       count(serverCounts, record.channelId);
       const sentAt = offset + (record.beforeMs + record.afterMs) / 2, low = sentAt - u, high = sentAt + u;
-      if (high < fault || low >= released) continue; // before the fault (floor 2b) or certainly released
-      // After the gate-off statement was sent but before its acknowledgement: the gate may still
-      // have been on. judgeHolds makes such a run INVALID only when it would otherwise PASS.
-      if (low >= recovery) { nearRelease.push({ ...record, sentAt }); continue; }
-      (low >= fault && high < recovery ? faultSends : indeterminate).push({ ...record, sentAt });
+      if (high < sendFrom || low >= released) continue; // before the fault (floor 2b) or certainly released
+      (low >= certainFrom && high < certainTo ? faultSends : ambiguous).push({ ...record, sentAt });
     }
     if (wrongRecords.length) reasons.push('a revocation send record names a Channel that was not revoked');
     if (faultSends.length) reasons.push('a revocation was sent while the failure was active');
-    if (indeterminate.length) reasons.push('a revocation send time is indeterminate at a fault edge');
   }
   const mismatched = timing ? [...revoked].filter(channel => (serverCounts.get(channel) ?? 0) !== (clientCounts.get(channel) ?? 0)) : [];
   if (mismatched.length) reasons.push(`${mismatched.length} Channels whose server send count differs from the client notice count`);
-  return { reasons, details: { faultSends, indeterminate, nearRelease, wrongRecords: wrongRecords.length, mismatched, clientNotices: Object.fromEntries(clientCounts), serverSends: Object.fromEntries(serverCounts) } };
+  return { reasons, details: { faultSends, ambiguous, wrongRecords: wrongRecords.length, mismatched, clientNotices: Object.fromEntries(clientCounts), serverSends: Object.fromEntries(serverCounts) } };
 }
