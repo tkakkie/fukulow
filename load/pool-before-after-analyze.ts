@@ -15,45 +15,51 @@ export const sessionLookup = 'SELECT s.account_id, u.id, u.name, u.role, o.name,
 
 export const tables = ['accounts', 'users', 'account_sessions', 'organizations', 'channels'] as const;
 type Table = typeof tables[number];
-export type TableStats = { relname: string; reltuples: number; last_vacuum: string | null; last_analyze: string | null };
+export type TableStats = { relname: string; reltuples: number; last_vacuum: string | null; last_analyze: string | null;
+  vacuumed_after_start: boolean | null; analyzed_after_start: boolean | null };
 
 // Seeded rows: 4,000 Members + owner + reader; one Session per Member (owner and reader add more).
 export function minimumRows(members: number, channels: number): Record<Table, number> {
   return { accounts: members + 2, users: members + 2, account_sessions: members, organizations: 2, channels };
 }
 
-export const statsQuery = `SELECT coalesce(json_agg(json_build_object('relname',c.relname,'reltuples',c.reltuples,
-  'last_vacuum',s.last_vacuum,'last_analyze',s.last_analyze) ORDER BY c.relname),'[]')
+// The freshness comparison stays in SQL so timestamptz keeps its microseconds.
+const pgTime = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,6})?[+-]\d{2}(:\d{2})?$/;
+export function statsQuery(startedAt: string) {
+  if (!pgTime.test(startedAt)) throw new Error('Invalid VACUUM start time');
+  return `SELECT coalesce(json_agg(json_build_object('relname',c.relname,'reltuples',c.reltuples,
+  'last_vacuum',s.last_vacuum,'last_analyze',s.last_analyze,
+  'vacuumed_after_start',s.last_vacuum >= '${startedAt}'::timestamptz,
+  'analyzed_after_start',s.last_analyze >= '${startedAt}'::timestamptz) ORDER BY c.relname),'[]')
   FROM pg_class c JOIN pg_stat_user_tables s ON s.relid=c.oid
   WHERE s.schemaname='public' AND c.relname IN (${tables.map(t => `'${t}'`).join(',')})`;
+}
 
-export function statsReasons(rows: TableStats[], startedAt: string, minimum: Record<Table, number>): string[] {
-  const started = Date.parse(startedAt);
-  if (!Number.isFinite(started)) return ['invalid VACUUM start time'];
+export function statsReasons(rows: TableStats[], minimum: Record<Table, number>): string[] {
   const reasons: string[] = [];
   for (const table of tables) {
     const row = rows.find(r => r.relname === table);
     if (!row) { reasons.push(`${table}: no statistics row`); continue; }
-    const fresh = (at: string | null) => at !== null && Date.parse(at) >= started;
-    if (!fresh(row.last_vacuum)) reasons.push(`${table}: not vacuumed by this step`);
-    if (!fresh(row.last_analyze)) reasons.push(`${table}: not analyzed by this step`);
+    if (row.vacuumed_after_start !== true) reasons.push(`${table}: not vacuumed by this step`);
+    if (row.analyzed_after_start !== true) reasons.push(`${table}: not analyzed by this step`);
     if (!(row.reltuples >= minimum[table])) reasons.push(`${table}: reltuples ${row.reltuples} < ${minimum[table]}`);
   }
   return reasons;
 }
 
-// Runs as the runtime role under RLS with the statement-local Organization context, like the app.
+// Runs as the runtime role under RLS, in the app's REPEATABLE READ READ ONLY snapshot with the
+// transaction-local Organization context (database::organization_read_only).
 export function planQuery(organization: string, token: string, mode: 'force_custom_plan' | 'force_generic_plan') {
   if (!/^[0-9a-f-]{36}$/.test(organization) || !/^[0-9a-f]{64}$/.test(token)) throw new Error('Invalid plan check input');
-  return `BEGIN READ ONLY;
+  return `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SELECT set_config('fukulow.organization_id','${organization}',true) \\g /dev/null
 SET LOCAL plan_cache_mode = ${mode};
 PREPARE session_lookup(bytea, uuid) AS ${sessionLookup};
 EXPLAIN (FORMAT JSON) EXECUTE session_lookup(sha256(convert_to('${token}','UTF8')), '${organization}');
-COMMIT;`;
+ROLLBACK;`;
 }
 
-type PlanNode = { 'Node Type': string; 'Parent Relationship'?: string; 'Relation Name'?: string; 'Index Name'?: string; Plans?: PlanNode[] };
+type PlanNode = { 'Node Type': string; 'Parent Relationship'?: string; 'Relation Name'?: string; 'Index Name'?: string; 'Index Cond'?: string; Plans?: PlanNode[] };
 const walk = (node: PlanNode): PlanNode[] => [node, ...(node.Plans ?? []).flatMap(walk)];
 // The join itself, without RLS policy SubPlans/InitPlans (the organizations policy reads users too).
 const joinNodes = (node: PlanNode): PlanNode[] =>
@@ -71,8 +77,12 @@ export function planReasons(explain: unknown): string[] {
   // Every users read, including policy SubPlans, must use the account index.
   const users = nodes.filter(n => n['Relation Name'] === 'users');
   for (const n of users) {
-    const index = n['Node Type'] === 'Bitmap Heap Scan' ? walk(n).find(c => c['Index Name'])?.['Index Name'] : n['Index Name'];
+    // A bitmap scan names its index on the child; either way the index must seek on account_id,
+    // not walk the whole index with the equality left to the join.
+    const probe = n['Node Type'] === 'Bitmap Heap Scan' ? walk(n).find(c => c['Index Name']) : n;
+    const index = probe?.['Index Name'];
     if (index !== 'users_account_id') reasons.push(`users read by ${n['Node Type']}${n['Index Name'] ? ' on ' + n['Index Name'] : ''}`);
+    else if (!/(^|[^a-z_.])(u\.)?account_id = /.test(probe?.['Index Cond'] ?? '')) reasons.push(`users_account_id without an account_id Index Cond`);
   }
   for (const n of nodes) {
     if (n['Node Type'] === 'Seq Scan' && ['users', 'account_sessions'].includes(n['Relation Name'] ?? '')) reasons.push(`Seq Scan on ${n['Relation Name']}`);

@@ -135,12 +135,21 @@ try {
       }
       // #519: the same step on both arms, after every seed write has committed and before any load.
       const vacuumStarted=sql('SELECT clock_timestamp()');
-      sql('VACUUM (ANALYZE);');
-      const tableStats=JSON.parse(sql(statsQuery));
-      const statsFailures=statsReasons(tableStats,vacuumStarted,minimumRows(settings.members,settings.channels));
-      const plans=Object.fromEntries((['force_custom_plan','force_generic_plan'] as const).map(mode=>[mode,JSON.parse(sql(planQuery(organization,tokens[0],mode),'fukulow_app'))]));
-      const planFailures=Object.entries(plans).flatMap(([mode,p])=>planReasons(p).map(r=>`${mode}: ${r}`));
-      save(`${dir}/seed-statistics.json`,{condition,vacuumStarted,tables:tableStats,plans,statsFailures,planFailures});
+      const seedCheck:{condition:string;vacuumStarted:string;tables?:unknown;plans?:Record<string,unknown>;statsFailures:string[];planFailures:string[];error?:string}=
+        {condition,vacuumStarted,statsFailures:[],planFailures:[]};
+      try {
+        sql('VACUUM (ANALYZE);');
+        const tableStats=JSON.parse(sql(statsQuery(vacuumStarted)));seedCheck.tables=tableStats;
+        seedCheck.statsFailures=statsReasons(tableStats,minimumRows(settings.members,settings.channels));
+        seedCheck.plans={};
+        for(const mode of ['force_custom_plan','force_generic_plan'] as const) {
+          const p=JSON.parse(sql(planQuery(organization,tokens[0],mode),'fukulow_app'));seedCheck.plans[mode]=p;
+          seedCheck.planFailures.push(...planReasons(p).map(r=>`${mode}: ${r}`));
+        }
+      } catch(error) { seedCheck.error=String(error).slice(0,2000); }
+      save(`${dir}/seed-statistics.json`,seedCheck);
+      const {statsFailures,planFailures}=seedCheck;
+      if(seedCheck.error)throw new Error('Seed statistics check failed');
       if(statsFailures.length||planFailures.length)throw new Error('Seed statistics check failed');
       for(const [org,token] of [[organization,tokens[0]],[otherOrganization,reader.token]]) {
         const r=await fetch(`${base}/api/v1/orgs/${org}/channels`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(10000)});
