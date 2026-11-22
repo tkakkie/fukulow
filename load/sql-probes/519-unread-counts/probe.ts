@@ -61,3 +61,30 @@ export function planSummary(explain: unknown): PlanSummary {
   const root = (explain as [{ 'Execution Time': number; Plan: Record<string, number> }])[0];
   return { executionMs: root['Execution Time'], sharedBlocks: root.Plan['Shared Hit Blocks'] + root.Plan['Shared Read Blocks'] };
 }
+
+// pgbench --log lines: "client_id transaction_no time_us script_no time_epoch time_us_part".
+export function logLatenciesMs(log: string): number[] {
+  return log.split('\n').filter(l => l.trim() !== '').map(line => {
+    const fields = line.trim().split(/\s+/);
+    const us = Number(fields[2]);
+    if (fields.length < 6 || !Number.isFinite(us)) throw new Error(`bad pgbench log line: ${line}`);
+    return us / 1000;
+  });
+}
+
+// §10 step 1 stop rule, fixed before the run: per pair, a3-final against current;
+// the rule fires when the median pair ratio exceeds a limit. Every pair is reported.
+export type PairSend = { pair: number; walBytesPerSend: number; tps: number };
+export function stopRule(current: PairSend[], final: PairSend[]) {
+  if (current.length === 0 || current.length !== final.length) throw new Error('unpaired send blocks');
+  const ratios = current.map((c, i) => {
+    const f = final[i];
+    if (f.pair !== c.pair) throw new Error('pair order mismatch');
+    return { pair: c.pair, walPerSend: f.walBytesPerSend / c.walBytesPerSend, tps: f.tps / c.tps };
+  });
+  const median = (xs: number[]) => quantile(xs, 0.5);
+  const walPerSend = median(ratios.map(r => r.walPerSend));
+  const tps = median(ratios.map(r => r.tps));
+  return { ratios, medianWalPerSend: walPerSend, medianTps: tps,
+    stop: walPerSend > 1.2 || tps < 0.9, limits: 'stop if median WAL/send ratio > 1.20 or median tps ratio < 0.90' };
+}
