@@ -1,0 +1,4 @@
+\set c random(1, 200)
+\set u random(3, 1000)
+\set t random(1, 100)
+SELECT proto_send(:c, :u, :c = 1 AND :t <= 70, :t <= 2);
