@@ -265,7 +265,7 @@ async function runArm(scenario: Scenario, pair: number, arm: Arm, expected: Meta
       assert.ok(code === 0 || code === 99, `k6 exited ${code}`);
       await Promise.all(snapshots);
       // Keep the raw snapshots and CPU samples alongside the k6 summary.
-      const result = collect(readFileSync(`${dir}/k6-summary.log`, 'utf8'), conditions, startMs, boundaries, samples);
+      const result = collect(readFileSync(`${dir}/k6-summary.log`, 'utf8'), conditions, startMs, boundaries, samples, s1Metadata !== undefined);
       run.steps = result.steps;
       run.totals = result.totals;
       run.identity = { ...stack, workload: result.workload, k6Image, bodySeed, bodySha256: result.bodySha256 };

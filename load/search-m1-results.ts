@@ -16,8 +16,9 @@ function readSummary<T>(log: string, prefix: string): T {
   return JSON.parse(lines[0].slice(prefix.length));
 }
 
+// M1 omits resources when any sample is missing; S1 (partialResources) keeps what it has, so accepted/s stays reported.
 export function collect(log: string, expected: Conditions, startMs: number | undefined,
-  boundaries: Boundary[], samples: CpuSample[]) {
+  boundaries: Boundary[], samples: CpuSample[], partialResources = false) {
   const data = readSummary<Throughput>(log, 'LOAD_THROUGHPUT ');
   const { metrics } = readSummary<{ metrics: Record<string, Metric> }>(log, 'LOAD_SUMMARY ');
   const { mode, channels, members, subscribers, preAllocatedVUs, maxVUs, requestTimeoutSeconds, bodySha256 } = data;
@@ -57,7 +58,23 @@ export function collect(log: string, expected: Conditions, startMs: number | und
     assert.ok(offered === 0 || [med, p95, p99].every(Number.isFinite), `Incomplete send latency percentiles: ${tags}`);
     return { sendMs: offered ? { p50: med, p95, p99 } : { p50: null, p95: null, p99: null }, sendSamples: trend.count };
   };
+  const completeResources = (first: number, last: number, accepted: number, acceptedInWindow: number | undefined) => {
+    const before = snapshots[first];
+    const after = snapshots[last];
+    if ('missing' in before) return { resourcesMissing: before.missing };
+    if ('missing' in after) return { resourcesMissing: after.missing };
+    if (startMs === undefined) return { resourcesMissing: 'host scenario start marker missing' };
+    if (acceptedInWindow === undefined) return { resourcesMissing: 'in-window acceptance count missing or invalid' };
+    const window = samples.filter(sample =>
+      sample.at >= startMs + first * cycle * 1000 && sample.at <= after.completedMs);
+    if (!window.length) return { resourcesMissing: 'CPU samples missing' };
+    return { resources: { acceptedPerSecond: acceptedInWindow / ((last - first) * expected.seconds),
+      walBytesPerSend: accepted ? (after.walBytes - before.walBytes) / accepted : null,
+      appCpuPeakPercent: Math.max(...window.map(sample => sample.appCpu)),
+      dbCpuPeakPercent: Math.max(...window.map(sample => sample.dbCpu)), dbSizeGrowthBytes: after.dbBytes - before.dbBytes } };
+  };
   const resources = (first: number, last: number, accepted: number, acceptedInWindow: number | undefined) => {
+    if (!partialResources) return completeResources(first, last, accepted, acceptedInWindow);
     const before = snapshots[first];
     const after = snapshots[last];
     const withSnapshots = !('missing' in before) && !('missing' in after);
@@ -65,7 +82,7 @@ export function collect(log: string, expected: Conditions, startMs: number | und
     const window = startMs === undefined ? [] : samples.filter(sample => sample.at >= startMs + first * cycle * 1000 &&
       sample.at <= ('missing' in after ? startMs + endOffset : after.completedMs));
     const resourcesMissing = 'missing' in before ? before.missing : 'missing' in after ? after.missing :
-      acceptedInWindow === undefined ? 'in-window acceptance count missing or invalid' : !window.length ? 'CPU samples missing' : undefined;
+      startMs === undefined ? 'host scenario start marker missing' : acceptedInWindow === undefined ? 'in-window acceptance count missing or invalid' : !window.length ? 'CPU samples missing' : undefined;
     return { resourcesMissing, resources: {
       acceptedPerSecond: acceptedInWindow === undefined ? null : acceptedInWindow / ((last - first) * expected.seconds),
       walBytesPerSend: withSnapshots && accepted ? (after.walBytes - before.walBytes) / accepted : null,
