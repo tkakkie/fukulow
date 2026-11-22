@@ -34,3 +34,29 @@ Smoke takes about 30 s (one cut, a 5 s bench pair) and only validates the harnes
 - The send bench runs as the superuser without RLS and emulates statements in one plpgsql call. It has no HTTP, pool, search terms, admission or network. Each 30 s block follows a `CHECKPOINT`, so full-page images inflate WAL and table growth lowers throughput over the run.
 - The prototype differs from the proposed product design (DB triggers, one count table, kept Mention rows). See #519.
 - One synthetic fixture on a shared Mac.
+
+## §10 step 1: final design (`final.ts`)
+
+DIAGNOSTIC. It compares the merged A3 design (`fd6a5949`: real triggers, backfill migration and `LIST_COUNTS_SQL`) with its parent `5ef561e5` on the same seed. Only the pre-registered stop rule from #519 §10 step 1 applies; it is not a gate.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --smoke --out /absolute/new/dir/outside/checkout
+FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
+  node load/sql-probes/519-unread-counts/final.ts --diagnostic --out /absolute/new/dir/outside/checkout
+```
+
+- **Schema:** both arms start from the parent's migrations and the same seed. The final arm then applies only the A3 migration in one transaction, as a deploy onto existing data would. The driver refuses any other migration diff.
+- **Reads:** at the same four cuts, as `fukulow_app` under RLS. The checksums must match and must be non-empty. The final arm's `count_drift` must stay false at every cut, and `message_counts_check` must be empty after the cuts and after the sends.
+- **Sends:** `sql/send-current.sql` in both arms, because A3 does not change the app's send SQL. pgbench runs as `fukulow_app` with the Organization set as a per-database role default; RLS is checked before the blocks. 8 clients × 3 alternating pairs.
+  - Each block runs `CHECKPOINT`, a 60 s warm block, then a 120 s measured block with `--log`.
+  - `max_wal_size=64GB` and `checkpoint_timeout=1h` keep checkpoints out of the blocks. A block that crosses a checkpoint fails the run.
+  - Reported per block: tps, p95/p99 from the per-transaction log (the line count must equal pgbench's transactions), WAL bytes/send from the insert-LSN delta, the `pg_stat_wal` bytes, records and full-page images, and images per WAL record.
+- **Stop rule, fixed before the diagnostic run:**
+  - Per pair, compute the final/current ratios. The rule fires when the median ratio exceeds a limit: WAL/send above 1.20, or tps below 0.90.
+  - Every pair and every individual breach is reported.
+- **Run conditions:** `--diagnostic` requires the held host-busy marker and records its line in `metadata.json`. Smoke uses 5 s blocks and one cut, and only validates the harness.
+- **Limits:**
+  - WAL statistics are cluster-wide, so idle clones can add background WAL.
+  - The send databases are reused across pairs, so the faster arm accumulates more rows.
+  - Shared caches persist across blocks.
+  - It is one plpgsql call per send, with no HTTP, pool or search terms.

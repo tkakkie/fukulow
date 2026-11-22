@@ -15,6 +15,10 @@ const { values } = parseArgs({ options: { out: { type: 'string' }, smoke: { type
 if (values.help) { console.log(usage); process.exit(0); }
 if (!values.out || values.smoke === values.diagnostic) throw new Error(usage);
 const smoke = values.smoke === true;
+// §10 step 1 runs under the shared host-busy marker; the diagnostic mode records it.
+const markerPath = process.env.FUKULOW_HOST_BUSY;
+const marker = markerPath ? readFileSync(markerPath, 'utf8').trim() : null;
+if (!smoke && !marker) throw new Error('--diagnostic needs FUKULOW_HOST_BUSY=<path of the held host-busy marker>');
 type FinalArm = 'current' | 'final';
 const pins: Record<FinalArm, string> = { current: '5ef561e5', final: 'fd6a5949' };
 const a3Migration = '202611221100_unread_counts.sql';
@@ -81,21 +85,37 @@ ${Array.from({ length: samples }, () => `EXECUTE q(${args}) \\g /dev/null`).join
 SELECT json_build_object('generic', generic_plans, 'custom', custom_plans) FROM pg_prepared_statements WHERE name = 'q';\n`, 'fukulow_app');
   const ms = timings(timed);
   if (ms.length !== samples) throw new Error(`expected ${samples} timings, got ${ms.length}`);
-  const checksum = psql(db, `${scope}${checksumSql(bindLiterals(sql, array))}\n`, 'fukulow_app').trim();
+  const bound = bindLiterals(sql, array);
+  const checksum = psql(db, `${scope}${checksumSql(bound)}\n`, 'fukulow_app').trim();
+  if (!/^[0-9a-f]{32} /.test(checksum)) throw new Error(`${arm} cut ${cut}: empty checksum`);
+  // A3 clamps a negative raw count to 0; the drift flag must stay false at every cut.
+  if (arm === 'final' && psql(db, `${scope}SELECT bool_or(count_drift) FROM (${bound}) x;\n`, 'fukulow_app').trim() !== 'f') {
+    throw new Error(`final cut ${cut}: count_drift`);
+  }
   return { arm, cut, ...planSummary(JSON.parse(explain)), samplesMs: ms, p50Ms: quantile(ms, 0.5), p95Ms: quantile(ms, 0.95),
     prepared: JSON.parse(timed.trim().split('\n').at(-1) ?? '{}'), checksum, role };
 }
 
 const walStats = (db: string) => JSON.parse(psql(db, `SELECT json_build_object('lsn', pg_current_wal_lsn(), 'records', w.wal_records, 'fpi', w.wal_fpi,
-  'checkpoints', c.num_timed + c.num_requested) FROM pg_stat_wal w, pg_stat_checkpointer c;`));
-const pgbenchArgs = (db: string, seconds: number) => ['exec', container, 'pgbench', '-U', 'postgres', '-n', '-c', '8', '-j', '4', '-T', String(seconds), '-f', '/work/sql/bench.pgb'];
+  'bytes', w.wal_bytes, 'checkpoints', c.num_timed + c.num_requested) FROM pg_stat_wal w, pg_stat_checkpointer c;`));
+// Sends run as the application role under RLS, like the app, so A3's policy checks are paid.
+const pgbenchArgs = (seconds: number) => ['exec', container, 'pgbench', '-U', 'fukulow_app', '-n', '-c', '8', '-j', '4', '-T', String(seconds), '-f', '/work/sql/bench.pgb'];
+function sendRole(db: string) {
+  psql('postgres', `ALTER ROLE fukulow_app IN DATABASE ${db} SET fukulow.organization_id = '${organization}';`);
+  const role = JSON.parse(psql(db, `SELECT json_build_object('user', current_user, 'superuser', rolsuper, 'bypassRls', rolbypassrls,
+    'rls', row_security_active('messages') AND row_security_active('channel_log'), 'org', current_setting('fukulow.organization_id', true))
+    FROM pg_roles WHERE rolname = current_user;`, 'fukulow_app'));
+  if (role.user !== 'fukulow_app' || role.superuser || role.bypassRls || !role.rls || role.org !== organization) throw new Error(`${db}: unexpected send role or RLS state`);
+  return role;
+}
 
 function bench(db: string, label: string) {
   psql(db, 'CHECKPOINT;');
-  pgbench(run('docker', [...pgbenchArgs(db, warmSeconds), db]));
+  const start = walStats(db);
+  pgbench(run('docker', [...pgbenchArgs(warmSeconds), db]));
   const before = walStats(db);
   const prefix = `/tmp/pgb-${label}`;
-  const output = run('docker', [...pgbenchArgs(db, measuredSeconds), '-l', `--log-prefix=${prefix}`, db]);
+  const output = run('docker', [...pgbenchArgs(measuredSeconds), '-l', `--log-prefix=${prefix}`, db]);
   const after = walStats(db);
   const log = run('docker', ['exec', container, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]);
   const latencies = logLatenciesMs(log);
@@ -104,16 +124,22 @@ function bench(db: string, label: string) {
   if (latencies.length !== result.transactions) throw new Error(`${label}: ${latencies.length} log lines for ${result.transactions} transactions`);
   const walBytes = Number(psql(db, `SELECT pg_wal_lsn_diff('${after.lsn}', '${before.lsn}');`).trim());
   const records = after.records - before.records;
+  const fpi = after.fpi - before.fpi;
+  const checkpoints = { warm: before.checkpoints - start.checkpoints, measured: after.checkpoints - before.checkpoints };
+  if (checkpoints.warm !== 0 || checkpoints.measured !== 0) throw new Error(`${label}: checkpoint inside a send block ${JSON.stringify(checkpoints)}`);
   return { ...result, p95Ms: quantile(latencies, 0.95), p99Ms: quantile(latencies, 0.99), walBytes,
-    walBytesPerSend: walBytes / result.transactions, fpiShare: records > 0 ? (after.fpi - before.fpi) / records : 0,
-    checkpointsDuringMeasure: after.checkpoints - before.checkpoints };
+    walBytesPerSend: walBytes / result.transactions, statWalBytes: Number(after.bytes) - Number(before.bytes),
+    walRecords: records, fpiRecords: fpi, imagesPerWalRecord: records > 0 ? fpi / records : 0, checkpoints };
 }
 
 const started = new Date().toISOString();
 let failed = false;
 try {
   run('docker', ['run', '-d', '--rm', '--name', container, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
-    '-v', `${work}:/work:ro`, image, '-c', 'shared_buffers=512MB', '-c', 'jit=off']);
+    '-v', `${work}:/work:ro`, image, '-c', 'shared_buffers=512MB', '-c', 'jit=off',
+    // No automatic checkpoint inside a send block: each block starts at its forced CHECKPOINT and
+    // full-page images settle during warm-up, as the plan requires. A crossing block fails the run.
+    '-c', 'max_wal_size=64GB', '-c', 'checkpoint_timeout=1h']);
   for (let i = 0; spawnSync('docker', ['exec', container, 'pg_isready', '-U', 'postgres', '-h', '127.0.0.1']).status !== 0; i++) {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
@@ -131,7 +157,8 @@ try {
     settings: JSON.parse(psql('p519', `SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN
       ('server_version','shared_buffers','work_mem','jit','plan_cache_mode','synchronous_commit','fsync','autovacuum','default_transaction_isolation','max_wal_size','checkpoint_timeout');`)),
     host: { platform: platform(), release: release(), cpus: cpus().length, memoryBytes: totalmem() },
-    cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts,
+    hostBusyMarker: marker, cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts,
+    walNotes: 'WAL bytes = cluster insert-LSN delta (and pg_stat_wal.wal_bytes); cluster-wide, so idle clones can add background WAL; send DBs are reused across pairs',
     sends: { clients: 8, threads: 4, warmSeconds, measuredSeconds, benchOrder }, stopRule: stopRule([{ pair: 1, walBytesPerSend: 1, tps: 1 }], [{ pair: 1, walBytesPerSend: 1, tps: 1 }]).limits,
   };
   save('metadata.json', metadata);
@@ -158,16 +185,19 @@ try {
     if (arm === 'final') migrateA3('s_final');
     file(`s_${arm}`, 'sql/send-current.sql');
   }
+  const sendRoles = { current: sendRole('s_current'), final: sendRole('s_final') };
   const sends = benchOrder.flatMap((pair, i) => pair.map(arm => ({ pair: i + 1, arm, ...bench(`s_${arm}`, `pair${i + 1}-${arm}`) })));
   const sendDrift = psql('s_final', `SELECT count(*) FROM message_counts_check('${organization}');`).trim();
   if (sendDrift !== '0') { failed = true; console.error(`message_counts_check reports ${sendDrift} rows after the sends`); }
-  save('sends.json', sends);
+  save('sends.json', { sendRoles, sends });
   const verdict = stopRule(sends.filter(s => s.arm === 'current'), sends.filter(s => s.arm === 'final'));
   save('stop-rule.json', verdict);
   const lines = ['| cut | arm | p50 ms | p95 ms | EXPLAIN ms | blocks | checksum |', '|---:|---|---:|---:|---:|---:|---|',
     ...reads.map(r => `| ${r.cut} | ${r.arm} | ${r.p50Ms} | ${r.p95Ms} | ${r.executionMs} | ${r.sharedBlocks} | ${r.checksum} |`),
-    '', '| pair | arm | tps | p95 ms | p99 ms | WAL bytes/send | FPI share | checkpoints |', '|---:|---|---:|---:|---:|---:|---:|---:|',
-    ...sends.map(s => `| ${s.pair} | ${s.arm} | ${s.tps.toFixed(0)} | ${s.p95Ms.toFixed(3)} | ${s.p99Ms.toFixed(3)} | ${s.walBytesPerSend.toFixed(0)} | ${s.fpiShare.toFixed(3)} | ${s.checkpointsDuringMeasure} |`),
+    '', '| pair | arm | tps | p95 ms | p99 ms | WAL bytes/send | images per WAL record |', '|---:|---|---:|---:|---:|---:|---:|',
+    ...sends.map(s => `| ${s.pair} | ${s.arm} | ${s.tps.toFixed(0)} | ${s.p95Ms.toFixed(3)} | ${s.p99Ms.toFixed(3)} | ${s.walBytesPerSend.toFixed(0)} | ${s.imagesPerWalRecord.toFixed(4)} |`),
+    '', '| pair | WAL/send ratio | tps ratio | breach |', '|---:|---:|---:|---|',
+    ...verdict.ratios.map(r => `| ${r.pair} | ${r.walPerSend.toFixed(3)} | ${r.tps.toFixed(3)} | ${[r.walPerSend > 1.2 ? 'WAL' : '', r.tps < 0.9 ? 'tps' : ''].filter(Boolean).join(', ') || '-'} |`),
     '', `Stop rule (${verdict.limits}): median WAL/send ratio ${verdict.medianWalPerSend.toFixed(3)}, median tps ratio ${verdict.medianTps.toFixed(3)} -> ${verdict.stop ? 'STOP' : 'no stop'}`];
   writeFileSync(join(out, 'summary.md'), `# #519 §10 step 1 final-design probe (${metadata.status})\n\n${lines.join('\n')}\n`);
   console.log(lines.join('\n'));
