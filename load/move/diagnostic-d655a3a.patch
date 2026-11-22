@@ -1,0 +1,665 @@
+diff --git a/server/src/database/stats.rs b/server/src/database/stats.rs
+index 1e68196..4951481 100644
+--- a/server/src/database/stats.rs
++++ b/server/src/database/stats.rs
+@@ -95,7 +95,7 @@ impl Stats {
+             start: Instant::now(),
+             completed: false,
+         };
+-        let result = pool.acquire().await;
++        let result = crate::move_diagnostic::timed("pool_acquire", pool.acquire()).await;
+         let counter = match &result {
+             Ok(_) => &self.success,
+             Err(sqlx::Error::PoolTimedOut) => &self.timeout,
+diff --git a/server/src/lib.rs b/server/src/lib.rs
+index 0c5b544..54763cf 100644
+--- a/server/src/lib.rs
++++ b/server/src/lib.rs
+@@ -2,6 +2,7 @@ pub mod auth;
+ pub mod channels;
+ pub mod database;
+ pub mod messages;
++mod move_diagnostic;
+ pub mod observability;
+ pub mod openapi;
+ pub mod realtime;
+@@ -294,6 +295,7 @@ pub(crate) async fn reject_new_requests(
+     next: Next,
+ ) -> axum::response::Response {
+     if shutdown.is_stopped() {
++        crate::move_diagnostic::rejection("shutdown");
+         return (
+             axum::http::StatusCode::SERVICE_UNAVAILABLE,
+             [
+diff --git a/server/src/messages.rs b/server/src/messages.rs
+index ba76164..a90c684 100644
+--- a/server/src/messages.rs
++++ b/server/src/messages.rs
+@@ -272,6 +272,7 @@ pub async fn send_message(
+     #[cfg(test)]
+     limiter::charged(input.client_message_id).await;
+     let admission = state.message_delivery.admission(&state.pool);
++    crate::move_diagnostic::before_admission();
+     let waiter = match admission.reserve_send(organization_id, channel_id) {
+         Ok(waiter) => waiter,
+         Err(refusal) => {
+@@ -282,7 +283,7 @@ pub async fn send_message(
+     };
+     // Finish persistence even if the HTTP caller disconnects; notification is detached.
+     let work = state.message_delivery.work.enter();
+-    let message = tokio::spawn(async move {
++    let message = tokio::spawn(crate::move_diagnostic::inherit(async move {
+         let _work = work;
+         lead.executing();
+         let result = persist(
+@@ -300,7 +301,7 @@ pub async fn send_message(
+         let unknown = matches!(failure, Some(MessageError::Database(error)) if !commit::definitely_rolled_back(error));
+         lead.settle(unknown, failure.map(MessageError::replay));
+         result
+-    })
++    }))
+     .await
+     .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
+     Ok(created(message))
+@@ -654,14 +655,17 @@ async fn persist(
+     let _permit = waiter.acquire().await?;
+     tokio::time::timeout(
+         admission::WORK_TIMEOUT,
+-        persist_admitted(
+-            pool,
+-            delivery,
+-            organization_id,
+-            sender,
+-            channel_id,
+-            input,
+-            _permit,
++        crate::move_diagnostic::timed(
++            "admitted_work",
++            persist_admitted(
++                pool,
++                delivery,
++                organization_id,
++                sender,
++                channel_id,
++                input,
++                _permit,
++            ),
+         ),
+     )
+     .await
+@@ -728,12 +732,15 @@ async fn persist_admitted(
+             .await?;
+         accepted
+     } else {
+-        let (visible, archived, accepted) = channels::authorize_send_targets(
+-            tx.connection()?,
+-            organization_id,
+-            member,
+-            channel_id,
+-            &targets,
++        let (visible, archived, accepted) = crate::move_diagnostic::timed(
++            "send_access_sql",
++            channels::authorize_send_targets(
++                tx.connection()?,
++                organization_id,
++                member,
++                channel_id,
++                &targets,
++            ),
+         )
+         .await?;
+         match visible {
+diff --git a/server/src/messages/admission.rs b/server/src/messages/admission.rs
+index 1a396b8..15e30ba 100644
+--- a/server/src/messages/admission.rs
++++ b/server/src/messages/admission.rs
+@@ -145,6 +145,10 @@ impl Admission {
+             None
+         };
+         if let Some(scope) = scope {
++            crate::move_diagnostic::rejection(match scope {
++                Rejection::SendGlobalQueue => "global_queue_full",
++                _ => "channel_queue_full",
++            });
+             admission(scope);
+             return Err(super::MessageError::AdmissionRejected);
+         }
+@@ -213,7 +217,11 @@ impl Admission {
+         } else {
+             Rejection::WatermarkChannel
+         };
+-        let channel_permit = acquire(&semaphore, deadline, channel_rejection).await;
++        let channel_permit = crate::move_diagnostic::timed(
++            "channel_admission_wait",
++            acquire(&semaphore, deadline, channel_rejection),
++        )
++        .await;
+         #[cfg(test)]
+         if !send && channel_permit.is_err() {
+             self.record_watermark_event(organization, channel, "channel_rejection");
+@@ -225,7 +233,11 @@ impl Admission {
+         } else {
+             Rejection::WatermarkGlobal
+         };
+-        let global_permit = acquire(global, deadline, global_rejection).await;
++        let global_permit = crate::move_diagnostic::timed(
++            "global_admission_wait",
++            acquire(global, deadline, global_rejection),
++        )
++        .await;
+         #[cfg(test)]
+         if !send && global_permit.is_err() {
+             self.record_watermark_event(organization, channel, "global_rejection");
+@@ -242,7 +254,21 @@ async fn acquire(
+ ) -> Result<OwnedSemaphorePermit, sqlx::Error> {
+     match tokio::time::timeout_at(deadline, semaphore.clone().acquire_owned()).await {
+         Ok(Ok(permit)) => Ok(permit),
+-        _ => {
++        failure => {
++            let reason = match (rejection, failure.is_err()) {
++                (Rejection::SendChannel, true) => Some("channel_admission_timeout"),
++                (Rejection::SendGlobal, true) => Some("global_admission_timeout"),
++                (Rejection::SendChannel, false) => Some("channel_admission_closed"),
++                (Rejection::SendGlobal, false) => Some("global_admission_closed"),
++                (Rejection::WatermarkChannel, true) => Some("watermark_channel_timeout"),
++                (Rejection::WatermarkGlobal, true) => Some("watermark_global_timeout"),
++                (Rejection::WatermarkChannel, false) => Some("watermark_channel_closed"),
++                (Rejection::WatermarkGlobal, false) => Some("watermark_global_closed"),
++                _ => None,
++            };
++            if let Some(reason) = reason {
++                crate::move_diagnostic::rejection(reason);
++            }
+             admission(rejection);
+             Err(sqlx::Error::Io(std::io::Error::new(
+                 std::io::ErrorKind::WouldBlock,
+diff --git a/server/src/messages/commit.rs b/server/src/messages/commit.rs
+index fdf4f86..6fd8702 100644
+--- a/server/src/messages/commit.rs
++++ b/server/src/messages/commit.rs
+@@ -24,7 +24,10 @@ impl Transaction {
+         organization: Option<Uuid>,
+     ) -> Result<Self, sqlx::Error> {
+         let mut tx = Self {
+-            connection: Some(crate::database::acquire(pool).await?),
++            connection: Some(
++                crate::move_diagnostic::timed("write_pool_acquire", crate::database::acquire(pool))
++                    .await?,
++            ),
+             _permit: permit,
+         };
+         tx.connection()?.execute(sql).await?;
+@@ -35,7 +38,7 @@ impl Transaction {
+     }
+
+     pub(crate) async fn commit(mut self) -> Result<(), sqlx::Error> {
+-        self.connection()?.execute("COMMIT").await?;
++        crate::move_diagnostic::timed("commit_sql", self.connection()?.execute("COMMIT")).await?;
+         drop(self.connection.take());
+         Ok(())
+     }
+@@ -83,11 +86,14 @@ pub(super) async fn lock(
+     } else {
+         sql.to_owned()
+     };
+-    sqlx::query(&sql)
+-        .bind(organization)
+-        .bind(channel)
+-        .execute(&mut *tx)
+-        .await?;
++    crate::move_diagnostic::timed(
++        "channel_advisory_sql",
++        sqlx::query(&sql)
++            .bind(organization)
++            .bind(channel)
++            .execute(&mut *tx),
++    )
++    .await?;
+     Ok(())
+ }
+
+diff --git a/server/src/messages/limiter.rs b/server/src/messages/limiter.rs
+index fdaf348..087793e 100644
+--- a/server/src/messages/limiter.rs
++++ b/server/src/messages/limiter.rs
+@@ -216,6 +216,7 @@ impl SendLimiter {
+         let marker = match inner.pending.get(&key) {
+             Some(Pending::InFlight(sender, leader)) => {
+                 if sender.receiver_count() >= MAX_WAITERS {
++                    crate::move_diagnostic::rejection("limiter_duplicate_waiters_cap");
+                     return Err(Refusal::Saturated);
+                 }
+                 return Ok(Begin::Wait(sender.subscribe(), *leader == intent));
+@@ -230,6 +231,7 @@ impl SendLimiter {
+                 |_, pending| !matches!(pending, Pending::Unknown(until, _) if *until <= now),
+             );
+             if inner.pending.len() >= MAX_PENDING {
++                crate::move_diagnostic::rejection("limiter_pending_cap");
+                 return Err(Refusal::Saturated);
+             }
+         }
+@@ -260,6 +262,7 @@ impl SendLimiter {
+             // Only a full bucket equals a fresh one, so only those are reclaimed.
+             inner.buckets.retain(|_, bucket| !bucket.full(now, limit));
+             if inner.buckets.len() >= MAX_BUCKETS {
++                crate::move_diagnostic::rejection("limiter_member_buckets_cap");
+                 return Err(Refusal::Saturated);
+             }
+         }
+diff --git a/server/src/messages/move_topic.rs b/server/src/messages/move_topic.rs
+index 2711754..d32c31b 100644
+--- a/server/src/messages/move_topic.rs
++++ b/server/src/messages/move_topic.rs
+@@ -124,20 +124,22 @@ pub async fn move_chain(
+         input,
+     };
+     require_visible_scoped(&state.pool, request.organization, request.member, channel).await?;
++    crate::move_diagnostic::before_admission();
+     let waiter = state
+         .message_delivery
+         .admission(&state.pool)
+         .reserve_send(request.organization, channel)?;
+     let work = state.message_delivery.work.enter();
+-    let outcome = tokio::spawn(async move {
++    let outcome = tokio::spawn(crate::move_diagnostic::inherit(async move {
+         let _work = work;
+         let permit = waiter.acquire().await?;
+-        tokio::time::timeout(admission::WORK_TIMEOUT, persist(&state, &request, permit))
+-            .await
+-            .map_err(|_| {
+-                MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))
+-            })?
+-    })
++        tokio::time::timeout(
++            admission::WORK_TIMEOUT,
++            crate::move_diagnostic::timed("admitted_work", persist(&state, &request, permit)),
++        )
++        .await
++        .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
++    }))
+     .await
+     .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
+     Ok(([(header::CACHE_CONTROL, "no-store")], Json(outcome)).into_response())
+@@ -330,12 +332,15 @@ async fn persist(
+ async fn prepare(tx: &mut PgConnection, request: &Move) -> Result<Prepared, MessageError> {
+     let org = request.organization;
+     let channel = request.channel;
+-    let (actor, resource, archived) = match channels::lock_channel_access(
+-        tx,
+-        org,
+-        request.member,
+-        channel,
+-        channels::ChannelLock::Share,
++    let (actor, resource, archived) = match crate::move_diagnostic::timed(
++        "move_access_sql",
++        channels::lock_channel_access(
++            tx,
++            org,
++            request.member,
++            channel,
++            channels::ChannelLock::Share,
++        ),
+     )
+     .await?
+     {
+@@ -352,7 +357,9 @@ async fn prepare(tx: &mut PgConnection, request: &Move) -> Result<Prepared, Mess
+     commit::lock(tx, org, channel, false).await?;
+     let generation =
+         history::validate(tx, org, channel, request.input.history_generation, None).await?;
+-    let chain = chain(tx, request, actor, resource).await?;
++    let chain =
++        crate::move_diagnostic::timed("move_chain_lookup", chain(tx, request, actor, resource))
++            .await?;
+     let operation = request.operation();
+     match receipts::resolve(tx, org, &operation).await? {
+         receipts::Resolution::Committed(outcome) => {
+@@ -436,7 +443,11 @@ async fn prepare_new(
+         operation_id: operation.operation_id,
+     });
+     if let Some(event) = &event {
+-        apply_move(tx, org, operation.actor, &chain, event).await?;
++        crate::move_diagnostic::timed(
++            "move_apply",
++            apply_move(tx, org, operation.actor, &chain, event),
++        )
++        .await?;
+     }
+     Ok(Prepared::Write(
+         MoveChainResponse {
+diff --git a/server/src/messages/topics/projection.rs b/server/src/messages/topics/projection.rs
+index 1c111c6..8006aa8 100644
+--- a/server/src/messages/topics/projection.rs
++++ b/server/src/messages/topics/projection.rs
+@@ -75,20 +75,31 @@ async fn read(
+     let limit = query.validate()?;
+     let organization = auth.identity.organization.organization_id;
+     // Cheap denial before watermark admission; reauthorize in the page snapshot.
+-    require_visible_scoped(
+-        &state.pool,
+-        organization,
+-        (auth.identity.member.id, auth.membership_revision),
+-        channel,
++    crate::move_diagnostic::timed(
++        "topic_visible_scoped",
++        require_visible_scoped(
++            &state.pool,
++            organization,
++            (auth.identity.member.id, auth.membership_revision),
++            channel,
++        ),
+     )
+     .await?;
+     if topics_only || topic.is_some() {
+-        reject_dm_topics_scoped(state, auth, channel).await?;
++        crate::move_diagnostic::timed(
++            "topic_dm_check",
++            reject_dm_topics_scoped(state, auth, channel),
++        )
++        .await?;
+     }
+     tokio::time::timeout(admission::WORK_TIMEOUT, async {
+-        super::watermark(state, organization, channel).await?;
++        crate::move_diagnostic::timed(
++            "topic_barrier",
++            super::watermark(state, organization, channel),
++        )
++        .await?;
+         // Admission resolves prior ambiguous commits; W is selected in the page snapshot.
+-        let (history_generation, rows) = crate::database::organization_read_only(
++        let page_tx = crate::database::organization_read_only(
+             &state.pool,
+             organization,
+             async |tx: &mut sqlx::PgConnection| {
+@@ -107,7 +118,8 @@ async fn read(
+                     query.as_of_seq,
+                 )
+                 .await?;
+-                let rows = sqlx::query(&page_sql())
++                let sql = page_sql();
++                let page = sqlx::query(&sql)
+                     // Repeated reads otherwise select a much slower generic plan (#326).
+                     .persistent(false)
+                     .bind(organization)
+@@ -119,12 +131,13 @@ async fn read(
+                     .bind(i64::from(limit) + 1)
+                     .bind(topics_only)
+                     .bind(topic)
+-                    .fetch_all(tx)
+-                    .await?;
++                    .fetch_all(tx);
++                let rows = crate::move_diagnostic::timed("topic_page_sql", page).await?;
+                 Ok::<_, MessageError>((history_generation, rows))
+             },
+-        )
+-        .await?;
++        );
++        let (history_generation, rows) =
++            crate::move_diagnostic::timed("topic_page_tx", page_tx).await?;
+         let first = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+         match first.try_get::<Option<bool>, _>("visible")? {
+             None => return Err(MessageError::OrganizationUnavailable),
+diff --git a/server/src/messages/unread.rs b/server/src/messages/unread.rs
+index e245339..5315901 100644
+--- a/server/src/messages/unread.rs
++++ b/server/src/messages/unread.rs
+@@ -143,31 +143,36 @@ pub async fn list_channels(
+ ) -> Result<Response, ApiError> {
+     let Query(query) =
+         query.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid input", None))?;
+-    crate::database::organization_read_only(
++    let list = crate::database::organization_read_only(
+         &state.pool,
+         auth.identity.organization.organization_id,
+         async |tx: &mut sqlx::PgConnection| {
+-            let channels =
+-                channels::visible_list(&mut *tx, &auth, Some(query.archived.unwrap_or(false)))
+-                    .await?;
++            let channels = crate::move_diagnostic::timed(
++                "channel_visible_sql",
++                channels::visible_list(&mut *tx, &auth, Some(query.archived.unwrap_or(false))),
++            )
++            .await?;
+             #[cfg(test)]
+             tests::unread::baseline::pause_list(auth.identity.member.id).await;
+-            let history_generation = crate::auth::history::validate(
+-                tx,
+-                auth.identity.organization.organization_id,
+-                query.history_generation,
++            let history_generation = crate::move_diagnostic::timed(
++                "channel_history_sql",
++                crate::auth::history::validate(
++                    tx,
++                    auth.identity.organization.organization_id,
++                    query.history_generation,
++                ),
+             )
+             .await?;
+             let ids = channels.iter().map(|c| c.id).collect::<Vec<_>>();
+             // Two batched queries in one authorization/data snapshot, independent of the
+             // number of Channels or Topics. No Message or position outside ids is read.
+-            let rows = sqlx::query(LIST_COUNTS_SQL)
++            let counts = sqlx::query(LIST_COUNTS_SQL)
+                 .bind(auth.identity.organization.organization_id)
+                 .bind(auth.identity.member.id)
+                 .bind(auth.membership_revision)
+                 .bind(&ids)
+-                .fetch_all(&mut *tx)
+-                .await?;
++                .fetch_all(&mut *tx);
++            let rows = crate::move_diagnostic::timed("channel_counts_sql", counts).await?;
+             let mut counts = std::collections::HashMap::new();
+             for row in rows {
+                 if row.try_get::<bool, _>("missing_position")? {
+@@ -215,8 +220,8 @@ pub async fn list_channels(
+             )
+                 .into_response())
+         },
+-    )
+-    .await
++    );
++    crate::move_diagnostic::timed("channel_list_total", list).await
+ }
+
+ #[utoipa::path(put, path = "/api/v1/orgs/{org}/channels/{id}/read", request_body = MarkReadRequest,
+diff --git a/server/src/move_diagnostic.rs b/server/src/move_diagnostic.rs
+new file mode 100644
+index 0000000..d5e111d
+--- /dev/null
++++ b/server/src/move_diagnostic.rs
+@@ -0,0 +1,158 @@
++use axum::response::Response;
++use std::{
++    future::Future,
++    sync::{
++        Arc, OnceLock,
++        atomic::{AtomicU64, Ordering::Relaxed},
++    },
++    time::Instant,
++};
++use uuid::Uuid;
++
++tokio::task_local! {
++    static WRITE: Write;
++}
++
++static SEND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
++static CHANNELS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
++static TOPICS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
++
++static READ_EVERY: OnceLock<Option<u64>> = OnceLock::new();
++
++// The harness sets the Part D read interval; without a valid one no read is sampled,
++// which the harness reports as missing read timings.
++fn read_every() -> Option<u64> {
++    *READ_EVERY.get_or_init(|| {
++        let every = std::env::var("FUKULOW_MOVE_DIAG_READ_EVERY")
++            .ok()
++            .and_then(|value| value.parse::<u64>().ok())
++            .filter(|every| (1..=1024).contains(every));
++        if every.is_none() {
++            tracing::warn!(target: "fukulow", event = "move_diag_read_every_invalid");
++        }
++        every
++    })
++}
++
++// Move always, sends 1 in 32, Part D reads 1 in FUKULOW_MOVE_DIAG_READ_EVERY.
++fn sampled(lane: &'static str) -> bool {
++    let (sequence, every) = match lane {
++        "move" => return true,
++        "send" => (&SEND_SEQUENCE, Some(32)),
++        "channels" => (&CHANNELS_SEQUENCE, read_every()),
++        _ => (&TOPICS_SEQUENCE, read_every()),
++    };
++    every.is_some_and(|every| sequence.fetch_add(1, Relaxed) % every == 0)
++}
++
++#[derive(Clone)]
++struct Write {
++    lane: &'static str,
++    // Set for the Channel-list route only: two workloads share it in separate Organizations.
++    organization: Option<Uuid>,
++    started: Instant,
++    sampled: bool,
++    reason: Arc<OnceLock<&'static str>>,
++}
++
++pub(crate) async fn request(
++    lane: &'static str,
++    organization: Option<Uuid>,
++    future: impl Future<Output = Response>,
++) -> Response {
++    let write = Write {
++        lane,
++        organization,
++        started: Instant::now(),
++        sampled: sampled(lane),
++        reason: Arc::default(),
++    };
++    let reason = write.reason.clone();
++    let response = WRITE.scope(write, future).await;
++    if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE {
++        let reason = reason.get().copied().unwrap_or("unclassified");
++        let organization = organization.map(|id| id.to_string()).unwrap_or_default();
++        tracing::info!(target: "fukulow", event = "move_diag_503", lane, organization, reason);
++    }
++    response
++}
++
++pub(crate) fn inherit<F: Future>(future: F) -> impl Future<Output = F::Output> {
++    let write = WRITE.try_with(Clone::clone).ok();
++    async move {
++        match write {
++            Some(write) => WRITE.scope(write, future).await,
++            None => future.await,
++        }
++    }
++}
++
++pub(crate) fn rejection(reason: &'static str) {
++    let _ = WRITE.try_with(|write| write.reason.set(reason));
++}
++
++pub(crate) fn before_admission() {
++    let _ = WRITE.try_with(|write| {
++        if write.sampled {
++            record(
++                write.lane,
++                write.organization,
++                "before_admission",
++                write.started,
++                false,
++            );
++        }
++    });
++}
++
++pub(crate) async fn timed<T>(phase: &'static str, future: impl Future<Output = T>) -> T {
++    let mut timer = WRITE
++        .try_with(|write| {
++            write.sampled.then(|| Timer {
++                lane: write.lane,
++                organization: write.organization,
++                phase,
++                started: Instant::now(),
++                interrupted: true,
++            })
++        })
++        .ok()
++        .flatten();
++    let result = future.await;
++    if let Some(timer) = &mut timer {
++        timer.interrupted = false;
++    }
++    result
++}
++
++struct Timer {
++    lane: &'static str,
++    organization: Option<Uuid>,
++    phase: &'static str,
++    started: Instant,
++    interrupted: bool,
++}
++
++impl Drop for Timer {
++    fn drop(&mut self) {
++        record(
++            self.lane,
++            self.organization,
++            self.phase,
++            self.started,
++            self.interrupted,
++        );
++    }
++}
++
++fn record(
++    lane: &'static str,
++    organization: Option<Uuid>,
++    phase: &'static str,
++    started: Instant,
++    interrupted: bool,
++) {
++    let organization = organization.map(|id| id.to_string()).unwrap_or_default();
++    tracing::info!(target: "fukulow", event = "move_diag_timing", lane, organization, phase,
++        us = started.elapsed().as_secs_f64() * 1_000_000.0, interrupted);
++}
+diff --git a/server/src/observability.rs b/server/src/observability.rs
+index 4a356be..e380ac6 100644
+--- a/server/src/observability.rs
++++ b/server/src/observability.rs
+@@ -110,7 +110,32 @@ pub(crate) async fn request(request: Request, next: Next) -> Response {
+         status = tracing::field::Empty, duration_ms = tracing::field::Empty);
+     async move {
+         let started = Instant::now();
+-        let response = next.run(request).await;
++        let lane = match (
++            request.method().as_str(),
++            request
++                .extensions()
++                .get::<MatchedPath>()
++                .map(MatchedPath::as_str),
++        ) {
++            ("POST", Some("/api/v1/orgs/{org}/channels/{id}/messages")) => Some("send"),
++            ("POST", Some("/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move")) => {
++                Some("move")
++            }
++            ("GET", Some("/api/v1/orgs/{org}/channels")) => Some("channels"),
++            ("GET", Some("/api/v1/orgs/{org}/channels/{id}/topics")) => Some("topics"),
++            _ => None,
++        };
++        // The Organization separates the Part D Channel list from the second-Organization reader.
++        let organization = (lane == Some("channels"))
++            .then(|| request.uri().path().split('/').nth(4))
++            .flatten()
++            .and_then(|id| uuid::Uuid::parse_str(id).ok());
++        let response = match lane {
++            Some(lane) => {
++                crate::move_diagnostic::request(lane, organization, next.run(request)).await
++            }
++            None => next.run(request).await,
++        };
+         let span = tracing::Span::current();
+         span.record("status", response.status().as_u16());
+         span.record("duration_ms", started.elapsed().as_secs_f64() * 1000.0);
