@@ -101,6 +101,8 @@ Mac-relative, B `b975ffa` vs A `f7fe08a`, harness `df695bc`; separate from #431.
 
 Build, then run each night: `node load/slice5/run.ts --help`.
 
+F1 diagnostic, not evidence; #515 stays FAIL. Under REPEATABLE READ a generic plan cut A HTTP p50 1.68 → 1.33 ms (1M-recent); the PR now uses READ COMMITTED, untimed. Values are not reproducible; the tests verify function only. [Record](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic)
+
 ## Unread candidate bounds (#355)
 
 2026-11-16 JST (PR #448). Against `1662d5d`, Auto execution fell 0.178 → 0.117 ms for visible list and 5.477 → 3.677 ms for counts. Evidence for [bounding the grant lookup and materializing Topic candidates](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).

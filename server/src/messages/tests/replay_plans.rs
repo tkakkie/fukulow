@@ -30,6 +30,16 @@ async fn replay_hydration_work_is_bounded_by_page_positions(pool: PgPool) {
         .await
         .unwrap();
     }
+    // Every Message carries a Mention, so an Organization-wide Mention scan
+    // shows up as rows beyond the page in either plan mode.
+    sqlx::query(
+        "INSERT INTO message_mentions (organization_id, channel_id, message_id, member_id) \
+         SELECT organization_id, channel_id, id, sender FROM messages WHERE organization_id = $1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
     seed_channel_log(&pool).await;
     sqlx::query("ANALYZE messages, channel_log, channels, users, message_mentions")
         .execute(&pool)
@@ -66,7 +76,7 @@ async fn replay_hydration_work_is_bounded_by_page_positions(pool: PgPool) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-async fn explain_replay(app: &PgPool, mode: &str, sql: &str, args: &str) -> Value {
+pub(super) async fn explain_replay(app: &PgPool, mode: &str, sql: &str, args: &str) -> Value {
     let mut conn = app.acquire().await.unwrap();
     let context: (bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT rolsuper, rolbypassrls, row_security_active('messages'), \
@@ -110,7 +120,7 @@ async fn explain_replay(app: &PgPool, mode: &str, sql: &str, args: &str) -> Valu
     plan
 }
 
-fn relation_nodes<'a>(node: &'a Value, relation: &str, nodes: &mut Vec<&'a Value>) {
+pub(super) fn relation_nodes<'a>(node: &'a Value, relation: &str, nodes: &mut Vec<&'a Value>) {
     if node["Relation Name"] == relation {
         nodes.push(node);
     }
@@ -122,8 +132,22 @@ fn relation_nodes<'a>(node: &'a Value, relation: &str, nodes: &mut Vec<&'a Value
 fn check_page_work(root: &Value, case: &str, limit: i64, failures: &mut Vec<String>) {
     let mut log = Vec::new();
     let mut messages = Vec::new();
+    let mut mentions = Vec::new();
     relation_nodes(root, "channel_log", &mut log);
     relation_nodes(root, "messages", &mut messages);
+    relation_nodes(root, "message_mentions", &mut mentions);
+    if mentions.is_empty() {
+        failures.push(format!("{case}: expected a message_mentions scan: {root}"));
+    }
+    for node in mentions {
+        let read = node["Actual Rows"].as_f64().unwrap() * node["Actual Loops"].as_f64().unwrap();
+        if node["Node Type"] == "Seq Scan" || read > limit as f64 {
+            failures.push(format!(
+                "{case}: Mention reads not bounded by the page ({} reading {read} rows)",
+                node["Node Type"]
+            ));
+        }
+    }
     let ([log], [message]) = (log.as_slice(), messages.as_slice()) else {
         failures.push(format!(
             "{case}: expected one scan each of channel_log and messages: {root}"
@@ -188,4 +212,124 @@ fn check_page_work(root: &Value, case: &str, limit: i64, failures: &mut Vec<Stri
             .filter(|(passed, _)| !passed)
             .map(|(_, detail)| format!("{case}: {detail}")),
     );
+}
+
+#[fukulow_test::test]
+async fn authorized_page_plans_generically_without_leaking_the_setting(pool: PgPool) {
+    let org = organization(&pool).await;
+    let (sender, outsider) = (Uuid::new_v4(), Uuid::new_v4());
+    member(&pool, org, sender).await;
+    member(&pool, org, outsider).await;
+    let (public, private) = (Uuid::new_v4(), Uuid::new_v4());
+    channel(&pool, org, public, sender, false).await;
+    channel(&pool, org, private, sender, true).await;
+    for id in [public, private] {
+        sqlx::query(
+            "INSERT INTO messages (organization_id, channel_id, sender, id, seq, client_message_id, body) \
+             SELECT $1, $2, $3, gen_random_uuid(), n, gen_random_uuid(), 'plan' FROM generate_series(1, 3) n",
+        )
+        .bind(org).bind(id).bind(sender).execute(&pool).await.unwrap();
+    }
+    seed_channel_log(&pool).await;
+    let app = crate::test_app_pool(pool.clone()).await;
+    // One connection, so every check below observes the page's own backend.
+    let single = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*app.connect_options()).clone())
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let page = crate::messages::authorized_replay_page(&single, org, (sender, 0), public, 0, 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+    }
+    // A private Channel non-member is still denied; the denial also ends the setting.
+    assert!(matches!(
+        crate::messages::authorized_replay_page(&single, org, (outsider, 0), private, 0, 3).await,
+        Err(crate::messages::MessageError::NotFound)
+    ));
+    let mut conn = single.acquire().await.unwrap();
+    let state: (String, String, bool) = sqlx::query_as(
+        "SELECT current_setting('plan_cache_mode'), current_setting('transaction_read_only'), \
+                current_setting('fukulow.organization_id', true) IS NULL \
+                OR current_setting('fukulow.organization_id', true) = ''",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(state, ("auto".into(), "off".into(), true));
+    // Exact text bound as a parameter, so this unprepared query cannot match itself.
+    let page = format!(
+        "{} ORDER BY event_seq",
+        crate::database::organization_statement_sql(&log::authorized_page_sql())
+    );
+    let plans: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE statement = $1",
+    )
+    .bind(&page)
+    .persistent(false)
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(plans, vec![(4, 0)]);
+    drop(conn);
+    single.close().await;
+    app.close().await;
+}
+
+// The page shares one snapshot for authorization and data, taken when it
+// executes. Parse is its own round trip on a statement-cache miss, so a removal
+// committed after Parse and before execution must still deny.
+#[fukulow_test::test]
+async fn authorized_page_denies_a_removal_committed_between_parse_and_execution(pool: PgPool) {
+    let org = organization(&pool).await;
+    let (sender, reader) = (Uuid::new_v4(), Uuid::new_v4());
+    member(&pool, org, sender).await;
+    member(&pool, org, reader).await;
+    let private = Uuid::new_v4();
+    channel(&pool, org, private, sender, true).await;
+    sqlx::query(
+        "INSERT INTO messages (organization_id, channel_id, sender, id, seq, client_message_id, body) \
+         SELECT $1, $2, $3, gen_random_uuid(), n, gen_random_uuid(), 'parse' FROM generate_series(1, 3) n",
+    )
+    .bind(org).bind(private).bind(sender).execute(&pool).await.unwrap();
+    seed_channel_log(&pool).await;
+    let grant = async || {
+        sqlx::query("INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $2, $3)")
+            .bind(org).bind(private).bind(reader).execute(&pool).await.unwrap();
+    };
+    let app = crate::test_app_pool(pool.clone()).await;
+    let page = format!(
+        "{} ORDER BY event_seq",
+        crate::database::organization_statement_sql(&log::authorized_page_sql())
+    );
+    let read = async |single: &PgPool| {
+        crate::messages::authorized_replay_page(single, org, (reader, 0), private, 0, 3).await
+    };
+    use crate::database::tests::interrupted::paused_after_parse;
+    // Positive controls: a grant committed in the window authorizes, and an
+    // unchanged grant still authorizes after the pause.
+    let granted = paused_after_parse(&app, &page, read, grant).await.unwrap();
+    assert_eq!(
+        granted.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let unchanged = paused_after_parse(&app, &page, read, async || {})
+        .await
+        .unwrap();
+    assert_eq!(unchanged.len(), 3);
+    let removed = paused_after_parse(&app, &page, read, async || {
+        sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+            .bind(org).bind(private).bind(reader).execute(&pool).await.unwrap();
+    })
+    .await;
+    assert!(
+        matches!(removed, Err(crate::messages::MessageError::NotFound)),
+        "{removed:?}"
+    );
+    app.close().await;
 }

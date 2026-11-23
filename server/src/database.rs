@@ -1,6 +1,7 @@
 use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConnection};
 
 mod context;
+pub(crate) mod generic_plan;
 mod pool;
 mod stats;
 pub(crate) use context::organization_confirming_rollback;

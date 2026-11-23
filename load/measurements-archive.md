@@ -1643,3 +1643,50 @@ The cause is the phase timing, not the lock. B2 starts 60 s after B1 starts, but
 ### Verdict (maintainer decision, 2026-11-22)
 Recorded as non-formal Part B alternative evidence, not a formal Part B PASS. Both B2 readings stand: the window reading passes in all 3 runs and `b2Strict` is false in all 3. Further checks A–C: #756. Decision D (password change sharing the email budget): #757. #359 stays open until #756 is reviewed.
 
+
+## Replay page generic plan (#515 F1, 2026-11-23 JST, Mac, diagnostic)
+
+Diagnostic only, never evidence, no PASS/FAIL. Night 3 stays 3 FAIL and 1 INVALID. The fixture and settle steps are the [515-replay](../load/sql-probes/515-replay/README.md) recorded fixture (checksum `051bebdad7a83e4bd3abec00c2e05cb2`), with A `4542f54`, PostgreSQL 18.6, `fukulow_app` with RLS active, `statement_timeout=10s` and `jit=off`. The ad hoc psql and HTTP drivers were local, and their raw data is not stored.
+
+**Cause.** In the 2026-11-23 app-path diagnostic, the A page statement was 0.39 ms slower than B at p50, the largest A − B component. PostgreSQL re-plans it on every execution: `pg_prepared_statements` showed generic 0 / custom 510 per block. Its generic cost estimate is about 2,896, against 485–572 for the custom plan. Warm EXPLAIN ANALYZE medians (n = 40, two repeats):
+
+| Statement | Planning (ms) | Execution (ms) |
+|---|---:|---:|
+| A page | 0.37 | 0.19 |
+| B page | 0.12 | 0.06 |
+| A log page only | 0.04–0.05 | 0.04–0.05 |
+| A log + hydration | 0.08 | 0.13–0.14 |
+| + Mentions | 0.26–0.27 | 0.18 |
+| + visibility | 0.19–0.21 | 0.16 |
+
+Not identified: why Mentions and visibility plan this slowly inside A's nesting, when B's page with Mentions plans in 0.12 ms.
+
+**Change.** `authorized_page` (REST events and WebSocket authorized replay) runs its unchanged statement in a read-only transaction with `SET LOCAL plan_cache_mode = force_generic_plan`. BEGIN and SET share one round trip, and ROLLBACK ends the setting. Every timing below used REPEATABLE READ. After review, the maintainer moved it to READ COMMITTED so the snapshot is taken at execution, not at Parse. That variant was not timed. With a forced generic plan, the shape matches the custom plan:
+- channel_log uses a primary-key range;
+- each Message is looked up per row through `messages_org_channel_id_key`, with no Organization-wide scan;
+- Mentions use an index per page row.
+
+The gap-fill `replay_page` is not on the measured path and is unchanged.
+
+**SQL timing.** Prepared EXECUTE round trips in the DB container, 4 alternating blocks of n = 500. p50 / p95 ms:
+
+| Variant | 1M-recent | 1M-deep | 100k-recent |
+|---|---|---|---|
+| Autocommit | 0.56–0.59 / 0.59–0.69 | 0.65–0.69 / 0.71–0.78 | 0.57–0.58 / 0.61–0.63 |
+| Transaction (sum of 3) | 0.30–0.33 / 0.35–0.40 | 0.38–0.40 / 0.46–0.51 | 0.30–0.31 / 0.35–0.37 |
+
+Dropped: a range read in place of the 51 Message probes. It went generic only on a cost margin (5,503 vs 8,783 estimated) and stayed custom on 100k-recent (0.59–0.61 ms).
+
+**HTTP.** A control vs A + F1, both unpatched images built from `4542f54`, with the 515-app fixture and client checks and the app over the Compose bridge. Two cells, 4 alternating blocks of 50 after 10 warmups. p50 / p95 ms, with block p50 ranges:
+
+| Cell | Control | F1 |
+|---|---|---|
+| 1M-recent | 1.676 / 2.733 (1.573–2.001) | 1.329 / 1.724 (1.276–1.400) |
+| 1M-deep | 2.052 / 2.694 (1.972–2.295) | 1.451 / 1.762 (1.407–1.517) |
+
+The deep saving beyond the measured planning difference is not identified.
+
+**Reproduction (functional verification only).** The SQL and HTTP timings above cannot be reproduced: the drivers and raw data were not kept. The tests below check function, not performance: plan shape and bounds, generic planning, snapshot timing, and connection state after errors and cancellation.
+- `server/src/messages/tests/replay_plans.rs`: `replay_hydration_work_is_bounded_by_page_positions` (now with Mentions), `authorized_page_plans_generically_without_leaking_the_setting` and `authorized_page_denies_a_removal_committed_between_parse_and_execution`.
+- `server/src/messages/tests/page_mentions.rs`: Mention index keys under a skewed multi-Organization fixture, and the REST 201-row lookahead.
+- `server/src/database/tests/generic_plan.rs`: helper errors, failed SET LOCAL or ROLLBACK, and cancellation.
