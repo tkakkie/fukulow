@@ -1,5 +1,5 @@
-# Default: `docker compose --profile caddy up -d`  (or `--profile nginx`). Runs the published
-# release image; build from source only with `-f compose.yml -f compose.dev.yml`.
+# Proxy: COMPOSE_PROFILES=caddy|nginx|none in .env (or --profile); switch with deploy/switch-proxy.sh.
+# Runs the published release image; build from source only with `-f compose.yml -f compose.dev.yml`.
 services:
   app:
     read_only: true

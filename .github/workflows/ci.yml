@@ -42,7 +42,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     env:
-      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm and Docker builds are unchanged. Part of the rust-cache key.
+      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm-release and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
@@ -63,13 +63,13 @@ jobs:
       - run: npm --prefix load ci --ignore-scripts
       - run: npm --prefix load run check && npm --prefix load test
   # server-tests and checks build the real SPA themselves (a few seconds) instead of waiting for the whole `web` job.
-  # The server tests run as 3 nextest partitions in parallel; every test still runs on every PR.
+  # The server tests run as 4 nextest slices in parallel; every test still runs on every PR.
   server-tests:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:18
@@ -83,7 +83,7 @@ jobs:
           --health-retries 15
     env:
       DATABASE_URL: postgres://postgres:ci-test-only@127.0.0.1:5432/postgres
-      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm and Docker builds are unchanged. Part of the rust-cache key.
+      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm-release and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
@@ -103,7 +103,7 @@ jobs:
         with: { tool: cargo-nextest@0.9.151 }
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
       # Keep the build flags in sync with cargo nextest list in web/scripts/check-invariants.ts.
-      - run: cargo nextest run --locked --features fukulow-client-core/wasm --no-fail-fast --partition count:${{ matrix.shard }}/3
+      - run: cargo nextest run --locked --features fukulow-client-core/wasm --no-fail-fast --partition slice:${{ matrix.shard }}/4
       - if: matrix.shard == 1
         run: cargo test --locked --doc # nextest does not run doctests
       - if: matrix.shard == 1
@@ -120,7 +120,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     env:
-      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm and Docker builds are unchanged. Part of the rust-cache key.
+      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm-release and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
@@ -194,6 +194,8 @@ jobs:
               args.push("--set", "app.cache-to=type=gha,scope=docker,mode=max");
             }
             await exec.exec("docker", args);
+      - name: Image ships the license texts, copyright notice and third-party notices (#807)
+        run: bash scripts/check-image-licenses.sh fukulow-app
       # The profiles run side by side as separate Compose projects with ephemeral ports (~130 s in sequence).
       # Distinct edge subnets keep the two projects apart.
       - name: Both proxy profiles reject forwarded-IP spoofing

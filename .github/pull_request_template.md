@@ -1,4 +1,5 @@
 Closes #
+<!-- The Issue should be approved first (status:ready). Security fixes: report privately first (SECURITY.md). -->
 
 ## Summary
 
@@ -15,4 +16,4 @@ Closes #
 ## Risk
 <!-- Auth / permissions / real-time / migrations touched? Denial test added? Did a critical guarantee or denial requirement change? If so, did you update the relevant docs/invariants/ part? -->
 
-<!-- Last line: AI: <name> / model: <id> / effort: <level> -->
+<!-- AI authors, last line: AI: <name> / model: <id> / effort: <level>. Others may omit it. -->

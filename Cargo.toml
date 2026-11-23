@@ -2,6 +2,9 @@
 members = ["server", "api-types", "client-core"]
 resolver = "2"
 
+[workspace.package]
+license = "MIT OR Apache-2.0"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
