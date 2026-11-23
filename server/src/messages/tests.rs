@@ -18,6 +18,7 @@ mod dms_pool;
 pub(super) mod history;
 mod mentions;
 mod move_topic;
+mod page_mentions;
 mod receipts;
 mod replay_plans;
 mod search;

@@ -1,12 +1,17 @@
 use sqlx::{PgConnection, PgPool};
 
-pub(super) const BEGIN: &str = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; \
+// READ COMMITTED: the one statement takes its snapshot at execution, as the
+// autocommit path did. REPEATABLE READ would fix it at Parse, a separate round
+// trip on a statement-cache miss, so a revocation committed in between would
+// still authorize the page.
+pub(super) const BEGIN: &str = "BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY; \
      SET LOCAL plan_cache_mode = force_generic_plan";
 
 /// `organization_statement` for a statement that PostgreSQL would re-plan on
 /// every execution although planning dominates its run time (#515). One
-/// read-only snapshot with a transaction-local generic plan: BEGIN and SET LOCAL
-/// share one simple-query round trip, and the setting ends with the ROLLBACK.
+/// read-only statement snapshot with a transaction-local generic plan: BEGIN and
+/// SET LOCAL share one simple-query round trip, and the setting ends with the
+/// ROLLBACK.
 /// Errors before a confirmed ROLLBACK, and cancellation, discard the connection.
 pub(crate) async fn organization_statement_generic<T>(
     pool: &PgPool,

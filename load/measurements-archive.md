@@ -1661,7 +1661,7 @@ Diagnostic only, never evidence, no PASS/FAIL. Night 3 stays 3 FAIL and 1 INVALI
 
 Not identified: why Mentions and visibility plan this slowly inside A's nesting, when B's page with Mentions plans in 0.12 ms.
 
-**Change.** `authorized_page` (REST events and WebSocket authorized replay) runs its unchanged statement in a read-only REPEATABLE READ transaction with `SET LOCAL plan_cache_mode = force_generic_plan`. BEGIN and SET share one round trip, and ROLLBACK ends the setting. With a forced generic plan, the shape matches the custom plan:
+**Change.** `authorized_page` (REST events and WebSocket authorized replay) runs its unchanged statement in a read-only transaction with `SET LOCAL plan_cache_mode = force_generic_plan`. BEGIN and SET share one round trip, and ROLLBACK ends the setting. Every timing below used REPEATABLE READ. After review, the maintainer moved it to READ COMMITTED so the snapshot is taken at execution, not at Parse. That variant was not timed. With a forced generic plan, the shape matches the custom plan:
 - channel_log uses a primary-key range;
 - each Message is looked up per row through `messages_org_channel_id_key`, with no Organization-wide scan;
 - Mentions use an index per page row.
@@ -1686,4 +1686,7 @@ Dropped: a range read in place of the 51 Message probes. It went generic only on
 
 The deep saving beyond the measured planning difference is not identified.
 
-**Reproduction.** `replay_hydration_work_is_bounded_by_page_positions` (now with Mentions) and `authorized_page_plans_generically_without_leaking_the_setting` in `server/src/messages/tests/replay_plans.rs`.
+**Reproduction (functional verification only).** The SQL and HTTP timings above cannot be reproduced: the drivers and raw data were not kept. The tests below check function, not performance: plan shape and bounds, generic planning, snapshot timing, and connection state after errors and cancellation.
+- `server/src/messages/tests/replay_plans.rs`: `replay_hydration_work_is_bounded_by_page_positions` (now with Mentions), `authorized_page_plans_generically_without_leaking_the_setting` and `authorized_page_denies_a_removal_committed_between_parse_and_execution`.
+- `server/src/messages/tests/page_mentions.rs`: Mention index keys under a skewed multi-Organization fixture, and the REST 201-row lookahead.
+- `server/src/database/tests/generic_plan.rs`: helper errors, failed SET LOCAL or ROLLBACK, and cancellation.

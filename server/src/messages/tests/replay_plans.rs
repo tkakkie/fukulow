@@ -76,7 +76,7 @@ async fn replay_hydration_work_is_bounded_by_page_positions(pool: PgPool) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-async fn explain_replay(app: &PgPool, mode: &str, sql: &str, args: &str) -> Value {
+pub(super) async fn explain_replay(app: &PgPool, mode: &str, sql: &str, args: &str) -> Value {
     let mut conn = app.acquire().await.unwrap();
     let context: (bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT rolsuper, rolbypassrls, row_security_active('messages'), \
@@ -120,7 +120,7 @@ async fn explain_replay(app: &PgPool, mode: &str, sql: &str, args: &str) -> Valu
     plan
 }
 
-fn relation_nodes<'a>(node: &'a Value, relation: &str, nodes: &mut Vec<&'a Value>) {
+pub(super) fn relation_nodes<'a>(node: &'a Value, relation: &str, nodes: &mut Vec<&'a Value>) {
     if node["Relation Name"] == relation {
         nodes.push(node);
     }
@@ -278,5 +278,58 @@ async fn authorized_page_plans_generically_without_leaking_the_setting(pool: PgP
     assert_eq!(plans, vec![(4, 0)]);
     drop(conn);
     single.close().await;
+    app.close().await;
+}
+
+// The page shares one snapshot for authorization and data, taken when it
+// executes. Parse is its own round trip on a statement-cache miss, so a removal
+// committed after Parse and before execution must still deny.
+#[fukulow_test::test]
+async fn authorized_page_denies_a_removal_committed_between_parse_and_execution(pool: PgPool) {
+    let org = organization(&pool).await;
+    let (sender, reader) = (Uuid::new_v4(), Uuid::new_v4());
+    member(&pool, org, sender).await;
+    member(&pool, org, reader).await;
+    let private = Uuid::new_v4();
+    channel(&pool, org, private, sender, true).await;
+    sqlx::query(
+        "INSERT INTO messages (organization_id, channel_id, sender, id, seq, client_message_id, body) \
+         SELECT $1, $2, $3, gen_random_uuid(), n, gen_random_uuid(), 'parse' FROM generate_series(1, 3) n",
+    )
+    .bind(org).bind(private).bind(sender).execute(&pool).await.unwrap();
+    seed_channel_log(&pool).await;
+    let grant = async || {
+        sqlx::query("INSERT INTO channel_members (organization_id, channel_id, member_id) VALUES ($1, $2, $3)")
+            .bind(org).bind(private).bind(reader).execute(&pool).await.unwrap();
+    };
+    let app = crate::test_app_pool(pool.clone()).await;
+    let page = format!(
+        "{} ORDER BY event_seq",
+        crate::database::organization_statement_sql(&log::authorized_page_sql())
+    );
+    let read = async |single: &PgPool| {
+        crate::messages::authorized_replay_page(single, org, (reader, 0), private, 0, 3).await
+    };
+    use crate::database::tests::interrupted::paused_after_parse;
+    // Positive controls: a grant committed in the window authorizes, and an
+    // unchanged grant still authorizes after the pause.
+    let granted = paused_after_parse(&app, &page, read, grant).await.unwrap();
+    assert_eq!(
+        granted.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let unchanged = paused_after_parse(&app, &page, read, async || {})
+        .await
+        .unwrap();
+    assert_eq!(unchanged.len(), 3);
+    let removed = paused_after_parse(&app, &page, read, async || {
+        sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
+            .bind(org).bind(private).bind(reader).execute(&pool).await.unwrap();
+    })
+    .await;
+    assert!(
+        matches!(removed, Err(crate::messages::MessageError::NotFound)),
+        "{removed:?}"
+    );
     app.close().await;
 }

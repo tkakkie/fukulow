@@ -65,7 +65,7 @@ WebSocket server: lifecycle, session, notification, access loss, watermark, cont
 | Subscribe racing removal refuses or emits access loss and retires; no stale subscribed restores it | `server/src/realtime/tests/access_loss.rs::subscribe_registration_racing_removal_never_hands_off_a_stale_subscription` |
 | Denied management emits no Message/access-loss event; ungranted public Guests cannot subscribe/receive live; an explicit grant permits both | `server/src/realtime/tests/access_loss.rs::denied_management_and_ungranted_guest_subscriptions_emit_no_protected_or_loss_events` |
 | Public Role changes preserve continuous access and adopt grant lifetimes; later remove/re-grant retires old subscriptions; Membership loss stays 4003 | `server/src/realtime/tests/access_loss.rs::continuous_public_role_changes_adopt_grant_lifetimes_and_membership_loss_keeps_4003` |
-| Replay authorization and page data share a fresh snapshot; removal committed before that snapshot denies even with its fast signal dropped | `server/src/realtime/tests/access_loss.rs::replay_snapshot_after_removal_commit_denies_even_without_a_fast_signal` |
+| Replay authorization and page data share a fresh snapshot; removal committed before that snapshot denies even with its fast signal dropped | `server/src/realtime/tests/access_loss.rs::replay_snapshot_after_removal_commit_denies_even_without_a_fast_signal`, `server/src/messages/tests/replay_plans.rs::authorized_page_denies_a_removal_committed_between_parse_and_execution` |
 
 ## Organization activity
 

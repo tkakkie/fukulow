@@ -101,7 +101,7 @@ Mac-relative, B `b975ffa` vs A `f7fe08a`, harness `df695bc`; separate from #431.
 
 Build, then run each night: `node load/slice5/run.ts --help`.
 
-Diagnostic, not evidence: re-planning the A page each run cost ~0.37 ms; F1's generic plan cut HTTP p50 1.68 → 1.33 ms (1M-recent). [Record](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic)
+F1 diagnostic, not evidence; #515 stays FAIL. Under REPEATABLE READ a generic plan cut A HTTP p50 1.68 → 1.33 ms (1M-recent); the PR now uses READ COMMITTED, untimed. Values are not reproducible; the tests verify function only. [Record](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic)
 
 ## Unread candidate bounds (#355)
 
