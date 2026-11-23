@@ -38,7 +38,8 @@ services:
     security_opt: [no-new-privileges:true]
     image: ${LOAD_APP_IMAGE:-${LOAD_PROJECT:?Set LOAD_PROJECT}-app}
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
-    command: ["fukulow-server", "migrate"]
+    entrypoint: ["fukulow-server", "migrate"]
+    command: []
     environment:
       DATABASE_URL: postgres://fukulow:${LOAD_DB_PASSWORD:?Set LOAD_DB_PASSWORD}@db:5432/fukulow
       POSTGRES_APP_PASSWORD: ${LOAD_APP_PASSWORD:?Set LOAD_APP_PASSWORD}

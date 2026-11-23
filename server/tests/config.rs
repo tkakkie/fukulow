@@ -1,6 +1,32 @@
 #![cfg(test)]
 
-use std::process::Command;
+use std::{
+    ffi::OsStr,
+    os::unix::ffi::OsStrExt,
+    process::{Command, Output},
+};
+
+#[path = "support/pools.rs"]
+mod test_support;
+
+const INVALID_UTF8: &[u8] = b"secret-config-test-only\xff";
+
+fn server_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
+    command
+        .env_clear()
+        .env("FUKULOW_SETUP_TOKEN", "secret-setup-value");
+    command
+}
+
+fn assert_config_error(output: Output, diagnostic: &str) {
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!("Error: {diagnostic:?}\n")
+    );
+}
 
 #[test]
 fn startup_panics_never_echo_payloads_or_secrets() {
@@ -141,26 +167,26 @@ fn startup_database_diagnostics_never_echo_sensitive_inputs() {
         let error = String::from_utf8(output.stderr).unwrap();
         assert!(!error.contains("secret-"), "{error}");
         assert!(error.contains("database_failure"), "{error}");
-        assert!(error.contains("diagnostics suppressed"), "{error}");
+        assert!(error.contains("Database connection failed (diagnostics suppressed); check DATABASE_URL syntax, credentials and PostgreSQL availability"), "{error}");
     }
 }
 
 #[test]
 fn roles_command_requires_password_before_connecting_and_rejects_unknown_commands() {
-    for password in [None, Some("")] {
+    for password in [
+        None,
+        Some(OsStr::new("")),
+        Some(OsStr::from_bytes(INVALID_UTF8)),
+    ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fukulow-server"));
         command.env_clear().args(["migrate", "roles"]);
         if let Some(password) = password {
             command.env("POSTGRES_APP_PASSWORD", password);
         }
-        let output = command.output().unwrap();
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8(output.stderr)
-                .unwrap()
-                .contains("POSTGRES_APP_PASSWORD must")
+        assert_config_error(
+            command.output().unwrap(),
+            "POSTGRES_APP_PASSWORD must be set to a nonempty app database password in UTF-8",
         );
-        assert!(output.stdout.is_empty());
     }
     for args in [
         vec!["unknown"],
@@ -208,7 +234,10 @@ fn startup_requires_setup_token_regardless_of_cookie_security() {
                 assert!(!error.contains("FUKULOW_SETUP_TOKEN"), "{error}");
                 assert!(!error.is_empty());
             } else {
-                assert!(error.contains("FUKULOW_SETUP_TOKEN must"), "{error}");
+                assert_eq!(
+                    error,
+                    "Error: \"FUKULOW_SETUP_TOKEN must be set to a private, random, nonblank UTF-8 token\"\n"
+                );
             }
             assert!(!error.contains("setup-token-test-only"));
             assert!(!error.contains("setup-token-local-test-only"));
@@ -216,6 +245,102 @@ fn startup_requires_setup_token_regardless_of_cookie_security() {
             assert!(output.stdout.is_empty());
         }
     }
+}
+
+#[test]
+fn startup_names_invalid_configuration_without_echoing_values() {
+    for args in [
+        vec![],
+        vec!["migrate"],
+        vec!["migrate", "roles"],
+        vec!["rotate-history-generation", "--all"],
+    ] {
+        for invalid in [
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new(" \t")),
+            Some(OsStr::from_bytes(INVALID_UTF8)),
+        ] {
+            let mut command = server_command();
+            command
+                .args(&args)
+                .env("POSTGRES_APP_PASSWORD", "secret-role-test-only");
+            if let Some(value) = invalid {
+                command.env("DATABASE_URL", value);
+            }
+            assert_config_error(
+                command.output().unwrap(),
+                "DATABASE_URL must be set to a PostgreSQL connection URL in UTF-8",
+            );
+        }
+    }
+
+    for name in [
+        "FUKULOW_ADDR",
+        "FUKULOW_WS_ALLOWED_ORIGINS",
+        "FUKULOW_TRUSTED_PROXIES",
+        "FUKULOW_CLIENT_IP_HEADER",
+        "FUKULOW_SEND_BURST",
+        "FUKULOW_SEND_REFILL_PER_SECOND",
+        "FUKULOW_DB_MAX_CONNECTIONS",
+        "FUKULOW_DB_ACQUIRE_TIMEOUT_MS",
+    ] {
+        assert_config_error(
+            server_command()
+                .env("DATABASE_URL", "test-only-invalid-url")
+                .env(name, OsStr::from_bytes(INVALID_UTF8))
+                .output()
+                .unwrap(),
+            &format!("{name} must be valid UTF-8"),
+        );
+    }
+    for (name, diagnostic) in [
+        (
+            "FUKULOW_SETUP_TOKEN",
+            "FUKULOW_SETUP_TOKEN must be set to a private, random, nonblank UTF-8 token",
+        ),
+        (
+            "FUKULOW_COOKIE_SECURE",
+            "FUKULOW_COOKIE_SECURE must be true or false",
+        ),
+        (
+            "FUKULOW_SEARCH_ENGINE",
+            "FUKULOW_SEARCH_ENGINE must be disabled or d3r",
+        ),
+    ] {
+        assert_config_error(
+            server_command()
+                .env("DATABASE_URL", "test-only-invalid-url")
+                .env(name, OsStr::from_bytes(INVALID_UTF8))
+                .output()
+                .unwrap(),
+            diagnostic,
+        );
+    }
+    assert_config_error(
+        server_command()
+            .arg("probe")
+            .env("FUKULOW_ADDR", "secret-config-test-only:invalid-port")
+            .output()
+            .unwrap(),
+        "Readiness probe failed; check FUKULOW_ADDR (host:port) and that the app is ready",
+    );
+}
+
+#[fukulow_test::test]
+async fn startup_names_listener_setting_on_bind_failure(pool: sqlx::PgPool) {
+    use sqlx::ConnectOptions;
+    let test_support::TestPools { admin, app } = test_support::TestPools::new(pool).await;
+    drop(admin);
+    let database_url = app.connect_options().to_url_lossy();
+    assert_config_error(
+        server_command()
+            .env("DATABASE_URL", database_url.as_str())
+            .env("FUKULOW_ADDR", "secret-config-test-only:invalid-port")
+            .output()
+            .unwrap(),
+        "Listener bind failed; set FUKULOW_ADDR to a local host and available port",
+    );
 }
 
 #[test]

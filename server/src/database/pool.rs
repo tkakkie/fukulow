@@ -12,11 +12,11 @@ pub struct PoolConfig {
 
 impl PoolConfig {
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        fn optional(name: &str) -> Result<Option<String>, env::VarError> {
+        fn optional(name: &str) -> Result<Option<String>, String> {
             match env::var(name) {
                 Ok(value) => Ok(Some(value)),
                 Err(env::VarError::NotPresent) => Ok(None),
-                Err(error) => Err(error),
+                Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8")),
             }
         }
         Self::configured(
