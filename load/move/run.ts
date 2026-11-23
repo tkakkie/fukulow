@@ -10,7 +10,7 @@ import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnost
 import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, readSampleEnvironment, rejectDiagnosticImage, remainingArmsSkipped,
   type ReadLanes } from './diagnostic-mode.ts';
 import { buildFixture, committedMoves, head, type Seeded } from './fixture.ts';
-import { armInvalid, infrastructureFailure, type Attempt, type Measurement, type Result } from './judge.ts';
+import { armInvalid, infrastructureFailure, judge, type Attempt, type Measurement, type Result } from './judge.ts';
 import { latency, storage } from './measure.ts';
 import { moveLimits, plan, rehearsalPlan, rehearsalSteps, stepId, steps, thresholds, type Plan, type Step } from './plan.ts';
 import { render } from './report.ts';
@@ -30,8 +30,9 @@ export function checkImageRevision(commit: string, revision: string) {
   if (revision !== commit) throw new Error('App image revision does not equal --commit');
 }
 
-export function canRerun(attempt: Attempt, used: boolean, smoke: boolean, aborted: boolean) {
-  return attempt.infrastructure === infrastructureFailure && !used && !smoke && !aborted;
+// sampled: this attempt reached its measurement boundary. A failure after it is a result and never reruns (#769).
+export function canRerun(attempt: Attempt, used: boolean, smoke: boolean, aborted: boolean, sampled: boolean) {
+  return attempt.infrastructure === infrastructureFailure && !used && !smoke && !aborted && !sampled;
 }
 
 // Report the Docker daemon condition alone. Docker command diagnostics can
@@ -54,7 +55,8 @@ function cleanup(project: string, step?: string) {
   }
 }
 
-async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir: string, labels: Record<string, string>, k6: string, signal: AbortSignal, diagnosticRun = false, readLanes: ReadLanes = 'all') {
+export async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir: string, labels: Record<string, string>, k6: string, signal: AbortSignal,
+  startSampling: () => void, diagnosticRun = false, readLanes: ReadLanes = 'all') {
   save(join(dir, 'data.json'), seeded.data);
   save(join(dir, 'tokens.json'), seeded.tokens);
   const name = `${stack.env.LOAD_PROJECT}-k6`;
@@ -79,6 +81,8 @@ async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir:
     k6CeilingWarnings: ReturnType<typeof k6CeilingWarnings>;
   }) | undefined;
   try {
+    // Fixture files, the start position and capture setup above are setup; k6 starts the measured window.
+    startSampling();
     const result = await exec('docker', generatorArgs, { signal, timeout: (seconds + 2 * p.drain + 30) * 1000 });
     stdout = result.stdout;
     if (diagnosticRun) stderr = result.stderr;
@@ -134,9 +138,36 @@ export function firstArmInvalid(p: Plan, diagnostic: boolean, row: Result) {
   return diagnostic ? [] : armInvalid(p, row, row.attempts.at(-1));
 }
 
-// A rehearsal applies every per-arm validity check to its arms; it is clean only when none fails.
+// A rehearsal applies every per-arm validity check to its arms and judge()'s functional checks to each
+// rehearsed round; it is clean only when none fails. Performance gates stay NOT EVALUATED in judge().
 export function rehearsalChecks(p: Plan, results: Result[]) {
-  return results.map(row => ({ step: stepId(row), problems: armInvalid(p, row, row.attempts.at(-1)) }));
+  const arms = results.map(row => ({ step: stepId(row), problems: armInvalid(p, row, row.attempts.at(-1)) }));
+  const rehearsed = (part: string, size: number, round: number) => results.some(row => row.part === part && row.size === size && row.round === round);
+  const functional = judge(p, results, true).rows.flatMap(row => row.rounds
+    .filter(round => rehearsed(row.part, row.size, round.round) && round.functional.status !== 'PASS')
+    .map(round => ({ step: `${row.part}-${row.size}-r${round.round}-functional`,
+      problems: round.functional.reasons.length ? round.functional.reasons : [round.functional.status] })));
+  return [...arms, ...functional];
+}
+
+// Any INVALID or unjudged verdict is never evidence. A valid FAIL stays evidence-eligible but fails the run.
+export function verdictInvalid(verdict: ReturnType<typeof judge>) {
+  return !(['PASS', 'FAIL'] as string[]).includes(verdict.overall)
+    || verdict.rows.some(row => row.rounds.some(round => round.status === 'INVALID' || round.functional.status === 'INVALID'));
+}
+
+// status.json flags from the final verdict and exit decision (harness-core/stages.ts semantics).
+export function statusFlags(o: { passed: boolean; finished: boolean; cleanupIssues: number; stoppedEarly: boolean; armProblem: boolean;
+  diagnosticIncomplete: boolean; verdict?: ReturnType<typeof judge> }) {
+  const incomplete = !o.finished || o.cleanupIssues > 0 || o.stoppedEarly || o.diagnosticIncomplete;
+  return { failed: !o.passed || incomplete || o.armProblem, invalidEvidence: incomplete || (o.verdict !== undefined && verdictInvalid(o.verdict)) };
+}
+
+// results.json: complete is false and skipped lists the arms when scheduled work did not all run (for
+// example a fail-fast stop). The verdict is still judged with the run's own completeness.
+export function scheduledWork(finished: boolean, orderedSteps: Step[], ran: number) {
+  const skipped = orderedSteps.slice(ran).map(stepId);
+  return { complete: finished && skipped.length === 0, skipped };
 }
 
 function postgresImage() {
@@ -230,7 +261,8 @@ async function main() {
         let stage = 'stack launch';
         let artifacts: object = {};
         let captured: Pick<Awaited<ReturnType<typeof generator>>, 'extra' | 'started'> | undefined;
-        let stepCleaned = false;
+        let stepCleaned = false, sampled = false;
+        const startSampling = () => { stage = 'measurement'; sampled = true; run.startSampling(); };
         run.enter(selection ? `DIAGNOSTIC ${id}` : id);
         try {
           const stack = await startStack({ id, project, source: repo, image: image.id, privateDir: dir,
@@ -240,11 +272,10 @@ async function main() {
           if (docker('inspect', '--format', '{{.Image}}', stack.app) !== image.id) throw new Error('App image changed');
           stage = 'fixture';
           const seeded = await buildFixture(stack, p, step);
-          stage = 'measurement';
-          run.startSampling();
-          const measured = step.part === 'A' ? await latency(stack, seeded, p, abort.signal)
-            : step.part === 'F' ? await storage(stack, seeded, p, step, abort.signal)
-            : await generator(stack, seeded, p, step, dir, labels, k6, abort.signal, Boolean(selection), selection?.readLanes);
+          stage = 'measurement setup';
+          const measured = step.part === 'A' ? await latency(stack, seeded, p, abort.signal, startSampling)
+            : step.part === 'F' ? await storage(stack, seeded, p, step, abort.signal, startSampling)
+            : await generator(stack, seeded, p, step, dir, labels, k6, abort.signal, startSampling, Boolean(selection), selection?.readLanes);
           attempt.measurement = measured.measurement;
           if ('problem' in measured) attempt.problem = measured.problem;
           artifacts = measured;
@@ -288,7 +319,7 @@ async function main() {
           }
           rmSync(dir, { recursive: true, force: true });
         }
-        if (!canRerun(attempt, rerun, p.smoke, abort.signal.aborted)) {
+        if (!canRerun(attempt, rerun, p.smoke, abort.signal.aborted, sampled)) {
           if (!stepCleaned) throw new Error(`${id}: could not clean up this arm`);
           break;
         }
@@ -325,10 +356,20 @@ async function main() {
     const finished = complete && cleaned && !abort.signal.aborted;
     const allArms = finished && cleanupIssues.length === 0 && results.length === orderedSteps.length;
     const captured = allArms && results.every(result => !result.attempts[0]?.problem);
-    const checks = p.rehearsal && !selection ? rehearsalChecks(p, results) : [];
-    const clean = selection ? captured : allArms && checks.every(check => !check.problems.length);
     const armProblem = results.some(row => row.attempts.at(-1)?.problem !== undefined);
-    let line = '', passed = false;
+    // Judge before status.json so its flags follow the verdict; a judge() error still reaches run.finish as a summary failure.
+    let summary: { report: ReturnType<typeof render>; checks: ReturnType<typeof rehearsalChecks>; clean: boolean } | undefined;
+    let summaryError: unknown;
+    if (!selection) {
+      try {
+        const report = render(p, results, finished);
+        const checks = p.rehearsal ? rehearsalChecks(p, results) : [];
+        summary = { report, checks, clean: allArms && checks.every(check => !check.problems.length) };
+      } catch (error) { summaryError = error; }
+    }
+    const passed = selection ? captured : summary !== undefined && finished
+      && (p.rehearsal ? summary.clean : p.smoke ? summary.report.verdict.functional === 'PASS' : summary.report.verdict.overall === 'PASS');
+    let line = '';
     const status = run.finish(() => {
       if (selection) {
         save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, ...(p.rehearsal && { rehearsal: true, evidence: false }),
@@ -336,20 +377,19 @@ async function main() {
           skipped: orderedSteps.slice(results.length).map(stepId) });
         line = `DIAGNOSTIC ${p.rehearsal ? 'REHEARSAL ' : ''}capture ${captured ? 'complete' : 'incomplete'}` + (attribution ? ` · ${attribution}` : '')
           + (p.rehearsal ? ' (never evidence)' : '');
-        passed = captured;
       } else {
-        const report = render(p, results, finished);
+        if (!summary) throw summaryError;
+        const { report, checks, clean } = summary;
         save(join(output, 'results.json'), { ...(p.rehearsal && { mode, evidence: false, rehearsalClean: clean, checks }),
-          complete: finished, ...(stoppedEarly === undefined ? {} : { stoppedEarly }), cleanupIssues, results, ...report.verdict });
+          ...scheduledWork(finished, orderedSteps, results.length), ...(stoppedEarly === undefined ? {} : { stoppedEarly }),
+          cleanupIssues, results, ...report.verdict });
         writeFileSync(join(output, 'report.md'), report.markdown, { mode: 0o600 });
         line = p.rehearsal ? `Move harness REHEARSAL ${clean ? 'clean' : 'not clean'} (never evidence)`
           : `Move harness ${p.smoke ? 'functional ' + report.verdict.functional : report.verdict.overall}`;
-        passed = finished && (p.rehearsal ? clean : p.smoke ? report.verdict.functional === 'PASS' : report.verdict.overall === 'PASS');
       }
-    }, { failed: !finished || cleanupIssues.length > 0 || stoppedEarly !== undefined || armProblem || (Boolean(selection) && !captured),
-      interrupted: abort.signal.aborted,
-      invalidEvidence: !finished || cleanupIssues.length > 0 || stoppedEarly !== undefined || (Boolean(selection) && !captured),
-      summaryInvalidates: true });
+    }, { ...statusFlags({ passed, finished, cleanupIssues: cleanupIssues.length, stoppedEarly: stoppedEarly !== undefined, armProblem,
+      diagnosticIncomplete: Boolean(selection) && !captured, verdict: summary?.report.verdict }),
+    interrupted: abort.signal.aborted, summaryInvalidates: true });
     if (line) console.log(line);
     console.log(`Move harness status ${status.outcome} (${mode}, evidence ${status.evidence})`);
     if (!passed || status.summaryFailed) process.exitCode = 1;

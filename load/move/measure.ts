@@ -5,7 +5,9 @@ import type { Plan, Step } from './plan.ts';
 import { sampler, sleep, snapshot, walWindow, type Stack } from '../slice5/stack.ts';
 import { watchedRelationsSQL } from '../slice5/fixture.ts';
 
-async function nodeWindow<T>(stack: Stack, seeded: Seeded, p: Plan, work: () => Promise<T>) {
+// startSampling marks the measurement boundary (#769): everything before it is setup.
+async function nodeWindow<T>(stack: Stack, seeded: Seeded, p: Plan, startSampling: () => void, work: () => Promise<T>) {
+  startSampling();
   const from = Date.now();
   const resources = sampler(stack, () => undefined, false);
   const reader = samples(), pending = new Set<Promise<void>>();
@@ -43,12 +45,12 @@ async function nodeWindow<T>(stack: Stack, seeded: Seeded, p: Plan, work: () => 
   }
 }
 
-export async function latency(stack: Stack, seeded: Seeded, p: Plan, signal: AbortSignal) {
+export async function latency(stack: Stack, seeded: Seeded, p: Plan, signal: AbortSignal, startSampling: () => void) {
   const { data } = seeded;
   const moves = samples();
   const verification: { operation: string; before: number; after: number; expectedVersion: number;
     ms: number; outcome: Outcome; ackMatches: boolean; committed: boolean }[] = [];
-  const work = await nodeWindow(stack, seeded, p, async () => {
+  const work = await nodeWindow(stack, seeded, p, startSampling, async () => {
     let position = head(stack, data), version = data.chain.version;
     let destination = 1;
     for (let i = 0; i < p.moves; i++) {
@@ -82,13 +84,13 @@ function rowCounts(stack: Stack, seeded: Seeded) {
     WHERE organization_id = '${organization}' AND channel_id = '${chain.channel}')`).join(',')});`)) as Record<typeof tables[number], number>;
 }
 
-export async function storage(stack: Stack, seeded: Seeded, p: Plan, step: Step, signal: AbortSignal) {
+export async function storage(stack: Stack, seeded: Seeded, p: Plan, step: Step, signal: AbortSignal, startSampling: () => void) {
   const { data, tokens } = seeded, active = step.arm === 'move';
   const writes = samples();
   const watched: number[] = JSON.parse(stack.sql(watchedRelationsSQL));
   const initialRows = rowCounts(stack, seeded);
   const before = snapshot(stack, watched);
-  const work = await nodeWindow(stack, seeded, p, async () => {
+  const work = await nodeWindow(stack, seeded, p, startSampling, async () => {
     let version = data.chain.version;
     let verified = true;
     for (let i = 0; i < p.moves; i++) {

@@ -337,11 +337,11 @@ test('1,000 is kept on A and B alone, otherwise report the largest fully passing
 test('only one confirmed infrastructure rerun is accepted and smoke never reruns', () => {
   const r = results(), row = step(r, 'A', 1000);
   const infra = { infrastructure: infrastructureFailure, problem: 'command failed' } as const;
-  assert.equal(canRerun(infra, false, false, false), true);
-  assert.equal(canRerun(infra, true, false, false), false);
-  assert.equal(canRerun(infra, false, true, false), false);
-  assert.equal(canRerun(infra, false, false, true), false);
-  assert.equal(canRerun({ problem: 'dropped iteration' }, false, false, false), false);
+  assert.equal(canRerun(infra, false, false, false, false), true);
+  assert.equal(canRerun(infra, true, false, false, false), false);
+  assert.equal(canRerun(infra, false, true, false, false), false);
+  assert.equal(canRerun(infra, false, false, true, false), false);
+  assert.equal(canRerun({ problem: 'dropped iteration' }, false, false, false, false), false);
   row.attempts.unshift({ problem: 'threshold failed' });
   assert.equal(status(r, 'A', 1000), 'INVALID');
   row.attempts[0] = infra;
