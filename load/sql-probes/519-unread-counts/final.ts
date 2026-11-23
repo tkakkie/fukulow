@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
-import { bindLiterals, channels, checkpointStarts, checksumSql, countsCheckOutcome, extractListCounts, logLatenciesMs, member, migrationOutcome, organization, pgbench, planSummary, quantile, sendBlocks, stopRule, timings } from './probe.ts';
+import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, extractListCounts, logLatenciesMs, member, migrationOutcome, organization, pgbench, planSummary,
+  quantile, runBlock, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
@@ -85,9 +86,10 @@ const migrateA3 = (db: string) => bounded(db, `A3 migration on ${db} (backfill g
   `BEGIN;\n\\i /work/${a3Migration}\nCOMMIT;\n`, c => migrationOutcome(c.status, c.stderr ?? ''));
 // Host state around each block. A diagnostic block refuses to start next to any other running
 // container; after the block, any container still running or started during it fails the block.
-function hostState(sinceMs?: number) {
+// sinceSeconds is taken before the pre-block `docker ps` (eventsSince), so the windows overlap.
+function hostState(sinceSeconds?: number) {
   const otherContainers = run('docker', ['ps', '--format', '{{.Names}}']).split('\n').filter(n => n !== '' && n !== container);
-  const startedDuringBlock = sinceMs === undefined ? undefined : run('docker', ['events', '--since', String(Math.floor(sinceMs / 1000)),
+  const startedDuringBlock = sinceSeconds === undefined ? undefined : run('docker', ['events', '--since', String(sinceSeconds),
     '--until', String(Math.ceil(Date.now() / 1000)), '--filter', 'type=container', '--filter', 'event=start', '--format', '{{.Actor.Attributes.name}}'])
     .split('\n').filter(n => n !== '' && n !== container);
   const busy = [...otherContainers, ...(startedDuringBlock ?? [])];
@@ -131,24 +133,20 @@ SELECT json_build_object('generic', generic_plans, 'custom', custom_plans) FROM 
     prepared: JSON.parse(timed.trim().split('\n').at(-1) ?? '{}'), checksum, role };
 }
 
-const walStats = (db: string) => JSON.parse(psql(db, `SELECT json_build_object('lsn', pg_current_wal_insert_lsn(), 'records', w.wal_records, 'fpi', w.wal_fpi,
-  'bytes', w.wal_bytes, 'checkpoints', c.num_timed + c.num_requested, 'redo', (pg_control_checkpoint()).redo_lsn) FROM pg_stat_wal w, pg_stat_checkpointer c;`));
+const walStats = (db: string) => JSON.parse(psql(db, `SELECT json_build_object('lsn', pg_current_wal_insert_lsn(),
+  'lsnBytes', pg_wal_lsn_diff(pg_current_wal_insert_lsn(), '0/0'), 'atMs', extract(epoch FROM clock_timestamp()) * 1000, 'records', w.wal_records,
+  'fpi', w.wal_fpi, 'bytes', w.wal_bytes, 'checkpoints', c.num_timed + c.num_requested, 'redo', (pg_control_checkpoint()).redo_lsn)
+  FROM pg_stat_wal w, pg_stat_checkpointer c;`));
 const serverLog = () => {
   const child = spawnSync('docker', ['logs', container], { encoding: 'utf8', maxBuffer });
-  return checkpointStarts(`${child.stdout ?? ''}\n${child.stderr ?? ''}`);
+  if (child.status !== 0) throw new Error(`server log read failed: ${(child.stderr ?? '').slice(-500) || `exit ${child.status}`}`);
+  return `${child.stdout}\n${child.stderr}`;
 };
-// Forces a checkpoint and waits until a new start line is in the server log. The checkpointer logs
-// starts in order, so every automatic start before this one is then visible too; a checkpoint still
-// in progress is finished first, because CHECKPOINT waits for one that starts after its request.
+// Forces a checkpoint and returns its request time on the server clock (the clock of the log's %m).
 function forcedCheckpoint(db: string) {
-  const known = serverLog().all;
-  psql(db, 'CHECKPOINT;');
-  for (let i = 0; ; i++) {
-    const starts = serverLog();
-    if (starts.all > known) return starts;
-    if (i > 120) throw new Error('CHECKPOINT start was not logged');
-    spawnSync('sleep', ['0.5']);
-  }
+  const requestMs = Number(psql(db, 'SELECT extract(epoch FROM clock_timestamp()) * 1000;\nCHECKPOINT;\n').trim());
+  if (!Number.isFinite(requestMs)) throw new Error('CHECKPOINT request time is undeterminable');
+  return requestMs;
 }
 // Sends run as the application role under RLS, like the app, so A3's policy checks are paid.
 const pgbenchArgs = (seconds: number) => ['exec', container, 'pgbench', '-U', 'fukulow_app', '-n', '-c', '8', '-j', '4', '-T', String(seconds), '-f', '/work/sql/bench.pgb'];
@@ -161,42 +159,57 @@ function sendRole(db: string) {
   return role;
 }
 
-function bench(db: string, label: string) {
-  const opened = forcedCheckpoint(db);
-  const start = walStats(db);
-  pgbench(run('docker', [...pgbenchArgs(warmSeconds), db]));
-  const before = walStats(db);
-  const prefix = `/tmp/pgb-${label}`;
-  const output = run('docker', [...pgbenchArgs(measuredSeconds), '-l', `--log-prefix=${prefix}`, db]);
-  const after = walStats(db);
-  const log = run('docker', ['exec', container, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]);
-  // Counters are published only after a checkpoint completes, so the crossing check also uses the
-  // control file's redo LSN and the logged checkpoint starts up to a closing forced checkpoint.
-  const late = walStats(db);
-  const closed = forcedCheckpoint(db);
-  const latencies = logLatenciesMs(log);
-  writeFileSync(join(out, `latency/${label}.txt`), latencies.join('\n') + '\n');
-  const result = pgbench(output);
-  if (latencies.length !== result.transactions) throw new Error(`${label}: ${latencies.length} log lines for ${result.transactions} transactions`);
-  const walBytes = Number(psql(db, `SELECT pg_wal_lsn_diff('${after.lsn}', '${before.lsn}');`).trim());
-  const records = after.records - before.records;
-  const fpi = after.fpi - before.fpi;
-  const checkpoints = { warm: before.checkpoints - start.checkpoints, measured: late.checkpoints - before.checkpoints,
-    automaticStarts: closed.automatic - opened.automatic, redoMoved: late.redo !== start.redo };
-  const crossed = checkpoints.warm !== 0 || checkpoints.measured !== 0 || checkpoints.automaticStarts !== 0 || checkpoints.redoMoved;
-  return { crossed, ...result, p95Ms: quantile(latencies, 0.95), p99Ms: quantile(latencies, 0.99), walBytes,
-    walBytesPerSend: walBytes / result.transactions, statWalBytes: Number(after.bytes) - Number(before.bytes),
-    walRecords: records, fpiRecords: fpi, imagesPerWalRecord: records > 0 ? fpi / records : 0, checkpoints };
+// One block: an opening forced CHECKPOINT, 60 s warm, 120 s measured. measure() builds the row as
+// soon as pgbench completes; closeCheckpoint() then forces the closing CHECKPOINT and judges the
+// block from server-log timestamps (see checkpointWindow). The counters and the control file's redo
+// LSN up to the end of the measured block are kept as a second, completed-checkpoint signal.
+function sendBlock(db: string, label: string) {
+  let openRequestMs = NaN;
+  let blockEndMs = NaN;
+  return {
+    measure() {
+      openRequestMs = forcedCheckpoint(db);
+      const start = walStats(db);
+      pgbench(run('docker', [...pgbenchArgs(warmSeconds), db]));
+      const before = walStats(db);
+      const prefix = `/tmp/pgb-${label}`;
+      const output = run('docker', [...pgbenchArgs(measuredSeconds), '-l', `--log-prefix=${prefix}`, db]);
+      const after = walStats(db);
+      blockEndMs = after.atMs;
+      const ended = new Date().toISOString();
+      const result = pgbench(output);
+      const errors: string[] = [];
+      let latencies: number[] = [];
+      try {
+        latencies = logLatenciesMs(run('docker', ['exec', container, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]));
+        writeFileSync(join(out, `latency/${label}.txt`), latencies.join('\n') + '\n');
+      } catch (e) { errors.push(`latency log: ${e instanceof Error ? e.message : String(e)}`); }
+      if (latencies.length !== result.transactions) errors.push(`${latencies.length} log lines for ${result.transactions} transactions`);
+      const walBytes = Number(after.lsnBytes) - Number(before.lsnBytes);
+      const records = after.records - before.records;
+      const fpi = after.fpi - before.fpi;
+      const checkpoints = { warm: before.checkpoints - start.checkpoints, measured: after.checkpoints - before.checkpoints, redoMoved: after.redo !== start.redo };
+      const crossed = checkpoints.warm !== 0 || checkpoints.measured !== 0 || checkpoints.redoMoved;
+      const latency = (q: number) => latencies.length > 0 ? quantile(latencies, q) : NaN;
+      return { crossed, errors, ended, ...result, p95Ms: latency(0.95), p99Ms: latency(0.99), walBytes,
+        walBytesPerSend: walBytes / result.transactions, statWalBytes: Number(after.bytes) - Number(before.bytes),
+        walRecords: records, fpiRecords: fpi, imagesPerWalRecord: records > 0 ? fpi / records : 0, checkpoints };
+    },
+    closeCheckpoint() {
+      const closeRequestMs = forcedCheckpoint(db);
+      return waitForCheckpointWindow(serverLog, openRequestMs, closeRequestMs, blockEndMs, 120, () => spawnSync('sleep', ['0.5']));
+    },
+  };
 }
 
-type SendRow = ReturnType<typeof bench> & { order: number; pair: number; arm: string; db: string; [key: string]: unknown };
+type HostState = ReturnType<typeof hostState>;
+type SendRow = ReturnType<ReturnType<typeof sendBlock>['measure']> & { checkpointLog: unknown; hostAfter: HostState | null; order: number; pair: number; arm: string; db: string };
 const sends: SendRow[] = [];
-// Each block is saved before its verification, so a later failure keeps every completed block.
-function keepBlock(row: SendRow, extra: Record<string, unknown> = {}) {
+// Each block is saved before any of its failures is raised, so a failed run keeps every finished block.
+const keepBlock = (extra: Record<string, unknown> = {}) => (row: SendRow) => {
   sends.push(row);
   save('sends.json', { ...extra, sends });
-  if (row.crossed) throw new Error(`block ${row.order}: checkpoint inside a send block ${JSON.stringify(row.checkpoints)}`);
-}
+};
 // Send re-measure: each block gets a fresh clone of its arm's template, which was vacuumed and
 // analyzed before any block, and is dropped after the block (and its check, for the final arm).
 function freshSends() {
@@ -210,13 +223,11 @@ function freshSends() {
   for (const b of sendBlocks(benchOrder)) {
     psql('postgres', `CREATE DATABASE ${b.db} TEMPLATE t_${b.arm};`);
     const role = sendRole(b.db);
+    const since = eventsSince(Date.now());
     const host = idleHost();
-    const startedMs = Date.now();
-    const result = bench(b.db, `block${b.order}-${b.arm}`);
-    const ended = new Date().toISOString();
-    const hostAfter = hostState(startedMs);
-    keepBlock({ ...b, role, host, ended, hostAfter, ...result });
-    if (hostAfter.busy) throw new Error(`block ${b.order}: host not idle (${hostAfter.otherContainers.concat(hostAfter.startedDuringBlock ?? []).join(', ')})`);
+    const steps = sendBlock(b.db, `block${b.order}-${b.arm}`);
+    runBlock({ label: `block ${b.order}`, measure: () => ({ ...b, role, host, ...steps.measure() }), closeCheckpoint: steps.closeCheckpoint,
+      hostAfter: () => hostState(since), keep: keepBlock() });
     if (b.arm === 'final') countsCheck(b.db, `after block ${b.order}`);
     psql('postgres', `DROP DATABASE ${b.db} WITH (FORCE);`);
   }
@@ -245,7 +256,8 @@ try {
     harnessCommit: git('rev-parse', 'HEAD'), harnessDirty: git('status', '--porcelain', '--', 'load/sql-probes/519-unread-counts') !== '',
     image, imageId: run('docker', ['image', 'inspect', '--format', '{{.Id}}', image]).trim(),
     settings: JSON.parse(psql('p519', `SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN
-      ('server_version','shared_buffers','work_mem','jit','plan_cache_mode','synchronous_commit','fsync','autovacuum','default_transaction_isolation','max_wal_size','checkpoint_timeout','log_checkpoints');`)),
+      ('server_version','shared_buffers','work_mem','jit','plan_cache_mode','synchronous_commit','fsync','autovacuum','default_transaction_isolation','max_wal_size','checkpoint_timeout','log_checkpoints',
+      'log_line_prefix','log_timezone');`)),
     host: { platform: platform(), release: release(), cpus: cpus().length, memoryBytes: totalmem() }, preflight,
     hostBusyMarker: marker, cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts: sendsOnly ? [] : cuts,
     walNotes: 'WAL bytes = cluster insert-LSN delta (and pg_stat_wal.wal_bytes); cluster-wide, so idle databases can add background WAL; ' +
@@ -255,6 +267,10 @@ try {
     stopRule: stopRule([{ pair: 1, walBytesPerSend: 1, tps: 1 }], [{ pair: 1, walBytesPerSend: 1, tps: 1 }]).limits,
   };
   save('metadata.json', metadata);
+  // Checkpoint crossings are judged by the log's %m timestamps (parsed as UTC).
+  if (!metadata.settings.log_line_prefix.startsWith('%m ') || !['UTC', 'Etc/UTC'].includes(metadata.settings.log_timezone)) {
+    throw new Error(`server log timestamps are undeterminable: log_line_prefix=${metadata.settings.log_line_prefix} log_timezone=${metadata.settings.log_timezone}`);
+  }
   const reads: ReturnType<typeof measure>[] = [];
   if (sendsOnly) {
     freshSends();
@@ -282,7 +298,11 @@ try {
       file(`s_${arm}`, 'sql/send-current.sql');
     }
     const sendRoles = { current: sendRole('s_current'), final: sendRole('s_final') };
-    for (const b of sendBlocks(benchOrder)) keepBlock({ ...b, db: `s_${b.arm}`, ...bench(`s_${b.arm}`, `pair${b.pair}-${b.arm}`) }, { sendRoles });
+    for (const b of sendBlocks(benchOrder)) {
+      const steps = sendBlock(`s_${b.arm}`, `pair${b.pair}-${b.arm}`);
+      runBlock<SendRow, HostState>({ label: `block ${b.order}`, measure: () => ({ ...b, db: `s_${b.arm}`, ...steps.measure(), checkpointLog: null, hostAfter: null }),
+        closeCheckpoint: steps.closeCheckpoint, keep: keepBlock({ sendRoles }) });
+    }
     countsCheck('s_final', 'after the sends');
   }
   const verdict = stopRule(sends.filter(s => s.arm === 'current'), sends.filter(s => s.arm === 'final'));

@@ -109,12 +109,79 @@ export function migrationOutcome(code: number | null, stderr: string): CountsChe
   return { ...countsCheckOutcome(code, '', stderr), status: /canceling statement due to statement timeout/.test(stderr) ? 'timeout' : 'error' };
 }
 
-// Checkpoint start lines from the server log (log_checkpoints=on). Each start is logged by the
-// checkpointer before it does any work, unlike the cumulative counters, which are published only
-// after a checkpoint completes. A start caused by WAL volume or by checkpoint_timeout is automatic.
-export function checkpointStarts(log: string): { all: number; automatic: number } {
-  const starts = log.split('\n').filter(l => /checkpoint starting:/.test(l));
-  return { all: starts.length, automatic: starts.filter(l => /checkpoint starting:.*\b(wal|time)\b/.test(l)).length };
+// Checkpoint start lines from the server log (log_checkpoints=on, log_line_prefix starting with %m
+// in UTC). The checkpointer logs each start before it does any work and in start order, unlike the
+// cumulative counters, which are published only after a checkpoint completes. A requested start
+// carries `force`; a start caused only by WAL volume or by checkpoint_timeout is automatic. A start
+// line without a readable server timestamp is undeterminable, so it fails instead of being skipped.
+export type CheckpointStart = { atMs: number; forced: boolean; automatic: boolean; line: string };
+export function checkpointStartLines(log: string): CheckpointStart[] {
+  return log.split('\n').filter(l => /checkpoint starting:/.test(l)).map(line => {
+    const m = line.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?) (?:UTC|GMT) /);
+    const atMs = m ? Date.parse(`${m[1]}T${m[2]}Z`) : NaN;
+    if (!Number.isFinite(atMs)) throw new Error(`checkpoint start without a server-log timestamp (undeterminable): ${line}`);
+    const flags = line.slice(line.indexOf('checkpoint starting:'));
+    const forced = /\bforce\b/.test(flags);
+    return { atMs, forced, automatic: !forced && /\b(wal|time)\b/.test(flags), line };
+  });
+}
+
+// One block judged by server-log timestamps. The opening and closing starts are the first forced
+// starts stamped at or after each CHECKPOINT request (%m truncates to the millisecond). Every start
+// logged between them that is stamped at or before the end of the measured block crossed the block;
+// a later one (for example a WAL-driven start after the block) is kept as afterBlock, not flagged.
+// null: the closing start is not logged yet, so nothing can be decided.
+export type CheckpointWindow = { openAtMs: number; closeAtMs: number; blockEndMs: number; inBlock: CheckpointStart[]; afterBlock: CheckpointStart[] };
+export function checkpointWindow(starts: CheckpointStart[], openRequestMs: number, closeRequestMs: number, blockEndMs: number): CheckpointWindow | null {
+  if (![openRequestMs, closeRequestMs, blockEndMs].every(Number.isFinite)) throw new Error('checkpoint window times are undeterminable');
+  const forcedFrom = (ms: number, from: number) => starts.findIndex((s, i) => i >= from && s.forced && s.atMs >= Math.floor(ms));
+  const open = forcedFrom(openRequestMs, 0);
+  const close = open < 0 ? -1 : forcedFrom(closeRequestMs, open + 1);
+  if (close < 0) return null;
+  const between = starts.slice(open + 1, close);
+  return { openAtMs: starts[open].atMs, closeAtMs: starts[close].atMs, blockEndMs,
+    inBlock: between.filter(s => s.atMs <= blockEndMs), afterBlock: between.filter(s => s.atMs > blockEndMs) };
+}
+
+// Polls the server log until the closing forced start is visible (log capture can lag). Because
+// starts are logged in order, every earlier start is visible then too. A read failure or running out
+// of polls throws: an undecided block is never a clean one.
+export function waitForCheckpointWindow(readLog: () => string, openRequestMs: number, closeRequestMs: number, blockEndMs: number,
+  polls: number, sleep: () => void): CheckpointWindow {
+  for (let i = 0; i < polls; i++) {
+    const window = checkpointWindow(checkpointStartLines(readLog()), openRequestMs, closeRequestMs, blockEndMs);
+    if (window) return window;
+    sleep();
+  }
+  throw new Error(`closing CHECKPOINT start not logged after ${polls} polls (undeterminable)`);
+}
+
+// Lower bound (whole seconds) for the post-block `docker events` query: at least 1 s before the
+// pre-block `docker ps`, so a container started between the two is not lost to rounding.
+export const eventsSince = (psMs: number) => Math.floor((psMs - 1000) / 1000);
+
+// One send block. The row is built as soon as pgbench completes; the closing checkpoint and the
+// host probe run after it, and their failures are recorded on the row. The row is kept (written to
+// sends.json) before any failure is raised, so a failed run still has every finished block.
+const message = (e: unknown) => e instanceof Error ? e.message : String(e);
+export type BlockOutcome<H> = { crossed: boolean; checkpointLog: CheckpointWindow | null; hostAfter: H | null; errors: string[] };
+export function runBlock<R extends { crossed: boolean; errors: string[] }, H extends { busy: boolean }>(steps: {
+  label: string; measure: () => R; closeCheckpoint: () => CheckpointWindow; hostAfter?: () => H; keep: (row: R & BlockOutcome<H>) => void;
+}): R & BlockOutcome<H> {
+  const measured = steps.measure();
+  const row: R & BlockOutcome<H> = { ...measured, checkpointLog: null, hostAfter: null, errors: [...measured.errors] };
+  try {
+    row.checkpointLog = steps.closeCheckpoint();
+    if (row.checkpointLog.inBlock.length > 0) row.crossed = true;
+  } catch (e) { row.errors.push(`closing CHECKPOINT: ${message(e)}`); }
+  if (steps.hostAfter) {
+    try { row.hostAfter = steps.hostAfter(); } catch (e) { row.errors.push(`host probe (docker ps/events): ${message(e)}`); }
+  }
+  steps.keep(row);
+  if (row.errors.length > 0) throw new Error(`${steps.label}: ${row.errors.join('; ')}`);
+  if (row.crossed) throw new Error(`${steps.label}: checkpoint inside a send block`);
+  if (row.hostAfter?.busy) throw new Error(`${steps.label}: host not idle ${JSON.stringify(row.hostAfter)}`);
+  return row;
 }
 
 // Send blocks in run order: each pair keeps its fixed arm order, and every block gets its own

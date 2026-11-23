@@ -49,7 +49,10 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
 - **Reads:** at the same four cuts, as `fukulow_app` under RLS. The checksums must match and must be non-empty. The final arm's `count_drift` must stay false at every cut, and `message_counts_check` must be empty after the cuts and after the sends.
 - **Sends:** `sql/send-current.sql` in both arms, because A3 does not change the app's send SQL. pgbench runs as `fukulow_app` with the Organization set as a per-database role default; RLS is checked before the blocks. 8 clients × 3 alternating pairs.
   - Each block runs `CHECKPOINT`, a 60 s warm block, then a 120 s measured block with `--log`.
-  - `max_wal_size=64GB` and `checkpoint_timeout=1h` keep checkpoints out of the blocks. A block that crosses a checkpoint fails the run, after the block's results are saved. A crossing is any of: a `pg_stat_checkpointer` count change, a moved redo LSN in `pg_control_checkpoint()`, or an automatic (`wal` or `time`) checkpoint start in the server log (`log_checkpoints=on`) before a closing forced `CHECKPOINT`. The log and the control file catch a checkpoint whose counters are not yet published.
+  - `max_wal_size=64GB` and `checkpoint_timeout=1h` keep checkpoints out of the blocks. A block that crosses a checkpoint fails the run, after the block's results are saved.
+  - A crossing is judged by server-log timestamps (`log_checkpoints=on`, `%m` prefix in UTC, both checked at start). The opening and closing starts are the first forced starts stamped at or after each `CHECKPOINT` request, on the server clock. Any start logged between them and stamped at or before the end of the measured block is a crossing. A start after the block ends, such as a WAL-driven one before the closing request, is recorded as `afterBlock` and not flagged. A `pg_stat_checkpointer` count change or a moved redo LSN up to the end of the measured block is also a crossing.
+  - The log is polled until the closing start is visible (capture can lag; starts are logged in order). A log-read failure, an unreadable timestamp or 60 s without the closing start fails the block: it is never treated as clean.
+  - The row is built as soon as pgbench completes. A closing `CHECKPOINT` or host-probe (`docker ps`/`docker events`) failure is recorded in the row's `errors`, the row is written to `sends.json`, and then the run fails.
   - Reported per block: tps, p95/p99 from the per-transaction log (the line count must equal pgbench's transactions), WAL bytes/send from the `pg_current_wal_insert_lsn()` delta, the `pg_stat_wal` bytes, records and full-page images, and images per WAL record.
 - **Consistency check:** every `message_counts_check`, including the one in the A3 migration's backfill guard, runs under `statement_timeout = 45min` (fixed before the run; the last unbounded check took about 33 min on three blocks' rows). Drift, a timeout or any error fails the run at once; the check is never skipped. Results, with the migration as its own row, go to `checks.json` and `summary.md`. Each send block is written to `sends.json` before its check, so a failed check keeps every completed block.
 - **Stop rule, fixed before the diagnostic run:**
@@ -60,7 +63,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   - WAL statistics are cluster-wide, so idle clones can add background WAL.
   - The send databases are reused across pairs, so the faster arm accumulates more rows.
   - Shared caches persist across blocks.
-  - `docker events` only sees the daemon's recent events (a bounded buffer), which covers one block's calls.
+  - `docker events` returns at most the daemon's last 256 events. A container start is missed if more than 256 daemon events (any type) follow it before the post-block query; one block's own `docker exec` calls add far fewer. The query window opens at least 1 s before the pre-block `docker ps`, so a start between the two is not lost to whole-second rounding.
   - It is one plpgsql call per send, with no HTTP, pool or search terms.
 
 ### Send re-measure (`--sends-only`)
