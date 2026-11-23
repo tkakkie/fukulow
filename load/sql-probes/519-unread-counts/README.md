@@ -58,6 +58,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
 - **Stop rule, fixed before the diagnostic run:**
   - Per pair, compute the final/current ratios. The rule fires when the median ratio exceeds a limit: WAL/send above 1.20, or tps below 0.90.
   - Every pair and every individual breach is reported.
+  - A zero, negative or non-finite WAL/send, tps, ratio or median fails the run instead of counting as no breach (#803).
 - **Run conditions:** `--diagnostic` requires the held host-busy marker and records its line in `metadata.json`. Smoke uses 5 s blocks and one cut, and only validates the harness.
 - **Limits:**
   - WAL statistics are cluster-wide, so idle clones can add background WAL.
