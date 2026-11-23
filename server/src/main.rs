@@ -84,6 +84,8 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
             fukulow_server::observability::database_failure(&error);
             "Database connection failed (diagnostics suppressed)"
         })?;
+    fukulow_server::database::validate_server_version(&pool).await?;
+    fukulow_server::database::PoolConfig::validate_app_role(&pool).await?;
     let pool_metrics = tokio::spawn(fukulow_server::database::report_pool_periodically(
         pool.clone(),
     ));

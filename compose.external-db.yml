@@ -1,0 +1,14 @@
+services:
+  db: !reset null
+  app:
+    environment:
+      DATABASE_URL: ${FUKULOW_APP_DATABASE_URL:?Set FUKULOW_APP_DATABASE_URL for external PostgreSQL}
+      PGSSLMODE: verify-full
+  migrate:
+    depends_on: !reset {}
+    environment:
+      DATABASE_URL: ${FUKULOW_MIGRATE_DATABASE_URL:?Set FUKULOW_MIGRATE_DATABASE_URL for external PostgreSQL}
+      PGSSLMODE: verify-full
+      POSTGRES_APP_PASSWORD: !reset null
+volumes:
+  postgres_data: !reset null

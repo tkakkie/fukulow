@@ -148,7 +148,32 @@ impl Drop for TransactionConnection {
     }
 }
 
+/// `transaction_timeout` (#158) needs PostgreSQL 17; older servers would fail every send.
+const MIN_SERVER_VERSION_NUM: i64 = 170_000;
+
+/// Startup and owner-command check: refuses PostgreSQL older than 17.
+pub async fn validate_server_version(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut connection = acquire(pool)
+        .await
+        .map_err(|_| "Cannot read the PostgreSQL server version")?;
+    let version: String = sqlx::query_scalar("SELECT current_setting('server_version_num')")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| "Cannot read the PostgreSQL server version")?;
+    check_server_version(&version).map_err(Into::into)
+}
+
+fn check_server_version(version: &str) -> Result<(), String> {
+    match version.parse::<i64>() {
+        Ok(number) if number >= MIN_SERVER_VERSION_NUM => Ok(()),
+        _ => Err(format!(
+            "PostgreSQL 17 or newer is required (server_version_num {version}, need >= {MIN_SERVER_VERSION_NUM})"
+        )),
+    }
+}
+
 pub async fn migrate_and_grant(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    validate_server_version(pool).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'fukulow_app')",
     )
@@ -211,6 +236,7 @@ pub async fn roles(pool: &PgPool, password: &str) -> Result<(), Box<dyn std::err
     if password.is_empty() {
         return Err("POSTGRES_APP_PASSWORD must be nonempty".into());
     }
+    validate_server_version(pool).await?;
     // Suppress database diagnostics: dynamic utility-statement context can expose
     // the password even though the input is passed as a bound value.
     update_roles(pool, password)
@@ -240,6 +266,7 @@ async fn update_roles(pool: &PgPool, password: &str) -> Result<(), sqlx::Error> 
 }
 
 pub async fn validate_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    validate_server_version(pool).await?;
     // A single read gives a consistent snapshot without SQLx's DDL/lock APIs.
     let applied: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
         "SELECT version, checksum, success FROM public._sqlx_migrations ORDER BY version",
