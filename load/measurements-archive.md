@@ -1690,3 +1690,70 @@ The deep saving beyond the measured planning difference is not identified.
 - `server/src/messages/tests/replay_plans.rs`: `replay_hydration_work_is_bounded_by_page_positions` (now with Mentions), `authorized_page_plans_generically_without_leaking_the_setting` and `authorized_page_denies_a_removal_committed_between_parse_and_execution`.
 - `server/src/messages/tests/page_mentions.rs`: Mention index keys under a skewed multi-Organization fixture, and the REST 201-row lookahead.
 - `server/src/database/tests/generic_plan.rs`: helper errors, failed SET LOCAL or ROLLBACK, and cancellation.
+
+## Sign-in burst owner impact (#756, #359, 2026-11-23 JST, Mac)
+
+The 3 formal runs of the #756 burst method, pre-registered in [comment 7075307714](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7075307714) and approved by the maintainer on 2026-11-22 ([comment 7079651809](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7079651809)). B1–B5 are the #359 criteria ([comment 6979633120](https://github.com/tkakkie/fukulow/issues/359#issuecomment-6979633120)); A0, C1 and C2 are new in #756. The four #785 evidence tolerances (owner late 5 ms, clock 1,000 ms, sampler gap 100 ms, log stamp 1 ms) were approved before the runs ([comment 7080161589](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7080161589)). No criterion, threshold, tolerance or load condition changed after any run. Result comment: [7089274460](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7089274460). It follows the [2026-11-22 Part B alternative runs](#sign-in-flood-owner-impact-part-b-alternative-method-359-2026-11-22-jst-mac), whose limits (lock barely exercised, 233 ms poll) #756 followed up.
+
+- **Code:** harness checkout `4e4b4b8b` (main after #785 merged, clean tree), `--recorded --harness-commit 4e4b4b8b4d6c65446231c9e439950d2dde7d604e`. Server `b4796346` (`origin/main` at run time, built from `git archive`), the same in all 3 runs; a merge freeze on `main` held from the rehearsal to the end of run 3. App image digests differ per build (`feb8bb…`, `c9524d…`, `00d682…`).
+- **Stack:** a fresh disposable stack per run, pool max 20, PostgreSQL 18.6 with `log_lock_waits=on`, `deadlock_timeout=10ms`, `log_line_prefix=%m [%p] ` (disposable stack only, maintainer-approved). Node v26.13.1.
+- **Load:** B0 60 s; 3 bursts of 16 native sign-ins with wrong passwords from 10.0.0.1 at 60.0 s, then 60.2 s after each previous admitted send; owner (10.0.0.2) sign-ins at odd seconds, password change / revoke-others every 5 s from Session S0, plus one authenticated operation 10 ms after each admitted burst send; Organization B reads 2/s; B2 70 s.
+- **Timing (JST, 2026-11-23):** rehearsal 02:20:48–02:22:44; run 1 02:23:03–02:28:33; run 2 02:28:34–02:34:05; run 3 02:34:08–02:40:38. Each formal run exited 0 with `evidence: true`.
+- **Host:** the single Mac, one run at a time under `runs/HOST-BUSY`. Preflight P passed before the rehearsal and each run (pinned Node, clean pinned harness, `origin/main` unchanged, no containers, port free, no workers, AC power, low power mode off). Host-vs-container clock skew 90 / 95 / 97 / 104 ms (< 500 ms); 1-minute load average at preflight 3.53 / 3.12 / 2.07 / 0.91.
+
+**Verdict: aggregate PASS.** `signin-owner-burst-aggregate.ts` over the three runs: `outcome: PASS`, `valid: 3`, verdicts `holds` ×3, no failures, matching harness and server commits.
+
+### Rehearsal (setup check, not evidence)
+1 burst, B0 40 s, `SERVER_REF` = `b4796346`. Verdict `inconclusive` with reasons exactly `A0 failed`, as expected (A0 needs 3 bursts). Gate R passed: `peakPids` 3, clock bound ±1.266 ms over 3 brackets, minimum wait start margin 4.28 ms, lock log complete, sampler median 19.93 ms and max gap 28.7 ms. B4 did not pass in the rehearsal (read p95 B1 18.56 ms vs bound 16.94 ms over 101 reads); this is a criterion result of the 1-burst rehearsal, not a setup failure, and is not evidence either way. The formal runs were judged on their own data.
+
+### Per-run results
+
+| | Run 1 | Run 2 | Run 3 | Criterion |
+|---|---|---|---|---|
+| **A0** counted (401) per burst; re-sends | 5, 5, 5; 0 | 5, 5, 5; 0 | 5, 5, 5; 0 | exactly 5 |
+| A0 burst-time owner operation sent (offset after admitted send) | 3/3 (13.3, 13.1, 13.7 ms) | 3/3 (13.7, 13.9, 13.0 ms) | 3/3 (13.1, 13.1, 13.9 ms) | all sent |
+| A0 peak attributed pids per burst | 3, 3, 3 | 3, 4, 3 | 3, 3, 3 | ≥ 2 in ≥ 2 of 3 |
+| Clock bound per burst (ms) | ±1.032, ±0.868, ±0.922 | ±1.517, ±0.863, ±0.860 | ±1.404, ±0.836, ±0.882 | |
+| B0 owner p95; V (sign-in p50) | 52.23; 35.11 ms | 52.70; 33.79 ms | 52.72; 34.38 ms | |
+| **B1** owner operations interfered (bound B0 p95 + 5V) | 0 of 130 (227.8 ms) | 0 of 130 (221.6 ms) | 0 of 130 (224.6 ms) | 0 |
+| B1 owner statuses | 20 password 204, 19 revoke 204, 1 web sign-in 200, 90 sign-ins 429 | same | same | only 200/204/429/503 |
+| B1 attacker statuses | 15×401, 33×429 | 15×401, 33×429 | 15×401, 33×429 | |
+| **B2** owner success; in-window / late 429; p95 vs B0 p95 (bound 2×) | 49/49; 0 / 0; 52.48 vs 52.23 ms | 49/49; 0 / 0; 52.34 vs 52.70 ms | 49/49; 0 / 0; 51.45 vs 52.72 ms | `b2Strict` true ×3 |
+| **B3** waiters (log, sampler); connections B0/B1/B2 | 3 (3, 3); 4/6/6 | 4 (4, 3); 4/6/6 | 3 (3, 3); 4/6/6 | ≤ 7; ≤ B0 + 7 and < 20 |
+| **B4** reads; p95 B1 / B2 vs bound | 623/623; 7.07 / 6.80 vs 17.90 ms | 623/623; 7.25 / 7.17 vs 17.50 ms | 623/623; 7.44 / 7.14 vs 16.56 ms | 100 %, ≤ bound |
+| **B5** client timeouts, 5xx, pool timeouts, panics | 0, 0, 0, 0 | 0, 0, 0, 0 | 0, 0, 0, 0 | 0 |
+| **C1** B1 password change / revoke-others 204 | 39/39 | 39/39 | 39/39 | all 204 |
+| **C2** over bound (password, revoke bound) | 0 of 39 (230.3, 212.3 ms) | 0 of 39 (223.6, 205.9 ms) | 0 of 39 (225.2, 206.6 ms) | 0 |
+| C2 B0 samples password / revoke; B0 p95 | 6 / 6; 54.74 / 36.76 ms | 6 / 6; 54.67 / 36.96 ms | 6 / 6; 53.34 / 34.74 ms | ≥ 4 each |
+| B1 owner authenticated max latency; burst-time ops | 101.8 ms; 101.8, 66.1, 99.3 ms | 98.6 ms; 98.6, 76.6, 98.5 ms | 105.3 ms; 105.3, 72.5, 99.1 ms | |
+| Burst-time ops total queuing delay (latency − B0 p50 of kind) | 49.6, 31.9, 47.1 ms | 46.1, 43.5, 46.1 ms | 53.1, 39.1, 46.9 ms | reported |
+| Pool (app counters): max in use, acquires, timeouts, waits > 1 s | 1, 2,191, 0, 0 | 2, 2,191, 0, 0 | 2, 2,191, 0, 0 | |
+
+Burst-time operations alternated password change, revoke-others, password change (bursts 1–3).
+
+### Lock waits on X's row (PostgreSQL log, `deadlock_timeout=10ms`)
+Each run logged 15 waits during the workload, 5 per burst (plus 1 setup-probe wait before the workload, excluded). In every burst, 4 waits were attacker sign-ins and 1 was the burst-time owner operation; all were attributed through the sampler's query text (`whoSource: sampler`), with no unknown, unparsed or unmatched lines.
+
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Waits (all acquired) | 15 | 15 | 15 |
+| Wait ms, min / p50 / max (nearest rank) | 12.6 / 36.7 / 59.1 | 18.5 / 37.9 / 60.2 | 18.5 / 37.7 / 60.8 |
+| Max wait per burst (ms) | 53.56, 51.16, 59.06 | 53.11, 51.55, 60.19 | 56.15, 45.09, 60.80 |
+| Owner wait per burst (ms) | 36.51, 22.50, 36.73 | 36.31, 35.85, 36.72 | 39.65, 33.92, 37.06 |
+| Wait start after the burst's first counted send (ms, minimum) | 4.35 | 3.01 | 3.77 |
+| Sampler: rows, median / max interval (ms) | 15,575, 19.95 / 29.33 | 15,575, 19.85 / 35.54 | 15,575, 19.83 / 30.84 |
+| Logging: lines, bytes, deadlock checks, acquired messages | 198, 20,315, 24, 24 | 205, 21,027, 25, 25 | 205, 21,022, 25, 25 |
+
+Waits took the tuple form, the transaction form or both (merged per pid), so both parser forms were exercised. The per-wait arrays are in each run's `results.json` (`waits`, `judgment.a0.locks`).
+
+### Limits
+- **Mac-relative, single host, 3 runs:** one Mac, fresh disposable stack, a client-IP header trusted only on the test stack; no confidence interval. Not production evidence.
+- **Clock:** waits are placed on the request timeline through PostgreSQL clock brackets (bound ±0.84–1.52 ms per burst) and 1 ms log stamps (`%m` truncates). The delay between PostgreSQL computing a wait and stamping its line, and a monotonic offset between brackets, are accepted risks (#785). The minimum start margin (3.01 ms) exceeded the widest bound.
+- **Peak 4 in run 2 burst 2:** the code path admits at most 3 waiters (`PASSWORD_CONCURRENCY = 4`). The 4-pid instant is where one sign-in's wait ended (log stamp …551) and another's reconstructed start was …550.72, an overlap inside the 1 ms stamp resolution; it may not be a real 4-way wait. B3 (≤ 7) and A0 (≥ 2) hold either way.
+- **Logging effect:** `deadlock_timeout=10ms` runs a deadlock check on each wait over 10 ms (24–25 per run), which may lengthen those waits slightly; no run without the logging was made. Waits under 10 ms are not logged.
+- **C2 baseline:** B0 p95 of 6 samples per kind is close to the max.
+- **Owner sign-in during B1:** 90 of 91 owner sign-ins got 429 in every run. This is the throttle-allowed shared email budget (B1 counts it as not interfered); it is the lockout tracked in #757, not row-lock interference.
+- **Not covered:** the 50/s multi-IP attack (declined), password admission saturation (no 503), production network or proxy, a stolen-Session attacker (#760 deterministic tests).
+- **Raw data:** run directories (`status.json`, `results.json`, `metadata.json`, `server-evidence.json`), the aggregate and the chain log are kept outside Git on the maintainer's Mac and may be removed later.
+
+Reproduce with `node load/signin-owner-burst.ts --recorded --harness-commit <SHA> --out <new absolute dir>` ×3 under the #769 pre-run gates (plan review [comment 7081883602](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7081883602)), then `node load/signin-owner-burst-aggregate.ts <run1> <run2> <run3>`.
