@@ -14,7 +14,7 @@ const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-r
 test('none publishes only loopback by default and keeps bundled proxy trust isolated', () => {
   const file = 'compose.external-proxy.yml'
   const domain = { FUKULOW_DOMAIN: 'chat.example.com' }
-  const configured = { ...domain, FUKULOW_ADDR: '0.0.0.0:9090', FUKULOW_CONTAINER_PORT: '9090',
+  const configured = { ...domain, FUKULOW_ADDR: '127.0.0.1:8080', FUKULOW_CONTAINER_PORT: '9090',
     FUKULOW_PUBLISH_ADDR: '192.0.2.10', FUKULOW_PUBLISH_PORT: '18080',
     FUKULOW_TRUSTED_PROXIES: '192.0.2.2', FUKULOW_CLIENT_IP_HEADER: 'CF-Connecting-IP', FUKULOW_COOKIE_SECURE: 'false' }
   const render = (profile: string, files: string[], overrides: Record<string, string>) => JSON.parse(execFileSync('docker',
