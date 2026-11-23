@@ -12,6 +12,8 @@ async fn startup_role_check_rejects_unsafe_roles(pool: PgPool) {
     for (case, setup) in [
         ("superuser", "ALTER ROLE test_role SUPERUSER"),
         ("bypassrls", "ALTER ROLE test_role BYPASSRLS"),
+        ("createrole", "ALTER ROLE test_role CREATEROLE"),
+        ("createdb", "ALTER ROLE test_role CREATEDB"),
         (
             "public relation owner",
             "CREATE SEQUENCE public.owned_sequence; ALTER SEQUENCE public.owned_sequence OWNER TO test_role",

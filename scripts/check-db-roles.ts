@@ -163,7 +163,7 @@ networks:
     assert.equal(ownerSql("SELECT relowner = current_user::regrole FROM pg_class WHERE oid = 'public.organizations'::regclass"), 't')
     const ownerAsApp = dc('run', '--rm', '--no-deps', '-e', `DATABASE_URL=${composeEnv.FUKULOW_MIGRATE_DATABASE_URL}`, 'app')
     assert.equal(ownerAsApp.status, 1)
-    assert.match(ownerAsApp.stderr, /App database role must be a non-superuser without BYPASSRLS, ownership of relations in public, or role memberships in either direction/)
+    assert.match(ownerAsApp.stderr, /App database role must be a non-superuser without BYPASSRLS, CREATEROLE, CREATEDB, ownership of relations in public, or role memberships in either direction/)
     assert.ok(!ownerAsApp.stderr.includes(ownerPassword))
     assert.equal(ownerSql("SELECT rolcanlogin AND NOT (rolsuper OR rolinherit OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls) " +
       "FROM pg_roles WHERE rolname = 'fukulow_app'"), 't')
