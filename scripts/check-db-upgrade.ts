@@ -21,7 +21,7 @@ const configOnly = process.argv.includes('--check-config')
 const image = process.env.CHECK_COMPOSE_IMAGE || `${project}-app`
 const env = { PATH: process.env.PATH, COMPOSE_PROJECT_NAME: project, COMPOSE_DISABLE_ENV_FILE: '1',
   POSTGRES_PASSWORD: 'upgrade-owner-test-only', POSTGRES_APP_PASSWORD: 'upgrade-app-test-only',
-  FUKULOW_SETUP_TOKEN: 'upgrade-setup-test-only', FUKULOW_COOKIE_SECURE: 'false',
+  FUKULOW_SETUP_TOKEN: 'upgrade-setup-test-only', FUKULOW_COOKIE_SECURE: 'false', FUKULOW_VERSION: '0.0.0-dev',
   FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(64, 128)}.${randomInt(256)}` }
 const override = join(directory, 'override.yml')
 const mainOverride = join(directory, 'main-override.yml')
@@ -38,7 +38,8 @@ volumes:
 const run = (args: string[], input?: string | Buffer) => execFileSync('docker', args,
   { cwd, env, input, encoding: 'utf8', timeout: 180_000, maxBuffer: 16 * 1024 * 1024 }).trim()
 const compose = (file: string, extra: string) => ['compose', '--env-file', '/dev/null', '-p', project, '-f', file, '-f', extra]
-const current = compose(join(cwd, 'compose.yml'), override)
+const current = ['compose', '--env-file', '/dev/null', '-p', project, '-f', join(cwd, 'compose.yml'),
+  '-f', join(cwd, 'compose.dev.yml'), '-f', override]
 const previous = compose(join(source, 'compose.yml'), mainOverride)
 const dc = (...args: string[]) => run([...current, ...args])
 const sql = (query: string) => dc('exec', '-T', 'db', 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1', '-Atc', query)

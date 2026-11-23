@@ -14,10 +14,10 @@ const directory = mkdtempSync(join(tmpdir(), 'fukulow-restart-'))
 const override = join(directory, 'restart.yml')
 const stop = new AbortController()
 const env = { ...process.env, CHECK_IMAGE: image, POSTGRES_PASSWORD: 'restart-check-only', FUKULOW_SETUP_TOKEN: 'restart-setup-test-only',
-  POSTGRES_APP_PASSWORD: 'restart-app-test-only',
+  POSTGRES_APP_PASSWORD: 'restart-app-test-only', FUKULOW_VERSION: '0.0.0-dev',
   // Separate from deployment defaults and the security check's second-octet range.
   FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(192, 256)}.${randomInt(256)}` }
-const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
+const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', 'compose.dev.yml', '-f', override]
 
 async function run(command: string, args: string[], allowFailure = false, cleaning = false) {
   const result = await new Promise<{ code: number | null, stdout: string, stderr: string }>((resolve, reject) => {
