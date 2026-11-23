@@ -30,7 +30,7 @@ export function checkImageRevision(commit: string, revision: string) {
   if (revision !== commit) throw new Error('App image revision does not equal --commit');
 }
 
-// sampled: this attempt reached its measurement boundary. A failure after it is a result and never reruns (#769).
+// sampled: the run reached its first measured sample. A failure after it is a result and never reruns (#769).
 export function canRerun(attempt: Attempt, used: boolean, smoke: boolean, aborted: boolean, sampled: boolean) {
   return attempt.infrastructure === infrastructureFailure && !used && !smoke && !aborted && !sampled;
 }
@@ -53,6 +53,15 @@ function cleanup(project: string, step?: string) {
     const ids = docker(kind, 'ls', kind === 'container' ? '-aq' : '-q', ...filters).split('\n').filter(Boolean);
     if (ids.length) docker(kind, 'rm', ...(kind === 'container' ? ['-f', '-v'] : []), ...ids);
   }
+}
+
+// Confirmed k6 start: a resource sample of the running k6 container (the formal sampler only records a
+// sample when the generator container answers; the DIAGNOSTIC capture counts k6 cgroup samples), or a
+// MOVE_RESULT with the measured window's start time.
+export function k6Started(stdout: string, generatorSamples: number) {
+  if (generatorSamples > 0) return true;
+  const line = stdout.split('\n').find(l => l.startsWith('MOVE_RESULT '));
+  try { return Boolean(line && (JSON.parse(line.slice('MOVE_RESULT '.length)) as { started?: number }).started); } catch { return false; }
 }
 
 export async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir: string, labels: Record<string, string>, k6: string, signal: AbortSignal,
@@ -81,8 +90,6 @@ export async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Ste
     k6CeilingWarnings: ReturnType<typeof k6CeilingWarnings>;
   }) | undefined;
   try {
-    // Fixture files, the start position and capture setup above are setup; k6 starts the measured window.
-    startSampling();
     const result = await exec('docker', generatorArgs, { signal, timeout: (seconds + 2 * p.drain + 30) * 1000 });
     stdout = result.stdout;
     if (diagnosticRun) stderr = result.stderr;
@@ -97,7 +104,13 @@ export async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Ste
       diagnostic = first.split(/ReferenceError|TypeError|SyntaxError/)[0].slice(0, 100);
   } finally {
     await resources?.stop();
-    if (capture) extra = { ...await capture.finish(), k6CeilingWarnings: k6CeilingWarnings(stderr) };
+    try {
+      if (capture) extra = { ...await capture.finish(), k6CeilingWarnings: k6CeilingWarnings(stderr) };
+    } finally {
+      // Fixture files, the start position, capture setup and the k6 launch are setup. Sampling started only
+      // if the k6 container was confirmed running or k6 reported its measured window.
+      if (k6Started(stdout, (resources?.samples.length ?? 0) + (extra?.containers.summary.k6?.samples ?? 0))) startSampling();
+    }
   }
   const line = stdout.split('\n').find(l => l.startsWith('MOVE_RESULT '));
   if (!line) return { problem: problem ?? 'Missing k6 summary', diagnostic, samples: resources?.samples, extra };
@@ -151,16 +164,27 @@ export function rehearsalChecks(p: Plan, results: Result[]) {
 }
 
 // Any INVALID or unjudged verdict is never evidence. A valid FAIL stays evidence-eligible but fails the run.
-export function verdictInvalid(verdict: ReturnType<typeof judge>) {
+// FAIL outranks INVALID in a round, so INVALID arms are checked directly; one clears evidence for the whole run.
+export function verdictInvalid(p: Plan, results: Result[], verdict: ReturnType<typeof judge>) {
   return !(['PASS', 'FAIL'] as string[]).includes(verdict.overall)
-    || verdict.rows.some(row => row.rounds.some(round => round.status === 'INVALID' || round.functional.status === 'INVALID'));
+    || verdict.rows.some(row => row.rounds.some(round => round.status === 'INVALID' || round.functional.status === 'INVALID'))
+    || results.some(row => armInvalid(p, row, row.attempts.at(-1)).length > 0);
 }
 
 // status.json flags from the final verdict and exit decision (harness-core/stages.ts semantics).
 export function statusFlags(o: { passed: boolean; finished: boolean; cleanupIssues: number; stoppedEarly: boolean; armProblem: boolean;
-  diagnosticIncomplete: boolean; verdict?: ReturnType<typeof judge> }) {
+  diagnosticIncomplete: boolean; judged?: { p: Plan; results: Result[]; verdict: ReturnType<typeof judge> } }) {
   const incomplete = !o.finished || o.cleanupIssues > 0 || o.stoppedEarly || o.diagnosticIncomplete;
-  return { failed: !o.passed || incomplete || o.armProblem, invalidEvidence: incomplete || (o.verdict !== undefined && verdictInvalid(o.verdict)) };
+  return { failed: !o.passed || incomplete || o.armProblem,
+    invalidEvidence: incomplete || (o.judged !== undefined && verdictInvalid(o.judged.p, o.judged.results, o.judged.verdict)) };
+}
+
+// A DIAGNOSTIC smoke needs a verified Move and its timings; a DIAGNOSTIC rehearsal is never complete
+// when committed Move verification failed. The recorded DIAGNOSTIC job keeps its own rules.
+export function diagnosticMoveMissing(p: Plan, step: Step, measurement: Measurement | undefined, moveApplyTimed: boolean) {
+  if (p.smoke && step.arm === 'move' && (!measurement?.moveVerified || !moveApplyTimed)) return ['verified Move and Move timings'];
+  if (p.rehearsal && step.arm === 'move' && step.part !== 'E' && !measurement?.moveVerified) return ['verified Move'];
+  return [];
 }
 
 // results.json: complete is false and skipped lists the arms when scheduled work did not all run (for
@@ -261,8 +285,8 @@ async function main() {
         let stage = 'stack launch';
         let artifacts: object = {};
         let captured: Pick<Awaited<ReturnType<typeof generator>>, 'extra' | 'started'> | undefined;
-        let stepCleaned = false, sampled = false;
-        const startSampling = () => { stage = 'measurement'; sampled = true; run.startSampling(); };
+        let stepCleaned = false;
+        const startSampling = () => { stage = 'measurement'; run.startSampling(); };
         run.enter(selection ? `DIAGNOSTIC ${id}` : id);
         try {
           const stack = await startStack({ id, project, source: repo, image: image.id, privateDir: dir,
@@ -295,8 +319,7 @@ async function main() {
               ...(app && generator && app.writeUnavailable < generator.completed503.send + generator.completed503.move
                 ? ['app 503 reasons (log incomplete)'] : []),
               ...Object.entries(containers.summary).filter(([, container]) => !container.samples).map(([name]) => name + ' cgroup samples'),
-              ...(p.smoke && step.arm === 'move' && (!measured.measurement?.moveVerified || !app?.byLane.move.phasesUs.move_apply)
-                ? ['verified Move and Move timings'] : []),
+              ...diagnosticMoveMissing(p, step, measured.measurement, Boolean(app?.byLane.move.phasesUs.move_apply)),
             ];
             if (missing.length) attempt.problem ??= 'Missing DIAGNOSTIC evidence (' + missing.join(', ') + ')';
           }
@@ -319,7 +342,8 @@ async function main() {
           }
           rmSync(dir, { recursive: true, force: true });
         }
-        if (!canRerun(attempt, rerun, p.smoke, abort.signal.aborted, sampled)) {
+        // Run-wide: once any arm sampled, every later failure is a result (harness-core README run rules).
+        if (!canRerun(attempt, rerun, p.smoke, abort.signal.aborted, run.sampling)) {
           if (!stepCleaned) throw new Error(`${id}: could not clean up this arm`);
           break;
         }
@@ -388,7 +412,7 @@ async function main() {
           : `Move harness ${p.smoke ? 'functional ' + report.verdict.functional : report.verdict.overall}`;
       }
     }, { ...statusFlags({ passed, finished, cleanupIssues: cleanupIssues.length, stoppedEarly: stoppedEarly !== undefined, armProblem,
-      diagnosticIncomplete: Boolean(selection) && !captured, verdict: summary?.report.verdict }),
+      diagnosticIncomplete: Boolean(selection) && !captured, judged: summary && { p, results, verdict: summary.report.verdict } }),
     interrupted: abort.signal.aborted, summaryInvalidates: true });
     if (line) console.log(line);
     console.log(`Move harness status ${status.outcome} (${mode}, evidence ${status.evidence})`);

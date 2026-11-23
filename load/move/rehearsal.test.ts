@@ -11,7 +11,7 @@ import { storage } from './measure.ts';
 import type { Lane } from './metrics.ts';
 import { moveInterval, plan, rehearsalCell, rehearsalPlan, rehearsalSeconds, rehearsalSteps, stepId, steps, type Plan, type Step } from './plan.ts';
 import { render } from './report.ts';
-import { canRerun, firstArmInvalid, generator, rehearsalChecks, scheduledWork, selectRun, statusFlags } from './run.ts';
+import { canRerun, diagnosticMoveMissing, firstArmInvalid, generator, k6Started, rehearsalChecks, scheduledWork, selectRun, statusFlags } from './run.ts';
 import type { Stack } from '../slice5/stack.ts';
 import { workloadOptions } from './workload-options.ts';
 
@@ -151,7 +151,7 @@ function recordedStatus(results: Result[]) {
     const run = stages(out, 'recorded');
     run.startSampling();
     const status = run.finish(() => {}, { ...statusFlags({ passed, finished: true, cleanupIssues: 0, stoppedEarly: false, armProblem: false,
-      diagnosticIncomplete: false, verdict }), interrupted: false, summaryInvalidates: true });
+      diagnosticIncomplete: false, judged: { p: formal, results, verdict } }), interrupted: false, summaryInvalidates: true });
     return { verdict, passed, status };
   } finally { rmSync(out, { recursive: true, force: true }); }
 }
@@ -213,11 +213,64 @@ test('sampling starts at the measurement boundary: fixture files, start position
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('an arm never reruns after its sampling started, even when Docker was unreachable', () => {
-  const docker = { infrastructure: infrastructureFailure, problem: 'measurement failed (Error)' } as const;
-  assert.equal(canRerun(docker, false, false, false, false), true);
-  assert.equal(canRerun(docker, false, false, false, true), false);
-  assert.equal(canRerun(docker, true, false, false, false), false);
+test('no arm reruns once the run has sampled, even when Docker was unreachable in a later arm\'s setup', () => {
+  const docker = { infrastructure: infrastructureFailure, problem: 'stack launch failed (Error)' } as const;
+  const dir = mkdtempSync(join(tmpdir(), 'move-rerun-'));
+  try {
+    const run = stages(dir, 'recorded');
+    // First arm, setup: one confirmed infrastructure rerun is still allowed.
+    assert.equal(canRerun(docker, false, false, false, run.sampling), true);
+    run.startSampling();
+    // A later arm failing in its own setup, before its own boundary, after an earlier arm sampled.
+    assert.equal(canRerun(docker, false, false, false, run.sampling), false);
+    assert.equal(canRerun(docker, true, false, false, false), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a k6 launch failure with no k6 sample is setup; a running k6 container or measured window is sampling', () => {
+  assert.equal(k6Started('', 0), false);
+  assert.equal(k6Started('docker: Error response from daemon\n', 0), false);
+  assert.equal(k6Started('MOVE_RESULT {"lanes":{}}\n', 0), false);
+  assert.equal(k6Started('MOVE_RESULT not json\n', 0), false);
+  assert.equal(k6Started('', 1), true);
+  assert.equal(k6Started('MOVE_RESULT {"lanes":{},"started":1700000000000}\n', 0), true);
+  const dir = mkdtempSync(join(tmpdir(), 'move-launch-'));
+  try {
+    const run = stages(dir, 'recorded');
+    if (k6Started('', 0)) run.startSampling();
+    assert.equal(run.write({ failed: true, interrupted: false }).outcome, 'setup-failure');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('sol round 2: a functional FAIL that hides an INVALID arm in the same round is never evidence', () => {
+  const all = rows(formal, steps(formal));
+  const target = all.find(row => row.part === 'D' && row.round === 1 && row.arm === 'baseline')!;
+  const results = all.map(row => {
+    if (row === target) return withLane(row, 'reader', { droppedIterations: 1 });
+    if (row.part === target.part && row.size === target.size && row.round === 1 && row.arm === 'move')
+      return { ...row, attempts: [{ measurement: { ...row.attempts[0].measurement!, moveVerified: false } }] };
+    return row;
+  });
+  const { verdict, status } = recordedStatus(results);
+  const round = verdict.rows.find(row => row.part === target.part && row.size === target.size)!.rounds[0];
+  assert.equal(verdict.overall, 'FAIL');
+  assert.equal(round.functional.status, 'FAIL');
+  assert.ok(round.functional.reasons.includes('baseline: reader: dropped iterations'));
+  assert.ok(round.functional.reasons.includes('Move failed or did not commit as expected'));
+  assert.deepEqual([status.outcome, status.evidence], ['result-failure', false]);
+});
+
+test('a DIAGNOSTIC rehearsal is not complete when committed Move verification failed', () => {
+  const p = rehearsalPlan(), [baseline, move] = rehearsalSteps(p);
+  const m = valid(p, move);
+  assert.deepEqual(diagnosticMoveMissing(p, move, { ...m, moveVerified: false }, true), ['verified Move']);
+  assert.deepEqual(diagnosticMoveMissing(p, move, { ...m, moveVerified: undefined }, true), ['verified Move']);
+  assert.deepEqual(diagnosticMoveMissing(p, move, m, false), []);
+  assert.deepEqual(diagnosticMoveMissing(p, baseline, valid(p, baseline), false), []);
+  // Smoke keeps its rule; the recorded DIAGNOSTIC job is unchanged.
+  const smoke = plan(true);
+  assert.deepEqual(diagnosticMoveMissing(smoke, move, m, false), ['verified Move and Move timings']);
+  assert.deepEqual(diagnosticMoveMissing(formal, move, { ...m, moveVerified: false }, false), []);
 });
 
 test('a formal rehearsal is not clean when the measured cell fails its functional checks', () => {
@@ -240,6 +293,6 @@ test('an early stop says the scheduled work was incomplete without changing the 
   // The verdict is still judged with the run's own completeness: the first arm stays INVALID.
   assert.equal(render(formal, [first], true).verdict.overall, 'INVALID');
   const flags = statusFlags({ passed: false, finished: true, cleanupIssues: 0, stoppedEarly: true, armProblem: false, diagnosticIncomplete: false,
-    verdict: render(formal, [first], true).verdict });
+    judged: { p: formal, results: [first], verdict: render(formal, [first], true).verdict } });
   assert.deepEqual(flags, { failed: true, invalidEvidence: true });
 });
