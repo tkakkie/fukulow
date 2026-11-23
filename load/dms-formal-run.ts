@@ -240,8 +240,9 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       let dbLog:string|undefined;
       if(stopDbLog) {
         // Stopped also with no time left: the follower ends and the raw stream is removed; the record then fails.
+        // The live collection end also applies, so an interrupt during the stop shortens it.
         const dbLogEnd=Date.now()+Math.max(0,dbLogMs);
-        try {dbLogStream=await stopDbLog({hurry:abort.signal,untilMs:()=>dbLogEnd});} catch {dbLogStream=undefined;}
+        try {dbLogStream=await stopDbLog({hurry:abort.signal,untilMs:()=>Math.min(dbLogEnd,collectionEnd())});} catch {dbLogStream=undefined;}
         if(!dbLogStream)collectionFailures.push('db.log: stream stop failed');
         else collectionFailures.push(...dbLogStream.failures);
         for(const path of [directory+'/db.log',directory+'/db.log.partial'])if(dbLog===undefined)try {dbLog=readFileSync(path,'utf8');} catch {/* the other name, or none */}

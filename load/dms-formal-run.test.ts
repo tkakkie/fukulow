@@ -620,7 +620,7 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
     limitMs:2951.823,startedAtMs:100,endedAtMs:12266};
   const baseline=outcome.startsWith('baseline'), vmGap=outcome.endsWith('vm-gap'), interrupted=outcome==='interrupted'||outcome==='interrupted-late', stopped=outcome==='stop-rule'||interrupted;
   const {timing,dbLog}=diagnosticSeedRecords(baseline?'baseline':'instrumented',stopped);
-  const vmLogDirectory=path+'/vm';mkdirSync(vmLogDirectory);writeFileSync(vmLogDirectory+'/console.log','1970-01-01T00:00:00Z kernel: ok');
+  const vmLogDirectory=path+'/vm';mkdirSync(vmLogDirectory);writeFileSync(vmLogDirectory+'/console.log','1970-01-01T00:00:00Z kernel: ok\n');
   const collectionFailure=outcome==='collection-failure'||vmGap;
   // vm-gap: the init.log followed since the seed start is rotated and removed before the collector reads it (retention
   // shorter than the seed), in either arm.
@@ -716,7 +716,7 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   // After an interrupt the macOS log is skipped (recorded) so container removal is not delayed.
   assert.deepEqual(events,['seed',...(baseline?[]:['stop samplers']),'db logs',...(interrupted?[]:['host log']),'cleanup','cleanup','cleanup']);
   assert.equal(readFileSync(config.output+'/formal/seed-timing.jsonl','utf8'),timing);
-  if(outcome!=='interrupted-late')assert.equal(readFileSync(config.output+'/formal/docker-vm/console.log','utf8'),'1970-01-01T00:00:00Z kernel: ok');
+  if(outcome!=='interrupted-late')assert.equal(readFileSync(config.output+'/formal/docker-vm/console.log','utf8'),'1970-01-01T00:00:00Z kernel: ok\n');
   else assert.ok(!existsSync(config.output+'/formal/docker-vm/console.log'),'no VM log is read once the collection slack is used up');
   if(!interrupted)assert.equal(readFileSync(config.output+'/formal/host.log','utf8'),'powerd: ok\n');
   assert.ok(!existsSync(config.output+'/db.log'),'the diagnostic keeps its DB log under formal/ only');
@@ -738,7 +738,8 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   assert.deepEqual(summary.collectionMissing,[]);
   assert.equal(summary.vmLogs.status,outcome==='interrupted-late'?'failed':vmGap?'partial':'complete');
   // Both arms use the one during-seed VM log collector: the same record shape, the same gap handling.
-  assert.deepEqual(Object.keys(summary.vmLogs).sort(),outcome==='interrupted-late'||vmGap?['polls','reason','sets','status']:['polls','sets','status']);
+  assert.deepEqual(Object.keys(summary.vmLogs).sort(),outcome==='interrupted-late'||vmGap?['bytesRead','bytesWritten','polls','reason','sets','status']:['bytesRead','bytesWritten','polls','sets','status']);
+  assert.ok(summary.vmLogs.bytesRead>0&&summary.vmLogs.bytesWritten>0,'observed collector I/O is recorded in both arms');
   assert.ok(summary.vmLogs.polls>=1);
   if(vmGap) {
     assert.match(summary.vmLogs.reason,/init: init\.log was removed before it was read to its end/);

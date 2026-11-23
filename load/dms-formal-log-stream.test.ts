@@ -4,6 +4,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { Writable } from 'node:stream';
 import { execute, type Command, type Executor } from './dms-formal-exec.ts';
 import { redactHostText } from './dms-formal-host-records.ts';
 import { dbLogStreamLimits, dockerTimestampMs, startDbLogStream, startVmLogStream, vmLogStreamLimits } from './dms-formal-log-stream.ts';
@@ -149,6 +150,42 @@ esac
   assert.deepEqual(readFileSync(join(dir, 'db.log'), 'utf8').trim().split('\n'), [seedLines[1], seedLines[2], seedLines[4]]);
 });
 
+test('DB log stream: an output write error (ENOSPC) fails the record without crashing, after the follower settled, and removes the raw stream', async () => {
+  const dir = temporary('db-stream-enospc-'), { exec } = stubDocker({ lines: seedLines });
+  let writes = 0;
+  const openOutput = () => new Writable({ highWaterMark: 1, write(_chunk, _encoding, done) {
+    writes++;
+    done(writes > 1 ? Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }) : null);
+  } });
+  const stop = startDbLogStream(exec, 'db-1', join(dir, 'db.log'), join(dir, 'raw'), { limits: fast, openOutput });
+  await sleep(20);
+  const record = await stop();
+  assert.deepEqual([record.status, record.failures, record.rawRemoved], ['failed', ['db.log: stream collection failed'], true]);
+  assert.ok(writes >= 2, 'the error came from a write after the first');
+  assert.deepEqual(readdirSync(join(dir, 'raw')), [], 'no unredacted output stays in the scratch');
+  assert.ok(!existsSync(join(dir, 'db.log')));
+});
+
+test('DB log stream: the marker scan starts at the marker command, reads in bounded chunks and finds a marker across a chunk edge', async () => {
+  // About 1 MiB of log before the stop: none of it is scanned for the marker.
+  const before = Array.from({ length: 4_000 }, (_, i) => pg('2026-11-23T02:34:08.000000000Z', `duration: ${i}.000 ms ${'y'.repeat(200)}`));
+  const dir = temporary('db-stream-scan-');
+  const { exec } = stubDocker({ lines: [...seedLines, ...before] });
+  // The filler puts the marker across the first 64 KiB chunk boundary of what arrives after the scan start.
+  const wrapped: Executor = async command => {
+    if (command.args.join(' ').includes('RAISE LOG')) appendFileSync(join(dir, 'raw', 'db-log-follow.raw'), 'z'.repeat(64 * 1024 - 60) + '\n');
+    return exec(command);
+  };
+  const stop = startDbLogStream(wrapped, 'db-1', join(dir, 'db.log'), join(dir, 'raw'), { limits: fast });
+  await sleep(20);
+  const record = await stop();
+  assert.deepEqual([record.status, record.marker], ['complete', 'seen'], JSON.stringify(record.failures));
+  const raw = record.rawBytes;
+  // Observed I/O: the redaction reads the raw stream once; the marker scan read only what followed the marker command.
+  assert.ok(record.bytesRead >= raw && record.bytesRead < raw + 128 * 1024, `${record.bytesRead} read for ${raw} raw bytes`);
+  assert.equal(record.bytesWritten, readFileSync(join(dir, 'db.log')).length);
+});
+
 const secret = 'f'.repeat(64);
 const redact = (text: string) => redactHostText(text, { secrets: [secret], home: '/Users/someone', user: 'someone', host: 'Someones-MacBook-Pro.local' });
 const vmLimits = { ...vmLogStreamLimits, intervalMs: 5 };
@@ -201,7 +238,7 @@ test('VM log stream: a rotated file removed before it was read is a gap (retenti
   assert.ok(existsSync(join(out, 'init.log.partial')) && !existsSync(join(out, 'init.log')), 'the incomplete set stays marked partial');
 });
 
-test('VM log stream: a line split by a read or a rotation is written once, whole; a shrunk file and the cap are gaps', async () => {
+test('VM log stream: a line split across reads of one file is written once, whole; a shrunk file and the cap are gaps', async () => {
   const dir = temporary('vm-stream-split-'), source = join(dir, 'vm'), out = join(dir, 'out');
   mkdirSync(source);
   writeFileSync(join(source, 'init.log'), entry(0) + '2026-11-23T02:30:01.000Z password=hun');
@@ -236,4 +273,102 @@ test('VM log stream: a stop with no time left skips the final read and keeps the
   assert.match(record.reason!, /no time left/);
   assert.deepEqual(readdirSync(out), ['init.log.partial'], 'a set without files leaves nothing; the read set stays partial');
   assert.equal(startVmLogStream(join(dir, 'absent'), join(dir, 'out2'), redact, { limits: vmLimits })().status, 'failed');
+});
+
+test('VM log stream: a line split by a rotation is joined across the two files and redacted once, whole', async () => {
+  const dir = temporary('vm-stream-rotate-split-'), source = join(dir, 'vm'), out = join(dir, 'out');
+  mkdirSync(source);
+  writeFileSync(join(source, 'init.log'), entry(0));
+  const seen: string[] = [];
+  const stop = startVmLogStream(source, out, text => { seen.push(text); return redact(text); }, { limits: { ...vmLimits, intervalMs: 60_000 } });
+  // Docker Desktop rotates in the middle of a line: the old file ends with its first half, the new one starts with the rest.
+  appendFileSync(join(source, 'init.log'), '2026-11-23T02:30:01.000Z password=hun');
+  rotate(source, 'init', '20261123-114400.830');
+  appendFileSync(join(source, 'init.log'), 'ter2 end\n' + entry(2));
+  const record = stop();
+  assert.equal(record.status, 'complete', JSON.stringify(record));
+  assert.equal(readFileSync(join(out, 'init.log'), 'utf8'), entry(0) + '2026-11-23T02:30:01.000Z password=[redacted] end\n' + entry(2));
+  assert.ok(seen.every(text => text.endsWith('\n')) && !seen.some(text => /password=hun(?!ter2)|^ter2/m.test(text)), 'the two pieces are never redacted apart');
+});
+
+test('VM log stream: after a gap at a rotation the fragment up to the next newline is dropped, never written as a line', () => {
+  const dir = temporary('vm-stream-gap-split-'), source = join(dir, 'vm'), out = join(dir, 'out');
+  mkdirSync(source);
+  writeFileSync(join(source, 'init.log'), entry(0) + '2026-11-23T02:30:01.000Z password=hun');
+  const stop = startVmLogStream(source, out, redact, { limits: { ...vmLimits, intervalMs: 60_000 } });
+  // The followed file ends mid-line, rotates and is removed before the collector reads it again.
+  appendFileSync(join(source, 'init.log'), 'te');
+  rotate(source, 'init', '20261123-114400.830');
+  rmSync(join(source, 'init.log.20261123-114400.830'));
+  appendFileSync(join(source, 'init.log'), 'r2 end\n' + entry(2));
+  const record = stop();
+  assert.equal(record.status, 'partial');
+  const saved = readFileSync(join(out, 'init.log.partial'), 'utf8');
+  assert.equal(saved, entry(0) + entry(2));
+  assert.ok(!saved.includes('r2 end') && !saved.includes('hun'));
+});
+
+test('VM log stream: a replaced file with a reused name is read from its own start, not at the old offset', () => {
+  const dir = temporary('vm-stream-replaced-'), source = join(dir, 'vm'), out = join(dir, 'out');
+  mkdirSync(source);
+  writeFileSync(join(source, 'init.log'), entry(0) + entry(1));
+  const stop = startVmLogStream(source, out, redact, { limits: { ...vmLimits, intervalMs: 60_000 } });
+  // The followed file is removed and a new init.log written (which may reuse the freed inode on Linux).
+  rmSync(join(source, 'init.log'));
+  writeFileSync(join(source, 'init.log'), entry(2) + entry(3) + entry(4));
+  const record = stop();
+  assert.equal(record.status, 'partial');
+  assert.match(record.reason!, /init\.log was removed before it was read to its end/);
+  assert.equal(readFileSync(join(out, 'init.log.partial'), 'utf8'), entry(0) + entry(1) + entry(3) + entry(4),
+    'the new file is read from its start (its first line dropped after the gap), never from the old offset');
+});
+
+test('VM log stream: a read cut short by a truncation writes no zero-filled bytes and is a gap', () => {
+  const dir = temporary('vm-stream-short-'), source = join(dir, 'vm'), out = join(dir, 'out');
+  mkdirSync(source);
+  writeFileSync(join(source, 'init.log'), entry(0));
+  let truncated = false;
+  const stop = startVmLogStream(source, out, text => {
+    // The writer truncates the file between two reads of the final drain.
+    if (!truncated && text.includes('exec/1')) { truncated = true; writeFileSync(join(source, 'init.log'), entry(9)); }
+    return redact(text);
+  }, { limits: { ...vmLimits, intervalMs: 60_000, readBytesPerPoll: entry(0).length } });
+  appendFileSync(join(source, 'init.log'), entry(1) + entry(2) + entry(3));
+  const record = stop();
+  const saved = readFileSync(join(out, 'init.log.partial'), 'utf8');
+  assert.ok(!saved.includes('\0'), 'no zero fill');
+  assert.equal(record.status, 'partial');
+  assert.match(record.reason!, /init\.log shrank/);
+});
+
+test('VM log stream: a set whose final rename fails makes the whole record failed', () => {
+  const dir = temporary('vm-stream-rename-'), source = join(dir, 'vm'), out = join(dir, 'out');
+  mkdirSync(source);
+  writeFileSync(join(source, 'init.log'), entry(0));
+  writeFileSync(join(source, 'console.log'), entry(1));
+  const stop = startVmLogStream(source, out, redact, { limits: { ...vmLimits, intervalMs: 60_000 } });
+  // A directory in the way of the complete name makes the rename fail.
+  mkdirSync(join(out, 'init.log'));
+  writeFileSync(join(out, 'init.log', 'x'), '');
+  const record = stop();
+  assert.deepEqual([record.status, record.sets.init!.status, record.sets.console!.status], ['failed', 'failed', 'complete']);
+  assert.match(record.reason!, /init: .*init\.log\.partial could not be renamed/);
+  assert.ok(existsSync(join(out, 'init.log.partial')));
+});
+
+test('VM log stream: observed I/O counts the first read, the rotation catch-up and the writes', async () => {
+  const dir = temporary('vm-stream-io-'), source = join(dir, 'vm'), out = join(dir, 'out');
+  mkdirSync(source);
+  writeFileSync(join(source, 'init.log.20261123-110000.000'), entry(99));
+  writeFileSync(join(source, 'init.log'), entry(0));
+  const stop = startVmLogStream(source, out, redact, { limits: { ...vmLimits, intervalMs: 60_000 } });
+  appendFileSync(join(source, 'init.log'), entry(1));
+  rotate(source, 'init', '20261123-114400.830');
+  appendFileSync(join(source, 'init.log'), entry(2));
+  const record = stop(), init = record.sets.init!;
+  assert.equal(record.status, 'complete');
+  assert.deepEqual([init.firstPollBytesRead, init.rotatedBytesRead, init.bytesRead], [entry(0).length, entry(1).length, entry(0).length * 3],
+    'the rotated file present before the run is not read');
+  assert.equal(init.bytesWritten, readFileSync(join(out, 'init.log')).length);
+  assert.deepEqual([record.bytesRead, record.bytesWritten], [init.bytesRead, init.bytesWritten]);
 });
