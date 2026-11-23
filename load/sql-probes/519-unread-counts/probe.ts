@@ -102,6 +102,21 @@ export function countsCheckOutcome(code: number | null, stdout: string, stderr: 
   return { status: out === '0' ? 'ok' : 'drift', rows: Number(out), detail: null };
 }
 
+// The A3 migration under the same statement_timeout: its backfill guard runs message_counts_check,
+// so a timeout there is a failed verification too.
+export function migrationOutcome(code: number | null, stderr: string): CountsCheck {
+  if (code === 0) return { status: 'ok', rows: null, detail: null };
+  return { ...countsCheckOutcome(code, '', stderr), status: /canceling statement due to statement timeout/.test(stderr) ? 'timeout' : 'error' };
+}
+
+// Checkpoint start lines from the server log (log_checkpoints=on). Each start is logged by the
+// checkpointer before it does any work, unlike the cumulative counters, which are published only
+// after a checkpoint completes. A start caused by WAL volume or by checkpoint_timeout is automatic.
+export function checkpointStarts(log: string): { all: number; automatic: number } {
+  const starts = log.split('\n').filter(l => /checkpoint starting:/.test(l));
+  return { all: starts.length, automatic: starts.filter(l => /checkpoint starting:.*\b(wal|time)\b/.test(l)).length };
+}
+
 // Send blocks in run order: each pair keeps its fixed arm order, and every block gets its own
 // database cloned from the arm's template, so no block inherits rows or vacuum debt from another.
 export type SendBlock = { order: number; pair: number; arm: string; db: string };

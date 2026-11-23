@@ -63,3 +63,15 @@ test('send blocks keep the fixed order and one fresh database per block', async 
   assert.throws(() => sendBlocks([['current', 'current']]));
   assert.throws(() => sendBlocks([['current']]));
 });
+
+test('A3 migration timeout fails like the check; checkpoint starts are counted from the log', async () => {
+  const { migrationOutcome, checkpointStarts } = await import('./probe.ts');
+  assert.equal(migrationOutcome(0, '').status, 'ok');
+  assert.equal(migrationOutcome(3, 'ERROR:  canceling statement due to statement timeout\n').status, 'timeout');
+  assert.equal(migrationOutcome(3, 'ERROR:  relation does not exist\n').status, 'error');
+  assert.equal(migrationOutcome(null, '').status, 'error');
+  const log = ['LOG:  checkpoint starting: immediate force wait', 'LOG:  checkpoint complete: wrote 3 buffers',
+    'LOG:  checkpoint starting: wal', 'LOG:  checkpoint starting: time', 'LOG:  checkpoint starting: fast force wait', 'LOG:  statement: SELECT 1'].join('\n');
+  assert.deepEqual(checkpointStarts(log), { all: 4, automatic: 2 });
+  assert.deepEqual(checkpointStarts(''), { all: 0, automatic: 0 });
+});
