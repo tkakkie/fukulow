@@ -42,7 +42,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     env:
-      # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
+      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
@@ -83,7 +83,7 @@ jobs:
           --health-retries 15
     env:
       DATABASE_URL: postgres://postgres:ci-test-only@127.0.0.1:5432/postgres
-      # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
+      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
@@ -120,7 +120,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     env:
-      # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
+      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
