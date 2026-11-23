@@ -3,10 +3,6 @@ on:
   pull_request:
 permissions:
   contents: read
-env:
-  # #800 PR 1: CI never reads full debuginfo; dropping it shortens test/dev compiles. Release, wasm and Docker builds are unchanged.
-  # Panic locations need no debuginfo; backtraces keep file:line. Changing this changes the rust-cache key.
-  CARGO_PROFILE_DEV_DEBUG: 'true'
 jobs:
   smoke:
     runs-on: ubuntu-24.04
@@ -28,6 +24,8 @@ jobs:
       # covered by the server tests.
       FUKULOW_SEND_BURST: '10000'
       FUKULOW_SEND_REFILL_PER_SECOND: '1000'
+      # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
+      CARGO_PROFILE_DEV_DEBUG: 'true'
       # A Playwright bump must update the tag and digest together.
       PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
     steps:

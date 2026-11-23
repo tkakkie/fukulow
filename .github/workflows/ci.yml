@@ -5,10 +5,6 @@ on:
     branches: [main]
 permissions:
   contents: read
-env:
-  # #800 PR 1: CI never reads full debuginfo; dropping it shortens test/dev compiles. Release, wasm and Docker builds are unchanged.
-  # Panic locations need no debuginfo; backtraces keep file:line. Changing this changes the rust-cache key.
-  CARGO_PROFILE_DEV_DEBUG: 'true'
 concurrency:
   # PRs: one group per PR, so a newer push cancels the older run. main: unique group per run, so no push is cancelled or queued.
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -45,6 +41,9 @@ jobs:
   # Linting needs no DB or real SPA: an empty web/dist satisfies rust-embed for clippy, so lint runs alongside `web`.
   lint:
     runs-on: ubuntu-latest
+    env:
+      # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
+      CARGO_PROFILE_DEV_DEBUG: 'true'
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
@@ -84,6 +83,8 @@ jobs:
           --health-retries 15
     env:
       DATABASE_URL: postgres://postgres:ci-test-only@127.0.0.1:5432/postgres
+      # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
+      CARGO_PROFILE_DEV_DEBUG: 'true'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -118,6 +119,9 @@ jobs:
         run: test "$RESULT" = success
   checks:
     runs-on: ubuntu-latest
+    env:
+      # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
+      CARGO_PROFILE_DEV_DEBUG: 'true'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
