@@ -20,7 +20,7 @@ export function releaseNotes(notes: Notes): string {
 
 - Index digest: \`${notes.index}\` (tags: ${notes.tags.map(tag => `\`${tag}\``).join(', ')})
 ${Object.entries(notes.platforms).map(([architecture, digest]) => `- linux/${architecture}: \`${digest}\``).join('\n')}
-- Set \`FUKULOW_VERSION=${pinned}\` in \`.env\`, then \`docker compose pull\` and \`docker compose --profile caddy up -d\` (or nginx).
+- Set \`FUKULOW_VERSION=${pinned}\` in \`.env\`, then \`docker compose pull\` and \`docker compose up -d\` (the proxy comes from \`COMPOSE_PROFILES\`).
 - Verify: \`gh attestation verify oci://${imageRepository}@${notes.index} --repo tkakkie/fukulow\` (build provenance; add \`--predicate-type https://spdx.dev/Document/v2.3\` for the SBOM).
 
 ## Upgrade notes
