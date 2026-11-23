@@ -37,7 +37,7 @@ Smoke takes about 30 s (one cut, a 5 s bench pair) and only validates the harnes
 
 ## §10 step 1: final design (`final.ts`)
 
-DIAGNOSTIC. It compares the merged A3 design (`fd6a5949`: real triggers, backfill migration and `LIST_COUNTS_SQL`) with its parent `5ef561e5` on the same seed. Only the pre-registered stop rule from #519 §10 step 1 applies; it is not a gate.
+DIAGNOSTIC. It compares the merged A3 design (`fd6a5949`: real triggers, backfill migration and `LIST_COUNTS_SQL`), plus the #820 UPDATE-first migration from `c672b0a4` in the final arm, with its parent `5ef561e5` on the same seed. Only the pre-registered stop rule from #519 §10 step 1 applies; it is not a gate.
 
 ```sh
 node load/sql-probes/519-unread-counts/final.ts --smoke --out /absolute/new/dir/outside/checkout
@@ -45,7 +45,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   node load/sql-probes/519-unread-counts/final.ts --diagnostic --out /absolute/new/dir/outside/checkout
 ```
 
-- **Schema:** both arms start from the parent's migrations and the same seed. The final arm then applies only the A3 migration in one transaction, as a deploy onto existing data would. The driver refuses any other migration diff.
+- **Schema:** both arms start from the parent's migrations and the same seed. The final arm then applies the A3 migration and, since the #814 fix (#820), the UPDATE-first follow-up from `c672b0a4`, each in its own transaction, as a deploy onto existing data would. The driver refuses any other A3 migration diff; unrelated migrations merged in between are not applied.
 - **Reads:** at the same four cuts, as `fukulow_app` under RLS. The checksums must match and must be non-empty. The final arm's `count_drift` must stay false at every cut, and `message_counts_check` must be empty after the cuts and after the sends.
 - **Sends:** `sql/send-current.sql` in both arms, because A3 does not change the app's send SQL. pgbench runs as `fukulow_app` with the Organization set as a per-database role default; RLS is checked before the blocks. 8 clients × 3 alternating pairs.
   - Each block runs `CHECKPOINT`, a 60 s warm block, then a 120 s measured block with `--log`.
@@ -77,7 +77,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --out /absolute/new/dir/outside/checkout
 ```
 
-- **Unchanged:** pins, image, server settings, seed, `sql/send-current.sql` in both arms, `fukulow_app` under RLS, 8 clients and 4 threads, a forced `CHECKPOINT` then 60 s warm and 120 s measured per block, the checkpoint-crossing failure, and the stop rule.
+- **Unchanged:** the baseline and A3 pins (`c672b0a4` only adds the UPDATE-first migration), image, server settings, seed, `sql/send-current.sql` in both arms, `fukulow_app` under RLS, 8 clients and 4 threads, a forced `CHECKPOINT` then 60 s warm and 120 s measured per block, the checkpoint-crossing failure, and the stop rule.
 - **Order, fixed:** blocks 1 to 6 are current, final, final, current, current, final (pairs 1 to 3, as in step 1).
 - **Changed, with reasons:**
   - Reads are skipped (already decided by step 1), so no idle read databases add background WAL.
