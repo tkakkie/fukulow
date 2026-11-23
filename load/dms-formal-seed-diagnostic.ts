@@ -26,29 +26,35 @@ export function seedFailure(startedAtMs: number, endedAtMs: number): SeedStop {
 }
 
 // PostgreSQL can attach SQL, parameters or error context to log messages.
-// Retain only server-generated event lines with known formats.
-export function redactSeedDbLogs(raw: string) {
+// Retain only server-generated event lines with known formats. The redactor is line by line (it keeps only whether the
+// last entry was an autovacuum header), so a streamed log of any size is redacted with bounded memory.
+export function dbLogLineRedactor() {
   const prefix = /^(\S+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ [A-Z]+ \[\d+\] (?:LOG|ERROR|FATAL|PANIC): +)(.*)$/;
   // Autovacuum and autoanalyze statistics follow their header on tab-indented lines; keep only strict numeric forms.
   const stats = /^\S+ \t(?:system usage: CPU: user: \d+\.\d+ s, system: \d+\.\d+ s, elapsed: \d+\.\d+ s|avg read rate: \d+\.\d+ MB\/s, avg write rate: \d+\.\d+ MB\/s|buffer usage: \d+ hits, \d+ reads, \d+ dirtied|WAL usage: \d+ records, \d+ full page images, \d+ bytes(?:, \d+ buffers full)?)$/;
   let inAutovacuum = false;
-  return raw.split('\n').flatMap(line => {
-    if (stats.test(line)) return inAutovacuum ? [line] : [];
+  return (line: string): string | null => {
+    if (stats.test(line)) return inAutovacuum ? line : null;
     const match = prefix.exec(line);
     // Other continuation lines (pages, tuples) do not end the autovacuum entry; only a new log entry does.
-    if (!match) return [];
+    if (!match) return null;
     inAutovacuum = false;
     if (/^automatic (?:aggressive )?(?:vacuum|analyze) of table /.test(match[2])) inAutovacuum = true;
     const [, header, message] = match;
-    if (/^checkpoints are occurring too frequently \(\d+ seconds? apart\)$/.test(message)) return [line];
+    if (/^checkpoints are occurring too frequently \(\d+ seconds? apart\)$/.test(message)) return line;
     // log_duration lines (diagnostic batch sessions only) carry no statement text.
-    if (/^duration: \d+(?:\.\d+)? ms$/.test(message)) return [line];
-    if (/^(checkpoint (?:starting|complete):|automatic (?:aggressive )?(?:vacuum|analyze) of table "[\w.]+":|temporary file: path "base\/pgsql_tmp\/pgsql_tmp[\d.]+", size \d+$)/.test(message)) return [line];
+    if (/^duration: \d+(?:\.\d+)? ms$/.test(message)) return line;
+    if (/^(checkpoint (?:starting|complete):|automatic (?:aggressive )?(?:vacuum|analyze) of table "[\w.]+":|temporary file: path "base\/pgsql_tmp\/pgsql_tmp[\d.]+", size \d+$)/.test(message)) return line;
     const lock = /^(process \d+ (?:still waiting for|acquired) \w+Lock) on .+ (after \d+(?:\.\d+)? ms)$/.exec(message);
-    if (lock) return [header + lock[1] + ' ' + lock[2]];
-    if (/(?:ERROR|FATAL|PANIC):\s+$/.test(header)) return [header + '[detail redacted]'];
-    return [];
-  }).join('\n');
+    if (lock) return header + lock[1] + ' ' + lock[2];
+    if (/(?:ERROR|FATAL|PANIC):\s+$/.test(header)) return header + '[detail redacted]';
+    return null;
+  };
+}
+
+export function redactSeedDbLogs(raw: string) {
+  const redact = dbLogLineRedactor();
+  return raw.split('\n').flatMap(line => { const kept = redact(line); return kept === null ? [] : [kept]; }).join('\n');
 }
 
 // Server-reported statement durations (log_duration) by backend PID, at the PostgreSQL log time (%m, UTC, whole

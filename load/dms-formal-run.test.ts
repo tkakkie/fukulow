@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, cpSync, existsSync, utimesSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, cpSync, existsSync, utimesSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { readConfig, readRunConfig, type Config } from './dms-formal-config.ts';
@@ -611,17 +611,20 @@ function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean) {
   return {timing:rows.join('\n')+'\n',dbLog:log};
 }
 
-for (const outcome of ['success','stop-rule','interrupted','collection-failure','interrupted-late','baseline']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
+for (const outcome of ['success','stop-rule','interrupted','collection-failure','interrupted-late','baseline','vm-gap','baseline-vm-gap']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
   const path=temporary(t), events:string[]=[], listeners=new Map<string,()=>void>();
   const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',
-    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,...(outcome==='baseline'?{seedBaseline:true}:{}),
+    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,...(outcome.startsWith('baseline')?{seedBaseline:true}:{}),
     reviewedPatchSha256:createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex')};
   const stop={organization:6,batchIndex:124,durationMs:12166,baselineMs:983.941,rule:'message-batch',
     limitMs:2951.823,startedAtMs:100,endedAtMs:12266};
-  const baseline=outcome==='baseline', interrupted=outcome==='interrupted'||outcome==='interrupted-late', stopped=outcome==='stop-rule'||interrupted;
+  const baseline=outcome.startsWith('baseline'), vmGap=outcome.endsWith('vm-gap'), interrupted=outcome==='interrupted'||outcome==='interrupted-late', stopped=outcome==='stop-rule'||interrupted;
   const {timing,dbLog}=diagnosticSeedRecords(baseline?'baseline':'instrumented',stopped);
   const vmLogDirectory=path+'/vm';mkdirSync(vmLogDirectory);writeFileSync(vmLogDirectory+'/console.log','1970-01-01T00:00:00Z kernel: ok');
-  const collectionFailure=outcome==='collection-failure';
+  const collectionFailure=outcome==='collection-failure'||vmGap;
+  // vm-gap: the init.log followed since the seed start is rotated and removed before the collector reads it (retention
+  // shorter than the seed), in either arm.
+  if(vmGap)writeFileSync(vmLogDirectory+'/init.log','1970-01-01T00:00:00Z init: ok\n');
   // Written during the run: the copy skips VM logs last changed before the seed started.
   utimesSync(vmLogDirectory+'/console.log',new Date(Date.now()+3600000),new Date(Date.now()+3600000));
   // The DB log fetch after a late interrupt uses up the collection slack: the VM log copy must not run past it.
@@ -629,6 +632,7 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   // A sampler wrongly started in the baseline arm is never stopped; mocked timers keep its next tick from outliving the test.
   if(baseline)t.mock.timers.enable({apis:['setTimeout']});
   let releaseSamplers:()=>void=()=>{};
+  let follower:{log:string}|undefined;
   const samplersStopped=new Promise<void>(resolve=>{releaseSamplers=resolve;});
   const self='--- self 9 (sh) S 1 9 9 0 -1 0 0 0 0 0 1 1 0 0 20';
   const runtime:Runtime={vmLogDirectory,on:(signal,listener)=>{listeners.set(signal,listener);},off:()=>{},transfer:async()=>{},
@@ -645,10 +649,24 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
       if(command.program==='docker' && command.log) {
         // Each long-lived loop writes one complete sample, then runs until the stop file appears.
         writeFileSync(command.log,command.args.includes('PGOPTIONS=-c statement_timeout=2000')
-          ?['--- pid 40','--- clk_tck 100','--- child 41',...Array.from({length:snapshotsPerSession},(_,i)=>['{"atMs":'+(i+1)+',"checkpointer":{},"wal":{},"io":[]}',...(collectionFailure&&i===0?[]:['Time: 2.0 ms'])]).flat(),'--- psql-exit 0',self,'--- stopped'].join('\n')
+          ?['--- pid 40','--- clk_tck 100','--- child 41',...Array.from({length:snapshotsPerSession},(_,i)=>['{"atMs":'+(i+1)+',"checkpointer":{},"wal":{},"io":[]}',...(outcome==='collection-failure'&&i===0?[]:['Time: 2.0 ms'])]).flat(),'--- psql-exit 0',self,'--- stopped'].join('\n')
           :['--- clk_tck 100','=== 1.0',...kernelFiles.map(file=>'==> '+file+' <=='),self,'--- stopped'].join('\n'));
         // The baseline arm never stops samplers, so a loop started there must not wait for a stop.
         if(!baseline)await samplersStopped;
+        return {code:0,stdout:''};
+      }
+      // The instrumented arm follows the DB log: the stream replays the log, then delivers the end marker once it is written.
+      if(text.includes('docker logs --follow')) {
+        writeFileSync(command.log!,['2026-11-22T00:00:00.000000000Z 2026-11-22 00:00:00.000 UTC [42] LOG:  checkpoint starting: time',...dbLog].join('\n')+'\n');
+        follower={log:command.log!};
+        await new Promise(resolve=>command.signal?.addEventListener('abort',resolve,{once:true}));
+        return {code:137,stdout:''};
+      }
+      if(command.program==='docker' && command.args[0]==='container' && command.args.includes('{{.State.StartedAt}}'))return {code:0,stdout:'2026-11-22T00:00:00.000000000Z'};
+      if(command.program==='docker' && text.includes('RAISE LOG')) {
+        events.push('db logs');
+        if(outcome==='interrupted-late')t.mock.timers.tick(collectionSlackMs);
+        appendFileSync(follower!.log,'2026-11-22T01:00:00.000000000Z 2026-11-22 01:00:00.000 UTC [77] LOG:  '+/fukulow-log-end-[0-9a-f]+/.exec(text)![0]+'\n');
         return {code:0,stdout:''};
       }
       if(text.includes('docker logs --timestamps')) {
@@ -675,18 +693,22 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
           mkdirSync(roleRoot+'/formal');
           writeFileSync(roleRoot+'/formal/seed-timing.jsonl',timing,{mode:0o600});
           if(outcome==='stop-rule')writeFileSync(roleRoot+'/formal/seed-stop.json',JSON.stringify(stop));
+          if(vmGap) {
+            appendFileSync(vmLogDirectory+'/init.log','1970-01-01T00:00:01Z init: lost\n');
+            rmSync(vmLogDirectory+'/init.log');writeFileSync(vmLogDirectory+'/init.log','1970-01-01T00:00:02Z init: new\n');
+          }
           if(interrupted)listeners.get('SIGINT')!();
           return {code:outcome==='success'||collectionFailure||baseline?0:1,stdout:''};
         }
         if(text.includes("'cleanup'")) {
-          assert.match(readFileSync(config.output+'/formal/db.log','utf8'),/checkpoint starting/);
+          assert.match(readFileSync(config.output+'/formal/db.log'+(outcome==='interrupted-late'?'.partial':''),'utf8'),/checkpoint starting/);
           events.push('cleanup');
         }
         assert.doesNotMatch(text,/'(?:restore|overhead-arm|generators|reduce)'/);
       }
       return {code:0,stdout:''};
     }};
-  if(outcome==='success'||baseline)assert.equal((await run(config,runtime)).infrastructureFailure,false);
+  if(outcome==='success'||outcome==='baseline')assert.equal((await run(config,runtime)).infrastructureFailure,false);
   else if(collectionFailure)await assert.rejects(run(config,runtime),/Seed diagnostic record collection failed/);
   else await assert.rejects(run(config,runtime),/sh failed/);
   // After an interrupt the macOS log is skipped (recorded) so container removal is not delayed.
@@ -706,13 +728,20 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
     assert.equal(record.status,'NOT EVALUATED');
   }
   assert.deepEqual(summary.attempts,[]);
-  assert.deepEqual(summary.collectionFailures,collectionFailure?['db-samples.txt: postgres: sample timing missing']
-    :outcome==='interrupted'?['host.log: failed']:outcome==='interrupted-late'?['docker-vm: failed','host.log: failed']:[]);
-  assert.equal(summary.infrastructureFailure,outcome!=='success'&&!baseline);
+  assert.deepEqual(summary.collectionFailures,vmGap?['docker-vm: partial']:collectionFailure?['db-samples.txt: postgres: sample timing missing']
+    :outcome==='interrupted'?['host.log: failed']:outcome==='interrupted-late'?['db.log: redaction cut short: no time left before cleanup','db.log: server duration missing or incomplete on 326 of 1325 batches','docker-vm: failed','host.log: failed']:[]);
+  assert.equal(summary.infrastructureFailure,outcome!=='success'&&outcome!=='baseline');
   assert.equal(summary.arm,baseline?'baseline':'instrumented');
   assert.deepEqual(Object.keys(summary.conditions).sort(),['harnessSha256','imageDigest','limits','load','machine','mode','postgres','scenario','sha','shape']);
   assert.deepEqual(summary.collectionMissing,[]);
-  assert.equal(summary.vmLogs.status,outcome==='interrupted-late'?'failed':'complete');
+  assert.equal(summary.vmLogs.status,outcome==='interrupted-late'?'failed':vmGap?'partial':'complete');
+  // Both arms use the one during-seed VM log collector: the same record shape, the same gap handling.
+  assert.deepEqual(Object.keys(summary.vmLogs).sort(),outcome==='interrupted-late'||vmGap?['polls','reason','sets','status']:['polls','sets','status']);
+  assert.ok(summary.vmLogs.polls>=1);
+  if(vmGap) {
+    assert.match(summary.vmLogs.reason,/init: init\.log was removed before it was read to its end/);
+    assert.ok(existsSync(config.output+'/formal/docker-vm/init.log.partial')&&!existsSync(config.output+'/formal/docker-vm/init.log'));
+  }
   assert.equal(summary.hostLog.status,interrupted?'failed':'complete');
   const batches=stopped?6*200+125:2000;
   assert.deepEqual([summary.overhead.batches.batches,summary.overhead.batches.missingRows,summary.overhead.batches.unexpectedRows],[batches,0,0]);
@@ -729,13 +758,20 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   assert.equal(summary.overhead.dockerExecs,3,'two long-lived loops and one stop exec, not one exec per second');
   assert.equal(summary.overhead.kernelLoopCpuSeconds,0.02);
   assert.equal(summary.overhead.instrumentationEffect,'unevaluated','the effect is claimed only by the matched comparison');
-  assert.deepEqual([summary.overhead.batches.medianDbClockSpanMs,summary.overhead.batches.medianServerMs,summary.overhead.batches.serverMissing,summary.overhead.recorderMs.max],[900,850.17,0,0.1]);
+  assert.deepEqual([summary.overhead.batches.medianDbClockSpanMs,summary.overhead.batches.medianServerMs,summary.overhead.batches.serverMissing,summary.overhead.recorderMs.max],[900,850.17,outcome==='interrupted-late'?326:0,0.1]);
   const server=readFileSync(config.output+'/formal/seed-batch-server.jsonl','utf8').trim().split('\n').map(line=>JSON.parse(line));
   assert.equal(server.length,batches);
   assert.deepEqual(server[1],{organization:0,batchIndex:1,durationMs:1000,dbClockSpanMs:900,serverMs:850.17,serverStatements:5});
-  assert.match(readFileSync(config.output+'/formal/db.log','utf8'),/duration: 800\.000 ms/);
+  const dbLogFile=config.output+'/formal/db.log'+(outcome==='interrupted-late'?'.partial':'');
+  assert.match(readFileSync(dbLogFile,'utf8'),/duration: 800\.000 ms/);
+  assert.doesNotMatch(readFileSync(dbLogFile,'utf8'),/fukulow-log-end/,'the end marker is not kept');
+  assert.equal(summary.dbLogStream.status,outcome==='interrupted-late'?'partial':'complete');
+  assert.equal(summary.dbLogStream.marker,'seen');
+  assert.equal(summary.dbLogStream.rawRemoved,true);
+  assert.equal(summary.overhead.dbLogDockerExecs,3,'one inspect, one follower and one marker exec');
   for(const file of ['db-kernel.txt','db-samples.txt'])assert.ok(existsSync(config.output+'/formal/'+file));
-  assert.deepEqual(readdirSync(config.output+'/formal').filter(file=>/\.(?:raw|partial)/.test(file)),[],'no raw sampler output in the artifact directory');
+  assert.deepEqual(readdirSync(config.output+'/formal').filter(file=>/\.(?:raw|partial)/.test(file)),outcome==='interrupted-late'?['db.log.partial']:[],'no raw sampler output in the artifact directory');
+  assert.deepEqual(readdirSync(resolve(follower!.log,'..')).filter(file=>file.startsWith('db-log-follow')),[],'the raw DB log stream is removed');
   if(stopped) {
     const failure=JSON.parse(readFileSync(config.output+'/failure.json','utf8'));
     assert.deepEqual(status.seedStop,failure.seedStop);
