@@ -1,7 +1,6 @@
 CREATE OR REPLACE FUNCTION message_counts_inserted() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     delta record;
-    updated boolean;
 BEGIN
     -- Take locks in key order across both paths, even when a key is being created
     -- in another transaction. UPDATE FROM alone has no guaranteed write order.
@@ -13,17 +12,11 @@ BEGIN
         CROSS JOIN LATERAL (VALUES ('00000000-0000-0000-0000-000000000000'::uuid), (n.sender)) v(member_id)
         GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4
     LOOP
-        WITH updated_keys AS (
-            UPDATE message_append_counts k SET appended = k.appended + d.appended
-            FROM (VALUES (delta.organization_id, delta.channel_id, delta.scope_id, delta.member_id, delta.appended))
-                d(organization_id, channel_id, scope_id, member_id, appended)
-            WHERE (k.organization_id, k.channel_id, k.scope_id, k.member_id)
-                = (d.organization_id, d.channel_id, d.scope_id, d.member_id)
-            RETURNING k.organization_id, k.channel_id, k.scope_id, k.member_id
-        )
-        SELECT EXISTS (SELECT 1 FROM updated_keys) INTO updated;
+        UPDATE message_append_counts k SET appended = k.appended + delta.appended
+        WHERE (k.organization_id, k.channel_id, k.scope_id, k.member_id)
+            = (delta.organization_id, delta.channel_id, delta.scope_id, delta.member_id);
 
-        IF NOT updated THEN
+        IF NOT FOUND THEN
             INSERT INTO message_append_counts AS k (organization_id, channel_id, scope_id, member_id, appended)
             VALUES (delta.organization_id, delta.channel_id, delta.scope_id, delta.member_id, delta.appended)
             ON CONFLICT (organization_id, channel_id, scope_id, member_id) DO UPDATE

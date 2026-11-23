@@ -211,7 +211,7 @@ async fn append_counts_rollback_reverts_updates_and_new_keys(pool: PgPool) {
 }
 
 #[fukulow_test::test]
-async fn append_counts_app_role_preserves_matching_keys_in_another_organization(pool: PgPool) {
+async fn append_counts_preserve_matching_keys_in_another_organization(pool: PgPool) {
     let org = organization(&pool).await;
     let other_org = organization(&pool).await;
     let sender = Uuid::new_v4();
@@ -222,6 +222,16 @@ async fn append_counts_app_role_preserves_matching_keys_in_another_organization(
     super::channel(&pool, other_org, channel, sender, false).await;
     let mut admin = pool.acquire().await.unwrap();
     insert_messages(&mut admin, other_org, channel, &[(1, sender, None)]).await;
+    let security_invoker: bool = sqlx::query_scalar(
+        "SELECT NOT prosecdef FROM pg_proc WHERE oid = 'public.message_counts_inserted()'::regprocedure",
+    )
+    .fetch_one(&mut *admin)
+    .await
+    .unwrap();
+    assert!(
+        security_invoker,
+        "the trigger must run as the inserting role"
+    );
 
     // Reuse the deployment role if the cluster-wide role test has created it.
     // Roll back any role creation and the grants for this database.
@@ -260,12 +270,18 @@ async fn append_counts_app_role_preserves_matching_keys_in_another_organization(
     assert_counts(&mut tx, org, channel, &[(nil, nil, 2), (nil, sender, 2)]).await;
     assert_counts(&mut tx, other_org, channel, &[]).await;
     sqlx::raw_sql("RESET ROLE").execute(&mut *tx).await.unwrap();
-    assert_counts(
-        &mut tx,
-        other_org,
-        channel,
-        &[(nil, nil, 1), (nil, sender, 1)],
-    )
-    .await;
+    let other_counts = [(nil, nil, 1), (nil, sender, 1)];
+    assert_counts(&mut tx, other_org, channel, &other_counts).await;
+
+    // With RLS bypassed, only the UPDATE's Organization predicate protects the matching keys.
+    let rls_active: bool =
+        sqlx::query_scalar("SELECT row_security_active('message_append_counts')")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert!(!rls_active);
+    insert_messages(&mut tx, org, channel, &[(3, sender, None)]).await;
+    assert_counts(&mut tx, other_org, channel, &other_counts).await;
+    assert_counts(&mut tx, org, channel, &[(nil, nil, 3), (nil, sender, 3)]).await;
     tx.rollback().await.unwrap();
 }

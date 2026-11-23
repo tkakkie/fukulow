@@ -47,6 +47,23 @@ async fn message_counts_check_matches_its_previous_definition(pool: PgPool) {
     sqlx::migrate!().run(&pool).await.unwrap();
 
     let (app, org, sender, channel, owner) = fixture(&pool).await;
+    // Channel IDs are scoped to an Organization, including in the counter join.
+    let other_org = organization(&pool).await;
+    let other_sender = Uuid::new_v4();
+    let other_owner = member(&pool, other_org, other_sender).await;
+    super::channel(&pool, other_org, channel, other_sender, false).await;
+    post(&app, &other_owner, channel, None).await;
+    let other_topic = post(&app, &other_owner, channel, Some("Topic")).await;
+    mark(&app, &other_owner, channel, None, 1).await;
+    mark(
+        &app,
+        &other_owner,
+        channel,
+        Some(other_topic["topic_id"].as_str().unwrap()),
+        2,
+    )
+    .await;
+
     let other = Uuid::new_v4();
     let other_token = member(&pool, org, other).await;
     let mentioned = post(&app, &owner, channel, None).await;
@@ -112,6 +129,7 @@ async fn message_counts_check_matches_its_previous_definition(pool: PgPool) {
     .unwrap();
 
     let differences = compare_checks(&mut tx, org).await;
+    assert!(compare_checks(&mut tx, other_org).await.is_empty());
     let kinds: BTreeSet<_> = differences.iter().map(|row| row.0.as_str()).collect();
     assert_eq!(
         kinds,
