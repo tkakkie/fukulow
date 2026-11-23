@@ -1,5 +1,7 @@
 [advisories]
 version = 2
+# cargo-deny 0.22 narrowed the default to "workspace"; keep checking every crate.
+unmaintained = "all"
 
 [licenses]
 version = 2
