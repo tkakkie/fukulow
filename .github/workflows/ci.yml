@@ -63,7 +63,7 @@ jobs:
       - run: npm --prefix load ci --ignore-scripts
       - run: npm --prefix load run check && npm --prefix load test
   # server-tests and checks build the real SPA themselves (a few seconds) instead of waiting for the whole `web` job.
-  # The server tests run as 3 nextest partitions in parallel; every test still runs on every PR.
+  # The server tests run as 4 nextest slices in parallel; every test still runs on every PR.
   server-tests:
     runs-on: ubuntu-latest
     strategy:
