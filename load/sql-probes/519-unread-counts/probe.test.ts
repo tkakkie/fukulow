@@ -42,6 +42,21 @@ test('parses pgbench per-transaction logs and applies the step 1 stop rule', asy
   assert.throws(() => stopRule(cur, cur.slice(1)));
 });
 
+test('stop rule fails closed on zero, negative, NaN or non-finite inputs (#803)', async () => {
+  const { stopRule } = await import('./probe.ts');
+  const cur = [1, 2, 3].map(pair => ({ pair, walBytesPerSend: 1000, tps: 100 }));
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    for (const field of ['walBytesPerSend', 'tps'] as const) {
+      const broken = (rows: typeof cur) => rows.map((r, i) => (i === 1 ? { ...r, [field]: bad } : r));
+      assert.throws(() => stopRule(broken(cur), cur), /not a positive finite number/, `current ${field}=${bad}`);
+      assert.throws(() => stopRule(cur, broken(cur)), /not a positive finite number/, `final ${field}=${bad}`);
+    }
+  }
+  // Finite positive inputs whose ratio overflows to Infinity or underflows to 0 also fail.
+  assert.throws(() => stopRule([{ pair: 1, walBytesPerSend: 1e-320, tps: 1 }], [{ pair: 1, walBytesPerSend: 1e300, tps: 1 }]), /ratio/);
+  assert.throws(() => stopRule([{ pair: 1, walBytesPerSend: 1e300, tps: 1 }], [{ pair: 1, walBytesPerSend: 1e-320, tps: 1 }]), /ratio/);
+});
+
 test('message_counts_check: only exactly 0 rows passes; a timeout fails', async () => {
   const { countsCheckOutcome } = await import('./probe.ts');
   assert.deepEqual(countsCheckOutcome(0, '0\n', ''), { status: 'ok', rows: 0, detail: null });

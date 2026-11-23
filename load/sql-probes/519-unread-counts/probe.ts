@@ -77,14 +77,25 @@ export function logLatenciesMs(log: string): number[] {
 export type PairSend = { pair: number; walBytesPerSend: number; tps: number };
 export function stopRule(current: PairSend[], final: PairSend[]) {
   if (current.length === 0 || current.length !== final.length) throw new Error('unpaired send blocks');
+  // A zero, negative or non-finite input, ratio or median is invalid: NaN reads as "no stop" and
+  // the others give a meaningless verdict, so the run fails instead (#803).
+  const positive = (label: string, x: number) => {
+    if (!Number.isFinite(x) || x <= 0) throw new Error(`stop rule input is not a positive finite number: ${label}=${x}`);
+    return x;
+  };
   const ratios = current.map((c, i) => {
     const f = final[i];
     if (f.pair !== c.pair) throw new Error('pair order mismatch');
-    return { pair: c.pair, walPerSend: f.walBytesPerSend / c.walBytesPerSend, tps: f.tps / c.tps };
+    for (const [arm, s] of [['current', c], ['final', f]] as const) {
+      positive(`pair ${s.pair} ${arm} walBytesPerSend`, s.walBytesPerSend);
+      positive(`pair ${s.pair} ${arm} tps`, s.tps);
+    }
+    return { pair: c.pair, walPerSend: positive(`pair ${c.pair} WAL/send ratio`, f.walBytesPerSend / c.walBytesPerSend),
+      tps: positive(`pair ${c.pair} tps ratio`, f.tps / c.tps) };
   });
   const median = (xs: number[]) => quantile(xs, 0.5);
-  const walPerSend = median(ratios.map(r => r.walPerSend));
-  const tps = median(ratios.map(r => r.tps));
+  const walPerSend = positive('median WAL/send ratio', median(ratios.map(r => r.walPerSend)));
+  const tps = positive('median tps ratio', median(ratios.map(r => r.tps)));
   return { ratios, medianWalPerSend: walPerSend, medianTps: tps,
     stop: walPerSend > 1.2 || tps < 0.9, limits: 'stop if median WAL/send ratio > 1.20 or median tps ratio < 0.90' };
 }
