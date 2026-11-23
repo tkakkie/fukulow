@@ -17,6 +17,8 @@
       "support": "latest only", "updates": "weekly-check", "class": "patch-minor", "latest": { "github": "grafana/k6" } },
     { "component": "wasm-bindgen-cli", "version": "0.2.130", "file": "client-core/Cargo.toml", "pattern": "wasm-bindgen = \\{ version = \"=([^\"]+)\"",
       "support": "latest only", "updates": "weekly-check", "class": "patch-minor", "latest": { "github": "wasm-bindgen/wasm-bindgen" } },
+    { "component": "cargo-about", "version": "0.9.3", "file": "Dockerfile", "pattern": "^RUN cargo install cargo-about --version (\\S+) --locked",
+      "support": "latest only", "updates": "weekly-check", "class": "patch-minor", "latest": { "github": "EmbarkStudios/cargo-about" } },
     { "component": "Playwright", "version": "1.65.1", "file": "web/package.json", "pattern": "\"@playwright/test\": \"([^\"]+)\"",
       "support": "latest only", "updates": "dependabot", "class": "patch-minor" },
     { "component": "axum", "version": "0.8.9", "file": "Cargo.lock", "pattern": "name = \"axum\"\\nversion = \"([^\"]+)\"",

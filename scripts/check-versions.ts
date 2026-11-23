@@ -8,7 +8,7 @@ export type Entry = {
 }
 
 export const requiredComponents = ['Rust', 'Node.js', 'PostgreSQL', 'Debian runtime base', 'Caddy', 'nginx', 'k6',
-  'wasm-bindgen-cli', 'Playwright', 'axum', 'tokio', 'sqlx', 'Svelte', 'Vite', 'TypeScript']
+  'wasm-bindgen-cli', 'cargo-about', 'Playwright', 'axum', 'tokio', 'sqlx', 'Svelte', 'Vite', 'TypeScript']
 
 // versions.json (#512): every entry names the version pinned in its file; one capture of `pattern` must equal it.
 export function checkInventory(entries: Entry[], read: (path: string) => string): void {
