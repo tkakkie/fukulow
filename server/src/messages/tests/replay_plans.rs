@@ -136,6 +136,9 @@ fn check_page_work(root: &Value, case: &str, limit: i64, failures: &mut Vec<Stri
     relation_nodes(root, "channel_log", &mut log);
     relation_nodes(root, "messages", &mut messages);
     relation_nodes(root, "message_mentions", &mut mentions);
+    if mentions.is_empty() {
+        failures.push(format!("{case}: expected a message_mentions scan: {root}"));
+    }
     for node in mentions {
         let read = node["Actual Rows"].as_f64().unwrap() * node["Actual Loops"].as_f64().unwrap();
         if node["Node Type"] == "Seq Scan" || read > limit as f64 {
@@ -259,13 +262,20 @@ async fn authorized_page_plans_generically_without_leaking_the_setting(pool: PgP
     .await
     .unwrap();
     assert_eq!(state, ("auto".into(), "off".into(), true));
-    let plans: (i64, i64) = sqlx::query_as(
-        "SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE statement LIKE '%log_page%'",
+    // Exact text bound as a parameter, so this unprepared query cannot match itself.
+    let page = format!(
+        "{} ORDER BY event_seq",
+        crate::database::organization_statement_sql(&log::authorized_page_sql())
+    );
+    let plans: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE statement = $1",
     )
-    .fetch_one(&mut *conn)
+    .bind(&page)
+    .persistent(false)
+    .fetch_all(&mut *conn)
     .await
     .unwrap();
-    assert_eq!(plans, (4, 0));
+    assert_eq!(plans, vec![(4, 0)]);
     drop(conn);
     single.close().await;
     app.close().await;

@@ -1,5 +1,8 @@
 use sqlx::{PgConnection, PgPool};
 
+pub(super) const BEGIN: &str = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; \
+     SET LOCAL plan_cache_mode = force_generic_plan";
+
 /// `organization_statement` for a statement that PostgreSQL would re-plan on
 /// every execution although planning dominates its run time (#515). One
 /// read-only snapshot with a transaction-local generic plan: BEGIN and SET LOCAL
@@ -20,12 +23,7 @@ pub(crate) async fn organization_statement_generic<T>(
         .connection
         .as_deref_mut()
         .ok_or(sqlx::Error::WorkerCrashed)?;
-    sqlx::Executor::execute(
-        &mut *connection,
-        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; \
-         SET LOCAL plan_cache_mode = force_generic_plan",
-    )
-    .await?;
+    sqlx::Executor::execute(&mut *connection, BEGIN).await?;
     let result = body(&mut *connection, &sql).await;
     let finished = sqlx::Executor::execute(&mut *connection, "ROLLBACK").await;
     guard.finished = finished.is_ok();

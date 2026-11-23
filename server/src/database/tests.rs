@@ -6,6 +6,7 @@ use sqlx::{
 use std::time::{Duration, Instant};
 
 pub(crate) mod context;
+mod generic_plan;
 pub(crate) mod interrupted;
 mod migrations;
 mod read_only;
