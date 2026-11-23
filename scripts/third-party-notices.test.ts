@@ -40,6 +40,16 @@ test('the notice must cover every shipped crate and bundled npm package', () => 
   assert.match(checkCompleteness(about, [{ ...npm[0], texts: [] }], ['serde 1.0.0']).join('\n'), /svelte@5.0.0 has no license/)
 })
 
+test('blank Rust license texts and NOTICE-only or blank npm texts fail the completeness check', () => {
+  const blankIsc = { ...about, licenses: [about.licenses[0], { ...about.licenses[1], text: ' \n\t ' }] }
+  const errors = checkCompleteness(blankIsc, npm, ['ring 0.17.0', 'serde 1.0.0']).join('\n')
+  assert.match(errors, /license text for ISC is blank/)
+  assert.match(errors, /ring 0.17.0 has no license text/)
+  for (const texts of [[{ file: 'NOTICE', text: 'notice' }], [{ file: 'LICENSE', text: '   ' }], [{ file: 'COPYING', text: '' }, { file: 'NOTICE.md', text: 'n' }]])
+    assert.match(checkCompleteness(about, [{ ...npm[0], texts }], ['serde 1.0.0']).join('\n'), /svelte@5.0.0 has no license/, JSON.stringify(texts))
+  assert.deepEqual(checkCompleteness(about, [{ ...npm[0], texts: [...npm[0].texts, { file: 'NOTICE', text: 'n' }] }], ['serde 1.0.0']), [])
+})
+
 test('the rendered notice names the project license and every third-party text', () => {
   const notice = renderNotices(about, npm)
   for (const part of ['tkakkie and the fukulow contributors', 'LICENSE-MIT, LICENSE-APACHE', 'Rust crates (2):',

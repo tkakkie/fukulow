@@ -28,6 +28,13 @@ describe('bundle license allow-list', () => {
     for (const bad of [pkg('GPL-3.0-only'), pkg(''), pkg('SEE LICENSE IN LICENSE'), pkg('UNLICENSED'), pkg('MIT', [])])
       expect(() => checkBundlePackages([pkg('MIT'), bad], allow)).toThrow(/Bundle license check failed/)
   })
+
+  it('rejects NOTICE-only, empty or whitespace-only license files and keeps NOTICE as a supplement', () => {
+    for (const texts of [[{ file: 'NOTICE', text: 'notice' }], [{ file: 'LICENSE', text: '' }], [{ file: 'COPYING', text: ' \n\t' }],
+      [{ file: 'LICENSE.md', text: '\n' }, { file: 'NOTICE.txt', text: 'notice' }]])
+      expect(() => checkBundlePackages([pkg('MIT', texts)], allow), JSON.stringify(texts)).toThrow(/no non-empty LICENSE or COPYING/)
+    expect(() => checkBundlePackages([pkg('MIT', [{ file: 'LICENSE', text: 'text' }, { file: 'NOTICE', text: 'notice' }])], allow)).not.toThrow()
+  })
 })
 
 describe('bundle package resolution', () => {
@@ -43,6 +50,8 @@ describe('bundle package resolution', () => {
   write(join(web, 'node_modules/@s/b'), { name: '@s/b', version: '2.0.0', license: 'ISC' }, 'license.md')
   write(join(web, 'node_modules/a/node_modules/c'), { name: 'c', version: '3.0.0', license: 'GPL-3.0-only' })
   write(join(web, 'node_modules/vite'), { name: 'vite', version: '8.0.0', license: 'MIT' })
+  write(join(web, 'node_modules/n'), { name: 'n', version: '1.0.0', license: 'Apache-2.0' }, 'NOTICE')
+  writeFileSync(join(web, 'node_modules/n/LICENSE'), '  \n')
   const resolve = (name: string) => join(web, 'node_modules', name)
 
   it('resolves module ids, nested and scoped packages and bundler runtime helpers', () => {
@@ -59,5 +68,11 @@ describe('bundle package resolution', () => {
     expect(() => checkBundlePackages(packages, allow)).toThrow(/c@3.0.0: license "GPL-3.0-only"/)
     expect(() => bundlePackages(['\0unknown-helper'], web, resolve)).toThrow(/virtual/)
     expect(() => bundlePackages([join(root, 'elsewhere/x.js')], web, resolve)).toThrow(/outside the web app/)
+  })
+
+  it('reads NOTICE files but rejects a package whose LICENSE on disk is blank', () => {
+    const packages = bundlePackages([join(web, 'node_modules/n/index.js')], web, resolve)
+    expect(packages[0].texts.map(t => t.file)).toEqual(['LICENSE', 'NOTICE'])
+    expect(() => checkBundlePackages(packages, allow)).toThrow(/n@1.0.0: no non-empty LICENSE or COPYING/)
   })
 })

@@ -10,6 +10,8 @@ export type AboutJson = {
 export type NpmPackage = { name: string, version: string, license: string, texts: { file: string, text: string }[] }
 
 const OWN_CRATE = /^fukulow(-|$)/
+const NOTICE_FILE = /^notice([.-].*)?$/i
+const blank = (text: string) => text.trim() === ''
 
 // `cargo tree --prefix none -f '{p}'` lines: "name vX.Y.Z", optionally followed by "(...)" markers.
 export function parseShipped(tree: string): string[] {
@@ -21,18 +23,23 @@ export function parseShipped(tree: string): string[] {
   return [...crates].sort()
 }
 
-// Every shipped crate must appear in the notice with at least one license text; every npm package needs its own text.
+// Every shipped crate must appear in the notice with at least one non-blank license text; every npm package needs its
+// own non-empty LICENSE or COPYING text (a NOTICE file is a supplement, not the license).
 export function checkCompleteness(about: AboutJson, npm: readonly NpmPackage[], shipped: readonly string[]): string[] {
   const listed = new Set(about.crates.map(c => `${c.package.name} ${c.package.version}`))
-  const withText = new Set(about.licenses.flatMap(l => l.used_by.map(u => `${u.crate.name} ${u.crate.version}`)))
+  const withText = new Set(about.licenses.filter(l => !blank(l.text)).flatMap(l => l.used_by.map(u => `${u.crate.name} ${u.crate.version}`)))
   const errors: string[] = []
+  for (const license of about.licenses) if (blank(license.text)) errors.push(`license text for ${license.id} is blank`)
   if (!shipped.length) errors.push('the shipped crate list is empty')
   for (const crate of shipped) {
     if (!listed.has(crate)) errors.push(`shipped crate ${crate} is missing from the cargo-about output`)
     else if (!withText.has(crate)) errors.push(`shipped crate ${crate} has no license text`)
   }
   if (!npm.length) errors.push('the bundle package list is empty')
-  for (const pkg of npm) if (!pkg.license || !pkg.texts.length) errors.push(`npm package ${pkg.name}@${pkg.version} has no license or license text`)
+  for (const pkg of npm) {
+    if (!pkg.license || !pkg.texts.some(t => !NOTICE_FILE.test(t.file) && !blank(t.text)))
+      errors.push(`npm package ${pkg.name}@${pkg.version} has no license or license text`)
+  }
   return errors
 }
 

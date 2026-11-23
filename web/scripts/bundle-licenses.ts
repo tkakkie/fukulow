@@ -8,6 +8,12 @@ export type BundlePackage = { name: string, version: string, license: string, te
 // Bundler runtime helpers that appear as virtual modules, mapped to the package that ships their code.
 const VIRTUAL_PACKAGES: [string, string][] = [['\0vite/', 'vite'], ['\0rolldown/', 'rolldown']]
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)([.-].*)?$/i
+const NOTICE_FILE = /^notice([.-].*)?$/i
+
+// A LICENSE or COPYING file with content; NOTICE files are kept in the notice as supplements but never count as the license.
+export function isLicenseText(text: { file: string, text: string }): boolean {
+  return !NOTICE_FILE.test(text.file) && text.text.trim() !== ''
+}
 
 // deny.toml is the single allow-list (#807): its [licenses] allow array.
 export function denyAllowList(denyToml: string): string[] {
@@ -78,7 +84,7 @@ export function readBundlePackage(dir: string): BundlePackage {
   return { name: manifest.name, version: manifest.version, license: typeof manifest.license === 'string' ? manifest.license : '', texts }
 }
 
-// Throws on a package with no license, an expression outside the allow-list or no license file to attribute.
+// Throws on a package with no license, an expression outside the allow-list or no non-empty LICENSE/COPYING file.
 export function checkBundlePackages(packages: readonly BundlePackage[], allow: readonly string[]): void {
   const errors: string[] = []
   for (const pkg of packages) {
@@ -89,7 +95,7 @@ export function checkBundlePackages(packages: readonly BundlePackage[], allow: r
         if (!licenseAllowed(pkg.license, allow)) errors.push(`${at}: license "${pkg.license}" is not in deny.toml [licenses] allow`)
       } catch (error) { errors.push(`${at}: ${(error as Error).message}`) }
     }
-    if (!pkg.texts.length) errors.push(`${at}: no LICENSE file to include in the third-party notice`)
+    if (!pkg.texts.some(isLicenseText)) errors.push(`${at}: no non-empty LICENSE or COPYING file to include in the third-party notice`)
   }
   if (errors.length) throw new Error(`Bundle license check failed (#807):\n${errors.join('\n')}`)
 }
