@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import { bundlePackages, checkBundlePackages, denyAllowList, licenseAllowed, type BundlePackage } from './bundle-licenses.ts'
 
 const allow = denyAllowList(readFileSync(new URL('../../deny.toml', import.meta.url), 'utf8'))
@@ -32,6 +32,7 @@ describe('bundle license allow-list', () => {
 
 describe('bundle package resolution', () => {
   const root = mkdtempSync(join(tmpdir(), 'bundle-licenses-'))
+  afterAll(() => rmSync(root, { recursive: true, force: true }))
   const web = join(root, 'web')
   const write = (dir: string, manifest: object, license = 'LICENSE') => {
     mkdirSync(dir, { recursive: true })

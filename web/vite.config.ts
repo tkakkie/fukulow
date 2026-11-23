@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 import { precompress } from './scripts/precompress.ts'
 import { checkCoreBundle } from './scripts/core-bundle.ts'
 import { bundlePackages, checkBundlePackages, denyAllowList } from './scripts/bundle-licenses.ts'
@@ -34,7 +35,7 @@ export default defineConfig(({ mode }) => {
       { name: 'bundle-licenses', apply: 'build', generateBundle(_options, bundle) {
         const root = fileURLToPath(new URL('.', import.meta.url))
         const ids = Object.values(bundle).flatMap(item => item.type === 'chunk' ? Object.keys(item.modules)
-          : item.originalFileNames.map(name => root + name))
+          : item.originalFileNames.map(name => resolve(root, name)))
         const packages = bundlePackages(ids, root, name => root + 'node_modules/' + name)
         checkBundlePackages(packages, denyAllowList(readFileSync(new URL('../deny.toml', import.meta.url), 'utf8')))
         writeFileSync(new URL('./bundle-licenses.json', import.meta.url), JSON.stringify(packages, null, 1) + '\n')
