@@ -193,6 +193,8 @@ jobs:
               args.push("--set", "app.cache-to=type=gha,scope=docker,mode=max");
             }
             await exec.exec("docker", args);
+      - name: Image ships the license texts, copyright notice and third-party notices (#807)
+        run: bash scripts/check-image-licenses.sh fukulow-app
       # The profiles run side by side as separate Compose projects with ephemeral ports (~130 s in sequence).
       # Distinct edge subnets keep the two projects apart.
       - name: Both proxy profiles reject forwarded-IP spoofing
