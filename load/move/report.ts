@@ -17,7 +17,8 @@ export function render(p: Plan, results: Result[], complete: boolean) {
     verdict,
     markdown: [
       '# Move to topic measurement', '',
-      p.smoke ? 'Smoke is a functional check. Every performance result is NOT EVALUATED.' : 'Mac-relative measurement using one release image across both arms.',
+      p.rehearsal ? `**REHEARSAL. Never evidence.** One ${p.seconds} s cell at the recorded fixture size; every gate is NOT EVALUATED.`
+        : p.smoke ? 'Smoke is a functional check. Every performance result is NOT EVALUATED.' : 'Mac-relative measurement using one release image across both arms.',
       '', `Overall **${verdict.overall}**. Functional checks **${verdict.functional}**.`,
       '', `1,000-Message limit · **${verdict.limit.status}**${verdict.limit.size ? ` (${verdict.limit.size} Messages)` : ''}.`,
       '', '| Part | Chain size | Rounds | Result |', '| --- | ---: | --- | --- |', ...rows, '',

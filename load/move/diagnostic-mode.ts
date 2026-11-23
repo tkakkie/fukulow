@@ -1,4 +1,4 @@
-import { plan, steps } from './plan.ts';
+import { plan, rehearsalPlan, steps } from './plan.ts';
 
 export const diagnosticMode = 'DIAGNOSTIC';
 export const diagnosticLabel = 'io.fukulow.move.diagnostic';
@@ -35,8 +35,8 @@ export function attributionLabel(readLanes: ReadLanes) {
     : `ATTRIBUTION RUN (Part D read lanes: ${readLanes} only); not the Part D Done-when load`;
 }
 
-export function diagnosticSelection(values: { diagnostic?: boolean; smoke?: boolean; sizes?: string; round?: string; image?: string;
-  commit?: string; 'read-lanes'?: string }) {
+export function diagnosticSelection(values: { diagnostic?: boolean; smoke?: boolean; rehearsal?: boolean; sizes?: string; round?: string;
+  image?: string; commit?: string; 'read-lanes'?: string }) {
   if (!values.diagnostic) {
     if (values.sizes !== undefined || values.round !== undefined || values['read-lanes'] !== undefined)
       throw new Error('--sizes, --round and --read-lanes require --diagnostic');
@@ -53,8 +53,10 @@ export function diagnosticSelection(values: { diagnostic?: boolean; smoke?: bool
   const round = values.round ?? '1';
   if (!['100', '1000', '100,1000'].includes(sizes) || !['1', '2', '3'].includes(round))
     throw new Error('Use --sizes 100, 1000 or 100,1000 and --round 1, 2 or 3');
-  const p = { ...plan(values.smoke ?? false), mode: diagnosticMode };
-  const selected: readonly number[] = p.smoke ? p.sizes : sizes.split(',').map(Number);
+  if (values.smoke && values.rehearsal) throw new Error('Pass at most one of --smoke and --rehearsal');
+  // A rehearsal keeps the job's commit, read lanes and round, and runs its first selected size only, in a short window.
+  const p = { ...(values.rehearsal ? rehearsalPlan() : plan(values.smoke ?? false)), mode: diagnosticMode };
+  const selected: readonly number[] = p.smoke ? p.sizes : sizes.split(',').map(Number).slice(0, values.rehearsal ? 1 : undefined);
   const target = diagnosticTargets[commit];
   return { plan: p, commit, patch: target.patch, readLanes: readLanes as ReadLanes,
     readTimingSampleEvery: target.readTimingSampleEvery && (p.smoke ? 1 : target.readTimingSampleEvery),

@@ -10,11 +10,13 @@ import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnost
 import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, readSampleEnvironment, rejectDiagnosticImage, remainingArmsSkipped,
   type ReadLanes } from './diagnostic-mode.ts';
 import { buildFixture, committedMoves, head, type Seeded } from './fixture.ts';
-import { infrastructureFailure, type Attempt, type Measurement, type Result } from './judge.ts';
+import { armInvalid, infrastructureFailure, type Attempt, type Measurement, type Result } from './judge.ts';
 import { latency, storage } from './measure.ts';
-import { moveLimits, plan, stepId, steps, thresholds, type Plan, type Step } from './plan.ts';
+import { moveLimits, plan, rehearsalPlan, rehearsalSteps, stepId, steps, thresholds, type Plan, type Step } from './plan.ts';
 import { render } from './report.ts';
 import { command, docker, sampler, sleep, startStack, type Stack } from '../slice5/stack.ts';
+import { assertDockerHeadroom } from '../harness-core/host.ts';
+import { stages, type Mode } from '../harness-core/stages.ts';
 
 const exec = promisify(execFile);
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -62,7 +64,7 @@ async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir:
     ...Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]),
     '-v', `${repo}:/work:ro`, '-v', `${dir}:/fixture:ro`, '-w', '/work',
     '-e', 'BASE_URL=http://app:8080', '-e', 'REQUEST_TIMEOUT_SECONDS=10', '-e', `MOVE_STEP=${JSON.stringify(step)}`,
-    '-e', `MOVE_SMOKE=${Number(p.smoke)}`, ...(readLanes === 'all' ? [] : ['-e', `MOVE_READ_LANES=${readLanes}`]),
+    '-e', `MOVE_SMOKE=${Number(p.smoke)}`, ...(p.rehearsal ? ['-e', 'MOVE_REHEARSAL=1'] : []), ...(readLanes === 'all' ? [] : ['-e', `MOVE_READ_LANES=${readLanes}`]),
     ...(output?.dockerArgs ?? []),
     k6, 'run', '--quiet', ...(output?.k6Args ?? []), 'load/move/workload-k6.ts'];
   const prior = head(stack, seeded.data);
@@ -110,36 +112,52 @@ async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Step, dir:
   return { measurement, problem, diagnostic, samples: resources?.samples, cpu: evidence?.cpu, started: raw.started, extra };
 }
 
+const usage = 'Usage: node load/move/run.ts --out NEW_DIRECTORY [--commit FULL_SHA --image IMAGE | --diagnostic [--commit PINNED_SHA] [--sizes 100,1000] [--round 1] [--read-lanes all|channels|topics]] [--smoke | --rehearsal]';
+// #758 D0 waiter value: Docker VM free space before the image builds, stacks and k6 output.
+export const headroomBytes = 20 * 1024 ** 3;
+
+// Mode, plan and arms of one invocation. Without --smoke or --rehearsal the run is the recorded job,
+// unchanged: plan(false) and every formal step, or the DIAGNOSTIC selection.
+export function selectRun(values: { smoke?: boolean; rehearsal?: boolean; diagnostic?: boolean; sizes?: string; round?: string;
+  image?: string; commit?: string; 'read-lanes'?: string }) {
+  if (values.smoke && values.rehearsal) throw new Error('Pass at most one of --smoke and --rehearsal');
+  const mode: Mode = values.smoke ? 'smoke' : values.rehearsal ? 'rehearsal' : 'recorded';
+  const selection = diagnosticSelection(values);
+  const p: Plan = selection?.plan ?? (mode === 'rehearsal' ? rehearsalPlan() : plan(mode === 'smoke'));
+  const orderedSteps = selection?.steps ?? (p.rehearsal ? rehearsalSteps(p) : steps(p));
+  return { mode, selection, p, orderedSteps };
+}
+
+// #769 fail fast: stop after the first measured arm if judge() would already call it INVALID.
+// DIAGNOSTIC arms keep their own missing-evidence stop (remainingArmsSkipped) after every arm.
+export function firstArmInvalid(p: Plan, diagnostic: boolean, row: Result) {
+  return diagnostic ? [] : armInvalid(p, row, row.attempts.at(-1));
+}
+
+// A rehearsal applies every per-arm validity check to its arms; it is clean only when none fails.
+export function rehearsalChecks(p: Plan, results: Result[]) {
+  return results.map(row => ({ step: stepId(row), problems: armInvalid(p, row, row.attempts.at(-1)) }));
+}
+
+function postgresImage() {
+  const pg = /\n  db:\n    image: (\S+)/.exec(readFileSync(join(repo, 'load/compose.yml'), 'utf8'))?.[1];
+  if (!pg) throw new Error('db image not found in load/compose.yml');
+  return pg;
+}
+
 async function main() {
   const { values } = parseArgs({ options: { commit: { type: 'string' }, image: { type: 'string' },
-    out: { type: 'string' }, smoke: { type: 'boolean' }, diagnostic: { type: 'boolean' },
+    out: { type: 'string' }, smoke: { type: 'boolean' }, rehearsal: { type: 'boolean' }, diagnostic: { type: 'boolean' },
     sizes: { type: 'string' }, round: { type: 'string' }, 'read-lanes': { type: 'string' } } });
-  const selection = diagnosticSelection(values);
-  if (!values.out || (!selection && (!values.commit || !values.image)))
-    throw new Error('Usage: node load/move/run.ts --out NEW_DIRECTORY [--commit FULL_SHA --image IMAGE | --diagnostic [--commit PINNED_SHA] [--sizes 100,1000] [--round 1] [--read-lanes all|channels|topics]] [--smoke]');
+  const { mode, selection, p, orderedSteps } = selectRun(values);
+  if (!values.out || (!selection && (!values.commit || !values.image))) throw new Error(usage);
   const commit = selection ? selection.commit : values.commit!;
   const attribution = selection && attributionLabel(selection.readLanes);
-  const p = selection?.plan ?? plan(values.smoke ?? false);
-  const orderedSteps = selection?.steps ?? steps(p);
-  let image: { id: string; revision: string; patchSha256?: string } | undefined;
-  if (!selection) {
-    const inspected = JSON.parse(docker('image', 'inspect', '--format',
-      `{"id":{{json .Id}},"revision":{{json (index .Config.Labels "${revisionLabel}")}},"diagnostic":{{json (index .Config.Labels "${diagnosticLabel}")}}}`,
-      values.image!)) as { id: string; revision: string; diagnostic: string | null };
-    rejectDiagnosticImage(inspected.diagnostic || null);
-    checkImageRevision(commit, inspected.revision);
-    image = { id: inspected.id, revision: inspected.revision };
-  }
-  if (command('git', ['-C', repo, 'rev-parse', '--verify', commit + '^{commit}']) !== commit) throw new Error('Commit is unavailable locally');
-  if (!p.smoke) {
-    if (!selection && platform() !== 'darwin') throw new Error('Formal Move measurement requires a Mac');
-    command('git', ['-C', repo, 'merge-base', '--is-ancestor', commit, 'origin/main']);
-  }
-  const k6 = command('make', ['-s', '-C', repo, 'load-image']);
-  const k6Id = docker('image', 'inspect', '--format', '{{.Id}}', k6);
   const output = resolve(values.out);
   mkdirSync(output, { mode: 0o700 });
   const project = `fukulow-move-${randomUUID()}`;
+  // status.json: setup-failure before the first measured sample, result-failure after it (#769).
+  const run = stages(output, mode, project);
   const tag = `fukulow-move-diagnostic:${project}`;
   const scratch = mkdtempSync(join(platform() === 'darwin' ? '/private/tmp' : tmpdir(), 'fukulow-move-'));
   const abort = new AbortController();
@@ -149,8 +167,32 @@ async function main() {
   const results: Result[] = [];
   const diagnosticArms: object[] = [];
   let rerun = false, complete = false;
+  let stoppedEarly: string | undefined;
   const cleanupIssues: string[] = [];
+  let image: { id: string; revision: string; patchSha256?: string } | undefined;
   try {
+    run.enter('source');
+    if (!selection) {
+      const inspected = JSON.parse(docker('image', 'inspect', '--format',
+        `{"id":{{json .Id}},"revision":{{json (index .Config.Labels "${revisionLabel}")}},"diagnostic":{{json (index .Config.Labels "${diagnosticLabel}")}}}`,
+        values.image!)) as { id: string; revision: string; diagnostic: string | null };
+      rejectDiagnosticImage(inspected.diagnostic || null);
+      checkImageRevision(commit, inspected.revision);
+      image = { id: inspected.id, revision: inspected.revision };
+    }
+    if (command('git', ['-C', repo, 'rev-parse', '--verify', commit + '^{commit}']) !== commit) throw new Error('Commit is unavailable locally');
+    if (!p.smoke) {
+      if (!selection && platform() !== 'darwin') throw new Error('Formal Move measurement requires a Mac');
+      command('git', ['-C', repo, 'merge-base', '--is-ancestor', commit, 'origin/main']);
+    }
+    let headroom: ReturnType<typeof assertDockerHeadroom> | undefined;
+    if (!p.smoke) {
+      run.enter('headroom');
+      headroom = assertDockerHeadroom(postgresImage(), headroomBytes);
+    }
+    run.enter('build');
+    const k6 = command('make', ['-s', '-C', repo, 'load-image']);
+    const k6Id = docker('image', 'inspect', '--format', '{{.Id}}', k6);
     if (selection) {
       console.log('DIAGNOSTIC: building the instrumented Part D image' + (attribution ? ` (${attribution})` : ''));
       image = await diagnosticImage(repo, scratch, tag, abort.signal, selection);
@@ -159,17 +201,20 @@ async function main() {
     const harnessFiles = command('git', ['-C', repo, 'ls-files', '--cached', '--others', '--exclude-standard', '--', 'load/move'])
       .split('\n').filter(file => file.endsWith('.ts') || (selection && file === selection.patch));
     const tracked = ['load/seed.ts', 'load/events.ts', 'load/compose.yml', 'load/channel-log.sql', 'load/slice5/stack.ts',
-      'load/slice5/fixture.ts', 'load/slice5/judge.ts', 'load/pool-before-after-summary.ts', ...harnessFiles];
+      'load/slice5/fixture.ts', 'load/slice5/judge.ts', 'load/pool-before-after-summary.ts',
+      'load/harness-core/stages.ts', 'load/harness-core/host.ts', ...harnessFiles];
     save(join(output, selection ? 'DIAGNOSTIC-metadata.json' : 'metadata.json'), {
-      // Formal metadata keeps its pre-diagnostic key order.
-      ...(selection ? { mode: diagnosticMode, sendTimingSampleEvery: 32, readTimingSampleEvery: selection.readTimingSampleEvery,
-        readLanes: selection.readLanes, attribution, commit, image, k6, k6Id, project, plan: p }
-        : { commit, image, k6, k6Id, project, plan: p, thresholds: { ...thresholds, moveP95Ms: moveLimits } }),
+      // Formal metadata keeps its pre-diagnostic key order; a rehearsal says so first.
+      ...(selection ? { mode: diagnosticMode, ...(p.rehearsal && { rehearsal: true, evidence: false }), sendTimingSampleEvery: 32,
+        readTimingSampleEvery: selection.readTimingSampleEvery, readLanes: selection.readLanes, attribution, commit, image, k6, k6Id, project, plan: p }
+        : { ...(p.rehearsal && { mode, evidence: false }), commit, image, k6, k6Id, project, plan: p,
+          thresholds: { ...thresholds, moveP95Ms: moveLimits } }),
       orderedSteps,
       harnessCommit: command('git', ['-C', repo, 'rev-parse', 'HEAD']),
       harnessHashes: Object.fromEntries(tracked.map(file => [file, createHash('sha256').update(readFileSync(join(repo, file))).digest('hex')])),
       machine: { platform: platform(), arch: arch(), os: release(), cpu: cpus().length, memory: totalmem(), load: loadavg(), node: process.version },
       started: new Date().toISOString(),
+      ...(headroom && { headroom }),
     });
     for (const step of orderedSteps) {
       abort.signal.throwIfAborted();
@@ -186,7 +231,7 @@ async function main() {
         let artifacts: object = {};
         let captured: Pick<Awaited<ReturnType<typeof generator>>, 'extra' | 'started'> | undefined;
         let stepCleaned = false;
-        console.log(selection ? `DIAGNOSTIC ${id}` : id);
+        run.enter(selection ? `DIAGNOSTIC ${id}` : id);
         try {
           const stack = await startStack({ id, project, source: repo, image: image.id, privateDir: dir,
             burst: p.burst, refill: p.refill, labels, port: '0', diagnostic: Boolean(selection),
@@ -196,6 +241,7 @@ async function main() {
           stage = 'fixture';
           const seeded = await buildFixture(stack, p, step);
           stage = 'measurement';
+          run.startSampling();
           const measured = step.part === 'A' ? await latency(stack, seeded, p, abort.signal)
             : step.part === 'F' ? await storage(stack, seeded, p, step, abort.signal)
             : await generator(stack, seeded, p, step, dir, labels, k6, abort.signal, Boolean(selection), selection?.readLanes);
@@ -253,8 +299,16 @@ async function main() {
         abort.signal.throwIfAborted();
         cleanup(project);
       }
+      run.done(stepId(step));
       if (remainingArmsSkipped(Boolean(selection), row.attempts[0]?.problem) && results.length < orderedSteps.length) {
+        stoppedEarly = `${stepId(step)}: ${row.attempts[0]?.problem}`;
         console.log(`DIAGNOSTIC stopped after ${stepId(step)}: ${row.attempts[0]?.problem}`);
+        break;
+      }
+      const invalid = results.length === 1 && results.length < orderedSteps.length ? firstArmInvalid(p, Boolean(selection), row) : [];
+      if (invalid.length) {
+        stoppedEarly = `${stepId(step)}: ${invalid.join('; ')}`;
+        console.log(`Move harness stopped after the first arm ${stepId(step)}: INVALID (${invalid.join('; ')})`);
         break;
       }
     }
@@ -269,21 +323,36 @@ async function main() {
     process.removeListener('SIGINT', stop);
     process.removeListener('SIGTERM', stop);
     const finished = complete && cleaned && !abort.signal.aborted;
-    if (selection) {
-      const captured = finished && cleanupIssues.length === 0 && results.length === orderedSteps.length
-        && results.every(result => !result.attempts[0]?.problem);
-      save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, readLanes: selection.readLanes, attribution,
-        complete: captured, cleanupIssues, arms: diagnosticArms,
-        skipped: orderedSteps.slice(results.length).map(stepId) });
-      console.log(`DIAGNOSTIC capture ${captured ? 'complete' : 'incomplete'}` + (attribution ? ` · ${attribution}` : ''));
-      if (!captured) process.exitCode = 1;
-    } else {
-      const report = render(p, results, finished);
-      save(join(output, 'results.json'), { complete: finished, cleanupIssues, results, ...report.verdict });
-      writeFileSync(join(output, 'report.md'), report.markdown, { mode: 0o600 });
-      console.log(`Move harness ${p.smoke ? 'functional ' + report.verdict.functional : report.verdict.overall}`);
-      if (!finished || (p.smoke ? report.verdict.functional !== 'PASS' : report.verdict.overall !== 'PASS')) process.exitCode = 1;
-    }
+    const allArms = finished && cleanupIssues.length === 0 && results.length === orderedSteps.length;
+    const captured = allArms && results.every(result => !result.attempts[0]?.problem);
+    const checks = p.rehearsal && !selection ? rehearsalChecks(p, results) : [];
+    const clean = selection ? captured : allArms && checks.every(check => !check.problems.length);
+    const armProblem = results.some(row => row.attempts.at(-1)?.problem !== undefined);
+    let line = '', passed = false;
+    const status = run.finish(() => {
+      if (selection) {
+        save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, ...(p.rehearsal && { rehearsal: true, evidence: false }),
+          readLanes: selection.readLanes, attribution, complete: captured, cleanupIssues, arms: diagnosticArms,
+          skipped: orderedSteps.slice(results.length).map(stepId) });
+        line = `DIAGNOSTIC ${p.rehearsal ? 'REHEARSAL ' : ''}capture ${captured ? 'complete' : 'incomplete'}` + (attribution ? ` · ${attribution}` : '')
+          + (p.rehearsal ? ' (never evidence)' : '');
+        passed = captured;
+      } else {
+        const report = render(p, results, finished);
+        save(join(output, 'results.json'), { ...(p.rehearsal && { mode, evidence: false, rehearsalClean: clean, checks }),
+          complete: finished, ...(stoppedEarly === undefined ? {} : { stoppedEarly }), cleanupIssues, results, ...report.verdict });
+        writeFileSync(join(output, 'report.md'), report.markdown, { mode: 0o600 });
+        line = p.rehearsal ? `Move harness REHEARSAL ${clean ? 'clean' : 'not clean'} (never evidence)`
+          : `Move harness ${p.smoke ? 'functional ' + report.verdict.functional : report.verdict.overall}`;
+        passed = finished && (p.rehearsal ? clean : p.smoke ? report.verdict.functional === 'PASS' : report.verdict.overall === 'PASS');
+      }
+    }, { failed: !finished || cleanupIssues.length > 0 || stoppedEarly !== undefined || armProblem || (Boolean(selection) && !captured),
+      interrupted: abort.signal.aborted,
+      invalidEvidence: !finished || cleanupIssues.length > 0 || stoppedEarly !== undefined || (Boolean(selection) && !captured),
+      summaryInvalidates: true });
+    if (line) console.log(line);
+    console.log(`Move harness status ${status.outcome} (${mode}, evidence ${status.evidence})`);
+    if (!passed || status.summaryFailed) process.exitCode = 1;
   }
 }
 

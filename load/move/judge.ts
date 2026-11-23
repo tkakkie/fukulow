@@ -70,6 +70,14 @@ function validity(p: Plan, step: Step, m: Measurement) {
   return reasons;
 }
 
+// #769 fail fast: the same per-arm INVALID rules judge() applies, for one arm's final attempt.
+export function armInvalid(p: Plan, step: Step, attempt: Attempt | undefined): string[] {
+  if (!attempt) return ['missing step'];
+  if (!attempt.measurement || attempt.problem || attempt.infrastructure)
+    return [attempt.problem ?? attempt.infrastructure ?? 'missing step evidence'];
+  return validity(p, step, attempt.measurement);
+}
+
 function lastAttempt(row: Result, reruns: number): Attempt | undefined {
   if (row.attempts.length === 1) return row.attempts[0];
   if (reruns === 1 && row.attempts.length === 2 && row.attempts[0].infrastructure === infrastructureFailure) return row.attempts[1];
@@ -196,6 +204,7 @@ export function judge(p: Plan, results: Result[], complete: boolean) {
         gate = performanceGate({ ...cell, round: r.round, arm: 'move' }, r.move!, r.baseline, a?.functional, a?.move?.lanes.move?.p95 ?? null);
       }
       if (p.smoke || !complete) gate = verdict('NOT EVALUATED', p.smoke ? 'smoke is functional only' : 'run incomplete');
+      if (p.rehearsal) gate = verdict('NOT EVALUATED', 'a rehearsal is never evidence');
       return { round: r.round, functional: r.functional, ...gate };
     });
     return { part: cell.part, size: cell.size, rounds, ...combine(rounds) };
