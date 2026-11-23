@@ -52,7 +52,7 @@ test('stop rule fails closed on zero, negative, NaN or non-finite inputs (#803)'
       assert.throws(() => stopRule(cur, broken(cur)), /not a positive finite number/, `final ${field}=${bad}`);
     }
   }
-  // Finite positive inputs whose ratio is not finite (underflow or overflow) also fail.
+  // Finite positive inputs whose ratio overflows to Infinity or underflows to 0 also fail.
   assert.throws(() => stopRule([{ pair: 1, walBytesPerSend: 1e-320, tps: 1 }], [{ pair: 1, walBytesPerSend: 1e300, tps: 1 }]), /ratio/);
   assert.throws(() => stopRule([{ pair: 1, walBytesPerSend: 1e300, tps: 1 }], [{ pair: 1, walBytesPerSend: 1e-320, tps: 1 }]), /ratio/);
 });

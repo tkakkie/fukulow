@@ -77,8 +77,8 @@ export function logLatenciesMs(log: string): number[] {
 export type PairSend = { pair: number; walBytesPerSend: number; tps: number };
 export function stopRule(current: PairSend[], final: PairSend[]) {
   if (current.length === 0 || current.length !== final.length) throw new Error('unpaired send blocks');
-  // A zero, negative or non-finite input or ratio makes every comparison false ("no stop"),
-  // so it fails the run instead (#803).
+  // A zero, negative or non-finite input, ratio or median is invalid: NaN reads as "no stop" and
+  // the others give a meaningless verdict, so the run fails instead (#803).
   const positive = (label: string, x: number) => {
     if (!Number.isFinite(x) || x <= 0) throw new Error(`stop rule input is not a positive finite number: ${label}=${x}`);
     return x;
