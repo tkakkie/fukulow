@@ -3,10 +3,15 @@ import { plan, steps } from './plan.ts';
 export const diagnosticMode = 'DIAGNOSTIC';
 export const diagnosticLabel = 'io.fukulow.move.diagnostic';
 export const diagnosticCommit = '3d86c8945e316fc4ef993fc9e5db6736e9e7c067';
-// Each pinned app commit has exactly one instrumentation patch; only the newer one times Part D reads.
-export const diagnosticTargets: Record<string, { patch: string; readTimingSampleEvery: number | null }> = {
+// Each pinned app commit has exactly one instrumentation patch; only the d655a3a patch times Part D reads.
+const readLaneTarget = { patch: 'load/move/diagnostic-d655a3a.patch', readTimingSampleEvery: 8, sendBreakdown: true } as const;
+export const diagnosticTargets: Record<string, { patch: string; readTimingSampleEvery: number | null; sendBreakdown?: true }> = {
   [diagnosticCommit]: { patch: 'load/move/diagnostic.patch', readTimingSampleEvery: null },
-  d655a3ad2795530c4a18587b7c589e58180d6ffb: { patch: 'load/move/diagnostic-d655a3a.patch', readTimingSampleEvery: 8 },
+  d655a3ad2795530c4a18587b7c589e58180d6ffb: readLaneTarget,
+  // #758 D0 pair around #783 (Topic page candidates before counts): main just before it and its merge.
+  // The d655a3a patch applies to both unchanged, so both arms carry the same hooks.
+  '9cb1f78c938b72657fe91177f43ca34f65015857': readLaneTarget,
+  '4e4b4b8b4d6c65446231c9e439950d2dde7d604e': readLaneTarget,
 };
 export const readLaneChoices = ['all', 'channels', 'topics'] as const;
 export type ReadLanes = typeof readLaneChoices[number];
@@ -53,6 +58,7 @@ export function diagnosticSelection(values: { diagnostic?: boolean; smoke?: bool
   const target = diagnosticTargets[commit];
   return { plan: p, commit, patch: target.patch, readLanes: readLanes as ReadLanes,
     readTimingSampleEvery: target.readTimingSampleEvery && (p.smoke ? 1 : target.readTimingSampleEvery),
+    sendBreakdown: target.sendBreakdown,
     steps: steps(p).filter(step => step.part === 'D' && selected.includes(step.size) && step.round === Number(round)) };
 }
 

@@ -29,6 +29,7 @@ async fn get(app: &Router, token: &str, channel: Uuid, suffix: &str) -> Value {
 
 pub(super) mod atomicity;
 mod denials;
+mod page_plans;
 mod paging;
 mod sends;
 

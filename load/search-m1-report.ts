@@ -26,25 +26,28 @@ export type Counts = {
 };
 export type Latency = { p50: number | null; p95: number | null; p99: number | null };
 export type Resources = {
-  acceptedPerSecond: number; walBytesPerSend: number | null; appCpuPeakPercent: number;
-  dbCpuPeakPercent: number; dbSizeGrowthBytes: number;
+  acceptedPerSecond: number | null; walBytesPerSend: number | null; appCpuPeakPercent: number | null;
+  dbCpuPeakPercent: number | null; dbSizeGrowthBytes: number | null;
 };
 type Evidence = Counts & { sendMs: Latency; sendSamples: number; resources?: Resources; resourcesMissing?: string };
 export type Step = Evidence & { rate: number; seconds: number };
-export type StackIdentity = {
+type M1Overlay = { storedBody: boolean; pgroongaIndex: boolean };
+export type StackIdentity<Overlay = M1Overlay> = {
   commit: string; appImage: string; migrateImage: string; dbImage: string;
-  limiter: typeof limiter; dbSettings: Record<string, string>; overlay: { storedBody: boolean; pgroongaIndex: boolean };
+  limiter: typeof limiter; dbSettings: Record<string, string>; overlay: Overlay;
 };
-export type Identity = StackIdentity & { bodySha256: string; bodySeed: number; k6Image: string; workload: ReturnType<typeof workload> };
-export type Run = {
-  scenario: Scenario; pair: number; arm: Arm; sequence: number; identity?: Identity; finalStack?: StackIdentity;
+export type Identity<Overlay = M1Overlay> = StackIdentity<Overlay> & {
+  bodySha256: string; bodySeed: number; k6Image: string; workload: ReturnType<typeof workload>;
+};
+export type Run<Overlay = M1Overlay> = {
+  scenario: Scenario; pair: number; arm: Arm; sequence: number; identity?: Identity<Overlay>; finalStack?: StackIdentity<Overlay>;
   cleanupVerified: boolean; errors: string[]; steps: Step[];
   totals?: Evidence;
 };
 export type Metadata = {
   smoke: boolean; expected: Omit<Identity, 'workload'>;
 };
-export type Batch = { runs: Run[]; imageCleanupVerified: boolean; errors: string[] };
+export type Batch<ArmRun = Run> = { runs: ArmRun[]; imageCleanupVerified: boolean; errors: string[] };
 
 export function workload(scenario: Scenario, smoke: boolean) {
   return { mode: scenario, channels: scenario === 'many' ? 200 : 1, members: 4, subscribers: 0,
@@ -54,10 +57,10 @@ export function workload(scenario: Scenario, smoke: boolean) {
 
 const outcomeKeys = ['accepted', 'rejected429', 'rejected503', 'otherHttpErrors', 'clientTimeouts', 'transportErrors'] as const;
 export const countKeys = ['offered', 'droppedIterations', ...outcomeKeys] as const;
-const sustained = 'sustained';
-const appShortfall = 'app-side shortfall';
-const generatorInvalid = 'generator-side shortfall INVALID';
-const runInvalid = 'INVALID run';
+export const sustained = 'sustained';
+export const appShortfall = 'app-side shortfall';
+export const generatorInvalid = 'generator-side shortfall INVALID';
+export const runInvalid = 'INVALID run';
 
 function completeCounts(counts: Evidence) {
   if (!countKeys.every(key => Number.isSafeInteger(counts[key]) && counts[key] >= 0) ||
@@ -92,21 +95,34 @@ export function runProblems(run: Run, metadata: Metadata, bodyHash: string | nul
     problems.push('Run identity mismatch');
   }
   if (run.cleanupVerified !== true || imageCleanupVerified !== true) problems.push('Cleanup unverified');
-  const totals = run.totals;
-  if (!totals || !completeCounts(totals) ||
-      !countKeys.every(key => totals[key] === run.steps.reduce((sum, step) => sum + step[key], 0)) ||
-      run.steps.length !== expectedWorkload.rates.length ||
-      run.steps.some((step, index) => step.rate !== expectedWorkload.rates[index] ||
-        step.seconds !== expectedWorkload.seconds || !completeCounts(step))) {
+  if (!completeRun(run, expectedWorkload)) {
     problems.push('Incomplete step or arm-run evidence');
   }
   return problems;
+}
+
+export function completeRun(run: Pick<Run, 'steps' | 'totals'>, expected: ReturnType<typeof workload>) {
+  const totals = run.totals;
+  return !!totals && completeCounts(totals) &&
+    countKeys.every(key => totals[key] === run.steps.reduce((sum, step) => sum + step[key], 0)) &&
+    run.steps.length === expected.rates.length &&
+    run.steps.every((step, index) => step.rate === expected.rates[index] &&
+      step.seconds === expected.seconds && completeCounts(step));
 }
 
 type ClassifiedStep = Partial<Step> & Pick<Step, 'rate' | 'seconds'> & { classification: ReturnType<typeof classify> };
 type ClassifiedRun = Omit<Run, 'steps'> & { problems: string[]; steps: ClassifiedStep[] };
 
 const median = (values: number[]) => [...values].sort((a, b) => a - b)[1];
+
+export function pairedLatency(a: number[], b: number[]) {
+  const pairs = a.map((aMs, index) => {
+    const bMs = b[index];
+    return { aMs, bMs, ratio: bMs === 0 && aMs === 0 ? 1 : aMs / bMs, differenceMs: aMs - bMs };
+  });
+  return { pairs, medianRatio: median(pairs.map(pair => pair.ratio)),
+    medianDifferenceMs: median(pairs.map(pair => pair.differenceMs)) };
+}
 
 function judgeScenario(scenario: Scenario, runs: ClassifiedRun[], smoke: boolean) {
   const arms = (arm: Arm, rate: number) => orders.map((_, index) => {
@@ -133,14 +149,8 @@ function judgeScenario(scenario: Scenario, runs: ClassifiedRun[], smoke: boolean
   const reasons = comparisonRates.filter(rate => arms('A', rate).some(step => step?.classification === appShortfall))
     .map(rate => `A app-side shortfall at ${rate}/s`);
   const latency = comparisonRates.filter(rate => rate <= 1000).map(rate => {
-    const pairs = arms('A', rate).map((a, index) => {
-      const aMs = a!.sendMs!.p95!;
-      const bMs = arms('B', rate)[index]!.sendMs!.p95!;
-      return { aMs, bMs, ratio: bMs === 0 && aMs === 0 ? 1 : aMs / bMs, differenceMs: aMs - bMs };
-    });
-    const medianRatio = median(pairs.map(pair => pair.ratio));
-    // Signed A − B: an A that is faster than B is not a regression (#153 maintainer decision 2026-11-18).
-    const medianDifferenceMs = median(pairs.map(pair => pair.differenceMs));
+    const { pairs, medianRatio, medianDifferenceMs } = pairedLatency(
+      arms('A', rate).map(step => step!.sendMs!.p95!), arms('B', rate).map(step => step!.sendMs!.p95!));
     if (medianRatio > 1.25 && medianDifferenceMs > 5) reasons.push(`A send p95 exceeds both limits at ${rate}/s`);
     return { rate, pairs, medianRatio, medianDifferenceMs };
   });

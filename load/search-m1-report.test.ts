@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sha256 } from './search-m1-bodies.ts';
-import { collect, type Boundary } from './search-m1-results.ts';
+import { collect, type Boundary, type CpuSample } from './search-m1-results.ts';
 import {
   classify, countKeys, limiter, orders, rates, report, workload,
   type Arm, type Batch, type Counts, type Metadata, type Run, type Step,
@@ -335,11 +335,11 @@ function rawK6(offered = 3000, drops = 0, failures = 0, timeouts = 0, twoSteps =
     metrics.dropped_iterations.values.count *= 2;
     metrics['http_req_duration{name:throughput_send}'].values.count *= 2;
   }
-  function extract(boundaries: Boundary[] = [], startMs: number | undefined = 1000) {
+  function extract(boundaries: Boundary[] = [], startMs: number | undefined = 1000, samples: CpuSample[] = [], partial = false) {
     const throughput = { ...settings, bodySha256: 'a'.repeat(64), offered: offered * rows.length,
       accepted: row.accepted * rows.length, steps: rows };
     const log = `LOAD_THROUGHPUT ${JSON.stringify(throughput)}\nLOAD_SUMMARY ${JSON.stringify({ metrics })}\n`;
-    return collect(log, conditions, startMs, boundaries, []);
+    return collect(log, conditions, startMs, boundaries, samples, partial);
   }
   return { tag, metrics, extract };
 }
@@ -461,5 +461,28 @@ test('Opus 2: late, missing and failed between-step SQL snapshots flag both adja
     const { steps } = rawK6(3000, 0, 0, 0, true).extract([start, boundary, end]);
     assert.deepEqual(steps.map(step => step.resourcesMissing), [reason, reason]);
     assert.ok(steps.every(step => classify(step, true) === 'sustained'));
+  }
+});
+
+test('accepted/s is available independently of WAL and CPU samples in S1', () => {
+  const before = { startedMs: 400, completedMs: 500, walBytes: 200, dbBytes: 100 };
+  const after = { startedMs: 61_000, completedMs: 61_100, walBytes: 300, dbBytes: 200 };
+  const samples = [{ at: 2000, appCpu: 12, dbCpu: 13 }];
+  for (const [boundaries, cpu, expectedWal, expectedCpu] of [
+    [[before, after], [], 100 / 3000, null],
+    [[], samples, null, 12],
+    [[], [], null, null],
+  ] as const) {
+    const { steps, totals } = rawK6().extract([...boundaries], 1000, [...cpu], true);
+    const m1 = rawK6().extract([...boundaries], 1000, [...cpu]);
+    for (const row of [m1.steps[0], m1.totals]) {
+      assert.equal(row.resources, undefined, 'M1 still omits resources when a sample is missing');
+      assert.ok(row.resourcesMissing);
+    }
+    for (const row of [steps[0], totals]) {
+      assert.equal(row.resources?.acceptedPerSecond, 50);
+      assert.equal(row.resources?.walBytesPerSend, expectedWal);
+      assert.equal(row.resources?.appCpuPeakPercent, expectedCpu);
+    }
   }
 });

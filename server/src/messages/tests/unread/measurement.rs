@@ -16,21 +16,9 @@ SELECT p.channel_id, p.read_seq,
  GROUP BY p.channel_id, p.read_seq
 "#;
 
-// Reconstruct LIST_COUNTS_SQL at main 4fa2ba0 by reversing only #356's
-// materialized lower-bound column and removal of the second position join.
-fn before_rls_seq_bound() -> String {
-    crate::messages::unread::LIST_COUNTS_SQL
-        .replace(
-            "t.id, t.last_seq,\n        COALESCE(tr.read_seq, p.initial_seq) AS read_seq",
-            "t.id, t.last_seq",
-        )
-        .replace(
-            "FROM unread_topics t\n",
-            "FROM unread_topics t\n    LEFT JOIN topic_read_positions tr ON tr.organization_id = $1 AND tr.channel_id = c.channel_id\n        AND tr.member_id = $2 AND tr.topic_id = t.id\n",
-        )
-        .replace("m.seq > t.read_seq", "m.seq > COALESCE(tr.read_seq, p.initial_seq)")
-        .replace("t.last_seq > t.read_seq", "t.last_seq > COALESCE(tr.read_seq, p.initial_seq)")
-}
+// The list counts SQL before #519 A3 (65f63307), kept as the exact oracle and as
+// the negative control for the A3 plan and buffer guards.
+pub(super) const PRE_A3: &str = include_str!("counts_pre_a3.sql");
 
 // Pool executors release connections asynchronously, including protocol drain,
 // rollback and ping. Prove both quiescence and visibility before inspecting plans.
@@ -82,8 +70,7 @@ async fn vacuum_messages_visible(connection: &mut sqlx::PgConnection) -> Result<
 }
 
 #[fukulow_test::test]
-async fn main_unread_count_uses_covering_range_without_message_heap(pool: PgPool) {
-    // No Router or restricted pool is needed during SQL-only fixture setup.
+async fn unread_list_count_buffers_do_not_grow_with_unread(pool: PgPool) {
     let org = organization(&pool).await;
     let sender = Uuid::new_v4();
     member(&pool, org, sender).await;
@@ -91,64 +78,121 @@ async fn main_unread_count_uses_covering_range_without_message_heap(pool: PgPool
     super::super::channel(&pool, org, channel, sender, false).await;
     let viewer = Uuid::new_v4();
     member(&pool, org, viewer).await;
-    let mut connection = pool.acquire().await.unwrap();
-    sqlx::query("INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,CASE WHEN n%2=0 THEN $3 ELSE $4 END,gen_random_uuid(),repeat('x',1024) FROM generate_series(1,10000) n")
-        .bind(org).bind(channel).bind(sender).bind(viewer).execute(&mut *connection).await.unwrap();
-    sqlx::query(
-        "INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES($1,$2,10000)",
-    )
-    .bind(org)
-    .bind(channel)
-    .execute(&mut *connection)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO message_mentions SELECT organization_id,channel_id,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$2 AND seq%10=0")
-        .bind(org).bind(channel).bind(viewer).execute(&mut *connection).await.unwrap();
-    vacuum_messages_visible(&mut connection).await.unwrap();
-    drop(connection);
-    let app = crate::test_app_pool(pool.clone()).await;
-    let mut tx = app.begin().await.unwrap();
-    crate::database::set_organization(&mut tx, org)
+    let topic = Uuid::new_v4();
+    // Odd seqs are main, even seqs one Topic; every 7th is the viewer's own. No VACUUM:
+    // the unread tail is not all-visible, as under continuous sends.
+    sqlx::query("ALTER TABLE messages SET (autovacuum_enabled=false)")
+        .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("SET LOCAL plan_cache_mode=force_generic_plan")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    let row = sqlx::query(crate::messages::unread::LIST_COUNTS_SQL)
+    sqlx::query("INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES($1,$2,$3,'Plan',2,40000,20000)")
+        .bind(org).bind(channel).bind(topic).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) SELECT $1,gen_random_uuid(),$2,n,CASE WHEN n%7=0 THEN $3 ELSE $4 END,gen_random_uuid(),repeat('x',200),CASE WHEN n%2=0 THEN $5 END FROM generate_series(1,40000) n")
+        .bind(org).bind(channel).bind(viewer).bind(sender).bind(topic).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO channel_message_sequences VALUES($1,$2,40000)")
         .bind(org)
-        .bind(viewer)
-        .bind(0_i64)
-        .bind([channel])
-        .fetch_one(&mut *tx)
+        .bind(channel)
+        .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(row.get::<i64, _>("unread_count"), 5_000);
-    assert_eq!(row.get::<i64, _>("mention_unread_count"), 1_000);
-    let plan: Value = sqlx::query_scalar(&format!(
-        "EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {}",
-        crate::messages::unread::LIST_COUNTS_SQL
-    ))
-    .bind(org)
-    .bind(viewer)
-    .bind(0_i64)
-    .bind([channel])
-    .fetch_one(&mut *tx)
-    .await
-    .unwrap();
-    fn covering(node: &Value) -> Option<&Value> {
-        if node["Index Name"] == "messages_main_unread_covering" {
-            return Some(node);
-        }
-        node["Plans"].as_array()?.iter().find_map(covering)
+    sqlx::query("INSERT INTO topic_read_positions(organization_id,channel_id,member_id,topic_id,read_seq) VALUES($1,$2,$3,$4,0)")
+        .bind(org).bind(channel).bind(viewer).bind(topic).execute(&pool).await.unwrap();
+    for table in [
+        "topics",
+        "channel_read_positions",
+        "topic_read_positions",
+        "message_append_counts",
+        "message_count_corrections",
+    ] {
+        sqlx::query(&format!("ANALYZE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
     }
-    let scan = covering(&plan[0]["Plan"]).expect("covering main-scope index range");
-    assert_eq!(scan["Node Type"], "Index Only Scan");
-    assert_eq!(scan["Heap Fetches"], 0);
-    assert_eq!(scan["Actual Rows"].as_f64().unwrap(), 5_000.0);
-    assert_eq!(scan["Rows Removed by Filter"].as_f64().unwrap(), 5_000.0);
-    tx.rollback().await.unwrap();
+    let app = crate::test_app_pool(pool.clone()).await;
+    for mode in ["force_custom_plan", "force_generic_plan", "auto"] {
+        let mut buffers = std::collections::HashMap::new();
+        // 1x: 200 unread seqs per scope; 100x: 20,000.
+        for (cut, read) in [(1, 39_600_i64), (100, 0)] {
+            sqlx::query("UPDATE channel_read_positions SET read_seq=$3 WHERE organization_id=$1 AND member_id=$2")
+                .bind(org).bind(viewer).bind(read).execute(&pool).await.unwrap();
+            sqlx::query("UPDATE topic_read_positions SET read_seq=$3 WHERE organization_id=$1 AND member_id=$2")
+                .bind(org).bind(viewer).bind(read).execute(&pool).await.unwrap();
+            let mut tx = app.begin().await.unwrap();
+            crate::database::set_organization(&mut tx, org)
+                .await
+                .unwrap();
+            sqlx::query(&format!("SET LOCAL plan_cache_mode={mode}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let mut rows = Vec::new();
+            for (arm, sql) in [
+                ("pre_a3", PRE_A3),
+                ("a3", crate::messages::unread::LIST_COUNTS_SQL),
+            ] {
+                sqlx::raw_sql(&format!(
+                    "PREPARE counts519(uuid,uuid,bigint,uuid[]) AS {sql}"
+                ))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+                let execute =
+                    format!("EXECUTE counts519('{org}','{viewer}',0,ARRAY['{channel}']::uuid[])");
+                // Auto may switch to a generic plan after five executions.
+                for _ in 0..if mode == "auto" { 6 } else { 1 } {
+                    sqlx::query(&execute).fetch_one(&mut *tx).await.unwrap();
+                }
+                let row = sqlx::query(&execute).fetch_one(&mut *tx).await.unwrap();
+                rows.push((
+                    row.get::<i64, _>("main_unread_count"),
+                    row.get::<i64, _>("unread_count"),
+                ));
+                let plan: Value =
+                    sqlx::query_scalar(&format!("EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {execute}"))
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap();
+                sqlx::query("DEALLOCATE counts519")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                let root = &plan[0]["Plan"];
+                let blocks = root["Shared Hit Blocks"].as_i64().unwrap_or(0)
+                    + root["Shared Read Blocks"].as_i64().unwrap_or(0);
+                eprintln!("UNREAD_BUFFERS {mode} {arm} cut={cut} blocks={blocks}");
+                buffers.insert((arm, cut), blocks);
+                assert_eq!(
+                    reads_relation(root, "messages"),
+                    arm == "pre_a3",
+                    "{mode} {arm}: {plan}"
+                );
+            }
+            assert_eq!(rows[0], rows[1], "{mode} cut={cut}");
+            tx.rollback().await.unwrap();
+        }
+        // A3 reads counts, positions and empty correction and Mention ranges: a fixed
+        // number of pages whatever the backlog. The pre-A3 SQL must fail the same bound.
+        const SLACK: i64 = 32;
+        assert!(
+            buffers[&("a3", 100)] <= buffers[&("a3", 1)] + SLACK,
+            "{mode}: {buffers:?}"
+        );
+        assert!(
+            buffers[&("pre_a3", 100)] > buffers[&("pre_a3", 1)] + SLACK,
+            "{mode}: {buffers:?}"
+        );
+    }
     app.close().await;
+}
+
+fn reads_relation(node: &Value, relation: &str) -> bool {
+    node["Relation Name"] == relation
+        || node["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| reads_relation(child, relation))
 }
 
 #[fukulow_test::test]
@@ -234,11 +278,11 @@ fn message_work_counts_lossy_bitmap_recheck() {
     assert!(error.contains("read 950 Messages"), "{error}");
 }
 
-// Always-on guard for #220's ranges (#225): fully read Topics never touch Messages,
-// and the one unread Topic is read only above its persisted position, including
-// under RLS (#356).
+// #519 A3: the counts never read Messages in any plan mode, under RLS, and equal
+// the pre-A3 SQL for fully read, partly read and missing Topic positions, own and
+// moved Messages and Mentions. The pre-A3 SQL is the negative control.
 #[fukulow_test::test]
-async fn unread_topic_counts_read_only_unread_topic_ranges(pool: PgPool) {
+async fn unread_list_counts_never_read_messages_in_any_plan_mode(pool: PgPool) {
     const TOPICS: i64 = 20;
     const PER_TOPIC: i64 = 50;
     let org = organization(&pool).await;
@@ -248,7 +292,7 @@ async fn unread_topic_counts_read_only_unread_topic_ranges(pool: PgPool) {
     super::super::channel(&pool, org, channel, sender, false).await;
     let viewer = Uuid::new_v4();
     member(&pool, org, viewer).await;
-    // Topic k holds seq k, k+20, ...; Topics are interleaved across the whole history.
+    // Topic k holds seq k, k+20, ...; main Messages follow at 1001..1400.
     sqlx::query(
         "INSERT INTO topics (organization_id,channel_id,id,name,first_seq,last_seq,message_count) \
         SELECT $1,$2,gen_random_uuid(),'Topic '||k,k,k+$3*($4-1),$4 FROM generate_series(1,$3) k",
@@ -261,29 +305,62 @@ async fn unread_topic_counts_read_only_unread_topic_ranges(pool: PgPool) {
     .await
     .unwrap();
     sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) \
-        SELECT $1,gen_random_uuid(),$2,t.first_seq+$3*n,$4,gen_random_uuid(),'plan',t.id \
-        FROM topics t CROSS JOIN generate_series(0,$5-1) n WHERE t.organization_id=$1 AND t.channel_id=$2")
-        .bind(org).bind(channel).bind(TOPICS).bind(sender).bind(PER_TOPIC).execute(&pool).await.unwrap();
+        SELECT $1,gen_random_uuid(),$2,t.first_seq+$3*n,CASE WHEN n%9=0 THEN $5 ELSE $4 END,gen_random_uuid(),'plan',t.id \
+        FROM topics t CROSS JOIN generate_series(0,$6-1) n WHERE t.organization_id=$1 AND t.channel_id=$2")
+        .bind(org).bind(channel).bind(TOPICS).bind(sender).bind(viewer).bind(PER_TOPIC).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) \
+        SELECT $1,gen_random_uuid(),$2,n,CASE WHEN n%9=0 THEN $4 ELSE $3 END,gen_random_uuid(),'plan' FROM generate_series(1001,1400) n")
+        .bind(org).bind(channel).bind(sender).bind(viewer).execute(&pool).await.unwrap();
     sqlx::query(
-        "INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES($1,$2,$3)",
+        "INSERT INTO channel_message_sequences(organization_id,channel_id,seq) VALUES($1,$2,1400)",
     )
     .bind(org)
     .bind(channel)
-    .bind(TOPICS * PER_TOPIC)
     .execute(&pool)
     .await
     .unwrap();
-    // Every Topic but 'Topic 1' is fully read; 'Topic 1' is read up to half its Messages.
+    // Move main seqs 1301..1340 into 'Topic 2' and Topic seqs of 'Topic 3' to main.
+    sqlx::query("UPDATE messages SET topic_id=(SELECT id FROM topics WHERE organization_id=$1 AND name='Topic 2') WHERE organization_id=$1 AND seq BETWEEN 1301 AND 1340")
+        .bind(org).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE messages SET topic_id=NULL WHERE organization_id=$1 AND topic_id=(SELECT id FROM topics WHERE organization_id=$1 AND name='Topic 3') AND seq > 500")
+        .bind(org).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE topics t SET last_seq=(SELECT max(seq) FROM messages m WHERE m.organization_id=t.organization_id AND m.topic_id=t.id) WHERE organization_id=$1")
+        .bind(org).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO message_mentions SELECT organization_id,channel_id,id,$2 FROM messages WHERE organization_id=$1 AND seq%10=0")
+        .bind(org).bind(viewer).execute(&pool).await.unwrap();
+    // Main read to 1200. 'Topic 1' is read to half; 'Topic 4' has no row (initial_seq);
+    // the rest are fully read.
+    sqlx::query(
+        "UPDATE channel_read_positions SET read_seq=1200 WHERE organization_id=$1 AND member_id=$2",
+    )
+    .bind(org)
+    .bind(viewer)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO topic_read_positions (organization_id,channel_id,member_id,topic_id,read_seq) \
         SELECT $1,$2,$3,id,CASE WHEN name='Topic 1' THEN first_seq+$4*($5/2-1) ELSE last_seq END \
-        FROM topics WHERE organization_id=$1 AND channel_id=$2 \
+        FROM topics WHERE organization_id=$1 AND channel_id=$2 AND name<>'Topic 4' \
         ON CONFLICT (organization_id,channel_id,member_id,topic_id) DO UPDATE SET read_seq=EXCLUDED.read_seq")
         .bind(org).bind(channel).bind(viewer).bind(TOPICS).bind(PER_TOPIC).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM topic_read_positions WHERE organization_id=$1 AND member_id=$2 AND topic_id=(SELECT id FROM topics WHERE organization_id=$1 AND name='Topic 4')")
+        .bind(org).bind(viewer).execute(&pool).await.unwrap();
+    let check: i64 = sqlx::query_scalar("SELECT count(*) FROM message_counts_check($1)")
+        .bind(org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // 'Topic 4' was created after the viewer's position, so its missing row is ordinals
+    // 0 at initial_seq, which the check confirms exact.
+    assert_eq!(check, 0);
     for table in [
         "messages",
         "topics",
         "topic_read_positions",
         "channel_read_positions",
+        "message_mentions",
+        "message_append_counts",
+        "message_count_corrections",
     ] {
         sqlx::query(&format!("ANALYZE {table}"))
             .execute(&pool)
@@ -291,99 +368,69 @@ async fn unread_topic_counts_read_only_unread_topic_ranges(pool: PgPool) {
             .unwrap();
     }
     let app = crate::test_app_pool(pool.clone()).await;
-    let explain = |sql: &str| format!("EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {sql}");
     for mode in ["force_custom_plan", "force_generic_plan", "auto"] {
         let mut tx = app.begin().await.unwrap();
         crate::database::set_organization(&mut tx, org)
             .await
             .unwrap();
+        let rls: bool = sqlx::query_scalar("SELECT row_security_active('message_append_counts')")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert!(rls);
         sqlx::query(&format!("SET LOCAL plan_cache_mode={mode}"))
             .execute(&mut *tx)
             .await
             .unwrap();
-        // EXPLAIN with bound parameters replans its inner query. PREPARE/EXECUTE
-        // exercises the selected cache mode. Auto may choose either plan;
-        // both are covered by the forced modes.
-        sqlx::raw_sql(&format!(
-            "PREPARE unread_topic_range(uuid,uuid,bigint,uuid[]) AS {}",
-            crate::messages::unread::LIST_COUNTS_SQL
-        ))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        let arguments = format!("('{org}','{viewer}',0,ARRAY['{channel}']::uuid[])");
-        let execute = format!("EXECUTE unread_topic_range{arguments}");
-        for _ in 0..if mode == "auto" { 6 } else { 1 } {
-            let row = sqlx::query(&execute).fetch_one(&mut *tx).await.unwrap();
-            assert_eq!(row.get::<i64, _>("unread_count"), PER_TOPIC / 2, "{mode}");
-        }
-        let plan: Value = sqlx::query_scalar(&explain(&execute))
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query("DEALLOCATE unread_topic_range")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        // Neither the 950 fully read Topic Messages nor this Topic's read prefix
-        // may be scanned: only its 25 unread Messages fit the bound.
-        bounded_message_work(&plan, (PER_TOPIC / 2) as f64)
-            .unwrap_or_else(|error| panic!("{mode}: {error}\n{plan}"));
-        // #356's regression reads the whole 50-Message Topic, including its
-        // read prefix, and must fail the same 25-Message bound in every mode.
-        sqlx::raw_sql(&format!(
-            "PREPARE unread_topic_before_rls(uuid,uuid,bigint,uuid[]) AS {}",
-            before_rls_seq_bound()
-        ))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        let execute_before_rls = format!("EXECUTE unread_topic_before_rls{arguments}");
-        for _ in 0..if mode == "auto" { 6 } else { 1 } {
-            let row = sqlx::query(&execute_before_rls)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-            assert_eq!(row.get::<i64, _>("unread_count"), PER_TOPIC / 2, "{mode}");
-        }
-        let before_rls: Value = sqlx::query_scalar(&explain(&execute_before_rls))
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query("DEALLOCATE unread_topic_before_rls")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        assert_eq!(
-            bounded_message_work(&before_rls, PER_TOPIC as f64).unwrap(),
-            PER_TOPIC as f64,
-            "{mode}: {before_rls}"
-        );
-        let error = bounded_message_work(&before_rls, (PER_TOPIC / 2) as f64).unwrap_err();
-        assert!(
-            error.contains("read 50 Messages, bound 25"),
-            "{mode}: {error}"
-        );
-        if mode == "force_generic_plan" {
-            // Negative control: #220's reviewed full-history query must fail the same check.
+        let mut results = Vec::new();
+        for (arm, sql) in [
+            ("pre_a3", PRE_A3),
+            ("a3", crate::messages::unread::LIST_COUNTS_SQL),
+        ] {
             sqlx::raw_sql(&format!(
-                "PREPARE unread_topic_before(uuid,uuid,bigint,uuid[]) AS {BEFORE}"
+                "PREPARE counts519(uuid,uuid,bigint,uuid[]) AS {sql}"
             ))
             .execute(&mut *tx)
             .await
             .unwrap();
-            let before: Value =
-                sqlx::query_scalar(&explain(&format!("EXECUTE unread_topic_before{arguments}")))
+            let execute =
+                format!("EXECUTE counts519('{org}','{viewer}',0,ARRAY['{channel}']::uuid[])");
+            let mut row = None;
+            for _ in 0..if mode == "auto" { 6 } else { 1 } {
+                row = Some(sqlx::query(&execute).fetch_one(&mut *tx).await.unwrap());
+            }
+            let row = row.unwrap();
+            results.push(
+                [
+                    "as_of_seq",
+                    "read_seq",
+                    "main_unread_count",
+                    "unread_count",
+                    "main_mention_unread_count",
+                    "mention_unread_count",
+                ]
+                .map(|c| row.get::<i64, _>(c)),
+            );
+            let plan: Value =
+                sqlx::query_scalar(&format!("EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) {execute}"))
                     .fetch_one(&mut *tx)
                     .await
                     .unwrap();
-            sqlx::query("DEALLOCATE unread_topic_before")
+            sqlx::query("DEALLOCATE counts519")
                 .execute(&mut *tx)
                 .await
                 .unwrap();
-            let error = bounded_message_work(&before, (PER_TOPIC / 2) as f64).unwrap_err();
-            assert!(error.contains("Messages"), "{error}");
+            assert_eq!(
+                reads_relation(&plan[0]["Plan"], "messages"),
+                arm == "pre_a3",
+                "{mode} {arm}: {plan}"
+            );
         }
+        assert_eq!(results[0], results[1], "{mode}");
+        assert!(
+            results[1][3] > results[1][2] && results[1][5] > 0,
+            "{mode}: fixture must have Topic Unread and Mentions: {results:?}"
+        );
         tx.rollback().await.unwrap();
     }
     app.close().await;
@@ -455,6 +502,8 @@ async fn measure_unread_list_read_position_ranges(pool: PgPool) {
         "channel_read_positions",
         "topic_read_positions",
         "channel_message_sequences",
+        "message_append_counts",
+        "message_count_corrections",
     ] {
         sqlx::query(&format!("ANALYZE {table}"))
             .execute(&pool)

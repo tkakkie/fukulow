@@ -9,7 +9,7 @@ Raw logs, artifact directories and local paths outside Git may be gone ([2026-11
 
 ## Topic projection paging (#137)
 
-2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. The [prefix aggregation decision](decisions/messages.md#topics-137-138) calls for remeasurement at ~649k (a proportional projection).
+2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. A proportional projection put the prefix query's 100 ms read p95 at ~649k Messages.
 
 Run `MEASURE_TOPICS=10000 cargo test --release -p fukulow-server --lib measure_topic_projection_pages -- --ignored --nocapture` against test PostgreSQL. Shared Mac, warm in-process HTTP, no TCP/proxy/TLS. [Full record](../load/measurements-archive.md#137-round-1-mixed-timeline-and-concurrent-send-remeasurement-2026-11-11)
 
@@ -135,7 +135,7 @@ Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out /pri
 
 2026-11-17 JST, `4fa2ba0` vs the materialized-bound rewrite. At 25 unread/Topic across 20 Topics, rows examined 50,500 → 500 in all modes and Generic median 32.470 → 1.419 ms. Evidence for restoring the lower Index Cond under the [Unread rules](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
 
-Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Runner and raw artifacts were not retained. Regression check: `cargo test --locked -p fukulow-server --lib unread_topic_counts_read_only_unread_topic_ranges`. Warm SQL, one Channel, no writers or Mentions. Cost grows with unread backlog. [Full record](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst)
+Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Runner and raw artifacts were not retained. Superseded by #519 A3 (guard: `unread_list_counts_never_read_messages_in_any_plan_mode`). Warm SQL, one Channel, no writers or Mentions. Cost grows with unread backlog. [Full record](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst)
 
 ## Revocation hold retry bursts (#592)
 

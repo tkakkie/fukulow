@@ -60,11 +60,12 @@ async fn unread_mentions_probe_work_is_bounded_by_mentions_not_unread(pool: PgPo
     let viewer = Uuid::new_v4();
     member(&pool, org, viewer).await;
     let topic = Uuid::new_v4();
-    sqlx::query("INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES($1,$2,$3,'Plan',2,10020,5010)")
+    sqlx::query("INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES($1,$2,$3,'Plan',2,10000,5000)")
         .bind(org).bind(channel).bind(topic).execute(&pool).await.unwrap();
-    // Even seqs belong to a Topic; own Messages and rows above the committed
-    // counter exercise exclusions independently of Mention density.
-    sqlx::query("INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) SELECT $1,gen_random_uuid(),$2,n,CASE WHEN n%7=0 THEN $3 ELSE $4 END,gen_random_uuid(),'plan',CASE WHEN n%2=0 THEN $5 END FROM generate_series(1,10020) n")
+    // Even seqs belong to a Topic; own Messages exercise exclusions independently
+    // of Mention density. No Message lies above the committed counter: sends commit
+    // both together, and #519's counts rely on it (message_counts_check reports it).
+    sqlx::query("INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) SELECT $1,gen_random_uuid(),$2,n,CASE WHEN n%7=0 THEN $3 ELSE $4 END,gen_random_uuid(),'plan',CASE WHEN n%2=0 THEN $5 END FROM generate_series(1,10000) n")
         .bind(org).bind(channel).bind(viewer).bind(sender).bind(topic).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO channel_message_sequences VALUES($1,$2,10000)")
         .bind(org)
@@ -105,6 +106,8 @@ async fn unread_mentions_probe_work_is_bounded_by_mentions_not_unread(pool: PgPo
         for table in [
             "messages",
             "message_mentions",
+            "message_append_counts",
+            "message_count_corrections",
             "topics",
             "channel_read_positions",
             "topic_read_positions",
@@ -209,8 +212,12 @@ async fn unread_mentions_probe_work_is_bounded_by_mentions_not_unread(pool: PgPo
                                 work.loops <= small.loops + 2.0,
                                 "{density} {mode}: {small:?} -> {work:?}"
                             );
+                            // #519 A3 counts the Member's Mentions in the unread ranges
+                            // on the counted index: growth is bounded by those index
+                            // pages (over 50 entries per page, two scopes), never per
+                            // unread Message.
                             assert!(
-                                work.buffers <= small.buffers + 8,
+                                work.buffers <= small.buffers + 8 + mention_rows / 50,
                                 "{density} {mode}: {small:?} -> {work:?}"
                             );
                         } else {
@@ -319,9 +326,13 @@ async fn unread_topic_mentions_scan_channel_set_once(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(flags, (false, false));
+    // Autoanalyze can update the append counters alone. Analyze the empty
+    // corrections table too so each scope skips probing its empty index.
     for table in [
         "messages",
         "message_mentions",
+        "message_append_counts",
+        "message_count_corrections",
         "topics",
         "channel_read_positions",
         "topic_read_positions",
@@ -398,16 +409,18 @@ async fn unread_topic_mentions_scan_channel_set_once(pool: PgPool) {
                     "MENTION_WORK {shape} {mode} {arm} unread={unread} loops={} mention_buffers={} root_buffers={buffers}",
                     work.loops, work.buffers
                 );
-                // Each of the two scopes may scan the Member's Channel set once.
-                // The buffer allowance covers those index pages once, not 100
-                // repeated scans, and never depends on wall-clock timing.
-                let bounded = work.loops <= 2.0 && work.buffers <= 256;
+                // #519 A3: one counted-index range per scope (the main timeline and
+                // each of the 100 unread Topics), a few pages each. Never a repeated
+                // scan of the Member's whole Mention set, and never wall-clock timing.
+                let probes = 101.0;
+                let bounded = work.loops <= probes && work.buffers <= 4 * probes as i64 + 64;
                 if arm == "old" {
                     old_buffers = buffers;
                 } else if arm == "round1" && shape == "b" {
                     assert!(!bounded, "round-1 negative control must fail: {work:?}");
                     eprintln!(
-                        "ROUND1_GUARD_FAILURE {shape} {mode}: {work:?}, bounds loops<=2 buffers<=256"
+                        "ROUND1_GUARD_FAILURE {shape} {mode}: {work:?}, bounds loops<={probes} buffers<={}",
+                        4 * probes as i64 + 64
                     );
                 } else if arm == "new" {
                     assert!(bounded, "{shape} {mode}: {work:?}");

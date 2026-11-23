@@ -4,7 +4,7 @@ use crate::database;
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-const TABLES: [&str; 15] = [
+const TABLES: [&str; 17] = [
     "organizations",
     "users",
     "channels",
@@ -15,6 +15,8 @@ const TABLES: [&str; 15] = [
     "channel_log",
     "operation_receipts",
     "message_mentions",
+    "message_append_counts",
+    "message_count_corrections",
     "topics",
     "channel_read_positions",
     "topic_read_positions",
@@ -58,6 +60,8 @@ async fn tenant(admin: &PgPool) -> Tenant {
         "INSERT INTO channel_log (organization_id,channel_id,event_seq,kind,message_id,sender,client_message_id) SELECT organization_id,channel_id,seq,'create',id,sender,client_message_id FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO operation_receipts (organization_id,actor,operation_id,kind,channel_id,target_id,intent_digest,outcome_version,outcome_deleted) SELECT $1,$3,gen_random_uuid(),'edit',$4,id,sha256('intent'::bytea),1,false FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO message_mentions (organization_id,channel_id,message_id,member_id) SELECT $1,$4,id,$3 FROM messages WHERE organization_id=$1 AND channel_id=$4",
+        // message_append_counts rows come from the Message trigger; a correction needs a Move or Delete.
+        "INSERT INTO message_count_corrections SELECT $1,$4,$5,seq,id,sender,1 FROM messages WHERE organization_id=$1 AND channel_id=$4",
         "INSERT INTO channel_read_positions (organization_id, channel_id, member_id, membership_revision, initial_seq, read_seq) SELECT $1, $4, $3, membership_revision, 0, 0 FROM users WHERE organization_id = $1 AND id = $3 ON CONFLICT DO NOTHING",
         "INSERT INTO topic_read_positions (organization_id, channel_id, member_id, topic_id, read_seq) VALUES ($1, $4, $3, $5, 0) ON CONFLICT DO NOTHING",
         "INSERT INTO invites (organization_id, id, created_by, email, role, token_hash, expires_at) VALUES ($1, gen_random_uuid(), $3, 'invitee@example.com', 'member', sha256(gen_random_uuid()::text::bytea), now() + interval '1 day')",

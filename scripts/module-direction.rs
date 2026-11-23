@@ -591,6 +591,12 @@ impl<'tcx> intravisit::Visitor<'tcx> for Direction<'tcx> {
 
     fn visit_expr(&mut self, expression: &'tcx Expr<'tcx>) {
         let owner = expression.hir_id.owner.def_id;
+        // Struct field array lengths and enum discriminants sit in owners without
+        // a body; rustc's typeck ICEs on them. Paths inside are still visited.
+        if self.tcx.hir_maybe_body_owned_by(owner).is_none() {
+            intravisit::walk_expr(self, expression);
+            return;
+        }
         let typeck = self.tcx.typeck(owner);
         // HIR also visits type-level constants (e.g. signature array lengths)
         // that have no expression type in this owner's body results.

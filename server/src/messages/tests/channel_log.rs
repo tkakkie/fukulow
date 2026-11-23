@@ -440,7 +440,9 @@ async fn channel_event_pages_exclude_uncommitted_tail_until_shared_watermark_adv
         sent(&app, &token, channel, input(Uuid::new_v4(), "prefix")).await;
     }
     let mut lower = pool.begin().await.unwrap();
-    for seq in [10, 11] {
+    // A3 count rows serialize Message inserts per Channel until commit (as the
+    // counter does for real sends), so position 11 commits before 10 is written.
+    for seq in [11, 10] {
         let id = Uuid::new_v4();
         let key = Uuid::new_v4();
         let mut upper = pool.begin().await.unwrap();

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { appEvidence, cgroupSample, dbEvidence, k6CeilingWarnings, k6Evidence, parseDbSample, parseStatements,
-  readTimingProblems, requiredReadPhases, statementGroup, statementGroupSql } from './diagnostic-evidence.ts';
+  readTimingProblems, requiredReadPhases, sendTimingProblems, statementGroup, statementGroupSql } from './diagnostic-evidence.ts';
 import { attributionLabel, diagnosticCommit, diagnosticSelection, diagnosticTargets, readSampleEnvironment, remainingArmsSkipped,
   rejectDiagnosticImage } from './diagnostic-mode.ts';
 import { judge } from './judge.ts';
@@ -60,6 +60,91 @@ test('server parsing aggregates timing and 503 causes by lane and retains only a
   assert.doesNotMatch(JSON.stringify(app), /discard/);
 });
 
+const sendTiming = (request_id: number, phase: string, us: number, send_children?: number, interrupted = false) =>
+  JSON.stringify({ timestamp: '2026-11-20T00:00:01Z',
+    fields: { event: 'move_diag_timing', lane: 'send', phase, us, interrupted, request_id, send_children } });
+
+test('send residuals pair interleaved requests and subtract each inclusive phase once', () => {
+  const app = appEvidence([
+    sendTiming(0, 'pool_acquire', 5), sendTiming(0, 'write_pool_acquire', 10),
+    sendTiming(32, 'send_begin_sql', 15), sendTiming(0, 'send_access_channel_sql', 20),
+    sendTiming(0, 'send_access_members_sql', 20), sendTiming(0, 'send_access_grants_sql', 10),
+    sendTiming(0, 'send_access_sql', 70), sendTiming(32, 'send_message_insert_sql', 25),
+    sendTiming(32, 'admitted_work', 200, 2), sendTiming(0, 'admitted_work', 100, 5),
+    sendTiming(64, 'send_begin_sql', 20, undefined, true), sendTiming(64, 'admitted_work', 30, 0, true),
+  ].join('\n'));
+  assert.deepEqual(app.byLane.send.phasesUs.send_unattributed,
+    { count: 2, p50: 20, p95: 160, p99: 160, max: 160, incomplete: 0, interrupted: 1 });
+  assert.deepEqual(sendTimingProblems(app), ['send admitted-work breakdown']);
+});
+
+test('a missing send child is excluded from residuals and counted as incomplete', () => {
+  const app = appEvidence([
+    sendTiming(0, 'send_access_sql', 70), sendTiming(0, 'admitted_work', 100, 2),
+    sendTiming(32, 'send_begin_sql', 15), sendTiming(32, 'admitted_work', 150, 1),
+  ].join('\n'));
+  const residual = app.byLane.send.phasesUs.send_unattributed;
+  assert.equal(residual.count, 1);
+  assert.equal(residual.p50, 135);
+  assert.equal(residual.incomplete, 1);
+  assert.deepEqual(sendTimingProblems(app), ['send admitted-work breakdown']);
+  assert.deepEqual(sendTimingProblems(appEvidence('')), ['send admitted-work breakdown']);
+});
+
+const completeSends = (count: number) => Array.from({ length: count }, (_, i) => [
+  sendTiming(i + 100, 'send_begin_sql', 15), sendTiming(i + 100, 'admitted_work', 150, 1),
+]).flat();
+
+test('the send timing gate allows exactly 1% incomplete and rejects just over 1%', () => {
+  const incomplete = sendTiming(0, 'admitted_work', 100, 2);
+  const onePercent = appEvidence([...completeSends(99), incomplete].join('\n'));
+  assert.equal(onePercent.byLane.send.phasesUs.send_unattributed.incomplete, 1);
+  assert.deepEqual(sendTimingProblems(onePercent), []);
+  const overOnePercent = appEvidence([...completeSends(98), incomplete].join('\n'));
+  assert.deepEqual(sendTimingProblems(overOnePercent), ['send admitted-work breakdown']);
+});
+
+test('the send timing gate counts interrupted parents and child-only requests', () => {
+  const interrupted = Array.from({ length: 49 }, (_, i) => sendTiming(i, 'admitted_work', 30, 0, true));
+  const childOnly = Array.from({ length: 49 }, (_, i) => [
+    sendTiming(i + 49, 'send_begin_sql', 10), sendTiming(i + 49, 'send_visibility_sql', 10),
+  ]).flat();
+  const app = appEvidence([...completeSends(1), ...interrupted, ...childOnly, sendTiming(98, 'pool_acquire', 5)].join('\n'));
+  const residual = app.byLane.send.phasesUs.send_unattributed;
+  assert.equal(residual.count, 1);
+  assert.equal(residual.interrupted, 99);
+  assert.equal(residual.incomplete, 0);
+  assert.deepEqual(sendTimingProblems(app), ['send admitted-work breakdown']);
+});
+
+test('duplicate children, children longer than the parent and missing ids are incomplete', () => {
+  const app = appEvidence([
+    sendTiming(0, 'send_begin_sql', 10), sendTiming(0, 'send_begin_sql', 10), sendTiming(0, 'admitted_work', 100, 2),
+    sendTiming(1, 'send_begin_sql', 150), sendTiming(1, 'admitted_work', 100, 1),
+    sendTiming(3, 'send_begin_sql', 10), sendTiming(3, 'admitted_work', 50, 1),
+    JSON.stringify({ timestamp: '2026-11-20T00:00:01Z', fields: { event: 'move_diag_timing', lane: 'send', phase: 'send_begin_sql', us: 5, interrupted: false } }),
+  ].join('\n'));
+  const residual = app.byLane.send.phasesUs.send_unattributed;
+  assert.equal(residual.count, 1);
+  assert.equal(residual.p50, 40);
+  assert.equal(residual.incomplete, 3);
+});
+
+test('every send hook in the diagnostic patch is included in the parser and child count', () => {
+  const patch = readFileSync(new URL('./diagnostic-d655a3a.patch', import.meta.url), 'utf8');
+  const added = patch.split('\n').filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n');
+  const shared = ['write_pool_acquire', 'send_access_sql', 'channel_advisory_sql', 'commit_sql'];
+  const phases = [...shared, ...Array.from(added.matchAll(/::send_(?:timed|sync)\(\s*"(send_[a-z_]+)"/g), match => match[1])];
+  for (const phase of shared) assert.ok(added.includes(`"${phase}"`), phase);
+  assert.ok(phases.includes('send_search_terms_sql'));
+  const app = appEvidence([
+    ...phases.map(phase => sendTiming(0, phase, 1)), sendTiming(0, 'admitted_work', 100, phases.length),
+  ].join('\n'));
+  for (const phase of phases) assert.equal(app.byLane.send.phasesUs[phase]?.count, 1, phase);
+  assert.equal(app.byLane.send.phasesUs.send_unattributed.p50, 56);
+  assert.deepEqual(sendTimingProblems(app), []);
+});
+
 test('k6 parser pairs VU gauges and uses full iterations to reconstruct write occupancy at drops', async () => {
   const point = (metric: string, sec: string, value: number, tags: object = {}) =>
     JSON.stringify({ type: 'Point', metric, data: { time: '2026-11-20T00:00:' + sec + 'Z', value, tags } });
@@ -106,6 +191,8 @@ test('diagnostic commit and read lanes are pinned choices recorded with the sele
   const main = diagnosticSelection({ diagnostic: true, commit: mainCommit, 'read-lanes': 'topics' })!;
   assert.deepEqual([main.commit, main.patch, main.readTimingSampleEvery, main.readLanes],
     [mainCommit, 'load/move/diagnostic-d655a3a.patch', 8, 'topics']);
+  assert.equal(main.sendBreakdown, true);
+  assert.equal(pinned.sendBreakdown, undefined);
   assert.deepEqual(main.steps, pinned.steps);
   assert.equal(diagnosticSelection({ diagnostic: true, smoke: true, commit: mainCommit })!.readTimingSampleEvery, 1);
   assert.equal(diagnosticSelection({ diagnostic: true, smoke: true })!.readTimingSampleEvery, null);
@@ -118,6 +205,17 @@ test('diagnostic commit and read lanes are pinned choices recorded with the sele
   assert.throws(() => diagnosticSelection({ 'read-lanes': 'all' }), /require --diagnostic/);
   assert.equal(attributionLabel('all'), undefined);
   assert.match(attributionLabel('channels')!, /^ATTRIBUTION RUN .*channels only.*not the Part D Done-when load$/);
+});
+
+test('the #783 D0 pair uses the d655a3a target unchanged in both arms', () => {
+  const pair = ['9cb1f78c938b72657fe91177f43ca34f65015857', '4e4b4b8b4d6c65446231c9e439950d2dde7d604e'];
+  assert.deepEqual(Object.keys(diagnosticTargets).sort(), [diagnosticCommit, mainCommit, ...pair].sort());
+  const main = diagnosticSelection({ diagnostic: true, commit: mainCommit })!;
+  for (const commit of pair) {
+    assert.deepEqual(diagnosticTargets[commit], diagnosticTargets[mainCommit]);
+    const selected = diagnosticSelection({ diagnostic: true, commit })!;
+    assert.deepEqual({ ...selected, commit: mainCommit }, main);
+  }
 });
 
 test('the main patch ports every hook of the pinned patch and adds the read-lane phases', () => {

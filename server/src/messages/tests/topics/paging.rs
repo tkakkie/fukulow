@@ -198,6 +198,65 @@ async fn topic_history_is_bounded_exclusive_ascending_and_projection_queries_val
 }
 
 #[fukulow_test::test]
+async fn topic_pages_exclude_later_topics_and_expire_after_a_move(pool: PgPool) {
+    let (app, _, _, channel, token) = fixture(&pool).await;
+    let empty = get(&app, &token, channel, "topics?limit=2").await;
+    assert_eq!(empty, json!({"as_of_seq":0,"topics":[],"has_more":false}));
+
+    let source = sent(&app, &token, channel, topic_input(Uuid::new_v4(), "A")).await;
+    for name in ["B", "C"] {
+        sent(&app, &token, channel, topic_input(Uuid::new_v4(), name)).await;
+    }
+    let first = get(&app, &token, channel, "topics?limit=2").await;
+    assert_eq!(first["as_of_seq"], 3);
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["topics"][0]["last_seq"], 2);
+    assert_eq!(first["topics"][1]["last_seq"], 3);
+
+    for name in ["D", "B", "D"] {
+        sent(&app, &token, channel, topic_input(Uuid::new_v4(), name)).await;
+    }
+    assert_eq!(
+        get(&app, &token, channel, "topics?as_of_seq=3&limit=2").await,
+        first
+    );
+    let next = get(
+        &app,
+        &token,
+        channel,
+        "topics?as_of_seq=3&before_position=2&limit=2",
+    )
+    .await;
+    assert_eq!(next["has_more"], false);
+    assert_eq!(next["topics"].as_array().unwrap().len(), 1);
+    assert_eq!(next["topics"][0]["id"], source["topic_id"]);
+
+    let id = source["id"].as_str().unwrap();
+    let moved = request(
+        &app, "POST", &format!("/api/v1/channels/{channel}/messages/{id}/move"), &token,
+        json!({"operation_id":Uuid::new_v4(),"expected_version":source["version"],"topic_name":"D"}),
+    ).await;
+    assert_eq!(moved.status(), StatusCode::OK);
+    for route in ["timeline", "topics"] {
+        let expired = request(
+            &app,
+            "GET",
+            &format!("/api/v1/channels/{channel}/{route}?as_of_seq=3"),
+            &token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(expired.status(), StatusCode::CONFLICT);
+        assert_eq!(body(expired).await, json!({"error":"snapshot_expired"}));
+    }
+    let fresh = get(&app, &token, channel, "topics?limit=2").await;
+    assert_eq!(fresh["as_of_seq"], 7);
+    assert_eq!(fresh["topics"][1]["name"], "D");
+    assert_eq!(fresh["topics"][1]["first_seq"], 1);
+    assert_eq!(fresh["topics"][1]["message_count"], 3);
+}
+
+#[fukulow_test::test]
 async fn topic_paging_many_moved_topics_has_no_loss_or_duplication(pool: PgPool) {
     let (app, _, _, channel, token) = fixture(&pool).await;
     let mut expected = std::collections::BTreeSet::new();

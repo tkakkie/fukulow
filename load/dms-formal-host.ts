@@ -21,7 +21,7 @@ import { reportPilot } from './dms-formal-pilot.ts';
 import { reportAttempt } from './dms-formal-results.ts';
 import { failureDetails, restoreSpace, workerLog, writeDiagnostic, type DiagnosticWriter, type ProbeDocker } from './dms-formal-diagnostics.ts';
 import { postgresCommand } from './dms-formal-seed-diagnostic.ts';
-export type HostState = { seedDiagnostic?:boolean; target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
+export type HostState = { seedDiagnostic?:boolean; seedBaseline?:boolean; target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
 const root = resolve(import.meta.dirname,'../..');
 const statePath = `${root}/state.json`;
 let cleaning = false;
@@ -37,6 +37,11 @@ const docker = (args: string[], input?: string, timeout = 120000) => {
 const command = (program: string, args: string[], timeout = 120000) => checked(execute, { program,args,timeout,captureStderr:true });
 const save = (path: string, value: unknown) => writeFileSync(path, typeof value === 'string' ? value : JSON.stringify(value,null,2), { mode: 0o600 });
 // The seed diagnostic stops after the seed, so it never starts the baseline arm.
+// The seed diagnostic baseline arm runs the formal seed on the formal DB command: only the instrumented arm adds the
+// diagnostic PostgreSQL logging and the batch clocks.
+export const instrumentedSeed = (s: Pick<HostState,'seedDiagnostic'|'seedBaseline'>) => !!s.seedDiagnostic && !s.seedBaseline;
+export const dbPostgresCommand = (s: Pick<HostState,'seedDiagnostic'|'seedBaseline'>) => postgresCommand(instrumentedSeed(s));
+export const seedScriptArgs = (s: Pick<HostState,'seedDiagnostic'|'seedBaseline'>, script: string) => instrumentedSeed(s) && script==='dms-formal-seed' ? ['--seed-diagnostic'] : [];
 export const buildsBaseline = (s: Pick<HostState,'overhead'|'pilot'|'seedDiagnostic'>) => !!s.overhead && !s.pilot && !s.seedDiagnostic;
 function state(): HostState { return JSON.parse(readFileSync(statePath,'utf8')); }
 const image = (s: HostState) => `${s.id}:release`;
@@ -101,7 +106,7 @@ async function database(s: HostState) {
   const local=s.target==='local';
   if(local)await docker(['network','create','--label',`dm-formal=${s.id}`,`${s.id}-edge`]);
   const memory = local?s.limits.dbMemory:s.mode === 'smoke' ? '2g' : '32g';
-  save(`${root}/db.json`,{ services:{ db:{ ...(local?{image:s.postgres.replace(/:[^/:@]+@/,'@'),pull_policy:'never'}:{}), cpus:local?s.limits.dbCpu:s.mode === 'smoke' ? 1 : 8, mem_limit:memory, ...(local?{}:{ports:['5432:5432']}), volumes:[`${s.id}-data:/var/lib/postgresql`], command:postgresCommand(s.seedDiagnostic) } }, ...(local?{networks:{default:{external:true,name:s.id+'-edge'}}}:{}), volumes:{ [`${s.id}-data`]:{name:`${s.id}-data`,labels:{'dm-formal':s.id}} } });
+  save(`${root}/db.json`,{ services:{ db:{ ...(local?{image:s.postgres.replace(/:[^/:@]+@/,'@'),pull_policy:'never'}:{}), cpus:local?s.limits.dbCpu:s.mode === 'smoke' ? 1 : 8, mem_limit:memory, ...(local?{}:{ports:['5432:5432']}), volumes:[`${s.id}-data:/var/lib/postgresql`], command:dbPostgresCommand(s) } }, ...(local?{networks:{default:{external:true,name:s.id+'-edge'}}}:{}), volumes:{ [`${s.id}-data`]:{name:`${s.id}-data`,labels:{'dm-formal':s.id}} } });
   await docker([...compose(s),'up','-d','--no-build',...(s.target==='local'?['--pull','never']:[]),'--wait','db'],undefined,180000);
   await docker([...compose(s),'run','--rm',...(s.target==='local'?['--pull','never']:[]),'migrate'],undefined,600000);
   await sql(s,'CREATE EXTENSION IF NOT EXISTS pg_stat_statements;');
@@ -140,7 +145,7 @@ async function seed(s: HostState) {
   const env = { ...process.env, DM_DB_CONTAINER:`${s.id}-db-1`, DM_FORMAL_SEED:'1', DM_FORMAL_SCENARIO:s.scenario, DM_FORMAL_SMOKE:s.mode === 'smoke'||s.pilot ? '1' : '0', DM_FORMAL_SEED_ORGS:s.pilot?'10':'', DM_FORMAL_OUT:`${root}/formal`, DM_SEED_OUT:`${root}/deep.json`, DM_OUTPUT:root, BASE_URL:`https://${s.appAddress}`, NODE_EXTRA_CA_CERTS:`${root}/ca.crt`, DM_QUERY_SOURCE:`${root}/source`, DM_PROBE_SAMPLES:'1', DM_SEND_PROBE_SAMPLES:'1' };
   const run = async (script: string) => {
     // Spawned seed/probe children inherit only this private configuration; their output is private.
-    await checked(execute,{program:process.execPath,args:[`${root}/harness/load/${script}.ts`,...(s.seedDiagnostic && script==='dms-formal-seed' ? ['--seed-diagnostic'] : [])],env,timeout:24*60*60*1000,log:s.seedDiagnostic?undefined:`${root}/${script}.log`});
+    await checked(execute,{program:process.execPath,args:[`${root}/harness/load/${script}.ts`,...seedScriptArgs(s,script)],env,timeout:24*60*60*1000,log:s.seedDiagnostic?undefined:`${root}/${script}.log`});
   };
   await run('dms-formal-seed'); await run('dms-seed'); await run('dms-probe');
   const checks=[];
