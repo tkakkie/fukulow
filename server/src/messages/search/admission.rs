@@ -19,6 +19,8 @@ pub(in crate::messages) struct Limiter {
 struct State {
     members: HashMap<Member, Entry>,
     next_sweep: Instant,
+    #[cfg(test)]
+    test_now: Option<Instant>,
 }
 
 struct Entry {
@@ -32,30 +34,40 @@ impl Limiter {
             state: Mutex::new(State {
                 members: HashMap::new(),
                 next_sweep: Instant::now(),
+                #[cfg(test)]
+                test_now: None,
             }),
             burst: REFILL_INTERVAL * burst,
         }
     }
 
-    pub(super) fn acquire(&self, member: Member) -> Option<Permit<'_>> {
+    pub(super) fn acquire(&self, member: Member) -> Result<Permit<'_>, Duration> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.acquire(member, Instant::now(), self.burst)?;
-        Some(Permit {
+        let now = Instant::now();
+        #[cfg(test)]
+        let now = state.test_now.unwrap_or(now);
+        state.acquire(member, now, self.burst)?;
+        Ok(Permit {
             limiter: self,
             member,
         })
     }
+
+    #[cfg(test)]
+    pub(super) fn freeze_test_clock(&self) {
+        self.state.lock().unwrap().test_now = Some(Instant::now());
+    }
 }
 
 impl State {
-    fn acquire(&mut self, member: Member, now: Instant, burst: Duration) -> Option<()> {
+    fn acquire(&mut self, member: Member, now: Instant, burst: Duration) -> Result<(), Duration> {
         if now >= self.next_sweep {
             self.members
                 .retain(|_, entry| entry.active || entry.full_at > now);
             self.next_sweep = now + SWEEP_INTERVAL;
         }
         if self.members.len() >= MAX_MEMBERS && !self.members.contains_key(&member) {
-            return None;
+            return Err(SWEEP_INTERVAL);
         }
         let entry = self.members.entry(member).or_insert(Entry {
             active: false,
@@ -63,12 +75,16 @@ impl State {
         });
         // Time until a full bucket represents its outstanding token debt.
         let full_at = entry.full_at.max(now) + REFILL_INTERVAL;
-        if entry.active || full_at > now + burst {
-            return None;
+        if entry.active {
+            return Err(REFILL_INTERVAL);
+        }
+        let burst_end = now + burst;
+        if full_at > burst_end {
+            return Err(full_at - burst_end);
         }
         entry.active = true;
         entry.full_at = full_at;
-        Some(())
+        Ok(())
     }
 }
 
@@ -101,14 +117,25 @@ mod tests {
         let now = state.next_sweep;
         let member = (Uuid::new_v4(), Uuid::new_v4());
         for _ in 0..BURST {
-            assert!(state.acquire(member, now, limiter.burst).is_some());
+            assert_eq!(state.acquire(member, now, limiter.burst), Ok(()));
             state.members.get_mut(&member).unwrap().active = false;
         }
-        assert!(state.acquire(member, now, limiter.burst).is_none());
+        assert_eq!(
+            state.acquire(member, now, limiter.burst),
+            Err(REFILL_INTERVAL)
+        );
+        let half_refill = REFILL_INTERVAL / 2;
+        assert_eq!(
+            state.acquire(member, now + half_refill, limiter.burst),
+            Err(half_refill)
+        );
         let refill = now + REFILL_INTERVAL;
-        assert!(state.acquire(member, refill, limiter.burst).is_some());
+        assert_eq!(state.acquire(member, refill, limiter.burst), Ok(()));
         state.members.get_mut(&member).unwrap().active = false;
-        assert!(state.acquire(member, refill, limiter.burst).is_none());
+        assert_eq!(
+            state.acquire(member, refill, limiter.burst),
+            Err(REFILL_INTERVAL)
+        );
     }
 
     #[test]
@@ -121,18 +148,24 @@ mod tests {
             assert!(
                 state
                     .acquire((org, Uuid::from_u128(i as u128)), now, limiter.burst)
-                    .is_some()
+                    .is_ok()
             );
         }
         let extra = (org, Uuid::new_v4());
-        assert!(state.acquire(extra, now, limiter.burst).is_none());
+        assert_eq!(
+            state.acquire(extra, now, limiter.burst),
+            Err(SWEEP_INTERVAL)
+        );
         let idle = (org, Uuid::nil());
         state.members.get_mut(&idle).unwrap().active = false;
-        assert!(state.acquire(extra, now, limiter.burst).is_none());
+        assert_eq!(
+            state.acquire(extra, now, limiter.burst),
+            Err(SWEEP_INTERVAL)
+        );
         assert!(
             state
                 .acquire(extra, now + SWEEP_INTERVAL, limiter.burst)
-                .is_some()
+                .is_ok()
         );
         assert_eq!(state.members.len(), MAX_MEMBERS);
         assert!(!state.members.contains_key(&idle));
