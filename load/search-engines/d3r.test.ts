@@ -26,7 +26,7 @@ import { loadBackfill, preserveSnapshot, receiptFile, removeSnapshot, snapshotFi
 import { timeQuery } from './d3r/timing.ts';
 import { assertHeadroom, dfBytes, dockerDiskArgs, headroomSampler, outputDisk, projectHeadroom, type Disk } from './d3r/headroom.ts';
 
-test('v16 freezes the approved settings and every production migration while preserving v13', () => {
+test('v17 freezes the approved settings and every production migration while preserving v13', () => {
   const {sha256, frozen} = loadManifest();
   const baseline = v13();
   assert.equal(sha256, hash(JSON.stringify(frozen)));
@@ -90,7 +90,7 @@ function pinnedV15(): ReturnType<typeof loadManifest> {
 
 test('v15 stays pinned and v16 differs from it only by the date, the new migration and its sources', () => {
   const v15 = pinnedV15();
-  const {frozen} = loadManifest();
+  const {frozen} = pinnedV16();
   const keys = [...new Set([...Object.keys(v15.frozen), ...Object.keys(frozen)])];
   const changed = keys.filter(key => JSON.stringify((v15.frozen as Record<string, unknown>)[key]) !== JSON.stringify((frozen as Record<string, unknown>)[key]));
   assert.deepEqual(changed.sort(), ['date', 'migrations', 'sourceHashes', 'version']);
@@ -99,6 +99,31 @@ test('v15 stays pinned and v16 differs from it only by the date, the new migrati
   const added = 'server/migrations/202611221101_topics_page.sql';
   assert.deepEqual(frozen.migrations, [...v15.frozen.migrations, added].sort());
   const before = new Map<string, string>(v15.frozen.sourceHashes.map((s: {path: string; sha256: string}) => [s.path, s.sha256]));
+  assert.ok([...before.keys()].every(path => frozen.sourceHashes.some(source => source.path === path)));
+  assert.deepEqual(frozen.sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
+    ['load/search-engines/d3r/manifest.ts', added]);
+});
+
+function pinnedV16(): ReturnType<typeof loadManifest> {
+  const text = readFileSync(new URL('./manifest-v16.json', import.meta.url), 'utf8');
+  assert.equal(hash(text), '97a26dd8fd50182108fb5b4974aa8857af42c48a3bb05bfa765409296bf6eef5');
+  const v16 = JSON.parse(text);
+  assert.equal(v16.sha256, '539a25e180192a1bd542c822abdd02546f711df90223699103d8d84622892088');
+  assert.equal(v16.sha256, hash(JSON.stringify(v16.frozen)));
+  return v16;
+}
+
+test('v16 stays pinned and v17 differs from it only by the new migration and its sources', () => {
+  const v16 = pinnedV16();
+  const {frozen} = loadManifest();
+  const keys = [...new Set([...Object.keys(v16.frozen), ...Object.keys(frozen)])];
+  const changed = keys.filter(key => JSON.stringify((v16.frozen as Record<string, unknown>)[key]) !== JSON.stringify((frozen as Record<string, unknown>)[key]));
+  assert.deepEqual(changed.sort(), ['migrations', 'sourceHashes', 'version']);
+  assert.equal(v16.frozen.version, 16);
+  assert.equal(frozen.version, 17);
+  const added = 'server/migrations/202611231100_unread_counts_update_first.sql';
+  assert.deepEqual(frozen.migrations, [...v16.frozen.migrations, added].sort());
+  const before = new Map<string, string>(v16.frozen.sourceHashes.map((s: {path: string; sha256: string}) => [s.path, s.sha256]));
   assert.ok([...before.keys()].every(path => frozen.sourceHashes.some(source => source.path === path)));
   assert.deepEqual(frozen.sourceHashes.filter(source => before.get(source.path) !== source.sha256).map(source => source.path),
     ['load/search-engines/d3r/manifest.ts', added]);

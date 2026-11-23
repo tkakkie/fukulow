@@ -325,8 +325,10 @@ async fn unread_migration_initializes_existing_visible_members_and_each_topic(po
 
 mod a3_oracle;
 mod access;
+mod append_counts;
 mod concurrency;
 mod context;
+mod count_check;
 mod count_plans;
 mod denials;
 mod measurement;
