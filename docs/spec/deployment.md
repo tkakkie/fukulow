@@ -4,7 +4,7 @@ Index and Terms: [docs/spec.md](../spec.md).
 Related: [Setup token](accounts.md#setup).
 
 ## Proxy and sign-in limits
-- Web/native sign-in share process-local failure budgets of 20 per IPv4 address or IPv6 /64 and 5 per normalized Account email per 60 s. IPv4-mapped IPv6 uses the IPv4 budget. In-flight attempts reserve capacity and successes release it.
+- Web/native sign-in share process-local failure budgets of 20 per IPv4 address or IPv6 /64 and 5 per normalized Account email per 60 s. IPv4-mapped IPv6 uses the IPv4 budget. In-flight attempts reserve capacity and successes release it. Password change and revoke-others use their own budgets of 3 per Session and 5 per Account per 60 s instead (#760), so an Account allows 5 + 5 wrong passwords per window. Each budget map holds at most 10,000 keys.
 - Standalone forwarding is opt-in. Set both `FUKULOW_TRUSTED_PROXIES` (comma-separated IPv4/IPv6 addresses or CIDRs) and `FUKULOW_CLIENT_IP_HEADER` (HTTP header name). Invalid or partial configuration stops startup. CIDR prefixes use decimal digits with no sign or leading zero except `/0`. Host bits are allowed and ignored for matching. IPv4-mapped IPv6 peers become IPv4, which matches IPv4 ranges or mapped IPv6 ranges wholly within `::ffff:0:0/96` (mapped address, prefix ≥96). Other IPv6 ranges cannot match IPv4 peers.
 - Only the trusted immediate socket peer can supply a client IP. It must append or overwrite the rightmost comma-separated IP in one header field. Ignore earlier values even if invalid. A missing, repeated or non-text field or invalid rightmost IP falls back to the socket peer. Ignore the entire header from untrusted peers.
 - Run exactly one HTTPS profile, `--profile caddy` (default) or `--profile nginx`. Only proxy/app join `edge`, and only app/migrate/DB join `backend`. App ports are unpublished by default. `FUKULOW_EDGE_PREFIX` (default `172.30.94`) sets subnet `<prefix>.0/29`, gateway `.1`, fixed proxy `.2`, fixed app `.3` and dynamic range `.4/30`, keeping dynamic containers off the fixed IPs. Compose sets `x-forwarded-for` and trusts only `.2`, ignoring `.env` overrides of `FUKULOW_TRUSTED_PROXIES` and `FUKULOW_CLIENT_IP_HEADER`.
@@ -24,6 +24,7 @@ Related: [Setup token](accounts.md#setup).
 - Restore with `--no-owner --no-acl` so the disposable drill needs no role creation for grants. In production, reapply ACLs/default privileges without changing data after the database-name switch and before starting app. End restored Sessions and reconcile permissions. [Recovery procedure](#production-recovery-maintainer-operated)
 
 ## Deployment (#194 C)
+- Search stays `disabled` in production pending #689 acceptance. Enable it on development and test servers with `FUKULOW_SEARCH_ENGINE=d3r`.
 - The image runs as UID/GID 10001 with a root-owned executable and no writable application data. Pin base and external deployment/load images by tag plus registry-verified multi-platform SHA-256. Weekly Dependabot updates for the Dockerfile and both Compose directories still need review and deployment checks.
 - Deployment/load app and migrate use read-only roots, drop ALL capabilities and forbid new privileges. No writable mounts or tmpfs. DB and proxy state keep their own storage. Fresh and populated upgrades must run under those restrictions. [Deployment invariants](../invariants/deployment.md)
 - App and both proxies set `Cross-Origin-Opener-Policy: same-origin` and identical empty `Permissions-Policy` feature allowlists on success and errors, including proxy 404s and upstream failures. Listed features (sensor/media/Clipboard/fullscreen/device and others) are denied. Unlisted features keep browser defaults (no wildcard default). Ordinary editing/paste works. App covers direct access. Proxies replace app copies and cover their own errors via Caddy’s shared normal/error policy and nginx’s http-scope `add_header ... always` without child overrides.
@@ -73,7 +74,11 @@ ss -ltnH '( sport = :80 or sport = :443 )'                                    # 
 The maintainer chooses how to issue and renew certificates.
 
 - DNS-01 keeps 80/443 closed. Use a reviewed, pinned custom Caddy build with a DNS provider module (absent from stock), a private least-privilege DNS API token outside the checkout, and outbound DNS/ACME. Account for DNS propagation and token custody.
-- HTTP-01 (80) or TLS-ALPN-01 (443) needs correct public DNS and a deliberate short public opening without the override. Restore it immediately after issuance and rerun restriction checks. Isolation weakens during the opening. Renew in another approved window before expiry or switch to DNS-01. One opening cannot renew unattended.
+- HTTP-01 (80) or TLS-ALPN-01 (443) needs correct public DNS and a deliberate short public opening. Isolation weakens during the opening. Renew in another approved window before expiry or switch to DNS-01. One opening cannot renew unattended. An opening has two layers, both temporary:
+  - the provider packet filter (and any host firewall) allows the port;
+  - Compose publishes it on the public address: prefer a private temporary override whose `ports: !override` lists the loopback 443 plus only the challenge port (for example `"80:80"`), so no other port is published. A plain `ports:` list appends to the base.
+  - The filter change can take effect with a delay. Before requesting the certificate, confirm the port is reachable from an external source. A first attempt that fails before the filter applies can be retried in the same window.
+  - After issuance, close the filter and restart the proxy with the loopback-only override. Then rerun the check block above and the restriction checks below.
 
 After approval, on the operator machine (replace placeholders privately):
 
@@ -106,6 +111,8 @@ curl --noproxy '*' --resolve '<app-domain>:8443:127.0.0.1' --connect-timeout 5 -
 ```
 
 Use a valid signed-in Member’s cookie jar (0600, outside checkout) and a base64-encoded 16-byte nonce. Keep credentials out of commands/logs. Require the actual TLS `101` even if curl later times out. Allowed Origin without credentials returns 401 before upgrade. Missing/disallowed cookie Origin returns 403 `origin_not_allowed`.
+
+**Image and operator.** CI publishes no image. `compose.yml` builds it on the VPS (`build: .`) from the checked-out revision. Check out the revision that passed #286, or for the restricted deploy the revision under test, and record it. A VPS build matches that revision’s source, not necessarily the image CI built: do not treat them as identical. The build needs enough memory (swap helps on small plans). Keep deployment `.env` as `root:fukulow-backup` 0640 ([backup runbook](#operator-runbook-and-production-hold-316)). A non-root operator runs Compose with `sudo`, for example `sudo docker compose -f compose.yml -f '<override>' --profile caddy up -d --build`. Do not widen `.env` or add the operator to `fukulow-backup` to avoid `sudo`. Docker access is root-equivalent either way.
 
 **Client IP through SSH.** The VPS/Docker loopback peer (typically the bridge gateway) is shared. One operator can exhaust the shared per-IP sign-in budget (20 per IPv4 address or IPv6 /64 per 60 s). Identify operators by Account, since IP logs/metrics cannot distinguish them. Never add forwarded headers or widen `FUKULOW_TRUSTED_PROXIES` to recover original IPs. Only clients connecting directly to public Caddy regain per-client IPs after lifting the restriction.
 

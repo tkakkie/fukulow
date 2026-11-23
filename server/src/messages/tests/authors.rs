@@ -35,7 +35,7 @@ async fn lookup(app: &Router, token: &str, ids: &[Uuid]) -> Value {
     body(response).await
 }
 
-async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, member: Uuid) {
+pub(super) async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, member: Uuid) {
     sqlx::query(
         "INSERT INTO channel_members (organization_id,channel_id,member_id,membership_revision) SELECT organization_id,$2,id,membership_revision FROM users WHERE organization_id=$1 AND id=$3",
     )
@@ -46,7 +46,7 @@ async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, member: Uuid) {
     .await
     .unwrap();
 }
-async fn revoke(pool: &PgPool, org: Uuid, channel: Uuid, member: Uuid) {
+pub(super) async fn revoke(pool: &PgPool, org: Uuid, channel: Uuid, member: Uuid) {
     sqlx::query(
         "DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3",
     )
@@ -57,7 +57,7 @@ async fn revoke(pool: &PgPool, org: Uuid, channel: Uuid, member: Uuid) {
     .await
     .unwrap();
 }
-async fn role(pool: &PgPool, org: Uuid, member: Uuid, role: &str) {
+pub(super) async fn role(pool: &PgPool, org: Uuid, member: Uuid, role: &str) {
     sqlx::query("UPDATE users SET role=$3 WHERE organization_id=$1 AND id=$2")
         .bind(org)
         .bind(member)
@@ -66,7 +66,7 @@ async fn role(pool: &PgPool, org: Uuid, member: Uuid, role: &str) {
         .await
         .unwrap();
 }
-async fn deactivate(pool: &PgPool, org: Uuid, member: Uuid, reactivate: bool) {
+pub(super) async fn deactivate(pool: &PgPool, org: Uuid, member: Uuid, reactivate: bool) {
     sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
         .bind(org)
         .bind(member)

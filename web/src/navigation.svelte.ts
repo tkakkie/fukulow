@@ -7,6 +7,7 @@ export function navigationAdapter(getController: () => Navigation) {
   return {
     get state() { subscribe(); return controller.get() },
     navigate: controller.navigate,
+    openSearchResult: controller.openSearchResult,
     initialize: controller.initialize,
   }
 }

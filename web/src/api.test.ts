@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { checkHealth, lookupAuthors } from './api'
+import { checkHealth, lookupAuthors, type ChannelPlacement, type CreatedSection, type SectionLayout } from './api'
 
 it('looks up display identities in the selected Organization using generated request and response types', async () => {
   const identities = [{ id: 'author', name: '名前', deactivated: true }]
@@ -87,6 +87,114 @@ describe('channel and message calls', () => {
     expect(await sendMessage('o', 'c', input, m)).toEqual({ ok: false, kind: 'network', retryAfterMs: 3000 })
     expect(m.mock.calls[0][0]).toBe('/api/v1/orgs/o/channels/c/messages')
     expect(JSON.parse(m.mock.calls[0][1].body)).toEqual(input)
+  })
+  it('returns immediately without reading the body on 5xx with Retry-After', async () => {
+    vi.useFakeTimers()
+    try {
+      const input = { body: 'x', client_message_id: 'same-key' }
+      const jsonBody = vi.fn<typeof fetch>().mockResolvedValue(new Response('{"error":"lock_contention"}', {
+        status: 503, headers: { 'Retry-After': '5' },
+      }))
+      expect(await sendMessage('o', 'c', input, jsonBody)).toStrictEqual({
+        ok: false, kind: 'network', retryAfterMs: 5000,
+      })
+
+      let pulled = false
+      let cancelled = false
+      const stalled = new Response(new ReadableStream({
+        pull() { pulled = true },
+        cancel() { cancelled = true },
+      }, { highWaterMark: 0 }), {
+        status: 503, headers: { 'Retry-After': '5' },
+      })
+      const stalledFetch = vi.fn<typeof fetch>().mockResolvedValue(stalled)
+      expect(await sendMessage('o', 'c', input, stalledFetch)).toStrictEqual({
+        ok: false, kind: 'network', retryAfterMs: 5000,
+      })
+      expect(pulled).toBe(false)
+      expect(cancelled).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('preserves string ErrorBody codes on 5xx without Retry-After and releases the reader lock', async () => {
+    const input = { body: 'x', client_message_id: 'same-key' }
+    for (const status of [503, 502, 500] as const) {
+      const res = new Response('{"error":"lock_contention"}', { status })
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(res)
+      expect(await sendMessage('o', 'c', input, fetcher)).toStrictEqual({
+        ok: false, kind: 'network', error: 'lock_contention',
+      })
+      expect(res.body?.locked).toBe(false)
+    }
+    for (const [status, body] of [
+      [502, '<html>Bad Gateway</html>'],
+      [503, ''],
+      [503, null],
+      [500, '{}'],
+      [503, '{"error":123}'],
+      [503, 'null'],
+    ] as const) {
+      const m = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status }))
+      expect(await sendMessage('o', 'c', input, m)).toStrictEqual({ ok: false, kind: 'network' })
+    }
+  })
+  it('bounds stalled 5xx body reads without Retry-After and cancels the stream', async () => {
+    vi.useFakeTimers()
+    try {
+      let cancelled = false
+      const stalled = new Response(new ReadableStream({
+        start() {},
+        cancel() { cancelled = true },
+      }), { status: 503 })
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(stalled)
+      let settled = false
+      const pending = sendMessage('o', 'c', { body: 'x', client_message_id: 'same-key' }, fetcher).then(r => {
+        settled = true
+        return r
+      })
+      await vi.advanceTimersByTimeAsync(999)
+      expect(settled).toBe(false)
+      expect(cancelled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toBe(true)
+      expect(await pending).toStrictEqual({ ok: false, kind: 'network' })
+      expect(cancelled).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('cancels 5xx body reads without Retry-After on signal abort and already-aborted signals', async () => {
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      let cancelled = false
+      const fetcher = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({
+        start() {},
+        cancel() { cancelled = true },
+      }), { status: 503 }))
+      const pending = listChannels('o', fetcher, controller.signal)
+      await Promise.resolve()
+      controller.abort()
+      expect(await pending).toStrictEqual({ ok: false, kind: 'network' })
+      expect(cancelled).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+
+      const aborted = new AbortController()
+      aborted.abort()
+      let abortedCancelled = false
+      const abortedFetch = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({
+        start() {},
+        cancel() { abortedCancelled = true },
+      }), { status: 503 }))
+      expect(await listChannels('o', abortedFetch, aborted.signal)).toStrictEqual({ ok: false, kind: 'network' })
+      expect(abortedCancelled).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it('preserves 429 ErrorBody and Retry-After with a safe one-second fallback', async () => {
     for (const [header, retryAfterMs] of [
@@ -237,4 +345,51 @@ it('posts exact Reply count batches with no-store and cancellation in the select
   expect(f).toHaveBeenCalledWith('/api/v1/orgs/org%2F1/channels/c%201/reply-counts', {
     credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: ['child'], history_generation: data.history_generation }), cache: 'no-store', signal: abort.signal,
   })
+})
+
+it('uses the scoped section routes with generated bodies and no-store reads', async () => {
+  const api = await import('./api')
+  const signal = new AbortController().signal
+  const f = vi.fn<typeof fetch>().mockImplementation(async () => new Response(null, { status: 204 }))
+  const org = 'org/1', section = 'section/2', channel = 'channel/3'
+  const base = '/api/v1/orgs/org%2F1/me'
+  const layout: SectionLayout = { generation: '0', sections: [], other_channel_ids: [] }
+  const placement: ChannelPlacement = { generation: '0', section_id: null }
+  f.mockResolvedValueOnce(Response.json(layout)).mockResolvedValueOnce(Response.json(placement))
+  await expect(api.getSectionLayout(org, f, signal)).resolves.toEqual({ ok: true, data: layout })
+  await expect(api.getChannelPlacement(org, channel, f, signal)).resolves.toEqual({ ok: true, data: placement })
+  const created: CreatedSection = { id: section, generation: '1' }
+  f.mockResolvedValueOnce(Response.json(created, { status: 201 })).mockResolvedValueOnce(Response.json(created, { status: 200 }))
+  for (let i = 0; i < 2; i++)
+    await expect(api.createSection(org, { id: section, name: 'Name' }, f, signal)).resolves.toEqual({ ok: true, data: created })
+  for (const result of [
+    await api.renameSection(org, section, { name: 'New name' }, f, signal),
+    await api.reorderSections(org, { section_ids: [section] }, f, signal),
+    await api.moveChannel(org, channel, { section_id: null }, f, signal),
+    await api.reorderSectionChannels(org, { section_id: null, channel_ids: [channel] }, f, signal),
+    await api.deleteSection(org, section, f, signal),
+  ]) expect(result).toEqual({ ok: true, data: undefined })
+  expect(f.mock.calls.map(([path, init]) => [path, init?.method ?? 'GET', init?.body])).toEqual([
+    [`${base}/sections`, 'GET', undefined],
+    [`${base}/channel-sections/channel%2F3`, 'GET', undefined],
+    [`${base}/sections`, 'POST', '{"id":"section/2","name":"Name"}'],
+    [`${base}/sections`, 'POST', '{"id":"section/2","name":"Name"}'],
+    [`${base}/sections/section%2F2`, 'PATCH', '{"name":"New name"}'],
+    [`${base}/sections/order`, 'PUT', '{"section_ids":["section/2"]}'],
+    [`${base}/channel-sections/channel%2F3`, 'PUT', '{"section_id":null}'],
+    [`${base}/section-channel-order`, 'PUT', '{"section_id":null,"channel_ids":["channel/3"]}'],
+    [`${base}/sections/section%2F2`, 'DELETE', undefined],
+  ])
+  for (const [, init] of f.mock.calls) {
+    expect(init).toMatchObject({ credentials: 'same-origin', signal })
+    if (init?.body) expect(init.headers).toEqual({ 'content-type': 'application/json' })
+    if (!init?.method) expect(init?.cache).toBe('no-store')
+  }
+})
+
+it('preserves the definite section lock contention code without retrying the write', async () => {
+  const { moveChannel } = await import('./api')
+  const f = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ error: 'lock_contention' }, { status: 503 }))
+  await expect(moveChannel('org', 'channel', { section_id: null }, f)).resolves.toEqual({ ok: false, kind: 'network', error: 'lock_contention' })
+  expect(f).toHaveBeenCalledOnce()
 })

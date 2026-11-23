@@ -2,7 +2,7 @@
 // pass: INVALID, NOT EVALUATED, REPORT ONLY and INVESTIGATE never are.
 import { stripVTControlCharacters } from 'node:util';
 import { STATUS_CODES } from 'node:http';
-import { commits, partA, partB, partC, partD, rounds, thresholds, validity, type Arm } from './config.ts';
+import { commits, partA, partB, partC, partD, rounds, thresholds, validity, type Arm, type ArmCommits } from './config.ts';
 
 export type Status = 'PASS' | 'FAIL' | 'INVALID' | 'NOT EVALUATED' | 'REPORT ONLY' | 'INVESTIGATE';
 export type Counts = { attempted: number; accepted: number; rejected429: number; rejected503: number; otherErrors: number;
@@ -93,7 +93,7 @@ export function walInvalid(wal: Wal): string[] {
 }
 
 // Mismatched settings, commits, images or fixtures, or a missing or extra run, make the cell INVALID.
-export function consistency<T extends RunIdentity>(runs: T[], cell: string): { b: T[]; a: T[]; reasons: string[] } {
+export function consistency<T extends RunIdentity>(runs: T[], cell: string, expected: ArmCommits = commits): { b: T[]; a: T[]; reasons: string[] } {
   const reasons: string[] = [];
   const pick = (arm: Arm) => rounds.map((_, i) => runs.filter(r => r.cell === cell && r.arm === arm && r.round === i + 1));
   const [bs, as] = [pick('B'), pick('A')];
@@ -102,7 +102,7 @@ export function consistency<T extends RunIdentity>(runs: T[], cell: string): { b
   if (all.length !== runs.filter(r => r.cell === cell).length) reasons.push('unexpected run');
   if (all.some(r => r.smoke)) reasons.push('smoke run');
   if (all.some(r => !r.complete)) reasons.push('incomplete run');
-  if (all.some(r => !r.commit.startsWith(commits[r.arm]))) reasons.push('commit mismatch');
+  if (all.some(r => !r.commit.startsWith(expected[r.arm]))) reasons.push('commit mismatch');
   if (new Set(b.map(r => r.image)).size !== 1 || new Set(a.map(r => r.image)).size !== 1) reasons.push('image mismatch');
   if (new Set(all.map(r => r.settingsHash)).size !== 1) reasons.push('settings mismatch');
   if (new Set(all.map(r => r.fixtureChecksum)).size !== 1) reasons.push('fixture checksum mismatch');
@@ -198,8 +198,8 @@ export function judgePartB(runs: RunB[], cell: string): Verdict {
   return { part: 'B', cell, status: metric.status, reasons: [], metrics: [metric] };
 }
 
-export function judgePartC(runs: RunC[], cell: string): Verdict {
-  const { b, a, reasons } = consistency(runs, cell);
+export function judgePartC(runs: RunC[], cell: string, expected: ArmCommits = commits): Verdict {
+  const { b, a, reasons } = consistency(runs, cell, expected);
   if (reasons.length) return { part: 'C', cell, status: 'INVALID', reasons, metrics: [] };
   const out: string[] = [];
   for (const r of [...b, ...a]) {

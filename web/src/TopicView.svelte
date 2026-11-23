@@ -26,9 +26,11 @@
     type ScrollAnchor,
   } from './timeline-scroll'
   import type { TopicsAdapter } from './topics.svelte'
+  import type { SearchPresentation } from './search-anchor.svelte'
   import type { UnreadAdapter } from './unread.svelte'
+  import SearchAnchorStatus from './ui/SearchAnchorStatus.svelte'
   import Button from './ui/Button.svelte'
-  import Dialog from './ui/Dialog.svelte'
+  import ReplaceDraftDialog from './ui/ReplaceDraftDialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
   import ReadMarker from './ui/ReadMarker.svelte'
@@ -58,6 +60,7 @@
     composerRef = $bindable(null),
     onopenreplies,
     onretrytopicmeta,
+    search,
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
@@ -82,6 +85,7 @@
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     onopenreplies?: (message: Message, opener?: HTMLElement | null) => void
     onretrytopicmeta?: () => void
+    search?: SearchPresentation
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
@@ -94,8 +98,16 @@
   const composerState = $derived(tc.composer)
   const tState = $derived(topics.state)
   const rState = $derived(replies ? replies.state : null)
+  const searchId = $derived(search?.target.messageId)
+  const searchVisit = $derived(search?.view?.visit)
   const uState = $derived(unread ? unread.state : null)
-  const view = $derived(tState.topic(currentTopicId))
+  const topicView = $derived(tState.topic(currentTopicId))
+  const view = $derived(search ? {
+    ...topicView, messages: search.view?.messages ?? [], initialized: search.view?.status === 'ready',
+    hasMore: search.view?.hasOlder ?? false, hasNewer: false, newerCount: 0,
+    loading: search.view?.paging ?? false, error: search.view?.pageError === 'older', notFound: false,
+  } : topicView)
+  let skipUnreadVisit = $state(false)
   let scrolledFirstUnreadId = $state<string | null>(null)
   const entry = $derived(uState?.entry?.scope.topicId === currentTopicId ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
@@ -112,7 +124,7 @@
     ),
   )
   const firstUnreadMessageId = $derived(
-    entry &&
+    !search && !skipUnreadVisit && entry &&
       entry.boundary !== null &&
       (entry.unreadAtEntry ?? 0) > 0 &&
       !needsOlderUnreadPage &&
@@ -123,7 +135,7 @@
   const replyCounts = $derived(replies?.counts ?? {})
   const channelUnavailable = $derived(s.status === 'unavailable' || tState.unavailable)
   const topicUnavailable = $derived(
-    !organizationUnavailable && !channelUnavailable && (topicStatus === 'unavailable' || view.notFound),
+    !organizationUnavailable && !channelUnavailable && (!search && (topicStatus === 'unavailable' || view.notFound)),
   )
   const targetUnavailable = $derived(
     organizationUnavailable || channelUnavailable || topicUnavailable,
@@ -185,11 +197,15 @@
     if (!isDocumentVisible()) return
     const currentEntry = uState?.entry
     if (!currentEntry || currentEntry.scope.topicId !== topicId) return
-    if (currentEntry.boundary === null || needsOlderUnreadPage) return
-    if ((currentEntry.unreadAtEntry ?? 0) > 0) {
-      if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
-    } else if (!initialScrollApplied) {
-      return
+    if (search) {
+      if (!initialScrollApplied || search.view?.status !== 'ready') return
+    } else if (!skipUnreadVisit) {
+      if (currentEntry.boundary === null || needsOlderUnreadPage) return
+      if ((currentEntry.unreadAtEntry ?? 0) > 0) {
+        if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
+      } else if (!initialScrollApplied) {
+        return
+      }
     }
     const seqs = measureVisibleConfirmedSeqs(scrollEl!)
     if (seqs.length > 0) {
@@ -210,7 +226,7 @@
     void focusMessage(focusableMessageIds[next]).catch(console.error)
   }
   async function revealScrollTarget(action: ScrollAction, anchor: ScrollAnchor | null, unreadId?: string | null) {
-    const id = action === 'scroll_first_unread' ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    const id = (action === 'scroll_first_unread' || action === 'scroll_search_anchor') ? unreadId : action === 'preserve_anchor' ? anchor?.messageId : null
     if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) await rowWindow?.reveal(id)
   }
 
@@ -230,7 +246,7 @@
     anchor: ScrollAnchor | null,
     firstUnreadId?: string | null,
   ) {
-    const id = action === 'scroll_first_unread' ? firstUnreadId : action === 'preserve_anchor' ? anchor?.messageId : null
+    const id = (action === 'scroll_first_unread' || action === 'scroll_search_anchor') ? firstUnreadId : action === 'preserve_anchor' ? anchor?.messageId : null
     if (id && !scrollEl?.querySelector(`[data-message-id="${CSS.escape(id)}"]`)) {
       void revealScrollTarget(action, anchor, firstUnreadId).then(() => {
         applyTimelineScrollAction(scrollEl, scrollController, action, anchor, firstUnreadId)
@@ -240,6 +256,15 @@
   }
 
   async function jumpToBottom() {
+    if (search) {
+      skipUnreadVisit = true
+      search.latest()
+      await tick()
+      if (search) return
+      await topics.loadTopicLatest(topicId)
+      await tick()
+      if (search) return
+    }
     if (view.hasNewer) { await topics.loadTopicLatest(topicId); await tick() }
     const action = scrollController.jumpToBottom()
     applyScrollAction(action, null)
@@ -248,7 +273,8 @@
 
   function loadOlderWithAnchor() {
     captureCurrentAnchor()
-    void topics.loadTopic(topicId).catch(console.error)
+    if (search) void search.loadOlder()
+    else void topics.loadTopic(topicId).catch(console.error)
   }
 
   function retryInitial() {
@@ -263,6 +289,11 @@
   onMount(() => {
     const id = topicId, release = topics.releaseTopic
     return () => release(id)
+  })
+  $effect(() => {
+    if (!searchId) return
+    requestedHistoryFor = ''
+    untrack(() => topics.releaseTopic(topicId))
   })
 
   $effect(() => {
@@ -335,7 +366,7 @@
   $effect(() => {
     const tId = currentTopicId
     const key = `${currentChannelId}:${tId}:${tState.generation}`
-    if (targetUnavailable || s.status === 'loading') return
+    if (search || targetUnavailable || s.status === 'loading') return
     const hasBaseline = tState.topics.some((t) => t.topicId === tId && t.baseline !== null)
     if (!hasBaseline && view.summaryError === null) {
       void topics.ensureSummary(tId).catch(console.error)
@@ -347,7 +378,7 @@
   })
 
   $effect(() => {
-    if (!needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
+    if (search || skipUnreadVisit || !needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
       return
     }
     if (effectiveStatus !== 'ready') return
@@ -357,6 +388,7 @@
   const effectiveStatus = $derived<'loading' | 'ready' | 'unavailable' | 'error'>(
     targetUnavailable
       ? 'unavailable'
+      : search ? (!search.view || search.view.status === 'loading' ? 'loading' : 'ready')
       : topicStatus === 'error' || (view.error && view.messages.length === 0)
         ? 'error'
         : (topicStatus === 'loading' || view.loading) && view.messages.length === 0
@@ -365,12 +397,13 @@
   )
 
   $effect(() => {
-    const scopeKey = `${currentChannelId}/${currentTopicId}`
-    const currentEntryId = entryId
+    const scopeKey = `${currentChannelId}/${currentTopicId}${searchId ? ':search' : ''}`
+    const currentEntryId = searchId ? searchVisit ?? null : entryId
     if (
       scopeKey !== lastScrollScopeKey ||
       (currentEntryId !== null && currentEntryId !== lastScrollEntryId)
     ) {
+      if (searchId) skipUnreadVisit = false
       lastScrollScopeKey = scopeKey
       lastScrollEntryId = currentEntryId
       initialScrollApplied = false
@@ -383,7 +416,7 @@
     const status = effectiveStatus
     const targetFirstUnreadId = firstUnreadMessageId
     const awaitingFirstUnread =
-      awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error)
+      !skipUnreadVisit && (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error))
     const { action, anchor } = scrollController.sync({
       channelId: scopeKey,
       visitId: currentEntryId,
@@ -394,17 +427,22 @@
       selfId,
       firstUnreadMessageId: targetFirstUnreadId,
       awaitingFirstUnread,
+      searchAnchorId: searchId,
+      searchAsOfSeq: search?.view?.asOfSeq,
     })
     if (action !== 'none') {
       pendingScrollAction = { action, anchor }
     }
+    const revealVisit = searchVisit
     void tick().then(() => {
+      if (searchVisit !== revealVisit) return
       if (!isTimelineDisplayed(scrollEl, viewSelected)) {
         if (
           !initialScrollApplied &&
           pendingScrollAction &&
           (pendingScrollAction.action === 'scroll_bottom' ||
-            pendingScrollAction.action === 'scroll_first_unread')
+            pendingScrollAction.action === 'scroll_first_unread' ||
+            pendingScrollAction.action === 'scroll_search_anchor')
         ) {
           pendingScrollAction = null
           scrollController.resetInitialScroll()
@@ -414,6 +452,15 @@
       if (pendingScrollAction) {
         const deferred = pendingScrollAction
         pendingScrollAction = null
+        if (deferred.action === 'scroll_search_anchor') {
+          void revealScrollTarget(deferred.action, null, searchId).then(() => {
+            if (searchVisit !== revealVisit || !isTimelineDisplayed(scrollEl, viewSelected)) return
+            applyTimelineScrollAction(scrollEl, scrollController, deferred.action, null, searchId)
+            initialScrollApplied = true
+            reportPresented()
+          }).catch(console.error)
+          return
+        }
         applyScrollAction(deferred.action, deferred.anchor, targetFirstUnreadId)
         if (deferred.action === 'scroll_first_unread' && targetFirstUnreadId) {
           scrolledFirstUnreadId = targetFirstUnreadId
@@ -423,7 +470,7 @@
         }
       } else {
         captureCurrentAnchor()
-        if (status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
+        if (!search && status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
           initialScrollApplied = true
         }
       }
@@ -478,6 +525,7 @@
     if (!topicName) return false
     const ok = await tc.submit(topicName)
     if (!ok) return false
+    if (search) { await jumpToBottom(); return true }
     if (view.hasNewer) await topics.loadTopicLatest(topicId)
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
@@ -518,7 +566,7 @@
         onaction={ongoToChannelList}
       />
     </div>
-  {:else if !targetUnavailable && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
+  {:else if !search && !targetUnavailable && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
     <div class="topic-view__banner">
       <StatusBanner
         tone="danger"
@@ -589,6 +637,7 @@
               <MessageRow
                 senderName={resolveSenderName ? resolveSenderName(m.sender) : undefined}
                 createdAt={m.created_at}
+                searchMatch={searchId === m.id}
                 body={m.body ?? ''}
                 mentions={m.mentions}
                 {resolveMentionName}
@@ -619,7 +668,7 @@
           />
         {/snippet}
         </VirtualRows>
-      {:else if effectiveStatus === 'ready'}
+      {:else if !search && effectiveStatus === 'ready'}
         <EmptyState
           title="まだメッセージがありません。"
           description="下の入力欄からメッセージを送信できます。"
@@ -630,6 +679,9 @@
       <Button variant="secondary" onclick={() => void jumpToBottom().catch(console.error)}>最新のメッセージを読み込む</Button>
     {/if}
 
+    {#if search && !targetUnavailable}
+      <SearchAnchorStatus {search} onlatest={() => void jumpToBottom().catch(console.error)} />
+    {/if}
   </div>
 
   {#if !scrollView.pinned && (scrollView.belowCount > 0 || (view.newerCount ?? 0) > 0)}
@@ -656,12 +708,9 @@
     />
   </div>
 
-  <Dialog
-    open={confirmReplaceId !== null}
-    title="入力中の下書きを置き換えますか？"
+  <ReplaceDraftDialog
+    pendingId={confirmReplaceId}
     description="入力中の下書きを破棄して、送信できなかったメッセージを入力欄に戻します。"
-    confirmLabel="置き換える"
-    cancelLabel="キャンセル"
     returnFocusFallback={composerRef}
     onconfirm={handleConfirmReplace}
     oncancel={handleCancelReplace}

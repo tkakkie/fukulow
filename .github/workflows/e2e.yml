@@ -25,14 +25,14 @@ jobs:
       FUKULOW_SEND_BURST: '10000'
       FUKULOW_SEND_REFILL_PER_SECOND: '1000'
       # A Playwright bump must update the tag and digest together.
-      PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.0-noble@sha256:6e3fb709361521eb27161606e6da6d2674e5e89fa16516cb37d6fdd91372273d
+      PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: rustup toolchain install --profile minimal
       # Prebuilt, checksum-verified binary: `cargo install` compiled it for 60-90 s in every job.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: wasm-bindgen@0.2.130 }
       - run: npm --prefix web ci
       - run: npm --prefix web run build

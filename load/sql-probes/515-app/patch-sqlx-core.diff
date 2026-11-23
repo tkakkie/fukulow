@@ -1,0 +1,308 @@
+diff --git a/src/pool/connection.rs b/src/pool/connection.rs
+index c029fec..ef829da 100644
+--- a/src/pool/connection.rs
++++ b/src/pool/connection.rs
+@@ -20,6 +20,7 @@ const CLOSE_ON_DROP_TIMEOUT: Duration = Duration::from_secs(5);
+ /// Will be returned to the pool on-drop.
+ pub struct PoolConnection<DB: Database> {
+     live: Option<Live<DB>>,
++    pub(super) fk515: Option<(super::fk515::Trace, usize)>,
+     close_on_drop: bool,
+     pub(crate) pool: Arc<PoolInner<DB>>,
+ }
+@@ -141,9 +142,10 @@ impl<DB: Database> PoolConnection<DB> {
+ 
+         let pool = self.pool.clone();
+ 
++        let trace = self.fk515.take();
+         async move {
+             let returned_to_pool = if let Some(floating) = floating {
+-                floating.return_to_pool().await
++                floating.return_to_pool(trace).await
+             } else {
+                 false
+             };
+@@ -260,6 +262,7 @@ impl<DB: Database> Floating<DB, Live<DB>> {
+         guard.cancel();
+         PoolConnection {
+             live: Some(inner),
++            fk515: None,
+             close_on_drop: false,
+             pool,
+         }
+@@ -272,7 +275,7 @@ impl<DB: Database> Floating<DB, Live<DB>> {
+     /// Return the connection to the pool.
+     ///
+     /// Returns `true` if the connection was successfully returned, `false` if it was closed.
+-    async fn return_to_pool(mut self) -> bool {
++    async fn return_to_pool(mut self, trace: Option<(super::fk515::Trace, usize)>) -> bool {
+         // Immediately close the connection.
+         if self.guard.pool.is_closed() {
+             self.close().await;
+@@ -311,7 +314,10 @@ impl<DB: Database> Floating<DB, Live<DB>> {
+         // returned to the pool; also of course, if it was dropped due to an error
+         // this is simply a band-aid as SQLx-next connections should be able
+         // to recover from cancellations
+-        if let Err(error) = self.raw.ping().await {
++        let start = trace.as_ref().map(|(trace, _)| trace.ns());
++        let ping = self.raw.ping().await;
++        let end = trace.as_ref().map(|(trace, _)| trace.ns());
++        let returned = if let Err(error) = ping {
+             tracing::warn!(
+                 %error,
+                 "error occurred while testing the connection on-release",
+@@ -324,7 +330,14 @@ impl<DB: Database> Floating<DB, Live<DB>> {
+             // if the connection is still viable, release it to the pool
+             self.release();
+             true
++        };
++        // Publish the timing only after returning or closing the connection.
++        // A failed ping closes the connection; label it so the harness rejects the sample.
++        if let (Some((trace, index)), Some(start), Some(end)) = (trace, start, end) {
++            let label = if returned { "return" } else { "return_failed" };
++            trace.record((label, Some(index), start, end));
+         }
++        returned
+     }
+ 
+     pub async fn close(self) {
+diff --git a/src/pool/fk515.rs b/src/pool/fk515.rs
+new file mode 100644
+index 0000000..b5fbf73
+--- /dev/null
++++ b/src/pool/fk515.rs
+@@ -0,0 +1,141 @@
++// Diagnostic-only instrumentation for the #515 REST replay.
++use crossbeam_queue::SegQueue;
++use std::{
++    future::Future,
++    sync::{
++        Arc, Mutex,
++        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
++    },
++    time::Instant,
++};
++
++pub type Event = (&'static str, Option<usize>, u64, u64);
++type Emit = Box<dyn FnOnce(Vec<Event>) + Send>;
++
++#[derive(Clone)]
++pub struct Trace(Arc<State>);
++
++struct State {
++    start: Instant,
++    acquired: AtomicUsize,
++    success: AtomicBool,
++    // Lock-free: a descheduled writer can never block the request worker.
++    events: SegQueue<Event>,
++    emit: Mutex<Option<Emit>>,
++}
++
++#[cfg(feature = "_rt-tokio")]
++tokio::task_local! { static TRACE: Trace; static SQL: (); }
++
++#[cfg(feature = "_rt-tokio")]
++pub async fn scope<T>(trace: Trace, future: impl Future<Output = T>) -> T {
++    TRACE.scope(trace, future).await
++}
++
++pub(super) fn current() -> Option<Trace> {
++    #[cfg(feature = "_rt-tokio")]
++    return TRACE.try_with(Clone::clone).ok();
++    #[cfg(not(feature = "_rt-tokio"))]
++    None
++}
++
++impl Trace {
++    pub fn new(emit: impl FnOnce(Vec<Event>) + Send + 'static) -> Self {
++        Self(Arc::new(State {
++            start: Instant::now(),
++            acquired: AtomicUsize::new(0),
++            success: AtomicBool::new(false),
++            events: SegQueue::new(),
++            emit: Mutex::new(Some(Box::new(emit))),
++        }))
++    }
++
++    pub(super) fn acquire_index(&self) -> usize {
++        self.0.acquired.fetch_add(1, Relaxed)
++    }
++
++    pub fn success(&self) {
++        self.0.success.store(true, Relaxed);
++    }
++
++    pub fn span(&self, label: &'static str, index: Option<usize>) -> Span {
++        Span {
++            trace: self.clone(),
++            label,
++            index,
++            start: self.ns(),
++        }
++    }
++
++    pub(super) fn record(&self, event: Event) {
++        self.0.events.push(event);
++    }
++
++    pub(super) fn ns(&self) -> u64 {
++        self.0.start.elapsed().as_nanos() as u64
++    }
++}
++
++impl Drop for State {
++    fn drop(&mut self) {
++        // Last owner may be an asynchronous SQLx return. Keep one log per
++        // request without waiting for a return on the HTTP path.
++        if self.success.load(Relaxed) {
++            if let Ok(Some(emit)) = self.emit.get_mut().map(Option::take) {
++                let mut events = Vec::with_capacity(self.events.len());
++                while let Some(event) = self.events.pop() {
++                    events.push(event);
++                }
++                emit(events);
++            }
++        }
++    }
++}
++
++pub struct Span {
++    trace: Trace,
++    label: &'static str,
++    index: Option<usize>,
++    start: u64,
++}
++
++impl Drop for Span {
++    fn drop(&mut self) {
++        let end = self.trace.ns();
++        self.trace.record((self.label, self.index, self.start, end));
++    }
++}
++
++pub fn span(label: &'static str) -> Option<Span> {
++    current().map(|trace| trace.span(label, None))
++}
++
++pub async fn observe<T>(label: &'static str, future: impl Future<Output = T>) -> T {
++    let _span = span(label);
++    future.await
++}
++
++pub fn measure<T>(label: &'static str, f: impl FnOnce() -> T) -> T {
++    let _span = span(label);
++    f()
++}
++
++#[cfg(feature = "_rt-tokio")]
++pub async fn query<T>(label: &'static str, future: impl Future<Output = T>) -> T {
++    SQL.scope((), observe(label, future)).await
++}
++
++pub fn sql_span(label: &'static str) -> Option<Span> {
++    #[cfg(feature = "_rt-tokio")]
++    return SQL.try_with(|()| span(label)).ok().flatten();
++    #[cfg(not(feature = "_rt-tokio"))]
++    {
++        let _ = label;
++        None
++    }
++}
++
++pub fn sql_measure<T>(label: &'static str, f: impl FnOnce() -> T) -> T {
++    let _span = sql_span(label);
++    f()
++}
+diff --git a/src/pool/inner.rs b/src/pool/inner.rs
+index 2066364..ba197c0 100644
+--- a/src/pool/inner.rs
++++ b/src/pool/inner.rs
+@@ -252,14 +252,14 @@ impl<DB: Database> PoolInner<DB> {
+             async {
+                 loop {
+                     // Handles the close-event internally
+-                    let permit = self.acquire_permit().await?;
++                    let permit = super::fk515::observe("permit", self.acquire_permit()).await?;
+ 
+ 
+                     // First attempt to pop a connection from the idle queue.
+                     let guard = match self.pop_idle(permit) {
+ 
+                         // Then, check that we can use it...
+-                        Ok(conn) => match check_idle_conn(conn, &self.options).await {
++                        Ok(conn) => match super::fk515::observe("reuse", check_idle_conn(conn, &self.options)).await {
+ 
+                             // All good!
+                             Ok(live) => return Ok(live),
+@@ -285,7 +285,7 @@ impl<DB: Database> PoolInner<DB> {
+                     };
+ 
+                     // Attempt to connect...
+-                    return self.connect(deadline, guard).await;
++                    return super::fk515::observe("connect", self.connect(deadline, guard)).await;
+                 }
+             }
+         )
+@@ -468,7 +468,7 @@ async fn check_idle_conn<DB: Database>(
+ ) -> Result<Floating<DB, Live<DB>>, DecrementSizeGuard<DB>> {
+     if options.test_before_acquire {
+         // Check that the connection is still live
+-        if let Err(error) = conn.ping().await {
++        if let Err(error) = super::fk515::observe("checkout", conn.ping()).await {
+             // an error here means the other end has hung up or we lost connectivity
+             // either way we're fine to just discard the connection
+             // the error itself here isn't necessarily unexpected so WARN is too strong
+diff --git a/src/pool/mod.rs b/src/pool/mod.rs
+index d85bce2..1f5fc79 100644
+--- a/src/pool/mod.rs
++++ b/src/pool/mod.rs
+@@ -84,6 +84,7 @@ mod executor;
+ pub mod maybe;
+ 
+ mod connection;
++pub mod fk515;
+ mod inner;
+ mod options;
+ 
+@@ -356,7 +357,18 @@ impl<DB: Database> Pool<DB> {
+     /// returning it.
+     pub fn acquire(&self) -> impl Future<Output = Result<PoolConnection<DB>, Error>> + 'static {
+         let shared = self.0.clone();
+-        async move { shared.acquire().await.map(|conn| conn.reattach()) }
++        async move {
++            let trace = fk515::current().map(|trace| {
++                let index = trace.acquire_index();
++                (trace, index)
++            });
++            let result = fk515::observe("acquire", shared.acquire()).await;
++            result.map(|conn| {
++                let mut connection = conn.reattach();
++                connection.fk515 = trace;
++                connection
++            })
++        }
+     }
+ 
+     /// Attempts to retrieve a connection from the pool if there is one available.
+diff --git a/src/query_as.rs b/src/query_as.rs
+index 9f28fe4..ca921a1 100644
+--- a/src/query_as.rs
++++ b/src/query_as.rs
+@@ -119,7 +119,7 @@ where
+         executor
+             .fetch_many(self.inner)
+             .map(|v| match v {
+-                Ok(Either::Right(row)) => O::from_row(&row).map(Either::Right),
++                Ok(Either::Right(row)) => crate::pool::fk515::sql_measure("decode", || O::from_row(&row)).map(Either::Right),
+                 Ok(Either::Left(v)) => Ok(Either::Left(v)),
+                 Err(e) => Err(e),
+             })
+@@ -192,7 +192,7 @@ where
+     {
+         let row = executor.fetch_optional(self.inner).await?;
+         if let Some(row) = row {
+-            O::from_row(&row).map(Some)
++            crate::pool::fk515::sql_measure("decode", || O::from_row(&row)).map(Some)
+         } else {
+             Ok(None)
+         }

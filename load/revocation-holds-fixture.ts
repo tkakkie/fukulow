@@ -1,0 +1,55 @@
+// Test fixture for #668 judgement: a clean H512 short run on a synthetic clock (offset ±1 ms).
+// Server wall timestamps equal harness time here, with the same ±1 ms calibration.
+import { SOCKETS_PER_ACCOUNT } from './revocation-holds-plan.ts';
+import type { HoldsRun, HoldsSample, TargetSocket } from './revocation-holds-judgment.ts';
+
+export const TIMES = { pass: 40_000, stall: 36_000, revoke: 37_000, resume: 40_100, end: 80_000 };
+export const GATE_ON = 39_700, GATE_OFF = 43_500;
+// A pool sample logged at harness time `at`, received `lag` ms later.
+export const poolSample = (at: number, lag = 0) => ({ at: at + lag, wallMs: at, fields: { wait_count: 0, acquire_timeout: 0 } as Record<string, number> });
+/** Sets the cumulative timeout counter to `n` on every pool sample logged at or after `from`. */
+export const timeoutsFrom = (run: { pool: { wallMs: number | undefined; fields: Record<string, number> }[] }, from: number, n: number) => {
+  for (const p of run.pool) if ((p.wallMs ?? -Infinity) >= from) p.fields.acquire_timeout = n;
+};
+export const CHANNELS = Array.from({ length: 16 }, (_, i) => `c${i}`);
+
+const retriesAt = (t: number) => t >= 41_800 ? 1536 : t >= 40_800 ? 1024 : t >= 40_300 ? 512 : 0;
+export const sample = (serverMs: number, over: Partial<HoldsSample> = {}): HoldsSample => ({
+  serverMs, activeHolds: serverMs >= 39_750 && serverMs < 44_000 ? 512 : 0,
+  highWaterMark: serverMs >= 39_750 ? 512 : 0, retryAttempts: retriesAt(serverMs), ...over,
+});
+
+export const target = (socket: number): TargetSocket => ({
+  account: Math.floor(socket / SOCKETS_PER_ACCOUNT), ready: true, subscribed: true,
+  stall: { reads: [{ at: 1_000, bytes: 200 }, { at: 40_101, bytes: 64_000 }], pausedAt: [TIMES.stall], resumedAt: [TIMES.resume], closes: [] },
+  stallMessagesAt: [40_150],
+});
+
+export function holdsFixture(): HoldsRun {
+  const sockets = 32;
+  const notices = Array.from({ length: sockets }, (_, socket) => CHANNELS.map((channelId, i) => ({ socket, channelId, at: 44_100 + i }))).flat();
+  const probes = (ms: number) => Array.from({ length: 1600 }, (_, i) => ({ at: i * 50, ms, ok: true, status: 200 }));
+  
+  return {
+    kind: 'fault', cell: 'H512', duration: 'short', repeat: 1,
+    times: { ...TIMES, gateOn: [GATE_ON, GATE_ON], gateOff: [GATE_OFF, GATE_OFF], nominalRecovery: { short: GATE_OFF } },
+    setup: { bystanders: 1024, bystandersReadyAtStall: 1024, targetsReadyAtStall: sockets, calibrationErrors: [], stallPostFailures: 0 },
+    serverCloses: [], wallOffsetBoundsMs: [-1, 1],
+    revokedChannels: [...CHANNELS],
+    accounts: [{ revokeStartedAt: 37_000, revokedAt: 37_100, revokeStatus: 200 }],
+    targets: Array.from({ length: sockets }, (_, i) => target(i)),
+    notices, bystanderNotices: 0, bystanderCloses: 0,
+    sendTiming: {
+      offsetBoundsMs: [-1, 1], uncertaintyMs: 2,
+      records: notices.map(n => ({ channelId: n.channelId, beforeMs: 44_000, afterMs: 44_002, afterHold: true })),
+    },
+    samples: Array.from({ length: 321 }, (_, i) => sample(i * 250)),
+    statements: [], refused: [],
+    dbProbe: probes(1), httpProbe: probes(5),
+    // Each closing bracket is the sample after the first logged certainly after the window end:
+    // 45_000 for the fault window (43_500), 81_000 for the recovery window (53_500).
+    pool: [poolSample(0), poolSample(39_000), poolSample(44_000), poolSample(45_000), poolSample(80_000), poolSample(81_000)],
+    rss: Array.from({ length: 160 }, (_, i) => ({ at: i * 500, kb: 1000 })),
+    metrics: { revocation_held: 512, revocation_delivered_after_hold: 512, revocation_retired_timeout: 0, revocation_retired_retries: 0, revocation_retired_fenced: 0, revocation_retired_global_cap: 0, revocation_retired_registration_cap: 0 },
+  };
+}

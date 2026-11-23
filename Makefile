@@ -1,4 +1,4 @@
-.PHONY: api load load-record load-throughput load-image load-signin load-proxy-compare
+.PHONY: api load load-record load-throughput load-image load-signin load-signin-owner load-proxy-compare
 api:
 	cargo run --locked --quiet -p fukulow-server --bin openapi > openapi.json
 	npx --yes --package=openapi-typescript@7.13.0 openapi-typescript openapi.json --root-types --root-types-no-schema-prefix -o web/src/api-schema.d.ts
@@ -60,6 +60,10 @@ load-image:
 # DB in-use = app-role client connections incl. idle; active is also reported, sampler excluded.
 load-signin:
 	node load/signin.ts
+
+# #359 Part B alternative: one attacker IP under the real limits, owner sign-in and password change.
+load-signin-owner:
+	node load/signin-owner.ts
 
 # Both proxies, fresh per-run stacks; PROXY_PRESET=smoke for harness validation.
 load-proxy-compare:

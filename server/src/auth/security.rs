@@ -2,12 +2,12 @@ use super::{
     AccountAuth, ApiError, ApiJson, ErrorBody, PASSWORD_WORKERS, PasswordWorkers,
     RetryAfterSeconds,
     password::{PasswordPermit, check_and_hash_password},
-    throttle::Attempt,
+    throttle::SecurityAttempt,
 };
 use crate::AppState;
 use axum::{
-    extract::{ConnectInfo, State},
-    http::{HeaderMap, StatusCode, header},
+    extract::State,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -39,25 +39,21 @@ pub struct RevokeOtherSessionsRequest {
     (status = 403, description = "current_password_incorrect; no password or Session changes; current Session remains valid", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody),
-    (status = 429, description = "too many sign-in attempts; shared IP/email failure and reservation budgets with web/native sign-in and revoke-others", body = ErrorBody,
+    (status = 429, description = "too many sign-in attempts; per-Session and per-Account failure and reservation budgets shared with revoke-others", body = ErrorBody,
         headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1"))),
     (status = 500, description = "Database or password worker failure; transaction rolled back", body = ErrorBody),
     (status = 503, description = "password admission unavailable; no mutation", body = ErrorBody)))]
 pub async fn change_password(
     State(state): State<AppState>,
     auth: AccountAuth,
-    peer: ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
     ApiJson(input): ApiJson<ChangePasswordRequest>,
 ) -> Result<Response, ApiError> {
-    change_password_with_workers(state, auth, peer, headers, input, &PASSWORD_WORKERS).await
+    change_password_with_workers(state, auth, input, &PASSWORD_WORKERS).await
 }
 
 async fn change_password_with_workers(
     state: AppState,
     auth: AccountAuth,
-    peer: ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
     input: ChangePasswordRequest,
     workers: &'static PasswordWorkers,
 ) -> Result<Response, ApiError> {
@@ -71,8 +67,6 @@ async fn change_password_with_workers(
     secure_account(
         state,
         auth,
-        peer,
-        headers,
         input.current_password,
         Some(input.new_password),
         workers,
@@ -89,34 +83,21 @@ async fn change_password_with_workers(
     (status = 403, description = "current_password_incorrect; no password or Session changes; current Session remains valid", body = ErrorBody),
     (status = 413, description = "Request body too large", body = ErrorBody),
     (status = 415, description = "Expected application/json", body = ErrorBody),
-    (status = 429, description = "too many sign-in attempts; shared IP/email failure and reservation budgets with web/native sign-in and password change", body = ErrorBody,
+    (status = 429, description = "too many sign-in attempts; per-Session and per-Account failure and reservation budgets shared with password change", body = ErrorBody,
         headers(("Retry-After" = inline(RetryAfterSeconds), description = "Seconds until retry; at least 1"))),
     (status = 500, description = "Database or password worker failure; transaction rolled back", body = ErrorBody),
     (status = 503, description = "password admission unavailable; no mutation", body = ErrorBody)))]
 pub async fn revoke_others(
     State(state): State<AppState>,
     auth: AccountAuth,
-    peer: ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
     ApiJson(input): ApiJson<RevokeOtherSessionsRequest>,
 ) -> Result<Response, ApiError> {
-    secure_account(
-        state,
-        auth,
-        peer,
-        headers,
-        input.current_password,
-        None,
-        &PASSWORD_WORKERS,
-    )
-    .await
+    secure_account(state, auth, input.current_password, None, &PASSWORD_WORKERS).await
 }
 
 async fn secure_account(
     state: AppState,
     auth: AccountAuth,
-    peer: ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
     current_password: String,
     new_password: Option<String>,
     workers: &'static PasswordWorkers,
@@ -129,16 +110,10 @@ async fn secure_account(
     if current_password.is_empty() || current_password.len() > 1024 {
         return Err(ApiError::bad_request());
     }
-    let ip = state.sign_in_throttle.client_ip(peer, &headers);
-    let mut attempt = state
-        .sign_in_throttle
-        .begin(ip)
+    let attempt = state
+        .account_security_throttle
+        .begin(auth.token_hash.clone(), auth.account_id)
         .map_err(ApiError::throttled)?;
-    let email = sqlx::query_scalar("SELECT email FROM accounts WHERE id = $1")
-        .bind(auth.account_id)
-        .fetch_one(&mut *crate::database::acquire(&state.pool).await?)
-        .await?;
-    attempt.account(email).map_err(ApiError::throttled)?;
     let permit = workers.acquire().await?;
     // Own COMMIT and every notification independently of the HTTP caller.
     tokio::spawn(async move {
@@ -170,7 +145,7 @@ async fn update_and_revoke(
     auth: AccountAuth,
     current_password: String,
     new_password: Option<String>,
-    attempt: Attempt,
+    attempt: SecurityAttempt,
     permit: PasswordPermit,
 ) -> Result<Vec<Vec<u8>>, ApiError> {
     let mut tx = crate::database::begin(pool).await?;

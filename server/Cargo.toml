@@ -8,6 +8,9 @@ default-run = "fukulow-server"
 [lints]
 workspace = true
 
+[features]
+hold-heap-measure = []
+
 [dependencies]
 fukulow-api = { path = "../api-types" }
 axum = { version = "0.8", features = ["ws"] }
@@ -15,7 +18,7 @@ tokio = { version = "1", features = ["full"] }
 rust-embed = "8"
 mime_guess = "2"
 argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "password-hash"] }
-rand = "=0.10.3"
+rand = "=0.10.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "=0.11.1"
@@ -28,6 +31,7 @@ tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json"] }
 
 [dev-dependencies]
+dhat = "0.3.3"
 fukulow-test = { path = "test-macros" }
 tokio = { version = "=1.54.1", features = ["test-util"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake"] }

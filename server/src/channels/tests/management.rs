@@ -34,6 +34,71 @@ pub(super) async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, target: Uuid)
 pub(super) async fn snapshot(pool: &PgPool) -> Value {
     sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(c) ORDER BY organization_id,channel_id,member_id) FROM channel_members c),(SELECT jsonb_agg(to_jsonb(p) ORDER BY organization_id,channel_id,member_id) FROM channel_read_positions p),(SELECT jsonb_agg(to_jsonb(p) ORDER BY organization_id,channel_id,member_id,topic_id) FROM topic_read_positions p))").fetch_one(pool).await.unwrap()
 }
+
+#[fukulow_test::test]
+async fn grant_target_lock_contention_leaves_rows_and_notices_unchanged(pool: PgPool) {
+    use crate::channels::activity::{Activity, Notice};
+    use futures_util::FutureExt;
+    use std::{sync::Arc, time::Duration};
+
+    let state = AppState::for_test(pool.clone()).await;
+    let app = crate::app(state.clone());
+    let org = organization(&pool).await;
+    let owner = member(&pool, org, Uuid::new_v4(), "owner").await;
+    let target = Uuid::new_v4();
+    let target_token = member(&pool, org, target, "member").await;
+    let channel = create(&app, &owner, "Private", "private").await;
+    let channel = serde_json::from_value(channel["id"].clone()).unwrap();
+    grant(&pool, org, channel, target).await;
+    let activity = Activity::default();
+    state
+        .session_changes
+        .set_activity(Arc::new(activity.clone()));
+    let owner_registration = activity.register(&extract_auth(state.clone(), &owner).await);
+    let target_registration = activity.register(&extract_auth(state, &target_token).await);
+    let before = snapshot(&pool).await;
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE organization_id=$1 AND id=$2 FOR NO KEY UPDATE")
+        .bind(org)
+        .bind(target)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let revoke = || mutation(&app, &owner, channel, target, false);
+    let response = tokio::time::timeout(Duration::from_secs(10), revoke())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    assert_eq!(body(response).await, json!({"error":"lock_contention"}));
+    blocker.rollback().await.unwrap();
+    assert_eq!(snapshot(&pool).await, before);
+    activity.drained().await;
+    for registration in [&owner_registration, &target_registration] {
+        assert!(registration.next().now_or_never().is_none());
+    }
+
+    assert_eq!(revoke().await.status(), StatusCode::NO_CONTENT);
+    assert_ne!(snapshot(&pool).await, before);
+    // The revoke starts separate post-COMMIT publishers for these two keys.
+    // Either can arrive first (realtime spec A7).
+    activity.drained().await;
+    let notices: Vec<_> = std::iter::from_fn(|| owner_registration.next().now_or_never().flatten())
+        .map(|frame| frame.event)
+        .collect();
+    assert!(
+        matches!(
+            notices.as_slice(),
+            [Notice::ChannelMembersChanged { channel_id }, Notice::MembersChanged]
+                | [Notice::MembersChanged, Notice::ChannelMembersChanged { channel_id }]
+                if *channel_id == channel
+        ),
+        "expected one ChannelMembersChanged for {channel} and one MembersChanged, got {notices:?}"
+    );
+}
+
 async fn denied(
     pool: &PgPool,
     app: &Router,

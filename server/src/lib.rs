@@ -31,6 +31,10 @@ use std::{
 
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
+pub fn spawn_revocation_holds_sampler() -> Option<tokio::task::JoinHandle<()>> {
+    observability::spawn_revocation_holds_sampler(channels::activity::revocation_hold_counts)
+}
+
 const PERMISSIONS_POLICY: &str = "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()";
 
 #[derive(serde::Deserialize)]
@@ -68,6 +72,7 @@ pub struct AppState {
     pub cookie_secure: bool,
     pub setup_token: String,
     pub sign_in_throttle: auth::SignInThrottle,
+    pub account_security_throttle: auth::AccountSecurityThrottle,
     pub message_delivery: messages::Delivery,
     pub session_changes: auth::SessionChanges,
     pub session_cleanup: auth::SessionCleanup,
@@ -90,6 +95,7 @@ impl AppState {
             cookie_secure: true,
             setup_token: "setup-token-test-only".into(),
             sign_in_throttle: Default::default(),
+            account_security_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
@@ -122,6 +128,10 @@ pub(crate) async fn test_app_pool(admin: sqlx::PgPool) -> sqlx::PgPool {
 }
 
 pub fn app(state: AppState) -> Router {
+    app_with_search(state, messages::search::SearchEngine::Disabled)
+}
+
+fn app_with_search(state: AppState, search_engine: messages::search::SearchEngine) -> Router {
     state.session_changes.set_activity(std::sync::Arc::new(
         state.message_delivery.channel_access.activity.clone(),
     ));
@@ -168,6 +178,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/orgs/{org}/message-authors",
             axum::routing::post(messages::authors::lookup_authors),
+        )
+        .route(
+            "/api/v1/orgs/{org}/search",
+            get(messages::search::search).layer(axum::Extension(search_engine)),
         )
         .route(
             "/api/v1/orgs/{org}/members/{id}/deactivate",
@@ -307,13 +321,31 @@ pub async fn serve(
     signal: impl Future<Output = ()>,
     deadline: Duration,
 ) -> std::io::Result<bool> {
+    serve_with_search(
+        listener,
+        state,
+        messages::search::SearchEngine::Disabled,
+        signal,
+        deadline,
+    )
+    .await
+}
+
+pub async fn serve_with_search(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    search_engine: messages::search::SearchEngine,
+    signal: impl Future<Output = ()>,
+    deadline: Duration,
+) -> std::io::Result<bool> {
     let shutdown = state.shutdown.clone();
     let pool = state.pool.clone();
     let delivery = state.message_delivery.clone();
     let stop_accepting = shutdown.clone();
     let server = axum::serve(
         listener,
-        app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app_with_search(state, search_engine)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move { stop_accepting.cancelled().await })
     .into_future();
@@ -418,6 +450,11 @@ async fn health() -> Result<&'static str, auth::ApiError> {
         auth::Action::Public,
         auth::Resource::Global,
     )?;
+    tracing::trace!(
+        target: observability::REVOCATION_MEASUREMENT_TARGET,
+        event = "revocation_clock_sample",
+        server_ms = observability::measurement_ms()
+    );
     Ok("ok")
 }
 
@@ -595,6 +632,7 @@ mod tests {
             cookie_secure: true,
             setup_token: "setup-token-test-only".into(),
             sign_in_throttle: Default::default(),
+            account_security_throttle: Default::default(),
             message_delivery: Default::default(),
             session_changes: Default::default(),
             session_cleanup: Default::default(),
@@ -617,6 +655,42 @@ mod tests {
     #[tokio::test]
     async fn health_ok() {
         assert_eq!(get("/api/v1/health").await.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_emits_clock_sample_only_with_measurement_enabled() {
+        use tracing::instrument::WithSubscriber;
+
+        let normal = observability::tests::Capture::default();
+        let response = get("/api/v1/health")
+            .with_subscriber(normal.subscriber())
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = normal.events();
+        assert!(!events.is_empty(), "expected a normal health event");
+        assert!(
+            events
+                .iter()
+                .all(|event| { event["fields"]["event"] != "revocation_clock_sample" })
+        );
+
+        let measurement = observability::tests::Capture::default();
+        let response = get("/api/v1/health")
+            .with_subscriber(measurement.measurement_subscriber())
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = measurement.events();
+        let samples: Vec<_> = events
+            .iter()
+            .filter(|event| event["fields"]["event"] == "revocation_clock_sample")
+            .collect();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(
+            samples[0]["target"],
+            observability::REVOCATION_MEASUREMENT_TARGET
+        );
+        let server_ms = samples[0]["fields"]["server_ms"].as_f64().unwrap();
+        assert!(server_ms.is_finite() && server_ms >= 0.0);
     }
 
     #[tokio::test]

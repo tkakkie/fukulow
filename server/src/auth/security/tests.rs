@@ -1,9 +1,12 @@
 use super::*;
-use crate::auth::{self, SignInThrottle};
+use crate::auth::{
+    self,
+    throttle::{SECURITY_ACCOUNT_LIMIT, SECURITY_SESSION_LIMIT},
+};
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::Request,
+    extract::{ConnectInfo, Request},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,6 +29,14 @@ struct Fixture {
     cookie: String,
     bearer: String,
     other: String,
+}
+
+impl Fixture {
+    fn security_counts(&self, token: &str) -> ((u32, u32), (u32, u32)) {
+        self.state
+            .account_security_throttle
+            .counts(&Sha256::digest(token.as_bytes()), self.account)
+    }
 }
 
 fn token() -> String {
@@ -139,27 +150,15 @@ fn app_with_workers(state: AppState, workers: &'static PasswordWorkers) -> Route
     let routes = Router::new()
         .route(
             "/api/v1/me/password",
-            axum::routing::put(move |State(state), auth, peer, headers, ApiJson(input)| {
-                change_password_with_workers(state, auth, peer, headers, input, workers)
+            axum::routing::put(move |State(state), auth, ApiJson(input)| {
+                change_password_with_workers(state, auth, input, workers)
             }),
         )
         .route(
             "/api/v1/me/sessions/revoke-others",
             axum::routing::post(
-                move |State(state),
-                      auth,
-                      peer,
-                      headers,
-                      ApiJson(input): ApiJson<RevokeOtherSessionsRequest>| {
-                    secure_account(
-                        state,
-                        auth,
-                        peer,
-                        headers,
-                        input.current_password,
-                        None,
-                        workers,
-                    )
+                move |State(state), auth, ApiJson(input): ApiJson<RevokeOtherSessionsRequest>| {
+                    secure_account(state, auth, input.current_password, None, workers)
                 },
             ),
         )
@@ -196,23 +195,7 @@ async fn security_wrong_password_is_403_preserves_all_accounts_and_sessions(pool
             );
         }
     }
-    // Exactly two failures, and no pending reservations; successes never reset failures.
-    assert_eq!(f.state.sign_in_throttle.pending_counts(), (0, 0));
-    for _ in 0..3 {
-        let mut attempt = f
-            .state
-            .sign_in_throttle
-            .begin("192.0.2.2".parse().unwrap())
-            .unwrap();
-        attempt.account("owner@example.com".into()).unwrap();
-        attempt.failed();
-    }
-    let mut refused = f
-        .state
-        .sign_in_throttle
-        .begin("192.0.2.3".parse().unwrap())
-        .unwrap();
-    assert!(refused.account("owner@example.com".into()).is_err());
+    assert_eq!(f.security_counts(&f.current), ((2, 0), (2, 0)));
 }
 
 #[fukulow_test::test]
@@ -232,6 +215,22 @@ async fn security_requires_valid_unexpired_session_before_password_or_body(pool:
         .unwrap();
     let before = snapshot(&pool).await;
     for (method, path) in OPERATIONS {
+        for stale in [&f.cookie, &f.bearer] {
+            error(
+                call(
+                    &f.app,
+                    method,
+                    path,
+                    Some(stale),
+                    false,
+                    body(path, "wrong password"),
+                )
+                .await,
+                StatusCode::UNAUTHORIZED,
+                "invalid credentials",
+            )
+            .await;
+        }
         for credential in [
             None,
             Some("invalid"),
@@ -247,7 +246,8 @@ async fn security_requires_valid_unexpired_session_before_password_or_body(pool:
             assert_eq!(snapshot(&pool).await, before);
         }
     }
-    assert_eq!(f.state.sign_in_throttle.pending_counts(), (0, 0));
+    assert_eq!(f.security_counts(&f.cookie), ((0, 0), (0, 0)));
+    assert_eq!(f.security_counts(&f.bearer), ((0, 0), (0, 0)));
 }
 
 #[fukulow_test::test]
@@ -307,15 +307,7 @@ async fn security_invalid_password_and_malformed_requests_do_not_mutate(pool: Pg
     }
     assert_eq!(snapshot(&pool).await, before);
     // Validation never spends a failure budget.
-    for _ in 0..5 {
-        let mut attempt = f
-            .state
-            .sign_in_throttle
-            .begin("192.0.2.1".parse().unwrap())
-            .unwrap();
-        attempt.account("owner@example.com".into()).unwrap();
-        attempt.failed();
-    }
+    assert_eq!(f.security_counts(&f.current), ((0, 0), (0, 0)));
 }
 
 #[fukulow_test::test]

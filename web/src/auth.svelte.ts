@@ -4,6 +4,7 @@ import { createAuthOperations } from './auth-operations'
 import { createAccountSecurity } from './account-security'
 import { accountSecurityAdapter } from './account-security.svelte'
 import { navigationTargetsAdapter } from './navigation-targets.svelte'
+import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.svelte'
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
@@ -18,16 +19,21 @@ import { membersAdapter } from './members.svelte'
 import { clearMessageFormatCache } from './message-format'
 import { syncAdapter, type SyncAdapter } from './sync.svelte'
 import { repliesAdapter, type RepliesAdapter } from './replies.svelte'
+import { sectionsAdapter, type SectionsAdapter } from './sections.svelte'
 import type { MoveDestination, MoveResult } from './move-chain'
 import { topicsAdapter, type TopicsAdapter } from './topics.svelte'
 import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
+import type { SearchSource } from './search-source'
 
 export type { AuthState } from './auth'
 export type SessionModel = {
   holdActivity?(key: string, target: ActivityTarget): unknown
   dms?: DmsAdapter
   navigationTargets?: ReturnType<typeof navigationTargetsAdapter>
+  searchAnchor?: SearchAnchorAdapter
+  searchSource?: SearchSource
   channels: ChannelsAdapter
+  sections?: SectionsAdapter
   sync: SyncAdapter
   topics(id: string): TopicsAdapter
   replies?(id: string): RepliesAdapter
@@ -36,6 +42,7 @@ export type SessionModel = {
   channelMembers?(id: string): ReturnType<typeof createChannelMembers>
   memberListAccess?(): MemberListAccess
   onMemberListRefresh?(listener: (reason: 'access' | 'refresh') => void): () => void
+  onChannelRevoked?(listener: (channelId: string) => void): () => void
   close(): void
 }
 export type AuthDeps = {
@@ -62,8 +69,12 @@ const defaults: AuthDeps = {
       holdActivity: session.holdActivity,
       memberListAccess: session.memberListAccess,
       navigationTargets: navigationTargetsAdapter(session.navigationTargets),
+      searchAnchor: searchAnchorAdapter(session.searchAnchor),
+      searchSource: session.searchSource,
+      onChannelRevoked: session.onChannelRevoked,
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
       channels: channelsAdapter(session.channels),
+      sections: sectionsAdapter(session.sections),
       dms: dmsAdapter(session.dms),
       sync: syncAdapter(session.sync),
       topics(id: string) {

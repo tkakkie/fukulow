@@ -333,3 +333,60 @@ fn move_epochs_increase_across_channel_resets_and_are_shared_across_channels() {
     let other = core.channel(other_channel).unwrap().move_epoch.unwrap();
     assert!(first < other);
 }
+
+#[test]
+fn a_new_move_is_reported_once_in_step_moves() {
+    use fukulow_client_core::{Effect, Page};
+
+    let channel = Uuid::from_u128(1);
+    let self_id = Uuid::from_u128(2);
+    let generation = Uuid::nil();
+    let root = Uuid::from_u128(100);
+    let mut core = Core::new(self_id);
+    let mut feed = |input: serde_json::Value| core.step(serde_json::from_value(input).unwrap());
+    feed(json!({"type":"session_start","selfId":self_id}));
+    feed(json!({"type":"connection_ready","connection":1}));
+    let watched = feed(json!({"type":"watch","channel":channel}));
+    let latest = watched
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::FetchHistory {
+                id,
+                page: Page::Latest,
+                ..
+            } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    let message = json!({
+        "history_generation":generation,"id":root,"channel_id":channel,
+        "created_seq":100,"version":100,"deleted":false,"client_message_id":Uuid::from_u128(1100),
+        "sender":self_id,"body":"body","created_at":"2026-01-01T00:00:00Z","topic_id":null,
+        "reply_to":null,"reply_root_id":null,"mentions":[]
+    });
+    let settled = feed(json!({"type":"history_result","request":latest,
+        "page":{"history_generation":generation,"as_of_seq":100,"messages":[message],"has_more":false}}));
+    assert!(settled.moves.is_empty());
+    feed(json!({"type":"event","connection":1,"event":{
+        "type":"subscribed","channel_id":channel,"history_generation":generation,"caught_up_seq":100}}));
+    let moved = json!({"type":"event","connection":1,"event":{
+        "type":"message","kind":"move","seq":101,"version":101,"channel_id":channel,
+        "history_generation":generation,"root_id":root,"source_topic_id":null,
+        "destination_topic_id":Uuid::from_u128(9),"operation_id":Uuid::from_u128(10)}});
+    let first = feed(moved.clone());
+    assert_eq!(first.moves.len(), 1);
+    assert_eq!(
+        (
+            first.moves[0].channel_id,
+            first.moves[0].root_id,
+            first.moves[0].version
+        ),
+        (channel, root, 101)
+    );
+    let serialized = serde_json::to_value(&first).unwrap();
+    assert_eq!(serialized["moves"][0]["root_id"], json!(root));
+    let again = feed(moved);
+    assert!(again.moves.is_empty());
+    assert!(serde_json::to_value(&again).unwrap().get("moves").is_none());
+}

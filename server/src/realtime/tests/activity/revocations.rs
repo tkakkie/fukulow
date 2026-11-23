@@ -15,6 +15,74 @@ use futures_util::FutureExt;
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Semaphore;
 
+#[test]
+fn send_measurement_records_delivered_revocation_only() {
+    // The production subscriber is process-wide. Other connection tests reach the same
+    // tracing callsites concurrently, so give this observation its own process.
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            concat!(module_path!(), "::send_measurement_child")
+                .split_once("::")
+                .unwrap()
+                .1,
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success() && stdout.contains("1 passed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[fukulow_test::test]
+#[ignore = "subprocess helper with a global measurement subscriber"]
+async fn send_measurement_child(pool: PgPool) {
+    let output = crate::observability::tests::Capture::default();
+    tracing::subscriber::set_global_default(output.measurement_subscriber()).unwrap();
+    let case = Case::new(&pool, false, Later::Regrant).await;
+    let mut socket = connect(&case.f, &case.token).await;
+    let sent = || {
+        output
+            .events()
+            .into_iter()
+            .filter(|event| event["fields"]["event"] == "channel_access_revoked_sent")
+            .collect::<Vec<_>>()
+    };
+
+    let gate = case.pause_revocation("handoff");
+    case.remove_grant().await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    assert!(sent().is_empty());
+    case.grant(case.revoked).await;
+    gate.release.add_permits(1);
+    let revoked = json!({"type":"channel_access_revoked", "channel_id":case.revoked});
+    assert!(!notices(&case.f, &mut socket).await.contains(&revoked));
+    assert!(sent().is_empty());
+
+    case.remove_grant().await;
+    assert!(notices(&case.f, &mut socket).await.contains(&revoked));
+    let recorded = sent();
+    assert_eq!(recorded.len(), 1, "{}", output.text());
+    assert_eq!(
+        recorded[0]["target"],
+        crate::observability::REVOCATION_MEASUREMENT_TARGET
+    );
+    let fields = &recorded[0]["fields"];
+    assert_eq!(fields["channel_id"], case.revoked.to_string());
+    assert_eq!(fields["after_hold"], false);
+    let before = fields["before_ms"].as_f64().unwrap();
+    let after = fields["after_ms"].as_f64().unwrap();
+    assert!(0.0 <= before && before <= after);
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Stage {
     Selection,

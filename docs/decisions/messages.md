@@ -3,6 +3,8 @@
 Channels, Messages, Topics, Replies and Unread. Writing rules and the other parts: [index](../decisions.md).
 
 ## Channels and Messages
+- #725 A future external search engine writes an outbox row in the Message transaction and applies it after COMMIT through a worker.
+- #725 Search generates a dedicated cursor key at process start to avoid reusing credentials or provisioning another secret. Cursors expire on restart.
 - #301 author lookup caps input at 100 ids, dedupes and omits unreadable authors. A shared non-locking history snapshot covers access, authorship and retained identities to prevent directory expansion and authorization races.
 - #149 usable managers add/remove and every Role can leave its own grant. Serialize private removal and its checks per Channel to preserve the last usable grant and any last manager (409).
 - #231/#305 Role demotion or deactivation that loses a private Channel's last usable manager fails atomically with 409 `last_channel_manager` and no Channel details. Reuse #149's locks and check via the guard injected into auth to preserve module direction.
@@ -26,7 +28,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #17 Scope canonical intent to Organization/sender/client id. Changed body/Channel/Topic name_key/parent gives 409. Concurrent losers roll back allocation before reading the winner. Keep whitespace for byte-exact idempotency. Bodies require 1..=4000 Unicode scalars. Invalid length, NUL or whitespace-only input gets 400 before allocation.
 - #146 History shares authorization and page data in one non-locking read-only REPEATABLE READ snapshot. Prior loss denies and authorized reads see no later Messages.
 
-## Personal sections (#204, specified)
+## Personal sections (#204, implemented)
 
 - #204 sections belong to one Member in one Organization, including Guest; Owner/Admin have no override. Reason: personal grouping must neither grant Channel access nor affect another Member's view.
 - #204 access loss hides but retains placement/order; regain restores it. Section/Channel deletion removes placements atomically; hidden Channel cleanup changes no exposed generation or notice. Reason: retain grouping without dangling placements or disclosing deletion after loss.
@@ -39,7 +41,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #142 Messages owns separate Channel/Topic read positions. The badge sums their counts (#148). Migration/grant triggers initialize existing scopes at committed seq, remove revoked rows and let later Topics inherit the grant baseline. First-fetch initialization would lose sends between grant and fetch.
 - #142 Serialize access per Organization (seed 142) so concurrent Member/Channel creation cannot miss positions. New visibility takes shared #135 through COMMIT. Mark-read rechecks access after W before locking Member/position. Revocation deletes positions and denies waiting updates. Only new access initializes. Continuous Channel/Topic access survives redundant grants and non-Guest Role changes (#144).
 - #142/#144 triggers mirror Channel visibility, including Roles and current public/private grants on reactivation; changes to visibility must update both predicates. The position/visibility equivalence test guards this duplication without reversing module ownership.
-- #142 Scan `messages_topic_seq` from read positions, skipping Topics already read through last_seq and excluding own sends. Cost is O(Channels + Topics + unread-range Messages), independent of read history. [Baseline](../measurements.md#channel-list-unread-ranges-142)
+- #519 A3: list counts read per-scope append counters and correction rows, never `messages`. Statement-level triggers on `messages` and BEFORE triggers on positions and Mentions maintain them. Ordinals are always computed, never taken from the writer, so old-image statements stay exact. Cost: list O(Channels + unread Topics + corrections in (read, as_of]); send one counter upsert per scope for total and sender; mark O(min(advance, tail)); Move and Delete O(changed rows). Rejected: range scans (grow with Unread), app-maintained counts (missed writers drift), per-Member counts (send fan-out O(Members)). Drift is clamped and logged; `message_counts_check` recounts.
 - #142 Missing positions suppress only that Channel's Unread at committed seq (Topic W), log list inconsistency, persist nothing and keep mark-read 404. A zero position marks old history unread and a list-wide 500 hides unaffected Channels.
 - #142 Accept serialized set-based work O(active Members + their Topics) on public Channel insert and O(visible Channels + Topics) on Member activation, with shared #135 until COMMIT. Remeasure larger Organizations.
 - #142 Backfill blocks sends and Member/grant writes under SHARE ROW EXCLUSIVE. Work scales with visible Member×Channel pairs plus Topics. A 5 s startup lock wait cap does not bound the write outage after acquisition.
@@ -80,8 +82,7 @@ Channels, Messages, Topics, Replies and Unread. Writing rules and the other part
 - #137 Topic names use 1..=60 Unicode scalars and reject empty/NUL/blank/surrounding Rust whitespace (400) without trimming. ASCII-only folded identity is per Channel and preserves the first display name. Channel validation differs.
 - #137 Atomically commit Topic create/join, Message, seq and summary under bounded send admission. Canonical intent includes normalized Topic name_key (null without Topic). Changes conflict with 409. Lost-response retries need no Topic UUID.
 - #137/#515 Resolve and release #135 admission/barrier before one fresh snapshot of auth, W, M and data so mutable rows cannot exceed server-selected W. Fixed W below M expires. Admission refusal is 503 + Retry-After.
-- #137 Keep prefix aggregation/index after the mixed recent/deep paging gate with concurrent sends. Remeasure near the projected 100 ms crossing (~649k Messages). [Conditions and results](../measurements.md#topic-projection-paging-137)
-- #137 Keep write-only Topic last_seq/message_count for #142/#143. Use Message aggregates for W-relative summaries because current cache values cannot reconstruct old W.
+- #758 Reuse the current Topic summary when its last creation is at/below W. At or above the mutation floor only Creates follow W, so an indexed position probe and suffix count reconstruct older summaries. For the selected Topics, subtract later Creates from #519 A3 Unread and bound counted Mentions at W. [Earlier prefix-aggregation baseline](../measurements.md#topic-projection-paging-137)
 
 ## Replies (#139, #140)
 - #139 Replies share send admission/barrier/transaction/publication and inherit committed parent's Topic and stable root. Scoped FKs and self-parent CHECK protect references, and committed immutable parents prevent cycles. Application writers/repairs must keep each Reply on its parent's root (or the parent itself), with null reply_root_id on roots and the committed parent id stored on each Reply. FKs alone cannot enforce this, so Move (#141) checks stored chain membership before rewriting a chain.

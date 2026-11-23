@@ -1,30 +1,52 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
+import { mkdirSync, copyFileSync, readFileSync, writeFileSync, chmodSync, renameSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isIP } from 'node:net';
-import { readConfig, quote, type Config } from './dms-formal-config.ts';
-import { execute, checked, transferImage, type Executor } from './dms-formal-exec.ts';
+import { readRunConfig, requireSeedDiagnostic, quote, type Config } from './dms-formal-config.ts';
+import { execute, checked, transferImage, CommandFailure, type Executor } from './dms-formal-exec.ts';
 import { requireHeadroom, GiB, summaryLimit } from './dms-formal-storage.ts';
 import { poolOverheadDesign, judgeOverhead, type OverheadArm } from './dms-formal-overhead.ts';
 import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
 import { scaledLoad, localLimits, localCopy } from './dms-formal-local.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
+import { failureDetails, writeDiagnostic } from './dms-formal-diagnostics.ts';
+import { redactSeedDbLogs, saveSeedDbLogs, seedFailure, type SeedStop } from './dms-formal-seed-diagnostic.ts';
+import { batchSummaryFailures, seedBatchSummary, seedShape, startSeedSamplers, type SeedSamplerRecord, type StopOptions } from './dms-formal-seed-samplers.ts';
+import { copyDockerVmLogs, dockerVmLogDirectory, hostCommandTimeoutMs, redactHostText, saveHostLog, startHostSampler, type HostSampleCoverage } from './dms-formal-host-records.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
-export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void };
+export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; vmLogDirectory?:string };
 const defaultRuntime:Runtime={exec:execute,transfer:transferImage,on:(s,f)=>process.on(s,f),off:(s,f)=>process.off(s,f)};
 export const cleanupReserveMs=10*60*1000;
+export const localCleanupMs=190_000;
+// The DB log save before cleanup fits the reserve's slack over the three sequential 190 s local cleanups (checked by a test).
+export const dbLogTimeoutMs=10_000;
+// Seed diagnostic collection after an interrupt or the deadline: the sampler stop, the host sampler stop and the DB
+// log all end within collectionSlackMs of it, so the three local cleanups keep their allowances (checked by a test).
+export const collectionSlackMs=cleanupReserveMs-3*localCleanupMs;
+export const seedDbLogMs={normal:30_000,fast:15_000};
+// The host sampler's last tick (two parallel commands) and the executor's teardown after an aborted sampler exec.
+export const hostStopMaxMs=hostCommandTimeoutMs+1_000, abortSettleMs=1_000;
+// Wall-clock end of the collection: the cleanup allowances before the deadline, and the slack after an interrupt.
+export const collectionEndMs=(deadline:number|undefined,interruptedAtMs:number|undefined)=>
+  Math.min(deadline===undefined?Infinity:deadline-3*localCleanupMs,interruptedAtMs===undefined?Infinity:interruptedAtMs+collectionSlackMs);
+export const samplerStopEndMs=(end:number)=>end-seedDbLogMs.fast-hostStopMaxMs-abortSettleMs;
+// The DB log of a run, with exit 3 only when Docker reports no such container; any other inspect failure (the daemon
+// refused or did not answer) exits 4, so it is recorded as failed, never as missing.
+export const dbLogCommand=(container:string)=>`sh -c 'out=$(docker container inspect "$1" 2>&1 >/dev/null) || { case "$out" in *"No such container"*|*"No such object"*) exit 3;; esac; exit 4; }; exec docker logs --timestamps "$1" 2>&1' db-log ${quote(container)}`;
 export const attemptBudgetMs=(mode:'formal'|'smoke')=>mode==='formal'?150*60*1000:30*60*1000;
 export const canStartAttempt=(config:Config,now=Date.now())=>config.deadline===undefined || config.deadline-now>=(config.pilot?(30+(config.pilotSeconds ?? 60)+90+120)*1000:attemptBudgetMs(config.mode))+cleanupReserveMs;
 export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   const overhead=config.scenario==='pool-overhead', local=config.target==='local', pilot=config.pilot===true;
   if(local && (config.scenario==='main'||config.scenario==='held200'||(!overhead && config.mode!=='smoke')))throw new Error('Local main/held200 acceptance scenarios are refused');
   if(pilot && (!local||!overhead))throw new Error('Pilot requires local pool-overhead');
-  const load=scaledLoad(config.loadScale),label=local?'MAC-RELATIVE':config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL';
+  const diagnostic=config.seedDiagnostic===true, baseline=diagnostic && config.seedBaseline===true;
+  const load=scaledLoad(config.loadScale ?? (diagnostic ? '1/25' : undefined)),label=diagnostic?'DIAGNOSTIC':local?'MAC-RELATIVE':config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL';
+  if(diagnostic)requireSeedDiagnostic(config,load.factor);
   if(!overhead && load.factor!=='1/1')throw new Error('Scale requires pool-overhead');
   const patchSha256=createHash('sha256').update(readFileSync(resolve(import.meta.dirname,'pool-overhead-baseline.patch'))).digest('hex');
   if(overhead && (config.mode!=='formal' || config.attempts!==3 || config.reviewedPatchSha256!==patchSha256))throw new Error('Pool overhead requires formal mode, three pairs and the reviewed patch SHA256');
   const design={...poolOverheadDesign,label,procedure:local?'MAC-RELATIVE: three pairs B/C, C/B, B/C; identical restored main fixture, scale and recorded resources; 300 s ramp, 300 s warm-up, 300 s judged core; all three roles share the developer Mac and Docker Desktop VM. Raw logs retained.':poolOverheadDesign.procedure};
-  const totalArms=pilot?1:overhead?6:config.attempts;
+  const totalArms=diagnostic?0:pilot?1:overhead?6:config.attempts;
   if(!isMixedScenario(config.scenario) && !overhead && config.scenario!=='smoke') {
     mkdirSync(config.output,{mode:0o700});
     const summary={scenario:config.scenario,label,status:'NOT EVALUATED',acceptance:false,reason:'Deferred scenario; not implemented.',...(config.scenario==='pool-overhead'?{design}:{})};
@@ -34,19 +56,45 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   const id=`dm-formal-${randomUUID()}`, root=`${local?realpathSync('/tmp'):'/tmp'}/${id}`, checkout=resolve(import.meta.dirname,'..');
   const roleRoot=(host:string)=>local?root+'/'+host:root;
   const json=(name:string,value:unknown)=>{const path=`${config.output}/${name}`,temp=path+'.tmp';writeFileSync(temp,JSON.stringify(Array.isArray(value)?value:{scenario:config.scenario,...value as object,label},null,2),{mode:0o600});renameSync(temp,path);};
-  let phase='initializing', attempt=0, lastError:string|null=null, interrupted=false;
+  let seedStop:SeedStop|undefined;
+  let phase='initializing', attempt=0, lastError:string|null=null, interrupted=false, interruptedAtMs:number|undefined;
   const start=new Date().toISOString();
   let operation='initializing',outcome='running',infrastructureFailure=false,statusWriteFailed=false;
-  const status=()=>{try {json('status.json',{id,label,phase,operation,outcome,attempt:Math.min(attempt,totalArms),started:start,updated:new Date().toISOString(),lastError});}catch {statusWriteFailed=true;console.error('Status write failed; cleanup remains active');}};
+  const status=()=>{try {json('status.json',{id,label,phase,operation,outcome,attempt:Math.min(attempt,totalArms),started:start,updated:new Date().toISOString(),lastError,...(diagnostic?{status:'NOT EVALUATED',seedStop}:{})});}catch {statusWriteFailed=true;console.error('Status write failed; cleanup remains active');}};
   const abort = new AbortController();
   const bounded=(timeout:number)=>phase==='cleanup'||config.deadline===undefined?timeout:Math.max(1000,Math.min(timeout,config.deadline-Date.now()-cleanupReserveMs));
   const hosts=[config.app,config.db,config.generator];
   const remote=(host:string,command:string,timeout=120000,log?:string)=>checked(runtime.exec,{program:local?'sh':'ssh',args:local?['-c',command.replaceAll(root,roleRoot(host))]:[...sshOptions,host,command],timeout:bounded(timeout),log,signal:phase==='cleanup' ? undefined : abort.signal});
   const invocation=(op:string,n:number,epoch:number)=>`env NODE_EXTRA_CA_CERTS=${quote(root+'/ca.crt')} ${local?quote(process.execPath):'node'} ${quote(root+'/harness/load/dms-formal-host.ts')} ${quote(op)} ${n} ${epoch}`;
-  const worker=(host:string,op:string,n=attempt,epoch=0,timeout=120000)=>{operation=op;status();const limit=bounded(timeout);return remote(host,local?invocation(op,n,epoch):`timeout --signal=KILL ${Math.max(1,Math.ceil(limit/1000)-5)}s sh -c 'export DM_FORMAL_OWNED_GROUP=$PPID; exec "$@"' dm-worker ${invocation(op,n,epoch)}`,limit,`${config.output}/host-${hosts.indexOf(host)}-${op}-${n}.log`);};
+  const worker=async(host:string,op:string,n=attempt,epoch=0,timeout=120000)=>{
+    operation=op;status();
+    const limit=bounded(timeout),path=`${config.output}/host-${hosts.indexOf(host)}-${op}-${n}`;
+    try {
+      return await remote(host,local?invocation(op,n,epoch):`timeout --signal=KILL ${Math.max(1,Math.ceil(limit/1000)-5)}s sh -c 'export DM_FORMAL_OWNED_GROUP=$PPID; exec "$@"' dm-worker ${invocation(op,n,epoch)}`,limit,path+'.log');
+    } catch(error) {
+      // A killed or unreachable worker cannot write its own failure record.
+      writeDiagnostic(line=>writeFileSync(path+'-invocation-failure.json',line,{mode:0o600}),
+        {event:'worker-invocation-failure',step:op,attempt:n,...failureDetails(error)});
+      throw error;
+    }
+  };
+  // Every run keeps the redacted DB log before cleanup removes the container, bounded by dbLogTimeoutMs (also on the
+  // remote host) so container removal keeps its allowances; a failed or timed-out save is recorded and changes no result.
+  const saveRunDbLog=async()=>{
+    try {
+      const logs=dbLogCommand(id+'-db-1');
+      const raw=await remote(config.db,local?logs:`timeout --signal=KILL ${dbLogTimeoutMs/1000-2}s ${logs}`,dbLogTimeoutMs);
+      writeFileSync(`${config.output}/db.log`,redactSeedDbLogs(raw)+'\n',{mode:0o600});
+    } catch(error) {
+      const code=error instanceof CommandFailure?error.exitCode:undefined;
+      try {json('db-log-collection.json',{collection:'db.log',status:code===3?'missing':'failed',
+        reason:code===3?'The DB container did not exist':code===4?'docker container inspect failed for another reason than a missing container':'docker logs failed or timed out with the DB container present'});} catch {/* Output directory unavailable. */}
+    }
+  };
   let cleanupPromise:Promise<void>|undefined;
   const cleanup=()=>cleanupPromise ??= (async()=>{
     phase='cleanup';status();
+    if(!diagnostic)await saveRunDbLog();
     // Local roles share one daemon: cleanup is sequential to avoid racing the
     // same run-owned containers, networks, volumes and image tags.
     const localCleanup=async()=>{
@@ -63,25 +111,29 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     json('cleanup.json',failures.map((result,index)=>({role:['app','db','generator'][index],ok:result.status==='fulfilled',retained:result.status==='fulfilled'?'Private scratch/raw evidence and shared base images/cache (if bootstrapped)':'Removal failed; inspect host cleanup log'})));
     if (failures.some(result=>result.status==='rejected')) throw new Error('Remote cleanup incomplete; see cleanup.json and private state');
   })();
-  const signal=()=>{interrupted=true;abort.abort();lastError='Interrupted by signal';status();void cleanup().catch(()=>{});};
+  const signal=()=>{interrupted=true;interruptedAtMs ??= Date.now();abort.abort();lastError='Interrupted by signal';status();if(!diagnostic || phase!=='seed')void cleanup().catch(()=>{});};
   // Registered before the first remote directory, image, container or volume exists.
   runtime.on('SIGINT',signal);runtime.on('SIGTERM',signal);
   const heartbeat=setInterval(status,15000);
   const deadlineTimer=config.deadline===undefined?undefined:setTimeout(()=>{lastError='Configured deadline cleanup reserve reached';signal();},Math.max(0,config.deadline-Date.now()-cleanupReserveMs));
   const checkpoint=()=>{if(interrupted)throw new Error('Interrupted');};
   const change=(next:string)=>{checkpoint();phase=next;status();console.log(`${label} ${config.scenario}: ${phase}${attempt ? ` (attempt ${attempt})` : ''}`);};
+  // cp and scp can print home paths and run paths; transfer.log keeps only the redacted text.
+  let runSecrets:string[]=[];
+  const transferRedact=(text:string)=>redactHostText(text,{secrets:runSecrets});
   const artifact=async(host:string,path:string,destination:string,raw=false)=>{
     operation='transfer:'+path;status();
     if(!raw) { const size=local?Number(await checked(runtime.exec,{program:process.execPath,args:[resolve(import.meta.dirname,'dms-formal-local.ts'),'size',roleRoot(host)+'/'+path],timeout:bounded(10000),signal:abort.signal})):Number(await remote(host,`du -sb ${quote(root+'/'+path)} | cut -f1`,10000));if(!Number.isFinite(size)||size>summaryLimit)throw new Error('Artifact exceeds bounded 32 MiB transfer'); }
-    if(local) {await localCopy(runtime.exec,roleRoot(host)+'/'+path,lstatSync(roleRoot(host)+'/'+path).isDirectory()?destination+'/'+path.split('/').at(-1):destination,bounded(raw?3600000:120000),abort.signal,`${config.output}/transfer.log`);return;}
+    if(local) {await localCopy(runtime.exec,roleRoot(host)+'/'+path,lstatSync(roleRoot(host)+'/'+path).isDirectory()?destination+'/'+path.split('/').at(-1):destination,bounded(raw?3600000:120000),abort.signal,`${config.output}/transfer.log`,transferRedact);return;}
     // scp is bounded, uses SSH config aliases, and never interpolates credentials.
-    await checked(runtime.exec,{program:'scp',args:[...sshOptions,'-r',`${host}:${root}/${path}`,destination],timeout:bounded(raw?3600000:120000),signal:abort.signal,log:`${config.output}/transfer.log`});
+    await checked(runtime.exec,{program:'scp',args:[...sshOptions,'-r',`${host}:${root}/${path}`,destination],timeout:bounded(raw?3600000:120000),signal:abort.signal,log:`${config.output}/transfer.log`,redactLog:transferRedact});
   };
-  const upload=async(host:string,source:string,dest:string)=>{if(local){await localCopy(runtime.exec,source,roleRoot(host)+'/'+dest,bounded(600000),abort.signal,`${config.output}/transfer.log`);return;}return checked(runtime.exec,{program:'scp',args:[...sshOptions,source,`${host}:${root}/${dest}`],timeout:600000,signal:abort.signal,log:`${config.output}/transfer.log`});};
+  const upload=async(host:string,source:string,dest:string)=>{if(local){await localCopy(runtime.exec,source,roleRoot(host)+'/'+dest,bounded(600000),abort.signal,`${config.output}/transfer.log`,transferRedact);return;}return checked(runtime.exec,{program:'scp',args:[...sshOptions,source,`${host}:${root}/${dest}`],timeout:600000,signal:abort.signal,log:`${config.output}/transfer.log`,redactLog:transferRedact});};
   const results:unknown[]=[];
   try {
     mkdirSync(config.output,{mode:0o700});
-    if(overhead)json('summary.json',{scenario:'pool-overhead',status:'NOT EVALUATED',acceptance:false,design});
+    if(diagnostic)json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[]});
+    else if(overhead)json('summary.json',{scenario:'pool-overhead',status:'NOT EVALUATED',acceptance:false,design});
     requireHeadroom(config.output,2*GiB);
     json('metadata.json',{id,mode:config.mode,label,load,pilot,limits:local?(config.limits ?? localLimits):undefined,sha:config.sha,acceptance:false});
     change('preflight');
@@ -93,16 +145,21 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     const [appAddress,dbAddress]=local?['localhost','db']:await Promise.all([address(config.app),address(config.db)]);
     if(!local && isIP(appAddress))throw new Error('Remote app SSH HostName must be a DNS hostname: HTTPS clients omit TLS SNI for IP addresses, which Caddy strict_sni_host rejects');
     const pin=(file:string,pattern:RegExp)=>{const value=pattern.exec(readFileSync(`${checkout}/${file}`,'utf8'))?.[1];if(!value)throw new Error('Missing repository image pin');return value;};
-    const common={id,overhead,pilot,pilotImage:config.pilotImage,pilotSeconds:config.pilotSeconds ?? 60,target:config.target ?? 'ssh',loadScale:load.factor,load,limits:local?(config.limits ?? localLimits):undefined,sourceCheckout:checkout,localRoot:root,label,patchSha256,scenario:overhead||config.scenario==='smoke'?'main':config.scenario,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:totalArms,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
-    json('private-state.json',{...common,hosts});
+    const common={...(diagnostic?{seedDiagnostic:true}:{}),...(baseline?{seedBaseline:true}:{}),id,overhead,pilot,pilotImage:config.pilotImage,pilotSeconds:config.pilotSeconds ?? 60,target:config.target ?? 'ssh',loadScale:load.factor,load,limits:local?(config.limits ?? localLimits):undefined,sourceCheckout:checkout,localRoot:root,label,patchSha256,scenario:overhead||config.scenario==='smoke'?'main':config.scenario,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:totalArms,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
+    runSecrets=[common.dbPassword,common.appPassword,common.setupToken];
+    if(!diagnostic)json('private-state.json',{...common,hosts});
     await checked(runtime.exec,{program:'tar',args:['--exclude=node_modules','-czf',`${config.output}/harness.tgz`,'-C',checkout,'load','web/src','deploy/Caddyfile'],timeout:120000});
     chmodSync(`${config.output}/harness.tgz`,0o600);
     for(const [index,host] of hosts.entries()) {
       checkpoint();
       await remote(host,`umask 077; mkdir ${local?'-p ':''}${quote(root)}; mkdir ${quote(root+'/harness')}`);
       await upload(host,`${config.output}/harness.tgz`,'harness.tgz');
-      json('host-state.json',{...common,role:['app','db','generator'][index]});
-      await upload(host,`${config.output}/host-state.json`,'state.json');
+      const hostState={...common,role:['app','db','generator'][index]};
+      if(diagnostic)writeFileSync(roleRoot(host)+'/state.json',JSON.stringify(hostState),{mode:0o600});
+      else {
+        json('host-state.json',hostState);
+        await upload(host,`${config.output}/host-state.json`,'state.json');
+      }
       await remote(host,`tar -xzf ${quote(root+'/harness.tgz')} -C ${quote(root+'/harness')}`);
       await worker(host,'preflight');
       await artifact(host,'preflight.json',`${config.output}/preflight-${index}.json`);
@@ -115,7 +172,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       checkpoint();await runtime.transfer([...sshOptions,config.app,`timeout --signal=KILL 600s docker save ${quote(id+':release')}`],[...sshOptions,host,'timeout --signal=KILL 600s docker load'],600000,abort.signal);
     }
     change('services');await worker(config.generator,'prepare-generator',0,0,720000);await worker(config.db,'database',0,0,900000);await worker(config.app,'app',0,0,300000);
-    if(overhead) {
+    if(overhead && !diagnostic) {
       if(!pilot) {
         await artifact(config.app,'overhead-images.json',`${config.output}/overhead-images.json`);
         await upload(config.generator,`${config.output}/overhead-images.json`,'overhead-images.json');
@@ -123,13 +180,105 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       await artifact(config.app,'source-toolchains.json',`${config.output}/source-toolchains.json`);
       await upload(config.generator,`${config.output}/source-toolchains.json`,'source-toolchains.json');
     }
-    await artifact(config.app,'image.json',`${config.output}/image.json`);
-    const imageId=JSON.parse(readFileSync(`${config.output}/image.json`,'utf8'))[0].Id;
-    await artifact(config.db,'image.json',`${config.output}/db-image.json`);
-    if(JSON.parse(readFileSync(`${config.output}/db-image.json`,'utf8'))[0].Id!==imageId)throw new Error('Transferred image digest mismatch');
-    await artifact(config.app,'ca.crt',`${config.output}/ca.crt`);
-    for(const host of [config.db,config.generator])await upload(host,`${config.output}/ca.crt`,'ca.crt');
-    change('seed');await worker(config.db,'seed',0,0,90000000);
+    if(!diagnostic)await artifact(config.app,'image.json',`${config.output}/image.json`);
+    const imageId=JSON.parse(readFileSync(diagnostic?roleRoot(config.app)+'/image.json':`${config.output}/image.json`,'utf8'))[0].Id;
+    if(!diagnostic)await artifact(config.db,'image.json',`${config.output}/db-image.json`);
+    if(JSON.parse(readFileSync(diagnostic?roleRoot(config.db)+'/image.json':`${config.output}/db-image.json`,'utf8'))[0].Id!==imageId)throw new Error('Transferred image digest mismatch');
+    const ca=diagnostic?roleRoot(config.app)+'/ca.crt':`${config.output}/ca.crt`;
+    if(!diagnostic)await artifact(config.app,'ca.crt',ca);
+    for(const host of [config.db,config.generator])await upload(host,ca,'ca.crt');
+    change('seed');
+    if(diagnostic) {
+      operation='seed';
+      const directory=`${config.output}/formal`, scratch=roleRoot(config.db)+'/formal', container=id+'-db-1';
+      const arm=baseline?'baseline':'instrumented';
+      // The run conditions, compared between the arms by dms-formal-seed-effect.ts (the machine as a digest, not its name).
+      // The seed diagnostic is pool-overhead only, which seeds the main fixture.
+      const conditions={sha:config.sha,machine:createHash('sha256').update(String(identities[0])).digest('hex').slice(0,16),load:load.factor,limits:common.limits,scenario:common.scenario,mode:config.mode,
+        postgres:common.postgres,imageDigest:imageId,shape:seedShape('main'),
+        harnessSha256:createHash('sha256').update(readFileSync(`${config.output}/harness.tgz`)).digest('hex')};
+      const startedAtMs=Date.now();
+      let stopSamplers:((options?:StopOptions)=>Promise<SeedSamplerRecord>)|undefined, stopHost:(()=>Promise<HostSampleCoverage>)|undefined, seedError:unknown;
+      let samplers:SeedSamplerRecord|undefined, host:HostSampleCoverage|undefined;
+      const collectionFailures:string[]=[];
+      const redact=(text:string)=>redactHostText(text,{secrets:[common.dbPassword,common.appPassword,common.setupToken]});
+      try {
+        mkdirSync(directory,{mode:0o700});
+        // The baseline arm runs no sampler: only the seed's own timing rows are recorded.
+        if(!baseline) {
+          // Raw sampler output stays in the private run scratch, outside the artifact directory.
+          const raw=roleRoot(config.db)+'/sampler-raw';mkdirSync(raw,{recursive:true,mode:0o700});
+          stopSamplers=startSeedSamplers(runtime.exec,container,{kernel:directory+'/db-kernel.txt',postgres:directory+'/db-samples.txt'},raw,redact);
+          stopHost=startHostSampler(runtime.exec,directory+'/host-samples.jsonl');
+        }
+        await worker(config.db,'seed',0,0,90000000);
+        checkpoint();
+      } catch(error) {
+        seedError=error;
+        try {seedStop=JSON.parse(readFileSync(scratch+'/seed-stop.json','utf8')) as SeedStop;}
+        catch {seedStop=seedFailure(startedAtMs,Date.now());}
+        status();
+      }
+      const endedAtMs=Date.now();
+      // After an interrupt or the deadline, also one that arrives during the stop, collection is cut short so
+      // container removal keeps its allowances: every step ends by collectionEnd().
+      const collectionEnd=()=>collectionEndMs(config.deadline,interruptedAtMs);
+      if(!baseline) {
+        try {samplers=await stopSamplers?.({hurry:abort.signal,untilMs:()=>samplerStopEndMs(collectionEnd())});} catch {samplers=undefined;}
+        try {host=await stopHost?.();} catch {host=undefined;}
+        if(!samplers)collectionFailures.push('db-kernel.txt','db-samples.txt');
+        else collectionFailures.push(...samplers.failures.map(reason=>(reason.startsWith('kernel')?'db-kernel.txt: ':'db-samples.txt: ')+reason));
+        if(!host?.complete)collectionFailures.push('host-samples.jsonl');
+      }
+      const dbLogMs=Math.min(interrupted?seedDbLogMs.fast:seedDbLogMs.normal,collectionEnd()-Date.now());
+      let dbLog:string|undefined;
+      if(dbLogMs<1_000)collectionFailures.push('db.log: skipped, no time left before cleanup');
+      else try {await saveSeedDbLogs(runtime.exec,container,directory+'/db.log',dbLogMs);dbLog=readFileSync(directory+'/db.log','utf8');}
+      catch {collectionFailures.push('db.log');}
+      let batches:Omit<ReturnType<typeof seedBatchSummary>,'perBatch'>|null=null;
+      try {
+        copyFileSync(scratch+'/seed-timing.jsonl',directory+'/seed-timing.jsonl');
+        const {perBatch,...summary}=seedBatchSummary(readFileSync(directory+'/seed-timing.jsonl','utf8'),dbLog,{shape:conditions.shape,stop:seedStop,arm});batches=summary;
+        if(!baseline)writeFileSync(directory+'/seed-batch-server.jsonl',perBatch.map(row=>JSON.stringify(row)+'\n').join(''),{mode:0o600});
+      } catch {collectionFailures.push('seed-timing.jsonl');}
+      // Every expected row is present, in order and in full (batch 0 included); in the instrumented arm each batch also
+      // carries its clock rows and its complete server-reported time. Anything else is a collection failure.
+      if(batches)collectionFailures.push(...batchSummaryFailures(batches));
+      // Right after the seed, before the Docker VM logs rotate, bounded by the collection end. Missing, partial, failed
+      // or skipped copies are recorded.
+      const vmLogs=copyDockerVmLogs(runtime.vmLogDirectory ?? dockerVmLogDirectory(),directory+'/docker-vm',startedAtMs,redact,{untilMs:collectionEnd()});
+      const hostLog=await saveHostLog(runtime.exec,directory+'/host.log',startedAtMs,endedAtMs,redact,{timeoutMs:bounded(600000),signal:abort.signal,skip:interrupted});
+      for(const [name,record] of [['docker-vm',vmLogs],['host.log',hostLog]] as const)if(record.status!=='complete')collectionFailures.push(`${name}: ${record.status}`);
+      const overhead={
+        instrumentationEffect:baseline?'baseline-arm':'unevaluated',
+        instrumentationEffectNote:baseline
+          ?'This arm runs the seed with every instrumentation off (formal seed and DB command, no samplers). dms-formal-seed-effect.ts compares its batch times with an instrumented arm under the same conditions.'
+          :'Every figure here is measured with the instrumentation on. Its effect on the seed is evaluated only by the matched comparison with a baseline arm (--seed-diagnostic-baseline, same conditions) in dms-formal-seed-effect.ts.',
+        dbClockSpanNote:'medianDbClockSpanMs is the server clock span between the two clock rows of each batch: PostgreSQL time plus any psql client time between the statements (descheduling, pipe I/O). It is an upper bound on PostgreSQL time, not PostgreSQL time alone.',
+        serverNote:'medianServerMs is the server-reported time of each batch: the summed log_duration of its session statements between the clock rows, joined from db.log by backend PID (per batch in seed-batch-server.jsonl). A gap between it and the clock span is time outside statement execution. log_duration is set for the diagnostic batch sessions only and adds one log line per statement.',
+        dockerExecs:samplers?.dockerExecs ?? null,kernelLoopCpuSeconds:samplers?.kernel?.loopCpuSeconds ?? null,
+        postgresLoopCpuSeconds:samplers?.postgres?.loopCpuSeconds ?? null,postgresSnapshotQueryMs:samplers?.postgres?.queryMs ?? null,
+        hostCommands:host?.commands ?? null,hostSampleMs:host?.sampleMs ?? null,seedSeconds:(endedAtMs-startedAtMs)/1000,
+        recorderMs:batches?.recorderMs ?? null,batches};
+      json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[],load,arm,conditions,
+        infrastructureFailure:interrupted || !!seedStop || collectionFailures.length>0,seedStop,collectionFailures,
+        collectionMissing:samplers?.missing ?? [],samplers:samplers??null,hostSamples:host??null,vmLogs,hostLog,overhead});
+      if(seedStop)throw seedError;
+      checkpoint();
+      if(collectionFailures.length)throw new Error('Seed diagnostic record collection failed');
+      return {scenario:config.scenario,acceptance:false,infrastructureFailure:statusWriteFailed,attempts:results};
+    }
+    try {await worker(config.db,'seed',0,0,90000000);}
+    catch(error) {
+      try {
+        mkdirSync(`${config.output}/formal`,{mode:0o700});
+        await artifact(config.db,'formal/seed-timing.jsonl',`${config.output}/formal/seed-timing.jsonl`);
+      } catch {
+        json('seed-timing-transfer-failure.json',{remoteRoot:root,operation:'transfer:formal/seed-timing.jsonl'});
+      }
+      operation='seed';
+      throw error;
+    }
     await artifact(config.db,'formal',config.output);await artifact(config.db,'deep.json',`${config.output}/deep.json`);
     // Mode 0600 seeds travel through bounded local copies or authenticated SSH.
     for(const file of ['deep.json',...Array.from({length:config.mode==='smoke'?1:10},(_,i)=>`formal/org-${i}.json`)]) {
@@ -191,13 +340,18 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       try {await artifact(host,'evidence.tgz',`${destination}/evidence.tgz`);}catch {infrastructureFailure=true;json(`host-${index}/transfer-failure.json`,{operation:'retain',remoteRoot:root});}
     }
     json('summary.json',{...(overhead&&!pilot?{status:judgeOverhead(results as OverheadArm[]).status,overhead:judgeOverhead(results as OverheadArm[])}:{}),label,acceptance:false,attempts:results,deferredScenarios,requiredScenarios:['main','held200'],scenarioAcceptance:scenarioAcceptance(results.map((row)=>({...row as {attempt:number;acceptance:boolean},scenario:config.scenario,mode:config.mode})),deferredScenarios),reason:'Acceptance requires main and held200, each with three consecutive passing formal attempts, and all deferred scenarios; missing evidence is NOT EVALUATED.'});
-  } catch(error) {lastError=error instanceof Error?error.message:'Runner failed';json('failure.json',{label,phase,attempt,lastError,acceptance:false});throw error;}
+  } catch(error) {
+    lastError=diagnostic?failureDetails(error).message:error instanceof Error?error.message:'Runner failed';
+    json('failure.json',{label,phase,attempt,lastError,acceptance:false,...(diagnostic?{status:'NOT EVALUATED',seedStop}:{})});
+    if(phase==='seed' && !diagnostic)json('summary.json',{status:'NOT EVALUATED',acceptance:false,infrastructureFailure:true,attempts:results,phase,reason:lastError,...(overhead?{design}:{})});
+    throw error;
+  }
   finally {
     try {await cleanup();}catch(error){lastError='Remote cleanup incomplete';throw error;}finally {clearInterval(heartbeat);clearTimeout(deadlineTimer);runtime.off('SIGINT',signal);runtime.off('SIGTERM',signal);phase=lastError?'failed':'complete';outcome=lastError?'infrastructure-failed':'complete';status();}
   }
   return {scenario:config.scenario,acceptance:false,infrastructureFailure:infrastructureFailure||statusWriteFailed,attempts:results};
 }
 if(process.argv[1]===import.meta.filename) {
-  try {const config=readConfig(process.argv[2]||'',resolve(import.meta.dirname,'..'),process.argv[3]==='--pilot');run(config).then(result=>{process.exitCode=result.infrastructureFailure?1:config.pilot?(result.attempts[0] as {sustained?:boolean})?.sustained?0:2:2;}).catch(()=>{console.error('DM formal run failed; inspect private status.json and failure.json');process.exitCode=1;});}
+  try {const config=readRunConfig(process.argv.slice(2),resolve(import.meta.dirname,'..'));run(config).then(result=>{process.exitCode=result.infrastructureFailure?1:config.seedDiagnostic?0:config.pilot?(result.attempts[0] as {sustained?:boolean})?.sustained?0:2:2;}).catch(()=>{console.error('DM formal run failed; inspect private status.json and failure.json');process.exitCode=1;});}
   catch(error){console.error(error instanceof Error?error.message:'Invalid config');process.exitCode=1;}
 }

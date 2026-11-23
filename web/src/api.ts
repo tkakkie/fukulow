@@ -18,7 +18,64 @@ export type SignInRequest = components['schemas']['SignInRequest']
 
 /** Result of an API call. `network` covers fetch failures and 5xx, including admission 503
  * (retryable with the same client_message_id, never a definite send refusal or "signed out"). */
-export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; retryAfterMs?: number }
+export type Result<T> = { ok: true; data: T } | { ok: false; kind: 'http'; status: number; error?: string; retryAfterMs?: number } | { ok: false; kind: 'network'; error?: string; retryAfterMs?: number }
+
+// Bound 5xx body reads (used only when Retry-After is absent) so stalled responses cannot hang callers.
+const SERVER_ERROR_BODY_TIMEOUT_MS = 1000
+
+function cancelResponseBody(res: Response): void {
+  try {
+    void res.body?.cancel().catch(() => {})
+  } catch { /* Ignore body cancel failures on locked or closed streams. */ }
+}
+
+async function readServerErrorCode(res: Response, signal?: AbortSignal | null): Promise<string | undefined> {
+  if (!res.body) return undefined
+  if (signal?.aborted) {
+    cancelResponseBody(res)
+    return undefined
+  }
+  let reader: ReadableStreamDefaultReader<Uint8Array>
+  try {
+    reader = res.body.getReader()
+  } catch {
+    return undefined
+  }
+  let stopped = false
+  const stop = () => {
+    if (stopped) return
+    stopped = true
+    try { void reader.cancel().catch(() => {}) } catch { /* Ignore cancel failures on closed readers. */ }
+  }
+  const timer = setTimeout(stop, SERVER_ERROR_BODY_TIMEOUT_MS)
+  signal?.addEventListener('abort', stop, { once: true })
+  try {
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (stopped) return undefined
+      if (done) break
+      chunks.push(value)
+      total += value.byteLength
+    }
+    if (total === 0) return undefined
+    const bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Partial<components['schemas']['ErrorBody']> | null
+    return typeof parsed?.error === 'string' ? parsed.error : undefined
+  } catch { /* Non-JSON, empty, or cancelled 5xx body leaves error absent. */
+    return undefined
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', stop)
+    try { reader.releaseLock() } catch { /* Ignore lock release failures. */ }
+  }
+}
 
 async function call<T>(
   fetchFn: typeof fetch,
@@ -32,8 +89,13 @@ async function call<T>(
     const res = await fetchFn(path, { credentials: 'same-origin', ...init })
     if (res.status >= 500) {
       const header = res.headers.get('Retry-After')
-      const delay = header === null ? NaN : /^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()
-      return { ok: false, kind: 'network', ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}) }
+      if (header !== null) {
+        cancelResponseBody(res)
+        const delay = /^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()
+        return { ok: false, kind: 'network', ...(Number.isFinite(delay) ? { retryAfterMs: Math.max(0, delay) } : {}) }
+      }
+      const error = await readServerErrorCode(res, init.signal)
+      return { ok: false, kind: 'network', ...(error === undefined ? {} : { error }) }
     }
     if (!res.ok) {
       let error: string | undefined
@@ -101,6 +163,27 @@ export const listChannels = (organizationId: string, f: typeof fetch = fetch, si
 
 export const createChannel = (organizationId: string, body: CreateChannelRequest, f: typeof fetch = fetch) =>
   call<Channel>(f, `${orgPath(organizationId)}/channels`, json(body), true)
+
+export type { ChannelOrder, ChannelPlacement, CreatedSection, CreateSection, MoveChannel, RenameSection, SectionLayout, SectionOrder } from './api-schema'
+const sectionsPath = (org: string) => `${orgPath(org)}/me/sections`
+const placementPath = (org: string, channel: string) => `${orgPath(org)}/me/channel-sections/${encodeURIComponent(channel)}`
+
+export const getSectionLayout = (org: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['SectionLayout']>(f, sectionsPath(org), { cache: 'no-store', signal }, true, 200)
+export const getChannelPlacement = (org: string, channel: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['ChannelPlacement']>(f, placementPath(org, channel), { cache: 'no-store', signal }, true, 200)
+export const createSection = (org: string, body: components['schemas']['CreateSection'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<components['schemas']['CreatedSection']>(f, sectionsPath(org), { ...json(body), signal }, true)
+export const renameSection = (org: string, id: string, body: components['schemas']['RenameSection'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, `${sectionsPath(org)}/${encodeURIComponent(id)}`, { ...json(body), method: 'PATCH', signal }, false, 204)
+export const reorderSections = (org: string, body: components['schemas']['SectionOrder'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, `${sectionsPath(org)}/order`, { ...json(body), method: 'PUT', signal }, false, 204)
+export const moveChannel = (org: string, channel: string, body: components['schemas']['MoveChannel'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, placementPath(org, channel), { ...json(body), method: 'PUT', signal }, false, 204)
+export const reorderSectionChannels = (org: string, body: components['schemas']['ChannelOrder'], f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, `${orgPath(org)}/me/section-channel-order`, { ...json(body), method: 'PUT', signal }, false, 204)
+export const deleteSection = (org: string, id: string, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<undefined>(f, `${sectionsPath(org)}/${encodeURIComponent(id)}`, { method: 'DELETE', signal }, false, 204)
 
 export type { Dm, DmChanges, DmDiscovery, DmList, OpenDmRequest } from './api-schema'
 export type DmListQuery = NonNullable<import('./api-schema').operations['list_dms']['parameters']['query']>
@@ -240,3 +323,9 @@ export const listInvites = (org: string, cursor?: string, f: typeof fetch = fetc
   call<InvitePage>(f, `${orgPath(org)}/invites${querySuffix({ cursor })}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 export const revokeInvite = (org: string, id: string, f: typeof fetch = fetch) =>
   call<undefined>(f, `${orgPath(org)}/invites/${encodeURIComponent(id)}`, { method: 'DELETE' }, false, 204)
+
+export type SearchHit = components['schemas']['SearchHit']
+export type SearchPage = components['schemas']['SearchPage']
+export type SearchQuery = import('./api-schema').operations['search']['parameters']['query']
+export const searchMessages = (organizationId: string, query: SearchQuery, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<SearchPage>(f, `${orgPath(organizationId)}/search${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)

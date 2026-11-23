@@ -397,6 +397,63 @@ async fn private_channel_access_all_roles(pool: PgPool) {
 }
 
 #[fukulow_test::test]
+async fn redundant_public_grant_removal_preserves_layout(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let public = f.channel("Public", "public").await;
+    let anchor = f.channel("Anchor", "public").await;
+    let channel_path = format!("/channels/{public}");
+    let members_path = format!("{channel_path}/members");
+    let has_grant = async |id: Uuid| {
+        f.get(&members_path).await["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|member| member["id"] == json!(id))
+    };
+    for role in ["owner", "admin", "member"] {
+        let id = Uuid::new_v4();
+        let token = member(&f.pools.admin, f.owner.org, id, role).await;
+        let send = async |method: &str, suffix: &str, input| {
+            as_member(&f, &token, method, suffix, input).await
+        };
+        let section = Uuid::new_v4();
+        expected(
+            send("POST", SECTIONS, json!({"id":section,"name":"Mine"})).await,
+            StatusCode::CREATED,
+        )
+        .await;
+        grant(&f, public, id, true).await;
+        assert!(has_grant(id).await, "{role}");
+        for channel in [anchor, public] {
+            expected(
+                send(
+                    "PUT",
+                    &placement_path(channel),
+                    json!({"section_id":section}),
+                )
+                .await,
+                StatusCode::NO_CONTENT,
+            )
+            .await;
+        }
+        let before = layout_as(&f, &token).await;
+        assert_eq!(
+            before["sections"][0]["channel_ids"],
+            json!([anchor, public])
+        );
+
+        grant(&f, public, id, false).await;
+        assert!(!has_grant(id).await, "{role}");
+        let read = send("GET", &channel_path, Value::Null).await;
+        assert_eq!(
+            (layout_as(&f, &token).await, read.status()),
+            (before, StatusCode::OK),
+            "{role}"
+        );
+    }
+}
+
+#[fukulow_test::test]
 async fn regained_slots_and_reactivation(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let id = Uuid::new_v4();

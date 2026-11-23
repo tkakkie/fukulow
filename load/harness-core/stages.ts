@@ -1,0 +1,54 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+// A failure before the first measured sample is a setup failure: the harness may be fixed and the
+// job rerun once the same night. Once sampling starts, any failure is a result and never reruns.
+export type Mode = 'smoke' | 'rehearsal' | 'recorded';
+export type Outcome = 'success' | 'setup-failure' | 'result-failure' | 'interrupted';
+
+export function outcome(o: { failed: boolean; interrupted: boolean; sampling: boolean }): Outcome {
+  if (o.interrupted) return 'interrupted';
+  if (!o.failed) return 'success';
+  return o.sampling ? 'result-failure' : 'setup-failure';
+}
+
+export function modeOf(flags: { smoke?: boolean; rehearsal?: boolean; recorded?: boolean }): Mode {
+  const set = (['smoke', 'rehearsal', 'recorded'] as const).filter(name => flags[name]);
+  if (set.length !== 1) throw new Error('Pass exactly one of --smoke, --rehearsal or --recorded');
+  return set[0];
+}
+
+// runId (optional) is written into status.json so a reader can bind it to the run's other artifacts.
+export function stages(out: string, mode: Mode, runId?: string) {
+  let stage = 'initialization';
+  let sampling = false;
+  const complete: string[] = [];
+  return {
+    get stage() { return stage; },
+    get sampling() { return sampling; },
+    enter(name: string) { stage = name; console.log(`${name}`); },
+    // Call immediately before the first measured sample is taken.
+    startSampling() { sampling = true; },
+    done(name: string) { complete.push(name); },
+    write(o: { failed: boolean; interrupted: boolean; summaryFailed?: boolean; invalidEvidence?: boolean }) {
+      const result = outcome({ ...o, sampling });
+      // After sampling, recorded failures can be evidence unless the caller flags invalid data.
+      const evidence = !o.invalidEvidence && mode === 'recorded' && (result === 'success' || result === 'result-failure');
+      const status = { ...(runId === undefined ? {} : { runId }), mode, evidence, outcome: result, sampling, lastStage: stage, complete,
+        summaryFailed: o.summaryFailed ?? false, finished: new Date().toISOString() };
+      writeFileSync(join(out, 'status.json'), JSON.stringify(status, null, 2) + '\n');
+      return status;
+    },
+    // Aggregation errors (for example invalid samples) must never stop status.json from being written.
+    // summaryInvalidates: a rejected summary means the samples are invalid, so the run is never evidence.
+    finish(summarize: () => void, o: { failed: boolean; interrupted: boolean; invalidEvidence?: boolean; summaryInvalidates?: boolean }) {
+      let summaryFailed = false;
+      try { summarize(); } catch (error) {
+        summaryFailed = true;
+        console.error(`summary failed (${error instanceof Error ? error.name : 'unknown error'})`);
+      }
+      const invalidEvidence = o.invalidEvidence || (summaryFailed && o.summaryInvalidates === true);
+      return this.write({ failed: o.failed || summaryFailed, interrupted: o.interrupted, summaryFailed, invalidEvidence });
+    },
+  };
+}

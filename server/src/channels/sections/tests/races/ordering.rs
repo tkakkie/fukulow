@@ -65,13 +65,13 @@ async fn concurrent_moves_and_section_delete(pool: PgPool) {
                 let deleting = spawn(&f, "DELETE", &section_path, &f.token, Value::Null);
                 wait_blocked(&f, "DELETE FROM member_sections%").await;
                 let moving = spawn(&f, "PUT", &channel_path, &f.token, move_input);
-                wait_blocked(&f, ORG_SHARE).await;
+                wait_blocked(&f, LAYOUT_LOCK).await;
                 (moving, deleting)
             } else {
                 let moving = spawn(&f, "PUT", &channel_path, &f.token, move_input);
                 wait_blocked(&f, INSERT_PLACEMENTS).await;
                 let deleting = spawn(&f, "DELETE", &section_path, &f.token, Value::Null);
-                wait_blocked(&f, ORG_EXCLUSIVE).await;
+                wait_blocked(&f, LAYOUT_LOCK).await;
                 (moving, deleting)
             };
             blocker.commit().await.unwrap();
@@ -169,6 +169,106 @@ async fn complete_orders_follow_last_committer(pool: PgPool) {
             unpause(&f, table).await;
         }
     }
+}
+
+#[fukulow_test::test]
+async fn channel_reorder_lock_timeout_releases_organization(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let a = f.channel("A", "public").await;
+    let b = f.channel("B", "public").await;
+    let order = channel_order(None, &[b, a]);
+    let group = Uuid::new_v4();
+    f.create(group, "Ensure layout row").await;
+    let admin_target = Uuid::new_v4();
+    member(&f.pools.admin, f.owner.org, admin_target, "member").await;
+    let before = f.get(SECTIONS).await;
+
+    let mut blocker = f.pools.admin.begin().await.unwrap();
+    sqlx::query("SELECT generation FROM member_section_generations WHERE organization_id=$1 AND member_id=$2 FOR UPDATE")
+        .bind(f.owner.org).bind(f.owner.member).fetch_one(&mut *blocker).await.unwrap();
+    let reordering = spawn(&f, "PUT", CHANNEL_ORDER, &f.token, order.clone());
+    wait_blocked(&f, LAYOUT_LOCK).await;
+    let admin = spawn(
+        &f,
+        "PATCH",
+        &format!("/members/{admin_target}/role"),
+        &f.token,
+        json!({"role":"guest"}),
+    );
+    // Observe the blocked admin before the reorder's 5 s lock_timeout fires.
+    // The test has no way to inject a shorter timeout.
+    wait_blocked(&f, ORG_EXCLUSIVE).await;
+    let response = tokio::time::timeout(Duration::from_secs(10), reordering)
+        .await
+        .unwrap()
+        .unwrap();
+    denied(response, StatusCode::SERVICE_UNAVAILABLE, "lock_contention").await;
+    let updated = expected(joined(admin).await, StatusCode::OK).await;
+    assert_eq!(updated["role"], "guest");
+    blocker.commit().await.unwrap();
+    assert_eq!(f.get(SECTIONS).await, before);
+    f.changed("PUT", CHANNEL_ORDER, order).await;
+    let after = f.get(SECTIONS).await;
+    assert_eq!(after["generation"], "2");
+    assert_eq!(after["other_channel_ids"], json!([b, a]));
+}
+
+#[fukulow_test::test]
+async fn section_write_lock_contention_rolls_back_without_notice(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let activity = activity::Activity::default();
+    let app = router(activity.clone()).with_state(f.state.clone());
+    let auth = crate::channels::tests::extract_auth(f.state.clone(), &f.token).await;
+    let registration = activity.register(&auth);
+    let id = Uuid::new_v4();
+    let uri = path(f.owner.org, SECTIONS);
+    let create = || send(&app, "POST", &uri, &f.token, json!({"id":id,"name":"New"}));
+
+    // Fail the generation update after the new section has been inserted.
+    sqlx::raw_sql(
+        "CREATE FUNCTION test_generation_timeout() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE SQLSTATE '55P03'; END $$;
+         CREATE TRIGGER test_generation_timeout BEFORE UPDATE ON member_section_generations
+         FOR EACH ROW EXECUTE FUNCTION test_generation_timeout()",
+    )
+    .execute(&f.pools.admin)
+    .await
+    .unwrap();
+    let before = f.get(SECTIONS).await;
+    let response = create().await;
+    assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    denied(response, StatusCode::SERVICE_UNAVAILABLE, "lock_contention").await;
+    assert_eq!(f.get(SECTIONS).await, before);
+    let generation_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM member_section_generations
+         WHERE organization_id=$1 AND member_id=$2)",
+    )
+    .bind(f.owner.org)
+    .bind(f.owner.member)
+    .fetch_one(&f.pools.admin)
+    .await
+    .unwrap();
+    assert!(!generation_exists);
+    activity.drained().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), registration.next())
+            .await
+            .is_err()
+    );
+
+    sqlx::query("DROP TRIGGER test_generation_timeout ON member_section_generations")
+        .execute(&f.pools.admin)
+        .await
+        .unwrap();
+    assert_eq!(create().await.status(), StatusCode::CREATED);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), registration.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .event,
+        activity::Notice::SectionsChanged { generation: 1 }
+    );
 }
 
 #[fukulow_test::test]
@@ -325,7 +425,7 @@ async fn waiting_reorders_see_committed_set_changes(pool: PgPool) {
             "DELETE FROM member_sections%",
             CHANNEL_ORDER,
             channel_order(None, &[]),
-            ORG_SHARE,
+            LAYOUT_LOCK,
         ),
     ] {
         let generation = f.get(SECTIONS).await["generation"]

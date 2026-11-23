@@ -6,12 +6,18 @@
 /deploy/db-roles.sql text eol=lf
 /load/package-lock.json text eol=lf
 /load/search-engines/Dockerfile text eol=lf
+/load/search-engines/b1-query.sql text eol=lf
+/load/search-engines/b1.sql text eol=lf
+/load/search-engines/b1.ts text eol=lf
 /load/search-engines/bench.ts text eol=lf
 /load/search-engines/bigm.sql text eol=lf
 /load/search-engines/cleanup.ts text eol=lf
 /load/search-engines/definer.sql text eol=lf
 /load/search-engines/definer.ts text eol=lf
 /load/search-engines/manifest-v1.json text eol=lf
+/load/search-engines/manifest-v11.json text eol=lf
+/load/search-engines/manifest-v12.json text eol=lf
+/load/search-engines/manifest-v13.json text eol=lf
 /load/search-engines/manifest-v2.json text eol=lf
 /load/search-engines/manifest-v3.json text eol=lf
 /load/search-engines/manifest-v4.json text eol=lf
@@ -19,6 +25,7 @@
 /load/search-engines/manifest-v6.json text eol=lf
 /load/search-engines/manifest-v7.json text eol=lf
 /load/search-engines/manifest-v8.json text eol=lf
+/load/search-engines/manifest-v9.json text eol=lf
 /load/search-engines/manifest.ts text eol=lf
 /load/search-engines/pgroonga.sql text eol=lf
 /load/search-engines/quality/dataset.ts text eol=lf
@@ -69,3 +76,4 @@
 /server/migrations/202611200223_invite_cleanup.sql text eol=lf
 /server/migrations/202611200410_channel_archive.sql text eol=lf
 /server/migrations/202611200621_send_receipt_null_topic.sql text eol=lf
+/server/migrations/202611200654_section_placement_channel_lookup.sql text eol=lf

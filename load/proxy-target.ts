@@ -79,7 +79,7 @@ export function proxyOverride(proxy: Proxy, directory: string, port: string) {
     image: ${image}${entrypoint}
     environment:
       FUKULOW_DOMAIN: ${domain}
-      NGINX_ACME_PACKAGE_VERSION: 1.31.8+0.4.1-1~trixie
+      NGINX_ACME_PACKAGE_VERSION: 1.31.9+0.4.2-1~trixie
     ulimits:
       nofile: 65536
     depends_on: [app]

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 export const operations = ['private-grant','guest-grant','public','reactivate','regrant','join'] as const;
 export type Operation = typeof operations[number];
@@ -22,6 +23,11 @@ export function estimate(points:Point[],repeats:number,channels:number) {
 export function equal(eager:unknown,lazy:unknown,label:string) {
   if(!isDeepStrictEqual(eager,lazy)) throw new Error(`eager/lazy mismatch: ${label}`);
 }
+// results.json keeps only this digest; the rows go to a gzipped file (they overflow one JSON string at 10k Topics × 1k Members).
+export function oracleDigest(oracle:unknown) {
+  const text=JSON.stringify(oracle);
+  return {text,bytes:Buffer.byteLength(text),sha256:createHash('sha256').update(text).digest('hex')};
+}
 export function percentile(values:number[],p:number) {
   if(!values.length) throw new Error('empty distribution');
   const a=[...values].sort((x,y)=>x-y); return a[Math.max(0,Math.ceil(a.length*p)-1)];
@@ -31,7 +37,7 @@ export interface ReadSample { stage:string; query:string; mode:string; ms:number
 const f=(v:number)=>v.toFixed(3);
 export function summary(samples:Sample[],pilot:boolean,conditions:string):string {
   const lines=[`## Unread initialization #403 (${pilot?'PILOT — harness validation only':'measurement'})`,'',conditions,'',
-    'Method: fresh migrated database clones per side/operation/repeat; alternating eager/lazy order. Non-owner NOBYPASSRLS app connections, transaction-local Organization context. Commit-inclusive server-clock latency; EXPLAIN ANALYZE BUFFERS/WAL for the mutation. Position writes are pg_stat_user_tables insert+update+delete deltas; WAL covers the concurrent sender too. Write buffers are pg_stat_database hit+read deltas including trigger queries, planning and concurrent sender; EXPLAIN root buffers are also retained, but omit trigger work. Read buffers use execution-root hit+read, excluding planning. Raw plans, lock/wait samples and per-table deltas are in results.json. Equality of Channel baselines, Unread/Mention counts and Topic projections asserted before reporting, before and after sparse Topic marks.','',
+    'Method: fresh migrated database clones per side/operation/repeat; alternating eager/lazy order. Non-owner NOBYPASSRLS app connections, transaction-local Organization context. Commit-inclusive server-clock latency; EXPLAIN ANALYZE BUFFERS/WAL for the mutation. Position writes are pg_stat_user_tables insert+update+delete deltas; WAL covers the concurrent sender too. Write buffers are pg_stat_database hit+read deltas including trigger queries, planning and concurrent sender; EXPLAIN root buffers are also retained, but omit trigger work. Read buffers use execution-root hit+read, excluding planning. Raw plans and per-table deltas are in results.json; lock/wait samples are in locks/*.json.gz (results.json keeps their digest). Equality of Channel baselines, Unread/Mention counts and Topic projections asserted before reporting, before and after sparse Topic marks.','',
     '| Operation | Topics | Members | Eager median/p95 ms | Lazy median/p95 ms | Median improvement | Position writes E/L | WAL bytes E/L | Window buffers E/L | Sender added ms E/L |',
     '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|'];
   for(const key of new Set(samples.map(s=>`${s.operation}/${s.topics}/${s.members}`))) {

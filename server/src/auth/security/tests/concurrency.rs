@@ -1,3 +1,4 @@
+use super::throttle::{throttled, wrong_current_password};
 use super::*;
 use std::time::Duration;
 
@@ -204,19 +205,9 @@ async fn security_rechecks_session_after_account_lock_before_argon2(pool: PgPool
         )
         .await;
         assert_eq!(snapshot(&pool).await, before);
-        assert_eq!(f.state.sign_in_throttle.pending_counts(), (0, 0));
+        assert_eq!(f.security_counts(&f.current), ((0, 0), (0, 0)));
         sqlx::query("UPDATE account_sessions SET expires_at=clock_timestamp()+interval '30 days' WHERE token_hash=$1")
             .bind(Sha256::digest(f.current.as_bytes()).to_vec()).execute(&pool).await.unwrap();
-    }
-    // Neither recheck denial counted as an incorrect password.
-    for _ in 0..5 {
-        let mut attempt = f
-            .state
-            .sign_in_throttle
-            .begin("192.0.2.1".parse().unwrap())
-            .unwrap();
-        attempt.account("owner@example.com".into()).unwrap();
-        attempt.failed();
     }
 }
 
@@ -313,4 +304,50 @@ async fn security_operations_serialize_and_reject_a_revoked_current_session(pool
         "invalid credentials",
     )
     .await;
+    assert_eq!(f.security_counts(&f.bearer), ((0, 0), (0, 0)));
+}
+
+#[fukulow_test::test]
+async fn concurrent_authenticated_attempts_reserve_the_last_account_slot(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let before = snapshot(&pool).await;
+    for n in 0..SECURITY_ACCOUNT_LIMIT - 1 {
+        let credential = if n % 2 == 0 { &f.current } else { &f.cookie };
+        wrong_current_password(&f.app, n as usize % OPERATIONS.len(), credential, false).await;
+    }
+    let mut blocker = pool.begin().await.unwrap();
+    super::super::test_support::lock_account(&mut blocker, f.account).await;
+    let admitted = tokio::spawn({
+        let app = f.app.clone();
+        let token = f.bearer.clone();
+        async move { wrong_current_password(&app, 0, &token, false).await }
+    });
+    waiting_for_account(&pool).await;
+    assert_eq!(
+        f.security_counts(&f.bearer),
+        ((0, 1), (SECURITY_ACCOUNT_LIMIT - 1, 1))
+    );
+    let (method, path) = OPERATIONS[1];
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        call(
+            &f.app,
+            method,
+            path,
+            Some(&f.current),
+            false,
+            body(path, PASSWORD),
+        ),
+    )
+    .await
+    .unwrap();
+    throttled(response).await;
+    assert_eq!(account_waiters(&pool).await, (0, 1));
+    blocker.commit().await.unwrap();
+    admitted.await.unwrap();
+    assert_eq!(
+        f.security_counts(&f.bearer),
+        ((1, 0), (SECURITY_ACCOUNT_LIMIT, 0))
+    );
+    assert_eq!(snapshot(&pool).await, before);
 }

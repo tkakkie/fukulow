@@ -25,8 +25,8 @@ const HTTP_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 // Every operation documents the common shutdown response.
-const EXPECTED_API_OPERATIONS: usize = 52;
-const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 391;
+const EXPECTED_API_OPERATIONS: usize = 53;
+const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 398;
 
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
@@ -149,6 +149,44 @@ fn author_lookup_contract_bounds_input_and_retains_deactivated_identity() {
 }
 
 #[test]
+fn search_contract_requires_query_and_documents_results_and_errors() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let operation = &document["paths"]["/api/v1/orgs/{org}/search"]["get"];
+    let parameters = operation["parameters"].as_array().unwrap();
+    for (name, required) in [("q", true), ("channel_id", false), ("cursor", false)] {
+        let parameter = parameters.iter().find(|p| p["name"] == name).unwrap();
+        assert_eq!(parameter["in"], "query");
+        assert_eq!(parameter["required"], required);
+    }
+    let responses = &operation["responses"];
+    assert_eq!(
+        responses["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/SearchPage"
+    );
+    for status in ["400", "401", "404", "429", "503"] {
+        assert_eq!(
+            responses[status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ErrorBody"
+        );
+    }
+    assert!(
+        responses["429"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("search_rate_limited")
+    );
+    let schemas = &document["components"]["schemas"];
+    let page = &schemas["SearchPage"]["properties"];
+    assert_eq!(page["hits"]["maxItems"], 20);
+    assert_eq!(page["next_cursor"]["type"], json!(["string", "null"]));
+    assert_eq!(
+        schemas["SearchHit"]["properties"]["message"]["$ref"],
+        "#/components/schemas/Message"
+    );
+    assert_eq!(schemas["ChannelKind"]["enum"], json!(["channel", "dm"]));
+}
+
+#[test]
 fn setup_token_contract_is_required_and_non_nullable() {
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
     let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
@@ -161,6 +199,40 @@ fn setup_token_contract_is_required_and_non_nullable() {
                 .contains(&json!("setup_token"))
         );
         assert_eq!(schema["properties"]["setup_token"]["type"], json!("string"));
+    }
+}
+
+#[test]
+fn permission_scoped_writes_document_lock_contention() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for (method, suffix) in [
+        ("patch", "/channels/{id}"),
+        ("post", "/channels/{id}/members"),
+        ("delete", "/channels/{id}/members/{member_id}"),
+        ("patch", "/channels/{id}/members/{member_id}"),
+        ("post", "/me/sections"),
+        ("patch", "/me/sections/{id}"),
+        ("delete", "/me/sections/{id}"),
+        ("put", "/me/sections/order"),
+        ("put", "/me/channel-sections/{channel_id}"),
+        ("put", "/me/section-channel-order"),
+    ] {
+        let path = format!("/api/v1/orgs/{{org}}{suffix}");
+        let response = &document["paths"][&path][method]["responses"]["503"];
+        assert_eq!(
+            response["content"]["application/json"]["schema"],
+            json!({"$ref": "#/components/schemas/ErrorBody"}),
+            "{method} {path}"
+        );
+        let description = response["description"].as_str().unwrap();
+        assert!(
+            description.starts_with("lock_contention on a lock timeout"),
+            "{method} {path}"
+        );
+        assert!(description.contains("(no Retry-After)"), "{method} {path}");
+        if (method, suffix) == ("delete", "/me/sections/{id}") {
+            assert!(description.contains("restart bound is exhausted"));
+        }
     }
 }
 
@@ -242,6 +314,7 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
         cookie_secure: true,
         setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
+        account_security_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
@@ -890,6 +963,7 @@ async fn websocket_upgrade_requires_authentication_without_database_access() {
         cookie_secure: true,
         setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
+        account_security_throttle: Default::default(),
         message_delivery: Default::default(),
         session_changes: Default::default(),
         session_cleanup: Default::default(),
@@ -1437,6 +1511,9 @@ fn account_security_contract_records_paths_errors_and_account_lock_order() {
                     .contains("current_password_incorrect")
             );
             assert!(responses["429"]["headers"]["Retry-After"].is_object());
+            assert!(responses["429"]["description"].as_str().unwrap().starts_with(
+                "too many sign-in attempts; per-Session and per-Account failure and reservation budgets"
+            ));
             for status in ["400", "401", "403", "413", "415", "429", "500", "503"] {
                 assert_eq!(
                     responses[status]["content"]["application/json"]["schema"]["$ref"],

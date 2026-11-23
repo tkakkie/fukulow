@@ -1,15 +1,15 @@
 # Measurements
 
-Keep only the latest baseline per scenario, the decision or open acceptance it supports, the harness path and reproduction command, and known limits. Append superseded or new detailed records verbatim to `load/measurements-archive.md` and summarise the current evidence here. [Writing rules](workflow.md#13-splitting-a-doc)
+Keep only the latest baseline per scenario, the decision or open acceptance it supports, the harness path and reproduction command ([focused SQL rules](workflow.md#14-focused-sql-measurements)), and known limits. Append superseded or new detailed records verbatim to `load/measurements-archive.md` and summarise the current evidence here. [Writing rules](workflow.md#13-splitting-a-doc)
 
 Measurements are evidence only and establish no performance, capacity or latency guarantee.
 Compare runs only at the same send-limit settings and publishing Member count.
 
-Raw logs, artifact directories and local paths are outside Git and may no longer exist. Checked 2026-11-18 on the maintainer's Mac (`/private/tmp` is volatile): gone for #137, #142, #151, #160 (except `i160-smoke-fix`), #195 send-drain logs, #196 B, #314 step 5 before-run, #469 smoke; still present for #153, #195 storms, #303, #314 step 5, #356, #409, #466, #486; Actions artifact `proxy-measure-43844208337-1` (#469) not yet expired. See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
+Raw logs, artifact directories and local paths outside Git may be gone ([2026-11-18 check](../load/measurements-archive.md#raw-data-check-2026-11-18)). See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
 
 ## Topic projection paging (#137)
 
-2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. The [prefix aggregation decision](decisions/messages.md#topics-137-138) calls for remeasurement at ~649k (a proportional projection).
+2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. A proportional projection put the prefix query's 100 ms read p95 at ~649k Messages.
 
 Run `MEASURE_TOPICS=10000 cargo test --release -p fukulow-server --lib measure_topic_projection_pages -- --ignored --nocapture` against test PostgreSQL. Shared Mac, warm in-process HTTP, no TCP/proxy/TLS. [Full record](../load/measurements-archive.md#137-round-1-mixed-timeline-and-concurrent-send-remeasurement-2026-11-11)
 
@@ -113,17 +113,11 @@ Use `load/hot-plans/seed.sql` and `EXPLAIN (ANALYZE, BUFFERS)` on the before/aft
 
 Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-plans/seed.sql`. Warm Mac, no DMs or sends. Measured three five-pass rounds. Current harness takes 15 passes. [Full record](../load/measurements-archive.md#bounded-fan-out-candidates-354-2026-11-16-jst)
 
-## Rust/wasm sync core (#466)
+## Rust/wasm sync core (#466, #487)
 
-2026-11-16 JST (PR #484). [Rust/wasm default](decisions/web.md#web-client) accepted with misses. At `d2fc5ea`, throttled cold `/` Timeline p95 2806.7 → 3260.3 ms and FCP p95 960.0 → 960.0 ms, 45 runs/cell in 9 rounds. At `117e75a`, sustained 100 msg/s p95 1.39 → 1.78 ms (queue 0), steady memory 11.34 → 14.88 MiB, five rounds.
+2026-11-21 JST. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466; at `d2fc5ea`, throttled cold `/` Timeline p95 2806.7 → 3260.3 ms, FCP 960.0 ms both). #487 `06264eab` → `c02e1a78`, 5 rounds: `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, steady 18.19 → 18.35 MiB. Open, not passed: bulk INCONCLUSIVE, slope HOLD (#489).
 
-Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts` and `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm|ts|main-ts --out <dir> --round <n>` (one core per historical checkout). Mac, loopback, synthetic bodies, Node 26.8.1. [Full record](../load/measurements-archive.md#web-rustwasm-sync-core-evaluation-466-2026-11-16-jst)
-
-## Precompressed web assets (#486)
-
-2026-11-17 JST, `41248ff` plus patch. Same release image’s wasm 131,573 → 103,813 bytes via Caddy and 159,174 → 103,813 via nginx. Evidence for [Brotli sidecars](decisions/auth.md#auth-accounts-and-tenancy).
-
-Byte comparison used external `node /private/tmp/fk486-transfer.ts`. For candidate checks, `docker build -t fk486-app .`, then `CHECK_COMPOSE_PROJECT=fukulow-security-486 CHECK_COMPOSE_IMAGE=fk486-app CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts`. Static TLS, transfer only. [Full record](../load/measurements-archive.md#precompressed-web-asset-transfer-486-2026-11-17-jst)
+Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`; `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --arm B|W --out <dir> --round <n>`, then `--aggregate`. Mac, Node 26.13.1. [Record](../load/measurements-archive.md#rustwasm-sync-core-typed-deltas-487-2026-11-21-jst-mac)
 
 ## Pool before and after PR #511 (#196 B)
 
@@ -137,32 +131,39 @@ Run `node load/pool-before-after.ts --out <dir>` at `ee36849` with the external 
 
 Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal4-409`. Warm loopback on shared Mac, no writes, subscribers or proxy/TLS. [Full record](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst)
 
-## Watermark subscription admission (#478)
-
-2026-11-17 JST (PR #531). All 4,617 reproduced closes in 31 valid matrix runs matched watermark admission rejection. Evidence for splitting delivery tests from capacity under the [admission policy](decisions/realtime.md#admission-and-timeouts).
-
-At `4fa2ba0^`, run `cargo test --locked -p fukulow-server --lib simultaneous_normal_subscriptions_have_no_internal_error_closes`. Matrix used extra hooks on a shared Mac. Five excluded handshake timeouts. Manual harness in #530. [Full record](../load/measurements-archive.md#watermark-subscription-admission-investigation-478-2026-11-17-jst)
-
 ## Unread Topic-count index bound under RLS (#356)
 
 2026-11-17 JST, `4fa2ba0` vs the materialized-bound rewrite. At 25 unread/Topic across 20 Topics, rows examined 50,500 → 500 in all modes and Generic median 32.470 → 1.419 ms. Evidence for restoring the lower Index Cond under the [Unread rules](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
 
-Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Runner and raw artifacts were not retained. Regression check: `cargo test --locked -p fukulow-server --lib unread_topic_counts_read_only_unread_topic_ranges`. Warm SQL, one Channel, no writers or Mentions. Cost grows with unread backlog. [Full record](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst)
+Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Runner and raw artifacts were not retained. Superseded by #519 A3 (guard: `unread_list_counts_never_read_messages_in_any_plan_mode`). Warm SQL, one Channel, no writers or Mentions. Cost grows with unread backlog. [Full record](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst)
+
+## Revocation hold retry bursts (#592)
+
+2026-11-21 JST, `2bad2c7d`, send time (#622): `recheck` 4,096 ×3 PASS, 24/24 sends matched each, 0 in fault. 2026-11-20 4096 FAIL kept. Maintainer: backoff acceptable (≤ 4 holds; high counts: #668), no jitter.
+
+Run `node load/revocation-burst.ts --out <dir>`. [Record](../load/measurements-archive.md#revocation-hold-send-time-rerun-592-2026-11-21-jst-mac)
+
+## Sign-in flood owner impact (#359 Part B alternative)
+
+2026-11-22 JST, `c1456d91`, 3 runs: B1–B5 held ×3, **not a formal Part B PASS** (no multi-IP attack). B2 window reading PASS ×3, `b2Strict` false ×3. One IP's 5 wrong passwords locked the owner out ~58 s, password change included (#757). Lock barely exercised, 0 waiters at a 233 ms poll (#756).
+
+Run `node load/signin-owner.ts` (judged by `load/signin-owner-judgment.ts`). [Record](../load/measurements-archive.md#sign-in-flood-owner-impact-part-b-alternative-method-359-2026-11-22-jst-mac)
 
 ## Archived only
 
 - [Load harness methods](../load/measurements-archive.md#load-harness-methods-20-57) — procedures for `make load` and `load/record.ts`. [Load decisions](decisions/load.md#load-testing-and-measurement)
 - [Earlier reconnect runs](../load/measurements-archive.md#graceful-shutdown-and-reconnect-storm-195-2026-11-11-jst) — superseded by the pinned repeat.
 - [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
-- [Search preliminary engine comparison](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) — superseded by frozen-manifest runs.
-- [Search preliminary quality comparison](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) — frozen rerun reproduced the scores.
+- Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs (quality scores reproduced).
 - [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
 - [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
 - [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
 - [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
 - Channel log [smoke](../load/measurements-archive.md#160-log-comparison-smoke-validation-2026-11-15) (functional only) and [full run](../load/measurements-archive.md#160-log-comparison-full-run-invalid-2026-11-16-jst) (INVALID for the gate).
-- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending. Send workloads use one publishing Member and burst/refill raised to 1,000,000. See `load/proxy-compare.ts`.
+- [Proxy comparison](../load/measurements-archive.md#proxy-comparison-harness-469-part-3--results-pending) — results pending.
 - [Earlier wasm first display](../load/measurements-archive.md#first-display-345-conditions-re-measured-at-d2fc5ea-45-runscell-across-9-interleaved-rounds-median-of-round-p50--p95-ms) — superseded by the startup fix.
 - [Pool before and after PR #388](../load/measurements-archive.md#196-b-beforeafter-results-2026-11-17-jst-mac) — superseded by the post-PR #511 comparison.
 - [Reply count SQL-only probe](../load/measurements-archive.md#authoritative-reply-count-sql-plans-409-2026-11-17) — superseded by HTTP and SQL evidence.
 - [Reply count HTTP runs 1–3 and pilots](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst) — NOT EVALUATED, superseded or pilot only; reasons in the record.
+- [Watermark subscription admission](../load/measurements-archive.md#watermark-subscription-admission-investigation-478-2026-11-17-jst) — investigation evidence for the [admission policy](decisions/realtime.md#admission-and-timeouts).
+- [Precompressed web assets](../load/measurements-archive.md#precompressed-web-asset-transfer-486-2026-11-17-jst) — wasm 131,573 → 103,813 bytes, evidence for [Brotli sidecars](decisions/auth.md#auth-accounts-and-tenancy).

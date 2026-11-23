@@ -6,14 +6,26 @@ pub(super) const LOCK_CHANNELS: &str =
 
 #[derive(sqlx::FromRow)]
 pub(super) struct LockedChannel {
-    id: Uuid,
+    pub(super) id: Uuid,
     public: bool,
     archived: bool,
 }
 
-pub(super) const GROUP_POSITIONS: &str =
-    "SELECT channel_id, position FROM member_section_placements
-     WHERE organization_id=$1 AND member_id=$2 AND section_id=$3 ORDER BY position, channel_id";
+pub(super) async fn group_positions(
+    tx: &mut PgConnection,
+    owner: Owner,
+    section: Uuid,
+) -> Result<Vec<(Uuid, i64)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT channel_id, position FROM member_section_placements
+         WHERE organization_id=$1 AND member_id=$2 AND section_id=$3 ORDER BY position, channel_id",
+    )
+    .bind(owner.org)
+    .bind(owner.member)
+    .bind(section)
+    .fetch_all(tx)
+    .await
+}
 
 pub(super) async fn lock_channels(
     tx: &mut PgConnection,

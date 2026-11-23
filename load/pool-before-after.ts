@@ -6,7 +6,9 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
 import { allowanceSeconds, generatorConfig } from './pool-before-after-config.ts';
-import { plan, pairs, settings, scenarios, scope, timeoutNote, judgeAll, validity, type Run, type Scenario, type Arm, type Counts } from './pool-before-after-summary.ts';
+import { condition, minimumRows, planQuery, planReasons, statsQuery, statsReasons } from './pool-before-after-analyze.ts';
+import { plan, sequence as runSequence, settings, scope, timeoutNote, judgeAll, overall, rehearsalChecks, rehearsalForecast, validity, type Run, type Arm, type Counts } from './pool-before-after-summary.ts';
+import { assertDockerHeadroom } from './harness-core/host.ts';
 import type { NativeSessionResponse, SetupRequest, Channel, CreateChannelRequest } from '../web/src/api-schema.d.ts';
 
 if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
@@ -14,16 +16,19 @@ if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
 } else {
   const exec=promisify(execFile);
   if(process.argv.includes('--help')) {
-    console.log(`${scope}\nUsage: node load/pool-before-after.ts --out /absolute/new/external/directory [--smoke]\nFull: 12 fresh runs, sends and mixed; three B/A, A/B, B/A pairs per scenario.\nSmoke: B only, sends only, 50/s for 10 s; never comparison evidence.`);
+    console.log(`${scope}\nUsage: node load/pool-before-after.ts --out /absolute/new/external/directory [--smoke | --rehearsal]\nFull: 12 fresh runs, sends and mixed; three B/A, A/B, B/A pairs per scenario.\nSmoke: B only, sends only, 50/s for 10 s; never comparison evidence.\nRehearsal: the full plan, one B and one A run per scenario with every validity check; never evidence.`);
     process.exit(0);
   }
   const args=process.argv.slice(2);
   const outIndex=args.indexOf('--out');
-  if(outIndex<0||!args[outIndex+1]||args.some((arg,i)=>i!==outIndex+1&&!['--out','--smoke'].includes(arg))) throw new Error('Use --out /absolute/new/external/directory [--smoke]');
+  if(outIndex<0||!args[outIndex+1]||args.some((arg,i)=>i!==outIndex+1&&!['--out','--smoke','--rehearsal'].includes(arg))
+    ||(args.includes('--smoke')&&args.includes('--rehearsal'))) throw new Error('Use --out /absolute/new/external/directory [--smoke | --rehearsal]');
   const output=outsideCheckout(args[outIndex+1]);
   if(existsSync(output)) throw new Error('Output directory already exists');
   if(process.version!=='v26.13.1') throw new Error('Use Node 26.13.1');
   const smoke=args.includes('--smoke');
+  const rehearsal=args.includes('--rehearsal');
+  const mode=smoke?'smoke':rehearsal?'rehearsal':'formal';
   mkdirSync(output,{recursive:true});
   const scratch=mkdtempSync(`${tmpdir()}/pool196-`);
   const project=`pool196-${Date.now()}-${randomUUID().slice(0,8)}`;
@@ -42,12 +47,20 @@ if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
   const stop=()=>{interrupted=true;generator?.kill('SIGTERM'); if(generatorName) {try{docker('rm','-f',generatorName);}catch{/* finally retries */}}};
   process.on('SIGINT',stop);process.on('SIGTERM',stop);
   const check=()=>{if(interrupted)throw new Error('Interrupted');};
-  const summary=(complete=false)=>({scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,runs,
-    judgement:judgeAll(runs,complete&&!smoke),cleanupErrors});
+  const summary=(complete=false)=>{const judgement=judgeAll(runs,complete&&mode==='formal');
+    return {scope,timeoutNote,poolAcquireTimeouts:'NOT EVALUATED',smoke,rehearsal,...(rehearsal?{evidence:false,checks:rehearsalChecks(runs),forecast:rehearsalForecast(runs)}:{}),runs,
+    judgement,overall:overall(judgement),cleanupErrors};};
   let failed=false;
+  let rehearsalClean=false;
+  // Docker Desktop volumes live in its VM; probe that disk before building (load/harness-core/README.md).
+  const postgresImage=/image: (postgres:\S+)/.exec(readFileSync('load/compose.yml','utf8'))?.[1];
+  if(!postgresImage) throw new Error('No Postgres image in load/compose.yml');
   try {
-    const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-config.ts','load/pool-before-after-summary.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
-    save(`${output}/metadata.json`,{scope,timeoutNote,commits,settings,smoke,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
+    // Compose pulls this pinned image anyway; make it present first so the probe (--pull never) works on a cold cache.
+    try { docker('image','inspect',postgresImage); } catch { docker('pull',postgresImage); }
+    const headroom=assertDockerHeadroom(postgresImage,(smoke?5:20)*1024**3);
+    const harnessFiles=['load/pool-before-after.ts','load/pool-before-after-load.ts','load/pool-before-after-config.ts','load/pool-before-after-summary.ts','load/pool-before-after-analyze.ts','load/throughput-summary.ts','load/seed.ts','load/compose.yml','deploy/init-db-roles.sh','deploy/db-roles.sql','deploy/db-role-settings.sql','deploy/db-grants.sql'];
+    save(`${output}/metadata.json`,{scope,harnessCondition:condition,timeoutNote,commits,settings,smoke,rehearsal,scenarios:{send:'sends only',mixed:'sends + 500 Channel-list reads/s + 20 correct sign-ins/s'},
       memberArithmetic:'4000 Members; max 2000 sends/s / 4000 = 0.5 sends/s/Member; round robin returns every 2 s; default bucket burst 10, refill 1/s unchanged.',
       poolTimeouts:'Both: SQLx PoolTimedOut -> ApiError::from -> HTTP 500, ErrorBody.error="internal error"; stderr database operation failed: pool timed out while waiting for an open connection. Logs have no request ID, include background/late failures: per-request counts NOT EVALUATED. No server patches.',
       workload:'THROUGHPUT_SCENARIO=many equivalent: 200 public Channels, index % 200; Member index % 4000; no subscribers. Open arrival k6, each send step 60 s, 11 s drains; reader 2/s continuous including drains. Success latency includes drain, successful requests only.',
@@ -55,6 +68,7 @@ if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
         send:generatorConfig(smoke,false).scenarios,mixed:generatorConfig(smoke,true).scenarios},
       sampling:'1 s /proc/1/stat CPU ticks (100 Hz, 100%=one core), /proc/1/status RSS; pg_stat_activity app-role client connections including idle and active separately; sampler excluded. Gaps >2.5 s or sampling errors invalidate.',
       node:process.version,machine:{platform:platform(),arch:arch(),release:release(),hostname:hostname(),cpus:cpus(),memory:totalmem()},
+      dockerHeadroom:headroom,
       docker:JSON.parse(docker('info','--format','{"version":{{json .ServerVersion}},"cpus":{{json .NCPU}},"memory":{{json .MemTotal}}}')),
       harnessCommit:command('git',['rev-parse','HEAD']),dirty:command('git',['status','--porcelain']),
       harnessHashes:Object.fromEntries(harnessFiles.map(p=>[p,createHash('sha256').update(readFileSync(p)).digest('hex')]))});
@@ -82,7 +96,7 @@ if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
     docker('pull',k6);
     const k6Id=docker('image','inspect','--format','{{.Id}}',k6);
     save(`${output}/images.json`,{scope,commits,images,k6,k6Id});
-    const sequence=smoke?[{scenario:'send' as Scenario,pair:1,arm:'B' as Arm}]:scenarios.flatMap(scenario=>pairs().flatMap((arms,i)=>arms.map(arm=>({scenario,pair:i+1,arm}))));
+    const sequence=runSequence(mode);
     for(const cell of sequence) {
       check();
       const id=`${cell.scenario}-${cell.pair}-${cell.arm}`;
@@ -96,7 +110,7 @@ if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
       const compose=['compose','--env-file','/dev/null','-p',env.LOAD_PROJECT!,'-f',resolve('load/compose.yml'),'-f',override];
       activeCompose=compose;activeEnv=env;
       const dc=(...args:string[])=>command('docker',[...compose,...args],undefined,env);
-      const sql=(query:string)=>command('docker',[...compose,'exec','-T','db','psql','-X','-v','ON_ERROR_STOP=1','-U','fukulow','-d','fukulow','-At'],query,env);
+      const sql=(query:string,user='fukulow')=>command('docker',[...compose,'exec','-T','db','psql','-X','-q','-v','ON_ERROR_STOP=1','-U',user,'-d','fukulow','-At'],query,env);
       let timer:ReturnType<typeof setInterval>|undefined;
       let pending:Promise<void>|undefined;
       const samples:{at:number;cpuTicks:number;rssKiB:number;connections:number;active:number;cpuPercent:number|null}[]=[];
@@ -136,13 +150,34 @@ if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
           const body:CreateChannelRequest={name:`load-${i}`,visibility:'public'};
           channels.push((await post(`/api/v1/orgs/${organization}/channels`,body,201,owner.token) as Channel).id);
         }
+        // #519: the same step on both arms, after every seed write has committed and before any load.
+        const seedCheck:{condition:string;vacuumStarted?:string;tables?:unknown;plans?:Record<string,unknown>;statsFailures:string[];planFailures:string[];error?:string}=
+          {condition,statsFailures:[],planFailures:[]};
+        try {
+          const vacuumStarted=sql('SELECT clock_timestamp()');seedCheck.vacuumStarted=vacuumStarted;
+          sql('VACUUM (ANALYZE);');
+          const tableStats=JSON.parse(sql(statsQuery(vacuumStarted)));seedCheck.tables=tableStats;
+          seedCheck.statsFailures=statsReasons(tableStats,minimumRows(settings.members,settings.channels));
+          seedCheck.plans={};
+          for(const mode of ['force_custom_plan','force_generic_plan'] as const) {
+            const p=JSON.parse(sql(planQuery(organization,tokens[0],mode),'fukulow_app'));seedCheck.plans[mode]=p;
+            seedCheck.planFailures.push(...planReasons(p).map(r=>`${mode}: ${r}`));
+          }
+        } catch(error) {
+          // The plan probe's SQL carries a Session token; keep it out of the artifact.
+          seedCheck.error=String(error).replaceAll(tokens[0],'<token>').replace(/[0-9a-f]{64}/g,'<hex64>').slice(0,2000);
+        }
+        save(`${dir}/seed-statistics.json`,seedCheck);
+        const {statsFailures,planFailures}=seedCheck;
+        if(seedCheck.error)throw new Error('Seed statistics check failed');
+        if(statsFailures.length||planFailures.length)throw new Error('Seed statistics check failed');
         for(const [org,token] of [[organization,tokens[0]],[otherOrganization,reader.token]]) {
           const r=await fetch(`${base}/api/v1/orgs/${org}/channels`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(10000)});
           if(r.status!==200)throw new Error('Fixture preflight failed');await r.arrayBuffer();
         }
         save(`${privateDir}/data.json`,{organization,otherOrganization,reader:reader.token,channels,password});
         save(`${privateDir}/tokens.json`,tokens);
-        save(`${dir}/metadata.json`,{scope,...cell,commit:commits[cell.arm],appImage:docker('inspect','--format','{{.Image}}',app),dbImage:docker('inspect','--format','{{.Image}}',db),settings,smoke,
+        save(`${dir}/metadata.json`,{scope,harnessCondition:condition,...cell,commit:commits[cell.arm],appImage:docker('inspect','--format','{{.Image}}',app),dbImage:docker('inspect','--format','{{.Image}}',db),settings,smoke,rehearsal,
           dbSettings:sql("SELECT name||'='||setting FROM pg_settings WHERE name IN ('max_connections','shared_buffers','statement_timeout','lock_timeout') ORDER BY name"),
           roleSettings:sql("SELECT rolname,rolconfig FROM pg_roles WHERE rolname IN ('fukulow','fukulow_app')"),started:new Date().toISOString()});
         const sample=()=> {
@@ -191,7 +226,7 @@ if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
           return {...r,resources:stats,evidence:{complete:result!.continuousReaderComplete,samples:stats.samples,maxSampleGapMs:stats.maxSampleGapMs,samplingErrors:sampleErrorTimes.filter(t=>t>=startMs!+step.startSeconds*1000&&t<startMs!+(step.startSeconds+step.seconds)*1000).length}};
         });
         const last=plan(smoke).at(-1)!;
-        const run:Run={scope,...cell,smoke,steps,reader:{...result.runMetrics.reader,rate:2,seconds:last.startSeconds+last.seconds+11}};
+        const run:Run={scope,...cell,smoke,...(rehearsal?{rehearsal}:{}),steps,reader:{...result.runMetrics.reader,rate:2,seconds:last.startSeconds+last.seconds+11}};
         const logs=dc('logs','--no-color','--timestamps','app');
         // Only this exact SQLx Display text is counted. Never infer from HTTP statuses.
         const events=logs.split('\n').filter(l=>/database operation failed: pool timed out while waiting for an open connection\s*$/.test(l)).map(l=>Date.parse(l.match(/\d{4}-\d\d-\d\dT\S+/)?.[0]??'')).filter(Number.isFinite);
@@ -218,10 +253,13 @@ if (Object.keys(process.env).some(name => name.startsWith('DIAG_'))) {
     if(activeCompose){try{command('docker',[...activeCompose,'down','--volumes','--remove-orphans'],undefined,activeEnv);}catch{cleanupErrors.push('Final Compose cleanup failed');}}
     for(const arm of ['B','A']) {try{const tag=`${project}-${arm.toLowerCase()}`;if(docker('image','ls','-q',tag))docker('image','rm',tag);}catch{cleanupErrors.push(`${arm}: image cleanup failed`);}}
     rmSync(scratch,{recursive:true,force:true});
-    const complete=!failed&&!interrupted&&!cleanupErrors.length&&(smoke||runs.length===scenarios.length*pairs().length*2);
-    save(`${output}/summary.json`,{...summary(complete),complete});
+    const complete=!failed&&!interrupted&&!cleanupErrors.length&&runs.length===runSequence(mode).length;
+    const final=summary(complete);
+    // A rehearsal is clean only when it completed and every run passes every check except load generation, which is forecast (#196 decision b); never a verdict.
+    rehearsalClean=rehearsal&&complete&&(final.checks??[]).every(c=>!c.problems.length);
+    save(`${output}/summary.json`,{...final,complete,...(rehearsal?{rehearsalClean}:{})});
     process.off('SIGINT',stop);process.off('SIGTERM',stop);
   }
   console.log(`${scope}: artifacts ${output}`);
-  process.exitCode=failed||interrupted||cleanupErrors.length?1:0;
+  process.exitCode=failed||interrupted||cleanupErrors.length||(rehearsal&&!rehearsalClean)?1:0;
 }

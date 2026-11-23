@@ -1,6 +1,7 @@
 // #515 slice 5 runner (approved pre-registration, 2026-11-17).
-//   --build : daytime only; builds both release images and Part D test binaries into --work.
-//   --night 1|2 : the overnight measurement (night 1 = Part A, night 2 = Parts B, C, D).
+//   --build [--night N] : daytime only; builds both release images (night N's commits, default nights 1-2) and,
+//     when the night includes Part D, the Part D test binaries into --work. An image already labelled with its commit is kept.
+//   --night 1|2|3 : the overnight measurement (night 1 = Part A, night 2 = Parts B, C, D, night 3 = Part C rerun).
 //   --smoke : tiny settings through the same code; never evidence.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -8,24 +9,28 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { arch, cpus, hostname, platform, release, tmpdir, totalmem } from 'node:os';
 import { resolve } from 'node:path';
 import { outsideCheckout } from '../proxy-target.ts';
-import { commits, dbSettings, fixture, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
+import { dbSettings, fixture, isNight, longBody, nights, partA, partB, partC, partD, rounds, scope, thresholds, timelineEnv, requireMergedHarness, type Arm } from './config.ts';
 import { appliedSettingsSQL, autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, relationBytesSQL, relationSizesSQL, settleSQL, watchedRelationsSQL } from './fixture.ts';
 import { judgePartA, judgePartB, judgePartC, classifyPartDFailure, closedLoopNonSuccess, confirmedPartDInfrastructure, parseTimeline, scanPartDPostgresLog, timelineTopics, vacuumCost, type Counts, type PostgresState, type RunA, type RunB, type RunC, type RunD, type StepA } from './judge.ts';
 import { readResults, scorePartDFiles } from './report.ts';
 import { command, dbCommand, docker, seed, send, sampler, sleep, snapshot, startStack, timed, walDump, walWindow, type Seeded, type Stack } from './stack.ts';
 
-const usage = 'node load/slice5/run.ts --work /abs/work (--build | --night 1|2 --out /abs/new/dir) [--smoke] [--parts A,B,C,D]';
+const usage = 'node load/slice5/run.ts --work /abs/work (--build [--night 1|2|3] | --night 1|2|3 --out /abs/new/dir) [--smoke] [--parts A,B,C,D]';
 const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 if (args.includes('--help')) { console.log(`${scope}\n${usage}`); process.exit(0); }
 if (process.version !== 'v26.13.1') throw new Error('Use Node 26.13.1');
 const work = outsideCheckout(flag('--work') ?? (() => { throw new Error(usage); })());
 const smoke = args.includes('--smoke'), build = args.includes('--build');
-const night = flag('--night') as '1' | '2' | undefined;
-if (!build && !(night === '1' || night === '2')) throw new Error(usage);
-const full = Object.fromEntries((['B', 'A'] as Arm[]).map(arm => [arm, command('git', ['rev-parse', `${commits[arm]}^{commit}`])])) as Record<Arm, string>;
+const nightFlag = flag('--night');
+if (nightFlag !== undefined && !isNight(nightFlag)) throw new Error(usage);
+const night = nightFlag as `${keyof typeof nights}` | undefined;
+if (!build && night === undefined) throw new Error(usage);
+const armCommits = nights[night ?? '1'].commits;
+const full = Object.fromEntries((['B', 'A'] as Arm[]).map(arm => [arm, command('git', ['rev-parse', `${armCommits[arm]}^{commit}`])])) as Record<Arm, string>;
 const tag = (arm: Arm) => `fukulow-slice5:${arm.toLowerCase()}-${full[arm].slice(0, 12)}`;
-const source = (arm: Arm) => `${work}/src-${arm}`;
+// Per-commit trees: a reused --work never builds or tests one commit from another commit's extracted source.
+const source = (arm: Arm) => `${work}/src-${arm}-${full[arm].slice(0, 12)}`;
 const save = (path: string, data: unknown) => writeFileSync(path, JSON.stringify(data, null, 2));
 let child: ChildProcess | undefined, childName: string | undefined, interrupted = '';
 let deadlineChild: ChildProcess | undefined;
@@ -57,17 +62,22 @@ function run(file: string, argv: string[], o: { env?: NodeJS.ProcessEnv; cwd?: s
 function extract(arm: Arm) {
   if (existsSync(source(arm))) return;
   mkdirSync(source(arm), { recursive: true });
-  command('git', ['archive', '--format=tar', `--output=${work}/${arm}.tar`, full[arm]]);
-  command('tar', ['-xf', `${work}/${arm}.tar`, '-C', source(arm)]);
+  command('git', ['archive', '--format=tar', `--output=${source(arm)}.tar`, full[arm]]);
+  command('tar', ['-xf', `${source(arm)}.tar`, '-C', source(arm)]);
 }
 if (build) {
   mkdirSync(work, { recursive: true });
   for (const arm of ['B', 'A'] as Arm[]) {
     extract(arm);
-    console.log(`slice5: building ${arm} ${full[arm]}`);
-    const image = await run('docker', ['build', '--label', `org.opencontainers.image.revision=${full[arm]}`, '-t', tag(arm), source(arm)], { timeoutMs: 3600_000 });
-    writeFileSync(`${work}/build-${arm}.log`, image.stdout + image.stderr);
-    if (image.code !== 0) throw new Error(`image build failed for ${arm}`);
+    const existing = spawnSync('docker', ['image', 'inspect', '--format', '{{index .Config.Labels "org.opencontainers.image.revision"}}', tag(arm)], { encoding: 'utf8' });
+    const keep = existing.status === 0 && existing.stdout.trim() === full[arm];
+    console.log(`slice5: ${keep ? 'keeping' : 'building'} ${arm} ${full[arm]}`);
+    if (!keep) {
+      const image = await run('docker', ['build', '--label', `org.opencontainers.image.revision=${full[arm]}`, '-t', tag(arm), source(arm)], { timeoutMs: 3600_000 });
+      writeFileSync(`${work}/build-${arm}.log`, image.stdout + image.stderr);
+      if (image.code !== 0) throw new Error(`image build failed for ${arm}`);
+    }
+    if (night !== undefined && !(nights[night].parts as readonly string[]).includes('D')) continue;
     // rust-embed needs web/dist to exist; Part D runs one DB test, so an empty one suffices (as in CI lint).
     mkdirSync(`${source(arm)}/web/dist`, { recursive: true });
     const test = await run('cargo', ['test', '--locked', '--release', '-p', 'fukulow-server', '--lib', '--no-run'], { cwd: source(arm), timeoutMs: 3600_000 });
@@ -436,7 +446,7 @@ try {
   const scoredD = parts.includes('D') ? scorePartDFiles(output, readResults(output), plan.rounds) : undefined;
   const verdicts = [
     ...plan.cellsA.map(c => judgePartA(runs<RunA>('A'), c.name)), ...plan.cellsA.map(c => vacuumCost(runs<RunA>('A'), c.name)),
-    ...plan.cellsB.map(c => judgePartB(runs<RunB>('B'), c)), ...partC.cells.map(c => judgePartC(runs<RunC>('C'), c)),
+    ...plan.cellsB.map(c => judgePartB(runs<RunB>('B'), c)), ...partC.cells.map(c => judgePartC(runs<RunC>('C'), c, armCommits)),
     ...(scoredD?.verdicts ?? []),
   ].filter(v => parts.includes((v as { part?: string }).part ?? 'A'));
   failed ||= scoredD?.failed ?? false;

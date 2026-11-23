@@ -1,3 +1,4 @@
+import { rejectDiagnosticEvidence } from './diagnostic-mode.ts';
 import { settings } from '../pool-before-after-summary.ts';
 import { evidenceComplete, walInvalid, worst, type Evidence, type Status, type Wal } from '../slice5/judge.ts';
 import { cells, moveInterval, moveLimits, thresholds, type Cell, type Plan, type Step } from './plan.ts';
@@ -158,6 +159,8 @@ function performanceGate(step: Step, move: Measurement, baseline: Measurement | 
 }
 
 export function judge(p: Plan, results: Result[], complete: boolean) {
+  rejectDiagnosticEvidence(p, ...results, ...results.flatMap(row =>
+    (row.attempts ?? []).flatMap(attempt => attempt.measurement ? [attempt, attempt.measurement] : [attempt])));
   const reruns = results.filter(row => row.attempts.length > 1).length;
   const lookup = (cell: Cell, round: number, arm: Step['arm']) => {
     const matches = results.filter(row => row.part === cell.part && row.size === cell.size && row.round === round && row.arm === arm);

@@ -295,7 +295,10 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
     await guestPage.setViewportSize({ width: 375, height: 667 })
 
     const heading = guestPage.locator('#channel-list-heading')
-    const singleChannelBtn = guestPage.locator('#channel-content .channel-list button')
+    const channelRows = guestPage.locator('#channel-content .channel-list > li[data-channel-id]')
+    const singleChannelBtn = guestPage.locator(
+      `#channel-content li[data-channel-id="${singleChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
+    )
     const backToListBtn = guestPage.getByRole('button', { name: 'チャンネル一覧へ戻る', exact: true }).first()
 
     // 1. Direct link to Channel view -> phone `list` intent replaces URL to /o/{org}, adds no extra entry, and focuses #channel-list-heading
@@ -308,6 +311,7 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
     await backToListBtn.click()
     await expect(guestPage).toHaveURL(`/o/${org}`)
     await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(channelRows).toHaveCount(1)
     await expect(singleChannelBtn).toHaveCount(1)
     await expect(heading).toBeVisible()
     await expect(heading).toBeFocused()
@@ -320,6 +324,7 @@ test('single-Channel phone list intent and Back/Forward preserve URL and History
     await guestPage.goForward()
     await expect(guestPage).toHaveURL(`/o/${org}`)
     await expect(guestPage.locator('.workspace')).toHaveAttribute('data-mobile-level', 'channels')
+    await expect(channelRows).toHaveCount(1)
     await expect(singleChannelBtn).toHaveCount(1)
     expect(await guestPage.evaluate(() => history.length)).toBe(directLen)
 
@@ -407,6 +412,9 @@ test('beforeunload warns for a draft in an Organization that is not selected, in
     if (path.endsWith('/me')) return route.fulfill(unavailable
       ? { status: 404, json: { error: 'organization_unavailable' } }
       : { json: { ...member, organization: otherOrganization } })
+    if (path.endsWith('/me/sections')) return route.fulfill(unavailable
+      ? { status: 404, json: { error: 'organization_unavailable' } }
+      : { json: { generation: '0', sections: [], other_channel_ids: [] } satisfies import('../src/api-schema.d.ts').components['schemas']['SectionLayout'] })
     if (path.endsWith('/channels')) return route.fulfill({ json: { history_generation: '00000000-0000-4000-8000-000000000515', channels: [] } })
     if (path.endsWith('/members')) return route.fulfill({ json: { members: [] } })
     return route.continue()
@@ -432,4 +440,145 @@ test('beforeunload warns for a draft in an Organization that is not selected, in
   await page.locator('.org-switcher__select').selectOption(other)
   await expect(page.getByRole('alert')).toContainText('この組織は利用できません。')
   expect(await warns()).toBe(true)
+})
+
+test('responsive panel geometry: overlays main at 960px, 1100px and 1279px, pushes main at 1280px, and tablet 768px drawer closes on Esc', async ({ page }) => {
+  const main = page.locator('#main-content')
+  const panel = page.locator('#panel-content')
+  const openPanelBtn = page.getByRole('button', { name: 'パネルを開く(⌘.)', exact: true })
+
+  // 1. 960px, 1100px, 1279px (960-1279px inclusive): open panel overlays main from the right,
+  //    stays inside the viewport, and overlaps main vertically without narrowing main
+  let prevMainWidth = 0
+  for (const width of [960, 1100, 1279]) {
+    await page.setViewportSize({ width, height: 800 })
+    if (prevMainWidth === 0) {
+      await page.goto(`/o/${org}/c/${first}`)
+      await expect(composer(page)).toBeEnabled()
+    } else {
+      await expect.poll(async () => (await main.boundingBox())?.width ?? 0).toBeGreaterThan(prevMainWidth + 50)
+    }
+    await expect
+      .poll(() => page.evaluate(() => window.matchMedia('(min-width: 960px) and (max-width: 1279px)').matches))
+      .toBe(true)
+
+    const viewport = page.viewportSize()
+    expect(viewport).not.toBeNull()
+    const mainClosed = await main.boundingBox()
+    expect(mainClosed).not.toBeNull()
+    prevMainWidth = mainClosed!.width
+
+    await openPanelBtn.click()
+    await expect(panel).toBeVisible()
+    const mainOpen = await main.boundingBox()
+    const panelBox = await panel.boundingBox()
+    expect(mainOpen).not.toBeNull()
+    expect(panelBox).not.toBeNull()
+
+    // Horizontal overlay without narrowing main
+    expect(Math.abs(mainOpen!.width - mainClosed!.width)).toBeLessThanOrEqual(1)
+    expect(Math.abs(mainOpen!.x - mainClosed!.x)).toBeLessThanOrEqual(1)
+    expect(panelBox!.width).toBeGreaterThan(200)
+    expect(panelBox!.x).toBeGreaterThan(mainOpen!.x)
+    expect(panelBox!.x).toBeLessThan(mainOpen!.x + mainOpen!.width)
+    expect(Math.abs((panelBox!.x + panelBox!.width) - (mainOpen!.x + mainOpen!.width))).toBeLessThanOrEqual(2)
+
+    // Viewport intersection and vertical overlap with main
+    expect(panelBox!.x).toBeGreaterThanOrEqual(0)
+    expect(panelBox!.y).toBeGreaterThanOrEqual(0)
+    expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(viewport!.width)
+    expect(panelBox!.y).toBeLessThan(viewport!.height)
+    const visibleWidth = Math.min(panelBox!.x + panelBox!.width, viewport!.width) - Math.max(panelBox!.x, 0)
+    const visibleHeight = Math.min(panelBox!.y + panelBox!.height, viewport!.height) - Math.max(panelBox!.y, 0)
+    expect(visibleWidth).toBeGreaterThan(200)
+    expect(visibleHeight).toBeGreaterThan(200)
+    const verticalOverlap =
+      Math.min(panelBox!.y + panelBox!.height, mainOpen!.y + mainOpen!.height) -
+      Math.max(panelBox!.y, mainOpen!.y)
+    expect(verticalOverlap).toBeGreaterThan(200)
+
+    await page.keyboard.press('Escape')
+    await expect(panel).toHaveCount(0)
+  }
+
+  // 2. 1280px (>= 1280px): open panel sits beside main and pushes main narrower
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await expect.poll(() => page.evaluate(() => window.matchMedia('(min-width: 1280px)').matches)).toBe(true)
+  const viewport1280 = page.viewportSize()
+  expect(viewport1280).not.toBeNull()
+  const mainClosed1280 = await main.boundingBox()
+  expect(mainClosed1280).not.toBeNull()
+
+  await openPanelBtn.click()
+  await expect(panel).toBeVisible()
+  const mainOpen1280 = await main.boundingBox()
+  const panel1280 = await panel.boundingBox()
+  expect(mainOpen1280).not.toBeNull()
+  expect(panel1280).not.toBeNull()
+  expect(mainClosed1280!.width - mainOpen1280!.width).toBeGreaterThanOrEqual(panel1280!.width)
+  expect(panel1280!.x).toBeGreaterThanOrEqual(mainOpen1280!.x + mainOpen1280!.width)
+  expect(panel1280!.y).toBeGreaterThanOrEqual(0)
+  expect(panel1280!.x + panel1280!.width).toBeLessThanOrEqual(viewport1280!.width)
+  expect(panel1280!.y + panel1280!.height).toBeLessThanOrEqual(viewport1280!.height)
+  const verticalOverlap1280 =
+    Math.min(panel1280!.y + panel1280!.height, mainOpen1280!.y + mainOpen1280!.height) -
+    Math.max(panel1280!.y, mainOpen1280!.y)
+  expect(verticalOverlap1280).toBeGreaterThan(200)
+
+  // 3. 768px (600-959px): drawer closes on Esc and focus remains on the rail opener
+  await page.keyboard.press('Escape')
+  await expect(panel).toHaveCount(0)
+  await page.setViewportSize({ width: 768, height: 800 })
+  const channelNav = page.locator('#channel-content')
+  const railChannelBtn = page.getByRole('button', { name: 'チャンネル一覧', exact: true })
+  await expect(channelNav).toBeHidden()
+  await railChannelBtn.click()
+  await expect(channelNav).toBeVisible()
+  await expect(page.locator('.workspace')).toHaveAttribute('data-drawer-open', 'true')
+  await expect(railChannelBtn).toHaveAttribute('aria-expanded', 'true')
+  await expect(railChannelBtn).toBeFocused()
+
+  await page.keyboard.press('Escape')
+  await expect(channelNav).toBeHidden()
+  await expect(page.locator('.workspace')).toHaveAttribute('data-drawer-open', 'false')
+  await expect(railChannelBtn).toHaveAttribute('aria-expanded', 'false')
+  await expect(railChannelBtn).toBeFocused()
+})
+
+test('direct URL access to ?panel=reply:{id} and ?panel=members renders the requested panel content', async ({ page }) => {
+  const rootRes = await secretSafe(() =>
+    page.request.post(`/api/v1/orgs/${org}/channels/${first}/messages`, {
+      data: { client_message_id: crypto.randomUUID(), body: '直接リンクのルートメッセージ' },
+    }),
+  )
+  expect(rootRes.status()).toBe(201)
+  const rootMsg = (await secretSafe(() => rootRes.json())) as import('../src/api-schema.d.ts').components['schemas']['Message']
+
+  const replyRes = await secretSafe(() =>
+    page.request.post(`/api/v1/orgs/${org}/channels/${first}/messages`, {
+      data: { client_message_id: crypto.randomUUID(), body: '直接リンクの子返信', reply_to: rootMsg.id },
+    }),
+  )
+  expect(replyRes.status()).toBe(201)
+
+  const panel = page.locator('#panel-content')
+
+  // 1. Direct load of ?panel=reply:{id} renders the Reply chain messages and enabled Reply Composer
+  await page.goto(`/o/${org}/c/${first}?panel=reply:${rootMsg.id}`)
+  await expect(page).toHaveURL(`/o/${org}/c/${first}?panel=reply:${rootMsg.id}`)
+  await expect(panel).toBeVisible()
+  await expect(panel.locator('h2')).toHaveText('返信のつながり')
+  await expect(panel.getByRole('article').filter({ hasText: '直接リンクのルートメッセージ' })).toBeVisible()
+  await expect(panel.getByRole('article').filter({ hasText: '直接リンクの子返信' })).toBeVisible()
+  await expect(panel.getByRole('textbox', { name: 'メッセージ', exact: true })).toBeEnabled()
+
+  // 2. Direct load of ?panel=members renders the Channel members tab and member list
+  await page.goto(`/o/${org}/c/${first}?panel=members`)
+  await expect(page).toHaveURL(`/o/${org}/c/${first}?panel=members`)
+  await expect(panel).toBeVisible()
+  await expect(panel.getByRole('tab', { name: 'メンバー', exact: true })).toHaveAttribute('aria-selected', 'true')
+  const membersRegion = panel.getByRole('region', { name: 'チャンネルのメンバー', exact: true })
+  await expect(membersRegion).toBeVisible()
+  await expect(membersRegion.getByText('Alice', { exact: true })).toBeVisible()
+  await expect(membersRegion.getByText('オーナー', { exact: true })).toBeVisible()
 })

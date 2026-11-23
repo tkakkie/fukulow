@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { matrix,integers,estimate,equal,percentile,summary,type Sample } from './model.ts';
+import { matrix,integers,estimate,equal,oracleDigest,percentile,summary,type Sample } from './model.ts';
 import { documents } from './measure.ts';
 import { fixture,projectionSql,countSql } from './sql.ts';
+import { readinessArgs } from './database.ts';
 test('matrix varies Members for public visibility; other operations affect one',()=>{
   const points=matrix([10,1000,10000],[1,100,1000]);
   assert.equal(points.length,24);assert.equal(points.filter(p=>p.operation==='public').length,9);
@@ -39,4 +40,16 @@ test('production read extraction retains initial_seq fallback and Mention counts
   assert.match(projectionSql(),/mention_unread_count/);assert.doesNotMatch(projectionSql(),/\{\}/);
   const join=fixture({operation:'join',topics:10,members:1},10);
   assert.match(join,/FROM generate_series\(0,0\) g/);assert.doesNotMatch(join,/@topics@|@members@/);
+});
+test('readiness probes TCP so the image init temporary socket-only server is not taken as ready',()=>{
+  const args=readinessArgs('c');
+  assert.deepEqual(args.slice(0,3),['exec','c','pg_isready']);
+  assert.equal(args[args.indexOf('-h')+1],'127.0.0.1');
+});
+
+test('oracle digest is stable for equal rows and differs for any changed row', () => {
+  const rows = { baselines: [1], 'baseline/counts': [{ channel: 'a', unread: 2 }] };
+  assert.equal(oracleDigest(rows).sha256, oracleDigest(structuredClone(rows)).sha256);
+  assert.notEqual(oracleDigest(rows).sha256, oracleDigest({ ...rows, 'baseline/counts': [{ channel: 'a', unread: 3 }] }).sha256);
+  assert.equal(oracleDigest(rows).bytes, Buffer.byteLength(JSON.stringify(rows)));
 });

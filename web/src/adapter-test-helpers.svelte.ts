@@ -141,7 +141,7 @@ export function fakeNetwork() {
       main_unread_count: 0,
     }
   }
-  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'replyCountsApi' | 'unreadApi' | 'sync'> => ({
+  const options = (selfId = 'me'): Pick<SessionOptions, 'channelsApi' | 'topicsApi' | 'repliesApi' | 'replyCountsApi' | 'unreadApi' | 'sectionsApi' | 'sync'> => ({
     channelsApi: {
       listChannels() {
         const d = deferred<Result<{ history_generation: string;  channels: Channel[] }>>()
@@ -275,6 +275,24 @@ export function fakeNetwork() {
         if (found?.kind === 'topic') return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: tl.as_of_seq, topic: found.topic } }
         return { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
       },
+    },
+    sectionsApi: {
+      async layout() {
+        const ids = [...new Set([
+          ...Object.keys(unreadChannels),
+          ...Object.keys(pages),
+          ...Object.keys(timelines),
+          ...Object.keys(caughtUp),
+        ])]
+        return { ok: true, data: { generation: '0', sections: [], other_channel_ids: ids } }
+      },
+      async placement() { return { ok: true, data: { generation: '0', section_id: null } } },
+      async create(body) { return { ok: true, data: { id: body.id, generation: '1' } } },
+      async rename() { return { ok: true, data: undefined } },
+      async reorder() { return { ok: true, data: undefined } },
+      async moveChannel() { return { ok: true, data: undefined } },
+      async reorderChannels() { return { ok: true, data: undefined } },
+      async delete() { return { ok: true, data: undefined } },
     },
     sync: {
       newId: () => `${selfId}-c${++ids}`,

@@ -36,7 +36,16 @@ export const thresholds = {
   vacuumDecisionRatio: 1.25,
 } as const;
 export const validity = { minimumOfferedFraction: 0.95, maxSampleGapMs: 2500 } as const;
-export const nights = { 1: { parts: ['A'], hardTimeoutMinutes: 210 }, 2: { parts: ['B', 'C', 'D'], hardTimeoutMinutes: 210 } } as const;
+// Night 3 is the Part C formal rerun approved on 2026-11-20 (issue #515, comment 7033367688): only A moves to
+// main with the #674 replay plan fix; B, Part C conditions, rounds, thresholds and validity rules are unchanged.
+export const nights = {
+  1: { parts: ['A'], hardTimeoutMinutes: 210, commits },
+  2: { parts: ['B', 'C', 'D'], hardTimeoutMinutes: 210, commits },
+  3: { parts: ['C'], hardTimeoutMinutes: 210, commits: { B: commits.B, A: '4542f545' } },
+} as const;
+export type Night = keyof typeof nights;
+export type ArmCommits = Readonly<Record<Arm, string>>;
+export const isNight = (n: string | undefined): n is `${Night}` => n === '1' || n === '2' || n === '3';
 
 // Formal runs must not inherit the feasibility test's smoke scale override.
 export function timelineEnv(env: NodeJS.ProcessEnv, smokeTopics?: string): NodeJS.ProcessEnv {

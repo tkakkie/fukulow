@@ -14,6 +14,10 @@ Rules for new records: keep results that affect a design decision, performance c
 
 Record text is copied verbatim from its source line(s) (values and conditions unchanged). Raw logs, artifact directories and `/private/tmp` paths named in records were kept outside Git; they are not in this repository and may no longer exist, so they cannot be restored from here.
 
+## Raw data check (2026-11-18)
+
+Moved verbatim from the `docs/measurements.md` header: Checked 2026-11-18 on the maintainer's Mac: gone for #137, #142, #151, #160 (except `i160-smoke-fix`), #195 send-drain logs, #196 B, #314 step 5 before-run, #469 smoke; still present for #153, #195 storms, #303, #314 step 5, #356, #409, #466, #486; Actions artifact `proxy-measure-43844208337-1` (#469) not yet expired.
+
 ## Moved records (#442, 2026-11-15)
 
 - Subscription context round trips (#314 step 3b, 2026-11-13): moved to #314 (intermediate step; the decision lists the statement counts).
@@ -903,6 +907,8 @@ Method: `node load/hot-plans/fanout.ts <container> <database> <out>` exports the
 
 ## Proxy comparison harness (#469 part 3) — results pending
 
+Moved from `docs/measurements.md`: Send workloads use one publishing Member and burst/refill raised to 1,000,000. See `load/proxy-compare.ts`.
+
 Method fixed by the approved #469 plan; this section records no comparison results. Dispatch `proxy-measure.yml` with `preset=full` and `scenarios=1,2,3,4,5,6`. Each scenario runs in its own GitHub-hosted `ubuntu-latest` job (one job cannot hold all scenarios within 6 h); both proxies run sequentially on that runner using one app image, PostgreSQL 18.6, and a fresh database per run (per step for connections). Each scenario discards one warm-up per proxy, then measures five runs each in alternating ABBA blocks: C N N C, N C C N, C N. The default proxy remains Caddy pending maintainer review.
 
 Harness fixes after full run 43844208337 (all inconclusive; approved on #469 2026-11-17): (A) sockets are spread over separate Accounts, never more than 32 per Account (#196 A `per_account`, unchanged): socket i belongs to Account ⌊i/32⌋, each Account has one Account Session, Account 0 is the Owner and the rest are invited Members of the same Organization; before measuring, every Account's Organization membership and read access to each Channel its sockets subscribe to are checked. 1,000/5,000/10,000 sockets use 32/157/313 Accounts; the same count and allocation apply to both proxies and are recorded per run in `summary.json` `conditions`. (B) every record run has a hard deadline (k6 setup + scenario + teardown limits plus 600 s for Compose; first display 1,800 s + 600 s); on expiry the run gets SIGTERM, SIGKILL for its whole process group after 180 s, then removal of its Compose project's containers, network and volumes and its named k6 container, and is recorded invalid with the reason; job limits are 90/240/355 min for smoke/preflight/full (smoke needs room for the fixed 2,580 s first-display bound), and a run whose budget plus grace would end later than the job limit minus 600 s is not started and is recorded invalid (`conditions[].skipped`), so a scenario whose runs exceed the job is inconclusive rather than cancelled midway. (C) `preset=preflight` runs one full-size discarded warm-up per proxy per scenario, stops at the first invalid run or a ladder whose first step fails, and is never counted among the five measured runs.
@@ -1254,6 +1260,175 @@ Moved verbatim from `docs/measurements.md` when the 2.x baseline replaced it (on
 
 2026-11-18 JST, `b156fba`, Caddy Compose on macOS. Eight publishing Members, 11.39 s (55 s cap), 80 sends, 400 deliveries, zero 429s at burst 10 and refill 1/s. From `5fa245f` until `b156fba`, light CI used one publishing Member, burst 10,000 and refill 1,000/s. [CI reproduction](#light-k6-reproduction-351)
 
+## Revocation hold retry bursts (#592, 2026-11-19 JST, Mac)
+
+Harness `6a9bfa9` (`load/revocation-burst.ts`, judgment in `load/revocation-burst-judgment.ts`). Server: unmodified release build of the PR #588 implementation; backoff 250 ms, 500 ms, 1 s, 2 s, 4 s per registration, no jitter. Fresh disposable PostgreSQL 18.6 per run, reached through a test relay. Host: Apple Silicon, 10 CPUs, 32 GiB; load average 7.8 just before the run, mostly the Docker VM. Mac-relative evidence only.
+
+Scenario and criteria were pre-registered on #592 before the formal runs. Sizes 256, 1,024 and 4,096 connections (one WebSocket per Member). 128 Members each lose access to one private Channel, 64 concurrent removals, and the 64 at even indexes get it back right after. The fault starts 0.3 s before an expected 30 s fallback recheck pass and recovers 3.5 s after it, so it lasts about 3.8 s. Kinds: `recheck` (only the revocation recheck statement fails, gated at the relay) and `outage` (the relay drops every database connection and refuses new ones). 3 repeats per size and kind, interleaved: 18 runs. One `control` run per size with no fault checks the harness only and is not part of the verdict.
+
+Holds start only when a handoff recheck or the fallback pass fails for a revocation in flight or queued. The 40 global activity permits bound in-flight publications, not holds: one publication captures every registration of the target Member and can hold one notice per registration. With one WebSocket per Member, as in this fixture, concurrent holds stay within 40; a Member with many registrations can exceed that. The 4,096-hold worst case was not measured, and this record does not show it is unreachable.
+
+Results, verbatim from the formal results comment on #592. Corrections from the raw `summary.json` (the quoted text is left as posted): notices lost without a revocation at 4096 were 47–54, not 47–51; RSS at 256 changed by -2 to +18 MiB, not 0–18 MiB. "Bounded by in-flight publications (at most 40)" holds only for one registration per Member; see the paragraph above.
+
+**Pre-registered verdict: 256 PASS, 1024 FAIL, 4096 FAIL.** Each failing size has a single failing run, both of kind `outage`, both with the same one reason: "a revocation was delivered while the failure was active". Every other criterion passed in all 18 runs. There were no failed database probes, no pool acquire timeouts, and no wrong, early, repeated or post-restore notices. Every HTTP probe in the recovery window succeeded within its bound.
+
+### The two failures are boundary arrivals
+| Run | Removal committed | Notice arrived at the client | 
+|---|---|---|
+| outage 1024 r3 | 250 ms before the fault started | 0.0 ms after the fault started |
+| outage 4096 r2 | 153 ms before the fault started | 2.0 ms after the fault started |
+
+Both Members' removals committed well before the relay cut the database connections. The server had already authorized and sent the notice. It arrived 0–2 ms after the harness stamped the fault start. No notice arrived later inside any fault window. The criterion uses client arrival time with no allowance for messages already in flight, so it counts these. My reading is that this is a harness boundary artifact, not a server defect. The pre-registered rule still says FAIL, and I am not changing it.
+
+### What the backoff did
+- **Holds were rare and all fenced.** There were 0 holds at 256 and in every `outage` run, 1–4 per `recheck` run at 1024, and 0 at 4096. Every hold ended as `fenced`: no delivered-after-hold, timeout or retries retirements, and no hold refusals. The synchronized retry burst the Issue worried about never formed. This matches the pre-registered finding that holds are bounded by in-flight publications (at most 40), not by connection count.
+- **Recheck query rate.** The peak sliding 1 s rate during the fault was about 290/s at 256, about 1,000/s at 1024, and about 1,600–1,700/s at 4096. In the recovery window it was 0 except in the 4096 `recheck` runs (497, 453 and 40/s). There the 128 removals took 3.2–3.9 s to finish, longer than the 3.8 s fault window, so late removals ran their first recheck after recovery. These are first rechecks, not hold retries (holds = 0).
+- **Database during and after.** Direct `SELECT 1` probe p99 was at most 14.4 ms during the fault and at most 25.7 ms in recovery (4096 `recheck` r2). Pool acquire timeouts were 0. The most waiters at once was 46–58, and only during `recheck` faults.
+- **Memory.** RSS grew by 0–18 MiB at 256, 44–53 MiB at 1024 and 102–236 MiB at 4096. Most of that is the connections and the removal burst. The holds were at most 4, so this run says nothing new about the documented 8 MiB per 4,096 holds bound.
+- **Lost notices.** Notices dropped without a revocation (allowed by O5) were 23–51 at 256, 52–83 at 1024 and 47–51 at 4096. The losses come from the 40-permit activity capacity, as in the smoke runs.
+
+Controls (harness check only, no fault): all three are flagged by the same arrival rule, because the nominal window is checked with no fault applied. The 4096 control also had HTTP p99 172 ms in the nominal window, while the removal burst was still running (19 notices after nominal recovery). The controls are not part of the verdict.
+
+<details><summary>All 18 runs</summary>
+
+| Kind | Size | Run | Pass | Holds (fenced) | Recheck QPS peak, fault | Recheck QPS peak, recovery | DB probe p99 fault / recovery (ms) | HTTP p99 recovery (ms) | Pool timeouts | Max pool waiting | Removal spread (ms) | RSS delta (MiB) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| recheck | 256 | 1 | yes | 0 (0) | 293 | 0 | 2.3 / 3.4 | 7.6 | 0 | 46 | 659 | 18 |
+| outage | 256 | 1 | yes | 0 (0) | 0 | 0 | 2.4 / 2.6 | 14.9 | 0 | 0 | 655 | 17 |
+| outage | 256 | 2 | yes | 0 (0) | 0 | 0 | 3.9 / 2.7 | 7.9 | 0 | 1 | 654 | 0 |
+| recheck | 256 | 2 | yes | 0 (0) | 279 | 0 | 2.3 / 2.7 | 7.0 | 0 | 46 | 667 | 17 |
+| recheck | 256 | 3 | yes | 0 (0) | 314 | 0 | 2.5 / 5.2 | 7.2 | 0 | 46 | 667 | -2 |
+| outage | 256 | 3 | yes | 0 (0) | 0 | 0 | 2.5 / 3.8 | 6.8 | 0 | 0 | 653 | -1 |
+| recheck | 1024 | 1 | yes | 3 (3) | 1038 | 0 | 2.5 / 2.4 | 6.5 | 0 | 47 | 1256 | 52 |
+| outage | 1024 | 1 | yes | 0 (0) | 0 | 0 | 8.4 / 3.2 | 9.1 | 0 | 1 | 695 | 46 |
+| outage | 1024 | 2 | yes | 0 (0) | 0 | 0 | 2.6 / 2.4 | 6.8 | 0 | 0 | 692 | 44 |
+| recheck | 1024 | 2 | yes | 4 (4) | 985 | 0 | 2.7 / 4.2 | 7.2 | 0 | 47 | 1205 | 48 |
+| recheck | 1024 | 3 | yes | 1 (1) | 1006 | 0 | 4.4 / 3.8 | 8.3 | 0 | 46 | 1257 | 53 |
+| outage | 1024 | 3 | **no** | 0 (0) | 0 | 0 | 8.3 / 2.6 | 7.1 | 0 | 0 | 673 | 45 |
+| recheck | 4096 | 1 | yes | 0 (0) | 1710 | 497 | 7.4 / 14.1 | 53.7 | 0 | 57 | 3735 | 234 |
+| outage | 4096 | 1 | yes | 0 (0) | 0 | 0 | 5.5 / 2.4 | 10.0 | 0 | 1 | 680 | 102 |
+| outage | 4096 | 2 | **no** | 0 (0) | 0 | 0 | 3.5 / 5.3 | 9.1 | 0 | 0 | 692 | 104 |
+| recheck | 4096 | 2 | yes | 0 (0) | 1711 | 453 | 11.4 / 25.7 | 82.6 | 0 | 56 | 3923 | 236 |
+| recheck | 4096 | 3 | yes | 0 (0) | 1577 | 40 | 14.4 / 2.8 | 9.7 | 0 | 58 | 3223 | 181 |
+| outage | 4096 | 3 | yes | 0 (0) | 0 | 0 | 9.9 / 2.6 | 11.0 | 0 | 0 | 731 | 119 |
+
+</details>
+
+### Verdict (maintainer decision, 2026-11-19)
+
+- **Pre-registered result, unchanged:** 256 PASS, 1024 FAIL, 4096 FAIL. The only failures are `outage` 1024 r3 and `outage` 4096 r2, both for "a revocation was delivered while the failure was active".
+- **Maintainer decision:** both failures count as PASS. They are boundary arrivals: the notices were authorized before the fault began (the last recheck statements completed about 1–3 ms before it), and they arrived 0.0 ms and 2.0 ms after the harness stamped the fault start. The criterion used client arrival time and allowed nothing for notices already in flight.
+- **Backoff:** acceptable within the paths and load observed here. At most 4 holds existed at once and no synchronized retry burst formed, so this record does not show that the backoff is safe under high hold counts.
+- **Jitter:** not needed now. No hold retries occurred, so no load came from the backoff.
+- **Follow-up:** #622 changes the arrival criterion to the server send time for future runs. This record and its thresholds stay unchanged.
+
+Harness fixes after the record (Copilot review of PR #623). The 18 runs above used harness `6a9bfa9`; later fixes do not change their numbers, but limit them:
+- Revocations reaching untracked sockets, or a tracked socket for the wrong Channel, were dropped before `run.json` was written. "No wrong notices" therefore covers only tracked sockets and the removed Channels; unauthorized deliveries elsewhere were not observable. The harness now records and fails on them.
+- A prepare-only (Parse/Describe/Sync) cycle counted as a recheck or fallback pass. About 41 of 146 fallback records are estimated prepare-only; the recheck count and the recheck QPS figures may be overstated by an amount the raw data cannot determine.
+- Every run had 121 pool samples bracketing the recovery window, so the missing-sample check (now explicit) could not have passed a run wrongly. `psql` ran without `ON_ERROR_STOP` and its stderr was discarded; all 39,440 direct probes recorded success, so no masked error is evident, but none can be ruled out.
+
+Limits: one Mac, client arrival timestamps, fault windows of about 3.8 s, at most 4 concurrent holds, and no measurement of the 8 MiB / 4,096-hold memory bound. Reproduce with `ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir` (add `--sizes`, `--kinds` or `--repeats` for a subset) from a release build. Raw run directories are outside Git.
+
+## Revocation hold retry bursts rerun (#592, 2026-11-20 JST, Mac)
+
+Verbatim from [the #592 results comment](https://github.com/tkakkie/fukulow/issues/592#issuecomment-7027823122), without its decision options. The maintainer chose option 2 (measure the server send time first) on 2026-11-20; that decision is below the 2026-11-21 record.
+
+Ran 2026-11-20 10:09–10:47 JST in the overnight chain, on harness commit `ee06465` (PR #623: the five review fixes plus the #622 boundary rule). The pre-registered matrix: 256, 1,024 and 4,096 connections × `recheck`, `outage` × 3 repeats = 18 runs, an unmodified release server and fresh PostgreSQL each time. Host: Apple Silicon, 10 CPUs, 32 GiB, with no other runs on the host. No control runs this time; controls were never part of the verdict. The script exited 0 and left no containers.
+
+**Pre-registered verdict: 256 PASS, 1024 PASS, 4096 FAIL.** 17 runs are clean PASS. No run is `PASS_WITH_BOUNDARY_EXCEPTION`. The single failure is `recheck` 4096 r2, with one reason: "a revocation was delivered while the failure was active". Every other criterion passed in all 18 runs.
+
+### The one failure
+In `recheck` 4096 r2, three notices arrived inside the fault window:
+
+| Socket | Removal returned 204 | Notice arrived at the client | Judged |
+|---|---|---|---|
+| 0 | 190 ms before the fault | 0.7 ms after the fault start | boundary exception (≤ 2 ms) |
+| 2 | 187 ms before the fault | 1.3 ms after | boundary exception (≤ 2 ms) |
+| 26 | 189 ms before the fault | **3.8 ms after** | **fail** (> 2 ms) |
+
+Context from the same run:
+- Two rechecks that started before the fault completed **successfully after** the fault start, at +1.3 ms and +4.7 ms. Statements already in flight when the relay starts the fault can still finish. The first recheck error completed at +0.8 ms.
+- Socket 26's notice arrived after the +1.3 ms success and before the next error-free completion. That fits a notice authorized by a recheck that was already running when the fault began, then delivered under 4,096-connection load.
+- The relay timings carry no Member or Channel identity, so the harness cannot prove which recheck authorized socket 26. This is consistent with the boundary class #622 describes, but it is not proven. The server send time is still not observable without a server change, which is why #622 used the 2 ms arrival allowance.
+
+The pre-registered rule says FAIL, and I am not changing it.
+
+### Everything else
+- **Holds:** 0–4 per run, every one ended `fenced`. There were no delivered-after-hold, timeout or retries retirements, and no hold refusals. Again no synchronized retry burst formed.
+- **Recheck QPS (executed only), peak sliding 1 s during the fault:** about 165–180/s at 256, 440–500/s at 1024, and 660–820/s at 4096 (`recheck` kind). In recovery it was 0, except in `recheck` 4096 r1 (45/s) and r3 (220/s), where the removal burst outlasted the fault window.
+- **Database:** no failed direct probes. Probe p99 was at most 12.8 ms during the fault and 6.2 ms in recovery. Pool acquire timeouts were 0. The most waiters at once was 61.
+- **HTTP in recovery:** no failures and no 5xx. p99 was at most 24.6 ms.
+- **Memory:** RSS grew by 17–18 MiB at 256, 26–32 MiB at 1024 and 89–188 MiB at 4096.
+- **Lost notices** without a revocation (allowed by O5): 26–52 at 256, 50–83 at 1024, 47–59 at 4096.
+
+<details><summary>All 18 runs</summary>
+
+| Kind | Size | Run | Verdict | Holds (fenced) | Recheck QPS peak, fault / recovery | DB probe p99 fault / recovery (ms) | HTTP p99 recovery (ms) | Pool timeouts | Max pool waiting | RSS delta (MiB) | Lost without notice |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| recheck | 256 | 1 | PASS | 2 (2) | 168 / 0 | 3.2 / 3.0 | 9.0 | 0 | 1 | 17 | 29 |
+| outage | 256 | 1 | PASS | 0 (0) | 0 / 0 | 2.8 / 2.9 | 9.4 | 0 | 0 | 17 | 51 |
+| outage | 256 | 2 | PASS | 0 (0) | 0 / 0 | 2.9 / 2.8 | 10.2 | 0 | 0 | 17 | 52 |
+| recheck | 256 | 2 | PASS | 4 (4) | 179 / 0 | 3.4 / 3.0 | 7.4 | 0 | 46 | 18 | 31 |
+| recheck | 256 | 3 | PASS | 0 (0) | 165 / 0 | 3.8 / 4.7 | 7.4 | 0 | 46 | 18 | 26 |
+| outage | 256 | 3 | PASS | 0 (0) | 0 / 0 | 2.8 / 2.8 | 9.6 | 0 | 1 | 17 | 45 |
+| recheck | 1024 | 1 | PASS | 3 (3) | 503 / 0 | 6.1 / 2.9 | 9.0 | 0 | 55 | 29 | 52 |
+| outage | 1024 | 1 | PASS | 0 (0) | 0 / 0 | 4.0 / 2.9 | 9.9 | 0 | 0 | 29 | 82 |
+| outage | 1024 | 2 | PASS | 1 (1) | 0 / 0 | 5.8 / 3.4 | 10.0 | 0 | 1 | 26 | 83 |
+| recheck | 1024 | 2 | PASS | 0 (0) | 439 / 0 | 3.1 / 2.7 | 9.4 | 0 | 46 | 32 | 53 |
+| recheck | 1024 | 3 | PASS | 0 (0) | 498 / 0 | 4.1 / 3.3 | 8.3 | 0 | 46 | 32 | 50 |
+| outage | 1024 | 3 | PASS | 2 (2) | 0 / 0 | 2.8 / 2.8 | 9.4 | 0 | 0 | 30 | 83 |
+| recheck | 4096 | 1 | PASS | 0 (0) | 730 / 45 | 12.8 / 2.8 | 15.2 | 0 | 61 | 159 | 50 |
+| outage | 4096 | 1 | PASS | 0 (0) | 0 / 0 | 4.2 / 3.0 | 9.9 | 0 | 0 | 89 | 48 |
+| outage | 4096 | 2 | PASS | 0 (0) | 0 / 0 | 5.2 / 3.8 | 9.4 | 0 | 0 | 89 | 47 |
+| recheck | 4096 | 2 | **FAIL** | 0 (0) | 657 / 0 | 9.3 / 2.9 | 10.4 | 0 | 55 | 148 | 59 |
+| recheck | 4096 | 3 | PASS | 1 (1) | 823 / 220 | 11.8 / 6.2 | 24.6 | 0 | 58 | 188 | 52 |
+| outage | 4096 | 3 | PASS | 0 (0) | 0 / 0 | 5.1 / 5.7 | 8.1 | 0 | 0 | 124 | 53 |
+
+</details>
+
+The few holds again say nothing about safety at high hold counts (one WebSocket per Member in this fixture), as stated in the maintainer's 2026-11-19 decision above.
+
+## Revocation hold send-time rerun (#592, 2026-11-21 JST, Mac)
+
+Verbatim from [the #592 results comment](https://github.com/tkakkie/fukulow/issues/592#issuecomment-7053649060), without its decision options. Run with `ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir --kinds recheck --sizes 4096 --repeats 3` from a release build of `2bad2c7d`. Raw run directories are outside Git.
+
+This is step 3 of the maintainer's 2026-11-20 decision (option 2). It ran in the overnight chain with harness commit `2bad2c7d` (the #622 change on PR #623's head). The server change is measurement-only: it records each notice's server send time on the same clock as the fault start, with no change to notice behaviour or authorization. The settings are unchanged from the 2026-11-20 rerun:
+- 128 removals at concurrency 64, fault lead 300 ms, recovery 3.5 s after the pass;
+- the same thresholds, 3 repeats, Node 26.13.1, the same host;
+- no other runs on the host.
+
+The script exited 0 and left no containers.
+
+**The pre-registered 2026-11-20 FAIL is unchanged.** These results are recorded separately, as the decision asked, and the verdict on them is the maintainer's.
+
+### Result
+| Repeat | Per-run verdict | Server send records matched | Indeterminate | Clock uncertainty | Boundary exceptions | Lost with / without notice | Holds (fenced) | Recheck errors (client) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | PASS | 24/24 | 0 | 0.22 ms | 0 | 11 / 53 | 2 (2) | 2,408 |
+| 2 | PASS | 24/24 | 0 | 0.09 ms | 0 | 10 / 54 | 0 (0) | 1,674 |
+| 3 | PASS | 24/24 | 0 | 0.17 ms | 0 | 13 / 51 | 0 (0) | 1,746 |
+
+- **No notice was sent while the failure was active, in any repeat.** Every server send record was matched to a client notice, and none was indeterminate. Because the send time is now measured directly, no run needed the 2 ms arrival allowance.
+- **Other criteria:**
+  - no notices after recovery, no resets and no server closes;
+  - DB probes had 0 failures; recovery p99 was at most 12.8 ms;
+  - HTTP recovery had no failures and no 5xx; p99 was at most 23.1 ms;
+  - 0 pool timeouts; at most 53 waiting during the fault;
+  - RSS delta 151–199 MiB.
+- **Holds:** at most 2, all fenced, with no delivered-after-hold, timeout, retries or cap retirements. Backoff safety at high hold counts is still unverified, as before; that is #668.
+- The summary's `bySize` reads `NOT EVALUATED` for all sizes. That is expected: this run covered only `recheck` at 4096. The script judges each run, not a size. **No size-level verdict is claimed here.**
+
+### What this suggests (not a verdict)
+The earlier socket 26 arrival at +3.8 ms is consistent with a notice sent before the fault and delivered late under load. That was the boundary class #622 described. These three repeats show no send inside the fault window when the send time is measured directly. They cannot retroactively prove what happened in the 2026-11-20 r2 run.
+
+### Verdict (maintainer decisions, 2026-11-20 and 2026-11-21)
+
+- **2026-11-20, option 2:** the 2026-11-20 4096 FAIL stands. Make the server send time measurable (measurement-only, #622), put it on the fault clock, rerun `recheck` at 4,096 ×3, and record the results separately.
+- **2026-11-21, accepted:** the 2026-11-20 pre-registered FAIL is kept unchanged as a record. The 2026-11-21 send-time rerun is a separate result: all 3 repeats PASS, every server send record matched, 0 indeterminate, 0 server sends inside the fault window.
+- **Backoff:** acceptable at the low hold counts covered here (256, 1,024 and 4,096 connections, at most 4 concurrent holds). Safety at high hold counts is still unverified and stays open in #668; this verdict does not extend to it.
+- **The earlier +3.8 ms arrival** (2026-11-20 `recheck` 4096 r2, socket 26) is consistent with a notice sent before the fault and delivered late under load. No earlier individual FAIL is rewritten as PASS.
+- **Jitter:** not needed now.
+
 ## Invite cleanup (#223, 2026-11-20 JST)
 
 `INVITE_SAMPLES=20 INVITE_COUNTS=10000,100000 node load/invite-scan.ts` on PostgreSQL 18.6, warm shared Mac, short runs. "Before" runs the same cleanup statement with the three retention indexes removed. With the indexes, both plan modes switch from three sequential scans to three index-only retention cutoff scans; the existing-tombstone lookup uses the tombstone primary key.
@@ -1342,4 +1517,129 @@ The judge marks every cell INVALID because candidate runs did not complete the r
 | PAGE boundary=Some(190000) | 47.7 ms | 49.0 ms | 1.03 | 7.5 % / 2.0 % | PASS |
 | SEND boundary=None | 17.5 ms | 19.1 ms | 1.09 | 8.0 % / 11.3 % | report only |
 | SEND boundary=Some(190000) | 13.4 ms | 15.7 ms | 1.17 | 18.0 % / 1.6 % | report only |
+
+
+## Rust/wasm sync core typed deltas (#487, 2026-11-21 JST, Mac)
+
+Formal re-measurement for maintainer condition 6 on #487 (PR #709). The first display and earlier core results are in the [#466 record](#web-rustwasm-sync-core-evaluation-466-2026-11-16-jst). Run 2026-11-21 08:16–08:53 JST in the overnight chain, behind an idle gate (no builds, tests, workers or containers; 5-minute load below 2), with no retries. Apple Silicon Mac, 10 CPUs, 32 GiB, AC power, Node 26.13.1 for every arm.
+
+| Arm | Label | Commit | Command |
+|---|---|---|---|
+| base | B | `06264eab` (main) | `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --out <dir>/base --round <n>` |
+| PR | W | `c02e1a78` | same; the script is byte-identical to base |
+| old TS core | R | `117e75a1` (#466 arm R) | that checkout's #466 script with `--core ts` |
+
+Five rounds of a cyclic Latin square (round 1: base, PR, TS; each later round rotated by one). Each arm's wasm was built before timing and passed `--smoke`. The TS arm ran in the same session by maintainer decision. The protocol inputs changed shape in #547 and #595, so **the TS ratio is cross-harness**.
+
+The chain did not pass `--arm`, so base rounds were written with label W, the same as PR, and the per-arm aggregation failed. With the maintainer's approval, base's label was changed from W to B in a copy, with the originals and their SHA-256 left untouched. Then `node web/scripts/measure-wasm-core.ts --aggregate --out <copy>` ran once over all arms with PR's aggregator, which is byte-identical to base's. All 5 rounds are included, and the targets are unchanged.
+
+Results are medians of rounds with [min–max]. Each change is against B; W and R are compared with B the same way.
+
+| Metric | B (base) | W (PR) | R (old TS, cross-harness) | Target | Status |
+|---|---|---|---|---|---|
+| `step()` p50 / p95 / p99 (µs), grid + 6,000-step trace | 42.46 / 426.42 / 2150.38 | 25.13 (−40.8%) / 346.25 [345.33–351.92] (−18.8%) / 1493.63 (−30.5%) | 4.79 / 24.08 / 33.38 | p50, p95 ≤ +10% | MET |
+| 100 msg/s × 60 s, 8 Channels, p50 / p95 / p99 (ms) | 0.89 / 1.94 [1.90–2.18] / 2.44 | 0.84 / 1.70 [1.67–2.04] (−12.2%, CI −13.1%..+4.4%) / 2.09, queue 0 | 0.62 / 1.39 [1.37–1.61] / 1.77 | p95 ≤ +10%, queue 0 | MET |
+| Max sustainable rate (msg/s) | 8000 | 8000 | 8000 | ≥ 500 | MET |
+| Bulk p50 / p95 (ms): history 8×50, history 2×200, catch-up 250, catch-up 1000 | 6.82/7.41, 6.85/6.96, 5.10/5.18, 17.70/17.85 | 5.20/5.72, 5.13/5.42, 3.93/4.00, 14.12/14.26 (−19.7% to −24.6%) | 0.19/0.20, 0.12/0.13, 0.16/0.17, 1.01/1.06 | ≤ +10% | INCONCLUSIVE |
+| Steady memory, post-GC heap + wasm linear (MiB) | 18.19 | 18.35 (+0.9%; wasm 1728 KiB) | 11.47 | ≤ +10% | MET |
+| Peak memory, pre-GC (MiB) | 46.30 | 52.19 (+12.8%; 27 pages) | 44.37 | ≤ +20% | MET |
+| Memory growth slope, 2.5k–10k msg | 269.09 B/msg, +0 pages | 255.87 B/msg, +0 pages | 2.39 B/msg, +0 pages | ≤ +64 B/msg, +0 pages | HOLD |
+
+- **Bulk INCONCLUSIVE, not a pass.** Seven of the eight bulk sub-metrics are MET. The eighth, catch-up 250 p95, is INCONCLUSIVE because base's 5-round spread is 19.9%, which is over the 10% noise rule. The cause is base round 4 at 6.17 ms, against 5.14–5.21 ms in the other rounds. That slot ran at 08:38–08:41 with a 5-minute load of 1.57–1.66, before the load rise, so the cause is not determined. PR's five rounds were 3.93–4.21 ms, and every paired delta was between −18.0% and −36.3%.
+- **Growth slope HOLD, not a pass.** The target is absolute: at most 64 B/msg and no added wasm pages. W's median is 255.87 B/msg, so it is held. Base is 269.09 B/msg, so the slope predates this PR, which does not make it worse. The old TS core grows 2.39 B/msg. Tracked in #489.
+- **Open items.** Both stay open after the merge. The next run of this harness (the #489 re-measurement) re-checks them.
+- **Host load.** From 08:43 the 5-minute load rose to 3.5–4.7 because of macOS `mediaanalysisd`; no workers were running. That covers TS round 4 and all of round 5. The rounds 4–5 vs 1–3 comparison below was not pre-registered, so it is report-only, and no round was excluded:
+  - `step()` and catch-up 1000 are within about 1–2% in all arms, except base round 4 catch-up at 18.43 ms against about 17.8 ms.
+  - 100 msg/s p95 is higher in rounds 4–5 in every arm.
+- **Development numbers from phase 1** (not formal; ranges overlapped for 100 msg/s): append p95 86.04 → 39.00 µs, send_ack 82.50 → 34.58 µs, and a Brotli wasm asset of 125,751 → 122,780 bytes. serde-wasm-bindgen was measured and not adopted.
+
+Raw round files, logs and the relabelled copy are in the maintainer's local run directory and are not in Git.
+
+## Summaries moved from docs/measurements.md (2026-11-22, budget for #359)
+
+Verbatim (links rebased to this file), as they stood in `docs/measurements.md` before the move.
+
+### Precompressed web assets (#486)
+
+2026-11-17 JST, `41248ff` plus patch. Same release image’s wasm 131,573 → 103,813 bytes via Caddy and 159,174 → 103,813 via nginx. Evidence for [Brotli sidecars](../docs/decisions/auth.md#auth-accounts-and-tenancy).
+
+Byte comparison used external `node /private/tmp/fk486-transfer.ts`. For candidate checks, `docker build -t fk486-app .`, then `CHECK_COMPOSE_PROJECT=fukulow-security-486 CHECK_COMPOSE_IMAGE=fk486-app CHECK_COMPOSE_ACCEPTANCE=1 node scripts/check-compose-security.ts`. Static TLS, transfer only. [Full record](#precompressed-web-asset-transfer-486-2026-11-17-jst)
+
+### Watermark subscription admission (#478)
+
+2026-11-17 JST (PR #531). All 4,617 reproduced closes in 31 valid matrix runs matched watermark admission rejection. Evidence for splitting delivery tests from capacity under the [admission policy](../docs/decisions/realtime.md#admission-and-timeouts).
+
+At `4fa2ba0^`, run `cargo test --locked -p fukulow-server --lib simultaneous_normal_subscriptions_have_no_internal_error_closes`. Matrix used extra hooks on a shared Mac. Five excluded handshake timeouts. Manual harness in #530. [Full record](#watermark-subscription-admission-investigation-478-2026-11-17-jst)
+
+## Sign-in flood owner impact, Part B alternative method (#359, 2026-11-22 JST, Mac)
+
+These are the 3 runs pre-registered in [comment 7061468527](https://github.com/tkakkie/fukulow/issues/359#issuecomment-7061468527). The B1–B5 criteria are the ones pre-registered in [comment 6979633120](https://github.com/tkakkie/fukulow/issues/359#issuecomment-6979633120) and were not changed.
+
+- **Code:** server `c1456d91` (main at run time, clean tree). The harness is `load/signin-owner.ts` and `load/signin-owner-judgment.ts`, from #722 and #724. Both merged before the runs, and all 3 runs used the same harness hashes.
+- **Stack:** a fresh disposable stack per run, pool max 20. The app image was rebuilt from the same commit each run, so the digests differ (`bb6991…`, `836434…`, `d4b7a8…`).
+- **Timing:** the runs went one at a time, 02:35–02:44 JST, after the host-idle gate. Each ended with exit 0 and `complete: true`, with no skipped operations.
+
+**Verdict: all of B1–B5 hold in all 3 runs. This is not a formal Part B PASS:** the judgment reports `formal: false` by design, because the original 50/s multi-IP attack was not run. One more qualification on B2 follows below.
+
+### What the owner saw (identical shape in all 3 runs)
+- **Attacker:** native sign-in, 10/s from one IP. Only the first 5 wrong passwords reached verification (401, 14–35 ms each, at 30.04–30.42 s). The other 595 got 429 in about 2 ms (max 7.5 ms), without verification.
+- **Owner:**
+  - B1 started with one correct web sign-in that succeeded at 30.06 s (53.9–54.3 ms).
+  - Every owner operation after that got 429 "too many sign-in attempts" until 90.0 s. That is 29 sign-ins and **all 6 password changes made with a valid Session**.
+  - The first B2 operation (90.0 s, still inside the 60 s window that ends at about 90.42 s) also got 429.
+  - From 92.0 s on, every owner operation succeeded.
+- **Lockout:** the owner was locked out for about 58 s, one email-budget window. That is the targeted lockout the throttle already allows (#196). It is not additional Account-row-lock interference.
+
+### Per-run results
+
+| | Run 1 | Run 2 | Run 3 | Criterion |
+|---|---|---|---|---|
+| B0 owner p50 / p95 (sign-in p50 = V) | 30.2 / 58.5 ms (V 29.7) | 30.5 / 53.4 ms (V 30.2) | 31.0 / 45.0 ms (V 31.0) | |
+| **B1** owner statuses | 1×200, 35×429 | 1×200, 35×429 | 1×200, 35×429 | only 200/204/429/503 |
+| B1 owner success latency / bound (B0 p95 + 5V) | 53.9 / 206.8 ms | 54.3 / 204.2 ms | 54.3 / 200.0 ms | 0 interfered: **pass ×3** |
+| B1 attacker statuses | 5×401, 595×429 | 5×401, 595×429 | 5×401, 595×429 | |
+| **B2** owner statuses | 34×200, 7×204, 1×429 | 34×200, 7×204, 1×429 | 34×200, 7×204, 1×429 | no 429 > 60 s after last counted failure |
+| B2 owner p95 vs 2× B0 p95 | 50.7 vs 116.9 ms | 52.7 vs 106.7 ms | 51.0 vs 90.0 ms | **pass ×3** (strict reading: see below) |
+| B2 sign-in p95 / password change p95 | 34.7 / 52.4 ms | 34.8 / 52.8 ms | 34.8 / 52.3 ms | |
+| **B3** peak waiters on X's row B0/B1/B2 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | ≤ 7 |
+| B3 peak app-role DB connections B0/B1/B2 | 4 / 4 / 4 | 3 / 4 / 4 | 3 / 4 / 4 | ≤ B0 + 7 and < 20: **pass ×3** |
+| Pool (app counters): max in use, acquires, acquire timeouts, waits > 1 s | 1, 1,138, 0, 0 | 1, 1,138, 0, 0 | 1, 1,138, 0, 0 | |
+| **B4** Organization B reads | 320/320 | 320/320 | 320/320 | 100% |
+| B4 reads p95 B0 / B1 / B2 vs bound | 8.9 / 7.0 / 7.2 vs 17.8 ms | 8.3 / 6.7 / 7.3 vs 16.7 ms | 9.1 / 7.0 / 7.4 vs 18.3 ms | **pass ×3** |
+| **B5** client timeouts, 5xx, pool timeouts, panics, DB failures | 0, 0, 0, 0, 0 | 0, 0, 0, 0, 0 | 0, 0, 0, 0, 0 | **pass ×3** |
+
+### B2 qualification (reported, not re-judged)
+The pre-registered B2 wording admits two readings: "all succeed" and "no 429 more than 60 s after the last counted failure". The judgment code was fixed before the runs. It applies the second reading in the B2 check and reports the first as `b2Strict`.
+- **Window reading (the B2 check):** pass in all 3 runs. The single B2 429 ended at 90.0 s, while the window ran until about 90.42 s.
+- **Strict reading (`b2Strict`):** false in all 3 runs, because of that same 429.
+
+The cause is the phase timing, not the lock. B2 starts 60 s after B1 starts, but the last counted failure came 0.42 s into B1.
+
+### Not tested by this method, and limits
+- **The 50/s multi-IP attack**, where the per-IP budget never binds, was not run (maintainer decision: no IP-evading tool). The per-IP budget did not bind here either: the email budget (5) stopped the attacker first.
+- **The Account row lock was barely exercised.**
+  - The 5 counted attempts arrived about 100 ms apart and each took 14–35 ms, so they did not overlap one another.
+  - In-flight concurrency at the lock was about 1, not the 5 that the email reservation allows, nor 16.
+  - Peak waiters = 0 therefore does not test the B3 waiter bound of ≤ 7.
+- **Lock waits can be missed between samples.** The lock/connection sampler ran every 233 ms (median; max 243 ms; target 200 ms), so a wait shorter than that can fall between samples. The one owner sign-in that overlapped the first attacker verification took about 54 ms vs a B0 sign-in p50 of about 30 ms. That is consistent with one queued verification, but no waiter was observed (inference, not verified).
+- **Not exercised:**
+  - password admission 503 (none occurred);
+  - revoke-others;
+  - native sign-in by the owner (the owner used web sign-in; the attacker used native, so cross-route sharing of the email budget was exercised).
+- **Mac-relative:** the stack trusts a client-IP header that only the test stack trusts. These are not production results.
+- **Supporting evidence:** the PR #624 deterministic race tests cover the concurrent interleavings this load does not reach. Their DB connection peak is polled, so it is a lower bound.
+
+### Remaining risks
+1. **A cheap, sustained owner lockout.** Five wrong passwords per 60 s from a single IP lock the owner out of web sign-in and out of password change, even from an existing Session. The attacker can renew this indefinitely. #196 accepts a one-window lockout, but these runs show it costs the attacker almost nothing to repeat, and it also blocks the owner's own recovery action.
+2. **Concurrent verification on one Account is unmeasured under load.** This method does not show how long the owner waits and how many connections are held when up to 5 reserved attempts verify concurrently behind the row lock. Only PR #624's tests cover it.
+3. **Pool use under concentrated attack.** Part A (spread over 1,000 Accounts) peaked at 8–9 of 20 connections. Many Accounts each under concurrent attempts, which is the multi-IP case, is untested.
+
+### Proposed further checks (no server change in this Issue)
+- **A. Single-IP burst at window open.** Send 16 concurrent wrong passwords for X from one IP at the moment the email window reopens, while the owner signs in. This needs no IP evasion and puts up to 5 reserved attempts on the row lock at once. That tests the B3 waiter bound and the B1 latency bound.
+- **B. Exact lock-wait measurement.** For A, record lock waits server-side, for example Postgres `log_lock_waits = on` with a low `deadlock_timeout` in the disposable stack only, or sample at ≤ 20 ms. Use this instead of the 233 ms poll.
+- **C. Owner mix.** Add native sign-in and revoke-others for the owner, so that every operation sharing the budget is covered.
+- **D. Decision review.** Decide whether password change from a valid Session should keep sharing the email failure budget (risk 1). If not, that is a spec/decision change in its own Issue.
+
+### Verdict (maintainer decision, 2026-11-22)
+Recorded as non-formal Part B alternative evidence, not a formal Part B PASS. Both B2 readings stand: the window reading passes in all 3 runs and `b2Strict` is false in all 3. Further checks A–C: #756. Decision D (password change sharing the email budget): #757. #359 stays open until #756 is reviewed.
 

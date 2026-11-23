@@ -164,6 +164,7 @@ async fn rest_precedence_and_refusals(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let before = f.get(SECTIONS).await;
     let bad_org = "/api/v1/orgs/invalid/me/sections";
+    let bad_delete = "/api/v1/orgs/invalid/me/sections/%FF";
     let other_org = organization(&f.pools.admin).await;
     let (expired, revoked) = (
         member(&f.pools.admin, f.owner.org, Uuid::new_v4(), "member").await,
@@ -183,12 +184,14 @@ async fn rest_precedence_and_refusals(pool: PgPool) {
         .unwrap();
     let invalid = "a".repeat(64);
     for token in ["", &invalid, &expired, &revoked] {
-        denied(
-            raw(&f.app, "POST", bad_org, token, None, "invalid".into()).await,
-            StatusCode::UNAUTHORIZED,
-            "invalid credentials",
-        )
-        .await;
+        for (method, uri) in [("POST", bad_org), ("DELETE", bad_delete)] {
+            denied(
+                raw(&f.app, method, uri, token, None, "invalid".into()).await,
+                StatusCode::UNAUTHORIZED,
+                "invalid credentials",
+            )
+            .await;
+        }
     }
     denied(
         raw(&f.app, "POST", bad_org, &f.token, None, "invalid".into()).await,
@@ -198,12 +201,14 @@ async fn rest_precedence_and_refusals(pool: PgPool) {
     .await;
     for org in [other_org, Uuid::new_v4()] {
         let uri = path(org, "/me/sections/%FF");
-        denied(
-            raw(&f.app, "PATCH", &uri, &f.token, None, "invalid".into()).await,
-            StatusCode::NOT_FOUND,
-            "organization_unavailable",
-        )
-        .await;
+        for method in ["PATCH", "DELETE"] {
+            denied(
+                raw(&f.app, method, &uri, &f.token, None, "invalid".into()).await,
+                StatusCode::NOT_FOUND,
+                "organization_unavailable",
+            )
+            .await;
+        }
     }
     for uri in [
         path(f.owner.org, "/me/sections/%FF"),

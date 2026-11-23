@@ -9,5 +9,5 @@
     "lib": ["ES2023"],
     "types": ["k6", "node"]
   },
-  "include": ["*.ts", "hot-plans/*.ts", "search-engines/*.ts", "search-engines/quality/*.ts", "log-compare/*.ts", "slice5/*.ts", "move/*.ts"]
+  "include": ["*.ts", "hot-plans/*.ts", "search-engines/*.ts", "search-engines/quality/*.ts", "log-compare/*.ts", "slice5/*.ts", "move/*.ts", "sql-probes/515-replay/*.ts", "sql-probes/515-app/*.ts", "harness-core/*.ts", "capacity/*.ts"]
 }

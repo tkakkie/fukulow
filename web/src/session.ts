@@ -1,6 +1,8 @@
 import { completeCountFields } from './unread-counts'
 import { createActivity, createActivityTarget, type ActivityTarget } from './activity'
 import { createNavigationTargets } from './navigation-targets'
+import { createSearchAnchor, SEARCH_WINDOW_LIMIT } from './search-anchor'
+import { createDefaultSearchSource } from './search-source'
 import * as api from './api'
 import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
@@ -10,6 +12,7 @@ import { createMoveChain, type MoveChainApi } from './move-chain'
 import { repliesApi, type RepliesApi } from './replies'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
 import { createReplySync } from './reply-sync'
+import { createSections, sectionsApi, type SectionsApi } from './sections'
 import type { SyncOptions } from './sync'
 import { createTopicSync } from './topic-sync'
 import { topicsApi, type TopicsApi } from './topics'
@@ -30,6 +33,7 @@ export type SessionOptions = {
   moveChainApi?: MoveChainApi
   unreadApi?: UnreadApi
   dmsApi?: DmsApi
+  sectionsApi?: SectionsApi
   initialRole?: api.Role
   onIdentity?: (identity: api.Identity) => void
   onIdentityInvalidated?: () => void
@@ -41,7 +45,14 @@ export function createSession(options: SessionOptions) {
   const organizationId = options.organizationId ?? ''
   let closed = false
   let ended = false
-  const notifyEnded = () => { if (!ended) { ended = true; options.onEnded() } }
+  let closeSections: (() => void) | undefined
+  const notifyEnded = () => {
+    if (ended || options.accountSignal?.aborted) return
+    ended = true
+    closeSections?.()
+    activity.close()
+    options.onEnded()
+  }
   let unavailable = false
   let dms: Dms | undefined
   let history: ReturnType<typeof createTopicSync>['sync'] | undefined
@@ -60,6 +71,7 @@ export function createSession(options: SessionOptions) {
     } else if (result.ok && epoch !== undefined && epoch !== history?.get().historyEpoch) return { ok: false, kind: 'network' }
     return result
   }
+  const channelRevokeListeners = new Set<(channelId: string) => void>()
   const activity = createActivity({
     kind: id => isDm(id) ? 'dm' : channels.isOrdinary(id) ? 'channel' : undefined,
     watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
@@ -73,7 +85,10 @@ export function createSession(options: SessionOptions) {
       }
       return false
     },
-    revoke: id => { dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable() },
+    revoke: id => {
+      sections.hideChannel(id); dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable()
+      for (const listener of [...channelRevokeListeners]) listener(id)
+    },
     access: id => { dms?.access(id); unread.activityAccess(id); topics.activityAccess(id) },
     reconcile: () => unread.activityReconcile(),
     random: options.sync?.random,
@@ -164,6 +179,18 @@ export function createSession(options: SessionOptions) {
     reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
+  const searchAnchor = createSearchAnchor(sync, {
+    messages: ({ channelId, topicId }, query) => observe(topicId
+      ? topicSource.listTopicMessages(channelId, topicId, query)
+      : timeline.listMessages(channelId, query)),
+    reply: ({ channelId, messageId }, query) =>
+      observe(replySource.listReplyChain(channelId, messageId, query, options.accountSignal)),
+  })
+  const stopSearchBudget = searchAnchor.subscribe(() => {
+    const view = searchAnchor.get()
+    const target = view?.status === 'missing' || view?.target.replyRootId ? undefined : view?.target
+    topics.reserveSearch(target?.channelId, target?.topicId ? 'topic' : 'main', target ? SEARCH_WINDOW_LIMIT : 0)
+  })
   let watched: string | null = null
   const { listArchivedChannels, getChannel, updateChannel } = source
   const channels = createChannels(
@@ -203,6 +230,11 @@ export function createSession(options: SessionOptions) {
       },
     },
   )
+  const sections = createSections({
+    api: options.sectionsApi ?? sectionsApi(organizationId), activity, list: channels.authorizedList, observeAccess,
+    random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs,
+  })
+  closeSections = sections.close
   const dmSource = options.dmsApi ?? dmsApi(organizationId)
   dms = createDms({ api: {
     list: (query, signal) => observe(dmSource.list({ history_generation: history?.get().historyGeneration, ...query }, signal)),
@@ -222,7 +254,7 @@ export function createSession(options: SessionOptions) {
     if (same && sync.get().channels[id]?.state === 'unavailable') void sync.watch(id)
   }, random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs })
   const stopActivity = sync.onActivity(notice => {
-    if (notice.type === 'activity_ready') dms?.ready()
+    if (notice.type === 'activity_ready') { dms?.ready(); sections.ready() }
     activity.notice(notice)
   })
   function terminate() {
@@ -230,6 +262,7 @@ export function createSession(options: SessionOptions) {
     unavailable = true
     activity.close(); capabilities.close()
     channels.close()
+    sections.close()
     dms?.close()
     void sync.unavailable()
   }
@@ -256,9 +289,12 @@ export function createSession(options: SessionOptions) {
   })
   activity.hold('capabilities', capabilities)
   let historyEpoch = sync.get().historyEpoch
+  let connection = sync.get().connection, connected = sync.get().connected
   let openUnavailable = false
   const stopSync = sync.subscribe(() => {
     const state = sync.get()
+    if ((connection !== null && connection !== state.connection) || (connected && !state.connected)) sections.disconnected()
+    connection = state.connection; connected = state.connected
     if (historyEpoch !== state.historyEpoch) {
       historyEpoch = state.historyEpoch
       dms?.resetHistory()
@@ -311,11 +347,20 @@ export function createSession(options: SessionOptions) {
     dms?.trackSelection(id)
     if (id !== null) void sync.watch(id)
   })
+  const searchSource = createDefaultSearchSource(organizationId, {
+    onEnded: notifyEnded,
+    onUnavailable: () => { if (!closed) terminate() },
+  })
   void sync.start()
   void channels.load()
+  sections.hold()
   return {
-    sync, topics, replies, moveChain, replyCounts, unread, channels, dms, navigationTargets,
+    sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets, searchAnchor, searchSource,
     memberListAccess,
+    onChannelRevoked(listener: (channelId: string) => void) {
+      channelRevokeListeners.add(listener)
+      return () => { channelRevokeListeners.delete(listener) }
+    },
     holdActivity: (key: string, target: ActivityTarget) => activity.hold(key, target),
     channelMembers(channel: string) {
       memberControllers.get(channel)?.controller.close()
@@ -350,10 +395,13 @@ export function createSession(options: SessionOptions) {
       closed = true
       stopActivity(); activity.close(); capabilities.close()
       navigationTargets.close(); replyCounts.close()
+      stopSearchBudget(); searchAnchor.close()
       stopFollowing(); stopSync(); stopMemberAccess()
       for (const { controller } of [...memberControllers.values()]) controller.close()
       memberControllers.clear()
+      channelRevokeListeners.clear()
       channels.close()
+      sections.close()
       dms?.close()
       void sync.close()
     },

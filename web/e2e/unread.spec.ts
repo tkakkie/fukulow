@@ -157,9 +157,9 @@ test('desktop 1280px: second user posts in main and Topics; first user sees badg
 
     // 1. In lobby, Alice sees the aggregate Unread badge (14 main + 2 Topic A + 1 Topic B = 17) on targetChannel
     const channelNav = page.locator('#channel-content')
-    const targetChannelRow = channelNav
-      .locator('.channel-list > li > .ui-list-row-group > button.ui-list-row')
-      .filter({ hasText: targetChannel.name })
+    const targetChannelRow = channelNav.locator(
+      `li[data-channel-id="${targetChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
+    )
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 17件')
 
     // 2. Alice selects targetChannel -> opens at the first Unread message (mainMessages[0]) with the 未読 read marker
@@ -273,9 +273,9 @@ test('phone 375px: Channel and Topic badges, open Channel at first Unread with �
 
     // Channel list shows aggregate badge (2) on targetChannel
     const channelNav = page.locator('#channel-content')
-    const targetChannelRow = channelNav
-      .locator('.channel-list > li > .ui-list-row-group > button.ui-list-row')
-      .filter({ hasText: targetChannel.name })
+    const targetChannelRow = channelNav.locator(
+      `li[data-channel-id="${targetChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
+    )
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 2件')
 
     // Tap targetChannel -> opens main timeline at first Unread with 未読 marker
@@ -345,9 +345,9 @@ test('keyboard path: open Unread Channel, enter Unread Topic via real key presse
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
 
     const channelNav = page.locator('#channel-content')
-    const targetChannelRow = channelNav
-      .locator('.channel-list > li > .ui-list-row-group > button.ui-list-row')
-      .filter({ hasText: targetChannel.name })
+    const targetChannelRow = channelNav.locator(
+      `li[data-channel-id="${targetChannel.id}"] .ui-list-row-group:not(.ui-list-row-group--topic) > button.ui-list-row`,
+    )
     await expect(targetChannelRow.locator('.ui-badge--unread')).toHaveAttribute('aria-label', '未読 2件')
 
     // Open Unread Channel via real Enter key press on its Channel row

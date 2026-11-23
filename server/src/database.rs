@@ -3,6 +3,7 @@ use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConn
 mod context;
 mod pool;
 mod stats;
+pub(crate) use context::organization_confirming_rollback;
 pub(crate) use context::organization_detached;
 pub(crate) use context::organization_read_only_detached;
 pub(crate) use context::set_organization;
@@ -67,7 +68,7 @@ pub async fn read_only<T, E>(
 where
     E: From<sqlx::Error>,
 {
-    transaction(pool, true, Discard::Close, body).await
+    transaction(pool, true, Discard::Close, |_| false, body).await
 }
 
 enum Discard {
@@ -79,6 +80,7 @@ async fn transaction<T, E>(
     pool: &PgPool,
     read_only: bool,
     discard: Discard,
+    confirm_rollback: fn(&E) -> bool,
     body: impl AsyncFnOnce(&mut PgConnection) -> Result<T, E>,
 ) -> Result<T, E>
 where
@@ -112,10 +114,16 @@ where
     };
     let finished = sqlx::Executor::execute(&mut **connection, end).await;
     guard.finished = finished.is_ok();
-    // A body error (e.g. 404) outranks a cleanup failure; the armed guard still discards.
-    let value = result?;
-    finished?;
-    Ok(value)
+    // Preserve body errors unless the caller requires a confirmed rollback for
+    // that error. The armed guard discards the connection on cleanup failure.
+    match (result, finished) {
+        (Err(body), Err(cleanup)) if confirm_rollback(&body) => Err(cleanup.into()),
+        (Err(body), _) => Err(body),
+        (Ok(value), finished) => {
+            finished?;
+            Ok(value)
+        }
+    }
 }
 
 struct TransactionConnection {
