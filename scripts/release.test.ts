@@ -240,6 +240,20 @@ test('publish refuses a misordered tag list, duplicate platforms and a token rea
   }, 'http://127.0.0.2:9/token')
 })
 
+test('blob uploads refuse a missing or foreign upload location', async () => {
+  for (const location of [undefined, 'http://127.0.0.2:9/v2/tkakkie/fukulow/blobs/uploads/1']) {
+    const requests: string[] = []
+    const fake = (async (url: URL, init: RequestInit) => {
+      requests.push(`${init.method} ${url.href}`)
+      if (init.method === 'HEAD') return new Response(null, { status: 404 })
+      return new Response(null, { status: 202, headers: location ? { location } : {} })
+    }) as typeof fetch
+    const registry = registryClient('http://127.0.0.1:9', 'tkakkie/fukulow', { user: 'actor', password: 'token-test-only' }, fake)
+    await assert.rejects(() => registry.pushBlob(`sha256:${'4'.repeat(64)}`, Buffer.from('x')), /upload location must be on the registry origin/)
+    assert.ok(!requests.some(request => request.startsWith('PUT')))
+  }
+})
+
 test('the index is deterministic and names the repository Compose pulls', () => {
   const amd64 = readLayout(layout('amd64'))
   const descriptor = { ...amd64.manifest, platform: { architecture: 'amd64', os: 'linux' } }

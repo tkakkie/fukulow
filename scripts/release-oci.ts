@@ -1,7 +1,7 @@
 // Release image layouts (#808): read and verify a per-platform OCI archive, build the index.
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -61,8 +61,12 @@ export function readLayout(directory: string): Layout {
 
 export function extractLayout(archive: string): Layout {
   const directory = mkdtempSync(join(tmpdir(), 'fukulow-release-layout-'))
-  execFileSync('tar', ['-xf', archive, '-C', directory])
-  return readLayout(directory)
+  try {
+    execFileSync('tar', ['-xf', archive, '-C', directory])
+    return readLayout(directory)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 }
 
 export function ociLabels(expected: Expected): Record<string, string> {

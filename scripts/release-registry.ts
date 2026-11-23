@@ -48,7 +48,10 @@ export function registryClient(origin: string, repository: string, credentials: 
       if (head.status === 200) return
       await expect(head, [404], `blob ${digest} lookup`)
       const started = await expect(await request('POST', `${base}/blobs/uploads/`), [202], `blob ${digest} upload start`)
-      const location = new URL(started.headers.get('location') ?? '', origin)
+      const header = started.headers.get('location')
+      // Uploads go to the registry origin only; a missing or foreign Location is refused.
+      const location = header ? new URL(header, origin) : undefined
+      if (!location || location.origin !== origin) throw new Error(`blob ${digest} upload location must be on the registry origin`)
       location.searchParams.set('digest', digest)
       await expect(await request('PUT', location.pathname + location.search,
         { 'Content-Type': 'application/octet-stream' }, bytes), [201], `blob ${digest} upload`)
