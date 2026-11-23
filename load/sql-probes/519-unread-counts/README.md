@@ -51,6 +51,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   - Each block runs `CHECKPOINT`, a 60 s warm block, then a 120 s measured block with `--log`.
   - `max_wal_size=64GB` and `checkpoint_timeout=1h` keep checkpoints out of the blocks. A block that crosses a checkpoint fails the run.
   - Reported per block: tps, p95/p99 from the per-transaction log (the line count must equal pgbench's transactions), WAL bytes/send from the insert-LSN delta, the `pg_stat_wal` bytes, records and full-page images, and images per WAL record.
+- **Consistency check:** every `message_counts_check` runs under `statement_timeout = 45min` (fixed before the run; the last unbounded check took about 33 min on three blocks' rows). Drift, a timeout or any error fails the run at once; the check is never skipped. Results go to `checks.json` and `summary.md`.
 - **Stop rule, fixed before the diagnostic run:**
   - Per pair, compute the final/current ratios. The rule fires when the median ratio exceeds a limit: WAL/send above 1.20, or tps below 0.90.
   - Every pair and every individual breach is reported.
@@ -60,3 +61,25 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   - The send databases are reused across pairs, so the faster arm accumulates more rows.
   - Shared caches persist across blocks.
   - It is one plpgsql call per send, with no HTTP, pool or search terms.
+
+### Send re-measure (`--sends-only`)
+
+Approved by the maintainer on 2026-11-23 after the step 1 STOP; that STOP stands. Each run needs its own go.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --smoke --sends-only --out /absolute/new/dir/outside/checkout
+FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
+  node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --out /absolute/new/dir/outside/checkout
+```
+
+- **Unchanged:** pins, image, server settings, seed, `sql/send-current.sql` in both arms, `fukulow_app` under RLS, 8 clients and 4 threads, a forced `CHECKPOINT` then 60 s warm and 120 s measured per block, the checkpoint-crossing failure, and the stop rule.
+- **Order, fixed:** blocks 1 to 6 are current, final, final, current, current, final (pairs 1 to 3, as in step 1).
+- **Changed, with reasons:**
+  - Reads are skipped (already decided by step 1), so no idle read databases add background WAL.
+  - Each block runs on its own database, cloned from a per-arm template and dropped (`WITH (FORCE)`) after the block. In step 1 the two send databases were reused, so each block ran on the rows and autovacuum debt of earlier blocks; pair 1, the first two blocks, had current at about twice the tps of every later block.
+  - Both templates get `VACUUM (ANALYZE)` before any clone, so no block pays the A3 backfill's vacuum or analyze.
+  - `message_counts_check` runs on the final template and after every final block, on that block's database.
+- **Host:** `--diagnostic` refuses to start a block while any other container runs, and records the load average per block. The operator also holds the host-busy marker and runs no other workers.
+- **Reported:** per block in run order: tps, p95/p99, WAL bytes/send, images per WAL record and per send, start and end times, host state. Per pair: both ratios and each breach. Every check with its duration.
+- **No exclusion or rerun after results.** A failed run (setup, check, timeout or crossing checkpoint) is reported as failed. At most one rerun for a known setup failure, as #769 allows.
+- **Time:** about 25 min of blocks, plus setup and three final-block checks (each expected well under the 45 min limit).

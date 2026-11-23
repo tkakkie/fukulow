@@ -41,3 +41,25 @@ test('parses pgbench per-transaction logs and applies the step 1 stop rule', asy
   assert.equal(stopRule(cur, [{ pair: 1, walBytesPerSend: 5000, tps: 10 }, cur[1], cur[2]]).stop, false);
   assert.throws(() => stopRule(cur, cur.slice(1)));
 });
+
+test('message_counts_check: only exactly 0 rows passes; a timeout fails', async () => {
+  const { countsCheckOutcome } = await import('./probe.ts');
+  assert.deepEqual(countsCheckOutcome(0, '0\n', ''), { status: 'ok', rows: 0, detail: null });
+  assert.equal(countsCheckOutcome(0, '3\n', '').status, 'drift');
+  assert.equal(countsCheckOutcome(0, '', '').status, 'error');
+  assert.equal(countsCheckOutcome(0, 'SET\n0\n', '').status, 'error');
+  const timeout = countsCheckOutcome(3, '', 'ERROR:  canceling statement due to statement timeout\n');
+  assert.equal(timeout.status, 'timeout');
+  assert.equal(timeout.rows, null);
+  assert.equal(countsCheckOutcome(1, '', 'ERROR:  function message_counts_check(unknown) does not exist').status, 'error');
+  assert.equal(countsCheckOutcome(null, '', '').status, 'error');
+});
+
+test('send blocks keep the fixed order and one fresh database per block', async () => {
+  const { sendBlocks } = await import('./probe.ts');
+  const blocks = sendBlocks([['current', 'final'], ['final', 'current'], ['current', 'final']]);
+  assert.deepEqual(blocks.map(b => `${b.order}:${b.pair}:${b.arm}`), ['1:1:current', '2:1:final', '3:2:final', '4:2:current', '5:3:current', '6:3:final']);
+  assert.equal(new Set(blocks.map(b => b.db)).size, 6);
+  assert.throws(() => sendBlocks([['current', 'current']]));
+  assert.throws(() => sendBlocks([['current']]));
+});

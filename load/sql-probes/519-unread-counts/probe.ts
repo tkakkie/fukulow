@@ -88,3 +88,26 @@ export function stopRule(current: PairSend[], final: PairSend[]) {
   return { ratios, medianWalPerSend: walPerSend, medianTps: tps,
     stop: walPerSend > 1.2 || tps < 0.9, limits: 'stop if median WAL/send ratio > 1.20 or median tps ratio < 0.90' };
 }
+
+// message_counts_check result as `SELECT count(*)` under a statement_timeout. Anything but
+// exactly 0 rows fails the run; a timeout is a failed verification, never a skipped one.
+export type CountsCheck = { status: 'ok' | 'drift' | 'timeout' | 'error'; rows: number | null; detail: string | null };
+export function countsCheckOutcome(code: number | null, stdout: string, stderr: string): CountsCheck {
+  if (code !== 0) {
+    const timeout = /canceling statement due to statement timeout/.test(stderr);
+    return { status: timeout ? 'timeout' : 'error', rows: null, detail: stderr.slice(-500) || `exit ${code}` };
+  }
+  const out = stdout.trim();
+  if (!/^[0-9]+$/.test(out)) return { status: 'error', rows: null, detail: `unexpected output: ${out.slice(0, 200)}` };
+  return { status: out === '0' ? 'ok' : 'drift', rows: Number(out), detail: null };
+}
+
+// Send blocks in run order: each pair keeps its fixed arm order, and every block gets its own
+// database cloned from the arm's template, so no block inherits rows or vacuum debt from another.
+export type SendBlock = { order: number; pair: number; arm: string; db: string };
+export function sendBlocks(pairs: string[][]): SendBlock[] {
+  return pairs.flatMap((pair, i) => {
+    if (pair.length !== 2 || new Set(pair).size !== 2) throw new Error('each pair needs both arms once');
+    return pair.map(arm => ({ pair: i + 1, arm }));
+  }).map((b, i) => ({ order: i + 1, ...b, db: `s${i + 1}_${b.arm}` }));
+}

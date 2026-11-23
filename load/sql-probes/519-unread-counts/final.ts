@@ -1,20 +1,25 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { cpus, platform, release, tmpdir, totalmem } from 'node:os';
+import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
-import { bindLiterals, channels, checksumSql, extractListCounts, logLatenciesMs, member, organization, pgbench, planSummary, quantile, stopRule, timings } from './probe.ts';
+import { bindLiterals, channels, checksumSql, countsCheckOutcome, extractListCounts, logLatenciesMs, member, organization, pgbench, planSummary, quantile, sendBlocks, stopRule, timings } from './probe.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
-const usage = 'node load/sql-probes/519-unread-counts/final.ts (--smoke | --diagnostic) --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
-const { values } = parseArgs({ options: { out: { type: 'string' }, smoke: { type: 'boolean' }, diagnostic: { type: 'boolean' }, help: { type: 'boolean' } } });
+const usage = 'node load/sql-probes/519-unread-counts/final.ts (--smoke | --diagnostic) [--sends-only] --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
+const { values } = parseArgs({ options: { out: { type: 'string' }, smoke: { type: 'boolean' }, diagnostic: { type: 'boolean' },
+  'sends-only': { type: 'boolean' }, help: { type: 'boolean' } } });
 if (values.help) { console.log(usage); process.exit(0); }
 if (!values.out || values.smoke === values.diagnostic) throw new Error(usage);
 const smoke = values.smoke === true;
+// Send re-measure (#519, approved 2026-11-23): sends only, one fresh database per block.
+const sendsOnly = values['sends-only'] === true;
+// Fixed before the run: the last unbounded check took about 33 min on three blocks' rows.
+const checkTimeout = '45min';
 // §10 step 1 runs under the shared host-busy marker; the diagnostic mode records it.
 const markerPath = process.env.FUKULOW_HOST_BUSY;
 const marker = markerPath ? readFileSync(markerPath, 'utf8').trim() : null;
@@ -63,6 +68,23 @@ const psql = (db: string, script: string, user = 'postgres') =>
   run('docker', ['exec', '-i', container, 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', db], script);
 const file = (db: string, path: string) => psql(db, `\\i /work/${path}\n`);
 const migrateA3 = (db: string) => psql(db, `BEGIN;\n\\i /work/${a3Migration}\nCOMMIT;\n`);
+const checks: Record<string, unknown>[] = [];
+// The full A3 consistency check, bounded by checkTimeout. Drift, a timeout or any error fails the
+// run at once (fail fast); the check is never skipped or retried.
+function countsCheck(db: string, label: string) {
+  const startedAt = Date.now();
+  const child = spawnSync('docker', ['exec', '-i', container, 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', db],
+    { input: `SET statement_timeout = '${checkTimeout}';\nSELECT count(*) FROM message_counts_check('${organization}');\n`, encoding: 'utf8' });
+  const outcome = countsCheckOutcome(child.status, child.stdout ?? '', child.stderr ?? '');
+  checks.push({ label, db, timeout: checkTimeout, seconds: (Date.now() - startedAt) / 1000, ...outcome });
+  if (outcome.status !== 'ok') throw new Error(`message_counts_check ${label}: ${outcome.status} (${outcome.rows ?? outcome.detail})`);
+}
+// Host state per block; a diagnostic block refuses to start next to any other running container.
+function hostState() {
+  const otherContainers = run('docker', ['ps', '--format', '{{.Names}}']).split('\n').filter(n => n !== '' && n !== container);
+  if (!smoke && otherContainers.length > 0) throw new Error(`host not idle: other containers ${otherContainers.join(', ')}`);
+  return { at: new Date().toISOString(), loadavg: loadavg(), otherContainers };
+}
 
 function measure(db: string, arm: FinalArm, cut: number, array: string) {
   const sql = readFileSync(join(work, `sql/list-${arm}.sql`), 'utf8');
@@ -135,9 +157,33 @@ function bench(db: string, label: string) {
     walRecords: records, fpiRecords: fpi, imagesPerWalRecord: records > 0 ? fpi / records : 0, checkpoints };
 }
 
+type SendRow = ReturnType<typeof bench> & { order: number; pair: number; arm: string };
+// Send re-measure: each block gets a fresh clone of its arm's template, which was vacuumed and
+// analyzed before any block, and is dropped after the block (and its check, for the final arm).
+function freshSends(): SendRow[] {
+  for (const arm of ['current', 'final'] as FinalArm[]) {
+    psql('postgres', `CREATE DATABASE t_${arm} TEMPLATE p519;`);
+    if (arm === 'final') migrateA3('t_final');
+    file(`t_${arm}`, 'sql/send-current.sql');
+    psql(`t_${arm}`, 'VACUUM (ANALYZE);');
+  }
+  countsCheck('t_final', 'final template, before the sends');
+  return sendBlocks(benchOrder).map(b => {
+    psql('postgres', `CREATE DATABASE ${b.db} TEMPLATE t_${b.arm};`);
+    const role = sendRole(b.db);
+    const host = hostState();
+    const result = bench(b.db, `block${b.order}-${b.arm}`);
+    const ended = new Date().toISOString();
+    if (b.arm === 'final') countsCheck(b.db, `after block ${b.order}`);
+    psql('postgres', `DROP DATABASE ${b.db} WITH (FORCE);`);
+    return { ...b, role, host, ended, ...result };
+  });
+}
+
 const started = new Date().toISOString();
 let failed = false;
 try {
+  const preflight = hostState();
   run('docker', ['run', '-d', '--rm', '--name', container, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
     '-v', `${work}:/work:ro`, image, '-c', 'shared_buffers=512MB', '-c', 'jit=off',
     // No automatic checkpoint inside a send block: each block starts at its forced CHECKPOINT and
@@ -152,58 +198,68 @@ try {
   psql('p519', "BEGIN;\nSELECT set_config('fukulow.app_password', 'probe', true) \\g /dev/null\n\\i /work/deploy/db-roles.sql\nCOMMIT;\n");
   file('p519', 'deploy/db-grants.sql');
   file('p519', 'sql/seed.sql');
-  const array = psql('p519', `SELECT ${channels};`).trim();
   const metadata = {
-    status: 'DIAGNOSTIC / NOT EVALUATED (stop rule only)', mode: smoke ? 'smoke' : 'diagnostic', started, commits, a3Migration,
+    status: 'DIAGNOSTIC / NOT EVALUATED (stop rule only)', mode: smoke ? 'smoke' : 'diagnostic', sendsOnly, started, commits, a3Migration,
     harnessCommit: git('rev-parse', 'HEAD'), harnessDirty: git('status', '--porcelain', '--', 'load/sql-probes/519-unread-counts') !== '',
     image, imageId: run('docker', ['image', 'inspect', '--format', '{{.Id}}', image]).trim(),
     settings: JSON.parse(psql('p519', `SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN
       ('server_version','shared_buffers','work_mem','jit','plan_cache_mode','synchronous_commit','fsync','autovacuum','default_transaction_isolation','max_wal_size','checkpoint_timeout');`)),
-    host: { platform: platform(), release: release(), cpus: cpus().length, memoryBytes: totalmem() },
-    hostBusyMarker: marker, cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts,
-    walNotes: 'WAL bytes = cluster insert-LSN delta (and pg_stat_wal.wal_bytes); cluster-wide, so idle clones can add background WAL; send DBs are reused across pairs',
-    sends: { clients: 8, threads: 4, warmSeconds, measuredSeconds, benchOrder }, stopRule: stopRule([{ pair: 1, walBytesPerSend: 1, tps: 1 }], [{ pair: 1, walBytesPerSend: 1, tps: 1 }]).limits,
+    host: { platform: platform(), release: release(), cpus: cpus().length, memoryBytes: totalmem() }, preflight,
+    hostBusyMarker: marker, cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts: sendsOnly ? [] : cuts,
+    walNotes: 'WAL bytes = cluster insert-LSN delta (and pg_stat_wal.wal_bytes); cluster-wide, so idle databases can add background WAL; ' +
+      (sendsOnly ? 'one fresh send database per block, cloned from a vacuumed per-arm template and dropped after the block' : 'send DBs are reused across pairs'),
+    sends: { clients: 8, threads: 4, warmSeconds, measuredSeconds, benchOrder, freshDatabasePerBlock: sendsOnly },
+    countsCheck: { timeout: checkTimeout, when: sendsOnly ? 'final template, then after every final block' : 'after the read cuts and after the sends' },
+    stopRule: stopRule([{ pair: 1, walBytesPerSend: 1, tps: 1 }], [{ pair: 1, walBytesPerSend: 1, tps: 1 }]).limits,
   };
   save('metadata.json', metadata);
-  for (const arm of ['current', 'final'] as FinalArm[]) {
-    psql('postgres', `CREATE DATABASE r_${arm} TEMPLATE p519;`);
-    if (arm === 'final') migrateA3('r_final');
-    file(`r_${arm}`, 'sql/current-fresh.sql');
-  }
-  const reads = [];
-  for (const [i, cut] of cuts.entries()) {
-    const order: FinalArm[] = i % 2 === 0 ? ['current', 'final'] : ['final', 'current'];
-    for (const arm of order) {
-      psql(`r_${arm}`, `\\set cut ${cut}\n\\i /work/sql/setcut.sql\n`);
-      reads.push(measure(`r_${arm}`, arm, cut, array));
+  const reads: ReturnType<typeof measure>[] = [];
+  let sends: SendRow[];
+  if (sendsOnly) {
+    sends = freshSends();
+    save('sends.json', { sends });
+  } else {
+    const array = psql('p519', `SELECT ${channels};`).trim();
+    for (const arm of ['current', 'final'] as FinalArm[]) {
+      psql('postgres', `CREATE DATABASE r_${arm} TEMPLATE p519;`);
+      if (arm === 'final') migrateA3('r_final');
+      file(`r_${arm}`, 'sql/current-fresh.sql');
     }
-    const sums = new Set(reads.filter(r => r.cut === cut).map(r => r.checksum));
-    if (sums.size !== 1) { failed = true; console.error(`checksum mismatch at cut ${cut}`); }
+    for (const [i, cut] of cuts.entries()) {
+      const order: FinalArm[] = i % 2 === 0 ? ['current', 'final'] : ['final', 'current'];
+      for (const arm of order) {
+        psql(`r_${arm}`, `\\set cut ${cut}\n\\i /work/sql/setcut.sql\n`);
+        reads.push(measure(`r_${arm}`, arm, cut, array));
+      }
+      const sums = new Set(reads.filter(r => r.cut === cut).map(r => r.checksum));
+      if (sums.size !== 1) { failed = true; console.error(`checksum mismatch at cut ${cut}`); }
+    }
+    countsCheck('r_final', 'after the read cuts');
+    save('reads.json', reads);
+    for (const arm of ['current', 'final'] as FinalArm[]) {
+      psql('postgres', `CREATE DATABASE s_${arm} TEMPLATE p519;`);
+      if (arm === 'final') migrateA3('s_final');
+      file(`s_${arm}`, 'sql/send-current.sql');
+    }
+    const sendRoles = { current: sendRole('s_current'), final: sendRole('s_final') };
+    sends = sendBlocks(benchOrder).map(b => ({ ...b, ...bench(`s_${b.arm}`, `pair${b.pair}-${b.arm}`) }));
+    countsCheck('s_final', 'after the sends');
+    save('sends.json', { sendRoles, sends });
   }
-  const drift = psql('r_final', `SELECT count(*) FROM message_counts_check('${organization}');`).trim();
-  if (drift !== '0') { failed = true; console.error(`message_counts_check reports ${drift} rows after the read cuts`); }
-  save('reads.json', reads);
-  for (const arm of ['current', 'final'] as FinalArm[]) {
-    psql('postgres', `CREATE DATABASE s_${arm} TEMPLATE p519;`);
-    if (arm === 'final') migrateA3('s_final');
-    file(`s_${arm}`, 'sql/send-current.sql');
-  }
-  const sendRoles = { current: sendRole('s_current'), final: sendRole('s_final') };
-  const sends = benchOrder.flatMap((pair, i) => pair.map(arm => ({ pair: i + 1, arm, ...bench(`s_${arm}`, `pair${i + 1}-${arm}`) })));
-  const sendDrift = psql('s_final', `SELECT count(*) FROM message_counts_check('${organization}');`).trim();
-  if (sendDrift !== '0') { failed = true; console.error(`message_counts_check reports ${sendDrift} rows after the sends`); }
-  save('sends.json', { sendRoles, sends });
   const verdict = stopRule(sends.filter(s => s.arm === 'current'), sends.filter(s => s.arm === 'final'));
   save('stop-rule.json', verdict);
-  const lines = ['| cut | arm | p50 ms | p95 ms | EXPLAIN ms | blocks | checksum |', '|---:|---|---:|---:|---:|---:|---|',
-    ...reads.map(r => `| ${r.cut} | ${r.arm} | ${r.p50Ms} | ${r.p95Ms} | ${r.executionMs} | ${r.sharedBlocks} | ${r.checksum} |`),
-    '', '| pair | arm | tps | p95 ms | p99 ms | WAL bytes/send | images per WAL record |', '|---:|---|---:|---:|---:|---:|---:|',
-    ...sends.map(s => `| ${s.pair} | ${s.arm} | ${s.tps.toFixed(0)} | ${s.p95Ms.toFixed(3)} | ${s.p99Ms.toFixed(3)} | ${s.walBytesPerSend.toFixed(0)} | ${s.imagesPerWalRecord.toFixed(4)} |`),
+  const lines = [
+    ...(reads.length === 0 ? [] : ['| cut | arm | p50 ms | p95 ms | EXPLAIN ms | blocks | checksum |', '|---:|---|---:|---:|---:|---:|---|',
+      ...reads.map(r => `| ${r.cut} | ${r.arm} | ${r.p50Ms} | ${r.p95Ms} | ${r.executionMs} | ${r.sharedBlocks} | ${r.checksum} |`), '']),
+    '| order | pair | arm | tps | p95 ms | p99 ms | WAL bytes/send | images per WAL record | images per send |', '|---:|---:|---|---:|---:|---:|---:|---:|---:|',
+    ...sends.map(s => `| ${s.order} | ${s.pair} | ${s.arm} | ${s.tps.toFixed(0)} | ${s.p95Ms.toFixed(3)} | ${s.p99Ms.toFixed(3)} | ${s.walBytesPerSend.toFixed(0)} | ${s.imagesPerWalRecord.toFixed(4)} | ${(s.fpiRecords / s.transactions).toFixed(4)} |`),
     '', '| pair | WAL/send ratio | tps ratio | breach |', '|---:|---:|---:|---|',
     ...verdict.ratios.map(r => `| ${r.pair} | ${r.walPerSend.toFixed(3)} | ${r.tps.toFixed(3)} | ${[r.walPerSend > 1.2 ? 'WAL' : '', r.tps < 0.9 ? 'tps' : ''].filter(Boolean).join(', ') || '-'} |`),
+    '', '| message_counts_check | rows | seconds |', '|---|---:|---:|', ...checks.map(c => `| ${c.label} | ${c.rows} | ${Number(c.seconds).toFixed(0)} |`),
     '', `HOST-BUSY marker: ${marker ?? '(none)'}`,
     '', `Stop rule (${verdict.limits}): median WAL/send ratio ${verdict.medianWalPerSend.toFixed(3)}, median tps ratio ${verdict.medianTps.toFixed(3)} -> ${verdict.stop ? 'STOP' : 'no stop'}`];
-  writeFileSync(join(out, 'summary.md'), `# #519 §10 step 1 final-design probe (${metadata.status})\n\n${lines.join('\n')}\n`);
+  const title = sendsOnly ? '#519 §10 step 1 send re-measure' : '#519 §10 step 1 final-design probe';
+  writeFileSync(join(out, 'summary.md'), `# ${title} (${metadata.status})\n\n${lines.join('\n')}\n`);
   console.log(lines.join('\n'));
 } catch (error) {
   failed = true;
@@ -211,6 +267,7 @@ try {
 } finally {
   spawnSync('docker', ['rm', '-f', container]);
   rmSync(work, { recursive: true, force: true });
+  save('checks.json', checks);
   save('status.json', { complete: !failed, finished: new Date().toISOString() });
 }
 process.exit(failed ? 1 : 0);
