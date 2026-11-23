@@ -279,6 +279,35 @@ fn startup_rejects_partial_or_invalid_proxy_configuration_before_database_access
 }
 
 #[test]
+fn startup_rejects_invalid_allowed_host_before_database_access() {
+    for host in [
+        "",
+        "*",
+        "https://chat.example",
+        "chat.example/",
+        "a.example,b.example",
+        "user@chat.example",
+        "chat.example:",
+        "chat.example:65536",
+        "[not-ip]:443",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
+            .env_clear()
+            .env("DATABASE_URL", "invalid-test-url")
+            .env("FUKULOW_SETUP_TOKEN", "setup-token-test-only")
+            .env("FUKULOW_ALLOWED_HOST", host)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            error.contains("FUKULOW_ALLOWED_HOST must be one hostname or IP"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn startup_rejects_invalid_websocket_origins_before_database_access() {
     for origins in [
         "",

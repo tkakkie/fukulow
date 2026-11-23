@@ -24,7 +24,7 @@ const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-switch-db-test
   POSTGRES_APP_PASSWORD: 'compose-switch-app-test-only', FUKULOW_SETUP_TOKEN: 'compose-switch-setup-test-only',
   // Separate second-octet range from the security (128-191) and restart (192-255) checks.
   FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(64, 128)}.${randomInt(256)}`,
-  FUKULOW_COOKIE_SECURE: 'true', FUKULOW_DOMAIN: testDomain, FUKULOW_VERSION: '0.0.0-dev' }
+  FUKULOW_COOKIE_SECURE: 'true', FUKULOW_DOMAIN: testDomain, FUKULOW_VERSION: '0.0.0-dev', FUKULOW_PUBLISH_PORT: '0' }
 const composeOptions = ['--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
 const attempt = (command: string, args: string[]) =>
   spawnSync(command, args, { cwd, env, encoding: 'utf8', timeout: 300_000, stdio: 'pipe' })
@@ -41,7 +41,8 @@ const dc = (...args: string[]) => run(['compose', ...composeOptions, '--profile'
 // profile of the proxy it follows). While the script waits for verified HTTPS, the ACME directory
 // follows the target into its namespace.
 async function switchProxy(target: Mode, { extra = [] as string[], follow = target !== 'none', scriptEnv = {} as Record<string, string> } = {}) {
-  const child = spawn('bash', ['deploy/switch-proxy.sh', target, ...composeOptions, ...extra],
+  const targetFiles = target === 'none' ? ['-f', 'compose.external-proxy.yml'] : []
+  const child = spawn('bash', ['deploy/switch-proxy.sh', target, ...composeOptions, ...targetFiles, ...extra],
     { cwd, env: { ...env, COMPOSE_PROFILES: target, SWITCH_PROXY_CACERT: rootFile, ...scriptEnv }, stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = '', stderr = '', exited = false
   child.stdout.on('data', chunk => { stdout += chunk })
@@ -94,7 +95,7 @@ function running(): string[] {
   return run(['ps', '--filter', `label=com.docker.compose.project=${project}`, '--filter', 'status=running',
     '--format', '{{.Label "com.docker.compose.service"}}']).split('\n').filter(name => proxies.includes(name as Proxy)).sort()
 }
-// Services (other than the stand-in external proxy) publishing host ports: only the running proxy.
+// Services publishing host ports, excluding the stand-in external proxy.
 function published(): string[] {
   return run(['ps', '--filter', `label=com.docker.compose.project=${project}`, '--format', '{{.Label "com.docker.compose.service"}} {{.Ports}}'])
     .split('\n').filter(line => line.includes('->')).map(line => line.split(' ')[0]).filter(name => name !== 'external').sort()
@@ -228,7 +229,8 @@ async function main() {
   console.log('PASS none trust failure: an untrusted external certificate is rejected and nginx restored')
   const unproxied = () => {
     assert.deepEqual(running(), [], 'no bundled proxy runs in none mode')
-    assert.deepEqual(published(), [], 'no bundled service publishes ports in none mode')
+    assert.deepEqual(published(), ['app'], 'only the app publishes a port in none mode')
+    assert.match(run(['port', dc('ps', '-q', 'app'), '8080/tcp']), /^127\.0\.0\.1:[1-9]\d*$/)
   }
   await switched('none', { scriptEnv: { ...none, SWITCH_PROXY_CACERT: externalCa } })
   unproxied()
