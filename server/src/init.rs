@@ -6,7 +6,7 @@ use std::{
 };
 
 const USAGE: &str = "Usage: fukulow-server init --version TAG@sha256:DIGEST [--domain HOST] [--proxy caddy|nginx|none]";
-const VERSION_ERROR: &str = "Set --version to the release's FUKULOW_VERSION (TAG@sha256: followed by 64 lowercase hex digits)";
+const VERSION_ERROR: &str = "Pass --version to the release's FUKULOW_VERSION (TAG@sha256: followed by 64 lowercase hex digits)";
 
 pub(super) fn execute(args: &[String]) -> Result<(), &'static str> {
     let (pairs, remaining) = args.as_chunks::<2>();
@@ -30,11 +30,11 @@ pub(super) fn execute(args: &[String]) -> Result<(), &'static str> {
         .ok_or(VERSION_ERROR)?;
     let domain = domain.unwrap_or("localhost");
     if !valid_domain(domain) {
-        return Err("Set --domain to a DNS hostname such as chat.example.com");
+        return Err("Pass --domain to a DNS hostname such as chat.example.com");
     }
     let proxy = proxy.unwrap_or("caddy");
     if !matches!(proxy, "caddy" | "nginx" | "none") {
-        return Err("Set --proxy to caddy, nginx or none");
+        return Err("Pass --proxy to caddy, nginx or none");
     }
 
     let setup_token = random_hex()?;

@@ -175,11 +175,11 @@ fn init_rejects_invalid_arguments_without_echoing_values() {
     for (args, diagnostic) in [
         (
             vec![],
-            "Set --version to the release's FUKULOW_VERSION (TAG@sha256: followed by 64 lowercase hex digits)",
+            "Pass --version to the release's FUKULOW_VERSION (TAG@sha256: followed by 64 lowercase hex digits)",
         ),
         (
             vec!["--version", "invalid-image-test-only"],
-            "Set --version to the release's FUKULOW_VERSION (TAG@sha256: followed by 64 lowercase hex digits)",
+            "Pass --version to the release's FUKULOW_VERSION (TAG@sha256: followed by 64 lowercase hex digits)",
         ),
         (
             vec![
@@ -188,11 +188,11 @@ fn init_rejects_invalid_arguments_without_echoing_values() {
                 "--domain",
                 "test-only\nPOSTGRES_PASSWORD=injected",
             ],
-            "Set --domain to a DNS hostname such as chat.example.com",
+            "Pass --domain to a DNS hostname such as chat.example.com",
         ),
         (
             vec!["--version", PIN, "--proxy", "invalid-profile-test-only"],
-            "Set --proxy to caddy, nginx or none",
+            "Pass --proxy to caddy, nginx or none",
         ),
     ] {
         assert_refused(
