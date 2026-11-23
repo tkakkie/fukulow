@@ -74,7 +74,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - #316 Drill R2 restore on the maintainer’s machine so a VPS compromise cannot obtain the read-only restore token/age identity to decrypt backups. VPS must pass full cycle and forced-failure alert. #285 remains blocked. [Activation gate](../spec/deployment.md#operator-runbook-and-production-hold-316)
 - #442 Feature work comes first until the chat app is usable. Premature tuning spends time and credit on changing code.
 - #442 Once per milestone, run large-scale measurement to find fixable/retestable bottlenecks within cost limits. Heavy runs are slow and costly, and one per milestone still catches regressions. Mac/single runs cannot establish exact capacity. Small CI `make load` remains the per-change regression check. Add `load/` files only when milestone measurement needs them. Unused harness code costs review and maintenance without adding evidence. The cadence batches heavy runs and preserves every acceptance gate, including #431 formal performance evaluation after the first rented-server deploy and #153 search-engine selection.
-- #475 Split server tests into three nextest shards because they set PR wall time. Keep the required `server` aggregator. Save Rust caches only from main. Caches readable only by their PR had overflowed the 10 GB limit and evicted main’s.
+- #475 Split server tests into nextest shards (four, by slice, since #800) because they set PR wall time. Keep the required `server` aggregator. Save Rust caches only from main. Caches readable only by their PR had overflowed the 10 GB limit and evicted main’s.
 
 ## Entries in other parts
 

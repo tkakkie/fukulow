@@ -405,35 +405,49 @@ impl World {
 }
 
 // Every mutation path that can change a count, compared after each step against
-// the exact pre-A3 query and the full-recount check.
+// the exact pre-A3 query and the full-recount check. One test per seed so nextest
+// can run the seeds in parallel and spread them across CI shards (#800). The
+// unsuffixed test is seed 0, the name docs/invariants cites.
 #[fukulow_test::test]
 async fn a3_counts_equal_the_pre_a3_query_after_every_random_step(pool: PgPool) {
-    for seed in SEEDS {
-        let world = World::new(&pool).await;
-        let mut rng = Rng(seed);
-        let mut keys = Vec::new();
-        world.assert_oracle(&pool, "start").await;
-        for n in 0..STEPS {
-            let what = step(&world, &pool, &mut rng, &mut keys).await;
-            world
-                .assert_oracle(&pool, &format!("seed {seed:x} step {n}: {what}"))
-                .await;
-        }
-        let counted: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM message_count_corrections WHERE organization_id=$1",
-        )
-        .bind(world.org)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        // The run must reach the correction path, not only appends.
-        assert!(
-            counted > 0 && keys.len() > 20,
-            "seed {seed:x}: {counted} {}",
-            keys.len()
-        );
-        world.reader.close().await;
+    assert_counts_seed(&pool, SEEDS[0]).await;
+}
+
+#[fukulow_test::test]
+async fn a3_counts_equal_the_pre_a3_query_after_every_random_step_seed_1(pool: PgPool) {
+    assert_counts_seed(&pool, SEEDS[1]).await;
+}
+
+#[fukulow_test::test]
+async fn a3_counts_equal_the_pre_a3_query_after_every_random_step_seed_2(pool: PgPool) {
+    assert_counts_seed(&pool, SEEDS[2]).await;
+}
+
+async fn assert_counts_seed(pool: &PgPool, seed: u64) {
+    let world = World::new(pool).await;
+    let mut rng = Rng(seed);
+    let mut keys = Vec::new();
+    world.assert_oracle(pool, "start").await;
+    for n in 0..STEPS {
+        let what = step(&world, pool, &mut rng, &mut keys).await;
+        world
+            .assert_oracle(pool, &format!("seed {seed:x} step {n}: {what}"))
+            .await;
     }
+    let counted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM message_count_corrections WHERE organization_id=$1",
+    )
+    .bind(world.org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    // The run must reach the correction path, not only appends.
+    assert!(
+        counted > 0 && keys.len() > 20,
+        "seed {seed:x}: {counted} {}",
+        keys.len()
+    );
+    world.reader.close().await;
 }
 
 // Concurrent sends, marks and Moves serialize on the Channel counter and lock 135;

@@ -169,11 +169,21 @@ async fn assert_pages(world: &World, reader: &mut sqlx::PgConnection, step: usiz
     tx.rollback().await.unwrap();
 }
 
+// One test per seed so nextest can run the seeds in parallel and spread them across CI shards (#800).
+// The unsuffixed test is seed 0, the name docs/invariants cites.
 #[fukulow_test::test]
 async fn topic_pages_equal_the_prefix_query_after_every_random_step(pool: PgPool) {
-    for seed in SEEDS {
-        assert_seed(&pool, seed).await;
-    }
+    assert_seed(&pool, SEEDS[0]).await;
+}
+
+#[fukulow_test::test]
+async fn topic_pages_equal_the_prefix_query_after_every_random_step_seed_1(pool: PgPool) {
+    assert_seed(&pool, SEEDS[1]).await;
+}
+
+#[fukulow_test::test]
+async fn topic_pages_equal_the_prefix_query_after_every_random_step_seed_2(pool: PgPool) {
+    assert_seed(&pool, SEEDS[2]).await;
 }
 
 async fn assert_seed(pool: &PgPool, seed: u64) {
