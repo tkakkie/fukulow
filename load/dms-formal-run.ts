@@ -12,7 +12,8 @@ import { deferredScenarios, judge } from './dms-formal-judgment.ts';
 import { failureDetails, writeDiagnostic } from './dms-formal-diagnostics.ts';
 import { redactSeedDbLogs, saveSeedDbLogs, seedFailure, type SeedStop } from './dms-formal-seed-diagnostic.ts';
 import { batchSummaryFailures, seedBatchSummary, seedShape, startSeedSamplers, type SeedSamplerRecord, type StopOptions } from './dms-formal-seed-samplers.ts';
-import { copyDockerVmLogs, dockerVmLogDirectory, hostCommandTimeoutMs, redactHostText, saveHostLog, startHostSampler, type HostSampleCoverage } from './dms-formal-host-records.ts';
+import { startDbLogStream, startVmLogStream, type DbLogStreamRecord, type LogStopOptions, type VmLogStreamRecord } from './dms-formal-log-stream.ts';
+import { dockerVmLogDirectory, hostCommandTimeoutMs, redactHostText, saveHostLog, startHostSampler, type HostSampleCoverage } from './dms-formal-host-records.ts';
 export const sshOptions=['-o','BatchMode=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','StrictHostKeyChecking=yes'];
 export type Runtime = { exec:Executor; transfer:typeof transferImage; on:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; off:(signal:'SIGINT'|'SIGTERM',listener:()=>void)=>void; vmLogDirectory?:string };
 const defaultRuntime:Runtime={exec:execute,transfer:transferImage,on:(s,f)=>process.on(s,f),off:(s,f)=>process.off(s,f)};
@@ -199,6 +200,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         harnessSha256:createHash('sha256').update(readFileSync(`${config.output}/harness.tgz`)).digest('hex')};
       const startedAtMs=Date.now();
       let stopSamplers:((options?:StopOptions)=>Promise<SeedSamplerRecord>)|undefined, stopHost:(()=>Promise<HostSampleCoverage>)|undefined, seedError:unknown;
+      let stopDbLog:((options?:LogStopOptions)=>Promise<DbLogStreamRecord>)|undefined, stopVmLog:((options?:LogStopOptions)=>VmLogStreamRecord)|undefined, dbLogStream:DbLogStreamRecord|undefined;
       let samplers:SeedSamplerRecord|undefined, host:HostSampleCoverage|undefined;
       const collectionFailures:string[]=[];
       const redact=(text:string)=>redactHostText(text,{secrets:[common.dbPassword,common.appPassword,common.setupToken]});
@@ -210,7 +212,11 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
           const raw=roleRoot(config.db)+'/sampler-raw';mkdirSync(raw,{recursive:true,mode:0o700});
           stopSamplers=startSeedSamplers(runtime.exec,container,{kernel:directory+'/db-kernel.txt',postgres:directory+'/db-samples.txt'},raw,redact);
           stopHost=startHostSampler(runtime.exec,directory+'/host-samples.jsonl');
+          // The DB log rotates during a full-size seed (B7 pair 1), so the instrumented arm follows it while it runs.
+          stopDbLog=startDbLogStream(runtime.exec,container,directory+'/db.log',raw);
         }
+        // So do the Docker VM logs: both arms collect them with this same collector (maintainer decision, #426 option A).
+        stopVmLog=startVmLogStream(runtime.vmLogDirectory ?? dockerVmLogDirectory(),directory+'/docker-vm',redact);
         await worker(config.db,'seed',0,0,90000000);
         checkpoint();
       } catch(error) {
@@ -232,7 +238,16 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       }
       const dbLogMs=Math.min(interrupted?seedDbLogMs.fast:seedDbLogMs.normal,collectionEnd()-Date.now());
       let dbLog:string|undefined;
-      if(dbLogMs<1_000)collectionFailures.push('db.log: skipped, no time left before cleanup');
+      if(stopDbLog) {
+        // Stopped also with no time left: the follower ends and the raw stream is removed; the record then fails.
+        // The live collection end also applies, so an interrupt during the stop shortens it.
+        const dbLogEnd=Date.now()+Math.max(0,dbLogMs);
+        try {dbLogStream=await stopDbLog({hurry:abort.signal,untilMs:()=>Math.min(dbLogEnd,collectionEnd())});} catch {dbLogStream=undefined;}
+        if(!dbLogStream)collectionFailures.push('db.log: stream stop failed');
+        else collectionFailures.push(...dbLogStream.failures);
+        for(const path of [directory+'/db.log',directory+'/db.log.partial'])if(dbLog===undefined)try {dbLog=readFileSync(path,'utf8');} catch {/* the other name, or none */}
+      }
+      else if(dbLogMs<1_000)collectionFailures.push('db.log: skipped, no time left before cleanup');
       else try {await saveSeedDbLogs(runtime.exec,container,directory+'/db.log',dbLogMs);dbLog=readFileSync(directory+'/db.log','utf8');}
       catch {collectionFailures.push('db.log');}
       let batches:Omit<ReturnType<typeof seedBatchSummary>,'perBatch'>|null=null;
@@ -244,9 +259,8 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       // Every expected row is present, in order and in full (batch 0 included); in the instrumented arm each batch also
       // carries its clock rows and its complete server-reported time. Anything else is a collection failure.
       if(batches)collectionFailures.push(...batchSummaryFailures(batches));
-      // Right after the seed, before the Docker VM logs rotate, bounded by the collection end. Missing, partial, failed
-      // or skipped copies are recorded.
-      const vmLogs=copyDockerVmLogs(runtime.vmLogDirectory ?? dockerVmLogDirectory(),directory+'/docker-vm',startedAtMs,redact,{untilMs:collectionEnd()});
+      // The VM log stream's final read, bounded by the collection end; missing, partial, failed or skipped is recorded.
+      const vmLogs=stopVmLog?stopVmLog({untilMs:collectionEnd}):{status:'failed' as const,reason:'Docker VM log stream not started'};
       const hostLog=await saveHostLog(runtime.exec,directory+'/host.log',startedAtMs,endedAtMs,redact,{timeoutMs:bounded(600000),signal:abort.signal,skip:interrupted});
       for(const [name,record] of [['docker-vm',vmLogs],['host.log',hostLog]] as const)if(record.status!=='complete')collectionFailures.push(`${name}: ${record.status}`);
       const overhead={
@@ -256,13 +270,13 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
           :'Every figure here is measured with the instrumentation on. Its effect on the seed is evaluated only by the matched comparison with a baseline arm (--seed-diagnostic-baseline, same conditions) in dms-formal-seed-effect.ts.',
         dbClockSpanNote:'medianDbClockSpanMs is the server clock span between the two clock rows of each batch: PostgreSQL time plus any psql client time between the statements (descheduling, pipe I/O). It is an upper bound on PostgreSQL time, not PostgreSQL time alone.',
         serverNote:'medianServerMs is the server-reported time of each batch: the summed log_duration of its session statements between the clock rows, joined from db.log by backend PID (per batch in seed-batch-server.jsonl). A gap between it and the clock span is time outside statement execution. log_duration is set for the diagnostic batch sessions only and adds one log line per statement.',
-        dockerExecs:samplers?.dockerExecs ?? null,kernelLoopCpuSeconds:samplers?.kernel?.loopCpuSeconds ?? null,
+        dockerExecs:samplers?.dockerExecs ?? null,dbLogDockerExecs:dbLogStream?.dockerExecs ?? null,kernelLoopCpuSeconds:samplers?.kernel?.loopCpuSeconds ?? null,
         postgresLoopCpuSeconds:samplers?.postgres?.loopCpuSeconds ?? null,postgresSnapshotQueryMs:samplers?.postgres?.queryMs ?? null,
         hostCommands:host?.commands ?? null,hostSampleMs:host?.sampleMs ?? null,seedSeconds:(endedAtMs-startedAtMs)/1000,
         recorderMs:batches?.recorderMs ?? null,batches};
       json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[],load,arm,conditions,
         infrastructureFailure:interrupted || !!seedStop || collectionFailures.length>0,seedStop,collectionFailures,
-        collectionMissing:samplers?.missing ?? [],samplers:samplers??null,hostSamples:host??null,vmLogs,hostLog,overhead});
+        collectionMissing:samplers?.missing ?? [],samplers:samplers??null,hostSamples:host??null,dbLogStream:dbLogStream??null,vmLogs,hostLog,overhead});
       if(seedStop)throw seedError;
       checkpoint();
       if(collectionFailures.length)throw new Error('Seed diagnostic record collection failed');
