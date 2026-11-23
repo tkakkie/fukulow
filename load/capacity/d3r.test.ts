@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { searchTables } from '../search-engines/d3r/rls.ts';
 import { appSessionSettings, hash } from '../search-engines/manifest.ts';
 import { backfillArchiveBytes, expectedSamples, GiB, judge, margin, needs, rehearsalFigures, type Figures } from './d3r.ts';
-import { darwinPool, desktopDisk, dfMount, dfTotal, hostStore, imageMatchesVm, linuxPool, localDocker, type Pool, type Store } from './stores.ts';
+import { darwinPool, desktopDisk, desktopDiskLocation, dfMount, dfTotal, hostStore, imageMatchesVm, linuxPool, localDocker, type Pool, type Store } from './stores.ts';
 
 const f: Figures = {archiveBytes: 60 * GiB, vmRoundPeak: 70 * GiB, vmRoundGrowth: 1 * GiB, roundOutputBytes: 4 * 1024 ** 2, formalRounds: 3};
 const disk = (free: number, used = 0) => ({free, used});
@@ -60,12 +60,38 @@ test('df mount points keep spaces', () => {
   assert.equal(dfTotal('Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 954925484 177202384 729141828 20% /'), 954925484 * 1024);
 });
 
+const nvme = {path: 66_306, sourceRdev: 66_306}; // st_dev of the path, st_rdev of its device node (259:2)
+
 test('Linux: only plain block devices are pools; thin, loop, btrfs and memory filesystems are refused', () => {
-  assert.deepEqual(linuxPool({source: '/dev/nvme0n1p2[/srv]', fstype: 'ext4', target: '/srv'}, 7),
-    {pool: 'dev:/dev/nvme0n1p2', free: 7, mount: '/srv', fs: 'ext4'});
+  assert.deepEqual(linuxPool({source: '/dev/nvme0n1p2[/srv]', fstype: 'ext4', target: '/srv'}, 7, nvme),
+    {pool: 'st_dev:66306', free: 7, mount: '/srv', fs: 'ext4'});
   for (const found of [{source: '/dev/mapper/vg-thin', fstype: 'ext4'}, {source: '/dev/dm-3', fstype: 'xfs'},
     {source: '/dev/loop0', fstype: 'ext4'}, {source: '/dev/sda1', fstype: 'btrfs'}, {source: 'tmpfs', fstype: 'tmpfs'}, {}]) {
-    assert.throws(() => linuxPool({...found, target: '/x'}, 1), /not a plain local block device/);
+    assert.throws(() => linuxPool({...found, target: '/x'}, 1, nvme), /not a plain local block device/);
+  }
+});
+
+test('Linux: the pool is the kernel device number, so two names for one device are one pool', () => {
+  // The output and DockerRootDir are on one ext4 device that findmnt reports under two names.
+  const pools: Record<string, Pool> = {
+    '/srv/out': linuxPool({source: '/dev/nvme0n1p2', fstype: 'ext4', target: '/srv'}, 200 * GiB, nvme),
+    '/var/lib/docker': linuxPool({source: '/dev/disk/by-uuid/0b6e-4f1c', fstype: 'ext4', target: '/var/lib/docker'}, 200 * GiB, nvme)};
+  const host = hostStore(Object.keys(pools), p => pools[p]);
+  assert.deepEqual(host.ids, ['host:st_dev:66306', 'host:st_dev:66306']);
+  assert.deepEqual(host.stores.map(s => s.mounts), [['/srv', '/var/lib/docker']]);
+  const list = needs('formal', f, {output: host.ids[0], dockerHost: host.ids[1]}, GiB);
+  // STOP: 60 GiB staged copy + 133 GiB cluster + margin > 200 GiB, although each alone would fit in 200 GiB.
+  assert.equal(judge(host.stores, list).ok, false);
+  const byName = needs('formal', f, {output: 'host:a', dockerHost: 'host:b'}, GiB);
+  assert.equal(judge([store('host:a', 200 * GiB), store('host:b', 200 * GiB)], byName).ok, true);
+  // Positive control: on a device with room for the combined need, the shared pool passes.
+  const roomy = hostStore(['/srv/out', '/var/lib/docker'], () => ({...pools['/srv/out'], free: 500 * GiB}));
+  assert.equal(judge(roomy.stores, needs('formal', f, {output: roomy.ids[0], dockerHost: roomy.ids[1]}, GiB)).ok, true);
+  // A different device is a different pool.
+  assert.equal(linuxPool({source: '/dev/sdb1', fstype: 'xfs', target: '/data'}, 1, {path: 2_065, sourceRdev: 2_065}).pool, 'st_dev:2065');
+  // Refused: the named device is not the one the path is on, or the device node is missing or not a block device.
+  for (const dev of [{path: 66_306, sourceRdev: 2_065}, {path: 66_306}, {path: 0, sourceRdev: 0}, {path: Number.NaN, sourceRdev: Number.NaN}]) {
+    assert.throws(() => linuxPool({source: '/dev/nvme0n1p2', fstype: 'ext4', target: '/srv'}, 1, dev), /device number/);
   }
 });
 
@@ -74,30 +100,60 @@ test('Docker: only the local default daemon, with its own disk image, is measure
   const socket = `${home}/.docker/run/docker.sock`;
   const real = (p: string) => (p === '/var/run/docker.sock' ? socket : p);
   const desktop = {endpoint: `unix://${socket}`, os: 'Docker Desktop', root: '/var/lib/docker'};
-  assert.deepEqual(localDocker('darwin', home, desktop, real), {desktop: true, disk: desktopDisk(home)});
-  assert.deepEqual(localDocker('darwin', home, {...desktop, endpoint: 'unix:///var/run/docker.sock'}, real).disk, desktopDisk(home));
-  assert.equal(localDocker('darwin', home, desktop, real, undefined, desktopDisk(home)).disk, desktopDisk(home));
+  const ok = {confirmed: true, folders: []};
+  assert.deepEqual(localDocker('darwin', home, desktop, real, ok), {desktop: true, disk: desktopDisk(home)});
+  assert.deepEqual(localDocker('darwin', home, {...desktop, endpoint: 'unix:///var/run/docker.sock'}, real, ok).disk, desktopDisk(home));
+  assert.equal(localDocker('darwin', home, desktop, real, ok, desktopDisk(home)).disk, desktopDisk(home));
+  const custom = {confirmed: true, folders: ['/Volumes/Big/Docker']};
   const refused: [Parameters<typeof localDocker>, RegExp][] = [
-    [['darwin', home, {...desktop, endpoint: 'tcp://10.0.0.5:2376'}, real], /not a local socket/],
-    [['darwin', home, {...desktop, endpoint: 'ssh://builder'}, real], /not a local socket/],
-    [['darwin', home, {...desktop, envHost: 'tcp://10.0.0.5:2376'}, real], /DOCKER_HOST differs/],
-    [['darwin', home, {...desktop, endpoint: `unix://${home}/.colima/default/docker.sock`, os: 'Ubuntu 24.04 LTS'}, real], /not supported on macOS/],
-    [['darwin', home, {...desktop, endpoint: `unix://${home}/.orbstack/run/docker.sock`, os: 'OrbStack'}, real], /not supported on macOS/],
-    [['darwin', home, {...desktop, endpoint: `unix://${home}/.colima/default/docker.sock`}, real], /not the local Docker Desktop socket/],
-    [['darwin', home, desktop, real, undefined, '/Volumes/Other/Docker.raw'], /not the local Docker Desktop disk image/],
-    [['darwin', home, desktop, real, '/Volumes/Big/Docker'], /custom disk image location/],
-    [['darwin', home, desktop, real, '/Volumes/Big/Docker', '/Volumes/Other/Docker.raw'], /custom disk image location/],
+    [['darwin', home, {...desktop, endpoint: 'tcp://10.0.0.5:2376'}, real, ok], /not a local socket/],
+    [['darwin', home, {...desktop, endpoint: 'ssh://builder'}, real, ok], /not a local socket/],
+    [['darwin', home, {...desktop, envHost: 'tcp://10.0.0.5:2376'}, real, ok], /DOCKER_HOST differs/],
+    [['darwin', home, {...desktop, endpoint: `unix://${home}/.colima/default/docker.sock`, os: 'Ubuntu 24.04 LTS'}, real, ok], /not supported on macOS/],
+    [['darwin', home, {...desktop, endpoint: `unix://${home}/.orbstack/run/docker.sock`, os: 'OrbStack'}, real, ok], /not supported on macOS/],
+    [['darwin', home, {...desktop, endpoint: `unix://${home}/.colima/default/docker.sock`}, real, ok], /not the local Docker Desktop socket/],
+    [['darwin', home, desktop, real, ok, '/Volumes/Other/Docker.raw'], /not the local Docker Desktop disk image/],
     [['linux', home, {endpoint: 'unix:///var/run/docker.sock', os: 'Docker Desktop', root: '/var/lib/docker'}, real], /Docker Desktop for Linux/],
     [['linux', home, {endpoint: 'unix:///var/run/docker.sock', os: 'Ubuntu', root: '/var/lib/docker'}, real, undefined, '/srv'], /DockerRootDir/],
     [['win32', home, {...desktop, endpoint: 'unix:///x'}, real], /Unsupported platform/]];
   for (const [args, message] of refused) assert.throws(() => localDocker(...args), message);
-  assert.equal(localDocker('darwin', home, desktop, real, '/Volumes/Big/Docker', '/Volumes/Big/Docker/Docker.raw').disk,
-    '/Volumes/Big/Docker/Docker.raw');
   assert.deepEqual(localDocker('linux', home, {endpoint: 'unix:///var/run/docker.sock', os: 'Ubuntu', root: '/var/lib/docker'}, real),
     {desktop: false, disk: '/var/lib/docker'});
   imageMatchesVm(994_609_987_584, 954_925_484 * 1024);
   assert.throws(() => imageMatchesVm(994_609_987_584, 60 * GiB), /does not match/);
   assert.throws(() => imageMatchesVm(60 * GiB, 900 * GiB), /does not match/);
+});
+
+test('Docker Desktop: a custom disk image location, or one that cannot be confirmed, is refused', () => {
+  const home = '/Users/u';
+  const desktop = {endpoint: `unix://${home}/.docker/run/docker.sock`, os: 'Docker Desktop', root: '/var/lib/docker'};
+  const real = (p: string) => p.replace(/\/$/, '');
+  const settings = (files: Record<string, string>) => desktopDiskLocation(file => files[file]);
+  // Confirmed default: a settings file without the key, with an empty value, or naming the default folder.
+  const defaults = [settings({'settings-store.json': '{"AutoStart":true}'}), settings({'settings.json': '{"dataFolder":""}'}),
+    settings({'settings-store.json': JSON.stringify({DataFolder: `${home}/Library/Containers/com.docker.docker/Data/vms/0/data/`})})];
+  for (const location of defaults) assert.equal(localDocker('darwin', home, desktop, real, location).disk, desktopDisk(home));
+  const unconfirmed = [settings({}), settings({'settings-store.json': '{"DataFolder":null}'}), settings({'settings.json': '[]'}),
+    settings({'settings-store.json': '{"diskImageLocation":42}', 'settings.json': '{}'})];
+  for (const location of unconfirmed) {
+    assert.equal(location.confirmed, false);
+    assert.throws(() => localDocker('darwin', home, desktop, real, location), /cannot be confirmed/);
+  }
+  assert.throws(() => localDocker('darwin', home, desktop, real), /cannot be confirmed/);
+  assert.throws(() => desktopDiskLocation(() => 'not json'));
+  // Custom: always STOP, whichever file names it and whatever --docker-disk says, even beside a default value.
+  const custom = [settings({'settings-store.json': '{"DataFolder":"/Volumes/Big/Docker"}'}),
+    settings({'settings.json': '{"diskImageLocation":"/Volumes/Big/Docker"}'}),
+    settings({'settings-store.json': '{"DataFolder":""}', 'settings.json': '{"dataFolder":"/Volumes/Big/Docker"}'})];
+  for (const location of custom) {
+    assert.deepEqual(location, {confirmed: true, folders: ['/Volumes/Big/Docker']});
+    for (const override of [undefined, '/Volumes/Big/Docker/Docker.raw', desktopDisk(home)]) {
+      assert.throws(() => localDocker('darwin', home, desktop, real, location, override), /custom disk image location .* unsupported/);
+    }
+  }
+  // An unresolvable folder cannot be shown to be the default one, so it counts as custom.
+  const throwing = (p: string) => { if (p.startsWith('/Volumes/Gone')) throw new Error('ENOENT'); return real(p); };
+  assert.throws(() => localDocker('darwin', home, desktop, throwing, {confirmed: true, folders: ['/Volumes/Gone']}), /custom disk image location/);
 });
 
 test('formal on Docker Desktop: the VM need lands on the VM disk and on the host disk image, the staged archive on the output store', () => {
@@ -132,7 +188,8 @@ test('STOP when any store is short, and when a need has no measured store', () =
 const frozen = {rounds: 3, querySet: [['q1', 'a'], ['q2', 'b']] as const};
 function rehearsal() {
   const free = [700, 690, 640, 630, 630, 699].map(n => n * GiB);
-  const samples = expectedSamples(frozen.querySet).map((at, i) => ({at, docker: disk(free[i], i === 5 ? GiB : 0), output: disk(1)}));
+  const used = [60, 70, 120, 130, 130, 61].map(n => n * GiB);
+  const samples = expectedSamples(frozen.querySet).map((at, i) => ({at, docker: disk(free[i], used[i]), output: disk(1)}));
   return {ok: true, problems: [], rehearsalRounds: 1, formalRounds: 3, samples, projection: {docker: {roundGrowth: GiB}}};
 }
 
@@ -151,7 +208,13 @@ test('rehearsal figures come only from a complete one-round record of the frozen
     [{...h, samples: h.samples.map((s, i) => (i === 3 ? {at: s.at, output: s.output} : s))}, /valid Docker samples/],
     [{...h, samples: h.samples.map((s, i) => (i === 3 ? {...s, docker: disk(Number.NaN)} : s))}, /valid Docker samples/],
     [{...h, samples: h.samples.map((s, i) => (i === 3 ? {...s, error: 'df failed'} : s))}, /valid Docker samples/],
-    [{...h, projection: {docker: {roundGrowth: 0}}}, /round growth does not match/]];
+    [{...h, projection: {docker: {roundGrowth: 0}}}, /round growth does not match/],
+    // All Docker counters zero (growth 0 matches): the measured clone would be charged nothing.
+    [{...h, samples: h.samples.map(s => ({...s, docker: disk(0, 0)})), projection: {docker: {roundGrowth: 0}}}, /valid Docker samples/],
+    [{...h, samples: h.samples.map((s, i) => (i === 2 ? {...s, docker: disk(s.docker.free, 0)} : s))}, /valid Docker samples/],
+    // Every sample in use but free never drops below the start: no round peak.
+    [{...h, samples: h.samples.map(s => ({...s, docker: disk(700 * GiB, 60 * GiB)})), projection: {docker: {roundGrowth: 0}}}, /no Docker peak/],
+    [{...h, samples: h.samples.map((s, i) => ({...s, docker: disk(i === 0 ? 600 * GiB : 650 * GiB, s.docker.used)}))}, /no Docker peak/]];
   for (const [record, message] of broken) assert.throws(() => rehearsalFigures(handoff, record as never, 5, frozen), message);
   assert.throws(() => rehearsalFigures(handoff, rehearsal(), 5, {...frozen, rounds: 0}), /frozen formal round count/);
   assert.throws(() => rehearsalFigures({snapshot: {bytes: 0}}, rehearsal(), 5, frozen), /archive/);

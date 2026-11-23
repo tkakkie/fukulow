@@ -14,7 +14,7 @@ import { verifiedBackfill } from '../search-engines/d3r/backfill.ts';
 import { validRls } from '../search-engines/d3r/rls.ts';
 import { receiptFile, snapshotFile } from '../search-engines/d3r/snapshot.ts';
 import { hash } from '../search-engines/manifest.ts';
-import { desktopDataFolder, dfTotal, hostStore, imageMatchesVm, localDocker, probePool, realpath, type Store } from './stores.ts';
+import { desktopDiskLocation, dfTotal, hostStore, imageMatchesVm, localDocker, probePool, readDesktopSettings, realpath, type Store } from './stores.ts';
 
 export const GiB = 1024 ** 3;
 // Fixed before any formal run (#788): per store, 20% of its need and never less than 20 GiB.
@@ -30,8 +30,10 @@ const bytes = (n: unknown, what: string, min = 0) => {
   assert.ok(typeof n === 'number' && Number.isSafeInteger(n) && n >= min, `${what}: not a byte count`);
   return n;
 };
-const validDisk = (d: {free?: unknown; used?: unknown} | undefined) =>
-  d !== undefined && [d.free, d.used].every(n => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0);
+// A real Docker sample always has some space in use (the restored cluster at least), so used must be above 0.
+const validDisk = (d: {free?: unknown; used?: unknown} | undefined) => d !== undefined &&
+  typeof d.free === 'number' && Number.isSafeInteger(d.free) && d.free >= 0 &&
+  typeof d.used === 'number' && Number.isSafeInteger(d.used) && d.used > 0;
 
 // The labels run.ts samples in a one-round rehearsal, in order (load/search-engines/d3r/run.ts, the round loop).
 export const expectedSamples = (querySet: Frozen['querySet']) => ['round 1 start', 'round 1 after warm-up',
@@ -55,7 +57,10 @@ export function rehearsalFigures(handoff: {snapshot?: {bytes?: number}},
   const minFree = Math.min(...docker.map(d => d.free));
   const vmRoundGrowth = bytes(headroom.projection?.docker?.roundGrowth, 'round growth');
   assert.equal(vmRoundGrowth, Math.max(0, end.used - start.used), 'The rehearsal round growth does not match its samples');
-  return {archiveBytes: bytes(handoff.snapshot?.bytes, 'archive', 1), vmRoundPeak: Math.max(0, start.free - minFree),
+  // The measured clone always takes space, so a round without a peak is not a real record.
+  const vmRoundPeak = start.free - minFree;
+  assert.ok(vmRoundPeak > 0, 'The rehearsal round has no Docker peak (the measured clone is missing)');
+  return {archiveBytes: bytes(handoff.snapshot?.bytes, 'archive', 1), vmRoundPeak,
     vmRoundGrowth, roundOutputBytes: bytes(roundOutputBytes, 'output'), formalRounds: frozen.rounds};
 }
 
@@ -162,7 +167,7 @@ function main() {
   }
   const docker = dockerSide();
   const local = localDocker(process.platform, homedir(), docker, realpath,
-    process.platform === 'darwin' ? desktopDataFolder(homedir()) : undefined, values['docker-disk']);
+    process.platform === 'darwin' ? desktopDiskLocation(readDesktopSettings(homedir())) : undefined, values['docker-disk']);
   const dockerDisk = local.disk;
   const diskStats = lstatSync(dockerDisk);
   assert.ok(local.desktop ? diskStats.isFile() : diskStats.isDirectory(), `Docker storage at ${dockerDisk} is not the expected kind`);

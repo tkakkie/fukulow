@@ -2,8 +2,8 @@
 // talks to. Anything it cannot place in a known pool, or tie to the local daemon, is refused (fail closed).
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync, statfsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 export type Pool = {pool: string; free: number; mount: string; fs: string};
 export type Store = {id: string; kind: 'host' | 'docker-vm'; paths: string[]; free: number; mounts: string[]};
@@ -52,11 +52,17 @@ export function darwinPool(mount: string, info: Record<string, unknown>, volumeF
 
 // Linux: only plain block-device filesystems, where the device is the pool. Device-mapper (possibly thin),
 // loop images, btrfs, ZFS, network and memory filesystems can share space invisibly, so they are refused.
-export function linuxPool(found: {source?: string; fstype?: string; target?: string}, volumeFree: number): Pool {
+// The pool is the path's kernel device number (st_dev), never the device name, so two names for one
+// device are one pool. `source` is the mount source with symlinks resolved; its device node's st_rdev
+// must be that same number, which ties the accepted block device to the filesystem the path is on.
+export function linuxPool(found: {source?: string; fstype?: string; target?: string}, volumeFree: number,
+  dev: {path: number; sourceRdev?: number}): Pool {
   const source = found.source?.replace(/\[.*\]$/, '');
   assert.ok(found.target && ['ext2', 'ext3', 'ext4', 'xfs'].includes(found.fstype ?? '') && source &&
     /^\/dev\/(?!loop|mapper\/|dm-)/.test(source), `${found.target}: ${found.fstype} on ${source} is not a plain local block device`);
-  return {pool: `dev:${source}`, free: volumeFree, mount: found.target, fs: found.fstype!};
+  assert.ok(Number.isSafeInteger(dev.path) && dev.path > 0 && dev.sourceRdev === dev.path,
+    `${found.target}: the device number of ${source} is not the one the path is on`);
+  return {pool: `st_dev:${dev.path}`, free: volumeFree, mount: found.target, fs: found.fstype!};
 }
 
 const volumeFree = (path: string) => { const s = statfsSync(path, {bigint: true}); return Number(s.bavail * s.bsize); };
@@ -70,30 +76,34 @@ export function probePool(path: string): Pool {
   }
   assert.ok(process.platform === 'linux', `Unsupported platform ${process.platform}`);
   const found = JSON.parse(run('findmnt', ['-J', '-n', '-o', 'SOURCE,FSTYPE,TARGET', '--target', path])).filesystems?.[0] ?? {};
-  return linuxPool(found, volumeFree(path));
+  const source = typeof found.source === 'string' ? found.source.replace(/\[.*\]$/, '') : undefined;
+  // statSync follows a by-id or by-uuid symlink to the device node; realpath names that node for linuxPool's checks.
+  const node = source?.startsWith('/dev/') ? statSync(source, {throwIfNoEntry: false}) : undefined;
+  return linuxPool({...found, source: node ? realpath(source!) : source}, volumeFree(path),
+    {path: statSync(path).dev, sourceRdev: node?.isBlockDevice() ? node.rdev : undefined});
 }
 
 export type DockerSide = {endpoint: string; envHost?: string; os: string; root: string};
 export const desktopDisk = (home: string) => join(home, 'Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw');
 
 // The daemon that `docker info` and the VM probe reach must be the local one whose storage is budgeted on the host.
-// macOS: only Docker Desktop through its own socket (Colima, OrbStack, remote contexts are refused); its disk image
-// is the default one, or, with a custom disk image location, a --docker-disk inside that location.
+// macOS: only Docker Desktop through its own socket (Colima, OrbStack, remote contexts are refused), with its disk
+// image at the default location. A custom disk image location is unsupported and always refused, and so is a
+// location that cannot be confirmed (`location.confirmed` false: no readable settings file, or an unreadable value).
 // Linux: only a native daemon on a local socket; its storage is DockerRootDir.
+export type DiskLocation = {confirmed: boolean; folders: string[]};
 export function localDocker(platform: string, home: string, docker: DockerSide, realpath: (p: string) => string,
-  dataFolder?: string, override?: string): {desktop: boolean; disk: string} {
+  location?: DiskLocation, override?: string): {desktop: boolean; disk: string} {
   assert.ok(docker.envHost === undefined || docker.envHost === docker.endpoint, 'DOCKER_HOST differs from the active Docker context');
   const socket = /^unix:\/\/(\/.+)$/.exec(docker.endpoint)?.[1];
   assert.ok(socket, `Docker endpoint ${docker.endpoint} is not a local socket`);
   if (platform === 'darwin') {
     assert.ok(docker.os === 'Docker Desktop', `Docker runtime "${docker.os}" is not supported on macOS; only Docker Desktop is`);
     assert.ok(realpath(socket) === realpath(join(home, '.docker/run/docker.sock')), 'The Docker endpoint is not the local Docker Desktop socket');
-    if (dataFolder) {
-      assert.ok(override && realpath(override).startsWith(realpath(dataFolder) + '/'),
-        `Docker Desktop uses a custom disk image location (${dataFolder}); pass --docker-disk=PATH inside it`);
-      return {desktop: true, disk: realpath(override)};
-    }
     const disk = desktopDisk(home);
+    assert.ok(location?.confirmed === true, 'The Docker Desktop disk image location cannot be confirmed from its settings');
+    const custom = location.folders.filter(folder => !samePath(realpath, folder, dirname(disk)));
+    assert.ok(custom.length === 0, `Docker Desktop uses a custom disk image location (${custom.join(', ')}), which is unsupported`);
     assert.ok(override === undefined || realpath(override) === realpath(disk), '--docker-disk is not the local Docker Desktop disk image');
     return {desktop: true, disk};
   }
@@ -116,21 +126,44 @@ export function dfTotal(df: string) {
   return kib * 1024;
 }
 
-// A custom disk image location in Docker Desktop's settings, if any (any key naming a data folder or disk image location).
-export function desktopDataFolder(home: string) {
-  for (const file of ['Library/Group Containers/group.com.docker/settings-store.json', 'Library/Group Containers/group.com.docker/settings.json']) {
-    let text: string;
+const samePath = (realpath: (p: string) => string, a: string, b: string) => {
+  try {
+    return realpath(a) === realpath(b);
+  } catch {
+    return false;
+  }
+};
+
+// The disk image location in Docker Desktop's settings files (any key naming a data folder or disk image location).
+// It is confirmed only when at least one settings file was read and every such key holds a string; an empty
+// string is the default location. `read` returns undefined for a missing file.
+export function desktopDiskLocation(read: (file: string) => string | undefined): DiskLocation {
+  let confirmed = false;
+  const folders: string[] = [];
+  for (const file of ['settings-store.json', 'settings.json']) {
+    const text = read(file);
+    if (text === undefined) continue;
+    const settings: unknown = JSON.parse(text);
+    if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) return {confirmed: false, folders};
+    for (const [key, value] of Object.entries(settings)) {
+      if (!/data.?folder|disk.?image.?location/i.test(key)) continue;
+      if (typeof value !== 'string') return {confirmed: false, folders};
+      if (value) folders.push(value);
+    }
+    confirmed = true;
+  }
+  return {confirmed, folders};
+}
+
+export function readDesktopSettings(home: string) {
+  return (file: string) => {
     try {
-      text = readFileSync(join(home, file), 'utf8');
+      return readFileSync(join(home, 'Library/Group Containers/group.com.docker', file), 'utf8');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
-    const settings: Record<string, unknown> = JSON.parse(text);
-    const value = Object.entries(settings).find(([key]) => /data.?folder|disk.?image.?location/i.test(key))?.[1];
-    if (typeof value === 'string' && value) return value;
-  }
-  return undefined;
+  };
 }
 
 export const realpath = (p: string) => realpathSync(p);
