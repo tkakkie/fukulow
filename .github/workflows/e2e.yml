@@ -3,6 +3,10 @@ on:
   pull_request:
 permissions:
   contents: read
+env:
+  # #800 PR 1: CI never reads full debuginfo; dropping it shortens test/dev compiles. Release, wasm and Docker builds are unchanged.
+  # Panic locations need no debuginfo; backtraces keep file:line. Changing this changes the rust-cache key.
+  CARGO_PROFILE_DEV_DEBUG: 'true'
 jobs:
   smoke:
     runs-on: ubuntu-24.04

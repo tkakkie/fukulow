@@ -5,6 +5,10 @@ on:
     branches: [main]
 permissions:
   contents: read
+env:
+  # #800 PR 1: CI never reads full debuginfo; dropping it shortens test/dev compiles. Release, wasm and Docker builds are unchanged.
+  # Panic locations need no debuginfo; backtraces keep file:line. Changing this changes the rust-cache key.
+  CARGO_PROFILE_DEV_DEBUG: 'true'
 concurrency:
   # PRs: one group per PR, so a newer push cancels the older run. main: unique group per run, so no push is cancelled or queued.
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
