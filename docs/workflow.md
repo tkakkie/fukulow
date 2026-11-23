@@ -4,7 +4,7 @@ Write cross-cutting work rules and procedures beyond code, tests and `openapi.js
 
 AIs use `gh` and `git` directly as `tkakkie` by maintainer decision. The `AI:` signature identifies the AI. For Codex and Antigravity workers, the orchestrator handles all commit, push and GitHub steps (§4), including labels, comments and CI checks. Never push to `main`. See §10 for merge authority.
 
-Cloud Claude Code sessions without Codex or Antigravity use the GitHub integration for Issues, PRs, labels and reviews. Maintainer-only review may replace §5's second AI only for docs-only changes or changes limited to a doc-length CI script and its tests. Exclude product code, auth, permissions, tenant scoping, real-time delivery, migrations and weakening any existing CI check. State this scope in the Issue; get maintainer approval. The `main` ruleset still requires green `web`, `server` and `docker` checks on the head.
+Cloud Claude Code sessions without Codex or Antigravity use the GitHub integration for Issues, PRs, labels and reviews. Maintainer-only review may replace §5's second AI only for docs-only changes or changes limited to a doc-length CI script and its tests. Exclude product code, auth, permissions, tenant scoping, real-time delivery, migrations and weakening any existing CI check. State this scope in the Issue; get maintainer approval. The `main` ruleset's required checks still apply.
 
 ## 1. Sweep (run at every wake-up, notification, user message, or finished AI run)
 1. Use `node scripts/sweep-state.ts` first in place of separate lists. It reads state and flags mechanical inconsistencies. Only §2 decides actions. On error or incomplete listing, use `gh pr list --state open --limit 200 --json number,title,labels,headRefOid` and `gh issue list --state open --limit 200 --json number,title,labels,milestone`. At 200 results, split by `--search 'created:<date'` until done. For cleanup also use `gh pr list --state merged --limit 30 --json number,headRefName,labels,mergedAt`. Get every open PR's mergeability (fallback: `gh pr view <n> --json mergeable`). Query checks (`gh pr checks <n>` or `--json statusCheckRollup`) only when the §2 row needs them.
@@ -78,7 +78,7 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 - Failures: a substantive attempt that misses "Done when"; one failing test or CI run does not count, and a stuck run (§7) is reported, not counted, unless restarted here. First failure -> same model and effort with the failure details. Second sol failure (any effort) -> astra `medium`, reason in the Issue. Astra failure -> `status:needs-decision`. Second Neon failure -> Claude `medium` (`status:needs-decision` under `quota:claude-low`). Second Hydrogen failure -> its rows 2–4 owner at `medium`. Second Claude failure, or a failure after any escalation -> `status:needs-decision`.
 - The comment that sets `status:ready` records `Assigned: <name> / model: <id> / effort: <level> / H: <numbers or none>`. The worker follows it and does not re-choose. A later quota label overrides it, and the orchestrator posts a new `Assigned:` line.
 - Antigravity runs `/usr/local/argon-agy/agy` (`agy models`, no Carbon, #260). Web PRs have no extra browser-check review (#275).
-- Permissions (#288): all three AIs can write the task worktree, run all Commands (including throwaway Postgres DB tests), use Docker/Compose and access package registries. Never read or print secrets or `.env` values. Tests use throwaway DBs and test-only values. Fix permission problems for all three or document a reasoned exception here. The sole exception: workers never commit, push or use GitHub, as one orchestrator owns commits, attribution and GitHub state.
+- Permissions (#288): all three AIs can write the task worktree, run all Commands (including throwaway Postgres DB tests), use Docker/Compose and access package registries. Never read or print secrets or `.env` values. Tests use throwaway DBs and test-only values. Fix permission problems for all three or document a reasoned exception here. The sole exception: workers never commit, push or use GitHub (header).
 - Orchestrator: launch each worker from the task worktree using the Bash tool with `run_in_background: true` (no `nohup ... &`). Harness exit notifications resume §1 unprompted. Keep prompt, `-o` result and logs in the scratchpad outside the repo. On exit read the result and log, then sweep. `<agy-home>` is the maintainer-provisioned Antigravity login directory shared across worktrees. An empty `HOME` prompts for login.
   Codex (CLI 0.169.0 or later; older CLIs reject the 6.2 model ids): `cd <worktree> && codex exec -m <gpt-6.2-sol|gpt-6.2-astra> -c 'model_reasoning_effort="<low|medium|high>"' --sandbox danger-full-access -C . -o <scratch>/result.md "$(cat <scratch>/prompt.md)" < /dev/null > <scratch>/log 2>&1` (same flags for every role; review and check prompts forbid edits).
   Antigravity: `env HOME=<agy-home> PATH=/usr/local/argon-agy:$PATH /usr/local/argon-agy/agy -p "$(cat <scratch>/prompt.md)" --model <gemini-4-neon-low|gemini-4-neon-medium|gemini-4-hydrogen-low> --dangerously-skip-permissions --print-timeout 3600s --output-format stream-json < /dev/null > <scratch>/log.jsonl 2>&1` (JSON events plus stderr, so progress shows; the final report ends the log).
@@ -86,7 +86,7 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 
   Before launching a worker, write `<scratch>/context.md` (a few KB, #451) next to the prompt. Include Issue number, title, "Done when" and "How I read the spec"; role (implementer/reviewer), limits (no commit/push/GitHub), model, effort, H numbers and H1–H3 stop/report instruction; touched-area AGENTS.md rules and matching spec, decisions and invariants headings, quoted verbatim with path and heading; likely files, owning module, neighbouring tests and Commands; report format (changes, tests/results, open questions, docs read beyond the pack).
   Implementers read the pack first, other docs only if needed, and report each extra doc and why. Reviewers start with the pack and read docs normally. State these reading rules in their prompts. Read summaries first for worker, CI, E2E and load results (result file, failing-job tail, `load/summary.ts`). Use full logs when diagnosis or consistency requires them.
-- Exceptions to the work table need a line in the Issue (e.g. Codex implements the sync protocol/controller, H3 high; adapter and components stay with Antigravity).
+- Exceptions to the work table need a line in the Issue.
 
 ## 5. Reviews
 - At most two AI review rounds total per Issue or PR, regardless of reviewer changes. Round 2 checks changes and responses to earlier findings only, by the round-1 reviewer's AI (§4). Non-blocking findings go to follow-up Issues and never trigger another round. Blocking findings left after round 2 -> `status:needs-decision` with the question in the last comment.
@@ -97,13 +97,12 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 
 ## 6. Conflicts and CI
 - In the conflicting PR's worktree, `git fetch origin && git merge origin/main`, resolve, run Commands and push. Keep both sides' current `docs/decisions/` entries. Rewrite only within that index header's writing rules. Existing green CI is stale. Require CI on the new head (§2).
-- If CI fails to start after the conflict-resolving merge push, and no permission denial is involved, push `git commit --allow-empty -m "Trigger CI"`.
-- If `gh run rerun` is denied, set `status:needs-decision` with the exact maintainer request. No workaround (including empty commit or other trigger).
+- If CI does not start after the merge push and no permission was denied, push `git commit --allow-empty -m "Trigger CI"`.
+- A denied `gh run rerun` gets `status:needs-decision` with the exact maintainer request and no workaround (empty commit or other trigger).
 
 ## 7. Stalls
 | Symptom | Action |
 |---|---|
-| CI not started after merge push | empty commit (section 6) |
 | Green CI on older SHA | Stale: wait for or trigger CI on the head |
 | Transient CI failure (network, runner, flaky) | Rerun failed jobs once (`gh run rerun <id> --failed`). Denied: §6. Second failure is real |
 | AI run ended without updating label/comment | Sweeper reads PR/branch, finishes label and comments with next step |
@@ -137,7 +136,7 @@ Cloud Claude Code sessions without Codex or Antigravity use the GitHub integrati
 3. Confirm Issue closed, remove labels, delete branch and worktree, and unblock dependents. Other merges use §2 cleanup.
 
 ## 11. Labels and milestones
-- Status names and meanings are in AGENTS.md. Filter with `label:status:human-review`.
+- Status names and meanings are in AGENTS.md.
 - `security` (red), `bug` (orange), `risk:needs-review`, `blocked`, and `quota:codex-low`, `quota:agy-low`, `quota:claude-low` (maintainer-set, §4). Urgent = `security`/`bug` + `status:human-review`/`status:needs-decision`. No area/type/ai labels.
 - Every Issue gets a milestone. A one-week sprint (max two open) holds work planned for that week. Use undated `Backlog` for unscheduled, conditional or future work, outside that cap. No milestone means untriaged. Use labels for modules, never milestones.
 - Only the maintainer moves `Backlog` Issues into a sprint. AIs may propose moves at sprint boundaries.
@@ -152,7 +151,7 @@ Merges; Issue approvals ("OK"); token/secret changes; adding a language, depende
 - Evaluate a split if pruning or merging leaves the doc over budget, the same doc has repeated merge conflicts at any size or a major feature is added to `docs/spec.md`. Split when the benefit justifies it. Keep `docs/measurements.md` small per its header's summary/archive rule (#560).
 - A split needs a reason in the PR and its own maintainer-approved Issue stating the review mode. Keep it out of unrelated PRs. Changing which files CI checks (e.g. invariants) follows independent review (§5) unless the maintainer approves otherwise.
 - Keep the original path as index (area, one-line scope, link). Parts are `docs/<kind>/<area>.md` by module (`auth`, `channels`, `messages`, `realtime`) or feature. No per-decision files. New doc kinds need maintainer approval. Never split `AGENTS.md`.
-- Pure split: move verbatim. Include an old -> new location table in the PR. Check relative links, heading anchors and file-path references and fix breaks caused by the move. Keep changes to spec guarantees, decisions and invariants out of the split PR and preserve their meaning and scope. Link cross-area rules to their one home where useful.
+- Pure split: move verbatim. Include an old -> new location table in the PR. Fix relative links, heading anchors and file-path references the move breaks. Keep changes to spec guarantees, decisions and invariants out of the split PR and preserve their meaning and scope. Link cross-area rules to their one home where useful.
 - Preserve CI checks and budget every resulting file. An invariants split keeps every `path::test_name` and invariant meaning, ensures `web/scripts/check-invariants.ts` checks every part and preserves existence, skip and cargo reconciliation checks. Add multi-file negative tests.
 
 ## 14. Focused SQL measurements
@@ -160,3 +159,6 @@ Merges; Issue approvals ("OK"); token/secret changes; adding a language, depende
 - Record per run: commit SHA, PostgreSQL image digest, DB settings, measured role and its RLS check, Custom/Generic/Auto, `pg_prepared_statements` state, cache condition and repetitions.
 - Keep raw `EXPLAIN` JSON and samples. In Git: at most 1 MiB compressed per run in total, never split to evade the cap. Larger: a dedicated Cloudflare R2 measurement bucket, separate from backups, with its own least-privilege credentials. Retain at least 365 days and while current results or decisions cite it; no automatic expiry; after that, review and delete only unneeded data. Creating, credentialing and enabling the bucket need separate approval; until then record the data as not stored. A temporary directory or expiring CI artifact alone never counts as stored.
 - The `docs/measurements.md` entry links harness, steps, raw data location, SHA-256 and retention end.
+
+## 15. Releases
+Only the maintainer pushes, moves or deletes `v*` tags or changes GHCR package settings; `release.yml` publishes them from green `main` commits ([process](spec/deployment.md#releases-808)). Rollback: migrations are append-only and forward-only, and startup refuses unknown ones, so an older image cannot run on a newer schema; past a migration, restore the pre-upgrade backup.

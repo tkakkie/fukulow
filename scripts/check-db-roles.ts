@@ -110,7 +110,7 @@ networks:
   const appUrl = `postgres://fukulow_app:${encodeURIComponent(externalPassword)}@${name}:5432/${database}`
   const ownerUrl = `postgres://${migrationOwner}:${ownerPassword}@${name}:5432/${database}`
   // The disposable database is reachable only on the unpublished Docker network.
-  const composeEnv = { PATH: env.PATH, FUKULOW_SETUP_TOKEN: env.LOAD_SETUP_TOKEN,
+  const composeEnv = { PATH: env.PATH, FUKULOW_SETUP_TOKEN: env.LOAD_SETUP_TOKEN, FUKULOW_VERSION: '0.0.0-dev',
     FUKULOW_APP_DATABASE_URL: `${appUrl}?sslmode=disable`,
     FUKULOW_MIGRATE_DATABASE_URL: `${ownerUrl}?sslmode=disable` }
   const dc = (...args: string[]) => spawnSync('docker', [...compose, ...args],

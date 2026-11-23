@@ -1,12 +1,12 @@
 # Proxy: COMPOSE_PROFILES=caddy|nginx|none in .env (or --profile); switch with deploy/switch-proxy.sh.
+# Runs the published release image; build from source only with `-f compose.yml -f compose.dev.yml`.
 services:
   app:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 75s
-    image: fukulow-app
-    build: .
+    image: ghcr.io/tkakkie/fukulow:${FUKULOW_VERSION:?Set FUKULOW_VERSION in .env (see .env.example)}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "fukulow-server", "probe"]
@@ -42,7 +42,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    image: fukulow-app
+    image: ghcr.io/tkakkie/fukulow:${FUKULOW_VERSION:?Set FUKULOW_VERSION in .env (see .env.example)}
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
     entrypoint: ["fukulow-server", "migrate"]
     command: []

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const cwd = fileURLToPath(new URL('..', import.meta.url))
 const env = { PATH: process.env.PATH, COMPOSE_PROJECT_NAME: `fukulow-config-${process.pid}`,
-  POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
+  POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only', FUKULOW_VERSION: '1.2.3' }
 const args = (profile: string, external = false) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml',
   ...(external ? ['-f', 'compose.external-db.yml'] : []), '--profile', profile, 'config', '--format', 'json']
 const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()'
@@ -329,10 +329,14 @@ function checkBaseImages(dockerfile: string) {
   }
 }
 
+// The release image is selected by the operator's FUKULOW_VERSION (an immutable SemVer tag,
+// optionally with the digest from its release notes); every other external image pins tag and digest.
+const releaseImage = /^ghcr\.io\/tkakkie\/fukulow:\d+\.\d+\.\d+(?:-[\w.-]+)?(?:@sha256:[a-f0-9]{64})?$/
 function checkImagesAndLogs(services: Record<string, { build?: unknown, image: string, logging: unknown }>) {
   const builtImages = new Set(Object.values(services).filter(service => service.build).map(service => service.image))
   for (const [name, service] of Object.entries(services)) {
-    if (!builtImages.has(service.image)) assert.match(service.image, /^[\w/.-]+:[\w.-]+@sha256:[a-f0-9]{64}$/, `${name} must pin tag and digest`)
+    const release = ['app', 'migrate'].includes(name) && releaseImage.test(service.image)
+    if (!builtImages.has(service.image) && !release) assert.match(service.image, /^[\w/.-]+:[\w.-]+@sha256:[a-f0-9]{64}$/, `${name} must pin tag and digest`)
     assert.deepEqual(service.logging, { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '3' } }, `${name} must rotate logs`)
   }
 }
@@ -351,6 +355,15 @@ test('all base images and external Compose images are pinned; every deployment/l
         if (mutation === 'pin') broken.db.image = broken.db.image.split('@')[0]
         else delete broken.db.logging.options['max-file']
         assert.throws(() => checkImagesAndLogs(broken), mutation === 'pin' ? /must pin/ : /must rotate/)
+      }
+      if (file === 'compose.yml') {
+        // Only app and migrate may use the release image, and only with a SemVer tag.
+        for (const [name, image] of [['app', 'ghcr.io/tkakkie/fukulow:latest'], ['app', 'ghcr.io/tkakkie/fukulow'],
+          ['app', 'ghcr.io/other/fukulow:1.2.3'], ['db', 'ghcr.io/tkakkie/fukulow:1.2.3']]) {
+          const broken = structuredClone(config.services)
+          broken[name].image = image
+          assert.throws(() => checkImagesAndLogs(broken), /must pin/, `${name} ${image}`)
+        }
       }
     }
   }
@@ -372,6 +385,36 @@ test('upgrade rehearsal pins both old images for the post-merge Compose shape', 
   assert.match(output, /PASS old stack images: app=.+ migrate=true/)
 })
 
+test('deployment Compose runs the required FUKULOW_VERSION release and builds from source only through compose.dev.yml', () => {
+  for (const profile of ['caddy', 'nginx']) {
+    for (const version of [undefined, '']) {
+      const result = spawnSync('docker', args(profile), { cwd, env: { ...env, FUKULOW_VERSION: version }, encoding: 'utf8' })
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, /FUKULOW_VERSION/)
+    }
+    const release = JSON.parse(execFileSync('docker', args(profile), { cwd, env, encoding: 'utf8' })).services
+    for (const name of ['app', 'migrate']) assert.equal(release[name].image, 'ghcr.io/tkakkie/fukulow:1.2.3', name)
+    for (const [name, service] of Object.entries(release)) assert.equal((service as { build?: unknown }).build, undefined, `${name} must not build`)
+    const pinned = `1.2.3@sha256:${'a'.repeat(64)}`
+    const digest = JSON.parse(execFileSync('docker', args(profile), { cwd, env: { ...env, FUKULOW_VERSION: pinned }, encoding: 'utf8' })).services
+    assert.equal(digest.app.image, `ghcr.io/tkakkie/fukulow:${pinned}`)
+    const devArgs = [...args(profile).slice(0, 5), '-f', 'compose.dev.yml', ...args(profile).slice(5)]
+    const dev = JSON.parse(execFileSync('docker', devArgs, { cwd, env, encoding: 'utf8' })).services
+    assert.equal(dev.app.build.context, cwd.replace(/\/$/, ''))
+    for (const name of ['app', 'migrate']) assert.equal(dev[name].image, 'fukulow-app', name)
+  }
+  // The shipped example leaves the version empty, so copying it never starts an implicit release.
+  const example = spawnSync('docker', ['compose', '--env-file', '.env.example', '-f', 'compose.yml', '--profile', 'caddy', 'config'],
+    { cwd, env: { PATH: process.env.PATH, POSTGRES_APP_PASSWORD: env.POSTGRES_APP_PASSWORD, FUKULOW_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN }, encoding: 'utf8' })
+  assert.notEqual(example.status, 0)
+  assert.match(example.stderr, /FUKULOW_VERSION/)
+  // The disposable load stack still builds the app from source.
+  const load = JSON.parse(execFileSync('docker', ['compose', '--env-file', '/dev/null', '-f', 'load/compose.yml', 'config', '--format', 'json'],
+    { cwd, env: { PATH: process.env.PATH, LOAD_PROJECT: 'release-config-test', LOAD_PORT: '18195', LOAD_DB_PASSWORD: 'owner-test-only',
+      LOAD_APP_PASSWORD: 'app-test-only', LOAD_SETUP_TOKEN: 'setup-test-only' }, encoding: 'utf8' })).services
+  assert.equal(load.app.build.context, cwd.replace(/\/$/, ''))
+})
+
 test('both profiles require a nonempty setup token before starting containers', () => {
   for (const profile of ['caddy', 'nginx']) {
     for (const token of [undefined, '']) {
@@ -385,7 +428,7 @@ test('both profiles require a nonempty setup token before starting containers', 
 test('the shipped deployment example cannot start either profile without a setup token', () => {
   for (const profile of ['caddy', 'nginx']) {
     const result = spawnSync('docker', ['compose', '--env-file', '.env.example', '-f', 'compose.yml', '--profile', profile, 'config'],
-      { cwd, env: { PATH: process.env.PATH, POSTGRES_APP_PASSWORD: env.POSTGRES_APP_PASSWORD }, encoding: 'utf8' })
+      { cwd, env: { PATH: process.env.PATH, POSTGRES_APP_PASSWORD: env.POSTGRES_APP_PASSWORD, FUKULOW_VERSION: env.FUKULOW_VERSION }, encoding: 'utf8' })
     assert.notEqual(result.status, 0)
     assert.match(result.stderr, /FUKULOW_SETUP_TOKEN/)
   }
@@ -452,7 +495,7 @@ test('leftover external database URLs block bundled startup for either proxy', (
 
 test('external PostgreSQL removes bundled resources and requires separate URLs for either proxy', () => {
   const externalEnv = {
-    PATH: env.PATH, COMPOSE_PROJECT_NAME: env.COMPOSE_PROJECT_NAME, FUKULOW_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN,
+    PATH: env.PATH, COMPOSE_PROJECT_NAME: env.COMPOSE_PROJECT_NAME, FUKULOW_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN, FUKULOW_VERSION: env.FUKULOW_VERSION,
     FUKULOW_APP_DATABASE_URL: 'postgres://fukulow_app:external-app-test-only@postgres.example.test:1532/chat?sslmode=verify-full',
     FUKULOW_MIGRATE_DATABASE_URL: 'postgres://owner:external-owner-test-only@postgres.example.test:1532/chat?sslmode=verify-full',
   }
