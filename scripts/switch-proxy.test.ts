@@ -38,6 +38,9 @@ const services = rest.filter(arg => !arg.startsWith('-') && !/^[0-9]+$/.test(arg
 state.calls.push([command, ...rest].join(' '))
 const active = profiles.length ? profiles : (process.env.COMPOSE_PROFILES || '').split(',')
 let status = 0
+// Like older Compose: a named proxy whose profile is not active is no such service.
+const inactive = services.find(s => ['caddy', 'nginx'].includes(s) && !active.includes(s))
+if (command !== 'config' && inactive) { process.stderr.write('no such service: ' + inactive + '\\n'); save(); process.exit(1) }
 if (command === 'config') out(['app', ...['caddy', 'nginx'].filter(p => active.includes(p))].join('\\n'))
 if (command === 'ps') out(services.filter(s => state.running.includes(s) || (rest.includes('-aq') && state.created.includes(s))).join('\\n'))
 if (command === 'up' && rest.includes('--no-start')) state.created.push(...services)
@@ -94,7 +97,12 @@ for (const from of modes) for (const to of modes) {
     // The previous proxy stops before the target starts, and HTTPS is verified afterwards.
     const calls = result.after.calls
     const stop = calls.findIndex(call => call.startsWith('stop'))
-    assert.ok(stop >= 0 && calls.slice(stop + 1).some(call => call === `curl ${to === 'none' ? external : to}`))
+    const verify = calls.findIndex((call, at) => at > stop && call === `curl ${to === 'none' ? external : to}`)
+    assert.ok(stop >= 0 && verify > stop)
+    if (to !== 'none') {
+      const start = calls.findIndex(call => call.startsWith('up -d'))
+      assert.ok(start > stop && start < verify, calls.join('\n'))
+    }
     assert.match(result.stdout, to === 'none' ? /^switch-proxy: none: https:\/\/fukulow\.test serves verified HTTPS/m
       : new RegExp(`^switch-proxy: ${to} is serving verified HTTPS; ${from === 'none' ? 'no other proxy' : from} is stopped`, 'm'))
   })

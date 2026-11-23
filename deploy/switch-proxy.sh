@@ -29,8 +29,8 @@ verified() {
 https_ok() {
   local domain address host
   if [ "$1" = none ]; then verified "$SWITCH_PROXY_URL" "${SWITCH_PROXY_CONNECT_TO:-}"; return; fi
-  domain=$(compose exec -T "$1" printenv FUKULOW_DOMAIN) || return 1
-  address=$(compose port "$1" 443) || return 1
+  domain=$(compose --profile "$1" exec -T "$1" printenv FUKULOW_DOMAIN) || return 1
+  address=$(compose --profile "$1" port "$1" 443) || return 1
   host=${address%:*}
   case "$host" in 0.0.0.0|'[::]'|'') host=127.0.0.1 ;; esac
   verified "https://$domain" "$host:${address##*:}"
@@ -72,7 +72,7 @@ for proxy in caddy nginx; do [ "$proxy" = "$target" ] || others="$others $proxy"
 previous=""
 previous_id=""
 for proxy in $others; do
-  id=$(compose ps -q --status running "$proxy")
+  id=$(compose --profile "$proxy" ps -q --status running "$proxy")
   if [ -n "$id" ]; then previous=$proxy; previous_id=$id; fi
 done
 if [ "$target" != none ]; then
@@ -81,7 +81,7 @@ if [ "$target" != none ]; then
   compose --profile "$target" up --no-start --no-deps "$target"
   if [ -n "$previous_id" ] && [ "${SWITCH_PROXY_ALLOW_PORT_CHANGE:-0}" != 1 ]; then
     wanted=$(bindings "$previous_id")
-    planned=$(bindings "$(compose ps -aq "$target")")
+    planned=$(bindings "$(compose --profile "$target" ps -aq "$target")")
     if [ "$wanted" != "$planned" ]; then
       log "$target would publish [$planned] but $previous publishes [$wanted]; pass the same ports override (nothing changed)"
       exit 2
@@ -89,9 +89,9 @@ if [ "$target" != none ]; then
   fi
 fi
 [ -n "$previous_id" ] || log "no other proxy is running; none will be started if $target fails"
-# Stop every other bundled proxy, so none keeps running or holding 80/443.
-# shellcheck disable=SC2086
-compose stop $others
+# Stop every other bundled proxy, so none keeps running or holding 80/443. Every command naming a
+# proxy passes its --profile: older Compose rejects a named service whose profile is not active.
+for proxy in $others; do compose --profile "$proxy" stop "$proxy"; done
 if start "$target"; then
   if [ "$target" = none ]; then
     echo "switch-proxy: none: $SWITCH_PROXY_URL serves verified HTTPS; no bundled proxy runs"
@@ -100,7 +100,7 @@ if start "$target"; then
   fi
   exit 0
 fi
-[ "$target" = none ] || compose stop "$target"
+[ "$target" = none ] || compose --profile "$target" stop "$target"
 if [ -z "$previous_id" ]; then
   log "no other proxy was running, so none is started"
   exit 1
