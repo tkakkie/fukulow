@@ -1,6 +1,76 @@
 use super::*;
 use sqlx::PgPool;
 
+#[fukulow_test::test]
+async fn startup_role_check_accepts_sqlx_app_role(pool: PgPool) {
+    let app = crate::test_app_pool(pool).await;
+    PoolConfig::validate_app_role(&app).await.unwrap();
+}
+
+#[sqlx::test]
+async fn startup_role_check_rejects_superuser(pool: PgPool) {
+    assert_role_rejected(pool, "ALTER ROLE test_role SUPERUSER").await;
+}
+
+#[sqlx::test]
+async fn startup_role_check_rejects_bypassrls(pool: PgPool) {
+    assert_role_rejected(pool, "ALTER ROLE test_role BYPASSRLS").await;
+}
+
+#[sqlx::test]
+async fn startup_role_check_rejects_public_relation_owner(pool: PgPool) {
+    assert_role_rejected(
+        pool,
+        "CREATE SEQUENCE public.owned_sequence; ALTER SEQUENCE public.owned_sequence OWNER TO test_role",
+    )
+    .await;
+}
+
+#[sqlx::test]
+async fn startup_role_check_rejects_role_member(pool: PgPool) {
+    assert_role_rejected(
+        pool,
+        "CREATE ROLE test_role_peer; GRANT test_role_peer TO test_role WITH INHERIT FALSE, SET FALSE",
+    )
+    .await;
+}
+
+#[sqlx::test]
+async fn startup_role_check_rejects_role_with_members(pool: PgPool) {
+    assert_role_rejected(
+        pool,
+        "CREATE ROLE test_role_peer; GRANT test_role TO test_role_peer",
+    )
+    .await;
+}
+
+#[sqlx::test]
+async fn startup_role_check_rejects_implicit_database_owner_membership(pool: PgPool) {
+    assert_role_rejected(
+        pool,
+        "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I OWNER TO test_role', current_database()); END $$",
+    )
+    .await;
+}
+
+async fn assert_role_rejected(pool: PgPool, setup: &str) {
+    let role = format!("startup_test_{}", uuid::Uuid::new_v4().simple());
+    // Roles are cluster-wide. Roll back all fixtures, even on assertion failure.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} LOGIN NOINHERIT; SET LOCAL ROLE {role}"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    validate_app_role(&mut tx).await.unwrap();
+    let setup =
+        format!("RESET ROLE; {setup}; SET LOCAL ROLE test_role").replace("test_role", &role);
+    sqlx::raw_sql(&setup).execute(&mut *tx).await.unwrap();
+    assert_eq!(validate_app_role(&mut tx).await, Err(APP_ROLE_ERROR));
+    tx.rollback().await.unwrap();
+}
+
 #[test]
 fn pool_configuration_defaults_bounds_and_overrides() {
     let defaults = PoolConfig::configured(None, None).unwrap().options();

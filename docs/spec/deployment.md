@@ -14,32 +14,34 @@ Related: [Setup token](accounts.md#setup).
 
 ## Database deployment and upgrade (#194 B)
 - PostgreSQL 17 or newer is required. Bundled PostgreSQL 18 is the Compose default. Its owner is `fukulow`. One-shot `migrate` uses the owner URL and runs `fukulow-server migrate`. App waits for successful migration and uses the `fukulow_app` URL. For standalone/dev set `DATABASE_URL` to the app URL for serving and to the owner URL for migration.
-- App startup only reads `public._sqlx_migrations`. Missing history, missing/extra/different versions, checksum mismatches or failed rows prevent listening. App never repairs or migrates. One-shot migration lock waits, including SQLx advisory locks, stop after 5 s. Resolve the blocker and retry manually with app stopped.
+- Startup checks the app role and reads `public._sqlx_migrations` without repairing or migrating. Invalid role or history blocks serving. One-shot migration lock waits stop after 5 s. Resolve the blocker and retry with app stopped.
 - App connections set `statement_timeout = 10s` and `jit = off` at connection startup, overriding URL options and role/database defaults without a per-connection query. App binds TCP, verifies both on an app connection, and exits without serving HTTP unless both match. Use HTTP readiness rather than a TCP connect. The owner connection does not get these settings. Migrations disable statement and transaction timeouts.
 - `migrate` without `fukulow_app` exits before schema changes and directs the operator to `migrate roles`.
 - `fukulow_app` is LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOINHERIT, NOREPLICATION and NOBYPASSRLS, without ownership or memberships in either direction. It gets CONNECT, public-schema USAGE, table SELECT/INSERT/UPDATE/DELETE and sequence USAGE, subject to SELECT/INSERT only on append-only `channel_log`, SELECT only on migration history, and exclusion of `organizations.history_generation` from INSERT/UPDATE. No CREATE, TEMP, TRUNCATE or trigger changes in the app DB. Other databases keep their PUBLIC privileges. Default DML/sequence grants cover future migration-owner objects. `migrate` reapplies history/log exceptions. RLS restricts the app to the transaction-local Organization or, read-only, the verified Account’s own Members and their Organizations. Owner bypass covers migrations, backup/drill and explicit generation rotation over the owner URL. Runtime cannot choose or update an epoch. Grant `fukulow_app` EXECUTE on `fukulow_setup_required()` and revoke it from PUBLIC, including after no-ACL restore.
 - Bundled mode requires nonempty `POSTGRES_PASSWORD` and a distinct URL-safe `POSTGRES_APP_PASSWORD` (e.g. `openssl rand -hex 32`). Role setup requires a superuser. Before sending the password, suppress statement/parameter/error-context logging and nested pg_stat_statements tracking transaction-locally or fail closed. Bind/quote the password as data and let PostgreSQL quote the utility statement. Suppress role-update diagnostics and keep passwords out of SQL files.
-- Initdb runs `deploy/init-db-roles.sh` with shared roles/grants SQL on new volumes only. To upgrade, take and drill a backup first, privately set setup token and new app password, build the matching image, and stop app/writers. Run `docker compose run --rm migrate roles`, then `docker compose --profile caddy up -d` (or nginx). Roles updates password/grants idempotently without changing rows. It refuses ownership/membership without reassigning or deleting anything. Reuse the password on subsequent runs. Rotation requires app recreation. Never remove the volume to fix an upgrade.
+- Bundled initdb runs `deploy/init-db-roles.sh` on new volumes only. Before upgrading, take and drill a backup, set the setup token and app password privately, build the image and stop writers. Run `docker compose run --rm migrate roles`, then `docker compose --profile caddy up -d` (or nginx). Role setup updates password/grants idempotently. Reuse the password except during rotation, which requires app recreation. Preserve the volume.
 - The disposable populated-volume [upgrade check](../../scripts/check-db-upgrade.ts) uses `origin/main` in an isolated directory and never loads deployment `.env`. `CHECK_COMPOSE_IMAGE` reuses a built candidate. `CHECK_UPGRADE_CACHE_FROM` lets CI reuse main’s layers via buildx `--cache-from`. CI runs it after building the candidate.
 - Restore with `--no-owner --no-acl` so the disposable drill needs no role creation for grants. In production, reapply ACLs/default privileges without changing data after the database-name switch and before starting app. End restored Sessions and reconcile permissions. [Recovery procedure](#production-recovery-maintainer-operated)
 
 ### External PostgreSQL (#810)
 
 1. Create a dedicated database owned by the migration login. Reserve the cluster-wide `fukulow_app` login for this deployment. Allow the operator and app/migrate containers to reach the server's TLS hostname.
-2. In a private `.pg_service.conf`, configure `fukulow-bootstrap` with the target instance, database, administrator login, `sslmode=verify-full` and trusted CA. Use a 0600 passfile. The administrator needs the role and logging rights above and the ability to assume the migration owner. Providers that restrict those rights must perform bootstrap with those protections.
-3. Supply a distinct `POSTGRES_APP_PASSWORD` privately to the script. From the checkout, run the shared role and grant SQL as one transaction. Substitute your migration login for `fukulow`.
+2. In a private `.pg_service.conf`, configure `fukulow-bootstrap` with the TLS hostname, database, administrator login, `sslmode=verify-full` and trusted CA. Use a 0600 passfile. Bootstrap requires a superuser-equivalent admin who can suppress logging and nested statistics and assume the migration owner. PostgreSQL grants non-superuser role creators automatic ADMIN membership, which violates the no-membership rule for `fukulow_app`. Providers without the required rights are unsupported.
+3. Supply a distinct `POSTGRES_APP_PASSWORD` privately and run from the checkout. Substitute your migration login for `fukulow`.
 
    ```sh
    PGSERVICE=fukulow-bootstrap FUKULOW_DB_OWNER=fukulow deploy/init-db-roles.sh --external
    ```
 
-4. Set `FUKULOW_APP_DATABASE_URL` for `fukulow_app` and `FUKULOW_MIGRATE_DATABASE_URL` for the owner. Use the same database, URL-encoded credentials and `sslmode=verify-full`. For a private CA, mount its PEM read-only in app/migrate and add `sslrootcert=/container/path.pem` to each URL. Remove bundled password settings and keep both Compose files in subsequent commands.
+4. Set `FUKULOW_APP_DATABASE_URL` for `fukulow_app` and `FUKULOW_MIGRATE_DATABASE_URL` for the owner, with URL-encoded credentials for the same database. URL `sslmode` overrides the Compose default. Anything weaker than `verify-full` is unsupported. Mount any private CA PEM read-only in app/migrate and add `sslrootcert=/container/path.pem` to both URLs. Remove bundled password settings.
 
    ```sh
    docker compose -f compose.yml -f compose.external-db.yml --profile caddy up -d --build
    ```
 
-   Use `--profile nginx` for nginx. To switch from bundled, stop writers, back up and restore to the new server, then stop the bundled DB with the original configuration. Preserve its volume.
+   Use `--profile nginx` for nginx. To switch from bundled, stop writers, back up and restore to the external server, then stop the bundled DB with the original configuration and preserve its volume.
+
+For upgrades and app-password rotation, take and drill a backup, stop writers, rerun `deploy/init-db-roles.sh --external` as in step 3, then run `up` with both `-f` files as in step 4. For rotation, pass a new `POSTGRES_APP_PASSWORD` and update `FUKULOW_APP_DATABASE_URL` before `up` recreates the app.
 
 ## Deployment (#194 C)
 - `FUKULOW_SEARCH_ENGINE` selects `disabled` (Compose default and production setting pending #689) or `d3r` (development/test). To opt in with Compose, add an override setting `services.app.environment.FUKULOW_SEARCH_ENGINE` to `d3r`.

@@ -416,6 +416,40 @@ test('both profiles require bundled passwords and keep owner credentials outside
   }
 })
 
+test('leftover external database URLs block bundled startup for either proxy', () => {
+  const checkHealth = (db: { healthcheck: { test: string[] } }) => {
+    const [mode, command] = db.healthcheck.test
+    assert.equal(mode, 'CMD-SHELL')
+    return spawnSync('/bin/sh', ['-c', `pg_isready() { return 0; }; ${command}`], { encoding: 'utf8' })
+  }
+  const leftoverUrl = 'postgres://user:leftover-db-test-only@postgres.example.test/chat'
+  for (const profile of ['caddy', 'nginx']) {
+    const bundled = JSON.parse(execFileSync('docker', args(profile), { cwd, env, encoding: 'utf8' }))
+    assert.equal(checkHealth(bundled.services.db).status, 0)
+    for (const [urlKey, passwordKey] of [
+      ['FUKULOW_APP_DATABASE_URL', 'POSTGRES_APP_PASSWORD'],
+      ['FUKULOW_MIGRATE_DATABASE_URL', 'POSTGRES_PASSWORD'],
+    ] as const) {
+      for (const password of [env[passwordKey], undefined, '']) {
+        const result = spawnSync('docker', args(profile), {
+          cwd, env: { ...env, [urlKey]: leftoverUrl, [passwordKey]: password }, encoding: 'utf8',
+        })
+        if (result.status !== 0) {
+          assert.match(result.stderr, new RegExp(`${urlKey}|${passwordKey}`))
+          continue
+        }
+        const { app, db, migrate } = JSON.parse(result.stdout).services
+        assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
+        assert.equal(migrate.depends_on.db.condition, 'service_healthy')
+        assert.ok(!JSON.stringify(db).includes('leftover-db-test-only'))
+        const health = checkHealth(db)
+        assert.equal(health.status, 1)
+        assert.match(health.stderr, new RegExp(urlKey))
+      }
+    }
+  }
+})
+
 test('external PostgreSQL removes bundled resources and requires separate URLs for either proxy', () => {
   const externalEnv = {
     PATH: env.PATH, COMPOSE_PROJECT_NAME: env.COMPOSE_PROJECT_NAME, FUKULOW_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN,

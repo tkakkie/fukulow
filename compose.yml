@@ -63,7 +63,7 @@ services:
     environment:
       POSTGRES_USER: fukulow
       POSTGRES_DB: fukulow
-      # The connection defaults above require these passwords in bundled mode.
+      # With no external URLs, the connection defaults require both passwords.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
       POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-}
     volumes:
@@ -73,7 +73,12 @@ services:
       - ./deploy/db-role-settings.sql:/opt/fukulow/db-role-settings.sql:ro
       - ./deploy/db-grants.sql:/opt/fukulow/db-grants.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fukulow -d fukulow"]
+      test:
+        - CMD-SHELL
+        - >-
+          test -z '${FUKULOW_APP_DATABASE_URL:+1}${FUKULOW_MIGRATE_DATABASE_URL:+1}' ||
+          { echo 'Unset FUKULOW_APP_DATABASE_URL and FUKULOW_MIGRATE_DATABASE_URL in bundled mode' >&2; exit 1; };
+          pg_isready -U fukulow -d fukulow
       interval: 2s
       timeout: 5s
       retries: 15

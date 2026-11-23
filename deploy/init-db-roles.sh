@@ -7,6 +7,13 @@ case "${1-}" in
         : "${FUKULOW_DB_OWNER:?Set FUKULOW_DB_OWNER to the migration owner}"
         export PGSSLMODE="${PGSSLMODE:-verify-full}"
         cd -- "$(dirname -- "$0")"
+        (
+            unset POSTGRES_APP_PASSWORD PGPASSWORD PGPASSFILE
+            # Override service and default passfiles. The readiness probe can reach
+            # a password-authenticated server without supplying a password.
+            preflight="passfile=/dev/null/pgpass password=''"
+            pg_isready -q -d "$preflight" || psql -X -w -d "$preflight" -c 'SELECT 1' >/dev/null
+        )
         ;;
     '')
         cd /opt/fukulow

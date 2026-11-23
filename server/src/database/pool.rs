@@ -1,5 +1,5 @@
 use sqlx::{
-    PgPool,
+    PgConnection, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use std::{env, time::Duration};
@@ -70,9 +70,45 @@ impl PoolConfig {
         self.options().connect_with(session(options)).await
     }
 
+    pub async fn validate_app_role(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+        let mut connection = super::acquire(pool).await.map_err(|_| APP_ROLE_ERROR)?;
+        validate_app_role(&mut connection).await.map_err(Into::into)
+    }
+
     /// Startup check: fails unless app connections carry the session settings.
     pub async fn validate_session(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         validate_session_settings(pool).await
+    }
+}
+
+const APP_ROLE_ERROR: &str = "App database role must be a non-superuser without BYPASSRLS, \
+    ownership of relations in public, or role memberships in either direction";
+
+async fn validate_app_role(connection: &mut PgConnection) -> Result<(), &'static str> {
+    // The current database owner is an implicit member of pg_database_owner.
+    let restricted: bool = sqlx::query_scalar(
+        "SELECT NOT (r.rolsuper OR r.rolbypassrls)
+            AND NOT EXISTS (
+                SELECT FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public' AND c.relowner = r.oid
+            )
+            AND NOT EXISTS (
+                SELECT FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid OR m.roleid = r.oid
+            )
+            AND NOT EXISTS (
+                SELECT FROM pg_catalog.pg_database d
+                WHERE d.datname = pg_catalog.current_database() AND d.datdba = r.oid
+            )
+         FROM pg_catalog.pg_roles r WHERE r.rolname = current_user",
+    )
+    .fetch_one(connection)
+    .await
+    .map_err(|_| APP_ROLE_ERROR)?;
+    if restricted {
+        Ok(())
+    } else {
+        Err(APP_ROLE_ERROR)
     }
 }
 
