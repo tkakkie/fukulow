@@ -45,7 +45,7 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   node load/sql-probes/519-unread-counts/final.ts --diagnostic --out /absolute/new/dir/outside/checkout
 ```
 
-- **Schema:** both arms start from the parent's migrations and the same seed. The final arm then applies only the A3 migration in one transaction, as a deploy onto existing data would. The driver refuses any other migration diff.
+- **Schema:** both arms start from the parent's migrations and the same seed. The final arm then applies the A3 migration and, since the #814 fix (#820), the UPDATE-first follow-up from `c672b0a4`, each in its own transaction, as a deploy onto existing data would. The driver refuses any other A3 migration diff; unrelated migrations merged in between are not applied.
 - **Reads:** at the same four cuts, as `fukulow_app` under RLS. The checksums must match and must be non-empty. The final arm's `count_drift` must stay false at every cut, and `message_counts_check` must be empty after the cuts and after the sends.
 - **Sends:** `sql/send-current.sql` in both arms, because A3 does not change the app's send SQL. pgbench runs as `fukulow_app` with the Organization set as a per-database role default; RLS is checked before the blocks. 8 clients × 3 alternating pairs.
   - Each block runs `CHECKPOINT`, a 60 s warm block, then a 120 s measured block with `--log`.

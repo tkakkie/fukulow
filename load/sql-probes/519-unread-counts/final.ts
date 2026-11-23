@@ -28,6 +28,10 @@ if (!smoke && !marker) throw new Error('--diagnostic needs FUKULOW_HOST_BUSY=<pa
 type FinalArm = 'current' | 'final';
 const pins: Record<FinalArm, string> = { current: '5ef561e5', final: 'fd6a5949' };
 const a3Migration = '202611221100_unread_counts.sql';
+// Re-measure after #814 (#820, approved 2026-11-23): the final arm also applies the UPDATE-first
+// follow-up, taken from its own pin. Unrelated migrations merged in between are not applied.
+const updatePin = 'c672b0a4';
+const a3Update = '202611231100_unread_counts_update_first.sql';
 const image = 'postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42';
 const cuts = smoke ? [75] : [75, 150, 575, 2150];
 const samples = smoke ? 5 : 30;
@@ -60,6 +64,11 @@ run('sh', ['-c', `git archive ${commits.current} server/migrations deploy/db-rol
 const changed = git('diff', '--name-only', commits.current, commits.final, '--', 'server/migrations');
 if (changed !== `server/migrations/${a3Migration}`) throw new Error(`unexpected migration diff: ${changed}`);
 writeFileSync(join(work, a3Migration), git('show', `${commits.final}:server/migrations/${a3Migration}`) + '\n');
+const update = git('rev-parse', updatePin + '^{commit}');
+if (spawnSync('git', ['merge-base', '--is-ancestor', commits.final, update]).status !== 0) throw new Error('update pin must descend from the final pin');
+if (git('diff', '--name-status', commits.final, update, '--', `server/migrations/${a3Migration}`, `server/migrations/${a3Update}`) !== `A\tserver/migrations/${a3Update}`)
+  throw new Error('update pin must add only the UPDATE-first migration and keep the A3 migration unchanged');
+writeFileSync(join(work, a3Update), git('show', `${update}:server/migrations/${a3Update}`) + '\n');
 cpSync(join(root, 'load/sql-probes/519-unread-counts/sql'), join(work, 'sql'), { recursive: true });
 for (const arm of ['current', 'final'] as FinalArm[]) {
   writeFileSync(join(work, `sql/list-${arm}.sql`), extractListCounts(git('show', `${commits[arm]}:server/src/messages/unread.rs`)) + '\n');
@@ -83,7 +92,7 @@ function bounded(db: string, label: string, script: string, outcome: (child: Spa
 const countsCheck = (db: string, label: string) => bounded(db, `message_counts_check ${label}`,
   `SELECT count(*) FROM message_counts_check('${organization}');\n`, c => countsCheckOutcome(c.status, c.stdout ?? '', c.stderr ?? ''));
 const migrateA3 = (db: string) => bounded(db, `A3 migration on ${db} (backfill guard runs message_counts_check)`,
-  `BEGIN;\n\\i /work/${a3Migration}\nCOMMIT;\n`, c => migrationOutcome(c.status, c.stderr ?? ''));
+  `BEGIN;\n\\i /work/${a3Migration}\nCOMMIT;\nBEGIN;\n\\i /work/${a3Update}\nCOMMIT;\n`, c => migrationOutcome(c.status, c.stderr ?? ''));
 // Host state around each block. A diagnostic block refuses to start next to any other running
 // container; after the block, any container still running or started during it fails the block.
 // sinceSeconds is taken before the pre-block `docker ps` (eventsSince), so the windows overlap.
@@ -252,7 +261,7 @@ try {
   file('p519', 'deploy/db-grants.sql');
   file('p519', 'sql/seed.sql');
   const metadata = {
-    status: 'DIAGNOSTIC / NOT EVALUATED (stop rule only)', mode: smoke ? 'smoke' : 'diagnostic', sendsOnly, started, commits, a3Migration,
+    status: 'DIAGNOSTIC / NOT EVALUATED (stop rule only)', mode: smoke ? 'smoke' : 'diagnostic', sendsOnly, started, commits: { ...commits, update }, a3Migration, a3Update,
     harnessCommit: git('rev-parse', 'HEAD'), harnessDirty: git('status', '--porcelain', '--', 'load/sql-probes/519-unread-counts') !== '',
     image, imageId: run('docker', ['image', 'inspect', '--format', '{{.Id}}', image]).trim(),
     settings: JSON.parse(psql('p519', `SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN
