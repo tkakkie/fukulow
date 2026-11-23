@@ -20,14 +20,33 @@ SELECT p.channel_id, p.read_seq,
 // the negative control for the A3 plan and buffer guards.
 pub(super) const PRE_A3: &str = include_str!("counts_pre_a3.sql");
 
-// Pool executors release connections asynchronously, including protocol drain,
-// rollback and ping. Prove both quiescence and visibility before inspecting plans.
-async fn vacuum_messages_visible(connection: &mut sqlx::PgConnection) -> Result<(), String> {
+#[derive(Debug, Default)]
+struct VacuumDiagnostic {
+    message: String,
+    client_pids: Vec<i64>,
+}
+
+fn client_transaction_pids(backends: &[Value]) -> Vec<i64> {
+    backends
+        .iter()
+        .filter(|backend| {
+            backend["backend_type"] == "client backend"
+                && (backend["backend_xid_set"] == true || backend["backend_xmin_set"] == true)
+        })
+        .map(|backend| backend["pid"].as_i64().unwrap())
+        .collect()
+}
+
+// Pool executors release connections asynchronously. Autovacuum and autoanalyze
+// can briefly delay visibility. Wait for both client quiescence and full visibility.
+async fn vacuum_messages_visible(
+    connection: &mut sqlx::PgConnection,
+) -> Result<(), VacuumDiagnostic> {
     const ATTEMPTS: usize = 20;
-    let mut diagnostic = String::new();
+    let mut diagnostic = VacuumDiagnostic::default();
     for attempt in 1..=ATTEMPTS {
-        let (transactions, backends): (i64, String) = sqlx::query_as(
-            "SELECT count(*), COALESCE(json_agg(json_build_object(
+        let backends: Value = sqlx::query_scalar(
+            "SELECT COALESCE(json_agg(json_build_object(
                  'pid', pid,
                  'backend_type', backend_type,
                  'application_name', application_name,
@@ -38,13 +57,15 @@ async fn vacuum_messages_visible(connection: &mut sqlx::PgConnection) -> Result<
                  'backend_xmin_set', backend_xmin IS NOT NULL,
                  'transaction_age_ms', (EXTRACT(EPOCH FROM clock_timestamp() - xact_start) * 1000)::bigint,
                  'query', left(query, 120)
-             ) ORDER BY pid)::text, '[]')
+             ) ORDER BY pid), '[]')
              FROM pg_stat_activity WHERE datname=current_database()
              AND pid<>pg_backend_pid() AND (backend_xid IS NOT NULL OR backend_xmin IS NOT NULL)",
         )
         .fetch_one(&mut *connection)
         .await
         .unwrap();
+        let client_pids = client_transaction_pids(backends.as_array().unwrap());
+        let transactions = client_pids.len();
         sqlx::query("VACUUM(ANALYZE) messages")
             .execute(&mut *connection)
             .await
@@ -58,15 +79,50 @@ async fn vacuum_messages_visible(connection: &mut sqlx::PgConnection) -> Result<
         if transactions == 0 && visible == total {
             return Ok(());
         }
-        diagnostic = format!(
-            "messages VACUUM exhausted {attempt} attempts: {visible}/{total} visible/total pages; \
-             {transactions} other same-database transactions; backends: {backends}"
-        );
+        diagnostic = VacuumDiagnostic {
+            message: format!(
+                "messages VACUUM exhausted {attempt} attempts: {visible}/{total} visible/total pages; \
+                 {transactions} other same-database client transactions; backends: {backends}"
+            ),
+            client_pids,
+        };
         if attempt < ATTEMPTS {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
     Err(diagnostic)
+}
+
+#[test]
+fn vacuum_counts_client_transactions_but_not_autovacuum() {
+    let mut backends = vec![
+        serde_json::json!({
+            "pid": 2455,
+            "backend_type": "autovacuum worker",
+            "state": "active",
+            "wait_event_type": "Timeout",
+            "wait_event": "VacuumDelay",
+            "backend_xid_set": false,
+            "backend_xmin_set": true,
+            "transaction_age_ms": 9,
+            "query": "autovacuum: VACUUM ANALYZE pg_catalog.pg_shdepend"
+        }),
+        serde_json::json!({
+            "pid": 2414,
+            "backend_type": "client backend",
+            "backend_xid_set": false,
+            "backend_xmin_set": true
+        }),
+    ];
+    assert_eq!(client_transaction_pids(&backends), [2414]);
+
+    backends.push(serde_json::json!({
+        "pid": 2456,
+        "backend_type": "client backend",
+        "backend_xid_set": true,
+        "backend_xmin_set": false
+    }));
+    assert_eq!(client_transaction_pids(&backends), [2414, 2456]);
 }
 
 #[fukulow_test::test]
@@ -211,16 +267,20 @@ async fn covering_range_vacuum_reports_held_same_database_transaction(pool: PgPo
         .fetch_one(&mut *held)
         .await
         .unwrap();
+    let held_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
     let mut connection = pool.acquire().await.unwrap();
     sqlx::query("INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT $1,gen_random_uuid(),$2,n,$3,gen_random_uuid(),repeat('x',1024) FROM generate_series(1,100) n")
         .bind(org).bind(channel).bind(sender).execute(&mut *connection).await.unwrap();
-    let diagnostic = vacuum_messages_visible(&mut connection).await.unwrap_err();
-    assert!(diagnostic.contains("exhausted 20 attempts"), "{diagnostic}");
-    assert!(diagnostic.contains("visible/total pages"), "{diagnostic}");
-    assert!(
-        diagnostic.contains("1 other same-database transactions"),
-        "{diagnostic}"
-    );
+    let VacuumDiagnostic {
+        message,
+        client_pids,
+    } = vacuum_messages_visible(&mut connection).await.unwrap_err();
+    assert!(message.contains("exhausted 20 attempts"), "{message}");
+    assert!(message.contains("visible/total pages"), "{message}");
+    assert_eq!(client_pids, [i64::from(held_pid)], "{message}");
     let (visible, total): (i32, i32) = sqlx::query_as(
         "SELECT relallvisible,relpages FROM pg_class WHERE oid='messages'::regclass",
     )
