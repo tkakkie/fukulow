@@ -11,7 +11,7 @@
       "cycle": "13", "support": "2030-06-30", "endoflife": "debian", "updates": "manual", "class": "manual-major" },
     { "component": "Caddy", "version": "2.11.9", "file": "compose.yml", "pattern": "image: caddy:([^@\\s]+)",
       "support": "latest only", "endoflife": "caddy", "updates": "dependabot", "class": "patch-minor" },
-    { "component": "nginx", "version": "1.31.8", "file": "compose.yml", "pattern": "image: nginx:([^@\\s]+)",
+    { "component": "nginx", "version": "1.31.9", "file": "compose.yml", "pattern": "image: nginx:([^@\\s]+)",
       "support": "latest only", "endoflife": "nginx", "updates": "dependabot", "class": "patch-minor" },
     { "component": "k6", "version": "2.4.0", "file": "Makefile", "pattern": "^K6_IMAGE := grafana/k6:([^@\\s]+)@sha256:[a-f0-9]{64}$",
       "support": "latest only", "updates": "weekly-check", "class": "patch-minor", "latest": { "github": "grafana/k6" } },
