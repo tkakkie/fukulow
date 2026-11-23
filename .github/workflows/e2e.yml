@@ -32,6 +32,10 @@ jobs:
       PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
     steps:
       - uses: actions/checkout@v7
+      # #800: overlap the image download with the builds. The smoke step still runs its bounded,
+      # digest-pinned pull (a no-op once this finishes) and `--pull never`.
+      - name: Prefetch the Playwright image in the background
+        run: nohup docker pull --quiet "$PLAYWRIGHT_IMAGE" > /dev/null 2> /dev/null &
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: rustup toolchain install --profile minimal
