@@ -1,6 +1,7 @@
 use sqlx::{PgConnection, PgPool, Postgres, migrate::MigrateError, pool::PoolConnection};
 
 mod context;
+pub(crate) mod generic_plan;
 mod pool;
 mod stats;
 pub(crate) use context::organization_confirming_rollback;
@@ -8,9 +9,7 @@ pub(crate) use context::organization_detached;
 pub(crate) use context::organization_read_only_detached;
 pub(crate) use context::set_organization;
 pub use context::{account, account_read_only, organization, organization_read_only};
-pub(crate) use context::{
-    organization_statement, organization_statement_generic, organization_statement_sql,
-};
+pub(crate) use context::{organization_statement, organization_statement_sql};
 pub use pool::PoolConfig;
 pub use stats::report_pool_periodically;
 pub(crate) use stats::{acquire, begin};

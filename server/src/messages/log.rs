@@ -284,7 +284,7 @@ async fn authorized_page(
     // PostgreSQL's cost model always picks a custom plan here, and re-planning
     // took about twice the execution time (#515). The generic plan keeps the
     // bounded shape checked in tests/replay_plans.rs.
-    let rows = crate::database::organization_statement_generic(
+    let rows = crate::database::generic_plan::organization_statement_generic(
         pool,
         &sql,
         async |tx: &mut PgConnection, sql: &str| {
