@@ -189,6 +189,10 @@ async fn search_migration_backfills_live_messages_in_each_organization_and_force
                     ($1, gen_random_uuid(), $2, $3, gen_random_uuid(), 'removed', 2, true)
              RETURNING id",
         ).bind(org).bind(public).bind(author).bind(text).fetch_one(&pool).await.unwrap();
+        // Sends commit the counter with the Message; #519's backfill check requires it.
+        sqlx::query("INSERT INTO channel_message_sequences (organization_id, channel_id, seq) VALUES ($1,$2,2) \
+            ON CONFLICT (organization_id, channel_id) DO UPDATE SET seq = 2")
+            .bind(org).bind(public).execute(&pool).await.unwrap();
         orgs.push((org, token, text, live));
     }
     sqlx::migrate!().run(&pool).await.unwrap();

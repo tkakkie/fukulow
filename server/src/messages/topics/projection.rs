@@ -3,53 +3,128 @@ use sqlx::Row;
 
 #[cfg(test)]
 mod measurement;
+#[cfg(test)]
+pub(in crate::messages) mod reference;
 
-// Reconstruct every Topic's position BEFORE the exclusive boundary. Current
-// topics.last_seq cannot enumerate Topics that moved after W. Counts use the same
-// immutable prefix. Only selected candidates fetch payloads (no per-Topic SQL).
-// A scalar visibility subquery preserves one NULL access row after Member loss,
-// so an empty page still distinguishes Organization loss from Channel denial.
+// At W >= the mutation floor, only Creates followed W. Topic summaries can
+// therefore be rewound by removing their live suffix. Find each Topic's last
+// position at W before applying the exclusive page boundary.
+// Bound both ends of the active Topic range so a Generic plan can index it.
+// The main range uses the NULL Topic key, which includes tombstones.
 pub(in crate::messages) fn page_sql() -> String {
     let sql = format!(
         r#"
 WITH access AS MATERIALIZED (SELECT ({}) AS visible),
-w AS MATERIALIZED (SELECT $5::bigint AS as_of_seq),
-positions AS (
-    SELECT m.topic_id, min(m.seq) AS first_seq, max(m.seq) AS last_seq, count(*) AS message_count,
-        COALESCE(tr.read_seq, cr.initial_seq, w.as_of_seq) AS read_seq,
-        count(*) FILTER (WHERE m.sender <> $2 AND m.seq > COALESCE(tr.read_seq, cr.initial_seq, w.as_of_seq)) AS unread_count
-    FROM messages m CROSS JOIN w CROSS JOIN access
-    LEFT JOIN channel_read_positions cr ON cr.organization_id = m.organization_id AND cr.channel_id = m.channel_id AND cr.member_id = $2 AND cr.membership_revision = $3
-    LEFT JOIN topic_read_positions tr ON tr.organization_id = m.organization_id AND tr.channel_id = m.channel_id AND tr.topic_id = m.topic_id AND tr.member_id = $2 AND cr.channel_id IS NOT NULL
-    WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id IS NOT NULL AND NOT m.deleted
-        AND m.seq <= w.as_of_seq AND access.visible AND ($9::uuid IS NULL OR m.topic_id = $9)
-    GROUP BY m.topic_id, tr.read_seq, cr.initial_seq, w.as_of_seq
+channel_counter AS MATERIALIZED (
+    SELECT seq FROM channel_message_sequences WHERE organization_id = $1 AND channel_id = $4
+        AND (SELECT visible FROM access)
+),
+unchanged_topics AS (
+    SELECT t.id AS topic_id, t.first_seq, t.last_seq, t.last_seq AS current_last_seq, t.message_count, t.name
+    FROM topics t
+    WHERE t.organization_id = $1 AND t.channel_id = $4 AND $9::uuid IS NULL
+        AND t.last_seq <= LEAST($5::bigint, $6::bigint - 1)
+        AND (SELECT visible FROM access)
+    ORDER BY t.last_seq DESC LIMIT $7
+),
+topics_to_position AS (
+    SELECT t.id, t.first_seq, t.last_seq, t.message_count, t.name
+    FROM topics t
+    WHERE t.organization_id = $1 AND t.channel_id = $4 AND $9 IS NULL
+        AND t.last_seq > $5 AND t.last_seq <= (SELECT seq FROM channel_counter)
+        AND t.first_seq <= $5 AND (SELECT visible FROM access)
+    UNION ALL
+    SELECT t.id, t.first_seq, t.last_seq, t.message_count, t.name
+    FROM topics t
+    WHERE t.organization_id = $1 AND t.channel_id = $4 AND t.id = $9
+        AND t.first_seq <= $5 AND (SELECT visible FROM access)
+),
+positioned_topics AS (
+    SELECT t.id AS topic_id, t.first_seq,
+        CASE WHEN t.last_seq <= $5 THEN t.last_seq ELSE (
+            SELECT m.seq FROM messages m
+            WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id = t.id
+                AND NOT m.deleted AND m.seq <= $5
+            ORDER BY m.seq DESC LIMIT 1
+        ) END AS last_seq,
+        t.last_seq AS current_last_seq, t.message_count, t.name
+    FROM topics_to_position t
+    OFFSET 0
+),
+main_messages AS (
+    SELECT m.topic_id, m.seq AS first_seq, m.seq AS last_seq,
+        m.seq AS current_last_seq, 1::bigint AS message_count, NULL::text AS name
+    FROM messages m
+    WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.topic_id IS NULL
+        AND m.seq <= LEAST($5, $6 - 1)
+        AND NOT $8 AND $9 IS NULL AND (SELECT visible FROM access)
+    ORDER BY m.seq DESC LIMIT $7
 ),
 candidates AS (
-    SELECT * FROM positions
+    SELECT * FROM unchanged_topics
     UNION ALL
-    SELECT topic_id, seq, seq, 1::bigint, 0::bigint, 0::bigint FROM messages, w, access
-    WHERE organization_id = $1 AND channel_id = $4 AND topic_id IS NULL
-        AND seq <= w.as_of_seq AND access.visible AND NOT $8 AND $9::uuid IS NULL
+    SELECT * FROM positioned_topics WHERE last_seq <= LEAST($5, $6 - 1)
+    UNION ALL
+    SELECT * FROM main_messages
 ),
-page AS MATERIALIZED (
-    SELECT * FROM candidates WHERE ($6::bigint IS NULL OR last_seq < $6)
-    ORDER BY last_seq DESC LIMIT $7
+page AS (
+    SELECT * FROM candidates ORDER BY last_seq DESC LIMIT $7
+),
+page_positions AS MATERIALIZED (
+    SELECT p.*,
+        CASE WHEN p.topic_id IS NULL THEN 0 ELSE COALESCE(tr.read_seq, cr.initial_seq, $5) END AS read_seq,
+        COALESCE(tr.read_ordinal, 0) AS read_ordinal,
+        COALESCE(tr.read_own_ordinal, 0) AS read_own_ordinal
+    FROM page p
+    LEFT JOIN channel_read_positions cr ON cr.organization_id = $1 AND cr.channel_id = $4
+        AND cr.member_id = $2 AND cr.membership_revision = $3 AND p.topic_id IS NOT NULL
+    LEFT JOIN LATERAL (
+        SELECT tr.read_seq, tr.read_ordinal, tr.read_own_ordinal
+        FROM topic_read_positions tr WHERE tr.organization_id = $1 AND tr.channel_id = $4
+            AND tr.member_id = $2 AND tr.topic_id = p.topic_id AND cr.channel_id IS NOT NULL
+        OFFSET 0
+    ) tr ON true
 )
-SELECT access.visible, w.as_of_seq, p.first_seq, p.last_seq,
-    p.message_count, p.read_seq, p.unread_count, mc.mention_unread_count, t.name, m.id, m.channel_id, m.seq, m.version, m.deleted, m.client_message_id,
+SELECT access.visible, $5 AS as_of_seq, p.first_seq, p.last_seq,
+    p.message_count - tail.message_count AS message_count, p.read_seq,
+    CASE WHEN p.last_seq IS NOT NULL THEN GREATEST(uc.unread_count, 0) END AS unread_count,
+    uc.unread_count < 0 AS count_drift, mc.mention_unread_count, p.name,
+    m.id, m.channel_id, m.seq, m.version, m.deleted, m.client_message_id,
     m.sender, m.body, m.topic_id, m.reply_to_id AS reply_to, m.reply_root_id,
     to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
-FROM access CROSS JOIN w LEFT JOIN page p ON true
-LEFT JOIN messages m ON m.organization_id = $1 AND m.channel_id = $4 AND m.seq = p.last_seq
-LEFT JOIN topics t ON t.organization_id = $1 AND t.channel_id = $4 AND t.id = p.topic_id
+FROM access LEFT JOIN page_positions p ON true
 CROSS JOIN LATERAL (
-    SELECT count(*) AS mention_unread_count FROM messages unread
-    JOIN message_mentions mm ON mm.organization_id=$1 AND mm.member_id=$2
-        AND mm.channel_id=$4 AND mm.message_id=unread.id
-    WHERE unread.organization_id=$1 AND unread.channel_id=$4 AND unread.topic_id=p.topic_id
-        AND unread.seq>p.read_seq AND unread.seq<=w.as_of_seq AND unread.sender<>$2 AND NOT unread.deleted
+    SELECT count(*) AS message_count, count(*) FILTER (WHERE m.sender <> $2) AS unread_count
+    FROM messages m
+    WHERE p.current_last_seq > $5 AND m.organization_id = $1 AND m.channel_id = $4
+        AND m.topic_id = p.topic_id AND NOT m.deleted AND m.seq > $5 AND m.seq <= p.current_last_seq
+) tail
+-- When p.last_seq > read_seq, every live Message above W is also above read_seq.
+-- The #519 A3 identity at the snapshot counter can then subtract that entire suffix.
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN p.topic_id IS NULL OR p.last_seq <= p.read_seq THEN 0 ELSE
+        (SELECT (COALESCE(sum(k.appended) FILTER (WHERE k.member_id = '00000000-0000-0000-0000-000000000000'), 0)
+              - COALESCE(sum(k.appended) FILTER (WHERE k.member_id = $2), 0))::bigint
+         FROM message_append_counts k WHERE k.organization_id = $1 AND k.channel_id = $4
+            AND k.scope_id = p.topic_id AND k.member_id IN ('00000000-0000-0000-0000-000000000000', $2))
+        - p.read_ordinal + p.read_own_ordinal
+        + (SELECT COALESCE(sum(x.delta), 0) FROM message_count_corrections x
+           WHERE x.organization_id = $1 AND x.channel_id = $4 AND x.scope_id = p.topic_id
+             AND x.seq > p.read_seq AND x.seq <= (SELECT seq FROM channel_counter) AND x.sender <> $2)
+        - tail.unread_count
+    END AS unread_count
+    OFFSET 0
+) uc
+CROSS JOIN LATERAL (
+    SELECT count(*) AS mention_unread_count
+    FROM message_mentions mm
+    WHERE mm.organization_id = $1 AND mm.member_id = $2 AND mm.channel_id = $4
+        AND mm.topic_id = p.topic_id AND mm.seq > p.read_seq AND mm.seq <= $5 AND mm.counted
 ) mc
+LEFT JOIN LATERAL (
+    SELECT * FROM messages m WHERE m.organization_id = $1 AND m.channel_id = $4 AND m.seq = p.last_seq
+    OFFSET 0
+) m ON true
 ORDER BY p.last_seq DESC
 "#,
         channels::member_visibility_sql(false)
@@ -136,6 +211,9 @@ async fn read(
         for row in &rows {
             if row.try_get::<Option<Uuid>, _>("id")?.is_none() {
                 continue;
+            }
+            if row.try_get::<bool, _>("count_drift")? {
+                tracing::error!(target: "fukulow", event = "unread_count_drift");
             }
             let message = message_from_row(row)?;
             items.push(match message.topic_id {

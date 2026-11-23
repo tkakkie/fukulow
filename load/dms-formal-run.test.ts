@@ -1,14 +1,16 @@
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, cpSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, cpSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { readConfig, readRunConfig, type Config } from './dms-formal-config.ts';
 import { budgets, commonWindow, judge, reconcile } from './dms-formal-judgment.ts';
-import { run, type Runtime } from './dms-formal-run.ts';
+import { spawnSync } from 'node:child_process';
+import { abortSettleMs, cleanupReserveMs, collectionEndMs, collectionSlackMs, dbLogCommand, dbLogTimeoutMs, hostStopMaxMs, localCleanupMs, run, samplerStopEndMs, seedDbLogMs, type Runtime } from './dms-formal-run.ts';
 import { checked, execute, type Command } from './dms-formal-exec.ts';
 import { parseSend } from './dms-formal-results.ts';
+import { kernelFiles, snapshotsPerSession, stopTiming } from './dms-formal-seed-samplers.ts';
 const checkout=resolve(import.meta.dirname,'..');
 function temporary(t: {after:(fn:()=>void)=>void}) { const path=mkdtempSync(`${tmpdir()}/dm-formal-test-`);t.after(()=>rmSync(path,{recursive:true,force:true}));return path; }
 function env(path:string, extra='') {return `DM_FORMAL_APP=app-alias\nDM_FORMAL_DB=db-alias\nDM_FORMAL_GENERATOR=generator-alias\nDM_FORMAL_SHA=${'a'.repeat(40)}\nDM_FORMAL_OUTPUT=${path}/output\n${extra}`;}
@@ -339,6 +341,76 @@ test('seed failure records the transfer failure when timing evidence is missing'
   assert.equal(failure.operation,'transfer:formal/seed-timing.jsonl');
   assert.equal(failure.remoteRoot,'/tmp/'+status.id);
 });
+test('a formal seed failure keeps the redacted DB log before cleanup removes the container',async t=>{
+  const {config,runtime,events}=lifecycle(t);const original=runtime.exec;
+  const prefix='2026-11-22T00:00:00.000000000Z 2026-11-22 00:00:00.000 UTC [7] ';
+  runtime.exec=async command=>{
+    const text=command.args.join(' ');
+    if(text.includes("'seed'"))return {code:1,stdout:''};
+    if(text.includes('docker logs --timestamps')) {
+      assert.equal(command.args.at(-2),'db');
+      assert.match(command.args.at(-1)!,/^timeout --signal=KILL 8s sh -c '.+' db-log 'dm-formal-[a-f0-9-]+-db-1'$/);
+      assert.equal(command.args.at(-1),'timeout --signal=KILL 8s '+dbLogCommand(/'(dm-formal-[a-f0-9-]+-db-1)'$/.exec(command.args.at(-1)!)![1]!));
+      assert.equal(command.timeout,dbLogTimeoutMs,'bounded on both ends');
+      assert.ok(!events.some(event=>event.includes(' cleanup && timeout')),'saved before any host cleanup');
+      events.push('db logs');
+      return {code:0,stdout:[prefix+'LOG:  checkpoints are occurring too frequently (24 seconds apart)',prefix+'STATEMENT:  INSERT secret-token'].join('\n')};
+    }
+    return original(command);
+  };
+  await assert.rejects(run(config,runtime),/ssh failed/);
+  assert.equal(events.filter(event=>event==='db logs').length,1);
+  assert.equal(readFileSync(config.output+'/db.log','utf8'),prefix+'LOG:  checkpoints are occurring too frequently (24 seconds apart)\n');
+  assert.ok(!existsSync(config.output+'/db-log-collection.json'));
+  assert.equal(JSON.parse(readFileSync(config.output+'/summary.json','utf8')).status,'NOT EVALUATED','the DB log changes no result');
+});
+test('the DB log command exits 3 only for a missing container; another inspect failure exits 4, recorded as failed',t=>{
+  const bin=temporary(t);
+  // A fake docker: inspect prints FAKE_INSPECT to stderr and exits FAKE_CODE; logs prints one line.
+  writeFileSync(bin+'/docker','#!/bin/sh\nif [ "$1" = container ]; then echo "$FAKE_INSPECT" >&2; exit "$FAKE_CODE"; fi\necho "db log line"\n',{mode:0o700});
+  const exit=(inspect:string,code:number)=>{
+    const result=spawnSync('sh',['-c',dbLogCommand('dm-formal-x-db-1')],{env:{PATH:`${bin}:/usr/bin:/bin`,FAKE_INSPECT:inspect,FAKE_CODE:String(code)},encoding:'utf8'});
+    return [result.status,result.stdout.trim()];
+  };
+  assert.deepEqual(exit('',0),[0,'db log line']);
+  assert.deepEqual(exit('Error response from daemon: No such container: dm-formal-x-db-1',1),[3,'']);
+  assert.deepEqual(exit('Error: No such object: dm-formal-x-db-1',1),[3,'']);
+  assert.deepEqual(exit('permission denied while trying to connect to the Docker daemon socket',1),[4,''],'a refused daemon is not a missing container');
+  assert.deepEqual(exit('Cannot connect to the Docker daemon. Is the docker daemon running?',1),[4,'']);
+});
+for(const [code,status] of [[3,'missing'],[4,'failed'],[137,'failed'],[1,'failed']] as const)test(`a DB log save that exits ${code} is recorded as ${status} and does not stop cleanup`,async t=>{
+  const {config,runtime,events}=lifecycle(t);const original=runtime.exec;
+  runtime.exec=async command=>{
+    if(command.args.join(' ').includes("'seed'"))return {code:1,stdout:''};
+    // 3: no such container; 4: inspect failed otherwise; 137: the remote timeout killed docker logs with the container present.
+    if(command.args.join(' ').includes('docker logs --timestamps'))return {code,stdout:''};
+    return original(command);
+  };
+  await assert.rejects(run(config,runtime),/ssh failed/);
+  assert.equal(JSON.parse(readFileSync(config.output+'/db-log-collection.json','utf8')).status,status);
+  assert.ok(!existsSync(config.output+'/db.log'));
+  assert.equal(events.filter(event=>event.includes(' cleanup && timeout')).length,3);
+});
+test('the DB log save before cleanup fits the cleanup reserve beside the three sequential local cleanups',()=>{
+  assert.ok(dbLogTimeoutMs+3*localCleanupMs<=cleanupReserveMs);
+});
+test('seed diagnostic collection ends before the three local cleanup allowances, even if the deadline fires just after a normal stop began',()=>{
+  const deadline=Date.parse('2026-11-23T06:00:00Z'), fired=deadline-cleanupReserveMs;
+  assert.equal(collectionSlackMs,30_000);
+  // Before the deadline fires, the collection end already leaves the cleanups their allowances.
+  assert.equal(collectionEndMs(deadline,undefined),deadline-3*localCleanupMs);
+  // Worst case: the normal sampler stop starts at fired-1 ms (10 s stop command, 15 s grace, 10 s kill: 35 s
+  // unbounded), the deadline fires 1 ms later. Every sampler step is cut to samplerStopEndMs, the host sampler stop
+  // and an aborted exec's teardown are bounded, and the DB log gets at most the time left before the end.
+  const end=collectionEndMs(deadline,fired), samplersDone=samplerStopEndMs(end)+abortSettleMs;
+  assert.ok(stopTiming.stopCommandMs+15_000+stopTiming.killMs>collectionSlackMs,'the unbounded normal stop would not fit');
+  const hostDone=samplersDone+hostStopMaxMs, dbLogDone=hostDone+Math.min(seedDbLogMs.fast,end-hostDone);
+  assert.ok(dbLogDone<=end && end<=deadline-3*localCleanupMs,`collection ends ${dbLogDone-(deadline-3*localCleanupMs)} ms into the cleanup allowances`);
+  assert.equal(end-hostDone,seedDbLogMs.fast,'the DB log keeps its full fast allowance');
+  assert.ok(samplerStopEndMs(end)-fired>=stopTiming.fastStopCommandMs+stopTiming.fastGraceMs,'a stop that starts after the deadline still gets its fast stop command and grace');
+  // A signal without a deadline gets the same slack.
+  assert.equal(collectionEndMs(undefined,fired),fired+collectionSlackMs);
+});
 test('config validates deadline timezone and raw opt-in',t=>{
   const path=temporary(t),file=path+'/config.env';
   for(const extra of ['DM_FORMAL_DEADLINE=invalid\n','DM_FORMAL_DEADLINE=2000-01-01T00:00:00Z\n','DM_FORMAL_DOWNLOAD_RAW=yes\n']) {
@@ -479,6 +551,23 @@ test('executor marks timed out log capture incomplete',async t=>{
   assert.equal(manifest.bytes,readFileSync(path).length);
 });
 
+test('executor writes a redacted log only, never the raw cp output with home paths',async t=>{
+  const path=temporary(t)+'/transfer.log';
+  const redactLog=(text:string)=>text.replace(/\/Users\/[^/\s]+/g,'/Users/[user]');
+  await assert.rejects(checked(execute,{program:'sh',args:['-c',"echo 'cp: /Users/someone/runs/out/formal: Permission denied' >&2; echo out /Users/someone/x; exit 1"],timeout:5000,log:path,redactLog}),/sh failed/);
+  const saved=readFileSync(path,'utf8');
+  assert.ok(!saved.includes('someone'),saved);
+  assert.match(saved,/cp: \/Users\/\[user\]\/runs\/out\/formal: Permission denied/);
+  const manifest=JSON.parse(readFileSync(path+'-retention.json','utf8'));
+  assert.deepEqual([manifest.complete,manifest.redacted,manifest.bytes>0],[true,true,true]);
+});
+test('every transfer.log capture of the runner is redacted',async t=>{
+  const {config,runtime}=stub(t,false);const original=runtime.exec;const logged:Command[]=[];
+  runtime.exec=async command=>{if(command.log?.endsWith('/transfer.log'))logged.push(command);return original(command);};
+  await assert.rejects(run(config,runtime));
+  assert.ok(logged.length>0,'the preflight uploads write transfer.log');
+  for(const command of logged)assert.equal(command.redactLog?.('cp: /Users/someone/x: Permission denied'),'cp: /Users/[user]/x: Permission denied',command.program);
+});
 test('seed diagnostic CLI accepts only local pool-overhead at pair scale with a formal fixture', t => {
   const path=temporary(t), file=path+'/config.env';
   const patch='DM_FORMAL_REVIEWED_PATCH_SHA256='+'a'.repeat(64)+'\n';
@@ -492,6 +581,10 @@ test('seed diagnostic CLI accepts only local pool-overhead at pair scale with a 
   assert.equal(diagnostic.pilot,false);
   assert.equal(diagnostic.loadScale,'1/25');
   assert.throws(()=>readRunConfig([file,'--pilot','--seed-diagnostic'],checkout),/Expected/);
+  // The baseline arm is the same seed diagnostic run with the instrumentation off.
+  const baselineArm=readRunConfig([file,'--seed-diagnostic-baseline'],checkout);
+  assert.deepEqual([baselineArm.seedDiagnostic,baselineArm.seedBaseline,baselineArm.loadScale,baselineArm.pilot],[true,true,'1/25',false]);
+  assert.equal(diagnostic.seedBaseline,undefined);
   for (const extra of [overhead,local+'DM_FORMAL_SCENARIO=smoke\nDM_FORMAL_MODE=smoke\n',
     local+overhead+'DM_FORMAL_LOAD_SCALE=1/10\n',local+overhead+'DM_FORMAL_MODE=smoke\n']) {
     writeFileSync(file,env(path,extra));
@@ -499,24 +592,69 @@ test('seed diagnostic CLI accepts only local pool-overhead at pair scale with a 
   }
 });
 
-for (const outcome of ['success','stop-rule','interrupted']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
+// The rows and DB log a seed diagnostic writes: per Organization 200 batches and its Organization row; each instrumented
+// batch logs its five statement durations inside its clock window. A stopped seed ends at Organization 6 batch 124.
+function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean) {
+  const base=Date.parse('2026-11-22T00:00:00Z'), rows:string[]=[], log:string[]=[];
+  const at=(ms:number)=>new Date(ms).toISOString().replace('T',' ').replace('Z',' UTC');
+  for(let o=0;o<10;o++) {
+    for(let b=0;b<200;b++) {
+      const index=o*201+b, startMs=base+index*1000, stop=stopped && o===6 && b===124, durationMs=stop?12166:b===0?2000:1000;
+      rows.push(JSON.stringify(arm==='baseline'?{kind:'batch',organization:o,batchIndex:b,durationMs}
+        :{kind:'batch',organization:o,batchIndex:b,durationMs,startedAtMs:startMs,endedAtMs:startMs+durationMs,dbClockStartMs:startMs,dbClockEndMs:startMs+900,dbClockSpanMs:900,dbBackendPid:1000+index,recorderMs:0.1}));
+      for(const [offset,ms] of [[0,'0.050'],[100,'800.000'],[101,'0.100'],[899,'50.000'],[900,'0.020']] as const)
+        log.push(`2026-11-22T00:00:00.000000000Z ${at(startMs+offset)} [${1000+index}] LOG:  duration: ${ms} ms`);
+      if(stop)return {timing:rows.join('\n')+'\n',dbLog:log};
+    }
+    rows.push(JSON.stringify(arm==='baseline'?{kind:'organization',organization:o,durationMs:200000}:{kind:'organization',organization:o,durationMs:200000,startedAtMs:base+o*201000,endedAtMs:base+o*201000+200000}));
+  }
+  return {timing:rows.join('\n')+'\n',dbLog:log};
+}
+
+for (const outcome of ['success','stop-rule','interrupted','collection-failure','interrupted-late','baseline']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
   const path=temporary(t), events:string[]=[], listeners=new Map<string,()=>void>();
   const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',
-    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,
+    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,...(outcome==='baseline'?{seedBaseline:true}:{}),
     reviewedPatchSha256:createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex')};
   const stop={organization:6,batchIndex:124,durationMs:12166,baselineMs:983.941,rule:'message-batch',
     limitMs:2951.823,startedAtMs:100,endedAtMs:12266};
-  const timing=JSON.stringify({kind:'batch',...stop})+'\n';
-  const runtime:Runtime={on:(signal,listener)=>{listeners.set(signal,listener);},off:()=>{},transfer:async()=>{},
+  const baseline=outcome==='baseline', interrupted=outcome==='interrupted'||outcome==='interrupted-late', stopped=outcome==='stop-rule'||interrupted;
+  const {timing,dbLog}=diagnosticSeedRecords(baseline?'baseline':'instrumented',stopped);
+  const vmLogDirectory=path+'/vm';mkdirSync(vmLogDirectory);writeFileSync(vmLogDirectory+'/console.log','1970-01-01T00:00:00Z kernel: ok');
+  const collectionFailure=outcome==='collection-failure';
+  // Written during the run: the copy skips VM logs last changed before the seed started.
+  utimesSync(vmLogDirectory+'/console.log',new Date(Date.now()+3600000),new Date(Date.now()+3600000));
+  // The DB log fetch after a late interrupt uses up the collection slack: the VM log copy must not run past it.
+  if(outcome==='interrupted-late')t.mock.timers.enable({apis:['Date'],now:Date.now()});
+  // A sampler wrongly started in the baseline arm is never stopped; mocked timers keep its next tick from outliving the test.
+  if(baseline)t.mock.timers.enable({apis:['setTimeout']});
+  let releaseSamplers:()=>void=()=>{};
+  const samplersStopped=new Promise<void>(resolve=>{releaseSamplers=resolve;});
+  const self='--- self 9 (sh) S 1 9 9 0 -1 0 0 0 0 0 1 1 0 0 20';
+  const runtime:Runtime={vmLogDirectory,on:(signal,listener)=>{listeners.set(signal,listener);},off:()=>{},transfer:async()=>{},
     exec:async command=>{
       const text=command.args.join(' ');
       if(command.program==='tar')writeFileSync(command.args[2],'archive');
       if(command.program==='cp')cpSync(command.args[1]!,command.args[2]!);
       if(command.args[0]?.endsWith('dms-formal-local.ts'))return {code:0,stdout:'1'};
-      if(command.program==='docker')return {code:0,stdout:command.args[0]==='exec'?'{"checkpointer":{},"bgwriter":{},"wal":{},"io":[],"waitEvents":[],"vacuum":[]}':'1.00%|1GiB / 4GiB|0B / 1MB'};
+      // A sampler exec in the baseline arm shows up in the event list (asserted below) instead of failing inside the run.
+      if(command.program==='iostat'||command.program==='vm_stat') {if(baseline && !events.includes('host sampler'))events.push('host sampler');return {code:0,stdout:'counters'};}
+      if(command.program==='log') {events.push('host log');return {code:0,stdout:'powerd: ok'};}
+      if(command.program==='docker' && baseline && command.log)events.push('sampler loop');
+      if(command.program==='docker' && command.args.includes('touch')) {events.push('stop samplers');releaseSamplers();return {code:0,stdout:''};}
+      if(command.program==='docker' && command.log) {
+        // Each long-lived loop writes one complete sample, then runs until the stop file appears.
+        writeFileSync(command.log,command.args.includes('PGOPTIONS=-c statement_timeout=2000')
+          ?['--- pid 40','--- clk_tck 100','--- child 41',...Array.from({length:snapshotsPerSession},(_,i)=>['{"atMs":'+(i+1)+',"checkpointer":{},"wal":{},"io":[]}',...(collectionFailure&&i===0?[]:['Time: 2.0 ms'])]).flat(),'--- psql-exit 0',self,'--- stopped'].join('\n')
+          :['--- clk_tck 100','=== 1.0',...kernelFiles.map(file=>'==> '+file+' <=='),self,'--- stopped'].join('\n'));
+        // The baseline arm never stops samplers, so a loop started there must not wait for a stop.
+        if(!baseline)await samplersStopped;
+        return {code:0,stdout:''};
+      }
       if(text.includes('docker logs --timestamps')) {
         events.push('db logs');
-        return {code:0,stdout:'2026-11-22T00:00:00.000000000Z 2026-11-22 00:00:00.000 UTC [42] LOG:  checkpoint starting: time'};
+        if(outcome==='interrupted-late')t.mock.timers.tick(collectionSlackMs);
+        return {code:0,stdout:['2026-11-22T00:00:00.000000000Z 2026-11-22 00:00:00.000 UTC [42] LOG:  checkpoint starting: time',...(baseline?[]:dbLog)].join('\n')};
       }
       const roleRoot=/'([^']+\/dm-formal-[a-f0-9-]+\/(?:db|app|generator))\//.exec(text)?.[1];
       if(command.program==='sh' && roleRoot) {
@@ -531,13 +669,14 @@ for (const outcome of ['success','stop-rule','interrupted']) test('seed diagnost
           events.push('seed');
           const workerState=JSON.parse(readFileSync(roleRoot+'/state.json','utf8'));
           assert.equal(workerState.seedDiagnostic,true);
+          assert.equal(workerState.seedBaseline,baseline?true:undefined);
           assert.equal(workerState.pilot,false);
           assert.equal(workerState.loadScale,'1/25');
           mkdirSync(roleRoot+'/formal');
           writeFileSync(roleRoot+'/formal/seed-timing.jsonl',timing,{mode:0o600});
           if(outcome==='stop-rule')writeFileSync(roleRoot+'/formal/seed-stop.json',JSON.stringify(stop));
-          if(outcome==='interrupted')listeners.get('SIGINT')!();
-          return {code:outcome==='success'?0:1,stdout:''};
+          if(interrupted)listeners.get('SIGINT')!();
+          return {code:outcome==='success'||collectionFailure||baseline?0:1,stdout:''};
         }
         if(text.includes("'cleanup'")) {
           assert.match(readFileSync(config.output+'/formal/db.log','utf8'),/checkpoint starting/);
@@ -547,10 +686,16 @@ for (const outcome of ['success','stop-rule','interrupted']) test('seed diagnost
       }
       return {code:0,stdout:''};
     }};
-  if(outcome==='success')assert.equal((await run(config,runtime)).infrastructureFailure,false);
+  if(outcome==='success'||baseline)assert.equal((await run(config,runtime)).infrastructureFailure,false);
+  else if(collectionFailure)await assert.rejects(run(config,runtime),/Seed diagnostic record collection failed/);
   else await assert.rejects(run(config,runtime),/sh failed/);
-  assert.deepEqual(events,['seed','db logs','cleanup','cleanup','cleanup']);
+  // After an interrupt the macOS log is skipped (recorded) so container removal is not delayed.
+  assert.deepEqual(events,['seed',...(baseline?[]:['stop samplers']),'db logs',...(interrupted?[]:['host log']),'cleanup','cleanup','cleanup']);
   assert.equal(readFileSync(config.output+'/formal/seed-timing.jsonl','utf8'),timing);
+  if(outcome!=='interrupted-late')assert.equal(readFileSync(config.output+'/formal/docker-vm/console.log','utf8'),'1970-01-01T00:00:00Z kernel: ok');
+  else assert.ok(!existsSync(config.output+'/formal/docker-vm/console.log'),'no VM log is read once the collection slack is used up');
+  if(!interrupted)assert.equal(readFileSync(config.output+'/formal/host.log','utf8'),'powerd: ok\n');
+  assert.ok(!existsSync(config.output+'/db.log'),'the diagnostic keeps its DB log under formal/ only');
   assert.ok(!existsSync(config.output+'/private-state.json'));
   assert.ok(!existsSync(config.output+'/host-state.json'));
   assert.ok(!existsSync(config.output+'/overhead-comparison.json'));
@@ -561,10 +706,37 @@ for (const outcome of ['success','stop-rule','interrupted']) test('seed diagnost
     assert.equal(record.status,'NOT EVALUATED');
   }
   assert.deepEqual(summary.attempts,[]);
-  assert.equal(summary.sampleCoverage.complete,true);
-  assert.ok(summary.sampleCoverage.attempted>=1);
-  assert.deepEqual(summary.collectionFailures,[]);
-  if(outcome!=='success') {
+  assert.deepEqual(summary.collectionFailures,collectionFailure?['db-samples.txt: postgres: sample timing missing']
+    :outcome==='interrupted'?['host.log: failed']:outcome==='interrupted-late'?['docker-vm: failed','host.log: failed']:[]);
+  assert.equal(summary.infrastructureFailure,outcome!=='success'&&!baseline);
+  assert.equal(summary.arm,baseline?'baseline':'instrumented');
+  assert.deepEqual(Object.keys(summary.conditions).sort(),['harnessSha256','imageDigest','limits','load','machine','mode','postgres','scenario','sha','shape']);
+  assert.deepEqual(summary.collectionMissing,[]);
+  assert.equal(summary.vmLogs.status,outcome==='interrupted-late'?'failed':'complete');
+  assert.equal(summary.hostLog.status,interrupted?'failed':'complete');
+  const batches=stopped?6*200+125:2000;
+  assert.deepEqual([summary.overhead.batches.batches,summary.overhead.batches.missingRows,summary.overhead.batches.unexpectedRows],[batches,0,0]);
+  if(baseline) {
+    assert.deepEqual([summary.samplers,summary.hostSamples,summary.overhead.dockerExecs,summary.overhead.recorderMs],[null,null,null,null]);
+    assert.equal(summary.overhead.instrumentationEffect,'baseline-arm');
+    assert.equal(summary.overhead.batches.medianMs,1000);
+    assert.ok(!existsSync(config.output+'/formal/seed-batch-server.jsonl'));
+    return;
+  }
+  assert.equal(summary.samplers.kernel.samples,1);
+  assert.equal(summary.samplers.postgres.samples,3);
+  assert.equal(summary.hostSamples.complete,true);
+  assert.equal(summary.overhead.dockerExecs,3,'two long-lived loops and one stop exec, not one exec per second');
+  assert.equal(summary.overhead.kernelLoopCpuSeconds,0.02);
+  assert.equal(summary.overhead.instrumentationEffect,'unevaluated','the effect is claimed only by the matched comparison');
+  assert.deepEqual([summary.overhead.batches.medianDbClockSpanMs,summary.overhead.batches.medianServerMs,summary.overhead.batches.serverMissing,summary.overhead.recorderMs.max],[900,850.17,0,0.1]);
+  const server=readFileSync(config.output+'/formal/seed-batch-server.jsonl','utf8').trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(server.length,batches);
+  assert.deepEqual(server[1],{organization:0,batchIndex:1,durationMs:1000,dbClockSpanMs:900,serverMs:850.17,serverStatements:5});
+  assert.match(readFileSync(config.output+'/formal/db.log','utf8'),/duration: 800\.000 ms/);
+  for(const file of ['db-kernel.txt','db-samples.txt'])assert.ok(existsSync(config.output+'/formal/'+file));
+  assert.deepEqual(readdirSync(config.output+'/formal').filter(file=>/\.(?:raw|partial)/.test(file)),[],'no raw sampler output in the artifact directory');
+  if(stopped) {
     const failure=JSON.parse(readFileSync(config.output+'/failure.json','utf8'));
     assert.deepEqual(status.seedStop,failure.seedStop);
     if(outcome==='stop-rule')assert.deepEqual(failure.seedStop,stop);

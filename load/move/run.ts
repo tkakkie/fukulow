@@ -5,7 +5,7 @@ import { arch, cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:o
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
-import { k6CeilingWarnings, readTimingProblems } from './diagnostic-evidence.ts';
+import { k6CeilingWarnings, readTimingProblems, sendTimingProblems } from './diagnostic-evidence.ts';
 import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnostic.ts';
 import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, readSampleEnvironment, rejectDiagnosticImage, remainingArmsSkipped,
   type ReadLanes } from './diagnostic-mode.ts';
@@ -207,6 +207,7 @@ async function main() {
             const { app, k6: generator, postgres, containers } = measured.extra;
             const missing = [
               ...(!app?.byLane.send.phasesUs.before_admission ? ['send timings'] : []),
+              ...(selection.sendBreakdown ? sendTimingProblems(app) : []),
               ...(selection.readTimingSampleEvery ? readTimingProblems(app?.byLane, selection.readLanes) : []),
               ...(!generator?.vus.some(point => point.active !== undefined && point.allocated !== undefined) ? ['k6 VU gauges'] : []),
               ...(!postgres.statementsAvailable ? ['PostgreSQL execution statistics'] : []),
