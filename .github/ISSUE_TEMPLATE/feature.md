@@ -15,6 +15,6 @@ labels: status:human-review
 ## Out of scope
 
 ## Risk
-<!-- auth / permissions / real-time / migrations / contract change / cost? If yes, add `risk:needs-review`. -->
+<!-- auth / permissions / real-time / migrations / contract change / cost? If yes, add `risk:needs-review` (or say so here if you cannot set labels). -->
 
-<!-- Last line: AI: <name> / model: <id> / effort: <level> -->
+<!-- AI authors, last line: AI: <name> / model: <id> / effort: <level>. Others may omit it. -->
