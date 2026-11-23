@@ -11,7 +11,7 @@ export async function secretSafe<T>(operation: () => T | Promise<T>): Promise<T>
 }
 
 // Keep the API bootstrap shared with navigation tests; auth.spec.ts still tests UI setup.
-export async function signInOwner(request: APIRequestContext): Promise<string> {
+export async function ensureSetup(request: APIRequestContext): Promise<void> {
   const setup = await secretSafe(() => request.get('/api/v1/setup'))
   expect(setup.ok()).toBe(true)
   if (((await secretSafe(() => setup.json())) as components['schemas']['SetupStatus']).setup_required) {
@@ -21,6 +21,10 @@ export async function signInOwner(request: APIRequestContext): Promise<string> {
     } }))
     expect(response.ok()).toBe(true)
   }
+}
+
+export async function signInOwner(request: APIRequestContext): Promise<string> {
+  await ensureSetup(request)
   const login = await secretSafe(() => request.post('/api/v1/session', { data: owner }))
   expect(login.ok()).toBe(true)
   const session = await secretSafe(() => login.json()) as components['schemas']['SessionResponse']

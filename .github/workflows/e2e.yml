@@ -24,6 +24,8 @@ jobs:
       # covered by the server tests.
       FUKULOW_SEND_BURST: '10000'
       FUKULOW_SEND_REFILL_PER_SECOND: '1000'
+      # #800: databases for the 4 Playwright workers (the CI default in web/playwright.config.ts).
+      E2E_WORKERS: '4'
       # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm-release and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
       # A Playwright bump must update the tag and digest together.
@@ -42,11 +44,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - name: Provision least-privilege connection and run one-shot migrations
+        shell: bash
         env:
           POSTGRES_APP_PASSWORD: ci-e2e-app-only
         run: |
+          set -euo pipefail
           target/debug/fukulow-server migrate roles
           target/debug/fukulow-server migrate
+          # Worker 0 uses postgres; worker i uses postgres_w<i>.
+          for i in $(seq 1 $((E2E_WORKERS - 1))); do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE postgres_w${i}"
+            DATABASE_URL="${DATABASE_URL}_w${i}" target/debug/fukulow-server migrate
+          done
       - name: Use only the app role for browser tests
         run: echo 'DATABASE_URL=postgres://fukulow_app:ci-e2e-app-only@127.0.0.1:5432/postgres' >> "$GITHUB_ENV"
       # Keep Rust and its cache on the runner; only the browser tests need the image's libraries.
