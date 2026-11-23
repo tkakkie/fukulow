@@ -20,6 +20,8 @@ export const dbLogStreamLimits = {
   headSlackMs: 30_000,
   markerWaitMs: 5_000, fastMarkerWaitMs: 2_000, markerCommandMs: 5_000, minStepMs: 500,
 };
+// The DB log output: bytesWritten counts what the file system accepted, as fs.WriteStream does.
+export type Output = Writable & { readonly bytesWritten: number };
 export type DbLogStreamRecord = {
   status: 'complete' | 'partial' | 'failed'; failures: string[]; rawBytes: number; lines: number; keptLines: number;
   firstEntryMs: number | null; containerStartedMs: number | null; marker: 'seen' | 'not-seen' | 'skipped' | 'write-failed';
@@ -45,8 +47,8 @@ export function dockerTimestampMs(line: string) {
 // `destination.partial`. The raw stream is removed whatever happened, after the follower has settled. If the runner
 // dies, the follower's process group ends with the container at cleanup (`docker logs --follow` exits when it is removed).
 export function startDbLogStream(exec: Executor, container: string, destination: string, rawDirectory: string,
-  { limits = dbLogStreamLimits, now = Date.now, openOutput = (path: string): Writable => createWriteStream(path, { mode: 0o600 }) }:
-  { limits?: typeof dbLogStreamLimits; now?: () => number; openOutput?: (path: string) => Writable } = {}) {
+  { limits = dbLogStreamLimits, now = Date.now, openOutput = (path: string): Output => createWriteStream(path, { mode: 0o600 }) }:
+  { limits?: typeof dbLogStreamLimits; now?: () => number; openOutput?: (path: string) => Output } = {}) {
   mkdirSync(rawDirectory, { recursive: true, mode: 0o700 });
   const raw = join(rawDirectory, 'db-log-follow.raw'), marker = `fukulow-log-end-${randomBytes(12).toString('hex')}`;
   let dockerExecs = 2, exited = false, capExceeded = false, bytesRead = 0;
@@ -107,25 +109,33 @@ export function startDbLogStream(exec: Executor, container: string, destination:
       if (record.rawBytes > limits.rawCapBytes) record.follower = 'cap-exceeded';
       let cut = false;
       const input = existsSync(raw) ? createReadStream(raw) : undefined;
-      input?.on('data', data => { record.bytesRead += data.length; });
       const redact = dbLogLineRedactor();
       async function* redacted() {
         if (!input) return;
         const lines = createInterface({ input, crlfDelay: Infinity });
         try {
           for await (const line of lines) {
+            // Counted per line here: a 'data' listener attached before readline would start the stream early.
+            record.bytesRead += Buffer.byteLength(line) + 1;
+            // At least the first line is kept, so the head check still has an entry to check.
+            if (record.lines > 0 && left() <= 0) { cut = true; break; }
             if (!line) continue;
             record.lines++;
             record.firstEntryMs ??= dockerTimestampMs(line);
             if (line.includes(marker)) continue;
             const kept = redact(line);
-            if (kept !== null) { record.keptLines++; record.bytesWritten += Buffer.byteLength(kept) + 1; yield kept + '\n'; }
-            if (record.lines % 5_000 === 0 && left() <= 0) { cut = true; break; }
+            if (kept !== null) { record.keptLines++; yield kept + '\n'; }
           }
         } finally { lines.close(); input.destroy(); }
       }
-      // pipeline() carries backpressure and any write error (ENOSPC) into this try, so the finally below still runs.
-      await pipeline(Readable.from(redacted()), openOutput(partial));
+      // pipeline() carries backpressure and any write error (ENOSPC) into this try, so the finally below still runs. The
+      // deadline is checked per line and, for a write that does not return, by a timer that aborts the pipeline.
+      const output = openOutput(partial), cutter = new AbortController();
+      const watch = setInterval(() => { if (left() <= 0) { cut = true; cutter.abort(); } }, 100);
+      try { await pipeline(Readable.from(redacted()), output, { signal: cutter.signal }); }
+      catch (error) { if (!cut) throw error; output.destroy(); }
+      finally { clearInterval(watch); record.bytesWritten = output.bytesWritten; }
+      if (left() <= 0) cut = true;
       const failures = record.failures;
       if (record.follower === 'exited-early') failures.push('db.log: log follower exited before the stop');
       if (record.follower === 'cap-exceeded') failures.push(`db.log: raw stream exceeded ${limits.rawCapBytes} bytes; follower stopped`);
@@ -159,6 +169,15 @@ export type VmLogStreamRecord = { status: 'complete' | 'partial' | 'failed' | 'm
   bytesRead: number; bytesWritten: number; reason?: string };
 type Tracked = { name: string; id: string; offset: number };
 type Listed = { name: string; id: string; mtimeMs: number };
+// Rotation order: Docker Desktop names a rotated file by its rotation time (`init.log.20261123-114710.876`), which
+// sorts as text; a numbered suffix counts up with age; anything else falls back to mtime.
+const rotationOrder = (live: string) => (a: Listed, b: Listed) => {
+  const suffix = (file: Listed) => file.name.slice(live.length + 1), stamp = /^\d{8}-\d{6}\.\d{3}$/, number = /^\d+$/;
+  const [x, y] = [suffix(a), suffix(b)];
+  if (stamp.test(x) && stamp.test(y)) return x < y ? -1 : x > y ? 1 : 0;
+  if (number.test(x) && number.test(y)) return Number(y) - Number(x);
+  return a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name);
+};
 type SetState = { set: string; current: Tracked | null; seen: Set<string>; carry: Buffer; skip: boolean; record: VmLogSetRecord; out: string; full: boolean };
 class NoTimeLeft extends Error {}
 // A file is the same file only if its device, inode and birth time all match: an inode freed by a removal can be reused.
@@ -169,7 +188,7 @@ const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'E
 // identity and offset, and every read goes through a descriptor whose identity was checked after it was opened. When
 // the live file rotates (renamed to `<set>.log.<YYYYMMDD-HHMMSS.mmm>`, or a numbered suffix), the rest of the renamed
 // file and every file rotated after it are read before the new live file, so every byte is read once, in order.
-// Rotated files present before the run are skipped. Bytes are cut into lines only at newlines, across reads and
+// Rotated files present before the run are skipped, and so is the live file's first partial line when one exists. Bytes are cut into lines only at newlines, across reads and
 // rotations alike, and only whole lines are redacted and written, to `<destination>/<set>.log.partial`, renamed on a
 // clean stop. A rotated file removed before it was read, a file that shrank, an over-long line, an unfinished last
 // line, the storage cap or a read error is a gap: the set is partial (failed on a read error). After a gap the bytes
@@ -244,7 +263,7 @@ export function startVmLogStream(source: string, destination: string, redact: (t
       const rotated: Listed[] = entries.filter(name => name.startsWith(`${liveName}.`)).flatMap(name => {
         try { const stat = statSync(join(source, name)); return stat.isFile() ? [{ name, id: identity(stat), mtimeMs: stat.mtimeMs }] : []; }
         catch (error) { if (missing(error)) return []; throw error; }
-      }).sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name));
+      }).sort(rotationOrder(liveName));
       if (polls === 1) for (const file of rotated) state.seen.add(file.id);
       const live = open(join(source, liveName));
       try {
@@ -266,6 +285,9 @@ export function startVmLogStream(source: string, destination: string, redact: (t
             read(state, { name: file.name, id: file.id, offset: 0 }, fd, { toEnd: true, deadline, rotated: true });
           })) gap(state, `${file.name} was removed before it was read`);
         }
+        // A rotated file from before the run means the live file may start mid-line: its bytes up to the first newline
+        // belong to a line whose start is not collected, so they are dropped, never written as a line.
+        if (!current && polls === 1 && rotated.length) state.skip = true;
         state.current = live ? { name: liveName, id: live.id, offset: 0 } : null;
         if (live) { state.seen.add(live.id); state.record.files.push(liveName); read(state, state.current!, live.fd, { toEnd: final, deadline, rotated: false }); }
       } finally { if (live) closeSync(live.fd); }
@@ -288,7 +310,13 @@ export function startVmLogStream(source: string, destination: string, redact: (t
     if (!failed && deadline - Date.now() >= 1_000) {
       try {
         poll(true, deadline);
-        for (const state of states) if (state.carry.length) gap(state, `${state.current?.name ?? state.set}: unfinished last line at the stop`);
+        for (const state of states) {
+          if (state.carry.length) gap(state, `${state.current?.name ?? state.set}: unfinished last line at the stop`);
+          // The live file must still be the one drained: a rotation during the final read leaves unread entries.
+          const live = open(join(source, `${state.set}.log`));
+          if (live) closeSync(live.fd);
+          if (live?.id !== state.current?.id) gap(state, `${state.set}.log rotated during the final read`);
+        }
       } catch (error) { failed = error instanceof NoTimeLeft ? 'Docker VM log final read cut short: no time left before cleanup' : 'Docker VM log read failed'; }
     } else if (!failed) failed = 'Docker VM log stream stopped without a final read: no time left before cleanup';
     const result: VmLogStreamRecord = { status: 'complete', sets: {}, polls, bytesRead: 0, bytesWritten: 0 };

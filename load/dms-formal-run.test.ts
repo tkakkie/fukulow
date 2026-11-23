@@ -731,7 +731,7 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   }
   assert.deepEqual(summary.attempts,[]);
   assert.deepEqual(summary.collectionFailures,vmGap?['docker-vm: partial']:collectionFailure?['db-samples.txt: postgres: sample timing missing']
-    :outcome==='interrupted'?['host.log: failed']:outcome==='interrupted-late'?['db.log: redaction cut short: no time left before cleanup','db.log: server duration missing or incomplete on 326 of 1325 batches','docker-vm: failed','host.log: failed']:[]);
+    :outcome==='interrupted'?['host.log: failed']:outcome==='interrupted-late'?['db.log: redaction cut short: no time left before cleanup','db.log: server duration missing or incomplete on 1325 of 1325 batches','docker-vm: failed','host.log: failed']:[]);
   assert.equal(summary.infrastructureFailure,outcome!=='success'&&outcome!=='baseline');
   assert.equal(summary.arm,baseline?'baseline':'instrumented');
   assert.deepEqual(Object.keys(summary.conditions).sort(),['harnessSha256','imageDigest','limits','load','machine','mode','postgres','scenario','sha','shape']);
@@ -761,12 +761,15 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   assert.equal(summary.overhead.dockerExecs,3,'two long-lived loops and one stop exec, not one exec per second');
   assert.equal(summary.overhead.kernelLoopCpuSeconds,0.02);
   assert.equal(summary.overhead.instrumentationEffect,'unevaluated','the effect is claimed only by the matched comparison');
-  assert.deepEqual([summary.overhead.batches.medianDbClockSpanMs,summary.overhead.batches.medianServerMs,summary.overhead.batches.serverMissing,summary.overhead.recorderMs.max],[900,850.17,outcome==='interrupted-late'?326:0,0.1]);
+  assert.deepEqual([summary.overhead.batches.medianDbClockSpanMs,summary.overhead.batches.medianServerMs,summary.overhead.batches.serverMissing,summary.overhead.recorderMs.max],[900,outcome==='interrupted-late'?null:850.17,outcome==='interrupted-late'?1325:0,0.1]);
   const server=readFileSync(config.output+'/formal/seed-batch-server.jsonl','utf8').trim().split('\n').map(line=>JSON.parse(line));
   assert.equal(server.length,batches);
-  assert.deepEqual(server[1],{organization:0,batchIndex:1,durationMs:1000,dbClockSpanMs:900,serverMs:850.17,serverStatements:5});
-  const dbLogFile=config.output+'/formal/db.log'+(outcome==='interrupted-late'?'.partial':'');
-  assert.match(readFileSync(dbLogFile,'utf8'),/duration: 800\.000 ms/);
+  const late=outcome==='interrupted-late';
+  // A late interrupt leaves no time: the redaction keeps only the first line, so no batch has a server duration.
+  assert.deepEqual(server[1],{organization:0,batchIndex:1,durationMs:1000,dbClockSpanMs:900,serverMs:late?null:850.17,serverStatements:late?0:5});
+  const dbLogFile=config.output+'/formal/db.log'+(late?'.partial':'');
+  if(late)assert.equal(readFileSync(dbLogFile,'utf8').trim().split('\n').length,1);
+  else assert.match(readFileSync(dbLogFile,'utf8'),/duration: 800\.000 ms/);
   assert.doesNotMatch(readFileSync(dbLogFile,'utf8'),/fukulow-log-end/,'the end marker is not kept');
   assert.equal(summary.dbLogStream.status,outcome==='interrupted-late'?'partial':'complete');
   assert.equal(summary.dbLogStream.marker,'seen');
