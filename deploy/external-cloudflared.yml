@@ -1,0 +1,13 @@
+# Locally managed tunnel. Replace the UUID in both fields and set up the public DNS route.
+# Enable HTTPS redirect, HSTS and WebSockets for this hostname at the Cloudflare edge.
+# cloudflared preserves Host and Origin and handles upgrades over HTTP/1.1.
+# To opt in to client-IP forwarding, trust only the connector socket peer and use
+# FUKULOW_CLIENT_IP_HEADER=CF-Connecting-IP, set at the Cloudflare edge.
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /etc/cloudflared/00000000-0000-0000-0000-000000000000.json
+ingress:
+  - hostname: chat.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      connectTimeout: 5s
+  - service: http_status:404

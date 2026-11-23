@@ -11,6 +11,52 @@ const args = (profile: string, external = false) => ['compose', '--env-file', '/
   ...(external ? ['-f', 'compose.external-db.yml'] : []), '--profile', profile, 'config', '--format', 'json']
 const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()'
 
+test('none publishes only loopback by default and keeps bundled proxy trust isolated', () => {
+  const file = 'compose.external-proxy.yml'
+  const domain = { FUKULOW_DOMAIN: 'chat.example.com' }
+  const configured = { ...domain, FUKULOW_ADDR: '127.0.0.1:8080', FUKULOW_CONTAINER_PORT: '9090',
+    FUKULOW_PUBLISH_ADDR: '192.0.2.10', FUKULOW_PUBLISH_PORT: '18080',
+    FUKULOW_TRUSTED_PROXIES: '192.0.2.2', FUKULOW_CLIENT_IP_HEADER: 'CF-Connecting-IP', FUKULOW_COOKIE_SECURE: 'false' }
+  const render = (profile: string, files: string[], overrides: Record<string, string>) => JSON.parse(execFileSync('docker',
+    ['compose', '--env-file', '/dev/null', '-f', 'compose.yml', ...files.flatMap(file => ['-f', file]),
+      'config', '--format', 'json'], { cwd, env: { ...env, COMPOSE_PROFILES: profile, ...overrides }, encoding: 'utf8' })).services
+
+  const defaults = render('none', [file], domain)
+  assert.deepEqual(Object.keys(defaults).sort(), ['app', 'db', 'migrate'])
+  checkRestrictions(defaults.app)
+  assert.deepEqual(defaults.app.ports.map(({ host_ip, published, target }) => [host_ip, published, target]),
+    [['127.0.0.1', '8080', 8080]])
+  assert.equal(defaults.app.environment.FUKULOW_ADDR, '0.0.0.0:8080')
+  assert.equal(defaults.app.environment.FUKULOW_ALLOWED_HOST, domain.FUKULOW_DOMAIN)
+  assert.equal(defaults.app.environment.FUKULOW_COOKIE_SECURE, 'true')
+  assert.equal(defaults.app.environment.FUKULOW_TRUSTED_PROXIES ?? null, null)
+  assert.equal(defaults.app.environment.FUKULOW_CLIENT_IP_HEADER ?? null, null)
+
+  const app = render('none', [file], configured).app
+  assert.deepEqual(app.ports.map(({ host_ip, published, target }) => [host_ip, published, target]),
+    [['192.0.2.10', '18080', 9090]])
+  assert.equal(app.environment.FUKULOW_ADDR, '0.0.0.0:9090')
+  assert.equal(app.environment.FUKULOW_COOKIE_SECURE, 'true')
+  assert.equal(app.environment.FUKULOW_TRUSTED_PROXIES, configured.FUKULOW_TRUSTED_PROXIES)
+  assert.equal(app.environment.FUKULOW_CLIENT_IP_HEADER, configured.FUKULOW_CLIENT_IP_HEADER)
+  for (const profile of ['caddy', 'nginx']) {
+    const bundled = render(profile, [], configured)
+    assert.ok(bundled[profile])
+    assert.equal(bundled.app.ports, undefined)
+    assert.equal(bundled.app.environment.FUKULOW_ALLOWED_HOST, undefined)
+    assert.equal(bundled.app.environment.FUKULOW_TRUSTED_PROXIES, '172.30.94.2')
+    assert.equal(bundled.app.environment.FUKULOW_CLIENT_IP_HEADER, 'x-forwarded-for')
+    assert.deepEqual(Object.keys(render(profile, [file], domain)).sort(), ['db', 'migrate'])
+  }
+  const externalDb = render('none', ['compose.external-db.yml', file], { ...domain,
+    FUKULOW_APP_DATABASE_URL: 'postgres://app@database.example/fukulow?sslmode=verify-full',
+    FUKULOW_MIGRATE_DATABASE_URL: 'postgres://owner@database.example/fukulow?sslmode=verify-full' })
+  assert.deepEqual(Object.keys(externalDb).sort(), ['app', 'migrate'])
+  assert.deepEqual(externalDb.app.ports, defaults.app.ports)
+  assert.equal(externalDb.app.environment.PGSSLMODE, 'verify-full')
+  assert.ok(!externalDb.app.environment.DATABASE_URL.includes('owner'))
+})
+
 function checkRestrictions(service: Record<string, unknown>) {
   assert.equal(service.read_only, true, 'read_only must be true')
   assert.deepEqual(service.cap_drop, ['ALL'], 'cap_drop must deny ALL')

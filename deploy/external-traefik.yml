@@ -1,0 +1,38 @@
+# Load via Traefik's file provider. Requires web (:80), websecure (:443),
+# and a trusted certificate for chat.example.com in the TLS store or resolver.
+# Leave forwardedHeaders.insecure disabled. Traefik appends the socket client IP
+# and handles WebSocket upgrades automatically, preserving the browser's Origin.
+http:
+  routers:
+    fukulow-http:
+      entryPoints: [web]
+      rule: Host(`chat.example.com`)
+      middlewares: [fukulow-https]
+      service: fukulow
+    fukulow-https:
+      entryPoints: [websecure]
+      rule: Host(`chat.example.com`)
+      tls: {}
+      middlewares: [fukulow-hsts]
+      service: fukulow
+  middlewares:
+    fukulow-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+    fukulow-hsts:
+      headers:
+        stsSeconds: 31536000
+  services:
+    fukulow:
+      loadBalancer:
+        passHostHeader: true
+        serversTransport: fukulow
+        servers:
+          - url: http://127.0.0.1:8080
+  serversTransports:
+    fukulow:
+      forwardingTimeouts:
+        dialTimeout: 5s
+        responseHeaderTimeout: 30s
+        idleConnTimeout: 90s

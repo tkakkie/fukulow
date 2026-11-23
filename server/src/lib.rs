@@ -1,3 +1,4 @@
+mod allowed_host;
 pub mod auth;
 pub mod channels;
 pub mod database;
@@ -12,6 +13,7 @@ mod test_support;
 #[cfg(test)]
 mod websocket_test_support;
 
+pub use allowed_host::AllowedHost;
 use axum::{
     Router,
     extract::{Request, State},
@@ -132,6 +134,14 @@ pub fn app(state: AppState) -> Router {
 }
 
 fn app_with_search(state: AppState, search_engine: messages::search::SearchEngine) -> Router {
+    configured_app(state, search_engine, AllowedHost::default())
+}
+
+fn configured_app(
+    state: AppState,
+    search_engine: messages::search::SearchEngine,
+    allowed_host: AllowedHost,
+) -> Router {
     state.session_changes.set_activity(std::sync::Arc::new(
         state.message_delivery.channel_access.activity.clone(),
     ));
@@ -283,6 +293,10 @@ fn app_with_search(state: AppState, search_engine: messages::search::SearchEngin
             reject_new_requests,
         ))
         .layer(middleware::from_fn_with_state(
+            allowed_host,
+            allowed_host::check,
+        ))
+        .layer(middleware::from_fn_with_state(
             cookie_secure,
             security_headers,
         ))
@@ -325,6 +339,7 @@ pub async fn serve(
         listener,
         state,
         messages::search::SearchEngine::Disabled,
+        AllowedHost::default(),
         signal,
         deadline,
     )
@@ -335,6 +350,7 @@ pub async fn serve_with_search(
     listener: tokio::net::TcpListener,
     state: AppState,
     search_engine: messages::search::SearchEngine,
+    allowed_host: AllowedHost,
     signal: impl Future<Output = ()>,
     deadline: Duration,
 ) -> std::io::Result<bool> {
@@ -344,7 +360,7 @@ pub async fn serve_with_search(
     let stop_accepting = shutdown.clone();
     let server = axum::serve(
         listener,
-        app_with_search(state, search_engine)
+        configured_app(state, search_engine, allowed_host)
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move { stop_accepting.cancelled().await })
