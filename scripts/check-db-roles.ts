@@ -1,7 +1,9 @@
-// Disposable regression for migration preflight and both password entry points.
+// Disposable regression for migration preflight, password handling and external PostgreSQL.
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -15,8 +17,9 @@ const run = (...args: string[]) => execFileSync('docker', args,
   { cwd, env, encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }).trim()
 const load = JSON.parse(run('compose', '--env-file', '/dev/null', '-f', 'load/compose.yml', 'config', '--format', 'json'))
 const sql = (query: string) => run('exec', name, 'psql', '-X', '-U', 'fukulow', '-d', 'fukulow', '-v', 'ON_ERROR_STOP=1', '-Atc', query)
+const externalPassword = "external-app-test-only-'\\"
 const passwords = ["role-bound-test-only-'\\; DROP TABLE users; --", 'role-rotated-test-only', env.LOAD_APP_PASSWORD,
-  'role-rejected-test-only', 'role-unprivileged-test-only']
+  'role-rejected-test-only', 'role-unprivileged-test-only', externalPassword]
 
 function command(args: string[], password = passwords[0], user = 'fukulow') {
   return spawnSync('docker', ['run', '--rm', '--network', name, '-e', 'DATABASE_URL', '-e', 'POSTGRES_APP_PASSWORD',
@@ -65,6 +68,133 @@ function noSecrets() {
   assert.equal(sql('SHOW log_statement'), 'all')
 }
 
+function checkExternal() {
+  const database = 'external_chat'
+  const migrationOwner = 'migration_owner'
+  const ownerPassword = 'external-owner-test-only'
+  const org = '00000000-0000-0000-0000-000000000001'
+  const otherOrg = '00000000-0000-0000-0000-000000000002'
+  sql(`CREATE ROLE ${migrationOwner} LOGIN PASSWORD '${ownerPassword}'`)
+  sql(`CREATE DATABASE ${database} OWNER ${migrationOwner}`)
+  const directory = mkdtempSync(join(cwd, '.external-db-check-'))
+  const override = join(directory, 'network.yml')
+  const serviceFile = join(directory, 'pg_service.conf')
+  writeFileSync(serviceFile, `[admin]
+host=${name}
+user=fukulow
+dbname=${database}
+sslmode=disable
+[owner]
+host=${name}
+user=${migrationOwner}
+dbname=${database}
+sslmode=disable
+`, { mode: 0o600 })
+  const passFile = join(directory, 'pgpass')
+  writeFileSync(passFile, `${name}:5432:${database}:fukulow:${env.LOAD_DB_PASSWORD}
+${name}:5432:${database}:${migrationOwner}:${ownerPassword}
+`, { mode: 0o600 })
+  writeFileSync(override, `services:
+  app:
+    image: ${image}
+    networks: !override [backend]
+  migrate:
+    image: ${image}
+networks:
+  backend:
+    name: ${name}
+    external: true
+`)
+  const compose = ['compose', '--env-file', '/dev/null', '-p', name, '-f', 'compose.yml',
+    '-f', 'compose.external-db.yml', '-f', override]
+  const appUrl = `postgres://fukulow_app:${encodeURIComponent(externalPassword)}@${name}:5432/${database}`
+  const ownerUrl = `postgres://${migrationOwner}:${ownerPassword}@${name}:5432/${database}`
+  // The disposable database is reachable only on the unpublished Docker network.
+  const composeEnv = { PATH: env.PATH, FUKULOW_SETUP_TOKEN: env.LOAD_SETUP_TOKEN,
+    FUKULOW_APP_DATABASE_URL: `${appUrl}?sslmode=disable`,
+    FUKULOW_MIGRATE_DATABASE_URL: `${ownerUrl}?sslmode=disable` }
+  const dc = (...args: string[]) => spawnSync('docker', [...compose, ...args],
+    { cwd, env: composeEnv, encoding: 'utf8', timeout: 60_000 })
+  const psql = (user: string, password: string, query: string) => spawnSync('docker',
+    ['exec', '-e', `PGPASSWORD=${password}`, name, 'psql', '-X', '-h', '127.0.0.1',
+      '-U', user, '-d', database, '-v', 'ON_ERROR_STOP=1', '-qAtc', query], { cwd, env, encoding: 'utf8', timeout: 10_000 })
+  const ownerSql = (query: string) => {
+    const result = psql(migrationOwner, ownerPassword, query)
+    succeeds(result)
+    return result.stdout.trim()
+  }
+  const appSql = (query: string) => psql('fukulow_app', externalPassword, query)
+  const bootstrap = (service: string) => spawnSync('docker', ['run', '--rm', '--network', name,
+    '-v', `${join(cwd, 'deploy')}:/sql:ro`, '-v', `${serviceFile}:/pg_service.conf:ro`, '-v', `${passFile}:/pgpass:ro`,
+    '-e', 'PGSERVICEFILE=/pg_service.conf', '-e', 'PGPASSFILE=/pgpass', '-e', `PGSERVICE=${service}`,
+    '-e', `FUKULOW_DB_OWNER=${migrationOwner}`, '-e', 'POSTGRES_APP_PASSWORD',
+    load.services.db.image, '/sql/init-db-roles.sh', '--external'],
+  { cwd, env: { ...env, POSTGRES_APP_PASSWORD: externalPassword }, encoding: 'utf8', timeout: 30_000 })
+  try {
+    const noTls = dc('run', '--rm', '-e', `DATABASE_URL=${ownerUrl}`, 'migrate')
+    assert.equal(noTls.status, 1)
+    assert.match(noTls.stderr, /Database connection failed/)
+    const missingRole = dc('run', '--rm', 'migrate')
+    assert.equal(missingRole.status, 1)
+    assert.match(missingRole.stderr, /fukulow_app is missing/)
+    assert.equal(ownerSql("SELECT to_regclass('public._sqlx_migrations') IS NULL"), 't')
+
+    const restricted = bootstrap('owner')
+    assert.equal(restricted.status, 1)
+    assert.match(restricted.stderr, /Database roles initialization failed \(diagnostics suppressed\)/)
+    assert.equal(ownerSql("SELECT count(*) FROM pg_roles WHERE rolname = 'fukulow_app'"), '0')
+    succeeds(bootstrap('admin'))
+    succeeds(bootstrap('admin'))
+    assert.equal(ownerSql("SELECT count(*) FROM pg_default_acl WHERE defaclrole = current_user::regrole"), '2')
+    const missingHistory = dc('run', '--rm', '--no-deps', 'app')
+    assert.equal(missingHistory.status, 1)
+    assert.match(missingHistory.stderr, /Cannot read migration history/)
+    assert.equal(ownerSql("SELECT to_regclass('public._sqlx_migrations') IS NULL"), 't')
+
+    succeeds(dc('up', '--no-build', '--wait', '--wait-timeout', '35', 'app'))
+    succeeds(dc('exec', '-T', 'app', 'fukulow-server', 'probe'))
+    assert.equal(ownerSql("SELECT relowner = current_user::regrole FROM pg_class WHERE oid = 'public.organizations'::regclass"), 't')
+    assert.equal(ownerSql("SELECT rolcanlogin AND NOT (rolsuper OR rolinherit OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls) " +
+      "FROM pg_roles WHERE rolname = 'fukulow_app'"), 't')
+    const history = appSql('SELECT count(*) > 0 FROM _sqlx_migrations')
+    succeeds(history)
+    assert.equal(history.stdout.trim(), 't')
+
+    ownerSql(`INSERT INTO organizations (organization_id, name) VALUES ('${org}', 'Own'), ('${otherOrg}', 'Other')`)
+    const withoutContext = appSql('SELECT count(*) FROM organizations')
+    succeeds(withoutContext)
+    assert.equal(withoutContext.stdout.trim(), '0')
+    const context = `SET fukulow.organization_id = '${org}'; `
+    const scoped = appSql(context + 'SELECT name FROM organizations')
+    succeeds(scoped)
+    assert.equal(scoped.stdout.trim(), 'Own')
+    for (const statement of ['', context].map(prefix => prefix +
+      "INSERT INTO organizations (organization_id, name) VALUES ('00000000-0000-0000-0000-000000000003', 'Denied')")) {
+      const denied = appSql(statement)
+      assert.notEqual(denied.status, 0)
+      assert.match(denied.stderr, /violates row-level security policy/)
+    }
+    for (const statement of ['CREATE TABLE public.denied (id int)', 'CREATE TEMP TABLE denied (id int)',
+      `SET ROLE ${migrationOwner}`, 'ALTER TABLE users DISABLE TRIGGER protect_member_identity',
+      'TRUNCATE organizations CASCADE', 'UPDATE _sqlx_migrations SET success = false WHERE false',
+      'DELETE FROM channel_log WHERE false', 'UPDATE organizations SET history_generation = NULL WHERE false']) {
+      const denied = appSql(statement)
+      assert.notEqual(denied.status, 0, statement)
+      assert.match(denied.stderr, /permission denied|must be owner/, statement)
+    }
+
+    succeeds(dc('stop', 'app'))
+    ownerSql("UPDATE _sqlx_migrations SET checksum = decode('00', 'hex') WHERE version = (SELECT max(version) FROM _sqlx_migrations)")
+    const mismatch = dc('run', '--rm', '--no-deps', 'app')
+    assert.equal(mismatch.status, 1)
+    assert.match(mismatch.stderr, /migration version\/checksum\/state mismatch/)
+    assert.equal(ownerSql("SELECT count(*) FROM _sqlx_migrations WHERE checksum = decode('00', 'hex')"), '1')
+  } finally {
+    dc('down', '-v', '--remove-orphans')
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
 try {
   run('network', 'create', name)
   await start(false)
@@ -100,6 +230,11 @@ try {
   succeeds(command(['migrate']))
   noSecrets()
   console.log('PASS missing-role preflight, initdb/rotation/rejection secrets absent from track=all snapshots and sampled statement logs')
+  run('rm', '-f', '-v', name)
+  await start(false)
+  checkExternal()
+  noSecrets()
+  console.log('PASS external PostgreSQL: verified TLS default, role bootstrap as administrator, owner migrations, app readiness, RLS and privilege denials, missing and mismatched history, app password absent from logs and SQL snapshots')
 } finally {
   spawnSync('docker', ['rm', '-f', '-v', name], { env, stdio: 'ignore' })
   spawnSync('docker', ['network', 'rm', name], { env, stdio: 'ignore' })

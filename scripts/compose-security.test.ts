@@ -5,8 +5,10 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const cwd = fileURLToPath(new URL('..', import.meta.url))
-const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
-const args = (profile: string) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml', '--profile', profile, 'config', '--format', 'json']
+const env = { PATH: process.env.PATH, COMPOSE_PROJECT_NAME: `fukulow-config-${process.pid}`,
+  POSTGRES_PASSWORD: 'compose-config-test-only', POSTGRES_APP_PASSWORD: 'app-config-test-only', FUKULOW_SETUP_TOKEN: 'setup-config-test-only' }
+const args = (profile: string, external = false) => ['compose', '--env-file', '/dev/null', '-f', 'compose.yml',
+  ...(external ? ['-f', 'compose.external-db.yml'] : []), '--profile', profile, 'config', '--format', 'json']
 const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()'
 
 function checkRestrictions(service: Record<string, unknown>) {
@@ -389,24 +391,62 @@ test('the shipped deployment example cannot start either profile without a setup
   }
 })
 
-test('both profiles require an app password and keep owner credentials outside app', () => {
+test('both profiles require bundled passwords and keep owner credentials outside app', () => {
   for (const profile of ['caddy', 'nginx']) {
-    for (const password of [undefined, '']) {
-      const result = spawnSync('docker', args(profile), { cwd, env: { ...env, POSTGRES_APP_PASSWORD: password }, encoding: 'utf8' })
-      assert.notEqual(result.status, 0)
-      assert.match(result.stderr, /POSTGRES_APP_PASSWORD/)
+    for (const key of ['POSTGRES_APP_PASSWORD', 'POSTGRES_PASSWORD']) {
+      for (const password of [undefined, '']) {
+        const result = spawnSync('docker', args(profile), { cwd, env: { ...env, [key]: password }, encoding: 'utf8' })
+        assert.notEqual(result.status, 0)
+        assert.ok(result.stderr.includes(key))
+      }
     }
     const { services: { app, migrate } } = JSON.parse(execFileSync('docker', args(profile), { cwd, env, encoding: 'utf8' }))
     assert.equal(app.environment.DATABASE_URL, `postgres://fukulow_app:${env.POSTGRES_APP_PASSWORD}@db:5432/fukulow`)
+    assert.equal(app.environment.FUKULOW_SEARCH_ENGINE, 'disabled')
     assert.ok(!Object.values(app.environment).some(value => String(value).includes(env.POSTGRES_PASSWORD)))
     assert.equal(app.environment.POSTGRES_APP_PASSWORD, undefined)
     assert.equal(app.environment.POSTGRES_PASSWORD, undefined)
     assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
     assert.deepEqual(Object.keys(migrate.networks), ['backend'])
     assert.equal(migrate.environment.DATABASE_URL, `postgres://fukulow:${env.POSTGRES_PASSWORD}@db:5432/fukulow`)
+    assert.equal(migrate.depends_on.db.condition, 'service_healthy')
     assert.deepEqual(migrate.entrypoint, ['fukulow-server', 'migrate'])
     assert.deepEqual(migrate.command, [])
     assert.equal(migrate.restart, 'no')
+  }
+})
+
+test('external PostgreSQL removes bundled resources and requires separate URLs for either proxy', () => {
+  const externalEnv = {
+    PATH: env.PATH, COMPOSE_PROJECT_NAME: env.COMPOSE_PROJECT_NAME, FUKULOW_SETUP_TOKEN: env.FUKULOW_SETUP_TOKEN,
+    FUKULOW_APP_DATABASE_URL: 'postgres://fukulow_app:external-app-test-only@postgres.example.test:1532/chat?sslmode=verify-full',
+    FUKULOW_MIGRATE_DATABASE_URL: 'postgres://owner:external-owner-test-only@postgres.example.test:1532/chat?sslmode=verify-full',
+  }
+  for (const profile of ['caddy', 'nginx']) {
+    const { services, volumes } = JSON.parse(execFileSync('docker', args(profile, true), { cwd, env: externalEnv, encoding: 'utf8' }))
+    assert.deepEqual(Object.keys(services).sort(), ['app', 'migrate', profile].sort())
+    assert.equal(volumes.postgres_data, undefined)
+    const { app, migrate } = services
+    assert.equal(app.environment.DATABASE_URL, externalEnv.FUKULOW_APP_DATABASE_URL)
+    assert.equal(app.environment.FUKULOW_SEARCH_ENGINE, 'disabled')
+    assert.equal(migrate.environment.DATABASE_URL, externalEnv.FUKULOW_MIGRATE_DATABASE_URL)
+    assert.equal(migrate.depends_on, undefined)
+    assert.equal(app.depends_on.migrate.condition, 'service_completed_successfully')
+    for (const [service, forbidden] of [[app, 'external-owner-test-only'], [migrate, 'external-app-test-only']] as const) {
+      assert.ok(!Object.values(service.environment).some(value => String(value).includes(forbidden)))
+      assert.equal(service.environment.POSTGRES_PASSWORD, undefined)
+      assert.equal(service.environment.POSTGRES_APP_PASSWORD, undefined)
+      assert.equal(service.environment.PGSSLMODE, 'verify-full')
+      assert.equal(service.ports, undefined)
+      checkRestrictions(service)
+    }
+    for (const key of ['FUKULOW_APP_DATABASE_URL', 'FUKULOW_MIGRATE_DATABASE_URL']) {
+      for (const url of [undefined, '']) {
+        const result = spawnSync('docker', args(profile, true), { cwd, env: { ...env, ...externalEnv, [key]: url }, encoding: 'utf8' })
+        assert.notEqual(result.status, 0)
+        assert.ok(result.stderr.includes(key))
+      }
+    }
   }
 })
 

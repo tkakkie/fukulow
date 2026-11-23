@@ -13,18 +13,42 @@ Related: [Setup token](accounts.md#setup).
 - Compose security checks isolate both profiles, use disposable values/ports/volumes, ignore deployment `.env` and clean up their resources. The security/restart harnesses use random private edge prefixes from separate ranges unless `CHECK_EDGE_PREFIX` selects a free subnet. `CHECK_COMPOSE_IMAGE` reuses a local image for security checks. [Deployment and auth invariants](../invariants/deployment.md#rows-in-other-parts)
 
 ## Database deployment and upgrade (#194 B)
-- One-shot Compose `migrate` uses the app image with `fukulow-server migrate`. Keep `fukulow` as migration owner. Compose requires nonempty `POSTGRES_PASSWORD` for DB/migrate only. App waits for successful migration and uses only the `fukulow_app` URL. Standalone/dev requires `DATABASE_URL` with the app role for serving and a separate owner URL for the matching migration command. Migration commands do not serve HTTP or need setup/proxy settings.
+- PostgreSQL 17 or newer is required. Bundled PostgreSQL 18 is the Compose default. Its owner is `fukulow`. One-shot `migrate` uses the owner URL and runs `fukulow-server migrate`. App waits for successful migration and uses the `fukulow_app` URL. For standalone/dev set `DATABASE_URL` to the app URL for serving and to the owner URL for migration.
 - App startup only reads `public._sqlx_migrations`. Missing history, missing/extra/different versions, checksum mismatches or failed rows prevent listening. App never repairs or migrates. One-shot migration lock waits, including SQLx advisory locks, stop after 5 s. Resolve the blocker and retry manually with app stopped.
 - App connections set `statement_timeout = 10s` and `jit = off` at connection startup, overriding URL options and role/database defaults without a per-connection query. App binds TCP, verifies both on an app connection, and exits without serving HTTP unless both match. Use HTTP readiness rather than a TCP connect. The owner connection does not get these settings. Migrations disable statement and transaction timeouts.
 - `migrate` without `fukulow_app` exits before schema changes and directs the operator to `migrate roles`.
 - `fukulow_app` is LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOINHERIT, NOREPLICATION and NOBYPASSRLS, without ownership or memberships in either direction. It gets CONNECT, public-schema USAGE, table SELECT/INSERT/UPDATE/DELETE and sequence USAGE, subject to SELECT/INSERT only on append-only `channel_log`, SELECT only on migration history, and exclusion of `organizations.history_generation` from INSERT/UPDATE. No CREATE, TEMP, TRUNCATE or trigger changes in the app DB. Other databases keep their PUBLIC privileges. Default DML/sequence grants cover future migration-owner objects. `migrate` reapplies history/log exceptions. RLS restricts the app to the transaction-local Organization or, read-only, the verified Account’s own Members and their Organizations. Owner bypass covers migrations, backup/drill and explicit generation rotation over the owner URL. Runtime cannot choose or update an epoch. Grant `fukulow_app` EXECUTE on `fukulow_setup_required()` and revoke it from PUBLIC, including after no-ACL restore.
-- Compose requires nonempty `POSTGRES_APP_PASSWORD`, with no owner-URL fallback. Use a distinct URL-safe random password (e.g. `openssl rand -hex 32`). Role setup and the Compose initdb owner require a superuser. Before sending the password, suppress statement/parameter/error-context logging and nested pg_stat_statements tracking transaction-locally or fail closed. Bind/quote the password as data and let PostgreSQL literal-quote the utility statement. Suppress role-update diagnostics and keep passwords out of SQL files.
+- Bundled mode requires nonempty `POSTGRES_PASSWORD` and a distinct URL-safe `POSTGRES_APP_PASSWORD` (e.g. `openssl rand -hex 32`). Role setup requires a superuser. Before sending the password, suppress statement/parameter/error-context logging and nested pg_stat_statements tracking transaction-locally or fail closed. Bind/quote the password as data and let PostgreSQL quote the utility statement. Suppress role-update diagnostics and keep passwords out of SQL files.
 - Initdb runs `deploy/init-db-roles.sh` with shared roles/grants SQL on new volumes only. To upgrade, take and drill a backup first, privately set setup token and new app password, build the matching image, and stop app/writers. Run `docker compose run --rm migrate roles`, then `docker compose --profile caddy up -d` (or nginx). Roles updates password/grants idempotently without changing rows. It refuses ownership/membership without reassigning or deleting anything. Reuse the password on subsequent runs. Rotation requires app recreation. Never remove the volume to fix an upgrade.
 - The disposable populated-volume [upgrade check](../../scripts/check-db-upgrade.ts) uses `origin/main` in an isolated directory and never loads deployment `.env`. `CHECK_COMPOSE_IMAGE` reuses a built candidate. `CHECK_UPGRADE_CACHE_FROM` lets CI reuse main’s layers via buildx `--cache-from`. CI runs it after building the candidate.
 - Restore with `--no-owner --no-acl` so the disposable drill needs no role creation for grants. In production, reapply ACLs/default privileges without changing data after the database-name switch and before starting app. End restored Sessions and reconcile permissions. [Recovery procedure](#production-recovery-maintainer-operated)
 
+### External PostgreSQL (#810)
+
+1. Create a dedicated database owned by the migration login. Reserve the cluster-wide `fukulow_app` login for this deployment. Allow the operator and app/migrate containers to reach the server's TLS hostname.
+2. In a private `.pg_service.conf`, configure `fukulow-bootstrap` with the target instance, database, administrator login, `sslmode=verify-full` and trusted CA. Use a 0600 passfile. The administrator needs the role and logging rights above and the ability to assume the migration owner. Providers that restrict those rights must perform bootstrap with those protections.
+3. Supply a distinct `POSTGRES_APP_PASSWORD` privately to the script. From the checkout, run the shared role and grant SQL as one transaction. Substitute your migration login for `fukulow`.
+
+   ```sh
+   PGSERVICE=fukulow-bootstrap FUKULOW_DB_OWNER=fukulow deploy/init-db-roles.sh --external
+   ```
+
+4. Set `FUKULOW_APP_DATABASE_URL` for `fukulow_app` and `FUKULOW_MIGRATE_DATABASE_URL` for the owner. Use the same database, URL-encoded credentials and `sslmode=verify-full`. For a private CA, mount its PEM read-only in app/migrate and add `sslrootcert=/container/path.pem` to each URL. Remove bundled password settings and keep both Compose files in subsequent commands.
+
+   ```sh
+   docker compose -f compose.yml -f compose.external-db.yml --profile caddy up -d --build
+   ```
+
+   Use `--profile nginx` for nginx. To switch from bundled, stop writers, back up and restore to the new server, then stop the bundled DB with the original configuration. Preserve its volume.
+
 ## Deployment (#194 C)
-- Search stays `disabled` in production pending #689 acceptance. Enable it on development and test servers with `FUKULOW_SEARCH_ENGINE=d3r`.
+- `FUKULOW_SEARCH_ENGINE` selects `disabled` (Compose default and production setting pending #689) or `d3r` (development/test). To opt in with Compose, add an override setting `services.app.environment.FUKULOW_SEARCH_ENGINE` to `d3r`.
+
+| Compose proxy | Bundled PostgreSQL 18 | External PostgreSQL ≥17 |
+|---|---|---|
+| Caddy | `disabled`, `d3r` (dev/test) | `disabled`, `d3r` (dev/test) |
+| nginx | `disabled`, `d3r` (dev/test) | `disabled`, `d3r` (dev/test) |
+
 - The image runs as UID/GID 10001 with a root-owned executable and no writable application data. Pin base and external deployment/load images by tag plus registry-verified multi-platform SHA-256. Weekly Dependabot updates for the Dockerfile and both Compose directories still need review and deployment checks.
 - Deployment/load app and migrate use read-only roots, drop ALL capabilities and forbid new privileges. No writable mounts or tmpfs. DB and proxy state keep their own storage. Fresh and populated upgrades must run under those restrictions. [Deployment invariants](../invariants/deployment.md)
 - App and both proxies set `Cross-Origin-Opener-Policy: same-origin` and identical empty `Permissions-Policy` feature allowlists on success and errors, including proxy 404s and upstream failures. Listed features (sensor/media/Clipboard/fullscreen/device and others) are denied. Unlisted features keep browser defaults (no wildcard default). Ordinary editing/paste works. App covers direct access. Proxies replace app copies and cover their own errors via Caddy’s shared normal/error policy and nginx’s http-scope `add_header ... always` without child overrides.
@@ -171,6 +195,12 @@ Use an operator-owned 0700 non-symlink directory below a trusted parent outside 
 All local writers hold `.backup-run.lock` through dump, encryption, upload, final read-back and cleanup. Under it, sweep only owned 0700 non-symlink directories named `.partial-` or `.partial-age-` plus six alphanumerics. Preserve all other entries and finals. Never copy partials. A stale lock is refused regardless of age/PID. Stop all writers before removing it manually. The next run sweeps remnants. Use trusted parents and the same lock for all writers.
 
 Schedule daily (e.g. 02:15 UTC). Provision space and check free space/success daily. Keep ≥14 successful daily VPS archives, ≥30 off VPS and the latest drilled archive until its replacement passes. Prune VPS finals manually only after verifying off-VPS copies. Never prune the last good copy or prune merely because a job ran.
+
+**External PostgreSQL.** Use provider backups or a custom-format dump. Drill on an isolated target and keep the same custody and capture-age checks. The #316 automation requires the Compose DB.
+
+1. Use `pg_dump` at least as new as the server, an owner libpq service with verified TLS and a private staging file (`umask 077`). Run `PGSERVICE=fukulow-backup pg_dump --format=custom --file="$archive"` and verify with `pg_restore --list "$archive"` before publishing.
+2. Recover the provider snapshot to a fresh target or restore as the migration owner with `PGSERVICE=fukulow-restore pg_restore --exit-on-error --single-transaction --no-owner --no-acl "$archive"`. Stop writers before cutover and preserve the original DB.
+3. Reapply external role bootstrap and switch both URLs while app is stopped. Follow the [production recovery checks](#production-recovery-maintainer-operated) on the restored target, including Session revocation, permission reconciliation, migration validation and history generation rotation.
 
 ### Automated off-VPS backup (#316; mock implementation)
 
