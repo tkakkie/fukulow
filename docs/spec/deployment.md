@@ -14,7 +14,7 @@ Related: [Setup token](accounts.md#setup).
 
 ### External proxy (#810)
 
-Set `COMPOSE_PROFILES=none` and `FUKULOW_DOMAIN` to the public Host (include any nondefault port). Run `docker compose -f compose.yml -f compose.external-proxy.yml up -d`. The overlay publishes `FUKULOW_PUBLISH_ADDR:FUKULOW_PUBLISH_PORT` (default `127.0.0.1:8080`); set a wider address explicitly and restrict access to the proxy. Remove the standalone `FUKULOW_ADDR` for the container default (`0.0.0.0` on `FUKULOW_CONTAINER_PORT`, default 8080). A custom bind must reach loopback for readiness and match the target port.
+Set `COMPOSE_PROFILES=none` and `FUKULOW_DOMAIN` to the public Host (include any nondefault port). Run `docker compose -f compose.yml -f compose.external-proxy.yml up -d`. The overlay publishes `FUKULOW_PUBLISH_ADDR:FUKULOW_PUBLISH_PORT` (default `127.0.0.1:8080`); set a wider address explicitly and restrict access to the proxy. The overlay binds the app to `0.0.0.0` on `FUKULOW_CONTAINER_PORT` (default 8080) and ignores `FUKULOW_ADDR`.
 
 Terminate verified HTTPS at the proxy, redirect HTTP, enable HSTS and preserve Host and WebSocket Origin. The overlay pins Secure cookies and sets `FUKULOW_ALLOWED_HOST`; the app rejects foreign Host and keeps readiness on container loopback. Cookie WebSocket Origin defaults to the public HTTPS origin. Trust a forwarding header only when the observed socket peer is exclusive to your proxy; a shared Docker gateway may also represent other clients.
 
