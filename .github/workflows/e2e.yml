@@ -24,7 +24,7 @@ jobs:
       # covered by the server tests.
       FUKULOW_SEND_BURST: '10000'
       FUKULOW_SEND_REFILL_PER_SECOND: '1000'
-      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm and Docker builds are unchanged. Part of the rust-cache key.
+      # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm-release and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
       # A Playwright bump must update the tag and digest together.
       PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
