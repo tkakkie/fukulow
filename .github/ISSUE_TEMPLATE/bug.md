@@ -5,7 +5,7 @@ labels: bug, status:human-review
 ---
 
 ## What happens
-<!-- Steps to reproduce, in the terms of docs/spec.md. Commit or image version, browser or client, proxy (Caddy or nginx). No real user data, credentials or tokens. -->
+<!-- Steps to reproduce, in the terms of docs/spec.md. Commit (or image digest), browser or client, proxy (Caddy or nginx). No real user data, credentials or tokens. -->
 
 ## Expected
 
