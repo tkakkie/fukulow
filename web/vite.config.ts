@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url'
 import { precompress } from './scripts/precompress.ts'
 import { checkCoreBundle } from './scripts/core-bundle.ts'
+import { bundlePackages, checkBundlePackages, denyAllowList } from './scripts/bundle-licenses.ts'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { defineConfig } from 'vitest/config'
 
@@ -27,6 +29,15 @@ export default defineConfig(({ mode }) => {
       { name: 'single-sync-implementation', generateBundle(_options, bundle) {
         checkCoreBundle(Object.values(bundle).flatMap(chunk => chunk.type === 'chunk' ? Object.keys(chunk.modules) : []),
           Object.values(bundle).filter(chunk => chunk.type === 'asset').map(asset => asset.fileName))
+      } },
+      // #807: npm packages in the shipped bundle must have an allowed license; the list feeds THIRD-PARTY-NOTICES.
+      { name: 'bundle-licenses', apply: 'build', generateBundle(_options, bundle) {
+        const root = fileURLToPath(new URL('.', import.meta.url))
+        const ids = Object.values(bundle).flatMap(item => item.type === 'chunk' ? Object.keys(item.modules)
+          : item.originalFileNames.map(name => root + name))
+        const packages = bundlePackages(ids, root, name => root + 'node_modules/' + name)
+        checkBundlePackages(packages, denyAllowList(readFileSync(new URL('../deny.toml', import.meta.url), 'utf8')))
+        writeFileSync(new URL('./bundle-licenses.json', import.meta.url), JSON.stringify(packages, null, 1) + '\n')
       } },
       svelte({
         // Vitest runs in Node, which Vite treats as SSR: `.svelte.ts` modules would compile with `generate: 'server'`,
