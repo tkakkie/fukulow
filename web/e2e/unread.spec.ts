@@ -93,8 +93,15 @@ test('first Unread pages beyond the main cap and read reporting survives trimmin
       const data = await response.json() as components['schemas']['ChannelList']
       return data.channels.find(c => c.id === channel.id)?.read_seq
     }).toBe(450)
-    for (let i = 0; i < 8; i++) await main.getByRole('button', { name: '以前のメッセージを読み込む', exact: true }).click()
     const older = main.getByRole('button', { name: '以前のメッセージを読み込む', exact: true })
+    for (let i = 0; i < 8; i++) {
+      await expect(older).toBeEnabled()
+      const pageLoaded = page.waitForResponse(
+        r => r.url().includes(`/api/v1/orgs/${org}/channels/${channel.id}/timeline`) && r.request().method() === 'GET' && r.ok(),
+      )
+      await older.click()
+      await pageLoaded
+    }
     await expect(older).toHaveCount(0)
     const composer = main.getByRole('textbox', { name: 'メッセージ', exact: true })
     await composer.focus(); await composer.press('ArrowUp')
