@@ -301,7 +301,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   function enqueue(v: Visit) {
     if (!isVisit(v)) return
     const c = getChannel(v.scope.channel), s = getScope(c, v.scope.topicId)
-    if (count(v.scope.channel, c, v.scope.topicId) === null) return
+    // Once a visit has resolved its entry boundary, a concurrent stale baseline below s.position
+    // hides counts until recovery but must not drop read reporting for newly presented rows.
+    if (v.boundary === null || s.stopped || c.stopped || c.error || !s.baseline ||
+      s.baseline.asOfSeq < c.requiredBase || (s.position > s.baseline.readSeq && s.baseline.readSeq < c.lostThrough)) return
     const seq = sequenceToSubmit(s.position, c.records.values(), coverage(v.scope), v.presented, v.scope, sync.get().selfId)
     if (seq <= s.position || seq <= (s.intent?.read_seq ?? 0) || seq <= (s.queued?.read_seq ?? 0)) return
     s.queued = { history_generation: sync.get().historyGeneration, read_seq: seq }

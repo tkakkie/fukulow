@@ -607,6 +607,19 @@ it('retains a visit boundary while positions advance and takes a new boundary on
   expect(c.unread.get('A').entry).toMatchObject({ boundary: 1, unreadAtEntry: 0, firstUnread: null })
   await c.sync.close()
 })
+it('keeps submitting presented reads in an active visit after a stale list snapshot lags behind position', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter()
+  c.event(msg(4))
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unread.get('A').main.position).toBe(1)
+  // An in-flight Channel list snapshot started before PUT /read returns read_seq: 0.
+  c.unread.activitySnapshot([row({ read_seq: 0, main_unread_count: 1, unread_count: 3 })])
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  c.unread.presented(id, [4]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1, 4])
+  expect(c.unread.get('A').main.position).toBe(4)
+  await c.sync.close()
+})
 it('requires older projection coverage for first Unread and never marks across a window gap', async () => {
   const c = unreadClient()
   c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: true, items: [{ kind: 'message', message: msg(3) }] }))
