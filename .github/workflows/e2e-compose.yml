@@ -41,7 +41,7 @@ jobs:
               throw new Error("Actions cache credentials are not available");
             }
             await exec.exec("docker", ["buildx", "bake", "--load",
-              "--file", "compose.yml",
+              "--file", "compose.dev.yml",
               "--set", "app.cache-from=type=gha,scope=docker",
               "--set", "app.cache-to=type=gha,scope=docker,mode=max"]);
       - name: Pebble HTTPS probe, browser acceptance, proxy parity and certificate lifecycle
@@ -73,4 +73,6 @@ jobs:
       # sqlx errors, so database diagnostics cannot be certified secret-free.
       - name: Remove stack and all disposable volumes
         if: always()
+        env:
+          FUKULOW_VERSION: 0.0.0-dev
         run: docker compose --env-file /dev/null -p "$COMPOSE_PROJECT_NAME" --profile "${{ matrix.profile }}" down -v --remove-orphans

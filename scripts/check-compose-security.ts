@@ -22,9 +22,13 @@ const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-e2e-db-test-on
   FUKULOW_SETUP_TOKEN: 'compose-e2e-setup-test-only',
   // Per-run private subnets; restart checks use a separate second-octet range.
   FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(128, 192)}.${randomInt(256)}`,
-  FUKULOW_COOKIE_SECURE: 'true', FUKULOW_DOMAIN: testDomain }
+  FUKULOW_COOKIE_SECURE: 'true', FUKULOW_DOMAIN: testDomain,
+  // Replaced by the image override below; a published-image check passes its real version.
+  FUKULOW_VERSION: process.env.FUKULOW_VERSION || '0.0.0-dev' }
 const helper = `${project}-untrusted`
-const compose = ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
+// Only a source build needs the development override; a supplied image runs on compose.yml alone.
+const files = process.env.CHECK_COMPOSE_IMAGE ? ['-f', 'compose.yml'] : ['-f', 'compose.yml', '-f', 'compose.dev.yml']
+const compose = ['compose', '--env-file', '/dev/null', '-p', project, ...files, '-f', override]
 const run = (args: string[], input?: string) => {
   const result = spawnSync('docker', args, { cwd, env, input, encoding: 'utf8', timeout: 180_000, stdio: 'pipe' })
   // Never forward raw container/CA logs, including stderr, into CI diagnostics.

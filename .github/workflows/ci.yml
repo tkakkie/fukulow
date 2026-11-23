@@ -187,7 +187,8 @@ jobs:
             if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {
               throw new Error("Actions cache credentials are not available");
             }
-            const args = ["buildx", "bake", "--load", "--file", "compose.yml",
+            // compose.dev.yml is the explicit source-build override (#808); compose.yml pulls releases.
+            const args = ["buildx", "bake", "--load", "--file", "compose.dev.yml",
               "--set", "app.cache-from=type=gha,scope=docker"];
             if (context.eventName === "push") {
               args.push("--set", "app.cache-to=type=gha,scope=docker,mode=max");
@@ -239,9 +240,10 @@ jobs:
         env:
           CHECK_COMPOSE_IMAGE: fukulow-app
           CHECK_UPGRADE_OLD_IMAGE: fukulow-upgrade-main
-      - run: docker compose --profile caddy up -d --no-build --wait
+      - run: docker compose -f compose.yml -f compose.dev.yml --profile caddy up -d --no-build --wait
         env:
           POSTGRES_PASSWORD: ci-compose-only
+          FUKULOW_VERSION: 0.0.0-dev
       - run: test "$(curl --insecure --retry 10 --retry-connrefused --retry-delay 1 -fsS https://localhost/api/v1/health)" = ok
       - name: Light k6 run (10 seconds; hard limit 55 seconds)
         env:
@@ -256,10 +258,12 @@ jobs:
         if: always()
         run: docker rm -f fukulow-ci-load || true
       - if: failure()
-        run: docker compose --profile caddy logs
+        run: docker compose -f compose.yml -f compose.dev.yml --profile caddy logs
         env:
           POSTGRES_PASSWORD: ci-compose-only
+          FUKULOW_VERSION: 0.0.0-dev
       - if: always()
-        run: docker compose --profile caddy down -v --remove-orphans
+        run: docker compose -f compose.yml -f compose.dev.yml --profile caddy down -v --remove-orphans
         env:
           POSTGRES_PASSWORD: ci-compose-only
+          FUKULOW_VERSION: 0.0.0-dev

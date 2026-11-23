@@ -22,7 +22,7 @@ const env = { PATH: process.env.PATH, POSTGRES_PASSWORD: 'compose-switch-db-test
   POSTGRES_APP_PASSWORD: 'compose-switch-app-test-only', FUKULOW_SETUP_TOKEN: 'compose-switch-setup-test-only',
   // Separate second-octet range from the security (128-191) and restart (192-255) checks.
   FUKULOW_EDGE_PREFIX: process.env.CHECK_EDGE_PREFIX || `10.${randomInt(64, 128)}.${randomInt(256)}`,
-  FUKULOW_COOKIE_SECURE: 'true', FUKULOW_DOMAIN: testDomain }
+  FUKULOW_COOKIE_SECURE: 'true', FUKULOW_DOMAIN: testDomain, FUKULOW_VERSION: '0.0.0-dev' }
 const composeOptions = ['--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', override]
 const attempt = (command: string, args: string[]) =>
   spawnSync(command, args, { cwd, env, encoding: 'utf8', timeout: 300_000, stdio: 'pipe' })
