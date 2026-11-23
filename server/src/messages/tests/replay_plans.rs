@@ -30,6 +30,16 @@ async fn replay_hydration_work_is_bounded_by_page_positions(pool: PgPool) {
         .await
         .unwrap();
     }
+    // Every Message carries a Mention, so an Organization-wide Mention scan
+    // shows up as rows beyond the page in either plan mode.
+    sqlx::query(
+        "INSERT INTO message_mentions (organization_id, channel_id, message_id, member_id) \
+         SELECT organization_id, channel_id, id, sender FROM messages WHERE organization_id = $1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
     seed_channel_log(&pool).await;
     sqlx::query("ANALYZE messages, channel_log, channels, users, message_mentions")
         .execute(&pool)
@@ -122,8 +132,19 @@ fn relation_nodes<'a>(node: &'a Value, relation: &str, nodes: &mut Vec<&'a Value
 fn check_page_work(root: &Value, case: &str, limit: i64, failures: &mut Vec<String>) {
     let mut log = Vec::new();
     let mut messages = Vec::new();
+    let mut mentions = Vec::new();
     relation_nodes(root, "channel_log", &mut log);
     relation_nodes(root, "messages", &mut messages);
+    relation_nodes(root, "message_mentions", &mut mentions);
+    for node in mentions {
+        let read = node["Actual Rows"].as_f64().unwrap() * node["Actual Loops"].as_f64().unwrap();
+        if node["Node Type"] == "Seq Scan" || read > limit as f64 {
+            failures.push(format!(
+                "{case}: Mention reads not bounded by the page ({} reading {read} rows)",
+                node["Node Type"]
+            ));
+        }
+    }
     let ([log], [message]) = (log.as_slice(), messages.as_slice()) else {
         failures.push(format!(
             "{case}: expected one scan each of channel_log and messages: {root}"
@@ -188,4 +209,64 @@ fn check_page_work(root: &Value, case: &str, limit: i64, failures: &mut Vec<Stri
             .filter(|(passed, _)| !passed)
             .map(|(_, detail)| format!("{case}: {detail}")),
     );
+}
+
+#[fukulow_test::test]
+async fn authorized_page_plans_generically_without_leaking_the_setting(pool: PgPool) {
+    let org = organization(&pool).await;
+    let (sender, outsider) = (Uuid::new_v4(), Uuid::new_v4());
+    member(&pool, org, sender).await;
+    member(&pool, org, outsider).await;
+    let (public, private) = (Uuid::new_v4(), Uuid::new_v4());
+    channel(&pool, org, public, sender, false).await;
+    channel(&pool, org, private, sender, true).await;
+    for id in [public, private] {
+        sqlx::query(
+            "INSERT INTO messages (organization_id, channel_id, sender, id, seq, client_message_id, body) \
+             SELECT $1, $2, $3, gen_random_uuid(), n, gen_random_uuid(), 'plan' FROM generate_series(1, 3) n",
+        )
+        .bind(org).bind(id).bind(sender).execute(&pool).await.unwrap();
+    }
+    seed_channel_log(&pool).await;
+    let app = crate::test_app_pool(pool.clone()).await;
+    // One connection, so every check below observes the page's own backend.
+    let single = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*app.connect_options()).clone())
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let page = crate::messages::authorized_replay_page(&single, org, (sender, 0), public, 0, 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+    }
+    // A private Channel non-member is still denied; the denial also ends the setting.
+    assert!(matches!(
+        crate::messages::authorized_replay_page(&single, org, (outsider, 0), private, 0, 3).await,
+        Err(crate::messages::MessageError::NotFound)
+    ));
+    let mut conn = single.acquire().await.unwrap();
+    let state: (String, String, bool) = sqlx::query_as(
+        "SELECT current_setting('plan_cache_mode'), current_setting('transaction_read_only'), \
+                current_setting('fukulow.organization_id', true) IS NULL \
+                OR current_setting('fukulow.organization_id', true) = ''",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(state, ("auto".into(), "off".into(), true));
+    let plans: (i64, i64) = sqlx::query_as(
+        "SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE statement LIKE '%log_page%'",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(plans, (4, 0));
+    drop(conn);
+    single.close().await;
+    app.close().await;
 }
