@@ -82,12 +82,12 @@ impl PoolConfig {
 }
 
 const APP_ROLE_ERROR: &str = "App database role must be a non-superuser without BYPASSRLS, \
-    ownership of relations in public, or role memberships in either direction";
+    CREATEROLE, CREATEDB, ownership of relations in public, or role memberships in either direction";
 
 async fn validate_app_role(connection: &mut PgConnection) -> Result<(), &'static str> {
     // The current database owner is an implicit member of pg_database_owner.
     let restricted: bool = sqlx::query_scalar(
-        "SELECT NOT (r.rolsuper OR r.rolbypassrls)
+        "SELECT NOT (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb)
             AND NOT EXISTS (
                 SELECT FROM pg_catalog.pg_class c
                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
