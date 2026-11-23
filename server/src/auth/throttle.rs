@@ -375,6 +375,7 @@ impl Drop for SecurityAttempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::PasswordWorkers;
 
     fn ip(n: u8) -> IpAddr {
         IpAddr::from([192, 0, 2, n])
@@ -558,8 +559,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn full_ip_map_allows_successful_password_verification_and_stays_bounded() {
+        static WORKERS: PasswordWorkers = PasswordWorkers::new();
+
         let password = "correct horse battery staple";
-        let stored = crate::auth::hash_password(password.into(), &crate::auth::PASSWORD_WORKERS)
+        let stored = crate::auth::hash_password(password.into(), &WORKERS)
             .await
             .unwrap();
         let throttle = SignInThrottle::default();
@@ -584,7 +587,7 @@ mod tests {
                 password.into(),
                 Some(stored),
                 attempt,
-                crate::auth::PASSWORD_WORKERS.acquire().await.unwrap(),
+                WORKERS.acquire().await.unwrap(),
             )
             .await
             .unwrap()
