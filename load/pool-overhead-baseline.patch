@@ -118,17 +118,17 @@ diff --git a/server/src/main.rs b/server/src/main.rs
 index 6622278..2399016 100644
 --- a/server/src/main.rs
 +++ b/server/src/main.rs
-@@ -86,9 +86,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
-         })?;
+@@ -98,9 +98,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
+         .map_err(database_connection_error)?;
      fukulow_server::database::validate_server_version(&pool).await?;
      fukulow_server::database::PoolConfig::validate_app_role(&pool).await?;
 -    let pool_metrics = tokio::spawn(fukulow_server::database::report_pool_periodically(
 -        pool.clone(),
 -    ));
      fukulow_server::database::validate_migrations(&pool).await?;
-     let addr = std::env::var("FUKULOW_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
      let listener = tokio::net::TcpListener::bind(&addr)
-@@ -146,7 +143,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
+         .await
+@@ -157,7 +154,6 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
      reclamation.abort();
      let _ = reclamation.await;
      metrics.abort();
