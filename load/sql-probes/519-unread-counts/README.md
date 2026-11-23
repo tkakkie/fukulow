@@ -49,8 +49,12 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
 - **Reads:** at the same four cuts, as `fukulow_app` under RLS. The checksums must match and must be non-empty. The final arm's `count_drift` must stay false at every cut, and `message_counts_check` must be empty after the cuts and after the sends.
 - **Sends:** `sql/send-current.sql` in both arms, because A3 does not change the app's send SQL. pgbench runs as `fukulow_app` with the Organization set as a per-database role default; RLS is checked before the blocks. 8 clients × 3 alternating pairs.
   - Each block runs `CHECKPOINT`, a 60 s warm block, then a 120 s measured block with `--log`.
-  - `max_wal_size=64GB` and `checkpoint_timeout=1h` keep checkpoints out of the blocks. A block that crosses a checkpoint fails the run.
-  - Reported per block: tps, p95/p99 from the per-transaction log (the line count must equal pgbench's transactions), WAL bytes/send from the insert-LSN delta, the `pg_stat_wal` bytes, records and full-page images, and images per WAL record.
+  - `max_wal_size=64GB` and `checkpoint_timeout=1h` keep checkpoints out of the blocks. A block that crosses a checkpoint fails the run, after the block's results are saved.
+  - A crossing is judged by server-log timestamps (`log_checkpoints=on`, `%m` prefix in UTC, both checked at start). The opening and closing starts are the first forced starts stamped at or after each `CHECKPOINT` request, on the server clock. Any start logged between them and stamped at or before the end of the measured block is a crossing. A start after the block ends, such as a WAL-driven one before the closing request, is recorded as `afterBlock` and not flagged. A `pg_stat_checkpointer` count change or a moved redo LSN up to the end of the measured block is also a crossing.
+  - The log is polled until the closing start is visible (capture can lag; starts are logged in order). A log-read failure, an unreadable timestamp or 60 s without the closing start fails the block: it is never treated as clean.
+  - The row is built as soon as pgbench completes. A closing `CHECKPOINT` or host-probe (`docker ps`/`docker events`) failure is recorded in the row's `errors`, the row is written to `sends.json`, and then the run fails.
+  - Reported per block: tps, p95/p99 from the per-transaction log (the line count must equal pgbench's transactions), WAL bytes/send from the `pg_current_wal_insert_lsn()` delta, the `pg_stat_wal` bytes, records and full-page images, and images per WAL record.
+- **Consistency check:** every `message_counts_check`, including the one in the A3 migration's backfill guard, runs under `statement_timeout = 45min` (fixed before the run; the last unbounded check took about 33 min on three blocks' rows). Drift, a timeout or any error fails the run at once; the check is never skipped. Results, with the migration as its own row, go to `checks.json` and `summary.md`. Each send block is written to `sends.json` before its check, so a failed check keeps every completed block.
 - **Stop rule, fixed before the diagnostic run:**
   - Per pair, compute the final/current ratios. The rule fires when the median ratio exceeds a limit: WAL/send above 1.20, or tps below 0.90.
   - Every pair and every individual breach is reported.
@@ -59,4 +63,27 @@ FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
   - WAL statistics are cluster-wide, so idle clones can add background WAL.
   - The send databases are reused across pairs, so the faster arm accumulates more rows.
   - Shared caches persist across blocks.
+  - `docker events` returns at most the daemon's last 256 events. A container start is missed if more than 256 daemon events (any type) follow it before the post-block query; one block's own `docker exec` calls add far fewer. The query window opens at least 1 s before the pre-block `docker ps`, so a start between the two is not lost to whole-second rounding.
   - It is one plpgsql call per send, with no HTTP, pool or search terms.
+
+### Send re-measure (`--sends-only`)
+
+Approved by the maintainer on 2026-11-23 after the step 1 STOP; that STOP stands. Each run needs its own go.
+
+```sh
+node load/sql-probes/519-unread-counts/final.ts --smoke --sends-only --out /absolute/new/dir/outside/checkout
+FUKULOW_HOST_BUSY=/path/of/the/held/host-busy/marker \
+  node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --out /absolute/new/dir/outside/checkout
+```
+
+- **Unchanged:** pins, image, server settings, seed, `sql/send-current.sql` in both arms, `fukulow_app` under RLS, 8 clients and 4 threads, a forced `CHECKPOINT` then 60 s warm and 120 s measured per block, the checkpoint-crossing failure, and the stop rule.
+- **Order, fixed:** blocks 1 to 6 are current, final, final, current, current, final (pairs 1 to 3, as in step 1).
+- **Changed, with reasons:**
+  - Reads are skipped (already decided by step 1), so no idle read databases add background WAL.
+  - Each block runs on its own database, cloned from a per-arm template and dropped (`WITH (FORCE)`) after the block. In step 1 the two send databases were reused, so each block ran on the rows and autovacuum debt of earlier blocks; pair 1, the first two blocks, had current at about twice the tps of every later block.
+  - Both templates get `VACUUM (ANALYZE)` before any clone, so no block pays the A3 backfill's vacuum or analyze.
+  - `message_counts_check` runs on the final template and after every final block, on that block's database.
+- **Host:** `--diagnostic` refuses to start a block while any other container runs, and fails a block if another container runs after it or started during it (`docker events`). Load average and containers are recorded before and after each block. The operator also holds the host-busy marker and runs no other workers.
+- **Reported:** per block in run order: tps, p95/p99, WAL bytes/send, images per WAL record and per send, start and end times, host state. Per pair: both ratios and each breach. Every check with its duration.
+- **No exclusion or rerun after results.** A failed run (setup, check, timeout or crossing checkpoint) is reported as failed. At most one rerun for a known setup failure, as #769 allows.
+- **Time:** about 25 min of blocks, plus setup and three final-block checks (each expected well under the 45 min limit).
