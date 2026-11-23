@@ -145,16 +145,15 @@ Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSO
 
 Run `node load/revocation-burst.ts --out <dir>`. [Record](../load/measurements-archive.md#revocation-hold-send-time-rerun-592-2026-11-21-jst-mac)
 
-## Sign-in flood owner impact (#359 Part B alternative)
+## Sign-in burst owner impact (#756, #359)
 
-2026-11-22 JST, `c1456d91`, 3 runs: B1–B5 held ×3, **not a formal Part B PASS** (no multi-IP attack). B2 window reading PASS ×3, `b2Strict` false ×3. One IP's 5 wrong passwords locked the owner out ~58 s, password change included (#757). Lock barely exercised, 0 waiters at a 233 ms poll (#756).
+2026-11-23 JST, server `b4796346`, harness `4e4b4b8b`: **aggregate PASS** (A0, B1–B5, C1, C2 ×3). One IP, 16 wrong passwords at 3 window opens: 5×401 each, 3 waiters on X's row (4 once, within 1 ms log stamps), waits 12.6–60.8 ms. Owner password change/revoke-others 39/39 204, ≤ 105.3 ms (C2 bound ≥ 205.9). 90/91 B1 owner sign-ins 429 (#757). Limits: no multi-IP attack, one Mac, 3 runs, clock ≤ ±1.52 ms, 10 ms `deadlock_timeout` logging; rehearsal B4 miss is no evidence.
 
-Run `node load/signin-owner.ts` (judged by `load/signin-owner-judgment.ts`). [Record](../load/measurements-archive.md#sign-in-flood-owner-impact-part-b-alternative-method-359-2026-11-22-jst-mac)
+Run `node load/signin-owner-burst.ts --recorded` ×3 and its `-aggregate.ts`. [Record](../load/measurements-archive.md#sign-in-burst-owner-impact-756-359-2026-11-23-jst-mac)
 
 ## Archived only
 
 - [Load harness methods](../load/measurements-archive.md#load-harness-methods-20-57) — procedures for `make load` and `load/record.ts`. [Load decisions](decisions/load.md#load-testing-and-measurement)
-- [Earlier reconnect runs](../load/measurements-archive.md#graceful-shutdown-and-reconnect-storm-195-2026-11-11-jst) — superseded by the pinned repeat.
 - [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
 - Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs (quality scores reproduced).
 - [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
