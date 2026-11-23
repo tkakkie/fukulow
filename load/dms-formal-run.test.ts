@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, cpSync, existsSync, utimesSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, cpSync, existsSync, utimesSync, appendFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { readConfig, readRunConfig, type Config } from './dms-formal-config.ts';
@@ -695,7 +695,9 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
           if(outcome==='stop-rule')writeFileSync(roleRoot+'/formal/seed-stop.json',JSON.stringify(stop));
           if(vmGap) {
             appendFileSync(vmLogDirectory+'/init.log','1970-01-01T00:00:01Z init: lost\n');
-            rmSync(vmLogDirectory+'/init.log');writeFileSync(vmLogDirectory+'/init.log','1970-01-01T00:00:02Z init: new\n');
+            // Rotated aside before the new file exists, so Linux cannot hand the new file the freed inode.
+            renameSync(vmLogDirectory+'/init.log',vmLogDirectory+'/init.log.19700101-000001.000');
+            writeFileSync(vmLogDirectory+'/init.log','1970-01-01T00:00:02Z init: new\n');rmSync(vmLogDirectory+'/init.log.19700101-000001.000');
           }
           if(interrupted)listeners.get('SIGINT')!();
           return {code:outcome==='success'||collectionFailure||baseline?0:1,stdout:''};
