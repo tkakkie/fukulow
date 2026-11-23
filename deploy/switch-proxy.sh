@@ -14,8 +14,23 @@ case "$target" in
   *) echo "usage: $0 caddy|nginx|none [docker compose options]" >&2; exit 2 ;;
 esac
 shift
-options=("$@")
+external_options=("$@")
+options=()
+external_overlay=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -f|--file)
+      case "${2:-}" in
+        compose.external-proxy.yml|*/compose.external-proxy.yml) external_overlay=true; shift 2; continue ;;
+      esac ;;
+    -f=compose.external-proxy.yml|--file=compose.external-proxy.yml|-f=*/compose.external-proxy.yml|--file=*/compose.external-proxy.yml)
+      external_overlay=true; shift; continue ;;
+  esac
+  options+=("$1")
+  shift
+done
 compose() { docker compose ${options[@]+"${options[@]}"} "$@"; }
+compose_external() { docker compose ${external_options[@]+"${external_options[@]}"} "$@"; }
 log() { echo "switch-proxy: $*" >&2; }
 bindings() {
   docker inspect --format '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{$p}}={{.HostIp}}:{{.HostPort}} {{end}}{{end}}' "$1"
@@ -40,6 +55,8 @@ start() {
   local deadline=$((SECONDS + timeout))
   if [ "$1" != none ]; then
     compose --profile "$1" up -d --wait --wait-timeout 120 "$1" || { log "$1 did not turn healthy"; return 1; }
+  elif "$external_overlay"; then
+    compose_external up -d --wait --wait-timeout 120 app || { log "none app did not turn healthy"; return 1; }
   fi
   # Issuance may still be running; HTTPS must verify before the deadline.
   until https_ok "$1"; do
@@ -66,6 +83,13 @@ expected=" $target"
 if [ "$selected" != "$expected" ]; then
   log "the active profiles select [${selected# }]; set COMPOSE_PROFILES=$target in .env (nothing changed)"
   exit 2
+fi
+if [ "$target" = none ] && "$external_overlay"; then
+  external_services=$(compose_external config --services)
+  if ! printf '%s\n' "$external_services" | grep -qx app; then
+    log "the external-proxy overlay needs COMPOSE_PROFILES=none (nothing changed)"
+    exit 2
+  fi
 fi
 others=""
 for proxy in caddy nginx; do [ "$proxy" = "$target" ] || others="$others $proxy"; done

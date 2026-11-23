@@ -28,20 +28,24 @@ const argv = process.argv.slice(2)
 const out = text => { if (text) process.stdout.write(text + '\\n') }
 if (argv[0] === 'inspect') { out(state.bindings[argv.at(-1)]); process.exit(0) }
 const profiles = []
+let overlay = false
 let i = 1
 while (!['config', 'ps', 'up', 'stop', 'exec', 'port'].includes(argv[i])) {
   if (argv[i] === '--profile') profiles.push(argv[++i])
+  if (argv[i].endsWith('compose.external-proxy.yml')) overlay = true
   i++
 }
 const [command, ...rest] = argv.slice(i)
 const services = rest.filter(arg => !arg.startsWith('-') && !/^[0-9]+$/.test(arg))
-state.calls.push([command, ...rest].join(' '))
+state.calls.push([command, ...rest].join(' ') + (overlay ? ' (external overlay)' : ''))
 const active = profiles.length ? profiles : (process.env.COMPOSE_PROFILES || '').split(',')
 let status = 0
 // Like older Compose: a named proxy whose profile is not active is no such service.
 const inactive = services.find(s => ['caddy', 'nginx'].includes(s) && !active.includes(s))
 if (command !== 'config' && inactive) { process.stderr.write('no such service: ' + inactive + '\\n'); save(); process.exit(1) }
-if (command === 'config') out(['app', ...['caddy', 'nginx'].filter(p => active.includes(p))].join('\\n'))
+if (command === 'config') out((overlay
+  ? (active.includes('none') ? ['app'] : [])
+  : ['app', ...['caddy', 'nginx'].filter(p => active.includes(p))]).join('\\n'))
 if (command === 'ps') out(services.filter(s => state.running.includes(s) || (rest.includes('-aq') && state.created.includes(s))).join('\\n'))
 if (command === 'up' && rest.includes('--no-start')) state.created.push(...services)
 else if (command === 'up') {
@@ -73,12 +77,12 @@ chmodSync(join(directory, 'docker'), 0o755)
 chmodSync(join(directory, 'curl'), 0o755)
 
 const loopback = '443/tcp=127.0.0.1:443 80/tcp=127.0.0.1:80 '
-function run(target: string, running: string[], { profiles = target, env = {} as Record<string, string>,
+function run(target: string, running: string[], { profiles = target, options = [] as string[], env = {} as Record<string, string>,
   state = {} as Partial<State> } = {}) {
   const initial: State = { running, created: [...running], bindings: { caddy: loopback, nginx: loopback },
     failStart: [], https: { caddy: true, nginx: true, external: true }, calls: [], ...state }
   writeFileSync(stateFile, JSON.stringify(initial))
-  const result = spawnSync('bash', [script, target], { encoding: 'utf8', env: { PATH: `${directory}:${process.env.PATH}`,
+  const result = spawnSync('bash', [script, target, ...options], { encoding: 'utf8', env: { PATH: `${directory}:${process.env.PATH}`,
     COMPOSE_PROFILES: profiles, SWITCH_PROXY_HTTPS_TIMEOUT: '0', SWITCH_PROXY_URL: 'https://fukulow.test',
     SWITCH_PROXY_CONNECT_TO: external, ...env } })
   const after: State = JSON.parse(readFileSync(stateFile, 'utf8'))
@@ -157,4 +161,19 @@ test('a failed switch from none starts no proxy that was not running', () => {
     assert.match(result.stderr, /^switch-proxy: no other proxy was running, so none is started$/m)
     assert.deepEqual(result.proxies, [])
   }
+})
+
+test('external overlay is applied only to the none app and removed on bundled rollback', () => {
+  const options = ['-f', 'compose.yml', '-f', 'compose.external-proxy.yml']
+  const result = run('none', ['nginx'], { options, state: { https: { caddy: true, nginx: true, external: false } } })
+  assert.equal(result.status, 1)
+  assert.deepEqual(result.proxies, ['nginx'])
+  assert.deepEqual(changes(result.after.calls), [
+    'stop caddy', 'stop nginx', 'up -d --wait --wait-timeout 120 app (external overlay)',
+    'up -d --wait --wait-timeout 120 nginx',
+  ])
+  const inactive = run('none', ['nginx'], { options, profiles: '' })
+  assert.equal(inactive.status, 2)
+  assert.match(inactive.stderr, /external-proxy overlay needs COMPOSE_PROFILES=none/)
+  assert.deepEqual(changes(inactive.after.calls), [])
 })

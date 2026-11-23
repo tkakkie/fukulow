@@ -158,9 +158,10 @@ async function check(profile: string) {
       assert.equal(curl(['-sk', url + '/api/v1/health']), 'ok')
     }
     const app = proxy('ps', '-q', 'app')
-    function checkHeaders(path: string, status: number, baseUrl = url) {
+    function checkHeaders(path: string, status: number | number[], baseUrl = url) {
       const output = curl(['-sI', '--insecure', '--show-error', '--max-time', '10', baseUrl + path])
-      assert.match(output, new RegExp(`^HTTP/\\S+ ${status}\\b`))
+      const statuses = [status].flat().join('|')
+      assert.match(output, new RegExp(`^HTTP/\\S+ (?:${statuses})\\b`))
       if (baseUrl === url) assert.match(output, /strict-transport-security: max-age=31536000/i)
       checkBrowserHeaders(output, path)
       console.log(`curl -sI --insecure ${baseUrl + path}\n${output.split(/\r?\n/).filter(line => /^(HTTP\/|permissions-policy:|cross-origin-opener-policy:)/i.test(line)).join('\n')}`)
@@ -313,9 +314,7 @@ async function check(profile: string) {
     assert.equal(stopped.State.OOMKilled, false)
     // Upstream error-path coverage only: refused peers do not measure the 5s
     // connect limit. The static config guard verifies that timeout in both profiles.
-    const failed = request('/api/v1/health')
-    assert.ok([502, 504].includes(failed.status))
-    checkHeaders('/api/v1/health', failed.status)
+    checkHeaders('/api/v1/health', [502, 504])
     checkCacheAndCompression('/api/v1/health')
     await restartApp()
     assert.equal(request('/api/v1/setup').body, '{"setup_required":false}')
