@@ -14,9 +14,9 @@ Related: [Setup token](accounts.md#setup).
 
 ### External proxy (#810)
 
-Set `COMPOSE_PROFILES=none` and `FUKULOW_DOMAIN` to the public Host (include any nondefault port). Run `docker compose -f compose.yml -f compose.external-proxy.yml up -d`. The overlay publishes `FUKULOW_PUBLISH_ADDR:FUKULOW_PUBLISH_PORT` (default `127.0.0.1:8080`); set a wider address explicitly and restrict access to the proxy. The overlay binds the app to `0.0.0.0` on `FUKULOW_CONTAINER_PORT` (default 8080) and ignores `FUKULOW_ADDR`.
+Set `COMPOSE_PROFILES=none` and `FUKULOW_DOMAIN` to the public Host (include any nondefault port). Run `docker compose -f compose.yml -f compose.external-proxy.yml up -d`. The overlay publishes `FUKULOW_PUBLISH_ADDR:FUKULOW_PUBLISH_PORT` (default `127.0.0.1:8080`); set wider addresses explicitly, reachable only by the proxy. The app binds `0.0.0.0:FUKULOW_CONTAINER_PORT` (default 8080); `FUKULOW_ADDR` is ignored.
 
-Terminate verified HTTPS at the proxy, redirect HTTP, enable HSTS and preserve Host and WebSocket Origin. The overlay pins Secure cookies and sets `FUKULOW_ALLOWED_HOST`; the app rejects foreign Host and keeps readiness on container loopback. Cookie WebSocket Origin defaults to the public HTTPS origin. Trust a forwarding header only when the observed socket peer is exclusive to your proxy; a shared Docker gateway may also represent other clients.
+Terminate verified HTTPS at the proxy, redirect HTTP, enable HSTS and preserve Host and WebSocket Origin. The overlay pins Secure cookies and sets `FUKULOW_ALLOWED_HOST`; the app rejects foreign Host and keeps readiness on container loopback. Cookie WebSocket Origin defaults to the public HTTPS origin. Trust a forwarding header only when the observed socket peer is exclusive to your proxy; a shared Docker gateway may carry other clients.
 
 Host-side examples: [nginx](../../deploy/external-nginx.conf), [Traefik](../../deploy/external-traefik.yml), [Cloudflare Tunnel](../../deploy/external-cloudflared.yml). [CI](../../scripts/check-external-proxy.ts) tests HTTPS/WSS and forwarding on nginx/Traefik and validates tunnel ingress. Check live Tunnel HTTPS, redirect and authenticated WSS after setting up the zone.
 
@@ -71,10 +71,11 @@ To leave bundled: stop writers, back up, restore externally, stop the bundled DB
 - The binary is PID 1, with Docker’s default SIGTERM and a 75 s stop grace (#195). It starts no children and needs no init wrapper.
 
 ### Releases (#808)
-- The maintainer tags `vX.Y.Z` or `vX.Y.Z-pre` on a `main` commit after its `ci`, `e2e-compose`, `gitleaks` and `security` push runs succeeded. The maintainer configures a tag ruleset limiting who creates, moves or deletes `v*`. `release.yml` rejects other tags, commits not on `main` and unfinished or failed CI. Re-run a gated run after CI; never move a tag.
-- It builds `linux/amd64` and `linux/arm64` from source on native runners without cache. Each exact archive must pass the platform, non-root user, OCI label, license file and Compose security checks before the push by digest. Only the publish job has `packages: write`, plus `id-token`/`attestations` for SBOM and provenance attestations on each platform digest and the index. A fresh runner then pulls the index with `compose.yml`, verifies the attestations and reruns the smoke. Only then is the GitHub Release created, with digests, migrations and config changes since the previous release and generated notes.
+- The maintainer limits `v*` creation/moves/deletion by ruleset and tags `vX.Y.Z` or `vX.Y.Z-pre` on `main` after successful `ci`, `e2e-compose`, `gitleaks` and `security` push runs. `release.yml` rejects other tags, off-main commits and unfinished/failed CI. Retry after CI; never move a tag.
+- Native runners build `linux/amd64` and `linux/arm64` from source without cache. Before push by digest each exact archive passes platform, non-root user, OCI label, license and Compose security checks. Only publish gets `packages: write` plus `id-token`/`attestations` for per-platform and index SBOM/provenance. A fresh runner pulls the index via `compose.yml`, verifies attestations and repeats the smoke before creating the GitHub Release with digests, migration/config changes since the prior release and generated notes.
 - Tags: `X.Y.Z`, plus `X.Y` and `latest` only when no newer release exists in that line or at all (`0.x` until 1.0). Pre-releases publish only `X.Y.Z-pre`. A published version tag is never overwritten.
 - Upgrade: check out the tag, set `FUKULOW_VERSION=X.Y.Z@sha256:<index>`, then follow the database upgrade above. Rollback limits: [workflow §15](../workflow.md#15-releases).
+- New bundled DB: in the Compose directory run `docker run --rm --read-only --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work <image> init --version <release-pin> [--domain HOST] [--proxy caddy|nginx|none]` with the matching image. You own `.env`; its three secrets are 32 OS-random bytes as 64 lowercase hex.
 
 ### Restricted access through SSH (#392; preparation for #285)
 

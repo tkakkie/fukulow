@@ -239,7 +239,7 @@ test('history generation rotation reboots connected sync and settles a pending s
   await secretSafe(async () => execFileSync('docker', ['run', '--rm', '--read-only', '--cap-drop=ALL',
     '--security-opt=no-new-privileges:true', '--network', network!,
     '-e', 'DATABASE_URL=postgres://fukulow:compose-e2e-db-test-only@db:5432/fukulow', image!,
-    'fukulow-server', 'rotate-history-generation', organization], { stdio: 'pipe', timeout: 30_000 }))
+    'rotate-history-generation', organization], { stdio: 'pipe', timeout: 30_000 }))
   await page.evaluate(() => (window as unknown as { reconnectForGeneration(): void }).reconnectForGeneration())
   await expect.poll(() => subscriptions.some(s => s.channel_id === channel.id && s.history_generation !== oldGeneration)).toBe(true)
   await expect(page.getByRole('button', { name: '再送する', exact: true })).toHaveCount(0)

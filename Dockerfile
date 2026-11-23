@@ -81,4 +81,4 @@ COPY --from=notices /licenses/ /usr/share/licenses/fukulow/
 ENV MALLOC_MMAP_THRESHOLD_=131072
 USER 10001:10001
 EXPOSE 8080
-CMD ["fukulow-server"]
+ENTRYPOINT ["fukulow-server"]

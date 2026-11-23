@@ -23,7 +23,7 @@ const passwords = ["role-bound-test-only-'\\; DROP TABLE users; --", 'role-rotat
 
 function command(args: string[], password = passwords[0], user = 'fukulow') {
   return spawnSync('docker', ['run', '--rm', '--network', name, '-e', 'DATABASE_URL', '-e', 'POSTGRES_APP_PASSWORD',
-    image, 'fukulow-server', ...args], { cwd, encoding: 'utf8', timeout: 60_000,
+    '--entrypoint', 'fukulow-server', image, ...args], { cwd, encoding: 'utf8', timeout: 60_000,
     env: { ...env, DATABASE_URL: `postgres://${user}:${env.LOAD_DB_PASSWORD}@db:5432/fukulow`, POSTGRES_APP_PASSWORD: password } })
 }
 

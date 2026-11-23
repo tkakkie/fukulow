@@ -153,7 +153,7 @@ try {
         if (!ready) throw new Error('DB readiness timeout');
         const ownerUrl = `postgres://fukulow:${secrets.ownerPassword}@db/fukulow`;
         for (const action of [['migrate', 'roles'], ['migrate']]) {
-          const log = docker('run', '--rm', '--name', owned.migrate, '--network', owned.network, '-e', `DATABASE_URL=${ownerUrl}`, '-e', `POSTGRES_APP_PASSWORD=${secrets.appPassword}`, appImage, 'fukulow-server', ...action);
+          const log = docker('run', '--rm', '--name', owned.migrate, '--network', owned.network, '-e', `DATABASE_URL=${ownerUrl}`, '-e', `POSTGRES_APP_PASSWORD=${secrets.appPassword}`, '--entrypoint', 'fukulow-server', appImage, ...action);
           writeArtifact(`${name}-${action.join('-')}.log`, log);
         }
         docker('run', '-d', '--name', owned.app, '--network', owned.network, '-p', '127.0.0.1::8080', '-e', 'FUKULOW_ADDR=0.0.0.0:8080', '-e', `DATABASE_URL=postgres://fukulow_app:${secrets.appPassword}@db/fukulow`, '-e', 'FUKULOW_COOKIE_SECURE=false', '-e', `FUKULOW_SETUP_TOKEN=${secrets.setupToken}`, appImage);

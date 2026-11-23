@@ -54,5 +54,5 @@
 ## Setup
 
 - Bootstrap creates only the first Organization and Owner. Repeat gives 409 `setup already completed` after token/input validation. Public read-only GET exposes only no-store `setup_required` independent of the token.
-- `FUKULOW_SETUP_TOKEN` is required in all modes. Missing, blank or former published example (including surrounding whitespace) fails startup. Keep exact bytes and never generate/log it. [Deployment](deployment.md#proxy-and-sign-in-limits)
+- `FUKULOW_SETUP_TOKEN` is required in all modes. Missing, blank or old example (even padded) fails startup. Startup preserves exact bytes without generating or logging it. [Deployment](deployment.md#proxy-and-sign-in-limits)
 - POST extraction comes first (malformed/missing/invalid JSON 400, oversized 413, unsupported media 415). Then missing/wrong token gives the same generic 401 before semantic validation, hashing or database access, before and after setup.
