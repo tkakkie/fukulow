@@ -1,0 +1,9 @@
+# Development override: build the app image from this checkout instead of pulling a release.
+#   docker compose -f compose.yml -f compose.dev.yml --profile caddy up -d --build
+# compose.yml still requires FUKULOW_VERSION; this override replaces the image, so any value works.
+services:
+  app:
+    image: fukulow-app
+    build: .
+  migrate:
+    image: fukulow-app

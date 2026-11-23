@@ -138,6 +138,7 @@ const env: NodeJS.ProcessEnv = {
   ...process.env,
   ...(existsSync(dockerConfigDir) ? { DOCKER_CONFIG: dockerConfigDir } : {}),
   COMPOSE_PROJECT_NAME: project,
+  FUKULOW_VERSION: '0.0.0-dev', // compose.dev.yml and the override replace the release image
   POSTGRES_PASSWORD: `fp345-db-only-${randomUUID()}`,
   POSTGRES_APP_PASSWORD: `fp345-app-only-${randomUUID()}`,
   FUKULOW_SETUP_TOKEN: external ? process.env.FUKULOW_SETUP_TOKEN : `fp345-setup-only-${randomUUID()}`,
@@ -145,7 +146,7 @@ const env: NodeJS.ProcessEnv = {
   FUKULOW_DOMAIN: 'localhost',
   FUKULOW_EDGE_PREFIX: `10.${randomInt(192, 256)}.${randomInt(256)}`,
 }
-const composeFlags: string[] = external ? JSON.parse(process.env.FIRST_PAINT_COMPOSE!) : ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', overridePath, '--profile', 'caddy']
+const composeFlags: string[] = external ? JSON.parse(process.env.FIRST_PAINT_COMPOSE!) : ['compose', '--env-file', '/dev/null', '-p', project, '-f', 'compose.yml', '-f', 'compose.dev.yml', '-f', overridePath, '--profile', 'caddy']
 
 function docker(args: string[], input?: string): string {
   return execFileSync('docker', args, {
