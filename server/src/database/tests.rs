@@ -1,4 +1,4 @@
-use super::{migrate, validate_migrations};
+use super::{check_server_version, migrate, validate_migrations, validate_server_version};
 use sqlx::{
     PgPool,
     migrate::{Migrate, MigrateError},
@@ -25,6 +25,21 @@ async fn startup_pool(pool: &PgPool) -> PgPool {
         ))
         .await
         .unwrap()
+}
+
+#[fukulow_test::test(migrations = false)]
+async fn server_version_check_requires_postgresql_17(pool: PgPool) {
+    validate_server_version(&pool).await.unwrap();
+    for accepted in ["170000", "170006", "180001", "190000"] {
+        assert_eq!(check_server_version(accepted), Ok(()), "{accepted}");
+    }
+    for rejected in ["169999", "160004", "90624", "", "17", "abc"] {
+        let error = check_server_version(rejected).unwrap_err();
+        assert!(
+            error.starts_with("PostgreSQL 17 or newer is required"),
+            "{rejected}: {error}"
+        );
+    }
 }
 
 #[fukulow_test::test(migrations = false)]
