@@ -88,6 +88,8 @@ function layout(architecture: string, change: (config: Record<string, any>) => v
   const manifest = writeBlob(directory, Buffer.from(JSON.stringify({ schemaVersion: 2, mediaType: 'application/vnd.oci.image.manifest.v1+json',
     config: configDescriptor, layers: [layer] })), 'application/vnd.oci.image.manifest.v1+json')
   writeFileSync(join(directory, 'index.json'), JSON.stringify({ schemaVersion: 2, manifests: [{ ...manifest, annotations: { 'org.opencontainers.image.ref.name': 'x' } }] }))
+  writeFileSync(join(directory, 'manifest.json'), JSON.stringify([{ Config: `blobs/sha256/${configDescriptor.digest.slice(7)}`,
+    RepoTags: [`fukulow-release:${architecture}`], Layers: [`blobs/sha256/${layer.digest.slice(7)}`] }]))
   return directory
 }
 
@@ -118,6 +120,20 @@ test('a layout with a tampered blob, several manifests or a nested index is reje
   assert.throws(() => readLayout(two), /exactly one/)
   writeFileSync(join(two, 'index.json'), JSON.stringify({ ...twoIndex, manifests: [{ ...twoIndex.manifests[0], mediaType: indexType }] }))
   assert.throws(() => readLayout(two), /exactly one/)
+})
+
+test('docker load must load the checked image: manifest.json names exactly the index.json image', () => {
+  const other = layout('arm64', config => { config.architecture = 'arm64' })
+  const otherEntries = readFileSync(join(other, 'manifest.json'), 'utf8')
+  const directory = layout('amd64')
+  const entries = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'))
+  for (const changed of [JSON.parse(otherEntries), [...entries, ...entries], [{ ...entries[0], Layers: [] }],
+    [{ ...entries[0], Config: entries[0].Layers[0] }]]) {
+    writeFileSync(join(directory, 'manifest.json'), JSON.stringify(changed))
+    assert.throws(() => readLayout(directory), /manifest.json must name exactly/)
+  }
+  writeFileSync(join(directory, 'manifest.json'), JSON.stringify(entries))
+  assert.equal(readLayout(directory).config.architecture, 'amd64')
 })
 
 test('the image license comes from the workspace package and is required', () => {

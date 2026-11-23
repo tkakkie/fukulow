@@ -63,6 +63,7 @@ jobs:
         with: { node-version-file: .node-version }
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build from source without cache, export the OCI archive
+        # The docker exporter writes the same OCI layout plus manifest.json, which `docker load` needs.
         id: build
         env:
           DRY_RUN: ${{ github.event_name != 'push' }}
@@ -81,7 +82,7 @@ jobs:
             --label "org.opencontainers.image.version=$VERSION" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.licenses=$license" \
-            --output "type=oci,dest=$ARCHIVE,name=fukulow-release:$ARCH,rewrite-timestamp=true" .
+            --output "type=docker,oci-mediatypes=true,dest=$ARCHIVE,name=fukulow-release:$ARCH,rewrite-timestamp=true" .
       - name: Platform, non-root user and OCI labels
         env:
           LICENSE: ${{ steps.build.outputs.license }}

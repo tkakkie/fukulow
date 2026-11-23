@@ -29,7 +29,19 @@ function blob(directory: string, descriptor: Descriptor): Buffer {
   return bytes
 }
 
-// An extracted OCI layout holding exactly one image manifest (built with --provenance=false --sbom=false).
+const blobPath = (digest: string) => `blobs/sha256/${digest.slice('sha256:'.length)}`
+
+// docker load on the runners' classic image store reads only manifest.json; it must name the checked image.
+function dockerManifestFailure(directory: string, config: Descriptor, layers: Descriptor[]): string | undefined {
+  const entries = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8')) as { Config?: string, Layers?: string[] }[]
+  const expected = JSON.stringify({ Config: blobPath(config.digest), Layers: layers.map(layer => blobPath(layer.digest)) })
+  if (entries.length !== 1 || JSON.stringify({ Config: entries[0].Config, Layers: entries[0].Layers }) !== expected) {
+    return 'manifest.json must name exactly the image of index.json'
+  }
+}
+
+// An extracted OCI layout holding exactly one image manifest (built with --provenance=false --sbom=false)
+// plus the docker manifest.json of that image (buildx type=docker,oci-mediatypes=true).
 export function readLayout(directory: string): Layout {
   const index = JSON.parse(readFileSync(join(directory, 'index.json'), 'utf8')) as { manifests?: Descriptor[] }
   if (index.manifests?.length !== 1 || index.manifests[0].mediaType !== manifestType) {
@@ -40,6 +52,8 @@ export function readLayout(directory: string): Layout {
   const manifestBytes = blob(directory, manifest)
   const parsed = JSON.parse(manifestBytes.toString('utf8')) as { config: Descriptor, layers: Descriptor[] }
   const configBytes = blob(directory, parsed.config)
+  const failure = dockerManifestFailure(directory, parsed.config, parsed.layers)
+  if (failure) throw new Error(failure)
   const blobs = [{ digest: parsed.config.digest, bytes: configBytes },
     ...parsed.layers.map(layer => ({ digest: layer.digest, bytes: blob(directory, layer) }))]
   return { manifest, manifestBytes, blobs, config: JSON.parse(configBytes.toString('utf8')) }
