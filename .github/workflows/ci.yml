@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
@@ -84,7 +84,7 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:ci-test-only@127.0.0.1:5432/postgres
       # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -121,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # #800 PR 1: CI never reads full debuginfo. Release, wasm and Docker builds are unchanged; this value is part of the rust-cache key.
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
