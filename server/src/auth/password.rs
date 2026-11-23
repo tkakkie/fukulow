@@ -318,6 +318,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn unknown_account_salt_entropy_failure_returns_500_without_spending_failure_budgets() {
+        static WORKERS: PasswordWorkers = PasswordWorkers::new();
+
         for partial in [false, true] {
             let calls = Arc::new(AtomicUsize::new(0));
             let observed = calls.clone();
@@ -329,7 +331,7 @@ mod tests {
                 "correct horse battery staple".into(),
                 None,
                 attempt,
-                super::super::PASSWORD_WORKERS.acquire().await.unwrap(),
+                WORKERS.acquire().await.unwrap(),
                 move |password| {
                     hash_password_sync_with_entropy(password, |bytes| {
                         observed.fetch_add(1, Ordering::SeqCst);
@@ -369,7 +371,7 @@ mod tests {
                         "incorrect password".into(),
                         None,
                         attempt,
-                        super::super::PASSWORD_WORKERS.acquire().await.unwrap(),
+                        WORKERS.acquire().await.unwrap(),
                     )
                     .await
                     .unwrap()
@@ -388,7 +390,7 @@ mod tests {
                         "incorrect password".into(),
                         None,
                         attempt,
-                        super::super::PASSWORD_WORKERS.acquire().await.unwrap(),
+                        WORKERS.acquire().await.unwrap(),
                     )
                     .await
                     .unwrap()
