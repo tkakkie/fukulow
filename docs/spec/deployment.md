@@ -13,7 +13,7 @@ Related: [Setup token](accounts.md#setup).
 - Compose security checks isolate both profiles with disposable resources and ignore deployment `.env`. `CHECK_EDGE_PREFIX` overrides their random edge prefix and `CHECK_COMPOSE_IMAGE` reuses a local image. [Deployment and auth invariants](../invariants/deployment.md#rows-in-other-parts)
 
 ## Database deployment and upgrade (#194 B)
-- PostgreSQL ≥17 is required; app and `migrate` refuse older ones. Compose bundles PostgreSQL 18 owned by `fukulow`. One-shot `migrate` runs `fukulow-server migrate` over the owner URL; app waits for it and uses the `fukulow_app` URL. Standalone/dev: `DATABASE_URL` is the app URL to serve, the owner URL to migrate.
+- PostgreSQL ≥17 is required; app and `migrate` refuse older ones. Compose bundles PostgreSQL 18 owned by `fukulow`. One-shot `migrate` runs `fukulow-server migrate` over the owner URL; app waits for it and uses the `fukulow_app` URL. Standalone/dev: `DATABASE_URL` is the app URL to serve, owner URL to migrate.
 - Startup checks the app role and reads `public._sqlx_migrations` without repairing it; an invalid role or history blocks serving. One-shot migration lock waits stop after 5 s; resolve the blocker and retry with app stopped.
 - App connections set `statement_timeout = 10s` and `jit = off` as startup parameters, overriding URL options and role/database defaults. App verifies both before serving HTTP, so use HTTP readiness, not a TCP connect. Owner connections do not get them; migrations disable statement and transaction timeouts.
 - `migrate` without `fukulow_app` exits before schema changes and directs the operator to `migrate roles`.
@@ -25,12 +25,12 @@ Related: [Setup token](accounts.md#setup).
 
 ### External PostgreSQL (#810)
 
-1. Create a database owned by the migration login and reserve the cluster-wide `fukulow_app` login for it. Operator, app and migrate must reach its TLS hostname.
-2. Put `fukulow-bootstrap` (TLS host, database, admin login, `sslmode=verify-full`, CA) in a private `.pg_service.conf` with a 0600 passfile. The admin must be superuser-equivalent (to suppress logging and assume the owner); else the creator gets ADMIN on `fukulow_app`, which is unsupported.
+1. Create a database owned by the migration login and reserve the cluster-wide `fukulow_app` login for it. Operator, app and migrate must reach it over TLS.
+2. Put `fukulow-bootstrap` (TLS host, database, admin login, `sslmode=verify-full`, CA) in a private `.pg_service.conf` with a 0600 passfile. The admin must be superuser-equivalent (to suppress logging and assume the owner); else the creator gets ADMIN on `fukulow_app` (unsupported).
 3. With a distinct private `POSTGRES_APP_PASSWORD`, run from the checkout (your migration login replaces `fukulow`): `PGSERVICE=fukulow-bootstrap FUKULOW_DB_OWNER=fukulow deploy/init-db-roles.sh --external`.
 4. Set URL-encoded `FUKULOW_APP_DATABASE_URL` (`fukulow_app`) and `FUKULOW_MIGRATE_DATABASE_URL` (owner) for that database; `sslmode` below `verify-full` is unsupported. For a private CA, mount its PEM read-only in app/migrate and add `sslrootcert=<path>` to both. Remove bundled password settings. Run `docker compose -f compose.yml -f compose.external-db.yml up -d`.
 
-To leave bundled: stop writers, back up, restore externally, stop the bundled DB as configured and keep its volume. Upgrade or rotation: back up and drill, stop writers, rerun step 3 (rotation: new `POSTGRES_APP_PASSWORD`, matching URL), then step 4's `up`.
+To leave bundled: stop writers, back up, restore externally, stop the bundled DB as configured; keep its volume. Upgrade or rotation: back up and drill, pull the release, stop writers, rerun step 3 (rotation: new `POSTGRES_APP_PASSWORD`, matching URL), then step 4's `up`.
 
 ## Deployment (#194 C)
 - `FUKULOW_SEARCH_ENGINE`: `disabled` (Compose default; production pending #689) or `d3r` (dev/test; a Compose `services.app.environment` override), with any proxy or database mode.
