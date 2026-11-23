@@ -10,14 +10,14 @@ import { httpOutcome, params, publish, uuid } from '../seed.ts';
 import type { Fixture } from './fixture.ts';
 import type { LaneName } from './judge.ts';
 import { outcomes, type Outcome } from './metrics.ts';
-import { plan, type Step } from './plan.ts';
+import { plan, rehearsalPlan, type Step } from './plan.ts';
 import { moveAcknowledged } from './wire.ts';
 import { counts, workloadOptions } from './workload-options.ts';
 
 const data = JSON.parse(open('/fixture/data.json')) as Fixture;
 const tokens = new SharedArray<string>('members', () => JSON.parse(open('/fixture/tokens.json')));
 const step = JSON.parse(__ENV.MOVE_STEP) as Step;
-const p = plan(__ENV.MOVE_SMOKE === '1');
+const p = __ENV.MOVE_REHEARSAL === '1' ? rehearsalPlan() : plan(__ENV.MOVE_SMOKE === '1');
 const base = __ENV.BASE_URL;
 const org = `${base}/api/v1/orgs/${data.organization}`;
 const channel = `${org}/channels/${data.chain.channel}`;

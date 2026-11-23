@@ -32,7 +32,14 @@ export function plan(smoke: boolean) {
     refill: settings.sendRefillPerSecond,
   };
 }
-export type Plan = ReturnType<typeof plan>;
+// #769 rehearsal: the recorded fixture and load rates, one short cell (round 1, both arms) and the same
+// validity checks; never evidence. Only the load window is shorter.
+export const rehearsalSeconds = 20;
+export const rehearsalCell: Cell = { part: 'D', size: 100 };
+export function rehearsalPlan() {
+  return { ...plan(false), seconds: rehearsalSeconds, rehearsal: true as const };
+}
+export type Plan = ReturnType<typeof plan> & { rehearsal?: true };
 export const moveInterval = (size: number) => size === 1000 ? 5 : 1;
 export const tombstones = (size: number) => Math.floor(size / 100);
 
@@ -46,6 +53,12 @@ export function steps(p: Plan): Step[] {
     const order: Arm[] = cell.part === 'A' ? ['move'] : i % 2 === 0 ? ['baseline', 'move'] : ['move', 'baseline'];
     return order.map(arm => ({ ...cell, round: i + 1, arm }));
   }).flat());
+}
+
+// Round 1 of one cell, in its recorded arm order.
+export function rehearsalSteps(p: Plan, cell: Cell = rehearsalCell): Step[] {
+  if (!p.rehearsal) throw new Error('Rehearsal steps need the rehearsal plan');
+  return steps(p).filter(step => step.part === cell.part && step.size === cell.size && step.round === 1);
 }
 
 export const stepId = ({ part, size, round, arm }: Step) => `${part}-${size}-r${round}-${arm}`;
