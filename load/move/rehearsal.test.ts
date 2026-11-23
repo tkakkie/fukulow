@@ -296,3 +296,25 @@ test('an early stop says the scheduled work was incomplete without changing the 
     judged: { p: formal, results: [first], verdict: render(formal, [first], true).verdict } });
   assert.deepEqual(flags, { failed: true, invalidEvidence: true });
 });
+
+test('a --diagnostic run is never evidence, with or without --rehearsal, while capture completeness still decides its result', () => {
+  for (const mode of ['recorded', 'rehearsal'] as const) {
+    for (const captured of [true, false]) {
+      const flags = statusFlags({ passed: captured, finished: true, cleanupIssues: 0, stoppedEarly: false, armProblem: false,
+        diagnostic: true, diagnosticIncomplete: !captured });
+      assert.deepEqual(flags, { failed: !captured, invalidEvidence: true });
+      const out = mkdtempSync(join(tmpdir(), 'move-diagnostic-status-'));
+      try {
+        const run = stages(out, mode);
+        run.startSampling();
+        const status = run.finish(() => {}, { ...flags, interrupted: false, summaryInvalidates: true });
+        assert.equal(status.evidence, false);
+        assert.equal(JSON.parse(readFileSync(join(out, 'status.json'), 'utf8')).evidence, false);
+        assert.equal(status.outcome, captured ? 'success' : 'result-failure');
+      } finally { rmSync(out, { recursive: true, force: true }); }
+    }
+  }
+  // A formal run with identical flags apart from diagnostic stays evidence-eligible.
+  assert.deepEqual(statusFlags({ passed: true, finished: true, cleanupIssues: 0, stoppedEarly: false, armProblem: false, diagnosticIncomplete: false }),
+    { failed: false, invalidEvidence: false });
+});

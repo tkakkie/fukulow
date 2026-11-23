@@ -171,12 +171,13 @@ export function verdictInvalid(p: Plan, results: Result[], verdict: ReturnType<t
     || results.some(row => armInvalid(p, row, row.attempts.at(-1)).length > 0);
 }
 
-// status.json flags from the final verdict and exit decision (harness-core/stages.ts semantics).
+// status.json flags from the final verdict and exit decision (harness-core/stages.ts semantics). A DIAGNOSTIC run
+// (--diagnostic, with or without --rehearsal) is never evidence; diagnosticIncomplete still decides its capture result.
 export function statusFlags(o: { passed: boolean; finished: boolean; cleanupIssues: number; stoppedEarly: boolean; armProblem: boolean;
-  diagnosticIncomplete: boolean; judged?: { p: Plan; results: Result[]; verdict: ReturnType<typeof judge> } }) {
+  diagnostic?: boolean; diagnosticIncomplete: boolean; judged?: { p: Plan; results: Result[]; verdict: ReturnType<typeof judge> } }) {
   const incomplete = !o.finished || o.cleanupIssues > 0 || o.stoppedEarly || o.diagnosticIncomplete;
   return { failed: !o.passed || incomplete || o.armProblem,
-    invalidEvidence: incomplete || (o.judged !== undefined && verdictInvalid(o.judged.p, o.judged.results, o.judged.verdict)) };
+    invalidEvidence: incomplete || o.diagnostic === true || (o.judged !== undefined && verdictInvalid(o.judged.p, o.judged.results, o.judged.verdict)) };
 }
 
 // A DIAGNOSTIC smoke needs a verified Move and its timings; a DIAGNOSTIC rehearsal is never complete
@@ -412,7 +413,7 @@ async function main() {
           : `Move harness ${p.smoke ? 'functional ' + report.verdict.functional : report.verdict.overall}`;
       }
     }, { ...statusFlags({ passed, finished, cleanupIssues: cleanupIssues.length, stoppedEarly: stoppedEarly !== undefined, armProblem,
-      diagnosticIncomplete: Boolean(selection) && !captured, judged: summary && { p, results, verdict: summary.report.verdict } }),
+      diagnostic: Boolean(selection), diagnosticIncomplete: Boolean(selection) && !captured, judged: summary && { p, results, verdict: summary.report.verdict } }),
     interrupted: abort.signal.aborted, summaryInvalidates: true });
     if (line) console.log(line);
     console.log(`Move harness status ${status.outcome} (${mode}, evidence ${status.evidence})`);
