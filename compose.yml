@@ -126,7 +126,7 @@ services:
     environment:
       FUKULOW_DOMAIN: ${FUKULOW_DOMAIN:-localhost}
       # This official image includes the official package; fail closed on drift.
-      NGINX_ACME_PACKAGE_VERSION: 1.31.8+0.4.1-1~trixie
+      NGINX_ACME_PACKAGE_VERSION: 1.31.9+0.4.2-1~trixie
     volumes:
       - ./deploy/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
       - ./deploy/nginx-acme.sh:/etc/nginx/acme-entrypoint.sh:ro
