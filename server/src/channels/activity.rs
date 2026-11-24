@@ -1,6 +1,6 @@
 //! Organization notices are invalidations, never Message delivery or authorization grants.
 use super::*;
-use crate::lock_ignoring_poison;
+use crate::{get_mut_ignoring_poison, lock_ignoring_poison};
 use auth::activity::ChangeScope;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -144,11 +144,7 @@ impl QueryToken {
 impl Drop for QueryToken {
     fn drop(&mut self) {
         if self.valid()
-            && let Some(recovery) = self
-                .recovery
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
+            && let Some(recovery) = get_mut_ignoring_poison(&mut self.recovery).as_ref()
         {
             // No query guard, fallback snapshot or frame can fence this token
             // after its last owner drops. Retain its reset authority as one bit,

@@ -38,6 +38,11 @@ pub(crate) fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+#[inline]
+pub(crate) fn get_mut_ignoring_poison<T>(mutex: &mut Mutex<T>) -> &mut T {
+    mutex.get_mut().unwrap_or_else(PoisonError::into_inner)
+}
+
 pub fn spawn_revocation_holds_sampler() -> Option<tokio::task::JoinHandle<()>> {
     observability::spawn_revocation_holds_sampler(channels::activity::revocation_hold_counts)
 }
