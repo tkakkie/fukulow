@@ -47,6 +47,29 @@ async function revealVirtualRow(container: Locator, position: number): Promise<L
   return row
 }
 
+
+// DIAGNOSTIC ONLY (#956): never merged.
+async function diag956(pages: Array<[string, Page]>, target?: Locator): Promise<string> {
+  const out: string[] = []
+  for (const [name, p] of pages) {
+    out.push(name + ' ' + JSON.stringify(await p.evaluate(() => {
+      const el = document.querySelector('#main-content .topic-view__scroll') as HTMLElement | null
+      const rows = el ? [...el.querySelectorAll('[data-message-id]')] : []
+      return el && { top: el.scrollTop, h: el.clientHeight, sh: el.scrollHeight, gap: el.scrollHeight - el.scrollTop - el.clientHeight,
+        newBelow: document.querySelector('.topic-view__new-below')?.textContent?.trim() ?? null, mounted: rows.length,
+        last: rows.at(-1)?.getAttribute('data-message-id'), lastPos: rows.at(-1)?.closest('[aria-posinset]')?.getAttribute('aria-posinset'),
+        panel: !!document.querySelector('#panel-content .reply-panel__scroll') }
+    }).catch(e => String(e))))
+    if (target && p === target.page()) {
+      out.push('target ' + JSON.stringify(await target.evaluate((b: HTMLElement) => {
+        const r = b.getBoundingClientRect(); const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
+        return { rect: [r.x, r.y, r.width, r.height], vh: innerHeight, hit: hit ? hit.tagName + '.' + hit.className + ' ' + (hit.textContent ?? '').trim().slice(0, 30) : null, self: hit === b || b.contains(hit) }
+      }).catch(e => String(e))))
+    }
+  }
+  return out.join('\n')
+}
+
 async function readVirtualRows(container: Locator, total: number) {
   await expectVirtualTotal(container, total)
   const rows: Array<{ id: string | null; text: string }> = []
@@ -445,7 +468,10 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
       await revealVirtualRow(topicScroll, total)
       const visibleTopicRow = p.locator(`#main-content [data-message-id="${chainMessages[51].id}"]`)
       await expect(visibleTopicRow).toBeVisible()
-      await visibleTopicRow.getByRole('button', { name: /返信/ }).click()
+      const replyButton = visibleTopicRow.getByRole('button', { name: /返信/ })
+      try { await replyButton.click({ timeout: 30_000 }) } catch (e) {
+        throw new Error(`DIAG956 click\n${await diag956([['owner', ownerPage], ['peer', peerPage]], replyButton)}\n${String(e)}`)
+      }
     }
 
     const ownerPanel = ownerPage.locator('#panel-content')
@@ -489,7 +515,9 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
 
     await expect(ownerPanel.locator(`[data-message-id="${ownerReplyMsg.id}"]`)).toContainText(ownerReplyBody)
     await expect(peerPanel.locator(`[data-message-id="${ownerReplyMsg.id}"]`)).toContainText(ownerReplyBody)
-    await expect(peerPage.locator(`#main-content [data-message-id="${ownerReplyMsg.id}"]`)).toContainText(ownerReplyBody)
+    try { await expect(peerPage.locator(`#main-content [data-message-id="${ownerReplyMsg.id}"]`)).toContainText(ownerReplyBody) } catch (e) {
+      throw new Error(`DIAG956 peer-main\n${await diag956([['owner', ownerPage], ['peer', peerPage]])}\n${String(e)}`)
+    }
 
     // Peer replies to a descendant (grandchildA1) through the panel Composer; verify it inherits the same Topic and root, and appears live in Owner's panel.
     await revealVirtualRow(peerPanel.locator('.reply-panel__scroll'), 4)
@@ -510,7 +538,9 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
 
     await expect(peerPanel.locator(`[data-message-id="${peerReplyMsg.id}"]`)).toContainText(peerReplyBody)
     await expect(ownerPanel.locator(`[data-message-id="${peerReplyMsg.id}"]`)).toContainText(peerReplyBody)
-    await expect(ownerPage.locator(`#main-content [data-message-id="${peerReplyMsg.id}"]`)).toContainText(peerReplyBody)
+    try { await expect(ownerPage.locator(`#main-content [data-message-id="${peerReplyMsg.id}"]`)).toContainText(peerReplyBody) } catch (e) {
+      throw new Error(`DIAG956 owner-main\n${await diag956([['owner', ownerPage], ['peer', peerPage]])}\n${String(e)}`)
+    }
   } finally {
     await peerContext?.close()
     await ownerContext.close()
