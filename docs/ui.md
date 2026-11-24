@@ -46,7 +46,7 @@ Write shared web UI rules beyond code and tests (#200), including layout, naviga
 - Sign-out, Account Session replacement and Account switching clear all drafts. Drafts never enter web storage. Reload or browser termination loses them. `beforeunload` prompts for non-empty drafts and pending sends are best effort, especially on phones.
 
 ## 4. Design tokens
-Values in `web/src/app.css` under `:root`, with dark overrides under `prefers-color-scheme: dark` and manual theme (§7). Components use tokens only. No literal colours, radii or font sizes.
+Values in `web/src/app.css` under `:root` using `light-dark()`, with `color-scheme` for system and manual theme (§7). Components use tokens only. No literal colours, radii or font sizes.
 
 | Token | Use |
 |---|---|

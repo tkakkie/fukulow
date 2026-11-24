@@ -1,32 +1,32 @@
 :root {
   color-scheme: light dark;
 
-  /* Colour tokens — Light (docs/ui.md §4) */
-  --app: #E9EFED;
-  --navbox: #F5F8F7;
-  --surface: #FFFFFF;
-  --bg: #F6F8F7;
-  --hover: #E3EBE8;
-  --text: #15201E;
-  --text2: #46534F;
-  --muted: #5F6C68;
-  --border: #DDE5E2;
-  --border-input: #7E8C88;
-  --primary: #0B6B63;
-  --on-primary: #FFFFFF;
-  --tint: #DDF0EC;
-  --on-tint: #0A5650;
-  --link: #0A5E57;
-  --focus: #0B6B63;
-  --amber: #F59E0B;
-  --on-amber: #3B2300;
-  --logo-ink: #15201E;
-  --mention: #FFF3D6;
-  --on-mention: #6B3F00;
-  --danger: #B42318;
-  --danger-bg: #FDECEA;
-  --info-bg: #E6F1F8;
-  --on-info: #0B4A6F;
+  /* Colour tokens — Light / Dark (docs/ui.md §4) */
+  --app: light-dark(#E9EFED, #0A0F0E);
+  --navbox: light-dark(#F5F8F7, #121918);
+  --surface: light-dark(#FFFFFF, #161E1D);
+  --bg: light-dark(#F6F8F7, #0F1514);
+  --hover: light-dark(#E3EBE8, #1A2423);
+  --text: light-dark(#15201E, #E5ECEA);
+  --text2: light-dark(#46534F, #A8B5B1);
+  --muted: light-dark(#5F6C68, #93A19D);
+  --border: light-dark(#DDE5E2, #26312F);
+  --border-input: light-dark(#7E8C88, #66736F);
+  --primary: light-dark(#0B6B63, #3CC4B1);
+  --on-primary: light-dark(#FFFFFF, #04211D);
+  --tint: light-dark(#DDF0EC, #133430);
+  --on-tint: light-dark(#0A5650, #9DE6D9);
+  --link: light-dark(#0A5E57, #6FD9C9);
+  --focus: light-dark(#0B6B63, #6FD9C9);
+  --amber: light-dark(#F59E0B, #F5A524);
+  --on-amber: light-dark(#3B2300, #3B2300);
+  --logo-ink: light-dark(#15201E, #15201E);
+  --mention: light-dark(#FFF3D6, #36290C);
+  --on-mention: light-dark(#6B3F00, #FCE3A6);
+  --danger: light-dark(#B42318, #F97066);
+  --danger-bg: light-dark(#FDECEA, #3A1714);
+  --info-bg: light-dark(#E6F1F8, #10283A);
+  --on-info: light-dark(#0B4A6F, #B9DDF5);
 
   /* Type scale — 15px base in rem (docs/ui.md §4) */
   --font-sans: 'Inter', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', Meiryo, sans-serif;
@@ -76,68 +76,12 @@
   --touch-target: 32px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    color-scheme: dark;
-    --app: #0A0F0E;
-    --navbox: #121918;
-    --surface: #161E1D;
-    --bg: #0F1514;
-    --hover: #1A2423;
-    --text: #E5ECEA;
-    --text2: #A8B5B1;
-    --muted: #93A19D;
-    --border: #26312F;
-    --border-input: #66736F;
-    --primary: #3CC4B1;
-    --on-primary: #04211D;
-    --tint: #133430;
-    --on-tint: #9DE6D9;
-    --link: #6FD9C9;
-    --focus: #6FD9C9;
-    --amber: #F5A524;
-    --on-amber: #3B2300;
-    --logo-ink: #15201E;
-    --mention: #36290C;
-    --on-mention: #FCE3A6;
-    --danger: #F97066;
-    --danger-bg: #3A1714;
-    --info-bg: #10283A;
-    --on-info: #B9DDF5;
-  }
-}
-
 :root[data-theme='light'] {
   color-scheme: light;
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --app: #0A0F0E;
-  --navbox: #121918;
-  --surface: #161E1D;
-  --bg: #0F1514;
-  --hover: #1A2423;
-  --text: #E5ECEA;
-  --text2: #A8B5B1;
-  --muted: #93A19D;
-  --border: #26312F;
-  --border-input: #66736F;
-  --primary: #3CC4B1;
-  --on-primary: #04211D;
-  --tint: #133430;
-  --on-tint: #9DE6D9;
-  --link: #6FD9C9;
-  --focus: #6FD9C9;
-  --amber: #F5A524;
-  --on-amber: #3B2300;
-  --logo-ink: #15201E;
-  --mention: #36290C;
-  --on-mention: #FCE3A6;
-  --danger: #F97066;
-  --danger-bg: #3A1714;
-  --info-bg: #10283A;
-  --on-info: #B9DDF5;
 }
 
 @media (max-width: 599px) {

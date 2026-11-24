@@ -31,22 +31,32 @@ export function contrastRatio(fgHex: string, bgHex: string): number {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
-function extractColorTokens(cssBlock: string): Record<string, string> {
-  const tokens: Record<string, string> = {}
-  for (const m of cssBlock.matchAll(/(--[a-z0-9-]+)\s*:\s*(#[0-9A-Fa-f]{6})\s*;/g)) {
-    tokens[m[1]] = m[2].toUpperCase()
-  }
-  return tokens
-}
+export function parseAppThemes(css: string): {
+  light: Record<string, string>
+  dark: Record<string, string>
+  duplicates: string[]
+  bareHexTokens: string[]
+} {
+  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '')
+  const light: Record<string, string> = {}
+  const dark: Record<string, string> = {}
+  const duplicates: string[] = []
+  const bareHexTokens: string[] = []
 
-function parseAppThemes(css: string): { light: Record<string, string>; dark: Record<string, string> } {
-  const darkMatch = css.match(/@media\s*\(prefers-color-scheme:\s*dark\)\s*\{([\s\S]*?)\n\}/)
-  const darkBlock = darkMatch ? darkMatch[1] : ''
-  const lightBlock = darkMatch ? css.slice(0, darkMatch.index) : css
-  return {
-    light: extractColorTokens(lightBlock),
-    dark: extractColorTokens(darkBlock),
+  for (const m of stripped.matchAll(
+    /(--[a-z0-9-]+)\s*:\s*light-dark\(\s*(#[0-9A-Fa-f]{6})\s*,\s*(#[0-9A-Fa-f]{6})\s*\)\s*;/g,
+  )) {
+    const [, name, lightHex, darkHex] = m
+    if (name in light) duplicates.push(name)
+    light[name] = lightHex.toUpperCase()
+    dark[name] = darkHex.toUpperCase()
   }
+
+  for (const m of stripped.matchAll(/(--[a-z0-9-]+)\s*:\s*(#[0-9A-Fa-f]{3,8})\s*;/g)) {
+    bareHexTokens.push(m[1])
+  }
+
+  return { light, dark, duplicates, bareHexTokens }
 }
 
 const CSS_NAMED_COLOURS = new Set([
@@ -167,9 +177,11 @@ function walkSvelte(dir: string, out: string[] = []): string[] {
 }
 
 describe('design tokens and WCAG 2.2 AA contrast pairs (docs/ui.md §4)', () => {
-  const { light, dark } = parseAppThemes(appCss)
+  const { light, dark, duplicates, bareHexTokens } = parseAppThemes(appCss)
 
   it('defines every required light and dark token from docs/ui.md §4 in web/src/app.css', () => {
+    expect(duplicates).toEqual([])
+    expect(bareHexTokens).toEqual([])
     expect(light).toEqual({
       '--app': '#E9EFED',
       '--navbox': '#F5F8F7',
@@ -226,14 +238,30 @@ describe('design tokens and WCAG 2.2 AA contrast pairs (docs/ui.md §4)', () => 
       '--on-info': '#B9DDF5',
     })
 
-    const manualDarkMatch = appCss.match(/:root\[data-theme='dark'\]\s*\{([\s\S]*?)\n\}/)
-    expect(manualDarkMatch).not.toBeNull()
-    expect(extractColorTokens(manualDarkMatch![1])).toEqual(dark)
-    expect(appCss).toContain(":root:not([data-theme='light'])")
+    // Single-source color-scheme rules replace duplicated dark token blocks (#832)
+    expect(appCss).toMatch(/:root\s*\{[\s\S]*?color-scheme:\s*light dark;/)
+    expect(appCss).toMatch(/:root\[data-theme='light'\]\s*\{\s*color-scheme:\s*light;\s*\}/)
+    expect(appCss).toMatch(/:root\[data-theme='dark'\]\s*\{\s*color-scheme:\s*dark;\s*\}/)
+    expect(appCss).not.toMatch(/prefers-color-scheme:\s*dark/)
     expect(appCss).toMatch(/html\s*\{[\s\S]*?font-size:\s*93\.75%;/)
     expect(appCss).toMatch(/html\[data-text-size='s'\]\s*\{\s*font-size:\s*87\.5%;\s*\}/)
     expect(appCss).toMatch(/html\[data-text-size='l'\]\s*\{\s*font-size:\s*106\.25%;\s*\}/)
     expect(appCss).toMatch(/html\[data-text-size='xl'\]\s*\{\s*font-size:\s*118\.75%;\s*\}/)
+  })
+
+  it('parses both light-dark() arguments and flags duplicate or bare-hex colour tokens', () => {
+    const sample = `
+      :root {
+        --a: light-dark(#ffffff, #000000);
+        --a: light-dark(#eeeeee, #111111);
+        --b: #123456;
+      }
+    `
+    const parsed = parseAppThemes(sample)
+    expect(parsed.light).toEqual({ '--a': '#EEEEEE' })
+    expect(parsed.dark).toEqual({ '--a': '#111111' })
+    expect(parsed.duplicates).toEqual(['--a'])
+    expect(parsed.bareHexTokens).toEqual(['--b'])
   })
 
   it('satisfies WCAG 2.2 AA contrast (>= 4.5:1 text, >= 3:1 non-text) for all allowed pairs in light and dark', () => {
