@@ -14,8 +14,12 @@ export const controlSQL = `SELECT json_build_object('lsn',pg_current_wal_insert_
   'redo',c.redo_lsn::text,'checkpoint',c.checkpoint_lsn::text,'time',c.checkpoint_time) FROM pg_control_checkpoint() c;`;
 export type Control = { lsn: string; redo: string; checkpoint: string; time: string };
 const coversSQL = (redo: string, before: string) => `SELECT pg_wal_lsn_diff('${redo}','${before}') >= 0;`;
-const lsn = /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/;
+const lsn = /^(?:0|[1-9A-F][0-9A-F]{0,7})\/(?:0|[1-9A-F][0-9A-F]{0,7})$/;
 const isLsn = (value: unknown): value is string => typeof value === 'string' && lsn.test(value);
+const parseLsn = (value: string): bigint => {
+  const [high, low] = value.split('/');
+  return (BigInt(`0x${high}`) << 32n) | BigInt(`0x${low}`);
+};
 const isControl = (control: Control | null | undefined): control is Control =>
   isLsn(control?.lsn) && isLsn(control.redo) && isLsn(control.checkpoint)
   && typeof control.time === 'string' && control.time.length > 0;
@@ -64,7 +68,7 @@ export function walCheckpoints(sql: Sql, from: string, to: string): WalCheckpoin
   }
 }
 
-// Only the explicit checkpoint's own two records, matched by LSN, may appear.
+// Only the explicit checkpoint's own two records, matched by canonical LSN, may appear.
 function walReasons(cp: CheckpointRecord & { ok: true }, measured: Measured, wal: WalCheckpoints | null): string[] {
   if (!wal) return ['checkpoint WAL evidence missing'];
   if (wal.ok === false && typeof wal.reason === 'string') return [`checkpoint WAL evidence: ${wal.reason}`];
@@ -72,6 +76,14 @@ function walReasons(cp: CheckpointRecord & { ok: true }, measured: Measured, wal
     return ['checkpoint WAL evidence malformed'];
   }
   if (wal.from !== cp.before.lsn || wal.to !== measured.controlAfter.lsn) return ['checkpoint WAL evidence covers the wrong range'];
+  const from = parseLsn(wal.from), to = parseLsn(wal.to);
+  if (wal.records.some(r => {
+    const position = parseLsn(r.lsn);
+    return position < from || position >= to;
+  })) {
+    return ['checkpoint WAL record outside the covered range'];
+  }
+  if (parseLsn(cp.after.redo) >= parseLsn(cp.after.checkpoint)) return ['checkpoint WAL redo must precede completion'];
   const redo = (r: WalRecord) => r.lsn === cp.after.redo && r.type === 'CHECKPOINT_REDO';
   const completion = (r: WalRecord) => r.lsn === cp.after.checkpoint && r.type === 'CHECKPOINT_ONLINE';
   const out: string[] = [];

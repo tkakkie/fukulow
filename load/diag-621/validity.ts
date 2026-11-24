@@ -22,11 +22,13 @@ const count = (value: number) => Number.isSafeInteger(value) && value >= 0;
 export const hasLoadCounts = (load: Load | null | undefined): load is Load =>
   !!load && [load.accepted, load.attempts, load.iterations, load.errors, load.dropped].every(count);
 
-export const hasMeasurementStats = (m: Result['measured']): m is NonNullable<Result['measured']> =>
+type MeasurementStats = Omit<NonNullable<Result['measured']>, 'controlBefore' | 'controlAfter'>;
+export const hasMeasurementStats = (m: MeasurementStats | null): m is MeasurementStats =>
   !!m && hasLoadCounts(m.load) && count(m.accepted)
   && [m.cpuUsec, m.walBytes, m.statWal?.records, m.statWal?.fpi, m.statWal?.bytes, m.statementInfo?.dealloc].every(Number.isFinite);
 
-export const hasVerificationShape = (v: Result['verification']): v is NonNullable<Result['verification']> =>
+type VerificationShape = Pick<NonNullable<Result['verification']>, 'shapeAfter'>;
+export const hasVerificationShape = (v: VerificationShape | null): v is VerificationShape =>
   !!v?.shapeAfter && [v.shapeAfter.heap_bytes, v.shapeAfter.index_bytes].every(count);
 
 export const hasStatementFields = (statements: readonly Statement[]) => Array.isArray(statements) && statements.every(s =>

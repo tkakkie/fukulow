@@ -147,6 +147,46 @@ test('duplicate checkpoint redo with no completion record makes the window INVAL
     'explicit checkpoint records not found exactly once in WAL');
 });
 
+const outsideWalRange = 'checkpoint WAL record outside the covered range';
+for (const [name, from, redo, completion, to, reason] of [
+  ['checkpoint records before the WAL range', '0/9', '0/2', '0/3', '0/500', outsideWalRange],
+  ['checkpoint completion at the WAL range end', '0/1', '0/2', '0/500', '0/500', outsideWalRange],
+  ['checkpoint redo at the WAL range start', '0/F', '0/F', '0/10', '0/500', null],
+  ['checkpoint completion before redo', '0/1', '0/10', '0/F', '0/500', 'checkpoint WAL redo must precede completion'],
+] as const) {
+  test(name, () => {
+    const m = manifest();
+    const [base] = m.windows;
+    const checkpointControl = (lsn: string): Control => ({ ...control(lsn), redo, checkpoint: completion });
+    const r = analyze(m, w => {
+      const f = fixture(w, armValues(w.arm));
+      if (w.id === base.id) {
+        f.result.checkpoint = { ok: true, startedAt: 's', ms: 41, before: control(from), after: checkpointControl('0/20') };
+        f.result.measured!.controlBefore = checkpointControl('0/20');
+        f.result.measured!.controlAfter = checkpointControl(to);
+        f.result.walCheckpoints = { ok: true, from, to, records: [
+          { lsn: redo, type: 'CHECKPOINT_REDO' }, { lsn: completion, type: 'CHECKPOINT_ONLINE' },
+        ] };
+      }
+      return f;
+    });
+    assert.equal(r.ok, reason === null);
+    assert.equal(r.tables.windows.find(row => row.id === base.id)?.valid, reason === null);
+    assert.deepEqual(r.invalid, reason === null ? [] : [{ id: base.id, reasons: [reason] }]);
+    assert.equal(r.tables['paired-deltas'].some(x => x.phase === base.phase && x.shape === base.shape && x.round === base.round), reason === null);
+  });
+}
+
+test('an additional checkpoint record at the WAL range end makes the window INVALID', () => {
+  assertPartialEvidenceInvalid({ walCheckpoints: { ...explicitWal, records: [...explicitWal.records, { lsn: explicitWal.to, type: 'CHECKPOINT_SHUTDOWN' }] } },
+    outsideWalRange);
+});
+
+test('an alternative LSN spelling for the same checkpoint redo makes the window INVALID', () => {
+  assertPartialEvidenceInvalid({ walCheckpoints: { ...explicitWal, records: [{ ...explicitWal.records[0], lsn: '0/02' }, explicitWal.records[1]] } },
+    'checkpoint WAL evidence malformed');
+});
+
 test('an INVALID manifest decision excludes a valid result from pairs', () => {
   const [bad] = windows(false);
   const m = manifest(false, { id: bad.id, reasons: ['checkpoint: boom'] });
