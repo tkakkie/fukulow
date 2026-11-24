@@ -39,7 +39,7 @@ const window = (generation: number) => ({ generation, main: paging(), list: pagi
   mainTopics: new Set<string>(), listTopics: new Set<string>(), mainPositions: new Map<string, number>(), baselines: new Map<string, TopicBaseline>(), topics: new Map<string, TopicWindow>(),
   evidence: topicEvidence(), evidenceRefresh: new Set<string>(),
   summaryThrough: new Map<string, number>(),
-  summaries: new Set<string>(), summaryRetries: new Map<string, SummaryRetry>(), reads: new Map<ReadSlot, symbol>(), unavailable: false })
+  summaries: new Set<string>(), summaryDemands: new Map<string, number>(), summaryRetries: new Map<string, SummaryRetry>(), reads: new Map<ReadSlot, symbol>(), unavailable: false })
 type Window = ReturnType<typeof window>
 type ReadSlot = 'main' | 'list' | `summary:${string}` | `topic:${string}`
 
@@ -421,7 +421,8 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   function pruneActivity(w: Window) {
     const channel = [...windows].find(([, value]) => value === w)?.[0]
     if (!channel) return
-    const retained = new Set([...w.baselines.keys(), ...w.topics.keys()])
+    // An awaited activitySummary() owns its target until it settles; pruning it would abort that read.
+    const retained = new Set([...w.baselines.keys(), ...w.topics.keys(), ...w.summaryDemands.keys()])
     for (const m of w.messages.values()) if (m.topic_id) retained.add(m.topic_id)
     for (const key of activityTargets.keys()) if (key.startsWith(`topic:${channel}:`) &&
       !retained.has(key.slice(`topic:${channel}:`.length))) releaseActivity(key)
@@ -805,9 +806,15 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       // Return accepted REST evidence even if display trimming immediately evicts its body.
       let accepted: TopicSummaryResponse | undefined
       const stop = activityTargets.get(`topic:${channel}:${topic}`)?.observeSummary?.(response => { accepted = response })
+      w.summaryDemands.set(topic, (w.summaryDemands.get(topic) ?? 0) + 1)
       try {
         if (cached) { target?.invalidate(); await target?.refresh() } else await target?.ensure()
-      } finally { stop?.() }
+      } finally {
+        stop?.()
+        const left = (w.summaryDemands.get(topic) ?? 1) - 1
+        if (left > 0) w.summaryDemands.set(topic, left)
+        else w.summaryDemands.delete(topic)
+      }
       if (accepted && current(channel, w)) return { ok: true, data: accepted }
       const failed = target?.failure()
       if (failed) return failed
