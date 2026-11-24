@@ -1,10 +1,10 @@
 import { flushSync, mount, unmount } from 'svelte'
-import { parse, type AST } from 'svelte/compiler'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createChannelMembers, channelMemberError } from './channel-members'
 import { channelMembersAdapter } from './channel-members.svelte'
 import ChannelMembers from './ChannelMembers.svelte'
 import * as api from './api'
+import { withMiniDom } from './svelte-dom-test-helpers'
 
 afterEach(() => vi.useRealTimers())
 function fixture(memberListRole?: () => api.Role | null) {
@@ -169,220 +169,8 @@ it('times out loading after 10 seconds and never lets a late list replace the re
   expect(c.controller.get().members[0].id).toBe('self')
 })
 
-class MiniNode {
-  parentNode: MiniNode | null = null
-  childNodes: MiniNode[] = []
-  constructor(readonly nodeType: number, readonly nodeName: string, public ownerDocument: MiniDoc | null, public data = '') {}
-  get nodeValue(): string { return this.data }
-  set nodeValue(v: string) { this.data = String(v ?? '') }
-  get firstChild(): MiniNode | null { return this.childNodes[0] ?? null }
-  get lastChild(): MiniNode | null { return this.childNodes[this.childNodes.length - 1] ?? null }
-  get nextSibling(): MiniNode | null {
-    if (!this.parentNode) return null
-    const i = this.parentNode.childNodes.indexOf(this)
-    return i >= 0 ? (this.parentNode.childNodes[i + 1] ?? null) : null
-  }
-  get previousSibling(): MiniNode | null {
-    if (!this.parentNode) return null
-    const i = this.parentNode.childNodes.indexOf(this)
-    return i > 0 ? (this.parentNode.childNodes[i - 1] ?? null) : null
-  }
-  get parentElement(): MiniEl | null { return this.parentNode instanceof MiniEl ? this.parentNode : null }
-  get isConnected(): boolean {
-    let cur: MiniNode | null = this
-    while (cur) { if (cur.nodeType === 9) return true; cur = cur.parentNode }
-    return false
-  }
-  get textContent(): string {
-    if (this.nodeType === 3 || this.nodeType === 8) return this.data
-    return this.childNodes.map(c => c.textContent).join('')
-  }
-  set textContent(v: string) {
-    for (const c of this.childNodes) c.parentNode = null
-    this.childNodes = []
-    if (v && this.ownerDocument) this.appendChild(this.ownerDocument.createTextNode(v))
-  }
-  appendChild<T extends MiniNode>(child: T): T { return this.insertBefore(child, null) }
-  insertBefore<T extends MiniNode>(child: T, ref: MiniNode | null): T {
-    if (child.nodeType === 11) { for (const g of [...child.childNodes]) this.insertBefore(g, ref); return child }
-    if (child.parentNode) child.parentNode.removeChild(child)
-    child.parentNode = this
-    const idx = ref ? this.childNodes.indexOf(ref) : -1
-    if (idx === -1) this.childNodes.push(child)
-    else this.childNodes.splice(idx, 0, child)
-    return child
-  }
-  removeChild<T extends MiniNode>(child: T): T {
-    const i = this.childNodes.indexOf(child)
-    if (i !== -1) { this.childNodes.splice(i, 1); child.parentNode = null }
-    return child
-  }
-  remove(): void { this.parentNode?.removeChild(this) }
-  append(...nodes: (MiniNode | string)[]): void {
-    for (const n of nodes) {
-      this.appendChild(typeof n === 'string' ? (this.ownerDocument ?? (this as unknown as MiniDoc)).createTextNode(n) : n)
-    }
-  }
-  before(...nodes: MiniNode[]): void { for (const n of nodes) this.parentNode?.insertBefore(n, this) }
-  after(...nodes: MiniNode[]): void { const ref = this.nextSibling; for (const n of nodes) this.parentNode?.insertBefore(n, ref) }
-  cloneNode(deep = false): MiniNode {
-    const copy = new MiniNode(this.nodeType, this.nodeName, this.ownerDocument, this.data)
-    if (deep) for (const c of this.childNodes) copy.appendChild(c.cloneNode(true))
-    return copy
-  }
-  private listeners = new Map<string, Array<(e: unknown) => void>>()
-  addEventListener(type: string, fn: ((e: unknown) => void) | null): void {
-    if (!fn) return
-    const list = this.listeners.get(type) ?? []
-    list.push(fn); this.listeners.set(type, list)
-  }
-  removeEventListener(type: string, fn: ((e: unknown) => void) | null): void {
-    const list = this.listeners.get(type)
-    if (!list || !fn) return
-    const i = list.indexOf(fn); if (i !== -1) list.splice(i, 1)
-  }
-  dispatchClick(): void {
-    let cur: MiniNode | null = this
-    const evt = { type: 'click', target: this, currentTarget: this as MiniNode | null, defaultPrevented: false, cancelBubble: false, preventDefault() { this.defaultPrevented = true }, stopPropagation() { this.cancelBubble = true } }
-    while (cur && !evt.cancelBubble) {
-      evt.currentTarget = cur
-      for (const fn of [...(cur.listeners.get('click') ?? [])]) fn.call(cur, evt)
-      cur = cur.parentNode
-    }
-  }
-}
-
-class MiniText extends MiniNode {
-  constructor(doc: MiniDoc | null, d = '') { super(3, '#text', doc, d) }
-  override cloneNode(): MiniText { return new MiniText(this.ownerDocument, this.data) }
-}
-
-class MiniComment extends MiniNode {
-  constructor(doc: MiniDoc | null, d = '') { super(8, '#comment', doc, d) }
-  override cloneNode(): MiniComment { return new MiniComment(this.ownerDocument, this.data) }
-}
-
-class MiniEl extends MiniNode {
-  readonly tagName: string
-  readonly localName: string
-  readonly attrs = new Map<string, string>()
-  readonly content: MiniNode
-  readonly classList = {
-    toggle: (cls: string, force?: boolean): boolean => {
-      const set = new Set(this.className.split(/\s+/).filter(Boolean))
-      const shouldHave = force ?? !set.has(cls)
-      if (shouldHave) set.add(cls)
-      else set.delete(cls)
-      this.className = [...set].join(' ')
-      return shouldHave
-    },
-    contains: (cls: string): boolean => this.className.split(/\s+/).includes(cls),
-  }
-  constructor(tag: string, doc: MiniDoc | null) {
-    super(1, tag.toUpperCase(), doc)
-    this.tagName = tag.toUpperCase()
-    this.localName = tag.toLowerCase()
-    this.content = new MiniNode(11, '#document-fragment', doc)
-  }
-  get disabled(): boolean { return this.attrs.has('disabled') }
-  set disabled(v: boolean) { if (v) this.attrs.set('disabled', ''); else this.attrs.delete('disabled') }
-  get className(): string { return this.attrs.get('class') ?? '' }
-  set className(v: string) { this.setAttribute('class', v) }
-  setAttribute(k: string, v: string | null): void {
-    if (v === null) this.attrs.delete(k.toLowerCase())
-    else this.attrs.set(k.toLowerCase(), String(v))
-  }
-  getAttribute(k: string): string | null { return this.attrs.get(k.toLowerCase()) ?? null }
-  hasAttribute(k: string): boolean { return this.attrs.has(k.toLowerCase()) }
-  removeAttribute(k: string): void { this.attrs.delete(k.toLowerCase()) }
-  set innerHTML(html: string) {
-    const target = this.tagName === 'TEMPLATE' ? this.content : this
-    target.childNodes = []
-    if (!html || !this.ownerDocument) return
-    appendAst(parse(html, { modern: true }).fragment.nodes, target, this.ownerDocument)
-  }
-  focus(): void { if (!this.disabled && this.ownerDocument) this.ownerDocument.activeElement = this }
-  click(): void { if (!this.disabled) { this.focus(); this.dispatchClick() } }
-  querySelectorAll(sel: string): MiniEl[] { return findAll(this, sel) }
-  querySelector(sel: string): MiniEl | null { return findAll(this, sel)[0] ?? null }
-  override cloneNode(deep = false): MiniEl {
-    const copy = new MiniEl(this.localName, this.ownerDocument)
-    for (const [k, v] of this.attrs) copy.attrs.set(k, v)
-    if (deep) {
-      for (const c of this.childNodes) copy.appendChild(c.cloneNode(true))
-      for (const c of this.content.childNodes) copy.content.appendChild(c.cloneNode(true))
-    }
-    return copy
-  }
-}
-
-class MiniDoc extends MiniNode {
-  readonly body: MiniEl
-  activeElement: MiniEl | null = null
-  constructor() {
-    super(9, '#document', null)
-    this.ownerDocument = this
-    this.body = new MiniEl('body', this)
-    this.appendChild(this.body)
-    this.activeElement = this.body
-  }
-  createElement(tag: string): MiniEl { return new MiniEl(tag, this) }
-  createTextNode(d = ''): MiniText { return new MiniText(this, d) }
-  createComment(d = ''): MiniComment { return new MiniComment(this, d) }
-  createDocumentFragment(): MiniNode { return new MiniNode(11, '#document-fragment', this) }
-  importNode<T extends MiniNode>(n: T, deep = false): T { return n.cloneNode(deep) as T }
-}
-
-function appendAst(nodes: AST.TemplateNode[], parent: MiniNode, doc: MiniDoc): void {
-  for (const n of nodes) {
-    if (n.type === 'Text') parent.appendChild(doc.createTextNode(n.data))
-    else if (n.type === 'Comment') parent.appendChild(doc.createComment(n.data))
-    else if (n.type === 'RegularElement') {
-      const el = doc.createElement(n.name)
-      for (const a of n.attributes) {
-        if (a.type === 'Attribute') {
-          el.setAttribute(a.name, a.value === true ? '' : Array.isArray(a.value) ? a.value.map(c => (c.type === 'Text' ? c.data : '')).join('') : '')
-        }
-      }
-      appendAst(n.fragment.nodes, el.tagName === 'TEMPLATE' ? el.content : el, doc)
-      parent.appendChild(el)
-    }
-  }
-}
-
-function findAll(root: MiniNode, sel: string): MiniEl[] {
-  const out: MiniEl[] = []
-  const visit = (n: MiniNode) => {
-    for (const c of n.childNodes) {
-      if (c instanceof MiniEl) {
-        const match =
-          sel === 'button' ? c.localName === 'button'
-          : sel === 'li' ? c.localName === 'li'
-          : sel === '[role="dialog"]' ? c.getAttribute('role') === 'dialog'
-          : sel === '[role="alert"]' ? c.getAttribute('role') === 'alert'
-          : sel === '.ui-chip' ? c.className.split(/\s+/).includes('ui-chip')
-          : sel.startsWith('button:not(:disabled)') ? c.localName === 'button' && !c.disabled
-          : false
-        if (match) out.push(c)
-      }
-      visit(c)
-    }
-  }
-  visit(root)
-  return out
-}
-
 it('renders チャンネル管理者 in the メンバー tab, hides controls without can_manage_managers, confirms or cancels via Dialog, disables controls while pending, refreshes after 204, and shows Japanese refusals', async () => {
-  const keys = ['window', 'document', 'Node', 'Element', 'HTMLElement', 'HTMLButtonElement', 'Text', 'Comment', 'DocumentFragment'] as const
-  const saved = new Map(keys.map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]))
-  const doc = new MiniDoc()
-  const win = new MiniNode(9, '#window', doc)
-  const patches: Record<string, unknown> = {
-    window: win, document: doc, Node: MiniNode, Element: MiniEl, HTMLElement: MiniEl, HTMLButtonElement: MiniEl, Text: MiniText, Comment: MiniComment, DocumentFragment: MiniNode,
-  }
-  for (const [k, v] of Object.entries(patches)) Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true })
-
-  try {
+  await withMiniDom(async (doc) => {
     const initialMembers: api.ChannelMember[] = [
       { id: 'self', name: '山田 太郎', role: 'owner', manager: true },
       { id: 'm2', name: '佐藤 花子', role: 'member', manager: false },
@@ -514,12 +302,7 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     }
 
     await unmount(inst)
-  } finally {
-    for (const [k, desc] of saved) {
-      if (desc) Object.defineProperty(globalThis, k, desc)
-      else Reflect.deleteProperty(globalThis, k)
-    }
-  }
+  })
 })
 
 it('a committed self notice during a grant mutation fences the list without leaving the action busy', async () => {

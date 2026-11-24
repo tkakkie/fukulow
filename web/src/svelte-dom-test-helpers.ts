@@ -6,6 +6,18 @@ type ListenerEntry = {
   capture: boolean
 }
 
+export interface MiniDomEventInit {
+  bubbles?: boolean
+  cancelable?: boolean
+  key?: string
+  shiftKey?: boolean
+  altKey?: boolean
+  ctrlKey?: boolean
+  metaKey?: boolean
+  isComposing?: boolean
+  keyCode?: number
+}
+
 export class MiniDomEvent {
   readonly type: string
   readonly bubbles: boolean
@@ -14,19 +26,26 @@ export class MiniDomEvent {
   cancelBubble = false
   target: unknown = null
   currentTarget: unknown = null
-  key = ''
-  shiftKey = false
-  altKey = false
-  ctrlKey = false
-  metaKey = false
-  isComposing = false
-  keyCode = 0
+  key: string
+  shiftKey: boolean
+  altKey: boolean
+  ctrlKey: boolean
+  metaKey: boolean
+  isComposing: boolean
+  keyCode: number
   private path: MiniEventTarget[] = []
 
-  constructor(type: string, init?: { bubbles?: boolean; cancelable?: boolean }) {
+  constructor(type: string, init?: MiniDomEventInit) {
     this.type = type
     this.bubbles = init?.bubbles ?? false
     this.cancelable = init?.cancelable ?? false
+    this.key = init?.key ?? ''
+    this.shiftKey = init?.shiftKey ?? false
+    this.altKey = init?.altKey ?? false
+    this.ctrlKey = init?.ctrlKey ?? false
+    this.metaKey = init?.metaKey ?? false
+    this.isComposing = init?.isComposing ?? false
+    this.keyCode = init?.keyCode ?? 0
   }
 
   preventDefault(): void {
@@ -247,15 +266,21 @@ export class MiniNode extends MiniEventTarget {
     this.remove()
   }
 
-  before(...nodes: MiniNode[]): void {
+  before(...nodes: (MiniNode | string)[]): void {
     if (!this.parentNode) return
-    for (const n of nodes) this.parentNode.insertBefore(n, this)
+    for (const n of nodes) {
+      const node = typeof n === 'string' ? (this.ownerDocument ?? (this as unknown as MiniDocument)).createTextNode(n) : n
+      this.parentNode.insertBefore(node, this)
+    }
   }
 
-  after(...nodes: MiniNode[]): void {
+  after(...nodes: (MiniNode | string)[]): void {
     if (!this.parentNode) return
     const ref = this.nextSibling
-    for (const n of nodes) this.parentNode.insertBefore(n, ref)
+    for (const n of nodes) {
+      const node = typeof n === 'string' ? (this.ownerDocument ?? (this as unknown as MiniDocument)).createTextNode(n) : n
+      this.parentNode.insertBefore(node, ref)
+    }
   }
 
   remove(): void {
@@ -292,8 +317,8 @@ export class MiniCharacterData extends MiniNode {
     return this.data
   }
 
-  set nodeValue(v: string) {
-    this.data = v
+  set nodeValue(v: string | null) {
+    this.data = v ?? ''
   }
 
   override cloneNode(): MiniCharacterData {
@@ -356,11 +381,12 @@ export class MiniElement extends MiniNode {
   scrollIntoView() {}
   selectionStart: number | null = 0
   selectionEnd: number | null = 0
-  setSelectionRange(start: number, end: number) { this.selectionStart = start; this.selectionEnd = end }
+  setSelectionRange(start: number, end = start) { this.selectionStart = start; this.selectionEnd = end }
   scrollTop = 0
   scrollHeight = 0
   clientHeight = 0
   readonly content: MiniDocumentFragment
+  readonly dataset: Record<string, string> = {}
   readonly style = {
     setProperty() {},
     removeProperty() {},
@@ -545,6 +571,21 @@ export class MiniElement extends MiniNode {
     }
   }
 
+  input(val: string): void {
+    if (this.disabled) return
+    this._value = val
+    this.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+  }
+
+  keydown(
+    key: string,
+    opts: { shiftKey?: boolean; altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; isComposing?: boolean; keyCode?: number } = {},
+  ): MiniDomEvent {
+    const evt = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key, ...opts })
+    this.dispatchEvent(evt)
+    return evt
+  }
+
   get hidden(): boolean {
     return this.attrs.has('hidden')
   }
@@ -600,20 +641,22 @@ export class MiniElement extends MiniNode {
 }
 
 export class MiniDocument extends MiniNode {
+  readonly documentElement: MiniElement
   readonly head: MiniElement
   readonly body: MiniElement
   activeElement: MiniElement | null = null
   defaultView: MiniWindow | null = null
+  visibilityState = 'visible'
 
   constructor() {
     super(9, '#document', null)
     this.ownerDocument = this
-    const html = new MiniElement('html', this)
+    this.documentElement = new MiniElement('html', this)
     this.head = new MiniElement('head', this)
     this.body = new MiniElement('body', this)
-    html.appendChild(this.head)
-    html.appendChild(this.body)
-    this.appendChild(html)
+    this.documentElement.appendChild(this.head)
+    this.documentElement.appendChild(this.body)
+    this.appendChild(this.documentElement)
     this.activeElement = this.body
   }
 
@@ -657,6 +700,7 @@ export class MiniDocument extends MiniNode {
     this.head.textContent = ''
     this.body.textContent = ''
     this.activeElement = this.body
+    this.visibilityState = 'visible'
   }
 }
 
@@ -862,8 +906,70 @@ const GLOBAL_KEYS = [
   'Comment',
   'DocumentFragment',
   'MutationObserver',
+  'ResizeObserver',
+  'IntersectionObserver',
   'CSS',
 ] as const
+
+class StubObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+function installGlobals(): { doc: MiniDocument; win: MiniWindow; restore: () => void } {
+  const savedGlobals = new Map<string, PropertyDescriptor | undefined>()
+  for (const key of GLOBAL_KEYS) {
+    savedGlobals.set(key, Object.getOwnPropertyDescriptor(globalThis, key))
+  }
+  const doc = new MiniDocument()
+  const win = new MiniWindow(doc)
+  const patches: Record<string, unknown> = {
+    window: win,
+    document: doc,
+    navigator: { userAgent: 'node' },
+    Node: MiniNode,
+    Element: MiniElement,
+    HTMLElement: MiniElement,
+    HTMLButtonElement: MiniElement,
+    HTMLInputElement: MiniElement,
+    HTMLTextAreaElement: MiniElement,
+    HTMLSelectElement: MiniElement,
+    HTMLMediaElement: class extends MiniElement {},
+    Text: MiniText,
+    Comment: MiniComment,
+    DocumentFragment: MiniDocumentFragment,
+    MutationObserver: class {
+      observe() {}
+      disconnect() {}
+      takeRecords() {
+        return []
+      }
+    },
+    ResizeObserver: StubObserver,
+    IntersectionObserver: StubObserver,
+    CSS: { escape: (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '\\$&') },
+  }
+  for (const [k, v] of Object.entries(patches)) {
+    Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true })
+  }
+  const restore = () => {
+    for (const [key, desc] of savedGlobals) {
+      if (desc) Object.defineProperty(globalThis, key, desc)
+      else Reflect.deleteProperty(globalThis, key)
+    }
+  }
+  return { doc, win, restore }
+}
+
+export async function withMiniDom<T>(fn: (doc: MiniDocument, win: MiniWindow) => Promise<T>): Promise<T> {
+  const { doc, win, restore } = installGlobals()
+  try {
+    return await fn(doc, win)
+  } finally {
+    restore()
+  }
+}
 
 export interface MiniDomEnv {
   readonly doc: MiniDocument
@@ -871,43 +977,15 @@ export interface MiniDomEnv {
 }
 
 export function installMiniDom(): MiniDomEnv {
-  const savedGlobals = new Map<string, PropertyDescriptor | undefined>()
   let doc!: MiniDocument
   let win!: MiniWindow
+  let restore: (() => void) | null = null
 
   beforeAll(() => {
-    for (const key of GLOBAL_KEYS) {
-      savedGlobals.set(key, Object.getOwnPropertyDescriptor(globalThis, key))
-    }
-    doc = new MiniDocument()
-    win = new MiniWindow(doc)
-    const patches: Record<string, unknown> = {
-      window: win,
-      document: doc,
-      navigator: { userAgent: 'node' },
-      Node: MiniNode,
-      Element: MiniElement,
-      HTMLElement: MiniElement,
-      HTMLButtonElement: MiniElement,
-      HTMLInputElement: MiniElement,
-      HTMLTextAreaElement: MiniElement,
-      HTMLSelectElement: MiniElement,
-      HTMLMediaElement: class extends MiniElement {},
-      Text: MiniText,
-      Comment: MiniComment,
-      DocumentFragment: MiniDocumentFragment,
-      MutationObserver: class {
-        observe() {}
-        disconnect() {}
-        takeRecords() {
-          return []
-        }
-      },
-      CSS: { escape: (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '\\$&') },
-    }
-    for (const [k, v] of Object.entries(patches)) {
-      Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true })
-    }
+    const installed = installGlobals()
+    doc = installed.doc
+    win = installed.win
+    restore = installed.restore
   })
 
   beforeEach(() => {
@@ -917,10 +995,8 @@ export function installMiniDom(): MiniDomEnv {
   })
 
   afterAll(() => {
-    for (const [key, desc] of savedGlobals) {
-      if (desc) Object.defineProperty(globalThis, key, desc)
-      else Reflect.deleteProperty(globalThis, key)
-    }
+    restore?.()
+    restore = null
   })
 
   afterEach(() => vi.useRealTimers())
