@@ -9,5 +9,5 @@
     "lib": ["ES2023"],
     "types": ["k6", "node"]
   },
-  "include": ["*.ts", "hot-plans/*.ts", "search-engines/*.ts", "search-engines/quality/*.ts", "search-engines/diagnose-870/*.ts", "log-compare/*.ts", "slice5/*.ts", "move/*.ts", "sql-probes/515-replay/*.ts", "sql-probes/515-app/*.ts", "sql-probes/519-unread-counts/*.ts", "unread-init/*.ts", "harness-core/*.ts", "launcher/*.ts", "capacity/*.ts"]
+  "include": ["*.ts", "hot-plans/*.ts", "search-engines/*.ts", "search-engines/quality/*.ts", "search-engines/diagnose-870/*.ts", "log-compare/*.ts", "slice5/*.ts", "move/*.ts", "sql-probes/515-replay/*.ts", "sql-probes/515-app/*.ts", "sql-probes/519-unread-counts/*.ts", "unread-init/*.ts", "harness-core/*.ts", "launcher/*.ts", "capacity/*.ts", "diag-621/*.ts"]
 }
