@@ -405,6 +405,29 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     )
   })
 
+  it('createTopicSummaryFocusController resumes after destroy: the Workspace effect may restart on the same instance', () => {
+    const body = {}
+    let activeElement: unknown = body
+    const fakeDoc: FocusDocument = {
+      get activeElement() {
+        return activeElement
+      },
+      body,
+      addEventListener() {},
+      removeEventListener() {},
+    }
+    const ctrl = createTopicSummaryFocusController(() => fakeDoc)
+    const summary = { isConnected: true, focus: vi.fn(() => { activeElement = summary }) }
+    const composer = { isConnected: true, focus: vi.fn(() => { activeElement = composer }) }
+    ctrl.syncNavigation({ revision: 1, focus: 'topic-summary' }, 't-1')
+    ctrl.destroy()
+    expect(ctrl.isPending(1)).toBe(false)
+    ctrl.syncNavigation({ revision: 2, focus: 'topic-summary' }, 't-1')
+    expect(ctrl.step({ revision: 2, status: 'ready', findSummary: () => summary, composer })).toBe('focused_summary')
+    expect(summary.focus).toHaveBeenCalledOnce()
+    expect(composer.focus).not.toHaveBeenCalled()
+  })
+
   it('createTopicSummaryFocusController waits for delayed summary render, falls back only when ready/error, and cancels on navigation or user focus change', () => {
     const body = {}
     let activeElement: unknown = body
@@ -650,6 +673,15 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     expect(target.focus).not.toHaveBeenCalled()
     expect(onUserCancel).toHaveBeenCalledTimes(3)
     expect(pending.isActive()).toBe(false)
+
+    // 5. A disconnected activeElement (no focusin) at apply() is a reset, not a user move: the candidate gets focus
+    activeElement = opener
+    const token4 = pending.begin()
+    activeElement = { isConnected: false }
+    expect(pending.hasUserMovedFocus(token4)).toBe(false)
+    expect(pending.apply([target], { token: token4 })).toBe(true)
+    expect(target.focus).toHaveBeenCalledOnce()
+    expect(onUserCancel).toHaveBeenCalledTimes(3)
   })
 
   it('createPendingFocus does nothing after cancel/reset, destroy/disconnect, or when all targets are disconnected', () => {

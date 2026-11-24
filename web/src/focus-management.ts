@@ -480,7 +480,7 @@ export function createTopicSummaryFocusController(
 
     destroy(): void {
       pending = null
-      pendingFocus.destroy()
+      pendingFocus.cancel()
     },
   }
 }
