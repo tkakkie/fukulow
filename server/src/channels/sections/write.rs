@@ -159,7 +159,7 @@ async fn write_body(
     owner: Owner,
     mutation: Mutation,
 ) -> Result<(Option<Uuid>, i64, activity::SectionsPublication), WriteExit> {
-    sqlx::query("SET LOCAL lock_timeout='5s'")
+    sqlx::query(crate::database::LOCK_TIMEOUT_SQL)
         .execute(&mut *tx)
         .await?;
     // An absent owned id is already a no-op. Recheck Membership without

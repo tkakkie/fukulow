@@ -34,7 +34,7 @@ pub(crate) async fn validate(
 /// Bound lock/work waits; rotate all selected Organizations atomically.
 pub async fn rotate(pool: &PgPool, organization: Option<Uuid>) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SET LOCAL lock_timeout='5s'")
+    sqlx::query(crate::database::LOCK_TIMEOUT_SQL)
         .execute(&mut *tx)
         .await?;
     sqlx::query("SET LOCAL statement_timeout='10s'")

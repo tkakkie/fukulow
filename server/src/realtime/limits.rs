@@ -1,5 +1,6 @@
 //! Socket admission (#196 A): per-Account and global connection caps, and the
 //! control-frame budget charged per connection and per Account before any DB access.
+use crate::lock_ignoring_poison;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -136,7 +137,7 @@ impl SocketGate {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         // Every step under the lock is await-free and leaves counts consistent.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        lock_ignoring_poison(&self.inner)
     }
 
     /// Takes one per-Account slot and one global slot, or neither. The Account cap and

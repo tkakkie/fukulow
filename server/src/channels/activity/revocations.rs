@@ -130,12 +130,12 @@ impl Tracking {
 impl Revocations {
     pub(super) fn check(&self, id: u64) -> Option<Check> {
         let tracking = self.0.as_ref()?;
-        tracking.lock().unwrap_or_else(|e| e.into_inner()).check(id)
+        lock_ignoring_poison(tracking).check(id)
     }
 
     pub(super) fn invalidate(&self, id: u64) {
         if let Some(tracking) = &self.0 {
-            let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = lock_ignoring_poison(tracking);
             if let Some((_, Scope::Notice(proof))) = state.live.get_mut(&id) {
                 proof.verified = false;
                 proof.revision += 1;
@@ -145,20 +145,20 @@ impl Revocations {
 
     pub(super) fn finish(&self, id: u64) {
         if let Some(tracking) = &self.0 {
-            let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = lock_ignoring_poison(tracking);
             state.remove(id);
         }
     }
 
     pub(super) fn capture(&mut self, scope: ChangeScope) -> Capture {
         let tracking = self.0.get_or_insert_with(Default::default);
-        let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock_ignoring_poison(tracking);
         Capture::new(tracking, &mut state, Scope::Mutation(scope), None)
     }
 
     pub(super) fn retire_member(&self) {
         if let Some(tracking) = &self.0 {
-            let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = lock_ignoring_poison(tracking);
             let min = state.sequence + 1;
             state.retire_member(min);
         }
@@ -178,7 +178,7 @@ impl Revocations {
         let Some(tracking) = &self.0 else {
             return Vec::new();
         };
-        let state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+        let state = lock_ignoring_poison(tracking);
         state
             .live
             .keys()
@@ -191,7 +191,7 @@ impl Revocations {
         let Some(tracking) = &self.0 else {
             return false;
         };
-        let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock_ignoring_poison(tracking);
         let Some(current) = state.check(check.id) else {
             return false;
         };
@@ -267,7 +267,7 @@ impl Capture {
         let Some(tracking) = self.tracking.upgrade() else {
             return;
         };
-        let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock_ignoring_poison(&tracking);
         // Capture calls are serialized by the mutation transaction's Organization
         // lock. Post-COMMIT callbacks can run in a different order.
         match self.scope {
@@ -287,7 +287,7 @@ impl Capture {
 
     pub(super) fn notice(&self, channel: Uuid, public: bool, role: Role) -> Option<Arc<Self>> {
         let tracking = self.tracking.upgrade()?;
-        let mut state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock_ignoring_poison(&tracking);
         let in_scope = match self.scope {
             Scope::Mutation(ChangeScope::Channel(id)) => id == channel,
             Scope::Mutation(ChangeScope::Role) => public,
@@ -312,7 +312,7 @@ impl Capture {
 
     pub(super) fn check(&self) -> Option<Check> {
         let tracking = self.tracking.upgrade()?;
-        let state = tracking.lock().unwrap_or_else(|e| e.into_inner());
+        let state = lock_ignoring_poison(&tracking);
         state.check(self.id)
     }
 }
@@ -320,10 +320,7 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         if let Some(tracking) = self.tracking.upgrade() {
-            tracking
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(self.id);
+            lock_ignoring_poison(&tracking).remove(self.id);
         }
     }
 }

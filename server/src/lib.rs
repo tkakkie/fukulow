@@ -27,11 +27,16 @@ use shutdown::Shutdown;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    sync::LazyLock,
+    sync::{LazyLock, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[inline]
+pub(crate) fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 pub fn spawn_revocation_holds_sampler() -> Option<tokio::task::JoinHandle<()>> {
     observability::spawn_revocation_holds_sampler(channels::activity::revocation_hold_counts)

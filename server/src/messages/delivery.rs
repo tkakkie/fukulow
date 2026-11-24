@@ -1,7 +1,7 @@
 use super::Message;
 use super::admission::{Admission, WORK_TIMEOUT};
 use super::failure::{FailureWatch, Failures};
-use crate::channels;
+use crate::{channels, lock_ignoring_poison};
 use axum::extract::ws::Utf8Bytes;
 use std::{
     collections::{HashMap, HashSet},
@@ -25,7 +25,7 @@ struct OrganizationReservation {
 
 impl Drop for OrganizationReservation {
     fn drop(&mut self) {
-        let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = lock_ignoring_poison(&self.registry);
         if let Some(count) = registry.get_mut(&self.organization) {
             *count -= 1;
             if *count == 0 {
@@ -43,7 +43,7 @@ struct ChannelLease {
 
 impl Drop for ChannelLease {
     fn drop(&mut self) {
-        let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = lock_ignoring_poison(&self.registry);
         if let Some((leases, _)) = registry.get_mut(&self.key) {
             *leases -= 1;
             if *leases == 0 {
@@ -387,10 +387,7 @@ impl Delivery {
         // Admission and final removal share one short lock: a concurrent release
         // cannot remove a replacement entry. No lock is held during publication.
         // Acquiring global capacity first bounds this map to 2,048 live entries.
-        let mut registry = self
-            .organization_notifications
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut registry = lock_ignoring_poison(&self.organization_notifications);
         let count = registry.entry(organization).or_default();
         if *count == MAX_ORGANIZATION_NOTIFICATIONS {
             return None;
@@ -506,7 +503,7 @@ impl Delivery {
     }
 
     fn channel(&self, key: ChannelKey) -> ChannelLease {
-        let mut registry = self.recipients.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = lock_ignoring_poison(&self.recipients);
         let (leases, fanout) = registry.entry(key).or_default();
         *leases += 1;
         ChannelLease {
@@ -624,10 +621,7 @@ impl Delivery {
         messages: &[super::ChannelEvent],
     ) {
         // Only this Channel's lock covers the O(subscribers) snapshot.
-        let recipients: Vec<_> = channel
-            .recipients
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let recipients: Vec<_> = lock_ignoring_poison(&channel.recipients)
             .values()
             .cloned()
             .collect();
@@ -725,12 +719,7 @@ impl LiveQueue {
                 .failures
                 .subscribe((self.organization, channel), &self.notification_failed);
             let fanout = self.delivery.channel((self.organization, channel));
-            fanout
-                .fanout
-                .recipients
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(self.id, self.sender.clone());
+            lock_ignoring_poison(&fanout.fanout.recipients).insert(self.id, self.sender.clone());
             self.channels.insert(channel, fanout);
         }
     }
@@ -739,12 +728,7 @@ impl LiveQueue {
             .failures
             .unsubscribe((self.organization, channel), &self.notification_failed);
         if let Some(fanout) = self.channels.remove(&channel) {
-            fanout
-                .fanout
-                .recipients
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&self.id);
+            lock_ignoring_poison(&fanout.fanout.recipients).remove(&self.id);
         }
     }
 }

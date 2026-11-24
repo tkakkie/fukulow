@@ -1,3 +1,4 @@
+use crate::lock_ignoring_poison;
 use std::{
     collections::HashMap,
     hash::Hash,
@@ -201,9 +202,7 @@ impl SignInThrottle {
     }
 
     fn lock(&self) -> MutexGuard<'_, Buckets> {
-        self.buckets
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        lock_ignoring_poison(&self.buckets)
     }
 
     pub(super) fn begin(&self, ip: IpAddr) -> Result<Attempt, Duration> {
@@ -296,9 +295,7 @@ struct SecurityBuckets {
 
 impl AccountSecurityThrottle {
     fn lock(&self) -> MutexGuard<'_, SecurityBuckets> {
-        self.buckets
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        lock_ignoring_poison(&self.buckets)
     }
 
     pub(super) fn begin(
