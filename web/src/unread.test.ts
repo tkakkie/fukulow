@@ -827,6 +827,91 @@ it('submits pre-hide seen read in a Topic visit when returning and presenting on
   expect(c.unread.get('A').topics.T).toMatchObject({ position: 2, unreadCount: 1 })
   await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
+async function setupPreHideQueuedMark(topicId: string | null, extraSelf = false) {
+  const c = unreadClient()
+  c.history.splice(0, c.history.length, msg(1, topicId), msg(2, topicId), msg(3, topicId))
+  c.summaries.clear()
+  if (topicId === null) {
+    c.rows[0] = row({ as_of_seq: 3, read_seq: 1, main_unread_count: 2, unread_count: 2 })
+  } else {
+    c.rows[0] = row({ as_of_seq: 3, read_seq: 0, main_unread_count: 0, unread_count: 2 })
+    c.summaries.set(topicId, summary(topicId, 3, 1, 2))
+  }
+  await c.boot()
+  if (extraSelf) {
+    c.event(msg(4, topicId, 'me')); await flush()
+  }
+  const id = await c.enter(topicId)
+  const firstMark = deferred<Result<ReadPosition>>()
+  c.unreadApi.markRead.mockReturnValueOnce(firstMark.promise)
+  // Enter at position 1, hold mark 2 in flight, present 3 so it queues, then hide.
+  c.unread.presented(id, [2]); await flush()
+  c.unread.presented(id, [3]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  c.unread.visibility(false)
+  // Mark 2 persists and a baseline accepts position 2 while hidden.
+  firstMark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 2 })); await flush()
+  if (topicId === null) {
+    c.rows[0] = row({ as_of_seq: 3, read_seq: 2, main_unread_count: 1, unread_count: 1 })
+    c.unread.activitySnapshot([c.rows[0]]); await flush()
+    expect(c.unread.get('A').main).toMatchObject({ position: 2, unreadCount: 1 })
+  } else {
+    c.summaries.set(topicId, summary(topicId, 3, 2, 1))
+    c.unread.activityRead('A', topicId); await flush()
+    expect(c.unread.get('A').topics[topicId]).toMatchObject({ position: 2, unreadCount: 1 })
+  }
+  return { c, id }
+}
+it.each([['Channel main', null], ['Topic', 'T']] as const)(
+  'submits pre-hide seen read in a %s visit when returning and presenting only the entry-boundary row',
+  async (_label, topicId) => {
+    const { c, id } = await setupPreHideQueuedMark(topicId)
+    c.unread.visibility(true); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+    c.unread.presented(id, [1]); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2, 3])
+    const scope = topicId === null ? c.unread.get('A').main : c.unread.get('A').topics[topicId]
+    expect(scope).toMatchObject({ position: 3, unreadCount: 0 })
+    await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+  },
+)
+it.each([['Channel main', null], ['Topic', 'T']] as const)(
+  'submits pre-hide seen read in a %s visit when returning and presenting only a self-authored row',
+  async (_label, topicId) => {
+    const { c, id } = await setupPreHideQueuedMark(topicId, true)
+    c.unread.visibility(true); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+    c.unread.presented(id, [4]); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2, 3])
+    const scope = topicId === null ? c.unread.get('A').main : c.unread.get('A').topics[topicId]
+    expect(scope).toMatchObject({ position: 3, unreadCount: 0 })
+    await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+  },
+)
+it.each([['Channel main', null], ['Topic', 'T']] as const)(
+  'keeps pre-hide latch in a %s visit when returning with an empty presented list and counts recover',
+  async (_label, topicId) => {
+    const { c, id } = await setupPreHideQueuedMark(topicId)
+    c.unread.visibility(true); await flush()
+    c.unread.presented(id, []); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+    if (topicId === null) {
+      c.unreadApi.listChannels.mockResolvedValueOnce(http(503))
+      void c.unread.refresh(); await flush()
+      expect(c.unread.get('A').main.unreadCount).toBeNull()
+      await vi.advanceTimersByTimeAsync(500); await flush()
+      expect(c.unread.get('A').main).toMatchObject({ position: 2, unreadCount: 1 })
+    } else {
+      c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
+      c.unread.activityRead('A', topicId); await flush()
+      expect(c.unread.get('A').topics[topicId].unreadCount).toBeNull()
+      await vi.advanceTimersByTimeAsync(500); await flush()
+      expect(c.unread.get('A').topics[topicId]).toMatchObject({ position: 2, unreadCount: 1 })
+    }
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+    await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+  },
+)
 it('does not trigger a mark when a Topic visit leaves recovery without a fresh presentation', async () => {
   const c = unreadClient(); await c.boot(); const id = await c.enter('T')
   c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))

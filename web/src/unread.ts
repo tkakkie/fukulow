@@ -722,17 +722,13 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     presented(id: symbol, seqs: number[]) {
       if (!visit || visit.id !== id || !isVisit(visit)) return
       const c = getChannel(visit.scope.channel)
-      let fresh = false
       for (const seq of seqs) {
         const m = c.records.get(seq)
-        if (m && inScope(m, visit.scope)) {
-          visit.presented.add(seq)
-          fresh = true
-        }
+        if (m && inScope(m, visit.scope)) visit.presented.add(seq)
       }
       while (visit.presented.size > UNREAD_RECORD_LIMIT) visit.presented.delete(visit.presented.values().next().value!)
       recordVisitCoverage(visit)
-      if (fresh) visit.needsPresentation = false
+      if (seqs.length > 0) visit.needsPresentation = false
       enqueue(visit)
     },
     replaceSession() { session++; reset() },
