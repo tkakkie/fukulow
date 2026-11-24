@@ -1,9 +1,10 @@
 // Publish gate (#808): the tagged commit is on main and its main push CI succeeded.
 import { pathToFileURL } from 'node:url'
 
-// Every workflow that runs on a main push. Their jobs include all required checks that
-// main commits get (web, server, docker, lint, migrations, checks, scan); smoke and
-// budget-changes run only on the pull request. e2e-compose is the release-candidate gate.
+// The workflows that verify a main push. Their jobs include all required checks that
+// main commits get (web, server, docker, lint, migrations, checks, scan); budget-changes
+// and smoke run only on the pull request. e2e-compose is the release-candidate gate.
+// docker-cache and e2e-cache only write caches on main (#926).
 export const requiredWorkflows = ['.github/workflows/ci.yml', '.github/workflows/e2e-compose.yml',
   '.github/workflows/gitleaks.yml', '.github/workflows/security.yml']
 

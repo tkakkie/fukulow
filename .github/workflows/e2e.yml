@@ -46,6 +46,8 @@ jobs:
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
+        # PR-ref caches are readable only by that PR and evicted main's (10 GB limit); e2e-cache.yml saves main's (#926).
+        with: { save-if: false }
       - run: cargo build --locked
       - name: Provision least-privilege connection and run one-shot migrations
         shell: bash

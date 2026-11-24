@@ -179,7 +179,7 @@ jobs:
       - name: Compose security configuration and rejection checks
         run: node --test scripts/compose-security.test.ts
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # Reads the layer cache only: docker-ops writes it on main, and two writers to one scope would race.
+      # Read-only: docker-cache.yml is the only writer of scope=docker (#926). A PR export once hung for 17 minutes.
       - name: Build image with GitHub Actions layer cache
         id: build-image
         timeout-minutes: 20
@@ -219,7 +219,7 @@ jobs:
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version }
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # Only main writes the layer cache: a PR export once hung for 17 minutes, and PRs read main's layers anyway.
+      # Read-only: docker-cache.yml is the only writer of scope=docker (#926). A PR export once hung for 17 minutes.
       - name: Build image with GitHub Actions layer cache
         id: build-image
         timeout-minutes: 20
@@ -231,12 +231,8 @@ jobs:
               throw new Error("Actions cache credentials are not available");
             }
             // compose.dev.yml is the explicit source-build override (#808); compose.yml pulls releases.
-            const args = ["buildx", "bake", "--load", "--file", "compose.dev.yml",
-              "--set", "app.cache-from=type=gha,scope=docker"];
-            if (context.eventName === "push") {
-              args.push("--set", "app.cache-to=type=gha,scope=docker,mode=max");
-            }
-            await exec.exec("docker", args);
+            await exec.exec("docker", ["buildx", "bake", "--load", "--file", "compose.dev.yml",
+              "--set", "app.cache-from=type=gha,scope=docker"]);
       - name: Image ships the license texts, copyright notice and third-party notices (#807)
         run: bash scripts/check-image-licenses.sh fukulow-app
       - name: Database roles fail closed and never export passwords to logs or SQL snapshots
