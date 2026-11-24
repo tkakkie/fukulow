@@ -3,9 +3,8 @@ import { pathToFileURL } from 'node:url'
 
 // The workflows that verify a main push. Their jobs include all required checks that
 // main commits get (web, server, docker, lint, migrations, checks, scan); budget-changes
-// runs only on the pull request. e2e-compose is the release-candidate gate. smoke (e2e.yml)
-// also runs on main to keep its rust-cache there (#926) and is not required; docker-cache
-// only writes the layer cache.
+// and smoke run only on the pull request. e2e-compose is the release-candidate gate.
+// docker-cache and e2e-cache only write caches on main (#926).
 export const requiredWorkflows = ['.github/workflows/ci.yml', '.github/workflows/e2e-compose.yml',
   '.github/workflows/gitleaks.yml', '.github/workflows/security.yml']
 

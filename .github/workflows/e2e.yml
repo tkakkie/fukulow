@@ -1,9 +1,6 @@
 name: e2e
 on:
   pull_request:
-  # #926: main runs the smoke too, so main holds the rust-cache every PR restores (PRs cannot read each other's).
-  push:
-    branches: [main]
 permissions:
   contents: read
 jobs:
@@ -49,8 +46,8 @@ jobs:
       - run: npm --prefix web run build
       - run: rustup toolchain install --profile minimal  # version and components come from rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
-        # PR-ref caches are readable only by that PR; saving them evicts main's (10 GB repository limit).
-        with: { save-if: "${{ github.ref == 'refs/heads/main' }}" }
+        # PR-ref caches are readable only by that PR and evicted main's (10 GB limit); e2e-cache.yml saves main's (#926).
+        with: { save-if: false }
       - run: cargo build --locked
       - name: Provision least-privilege connection and run one-shot migrations
         shell: bash
