@@ -77,6 +77,7 @@ const result = await launch(queue, {
   exists: existsSync, claim, remove: p => rmSync(p, { force: true }), append: appendFileSync, write: writeFileSync,
   freeBytes: p => safe(() => freeBytes(exec(['df', '-Pk', p]).stdout)), dockerFreeBytes: image => safe(() => dockerFreeBytes(image)),
   nodeVersion: process.version, pid: process.pid, now: () => new Date(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
+  every: (ms, fn) => { const t = setInterval(fn, ms); return () => clearInterval(t); },
   onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => { signalled.abort(); handler(s); }); },
 });
 console.log(JSON.stringify(result));

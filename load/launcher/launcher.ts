@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import type { HostRecord } from '../harness-core/host-record.ts';
+import { requirementViolations, type HostRecord } from '../harness-core/host-record.ts';
+import { tctl } from '../harness-core/thermal.ts';
 import type { Platform } from './platform.ts';
 import type { Job, Queue } from './queue.ts';
 
@@ -28,6 +29,8 @@ export type Deps = {
   pid: number;
   now(): Date;
   sleep(ms: number): Promise<void>;
+  // Calls fn every ms until the returned stop is called.
+  every(ms: number, fn: () => void): () => void;
   onSignal(handler: (signal: string) => void): void;
 };
 export type Result = { outcome: 'done' | 'stop'; reason?: string; jobs: { name: string; exit: number | null }[] };
@@ -36,6 +39,7 @@ export type Result = { outcome: 'done' | 'stop'; reason?: string; jobs: { name: 
 export const workerPattern = /codex exec|agy -p|cargo (test|build|nextest|check|clippy)|playwright|vitest|k6 run|node load\//;
 export const maxLoad15 = 3;
 export const pollMs = 60_000;
+export const coolPollMs = 15_000;
 const GiB = 1024 ** 3;
 
 export function workers(ps: string, self: number): string[] {
@@ -74,6 +78,8 @@ export function preflight(d: Deps, q: Queue, job: Job, record: HostRecord): stri
   const busy = ps.status === 0 ? workers(ps.stdout, d.pid) : ['ps failed'];
   if (busy.length > 0) r.push(`workers running: ${busy.slice(0, 3).join(' | ')}`);
   r.push(...d.platform.violations(record));
+  r.push(...requirementViolations(record, job.requireHost));
+  if (job.thermalSampleSeconds !== undefined && d.platform.thermal(d.now()) === null) r.push('no thermal readings on this platform');
   const min = (job.minFreeGiB ?? 40) * GiB;
   const host = d.freeBytes(q.chainDir);
   if (host === null || host < min) r.push(`host free ${host === null ? 'unreadable' : (host / GiB).toFixed(1) + ' GiB'} < ${job.minFreeGiB ?? 40} GiB`);
@@ -105,6 +111,39 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     try { return await child.done; } finally { child = null; }
   };
   const stop = (reason: string): Result => { log(`STOP: ${reason}`); return { outcome: 'stop', reason, jobs }; };
+  // #796 L5: wait until Tctl is at most maxTctlC; past maxWaitSeconds, or unreadable, is a STOP.
+  // Every reading is kept in <job>-cooldown.json.
+  const coolDown = async (job: Job, c: NonNullable<Job['cooldown']>) => {
+    const start = d.now().getTime();
+    const readings: { at: string; tctlC: number | null }[] = [];
+    for (;;) {
+      const at = d.now();
+      const t = tctl(d.platform.thermal(at));
+      readings.push({ at: at.toISOString(), tctlC: t });
+      const waited = (at.getTime() - start) / 1000;
+      const problem = signalled ? `${signalled} while cooling down` : t === null ? 'Tctl unreadable' : t <= c.maxTctlC ? null
+        : waited >= c.maxWaitSeconds ? `Tctl ${t} °C > ${c.maxTctlC} °C after ${waited} s` : undefined;
+      if (problem !== undefined) {
+        d.write(join(q.chainDir, `${job.name}-cooldown.json`), JSON.stringify({ ...c, waitedSeconds: waited, ok: problem === null, problem, readings }, null, 2) + '\n');
+        if (problem === null) log(`${job.name}: cool-down done, Tctl ${t} °C after ${waited} s`);
+        return problem;
+      }
+      await d.sleep(Math.min(coolPollMs, c.maxWaitSeconds * 1000 - (at.getTime() - start)));
+    }
+  };
+  // One sample at start, then every thermalSampleSeconds, into <job>-thermal.jsonl. A failed read is
+  // kept as an error line, so a gap is visible instead of silently missing.
+  const sampleThermal = (job: Job, seconds: number) => {
+    const file = join(q.chainDir, `${job.name}-thermal.jsonl`);
+    const take = () => {
+      const at = d.now();
+      let line: unknown;
+      try { line = d.platform.thermal(at) ?? { at: at.toISOString(), error: 'no thermal readings' }; } catch (e) { line = { at: at.toISOString(), error: String(e) }; }
+      d.append(file, JSON.stringify(line) + '\n');
+    };
+    take();
+    return d.every(seconds * 1000, take);
+  };
   try {
     log(`queue ${q.name}: ${q.jobs.map(j => `${j.name} (#${j.issue})`).join(', ')}; waiting for an idle host`);
     for (;;) {
@@ -117,6 +156,10 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     for (const job of q.jobs) {
       if (signalled) return stop(`${signalled}; ${job.name} not started`);
       log(`${job.name}: go "${job.go.quote}" (${job.go.date})`);
+      if (job.cooldown) {
+        const problem = await coolDown(job, job.cooldown);
+        if (problem !== null) return stop(`${job.name} cool-down: ${problem}; job not started`);
+      }
       const before = d.platform.record(q.chainDir);
       d.write(join(q.chainDir, `${job.name}-host-before.json`), JSON.stringify(before, null, 2) + '\n');
       const problems = preflight(d, q, job, before);
@@ -129,7 +172,9 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       }
       if (job.postgresLogLabel) stopLogs = d.captureLogs(job.postgresLogLabel, join(q.chainDir, `${job.name}-postgres.log`));
       log(`${job.name}: start (once, no rerun)`);
-      const exit = await run(d.platform.inhibit(job.command), `${job.name}.log`, job);
+      const stopSampling = job.thermalSampleSeconds === undefined ? null : sampleThermal(job, job.thermalSampleSeconds);
+      let exit: number;
+      try { exit = await run(d.platform.inhibit(job.command), `${job.name}.log`, job); } finally { stopSampling?.(); }
       endLogs();
       jobs.push({ name: job.name, exit });
       d.write(join(q.chainDir, `${job.name}-host-after.json`), JSON.stringify(d.platform.record(q.chainDir), null, 2) + '\n');

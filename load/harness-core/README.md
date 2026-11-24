@@ -25,6 +25,10 @@ The launcher:
 - runs the preflight (pinned clean tree, Node, containers, platform conditions, free disk) and the job's own gate;
 - captures PostgreSQL logs;
 - runs each job once and writes one `chain.log`.
+- for a job with cooling fields (#796):
+  - `requireHost` lists boost, per-CPU boost, platform profile and hwmon fan-control values that must hold before the job; unreadable or different is a STOP;
+  - `cooldown` waits until k10temp Tctl is at most `maxTctlC`, and STOPs after `maxWaitSeconds`; every reading goes to `<job>-cooldown.json`;
+  - `thermalSampleSeconds` appends a `thermal.ts` sample (per-CPU `cpuinfo_avg_freq`, hwmon temperatures and fans) to `<job>-thermal.jsonl` while the job runs.
 
 A STOP or a failed job ends the queue. Nothing reruns: a `setup-failure` rerun under the rules below is a new queue entry with its own quoted go. Sleep prevention is `caffeinate` on macOS. On Linux it is the masked sleep targets, which are a preflight condition.
 

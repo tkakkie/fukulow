@@ -16,15 +16,24 @@ type World = {
   files: Map<string, string>; containers: string; ps: string; load: number[]; violations: string[]; exits: number[];
   head: string; dirty: string; node: string; free: number | null; dockerFree?: number | null; spawned: string[][]; captured: string[]; stoppedLogs: number;
   kills: number; busyAtExit: boolean[]; psLater?: string;
+  // Thermal fakes: Tctl per reading (the last one repeats; null is unreadable), the clock that sleep advances,
+  // the host record and the sampler's intervals and stops.
+  tctl: (number | null)[]; clock: number; record?: HostRecord; noThermal?: boolean; everyMs: number[]; samplerStops: number;
   signal?: { at: 'wait' | 'job' | 'gate'; handler?: (s: string) => void };
 };
 function world(over: Partial<World> = {}): World {
   return { files: new Map(), containers: '', ps: '1 /sbin/init\n', load: [0.5], violations: [], exits: [0, 0], head: 'abc1234def\n', dirty: '',
-    node: '26.13.1\n', free: 100 * GiB, spawned: [], captured: [], stoppedLogs: 0, kills: 0, busyAtExit: [], ...over };
+    node: '26.13.1\n', free: 100 * GiB, spawned: [], captured: [], stoppedLogs: 0, kills: 0, busyAtExit: [],
+    tctl: [40], clock: Date.parse('2026-11-24T00:00:00Z'), everyMs: [], samplerStops: 0, ...over };
 }
 function deps(w: World, platform?: Platform): Deps {
   const p: Platform = platform ?? { name: 'fake', inhibit: a => ['inhibit', ...a], violations: () => w.violations,
-    load15: () => (w.load.length > 1 ? w.load.shift()! : w.load[0]), record: () => ({ fake: true } as unknown as HostRecord) };
+    load15: () => (w.load.length > 1 ? w.load.shift()! : w.load[0]), record: () => w.record ?? ({ fake: true } as unknown as HostRecord),
+    thermal: now => {
+      if (w.noThermal) return null;
+      const t = w.tctl.length > 1 ? w.tctl.shift()! : w.tctl[0];
+      return { at: now.toISOString(), avgFreqKHz: [3_000_000], temperaturesC: (t === null ? {} : { 'k10temp/Tctl': t }) as Record<string, number>, fansRpm: {} };
+    } };
   return {
     platform: p,
     exec: argv => {
@@ -51,8 +60,9 @@ function deps(w: World, platform?: Platform): Deps {
     append: (path, text) => { w.files.set(path, (w.files.get(path) ?? '') + text); },
     write: (path, text) => { w.files.set(path, text); },
     freeBytes: () => w.free, dockerFreeBytes: () => (w.dockerFree === undefined ? w.free : w.dockerFree),
-    nodeVersion: 'v26.13.1', pid: 42, now: () => new Date('2026-11-24T00:00:00Z'),
-    sleep: async () => { if (w.signal?.at === 'wait') w.signal.handler?.('SIGINT'); },
+    nodeVersion: 'v26.13.1', pid: 42, now: () => new Date(w.clock),
+    sleep: async ms => { w.clock += ms; if (w.signal?.at === 'wait') w.signal.handler?.('SIGINT'); },
+    every: (ms, fn) => { w.everyMs.push(ms); fn(); return () => { w.samplerStops++; }; },
     onSignal: handler => { if (w.signal) w.signal.handler = handler; },
   };
 }
@@ -210,4 +220,76 @@ test('platform parts: sleep prevention and conditions', () => {
   assert.deepEqual(darwin.inhibit(['node', 'x']), ['caffeinate', '-dimsu', 'node', 'x']);
   assert.deepEqual(linux.inhibit(['node', 'x']), ['node', 'x']);
   assert.ok(linux.violations({ platform: 'linux', logicalCpus: 1, governors: null, ac: null, updateUnits: null, sleepUnits: null, snapHold: null } as unknown as HostRecord).length > 0);
+});
+
+const cooling = { cooldown: { maxTctlC: 50, maxWaitSeconds: 1200 } };
+
+test('the cool-down waits until Tctl is at most the limit, then starts the job, and keeps every reading', async () => {
+  const w = world({ tctl: [70, 60, 50] });
+  const r = await launch(queue([job('a', cooling)]), deps(w));
+  assert.equal(r.outcome, 'done');
+  assert.equal(w.spawned.length, 1);
+  const record = JSON.parse(w.files.get('/runs/chain/a-cooldown.json') ?? '{}');
+  assert.deepEqual([record.ok, record.waitedSeconds, record.readings.map((x: { tctlC: number }) => x.tctlC)], [true, 30, [70, 60, 50]]);
+  assert.match(chain(w), /a: cool-down done, Tctl 50 °C after 30 s/);
+});
+
+test('a host that stays hot, an unreadable Tctl or a signal during the cool-down is a STOP before the job', async () => {
+  const hot = world({ tctl: [51] });
+  const r = await launch(queue([job('a', cooling)]), deps(hot));
+  assert.match(r.reason ?? '', /a cool-down: Tctl 51 °C > 50 °C after 1200 s; job not started/);
+  assert.equal(JSON.parse(hot.files.get('/runs/chain/a-cooldown.json') ?? '{}').ok, false);
+  assert.deepEqual([hot.spawned.length, hot.files.has('/runs/HOST-BUSY')], [0, false]);
+
+  for (const over of [{ tctl: [null] }, { noThermal: true }]) {
+    const w = world(over);
+    assert.match((await launch(queue([job('a', cooling)]), deps(w))).reason ?? '', /Tctl unreadable/);
+    assert.equal(w.spawned.length, 0);
+  }
+
+  const signalled = world({ tctl: [70] });
+  const d = deps(signalled);
+  let handler: ((s: string) => void) | undefined;
+  d.onSignal = h => { handler = h; };
+  d.sleep = async ms => { signalled.clock += ms; handler?.('SIGTERM'); };
+  assert.match((await launch(queue([job('a', cooling)]), d)).reason ?? '', /SIGTERM while cooling down/);
+  assert.deepEqual([signalled.spawned.length, signalled.files.has('/runs/HOST-BUSY')], [0, false]);
+});
+
+test('required host settings are checked before the job; unreadable or different is a STOP', async () => {
+  const base = { platform: 'linux', logicalCpus: 2, boost: '0', policyBoost: { 0: [0, 1] }, platformProfile: 'performance', fanControl: { 'hp/pwm1_enable': 0 } };
+  const requireHost = { boost: '0', policyBoost: '0', platformProfile: 'performance', fanControl: { 'hp/pwm1_enable': 0 } };
+  const ok = world({ record: base as unknown as HostRecord });
+  assert.equal((await launch(queue([job('a', { requireHost })]), deps(ok))).outcome, 'done');
+  const cases: [Record<string, unknown>, RegExp][] = [
+    [{ boost: '1' }, /boost is 1, required 0/],
+    [{ policyBoost: { 0: [0], 1: [1] } }, /per-CPU boost is not 0 on every CPU/],
+    [{ platformProfile: 'balanced' }, /platform profile is balanced/],
+    [{ fanControl: { 'hp/pwm1_enable': 2 } }, /fan control hp\/pwm1_enable is 2, required 0/],
+    [{ fanControl: null }, /fan control hp\/pwm1_enable is unreadable/],
+  ];
+  for (const [over, pattern] of cases) {
+    const w = world({ record: { ...base, ...over } as unknown as HostRecord });
+    const r = await launch(queue([job('a', { requireHost })]), deps(w));
+    assert.match(r.reason ?? '', pattern);
+    assert.equal(w.spawned.length, 0);
+  }
+});
+
+test('thermal samples are taken while the job runs and stop when it exits, even if it fails', async () => {
+  const w = world({ exits: [3] });
+  const r = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), deps(w));
+  assert.equal(r.outcome, 'stop');
+  assert.deepEqual([w.everyMs, w.samplerStops], [[5000], 1]);
+  const lines = (w.files.get('/runs/chain/a-thermal.jsonl') ?? '').trim().split('\n').map(l => JSON.parse(l));
+  assert.equal(lines.length, 2); // one at start, one tick from the fake interval
+  assert.equal(lines[0]['temperaturesC']['k10temp/Tctl'], 40);
+  const none = world({ noThermal: true });
+  assert.match((await launch(queue([job('a', { thermalSampleSeconds: 5 })]), deps(none))).reason ?? '', /no thermal readings on this platform/);
+});
+
+test('bad cooling fields are refused', () => {
+  const bad = [{ cooldown: { maxTctlC: 0, maxWaitSeconds: 10 } }, { thermalSampleSeconds: -1 }, { requireHost: {} },
+    { requireHost: { boost: 0 } }, { requireHost: { turbo: '0' } }, { requireHost: { fanControl: { 'hp/pwm1_enable': '0' } } }];
+  for (const extra of bad) assert.throws(() => queue([job('a', extra)]), /cooldown|thermalSampleSeconds|requireHost/, JSON.stringify(extra));
 });
