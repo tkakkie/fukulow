@@ -23,10 +23,10 @@ export const unreadApi = (org: string, generation: () => string | undefined = ()
 })
 // At most the union of sync, main and the active Topic bodies, plus one visit marker.
 export const UNREAD_RECORD_LIMIT = MAIN_MESSAGE_LIMIT * 2 + TOPIC_MESSAGE_LIMIT
-type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: number; blockedPosition: number; stopped: boolean; error: boolean; summaryError: boolean;
+type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: number; stopped: boolean; error: boolean;
   topicMissing?: true;
   operation?: symbol; intent?: MarkReadRequest; queued?: MarkReadRequest; timer?: ReturnType<typeof setTimeout>; attempt: number }
-const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, blockedPosition: 0, stopped: false, error: false, summaryError: false, attempt: 0 })
+const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, attempt: 0 })
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
   archived: undefined as boolean | undefined,
   records: new Map<number, UnreadRecord>(), lostThrough: 0, aggregate: undefined as AggregateBaseline | undefined, accepted: 0, requiredAfter: 0, requiredAggregateAfter: 0, requiredBase: 0,
@@ -34,7 +34,7 @@ const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new M
   summaryReads: new Map<string, symbol>(), queuedSummaries: new Set<string>(), ignoredBaselines: new WeakSet<TopicBaseline>(), observedBaselines: new WeakSet<TopicBaseline>(),
   summaryTimers: new Map<string, ReturnType<typeof setTimeout>>(), summaryAttempts: new Map<string, number>() })
 type Channel = ReturnType<typeof channelState>
-type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAtEntry: number | null; acknowledgedPosition: number; presented: Set<number>; firstUnread?: UnreadRecord }
+type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAtEntry: number | null; presented: Set<number>; covered: Coverage[]; firstUnread?: UnreadRecord }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
 export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
@@ -181,7 +181,6 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (s.position > s.baseline.readSeq) {
       s.requiredPosition = Math.max(s.requiredPosition, s.position)
     }
-    s.summaryError = false
     s.error = s.baseline.readSeq < s.requiredPosition
   }
   async function refresh(retryTokens?: Map<string, symbol>) {
@@ -202,6 +201,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (!active() || generation !== epoch || list !== token) return
     list = undefined
     if (r.ok) {
+      const blocked = visitBlocked()
       const changed = new Set<string>()
       for (const row of r.data.channels) {
         if (retryTokens && !discovering && !tokens.has(row.id)) continue
@@ -244,6 +244,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         listTimer = setTimeout(() => { listTimer = undefined; void refresh(affected) }, retryDelay(listAttempt++, r))
       } else listAttempt = 0
       if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+      else if (blocked && visit) enqueue(visit)
       notify(changed)
     } else if (!api.isOrganizationUnavailable(r)) {
       const affected = new Map([...tokens].filter(([id, token]) => {
@@ -299,21 +300,35 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     return true
   }
   const isVisit = (v: Visit) => visit === v && visible && watched(v.scope.channel)
-  function canEnqueue(v: Visit, c: Channel, s: Scope) {
-    if (count(v.scope.channel, c, v.scope.topicId) !== null) return true
-    // Allow read reporting in an already-entered active visit only when the sole recovery
-    // reason is a baseline lagging behind a local mark acknowledged in this visit.
-    return v.boundary !== null && !s.stopped && !c.stopped && !c.error && !s.summaryError &&
-      s.baseline !== undefined && s.baseline.asOfSeq >= c.requiredBase &&
-      !(s.position > s.baseline.readSeq && s.baseline.readSeq < c.lostThrough) &&
-      s.baseline.readSeq >= s.blockedPosition &&
-      s.requiredPosition <= v.acknowledgedPosition
+  const visitBlocked = () => visit !== undefined && visit.boundary !== null &&
+    count(visit.scope.channel, getChannel(visit.scope.channel), visit.scope.topicId) === null
+  function recordVisitCoverage(v: Visit) {
+    const lost = channels.get(v.scope.channel)?.lostThrough ?? 0
+    const merged: Coverage[] = []
+    for (const range of [...v.covered, ...coverage(v.scope)].sort((a, b) => a.after - b.after)) {
+      const after = Math.max(range.after, lost)
+      if (after >= range.through) continue
+      const last = merged.at(-1)
+      if (last && after <= last.through) last.through = Math.max(last.through, range.through)
+      else merged.push({ after, through: range.through })
+    }
+    if (merged.length > MAIN_MESSAGE_LIMIT) merged.splice(0, merged.length - MAIN_MESSAGE_LIMIT)
+    v.covered = merged
+  }
+  function visitCoverage(v: Visit): Coverage[] {
+    const lost = channels.get(v.scope.channel)?.lostThrough ?? 0
+    const ranges = coverage(v.scope)
+    for (const range of v.covered) {
+      const after = Math.max(range.after, lost)
+      if (after < range.through) ranges.push({ after, through: range.through })
+    }
+    return ranges
   }
   function enqueue(v: Visit) {
     if (!isVisit(v)) return
     const c = getChannel(v.scope.channel), s = getScope(c, v.scope.topicId)
-    if (!canEnqueue(v, c, s)) return
-    const seq = sequenceToSubmit(s.position, c.records.values(), coverage(v.scope), v.presented, v.scope, sync.get().selfId)
+    if (count(v.scope.channel, c, v.scope.topicId) === null) return
+    const seq = sequenceToSubmit(s.position, c.records.values(), visitCoverage(v), v.presented, v.scope, sync.get().selfId)
     if (seq <= s.position || seq <= (s.intent?.read_seq ?? 0) || seq <= (s.queued?.read_seq ?? 0)) return
     s.queued = { history_generation: sync.get().historyGeneration, read_seq: seq }
     if (!s.intent) void submit(v, c, s)
@@ -333,26 +348,21 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         if (!c.heldPositions.has(v.scope.topicId)) c.heldPositions.set(v.scope.topicId, s.position)
         c.requiredAfter = issue + 1
       }
-      s.position = Math.max(s.position, r.data.read_seq); s.intent = undefined; s.attempt = 0
-      const ahead = r.data.read_seq > intent.read_seq
-      if (ahead) {
+      s.position = Math.max(s.position, r.data.read_seq); s.error = false; s.intent = undefined; s.attempt = 0
+      if (r.data.read_seq > intent.read_seq) {
         s.requiredPosition = Math.max(s.requiredPosition, r.data.read_seq)
-        s.blockedPosition = Math.max(s.blockedPosition, r.data.read_seq)
+        s.error = true
         if (v.scope.topicId === null) void refresh()
         else void refreshTopic(v.scope.channel, v.scope.topicId)
       }
       if (s.queued && s.queued.read_seq <= s.position) s.queued = undefined
       for (const seq of v.presented) if (seq <= s.position) v.presented.delete(seq)
-      const evicted = Boolean(s.baseline && s.position > s.baseline.readSeq && s.baseline.readSeq < c.lostThrough)
-      if (evicted) {
-        s.requiredPosition = Math.max(s.requiredPosition, s.position)
-        s.blockedPosition = Math.max(s.blockedPosition, s.position)
+      if (s.baseline && s.position > s.baseline.readSeq && s.baseline.readSeq < c.lostThrough) {
+        s.requiredPosition = Math.max(s.requiredPosition, s.position); s.error = true
         if (v.scope.topicId === null) void refresh()
         else void refreshTopic(v.scope.channel, v.scope.topicId)
       }
-      if (!ahead && !evicted) v.acknowledgedPosition = Math.max(v.acknowledgedPosition, r.data.read_seq)
-      s.error = s.summaryError || (s.baseline !== undefined && (s.baseline.readSeq < s.requiredPosition || s.baseline.asOfSeq < c.requiredBase)) || ahead || evicted
-      if (s.queued && !canEnqueue(v, c, s)) s.queued = undefined
+      if (s.queued && count(v.scope.channel, c, v.scope.topicId) === null) s.queued = undefined
       if (v.scope.topicId !== null) void refresh()
       notify(v.scope.channel)
       if (s.queued) void submit(v, c, s)
@@ -378,12 +388,12 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const r = await request(() => options.api.getTopicSummary(id, topic), id)
     if (!watched(id) || c.token !== token || c.summaryReads.get(topic) !== operation) return
     c.summaryReads.delete(topic)
+    const blocked = visitBlocked()
     if (r.ok && r.data.topic.id === topic) {
       acceptScope(s, topicBaseline(r.data.as_of_seq, r.data.topic))
       if (s.baseline && s.baseline.asOfSeq < c.requiredBase) s.error = true
       if (!s.error) { s.topicMissing = undefined; c.summaryAttempts.delete(topic) }
     } else {
-      s.summaryError = true
       s.error = true
       if (!retryable(r)) {
         s.stopped = true
@@ -404,6 +414,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     const changed = new Set([id])
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+    else if (blocked && visit) enqueue(visit)
     prune(c); notify(changed)
     if (rerun) void refreshTopic(id, topic)
   }
@@ -467,6 +478,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (!next.running || next.organization !== 'available') { if (before.running) reset(); return }
     if (before.historyEpoch !== next.historyEpoch) reset()
     let rebootstrap = false, moveRefresh = false
+    const blocked = visitBlocked()
     const changed = new Set<string>()
     const selfChanged = before.selfId !== next.selfId
     if (selfChanged) {
@@ -501,7 +513,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const archived = c.archived
         fence(id, c); channels.set(id, c = { ...channelState(), archived }); rebootstrap = true
         for (const b of oldBaselines) { c.ignoredBaselines.add(b); getScope(c, b.summary.id) }
-        if (oldVisit) visit = { id: Symbol(), scope: oldVisit.scope, boundary: null, unreadAtEntry: null, acknowledgedPosition: 0, presented: new Set() }
+        if (oldVisit) visit = { id: Symbol(), scope: oldVisit.scope, boundary: null, unreadAtEntry: null, presented: new Set(), covered: [] }
         channelChanged = true
       }
       // Bootstrap omits history <= B from replay. A REST snapshot older than B cannot cover that prefix.
@@ -517,7 +529,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         for (const [seq, message] of c.records)
           if ((message.version ?? seq) < position) c.records.delete(seq)
         if (visit?.scope.channel === id) {
-          visit.boundary = null; visit.unreadAtEntry = null; visit.firstUnread = undefined; visit.presented.clear()
+          visit.boundary = null; visit.unreadAtEntry = null; visit.firstUnread = undefined; visit.presented.clear(); visit.covered = []
           const topic = visit.scope.topicId
           if (topic !== null) {
             // Absence is specific to the old projection. A Move can revive the same Topic identity.
@@ -535,6 +547,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (channelChanged) changed.add(id)
     }
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+    else if (blocked && visit) enqueue(visit)
     notify(changed)
     if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); deadlines.cancel() }
     if (moveRefresh && !rebootstrap) void refresh()
@@ -546,6 +559,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   const unsubscribe = sync.subscribe(reconcile)
   const unsubscribeTopics = options.topics?.subscribe(topicChannels => {
     if (!active()) return
+    const blocked = visitBlocked()
     const changed = new Set<string>()
     const targets = topicChannels && topicChannels.size > 0 ? topicChannels : channels.keys()
     for (const id of targets) {
@@ -554,6 +568,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (collect(id, c) || visit?.scope.channel === id) changed.add(id)
     }
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+    else if (blocked && visit) enqueue(visit)
     notify(changed)
   })
   function snapshot(id: string) {
@@ -620,6 +635,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     activityMainCoverage(id: string) { const row = channels.get(id)?.aggregate; return row && completeCountFields(row) ? row.read_seq : -1 },
     activitySnapshot(rows: UnreadChannel[]) {
       if (!active()) return
+      const blocked = visitBlocked()
       const ids = new Set(rows.map(r => r.id))
       for (const [id, c] of channels) {
         if (ids.has(id)) continue
@@ -628,12 +644,15 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         else if (!watched(id) && !options.isDm?.(id)) { fence(id, c); channels.delete(id) }
       }
       rows.forEach(acceptListBaseline)
-      resolveBoundary(); notify()
+      if (!resolveBoundary() && blocked && visit) enqueue(visit)
+      notify()
     },
     activityArchivedSnapshot(rows: UnreadChannel[]) {
       if (!active() || rows.length === 0) return
+      const blocked = visitBlocked()
       rows.forEach(acceptListBaseline)
-      resolveBoundary(); notify(rows.map(row => row.id))
+      if (!resolveBoundary() && blocked && visit) enqueue(visit)
+      notify(rows.map(row => row.id))
     },
     activityArchive(id: string, archived: boolean) {
       if (!active()) return
@@ -643,6 +662,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     },
     activityDmSnapshot(row: Dm, replace: boolean) {
       if (!active() || !completeCountFields(row) || sync.get().channels[row.id]?.state === 'unavailable') return
+      const blocked = visitBlocked()
       let c = getChannel(row.id)
       if (c.stopped) return
       if (replace) { fence(row.id, c); channels.set(row.id, c = channelState()) }
@@ -650,7 +670,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       const baseline = { ...row, main_mention_unread_count: row.mention_unread_count }
       c.aggregate = baseline; acceptScope(c.main, mainBaseline(baseline))
       c.error = false; c.heldPositions.clear(); prune(c); collect(row.id, c)
-      resolveBoundary(); notify(row.id)
+      if (!resolveBoundary() && blocked && visit) enqueue(visit)
+      notify(row.id)
     },
     activityReconcile() {
       for (const [id, c] of channels) if (!watched(id)) { fence(id, c); channels.set(id, { ...channelState(), archived: c.archived }) }
@@ -679,7 +700,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (c.stopped) { fence(scope.channel, c); channels.set(scope.channel, c = channelState()); void refresh() }
       const s = getScope(c, scope.topicId), wasStopped = s.stopped || s.error
       s.stopped = false; s.error = wasStopped
-      visit = { id: Symbol(), scope: { ...scope }, boundary: null, unreadAtEntry: null, acknowledgedPosition: 0, presented: new Set() }
+      visit = { id: Symbol(), scope: { ...scope }, boundary: null, unreadAtEntry: null, presented: new Set(), covered: [] }
       const id = visit.id
       collect(scope.channel, c); resolveBoundary(); notify(scope.channel)
       if (!s.baseline || s.baseline.asOfSeq < c.requiredBase || wasStopped) {
@@ -695,7 +716,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const c = getChannel(visit.scope.channel), s = getScope(c, visit.scope.topicId)
         if (!value) {
           stopScope(s); deadlines.cancel(visit.scope.channel)
-          if (visit.boundary === null) visit.presented.clear()
+          if (visit.boundary === null) { visit.presented.clear(); visit.covered = [] }
         }
         // Returning to a visible document needs a fresh row presentation intent.
         notify(visit.scope.channel)
@@ -706,6 +727,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       const c = getChannel(visit.scope.channel)
       for (const seq of seqs) { const m = c.records.get(seq); if (m && inScope(m, visit.scope)) visit.presented.add(seq) }
       while (visit.presented.size > UNREAD_RECORD_LIMIT) visit.presented.delete(visit.presented.values().next().value!)
+      recordVisitCoverage(visit)
       enqueue(visit)
     },
     replaceSession() { session++; reset() },
