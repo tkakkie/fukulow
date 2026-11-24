@@ -106,6 +106,39 @@ test('a queue runs every job once, in order, and releases HOST-BUSY', async () =
     ['q', 'done', 'released', [['a', 0], ['b', 0]]]);
 });
 
+test('#796 issues its go to the runner and keeps HOST-BUSY while a cpufreq restore is pending', async () => {
+  const w = world();
+  const d = deps(w);
+  const spawn = d.spawn;
+  d.spawn = (argv, opts) => {
+    w.files.set('/runs/out-a/frequency-restore-pending.json', '{}');
+    return spawn(argv, opts);
+  };
+  const q = queue([job('a', { issue: 796 })]);
+  const result = await launch(q, d);
+  assert.equal(result.outcome, 'stop');
+  assert.equal(w.files.has('/runs/HOST-BUSY'), true);
+  const session = JSON.parse(w.files.get('/runs/chain/session.json')!);
+  assert.match(session.workloadProblems.join(), /cpufreq restoration is unconfirmed/);
+  assert.deepEqual(session.jobs[0].frequencyGo, q.jobs[0].go);
+  assert.deepEqual(JSON.parse(w.envs[0]!.FUKULOW_LAUNCH_FREQUENCY).go, q.jobs[0].go);
+});
+
+test('#796 snapshots CPU policies before starting the job and stops if they are unreadable', async () => {
+  const q = queue([job('a', { issue: 796, command: ['node', 'final.ts', '--frequency-v3=control'] })]);
+  const unreadable = world();
+  const stopped = await launch(q, deps(unreadable));
+  assert.match(stopped.reason ?? '', /F1 CPU policies unreadable/);
+  assert.deepEqual(unreadable.spawned, []);
+  const w = world();
+  const d = deps(w);
+  const policy = { bootId: 'boot', kernel: 'kernel', online: '0-15', boost: '0', profile: 'performance', paranoid: '4', policies: [] };
+  d.platform.cpuPolicy = () => policy;
+  assert.equal((await launch(q, d)).outcome, 'done');
+  assert.deepEqual(JSON.parse(w.envs[0]!.FUKULOW_LAUNCH_FREQUENCY).policy, policy);
+  assert.deepEqual(JSON.parse(w.files.get('/runs/chain/a-launch-check.json')!).frequencyPolicy, policy);
+});
+
 test('the launcher waits until the host is idle, then claims HOST-BUSY', async () => {
   const w = world({ load: [5, 5, 0.5] });
   const r = await launch(queue([job('a')]), deps(w));

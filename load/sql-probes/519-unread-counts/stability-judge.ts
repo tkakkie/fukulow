@@ -1,7 +1,13 @@
-import { requirementViolations, type HostRecord } from '../../harness-core/host-record.ts';
-import { blockThermal, exactFraction, median, type BlockThermal, type MeasuredWindow, type SampleLine } from '../../harness-core/thermal.ts';
+import { linuxViolations, requirementViolations, type HostRecord } from '../../harness-core/host-record.ts';
+import { blockThermal, median, type BlockThermal, type MeasuredWindow, type SampleLine } from '../../harness-core/thermal.ts';
+import type { PolicySnapshot } from '../../harness-core/cpu-policy.ts';
 import type { PgbenchWindow } from './probe.ts';
 import type { Session } from '../../launcher/launcher.ts';
+import { judgeFrequency, type Floors } from './frequency-judge.ts';
+import { affinityProblems, type Affinity } from './frequency-affinity.ts';
+import { same, type CounterBlock, type FrequencyEvidence } from './frequency-evidence.ts';
+import { isQuote, type FrequencyStage } from './frequency-approval.ts';
+import { legacyFrequencyProblems } from './legacy-frequency.ts';
 
 // Second #796 stability check (pre-registered on #796 and approved 2026-11-24, before any run):
 // 3 consecutive runs of the #519 send diagnosis with cooling levers L2 (boost off), L3 (airflow,
@@ -16,17 +22,6 @@ export const sampleSeconds = 5;
 export const runsRequired = 3;
 export const blocksPerRun = 6;
 export const limits = { tpsSpread: 0.05, walSpread: 0.02, throttle: 0.05 };
-// Frequency judgement (maintainer decision on PR #875, 2026-11-24, F1-F7, option A: both sets). An idle
-// CPU reads the cpuinfo_min_freq placeholder, so only active readings are judged. A CPU is active in a
-// tick when its /proc/stat busy fraction since the previous tick is >= minBusy (F1, F2). It qualifies in
-// a block when active in >= minTickShare of the block's ticks; its block value is the median of its
-// active readings (F3). A set needs >= minCpuShare of its CPUs qualifying, else the block is INVALID
-// (F4). Throttle (F5): over the CPUs qualifying in both block 1 and block k (again >= minCpuShare of the
-// set, else INVALID), block k is throttled when the median of per-CPU value ratios k / 1 is
-// < 1 - limits.throttle; exactly 5.0 % is allowed. Comparing each CPU with itself keeps a change in
-// which CPUs are busy from looking like throttling. Missing data is INVALID (F6, blockThermal). Every
-// threshold is compared exactly in integers (exactFraction), never through floating-point rounding.
-export const activity = { minBusy: 0.5, minTickShare: 0.5, minCpuShare: 0.5 };
 // Lateness allowed on one tick. The launcher schedules tick k at k x 5 s on its monotonic clock (no
 // drift), so a tick is late only by event-loop delay, which does not add up across ticks. Every gap
 // must be at most 5 s + this, and a block needs at least floor((window - this - clock spread) / 5 s)
@@ -49,22 +44,23 @@ export const workloadLabel = 'io.fukulow.probe=519-final';
 type Observation = { busy?: unknown; otherContainers?: unknown };
 type Send = {
   order: number; arm: string; tps: number; walBytesPerSend: number; crossed: boolean; errors?: string[];
+  counters?: CounterBlock; affinity?: Affinity;
   measuredWindow?: MeasuredWindow; pgbenchWindow?: PgbenchWindow | null; host?: Observation | null; hostAfter?: Observation | null;
 };
 // Every launcher record carries the id of the launcher session that wrote it (launchSession).
 type Bound = { launchSession?: unknown };
-export type LaunchCheck = (Bound & { ok?: boolean; tctlC?: number | null; record?: HostRecord }) | null;
+export type LaunchCheck = (Bound & { ok?: boolean; tctlC?: number | null; record?: HostRecord; frequencyPolicy?: PolicySnapshot }) | null;
 // The launcher's journal check for wall-clock set events during the job (PR #875, option 1b).
 export type ClockEvents = (Bound & { ok?: boolean; events?: unknown; problem?: unknown }) | null;
 export type Cooldown = (Bound & { ok?: boolean; maxTctlC?: number; maxWaitSeconds?: number; readings?: { elapsedMs?: number; tctlC?: number | null }[] }) | null;
 export type RunInput = {
   name: string; out: string; complete: boolean; statusSession: unknown; sends: Send[];
-  metadata: { mode?: string; sendsOnly?: boolean; launchSession?: unknown; cpuSets: { server: number[]; client: number[] } | null; sends: { measuredSeconds: number } };
+  metadata: { frequencyStage?: FrequencyStage; frequencyApproval?: string; frequencyGo?: { quote: string; date: string }; mode?: string; sendsOnly?: boolean; launchSession?: unknown; cpuSets: { server: number[]; client: number[] } | null; sends: { measuredSeconds: number } };
   hostBefore: (HostRecord & Bound) | null; cooldown: Cooldown; launchCheck: LaunchCheck; clockEvents: ClockEvents;
-  samples: SampleLine[];
+  samples: SampleLine[]; frequency?: FrequencyEvidence | null; hostAfter?: (HostRecord & Bound) | null;
 };
 // What the judged launcher session says: its id, and the sampling period it actually used for the run.
-export type Binding = { id: string | null; thermalSampleSeconds: unknown };
+export type Binding = { id: string | null; thermalSampleSeconds: unknown; go?: { quote: string; date: string } };
 
 const observationProblems = (o: Observation | null | undefined, when: string) => {
   if (o === null || typeof o !== 'object') return [`no host observation ${when}`];
@@ -102,63 +98,12 @@ function bindingProblems(r: RunInput, id: string | null): string[] {
 }
 
 const unsampled = { cpus: [], problem: 'no thermal window' };
-const empty: BlockThermal = { samples: 0, failed: 0, ticks: 0, windowMs: NaN, maxGapMs: Infinity, monoComplete: false, offsetSpreadMs: NaN, server: unsampled, client: unsampled, maxTctlC: null };
-type CpuSet = 'server' | 'client';
-
-// The qualifying CPUs of a set in a block (F3), by CPU number with twice their block value (the sum
-// of the two middle active readings), so ratios stay exact integers.
-// n / total >= share, in integers (no rounding at the boundary).
-const atLeast = (n: number, total: number, share: number) => { const [a, b] = exactFraction(share); return BigInt(n) * b >= a * BigInt(total); };
-function qualifying(t: BlockThermal, set: CpuSet): Map<number, bigint> {
-  return new Map(t[set].cpus.flatMap(c => (c.mid !== null && atLeast(c.activeTicks, t.ticks, activity.minTickShare) ? [[c.cpu, BigInt(c.mid[0]) + BigInt(c.mid[1])] as const] : [])));
-}
-
-type Ratio = [bigint, bigint]; // numerator, positive denominator
-const below = (a: Ratio, b: Ratio) => a[0] * b[1] < b[0] * a[1];
-// The median of exact ratios as an exact ratio: the middle one, or the mean of the two middle ones.
-function medianRatio(rs: Ratio[]): Ratio {
-  const s = [...rs].sort((a, b) => (below(a, b) ? -1 : below(b, a) ? 1 : 0));
-  const [a, b] = [s[(s.length - 1) >> 1], s[s.length >> 1]];
-  return [a[0] * b[1] + b[0] * a[1], 2n * a[1] * b[1]];
-}
-// A ratio rounded down to 4 decimals, so a printed "x < limit" is always true.
-const floor4 = (r: Ratio) => (Number((r[0] * 10_000n) / r[1]) / 10_000).toFixed(4);
-
-// F4 and F5 for one set over the run's blocks. The baseline is block 1 itself: without it nothing is
-// compared and the run is INVALID. An empty or malformed set is INVALID, never judged as passing.
-function frequencyProblems(blocks: { order: number; thermal: BlockThermal }[], set: CpuSet, cpus: number[]): string[] {
-  const size = cpus.length;
-  if (size === 0 || new Set(cpus).size !== size || !cpus.every(c => Number.isSafeInteger(c) && c >= 0)) return [`${set} set is empty or not distinct CPU numbers: [${cpus.join(',')}]`];
-  const p: string[] = [];
-  const enough = (n: number) => atLeast(n, size, activity.minCpuShare);
-  const judgeable = blocks.map(b => {
-    const a = b.thermal[set];
-    if (a.problem !== null) { p.push(`block ${b.order}: ${set} set: ${a.problem}`); return null; }
-    const q = qualifying(b.thermal, set);
-    if (!enough(q.size)) { p.push(`block ${b.order}: too few active CPUs to judge frequency, ${set} set ${q.size} of ${size} qualify`); return null; }
-    return q;
-  });
-  const i1 = blocks.findIndex(b => b.order === 1);
-  if (i1 < 0) return [...p, `${set} set: no block 1 to compare frequency with`];
-  const base = judgeable[i1];
-  if (!base) return p; // block 1 is already INVALID; nothing to compare with
-  const keep = exactFraction(1 - limits.throttle);
-  for (const [i, b] of blocks.entries()) {
-    const got = judgeable[i];
-    if (i === i1 || !got) continue;
-    const ratios = [...got].flatMap(([cpu, v]): Ratio[] => (base.has(cpu) ? [[v, base.get(cpu)!]] : []));
-    if (!enough(ratios.length)) { p.push(`block ${b.order}: ${set} set: ${ratios.length} of ${size} CPUs qualify in both block 1 and this block, too few to compare`); continue; }
-    const m = medianRatio(ratios);
-    if (below(m, keep)) p.push(`block ${b.order}: throttled, ${set} median per-CPU ratio ${floor4(m)} < ${1 - limits.throttle} of block 1 (${ratios.length} CPUs)`);
-  }
-  return p;
-}
-
-export function judgeRun(r: RunInput, bound: Binding) {
+const empty: BlockThermal = { samples: 0, failed: 0, procFailed: 0, ticks: 0, windowMs: NaN, maxGapMs: Infinity, monoComplete: false, offsetSpreadMs: NaN, server: unsampled, client: unsampled, maxTctlC: null };
+function judgeProcedure(r: RunInput, bound: Binding, count: number, legacy: boolean) {
   const invalid: string[] = bindingProblems(r, bound.id);
   if (!r.complete) invalid.push('run did not complete');
   if (r.metadata.mode !== 'diagnostic' || r.metadata.sendsOnly !== true) invalid.push('not the #519 send diagnosis (--diagnostic --sends-only)');
-  if (r.sends.length !== blocksPerRun) invalid.push(`${r.sends.length} blocks, not ${blocksPerRun}`);
+  if (r.sends.length !== count) invalid.push(`${r.sends.length} blocks, not ${count}`);
   const orders = r.sends.map(s => s.order).sort((a, b) => a - b);
   if (orders.join() !== Array.from({ length: r.sends.length }, (_, i) => i + 1).join()) invalid.push(`blocks numbered ${orders.join(',')}, not 1 to ${r.sends.length}`);
   const measured = r.metadata.sends.measuredSeconds;
@@ -191,11 +136,12 @@ export function judgeRun(r: RunInput, bound: Binding) {
   if (sets === null) invalid.push('no CPU sets in the run metadata');
   const blocks = [...r.sends].sort((a, b) => a.order - b.order).map(s => {
     const w = s.pgbenchWindow;
-    const t = sets && w ? blockThermal(r.samples, w.startMs, w.endMs, sets, activity.minBusy) : empty;
+    const t = sets && w ? blockThermal(r.samples, w.startMs, w.endMs, sets, 0.5) : empty;
     return { order: s.order, arm: s.arm, tps: s.tps, walBytesPerSend: s.walBytesPerSend, thermal: t };
   });
   for (const b of blocks) {
-    if (b.thermal.failed > 0) invalid.push(`block ${b.order}: ${b.thermal.failed} failed thermal samples`);
+    const failed = legacy ? b.thermal.failed : b.thermal.procFailed;
+    if (failed > 0) invalid.push(`block ${b.order}: ${legacy ? '' : 'F6 '}${failed} failed thermal samples`);
     const t = b.thermal;
     if (!t.monoComplete) invalid.push(`block ${b.order}: thermal ticks without a monotonic stamp`);
     else if (!(t.offsetSpreadMs <= clockStepToleranceMs)) invalid.push(`block ${b.order}: wall clock stepped against the sampler's monotonic clock (${Math.round(t.offsetSpreadMs)} ms)`);
@@ -203,9 +149,51 @@ export function judgeRun(r: RunInput, bound: Binding) {
     const expected = Math.floor((t.windowMs - tickToleranceMs - (Number.isFinite(t.offsetSpreadMs) ? t.offsetSpreadMs : 0)) / (sampleSeconds * 1000));
     if (!(t.ticks >= expected)) invalid.push(`block ${b.order}: ${t.ticks} thermal ticks, fewer than the ${expected} of a ${sampleSeconds} s cadence`);
   }
-  if (sets) for (const set of ['server', 'client'] as const) invalid.push(...frequencyProblems(blocks, set, sets[set]));
   const arm = (a: string) => ({ tps: median(blocks.filter(b => b.arm === a).map(b => b.tps)), wal: median(blocks.filter(b => b.arm === a).map(b => b.walBytesPerSend)) });
   return { name: r.name, valid: invalid.length === 0, invalid, current: arm('current'), final: arm('final'), blocks };
+}
+
+export function replayLegacyRun(r: RunInput, bound: Binding) {
+  const procedural = judgeProcedure(r, bound, blocksPerRun, true);
+  const sets = r.metadata.cpuSets;
+  const legacy = sets ? (['server', 'client'] as const).flatMap(set => legacyFrequencyProblems(procedural.blocks, set, sets[set])) : [];
+  const invalid = [...procedural.invalid, ...legacy];
+  return { ...procedural, valid: invalid.length === 0, invalid, legacy };
+}
+
+export function judgeRun(r: RunInput, bound: Binding, floors: Floors | null, stage: FrequencyStage, approval?: string) {
+  const control = stage === 'control';
+  const p = judgeProcedure(r, bound, control ? 3 : blocksPerRun, false);
+  const invalid = [...p.invalid];
+  if (!isQuote(bound.go) || bound.go.quote !== r.metadata.frequencyGo?.quote || bound.go.date !== r.metadata.frequencyGo?.date) {
+    invalid.push('no matching #796 go in the launcher session');
+  }
+  if (r.metadata.frequencyStage !== stage || r.metadata.frequencyApproval !== approval) invalid.push('wrong #796 stage or reviewed floor digest');
+  const expectedArms = control ? 'current,current,current' : 'current,final,final,current,current,final';
+  if ([...r.sends].sort((a, b) => a.order - b.order).map(s => s.arm).join(',') !== expectedArms) invalid.push('incorrect send arm order');
+  if (r.metadata.sends.measuredSeconds !== 120) invalid.push('incorrect 120 s workload');
+  if (!r.hostAfter || r.hostAfter.platform !== 'linux' || r.hostAfter.launchSession !== bound.id) invalid.push('missing launcher host-after record');
+  else invalid.push(...linuxViolations(r.hostAfter), ...requirementViolations(r.hostAfter, levers));
+  for (const s of r.sends) {
+    invalid.push(...affinityProblems(s.affinity).map(problem => `block ${s.order}: ${problem}`));
+    if (s.counters && s.measuredWindow) {
+      try {
+        const monotonicMs = Number(BigInt(s.counters.exitNs) - BigInt(s.counters.startNs)) / 1e6;
+        if (monotonicMs !== s.measuredWindow.monoMs) invalid.push(`block ${s.order}: F2 perf/runner clock interval differs`);
+      } catch { invalid.push(`block ${s.order}: F2 unreadable perf/runner interval`); }
+    }
+  }
+  if (!r.launchCheck?.frequencyPolicy || !same(r.launchCheck.frequencyPolicy, r.frequency?.before)) {
+    invalid.push('F1 launcher and run CPU policy snapshots differ');
+  }
+  const frequency = judgeFrequency(r.sends, r.metadata.cpuSets, r.frequency, bound.id, floors, control);
+  if (control && !(r.frequency?.permissionCheck?.go.exit === 0 && same(r.frequency.permissionCheck.identity, r.frequency.calibration.identity))) {
+    invalid.push('no passed permission check for the control collector');
+  }
+  const expected = control ? ['block 2: F5 throttled server', 'block 2: F5 throttled client'] : [];
+  invalid.push(...frequency.reasons.filter(reason => !expected.includes(reason)));
+  invalid.push(...expected.filter(reason => !frequency.reasons.includes(reason)).map(reason => `control failed to show ${reason}`));
+  return { ...p, invalid, valid: invalid.length === 0, frequency };
 }
 
 // The runs must be the jobs of one completed launcher session that released HOST-BUSY, each with
@@ -233,10 +221,11 @@ export function sessionProblems(session: Session | null, queue: string, runs: { 
 
 const spread = (xs: number[]) => (Math.max(...xs) - Math.min(...xs)) / median(xs);
 
-export function judge(runs: RunInput[], session: Session | null, queue: string) {
+export function judgeChain<Run extends { name: string; valid: boolean; current: { tps: number; wal: number }; final: { tps: number; wal: number } }>(
+  runs: RunInput[], session: Session | null, queue: string, assess: (r: RunInput, bound: Binding) => Run) {
   const id = typeof session?.id === 'string' && session.id.trim() !== '' ? session.id : null;
   // The sampling period is the launcher's own record of the run, never the queue handed to the judge.
-  const judged = runs.map(r => judgeRun(r, { id, thermalSampleSeconds: session?.jobs?.find(j => j.name === r.name)?.thermalSampleSeconds }));
+  const judged = runs.map(r => assess(r, { id, thermalSampleSeconds: session?.jobs?.find(j => j.name === r.name)?.thermalSampleSeconds, go: session?.jobs?.find(j => j.name === r.name)?.frequencyGo }));
   const reasons: string[] = sessionProblems(session, queue, runs);
   if (runs.length !== runsRequired) reasons.push(`${runs.length} runs, not ${runsRequired}`);
   for (const r of judged) if (!r.valid) reasons.push(`${r.name} INVALID`);

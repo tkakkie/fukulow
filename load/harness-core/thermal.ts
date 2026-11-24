@@ -124,7 +124,7 @@ export type SetActivity = { cpus: CpuBlock[]; problem: string | null };
 // wall clock; Infinity when an edge tick is missing. offsetSpreadMs: how far wall minus monotonic
 // moves along the chain, so a wall-clock step during the block shows (NaN without monotonic stamps).
 export type BlockThermal = {
-  samples: number; failed: number; ticks: number; windowMs: number; maxGapMs: number; monoComplete: boolean; offsetSpreadMs: number;
+  samples: number; failed: number; procFailed: number; ticks: number; windowMs: number; maxGapMs: number; monoComplete: boolean; offsetSpreadMs: number;
   server: SetActivity; client: SetActivity; maxTctlC: number | null;
 };
 
@@ -133,7 +133,7 @@ type Delta = { busy: bigint; total: bigint };
 
 // Why tick i inside the block cannot be judged on these CPUs, or its per-CPU deltas. Each tick's
 // activity is taken against the tick before it (for the first, the last tick before the window).
-function tickReadings(inside: Placed[], before: Placed | undefined, i: number, set: number[]): string | Delta[] {
+function tickReadings(inside: Placed[], before: Placed | undefined, i: number, set: number[], requireFrequency = true): string | Delta[] {
   const cur = inside[i].l;
   if (isFailed(cur)) return 'failed thermal tick';
   const prev = i === 0 ? before?.l : inside[i - 1].l;
@@ -141,7 +141,7 @@ function tickReadings(inside: Placed[], before: Placed | undefined, i: number, s
   if (isFailed(prev)) return 'failed tick before the block';
   const deltas: Delta[] = [];
   for (const cpu of set) {
-    if (!validKHz(cur.avgFreqKHz[cpu])) return `unreadable CPU frequency on CPU ${cpu}`;
+    if (requireFrequency && !validKHz(cur.avgFreqKHz[cpu])) return `unreadable CPU frequency on CPU ${cpu}`;
     const a = Array.isArray(prev.procStat) ? prev.procStat[cpu] : null;
     const b = Array.isArray(cur.procStat) ? cur.procStat[cpu] : null;
     if (!validCounters(a) || !validCounters(b)) return `unreadable /proc/stat on CPU ${cpu}`;
@@ -192,8 +192,9 @@ export function blockThermal(lines: SampleLine[], startMs: number, endMs: number
   const offsetSpreadMs = monoComplete && chain.length > 0 ? Math.max(...offsets) - Math.min(...offsets) : NaN;
   const judged = [...sets.server, ...sets.client];
   const ok = inside.filter((_, i) => typeof tickReadings(inside, before, i, judged) !== 'string').length;
+  const procFailed = inside.filter((_, i) => typeof tickReadings(inside, before, i, judged, false) === 'string').length;
   const temps = inside.map(x => x.l).filter((l): l is ThermalSample => !isFailed(l)).map(tctl).filter((t): t is number => t !== null);
-  return { samples: ok, failed: inside.length - ok, ticks: inside.length, windowMs: to - from, maxGapMs, monoComplete, offsetSpreadMs,
+  return { samples: ok, failed: inside.length - ok, procFailed, ticks: inside.length, windowMs: to - from, maxGapMs, monoComplete, offsetSpreadMs,
     server: setActivity(inside, before, sets.server, minBusy), client: setActivity(inside, before, sets.client, minBusy), maxTctlC: temps.length ? Math.max(...temps) : null };
 }
 

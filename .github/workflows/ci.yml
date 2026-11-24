@@ -62,6 +62,13 @@ jobs:
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: load/package-lock.json }
       - run: npm --prefix load ci --ignore-scripts
       - run: npm --prefix load run check && npm --prefix load test
+      - run: rustup toolchain install --profile minimal
+      - name: MSR helper checks without hardware access
+        working-directory: load/harness-core/perf-helper
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
   # server-tests and checks build the real SPA themselves (a few seconds) instead of waiting for the whole `web` job.
   # The server tests run as 4 nextest slices in parallel; every test still runs on every PR.
   server-tests:

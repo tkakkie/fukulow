@@ -1,0 +1,25 @@
+[package]
+name = "fukulow-perf-helper"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# This operator tool is not part of either shipped application.
+[workspace]
+
+[dependencies]
+serde_json = "=1.0.154"
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+# Exposes the safe perf_event_open, grouped read and event ID APIs for a configurable leader.
+perf-event2 = "=0.7.4"
+# Supplies safe CLOCK_MONOTONIC and CLOCK_MONOTONIC_RAW reads.
+rustix = { version = "=1.1.6", features = ["time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

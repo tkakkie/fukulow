@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { loadavg, platform } from 'node:os';
+import { cpus, loadavg, platform } from 'node:os';
+import { readCpuPolicy, type PolicySnapshot } from '../harness-core/cpu-policy.ts';
 import { hostRecord, linuxViolations, type HostRecord } from '../harness-core/host-record.ts';
 import { thermalSample, type ThermalSample } from '../harness-core/thermal.ts';
 
@@ -14,6 +15,7 @@ export type Platform = {
   record(diskPath: string): HostRecord;
   // Thermal sample for the cool-down wait and the job sampler; null where the platform has none.
   thermal(now: Date): ThermalSample | null;
+  cpuPolicy?(): PolicySnapshot;
 };
 
 const macAc = () => {
@@ -39,6 +41,7 @@ export const linux: Platform = {
   load15: () => loadavg()[2],
   record: hostRecord,
   thermal: thermalSample,
+  cpuPolicy: () => readCpuPolicy(cpus().map((_, cpu) => cpu)),
 };
 
 export function currentPlatform(): Platform {
