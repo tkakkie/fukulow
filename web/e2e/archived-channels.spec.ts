@@ -198,7 +198,16 @@ test('disabled archived Channels summary stays exposed in the accessibility tree
       // Clicking and keyboard activation cannot open while disabled.
       await summary.click({ force: true })
       await expect(details).not.toHaveAttribute('open', '')
-      await tabTo(page, summary)
+      // Tab skips the disabled summary, like the disabled button it replaced.
+      await expect(summary).toHaveAttribute('tabindex', '-1')
+      await page.locator('body').focus()
+      const stops = await page.locator('a[href], button, input, textarea, select, summary, [tabindex]').count() + 2
+      for (let i = 0; i < stops; i++) {
+        await page.keyboard.press('Tab')
+        expect(await summary.evaluate(el => el === document.activeElement)).toBe(false)
+      }
+      // Even if focused programmatically, Enter and Space do not open it.
+      await summary.focus()
       await page.keyboard.press('Enter')
       await page.keyboard.press('Space')
       await expect(details).not.toHaveAttribute('open', '')

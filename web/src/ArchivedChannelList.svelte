@@ -55,6 +55,7 @@
     <summary
       class="archived-list__toggle"
       aria-disabled={disabled ? 'true' : undefined}
+      tabindex={disabled ? -1 : undefined}
       onclick={handleSummaryClick}
       onkeydown={handleSummaryKeydown}
     >アーカイブ済みチャンネル</summary>
