@@ -293,7 +293,7 @@ export const finishKindOf = (stopped: string | null, ev: {complete: boolean}, ab
 // What a Stage 2 after this Stage 1 can and cannot conclude, recorded in both stages' results.
 export function stage2Constraints(kind: FinishKind, source: Noise['source'], shortfall: string[]) {
   return [
-    ...(kind === 'limited' ? [`Stage 1 was a limited finish (${shortfall.join('; ')}): its attribution (H1-H6) stays as recorded, withheld or partial, and Stage 2 does not complete it.`,
+    ...(kind === 'limited' ? [`Stage 1 was a limited finish (${shortfall.join('; ')}): its attribution (H1-H6) and outcome stay as recorded, and Stage 2 neither completes nor changes them.`,
       'Stage 2 decides only the §5.3 scan contrast (B.post1 / B.pre: reproduced, not reproduced or inconclusive); it cannot establish a cause.'] : []),
     ...(source === 'A1 spread (fallback)' ? ['N is the A1 spread (fallback, §4.1), not the C hot1/hot2 spread. It contains any A1 rise, so it can exceed the noise: "reproduced" (>= 3 x (N - 1)) is harder to reach, and "not reproduced" (< 1.15) does not use N.'] : []),
   ];
@@ -313,12 +313,15 @@ export function stage1(ms: Measurement[], stopped: string | null = null, stageMi
     stage2: kind === 'normal' ? 'with its own go' : kind === 'limited' && nComputable ? 'only with its own go naming this limited Stage 1' : 'refused',
     stage2Constraints: kind === 'blocked' ? [] : stage2Constraints(kind, N.source, abnormal)};
   const base = {noise: N, reproduction: repro, minimums: min, stopped, evidence: ev, abnormal, finish};
+  // One direction for Stage 2 (sol review of the re-approval fix): a finish that refuses Stage 2 is never
+  // also a proposal for it.
+  const next = (proposal: 'propose' | 'may be skipped') => finish.stage2 === 'refused' ? 'refused' as const : proposal;
   // A STOP before the A1 minimum leaves reproduction inconclusive; after it, the A1 result stands.
   // Incomplete evidence is inconclusive whatever the numbers say: no cause from partial evidence.
-  if (!ev.complete) return {...base, outcome: 'inconclusive' as Outcome, inconclusiveReason: 'evidence incomplete', attribution: null, repetitionLinked: false, stage2: 'propose'};
+  if (!ev.complete) return {...base, outcome: 'inconclusive' as Outcome, inconclusiveReason: 'evidence incomplete', attribution: null, repetitionLinked: false, stage2: next('propose')};
   if (repro.result !== 'reproduced') {
     const outcome: Outcome = repro.result === 'not reproduced' ? 'not reproduced' : 'inconclusive';
-    return {...base, outcome, attribution: null, repetitionLinked: false, stage2: 'propose'};
+    return {...base, outcome, attribution: null, repetitionLinked: false, stage2: next('propose')};
   }
   const att = attribution(ms, N.value);
   const verdicts = Object.values(att);
@@ -329,7 +332,7 @@ export function stage1(ms: Measurement[], stopped: string | null = null, stageMi
   const repetitionLinked = (['H1', 'H2', 'H3', 'H4', 'H5'] as const).every(h => att[h] === 'ruled out');
   const established = !repetitionLinked && verdicts.filter(v => v === 'supported').length === 1 && verdicts.every(v => v !== 'withheld');
   const outcome: Outcome = established ? 'cause established' : repetitionLinked ? 'repetition-linked, cause not established' : 'cause not established';
-  return {...base, outcome, attribution: att, repetitionLinked, stage2: established ? 'may be skipped' : 'propose'};
+  return {...base, outcome, attribution: att, repetitionLinked, stage2: next(established ? 'may be skipped' : 'propose')};
 }
 
 // The smoke passes only when its single round ran, is valid and saved all of its evidence; its numbers are not used.

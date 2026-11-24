@@ -302,7 +302,8 @@ test('a window the sampler never checked (sampler death in the final validation)
   assert.deepEqual(r.evidence.missing, ['C2.restart: sampler window not checked']);
   assert.equal(r.outcome, 'inconclusive');
   assert.equal(r.attribution, null);
-  assert.equal(r.stage2, 'propose');
+  // A blocked finish refuses Stage 2, and the top-level direction agrees (sol review of the re-approval fix).
+  assert.deepEqual([r.finish.kind, r.finish.stage2, r.stage2], ['blocked', 'refused', 'refused']);
 });
 
 test('§4.2 and §5.3 thresholds are exact on the stored p95s, with no tolerance: 23 queries at 100 -> 130 ms is 1.30', () => {
@@ -342,10 +343,18 @@ test('§4.2 noise condition with a measured spread is exact: r + 2 >= 3 x spread
   assert.equal(at(70), 'reproduced');
 });
 
+test('a limited Stage 1 keeps its recorded outcome; the constraint says Stage 2 cannot change it', () => {
+  const one = stage1(scenario({}, {'A1.2': {invalid: ['fake']}}));
+  assert.equal(one.finish.kind, 'limited');
+  const text = one.finish.stage2Constraints.join(' ');
+  assert.match(text, /attribution \(H1-H6\) and outcome stay as recorded/);
+  assert.doesNotMatch(text, /withheld or partial/);
+});
+
 test('incomplete evidence never establishes a cause: the outcome is inconclusive (evidence incomplete)', () => {
   assert.equal(stage1(scenario()).outcome, 'cause established');
   const partial = stage1(scenario({}, {'D.current1': {missingEvidence: ['stats-after: Error: psql']}}));
-  assert.deepEqual([partial.outcome, why(partial).inconclusiveReason, partial.attribution, partial.stage2], ['inconclusive', 'evidence incomplete', null, 'propose']);
+  assert.deepEqual([partial.outcome, why(partial).inconclusiveReason, partial.attribution, partial.stage2], ['inconclusive', 'evidence incomplete', null, 'refused']);
   assert.deepEqual(partial.evidence, {complete: false, missing: ['D.current1: stats-after: Error: psql']});
   assert.deepEqual(partial.abnormal, ['evidence incomplete']);
   const noLog = stage1(scenario(), null, ['postgres log: docker logs exited 1']);

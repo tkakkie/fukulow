@@ -118,7 +118,10 @@ test('Stage 2 needs a finalized Stage 1 whose recorded outcome and N are what it
     const out = prior(mkdtempSync(join(h.dir, 's')), '1', judgement, {measurements, normal});
     return prerequisites(options(argv(h, '2', ['--stage1-out', out]), 'linux'), hash, env, 16);
   };
-  const n = run({outcome: good.outcome, noise: good.noise}).stage1Noise!;
+  const n = run({outcome: good.outcome, noise: good.noise, finish: good.finish}).stage1Noise!;
+  // The recorded finish must be what the measurements give, not only the outcome and N.
+  assert.throws(() => run({outcome: good.outcome, noise: good.noise}), /recorded finish \(kind or shortfall\) is not what/);
+  assert.throws(() => run({outcome: good.outcome, noise: good.noise, finish: {...good.finish, kind: 'limited'}}), /recorded finish \(kind or shortfall\) is not what/);
   assert.deepEqual([n.value, n.source], [1.05, 'C hot1/hot2']);
   // The exact spreads are recomputed from Stage 1's stored p95s for Stage 2 (review round 7).
   assert.equal(n.spreads.length, 2);
@@ -290,7 +293,11 @@ test('a limited Stage 1 allows Stage 2 only with usable evidence, a computable N
   // Without the acknowledgement, or one naming another outcome or shortfall: refused.
   assert.throws(() => run(record, fallback, {}), /must name it/);
   assert.throws(() => run(record, fallback, {acceptsLimitedStage1: {outcome: f.outcome, shortfall: ['minimum not met: H2']}}), /must name it/);
-  // Unusable evidence: a measurement with missing evidence.
+  // The go is matched against the recomputed shortfall (sol review of the re-approval fix): a record whose finish
+  // names another shortfall than its own measurements give is refused, with a go naming either one.
+  const forged = {...record, finish: {...f.finish, shortfall: ['minimum not met: H2']}};
+  assert.throws(() => run(forged, fallback, {acceptsLimitedStage1: {outcome: f.outcome, shortfall: ['minimum not met: H2']}}), /recorded finish \(kind or shortfall\) is not what/);
+  assert.throws(() => run(forged, fallback, ack), /recorded finish \(kind or shortfall\) is not what/);
   // Unusable evidence (a measurement with missing evidence) is a blocked finish; records claiming limited are refused.
   const partial = fallback.map(m => m.id === 'A1.3' ? {...m, missingEvidence: ['stats-after: Error: psql']} : m);
   const p = stage1(partial);

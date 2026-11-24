@@ -131,6 +131,10 @@ function stage1Noise(dir: string, judgement: Stage1Record, limited: boolean): St
   assert.equal(JSON.stringify(judgement.abnormal), JSON.stringify(again.abnormal), 'Stage 1\'s recorded shortfall is not what its measurements give');
   assert.ok(judgement.evidence?.complete === true && again.evidence.complete, 'Stage 1\'s evidence is incomplete: unusable for Stage 2');
   assert.equal(again.finish.kind, limited ? 'limited' : 'normal', `Stage 1's measurements give a ${again.finish.kind} finish`);
+  // The go is matched against the recomputed finish, so the recorded finish must be exactly that (sol review of
+  // the re-approval fix): a record whose finish disagrees with its own measurements is rejected.
+  assert.ok(judgement.finish?.kind === again.finish.kind && JSON.stringify(judgement.finish.shortfall) === JSON.stringify(again.finish.shortfall),
+    'Stage 1\'s recorded finish (kind or shortfall) is not what its measurements give');
   assert.ok(limited || judgement.noise.source === 'C hot1/hot2', 'A normal Stage 1 has N from both cache replicates (C hot1/hot2)');
   // The exact spreads behind N, from Stage 1's stored p95s (review round 7): Stage 2 never uses the double.
   const spreads = noiseSpreads(ms);
@@ -165,11 +169,16 @@ export function prerequisites(args: ReturnType<typeof options>, manifestHash: st
   const prior = args.stage === '1' ? finishedStage(args.smokeOut!, 'smoke', manifestHash, args.cpuSets, logicalCpus)
     : args.stage === '2' ? finishedStage(args.stage1Out!, '1', manifestHash, args.cpuSets, logicalCpus, true) : null;
   if (args.stage === '1') assert.equal(prior!.judgement.outcome, 'smoke passed', 'The smoke did not pass');
-  const limitedStage1 = prior?.limited ? {outcome: prior.judgement.outcome as string, shortfall: prior.judgement.finish.shortfall as string[]} : null;
+  // Stage 1 is re-validated against its own measurements before the go is matched, and the go must name the
+  // recomputed outcome and shortfall, never the recorded fields alone (sol review of the re-approval fix).
+  let n: Stage1N | null = null;
+  if (args.stage === '2') {
+    assert.ok(stage1Outcomes.includes(prior!.judgement.outcome), `Stage 1 has no recognized outcome: ${prior!.judgement.outcome}`);
+    n = stage1Noise(args.stage1Out!, prior!.judgement, prior!.limited);
+  }
+  const limitedStage1 = n?.stage1.kind === 'limited' ? {outcome: prior!.judgement.outcome as string, shortfall: n.stage1.shortfall} : null;
   const approval = approvalFor(args.approval, args.stage, env.FUKULOW_LAUNCH_JOB, prior?.finishedAt ?? null, limitedStage1);
-  if (args.stage !== '2') return {stage1Noise: null, approval};
-  assert.ok(stage1Outcomes.includes(prior!.judgement.outcome), `Stage 1 has no recognized outcome: ${prior!.judgement.outcome}`);
-  return {stage1Noise: stage1Noise(args.stage1Out!, prior!.judgement, prior!.limited), approval};
+  return {stage1Noise: n, approval};
 }
 const stage1Outcomes = ['not reproduced', 'cause established', 'cause not established', 'repetition-linked, cause not established', 'inconclusive'];
 
