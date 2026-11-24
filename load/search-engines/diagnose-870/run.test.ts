@@ -21,7 +21,7 @@ function host() {
   return {dir, busy, qualification, env: {FUKULOW_HOST_BUSY: busy, FUKULOW_LAUNCH_JOB: 'stage1-870'}};
 }
 // A prior stage's records as the worker and the supervisor leave them.
-function prior(dir: string, stage: string, judgement: Record<string, unknown>, {finalized = true, valid = true} = {}) {
+function prior(dir: string, stage: string, judgement: Record<string, unknown>, {finalized = true, valid = true, swept = true} = {}) {
   const out = join(dir, `out-${stage}`);
   mkdirSync(out);
   json(join(out, 'completed.json'), {manifestHash: hash, stage});
@@ -31,6 +31,7 @@ function prior(dir: string, stage: string, judgement: Record<string, unknown>, {
     json(join(out, 'finished.json'), {manifestHash: hash, stage});
     json(join(out, 'run-status.json'), {manifestHash: hash, valid, cleanupVerified: valid, exitCode: valid ? 0 : 1});
   }
+  if (swept) json(join(out, 'leftover-cleanup.json'), {verified: true, found: [], failures: []});
   return out;
 }
 const argv = (h: ReturnType<typeof host>, stage: string, extra: string[] = [], cpuSets = sets) =>
@@ -68,6 +69,12 @@ test('Stage 1 needs a smoke the supervisor finalized as valid, not only the work
   assert.throws(() => run(unfinalized), /not a finalized, valid smoke run/);
   const invalid = prior(mkdtempSync(join(h.dir, 'i')), 'smoke', {outcome: 'smoke passed'}, {valid: false});
   assert.throws(() => run(invalid), /not a finalized, valid smoke run/);
+  // The supervisor publishes before the sweep: a sweep killed midway leaves no verified record.
+  const unswept = prior(mkdtempSync(join(h.dir, 'w')), 'smoke', {outcome: 'smoke passed'}, {swept: false});
+  assert.throws(() => run(unswept), /leftover sweep did not verify/);
+  const failedSweep = prior(mkdtempSync(join(h.dir, 'x')), 'smoke', {outcome: 'smoke passed'}, {swept: false});
+  json(join(failedSweep, 'leftover-cleanup.json'), {verified: false, found: [], failures: ['listing failed']});
+  assert.throws(() => run(failedSweep), /leftover sweep did not verify/);
   assert.throws(() => run(prior(mkdtempSync(join(h.dir, 'f')), 'smoke', {outcome: 'smoke failed'})), /did not pass/);
 });
 
@@ -85,30 +92,33 @@ test('Stage 2 needs a finalized Stage 1 with a recognized outcome and N from a r
   assert.throws(() => run({...good, noise: {value: 1.04, source: 'C hot1/hot2'}}), /no usable N/);
 });
 
-test('leftover harness resources are removed and recorded; a failed removal makes the run invalid', () => {
+test('the sweep always records whether it verified a clean host; a failed removal revokes validity, cleanup and the zero exit', () => {
   const fake = (present: string[], failRm = false) => (...a: string[]) => {
     if (a[1] === 'ls') return a[0] === 'container' ? present.map(n => `${n}|153`).join('\n') : '';
     if (a[0] === 'rm') { if (failRm) throw new Error('busy'); present.splice(present.indexOf(a[2]), 1); }
     return '';
   };
+  const read = (dir: string, file: string) => JSON.parse(readFileSync(join(dir, file), 'utf8'));
   const clean = mkdtempSync(join(tmpdir(), 'diag870-'));
   assert.equal(sweepLeftovers(clean, fake([])), true);
-  assert.equal(existsSync(join(clean, 'leftover-cleanup.json')), false);
+  assert.deepEqual(read(clean, 'leftover-cleanup.json'), {verified: true, found: [], failures: []});
 
   const removed = mkdtempSync(join(tmpdir(), 'diag870-'));
   json(join(removed, 'run-status.json'), {valid: true});
   writeFileSync(join(removed, 'finished.json'), '{}');
   assert.equal(sweepLeftovers(removed, fake(['probe'])), true);
-  assert.deepEqual(JSON.parse(readFileSync(join(removed, 'leftover-cleanup.json'), 'utf8')).found, [{kind: 'container', name: 'probe'}]);
+  assert.deepEqual(read(removed, 'leftover-cleanup.json'), {verified: true, found: [{kind: 'container', name: 'probe'}], failures: []});
   assert.equal(JSON.parse(readFileSync(join(removed, 'run-status.json'), 'utf8')).valid, true);
 
   const stuck = mkdtempSync(join(tmpdir(), 'diag870-'));
-  json(join(stuck, 'run-status.json'), {valid: true});
+  json(join(stuck, 'run-status.json'), {valid: true, cleanupVerified: true, exitCode: 0});
   writeFileSync(join(stuck, 'finished.json'), '{}');
   const code = process.exitCode;
   try {
     assert.equal(sweepLeftovers(stuck, fake(['probe'], true)), false);
-    assert.equal(JSON.parse(readFileSync(join(stuck, 'run-status.json'), 'utf8')).valid, false);
+    const status = read(stuck, 'run-status.json');
+    assert.deepEqual([status.valid, status.cleanupVerified, status.exitCode], [false, false, 1]);
+    assert.equal(read(stuck, 'leftover-cleanup.json').verified, false);
     assert.equal(existsSync(join(stuck, 'finished.json')), false);
   } finally { process.exitCode = code; }
 });

@@ -61,14 +61,17 @@ export function options(argv: string[], os = platform()) {
 }
 
 // A finished earlier stage of this diagnosis: finalized by the supervisor (finished.json, and run-status.json
-// valid with cleanup verified), under this manifest, not stopped, same CPU sets. The worker's completed.json
-// alone is not enough: it is written before teardown.
+// valid with cleanup verified), swept afterwards with nothing left (leftover-cleanup.json verified), under this
+// manifest, not stopped, same CPU sets. The worker's completed.json alone is not enough: it is written before
+// teardown. The supervisor publishes before the sweep runs, so a sweep killed midway leaves no verified record.
 const readIf = (file: string) => existsSync(file) ? readJson(file) : null;
 function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets: string, logicalCpus: number) {
   const name = stage === 'smoke' ? 'smoke' : `Stage ${stage}`;
   const finished = readIf(`${dir}/finished.json`), status = readIf(`${dir}/run-status.json`);
   assert.ok(finished && status?.valid === true && status.cleanupVerified === true && status.manifestHash === manifestHash,
     `${dir} is not a finalized, valid ${name} run (finished.json and a valid run-status.json are required)`);
+  assert.ok(readIf(`${dir}/leftover-cleanup.json`)?.verified === true,
+    `${dir} is not a finalized, valid ${name} run (the leftover sweep did not verify a clean host)`);
   const judgement = readJson(`${dir}/judgement.json`), metadata = readJson(`${dir}/metadata.json`);
   assert.ok(finished.manifestHash === manifestHash && finished.stage === stage && judgement.stage === stage && judgement.stopped === null,
     `${dir} is not a finished ${name} of this manifest`);
@@ -79,7 +82,10 @@ function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets:
 const stage1Outcomes = ['not reproduced', 'cause established', 'cause not established', 'inconclusive'];
 const noiseSources = ['C hot1/hot2', 'A1 spread (fallback)'];
 
-// The HOST-BUSY the launcher claimed for this queue names this job (the launcher passes both).
+// The HOST-BUSY the launcher claimed for this queue names this job (the launcher passes both). This stops an
+// accidental direct run, which has neither variable. It cannot stop a deliberate bypass: whatever the driver
+// can check locally can be written locally. Starting through the launcher (preflight, recorded go) is an
+// operator rule (maintainer decision on PR #871, extra round sol 1).
 function launchedJob(env: NodeJS.ProcessEnv) {
   const file = env.FUKULOW_HOST_BUSY, job = env.FUKULOW_LAUNCH_JOB;
   if (!file || !job || !existsSync(file)) return false;
@@ -382,11 +388,12 @@ export function sweepLeftovers(out: string, d: (...args: string[]) => string = d
     const remain = ownedResources(d);
     if (remain.length) failures.push(`still present: ${remain.map(r => `${r.kind} ${r.name}`).join(', ')}`);
   } catch (error) { failures.push(`verification failed: ${String(error)}`); }
-  if (found.length || failures.length) save(`${out}/leftover-cleanup.json`, {found, failures});
+  save(`${out}/leftover-cleanup.json`, {verified: !failures.length, found, failures});
   if (!failures.length) return true;
   const statusFile = `${out}/run-status.json`;
   const status = existsSync(statusFile) ? readJson(statusFile) : {};
-  writeFileSync(statusFile, JSON.stringify({...status, valid: false, leftoverFailures: failures}) + '\n');
+  writeFileSync(statusFile, JSON.stringify({...status, valid: false, cleanupVerified: false,
+    exitCode: status.exitCode ? status.exitCode : 1, leftoverFailures: failures}) + '\n');
   rmSync(`${out}/finished.json`, {force: true});
   note(`${label}: harness cleanup failed (${failures.join('; ')}); the run is not valid`);
   if (!process.exitCode) process.exitCode = 1;
