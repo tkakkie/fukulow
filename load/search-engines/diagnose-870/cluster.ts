@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -41,21 +41,27 @@ export function checkPins(container: string, sets: CpuSets) {
   return {postmaster, client};
 }
 
-// bench.ts `benchmark`, with pgbench pinned to the client CPU set. Same guard, script, sampling and checks.
-export function pinnedBenchmark(client: number[]) {
+// The Docker commands the benchmark runs; the worker passes its gated set (io.ts), so after a signal no
+// further docker cp, exec or pgbench starts inside a benchmark either (review round 8).
+export type DockerLayer = {docker: (...args: string[]) => string; spawn: (command: string, args: string[]) => ChildProcessWithoutNullStreams};
+
+// bench.ts `benchmark`, with pgbench pinned to the client CPU set when one is given. Same guard, script,
+// sampling and checks.
+export function pinnedBenchmark(client: number[] | undefined, layer: DockerLayer = {docker, spawn}) {
+  const {docker: run} = layer;
   return async (container: string, db: string, script: string, dest: string, transactions: number, clients = 5, role = 'fukulow_app') => {
     const guarded = `SELECT 1 / (current_setting('statement_timeout')::interval = interval '10 seconds')::int;\n${script}`;
     writeFileSync(`${dest}.sql`, guarded);
-    docker('cp', `${dest}.sql`, `${container}:/tmp/bench.sql`);
+    run('cp', `${dest}.sql`, `${container}:/tmp/bench.sql`);
     const name = `${dest.split('/').at(-1)}-${createHash('sha256').update(dest).digest('hex').slice(0, 12)}`;
-    docker('exec', container, 'mkdir', '-p', `/tmp/${name}`);
+    run('exec', container, 'mkdir', '-p', `/tmp/${name}`);
     const prefix = `/tmp/${name}/log`;
-    const args = ['exec', ...appSessionArguments, container, ...pinned(client, ['pgbench', '-n', '-U', role, '-d', db,
-      '-c', String(clients), '-j', String(clients), '-t', String(transactions), '-M', 'prepared', '-l', '--log-prefix', prefix,
-      '-f', '/tmp/bench.sql'])];
+    const pgbench = ['pgbench', '-n', '-U', role, '-d', db, '-c', String(clients), '-j', String(clients), '-t', String(transactions),
+      '-M', 'prepared', '-l', '--log-prefix', prefix, '-f', '/tmp/bench.sql'];
+    const args = ['exec', ...appSessionArguments, container, ...(client ? pinned(client, pgbench) : pgbench)];
     const start = performance.now();
     const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn('docker', args); let result = '';
+      const child = layer.spawn('docker', args); let result = '';
       const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('docker pgbench timed out')); }, timeouts.benchmark);
       child.stdout.on('data', b => { result += String(b); }); child.stderr.on('data', b => { result += String(b); });
       child.on('error', error => { clearTimeout(timer); reject(error); });
@@ -68,7 +74,7 @@ export function pinnedBenchmark(client: number[]) {
       });
     });
     const wallMs = performance.now() - start;
-    docker('cp', `${container}:/tmp/${name}`, dest);
+    run('cp', `${container}:/tmp/${name}`, dest);
     const samples: number[] = [];
     for (const file of readdirSync(dest)) for (const row of readFileSync(`${dest}/${file}`, 'utf8').trim().split('\n')) {
       const us = Number(row.trim().split(/\s+/)[2]);

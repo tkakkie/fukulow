@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { pinnedBenchmark } from './cluster.ts';
 import { gatedIo, rawIo, Refused, type Io } from './io.ts';
 import { postgresLog } from './run.ts';
 
@@ -54,4 +58,27 @@ test('the worker reaches I/O only through gatedIo: run.ts imports no raw entry p
   const worker = source.slice(source.indexOf('async function worker('), source.indexOf('\nexport function workerGate'));
   assert.match(worker, /const io = gatedIo\(rawIo, \(\) => abortReason\);/);
   assert.doesNotMatch(worker, /rawDocker|rawIo\./);
+  // Its one raw spawn starts the sampler (a node process, stopped on a signal), never docker.
+  assert.deepEqual(worker.match(/\bspawn\([^,]*/g), ['spawn(process.execPath']);
+});
+
+test('a signal during pgbench starts no further docker command in the real cluster.ts benchmark flow (review round 8)', async () => {
+  let reason: string | null = null;
+  const commands: string[] = [];
+  const raw = {...rawIo,
+    docker: (...args: string[]) => { if (reason !== null) assert.fail(`docker ${args[0]} started after the abort`); commands.push(`docker ${args.slice(0, 2).join(' ')}`); return ''; },
+    spawn: (command: string, args: string[]) => {
+      if (reason !== null) assert.fail('spawn after the abort');
+      commands.push(`${command} ${args.includes('pgbench') ? 'pgbench' : args[0]}`);
+      const child = Object.assign(new EventEmitter(), {stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true});
+      // SIGTERM arrives while pgbench runs; pgbench then finishes normally.
+      setTimeout(() => { reason = 'SIGTERM'; child.emit('close', 0); }, 1);
+      return child;
+    },
+    pinnedBenchmark} as unknown as Io;
+  const io = gatedIo(raw, () => reason);
+  const dest = join(mkdtempSync(join(tmpdir(), 'diag870-bench-')), 'q1');
+  await assert.rejects(io.pinnedBenchmark([1, 3])('c', 'measured', 'SELECT 1;', dest, 1, 1), Refused);
+  // The copy-in and mkdir ran, pgbench ran, and the copy-out after it did not start.
+  assert.deepEqual(commands, ['docker cp ' + `${dest}.sql`, 'docker exec c', 'docker pgbench']);
 });

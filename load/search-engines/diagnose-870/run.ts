@@ -159,7 +159,7 @@ async function worker(env: NodeJS.ProcessEnv) {
   // docker command, session, statement or pgbench starts once it is set.
   let abortReason: string | null = null;
   const io = gatedIo(rawIo, () => abortReason);
-  const {sql, docker, command, boundedCommand, checkPins, benchmark, pinnedBenchmark, pinnedSession} = io;
+  const {sql, docker, command, boundedCommand, checkPins, pinnedBenchmark, pinnedSession} = io;
   const {frozen, sha256} = loadManifest();
   // Before anything else: the prerequisites again, and this launch's one-time token (review round 5, item 1).
   const {stage1Noise} = workerGate(env, sha256);
@@ -231,7 +231,7 @@ async function worker(env: NodeJS.ProcessEnv) {
   const samplerGroup = {get exitCode() { return sampler.exitCode; }, get signalCode() { return sampler.signalCode; },
     kill: (signal: NodeJS.Signals) => { try { process.kill(-sampler.pid!, signal); return true; } catch { return false; } }};
   const groupAlive = () => { try { process.kill(-sampler.pid!, 0); return true; } catch { return false; } };
-  const time = sets ? pinnedBenchmark(sets.client) : benchmark;
+  const time = pinnedBenchmark(sets?.client);
   const windows = new Map<string, {start: number; end: number; blocks: Block[]; restart: Restart | null; checked: boolean}>();
   let previous: {id: string; end: number} | null = null;
   let lastRestart: Restart | null = null;
