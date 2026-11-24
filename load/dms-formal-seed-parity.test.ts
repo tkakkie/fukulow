@@ -36,7 +36,8 @@ const originDigests: Record<string, string> = {
 function transcript(t: TestContext, mode: Mode, run: () => void) {
   const output = mkdtempSync(join(tmpdir(), 'dm-seed-parity-'));
   t.after(() => rmSync(output, { recursive: true, force: true }));
-  const env = { DM_FORMAL_SEED: '1', DM_FORMAL_OUT: output, DM_DB_CONTAINER: 'stub', ...mode.env };
+  // DM_FORMAL_SEED_BATCHES is cleared as the full-size worker does, so an exported shell value cannot shorten the transcript.
+  const env = { DM_FORMAL_SEED: '1', DM_FORMAL_OUT: output, DM_DB_CONTAINER: 'stub', DM_FORMAL_SEED_BATCHES: '', ...mode.env };
   const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   Object.assign(process.env, env);
   const hash = createHash('sha256'), add = (line: string) => hash.update(line + '\n');
@@ -80,6 +81,11 @@ for (const mode of modes) test(`formal seed (${mode.name}) matches the origin/ma
     if (process.env.DM_SEED_PARITY_PRINT) console.error(`PARITY ${JSON.stringify(mode.name)}: '${expected}'`);
     assert.equal(current, expected);
   } else assert.equal(current, originDigests[mode.name]);
+});
+
+// The full-size diagnostic seed (#920): the rehearsal's batch limit must not change it. Pinned from the seed at a17fc978.
+test('the full-size diagnostic seed keeps its pinned command and clock transcript', t => {
+  assert.equal(transcript(t, modes[0]!, () => seed(true)), '8d06a65f8b9e47011829f872f9136ea443b29d8ce0e2529567c360ff7f6e3ef3');
 });
 
 test('the diagnostic seed differs from the formal transcript, so the parity check can fail', t => {

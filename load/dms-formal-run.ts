@@ -10,7 +10,7 @@ import { isMixedScenario, scenarioAcceptance } from './dms-formal-scenarios.ts';
 import { scaledLoad, localLimits, localCopy } from './dms-formal-local.ts';
 import { deferredScenarios, judge } from './dms-formal-judgment.ts';
 import { failureDetails, writeDiagnostic } from './dms-formal-diagnostics.ts';
-import { redactSeedDbLogs, saveSeedDbLogs, seedFailure, type SeedStop } from './dms-formal-seed-diagnostic.ts';
+import { redactSeedDbLogs, saveSeedDbLogs, seedFailure, seedRehearsal, type SeedStop } from './dms-formal-seed-diagnostic.ts';
 import { batchSummaryFailures, seedBatchSummary, seedShape, startSeedSamplers, type SeedSamplerRecord, type StopOptions } from './dms-formal-seed-samplers.ts';
 import { startDbLogStream, startVmLogStream, type DbLogStreamRecord, type LogStopOptions, type VmLogStreamRecord } from './dms-formal-log-stream.ts';
 import { dockerVmLogDirectory, hostCommandTimeoutMs, redactHostText, saveHostLog, startHostSampler, type HostSampleCoverage } from './dms-formal-host-records.ts';
@@ -41,7 +41,10 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   if(local && (config.scenario==='main'||config.scenario==='held200'||(!overhead && config.mode!=='smoke')))throw new Error('Local main/held200 acceptance scenarios are refused');
   if(pilot && (!local||!overhead))throw new Error('Pilot requires local pool-overhead');
   const diagnostic=config.seedDiagnostic===true, baseline=diagnostic && config.seedBaseline===true;
-  const load=scaledLoad(config.loadScale ?? (diagnostic ? '1/25' : undefined)),label=diagnostic?'DIAGNOSTIC':local?'MAC-RELATIVE':config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL';
+  // A seed diagnostic rehearsal (#920) is the same arm at small size, marked in every record and never pair evidence.
+  if(config.seedRehearsal && !diagnostic)throw new Error('Rehearsal requires a seed diagnostic arm');
+  const rehearsal=config.seedRehearsal===true, marked=rehearsal?{rehearsal:true}:{};
+  const load=scaledLoad(config.loadScale ?? (diagnostic ? '1/25' : undefined)),label=diagnostic?(rehearsal?'DIAGNOSTIC REHEARSAL':'DIAGNOSTIC'):local?'MAC-RELATIVE':config.mode==='smoke'?'NON-ACCEPTANCE':'FORMAL';
   if(diagnostic)requireSeedDiagnostic(config,load.factor);
   if(!overhead && load.factor!=='1/1')throw new Error('Scale requires pool-overhead');
   const patchSha256=createHash('sha256').update(readFileSync(resolve(import.meta.dirname,'pool-overhead-baseline.patch'))).digest('hex');
@@ -61,7 +64,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   let phase='initializing', attempt=0, lastError:string|null=null, interrupted=false, interruptedAtMs:number|undefined;
   const start=new Date().toISOString();
   let operation='initializing',outcome='running',infrastructureFailure=false,statusWriteFailed=false;
-  const status=()=>{try {json('status.json',{id,label,phase,operation,outcome,attempt:Math.min(attempt,totalArms),started:start,updated:new Date().toISOString(),lastError,...(diagnostic?{status:'NOT EVALUATED',seedStop}:{})});}catch {statusWriteFailed=true;console.error('Status write failed; cleanup remains active');}};
+  const status=()=>{try {json('status.json',{id,label,phase,operation,outcome,attempt:Math.min(attempt,totalArms),started:start,updated:new Date().toISOString(),lastError,...(diagnostic?{status:'NOT EVALUATED',seedStop,...marked}:{})});}catch {statusWriteFailed=true;console.error('Status write failed; cleanup remains active');}};
   const abort = new AbortController();
   const bounded=(timeout:number)=>phase==='cleanup'||config.deadline===undefined?timeout:Math.max(1000,Math.min(timeout,config.deadline-Date.now()-cleanupReserveMs));
   const hosts=[config.app,config.db,config.generator];
@@ -133,10 +136,10 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
   const results:unknown[]=[];
   try {
     mkdirSync(config.output,{mode:0o700});
-    if(diagnostic)json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[]});
+    if(diagnostic)json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[],...marked});
     else if(overhead)json('summary.json',{scenario:'pool-overhead',status:'NOT EVALUATED',acceptance:false,design});
     requireHeadroom(config.output,2*GiB);
-    json('metadata.json',{id,mode:config.mode,label,load,pilot,limits:local?(config.limits ?? localLimits):undefined,sha:config.sha,acceptance:false});
+    json('metadata.json',{id,mode:config.mode,label,load,pilot,limits:local?(config.limits ?? localLimits):undefined,sha:config.sha,acceptance:false,...marked});
     change('preflight');
     const address=async(host:string)=>{
       const text=await checked(runtime.exec,{program:'ssh',args:['-G',host],timeout:10000});
@@ -146,7 +149,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     const [appAddress,dbAddress]=local?['localhost','db']:await Promise.all([address(config.app),address(config.db)]);
     if(!local && isIP(appAddress))throw new Error('Remote app SSH HostName must be a DNS hostname: HTTPS clients omit TLS SNI for IP addresses, which Caddy strict_sni_host rejects');
     const pin=(file:string,pattern:RegExp)=>{const value=pattern.exec(readFileSync(`${checkout}/${file}`,'utf8'))?.[1];if(!value)throw new Error('Missing repository image pin');return value;};
-    const common={...(diagnostic?{seedDiagnostic:true}:{}),...(baseline?{seedBaseline:true}:{}),id,overhead,pilot,pilotImage:config.pilotImage,pilotSeconds:config.pilotSeconds ?? 60,target:config.target ?? 'ssh',loadScale:load.factor,load,limits:local?(config.limits ?? localLimits):undefined,sourceCheckout:checkout,localRoot:root,label,patchSha256,scenario:overhead||config.scenario==='smoke'?'main':config.scenario,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:totalArms,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
+    const common={...(diagnostic?{seedDiagnostic:true}:{}),...(baseline?{seedBaseline:true}:{}),...(rehearsal?{seedRehearsal:true}:{}),id,overhead,pilot,pilotImage:config.pilotImage,pilotSeconds:config.pilotSeconds ?? 60,target:config.target ?? 'ssh',loadScale:load.factor,load,limits:local?(config.limits ?? localLimits):undefined,sourceCheckout:checkout,localRoot:root,label,patchSha256,scenario:overhead||config.scenario==='smoke'?'main':config.scenario,sha:config.sha,mode:config.mode,appAddress,dbAddress,generatorTarget:config.generator,attempts:totalArms,dbPassword:randomBytes(32).toString('hex'),appPassword:randomBytes(32).toString('hex'),setupToken:randomBytes(32).toString('hex'),postgres:pin('load/compose.yml',/image: (postgres:\S+)/),k6:pin('Makefile',/K6_IMAGE := (\S+)/),caddy:pin('compose.yml',/image: (caddy:\S+)/),nodeVersion:readFileSync(`${checkout}/.node-version`,'utf8').trim()};
     runSecrets=[common.dbPassword,common.appPassword,common.setupToken];
     if(!diagnostic)json('private-state.json',{...common,hosts});
     await checked(runtime.exec,{program:'tar',args:['--exclude=node_modules','-czf',`${config.output}/harness.tgz`,'-C',checkout,'load','web/src','deploy/Caddyfile'],timeout:120000});
@@ -196,7 +199,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
       // The run conditions, compared between the arms by dms-formal-seed-effect.ts (the machine as a digest, not its name).
       // The seed diagnostic is pool-overhead only, which seeds the main fixture.
       const conditions={sha:config.sha,machine:createHash('sha256').update(String(identities[0])).digest('hex').slice(0,16),load:load.factor,limits:common.limits,scenario:common.scenario,mode:config.mode,
-        postgres:common.postgres,imageDigest:imageId,shape:seedShape('main'),
+        postgres:common.postgres,imageDigest:imageId,shape:rehearsal?{...seedRehearsal}:seedShape('main'),
         harnessSha256:createHash('sha256').update(readFileSync(`${config.output}/harness.tgz`)).digest('hex')};
       const startedAtMs=Date.now();
       let stopSamplers:((options?:StopOptions)=>Promise<SeedSamplerRecord>)|undefined, stopHost:(()=>Promise<HostSampleCoverage>)|undefined, seedError:unknown;
@@ -274,7 +277,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
         postgresLoopCpuSeconds:samplers?.postgres?.loopCpuSeconds ?? null,postgresSnapshotQueryMs:samplers?.postgres?.queryMs ?? null,
         hostCommands:host?.commands ?? null,hostSampleMs:host?.sampleMs ?? null,seedSeconds:(endedAtMs-startedAtMs)/1000,
         recorderMs:batches?.recorderMs ?? null,batches};
-      json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[],load,arm,conditions,
+      json('summary.json',{status:'NOT EVALUATED',acceptance:false,attempts:[],...marked,load,arm,conditions,
         infrastructureFailure:interrupted || !!seedStop || collectionFailures.length>0,seedStop,collectionFailures,
         collectionMissing:samplers?.missing ?? [],samplers:samplers??null,hostSamples:host??null,dbLogStream:dbLogStream??null,vmLogs,hostLog,overhead});
       if(seedStop)throw seedError;
@@ -356,7 +359,7 @@ export async function run(config:Config, runtime:Runtime=defaultRuntime) {
     json('summary.json',{...(overhead&&!pilot?{status:judgeOverhead(results as OverheadArm[]).status,overhead:judgeOverhead(results as OverheadArm[])}:{}),label,acceptance:false,attempts:results,deferredScenarios,requiredScenarios:['main','held200'],scenarioAcceptance:scenarioAcceptance(results.map((row)=>({...row as {attempt:number;acceptance:boolean},scenario:config.scenario,mode:config.mode})),deferredScenarios),reason:'Acceptance requires main and held200, each with three consecutive passing formal attempts, and all deferred scenarios; missing evidence is NOT EVALUATED.'});
   } catch(error) {
     lastError=diagnostic?failureDetails(error).message:error instanceof Error?error.message:'Runner failed';
-    json('failure.json',{label,phase,attempt,lastError,acceptance:false,...(diagnostic?{status:'NOT EVALUATED',seedStop}:{})});
+    json('failure.json',{label,phase,attempt,lastError,acceptance:false,...(diagnostic?{status:'NOT EVALUATED',seedStop,...marked}:{})});
     if(phase==='seed' && !diagnostic)json('summary.json',{status:'NOT EVALUATED',acceptance:false,infrastructureFailure:true,attempts:results,phase,reason:lastError,...(overhead?{design}:{})});
     throw error;
   }

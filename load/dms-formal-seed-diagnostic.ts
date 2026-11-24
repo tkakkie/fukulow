@@ -9,6 +9,11 @@ export function postgresCommand(seedDiagnostic = false) {
   ].flatMap(setting => ['-c', setting])] : formal;
 }
 
+// The seed diagnostic rehearsal (#920, `--seed-diagnostic-rehearsal`, `--seed-diagnostic-baseline-rehearsal`): the same
+// run path at small size, one Organization and its first five Message batches (125,000 Messages), every collector on.
+// With one Organization the PR #685 stop rules cannot fire (Organization 0 is their baseline). Never pair evidence.
+export const seedRehearsal = { organizations: 1, batchesPerOrganization: 5 } as const;
+
 export type SeedStop = {
   organization: number | null;
   batchIndex: number | null;
