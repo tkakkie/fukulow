@@ -1,0 +1,70 @@
+import { spawn, spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { parseArgs } from 'node:util';
+import { dockerFreeBytes, freeBytes } from './harness-core/host.ts';
+import { launch, type Child } from './launcher/launcher.ts';
+import { currentPlatform } from './launcher/platform.ts';
+import { parseQueue } from './launcher/queue.ts';
+
+// Runs an approved queue of measurement jobs (#867). See load/launcher/launcher.ts.
+const usage = 'node load/launch.ts --queue FILE';
+const { values } = parseArgs({ options: { queue: { type: 'string' }, help: { type: 'boolean' } } });
+if (values.help) { console.log(usage); process.exit(0); }
+if (!values.queue) throw new Error(usage);
+const queue = parseQueue(readFileSync(values.queue, 'utf8'));
+if (!existsSync(queue.chainDir)) throw new Error(`chainDir does not exist: ${queue.chainDir}`);
+
+const exec = (argv: string[], cwd?: string) => {
+  const c = spawnSync(argv[0], argv.slice(1), { cwd, encoding: 'utf8', timeout: 120_000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024 });
+  return { status: c.error || c.signal ? null : c.status, stdout: c.stdout ?? '' };
+};
+
+function run(argv: string[], opts: { cwd: string; log: string; env?: Record<string, string> }): Child {
+  const fd = openSync(opts.log, 'a');
+  const c = spawn(argv[0], argv.slice(1), { cwd: opts.cwd, env: { ...process.env, ...opts.env }, stdio: ['ignore', fd, fd] });
+  const done = new Promise<number>(resolve => {
+    c.on('error', e => { writeSync(fd, `spawn failed: ${e.message}\n`); resolve(127); });
+    c.on('exit', (code, signal) => resolve(code ?? (signal ? 128 : 1)));
+  }).finally(() => closeSync(fd));
+  return { done, kill: () => { c.kill('SIGTERM'); } };
+}
+
+// Polls for a container with the label and follows its logs; a new container is picked up after the last one ends.
+function captureLogs(label: string, file: string) {
+  let stopped = false;
+  let follower: ReturnType<typeof spawn> | null = null;
+  const loop = async () => {
+    while (!stopped) {
+      if (follower === null) {
+        const id = exec(['docker', 'ps', '--filter', `label=${label}`, '--format', '{{.ID}}']).stdout.trim().split('\n')[0];
+        if (id) {
+          const fd = openSync(file, 'a');
+          follower = spawn('docker', ['logs', '-f', id], { stdio: ['ignore', fd, fd] });
+          follower.on('exit', () => { closeSync(fd); follower = null; });
+        }
+      }
+      await sleep(5_000);
+    }
+  };
+  void loop();
+  return () => { stopped = true; follower?.kill('SIGTERM'); };
+}
+
+const claim = (path: string, text: string) => {
+  try { writeFileSync(path, text, { flag: 'wx' }); return true; } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw e;
+  }
+};
+const safe = <T>(f: () => T) => { try { return f(); } catch { return null; } };
+
+const result = await launch(queue, {
+  platform: currentPlatform(), exec, spawn: run, captureLogs,
+  exists: existsSync, claim, remove: p => rmSync(p, { force: true }), append: appendFileSync, write: writeFileSync,
+  freeBytes: p => safe(() => freeBytes(exec(['df', '-Pk', p]).stdout)), dockerFreeBytes: image => safe(() => dockerFreeBytes(image)),
+  nodeVersion: process.version, pid: process.pid, now: () => new Date(), sleep: ms => sleep(ms),
+  onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => handler(s)); },
+});
+console.log(JSON.stringify(result));
+process.exit(result.outcome === 'done' ? 0 : 3);

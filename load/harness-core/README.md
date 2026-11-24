@@ -16,6 +16,18 @@ Plumbing that every measurement harness needs, so a fix lands once. New harnesse
   - `node load/host-record.ts --out FILE --check` exits 3 on any violation.
 - `cpusets.ts` (#796): `--cpu-sets "server=LIST;client=LIST"`, checked to be disjoint. Processes are pinned with `taskset`, and the pin is read back from `/proc/<pid>/status`.
 
+## Launching runs (#867)
+
+`node load/launch.ts --queue FILE` replaces the hand-written waiter scripts on macOS and Linux. The queue lists the approved jobs in order, each with its Issue, pinned commit, worktree, command, output and the maintainer's go quoted from chat.
+
+The launcher:
+- waits for an idle host, then claims `HOST-BUSY` and releases it on every exit;
+- runs the preflight (pinned clean tree, Node, containers, platform conditions, free disk) and the job's own gate;
+- captures PostgreSQL logs;
+- runs each job once and writes one `chain.log`.
+
+A STOP or a failed job ends the queue. Nothing reruns: a `setup-failure` rerun under the rules below is a new queue entry with its own quoted go. Sleep prevention is `caffeinate` on macOS. On Linux it is the masked sleep targets, which are a preflight condition.
+
 ## Run rules (maintainer decisions, 2026-11-21 and 2026-11-22, #769)
 
 These rules stop invalid runs early and keep a failure from being paid for twice. Criteria, thresholds and VALID/INVALID rules never change under them.
