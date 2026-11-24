@@ -6,14 +6,16 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
+import { allowedCpus, cpuList, parseCpuSets, pinned } from '../../harness-core/cpusets.ts';
+import { hostRecord, linuxViolations } from '../../harness-core/host-record.ts';
 import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, extractListCounts, logLatenciesMs, member, migrationOutcome, organization, pgbench, planSummary,
   quantile, runBlock, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
-const usage = 'node load/sql-probes/519-unread-counts/final.ts (--smoke | --diagnostic) [--sends-only] --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
+const usage = 'node load/sql-probes/519-unread-counts/final.ts (--smoke | --diagnostic) [--sends-only] [--cpu-sets "server=LIST;client=LIST"] --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
 const { values } = parseArgs({ options: { out: { type: 'string' }, smoke: { type: 'boolean' }, diagnostic: { type: 'boolean' },
-  'sends-only': { type: 'boolean' }, help: { type: 'boolean' } } });
+  'sends-only': { type: 'boolean' }, 'cpu-sets': { type: 'string' }, help: { type: 'boolean' } } });
 if (values.help) { console.log(usage); process.exit(0); }
 if (!values.out || values.smoke === values.diagnostic) throw new Error(usage);
 const smoke = values.smoke === true;
@@ -25,6 +27,10 @@ const checkTimeout = '45min';
 const markerPath = process.env.FUKULOW_HOST_BUSY;
 const marker = markerPath ? readFileSync(markerPath, 'utf8').trim() : null;
 if (!smoke && !marker) throw new Error('--diagnostic needs FUKULOW_HOST_BUSY=<path of the held host-busy marker>');
+// Linux host (#796 item 3, maintainer decision 2026-11-24): PostgreSQL and pgbench run on fixed,
+// disjoint CPU sets, required for --diagnostic there. macOS runs are unchanged.
+const cpuSets = values['cpu-sets'] === undefined ? undefined : parseCpuSets(values['cpu-sets'], cpus().length);
+if (!smoke && platform() === 'linux' && cpuSets === undefined) throw new Error('--diagnostic on Linux needs --cpu-sets');
 type FinalArm = 'current' | 'final';
 const pins: Record<FinalArm, string> = { current: '5ef561e5', final: 'fd6a5949' };
 const a3Migration = '202611221100_unread_counts.sql';
@@ -75,7 +81,8 @@ for (const arm of ['current', 'final'] as FinalArm[]) {
 }
 const migrations = readdirSync(join(work, 'server/migrations')).filter(f => f.endsWith('.sql')).sort();
 
-const psqlArgs = (db: string, user = 'postgres') => ['exec', '-i', container, 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', db];
+// psql (setup, WAL counters, checks) runs on the client set too, so only the server works on the server set.
+const psqlArgs = (db: string, user = 'postgres') => ['exec', '-i', container, ...pinned(cpuSets?.client, ['psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', db])];
 const psql = (db: string, script: string, user = 'postgres') => run('docker', psqlArgs(db, user), script);
 const file = (db: string, path: string) => psql(db, `\\i /work/${path}\n`);
 const checks: Record<string, unknown>[] = [];
@@ -158,7 +165,8 @@ function forcedCheckpoint(db: string) {
   return requestMs;
 }
 // Sends run as the application role under RLS, like the app, so A3's policy checks are paid.
-const pgbenchArgs = (seconds: number) => ['exec', container, 'pgbench', '-U', 'fukulow_app', '-n', '-c', '8', '-j', '4', '-T', String(seconds), '-f', '/work/sql/bench.pgb'];
+const pgbenchArgs = (seconds: number) => ['exec', container, ...pinned(cpuSets?.client,
+  ['pgbench', '-U', 'fukulow_app', '-n', '-c', '8', '-j', '4', '-T', String(seconds), '-f', '/work/sql/bench.pgb'])];
 function sendRole(db: string) {
   psql('postgres', `ALTER ROLE fukulow_app IN DATABASE ${db} SET fukulow.organization_id = '${organization}';`);
   const role = JSON.parse(psql(db, `SELECT json_build_object('user', current_user, 'superuser', rolsuper, 'bypassRls', rolbypassrls,
@@ -246,14 +254,30 @@ const started = new Date().toISOString();
 let failed = false;
 try {
   const preflight = idleHost();
+  const recordBefore = hostRecord(out);
+  save('host-record-before.json', recordBefore);
+  const violations = linuxViolations(recordBefore);
+  if (!smoke && violations.length > 0) throw new Error(`measurement conditions not met: ${violations.join('; ')}`);
+  // With CPU sets, taskset wraps the image's entrypoint, so the postmaster and every backend inherit the server set.
+  const serverStart = cpuSets ? ['--entrypoint', 'taskset', image, '-c', cpuList(cpuSets.server), 'docker-entrypoint.sh', 'postgres'] : [image];
   run('docker', ['run', '-d', '--rm', '--name', container, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
-    '-v', `${work}:/work:ro`, image, '-c', 'shared_buffers=512MB', '-c', 'jit=off',
+    '-v', `${work}:/work:ro`, ...serverStart, '-c', 'shared_buffers=512MB', '-c', 'jit=off',
     // No automatic checkpoint inside a send block: each block starts at its forced CHECKPOINT and
     // full-page images settle during warm-up, as the plan requires. A crossing block fails the run.
     '-c', 'max_wal_size=64GB', '-c', 'checkpoint_timeout=1h', '-c', 'log_checkpoints=on']);
   for (let i = 0; spawnSync('docker', ['exec', container, 'pg_isready', '-U', 'postgres', '-h', '127.0.0.1']).status !== 0; i++) {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
+  }
+  // Max frequencies per set make a swapped or mixed split visible in the record (Zen 5 vs Zen 5c).
+  const maxKHz = (set: number[]) => [...new Set(set.map(c => Object.entries(recordBefore.maxFrequencyKHz ?? {}).find(([, cs]) => cs.includes(c))?.[0] ?? 'unknown'))];
+  const cpuPins = cpuSets === undefined ? null : {
+    server: cpuSets.server, client: cpuSets.client, serverMaxKHz: maxKHz(cpuSets.server), clientMaxKHz: maxKHz(cpuSets.client),
+    postmasterAllowed: allowedCpus(run('docker', ['exec', container, 'cat', '/proc/1/status'])),
+    clientAllowed: allowedCpus(run('docker', ['exec', container, ...pinned(cpuSets.client, ['cat', '/proc/self/status'])])),
+  };
+  if (cpuPins && (cpuList(cpuPins.postmasterAllowed) !== cpuList(cpuPins.server) || cpuList(cpuPins.clientAllowed) !== cpuList(cpuPins.client))) {
+    throw new Error(`CPU sets did not take effect: postmaster ${cpuList(cpuPins.postmasterAllowed)}, client ${cpuList(cpuPins.clientAllowed)}`);
   }
   psql('postgres', 'CREATE DATABASE p519;');
   psql('p519', migrations.map(m => `BEGIN;\n\\i /work/server/migrations/${m}\nCOMMIT;`).join('\n') + '\n');
@@ -267,7 +291,7 @@ try {
     settings: JSON.parse(psql('p519', `SELECT json_object_agg(name, setting) FROM pg_settings WHERE name IN
       ('server_version','shared_buffers','work_mem','jit','plan_cache_mode','synchronous_commit','fsync','autovacuum','default_transaction_isolation','max_wal_size','checkpoint_timeout','log_checkpoints',
       'log_line_prefix','log_timezone');`)),
-    host: { platform: platform(), release: release(), cpus: cpus().length, memoryBytes: totalmem() }, preflight,
+    host: { platform: platform(), release: release(), cpus: cpus().length, memoryBytes: totalmem() }, preflight, cpuSets: cpuPins,
     hostBusyMarker: marker, cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts: sendsOnly ? [] : cuts,
     walNotes: 'WAL bytes = cluster insert-LSN delta (and pg_stat_wal.wal_bytes); cluster-wide, so idle databases can add background WAL; ' +
       (sendsOnly ? 'one fresh send database per block, cloned from a vacuumed per-arm template and dropped after the block' : 'send DBs are reused across pairs'),
@@ -335,7 +359,9 @@ try {
 } finally {
   spawnSync('docker', ['rm', '-f', container]);
   rmSync(work, { recursive: true, force: true });
-  save('checks.json', checks);
+  // Each write is attempted on its own, so a failed record or checks write cannot skip status.json.
+  try { save('host-record-after.json', hostRecord(out)); } catch (e) { console.error('host record after the run:', e); }
+  try { save('checks.json', checks); } catch (e) { failed = true; console.error('checks.json:', e); }
   save('status.json', { complete: !failed, finished: new Date().toISOString() });
 }
 process.exit(failed ? 1 : 0);
