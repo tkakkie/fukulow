@@ -15,6 +15,18 @@ Plumbing that every measurement harness needs, so a fix lands once. New harnesse
   - `linuxViolations` lists the unmet Linux measurement conditions.
   - `node load/host-record.ts --out FILE --check` exits 3 on any violation.
 - `cpusets.ts` (#796): `--cpu-sets "server=LIST;client=LIST"`, checked to be disjoint. Processes are pinned with `taskset`, and the pin is read back from `/proc/<pid>/status`.
+- `provenance.ts` (#866): `harnessHashes(paths)`, the SHA-256 of each listed file. A missing file, an empty or duplicate list, or an absolute or escaping path throws.
+- `provenance-coverage.ts` (#866, tests only): `missingFromProvenance(entry, list)` returns the entry and every local module it imports (transitively, type-only imports included) that the list lacks.
+- `nearest-rank.ts` (#866): `nearestRank(sorted, fraction)`, with `fraction` in (0, 1]. Empty input returns `undefined`.
+- `checkout.ts` (#866): `outsideCheckout(path, checkout)`, symlink-aware. A relative path is never outside.
+
+Adoption (#866): a harness moves to these only when it next changes, never in a frozen file. It keeps a thin local wrapper for its scale and its empty-input result (null, NaN, 0, a throw), because those feed different INVALID / NOT EVALUATED rules. Each adoption adds a same-input equality test against the old copy.
+
+Medians are named here, not unified, because their even-count and empty results differ:
+- mean of the two middle values: `proxy-judgment.ts`, `signin-owner-burst-locks.ts`, `revocation-holds-memory.ts` (empty: NaN), `dms-formal-seed-samplers.ts` (empty: null), `thermal.ts`, `search-engines/diagnose-870/judge.ts`;
+- upper middle value `sorted[floor(n / 2)]`: `slice5/judge.ts`, `hot-plans/fanout.ts`;
+- middle of exactly three: `search-m1-report.ts`;
+- nearest-rank p50 (lower middle): `search-engines/summarize.ts`.
 
 ## Launching runs (#867)
 
