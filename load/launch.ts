@@ -1,7 +1,7 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { parseArgs } from 'node:util';
+import { parseArgs, promisify } from 'node:util';
 import { dockerFreeBytes, freeBytes } from './harness-core/host.ts';
 import { launch, type Child } from './launcher/launcher.ts';
 import { currentPlatform } from './launcher/platform.ts';
@@ -30,25 +30,36 @@ function run(argv: string[], opts: { cwd: string; log: string; env?: Record<stri
   return { done, kill: () => { c.kill('SIGTERM'); } };
 }
 
+const execAsync = promisify(execFile);
 // Polls for a container with the label and follows its logs; a new container is picked up after the last one ends.
+// Asynchronous and abortable, so a stalled Docker daemon never blocks signals or the job's exit.
 function captureLogs(label: string, file: string) {
-  let stopped = false;
+  const stop = new AbortController();
   let follower: ReturnType<typeof spawn> | null = null;
+  const follow = (id: string) => {
+    const fd = openSync(file, 'a');
+    let closed = false;
+    const done = () => { if (!closed) { closed = true; closeSync(fd); } follower = null; };
+    try {
+      follower = spawn('docker', ['logs', '-f', id], { stdio: ['ignore', fd, fd] });
+      follower.on('error', done);
+      follower.on('exit', done);
+    } catch { done(); }
+  };
   const loop = async () => {
-    while (!stopped) {
+    while (!stop.signal.aborted) {
       if (follower === null) {
-        const id = exec(['docker', 'ps', '--filter', `label=${label}`, '--format', '{{.ID}}']).stdout.trim().split('\n')[0];
-        if (id) {
-          const fd = openSync(file, 'a');
-          follower = spawn('docker', ['logs', '-f', id], { stdio: ['ignore', fd, fd] });
-          follower.on('exit', () => { closeSync(fd); follower = null; });
-        }
+        try {
+          const { stdout } = await execAsync('docker', ['ps', '--filter', `label=${label}`, '--format', '{{.ID}}'], { timeout: 30_000, killSignal: 'SIGKILL', signal: stop.signal });
+          const id = stdout.trim().split('\n')[0];
+          if (id && !stop.signal.aborted) follow(id);
+        } catch { /* retried on the next poll */ }
       }
-      await sleep(5_000);
+      await sleep(5_000, undefined, { signal: stop.signal }).catch(() => {});
     }
   };
   void loop();
-  return () => { stopped = true; follower?.kill('SIGTERM'); };
+  return () => { stop.abort(); follower?.kill('SIGTERM'); };
 }
 
 const claim = (path: string, text: string) => {
@@ -59,12 +70,14 @@ const claim = (path: string, text: string) => {
 };
 const safe = <T>(f: () => T) => { try { return f(); } catch { return null; } };
 
+// A signal also ends the idle wait at once instead of after the current poll.
+const signalled = new AbortController();
 const result = await launch(queue, {
   platform: currentPlatform(), exec, spawn: run, captureLogs,
   exists: existsSync, claim, remove: p => rmSync(p, { force: true }), append: appendFileSync, write: writeFileSync,
   freeBytes: p => safe(() => freeBytes(exec(['df', '-Pk', p]).stdout)), dockerFreeBytes: image => safe(() => dockerFreeBytes(image)),
-  nodeVersion: process.version, pid: process.pid, now: () => new Date(), sleep: ms => sleep(ms),
-  onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => handler(s)); },
+  nodeVersion: process.version, pid: process.pid, now: () => new Date(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
+  onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => { signalled.abort(); handler(s); }); },
 });
 console.log(JSON.stringify(result));
 process.exit(result.outcome === 'done' ? 0 : 3);

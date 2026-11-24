@@ -70,6 +70,9 @@ export function preflight(d: Deps, q: Queue, job: Job, record: HostRecord): stri
   if (pinned.status !== 0 || `v${pinned.stdout.trim()}` !== d.nodeVersion) r.push(`node ${d.nodeVersion} is not the pinned ${pinned.stdout.trim() || '(unreadable)'}`);
   const containers = d.exec(['docker', 'ps', '-q']);
   if (containers.status !== 0 || containers.stdout.trim() !== '') r.push('containers running or docker unavailable');
+  const ps = d.exec(['ps', '-Ao', 'pid=,command=']);
+  const busy = ps.status === 0 ? workers(ps.stdout, d.pid) : ['ps failed'];
+  if (busy.length > 0) r.push(`workers running: ${busy.slice(0, 3).join(' | ')}`);
   r.push(...d.platform.violations(record));
   const min = (job.minFreeGiB ?? 40) * GiB;
   const host = d.freeBytes(q.chainDir);
@@ -89,11 +92,18 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   let child: Child | null = null;
   let stopLogs: (() => void) | null = null;
   let signalled: string | null = null;
+  const endLogs = () => { const s = stopLogs; stopLogs = null; try { s?.(); } catch (e) { log(`log capture stop failed: ${String(e)}`); } };
   const release = () => {
-    stopLogs?.(); stopLogs = null;
-    if (claimed) { d.remove(q.hostBusy); claimed = false; log('HOST-BUSY released'); }
+    try { endLogs(); } finally {
+      if (claimed) { d.remove(q.hostBusy); claimed = false; log('HOST-BUSY released'); }
+    }
   };
-  d.onSignal(signal => { signalled = signal; log(`STOP: ${signal}`); child?.kill(); release(); });
+  // A signal kills the running gate or job; HOST-BUSY is released only after it has exited (finally).
+  d.onSignal(signal => { signalled = signal; log(`STOP: ${signal}`); child?.kill(); });
+  const run = async (argv: string[], file: string, job: Job) => {
+    child = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: job.env });
+    try { return await child.done; } finally { child = null; }
+  };
   const stop = (reason: string): Result => { log(`STOP: ${reason}`); return { outcome: 'stop', reason, jobs }; };
   try {
     log(`queue ${q.name}: ${q.jobs.map(j => `${j.name} (#${j.issue})`).join(', ')}; waiting for an idle host`);
@@ -112,20 +122,20 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       const problems = preflight(d, q, job, before);
       if (problems.length > 0) return stop(`${job.name} preflight: ${problems.join('; ')}`);
       if (job.gate) {
-        const gate = await d.spawn(job.gate, { cwd: job.worktree, log: join(q.chainDir, `${job.name}-gate.log`), env: job.env }).done;
+        const gate = await run(job.gate, `${job.name}-gate.log`, job);
         log(`${job.name} gate: exit=${gate}`);
+        if (signalled) return stop(`${signalled} during the gate; ${job.name} not started`);
         if (gate !== 0) return stop(`${job.name} gate did not pass; job not started`);
       }
       if (job.postgresLogLabel) stopLogs = d.captureLogs(job.postgresLogLabel, join(q.chainDir, `${job.name}-postgres.log`));
       log(`${job.name}: start (once, no rerun)`);
-      child = d.spawn(d.platform.inhibit(job.command), { cwd: job.worktree, log: join(q.chainDir, `${job.name}.log`), env: job.env });
-      const exit = await child.done;
-      child = null;
-      stopLogs?.(); stopLogs = null;
+      const exit = await run(d.platform.inhibit(job.command), `${job.name}.log`, job);
+      endLogs();
       jobs.push({ name: job.name, exit });
       d.write(join(q.chainDir, `${job.name}-host-after.json`), JSON.stringify(d.platform.record(q.chainDir), null, 2) + '\n');
       const left = d.exec(['docker', 'ps', '-q']).stdout.trim().split('\n').filter(Boolean).length;
       log(`${job.name}: exit=${exit}; containers left: ${left}`);
+      if (signalled) return stop(`${signalled} during ${job.name}; the queue ends (no rerun)`);
       if (exit !== 0) return stop(`${job.name} exited ${exit}; the queue ends (no rerun)`);
     }
     log('queue done');

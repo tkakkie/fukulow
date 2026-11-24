@@ -14,12 +14,13 @@ const queue = (jobs = [job('a'), job('b')]): Queue => parseQueue(JSON.stringify(
 
 type World = {
   files: Map<string, string>; containers: string; ps: string; load: number[]; violations: string[]; exits: number[];
-  head: string; dirty: string; node: string; free: number | null; spawned: string[][]; captured: string[]; stoppedLogs: number;
-  signal?: { at: 'wait' | 'job'; handler?: (s: string) => void };
+  head: string; dirty: string; node: string; free: number | null; dockerFree?: number | null; spawned: string[][]; captured: string[]; stoppedLogs: number;
+  kills: number; busyAtExit: boolean[]; psLater?: string;
+  signal?: { at: 'wait' | 'job' | 'gate'; handler?: (s: string) => void };
 };
 function world(over: Partial<World> = {}): World {
   return { files: new Map(), containers: '', ps: '1 /sbin/init\n', load: [0.5], violations: [], exits: [0, 0], head: 'abc1234def\n', dirty: '',
-    node: '26.13.1\n', free: 100 * GiB, spawned: [], captured: [], stoppedLogs: 0, ...over };
+    node: '26.13.1\n', free: 100 * GiB, spawned: [], captured: [], stoppedLogs: 0, kills: 0, busyAtExit: [], ...over };
 }
 function deps(w: World, platform?: Platform): Deps {
   const p: Platform = platform ?? { name: 'fake', inhibit: a => ['inhibit', ...a], violations: () => w.violations,
@@ -29,7 +30,7 @@ function deps(w: World, platform?: Platform): Deps {
     exec: argv => {
       const k = argv.join(' ');
       if (k === 'docker ps -q') return { status: 0, stdout: w.containers };
-      if (k.startsWith('ps ')) return { status: 0, stdout: w.ps };
+      if (k.startsWith('ps ')) { const out = w.ps; if (w.psLater !== undefined) w.ps = w.psLater; return { status: 0, stdout: out }; }
       if (k === 'git rev-parse HEAD') return { status: 0, stdout: w.head };
       if (k === 'git status --porcelain') return { status: 0, stdout: w.dirty };
       if (k === 'cat .node-version') return { status: 0, stdout: w.node };
@@ -37,8 +38,11 @@ function deps(w: World, platform?: Platform): Deps {
     },
     spawn: argv => {
       w.spawned.push(argv);
-      if (w.signal?.at === 'job' && argv[0] === 'inhibit') w.signal.handler?.('SIGTERM');
-      return { done: Promise.resolve(w.exits.shift() ?? 0), kill: () => {} };
+      const code = w.exits.shift() ?? 0;
+      const child = { done: Promise.resolve().then(() => { w.busyAtExit.push(w.files.has('/runs/HOST-BUSY')); return code; }), kill: () => { w.kills++; } };
+      const isJob = argv[0] === 'inhibit';
+      if ((w.signal?.at === 'job' && isJob) || (w.signal?.at === 'gate' && !isJob)) queueMicrotask(() => w.signal?.handler?.('SIGTERM'));
+      return child;
     },
     captureLogs: (label, file) => { w.captured.push(`${label} -> ${file}`); return () => { w.stoppedLogs++; }; },
     exists: path => w.files.has(path),
@@ -46,7 +50,7 @@ function deps(w: World, platform?: Platform): Deps {
     remove: path => { w.files.delete(path); },
     append: (path, text) => { w.files.set(path, (w.files.get(path) ?? '') + text); },
     write: (path, text) => { w.files.set(path, text); },
-    freeBytes: () => w.free, dockerFreeBytes: () => w.free,
+    freeBytes: () => w.free, dockerFreeBytes: () => (w.dockerFree === undefined ? w.free : w.dockerFree),
     nodeVersion: 'v26.13.1', pid: 42, now: () => new Date('2026-11-24T00:00:00Z'),
     sleep: async () => { if (w.signal?.at === 'wait') w.signal.handler?.('SIGINT'); },
     onSignal: handler => { if (w.signal) w.signal.handler = handler; },
@@ -94,6 +98,9 @@ test('each preflight STOP ends the queue before launch and releases HOST-BUSY', 
     [{ violations: ['not on AC power'] }, {}, /not on AC power/],
     [{ free: 10 * GiB }, {}, /host free 10\.0 GiB < 40 GiB/],
     [{ free: null }, { image: 'postgres:18.6' }, /host free unreadable.*Docker free unreadable/],
+    [{ dockerFree: 5 * GiB }, { image: 'postgres:18.6' }, /Docker free 5\.0 GiB < 40 GiB/],
+    // A worker that starts after the idle check (the first ps) is caught by the preflight (the second).
+    [{ psLater: '1 /sbin/init\n77 cargo test --all\n' }, {}, /workers running: 77 cargo test/],
   ];
   for (const [over, extra, pattern] of cases) {
     const w = world(over);
@@ -106,6 +113,7 @@ test('each preflight STOP ends the queue before launch and releases HOST-BUSY', 
   const w = world();
   w.files.set('/runs/out-a', '');
   assert.match((await launch(queue([job('a')]), deps(w))).reason ?? '', /output exists/);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
 test('containers that appear after the idle check stop the job', async () => {
@@ -117,6 +125,7 @@ test('containers that appear after the idle check stop the job', async () => {
   const r = await launch(queue([job('a')]), d);
   assert.match(r.reason ?? '', /containers running/);
   assert.equal(w.spawned.length, 0);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
 test('a failed gate stops the queue; the job is not started', async () => {
@@ -125,6 +134,7 @@ test('a failed gate stops the queue; the job is not started', async () => {
   assert.equal(r.outcome, 'stop');
   assert.deepEqual(w.spawned, [['node', 'load/capacity/d3r.ts']]);
   assert.match(chain(w), /a gate: exit=9/);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
 test('a failed job ends the queue and is never rerun', async () => {
@@ -136,13 +146,32 @@ test('a failed job ends the queue and is never rerun', async () => {
   assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
-test('a signal during a job kills it, releases HOST-BUSY and starts nothing else', async () => {
+test('a signal during a job kills it, keeps HOST-BUSY until it exits, then releases it and starts nothing else', async () => {
   const w = world({ signal: { at: 'job' }, exits: [143, 0] });
   const r = await launch(queue(), deps(w));
   assert.equal(r.outcome, 'stop');
   assert.equal(w.spawned.length, 1);
+  assert.equal(w.kills, 1);
+  assert.deepEqual(w.busyAtExit, [true]);
   assert.equal(w.files.has('/runs/HOST-BUSY'), false);
   assert.match(chain(w), /STOP: SIGTERM/);
+});
+
+test('a signal on the last job is a STOP even if the job exits 0', async () => {
+  const w = world({ signal: { at: 'job' }, exits: [0] });
+  const r = await launch(queue([job('a')]), deps(w));
+  assert.equal(r.outcome, 'stop');
+  assert.match(r.reason ?? '', /SIGTERM during a/);
+});
+
+test('a signal during the gate kills it and the job never starts, even if the gate exits 0', async () => {
+  const w = world({ signal: { at: 'gate' }, exits: [0, 0] });
+  const r = await launch(queue([job('a', { gate: ['node', 'gate.ts'] })]), deps(w));
+  assert.equal(r.outcome, 'stop');
+  assert.deepEqual(w.spawned, [['node', 'gate.ts']]);
+  assert.equal(w.kills, 1);
+  assert.deepEqual(w.busyAtExit, [true]);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
 test('HOST-BUSY is released when a step throws', async () => {
@@ -158,6 +187,15 @@ test('PostgreSQL logs are captured for the job only', async () => {
   await launch(queue([job('a', { postgresLogLabel: 'io.fukulow.search-harness=153' })]), deps(w));
   assert.deepEqual(w.captured, ['io.fukulow.search-harness=153 -> /runs/chain/a-postgres.log']);
   assert.equal(w.stoppedLogs, 1);
+});
+
+test('HOST-BUSY is released even if stopping the log capture throws', async () => {
+  const w = world();
+  const d = deps(w);
+  d.captureLogs = () => () => { throw new Error('follower'); };
+  d.platform = { ...d.platform, record: (() => { let n = 0; return () => { if (++n > 1) throw new Error('after'); return {} as HostRecord; }; })() };
+  await assert.rejects(launch(queue([job('a', { postgresLogLabel: 'l' })]), d), /after/);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
 test('a job without a quoted go, or another bad field, is refused with every problem', () => {
