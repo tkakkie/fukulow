@@ -4,6 +4,8 @@ export type ObserverReadProbe = {
   presented: number[]
   /** Seqs applied after `stop()`; all of them came from inside the row window's IntersectionObserver callback. */
   afterStop: number[]
+  /** Seqs of rows that were intersecting targets of an observer callback whose report was applied after `stop()`. */
+  firedAfterStop: number[]
   /** The production Unread rule (`sequenceToSubmit`) over `presented`: the stand-in for the visit's read_seq. */
   readSeq: number
   /** `presented` calls after `stop()` from any other caller (scroll handler, effects); counted and never applied. */

@@ -69,11 +69,13 @@ test('rows mounted after native scrolling stops are reported through the Interse
     return {
       mountedAfterStopShown: mountedAfterStop.length >= 5,
       notReportedByObserver: mountedAfterStop.filter(seq => !p.afterStop.includes(seq)),
+      // Each row mounted after the stop fired an applied observer callback itself, not only rows mounted before it.
+      notObservedThemselves: mountedAfterStop.filter(seq => !p.firedAfterStop.includes(seq)),
       reportedButNotShown: p.afterStop.filter(seq => !shown.includes(seq)),
       readSeqIsLastShown: p.readSeq === shown.at(-1) && p.readSeq > p.stopped!.readSeq,
     }
   }, { timeout: 5_000 }).toEqual({
-    mountedAfterStopShown: true, notReportedByObserver: [], reportedButNotShown: [], readSeqIsLastShown: true,
+    mountedAfterStopShown: true, notReportedByObserver: [], notObservedThemselves: [], reportedButNotShown: [], readSeqIsLastShown: true,
   })
   const after = await probe(page)
   expect({ scrolls: after.scrolls, scrollEnds: after.scrollEnds }).toEqual({ scrolls: stopped!.scrolls, scrollEnds: stopped!.scrollEnds })

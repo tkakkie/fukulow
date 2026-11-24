@@ -24,7 +24,7 @@ const messages: Message[] = Array.from({ length: MESSAGE_COUNT }, (_, i) => ({
 }))
 
 const probe: ObserverReadProbe = {
-  presented: [], afterStop: [], readSeq: 0, otherReports: 0, everMounted: [], scrolls: 0, scrollEnds: 0, stopped: null,
+  presented: [], afterStop: [], firedAfterStop: [], readSeq: 0, otherReports: 0, everMounted: [], scrolls: 0, scrollEnds: 0, stopped: null,
 }
 const stop = () => {
   probe.stopped = { mounted: [...probe.everMounted], scrolls: probe.scrolls, scrollEnds: probe.scrollEnds, readSeq: probe.readSeq }
@@ -32,13 +32,18 @@ const stop = () => {
 Object.assign(globalThis, { observerRead: probe, stop })
 
 // The native observer computes every intersection; the subclass only marks when its callback is running.
+// It also keeps the seqs of the callback's intersecting targets, so an applied report can name the rows that fired it.
 let inObserverCallback = 0
+let callbackTargets: number[] = []
 const NativeIntersectionObserver = globalThis.IntersectionObserver
 globalThis.IntersectionObserver = class extends NativeIntersectionObserver {
   constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
     super((entries, observer) => {
+      const outer = callbackTargets
+      callbackTargets = entries.filter(e => e.isIntersecting)
+        .map(e => Number((e.target as HTMLElement).dataset.confirmedSeq)).filter(seq => seq > 0)
       inObserverCallback++
-      try { callback(entries, observer) } finally { inObserverCallback-- }
+      try { callback(entries, observer) } finally { inObserverCallback--; callbackTargets = outer }
     }, options)
   }
 }
@@ -67,6 +72,7 @@ const unread: UnreadAdapter = {
       if (!probe.presented.includes(seq)) probe.presented.push(seq)
       if (probe.stopped && !probe.afterStop.includes(seq)) probe.afterStop.push(seq)
     }
+    if (probe.stopped) for (const seq of callbackTargets) if (!probe.firedAfterStop.includes(seq)) probe.firedAfterStop.push(seq)
     probe.readSeq = sequenceToSubmit(0, messages, coverage, new Set(probe.presented), { channel: CHANNEL, topicId: null }, SELF)
   },
 }
