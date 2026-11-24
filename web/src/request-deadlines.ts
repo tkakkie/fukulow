@@ -1,13 +1,15 @@
+type DeadlineOptions<T> = {
+  timeoutMs?: number
+  onTimeout?: () => T
+  channel?: string
+  signal?: AbortSignal
+}
+
 /** Ends the caller's wait. The transport and its response observers keep running. */
 export function createRequestDeadlines() {
   const pending = new Map<() => void, string | undefined>()
-  return {
-    start<T>(cancelled: T, options: {
-      timeoutMs?: number
-      onTimeout?: () => T
-      channel?: string
-      signal?: AbortSignal
-    }) {
+  const deadlines = {
+    start<T>(cancelled: T, options: DeadlineOptions<T>) {
       let cancel: (() => void) | undefined
       let timer: ReturnType<typeof setTimeout> | undefined
       const { signal, channel, timeoutMs, onTimeout } = options
@@ -46,6 +48,17 @@ export function createRequestDeadlines() {
       })
       return { until, clear }
     },
+    wait<T>(request: Promise<T>, cancelled: NoInfer<T>, options: DeadlineOptions<NoInfer<T>>): Promise<T> {
+      const deadline = deadlines.start<T>(cancelled, options)
+      // Clear in the settlement handler so cleanup adds no extra promise turns for callers.
+      return new Promise((resolve, reject) => {
+        void request.then(
+          result => { deadline.clear(); resolve(result) },
+          error => { deadline.clear(); reject(error) },
+        )
+        void deadline.until.then(resolve)
+      })
+    },
     cancel(channel?: string) {
       for (const [cancel, owner] of pending) {
         if (channel !== undefined && owner !== channel) continue
@@ -53,4 +66,5 @@ export function createRequestDeadlines() {
       }
     },
   }
+  return deadlines
 }
