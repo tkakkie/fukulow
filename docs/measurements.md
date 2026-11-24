@@ -7,6 +7,13 @@ Compare runs only at the same send-limit settings and publishing Member count.
 
 Raw logs, artifact directories and local paths outside Git may be gone ([2026-11-18 check](../load/measurements-archive.md#raw-data-check-2026-11-18)). See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
 
+## Measurement hosts (#796)
+
+- **Mac (Apple M5):** formal today. #689, #519 and #426 B7 keep their Mac conditions; Mac results stay.
+- **Ubuntu (x86_64, Zen 5 + Zen 5c):** investigation only (not formal, never compared with Mac baselines or used for a gate) until it passes the #796 stability check; then formal, and the Mac is for development.
+- **Ubuntu conditions:** `host-record.ts --check` passes (AC, sleep targets masked, governor `performance`, update jobs and snap refresh held), `HOST-BUSY`, CPU sets `server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15`; each run attaches both ([harness](../load/harness-core/README.md)).
+- **Moving a series:** never for a bad Mac result; it restarts with an Ubuntu baseline and criteria fixed first.
+
 ## Topic projection paging (#137)
 
 2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. A proportional projection put the prefix query's 100 ms read p95 at ~649k Messages.
@@ -27,7 +34,7 @@ In a separate source Compose project, run `node scripts/backup.ts /absolute/priv
 
 ## Channel-list Unread ranges (#142)
 
-2026-11-11 (review B1, `d1d5aaf`). Across 20 public Channels and 200 Topics at 1,000,000 Messages, before/after SQL p95 was 174.414 → 11.157 ms fully read and 255.727 → 14.202 ms with 2,000 unread. Evidence for [skipping read ranges](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8). #356 below covers the later RLS bound.
+2026-11-11 (review B1, `d1d5aaf`). Across 20 public Channels and 200 Topics at 1,000,000 Messages, before/after SQL p95 was 174.414 → 11.157 ms fully read and 255.727 → 14.202 ms with 2,000 unread. Evidence for [skipping read ranges](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
 
 With disposable PostgreSQL 18.6 in `DATABASE_URL`, run `cargo test --release -p fukulow-server --lib measure_unread_list_read_position_ranges -- --ignored --nocapture`. Warm sequential SQL, JIT at 1M, no HTTP or writers. [Full record](../load/measurements-archive.md#channel-list-unread-read-position-ranges-142-review-b1-2026-11-11)
 
@@ -101,8 +108,6 @@ Mac-relative, B `b975ffa` vs A `f7fe08a`, harness `df695bc`; separate from #431.
 
 Build, then run each night: `node load/slice5/run.ts --help`.
 
-F1 diagnostic, not evidence; #515 stays FAIL. Under REPEATABLE READ a generic plan cut A HTTP p50 1.68 → 1.33 ms (1M-recent); the PR now uses READ COMMITTED, untimed. Values are not reproducible; the tests verify function only. [Record](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic)
-
 ## Unread candidate bounds (#355)
 
 2026-11-16 JST (PR #448). Against `1662d5d`, Auto execution fell 0.178 → 0.117 ms for visible list and 5.477 → 3.677 ms for counts. Evidence for [bounding the grant lookup and materializing Topic candidates](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
@@ -133,12 +138,6 @@ Run `node load/pool-before-after.ts --out <dir>` at `ee36849` with the external 
 
 Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal4-409`. Warm loopback on shared Mac, no writes, subscribers or proxy/TLS. [Full record](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst)
 
-## Unread Topic-count index bound under RLS (#356)
-
-2026-11-17 JST, `4fa2ba0` vs the materialized-bound rewrite. At 25 unread/Topic across 20 Topics, rows examined 50,500 → 500 in all modes and Generic median 32.470 → 1.419 ms. Evidence for restoring the lower Index Cond under the [Unread rules](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
-
-Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Runner and raw artifacts were not retained. Superseded by #519 A3 (guard: `unread_list_counts_never_read_messages_in_any_plan_mode`). Warm SQL, one Channel, no writers or Mentions. Cost grows with unread backlog. [Full record](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst)
-
 ## Revocation hold retry bursts (#592)
 
 2026-11-21 JST, `2bad2c7d`, send time (#622): `recheck` 4,096 ×3 PASS, 24/24 sends matched each, 0 in fault. 2026-11-20 4096 FAIL kept. Maintainer: backoff acceptable (≤ 4 holds; high counts: #668), no jitter.
@@ -157,6 +156,8 @@ Run `node load/signin-owner-burst.ts --recorded` ×3 and its `-aggregate.ts`. [R
 - [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
 - Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs (quality scores reproduced).
 - [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
+- [Unread Topic-count index bound under RLS (#356)](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst) — superseded by #519 A3 (guard `unread_list_counts_never_read_messages_in_any_plan_mode`).
+- [Replay page generic plan (#515 F1)](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic) — diagnostic only, not evidence; #515 stays FAIL.
 - [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
 - [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
 - [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
