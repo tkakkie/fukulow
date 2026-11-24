@@ -84,24 +84,11 @@ Server platform: database, startup, config, shutdown, schema guard, OpenAPI cont
 
 ## Rows in other parts
 
-- [channels](channels.md): `bounded_fanout_cancellation_discards_context_in_both_plan_modes`
-
-- [channels](channels.md): `only_current_pair_participants_read_write_retry_and_discover`, `guests_cannot_open_but_participate_and_every_management_and_topic_route_denies`, `reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread`, `existing_channels_grants_messages_and_unread_survive_dm_migration`
-- [messages](messages.md): `send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions`, `default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime`
-- [realtime](realtime.md): `dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_denied`, `dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does_not_restore_access`, `dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_recovers_first_message`
-
 Rows that also govern this area, listed by a test name unique to the row in that part, or by its `#id` when no such name exists.
 
-- [realtime](realtime.md): `connection_database_failures_emit_once_with_fixed_operation_and_no_details`
-- [auth](auth.md): `startup_requires_setup_token_regardless_of_cookie_security`, `proxy_cidrs_match_only_peers_in_the_configured_networks`
-- [messages](messages.md): `send_context_is_bound_and_cleared_on_commit_rollback_error_and_abort`, `send_context_cancelled_begin_setting_work_and_cleanup_discard`
+- [channels](channels.md): `bounded_fanout_cancellation_discards_context_in_both_plan_modes`, `only_current_pair_participants_read_write_retry_and_discover`, `guests_cannot_open_but_participate_and_every_management_and_topic_route_denies`, `reciprocal_open_and_renewal_are_unique_and_noops_preserve_unread`, `existing_channels_grants_messages_and_unread_survive_dm_migration`
+- [messages](messages.md): `send_first_holds_peer_through_commit_and_deactivation_first_denies_both_directions`, `default_open_resolves_before_peer_eligibility_and_renewal_preserves_current_lifetime`, `send_context_is_bound_and_cleared_on_commit_rollback_error_and_abort`, `send_context_cancelled_begin_setting_work_and_cleanup_discard`, `history_generation_rotation_is_explicit_scoped_and_owner_only`
+- [realtime](realtime.md): `dm_participant_and_guest_replay_live_and_every_nonparticipant_role_is_denied`, `dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does_not_restore_access`, `dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_recovers_first_message`, `connection_database_failures_emit_once_with_fixed_operation_and_no_details`, `sigint_drains_and_closes_idle_sockets_normally`, `sigterm_drain_deadline_expires_without_closing_pool_under_unfinished_work`, `work_counts_unpolled_and_cancelled_tasks_and_nested_notification`, `delivery_contract_rejects_incorrect_unread_counts_and_positions`
+- [auth](auth.md): `startup_requires_setup_token_regardless_of_cookie_security`, `proxy_cidrs_match_only_peers_in_the_configured_networks`, `handlers_and_fanout_require_authenticated_context`, `deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled`, `account_security_contract_records_paths_errors_and_account_lock_order`, `invite_revocation_upgrade_backfills_existing_rows_and_pages_tied_expiries`
 - [topics](topics.md): `topic_openapi_contract_includes_all_shapes_and_discriminators`
 - [replies](replies.md): `validates running Reply delivery labels and pages`
-- [realtime](realtime.md): `sigint_drains_and_closes_idle_sockets_normally`, `sigterm_drain_deadline_expires_without_closing_pool_under_unfinished_work`, `work_counts_unpolled_and_cancelled_tasks_and_nested_notification`, `delivery_contract_rejects_incorrect_unread_counts_and_positions`
-
-- [auth](auth.md): `handlers_and_fanout_require_authenticated_context`, `deadline_frees_pool_slot_while_transaction_transport_cleanup_is_stalled`
-
-- [auth](auth.md): `account_security_contract_records_paths_errors_and_account_lock_order`
-- [auth](auth.md): `invite_revocation_upgrade_backfills_existing_rows_and_pages_tied_expiries`
-
-- [messages](messages.md): `history_generation_rotation_is_explicit_scoped_and_owner_only`
