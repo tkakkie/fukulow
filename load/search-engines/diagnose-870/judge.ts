@@ -254,9 +254,9 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
     });
     const rf = f.map(([, x]) => x), rr = queries.map(q => r.find(([x]) => x === q)?.[1] ?? NaN);
     const [pf, pr] = [spearman(position('F'), rf), spearman(position('R'), rr)];
-    // The rise follows the position in both orders, in either direction (later or earlier positions rise
-    // more), with the same sign in F and R (decision 5, |rho| >= 0.8).
-    const follows = pf !== null && pr !== null && ((pf >= 0.8 && pr >= 0.8) || (pf <= -0.8 && pr <= -0.8));
+    // The rise follows the position in both orders: later positions rise more, rho >= 0.8 in F and in R
+    // (decision 5 as approved; a negative rho never supports H6).
+    const follows = pf !== null && pr !== null && pf >= 0.8 && pr >= 0.8;
     out.H6 = verdict(follows, rf.every((x, i) => within(x / rr[i], n)));
   }
   return out;
@@ -347,6 +347,7 @@ export function smoke(ms: Measurement[], stopped: string | null, stageMissing: s
 export const cacheConstraint = {
   statement: 'No privileged container and no drop_caches. Restart-only empties PostgreSQL shared buffers only; the OS page cache may still hold the relation files, so it is not a cold-cache measurement. The OS cache state is recorded, not controlled.',
   h1Scope: 'H1 covers shared-buffer state and whether reads reach the OS. A cause in the OS page cache alone is withheld, never ruled out.',
+  h1Reads: 'Shared reads are the measured database\'s blks_read delta over the window, so they also count autovacuum and analyze reads. They are supporting evidence for H1 only and never attribute the rise to a particular query.',
 };
 
 // §5.3 Stage 2, as written: G95(first round after the scan) / G95(the first round), so B.post1 against

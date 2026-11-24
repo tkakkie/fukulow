@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { attribution, evidence, fillPlans, g95, minimums, noise, noiseSpreads, ownReasons, reproduction, smoke, spearman, stage1, stage2, type Measurement, type Plan } from './judge.ts';
+import { attribution, cacheConstraint, evidence, fillPlans, g95, minimums, noise, noiseSpreads, ownReasons, reproduction, smoke, spearman, stage1, stage2, type Measurement, type Plan } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
 import { rational, ratio } from './exact.ts';
 
@@ -264,7 +264,7 @@ test('Stage 1 outcomes: not reproduced, several supported, none supported with o
   assert.equal(h6.stage2, 'propose');
 });
 
-test('H6 is supported by a position effect in either direction, but only with the same sign in F and R', () => {
+test('H6 is not supported when earlier positions rise more (rho <= -0.8 in F and R; decision 5 is rho >= 0.8)', () => {
   // Earlier positions rise more in both orders: q1 most in F rounds, q3 most in R rounds.
   const early = (id: string, base: number) => {
     const x = m(id, base);
@@ -273,7 +273,7 @@ test('H6 is supported by a position effect in either direction, but only with th
     return x;
   };
   const ms = scenario().map(x => x.id === 'A1.5' ? early('A1.5', 53) : x.id === 'A1.6' ? early('A1.6', 56) : x);
-  assert.equal(attribution(ms, 1.05).H6, 'supported');
+  assert.notEqual(attribution(ms, 1.05).H6, 'supported');
 });
 
 test('a normal Stage 1 has no abnormal reasons; each unmet minimum and a STOP are listed', () => {
@@ -454,4 +454,10 @@ test('the reported rho is computed from the exact G95 ranks used for the decisio
   assert.notEqual(a3.order, a4.order);
   assert.notEqual(g95(a3), g95(a4));
   assert.equal(reproduction(ms, 1.05).rho, spearman([1, 2, 3, 4, 5, 6], [1, 2, 3.5, 3.5, 5, 6]));
+});
+
+test('every judgement states that H1 shared reads are database-wide supporting evidence, never a per-query cause', () => {
+  assert.match(cacheConstraint.h1Reads, /blks_read delta/);
+  assert.match(cacheConstraint.h1Reads, /autovacuum and analyze/);
+  assert.match(cacheConstraint.h1Reads, /never attribute the rise to a particular query/);
 });
