@@ -341,7 +341,7 @@
     min-width: 0;
   }
 
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .main-card__search {
       max-width: none;
     }
@@ -430,7 +430,7 @@
     display: none;
   }
 
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .mobile-only {
       display: inline-flex;
     }

@@ -1,4 +1,5 @@
 import { createInvites } from './invites'
+import { sessionEndedMessage } from './auth'
 import { createActivityTarget } from './activity'
 import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
 
@@ -57,7 +58,7 @@ export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
   if (r.error === 'member_already_active') return 'すでにこの組織のメンバーです。'
   if (r.error === 'invite_unavailable') return 'この招待は利用できません。招待先アドレスと有効期限を確認してください。'
   if (r.error === 'invite_limit_reached') return '有効な招待が上限に達しています。不要な招待を取り消してから、もう一度お試しください。'
-  if (r.status === 401) return 'セッションが終了しました。もう一度ログインしてください。'
+  if (r.status === 401) return sessionEndedMessage
   if (r.status === 403) return 'この操作の権限がありません。'
   return '入力内容と権限を確認してください。'
 }

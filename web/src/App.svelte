@@ -502,7 +502,7 @@
     font-size: var(--font-size-14);
   }
 
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .app-fallback {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: 1fr auto;

@@ -16,14 +16,19 @@ const PASSWORD: &str = "correct horse battery staple";
 
 #[path = "support/pools.rs"]
 mod test_support;
+use test_support::TestPools;
 
-fn router(pool: &PgPool) -> Router {
-    router_with_cookie_security(pool, true)
+fn router(app_pool: &PgPool) -> Router {
+    router_with_cookie_security(app_pool, true)
 }
 
-fn router_with_cookie_security(pool: &PgPool, cookie_secure: bool) -> Router {
-    app(AppState {
-        pool: pool.clone(),
+fn router_with_cookie_security(app_pool: &PgPool, cookie_secure: bool) -> Router {
+    app(app_state(app_pool, cookie_secure))
+}
+
+fn app_state(app_pool: &PgPool, cookie_secure: bool) -> AppState {
+    AppState {
+        pool: app_pool.clone(),
         cookie_secure,
         setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),
@@ -34,7 +39,7 @@ fn router_with_cookie_security(pool: &PgPool, cookie_secure: bool) -> Router {
         shutdown: Default::default(),
         ws_allowed_origins: Default::default(),
         socket_gate: Default::default(),
-    })
+    }
 }
 
 async fn request(
@@ -96,9 +101,10 @@ async fn assert_internal_error(response: Response) {
 
 #[fukulow_test::test]
 async fn auth_extractor_database_failures_return_generic_500_on_all_protected_endpoints(
-    pool: PgPool,
+    admin: PgPool,
 ) {
-    let app = router(&pool);
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     let identity = setup(&app).await;
     let session = body(
         sign_in(
@@ -127,7 +133,7 @@ async fn auth_extractor_database_failures_return_generic_500_on_all_protected_en
     sqlx::query(
         "ALTER TABLE account_sessions RENAME COLUMN account_id TO injected_unavailable_account",
     )
-    .execute(&pool)
+    .execute(&pools.admin)
     .await
     .unwrap();
     let org = identity["organization"]["organization_id"]
@@ -164,10 +170,11 @@ async fn auth_extractor_database_failures_return_generic_500_on_all_protected_en
 }
 
 #[fukulow_test::test]
-async fn public_endpoint_database_failures_return_generic_500(pool: PgPool) {
-    let app = router(&pool);
+async fn public_endpoint_database_failures_return_generic_500(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     sqlx::raw_sql("ALTER TABLE accounts RENAME TO injected_unavailable_accounts; ALTER TABLE organizations RENAME TO injected_unavailable_organizations;")
-        .execute(&pool)
+        .execute(&pools.admin)
         .await
         .unwrap();
     for (method, path, input) in [
@@ -189,8 +196,9 @@ async fn public_endpoint_database_failures_return_generic_500(pool: PgPool) {
 }
 
 #[fukulow_test::test]
-async fn sign_out_database_failure_returns_generic_500_and_preserves_session(pool: PgPool) {
-    let app = router(&pool);
+async fn sign_out_database_failure_returns_generic_500_and_preserves_session(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     let identity = setup(&app).await;
     let session = body(
         sign_in(
@@ -206,7 +214,7 @@ async fn sign_out_database_failure_returns_generic_500_and_preserves_session(poo
     let authorization = format!("Bearer {}", session["token"].as_str().unwrap());
     let headers = [("authorization", authorization.as_str())];
     sqlx::raw_sql("CREATE FUNCTION fail_session_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected session deletion failure'; END $$; CREATE TRIGGER fail_session_delete BEFORE DELETE ON account_sessions FOR EACH ROW EXECUTE FUNCTION fail_session_delete();")
-        .execute(&pool).await.unwrap();
+        .execute(&pools.admin).await.unwrap();
     assert_internal_error(request(&app, "DELETE", "/api/v1/session", Value::Null, &headers).await)
         .await;
     assert_eq!(
@@ -219,7 +227,7 @@ async fn sign_out_database_failure_returns_generic_500_and_preserves_session(poo
 
 // Reusable fixture for later tenant denial tests. The production setup API is
 // deliberately single-use; insert the second organization only through test SQL.
-async fn two_organizations(pool: &PgPool, app: &Router) -> (Value, Uuid) {
+async fn two_organizations(admin: &PgPool, app: &Router) -> (Value, Uuid) {
     let first = setup(app).await;
     let first_id: Uuid = first["organization"]["organization_id"]
         .as_str()
@@ -229,33 +237,54 @@ async fn two_organizations(pool: &PgPool, app: &Router) -> (Value, Uuid) {
     let second_id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (organization_id, name) VALUES ($1, 'Organization B')")
         .bind(second_id)
-        .execute(pool)
+        .execute(admin)
         .await
         .unwrap();
     // Use the same member id and email in both organizations to catch joins
     // which accidentally omit the organization_id part of a composite key.
     sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) SELECT $1, id, account_id, 'Owner B', 'guest' FROM users WHERE organization_id = $2")
-        .bind(second_id).bind(first_id).execute(pool).await.unwrap();
+        .bind(second_id).bind(first_id).execute(admin).await.unwrap();
     (first, second_id)
 }
 
-async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
+#[fukulow_test::test]
+async fn auth_app_pool_enforces_organization_rls(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let state = app_state(&pools.app, true);
+    let app_pool = state.pool.clone();
+    let flags: (bool, bool) =
+        sqlx::query_as("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&app_pool)
+            .await
+            .unwrap();
+    assert_eq!(flags, (false, false), "auth app role must enforce RLS");
+
+    let (identity, other) = two_organizations(&pools.admin, &app(state)).await;
+    let organization = identity["organization"]["organization_id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    let mut transaction = scoped(&app_pool, organization).await;
+    let visible: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT organization_id FROM organizations WHERE organization_id IN ($1, $2)",
+    )
+    .bind(organization)
+    .bind(other)
+    .fetch_all(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(visible, [organization]);
+}
+
+async fn assert_setup_status(app_pool: &PgPool, setup_required: bool) {
     for setup_token in [
         "setup-status-test-only".into(),
         "another-status-test-only".into(),
     ] {
         let app = app(AppState {
-            pool: pool.clone(),
-            cookie_secure: true,
             setup_token,
-            sign_in_throttle: Default::default(),
-            account_security_throttle: Default::default(),
-            message_delivery: Default::default(),
-            session_changes: Default::default(),
-            session_cleanup: Default::default(),
-            shutdown: Default::default(),
-            ws_allowed_origins: Default::default(),
-            socket_gate: Default::default(),
+            ..app_state(app_pool, true)
         });
         let response = app
             .oneshot(Request::get("/api/v1/setup").body(Body::empty()).unwrap())
@@ -274,33 +303,35 @@ async fn assert_setup_status(pool: &PgPool, setup_required: bool) {
 }
 
 #[fukulow_test::test]
-async fn setup_status_empty_database_is_public_and_reveals_only_boolean(pool: PgPool) {
-    assert_setup_status(&pool, true).await;
+async fn setup_status_empty_database_is_public_and_reveals_only_boolean(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    assert_setup_status(&pools.app, true).await;
     let counts: (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM account_sessions)",
     )
-    .fetch_one(&pool)
+    .fetch_one(&pools.admin)
     .await
     .unwrap();
     assert_eq!(counts, (0, 0, 0));
 }
 
 #[fukulow_test::test]
-async fn setup_status_after_setup_is_public_and_reveals_only_boolean(pool: PgPool) {
-    setup(&router(&pool)).await;
-    assert_setup_status(&pool, false).await;
+async fn setup_status_after_setup_is_public_and_reveals_only_boolean(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    setup(&router(&pools.app)).await;
+    assert_setup_status(&pools.app, false).await;
     let counts: (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM organizations), (SELECT count(*) FROM users), (SELECT count(*) FROM account_sessions)",
     )
-    .fetch_one(&pool)
+    .fetch_one(&pools.admin)
     .await
     .unwrap();
     assert_eq!(counts, (1, 1, 0));
 }
 
 #[fukulow_test::test]
-async fn setup_works_once_and_is_atomic(pool: PgPool) {
-    let pools = test_support::TestPools::new(pool).await;
+async fn setup_works_once_and_is_atomic(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
     let app = router(&pools.app);
     let (a, b) = tokio::join!(
         request(&app, "POST", "/api/v1/setup", setup_input(), &[]),
@@ -336,7 +367,6 @@ async fn setup_works_once_and_is_atomic(pool: PgPool) {
     assert!(hash.starts_with("$argon2id$"));
     assert!(!hash.contains(PASSWORD));
     assert_eq!(role, "owner");
-    pools.app.close().await;
 }
 
 #[tokio::test]
@@ -446,20 +476,12 @@ async fn json_rejections_use_error_body_on_setup_and_sign_in() {
 }
 
 #[fukulow_test::test]
-async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPool) {
+async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
     let setup_token = "setup-token-test-only";
     let app = app(AppState {
-        pool: pool.clone(),
-        cookie_secure: true,
         setup_token: setup_token.into(),
-        sign_in_throttle: Default::default(),
-        account_security_throttle: Default::default(),
-        message_delivery: Default::default(),
-        session_changes: Default::default(),
-        session_cleanup: Default::default(),
-        shutdown: Default::default(),
-        ws_allowed_origins: Default::default(),
-        socket_gate: Default::default(),
+        ..app_state(&pools.app, true)
     });
     let expected = json!({"error": "invalid credentials"});
     for completed in [false, true] {
@@ -483,7 +505,7 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
             assert_eq!(body(response).await, expected);
         }
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM organizations")
-            .fetch_one(&pool)
+            .fetch_one(&pools.admin)
             .await
             .unwrap();
         assert_eq!(count, i64::from(completed));
@@ -502,8 +524,9 @@ async fn setup_token_is_required_and_does_not_reveal_bootstrap_state(pool: PgPoo
 }
 
 #[fukulow_test::test]
-async fn setup_rejects_wrong_token_with_default_test_configuration(pool: PgPool) {
-    let app = router(&pool);
+async fn setup_rejects_wrong_token_with_default_test_configuration(admin: PgPool) {
+    let app_pool = TestPools::new(admin).await.app;
+    let app = router(&app_pool);
     let mut input = setup_input();
     input["setup_token"] = json!("client-supplied-test-only");
     assert_eq!(
@@ -551,8 +574,9 @@ async fn setup_token_precedes_semantic_validation_and_database_access() {
 }
 
 #[fukulow_test::test]
-async fn sign_in_without_organization_uses_the_only_organization(pool: PgPool) {
-    let app = router(&pool);
+async fn sign_in_without_organization_uses_the_only_organization(admin: PgPool) {
+    let app_pool = TestPools::new(admin).await.app;
+    let app = router(&app_pool);
     let identity = setup(&app).await;
     let response = request(
         &app,
@@ -606,9 +630,10 @@ async fn sign_in_without_organization_uses_the_only_organization(pool: PgPool) {
 }
 
 #[fukulow_test::test]
-async fn one_account_has_independent_members_and_roles_in_multiple_organizations(pool: PgPool) {
-    let app = router(&pool);
-    let (first, second) = two_organizations(&pool, &app).await;
+async fn one_account_has_independent_members_and_roles_in_multiple_organizations(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
+    let (first, second) = two_organizations(&pools.admin, &app).await;
     let response = sign_in(&app, "", PASSWORD).await;
     assert_eq!(response.status(), StatusCode::OK);
     let session = body(response).await;
@@ -649,9 +674,10 @@ async fn one_account_has_independent_members_and_roles_in_multiple_organizations
 }
 
 #[fukulow_test::test]
-async fn sign_in_without_organization_rejects_an_unconfigured_instance(pool: PgPool) {
+async fn sign_in_without_organization_rejects_an_unconfigured_instance(admin: PgPool) {
+    let app_pool = TestPools::new(admin).await.app;
     let response = request(
-        &router(&pool),
+        &router(&app_pool),
         "POST",
         "/api/v1/session",
         json!({"email": "owner@example.com", "password": PASSWORD}),
@@ -662,8 +688,9 @@ async fn sign_in_without_organization_rejects_an_unconfigured_instance(pool: PgP
 }
 
 #[fukulow_test::test]
-async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
-    let app = router(&pool);
+async fn sign_in_cookie_bearer_and_sign_out(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     let identity = setup(&app).await;
     let organization_id = identity["organization"]["organization_id"]
         .as_str()
@@ -722,7 +749,7 @@ async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
     let hashes: Vec<Vec<u8>> =
         sqlx::query_scalar("SELECT token_hash FROM account_sessions WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)")
             .bind(organization_id.parse::<Uuid>().unwrap())
-            .fetch_all(&pool)
+            .fetch_all(&pools.admin)
             .await
             .unwrap();
     assert_eq!(hashes.len(), 1);
@@ -792,17 +819,18 @@ async fn sign_in_cookie_bearer_and_sign_out(pool: PgPool) {
 }
 
 #[fukulow_test::test]
-async fn offline_restore_ends_every_account_session_and_preserves_members(pool: PgPool) {
-    let app = router(&pool);
-    let (_, second) = two_organizations(&pool, &app).await;
+async fn offline_restore_ends_every_account_session_and_preserves_members(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
+    let (_, second) = two_organizations(&pools.admin, &app).await;
     sqlx::query("INSERT INTO accounts (id, email, password_hash) SELECT gen_random_uuid(), 'second@example.com', password_hash FROM accounts LIMIT 1")
-        .execute(&pool).await.unwrap();
+        .execute(&pools.admin).await.unwrap();
     sqlx::query("INSERT INTO users (organization_id, id, account_id, name, role) SELECT $1, gen_random_uuid(), id, 'Second', 'member' FROM accounts WHERE email = 'second@example.com'")
-        .bind(second).execute(&pool).await.unwrap();
+        .bind(second).execute(&pools.admin).await.unwrap();
     let members: String = sqlx::query_scalar(
         "SELECT jsonb_agg(to_jsonb(u) ORDER BY organization_id, id)::text FROM users u",
     )
-    .fetch_one(&pool)
+    .fetch_one(&pools.admin)
     .await
     .unwrap();
     let mut credentials = Vec::new();
@@ -856,11 +884,11 @@ async fn offline_restore_ends_every_account_session_and_preserves_members(pool: 
         }
     }
     sqlx::raw_sql(include_str!("../src/auth/end-all-sessions.sql"))
-        .execute(&pool)
+        .execute(&pools.admin)
         .await
         .unwrap();
     let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM account_sessions")
-        .fetch_one(&pool)
+        .fetch_one(&pools.admin)
         .await
         .unwrap();
     assert_eq!(remaining, 0);
@@ -880,7 +908,7 @@ async fn offline_restore_ends_every_account_session_and_preserves_members(pool: 
     let after: String = sqlx::query_scalar(
         "SELECT jsonb_agg(to_jsonb(u) ORDER BY organization_id, id)::text FROM users u",
     )
-    .fetch_one(&pool)
+    .fetch_one(&pools.admin)
     .await
     .unwrap();
     assert_eq!(members, after);
@@ -888,8 +916,9 @@ async fn offline_restore_ends_every_account_session_and_preserves_members(pool: 
 }
 
 #[fukulow_test::test]
-async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
-    let app = router(&pool);
+async fn invalid_expired_and_ambiguous_credentials_are_refused(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     let identity = setup(&app).await;
     let id = identity["organization"]["organization_id"]
         .as_str()
@@ -925,7 +954,7 @@ async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
         "UPDATE account_sessions SET expires_at = now() - interval '1 second' WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1)",
     )
     .bind(id.parse::<Uuid>().unwrap())
-    .execute(&pool)
+    .execute(&pools.admin)
     .await
     .unwrap();
     assert_eq!(
@@ -955,12 +984,13 @@ async fn invalid_expired_and_ambiguous_credentials_are_refused(pool: PgPool) {
 }
 
 #[fukulow_test::test]
-async fn session_cannot_access_another_organization(pool: PgPool) {
-    check_tenant_denials(pool).await;
+async fn session_cannot_access_another_organization(admin: PgPool) {
+    let app_pool = TestPools::new(admin).await.app;
+    check_tenant_denials(&app_pool).await;
 }
 
-async fn check_tenant_denials(pool: PgPool) {
-    let app = router(&pool);
+async fn check_tenant_denials(app_pool: &PgPool) {
+    let app = router(app_pool);
     let first = setup(&app).await;
     let first_id = first["organization"]["organization_id"]
         .as_str()
@@ -975,7 +1005,7 @@ async fn check_tenant_denials(pool: PgPool) {
         .parse::<Uuid>()
         .unwrap();
     // Fixture SQL as the app role runs in each Organization's context (#314).
-    let mut foreign_scoped = scoped(&pool, foreign).await;
+    let mut foreign_scoped = scoped(app_pool, foreign).await;
     sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Foreign')")
         .bind(foreign)
         .execute(&mut *foreign_scoped)
@@ -985,20 +1015,20 @@ async fn check_tenant_denials(pool: PgPool) {
         "INSERT INTO accounts (id,email,password_hash) VALUES ($1,'foreign@example.com','unused')",
     )
     .bind(account)
-    .execute(&pool)
+    .execute(app_pool)
     .await
     .unwrap();
     sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Foreign member','owner')").bind(foreign).bind(shared_id).bind(account).execute(&mut *foreign_scoped).await.unwrap();
     foreign_scoped.commit().await.unwrap();
     let session = body(sign_in(&app, "", PASSWORD).await).await;
     let auth = format!("Bearer {}", session["token"].as_str().unwrap());
-    let mut first_scoped = scoped(&pool, first_id).await;
+    let mut first_scoped = scoped(app_pool, first_id).await;
     let guard = additional_owner(&mut first_scoped, first_id).await;
     first_scoped.commit().await.unwrap();
     let mut refusal = None;
     for organization in [foreign, Uuid::new_v4(), first_id] {
         if organization == first_id {
-            let mut first_scoped = scoped(&pool, first_id).await;
+            let mut first_scoped = scoped(app_pool, first_id).await;
             sqlx::query(
                 "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id<>$2",
             )
@@ -1043,8 +1073,9 @@ async fn check_tenant_denials(pool: PgPool) {
 }
 
 #[fukulow_test::test]
-async fn invalid_setup_does_not_consume_bootstrap(pool: PgPool) {
-    let app = router(&pool);
+async fn invalid_setup_does_not_consume_bootstrap(admin: PgPool) {
+    let app_pool = TestPools::new(admin).await.app;
+    let app = router(&app_pool);
     for (field, value) in [
         ("password", "short"),
         ("email", "invalid"),
@@ -1115,10 +1146,11 @@ async fn assert_throttled(response: Response) {
 }
 
 #[fukulow_test::test]
-async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts(pool: PgPool) {
-    let app = router(&pool);
+async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     setup(&app).await;
-    sqlx::query("INSERT INTO accounts (id,email,password_hash) SELECT $1,'other@example.com',password_hash FROM accounts").bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO accounts (id,email,password_hash) SELECT $1,'other@example.com',password_hash FROM accounts").bind(Uuid::new_v4()).execute(&pools.admin).await.unwrap();
     for n in 1..=5 {
         assert_eq!(
             sign_in_from(
@@ -1176,8 +1208,9 @@ async fn failed_sign_ins_throttle_account_across_ips_but_not_other_accounts(pool
 }
 
 #[fukulow_test::test]
-async fn failed_sign_ins_throttle_ip_and_ignore_spoofed_forwarded_header_by_default(pool: PgPool) {
-    let app = router(&pool);
+async fn failed_sign_ins_throttle_ip_and_ignore_spoofed_forwarded_header_by_default(admin: PgPool) {
+    let app_pool = TestPools::new(admin).await.app;
+    let app = router(&app_pool);
     let first = setup(&app).await;
     let organization: Uuid = first["organization"]["organization_id"]
         .as_str()
@@ -1242,26 +1275,19 @@ async fn failed_sign_ins_throttle_ip_and_ignore_spoofed_forwarded_header_by_defa
 
 #[fukulow_test::test]
 async fn trusted_proxy_uses_rightmost_client_ip_and_omitted_organization_shares_account_budget(
-    pool: PgPool,
+    admin: PgPool,
 ) {
-    let first = setup(&router(&pool)).await;
+    let app_pool = TestPools::new(admin).await.app;
+    let first = setup(&router(&app_pool)).await;
     for peers in ["192.0.2.1", "192.0.2.0/24", "2001:db8::/32, 192.0.2.0/24"] {
         let app = app(AppState {
-            pool: pool.clone(),
-            cookie_secure: true,
             setup_token: "setup-token-test-only".into(),
             sign_in_throttle: fukulow_server::auth::SignInThrottle::with_proxy_config(
                 Some(peers),
                 Some("x-forwarded-for"),
             )
             .unwrap(),
-            account_security_throttle: Default::default(),
-            message_delivery: Default::default(),
-            session_changes: Default::default(),
-            session_cleanup: Default::default(),
-            shutdown: Default::default(),
-            ws_allowed_origins: Default::default(),
-            socket_gate: Default::default(),
+            ..app_state(&app_pool, true)
         });
         let organization: Uuid = first["organization"]["organization_id"]
             .as_str()
@@ -1349,9 +1375,10 @@ async fn advance_cleanup_interval_and_expire_throttle_window() {
 }
 
 #[fukulow_test::test]
-async fn multiple_organizations_do_not_make_account_sign_in_ambiguous(pool: PgPool) {
-    let app = router(&pool);
-    two_organizations(&pool, &app).await;
+async fn multiple_organizations_do_not_make_account_sign_in_ambiguous(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
+    two_organizations(&pools.admin, &app).await;
     for _ in 0..6 {
         assert_eq!(
             sign_in_from(
@@ -1374,8 +1401,9 @@ async fn multiple_organizations_do_not_make_account_sign_in_ambiguous(pool: PgPo
 const ARGON2_053_PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$gy5SuVm5Z7Vw7keB9se9p87QGcomaseB/S2U1OhTsM0";
 
 #[fukulow_test::test]
-async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(pool: PgPool) {
-    let app = router(&pool);
+async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     let identity = setup(&app).await;
     let organization = identity["organization"]["organization_id"]
         .as_str()
@@ -1383,7 +1411,7 @@ async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(pool: PgPool) {
     sqlx::query("UPDATE accounts SET password_hash = $1 WHERE id IN (SELECT account_id FROM users WHERE organization_id = $2)")
         .bind(ARGON2_053_PHC)
         .bind(organization.parse::<Uuid>().unwrap())
-        .execute(&pool)
+        .execute(&pools.admin)
         .await
         .unwrap();
     assert_eq!(
@@ -1399,8 +1427,9 @@ async fn argon2_053_fixture_signs_in_and_rejects_wrong_password(pool: PgPool) {
 }
 
 #[fukulow_test::test]
-async fn new_password_hash_preserves_explicit_parameters_and_salt_length(pool: PgPool) {
-    let identity = setup(&router(&pool)).await;
+async fn new_password_hash_preserves_explicit_parameters_and_salt_length(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let identity = setup(&router(&pools.app)).await;
     let hash: String =
         sqlx::query_scalar("SELECT password_hash FROM accounts WHERE id IN (SELECT account_id FROM users WHERE organization_id = $1)")
             .bind(
@@ -1410,7 +1439,7 @@ async fn new_password_hash_preserves_explicit_parameters_and_salt_length(pool: P
                     .parse::<Uuid>()
                     .unwrap(),
             )
-            .fetch_one(&pool)
+            .fetch_one(&pools.admin)
             .await
             .unwrap();
     let fields: Vec<_> = hash.split('$').collect();
@@ -1431,13 +1460,14 @@ const FIXED_CREDENTIAL: &str = "11111111-2222-4333-8444-555555555555.00010203040
 const FIXED_DIGEST: &str = "da36cd522069db7890f63fe6e69904762a6868b9b26b8533b81792b4eda34db0";
 
 #[fukulow_test::test]
-async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) {
+async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
     let organization: Uuid = "11111111-2222-4333-8444-555555555555".parse().unwrap();
     let account = Uuid::new_v4();
     let user_id = Uuid::new_v4();
     sqlx::query("INSERT INTO organizations (organization_id,name) VALUES ($1,'Fixture')")
         .bind(organization)
-        .execute(&pool)
+        .execute(&pools.admin)
         .await
         .unwrap();
     sqlx::query(
@@ -1445,19 +1475,19 @@ async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) 
     )
     .bind(account)
     .bind(ARGON2_053_PHC)
-    .execute(&pool)
+    .execute(&pools.admin)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Fixture','owner')").bind(organization).bind(user_id).bind(account).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Fixture','owner')").bind(organization).bind(user_id).bind(account).execute(&pools.admin).await.unwrap();
     sqlx::query(
         "INSERT INTO account_sessions (account_id,token_hash) VALUES ($1,decode($2,'hex'))",
     )
     .bind(account)
     .bind(FIXED_DIGEST)
-    .execute(&pool)
+    .execute(&pools.admin)
     .await
     .unwrap();
-    let app = router(&pool);
+    let app = router(&pools.app);
     for (name, value) in [
         (
             "cookie",
@@ -1477,8 +1507,9 @@ async fn fixed_session_fixture_authenticates_by_cookie_and_bearer(pool: PgPool) 
 }
 
 #[fukulow_test::test]
-async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: PgPool) {
-    let app = router(&pool);
+async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     let identity = setup(&app).await;
     let organization = identity["organization"]["organization_id"]
         .as_str()
@@ -1498,7 +1529,7 @@ async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: Pg
         );
         // PostgreSQL's SHA-256 is independent from the Rust implementation.
         let stored: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM account_sessions WHERE account_id IN (SELECT account_id FROM users WHERE organization_id = $1) AND token_hash = sha256(convert_to($2, 'UTF8')))")
-            .bind(organization.parse::<Uuid>().unwrap()).bind(token).fetch_one(&pool).await.unwrap();
+            .bind(organization.parse::<Uuid>().unwrap()).bind(token).fetch_one(&pools.admin).await.unwrap();
         assert!(stored);
         tokens.push(token.to_owned());
     }
@@ -1506,8 +1537,9 @@ async fn issued_session_uses_32_random_bytes_and_hashes_full_credential(pool: Pg
 }
 
 #[fukulow_test::test]
-async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(pool: PgPool) {
-    check_member_identity(pool).await;
+async fn duplicate_membership_is_rejected_and_member_identity_is_preserved(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    check_member_identity(&pools.app, &pools.admin).await;
 }
 
 /// A transaction with a transaction-local Organization context, so RLS admits
@@ -1522,21 +1554,20 @@ async fn scoped(pool: &PgPool, organization: Uuid) -> sqlx::Transaction<'static,
     transaction
 }
 
-async fn check_member_identity(pool: PgPool) -> Value {
-    let app = router(&pool);
+async fn check_member_identity(app_pool: &PgPool, member_pool: &PgPool) -> Value {
+    let app = router(app_pool);
     let identity = setup(&app).await;
     let organization: Uuid = identity["organization"]["organization_id"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
-    // Direct SQL as the app role needs an Organization context under RLS (#314).
     let account: Uuid = sqlx::query_scalar("SELECT account_id FROM users WHERE organization_id=$1")
         .bind(organization)
-        .fetch_one(&mut *scoped(&pool, organization).await)
+        .fetch_one(&mut *scoped(member_pool, organization).await)
         .await
         .unwrap();
-    let error=sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Duplicate','guest')").bind(organization).bind(Uuid::new_v4()).bind(account).execute(&mut *scoped(&pool, organization).await).await.unwrap_err();
+    let error=sqlx::query("INSERT INTO users (organization_id,id,account_id,name,role) VALUES ($1,$2,$3,'Duplicate','guest')").bind(organization).bind(Uuid::new_v4()).bind(account).execute(&mut *scoped(member_pool, organization).await).await.unwrap_err();
     assert_eq!(
         error.as_database_error().unwrap().code().as_deref(),
         Some("23505")
@@ -1544,14 +1575,14 @@ async fn check_member_identity(pool: PgPool) -> Value {
     assert!(
         sqlx::query("DELETE FROM users WHERE organization_id=$1")
             .bind(organization)
-            .execute(&mut *scoped(&pool, organization).await)
+            .execute(&mut *scoped(member_pool, organization).await)
             .await
             .is_err()
     );
-    let mut transaction = scoped(&pool, organization).await;
+    let mut transaction = scoped(member_pool, organization).await;
     let guard = additional_owner(&mut transaction, organization).await;
     transaction.commit().await.unwrap();
-    let mut transaction = scoped(&pool, organization).await;
+    let mut transaction = scoped(member_pool, organization).await;
     sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id<>$2")
         .bind(organization)
         .bind(guard)
@@ -1559,7 +1590,7 @@ async fn check_member_identity(pool: PgPool) -> Value {
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    let mut transaction = scoped(&pool, organization).await;
+    let mut transaction = scoped(member_pool, organization).await;
     sqlx::query("UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id<>$2")
         .bind(organization)
         .bind(guard)
@@ -1572,7 +1603,7 @@ async fn check_member_identity(pool: PgPool) -> Value {
     )
     .bind(organization)
     .bind(guard)
-    .fetch_one(&mut *scoped(&pool, organization).await)
+    .fetch_one(&mut *scoped(member_pool, organization).await)
     .await
     .unwrap();
     assert_eq!(member.to_string(), identity["member"]["id"]);
@@ -1581,15 +1612,16 @@ async fn check_member_identity(pool: PgPool) -> Value {
 }
 
 #[fukulow_test::test]
-async fn member_truncate_is_refused_and_preserves_history(pool: PgPool) {
-    let app = router(&pool);
+async fn member_truncate_is_refused_and_preserves_history(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     let identity = setup(&app).await;
-    check_member_truncate(pool, identity, "P0001").await;
+    check_member_truncate(&pools.admin, identity, "P0001").await;
 }
 
-async fn check_member_truncate(pool: PgPool, identity: Value, expected_code: &str) {
+async fn check_member_truncate(member_pool: &PgPool, identity: Value, expected_code: &str) {
     let error = sqlx::query("TRUNCATE users CASCADE")
-        .execute(&pool)
+        .execute(member_pool)
         .await
         .unwrap_err();
     let error = error.as_database_error().unwrap();
@@ -1610,7 +1642,7 @@ async fn check_member_truncate(pool: PgPool, identity: Value, expected_code: &st
         .unwrap();
     let preserved: bool = sqlx::query_scalar("SELECT EXISTS (SELECT FROM users WHERE id = $1)")
         .bind(member)
-        .fetch_one(&mut *scoped(&pool, organization).await)
+        .fetch_one(&mut *scoped(member_pool, organization).await)
         .await
         .unwrap();
     assert!(preserved);
@@ -1618,9 +1650,10 @@ async fn check_member_truncate(pool: PgPool, identity: Value, expected_code: &st
 
 #[fukulow_test::test]
 async fn legacy_cookie_cannot_shadow_secure_identity_and_host_cookie_is_ignored_on_http(
-    pool: PgPool,
+    admin: PgPool,
 ) {
-    let secure = router(&pool);
+    let pools = TestPools::new(admin).await;
+    let secure = router(&pools.app);
     let victim = setup(&secure).await;
     let organization = victim["organization"]["organization_id"].as_str().unwrap();
     let victim_session = body(sign_in(&secure, organization, PASSWORD).await).await;
@@ -1630,7 +1663,7 @@ async fn legacy_cookie_cannot_shadow_secure_identity_and_host_cookie_is_ignored_
     sqlx::query("INSERT INTO accounts (id, email, password_hash) SELECT $1, 'attacker@example.com', password_hash FROM accounts WHERE id = $2")
         .bind(Uuid::new_v4())
         .bind(Uuid::parse_str(victim_account).unwrap())
-        .execute(&pool).await.unwrap();
+        .execute(&pools.admin).await.unwrap();
     let attacker_session = body(
         request(
             &secure,
@@ -1670,7 +1703,7 @@ async fn legacy_cookie_cannot_shadow_secure_identity_and_host_cookie_is_ignored_
             }
         }
     }
-    let http = router_with_cookie_security(&pool, false);
+    let http = router_with_cookie_security(&pools.app, false);
     for path in &paths {
         assert_eq!(
             request(
@@ -1700,7 +1733,7 @@ async fn legacy_cookie_cannot_shadow_secure_identity_and_host_cookie_is_ignored_
 }
 
 #[fukulow_test::test(migrations = false)]
-async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool: PgPool) {
+async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(admin: PgPool) {
     let migrations = sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/migrations"
@@ -1708,17 +1741,19 @@ async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool:
     .await
     .unwrap();
     for migration in migrations.iter().filter(|m| m.version < 202611110197) {
-        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+        sqlx::raw_sql(&migration.sql).execute(&admin).await.unwrap();
     }
     // Current setup code calls the #314 bootstrap check; the old schema lacks it.
     sqlx::raw_sql(
         "CREATE FUNCTION fukulow_setup_required() RETURNS boolean LANGUAGE sql STABLE \
          AS $$ SELECT NOT EXISTS (SELECT 1 FROM public.organizations) $$",
     )
-    .execute(&pool)
+    .execute(&admin)
     .await
     .unwrap();
-    let app = router_with_cookie_security(&pool, false);
+    // This migration predates tenant RLS. Keep its schema and use production grants.
+    let pools = TestPools::new(admin).await;
+    let app = router_with_cookie_security(&pools.app, false);
     setup(&app).await;
     let input = json!({"email":"owner@example.com", "password":PASSWORD});
     let web = request(&app, "POST", "/api/v1/session", input.clone(), &[]).await;
@@ -1750,7 +1785,7 @@ async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool:
     sqlx::raw_sql(include_str!(
         "../migrations/202611110197_revoke_exposed_sessions.sql"
     ))
-    .execute(&pool)
+    .execute(&pools.admin)
     .await
     .unwrap();
     for credential in credentials {
@@ -1762,7 +1797,7 @@ async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool:
         );
     }
     let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM account_sessions")
-        .fetch_one(&pool)
+        .fetch_one(&pools.admin)
         .await
         .unwrap();
     assert_eq!(sessions, 0);
@@ -1784,8 +1819,9 @@ async fn cookie_only_migration_revokes_preexisting_web_and_native_sessions(pool:
 }
 
 #[fukulow_test::test]
-async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(pool: PgPool) {
-    let app = router(&pool);
+async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(admin: PgPool) {
+    let pools = TestPools::new(admin).await;
+    let app = router(&pools.app);
     let identity = setup(&app).await;
     let session = body(
         sign_in(
@@ -1801,10 +1837,10 @@ async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(pool: 
     let legacy = format!("fukulow_session={}", session["token"].as_str().unwrap());
     let before: Value =
         sqlx::query_scalar("SELECT json_agg(s ORDER BY token_hash) FROM account_sessions s")
-            .fetch_one(&pool)
+            .fetch_one(&pools.admin)
             .await
             .unwrap();
-    let mut transaction = pool.begin().await.unwrap();
+    let mut transaction = pools.admin.begin().await.unwrap();
     // Any session lookup or revocation would block behind this lock.
     sqlx::query("LOCK TABLE account_sessions IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *transaction)
@@ -1845,7 +1881,7 @@ async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(pool: 
     transaction.rollback().await.unwrap();
     let after: Value =
         sqlx::query_scalar("SELECT json_agg(s ORDER BY token_hash) FROM account_sessions s")
-            .fetch_one(&pool)
+            .fetch_one(&pools.admin)
             .await
             .unwrap();
     assert!(
@@ -1855,10 +1891,11 @@ async fn secure_sign_out_expires_legacy_cookie_without_accessing_sessions(pool: 
 }
 
 #[fukulow_test::test]
-async fn web_and_native_contracts_cookie_migration_and_revocation(pool: PgPool) {
-    setup(&router(&pool)).await;
+async fn web_and_native_contracts_cookie_migration_and_revocation(admin: PgPool) {
+    let app_pool = TestPools::new(admin).await.app;
+    setup(&router(&app_pool)).await;
     for secure in [false, true] {
-        let app = router_with_cookie_security(&pool, secure);
+        let app = router_with_cookie_security(&app_pool, secure);
         let input = json!({"email":"owner@example.com", "password":PASSWORD});
         let web = request(
             &app,
@@ -2039,10 +2076,11 @@ async fn web_and_native_contracts_cookie_migration_and_revocation(pool: PgPool) 
 }
 
 #[fukulow_test::test]
-async fn web_and_native_share_account_and_ip_failure_budgets(pool: PgPool) {
-    setup(&router(&pool)).await;
+async fn web_and_native_share_account_and_ip_failure_budgets(admin: PgPool) {
+    let app_pool = TestPools::new(admin).await.app;
+    setup(&router(&app_pool)).await;
     for by_ip in [false, true] {
-        let app = router(&pool);
+        let app = router(&app_pool);
         for n in 0..if by_ip { 20 } else { 5 } {
             let path = if n % 2 == 0 {
                 "/api/v1/session"
