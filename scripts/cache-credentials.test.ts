@@ -59,7 +59,7 @@ function checkActionInputs(step: string, body: string) {
   }
 }
 
-// Deliberately accepts only the repo's block-style steps/scripts at these three
+// Deliberately accepts only the repo's block-style steps/scripts at the allowed
 // locations. Other YAML forms containing credential references fail closed.
 // github-script also gets credentials implicitly, even without naming them.
 function checkWorkflow(file: string, workflow: string) {
@@ -330,7 +330,7 @@ test('the layer-cache writer runs only for main pushes, one at a time, and never
   assert.match(workflow, /^concurrency:\n  group: docker-cache\n  cancel-in-progress: false\n/m)
   // Verification never shares the writer's concurrency group, so queueing cannot cancel a check.
   for (const file of readdirSync(new URL('../.github/workflows/', import.meta.url)).filter(file => file !== 'docker-cache.yml')) {
-    assert.doesNotMatch(read(`.github/workflows/${file}`), /group: docker-cache\b/, file)
+    assert.doesNotMatch(read(`.github/workflows/${file}`), /group:\s*['"]?docker-cache\b/, file)
   }
 })
 
