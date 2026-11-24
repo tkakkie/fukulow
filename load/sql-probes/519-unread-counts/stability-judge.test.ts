@@ -6,6 +6,8 @@ import type { Session } from '../../launcher/launcher.ts';
 import { judge, judgeRun, sessionProblems, type RunInput } from './stability-judge.ts';
 
 const t0 = Date.parse('2026-11-25T00:00:00Z');
+const cpus = [0, 1, 2, 3, 4, 5, 6, 7];
+const cpuSets = { server: [0, 2, 4, 6], client: [1, 3, 5, 7] };
 const host = { platform: 'linux', logicalCpus: 4, boost: '0', policyBoost: { 0: [0, 1, 2, 3] }, platformProfile: 'performance', fanControl: { 'hp/pwm1_enable': 0 } } as unknown as HostRecord;
 const arms = ['current', 'final', 'final', 'current', 'current', 'final'];
 const idle = () => ({ busy: false, otherContainers: [] as string[] });
@@ -16,8 +18,10 @@ const session = (names = ['s1', 's2', 's3'], over: Partial<Session> = {}): Sessi
 const jr = (r: RunInput, thermalSampleSeconds: unknown = 5) => judgeRun(r, { id: sid, thermalSampleSeconds });
 
 // Six 120 s pgbench intervals ending 200 s apart, each inside a slightly longer run wrapper, sampled
-// every 5 s; freq(block) gives the server and client kHz.
-function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number]; periodMs?: number } = {}): RunInput {
+// every 5 s on 8 CPUs (server = even, client = odd); freq(block) gives the server and client kHz, and
+// cpu(block, cpu, tick) may override one CPU's kHz and its busy fraction (default 0.9) in a tick.
+type CpuTick = { khz?: number | null; busy?: number };
+function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number]; periodMs?: number; cpu?: (block: number, cpu: number, ms: number) => CpuTick } = {}): RunInput {
   const freq = opts.freq ?? (() => [2_000_000, 2_000_000]);
   const sends = arms.map((arm, i) => {
     const endMs = t0 + (i + 1) * 200_000;
@@ -25,13 +29,17 @@ function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; w
       measuredWindow: { startMs: endMs - 121_200, endMs: endMs + 300, monoMs: 121_500 }, pgbenchWindow: { startMs: endMs - 120_000, endMs }, host: idle(), hostAfter: idle() };
   });
   const samples: SampleLine[] = [];
+  const jiffies = cpus.map(() => [0, 0]);
   for (let ms = 0; ms <= 1_300_000; ms += opts.periodMs ?? 5000) {
     const block = Math.min(6, Math.max(1, Math.ceil(ms / 200_000)));
     const [server, client] = freq(block);
-    samples.push({ at: new Date(t0 + ms).toISOString(), monoMs: ms, avgFreqKHz: [server, client, server, client], temperaturesC: { 'k10temp/Tctl': 70 }, fansRpm: {}, launchSession: sid });
+    const ticks = cpus.map(cpu => ({ khz: cpu % 2 === 0 ? server : client, busy: 0.9, ...opts.cpu?.(block, cpu, ms) }));
+    ticks.forEach((c, cpu) => { jiffies[cpu][0] += 500 * c.busy; jiffies[cpu][1] += 500 * (1 - c.busy); });
+    samples.push({ at: new Date(t0 + ms).toISOString(), monoMs: ms, avgFreqKHz: ticks.map(c => c.khz), procStat: jiffies.map(([b, i]) => [b, 0, 0, i, 0, 0, 0, 0]),
+      temperaturesC: { 'k10temp/Tctl': 70 }, fansRpm: {}, launchSession: sid });
   }
   return { name, out: '/runs/' + name, complete: true, statusSession: sid, sends,
-    metadata: { mode: 'diagnostic', sendsOnly: true, launchSession: sid, cpuSets: { server: [0, 2], client: [1, 3] }, sends: { measuredSeconds: 120 } },
+    metadata: { mode: 'diagnostic', sendsOnly: true, launchSession: sid, cpuSets, sends: { measuredSeconds: 120 } },
     hostBefore: { ...host, launchSession: sid }, cooldown: { ok: true, maxTctlC: 50, maxWaitSeconds: 1200, readings: [{ elapsedMs: 30_000, tctlC: 49 }], launchSession: sid },
     launchCheck: { ok: true, tctlC: 48, record: host, launchSession: sid }, clockEvents: { ok: true, events: [], launchSession: sid }, samples, ...over };
 }
@@ -56,17 +64,86 @@ test('a WAL/send spread over 2 % alone FAILs; exactly 2 % passes', () => {
   assert.equal(judge([run('s1', {}, { wal: 1000 }), run('s2', {}, { wal: 1010 }), run('s3', {}, { wal: 1020 })], session(), 'q796').result, 'PASS');
 });
 
-test('a block more than 5 % below block 1 on either set is throttled: the run is INVALID and the check FAILs', () => {
-  const r = jr(run('s1', {}, { freq: b => [b === 5 ? 1_890_000 : 2_000_000, 2_000_000] }));
-  assert.equal(r.valid, false);
-  assert.match(r.invalid.join(), /block 5: throttled, server median 1890000 kHz < 95 % of block 1/);
-  assert.equal(jr(run('s1', {}, { freq: b => [2_000_000, b === 6 ? 1_899_999 : 2_000_000] })).invalid.length, 1);
-  assert.equal(jr(run('s1', {}, { freq: b => [b === 3 ? 1_900_000 : 2_000_000, 2_000_000] })).valid, true); // exactly 5 % is not throttled
+test('throttle: a median per-CPU drop over 5 % on either set is INVALID; exactly 5.0 % and 4.9 % are not', () => {
+  const r = jr(run('s1', {}, { freq: b => [b === 5 ? 1_898_000 : 2_000_000, 2_000_000] })); // 5.1 %
+  assert.deepEqual([r.valid, r.invalid], [false, ['block 5: throttled, server median per-CPU ratio 0.949 < 0.95 of block 1 (4 CPUs)']]);
+  assert.deepEqual(jr(run('s1', {}, { freq: b => [2_000_000, b === 6 ? 1_898_000 : 2_000_000] })).invalid, ['block 6: throttled, client median per-CPU ratio 0.949 < 0.95 of block 1 (4 CPUs)']);
+  assert.deepEqual(jr(run('s1', {}, { freq: b => [b === 3 ? 1_900_000 : 2_000_000, b === 4 ? 1_900_000 : 2_000_000] })).invalid, []); // exactly 5.0 %
+  assert.deepEqual(jr(run('s1', {}, { freq: b => [b === 3 ? 1_902_000 : 2_000_000, b === 4 ? 1_902_000 : 2_000_000] })).invalid, []); // 4.9 %
   assert.equal(judge([run('s1', {}, { freq: b => [b > 3 ? 1_000_000 : 2_000_000, 2_000_000] }), run('s2'), run('s3')], session(), 'q796').result, 'FAIL');
+  // The ratio is per CPU: two Zen 5 CPUs at 4.9 GHz and two Zen 5c at 3.47 GHz, each 6 % lower in
+  // block 2, each compared with itself.
+  const mixed = (b: number, cpu: number) => ({ khz: (cpu % 4 === 0 ? 4_900_000 : 3_470_000) * (b === 2 ? 0.94 : 1) });
+  assert.deepEqual(jr(run('s1', {}, { cpu: (b, cpu) => (cpu % 2 === 0 ? mixed(b, cpu) : {}) })).invalid, ['block 2: throttled, server median per-CPU ratio 0.940 < 0.95 of block 1 (4 CPUs)']);
+});
+
+test('a change in which CPUs are busy between blocks is not throttling; idle CPUs at the placeholder never lower a value', () => {
+  // Server CPUs 0 and 2 (Zen 5, 4.9 GHz) are busy in block 1, CPUs 4 and 6 (Zen 5c, 3.47 GHz) idle at
+  // the cpuinfo_min_freq placeholder; from block 2 on all four are busy. A pooled median over the busy
+  // CPUs would fall from 4.9 to 4.18 GHz (-15 %); per CPU, nothing changed.
+  const min = 623_377;
+  const subset = (b: number, cpu: number): CpuTick => {
+    if (cpu % 2 === 1) return {};
+    const khz = cpu < 4 ? 4_900_000 : 3_470_000;
+    return b === 1 && cpu >= 4 ? { khz: min, busy: 0.02 } : { khz };
+  };
+  assert.deepEqual(jr(run('s1', {}, { cpu: subset })).invalid, []);
+  // Two of four server CPUs idle at the placeholder in block 3 (a pooled median over all four would
+  // fall to 1.31 GHz); the other two hold their value, so block 3 passes.
+  const idleInBlock3 = (b: number, cpu: number): CpuTick => (cpu % 2 === 0 && cpu >= 4 && b === 3 ? { khz: min, busy: 0 } : {});
+  const j = jr(run('s1', {}, { cpu: idleInBlock3 }));
+  assert.deepEqual(j.invalid, []);
+  assert.deepEqual(j.blocks[2].thermal.server.cpus.map(c => c.valueKHz), [2_000_000, 2_000_000, null, null]);
+});
+
+test('coverage: a CPU qualifies when active in at least half of the block\'s ticks; a set needs at least half its CPUs qualifying', () => {
+  // Block 2's pgbench window (80-200 s, relative to its end at 400 s: 280-400 s) holds 25 ticks.
+  // Server CPUs 4 and 6 never busy; CPU 2 active in the first `n` ticks of block 2 only.
+  const partial = (n: number) => (b: number, cpu: number, ms: number): CpuTick => {
+    if (cpu === 4 || cpu === 6) return { busy: 0.1 };
+    if (cpu === 2 && b === 2) return { busy: ms >= 280_000 && ms < 280_000 + n * 5000 ? 0.9 : 0.1 };
+    return {};
+  };
+  const ticks = jr(run('s1')).blocks[1].thermal.ticks;
+  assert.equal(ticks, 25);
+  // 13 of 25 ticks (>= half): CPU 2 qualifies, 2 of 4 qualify, exactly half: judged.
+  assert.deepEqual(jr(run('s1', {}, { cpu: partial(13) })).invalid, []);
+  // 12 of 25 ticks (one below half): only 1 of 4 qualifies.
+  assert.deepEqual(jr(run('s1', {}, { cpu: partial(12) })).invalid, ['block 2: too few active CPUs to judge frequency, server set 1 of 4 qualify']);
+  // An even tick count: exactly half of the ticks qualifies. Block 2's window shortened to 24 ticks.
+  const even = (n: number) => { const r = run('s1', {}, { cpu: partial(n) }); r.sends[1].pgbenchWindow = { startMs: t0 + 280_000, endMs: t0 + 399_999 }; return jr(r); };
+  assert.equal(even(12).blocks[1].thermal.ticks, 24);
+  assert.deepEqual(even(12).invalid.filter(x => /set/.test(x)), []);
+  assert.deepEqual(even(11).invalid.filter(x => /set/.test(x)), ['block 2: too few active CPUs to judge frequency, server set 1 of 4 qualify']);
+  // Half the CPUs qualify in each block but only one of them in both: not comparable, INVALID.
+  const swap = (b: number, cpu: number): CpuTick => {
+    if (cpu % 2 === 1) return {};
+    const busyIn = b === 1 ? [0, 2] : b === 4 ? [2, 4] : [0, 2];
+    return busyIn.includes(cpu) ? {} : { khz: 623_377, busy: 0.05 };
+  };
+  assert.deepEqual(jr(run('s1', {}, { cpu: swap })).invalid, ['block 4: server set: 1 of 4 CPUs qualify in both block 1 and this block, too few to compare']);
+  // Block 1 without coverage is INVALID once; later blocks are not compared with it.
+  assert.deepEqual(jr(run('s1', {}, { cpu: (b, cpu) => (b === 1 && cpu % 2 === 1 && cpu > 1 ? { busy: 0.2 } : {}) })).invalid, ['block 1: too few active CPUs to judge frequency, client set 1 of 4 qualify']);
+});
+
+test('missing frequency or /proc/stat data on an active CPU makes the run INVALID', () => {
+  const mutate = (index: number, f: (x: { avgFreqKHz: (number | null)[]; procStat?: (number[] | null)[] | null }) => void) => {
+    const r = run('s1');
+    f(r.samples[index] as { avgFreqKHz: (number | null)[]; procStat?: (number[] | null)[] | null });
+    return jr(r).invalid;
+  };
+  assert.deepEqual(mutate(30, x => { x.avgFreqKHz[1] = null; }), ['block 1: client set: unreadable CPU frequency on CPU 1']);
+  assert.deepEqual(mutate(30, x => { x.procStat = null; }), ['block 1: server set: unreadable /proc/stat on CPU 0', 'block 1: client set: unreadable /proc/stat on CPU 1']);
+  assert.deepEqual(mutate(30, x => { delete x.procStat; }), ['block 1: server set: unreadable /proc/stat on CPU 0', 'block 1: client set: unreadable /proc/stat on CPU 1']);
+  assert.deepEqual(mutate(30, x => { x.procStat![6] = [0, 0, 0, 0, 0, 0, 0, 0]; }), ['block 1: server set: /proc/stat counters of CPU 6 went backwards or did not advance']);
+  // A zero total delta: the counters did not advance since the previous tick.
+  const r = run('s1');
+  (r.samples[31] as { procStat: (number[] | null)[] }).procStat[5] = [...(r.samples[30] as { procStat: number[][] }).procStat[5]];
+  assert.match(jr(r).invalid.join('\n'), /^block 1: client set: \/proc\/stat counters of CPU 5 went backwards or did not advance$/m);
 });
 
 const setFreq = (r: RunInput, from: number, to: number, khz: number) => {
-  for (const x of r.samples as { at: string; monoMs: number; avgFreqKHz: number[] }[]) if (x.monoMs >= from && x.monoMs <= to) x.avgFreqKHz = [khz, 2_000_000, khz, 2_000_000];
+  for (const x of r.samples as { at: string; monoMs: number; avgFreqKHz: number[] }[]) if (x.monoMs >= from && x.monoMs <= to) x.avgFreqKHz = cpus.map(c => (c % 2 === 0 ? khz : 2_000_000));
 };
 
 test('the block is judged on pgbench\'s own interval, not on the run wrapper around it', () => {
@@ -78,7 +155,7 @@ test('the block is judged on pgbench\'s own interval, not on the run wrapper aro
   r.sends[4].measuredWindow = { startMs: t0 + 869_800, endMs: t0 + 1_011_000, monoMs: 141_200 };
   r.sends[4].pgbenchWindow = { startMs: t0 + 881_000, endMs: t0 + 1_000_000 };
   const j = jr(r);
-  assert.deepEqual(j.invalid, ['block 5: throttled, server median 1780000 kHz < 95 % of block 1 (2000000 kHz)']);
+  assert.deepEqual(j.invalid, ['block 5: throttled, server median per-CPU ratio 0.890 < 0.95 of block 1 (4 CPUs)']);
   assert.equal(j.blocks[4].thermal.samples, 24);
   // A healthy run with 11 s of Docker and connection overhead around the 120 s is not rejected.
   const slowStart = run('s1');
@@ -124,7 +201,7 @@ test('a wall-clock step over 50 ms makes the run INVALID; every tick in pgbench\
   setFreq(edgeSlow, 880_000, 940_000, 1_850_000);
   edgeSlow.sends[4].pgbenchWindow = { startMs: t0 + 880_000, endMs: t0 + 1_000_000 - 1 };
   edgeSlow.sends[4].measuredWindow = { startMs: t0 + 879_000, endMs: t0 + 1_001_000, monoMs: 122_000 };
-  assert.deepEqual([jr(edgeSlow).blocks[4].thermal.ticks, jr(edgeSlow).invalid], [24, ['block 5: throttled, server median 1850000 kHz < 95 % of block 1 (2000000 kHz)']]);
+  assert.deepEqual([jr(edgeSlow).blocks[4].thermal.ticks, jr(edgeSlow).invalid], [24, ['block 5: throttled, server median per-CPU ratio 0.925 < 0.95 of block 1 (4 CPUs)']]);
 });
 
 test('a wall-clock set in the journal during the run, or no readable journal check, makes the run INVALID', () => {
@@ -224,7 +301,7 @@ test('a cool-down record whose accepted reading is late or hot makes the run INV
 test('a failed, missing or torn thermal tick in a block makes the run INVALID (no allowance)', () => {
   const failedTick = run('s1');
   failedTick.samples[20] = { at: failedTick.samples[20].at, error: 'EIO' }; // 100 s, inside block 1
-  assert.match(jr(failedTick).invalid.join(), /block 1: 1 failed thermal samples.*block 1: unreadable CPU frequency/);
+  assert.match(jr(failedTick).invalid.join(), /block 1: 1 failed thermal samples.*block 1: server set: failed thermal tick/);
   const missing = run('s1');
   missing.samples.splice(20, 1);
   const r = jr(missing);
@@ -233,8 +310,8 @@ test('a failed, missing or torn thermal tick in a block makes the run INVALID (n
   torn.samples.push({ at: null, error: 'unparseable line' });
   assert.match(jr(torn).invalid.join(), /1 thermal lines without a time/);
   const unreadable = run('s1');
-  unreadable.samples[30] = { ...unreadable.samples[30], avgFreqKHz: [null, 1, 1, 1] } as SampleLine;
-  assert.match(jr(unreadable).invalid.join(), /unreadable CPU frequency/);
+  unreadable.samples[30] = { ...unreadable.samples[30], avgFreqKHz: [null, 1, 1, 1, 1, 1, 1, 1] } as SampleLine;
+  assert.match(jr(unreadable).invalid.join(), /block 1: server set: unreadable CPU frequency on CPU 0/);
 });
 
 test('a missing lever, cool-down, launch check, procedure or thermal record makes the run INVALID', () => {
@@ -251,8 +328,8 @@ test('a missing lever, cool-down, launch check, procedure or thermal record make
     [{ launchCheck: { ok: true, tctlC: 45, record: { ...host, boost: '1' } as HostRecord } }, /lever at launch: boost is 1/],
     [{ samples: [] }, /block 1: missing 5 s thermal tick \(gap Infinity ms\)/],
     [{ metadata: { mode: 'diagnostic', sendsOnly: true, cpuSets: null, sends: { measuredSeconds: 120 } } }, /no CPU sets/],
-    [{ metadata: { mode: 'diagnostic', sendsOnly: false, cpuSets: { server: [0, 2], client: [1, 3] }, sends: { measuredSeconds: 120 } } }, /not the #519 send diagnosis/],
-    [{ metadata: { mode: 'smoke', sendsOnly: true, cpuSets: { server: [0, 2], client: [1, 3] }, sends: { measuredSeconds: 120 } } }, /not the #519 send diagnosis/],
+    [{ metadata: { mode: 'diagnostic', sendsOnly: false, cpuSets, sends: { measuredSeconds: 120 } } }, /not the #519 send diagnosis/],
+    [{ metadata: { mode: 'smoke', sendsOnly: true, cpuSets, sends: { measuredSeconds: 120 } } }, /not the #519 send diagnosis/],
     [{ complete: false }, /did not complete/],
   ];
   for (const [over, pattern] of cases) {
