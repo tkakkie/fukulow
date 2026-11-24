@@ -1,3 +1,4 @@
+use crate::lock_ignoring_poison;
 use crate::observability::{Admission as Rejection, admission};
 use std::{
     collections::HashMap,
@@ -48,11 +49,7 @@ impl SendWaiter {
 
 impl Drop for SendWaiter {
     fn drop(&mut self) {
-        let mut queued = self
-            .admission
-            .queued
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut queued = lock_ignoring_poison(&self.admission.queued);
         queued.total -= 1;
         if let Some(count) = queued.channels.get_mut(&self.key) {
             *count -= 1;
@@ -136,7 +133,7 @@ impl Admission {
         channel: Uuid,
     ) -> Result<SendWaiter, super::MessageError> {
         let key = (organization, channel);
-        let mut queued = self.queued.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queued = lock_ignoring_poison(&self.queued);
         let scope = if queued.total >= GLOBAL_QUEUE_CAP {
             Some(Rejection::SendGlobalQueue)
         } else if queued.channels.get(&key).copied().unwrap_or(0) >= CHANNEL_QUEUE_CAP {
@@ -163,10 +160,7 @@ impl Admission {
         send: bool,
     ) -> Result<Permit, sqlx::Error> {
         let key = (organization, channel);
-        let slots = self
-            .channels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let slots = lock_ignoring_poison(&self.channels)
             .entry(key)
             .or_insert_with(|| {
                 Arc::new(Slots {
@@ -256,11 +250,7 @@ impl Drop for Permit {
     fn drop(&mut self) {
         drop(self.global.take());
         drop(self.channel.take());
-        let mut channels = self
-            .admission
-            .channels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut channels = lock_ignoring_poison(&self.admission.channels);
         // Release the registry reference while locked, including concurrent last exits.
         drop(self.slots.take());
         if channels

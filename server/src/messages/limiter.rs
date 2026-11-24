@@ -1,6 +1,7 @@
 //! Per-(Organization, Member) send limiter and bounded duplicate tracking (#306).
 //! State is in-process and bounded; numbers and memory estimates are in
 //! `docs/decisions/messages.md`.
+use crate::lock_ignoring_poison;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -206,7 +207,7 @@ impl SendLimiter {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         // The state stays consistent at every await-free step; a panic elsewhere
         // must not disable sending.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        lock_ignoring_poison(&self.inner)
     }
 
     /// Claims `key` or joins the request already in flight with it. Charges nothing.

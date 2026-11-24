@@ -312,7 +312,7 @@ async fn mark_inner(
     let state = state.clone();
     let (read_seq, history_generation) = tokio::spawn(async move {
     let (read_seq, changed, history_generation) = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
-        sqlx::query("SET LOCAL lock_timeout = '5s'")
+        sqlx::query(crate::database::LOCK_TIMEOUT_SQL)
             .execute(&mut *tx)
             .await?;
         match channels::is_visible_for_write(&mut *tx, organization, member, channel).await? {
