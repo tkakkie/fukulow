@@ -188,23 +188,23 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
 
   it('resolves the skip link target ID to the visible primary region at every phone level and desktop/tablet breakpoint', () => {
     // Phone (< 600px): targets the active screen's region at each level
-    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'channels', panelOpen: false })).toBe(
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'channels', panelOpen: false })).toBe(
       'channel-content',
     )
-    expect(resolveSkipLinkTargetId({ viewportWidth: 599, mobileLevel: 'channels', panelOpen: true })).toBe(
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'channels', panelOpen: true })).toBe(
       'channel-content',
     )
-    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'view', panelOpen: false })).toBe('main-content')
-    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'panel', panelOpen: true })).toBe('panel-content')
-    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'panel', panelOpen: false })).toBe(
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'view', panelOpen: false })).toBe('main-content')
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'panel', panelOpen: true })).toBe('panel-content')
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'panel', panelOpen: false })).toBe(
       'main-content',
     )
 
     // Tablet and desktop (>= 600px): main-content stays visible across all mobileLevel and panelOpen states
-    for (const viewportWidth of [600, 768, 960, 1280, 1400]) {
+    for (const viewport of ['tablet', 'desktop'] as const) {
       for (const mobileLevel of ['channels', 'view', 'panel'] as const) {
         for (const panelOpen of [false, true]) {
-          expect(resolveSkipLinkTargetId({ viewportWidth, mobileLevel, panelOpen })).toBe('main-content')
+          expect(resolveSkipLinkTargetId({ viewport, mobileLevel, panelOpen })).toBe('main-content')
         }
       }
     }
@@ -212,17 +212,11 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
 
   it('opens the Channel drawer only at tablet widths and focuses the Channel list on チャンネル一覧へ', () => {
     // Phone (< 600px): switches to 'channels' screen without opening tablet drawer
-    for (const width of [320, 375, 599]) {
-      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
-    }
+    expect(resolveChannelListNavigation('phone')).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
     // Tablet (600-959px): opens the Channel drawer
-    for (const width of [600, 768, 959]) {
-      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: true, mobileLevel: 'channels' })
-    }
+    expect(resolveChannelListNavigation('tablet')).toEqual({ drawerOpen: true, mobileLevel: 'channels' })
     // Desktop (>= 960px): Channel column is permanently visible, drawer stays closed
-    for (const width of [960, 1280, 1440]) {
-      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
-    }
+    expect(resolveChannelListNavigation('desktop')).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
 
     const visibleHeading = {
       focus: vi.fn(),

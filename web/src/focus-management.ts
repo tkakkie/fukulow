@@ -1,3 +1,5 @@
+import type { ViewportClass } from './breakpoints'
+
 export type FocusableTarget = {
   focus(): void
   isConnected?: boolean
@@ -18,19 +20,16 @@ export type VisibleFocusableTarget = FocusableTarget & {
 export type MobileLevel = 'channels' | 'view' | 'panel'
 export type SkipLinkTargetId = 'channel-content' | 'main-content' | 'panel-content'
 
-export const MOBILE_BREAKPOINT_PX = 600
-export const DESKTOP_BREAKPOINT_PX = 960
-
 /**
  * Resolves the ID of the currently visible primary region for the page skip link (`メッセージへ移動`)
  * across desktop/tablet (`>= 600px`) and phone (`< 600px`) levels (`docs/ui.md` §3, §6).
  */
 export function resolveSkipLinkTargetId(options: {
-  viewportWidth: number
+  viewport: ViewportClass
   mobileLevel: MobileLevel
   panelOpen: boolean
 }): SkipLinkTargetId {
-  if (options.viewportWidth >= MOBILE_BREAKPOINT_PX) {
+  if (options.viewport !== 'phone') {
     return 'main-content'
   }
   if (options.mobileLevel === 'panel' && options.panelOpen) {
@@ -47,12 +46,12 @@ export function resolveSkipLinkTargetId(options: {
  * opens the Channel drawer only at tablet widths (`600-959px`), enters the `'channels'`
  * screen level for phone (`< 600px`), and keeps desktop (`>= 960px`) drawer-free.
  */
-export function resolveChannelListNavigation(viewportWidth: number): {
+export function resolveChannelListNavigation(viewport: ViewportClass): {
   drawerOpen: boolean
   mobileLevel: MobileLevel
 } {
   return {
-    drawerOpen: viewportWidth >= MOBILE_BREAKPOINT_PX && viewportWidth < DESKTOP_BREAKPOINT_PX,
+    drawerOpen: viewport === 'tablet',
     mobileLevel: 'channels',
   }
 }
