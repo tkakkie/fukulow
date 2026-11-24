@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { evidence, type Measurement } from './judge.ts';
-import { diskStop, execute, maxInvalid, minDockerStartBytes, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
+import { abortableIdle, diskStop, execute, maxInvalid, minDockerStartBytes, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
 import { sequence, settleCapMs } from './plan.ts';
 
 const GiB = 1024 ** 3;
@@ -20,13 +20,14 @@ function fake(over: Partial<Deps> & {invalidIds?: string[]; failOn?: string} = {
       if (over.failOn === step.id) throw new Error('boom');
       calls.push(`measure ${step.id}${opts.explain ? ' +explain' : ''}`);
       return {id: step.id, kind: step.kind, arm: step.arm, order: step.order, settle: false, latencies: [], plans: null,
-        sharedReads: 0, env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []},
+        sharedReads: 0, env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: [], autovacuumInsideQueries: []},
         invalid: over.invalidIds?.includes(step.id) ? ['fake'] : [], missingEvidence: [], samplerChecked: false} satisfies Measurement;
     },
     validate: async ms => { for (const m of ms) m.samplerChecked = true; },
     idle: async ms => { calls.push(`idle ${ms}`); },
     scan: async () => { calls.push('scan'); },
     log: () => undefined,
+    aborted: () => null,
     ...over,
   };
   return {d, calls, current: () => current};
@@ -220,4 +221,40 @@ test('after a CHECKPOINT that overran the cap no reading starts: INVALID, not a 
   const io = {checkpoint: () => { t = settleCapMs + 1; }, now: () => t, sleep: async () => undefined,
     reading: () => { throw new Error('docker exec: container busy'); }};
   assert.equal(await settleWait(io, settleCapMs), false);
+});
+
+test('a signal during the idle ends the sequence: no copy, restart or measurement starts after it (review round 6)', async () => {
+  let reason: string | null = null;
+  const {d, calls} = fake({idle: async ms => { calls.push(`idle ${ms}`); reason = 'SIGTERM'; }, aborted: () => reason});
+  const {stopped} = await execute(sequence('1'), d);
+  const idle = calls.findIndex(c => c.startsWith('idle'));
+  assert.ok(idle > 0);
+  assert.deepEqual(calls.slice(idle + 1), []);
+  assert.match(stopped ?? '', /aborted by SIGTERM/);
+});
+
+test('a signal between a copy and its restart stops before the restart; one after the last step still STOPs', async () => {
+  let reason: string | null = null;
+  const {d, calls} = fake({copy: async () => { calls.push('copy'); reason = 'SIGINT'; }, aborted: () => reason});
+  const r = await execute(sequence('smoke'), d);
+  assert.deepEqual(calls, ['copy']);
+  assert.match(r.stopped ?? '', /smoke\.1: aborted by SIGINT/);
+  let late: string | null = null;
+  let validated = 0;
+  const after = fake({measure: async (step, opts) => { late = 'SIGTERM'; return fake().d.measure(step, opts); }, aborted: () => late,
+    validate: async () => { validated++; }});
+  const r2 = await execute(sequence('smoke'), after.d);
+  assert.equal(r2.stopped, 'aborted by SIGTERM');
+  // The per-step validation ran before the signal was seen; the final coverage wait is skipped after it.
+  assert.equal(validated, 1);
+});
+
+test('the idle wait ends within one slice of a signal', async () => {
+  let t = 0, reason: string | null = null;
+  const slept: number[] = [];
+  await abortableIdle(30 * 60_000, () => reason, () => t, async ms => { slept.push(ms); t += ms; if (t >= 3_000) reason = 'SIGTERM'; });
+  assert.deepEqual(slept, [1_000, 1_000, 1_000]);
+  t = 0; reason = null; slept.length = 0;
+  await abortableIdle(2_500, () => reason, () => t, async ms => { slept.push(ms); t += ms; });
+  assert.deepEqual(slept, [1_000, 1_000, 500]);
 });

@@ -22,7 +22,7 @@ import { loadBackfill } from '../d3r/snapshot.ts';
 import { timeQuery } from '../d3r/timing.ts';
 import { checkPins, diagnosticSettings, expectedSnapshotSha256, launchArgs, pinnedBenchmark, pinnedSession, planShape, qualifiedCpuSets } from './cluster.ts';
 import { cacheConstraint, fillPlans, ownReasons, smoke, stage1, stage2, type Block, type Measurement, type Noise, type Plan } from './judge.ts';
-import { execute, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
+import { abortableIdle, execute, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
 import { ownedResources } from '../runtime.ts';
 import { ordered, sequence, type MeasuredStep, type Stage } from './plan.ts';
 import { awaitCoverage, freshFast, freshWaitMs, readSamples, stopProcess, windowFacts, type Restart } from './sampler.ts';
@@ -224,6 +224,10 @@ async function worker(env: NodeJS.ProcessEnv) {
   const groupAlive = () => { try { process.kill(-sampler.pid!, 0); return true; } catch { return false; } };
   const time = sets ? pinnedBenchmark(sets.client) : benchmark;
   const windows = new Map<string, {start: number; end: number; blocks: Block[]; restart: Restart | null; checked: boolean}>();
+  // Set by a signal (review round 6). Every Docker or database action below checks it first, so no new
+  // step, copy or query starts once a signal has arrived.
+  let abortReason: string | null = null;
+  const guard = () => { if (abortReason !== null) throw new Error(`aborted by ${abortReason}`); };
   let previous: {id: string; end: number} | null = null;
   let lastRestart: Restart | null = null;
   const app = <T>(body: (search: (text: string) => Promise<string>) => Promise<T>) => pinnedSession(container, 'measured', true, sets?.client, body);
@@ -253,7 +257,7 @@ async function worker(env: NodeJS.ProcessEnv) {
 
   const deps: Deps = {
     freeBytes: () => ({docker: dockerFree(), snapshot: freeOrNull(source.snapshotDirectory), output: freeOrNull(out)}),
-    copy: async () => { owner('postgres', 'DROP DATABASE IF EXISTS measured;'); owner('postgres', 'CREATE DATABASE measured TEMPLATE base;'); },
+    copy: async () => { guard(); owner('postgres', 'DROP DATABASE IF EXISTS measured;'); guard(); owner('postgres', 'CREATE DATABASE measured TEMPLATE base;'); },
     // Every command gets the time left before the cap; passing the cap, or a command timing out at it, is
     // false (that round is INVALID), never a STOP. The rule itself is settleWait (tested with a fake clock).
     settle: async capMs => {
@@ -263,8 +267,9 @@ async function worker(env: NodeJS.ProcessEnv) {
         '-U', 'fukulow', '-d', 'postgres'], left(), text).trim();
       try {
         return await settleWait({
-          checkpoint: () => { owned('CHECKPOINT;'); },
+          checkpoint: () => { guard(); owned('CHECKPOINT;'); },
           reading: () => {
+            guard();
             const mem = boundedCommand('docker', ['exec', container, 'cat', '/proc/meminfo'], Math.min(left(), timeouts.docker));
             // An unreadable field is NaN, which never settles: the wait runs to its cap (INVALID), not a STOP.
             const kib = (k: string) => Number(new RegExp(`^${k}:\\s+(\\d+) kB$`, 'm').exec(mem)?.[1] ?? NaN) * 1024;
@@ -301,6 +306,7 @@ async function worker(env: NodeJS.ProcessEnv) {
       // reads, the read-counter wait and the sampler check, and the interval is recorded).
       const sincePrevious = previous && {id: previous.id, endedAt: previous.end, ms: start - previous.end};
       for (const [query, raw] of ordered(querySet, step.order)) {
+        guard();
         const b = Date.now();
         try {
           const sample = await timeQuery(container, 'measured', path.page, query, raw, !accepts(query), `${dest}/${query}`, transactions, clients, time);
@@ -313,9 +319,12 @@ async function worker(env: NodeJS.ProcessEnv) {
       }
       const end = Date.now();
       await new Promise(r => setTimeout(r, 1_000));
+      guard();
       const readsAfter = capture('blks_read after', missing, reads);
       const sharedReads = readsBefore === null || readsAfter === null || !Number.isFinite(readsAfter - readsBefore) ? null : readsAfter - readsBefore;
+      guard();
       const plans = opts.explain ? await explainAll(dest, missing) : null;
+      guard();
       const after = capture('stats-after', missing, stats);
       if (after !== null) save(`${dest}/stats-after.json`, after);
       windows.set(step.id, {start, end, blocks, restart: restartBefore, checked: false});
@@ -323,7 +332,7 @@ async function worker(env: NodeJS.ProcessEnv) {
         : 'p95' in r.sample ? {query: r.query, p95: r.sample.p95} : {query: r.query, error: r.sample.sqlError});
       const m: Measurement = {id: step.id, kind: step.kind, arm: step.arm, order: step.order, settle: step.kind === 'copy' && step.settle,
         latencies, plans, sharedReads, invalid: ownReasons(results, load15), missingEvidence: missing, samplerChecked: false,
-        env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []}};
+        env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: [], autovacuumInsideQueries: []}};
       // Option A: hot 2's EXPLAIN sweep stands for warm, hot 1 and hot 2 of its cache arm.
       const plansStandFor = step.kind === 'hot' && step.id.endsWith('.hot2') ? ['warm', 'hot1', 'hot2'].map(x => `${step.arm}.${x}`) : undefined;
       save(`${dest}/measurement.json`, {...m, window: {start, end, blocks}, restart: restartBefore, sincePrevious, plansStandFor, load15});
@@ -345,15 +354,17 @@ async function worker(env: NodeJS.ProcessEnv) {
         w.checked = true;
       }
     },
-    idle: ms => new Promise(r => setTimeout(r, ms)),
+    idle: ms => abortableIdle(ms, () => abortReason, Date.now, ms => new Promise(r => setTimeout(r, ms))),
     // A scan that could not page through every result did not do the §5.3 work: a STOP.
     scan: async () => {
+      guard();
       const report = await app(async search => { await search(prepare(path.page)); return completeness(search); });
       save(`${out}/B.scan.json`, report);
       const broken = report.flatMap(q => q.actors.filter(a => a.paginationError).map(a => `${q.query}/${a.actor}`));
       if (broken.length) throw new Error(`completeness scan pagination errors: ${broken.join(', ')}`);
     },
     log: note,
+    aborted: () => abortReason,
   };
   // EXPLAIN (ANALYZE, BUFFERS) for every accepted query. A failed query or session keeps the measurement, and
   // every accepted query without a plan gets an error entry, so the list is never partial: H3 is withheld and
@@ -365,6 +376,7 @@ async function worker(env: NodeJS.ProcessEnv) {
       await app(async search => {
         await search(prepare(path.page));
         for (const [query, raw] of accepted) {
+          guard();
           try {
             const {explain} = await explainPage(search, raw);
             save(`${dest}/${query}-plan.json`, explain);
@@ -378,12 +390,18 @@ async function worker(env: NodeJS.ProcessEnv) {
 
   let samplerStopped: Promise<{verified: boolean; how: string}> | null = null;
   const stopSampler = () => samplerStopped ??= stopProcess(samplerGroup, 15_000, 5_000, groupAlive).then(r => { save(`${out}/sampler-stop.json`, r); return r; });
-  const onSignal = (signal: NodeJS.Signals, code: number) => process.once(signal, signalStop(signal, code, stopSampler, c => process.exit(c)));
+  const onSignal = (signal: NodeJS.Signals, code: number) => process.once(signal, signalStop(signal, code, {
+    abort: () => { abortReason ??= signal; },
+    stop: stopSampler,
+    record: () => { finishRecords(out, stage, sha256, `signal ${signal}`, [`STOP: signal ${signal}`]); },
+    exit: c => process.exit(c)}));
   onSignal('SIGTERM', 143); onSignal('SIGINT', 130);
   let logTried = false;
   try {
     const result = await execute(sequence(stage), deps);
     save(`${out}/measurements.json`, result);
+    // After a signal the handler records the abnormal finish and exits; no judgement, no `docker logs`.
+    if (abortReason !== null) return;
     // Every record is complete before the judgement (review item 4): the samples (sampler stopped), and the
     // PostgreSQL log. A missing one is incomplete evidence, never a judgement on part of the evidence.
     const stageMissing: string[] = [];
@@ -401,7 +419,7 @@ async function worker(env: NodeJS.ProcessEnv) {
   } finally {
     const r = await stopSampler();
     if (!r.verified) { note(`sampler did not exit: ${r.how}`); process.exitCode ||= stopExitCode; }
-    if (!logTried) postgresLog(container, out);
+    if (!logTried && abortReason === null) postgresLog(container, out);
   }
 }
 
@@ -422,10 +440,19 @@ export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logical
   return checked;
 }
 
-// A signal to the worker: stop the sampler (verified, or recorded as not) before exiting.
-export const signalStop = (signal: string, code: number, stop: () => Promise<{verified: boolean; how: string}>, exit: (code: number) => void) =>
-  () => { void stop().then(r => { note(`${signal}: sampler stop ${r.verified ? 'verified' : 'NOT verified'} (${r.how}); the stage ends`); exit(code); },
-    error => { note(`${signal}: sampler stop failed: ${String(error)}`); exit(code); }); };
+// A signal to the worker: abort first (synchronously, so no new step, copy or Docker work starts), then
+// stop the sampler (verified, or recorded as not), record the abnormal finish, and exit with `code`.
+export type SignalActions = {abort(): void; stop(): Promise<{verified: boolean; how: string}>; record(): void; exit(code: number): void};
+export const signalStop = (signal: string, code: number, a: SignalActions) => () => {
+  a.abort();
+  const finish = (line: string) => {
+    note(line);
+    try { a.record(); } catch (error) { note(`${signal}: finish records not saved: ${String(error)}`); }
+    a.exit(code);
+  };
+  void a.stop().then(r => finish(`${signal}: sampler stop ${r.verified ? 'verified' : 'NOT verified'} (${r.how}); the stage ends`),
+    error => finish(`${signal}: sampler stop failed: ${String(error)}`));
+};
 
 // A single non-negative integer on the last line of psql output; anything else is unreadable (Neon r5).
 export function parseCount(text: string) {
@@ -443,6 +470,8 @@ export function finishRecords(out: string, stage: Stage, manifestHash: string, s
     save(`${out}/completed.json`, {manifestHash, label, stage, at});
     return 0;
   }
+  // A signal after a normal finish turns it abnormal: completed.json goes, so no record says otherwise.
+  rmSync(`${out}/completed.json`, {force: true});
   save(`${out}/stopped.json`, {label, stage, stopped, reasons: abnormal, at});
   note(`not a normal finish: ${abnormal.join('; ')}`);
   return stopExitCode;

@@ -33,7 +33,7 @@ function stage1Measurements(): Measurement[] {
   return sequence('1').filter((s): s is MeasuredStep => s.kind !== 'idle' && s.kind !== 'scan').map(s => ({id: s.id, kind: s.kind,
     arm: s.arm, order: s.order, settle: s.kind === 'copy' && s.settle, latencies: [{query: 'fullwidth', p95: 40}],
     plans: [{query: 'fullwidth', shapeHash: 'x', buffers: 1, sharedHit: 1, sharedRead: 0}], sharedReads: 0, invalid: [], missingEvidence: [], samplerChecked: true,
-    env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []}}));
+    env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: [], autovacuumInsideQueries: []}}));
 }
 // A prior stage's records as the worker and the supervisor leave them.
 function prior(dir: string, stage: string, judgement: Record<string, unknown>,
@@ -222,16 +222,28 @@ test('the worker checks the prerequisites itself and claims a one-time token; SE
   assert.throws(() => gate(env), /missing or already claimed/);
 });
 
-test('a signal to the worker exits only after the sampler stop has finished', async () => {
+test('a signal aborts at once, then exits only after the sampler stop and the abnormal finish record', async () => {
   const order: string[] = [];
   let release!: () => void;
   const stop = () => new Promise<{verified: boolean; how: string}>(r => { release = () => { order.push('stopped'); r({verified: true, how: 'SIGTERM'}); }; });
-  signalStop('SIGTERM', 143, stop, code => order.push(`exit ${code}`))();
+  signalStop('SIGTERM', 143, {abort: () => order.push('abort'), stop, record: () => order.push('record'), exit: code => order.push(`exit ${code}`)})();
+  // The abort is synchronous: nothing new can start while the sampler stops.
+  assert.deepEqual(order, ['abort']);
   await new Promise(r => setTimeout(r, 5));
-  assert.deepEqual(order, []);
+  assert.deepEqual(order, ['abort']);
   release();
   await new Promise(r => setTimeout(r, 5));
-  assert.deepEqual(order, ['stopped', 'exit 143']);
+  assert.deepEqual(order, ['abort', 'stopped', 'record', 'exit 143']);
+});
+
+test('a signal records an abnormal finish: stopped.json, no completed.json, finish.json not normal', () => {
+  const out = mkdtempSync(join(tmpdir(), 'diag870-sig-'));
+  // Even after a normal finish was recorded, a later signal leaves no completed.json behind.
+  assert.equal(finishRecords(out, '1', hash, null, []), 0);
+  assert.equal(finishRecords(out, '1', hash, 'signal SIGTERM', ['STOP: signal SIGTERM']), stopExitCode);
+  assert.deepEqual(JSON.parse(readFileSync(join(out, 'finish.json'), 'utf8')), {normal: false, reasons: ['STOP: signal SIGTERM']});
+  assert.equal(existsSync(join(out, 'completed.json')), false);
+  assert.equal(JSON.parse(readFileSync(join(out, 'stopped.json'), 'utf8')).stopped, 'signal SIGTERM');
 });
 
 test('a read counter must be a single integer; empty or other output is unreadable (Neon r5)', () => {

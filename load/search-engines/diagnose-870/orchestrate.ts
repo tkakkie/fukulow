@@ -26,8 +26,11 @@ export type Deps = {
   // Waits until the samplers have covered every unchecked window (a sample at or after its end in each
   // stream, or the coverage deadline), then adds their reasons. Nothing starts before it resolves.
   validate(measurements: Measurement[]): Promise<void>;
+  // Returns early once aborted() is set.
   idle(ms: number): Promise<void>;
   scan(): Promise<void>;
+  // The reason once a signal has arrived, else null. Nothing new starts after it (review round 6).
+  aborted(): string | null;
   log(line: string): void;
 };
 
@@ -75,12 +78,18 @@ export async function settleWait(io: SettleIo, capMs: number) {
   }
 }
 
+class Aborted extends Error {}
+
 export async function execute(steps: Step[], d: Deps) {
   const measurements: Measurement[] = [];
   let stopped: string | null = null;
+  // Checked before every action that starts work (a step, a copy, a settle, a restart, a warm-up, a
+  // measurement), so a signal ends the sequence before anything new starts.
+  const go = () => { const reason = d.aborted(); if (reason !== null) throw new Aborted(reason); };
   const invalidCount = async () => { await d.validate(measurements); return measurements.filter(m => m.invalid.length > 0).length; };
   for (const step of steps) {
     try {
+      go();
       if (step.kind === 'idle') { d.log(`${step.id}: idle ${step.ms / 60_000} min`); await d.idle(step.ms); continue; }
       if (step.kind === 'scan') { d.log(`${step.id}: completeness scan`); await d.scan(); continue; }
       let settleCapped = false;
@@ -88,21 +97,37 @@ export async function execute(steps: Step[], d: Deps) {
         const low = diskStop(d.freeBytes());
         if (low) { stopped = `${step.id}: ${low}`; break; }
         await d.copy();
+        go();
         if (step.settle) settleCapped = !await d.settle(settleCapMs);
       }
+      go();
       if (step.kind !== 'hot') await d.restart();
+      go();
       if (step.kind === 'copy') await d.warmup(step);
+      go();
       const m = await d.measure(step, {explain: explains(step)});
       if (settleCapped) m.invalid.push('settle wait hit its cap');
       measurements.push(m);
       d.log(`${step.id}: measured${m.invalid.length ? ` INVALID (${m.invalid.join('; ')})` : ''}`);
       if (await invalidCount() > maxInvalid) { stopped = `more than ${maxInvalid} INVALID measurements`; break; }
     } catch (error) {
-      stopped = `${step.id}: ${String(error)}`;
+      stopped = error instanceof Aborted ? `${step.id}: aborted by ${error.message}` : `${step.id}: ${String(error)}`;
       break;
     }
   }
+  // A signal that arrives after the last step still makes the stage abnormal.
+  const late = d.aborted();
+  if (late !== null) stopped ??= `aborted by ${late}`;
   if (stopped) d.log(`STOP: ${stopped}`);
-  try { await d.validate(measurements); } catch (error) { stopped ??= `sampler validation: ${String(error)}`; }
+  // After a signal nothing waits on sampler coverage; the unchecked windows are incomplete evidence.
+  if (late === null) {
+    try { await d.validate(measurements); } catch (error) { stopped ??= `sampler validation: ${String(error)}`; }
+  }
   return {measurements, stopped};
+}
+
+// An idle wait in slices of at most `sliceMs`, ending early once aborted() is set.
+export async function abortableIdle(ms: number, aborted: () => string | null, now: () => number, sleep: (ms: number) => Promise<void>, sliceMs = 1_000) {
+  const end = now() + ms;
+  while (aborted() === null && now() < end) await sleep(Math.min(sliceMs, end - now()));
 }

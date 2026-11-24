@@ -1,5 +1,6 @@
 import { accepts, fullySampled, type Sample } from '../d3r/acceptance.ts';
 import type { Arm, Order } from './plan.ts';
+import { atLeast, below, compare, geometric, q, rational, ratio, rhoAtLeast, sumAtLeast, type Root } from './exact.ts';
 
 // The pre-set #870 Stage 1 and Stage 2 judgement (design rev 2, §4 and §5). Diagnosis only: nothing here
 // reads or changes the #689 verdict. Every function is pure, so each rule is tested with fixed records.
@@ -10,8 +11,9 @@ export type Latency = {query: string; p95?: number; error?: string};
 export type Plan = {query: string; shapeHash: string; buffers: number; sharedHit: number; sharedRead: number} | {query: string; error: string};
 export type Environment = {
   dirtyWritebackAtStartBytes: number | null; meanTemperatureC: number | null; meanFrequencyKHz: number | null;
-  // Queries whose block overlapped an autovacuum worker on `measured`.
-  autovacuumQueries: string[];
+  // Queries whose block an autovacuum reading on `measured` overlapped (blocks the H5 rule-out), and those
+  // whose block wholly contained such a reading (the only H5 support).
+  autovacuumQueries: string[]; autovacuumInsideQueries: string[];
 };
 export type Measurement = {
   id: string; kind: 'copy' | 'hot' | 'restart-only'; arm: Arm; order: Order; settle: boolean;
@@ -36,12 +38,6 @@ export function ownReasons(results: ({query: string} & ({sample: Sample} | {erro
     : fullySampled(r.sample) ? [] : [`${r.query} not fully sampled`]);
   return load15 > maxLoad15 ? [`load15 ${load15.toFixed(2)} > ${maxLoad15} at start`, ...reasons] : reasons;
 }
-// Threshold comparisons on computed ratios (§4.2, §5.3) allow for floating-point rounding only: a G95 ratio
-// that is mathematically 1.30 can compute as 1.2999999999999994. The tolerance is relative, 1e-9, far below
-// any measurable difference, so the thresholds themselves are unchanged.
-const tolerance = 1e-9;
-export const atLeast = (x: number, threshold: number) => x >= threshold - tolerance * Math.max(1, Math.abs(threshold));
-export const below = (x: number, threshold: number) => !atLeast(x, threshold);
 const valid = (m: Measurement | undefined): m is Measurement => m !== undefined && m.invalid.length === 0;
 const byId = (ms: Measurement[], id: string) => ms.find(m => m.id === id);
 const validIds = (ms: Measurement[], ids: string[]) => ids.map(id => byId(ms, id)).filter(valid);
@@ -55,6 +51,13 @@ export function g95(m: Measurement) {
   return Math.exp(values.reduce<number>((s, v) => s + Math.log(v as number), 0) / values.length);
 }
 const G = (m: Measurement) => g95(m) as number;
+// The G95 as an exact root of the stored p95s, for the §4.2 and §5.3 thresholds (exact.ts); null when
+// a p95 is missing, which no threshold passes.
+export function g95Root(m: Measurement): Root | null {
+  const values = m.latencies.filter(l => accepts(l.query)).map(l => l.p95);
+  return values.length > 0 && values.every(v => v !== undefined && v > 0) ? geometric(values as number[]) : null;
+}
+const byRoot = (a: Root, b: Root) => compare(ratio(a, b), q(1));
 const within = (ratio: number, n: number) => ratio <= n && ratio >= 1 / n;
 const isPlan = (p: Plan | undefined): p is Extract<Plan, {shapeHash: string}> => p !== undefined && 'shapeHash' in p;
 // The accepted queries, from the frozen set as measured.
@@ -68,12 +71,12 @@ export const plansComplete = (m: Measurement) => m.plans !== null && acceptedOf(
 export const fillPlans = (accepted: string[], list: Plan[], error: string): Plan[] =>
   [...list, ...accepted.filter(q => !list.some(p => p.query === q)).map(query => ({query, error}))];
 
-function ranks(xs: number[]) {
-  const sorted = xs.map((x, i) => [x, i] as const).sort((a, b) => a[0] - b[0]);
+function ranks<T>(xs: T[], order: (a: T, b: T) => number = (a, b) => (a as number) - (b as number)) {
+  const sorted = xs.map((x, i) => [x, i] as const).sort((a, b) => order(a[0], b[0]));
   const r = new Array<number>(xs.length);
   for (let i = 0; i < sorted.length;) {
     let j = i;
-    while (j + 1 < sorted.length && sorted[j + 1]![0] === sorted[i]![0]) j++;
+    while (j + 1 < sorted.length && order(sorted[j + 1]![0], sorted[i]![0]) === 0) j++;
     for (let k = i; k <= j; k++) r[sorted[k]![1]] = (i + j) / 2 + 1;
     i = j + 1;
   }
@@ -121,17 +124,38 @@ export function noise(ms: Measurement[]) {
   const a1 = validIds(ms, a1Ids).map(G);
   return {value: a1.length ? Math.max(minNoise, Math.max(...a1) / Math.min(...a1)) : minNoise, source: 'A1 spread (fallback)' as const};
 }
+// The spreads behind N as exact roots (N = max(1.05, spreads)), for the §4.2 noise condition; null when a
+// G95 behind a spread is missing, which fails the condition.
+export function noiseSpreads(ms: Measurement[]): Root[] | null {
+  const spread = (gs: Root[]) => {
+    const sorted = [...gs].sort(byRoot);
+    return ratio(sorted.at(-1)!, sorted[0]);
+  };
+  const roots = (ids: string[]) => ids.map(id => g95Root(byId(ms, id)!));
+  const sets = minimums(ms).H1 ? (['C1', 'C2'] as const).map(arm => roots([`${arm}.hot1`, `${arm}.hot2`]))
+    : [validIds(ms, a1Ids).map(g95Root)].filter(gs => gs.length > 0);
+  return sets.every(gs => gs.every(g => g !== null)) ? sets.map(gs => spread(gs as Root[])) : null;
+}
 
-// §4.2. first = first valid of A1.1-A1.2, last = last valid of A1.5-A1.6.
-export function reproduction(ms: Measurement[], n: number) {
+// §4.2. first = first valid of A1.1-A1.2, last = last valid of A1.5-A1.6. The thresholds are decided
+// exactly on the stored p95s (exact.ts); r and rho are reported as doubles. N is the rational `n`, and also
+// at least every exact root in `spreads` (Stage 1 passes N's floor and its measured spreads).
+export function reproduction(ms: Measurement[], n: number, spreads: Root[] | null = []) {
   if (!minimums(ms).A1) return {result: 'inconclusive' as const, reason: 'A1 minimum not met', r: null, rho: null};
   const first = validIds(ms, ['A1.1', 'A1.2'])[0];
   const last = validIds(ms, ['A1.5', 'A1.6']).at(-1)!;
   const r = G(last) / G(first);
   const rounds = a1Ids.map((id, i) => [i + 1, byId(ms, id)] as const).filter(([, m]) => valid(m));
   const rho = spearman(rounds.map(([i]) => i), rounds.map(([, m]) => G(m!)));
-  if (atLeast(r, 1.30) && rho !== null && atLeast(rho, 0.8) && atLeast(r - 1, 3 * (n - 1))) return {result: 'reproduced' as const, r, rho};
-  if (below(r, 1.15)) return {result: 'not reproduced' as const, r, rho};
+  const [gl, gf, gs] = [g95Root(last), g95Root(first), rounds.map(([, m]) => g95Root(m!))];
+  if (gl === null || gf === null || gs.some(g => g === null)) return {result: 'inconclusive' as const, reason: 'a G95 is missing', r, rho};
+  const R = ratio(gl, gf);
+  const rhoMet = rounds.length >= 3 && rhoAtLeast(ranks(rounds.map(([i]) => i)), ranks(gs as Root[], byRoot), q(4, 5));
+  // r - 1 >= 3 (N - 1): r >= 3n - 2 for the rational n, and r + 2 >= 3 x spread for each root.
+  const nq = rational(n);
+  const noiseMet = atLeast(R, {n: 3n * nq.n - 2n * nq.d, d: nq.d}) && spreads !== null && spreads.every(s => sumAtLeast(R, q(2), q(3), s) === true);
+  if (atLeast(R, q(13, 10)) && rhoMet && noiseMet) return {result: 'reproduced' as const, r, rho};
+  if (below(R, q(23, 20))) return {result: 'not reproduced' as const, r, rho};
   return {result: 'inconclusive' as const, reason: 'between the reproduction thresholds', r, rho};
 }
 
@@ -196,7 +220,8 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
   }
 
   // H4: settle vs current in both pairs, with dirty memory at the start of the current rounds.
-  // H5: an autovacuum worker on `measured` over a block that rose 1.25x against A1's first valid round.
+  // H5: an autovacuum worker on `measured` seen wholly inside a block that rose 1.25x against A1's first
+  // valid round; a reading that only overlaps a block keeps H5 from being ruled out but never supports it.
   if (!min.H45) { out.H4 = 'withheld'; out.H5 = 'withheld'; }
   else {
     const pairs = [1, 2].map(i => [byId(ms, `D.settle${i}`)!, byId(ms, `D.current${i}`)!] as const);
@@ -204,8 +229,9 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
     const dirty = pairs.every(([, c]) => (c.env.dirtyWritebackAtStartBytes ?? 0) > 64 * 1024 ** 2);
     out.H4 = verdict(ratios.every(x => x <= 0.80) && dirty, ratios.every(x => within(x, n)));
     const measured = ms.filter(valid);
-    const overlaps = measured.flatMap(m => m.env.autovacuumQueries.map(q => [m, q] as const));
-    out.H5 = verdict(overlaps.some(([m, q]) => (p95Of(m, q) ?? 0) >= 1.25 * (p95Of(first, q) ?? Infinity)), overlaps.length === 0);
+    const overlaps = measured.flatMap(m => m.env.autovacuumQueries);
+    const inside = measured.flatMap(m => m.env.autovacuumInsideQueries.map(q => [m, q] as const));
+    out.H5 = verdict(inside.some(([m, q]) => (p95Of(m, q) ?? 0) >= 1.25 * (p95Of(first, q) ?? Infinity)), overlaps.length === 0 && inside.length === 0);
   }
 
   // H6 (position): the per-query rise in F rounds vs R rounds of A1.
@@ -256,7 +282,7 @@ const abnormalOf = (stopped: string | null, unmet: string[], ev: ReturnType<type
 // §5.2. `stopped` is a STOP reason when the stage ended early.
 export function stage1(ms: Measurement[], stopped: string | null = null, stageMissing: string[] = []) {
   const N = noise(ms);
-  const repro = reproduction(ms, N.value);
+  const repro = reproduction(ms, minNoise, noiseSpreads(ms));
   const min = minimums(ms);
   const ev = evidence(ms, stageMissing);
   const abnormal = abnormalOf(stopped, Object.entries(min).filter(([, met]) => !met).map(([k]) => k), ev, ms);
@@ -310,8 +336,13 @@ export function stage2(ms: Measurement[], noise: Noise, stopped: string | null =
   if (!ev.complete) return {...base, result: 'inconclusive' as const, reason: 'evidence incomplete', ratio: null};
   if (!valid(pre) || post.length < 2 || cool.length < 2) return {...base, result: 'inconclusive' as const, reason: 'Stage 2 minimum not met', ratio: null};
   if (!valid(first)) return {...base, result: 'inconclusive' as const, reason: 'B.post1 INVALID', ratio: null};
-  const ratio = G(first) / G(pre);
-  if (atLeast(ratio, 1.30) && atLeast(ratio, 3 * (n - 1))) return {...base, result: 'reproduced' as const, ratio};
-  if (below(ratio, 1.15)) return {...base, result: 'not reproduced' as const, ratio};
-  return {...base, result: 'inconclusive' as const, reason: 'between the thresholds', ratio};
+  const value = G(first) / G(pre);
+  const [gp, gq] = [g95Root(first), g95Root(pre)];
+  if (gp === null || gq === null) return {...base, result: 'inconclusive' as const, reason: 'a G95 is missing', ratio: value};
+  // Decided exactly on the stored p95s and the recorded N as a rational (exact.ts); the double is reported.
+  const R = ratio(gp, gq);
+  const nq = rational(n);
+  if (atLeast(R, q(13, 10)) && atLeast(R, {n: 3n * (nq.n - nq.d), d: nq.d})) return {...base, result: 'reproduced' as const, ratio: value};
+  if (below(R, q(23, 20))) return {...base, result: 'not reproduced' as const, ratio: value};
+  return {...base, result: 'inconclusive' as const, reason: 'between the thresholds', ratio: value};
 }

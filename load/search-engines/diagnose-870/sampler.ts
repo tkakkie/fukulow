@@ -152,12 +152,14 @@ export function windowFacts(samples: Sample[], start: number, end: number, block
   // Frequency counts only from samples that read every server CPU; with no server set it is not used.
   const freqs = serverCpus === null ? [] : thermals.filter(s => serverCpus.every(c => Number.isFinite(s.frequencyKHz[String(c)])))
     .flatMap(s => serverCpus.map(c => s.frequencyKHz[String(c)]));
-  // As for workers and containers: a reading whose interval overlaps a block counts for that block.
-  const autovacuumQueries = blocks.filter(b => fast.some(s => overlaps(s, b.start, b.end) &&
-    s.autovacuum.some(w => w.datname === 'measured'))).map(b => b.query);
+  // When in [at, done] a reading saw the worker is unknown, so a reading that only overlaps a block keeps
+  // H5 from being ruled out for it, and only a reading wholly inside the block counts as support.
+  const onMeasured = fast.filter(s => s.autovacuum.some(w => w.datname === 'measured'));
+  const autovacuumQueries = blocks.filter(b => onMeasured.some(s => overlaps(s, b.start, b.end))).map(b => b.query);
+  const autovacuumInsideQueries = blocks.filter(b => onMeasured.some(s => s.at >= b.start && (s.done ?? s.at) <= b.end)).map(b => b.query);
   return {invalid: [...new Set(invalid)], env: {
     dirtyWritebackAtStartBytes: atStart ? atStart.dirtyBytes + atStart.writebackBytes : null,
-    meanTemperatureC: mean(temps), meanFrequencyKHz: mean(freqs), autovacuumQueries,
+    meanTemperatureC: mean(temps), meanFrequencyKHz: mean(freqs), autovacuumQueries, autovacuumInsideQueries,
   }};
 }
 

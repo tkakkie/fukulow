@@ -191,14 +191,17 @@ test('the sampler stop is SIGTERM, a bounded wait, SIGKILL, and a verified exit'
   assert.deepEqual(gone.signals, []);
 });
 
-test('an autovacuum reading whose interval overlaps a block counts for it, like workers and containers (Neon r5)', () => {
+test('an autovacuum reading that partly overlaps a block only blocks the H5 rule-out; support needs it wholly inside', () => {
   const av = {autovacuum: [{pid: 1, datname: 'measured', query: 'autovacuum: VACUUM public.messages'}]};
   const blocks = [{query: 'q1', start: 40_000, end: 60_000}];
-  // Started 0.4 s before the block and returned inside it.
-  const s = [...steady(), {...fast(39_600, av), done: 40_200}];
-  assert.deepEqual(windowFacts(s, 20_000, 80_000, blocks, opts).env.autovacuumQueries, ['q1']);
-  const before = [...steady(), {...fast(39_000, av), done: 39_500}];
-  assert.deepEqual(windowFacts(before, 20_000, 80_000, blocks, opts).env.autovacuumQueries, []);
+  const env = (s: Parameters<typeof windowFacts>[0]) => windowFacts(s, 20_000, 80_000, blocks, opts).env;
+  // Started 0.4 s before the block and returned inside it: the worker may have finished before the block.
+  const partial = env([...steady(), {...fast(39_600, av), done: 40_200}]);
+  assert.deepEqual([partial.autovacuumQueries, partial.autovacuumInsideQueries], [['q1'], []]);
+  const inside = env([...steady(), {...fast(40_000, av), done: 40_600}]);
+  assert.deepEqual([inside.autovacuumQueries, inside.autovacuumInsideQueries], [['q1'], ['q1']]);
+  const before = env([...steady(), {...fast(39_000, av), done: 39_500}]);
+  assert.deepEqual([before.autovacuumQueries, before.autovacuumInsideQueries], [[], []]);
 });
 
 test('the sampler stop is verified only when its whole process group is gone', async () => {

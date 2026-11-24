@@ -20,7 +20,7 @@ function m(id: string, g: number, over: Partial<Measurement> = {}): Measurement 
   return {id, kind: s.kind, arm: s.arm, order, settle: s.kind === 'copy' && s.settle,
     latencies: names.map(query => ({query, p95: query === 'scalar' ? 1 : g})),
     plans: plans(), sharedReads: 0,
-    env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []},
+    env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: [], autovacuumInsideQueries: []},
     invalid: [], missingEvidence: [], samplerChecked: true, ...over};
 }
 
@@ -177,8 +177,8 @@ test('H3 is withheld when an A1 plan is missing or its EXPLAIN failed, never rea
 
 test('H4 needs settle/current <= 0.80 in both pairs and dirty memory at the start of the current rounds', () => {
   const g = {'D.settle1': 39, 'D.settle2': 39};
-  const dirty = {'D.current1': {env: {dirtyWritebackAtStartBytes: 100 * 1024 ** 2, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []}},
-    'D.current2': {env: {dirtyWritebackAtStartBytes: 100 * 1024 ** 2, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []}}};
+  const dirty = {'D.current1': {env: {dirtyWritebackAtStartBytes: 100 * 1024 ** 2, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: [], autovacuumInsideQueries: []}},
+    'D.current2': {env: {dirtyWritebackAtStartBytes: 100 * 1024 ** 2, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: [], autovacuumInsideQueries: []}}};
   assert.equal(attribution(scenario(g, dirty), 1.05).H4, 'supported');
   assert.equal(attribution(scenario(g), 1.05).H4, 'withheld');
   assert.equal(attribution(scenario({'D.settle1': 39}, dirty), 1.05).H4, 'withheld');
@@ -203,9 +203,12 @@ test('the H4/H5 minimum needs both current rounds and both settle rounds; H2 nee
 });
 
 test('H5: an autovacuum worker over a slow block supports it; any overlap stops it being ruled out', () => {
-  const env = (q: string[]) => ({env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: q}});
+  const env = (q: string[], inside = q) => ({env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: q, autovacuumInsideQueries: inside}});
   assert.equal(attribution(scenario({}, {'A1.6': env(['q2'])}), 1.05).H5, 'supported');
   assert.equal(attribution(scenario({}, {'A1.1': env(['q2'])}), 1.05).H5, 'withheld');
+  assert.equal(attribution(scenario(), 1.05).H5, 'ruled out');
+  // Review round 6: a reading that only partly overlaps the slow block is not support; it is withheld.
+  assert.equal(attribution(scenario({}, {'A1.6': env(['q2'], [])}), 1.05).H5, 'withheld');
 });
 
 test('H6: a rise that follows the position in the round, in F and in R rounds, supports it', () => {
@@ -300,17 +303,41 @@ test('a window the sampler never checked (sampler death in the final validation)
   assert.equal(r.stage2, 'propose');
 });
 
-test('§4.2 and §5.3 thresholds hold under floating-point rounding: 23 queries at 100 -> 130 ms is 1.30', () => {
-  const many = (id: string, v: number) => {
-    const x = m(id, v);
-    x.latencies = Array.from({length: 23}, (_, i) => ({query: `fullwidth-${i}`, p95: v}));
+test('§4.2 and §5.3 thresholds are exact on the stored p95s, with no tolerance: 23 queries at 100 -> 130 ms is 1.30', () => {
+  const many = (id: string, values: number[]) => {
+    const x = m(id, values[0]);
+    x.latencies = values.map((p95, i) => ({query: `fullwidth-${i}`, p95}));
     return x;
   };
-  const ms = b({}).map(x => x.id === 'B.pre' ? many('B.pre', 100) : x.id === 'B.post1' ? many('B.post1', 130) : x);
-  assert.equal(stage2(ms, C(1.05)).result, 'reproduced');
-  const just = b({}).map(x => x.id === 'B.pre' ? many('B.pre', 100) : x.id === 'B.post1' ? many('B.post1', 129.99) : x);
-  assert.equal(stage2(just, C(1.05)).result, 'inconclusive');
+  const with2 = (pre: number[], post: number[]) =>
+    b({}).map(x => x.id === 'B.pre' ? many('B.pre', pre) : x.id === 'B.post1' ? many('B.post1', post) : x);
+  const flat = (v: number) => Array.from({length: 23}, () => v);
+  // The double ratio computes below 1.30 here; the exact comparison still reproduces a true 1.30.
+  assert.equal(stage2(with2(flat(100), flat(130)), C(1.05)).result, 'reproduced');
+  assert.equal(stage2(with2(flat(100), flat(129.99)), C(1.05)).result, 'inconclusive');
+  // Review round 6: 129.999 and 130.001 give a true ratio of 1.2999999999966554, below 1.30. The removed
+  // 1e-9 tolerance reproduced it; the exact comparison does not.
+  const sub = [129.999, 130.001, ...flat(130).slice(2)];
+  assert.ok(g95(many('B.post1', sub))! / 100 < 1.3);
+  assert.equal(stage2(with2(flat(100), sub), C(1.05)).result, 'inconclusive');
+  // The same at the 1.15 bound: a true 1.15 is not "not reproduced", a hair below it is.
+  assert.equal(stage2(with2(flat(100), flat(115)), C(1.05)).result, 'inconclusive');
+  assert.equal(stage2(with2(flat(100), [114.999, 115.001, ...flat(115).slice(2)]), C(1.05)).result, 'not reproduced');
+  // §4.2 on A1: a true 1.30 reproduces and a ratio just under it does not.
+  const rising: Record<string, number> = {'A1.1': 100, 'A1.2': 104, 'A1.3': 108, 'A1.4': 112, 'A1.5': 120};
+  const a1 = (last: number[]) => scenario({'C1.restart': 400, 'C2.restart': 400})
+    .map(x => x.id.startsWith('A1.') ? many(x.id, x.id === 'A1.6' ? last : flat(rising[x.id])) : x);
+  assert.equal(stage1(a1(flat(130))).reproduction.result, 'reproduced');
+  assert.equal(stage1(a1(sub)).reproduction.result, 'inconclusive');
   assert.deepEqual(stage1(scenario(), 'more than 4 INVALID measurements').abnormal, ['STOP: more than 4 INVALID measurements']);
+});
+
+test('§4.2 noise condition with a measured spread is exact: r + 2 >= 3 x spread, an undecidable case never passes', () => {
+  // hot2 / hot1 = 48 / 40 = 1.2 in both replicates, so N = 1.2 and r must be at least 1.6.
+  const at = (last: number) => stage1(scenario({'C1.hot2': 48, 'C2.hot2': 48, 'A1.6': last})).reproduction.result;
+  assert.equal(at(64), 'reproduced');
+  assert.equal(at(63.999), 'inconclusive');
+  assert.equal(at(70), 'reproduced');
 });
 
 test('incomplete evidence never establishes a cause: the outcome is inconclusive (evidence incomplete)', () => {
@@ -358,9 +385,9 @@ test('Stage 2 boundaries are §5.3 literally: 1.30 reproduces, 1.15 is inconclus
   assert.equal(stage2(b({'B.post1': 51.99}), C(1.05)).result, 'inconclusive');
   assert.equal(stage2(b({'B.post1': 46}), C(1.05)).result, 'inconclusive');
   assert.equal(stage2(b({'B.post1': 45.99}), C(1.05)).result, 'not reproduced');
-  // The noise condition is on the ratio itself: 1.40 >= 3 x (1.4667 - 1) = 1.40 reproduces, a larger N does not.
-  assert.equal(stage2(b({}), C(1 + 1.4 / 3)).result, 'reproduced');
-  assert.equal(stage2(b({}), C(1 + 1.4 / 3 + 1e-9)).result, 'inconclusive');
+  // The noise condition is on the ratio itself: 1.50 >= 3 x (1.5 - 1) = 1.50 reproduces, the next double N does not.
+  assert.equal(stage2(b({'B.post1': 60}), C(1.5)).result, 'reproduced');
+  assert.equal(stage2(b({'B.post1': 60}), C(1.5 + 2 ** -52)).result, 'inconclusive');
 });
 
 test('Stage 2 is not a normal finish when its minimum, B.post1 or any evidence is missing; it records N and its source', () => {
