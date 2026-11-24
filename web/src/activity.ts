@@ -21,7 +21,7 @@ export function createActivityTarget<T>(options: {
   settled?(): void
 }) {
   const random = options.random ?? Math.random
-  let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0
+  let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let retry = false, due = 0, stopped = false
   let failure: Exclude<Result<T>, { ok: true }> | undefined
@@ -33,6 +33,11 @@ export function createActivityTarget<T>(options: {
     due = Date.now() + ms
     const own = generation
     timer = setTimeout(() => { timer = undefined; if (closed || own !== generation) return; retry = false; void run() }, ms)
+  }
+  function scheduleRetry(retryAfterMs = 0) {
+    retry = true
+    const cap = Math.min(30_000, 1000 * 2 ** Math.min(attempt++, 5))
+    schedule(Math.max(retryAfterMs, cap / 2 + random() * cap / 2))
   }
   async function run() {
     if (closed || !dirty) return
@@ -57,18 +62,20 @@ export function createActivityTarget<T>(options: {
     if (cancelled) { if (dirty) schedule(0); return }
     try { if (result.ok) {
       if (own !== generation) { if (dirty && !retry) schedule(200); return }
-      if (options.covers?.(result.data) === false) { schedule(200); return }
+      if (options.covers?.(result.data) === false) {
+        if (++belowFloor >= 3) scheduleRetry()
+        else schedule(200)
+        return
+      }
       dirty = queued
-      failure = undefined; stopped = false; attempt = 0; options.accept(result.data)
+      failure = undefined; stopped = false; attempt = 0; belowFloor = 0; options.accept(result.data)
       if (dirty) schedule(200)
     } else {
-      if (own === generation) { failure = result; options.error?.(result) }
+      if (own === generation) { belowFloor = 0; failure = result; options.error?.(result) }
       if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; stopped = true; return }
       if (options.manualRetry) { dirty = false; queued = false; return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
-        retry = true
-        const cap = Math.min(30_000, 1000 * 2 ** Math.min(attempt++, 5))
-        schedule(Math.max(result.retryAfterMs ?? 0, cap / 2 + random() * cap / 2))
+        scheduleRetry(result.retryAfterMs ?? 0)
       } else if (own !== generation) { if (dirty) schedule(200) }
       else { dirty = false; queued = false; stopped = true }
     } } finally { options.settled?.() }
@@ -92,12 +99,12 @@ export function createActivityTarget<T>(options: {
     invalidate,
     fence,
     // An in-flight snapshot can cover a newer notice if it passes covers().
-    demandCoverage() { if (!inFlight) invalidate() },
+    demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
     ensure() { if (!closed && !stopped && !dirty && !inFlight && timer === undefined && !retry) { dirty = true; return run() } },
     refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
-    retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; dirty = true; return run() },
-    suspend() { generation++; dirty = false; queued = false; retry = false; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
+    retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
+    suspend() { generation++; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
     close() { closed = true; generation++; clearTimeout(timer); clearTimeout(deadline); completion?.(); controller?.abort(); timer = undefined },
   }
 }
