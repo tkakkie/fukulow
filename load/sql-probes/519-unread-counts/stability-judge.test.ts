@@ -21,7 +21,10 @@ const jr = (r: RunInput, thermalSampleSeconds: unknown = 5) => judgeRun(r, { id:
 // every 5 s on 8 CPUs (server = even, client = odd); freq(block) gives the server and client kHz, and
 // cpu(block, cpu, tick) may override one CPU's kHz and its busy fraction (default 0.9) in a tick.
 type CpuTick = { khz?: number | null; busy?: number };
-function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number]; periodMs?: number; cpu?: (block: number, cpu: number, ms: number) => CpuTick } = {}): RunInput {
+// ncpu replaces the 8 CPUs (server = even, client = odd, in the metadata too).
+function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number]; periodMs?: number; cpu?: (block: number, cpu: number, ms: number) => CpuTick; ncpu?: number } = {}): RunInput {
+  const all = opts.ncpu === undefined ? cpus : Array.from({ length: opts.ncpu }, (_, i) => i);
+  const sets = opts.ncpu === undefined ? cpuSets : { server: all.filter(c => c % 2 === 0), client: all.filter(c => c % 2 === 1) };
   const freq = opts.freq ?? (() => [2_000_000, 2_000_000]);
   const sends = arms.map((arm, i) => {
     const endMs = t0 + (i + 1) * 200_000;
@@ -29,17 +32,17 @@ function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; w
       measuredWindow: { startMs: endMs - 121_200, endMs: endMs + 300, monoMs: 121_500 }, pgbenchWindow: { startMs: endMs - 120_000, endMs }, host: idle(), hostAfter: idle() };
   });
   const samples: SampleLine[] = [];
-  const jiffies = cpus.map(() => [0, 0]);
+  const jiffies = all.map(() => [0, 0]);
   for (let ms = 0; ms <= 1_300_000; ms += opts.periodMs ?? 5000) {
     const block = Math.min(6, Math.max(1, Math.ceil(ms / 200_000)));
     const [server, client] = freq(block);
-    const ticks = cpus.map(cpu => ({ khz: cpu % 2 === 0 ? server : client, busy: 0.9, ...opts.cpu?.(block, cpu, ms) }));
+    const ticks = all.map(cpu => ({ khz: cpu % 2 === 0 ? server : client, busy: 0.9, ...opts.cpu?.(block, cpu, ms) }));
     ticks.forEach((c, cpu) => { const j = Math.round(500 * c.busy); jiffies[cpu][0] += j; jiffies[cpu][1] += 500 - j; });
     samples.push({ at: new Date(t0 + ms).toISOString(), monoMs: ms, avgFreqKHz: ticks.map(c => c.khz), procStat: jiffies.map(([b, i]) => [b, 0, 0, i, 0, 0, 0, 0]),
       temperaturesC: { 'k10temp/Tctl': 70 }, fansRpm: {}, launchSession: sid });
   }
   return { name, out: '/runs/' + name, complete: true, statusSession: sid, sends,
-    metadata: { mode: 'diagnostic', sendsOnly: true, launchSession: sid, cpuSets, sends: { measuredSeconds: 120 } },
+    metadata: { mode: 'diagnostic', sendsOnly: true, launchSession: sid, cpuSets: sets, sends: { measuredSeconds: 120 } },
     hostBefore: { ...host, launchSession: sid }, cooldown: { ok: true, maxTctlC: 50, maxWaitSeconds: 1200, readings: [{ elapsedMs: 30_000, tctlC: 49 }], launchSession: sid },
     launchCheck: { ok: true, tctlC: 48, record: host, launchSession: sid }, clockEvents: { ok: true, events: [], launchSession: sid }, samples, ...over };
 }
@@ -158,7 +161,8 @@ test('F6 (round-1 blocker 1): malformed frequencies and counters are unreadable,
     assert.deepEqual(at30(x => { x.procStat![1][4] = bad; }), ['block 1: 2 failed thermal samples', 'block 1: client set: unreadable /proc/stat on CPU 1'], String(bad));
   }
   assert.deepEqual(at30(x => { x.procStat![1] = x.procStat![1].slice(0, 7); }), ['block 1: 2 failed thermal samples', 'block 1: client set: unreadable /proc/stat on CPU 1']);
-  // Guest counters (beyond the 8 summed) going backwards, or a line whose length changed, fail closed.
+  // Guest counters (beyond the 8 summed) going backwards fail closed. A line whose width changed is
+  // compared on the counters both lines have (round 2: a width change alone is not missing data).
   const guest = (f: (lines: Line[]) => void) => {
     const r = run('s1');
     const lines = r.samples as unknown as Line[];
@@ -168,7 +172,10 @@ test('F6 (round-1 blocker 1): malformed frequencies and counters are unreadable,
   };
   assert.deepEqual(guest(() => {}), []);
   assert.deepEqual(guest(l => { l[30].procStat![3][8] = 0; }), ['block 1: 1 failed thermal samples', 'block 1: client set: /proc/stat counters of CPU 3 went backwards or did not advance']);
-  assert.deepEqual(guest(l => { l[30].procStat![3] = l[30].procStat![3].slice(0, 8); }), ['block 1: 2 failed thermal samples', 'block 1: client set: /proc/stat counters of CPU 3 went backwards or did not advance']);
+  assert.deepEqual(guest(l => { l[30].procStat![3] = l[30].procStat![3].slice(0, 8); }), []);
+  assert.deepEqual(guest(l => { l[30].procStat![3] = l[30].procStat![3].slice(0, 8); l[31].procStat![3][8] = 0; }), []); // 8 -> 10 columns again
+  assert.deepEqual(guest(l => { l[30].procStat![3] = [...l[30].procStat![3].slice(0, 8), 10 * 30]; l[31].procStat![3][8] = 0; }),
+    ['block 1: 1 failed thermal samples', 'block 1: client set: /proc/stat counters of CPU 3 went backwards or did not advance']); // guest on both, backwards
 });
 
 test('F4-F6 (round-1 blocker 2): an empty or malformed CPU set is INVALID, never a pass', () => {
@@ -218,6 +225,52 @@ test('F1, F3, F4 boundaries are wired to the approved values: busy 0.5, half the
   const odd = (qualify: number[]) => { const r = run('s1', {}, { cpu: (_, cpu) => (cpu % 2 === 0 && !qualify.includes(cpu) ? { busy: 0.1 } : {}) }); r.metadata.cpuSets = { server: [0, 2, 4], client: [1, 3, 5, 7] }; return jr(r).invalid; };
   assert.deepEqual(odd([0]), [1, 2, 3, 4, 5, 6].map(b => `block ${b}: too few active CPUs to judge frequency, server set 1 of 3 qualify`));
   assert.deepEqual(odd([0, 2]), []);
+});
+
+test('round 2: boundaries just inside the approved values are caught (busy 0.498, shares 0.49, odd F5 minimum, unrounded medians)', () => {
+  // F1: busy 0.498 (249 of 500 jiffies) is idle, like 0.49.
+  assert.deepEqual(jr(run('s1', {}, { cpu: (_, cpu) => (cpu === 2 || cpu === 4 || cpu === 6 ? { busy: 0.498 } : {}) })).invalid,
+    [1, 2, 3, 4, 5, 6].map(b => `block ${b}: too few active CPUs to judge frequency, server set 1 of 4 qualify`));
+  // F3: 25 of 51 ticks (0.4902) does not qualify. Block 2's window widened to 150-400 s (51 ticks);
+  // server CPUs 4 and 6 idle, CPU 2 active in 25 (or 26) of those ticks.
+  const ticks = (n: number) => {
+    const r = run('s1', {}, { cpu: (_, cpu, ms) => (cpu === 4 || cpu === 6 ? { busy: 0.1 } : cpu === 2 && ms >= 150_000 && ms <= 400_000 ? { busy: ms < 150_000 + n * 5000 ? 0.9 : 0.1 } : {}) });
+    r.sends[1].pgbenchWindow = { startMs: t0 + 150_000, endMs: t0 + 400_000 };
+    r.sends[1].measuredWindow = { startMs: t0 + 149_000, endMs: t0 + 401_000, monoMs: 252_000 };
+    const j = jr(r);
+    assert.equal(j.blocks[1].thermal.ticks, 51);
+    return j.invalid.filter(x => /^block 2: too few/.test(x));
+  };
+  assert.deepEqual(ticks(25), ['block 2: too few active CPUs to judge frequency, server set 1 of 4 qualify']);
+  assert.deepEqual(ticks(26), []);
+  // F4: 25 of 51 server CPUs (0.4902) qualifying is too few; 26 is enough.
+  const wide = (n: number) => jr(run('s1', {}, { ncpu: 102, cpu: (_, cpu) => (cpu % 2 === 0 && cpu >= 2 * n ? { busy: 0.1 } : {}) })).invalid;
+  assert.deepEqual(wide(25), [1, 2, 3, 4, 5, 6].map(b => `block ${b}: too few active CPUs to judge frequency, server set 25 of 51 qualify`));
+  assert.deepEqual(wide(26), []);
+  // F5's common minimum, the same share: 26 qualify in each block but only 25 in both.
+  const shift = jr(run('s1', {}, { ncpu: 102, cpu: (b, cpu) => {
+    if (cpu % 2 === 1) return {};
+    const k = cpu / 2;
+    return (b === 4 ? k >= 1 && k <= 26 : k <= 25) ? {} : { busy: 0.1 };
+  } })).invalid;
+  assert.deepEqual(shift, ['block 4: server set: 25 of 51 CPUs qualify in both block 1 and this block, too few to compare']);
+  // F5's common minimum on an odd set: 2 of 3 qualify in each block, 1 in both: INVALID (1.5 rounded up).
+  const odd = run('s1', {}, { cpu: (b, cpu) => (cpu % 2 === 1 ? {} : (b === 4 ? [2, 4] : [0, 2]).includes(cpu) ? {} : { busy: 0.1 }) });
+  odd.metadata.cpuSets = { server: [0, 2, 4], client: [1, 3, 5, 7] };
+  assert.deepEqual(jr(odd).invalid, ['block 4: server set: 1 of 3 CPUs qualify in both block 1 and this block, too few to compare']);
+  // A per-CPU median of 1,899,999.5 kHz against 2,000,000 kHz is a drop over 5 %: not rounded to whole kHz.
+  // Block 2's 25 ticks: one idle, 12 active at 1,899,999 and 12 at 1,900,000 on every server CPU.
+  let k = 0;
+  const half = run('s1', {}, { cpu: (b, cpu, ms) => {
+    if (b !== 2 || cpu % 2 === 1 || ms < 280_000 || ms > 400_000) return {};
+    if (cpu === 0) k++;
+    const i = (ms - 280_000) / 5000;
+    return i === 0 ? { busy: 0.1, khz: 623_377 } : { khz: i % 2 ? 1_899_999 : 1_900_000 };
+  } });
+  assert.equal(k, 25);
+  const j = jr(half);
+  assert.deepEqual(j.blocks[1].thermal.server.cpus[0].mid, [1_899_999, 1_900_000]);
+  assert.deepEqual(j.invalid, ['block 2: throttled, server median per-CPU ratio 0.9499 < 0.95 of block 1 (4 CPUs)']);
 });
 
 const setFreq = (r: RunInput, from: number, to: number, khz: number) => {

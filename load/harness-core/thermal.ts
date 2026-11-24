@@ -38,12 +38,13 @@ export function parseProcStat(text: string): ProcStat {
 }
 
 // A CPU's busy and total jiffies between two ticks, exactly: total = the first 8 counters' delta (guest
-// time is already in user and nice), busy = total - (idle + iowait delta). null (activity unknown,
-// never "idle") when either side is unreadable, the two lines differ in length, any counter read went
-// backwards (guest included), or the total did not advance.
+// time is already in user and nice), busy = total - (idle + iowait delta). The counters present on both
+// lines are compared (always the first 8; a line may gain or lose trailing columns, which alone is not
+// a failure). null (activity unknown, never "idle") when either side is unreadable, any compared counter
+// went backwards (guest included), or the total did not advance.
 export function cpuDelta(prev: unknown, cur: unknown): { busy: bigint; total: bigint } | null {
-  if (!validCounters(prev) || !validCounters(cur) || prev.length !== cur.length) return null;
-  const d = cur.map((x, i) => BigInt(x) - BigInt(prev[i]));
+  if (!validCounters(prev) || !validCounters(cur)) return null;
+  const d = cur.slice(0, Math.min(prev.length, cur.length)).map((x, i) => BigInt(x) - BigInt(prev[i]));
   if (d.some(x => x < 0n)) return null;
   const total = d.slice(0, 8).reduce((a, b) => a + b, 0n);
   return total > 0n ? { busy: total - d[3] - d[4], total } : null;

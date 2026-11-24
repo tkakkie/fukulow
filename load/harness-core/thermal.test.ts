@@ -174,3 +174,15 @@ test('F7: the sampler reads cpuinfo_avg_freq only, as a positive integer; scalin
   assert.deepEqual(r, { avgFreqKHz: [4_900_000, null, null, null], procStat: [[1, 2, 3, 4, 5, 6, 7, 8, 0, 0], [1, 2, 3, 4, 5, 6, 7, 8, 0, 0]] });
   assert.equal(cpuReadings(fsys({}), 1).procStat, null);
 });
+
+test('round 2: a /proc/stat line that gains or loses trailing columns is compared on the counters both have', () => {
+  // 8 then 10 counters, all non-decreasing, the total advancing: not a failure, same busy as on 8 columns.
+  assert.deepEqual(cpuDelta(counters(0, 0), [...counters(300, 100), 5, 0]), { busy: 300n, total: 400n });
+  assert.deepEqual(cpuDelta([...counters(0, 0), 5, 0], counters(300, 100)), { busy: 300n, total: 400n });
+  assert.equal(cpuDelta([...counters(0, 0), 5], [...counters(300, 100), 4, 9]), null); // guest on both lines went backwards
+  const l = series([0, 5, 10].map(s => ({ s, f: [5000, 3000, 5000, 3000] })));
+  l[1].procStat![0] = [...l[1].procStat![0]!, 0, 0];
+  l[2].procStat![0] = [...l[2].procStat![0]!, 7, 0];
+  const b = B(l, 3, 12);
+  assert.deepEqual([b.samples, b.failed, b.server.problem, b.server.cpus[0].activeTicks], [2, 0, null, 2]);
+});
