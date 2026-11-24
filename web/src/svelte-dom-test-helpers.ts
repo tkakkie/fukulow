@@ -644,7 +644,6 @@ export class MiniElement extends MiniNode {
       event.key === 'Enter' &&
       !event.isComposing &&
       event.keyCode !== 229 &&
-      !event.shiftKey &&
       !event.altKey &&
       !event.ctrlKey &&
       !event.metaKey
@@ -654,7 +653,12 @@ export class MiniElement extends MiniNode {
         (btn) => (btn.getAttribute('type') ?? 'submit') === 'submit',
       )
       if (form && defaultSubmit && !defaultSubmit.disabled) {
-        form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+        const clickEvt = new MiniDomEvent('click', { bubbles: true, cancelable: true })
+        defaultSubmit.dispatchEvent(clickEvt)
+        const submitMode = this.ownerDocument?.options.clickSubmit ?? 'default'
+        if (submitMode !== 'never' && (submitMode === 'always' || !clickEvt.defaultPrevented)) {
+          form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+        }
       }
     }
     return notPrevented

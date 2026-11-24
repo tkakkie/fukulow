@@ -120,7 +120,7 @@
 <Dialog
   open={mode !== null}
   {busy}
-  form
+  form={mode?.kind === 'create' || mode?.kind === 'rename'}
   {title}
   {description}
   {confirmLabel}

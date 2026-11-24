@@ -535,8 +535,13 @@ test('section dialog native form submit: valid Enter confirms, invalid shows err
     await expect(dialog.getByRole('alert')).toHaveText('セクション名の前後に空白は入れられません。空白を取り除いて入力してください。')
     expect(postCount).toBe(0)
 
-    // 2. IME composition Enter does not confirm.
-    await nameInput.fill('')
+    // 2. IME composition Enter does not confirm even with a valid name;
+    //    the same Enter submits once composition ends (positive control).
+    //    Chromium CDP exercises real browser composition; untrusted synthetic DOM events cannot
+    //    trigger native implicit submission, so non-Chromium browsers are not simulated here.
+    //    Manual Japanese IME verification in Safari is performed separately.
+    const validName = `フォーム確認-${suffix}`
+    await nameInput.fill(validName)
     await nameInput.focus()
     if (browserName === 'chromium') {
       const cdp = await page.context().newCDPSession(page)
@@ -546,20 +551,9 @@ test('section dialog native form submit: valid Enter confirms, invalid shows err
           selectionStart: 4,
           selectionEnd: 4,
         })
-        await cdp.send('Input.dispatchKeyEvent', {
-          type: 'rawKeyDown',
-          key: 'Process',
-          code: 'Enter',
-          windowsVirtualKeyCode: 229,
-          nativeVirtualKeyCode: 229,
-        })
-        await cdp.send('Input.dispatchKeyEvent', {
-          type: 'keyUp',
-          key: 'Enter',
-          code: 'Enter',
-          windowsVirtualKeyCode: 13,
-          nativeVirtualKeyCode: 13,
-        })
+        await page.keyboard.press('Enter')
+        await expect(dialog).toBeVisible()
+        expect(postCount).toBe(0)
         await cdp.send('Input.imeSetComposition', {
           text: '',
           selectionStart: 0,
@@ -568,20 +562,13 @@ test('section dialog native form submit: valid Enter confirms, invalid shows err
       } finally {
         await cdp.detach()
       }
-    } else {
-      await nameInput.evaluate((el) => {
-        el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }))
-        el.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: 'にほんご' }))
-        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229, bubbles: true, cancelable: true }))
-        el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: 'にほんご' }))
-      })
     }
     await expect(dialog).toBeVisible()
+    await expect(nameInput).toHaveValue(validName)
     expect(postCount).toBe(0)
 
-    // 3. Valid name + Enter confirms via native form submit; Enter while busy does nothing.
-    const validName = `フォーム確認-${suffix}`
-    await nameInput.fill(validName)
+    // 3. Positive control: the same Enter confirms via native form submit once composition ends;
+    //    Enter while busy does nothing.
     await page.keyboard.press('Enter')
     await firstPostArrived
     expect(postCount).toBe(1)
@@ -601,6 +588,96 @@ test('section dialog native form submit: valid Enter confirms, invalid shows err
   } finally {
     releaseFirstPost()
     await page.unroute(`**${layoutPath}`).catch(() => {})
+    await cleanupCreatedSections(page, orgId, createdIds)
+  }
+})
+
+test('section dialogs: modified Enter does not create or rename, and Enter on a move radio does not move (#838)', async ({ page }) => {
+  const orgId = await signInOwner(page.request)
+  const createdIds = new Set<string>()
+  const suffix = crypto.randomUUID().slice(0, 8)
+  const ch = await createChannel(page.request, orgId, `sec-guard-${suffix}`)
+  const sectionsRoute = `**/api/v1/orgs/${orgId}/me/**`
+  let mutationCount = 0
+
+  await page.route(sectionsRoute, async (route) => {
+    const req = route.request()
+    if (req.method() !== 'GET') {
+      mutationCount++
+      if (req.method() === 'POST') {
+        const body = req.postDataJSON() as Partial<CreateSection> | null
+        if (body?.id) createdIds.add(body.id)
+      }
+    }
+    await route.continue().catch(() => {})
+  })
+
+  try {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto(`/o/${orgId}/c/${ch.id}`)
+    const leftCol = page.locator('#channel-content')
+    await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    const createBtn = leftCol.getByRole('button', { name: 'セクションを作成', exact: true })
+    await expect(createBtn).toBeEnabled()
+
+    // 1. Create dialog: Shift/Alt/Control/Meta+Enter must not submit; plain Enter submits.
+    await createBtn.click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    const nameInput = dialog.getByLabel('セクション名', { exact: true })
+    const initialName = `修飾前-${suffix}`
+    await nameInput.fill(initialName)
+    await nameInput.focus()
+
+    for (const combo of ['Shift+Enter', 'Alt+Enter', 'Control+Enter', 'Meta+Enter']) {
+      await page.keyboard.press(combo)
+      await expect(dialog).toBeVisible()
+      expect(mutationCount).toBe(0)
+    }
+
+    await page.keyboard.press('Enter')
+    await expect(dialog).toHaveCount(0)
+    const sec = leftCol.locator(`section[aria-label="${initialName}"]`)
+    await expect(sec).toBeVisible()
+    expect(mutationCount).toBe(1)
+
+    // 2. Rename dialog: Shift/Alt/Control/Meta+Enter must not submit; plain Enter submits.
+    await sec.getByRole('button', { name: '名前を変更', exact: true }).click()
+    await expect(dialog).toBeVisible()
+    const renamedName = `修飾後-${suffix}`
+    await nameInput.fill(renamedName)
+    await nameInput.focus()
+
+    for (const combo of ['Shift+Enter', 'Alt+Enter', 'Control+Enter', 'Meta+Enter']) {
+      await page.keyboard.press(combo)
+      await expect(dialog).toBeVisible()
+      expect(mutationCount).toBe(1)
+    }
+
+    await page.keyboard.press('Enter')
+    await expect(dialog).toHaveCount(0)
+    const renamedSec = leftCol.locator(`section[aria-label="${renamedName}"]`)
+    await expect(renamedSec).toBeVisible()
+    expect(mutationCount).toBe(2)
+
+    // 3. Move dialog: Enter on a focused radio must not move; explicit click on 移動する moves.
+    await leftCol.locator(`[data-channel-id="${ch.id}"]`).getByRole('button', { name: 'チャンネルを移動', exact: true }).click()
+    await expect(dialog).toBeVisible()
+    await expect(dialog.locator('form')).toHaveCount(0)
+    const targetRadio = dialog.getByLabel(renamedName, { exact: true })
+    await targetRadio.check()
+    await targetRadio.focus()
+    await expect(targetRadio).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(dialog).toBeVisible()
+    expect(mutationCount).toBe(2)
+
+    await dialog.getByRole('button', { name: '移動する', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(renamedSec.locator(`[data-channel-id="${ch.id}"]`)).toBeVisible()
+    expect(mutationCount).toBe(3)
+  } finally {
+    await page.unroute(sectionsRoute).catch(() => {})
     await cleanupCreatedSections(page, orgId, createdIds)
   }
 })

@@ -85,6 +85,19 @@
         ? document.activeElement
         : null
       stepDialogTab(getFocusableControls(), active, e.shiftKey, dialogEl)
+      return
+    }
+    if (form && e.key === 'Enter') {
+      if (isImeComposing(e)) {
+        e.preventDefault()
+        return
+      }
+      if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) {
+        const tag = e.target instanceof HTMLElement ? e.target.tagName : ''
+        if (tag !== 'TEXTAREA') {
+          e.preventDefault()
+        }
+      }
     }
   }
 
