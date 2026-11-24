@@ -341,9 +341,14 @@ impl Step<'_> {
         let mut merged = coalesce(ranges);
         if (source == Source::Stream || source == Source::Events)
             && let Some(mut cursor) = c.cursor
-            && positions.contains(&(cursor + 1))
+            && cursor
+                .checked_add(1)
+                .is_some_and(|next| positions.contains(&next))
         {
-            while merged.first().is_some_and(|r| r.start <= cursor + 1) {
+            while merged
+                .first()
+                .is_some_and(|r| r.start <= cursor.saturating_add(1))
+            {
                 cursor = cursor.max(merged.remove(0).end);
             }
             c.cursor = Some(cursor);
@@ -427,13 +432,13 @@ impl Step<'_> {
     }
 }
 
-/// Sorts by start and merges ranges that overlap or touch (`start <= last.end + 1`).
+/// Sorts by start and merges ranges that overlap or touch.
 fn coalesce(mut ranges: Vec<Range>) -> Vec<Range> {
     ranges.sort_by_key(|r| r.start);
     let mut merged: Vec<Range> = Vec::new();
     for range in ranges {
         if let Some(last) = merged.last_mut()
-            && range.start <= last.end + 1
+            && range.start <= last.end.saturating_add(1)
         {
             last.end = last.end.max(range.end);
         } else {
@@ -472,6 +477,34 @@ mod tests {
             coalesce(vec![r(i64::MAX, i64::MAX), r(i64::MAX - 2, i64::MAX - 2)]),
             vec![r(i64::MAX - 2, i64::MAX - 2), r(i64::MAX, i64::MAX)]
         );
+    }
+
+    #[test]
+    fn coalesce_merges_overlap_after_maximum_end() {
+        assert_eq!(
+            coalesce(vec![r(i64::MAX - 1, i64::MAX), r(i64::MAX, i64::MAX)]),
+            vec![r(i64::MAX - 1, i64::MAX)]
+        );
+    }
+
+    #[test]
+    fn merge_event_advances_to_maximum_cursor_and_handles_duplicates() {
+        for source in [Source::Stream, Source::Events] {
+            let channel = Uuid::from_u128(1);
+            let mut core = Core::new(Uuid::from_u128(2));
+            let mut step = Step::new(&mut core);
+            step.channel(channel).cursor = Some(i64::MAX - 2);
+
+            step.merge_event(channel, Vec::new(), source, Some(i64::MAX));
+            assert_eq!(step.channel(channel).cursor, Some(i64::MAX - 2));
+            step.merge_event(channel, Vec::new(), source, Some(i64::MAX - 1));
+            assert_eq!(step.channel(channel).cursor, Some(i64::MAX));
+            assert!(step.channel(channel).advancing.is_empty());
+
+            step.merge_event(channel, Vec::new(), source, Some(i64::MAX));
+            assert_eq!(step.channel(channel).cursor, Some(i64::MAX));
+            assert!(step.channel(channel).advancing.is_empty());
+        }
     }
 
     #[test]

@@ -136,7 +136,7 @@ impl Step<'_> {
                     } else if let Some(first) = first {
                         c.retired_through = c
                             .retired_through
-                            .map(|through| through.min(first - 1))
+                            .map(|through| through.min(first.saturating_sub(1)))
                             .filter(|through| *through > 0);
                     }
                 }
@@ -298,5 +298,37 @@ impl Step<'_> {
                 self.reconcile(channel, true);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn latest_page_clears_retired_floor_at_minimum_creation_position() {
+        let channel = Uuid::from_u128(1);
+        let mut core = Core::new(Uuid::from_u128(2));
+        let mut step = Step::new(&mut core);
+        step.channel(channel).retired_through = Some(10);
+        step.history(channel, Page::Latest, None);
+        let request = step.channel(channel).latest.unwrap();
+        let page = serde_json::from_value(json!({
+            "history_generation": Uuid::nil(), "as_of_seq": 10, "has_more": true,
+            "messages": [{
+                "history_generation": Uuid::nil(), "channel_id": channel,
+                "id": Uuid::from_u128(3), "client_message_id": Uuid::from_u128(4),
+                "created_seq": i64::MIN, "version": i64::MIN, "deleted": false,
+                "sender": Uuid::from_u128(5), "body": "message",
+                "created_at": "2026-01-01T00:00:00Z", "topic_id": null,
+                "reply_to": null, "reply_root_id": null, "mentions": []
+            }]
+        }))
+        .unwrap();
+
+        step.history_response(request, Ok(HistoryPage::Messages(page)));
+
+        assert_eq!(step.channel(channel).retired_through, None);
     }
 }
