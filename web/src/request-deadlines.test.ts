@@ -15,6 +15,43 @@ describe('createRequestDeadlines', () => {
     vi.useRealTimers()
   })
 
+  it('returns an early response and clears the deadline timer', async () => {
+    const deadlines = createRequestDeadlines()
+    let finish!: (value: string) => void
+    const request = new Promise<string>(resolve => { finish = resolve })
+    const onTimeout = vi.fn(() => 'timeout')
+    const result = deadlines.wait(request, 'cancelled', { timeoutMs: 500, onTimeout })
+
+    expect(vi.getTimerCount()).toBe(1)
+    await vi.advanceTimersByTimeAsync(499)
+    finish('response')
+    await expect(result).resolves.toBe('response')
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(onTimeout).not.toHaveBeenCalled()
+  })
+
+  it('times out at the deadline, clears the timer and leaves the request observable', async () => {
+    const deadlines = createRequestDeadlines()
+    let finish!: (value: string) => void
+    const request = new Promise<string>(resolve => { finish = resolve })
+    const observe = vi.fn()
+    const settled = vi.fn()
+    const result = deadlines.wait(request.then(value => { observe(value); return value }), 'timeout', { timeoutMs: 500 })
+    void result.then(settled)
+
+    await vi.advanceTimersByTimeAsync(499)
+    expect(settled).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(result).resolves.toBe('timeout')
+    expect(vi.getTimerCount()).toBe(0)
+    expect(observe).not.toHaveBeenCalled()
+    finish('late response')
+    await expect(request).resolves.toBe('late response')
+    expect(observe).toHaveBeenCalledWith('late response')
+  })
+
   it('cancels by Channel while leaving other Channels pending, and cancel() cancels all', async () => {
     const deadlines = createRequestDeadlines()
     const acA = new AbortController()

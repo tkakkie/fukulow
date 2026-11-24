@@ -1,4 +1,5 @@
 import type { Result, ServerEvent } from './api'
+import { createRequestDeadlines } from './request-deadlines'
 
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
@@ -21,11 +22,11 @@ export function createActivityTarget<T>(options: {
   settled?(): void
 }) {
   const random = options.random ?? Math.random
+  const deadlines = createRequestDeadlines()
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let retry = false, due = 0, stopped = false
   let failure: Exclude<Result<T>, { ok: true }> | undefined
-  let deadline: ReturnType<typeof setTimeout> | undefined
   let completion: (() => void) | undefined
   let controller: AbortController | undefined
   function schedule(ms: number) {
@@ -51,11 +52,13 @@ export function createActivityTarget<T>(options: {
     let pending: Promise<Result<T>>
     try { pending = options.load(request.signal).catch((): Result<T> => ({ ok: false, kind: 'network' })) }
     catch { pending = Promise.resolve({ ok: false, kind: 'network' }) }
-    const result = await Promise.race([pending, new Promise<Result<T>>(resolve => {
-      completion = () => { cancelled = true; request.abort(); resolve({ ok: false, kind: 'network' }) }
-      deadline = setTimeout(() => { request.abort(); resolve({ ok: false, kind: 'network' }) }, options.timeoutMs ?? 10_000)
-    })])
-    clearTimeout(deadline); deadline = undefined; completion = undefined
+    const networkFailure: Result<T> = { ok: false, kind: 'network' }
+    completion = () => { cancelled = true; request.abort(); deadlines.cancel() }
+    const result = await deadlines.wait(pending, networkFailure, {
+      timeoutMs: options.timeoutMs ?? 10_000,
+      onTimeout: () => { request.abort(); return networkFailure },
+    })
+    completion = undefined
     if (controller === request) controller = undefined
     inFlight = false
     if (closed) return
@@ -105,7 +108,7 @@ export function createActivityTarget<T>(options: {
     refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
     suspend() { generation++; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
-    close() { closed = true; generation++; clearTimeout(timer); clearTimeout(deadline); completion?.(); controller?.abort(); timer = undefined },
+    close() { closed = true; generation++; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
   }
 }
 

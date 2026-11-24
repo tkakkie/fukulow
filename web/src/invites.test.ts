@@ -182,6 +182,30 @@ describe('Invite management', () => {
       c.close()
     } finally { vi.useRealTimers() }
   })
+
+  it('ends the Account Session on a 401 after an Invite page deadline', async () => {
+    vi.useFakeTimers()
+    let finish!: (result: Result<InvitePage>) => void
+    const request = new Promise<Result<InvitePage>>(resolve => { finish = resolve })
+    const ended = vi.fn()
+    const c = createInvites('org', ended, vi.fn(), { listInvites: () => request, revokeInvite: vi.fn() })
+    try {
+      const loading = c.load()
+      await vi.advanceTimersByTimeAsync(10_000)
+      await loading
+      const timedOut = c.get()
+      expect(timedOut).toMatchObject({
+        loading: false,
+        retryable: true,
+        error: '招待を取得できませんでした。通信状況を確認して再試行してください。',
+      })
+      expect(ended).not.toHaveBeenCalled()
+      finish({ ok: false, kind: 'http', status: 401 })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(ended).toHaveBeenCalledOnce()
+      expect(c.get()).toBe(timedOut)
+    } finally { c.close(); vi.useRealTimers() }
+  })
 })
 
 it('uses scoped no-store GET with an opaque cursor and bodyless DELETE accepting only 204', async () => {

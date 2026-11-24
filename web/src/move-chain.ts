@@ -1,5 +1,6 @@
 import type { MoveChainRequest, MoveChainResponse, Result } from './api'
 import type { Replies } from './replies'
+import { createRequestDeadlines } from './request-deadlines'
 import type { createSync } from './sync'
 
 export type MoveDestination = { topicId: string; topicName?: never } | { topicName: string; topicId?: never }
@@ -18,6 +19,7 @@ type MoveAttempt = (target: MoveTarget) => Promise<MoveResult>
 export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'get' | 'observeHistoryGeneration'>,
   replies: Pick<Replies, 'moveTarget'>, options: { api: MoveChainApi; newId?: () => string; requestTimeoutMs?: number }) {
   const newId = options.newId ?? (() => crypto.randomUUID())
+  const deadlines = createRequestDeadlines()
   const unresolved = new Map<string, { generation: string; attempts: Map<string, MoveAttempt> }>()
   return function moveChain(channel: string, anchor: string, destination: MoveDestination): Promise<MoveResult> {
     const target = replies.moveTarget(channel, anchor)
@@ -69,15 +71,14 @@ export function createMoveChain(sync: Pick<ReturnType<typeof createSync>, 'get' 
     }
 
     async function run(target: MoveTarget): Promise<MoveResult> {
-      let timer: ReturnType<typeof setTimeout> | undefined
       const operation = Promise.resolve().then(() => {
         if (!target.isCurrent()) return
         dispatched = true
         return options.api(channel, anchor, body)
       }).catch((): Result<MoveChainResponse> => ({ ok: false, kind: 'network' }))
-      const result = await Promise.race([operation, new Promise<Result<MoveChainResponse>>(resolve => {
-        timer = setTimeout(() => resolve({ ok: false, kind: 'network' }), options.requestTimeoutMs ?? 30_000)
-      })]).finally(() => clearTimeout(timer))
+      const result = await deadlines.wait(operation, { ok: false, kind: 'network' }, {
+        timeoutMs: options.requestTimeoutMs ?? 30_000,
+      })
       if (!result) return dispatched ? unknown(target) : { kind: 'superseded' }
       if (result.ok) {
         if (target.isCurrent()) sync.observeHistoryGeneration(result.data.history_generation)

@@ -1,5 +1,6 @@
 import type { Message, Result, TopicSummaryResponse, ReplyChainPage } from './api'
 import type { NavigationTarget } from './navigation-url'
+import { createRequestDeadlines } from './request-deadlines'
 
 type TargetState = { status: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'; name: string; targetId?: string; anchor?: Message }
 const idle: TargetState = { status: 'idle', name: '' }
@@ -16,17 +17,11 @@ export function createNavigationTargets(reads: Reads) {
   let key = ''
   let currentTarget: NavigationTarget | undefined
   let closed = false
-  const pending = new Set<() => void>()
+  const deadlines = createRequestDeadlines()
   const listeners = new Set<() => void>()
   const publish = () => listeners.forEach(listener => listener())
   function bounded<T>(read: Promise<Result<T>>): Promise<Result<T>> {
-    return new Promise(resolve => {
-      const finish = (result: Result<T>) => { clearTimeout(timer); pending.delete(cancel); resolve(result) }
-      const cancel = () => finish({ ok: false, kind: 'network' })
-      const timer = setTimeout(cancel, 10_000)
-      pending.add(cancel)
-      void read.then(finish)
-    })
+    return deadlines.wait(read, { ok: false, kind: 'network' }, { timeoutMs: 10_000 })
   }
   async function load(target: NavigationTarget, retry = false) {
     currentTarget = target
@@ -73,10 +68,10 @@ export function createNavigationTargets(reads: Reads) {
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     load,
     resetHistory() {
-      generation++; key = ''; pending.forEach(cancel => cancel())
+      generation++; key = ''; deadlines.cancel()
       state = { topic: idle, reply: idle }; publish()
       if (currentTarget) void load(currentTarget)
     },
-    close() { closed = true; generation++; pending.forEach(cancel => cancel()); listeners.clear() },
+    close() { closed = true; generation++; deadlines.cancel(); listeners.clear() },
   }
 }
