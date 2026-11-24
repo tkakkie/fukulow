@@ -3,13 +3,15 @@
 
 export type CpuSets = { server: number[]; client: number[] };
 
-export function parseCpuList(text: string): number[] {
+// Endpoints are bounded before expansion, so an oversized range cannot loop or allocate.
+export function parseCpuList(text: string, limit = 65_536): number[] {
   const out = new Set<number>();
   for (const part of text.split(',')) {
     const m = /^(\d+)(?:-(\d+))?$/.exec(part.trim());
     if (!m) throw new Error(`invalid CPU list: ${text}`);
     const [from, to] = [Number(m[1]), Number(m[2] ?? m[1])];
     if (to < from) throw new Error(`invalid CPU range: ${part}`);
+    if (to >= limit) throw new Error(`CPU ${to} does not exist on this host (${limit} CPUs)`);
     for (let c = from; c <= to; c++) out.add(c);
   }
   return [...out].sort((a, b) => a - b);
@@ -20,11 +22,9 @@ export function parseCpuSets(text: string, logicalCpus: number): CpuSets {
   const fields = Object.fromEntries(text.split(';').map(p => p.split('=').map(s => s.trim())));
   const keys = Object.keys(fields).sort().join(',');
   if (keys !== 'client,server') throw new Error(`--cpu-sets needs exactly server=... and client=..., got: ${text}`);
-  const sets = { server: parseCpuList(fields.server), client: parseCpuList(fields.client) };
+  const sets = { server: parseCpuList(fields.server, logicalCpus), client: parseCpuList(fields.client, logicalCpus) };
   const overlap = sets.server.filter(c => sets.client.includes(c));
   if (overlap.length > 0) throw new Error(`CPU sets overlap on ${overlap.join(',')}`);
-  const outside = [...sets.server, ...sets.client].filter(c => c >= logicalCpus);
-  if (outside.length > 0) throw new Error(`CPU ${outside.join(',')} does not exist on this host (${logicalCpus} CPUs)`);
   return sets;
 }
 

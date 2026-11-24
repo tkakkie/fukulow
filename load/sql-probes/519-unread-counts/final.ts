@@ -81,7 +81,8 @@ for (const arm of ['current', 'final'] as FinalArm[]) {
 }
 const migrations = readdirSync(join(work, 'server/migrations')).filter(f => f.endsWith('.sql')).sort();
 
-const psqlArgs = (db: string, user = 'postgres') => ['exec', '-i', container, 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', db];
+// psql (setup, WAL counters, checks) runs on the client set too, so only the server works on the server set.
+const psqlArgs = (db: string, user = 'postgres') => ['exec', '-i', container, ...pinned(cpuSets?.client, ['psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', db])];
 const psql = (db: string, script: string, user = 'postgres') => run('docker', psqlArgs(db, user), script);
 const file = (db: string, path: string) => psql(db, `\\i /work/${path}\n`);
 const checks: Record<string, unknown>[] = [];
@@ -268,8 +269,10 @@ try {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
   }
+  // Max frequencies per set make a swapped or mixed split visible in the record (Zen 5 vs Zen 5c).
+  const maxKHz = (set: number[]) => [...new Set(set.map(c => Object.entries(recordBefore.maxFrequencyKHz ?? {}).find(([, cs]) => cs.includes(c))?.[0] ?? 'unknown'))];
   const cpuPins = cpuSets === undefined ? null : {
-    server: cpuSets.server, client: cpuSets.client,
+    server: cpuSets.server, client: cpuSets.client, serverMaxKHz: maxKHz(cpuSets.server), clientMaxKHz: maxKHz(cpuSets.client),
     postmasterAllowed: allowedCpus(run('docker', ['exec', container, 'cat', '/proc/1/status'])),
     clientAllowed: allowedCpus(run('docker', ['exec', container, ...pinned(cpuSets.client, ['cat', '/proc/self/status'])])),
   };
@@ -356,7 +359,7 @@ try {
 } finally {
   spawnSync('docker', ['rm', '-f', container]);
   rmSync(work, { recursive: true, force: true });
-  save('host-record-after.json', hostRecord(out));
+  try { save('host-record-after.json', hostRecord(out)); } catch (e) { console.error('host record after the run:', e); }
   save('checks.json', checks);
   save('status.json', { complete: !failed, finished: new Date().toISOString() });
 }
