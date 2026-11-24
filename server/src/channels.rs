@@ -213,7 +213,7 @@ fn name_write_error(error: sqlx::Error) -> ApiError {
         error.is_unique_violation()
             && error.constraint() == Some("channels_organization_name_unique")
     }) {
-        ApiError(StatusCode::CONFLICT, "channel name already exists", None)
+        ApiError::channel_name_already_exists()
     } else {
         error.into()
     }

@@ -33,6 +33,40 @@ async fn body(response: Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 256 * 1024).await.unwrap()).unwrap()
 }
 
+#[tokio::test]
+async fn dm_error_mapping_ignores_api_error_text() {
+    for (mut error, status, wire_text) in [
+        (
+            ApiError::channel_not_found(),
+            StatusCode::NOT_FOUND,
+            "channel not found",
+        ),
+        (
+            ApiError::organization_unavailable(),
+            StatusCode::NOT_FOUND,
+            "organization_unavailable",
+        ),
+        (
+            ApiError::dm_peer_deactivated(),
+            StatusCode::CONFLICT,
+            "dm_peer_deactivated",
+        ),
+        (
+            ApiError::dm_peer_access_lapsed(),
+            StatusCode::CONFLICT,
+            "dm_peer_access_lapsed",
+        ),
+    ] {
+        error.1 = "changed constructor text";
+        let response = dm_error(error).into_response();
+        assert_eq!(response.status(), status);
+        assert_eq!(body(response).await, json!({"error": wire_text}));
+    }
+
+    let untyped = ApiError(StatusCode::NOT_FOUND, "channel not found", None);
+    assert!(matches!(dm_error(untyped), MessageError::Database(_)));
+}
+
 async fn request(app: &Router, method: &str, path: &str, token: &str, input: Value) -> Response {
     let path = scoped_path(path, token);
     app.clone()

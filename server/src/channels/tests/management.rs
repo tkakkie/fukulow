@@ -207,6 +207,7 @@ async fn management_denial_matrix_and_idempotent_current_revision_grants(pool: P
         )
         .await;
         assert_eq!(list.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(list).await, json!({"error":"channel not found"}));
         grant(&pool, org, channel, id).await;
         if role == "member" || role == "guest" {
             for add in [true, false] {
