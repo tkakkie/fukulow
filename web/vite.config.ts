@@ -53,7 +53,7 @@ export default defineConfig(({ mode }) => {
       // Timing-ratio tests run after every other file, one file at a time: other test files running
       // in parallel inflate their ratios (#753).
       projects: [
-        { extends: true, test: { name: 'unit', exclude: ['e2e/**', 'e2e-compose/**', 'node_modules/**', PERF_TESTS], sequence: { groupOrder: 0 } } },
+        { extends: true, test: { name: 'unit', exclude: ['e2e/**', 'e2e-compose/**', 'e2e-component/**', 'node_modules/**', PERF_TESTS], sequence: { groupOrder: 0 } } },
         { extends: true, test: { name: 'perf', include: [PERF_TESTS], fileParallelism: false, sequence: { groupOrder: 1 } } },
       ],
     },
