@@ -197,8 +197,189 @@ export type FocusDocument = {
 
 export type TopicSummaryFocusStepResult = 'focused_summary' | 'focused_composer' | 'waiting' | 'cancelled'
 
+export type PendingFocusCandidate =
+  | FocusableTarget
+  | null
+  | undefined
+  | (() => FocusableTarget | null | undefined)
+
+export type PendingFocusOptions = {
+  getDoc?: () => FocusDocument | null
+  cancelOnPointerDown?: boolean
+  requireVisible?: boolean
+  onUserCancel?: () => void
+}
+
 function defaultFocusDocument(): FocusDocument | null {
   return typeof document !== 'undefined' ? (document as unknown as FocusDocument) : null
+}
+
+/**
+ * Returns true when `active` is absent, reset to `body`/`documentElement`, or disconnected from the DOM.
+ * Used to distinguish DOM teardown/reset from an intentional user focus move (`docs/ui.md` §2, §5).
+ */
+export function isResetOrDisconnectedActive(
+  active: unknown,
+  doc: FocusDocument | null = defaultFocusDocument(),
+): boolean {
+  if (!active) return true
+  if (doc && (active === doc.body || active === doc.documentElement)) return true
+  if (
+    typeof active === 'object' &&
+    'isConnected' in active &&
+    (active as { isConnected?: boolean }).isConnected === false
+  ) {
+    return true
+  }
+  return false
+}
+
+/**
+ * Tracks a deferred focus restoration across async renders/writes (`docs/ui.md` §2, §5):
+ * cancels immediately if the user moves focus elsewhere (or clicks elsewhere when `cancelOnPointerDown`
+ * is enabled), ignores focus resets to `body`/`documentElement` or disconnected nodes, and applies
+ * focus to the first eligible candidate or fallback while guarding against self-cancellation.
+ */
+export function createPendingFocus(options: PendingFocusOptions = {}) {
+  const getDoc = options.getDoc ?? defaultFocusDocument
+  const cancelOnPointerDown = options.cancelOnPointerDown ?? false
+  const requireVisible = options.requireVisible ?? false
+
+  let activeToken: number | null = null
+  let nextToken = 1
+  let allowedActive = new Set<unknown>()
+  let applyingFocus = false
+  let attachedDoc: FocusDocument | null = null
+  let destroyed = false
+
+  const detachListeners = () => {
+    if (attachedDoc?.removeEventListener) {
+      attachedDoc.removeEventListener('focusin', onFocusIn, true)
+      if (cancelOnPointerDown) {
+        attachedDoc.removeEventListener('pointerdown', onPointerDown, true)
+      }
+    }
+    attachedDoc = null
+  }
+
+  const clear = () => {
+    detachListeners()
+    activeToken = null
+    allowedActive.clear()
+  }
+
+  const onFocusIn = (event: { target?: unknown }) => {
+    if (activeToken === null || applyingFocus) return
+    const doc = getDoc()
+    const target = event.target
+    if (isResetOrDisconnectedActive(target, doc) || allowedActive.has(target)) return
+    clear()
+    options.onUserCancel?.()
+  }
+
+  const onPointerDown = () => {
+    if (activeToken === null) return
+    clear()
+    options.onUserCancel?.()
+  }
+
+  const focusOne = (target: FocusableTarget | null | undefined): boolean => {
+    if (!target) return false
+    applyingFocus = true
+    try {
+      if (requireVisible && 'getClientRects' in target) {
+        return focusIfVisible(target as VisibleFocusableTarget)
+      }
+      return focusTarget(target)
+    } finally {
+      applyingFocus = false
+    }
+  }
+
+  const isActive = (token?: number): boolean => {
+    if (destroyed || activeToken === null) return false
+    return token === undefined ? true : activeToken === token
+  }
+
+  const hasUserMovedFocus = (token?: number): boolean => {
+    if (!isActive(token)) return true
+    const doc = getDoc()
+    if (!doc) return false
+    const active = doc.activeElement
+    if (isResetOrDisconnectedActive(active, doc)) return false
+    return !allowedActive.has(active)
+  }
+
+  return {
+    begin(extraAllowed?: readonly unknown[]): number {
+      clear()
+      if (destroyed) return 0
+      const doc = getDoc()
+      const token = nextToken++
+      activeToken = token
+      allowedActive = new Set<unknown>([doc?.activeElement ?? null])
+      if (extraAllowed) {
+        for (const el of extraAllowed) {
+          allowedActive.add(el)
+        }
+      }
+      if (doc?.addEventListener) {
+        doc.addEventListener('focusin', onFocusIn, true)
+        if (cancelOnPointerDown) {
+          doc.addEventListener('pointerdown', onPointerDown, true)
+        }
+        attachedDoc = doc
+      }
+      return token
+    },
+
+    allow(el: unknown, token?: number): void {
+      if (!isActive(token)) return
+      if (el !== null && el !== undefined) {
+        allowedActive.add(el)
+      }
+    },
+
+    isActive,
+    hasUserMovedFocus,
+
+    apply(
+      candidates: readonly PendingFocusCandidate[],
+      applyOptions?: {
+        token?: number
+        fallback?: readonly PendingFocusCandidate[]
+        keepPendingOnMiss?: boolean
+      },
+    ): boolean {
+      if (!isActive(applyOptions?.token)) return false
+      if (hasUserMovedFocus(applyOptions?.token)) {
+        clear()
+        options.onUserCancel?.()
+        return false
+      }
+      const list = applyOptions?.fallback ? [...candidates, ...applyOptions.fallback] : candidates
+      for (const candidate of list) {
+        const target = typeof candidate === 'function' ? candidate() : candidate
+        if (focusOne(target)) {
+          clear()
+          return true
+        }
+      }
+      if (!applyOptions?.keepPendingOnMiss) {
+        clear()
+      }
+      return false
+    },
+
+    cancel(): void {
+      clear()
+    },
+
+    destroy(): void {
+      destroyed = true
+      clear()
+    },
+  }
 }
 
 /**
@@ -213,62 +394,25 @@ export function createTopicSummaryFocusController(
   type Pending = {
     revision: number
     topicId: string | null
-    baselineActive: unknown
+    token: number
   }
 
   let pending: Pending | null = null
   let lastHandledRevision = -1
-  let applyingFocus = false
-  let attachedDoc: FocusDocument | null = null
 
-  const isResetOrDisconnectedActive = (active: unknown, doc: FocusDocument | null): boolean => {
-    if (!active) return true
-    if (doc && (active === doc.body || active === doc.documentElement)) return true
-    if (
-      typeof active === 'object' &&
-      'isConnected' in active &&
-      (active as { isConnected?: boolean }).isConnected === false
-    ) {
-      return true
-    }
-    return false
-  }
-
-  const onFocusIn = (event: { target?: unknown }) => {
-    if (!pending || applyingFocus) return
-    const doc = getDoc()
-    const target = event.target
-    if (isResetOrDisconnectedActive(target, doc) || target === pending.baselineActive) return
-    lastHandledRevision = pending.revision
-    clearPending()
-  }
-
-  const detachListener = () => {
-    if (attachedDoc?.removeEventListener) {
-      attachedDoc.removeEventListener('focusin', onFocusIn, true)
-    }
-    attachedDoc = null
-  }
+  const pendingFocus = createPendingFocus({
+    getDoc,
+    onUserCancel: () => {
+      if (pending) {
+        lastHandledRevision = pending.revision
+        pending = null
+      }
+    },
+  })
 
   const clearPending = () => {
-    detachListener()
+    pendingFocus.cancel()
     pending = null
-  }
-
-  const hasUserMovedFocus = (entry: Pending, doc: FocusDocument | null): boolean => {
-    if (!doc) return false
-    const active = doc.activeElement
-    if (isResetOrDisconnectedActive(active, doc)) return false
-    return active !== entry.baselineActive
-  }
-
-  const focusWithGuard = (target: FocusableTarget | null | undefined): boolean => {
-    applyingFocus = true
-    try {
-      return focusTarget(target)
-    } finally {
-      applyingFocus = false
-    }
   }
 
   return {
@@ -280,21 +424,20 @@ export function createTopicSummaryFocusController(
       if (pending?.revision === snapshot.revision || lastHandledRevision === snapshot.revision) {
         return
       }
-      clearPending()
-      const doc = getDoc()
+      const token = pendingFocus.begin()
+      if (token === 0) {
+        pending = null
+        return
+      }
       pending = {
         revision: snapshot.revision,
         topicId: returningTopicId,
-        baselineActive: doc?.activeElement ?? null,
-      }
-      if (doc?.addEventListener) {
-        doc.addEventListener('focusin', onFocusIn, true)
-        attachedDoc = doc
+        token,
       }
     },
 
     isPending(revision: number): boolean {
-      return pending !== null && pending.revision === revision
+      return pending !== null && pending.revision === revision && pendingFocus.isActive(pending.token)
     },
 
     step(options: {
@@ -303,34 +446,40 @@ export function createTopicSummaryFocusController(
       findSummary: (topicId: string) => FocusableTarget | null | undefined
       composer: FocusableTarget | null | undefined
     }): TopicSummaryFocusStepResult {
-      if (!pending || pending.revision !== options.revision) {
+      if (!pending || pending.revision !== options.revision || !pendingFocus.isActive(pending.token)) {
         return 'cancelled'
       }
-      const doc = getDoc()
-      if (hasUserMovedFocus(pending, doc)) {
+      if (pendingFocus.hasUserMovedFocus(pending.token)) {
         lastHandledRevision = options.revision
         clearPending()
         return 'cancelled'
       }
       if (pending.topicId) {
-        const summary = options.findSummary(pending.topicId)
-        if (focusWithGuard(summary)) {
+        const topicId = pending.topicId
+        if (
+          pendingFocus.apply([() => options.findSummary(topicId)], {
+            token: pending.token,
+            keepPendingOnMiss: true,
+          })
+        ) {
           lastHandledRevision = options.revision
-          clearPending()
+          pending = null
           return 'focused_summary'
         }
       }
       if (options.status === 'loading') {
         return 'waiting'
       }
+      const token = pending.token
       lastHandledRevision = options.revision
-      clearPending()
-      focusWithGuard(options.composer)
+      pending = null
+      pendingFocus.apply([options.composer], { token })
       return 'focused_composer'
     },
 
     destroy(): void {
-      clearPending()
+      pending = null
+      pendingFocus.cancel()
     },
   }
 }

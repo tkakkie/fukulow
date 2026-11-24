@@ -1,14 +1,13 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte'
   import type { Channel } from './channels.svelte'
-  import { focusIfVisible, focusTarget, type FocusableTarget, type VisibleFocusableTarget } from './focus-management'
+  import { createPendingFocus, type FocusableTarget } from './focus-management'
   import SectionDialogs, { type SectionDialogMode } from './SectionDialogs.svelte'
   import {
     OTHER_CHANNELS_LABEL,
     reorderList,
     resolveDeleteFocusTargets,
     sectionWriteError,
-    type DeleteFocusTarget,
   } from './section-ui'
   import type { SectionGroup, SectionsAdapter } from './sections.svelte'
   import type { TopicLine } from './topic-selectors'
@@ -28,35 +27,28 @@
     | { kind: 'move'; channelId: string }
     | null
 
-  type PendingFocusBase = {
-    phase: 'writing' | 'awaiting-layout' | 'applying'
-    baselineLayoutRevision: number
-    allowedActive: Set<unknown>
-    cancelled: boolean
-  }
-
-  type PendingFocus =
-    | (PendingFocusBase & {
-        kind: 'section-move'
-        sectionId: string
-        direction: 'up' | 'down'
-      })
-    | (PendingFocusBase & {
-        kind: 'channel-move-order'
-        channelId: string
-        direction: 'up' | 'down'
-      })
-    | (PendingFocusBase & {
-        kind: 'channel-move-group'
-        channelId: string
-        destinationKey: string
-      })
-    | (PendingFocusBase & {
+  type PendingFocusIntent =
+    | { kind: 'section-move'; sectionId: string; direction: 'up' | 'down' }
+    | { kind: 'channel-move-order'; channelId: string; direction: 'up' | 'down' }
+    | { kind: 'channel-move-group'; channelId: string; destinationKey: string }
+    | {
         kind: 'section-delete'
         deletedId: string
         nextSectionIds: readonly string[]
         prevSectionIds: readonly string[]
-      })
+      }
+
+  type PendingFocusWrite = {
+    token: number
+    intent: PendingFocusIntent
+    phase: 'writing' | 'awaiting-layout' | 'applying'
+    baselineLayoutRevision: number
+  }
+
+  type PendingFocusPlan = {
+    ticks: 1 | 2
+    selectors: readonly string[]
+  }
 
   let {
     channels,
@@ -121,12 +113,18 @@
   let inlineError = $state('')
   let pendingCreateId = ''
   let pendingCreateName = ''
-  let activePendingFocus: PendingFocus | null = null
+  let pendingWrite: PendingFocusWrite | null = null
   let pendingFocusTrigger = $state(0)
-  let focusListenersAttached = false
   let unmounted = false
   let dialogOpener: unknown = null
-  let applyingFocus = false
+
+  const pendingFocus = createPendingFocus({
+    cancelOnPointerDown: true,
+    requireVisible: true,
+    onUserCancel: () => {
+      pendingWrite = null
+    },
+  })
 
   function findAuthorizedChannel(channelId: string): { channel: Channel; sectionId: string | null } | null {
     for (const g of groups) {
@@ -171,133 +169,55 @@
     return id ?? OTHER_KEY
   }
 
-  function isResetOrDisconnected(el: unknown): boolean {
-    if (!el) return true
-    if (typeof document !== 'undefined' && (el === document.body || el === document.documentElement)) {
-      return true
-    }
-    if (typeof el === 'object' && 'isConnected' in el && (el as { isConnected?: boolean }).isConnected === false) {
-      return true
-    }
-    return false
-  }
-
-  function hasUserMovedFocus(p: PendingFocus): boolean {
-    if (typeof document === 'undefined') return false
-    const active = document.activeElement
-    if (isResetOrDisconnected(active)) return false
-    return !p.allowedActive.has(active)
-  }
-
-  function onFocusIn(e: FocusEvent) {
-    if (applyingFocus || !activePendingFocus) return
-    const target = e.target
-    if (isResetOrDisconnected(target) || activePendingFocus.allowedActive.has(target)) return
-    clearPendingFocus()
-  }
-
-  function onPointerDown() {
-    if (!activePendingFocus) return
-    clearPendingFocus()
-  }
-
   function clearPendingFocus() {
-    if (activePendingFocus) {
-      activePendingFocus.cancelled = true
-      activePendingFocus = null
-    }
-    if (focusListenersAttached && typeof document !== 'undefined') {
-      document.removeEventListener('focusin', onFocusIn, true)
-      document.removeEventListener('pointerdown', onPointerDown, true)
-      focusListenersAttached = false
-    }
+    pendingWrite = null
+    pendingFocus.cancel()
   }
 
-  function beginPendingFocus(token: PendingFocus) {
-    clearPendingFocus()
-    activePendingFocus = token
-    if (typeof document !== 'undefined' && !focusListenersAttached) {
-      document.addEventListener('focusin', onFocusIn, true)
-      document.addEventListener('pointerdown', onPointerDown, true)
-      focusListenersAttached = true
+  function startPendingFocus(intent: PendingFocusIntent, extraAllowed?: readonly unknown[]): number {
+    const token = pendingFocus.begin(extraAllowed)
+    pendingWrite = {
+      token,
+      intent,
+      phase: 'writing',
+      baselineLayoutRevision: -1,
     }
     pendingFocusTrigger++
+    return token
   }
 
-  function armPendingFocusAfterWrite(token: PendingFocus) {
-    if (unmounted || token.cancelled || activePendingFocus !== token) return
-    if (hasUserMovedFocus(token)) {
+  function armPendingFocusAfterWrite(token: number) {
+    if (unmounted || !pendingWrite || pendingWrite.token !== token || !pendingFocus.isActive(token)) return
+    if (pendingFocus.hasUserMovedFocus(token)) {
       clearPendingFocus()
       return
     }
-    if (dialogFocusFallback) token.allowedActive.add(dialogFocusFallback)
-    token.baselineLayoutRevision = sections?.state.layoutRevision ?? 0
-    token.phase = 'awaiting-layout'
+    if (dialogFocusFallback) pendingFocus.allow(dialogFocusFallback, token)
+    pendingWrite.baselineLayoutRevision = sections?.state.layoutRevision ?? 0
+    pendingWrite.phase = 'awaiting-layout'
     pendingFocusTrigger++
   }
 
   onDestroy(() => {
     unmounted = true
-    clearPendingFocus()
+    pendingWrite = null
+    pendingFocus.destroy()
   })
-
-  function applyFocus(target: FocusableTarget | null | undefined): boolean {
-    if (!target) return false
-    applyingFocus = true
-    try {
-      if ('getClientRects' in target) {
-        return focusIfVisible(target as VisibleFocusableTarget)
-      }
-      return focusTarget(target)
-    } finally {
-      applyingFocus = false
-    }
-  }
-
-  function focusVisibleFallback(): boolean {
-    if (applyFocus(channelListHeading)) return true
-    const firstHeading = containerEl?.querySelector<HTMLElement>('[data-section-heading]')
-    if (applyFocus(firstHeading)) return true
-    const createBtn = containerEl?.querySelector<HTMLElement>('.section-channel-list__toolbar button')
-    return applyFocus(createBtn)
-  }
 
   function toggleCollapse(key: string) {
     collapsed[key] = !collapsed[key]
   }
 
-  function openCreateDialog() {
+  function openDialog(mode: Exclude<DialogIntent, null>) {
     if (controlsDisabled) return
     inlineError = ''
     dialogError = ''
     dialogOpener = typeof document !== 'undefined' ? document.activeElement : null
-    pendingCreateId = crypto.randomUUID()
-    pendingCreateName = ''
-    dialogMode = { kind: 'create' }
-  }
-
-  function openRenameDialog(section: Extract<SectionGroup, { id: string }>) {
-    if (controlsDisabled) return
-    inlineError = ''
-    dialogError = ''
-    dialogOpener = typeof document !== 'undefined' ? document.activeElement : null
-    dialogMode = { kind: 'rename', sectionId: section.id, currentName: section.name }
-  }
-
-  function openDeleteDialog(section: Extract<SectionGroup, { id: string }>) {
-    if (controlsDisabled) return
-    inlineError = ''
-    dialogError = ''
-    dialogOpener = typeof document !== 'undefined' ? document.activeElement : null
-    dialogMode = { kind: 'delete', sectionId: section.id, sectionName: section.name }
-  }
-
-  function openMoveDialog(channelId: string) {
-    if (controlsDisabled) return
-    inlineError = ''
-    dialogError = ''
-    dialogOpener = typeof document !== 'undefined' ? document.activeElement : null
-    dialogMode = { kind: 'move', channelId }
+    if (mode.kind === 'create') {
+      pendingCreateId = crypto.randomUUID()
+      pendingCreateName = ''
+    }
+    dialogMode = mode
   }
 
   function closeDialog() {
@@ -341,24 +261,19 @@
     if (!sections || controlsDisabled) return
     dialogError = ''
     const idx = customGroups.findIndex((g) => g.id === sectionId)
-    const nextSectionIds = idx >= 0 ? customGroups.slice(idx + 1).map((g) => g.id) : []
-    const prevSectionIds = idx >= 0 ? customGroups.slice(0, idx).reverse().map((g) => g.id) : []
-    const baselineActive = typeof document !== 'undefined' ? document.activeElement : null
-    const token: PendingFocus = {
-      kind: 'section-delete',
-      deletedId: sectionId,
-      nextSectionIds,
-      prevSectionIds,
-      phase: 'writing',
-      baselineLayoutRevision: -1,
-      allowedActive: new Set([baselineActive, dialogOpener, dialogFocusFallback]),
-      cancelled: false,
-    }
-    beginPendingFocus(token)
+    const token = startPendingFocus(
+      {
+        kind: 'section-delete',
+        deletedId: sectionId,
+        nextSectionIds: idx >= 0 ? customGroups.slice(idx + 1).map((g) => g.id) : [],
+        prevSectionIds: idx >= 0 ? customGroups.slice(0, idx).reverse().map((g) => g.id) : [],
+      },
+      [dialogOpener, dialogFocusFallback],
+    )
     const result = await sections.delete(sectionId)
     if (unmounted) return
     if (!result.ok) {
-      if (activePendingFocus === token) clearPendingFocus()
+      if (pendingWrite?.token === token) clearPendingFocus()
       dialogError = sectionWriteError(result)
       return
     }
@@ -370,21 +285,14 @@
     if (!sections || controlsDisabled) return
     dialogError = ''
     const destinationKey = groupKeyOf(destinationId)
-    const baselineActive = typeof document !== 'undefined' ? document.activeElement : null
-    const token: PendingFocus = {
-      kind: 'channel-move-group',
-      channelId,
-      destinationKey,
-      phase: 'writing',
-      baselineLayoutRevision: -1,
-      allowedActive: new Set([baselineActive, dialogOpener, dialogFocusFallback]),
-      cancelled: false,
-    }
-    beginPendingFocus(token)
+    const token = startPendingFocus(
+      { kind: 'channel-move-group', channelId, destinationKey },
+      [dialogOpener, dialogFocusFallback],
+    )
     const result = await sections.moveChannel(channelId, { section_id: destinationId })
     if (unmounted) return
     if (!result.ok) {
-      if (activePendingFocus === token) clearPendingFocus()
+      if (pendingWrite?.token === token) clearPendingFocus()
       dialogError = sectionWriteError(result)
       return
     }
@@ -396,24 +304,13 @@
   async function handleReorderSection(sectionId: string, index: number, direction: 'up' | 'down') {
     if (!sections || controlsDisabled) return
     inlineError = ''
-    const ids = customGroups.map((g) => g.id)
-    const next = reorderList(ids, index, direction)
+    const next = reorderList(customGroups.map((g) => g.id), index, direction)
     if (!next) return
-    const baselineActive = typeof document !== 'undefined' ? document.activeElement : null
-    const token: PendingFocus = {
-      kind: 'section-move',
-      sectionId,
-      direction,
-      phase: 'writing',
-      baselineLayoutRevision: -1,
-      allowedActive: new Set([baselineActive]),
-      cancelled: false,
-    }
-    beginPendingFocus(token)
+    const token = startPendingFocus({ kind: 'section-move', sectionId, direction })
     const result = await sections.reorder({ section_ids: next })
     if (unmounted) return
     if (!result.ok) {
-      if (activePendingFocus === token) clearPendingFocus()
+      if (pendingWrite?.token === token) clearPendingFocus()
       inlineError = sectionWriteError(result)
       return
     }
@@ -431,141 +328,106 @@
     const ids = groupChannels.map((c) => c.id)
     const next = reorderList(ids, index, direction)
     if (!next) return
-    const channelId = ids[index]
-    const baselineActive = typeof document !== 'undefined' ? document.activeElement : null
-    const token: PendingFocus = {
-      kind: 'channel-move-order',
-      channelId,
-      direction,
-      phase: 'writing',
-      baselineLayoutRevision: -1,
-      allowedActive: new Set([baselineActive]),
-      cancelled: false,
-    }
-    beginPendingFocus(token)
+    const token = startPendingFocus({ kind: 'channel-move-order', channelId: ids[index], direction })
     const result = await sections.reorderChannels({ section_id: sectionId, channel_ids: next })
     if (unmounted) return
     if (!result.ok) {
-      if (activePendingFocus === token) clearPendingFocus()
+      if (pendingWrite?.token === token) clearPendingFocus()
       inlineError = sectionWriteError(result)
       return
     }
     armPendingFocusAfterWrite(token)
   }
 
-  function focusDeleteTargets(targets: readonly DeleteFocusTarget[]) {
-    for (const target of targets) {
-      if (target.kind === 'section') {
-        const el = containerEl?.querySelector<HTMLElement>(
-          `[data-section-heading="${CSS.escape(target.id)}"]`,
-        )
-        if (applyFocus(el)) return
-      } else if (target.kind === 'other') {
-        const el = containerEl?.querySelector<HTMLElement>(
-          `[data-section-heading="${OTHER_KEY}"]`,
-        )
-        if (applyFocus(el)) return
-      } else if (focusVisibleFallback()) {
-        return
-      }
+  // Wait two ticks for dialog-driven mutations so restoration runs after Dialog's close focus restoration.
+  const PENDING_FOCUS_PLANS: {
+    [K in PendingFocusIntent['kind']]: (intent: Extract<PendingFocusIntent, { kind: K }>) => PendingFocusPlan
+  } = {
+    'section-move': (p) => ({
+      ticks: 1,
+      selectors: [
+        `[data-testid="section-move-${p.direction}-${CSS.escape(p.sectionId)}"]`,
+        `[data-section-heading="${CSS.escape(p.sectionId)}"]`,
+      ],
+    }),
+    'channel-move-order': (p) => ({
+      ticks: 1,
+      selectors: [
+        `[data-testid="channel-move-${p.direction}-${CSS.escape(p.channelId)}"]`,
+        `[data-channel-id="${CSS.escape(p.channelId)}"] .ui-list-row`,
+      ],
+    }),
+    'channel-move-group': (p) => ({
+      ticks: 2,
+      selectors: [
+        `[data-channel-id="${CSS.escape(p.channelId)}"] .ui-list-row`,
+        `[data-section-heading="${CSS.escape(p.destinationKey)}"]`,
+      ],
+    }),
+    'section-delete': (p) => ({
+      ticks: 2,
+      selectors: resolveDeleteFocusTargets(
+        customGroups.map((g) => g.id),
+        p.nextSectionIds,
+        p.prevSectionIds,
+        Boolean(otherGroup && otherGroup.channels.length > 0),
+      ).flatMap((target) => {
+        if (target.kind === 'section') return [`[data-section-heading="${CSS.escape(target.id)}"]`]
+        if (target.kind === 'other') return [`[data-section-heading="${OTHER_KEY}"]`]
+        return []
+      }),
+    }),
+  }
+
+  function buildPendingFocusPlan(intent: PendingFocusIntent): PendingFocusPlan {
+    switch (intent.kind) {
+      case 'section-move':
+        return PENDING_FOCUS_PLANS['section-move'](intent)
+      case 'channel-move-order':
+        return PENDING_FOCUS_PLANS['channel-move-order'](intent)
+      case 'channel-move-group':
+        return PENDING_FOCUS_PLANS['channel-move-group'](intent)
+      case 'section-delete':
+        return PENDING_FOCUS_PLANS['section-delete'](intent)
     }
   }
 
   $effect(() => {
     void pendingFocusTrigger
     const layoutRevision = sectionsState?.layoutRevision ?? 0
-    const p = activePendingFocus
-    if (!p || p.cancelled || p.phase !== 'awaiting-layout' || writing || resolvedDialogMode !== null) return
-    if (hasUserMovedFocus(p)) {
+    const p = pendingWrite
+    if (!p || p.phase !== 'awaiting-layout' || writing || resolvedDialogMode !== null) return
+    if (!pendingFocus.isActive(p.token)) {
+      pendingWrite = null
+      return
+    }
+    if (pendingFocus.hasUserMovedFocus(p.token)) {
       clearPendingFocus()
       return
     }
     if (layoutRevision <= p.baselineLayoutRevision) return
-    if (p.kind === 'section-delete') {
-      if (customGroups.some((g) => g.id === p.deletedId)) return
-      p.phase = 'applying'
-      const targets = resolveDeleteFocusTargets(
-        customGroups.map((g) => g.id),
-        p.nextSectionIds,
-        p.prevSectionIds,
-        Boolean(otherGroup && otherGroup.channels.length > 0),
-      )
-      void tick()
-        .then(() => tick())
-        .then(() => {
-          if (unmounted || p.cancelled || activePendingFocus !== p) return
-          if (hasUserMovedFocus(p)) {
-            clearPendingFocus()
-            return
-          }
-          focusDeleteTargets(targets)
-          clearPendingFocus()
-        })
-      return
+    if (p.intent.kind === 'section-delete') {
+      const { deletedId } = p.intent
+      if (customGroups.some((g) => g.id === deletedId)) return
     }
     p.phase = 'applying'
-    if (p.kind === 'section-move') {
-      void tick().then(() => {
-        if (unmounted || p.cancelled || activePendingFocus !== p) return
-        if (hasUserMovedFocus(p)) {
-          clearPendingFocus()
-          return
-        }
-        const btn = containerEl?.querySelector<HTMLElement>(
-          `[data-testid="section-move-${p.direction}-${CSS.escape(p.sectionId)}"]`,
-        )
-        if (!applyFocus(btn)) {
-          const heading = containerEl?.querySelector<HTMLElement>(
-            `[data-section-heading="${CSS.escape(p.sectionId)}"]`,
-          )
-          if (!applyFocus(heading)) focusVisibleFallback()
-        }
-        clearPendingFocus()
-      })
-      return
-    }
-    if (p.kind === 'channel-move-order') {
-      void tick().then(() => {
-        if (unmounted || p.cancelled || activePendingFocus !== p) return
-        if (hasUserMovedFocus(p)) {
-          clearPendingFocus()
-          return
-        }
-        const btn = containerEl?.querySelector<HTMLElement>(
-          `[data-testid="channel-move-${p.direction}-${CSS.escape(p.channelId)}"]`,
-        )
-        if (!applyFocus(btn)) {
-          const row = containerEl?.querySelector<HTMLElement>(
-            `[data-channel-id="${CSS.escape(p.channelId)}"] .ui-list-row`,
-          )
-          if (!applyFocus(row)) focusVisibleFallback()
-        }
-        clearPendingFocus()
-      })
-      return
-    }
-    if (p.kind === 'channel-move-group') {
-      // Wait two ticks so this runs after Dialog's close focus restoration.
-      void tick()
-        .then(() => tick())
-        .then(() => {
-          if (unmounted || p.cancelled || activePendingFocus !== p) return
-          if (hasUserMovedFocus(p)) {
-            clearPendingFocus()
-            return
-          }
-          const row = containerEl?.querySelector<HTMLElement>(
-            `[data-channel-id="${CSS.escape(p.channelId)}"] .ui-list-row`,
-          )
-          if (!applyFocus(row)) {
-            const heading = containerEl?.querySelector<HTMLElement>(
-              `[data-section-heading="${CSS.escape(p.destinationKey)}"]`,
-            )
-            if (!applyFocus(heading)) focusVisibleFallback()
-          }
-          clearPendingFocus()
-        })
-    }
+    const plan = buildPendingFocusPlan(p.intent)
+    const wait = plan.ticks === 2 ? tick().then(() => tick()) : tick()
+    void wait.then(() => {
+      if (unmounted || pendingWrite !== p) return
+      pendingFocus.apply(
+        plan.selectors.map((sel) => () => containerEl?.querySelector<HTMLElement>(sel)),
+        {
+          token: p.token,
+          fallback: [
+            () => channelListHeading,
+            () => containerEl?.querySelector<HTMLElement>('[data-section-heading]'),
+            () => containerEl?.querySelector<HTMLElement>('.section-channel-list__toolbar button'),
+          ],
+        },
+      )
+      if (pendingWrite === p) pendingWrite = null
+    })
   })
 </script>
 
@@ -613,7 +475,7 @@
   <div class="section-channel-list" bind:this={containerEl} aria-busy={writing ? 'true' : undefined}>
     {#if !disabled}
       <div class="section-channel-list__toolbar">
-        <Button variant="secondary" disabled={controlsDisabled} onclick={openCreateDialog}>
+        <Button variant="secondary" disabled={controlsDisabled} onclick={() => openDialog({ kind: 'create' })}>
           セクションを作成
         </Button>
       </div>
@@ -687,7 +549,7 @@
                   variant="icon"
                   ariaLabel="名前を変更"
                   disabled={controlsDisabled}
-                  onclick={() => openRenameDialog(group)}
+                  onclick={() => openDialog({ kind: 'rename', sectionId: group.id, currentName: group.name })}
                 >
                   ✎
                 </Button>
@@ -695,7 +557,7 @@
                   variant="icon"
                   ariaLabel="セクションを削除"
                   disabled={controlsDisabled}
-                  onclick={() => openDeleteDialog(group)}
+                  onclick={() => openDialog({ kind: 'delete', sectionId: group.id, sectionName: group.name })}
                 >
                   ×
                 </Button>
@@ -736,7 +598,7 @@
                             variant="icon"
                             ariaLabel="チャンネルを移動"
                             disabled={controlsDisabled}
-                            onclick={() => openMoveDialog(c.id)}
+                            onclick={() => openDialog({ kind: 'move', channelId: c.id })}
                           >
                             ⇄
                           </Button>
