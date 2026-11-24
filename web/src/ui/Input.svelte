@@ -51,98 +51,63 @@
   }
 </script>
 
+{#snippet control()}
+  {#if multiline}
+    <textarea
+      bind:this={inputRef}
+      class="ui-input ui-input--textarea"
+      aria-label={label ? undefined : ariaLabel}
+      {name}
+      {rows}
+      {placeholder}
+      {required}
+      {disabled}
+      {minlength}
+      {maxlength}
+      {value}
+      oninput={handleInput}
+      {onkeydown}
+      {onselect}
+      {onblur}
+      aria-autocomplete={ariaControls ? 'list' : undefined}
+      aria-controls={ariaControls}
+      aria-activedescendant={ariaActiveDescendant}
+    ></textarea>
+  {:else}
+    <input
+      bind:this={inputRef}
+      class="ui-input"
+      aria-label={label ? undefined : ariaLabel}
+      {name}
+      {type}
+      {placeholder}
+      {required}
+      {disabled}
+      {minlength}
+      {maxlength}
+      {autocomplete}
+      {value}
+      oninput={handleInput}
+      {onkeydown}
+      {onselect}
+      {onblur}
+      aria-autocomplete={ariaControls ? 'list' : undefined}
+      aria-controls={ariaControls}
+      aria-activedescendant={ariaActiveDescendant}
+    />
+  {/if}
+{/snippet}
+
 {#if label}
   <label class="ui-field">
     <span class="ui-field__label">{label}</span>
-    {#if multiline}
-      <textarea
-        bind:this={inputRef}
-        class="ui-input ui-input--textarea"
-        {name}
-        {rows}
-        {placeholder}
-        {required}
-        {disabled}
-        {minlength}
-        {maxlength}
-        {value}
-        oninput={handleInput}
-        {onkeydown}
-        {onselect}
-        {onblur}
-        aria-autocomplete={ariaControls ? 'list' : undefined}
-        aria-controls={ariaControls}
-        aria-activedescendant={ariaActiveDescendant}
-      ></textarea>
-    {:else}
-      <input
-        bind:this={inputRef}
-        class="ui-input"
-        {name}
-        {type}
-        {placeholder}
-        {required}
-        {disabled}
-        {minlength}
-        {maxlength}
-        {autocomplete}
-        {value}
-        oninput={handleInput}
-        {onkeydown}
-        {onselect}
-        {onblur}
-        aria-autocomplete={ariaControls ? 'list' : undefined}
-        aria-controls={ariaControls}
-        aria-activedescendant={ariaActiveDescendant}
-      />
-    {/if}
+    {@render control()}
     {#if hint}
       <small class="ui-field__hint">{hint}</small>
     {/if}
   </label>
-{:else if multiline}
-  <textarea
-    bind:this={inputRef}
-    class="ui-input ui-input--textarea"
-    aria-label={ariaLabel}
-    {name}
-    {rows}
-    {placeholder}
-    {required}
-    {disabled}
-    {minlength}
-    {maxlength}
-    {value}
-    oninput={handleInput}
-    {onkeydown}
-    {onselect}
-    {onblur}
-    aria-autocomplete={ariaControls ? 'list' : undefined}
-    aria-controls={ariaControls}
-    aria-activedescendant={ariaActiveDescendant}
-  ></textarea>
 {:else}
-  <input
-    bind:this={inputRef}
-    class="ui-input"
-    aria-label={ariaLabel}
-    {name}
-    {type}
-    {placeholder}
-    {required}
-    {disabled}
-    {minlength}
-    {maxlength}
-    {autocomplete}
-    {value}
-    oninput={handleInput}
-    {onkeydown}
-    {onselect}
-    {onblur}
-    aria-autocomplete={ariaControls ? 'list' : undefined}
-    aria-controls={ariaControls}
-    aria-activedescendant={ariaActiveDescendant}
-  />
+  {@render control()}
 {/if}
 
 <style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { mentionKey, shouldFocusLatestMessageOnArrowUp, shouldSubmitOnEnter } from './composer-keys'
+  import { isImeComposing, mentionKey, shouldFocusLatestMessageOnArrowUp, shouldSubmitOnEnter } from './composer-keys'
   import { focusTarget, submitAndFocusComposer } from './focus-management'
   import { tick } from 'svelte'
   import type { Member } from './api'
@@ -80,7 +80,7 @@
   }
 
   function keydown(e: KeyboardEvent) {
-    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return
+    if (e.defaultPrevented || isImeComposing(e)) return
     const action = query ? mentionKey(e) : null
     if (action === 'dismiss') { e.preventDefault(); e.stopPropagation(); dismissed = true; return }
     if (action && candidates.length) {
