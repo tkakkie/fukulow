@@ -23,7 +23,10 @@ describe('measurement fixture client', () => {
   // Same-input proof for #866. The golden file holds, per fixture, SHA-256 digests captured before the two
   // copies were merged: the fixture, the inputs and errors of the measurement copy (exact JSON, so wasm traces
   // stay byte-identical) and of the former web/src/protocol-test-helpers.ts copy (keys sorted: it built
-  // events_result and history_result pages in another key order). A fixture changed since is not comparable.
+  // events_result pages in another key order). A fixture changed since is not comparable and is skipped.
+  // The digests also cover errors, so a change that only alters a thrown or assertion message (for example
+  // a proposed scenario starting to run) fails here: delete that fixture's entry from the golden file in the
+  // same PR. This proof is one-off; delete the test and the golden file once no entry is compared.
   it('produces the inputs both former copies produced, for every fixture unchanged since #866', () => {
     const sha = (text: string) => createHash('sha256').update(text).digest('hex')
     const sorted = (v: unknown): unknown => Array.isArray(v) ? v.map(sorted)
