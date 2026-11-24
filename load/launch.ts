@@ -20,14 +20,23 @@ const exec = (argv: string[], cwd?: string) => {
   return { status: c.error || c.signal ? null : c.status, stdout: c.stdout ?? '' };
 };
 
+// The job runs in its own process group (detached), so a stop reaches every process it started,
+// for example a `docker exec` client, and alive() can tell when the whole group has ended.
 function run(argv: string[], opts: { cwd: string; log: string; env?: Record<string, string> }): Child {
   const fd = openSync(opts.log, 'a');
-  const c = spawn(argv[0], argv.slice(1), { cwd: opts.cwd, env: { ...process.env, ...opts.env }, stdio: ['ignore', fd, fd] });
+  const c = spawn(argv[0], argv.slice(1), { cwd: opts.cwd, env: { ...process.env, ...opts.env }, stdio: ['ignore', fd, fd], detached: true });
   const done = new Promise<number>(resolve => {
     c.on('error', e => { writeSync(fd, `spawn failed: ${e.message}\n`); resolve(127); });
     c.on('exit', (code, signal) => resolve(code ?? (signal ? 128 : 1)));
   }).finally(() => closeSync(fd));
-  return { done, kill: () => { c.kill('SIGTERM'); } };
+  const group = (signal: NodeJS.Signals | 0) => {
+    if (c.pid === undefined) return false;
+    try { process.kill(-c.pid, signal); return true; } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ESRCH') return false;
+      throw e;
+    }
+  };
+  return { done, kill: (signal = 'SIGTERM') => { group(signal); }, alive: () => group(0) };
 }
 
 const execAsync = promisify(execFile);
@@ -77,6 +86,7 @@ const result = await launch(queue, {
   exists: existsSync, claim, remove: p => rmSync(p, { force: true }), append: appendFileSync, write: writeFileSync,
   freeBytes: p => safe(() => freeBytes(exec(['df', '-Pk', p]).stdout)), dockerFreeBytes: image => safe(() => dockerFreeBytes(image)),
   nodeVersion: process.version, pid: process.pid, now: () => new Date(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
+  pause: ms => sleep(ms),
   every: (ms, fn) => { const t = setInterval(fn, ms); return () => clearInterval(t); },
   onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => { signalled.abort(); handler(s); }); },
 });

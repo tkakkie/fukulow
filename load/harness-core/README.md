@@ -28,7 +28,11 @@ The launcher:
 - for a job with cooling fields (#796):
   - `requireHost` lists boost, per-CPU boost, platform profile and hwmon fan-control values that must hold before the job; unreadable or different is a STOP;
   - `cooldown` waits until k10temp Tctl is at most `maxTctlC`, and STOPs after `maxWaitSeconds`; every reading goes to `<job>-cooldown.json`;
-  - `thermalSampleSeconds` appends a `thermal.ts` sample (per-CPU `cpuinfo_avg_freq`, hwmon temperatures and fans) to `<job>-thermal.jsonl` while the job runs.
+  - `cooldown` checks the deadline before it accepts a reading. Right before the spawn, after the gate, Tctl and `requireHost` are checked again into `<job>-launch-check.json`;
+  - `thermalSampleSeconds` appends a `thermal.ts` sample (per-CPU `cpuinfo_avg_freq`, hwmon temperatures and fans) to `<job>-thermal.jsonl` while the job runs. The preflight needs a sample with every CPU readable. A failed read stays in the file as an error line, and a failed write stops the job;
+  - `confirmations` records the maintainer's quoted confirmations of conditions the host cannot read (for example L3 airflow).
+- runs each job in its own process group. A signal or a failed sampler write takes one stop path. Before `HOST-BUSY` is released, every started process group must be gone (SIGTERM, then SIGKILL) and no container with the job's `workloadLabel` may still run; otherwise `HOST-BUSY` stays held;
+- writes `session.json` (queue, outcome, jobs and exits, confirmations, `hostBusy`), which a judge binds to.
 
 A STOP or a failed job ends the queue. Nothing reruns: a `setup-failure` rerun under the rules below is a new queue entry with its own quoted go. Sleep prevention is `caffeinate` on macOS. On Linux it is the masked sleep targets, which are a preflight condition.
 

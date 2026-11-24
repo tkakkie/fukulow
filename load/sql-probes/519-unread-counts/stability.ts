@@ -22,9 +22,10 @@ const runs: RunInput[] = q.jobs.map(job => ({
   metadata: json(join(job.out, 'metadata.json')) ?? { cpuSets: null, sends: { measuredSeconds: NaN } },
   hostBefore: json(join(q.chainDir, `${job.name}-host-before.json`)),
   cooldown: json(join(q.chainDir, `${job.name}-cooldown.json`)),
+  launchCheck: json(join(q.chainDir, `${job.name}-launch-check.json`)),
   samples: parseSamples(text(join(q.chainDir, `${job.name}-thermal.jsonl`)) ?? ''),
   thermalSampleSeconds: job.thermalSampleSeconds,
 }));
-const verdict = judge(runs);
+const verdict = judge(runs, json(join(q.chainDir, 'session.json')), q.name);
 writeFileSync(values.out, JSON.stringify(verdict, null, 2) + '\n', { flag: 'wx' });
 console.log(`${verdict.result}${verdict.reasons.length ? ': ' + verdict.reasons.join('; ') : ''}`);

@@ -8,6 +8,7 @@ import { parseArgs } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
 import { allowedCpus, cpuList, parseCpuSets, pinned } from '../../harness-core/cpusets.ts';
 import { hostRecord, linuxViolations } from '../../harness-core/host-record.ts';
+import { timed } from '../../harness-core/thermal.ts';
 import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, extractListCounts, logLatenciesMs, member, migrationOutcome, organization, pgbench, planSummary,
   quantile, runBlock, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 
@@ -63,6 +64,8 @@ const commits = { current: git('rev-parse', pins.current + '^{commit}'), final: 
 if (git('rev-parse', commits.final + '^') !== commits.current) throw new Error('final pin must be the direct child of current');
 const work = mkdtempSync(join(realpathSync(tmpdir()), 'fk519f-'));
 const container = 'fk519f-' + randomUUID();
+// The launcher's workloadLabel for this probe: a stopped run's container is found and removed by it.
+const workloadLabel = 'io.fukulow.probe=519-final';
 
 // Schema and roles from the current pin; the final arm adds only the A3 migration from its pin,
 // applied after the seed as a deploy would (backfill under its own lock and check).
@@ -190,7 +193,9 @@ function sendBlock(db: string, label: string) {
       pgbench(run('docker', [...pgbenchArgs(warmSeconds), db]));
       const before = walStats(db);
       const prefix = `/tmp/pgb-${label}`;
-      const output = run('docker', [...pgbenchArgs(measuredSeconds), '-l', `--log-prefix=${prefix}`, db]);
+      // The measured pgbench run's own interval (#796): the thermal judge reads the launcher's samples
+      // inside it. Wall clock as the sampler stamps it, plus the monotonic length to expose a clock step.
+      const { value: output, window: measuredWindow } = timed(() => run('docker', [...pgbenchArgs(measuredSeconds), '-l', `--log-prefix=${prefix}`, db]));
       const after = walStats(db);
       blockEndMs = after.atMs;
       const ended = new Date().toISOString();
@@ -208,7 +213,7 @@ function sendBlock(db: string, label: string) {
       const checkpoints = { warm: before.checkpoints - start.checkpoints, measured: after.checkpoints - before.checkpoints, redoMoved: after.redo !== start.redo };
       const crossed = checkpoints.warm !== 0 || checkpoints.measured !== 0 || checkpoints.redoMoved;
       const latency = (q: number) => latencies.length > 0 ? quantile(latencies, q) : NaN;
-      return { crossed, errors, ended, ...result, p95Ms: latency(0.95), p99Ms: latency(0.99), walBytes,
+      return { crossed, errors, ended, measuredWindow, ...result, p95Ms: latency(0.95), p99Ms: latency(0.99), walBytes,
         walBytesPerSend: walBytes / result.transactions, statWalBytes: Number(after.bytes) - Number(before.bytes),
         walRecords: records, fpiRecords: fpi, imagesPerWalRecord: records > 0 ? fpi / records : 0, checkpoints };
     },
@@ -260,7 +265,7 @@ try {
   if (!smoke && violations.length > 0) throw new Error(`measurement conditions not met: ${violations.join('; ')}`);
   // With CPU sets, taskset wraps the image's entrypoint, so the postmaster and every backend inherit the server set.
   const serverStart = cpuSets ? ['--entrypoint', 'taskset', image, '-c', cpuList(cpuSets.server), 'docker-entrypoint.sh', 'postgres'] : [image];
-  run('docker', ['run', '-d', '--rm', '--name', container, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
+  run('docker', ['run', '-d', '--rm', '--name', container, '--label', workloadLabel, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
     '-v', `${work}:/work:ro`, ...serverStart, '-c', 'shared_buffers=512MB', '-c', 'jit=off',
     // No automatic checkpoint inside a send block: each block starts at its forced CHECKPOINT and
     // full-page images settle during warm-up, as the plan requires. A crossing block fails the run.

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { hwmon } from './host-record.ts';
 
 // Thermal samples taken by the launcher while a job runs (#796 cooling plan, approved 2026-11-24).
@@ -7,6 +8,10 @@ import { hwmon } from './host-record.ts';
 // requested one), every hwmon temperature and fan. A missing reading is null, never an error.
 
 export type ThermalSample = { at: string; avgFreqKHz: (number | null)[]; temperaturesC: Record<string, number> | null; fansRpm: Record<string, number> | null };
+// A tick that produced no sample. `at` is null when the line could not be placed in time (torn or unparseable).
+export type FailedSample = { at: string | null; error: string };
+export type SampleLine = ThermalSample | FailedSample;
+export const isFailed = (s: SampleLine): s is FailedSample => !Array.isArray((s as ThermalSample).avgFreqKHz);
 
 const readNumber = (path: string) => {
   try { const n = Number(readFileSync(path, 'utf8').trim()); return Number.isFinite(n) && n > 0 ? n : null; } catch { return null; }
@@ -30,8 +35,22 @@ export const median = (xs: number[]) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
+// The measured interval of a block on the wall clock the sampler stamps (`at`), plus the monotonic
+// length of the same interval, so a wall-clock step inside it is detectable.
+export type MeasuredWindow = { startMs: number; endMs: number; monoMs: number };
+export function timed<T>(fn: () => T, clock = { wall: () => Date.now(), mono: () => performance.now() }): { value: T; window: MeasuredWindow } {
+  const startMs = clock.wall();
+  const mono0 = clock.mono();
+  const value = fn();
+  const monoMs = clock.mono() - mono0;
+  return { value, window: { startMs, endMs: clock.wall(), monoMs } };
+}
+
 export type SetStats = { medianKHz: number; minKHz: number };
-export type BlockThermal = { samples: number; server: SetStats | null; client: SetStats | null; maxTctlC: number | null };
+// samples: usable samples inside the window; failed: failed ticks inside it; maxGapMs: the longest
+// gap between consecutive ticks (failed ones included) from the last tick at or before the start to
+// the first at or after the end (Infinity when either is missing).
+export type BlockThermal = { samples: number; failed: number; maxGapMs: number; server: SetStats | null; client: SetStats | null; maxTctlC: number | null };
 
 // One set in one sample: the median and minimum over its CPUs, or null if any of them is unreadable.
 function setStats(s: ThermalSample, set: number[]) {
@@ -39,19 +58,29 @@ function setStats(s: ThermalSample, set: number[]) {
   return f.some(x => x === null) || f.length === 0 ? null : { median: median(f as number[]), min: Math.min(...(f as number[])) };
 }
 
-// A block's thermal record from the samples inside [startMs, endMs]: per set, the median of the
-// per-sample set medians and the minimum of the per-sample set minima. A set with any unusable
-// sample in the window is null, so missing data can never look like an unthrottled block.
-export function blockThermal(samples: ThermalSample[], startMs: number, endMs: number, sets: { server: number[]; client: number[] }): BlockThermal {
-  const inside = samples.filter(s => { const t = Date.parse(s.at); return t >= startMs && t <= endMs; });
+// A block's thermal record from the ticks inside [startMs, endMs]: per set, the median of the
+// per-sample set medians and the minimum of the per-sample set minima. A set is null when any tick in
+// the window failed or has an unreadable CPU, so missing data can never look like an unthrottled block.
+export function blockThermal(lines: SampleLine[], startMs: number, endMs: number, sets: { server: number[]; client: number[] }): BlockThermal {
+  const placed = lines.map(l => ({ l, t: l.at === null ? NaN : Date.parse(l.at) })).filter(x => Number.isFinite(x.t)).sort((a, b) => a.t - b.t);
+  const inside = placed.filter(x => x.t >= startMs && x.t <= endMs);
+  const edges = [placed.filter(x => x.t <= startMs).at(-1)?.t ?? -Infinity, ...inside.map(x => x.t), placed.find(x => x.t >= endMs)?.t ?? Infinity];
+  const maxGapMs = Math.max(...edges.slice(1).map((t, i) => t - edges[i]));
+  const ok = inside.map(x => x.l).filter((l): l is ThermalSample => !isFailed(l));
+  const failed = inside.length - ok.length;
   const stats = (set: number[]): SetStats | null => {
-    const per = inside.map(s => setStats(s, set));
-    if (per.length === 0 || per.some(p => p === null)) return null;
+    const per = ok.map(s => setStats(s, set));
+    if (failed > 0 || per.length === 0 || per.some(p => p === null)) return null;
     return { medianKHz: median(per.map(p => p!.median)), minKHz: Math.min(...per.map(p => p!.min)) };
   };
-  const temps = inside.map(tctl).filter((t): t is number => t !== null);
-  return { samples: inside.length, server: stats(sets.server), client: stats(sets.client), maxTctlC: temps.length ? Math.max(...temps) : null };
+  const temps = ok.map(tctl).filter((t): t is number => t !== null);
+  return { samples: ok.length, failed, maxGapMs, server: stats(sets.server), client: stats(sets.client), maxTctlC: temps.length ? Math.max(...temps) : null };
 }
 
-export const parseSamples = (jsonl: string): ThermalSample[] =>
-  jsonl.split('\n').filter(l => l.trim() !== '').map(l => JSON.parse(l) as ThermalSample).filter(s => Array.isArray(s.avgFreqKHz));
+// Every line is kept: an error line or an unusable line is a failed tick, never dropped.
+export const parseSamples = (jsonl: string): SampleLine[] => jsonl.split('\n').filter(l => l.trim() !== '').map(l => {
+  let v: Record<string, unknown>;
+  try { v = JSON.parse(l); } catch { return { at: null, error: 'unparseable line' }; }
+  if (typeof v?.at !== 'string' || !Number.isFinite(Date.parse(v.at))) return { at: null, error: 'line without a time' };
+  return Array.isArray(v.avgFreqKHz) ? (v as unknown as ThermalSample) : { at: v.at, error: String(v.error ?? 'no frequencies') };
+});

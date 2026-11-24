@@ -19,6 +19,12 @@ export type Job = {
   image?: string;
   minFreeGiB?: number;
   env?: Record<string, string>;
+  // Docker label of the containers the job starts (`docker ps --filter label=...`). Before HOST-BUSY
+  // is released, any still running are removed and their absence is confirmed.
+  workloadLabel?: string;
+  // Maintainer confirmations of conditions the host cannot read (for example #796 L3 airflow),
+  // quoted from chat with their date, copied into the chain's session.json.
+  confirmations?: Record<string, { quote: string; date: string }>;
   // #796 cooling plan: host settings that must hold before the job (unreadable is a STOP), a
   // cool-down wait before it (Tctl at most maxTctlC within maxWaitSeconds, else STOP) and a
   // thermal sample every thermalSampleSeconds while it runs.
@@ -44,6 +50,12 @@ function jobProblems(j: Record<string, unknown>, i: number): string[] {
   if (!isString(j.out) || !isAbsolute(j.out)) p.push(`${at}: out must be an absolute path`);
   if (j.gate !== undefined && !isArgv(j.gate)) p.push(`${at}: gate must be a non-empty argv`);
   if (j.minFreeGiB !== undefined && !(typeof j.minFreeGiB === 'number' && j.minFreeGiB >= 0)) p.push(`${at}: minFreeGiB must be a number >= 0`);
+  if (j.workloadLabel !== undefined && !(isString(j.workloadLabel) && /^[\w.\-/]+(=[\w.\-/]+)?$/.test(j.workloadLabel))) p.push(`${at}: workloadLabel must be key or key=value`);
+  const conf = j.confirmations as Record<string, unknown> | undefined;
+  if (conf !== undefined && (typeof conf !== 'object' || conf === null || Object.keys(conf).length === 0
+    || !Object.values(conf).every(c => isString((c as Record<string, unknown>)?.quote) && isString((c as Record<string, unknown>)?.date)))) {
+    p.push(`${at}: confirmations must map each condition to a quote and a date`);
+  }
   p.push(...coolingProblems(j, at));
   return p;
 }
