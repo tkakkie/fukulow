@@ -9,9 +9,9 @@ Raw logs, artifact directories and local paths outside Git may be gone ([2026-11
 
 ## Measurement hosts (#796)
 
-- **Mac (Apple M5):** formal today. #689, #519 and #426 B7 keep their Mac conditions; Mac results stay.
-- **Ubuntu (x86_64, Zen 5 + Zen 5c):** investigation only (not formal, never compared with Mac baselines or used for a gate) until it passes the #796 stability check; then formal, and the Mac is for development.
-- **Ubuntu conditions:** `host-record.ts --check` passes (AC, sleep targets masked, governor `performance`, update jobs and snap refresh held), `HOST-BUSY`, CPU sets `server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15`; each run attaches both ([harness](../load/harness-core/README.md)).
+- **Mac (Apple M5):** formal today. #689, #519 and #426 B7 keep their Mac conditions and results.
+- **Ubuntu (Zen 5 + Zen 5c):** investigation only (not formal, never compared with Mac baselines or used for a gate) until it passes the #796 stability check; then formal; the Mac is for development.
+- **Ubuntu conditions:** `load/host-record.ts --check` passes (AC, sleep masked, governor `performance`, update jobs off, snap held), boost on, `HOST-BUSY`, CPU sets `server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15`. Runs attach the sets and before/after host records; their temperatures and frequencies show throttling ([harness](../load/harness-core/README.md)).
 - **Moving a series:** never for a bad Mac result; it restarts with an Ubuntu baseline and criteria fixed first.
 
 ## Topic projection paging (#137)
@@ -98,9 +98,9 @@ Run overnight on an otherwise idle Mac with Node 26.13.1: `node load/search-m1.t
 
 ## Channel log design evidence (#160)
 
-2026-11-17 JST (PR #499). Settled Mac WAL at 250 ops/s, baseline/events-ids/log-ids: 5,190/5,197/5,434 B/op for create-1-17 and 42,511/42,703/43,051 B/op for mixed90-200-4000. Run `node load/log-compare/run.ts --diagnose --out /private/tmp/i160-diagnose --settle-fixture`. Two workloads at 50/250 ops/s, host-to-psql transport included.
+2026-11-17 JST (PR #499). Settled Mac WAL at 250 ops/s, baseline/events-ids/log-ids: 5,190/5,197/5,434 B/op for create-1-17 and 42,511/42,703/43,051 B/op for mixed90-200-4000. Run `node load/log-compare/run.ts --diagnose --out <dir> --settle-fixture`. Two workloads at 50/250 ops/s, host-to-psql transport included.
 
-Reference for the [Channel log decision](spec/realtime.md#measurement-status), from the INVALID full run. A cold recent 50-entry deleted-range page at 1M positions used 235/34,126/209 shared buffers across baseline/events-ids/log-ids. At 1M Messages, log-ids cutover blocked for about 3.7 s (455 MiB WAL, +153 MiB storage). Command at `1662d5d`: `node load/log-compare/run.ts --full --out /private/tmp/i160-full --rates 50,250,1000 --seconds 30 --max-seconds 15 --clients 16 --rounds 3`. Timing spread exceeded the rule. [Settled WAL](../load/measurements-archive.md#160-log-comparison-wal-variance-diagnose-2026-11-17-jst) · [Replay and migration](../load/measurements-archive.md#160-log-comparison-replay-and-migration-reference-2026-11-17)
+Reference for the [Channel log decision](spec/realtime.md#measurement-status), from the INVALID full run. A cold recent 50-entry deleted-range page at 1M positions used 235/34,126/209 shared buffers across baseline/events-ids/log-ids. At 1M Messages, log-ids cutover blocked for about 3.7 s (455 MiB WAL, +153 MiB storage). Command at `1662d5d`: `node load/log-compare/run.ts --full --out <dir> --rates 50,250,1000 --seconds 30 --max-seconds 15 --clients 16 --rounds 3`. Timing spread exceeded the rule. [Settled WAL](../load/measurements-archive.md#160-log-comparison-wal-variance-diagnose-2026-11-17-jst) · [Replay and migration](../load/measurements-archive.md#160-log-comparison-replay-and-migration-reference-2026-11-17)
 
 ## Channel log send and replay (#515 slice 5)
 
@@ -136,7 +136,7 @@ Run `node load/pool-before-after.ts --out <dir>` at `ee36849` with the external 
 
 2026-11-18 JST, run 4 at `d3a9b28`. Open-loop HTTP with RLS, 16 requests per 100 ms, three repeats per shape with 10,000 successes each. Scheduled-start p95 was 27.508–28.282 ms for normal batches and 29.456–30.185 / 33.788–34.142 ms with 10,000/100,000-Reply chains. All met the [Reply count](spec/realtime.md#topic-reply-and-unread-projections-owners-137-topics-server-138-topics-web-139-replies-server-140-replies-web-142-unread) gate.
 
-Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal4-409`. Warm loopback on shared Mac, no writes, subscribers or proxy/TLS. [Full record](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst)
+Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out <dir>`. Warm loopback on shared Mac, no writes, subscribers or proxy/TLS. [Full record](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst)
 
 ## Revocation hold retry bursts (#592)
 
