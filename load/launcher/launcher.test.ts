@@ -19,7 +19,7 @@ type World = {
   // Thermal fakes: Tctl per reading (the last one repeats; null is unreadable), the clock that sleep advances,
   // the host record and the sampler's intervals and stops.
   tctl: (number | null)[]; clock: number; record?: HostRecord; noThermal?: boolean; everyMs: number[]; samplerStops: number;
-  freqs?: (number | null)[]; thermalThrows?: boolean;
+  freqs?: (number | null)[]; procStat?: (number[] | null)[] | null; thermalThrows?: boolean;
   signal?: { at: 'wait' | 'job' | 'gate'; handler?: (s: string) => void };
   // Workload fakes: the process group's liveness, the signals sent to it, `docker ps --filter label=`
   // answers (the last repeats) and the removed containers.
@@ -44,7 +44,9 @@ function deps(w: World, platform?: Platform): Deps {
       if (w.noThermal) return null;
       if (w.thermalThrows) throw new Error('EIO');
       const t = w.tctl.length > 1 ? w.tctl.shift()! : w.tctl[0];
-      return { at: now.toISOString(), avgFreqKHz: w.freqs ?? [3_000_000], temperaturesC: (t === null ? {} : { 'k10temp/Tctl': t }) as Record<string, number>, fansRpm: {} };
+      const avgFreqKHz = w.freqs ?? [3_000_000];
+      const procStat = w.procStat === undefined ? avgFreqKHz.map(() => [1, 0, 0, 1, 0, 0, 0, 0]) : w.procStat;
+      return { at: now.toISOString(), avgFreqKHz, procStat, temperaturesC: (t === null ? {} : { 'k10temp/Tctl': t }) as Record<string, number>, fansRpm: {} };
     } };
   return {
     platform: p,
@@ -315,6 +317,8 @@ test('thermal samples are taken while the job runs and stop when it exits, even 
     [{ thermalThrows: true }, /thermal sample failed: Error: EIO/],
     [{ freqs: [3_000_000, null, 3_000_000, null] }, /CPU frequency unreadable on CPU 1,3/],
     [{ freqs: [] }, /no CPU frequencies/],
+    [{ procStat: null }, /\/proc\/stat unreadable/],
+    [{ freqs: [3_000_000, 3_000_000], procStat: [[1, 0, 0, 1, 0, 0, 0, 0]] }, /\/proc\/stat counters unreadable on CPU 1/],
   ];
   for (const [over, pattern] of cases) {
     const bad = world(over);
@@ -491,7 +495,7 @@ test('a failed first sampler read after a passed preflight blocks the spawn', as
       const m = mode(++n);
       if (m === 'throw') throw new Error('EIO');
       if (m === 'none') return null;
-      return { at: now.toISOString(), avgFreqKHz: [m === 'unreadable' ? null : 3_000_000], temperaturesC: {}, fansRpm: {} };
+      return { at: now.toISOString(), avgFreqKHz: [m === 'unreadable' ? null : 3_000_000], procStat: [[1, 0, 0, 1, 0, 0, 0, 0]], temperaturesC: {}, fansRpm: {} };
     } };
     const r = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), d);
     assert.match(r.reason ?? '', pattern);

@@ -117,7 +117,8 @@ export function preflight(d: Deps, q: Queue, job: Job, record: HostRecord): stri
 }
 
 // The sampler must work before the job starts: a failed read, or any CPU without a measured
-// frequency, is a STOP (the CPU sets are subsets of all CPUs).
+// frequency or /proc/stat counters (the judge's activity rule needs both), is a STOP (the CPU sets
+// are subsets of all CPUs).
 export function samplerProblems(d: Deps): string[] {
   let s;
   try { s = d.platform.thermal(d.now()); } catch (e) { return [`thermal sample failed: ${String(e)}`]; }
@@ -127,7 +128,11 @@ function sampleProblems(s: ThermalSample | null): string[] {
   if (s === null) return ['no thermal readings on this platform'];
   const unreadable = s.avgFreqKHz.flatMap((f, cpu) => (f === null ? [cpu] : []));
   if (s.avgFreqKHz.length === 0) return ['no CPU frequencies in the thermal sample'];
-  return unreadable.length > 0 ? [`CPU frequency unreadable on CPU ${unreadable.join(',')}`] : [];
+  const p = unreadable.length > 0 ? [`CPU frequency unreadable on CPU ${unreadable.join(',')}`] : [];
+  if (!Array.isArray(s.procStat)) return [...p, '/proc/stat unreadable'];
+  const stat = s.procStat;
+  const noStat = s.avgFreqKHz.flatMap((_, cpu) => (Array.isArray(stat[cpu]) ? [] : [cpu]));
+  return noStat.length > 0 ? [...p, `/proc/stat counters unreadable on CPU ${noStat.join(',')}`] : p;
 }
 
 // Wall-clock set events in the system journal (maintainer decision on PR #875, option 1b). A step
@@ -362,7 +367,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     return problems;
   };
   // One sample before the spawn, then every thermalSampleSeconds, into <job>-thermal.jsonl. The first
-  // sample must succeed with every CPU's frequency readable, or the job does not start (the string
+  // sample must succeed with every CPU's frequency and counters readable, or the job does not start (the string
   // returned). Later, a failed read is kept as an error line, so a gap is visible instead of
   // silently missing; a failed write aborts.
   const sampleThermal = (job: Job, seconds: number): string | (() => void) => {
