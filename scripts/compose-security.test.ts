@@ -296,7 +296,7 @@ test('both proxies enforce browser headers with removal weakening and inheritanc
       }
     }
   }
-  const app = readFileSync(new URL('../server/src/lib.rs', import.meta.url), 'utf8')
+  const app = readFileSync(new URL('../server/src/security_headers.rs', import.meta.url), 'utf8')
   assert.ok(app.includes(`const PERMISSIONS_POLICY: &str = "${permissionsPolicy}";`), 'direct app policy must agree with proxies')
 })
 
