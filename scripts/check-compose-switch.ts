@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { acmeFixture, caActivity, certificate, checkStartupReuse, checkVerifiedTls, nodeImage, pebbleIssuingRoot, poll, testDomain } from './compose-acme.ts'
+import type { ReuseObservation } from './compose-acme.ts'
 
 type Proxy = 'caddy' | 'nginx'
 type Mode = Proxy | 'none'
@@ -125,7 +126,7 @@ async function serving(proxy: Proxy, root: string, untrustedCa: string) {
 }
 
 // Returning to a profile must reuse its persisted certificate and account: no order.
-async function reused(proxy: Proxy, before: { serial: string, orders: number, accounts: number }, root: string, untrustedCa: string) {
+async function reused(proxy: Proxy, before: ReuseObservation, root: string, untrustedCa: string) {
   const serial = await serving(proxy, root, untrustedCa)
   const readyAt = Date.now()
   await poll(`${proxy} reuse observation`, async () => {
