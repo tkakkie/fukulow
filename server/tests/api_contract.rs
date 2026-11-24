@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 
 use axum::{
+    Router,
     body::{Body, to_bytes},
-    http::{Request, header},
+    http::{Request, StatusCode, header},
 };
 use fukulow_server::{
     AppState, app,
@@ -393,6 +394,114 @@ async fn shutdown_rejects_every_api_operation_and_static_requests_with_retry_con
             json!({"error": "shutting_down"})
         );
     }
+}
+
+async fn check_openapi_routes(
+    router: Router,
+    paths: &serde_json::Map<String, Value>,
+) -> Result<usize, String> {
+    let mut checked = 0;
+    let id = Uuid::nil().to_string();
+    for (path, item) in paths {
+        assert!(path.starts_with("/api/v1/"), "{path} is outside the API");
+        let uri = path
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') && segment.ends_with('}') {
+                    id.as_str()
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        for method in HTTP_METHODS {
+            if item.get(method).is_none() {
+                continue;
+            }
+            let method = method.to_ascii_uppercase();
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.as_str())
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            // API handlers can return a JSON 404. The router's API fallback is bare.
+            if status == StatusCode::METHOD_NOT_ALLOWED
+                || (status == StatusCode::NOT_FOUND
+                    && !response.headers().contains_key(header::CONTENT_TYPE)
+                    && to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap()
+                        .is_empty())
+            {
+                return Err(format!("{method} {path}: {status}"));
+            }
+            checked += 1;
+        }
+    }
+    Ok(checked)
+}
+
+#[tokio::test]
+async fn every_committed_openapi_operation_is_routed() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    pool.close().await;
+    let router = app(AppState {
+        pool,
+        shutdown: Default::default(),
+        cookie_secure: true,
+        setup_token: "setup-token-test-only".into(),
+        sign_in_throttle: Default::default(),
+        account_security_throttle: Default::default(),
+        message_delivery: Default::default(),
+        session_changes: Default::default(),
+        session_cleanup: Default::default(),
+        ws_allowed_origins: Default::default(),
+        socket_gate: Default::default(),
+    });
+    let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
+    assert_eq!(
+        check_openapi_routes(router, committed["paths"].as_object().unwrap()).await,
+        Ok(EXPECTED_API_OPERATIONS)
+    );
+}
+
+#[tokio::test]
+async fn openapi_route_check_rejects_missing_path_or_method() {
+    use axum::routing::{get, post};
+
+    let path = "/api/v1/health";
+    let documented = json!({ (path): { "get": {} } });
+    let paths = documented.as_object().unwrap();
+    assert_eq!(
+        check_openapi_routes(
+            Router::new().route(path, get(|| async { StatusCode::OK })),
+            paths,
+        )
+        .await,
+        Ok(1)
+    );
+    assert_eq!(
+        check_openapi_routes(Router::new(), paths).await,
+        Err("GET /api/v1/health: 404 Not Found".into())
+    );
+    assert_eq!(
+        check_openapi_routes(
+            Router::new().route(path, post(|| async { StatusCode::OK })),
+            paths,
+        )
+        .await,
+        Err("GET /api/v1/health: 405 Method Not Allowed".into())
+    );
 }
 
 #[test]
