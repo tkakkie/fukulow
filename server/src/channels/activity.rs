@@ -1,5 +1,6 @@
 //! Organization notices are invalidations, never Message delivery or authorization grants.
 use super::*;
+use crate::{get_mut_ignoring_poison, lock_ignoring_poison};
 use auth::activity::ChangeScope;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -104,7 +105,7 @@ struct RecoveryState {
 }
 impl Recovery {
     fn valid(&self) -> bool {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = lock_ignoring_poison(&self.state);
         state.settled || state.live != 0
     }
 }
@@ -125,42 +126,30 @@ impl QueryToken {
     fn contribute(&self, recovery: &Arc<Recovery>) {
         // Each recipient query enqueues one contribution. Coalescing attaches its
         // token once; subsequent merges keep the same recovery accumulator.
-        let mut contribution = self.recovery.lock().unwrap_or_else(|e| e.into_inner());
+        let mut contribution = lock_ignoring_poison(&self.recovery);
         if contribution.is_none() && self.valid() {
-            recovery
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .live += 1;
+            lock_ignoring_poison(&recovery.state).live += 1;
             *contribution = Some(recovery.clone());
         }
     }
     fn retire(&self) {
-        let contribution = self.recovery.lock().unwrap_or_else(|e| e.into_inner());
+        let contribution = lock_ignoring_poison(&self.recovery);
         if self.valid.swap(false, Ordering::Relaxed)
             && let Some(recovery) = contribution.as_ref()
         {
-            recovery
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .live -= 1;
+            lock_ignoring_poison(&recovery.state).live -= 1;
         }
     }
 }
 impl Drop for QueryToken {
     fn drop(&mut self) {
         if self.valid()
-            && let Some(recovery) = self
-                .recovery
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
+            && let Some(recovery) = get_mut_ignoring_poison(&mut self.recovery).as_ref()
         {
             // No query guard, fallback snapshot or frame can fence this token
             // after its last owner drops. Retain its reset authority as one bit,
             // rather than retaining a growing list of completed query tokens.
-            let mut state = recovery.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = lock_ignoring_poison(&recovery.state);
             state.settled = true;
             state.live -= 1;
         }
@@ -268,7 +257,7 @@ impl Authorization {
         let id = Uuid::new_v4();
         let valid = Arc::new(QueryToken::new());
         let directory_epoch = {
-            let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut b = lock_ignoring_poison(&entry.buffer);
             let directory_epoch =
                 directory.then_some(expected_directory_epoch.unwrap_or(b.directory_epoch));
             if epoch == b.epoch {
@@ -292,7 +281,7 @@ impl Authorization {
         }
     }
     fn proved(&self, proof: &Option<Proof>) {
-        let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut b = lock_ignoring_poison(&self.entry.buffer);
         if self.epoch == b.epoch
             && (proof.as_ref().is_none_or(|proof| proof.role != Role::Guest)
                 || self
@@ -306,10 +295,7 @@ impl Authorization {
 }
 impl Drop for Authorization {
     fn drop(&mut self) {
-        self.entry
-            .buffer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        lock_ignoring_poison(&self.entry.buffer)
             .in_flight
             .remove(&self.id);
     }
@@ -394,12 +380,9 @@ pub(crate) struct Registration {
 impl Drop for Registration {
     fn drop(&mut self) {
         if let Some(registry) = self.registry.upgrade() {
-            registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&self.id);
+            lock_ignoring_poison(&registry).remove(&self.id);
         }
-        let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut b = lock_ignoring_poison(&self.entry.buffer);
         let Buffer {
             holds, revocations, ..
         } = &mut *b;
@@ -430,10 +413,7 @@ impl Activity {
             buffer: Default::default(),
             wake: Notify::new(),
         });
-        self.entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, entry.clone());
+        lock_ignoring_poison(&self.entries).insert(id, entry.clone());
         Registration {
             id,
             registry: Arc::downgrade(&self.entries),
@@ -441,15 +421,13 @@ impl Activity {
         }
     }
     fn snapshot(&self, organization: Uuid) -> Vec<(Arc<Entry>, u64)> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        lock_ignoring_poison(&self.entries)
             .values()
             .filter_map(|e| {
                 if e.organization != organization {
                     return None;
                 }
-                let b = e.buffer.lock().unwrap_or_else(|error| error.into_inner());
+                let b = lock_ignoring_poison(&e.buffer);
                 let epoch = b.epoch;
                 self.epochs
                     .as_ref()
@@ -470,7 +448,7 @@ impl Activity {
             .into_iter()
             .filter(|(e, _)| e.member.0 == member)
         {
-            let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut b = lock_ignoring_poison(&entry.buffer);
             match retirement {
                 Retirement::Mutation(captures) => {
                     if let Some(capture) = captures.get(&entry.id) {
@@ -487,12 +465,12 @@ impl Activity {
     }
     fn advance_directory_epochs(&self, organization: Uuid) -> HashMap<Uuid, u64> {
         let mut epochs = HashMap::new();
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = lock_ignoring_poison(&self.entries);
         for entry in entries
             .values()
             .filter(|entry| entry.organization == organization)
         {
-            let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut b = lock_ignoring_poison(&entry.buffer);
             b.directory_epoch = b.directory_epoch.wrapping_add(1);
             b.pending
                 .retain(|pending| pending.directory_epoch.is_none());
@@ -533,7 +511,7 @@ impl Activity {
         seq: i64,
     ) {
         let key = (organization, channel);
-        let mut batches = self.batches.lock().unwrap_or_else(|e| e.into_inner());
+        let mut batches = lock_ignoring_poison(&self.batches);
         if let Some(batch) = batches.get_mut(&key) {
             batch.add(sender, seq);
             return;
@@ -556,7 +534,7 @@ impl Activity {
             loop {
                 // Freeze sender maxima before starting authorization. New commits form the next batch.
                 let batch = {
-                    let mut batches = this.batches.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut batches = lock_ignoring_poison(&this.batches);
                     std::mem::take(batches.entry(key).or_default())
                 };
                 let work = this.publish(
@@ -570,7 +548,7 @@ impl Activity {
                     Some(&batch),
                 );
                 let _ = tokio::time::timeout(Duration::from_secs(10), work).await;
-                let mut batches = this.batches.lock().unwrap_or_else(|e| e.into_inner());
+                let mut batches = lock_ignoring_poison(&this.batches);
                 if batches.get(&key).is_none_or(ActivityBatch::is_empty) {
                     batches.remove(&key);
                     _lease.finished = true;
@@ -811,7 +789,7 @@ impl SectionsPublication {
     }
 }
 fn enqueue(entry: &Entry, mut pending: Pending) {
-    let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = lock_ignoring_poison(&entry.buffer);
     if !pending.valid.valid()
         || !pending.epoch.retained(&b)
         || pending
@@ -912,7 +890,7 @@ impl Registration {
             )
             .await;
             let (pending, wake_at) = {
-                let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                let mut b = lock_ignoring_poison(&self.entry.buffer);
                 let now = Instant::now();
                 let Buffer {
                     holds, revocations, ..
@@ -936,7 +914,7 @@ impl Registration {
                     Some(self.entry.member.0),
                 )
                 .await;
-                let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                let mut b = lock_ignoring_poison(&self.entry.buffer);
                 if !pending.recoverable()
                     || !pending.epoch.retained(&b)
                     || pending
@@ -1035,7 +1013,7 @@ impl NoticeFrame {
             write(event).await
         });
         let mut first_poll = |cx: &mut std::task::Context<'_>, deadline: Option<Instant>| {
-            let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut b = lock_ignoring_poison(&self.entry.buffer);
             if !(self.valid.valid() || self.recovery.as_ref().is_some_and(|r| r.valid()))
                 || self
                     .directory_epoch
@@ -1113,7 +1091,7 @@ impl NoticeFrame {
                         Err(RecheckFailure::Deadline) => break None,
                         Err(RecheckFailure::Database) => {
                             if self.retry {
-                                let b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                                let b = lock_ignoring_poison(&self.entry.buffer);
                                 b.holds.recheck_error();
                             } else {
                                 let (mut b, now) = holds::lock_for_admission(&self.entry);
@@ -1132,7 +1110,7 @@ impl NoticeFrame {
         if first.is_none()
             && let Epoch::Revocation(capture) = &self.epoch
         {
-            let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut b = lock_ignoring_poison(&self.entry.buffer);
             let Buffer {
                 holds, revocations, ..
             } = &mut *b;
@@ -1180,7 +1158,7 @@ impl NoticeFrame {
         .await
         .map_err(|_| RecheckFailure::Deadline)?
         .map_err(|_| RecheckFailure::Database)?;
-        let mut b = self.entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut b = lock_ignoring_poison(&self.entry.buffer);
         if self.retry {
             b.apply_revocation_proof(check, proofs[0].as_ref(), Some(proofs[1].is_some()));
         } else {
@@ -1392,7 +1370,7 @@ impl auth::activity::ActivityChanges for Activity {
             let registrations = entries
                 .into_iter()
                 .map(|(entry, _)| {
-                    let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut b = lock_ignoring_poison(&entry.buffer);
                     (entry.id, b.revocations.capture(scope))
                 })
                 .collect();
@@ -1595,7 +1573,7 @@ impl Activity {
         #[cfg(test)]
         test_pause(organization, channel, "revocation", Some(target)).await;
         let captured: Vec<_> = {
-            let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            let entries = lock_ignoring_poison(&self.entries);
             change
                 .registrations
                 .iter()
@@ -1604,7 +1582,7 @@ impl Activity {
                     if entry.organization != organization || entry.member.0 != target {
                         return None;
                     }
-                    let _gate = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                    let _gate = lock_ignoring_poison(&entry.buffer);
                     let capture = capture.notice(channel, public, role)?;
                     let check = capture.check()?;
                     Some((entry.clone(), capture, check))
@@ -1627,7 +1605,7 @@ impl Activity {
         let (proofs, _) = proofs.as_chunks::<2>();
         for ((entry, capture, check), [identity, access]) in captured.into_iter().zip(proofs) {
             {
-                let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                let mut b = lock_ignoring_poison(&entry.buffer);
                 b.apply_revocation(check, identity.as_ref(), Some(access.is_some()));
             }
             if identity.is_none() {
@@ -1708,10 +1686,7 @@ enum Recheck {
 }
 impl Activity {
     pub(crate) async fn check(&self, pool: &sqlx::PgPool, scope: auth::SubscriptionScope) {
-        let entries: Vec<_> = self
-            .entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let entries: Vec<_> = lock_ignoring_poison(&self.entries)
             .values()
             .filter(|e| match scope {
                 auth::SubscriptionScope::All => true,
@@ -1725,7 +1700,7 @@ impl Activity {
         let mut organizations = std::collections::BTreeMap::<_, Vec<_>>::new();
         let mut revocation_cutoffs = HashMap::new();
         for entry in entries {
-            let b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let b = lock_ignoring_poison(&entry.buffer);
             let rows = organizations.entry(entry.organization).or_default();
             rows.extend(b.proofs.iter().map(|(&channel, proof)| {
                 (
@@ -1798,12 +1773,7 @@ impl Activity {
                 }
                 let Ok(proofs) = authorize_batch(pool, &selected).await else {
                     if let Some((entry, _)) = chunk.first() {
-                        entry
-                            .buffer
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .holds
-                            .recheck_error();
+                        lock_ignoring_poison(&entry.buffer).holds.recheck_error();
                     }
                     let mut seen = HashSet::new();
                     for (entry, row) in chunk {
@@ -1828,7 +1798,7 @@ impl Activity {
                             }
                             b
                         } else {
-                            entry.buffer.lock().unwrap_or_else(|e| e.into_inner())
+                            lock_ignoring_poison(&entry.buffer)
                         };
                         if let Recheck::Notice(notice) = row
                             && b.epoch == notice.epoch
@@ -1841,7 +1811,7 @@ impl Activity {
                 let proof = |index: usize| proofs[index].as_ref();
                 for ((entry, row), (index, access)) in chunk.iter().zip(offsets) {
                     let current = proof(index);
-                    let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut b = lock_ignoring_poison(&entry.buffer);
                     match row {
                         Recheck::Notice(notice) => notice.apply(&mut b, current),
                         Recheck::Revocation(check) => {
@@ -1864,10 +1834,7 @@ impl Drop for BatchLease {
         if self.finished {
             return;
         }
-        self.batches
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.key);
+        lock_ignoring_poison(&self.batches).remove(&self.key);
     }
 }
 

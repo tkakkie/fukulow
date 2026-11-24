@@ -1,5 +1,5 @@
 use super::Auth;
-use crate::AppState;
+use crate::{AppState, lock_ignoring_poison};
 use sqlx::PgPool;
 use std::{
     collections::{HashMap, HashSet},
@@ -90,7 +90,7 @@ impl Default for SessionChanges {
 
 impl SessionChanges {
     pub(crate) fn set_activity(&self, hook: super::activity::Hook) {
-        *self.activity.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+        *lock_ignoring_poison(&self.activity) = Some(hook);
     }
     pub(crate) async fn capture_activity(
         &self,
@@ -99,11 +99,7 @@ impl SessionChanges {
         target: Uuid,
         scope: super::activity::ChangeScope,
     ) -> Result<Option<Box<dyn super::activity::ActivityChange>>, sqlx::Error> {
-        let hook = self
-            .activity
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let hook = lock_ignoring_poison(&self.activity).clone();
         match hook {
             Some(hook) => hook
                 .capture(connection, organization, target, scope)
@@ -118,44 +114,28 @@ impl SessionChanges {
         organization: Uuid,
         change: super::activity::ChannelChange,
     ) {
-        let hook = self
-            .activity
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let hook = lock_ignoring_poison(&self.activity).clone();
         if let Some(hook) = hook {
             hook.channel(pool, organization, change);
         }
     }
     pub(crate) fn directory_changed(&self, pool: PgPool, organization: Uuid, target: Uuid) {
-        let hook = self
-            .activity
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let hook = lock_ignoring_poison(&self.activity).clone();
         if let Some(hook) = hook {
             hook.directory(pool, organization, target);
         }
     }
     /// Not started is normal; reuse the supervisor's latched exit state.
     pub(crate) fn fallback_available(&self) -> bool {
-        !self
-            .sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .unavailable
+        !lock_ignoring_poison(&self.sessions).unavailable
     }
 
     pub fn set_subscription_recheck(&self, check: Arc<dyn SubscriptionRecheck>) {
-        *self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()) = Some(check);
+        *lock_ignoring_poison(&self.subscriptions) = Some(check);
     }
 
     pub(crate) async fn recheck_subscriptions(&self, pool: &PgPool, scope: SubscriptionScope) {
-        let check = self
-            .subscriptions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let check = lock_ignoring_poison(&self.subscriptions).clone();
         if let Some(check) = check
             && !matches!(
                 tokio::time::timeout(CHECK_TIMEOUT, check.check(pool, scope)).await,
@@ -177,7 +157,7 @@ impl SessionChanges {
         account_id: Uuid,
         membership_revision: i64,
     ) -> Registration {
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = lock_ignoring_poison(&self.sessions);
         let unavailable = sessions.unavailable;
         let signal = sessions.entries.entry(key.clone()).or_insert_with(|| {
             watch::channel(SessionStatus {
@@ -258,7 +238,7 @@ impl SessionChanges {
     }
 
     pub(super) fn revoked(&self, hash: Vec<u8>) {
-        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions = lock_ignoring_poison(&self.sessions);
         if let Some(keys) = sessions.by_token.get(&hash) {
             for key in keys {
                 if let Some(signal) = sessions.entries.get(key) {
@@ -268,7 +248,7 @@ impl SessionChanges {
         }
     }
     pub(super) fn membership_revoked(&self, organization: Uuid, account_id: Uuid, revision: i64) {
-        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions = lock_ignoring_poison(&self.sessions);
         if let Some(keys) = sessions.by_member.get(&(organization, account_id)) {
             for key in keys {
                 if let Some(signal) = sessions.entries.get(key)
@@ -306,11 +286,7 @@ struct RegistrationGuard {
 }
 impl Drop for RegistrationGuard {
     fn drop(&mut self) {
-        let mut sessions = self
-            .registry
-            .sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut sessions = lock_ignoring_poison(&self.registry.sessions);
         // Registration and last-receiver removal use the same lock as sign-out.
         if sessions
             .entries

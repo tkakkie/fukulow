@@ -46,7 +46,7 @@ for (const role of ['owner', 'admin', 'member', 'guest'] as const) {
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
     try {
       await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)
-      await page.locator('summary').click()
+      await page.locator('details.member-list > summary').click()
       await expect(page.getByRole('button', { name: '自分を無効化', exact: true })).toHaveCount(0)
       await expect(page.getByRole('button', { name: '別のオーナーを無効化', exact: true })).toHaveCount(role === 'owner' ? 1 : 0)
       const action = page.getByRole('button', { name: '対象メンバーを無効化', exact: true })
@@ -65,7 +65,7 @@ for (const role of ['owner', 'admin', 'member', 'guest'] as const) {
       await action.click()
       await dialog.getByRole('button', { name: '無効化する', exact: true }).click()
       await expect(action).toHaveCount(0)
-      await expect(page.locator('summary')).toBeFocused()
+      await expect(page.locator('details.member-list > summary')).toBeFocused()
       expect(requests).toBe(2)
     } finally {
       await page.goto('about:blank')

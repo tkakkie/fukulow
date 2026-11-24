@@ -1,6 +1,7 @@
+use crate::lock_ignoring_poison;
 use std::{
     collections::HashMap,
-    sync::{Mutex, PoisonError},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -38,7 +39,7 @@ impl Limiter {
     }
 
     pub(super) fn acquire(&self, member: Member) -> Option<Permit<'_>> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = lock_ignoring_poison(&self.state);
         state.acquire(member, Instant::now(), self.burst)?;
         Some(Permit {
             limiter: self,
@@ -79,11 +80,7 @@ pub(super) struct Permit<'a> {
 
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        let mut state = self
-            .limiter
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut state = lock_ignoring_poison(&self.limiter.state);
         if let Some(entry) = state.members.get_mut(&self.member) {
             entry.active = false;
         }

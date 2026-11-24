@@ -460,6 +460,18 @@ export class MiniElement extends MiniNode {
     else this.attrs.delete('disabled')
   }
 
+  get open(): boolean {
+    return this.attrs.has('open')
+  }
+
+  set open(v: boolean) {
+    const next = Boolean(v)
+    const prev = this.attrs.has('open')
+    if (next) this.attrs.set('open', '')
+    else this.attrs.delete('open')
+    if (this.tagName === 'DETAILS' && next !== prev) this.dispatchEvent(new MiniDomEvent('toggle'))
+  }
+
   get type(): string {
     return this.attrs.get('type') ?? (this.tagName === 'BUTTON' ? 'submit' : '')
   }
@@ -591,6 +603,10 @@ export class MiniElement extends MiniNode {
     }
     const evt = new MiniDomEvent('click', { bubbles: true, cancelable: true })
     this.dispatchEvent(evt)
+    const parent = this.parentNode
+    if (!evt.defaultPrevented && this.tagName === 'SUMMARY' && parent instanceof MiniElement && parent.tagName === 'DETAILS') {
+      parent.open = !parent.open
+    }
     const submitMode = opts?.clickSubmit ?? 'default'
     if (
       submitMode !== 'never' &&

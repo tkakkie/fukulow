@@ -436,8 +436,9 @@ describe('ArchivedChannelList UI', () => {
           flushSync()
 
           // Initially collapsed: archived list is NOT held or fetched
-          const toggle = host.querySelector('button')!
-          expect(toggle.getAttribute('aria-expanded')).toBe('false')
+          const details = host.querySelector('details')!
+          const toggle = host.querySelector('summary')!
+          expect(details.open).toBe(false)
           expect(listArchivedChannels).not.toHaveBeenCalled()
 
           // Expand: holds target and fetches archived channels
@@ -445,7 +446,7 @@ describe('ArchivedChannelList UI', () => {
           flushSync()
           await vi.advanceTimersByTimeAsync(200)
           flushSync()
-          expect(toggle.getAttribute('aria-expanded')).toBe('true')
+          expect(details.open).toBe(true)
           expect(listArchivedChannels).toHaveBeenCalledTimes(1)
 
           const items = host.querySelectorAll('li')
@@ -464,6 +465,7 @@ describe('ArchivedChannelList UI', () => {
           // Collapse: releases hold and clears archivedList
           toggle.click()
           flushSync()
+          expect(details.open).toBe(false)
           expect(adapter.state.archivedList).toBeUndefined()
           listArchivedChannels.mockClear()
           net.event({ type: 'channel_list_changed' })
@@ -479,6 +481,117 @@ describe('ArchivedChannelList UI', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('opens and closes on click and mounts content only when open', async () => {
+    await withDom(async (doc) => {
+      const host = doc.createElement('div')
+      doc.body.appendChild(host)
+      const release = vi.fn()
+      const onhold = vi.fn(() => release)
+      const archivedRow = { ...row({ id: 'arch-1', name: 'archived-room' }), archived: true }
+      const inst = mount(ArchivedChannelList, {
+        target: host as unknown as Element,
+        props: {
+          list: { status: 'ready', channels: [archivedRow] },
+          selectedId: null,
+          onhold,
+          onretry: vi.fn(),
+          onselect: vi.fn(),
+        },
+      })
+      flushSync()
+
+      const details = host.querySelector('details')!
+      const summary = host.querySelector('summary')!
+      expect(details.open).toBe(false)
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBeNull()
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(onhold).not.toHaveBeenCalled()
+
+      // Click opens and mounts content
+      summary.click()
+      flushSync()
+      expect(details.open).toBe(true)
+      expect(host.querySelector('.archived-list__body')).not.toBeNull()
+      expect(host.querySelectorAll('li')).toHaveLength(1)
+      expect(onhold).toHaveBeenCalledTimes(1)
+
+      // Click closes and unmounts content
+      summary.click()
+      flushSync()
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(release).toHaveBeenCalledTimes(1)
+
+      await unmount(inst)
+    })
+  })
+
+  it('exposes aria-disabled without inert, prevents opening while disabled and collapses/unmounts if disabled while open', async () => {
+    await withDom(async (doc) => {
+      const host = doc.createElement('div')
+      doc.body.appendChild(host)
+      const release = vi.fn()
+      const onhold = vi.fn(() => release)
+      const archivedRow = { ...row({ id: 'arch-1', name: 'archived-room' }), archived: true }
+      const state = $state({ disabled: true })
+      const inst = mount(ArchivedChannelList, {
+        target: host as unknown as Element,
+        props: {
+          list: { status: 'ready', channels: [archivedRow] },
+          selectedId: null,
+          get disabled() { return state.disabled },
+          onhold,
+          onretry: vi.fn(),
+          onselect: vi.fn(),
+        },
+      })
+      flushSync()
+
+      const details = host.querySelector('details')!
+      const summary = host.querySelector('summary')!
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBe('true')
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+
+      // Click cannot open while disabled
+      summary.click()
+      flushSync()
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(onhold).not.toHaveBeenCalled()
+
+      // Even a direct open mutation is rejected while disabled
+      details.open = true
+      flushSync()
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(onhold).not.toHaveBeenCalled()
+
+      // Re-enabling allows opening; disabling again collapses, unmounts and releases hold
+      state.disabled = false
+      flushSync()
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBeNull()
+      summary.click()
+      flushSync()
+      expect(details.open).toBe(true)
+      expect(host.querySelector('.archived-list__body')).not.toBeNull()
+      expect(onhold).toHaveBeenCalledTimes(1)
+
+      state.disabled = true
+      flushSync()
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBe('true')
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(release).toHaveBeenCalledTimes(1)
+
+      await unmount(inst)
+    })
   })
 })
 
@@ -529,7 +642,7 @@ describe('ArchivedChannelList retry', () => {
             },
           })
           flushSync()
-          host.querySelector('button')!.click()
+          host.querySelector('summary')!.click()
           flushSync()
           await vi.advanceTimersByTimeAsync(300)
           flushSync()

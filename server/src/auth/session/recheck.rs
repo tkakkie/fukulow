@@ -1,4 +1,5 @@
 use super::*;
+use crate::lock_ignoring_poison;
 use sqlx::PgConnection;
 use std::sync::Weak;
 
@@ -58,7 +59,7 @@ async fn supervise(
     let abnormal = result.is_err() || (sessions.is_some() && !pool.is_closed());
     if let Some(sessions) = sessions {
         // Admission and failure signalling share the registration lock.
-        let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = lock_ignoring_poison(&sessions);
         sessions.unavailable = true;
         for signal in sessions.entries.values() {
             signal.send_modify(|status| status.failed = true);
@@ -103,10 +104,7 @@ async fn run(
             &gate,
         )
         .await;
-        let check = subscriptions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let check = lock_ignoring_poison(&subscriptions).clone();
         if let Some(check) = check
             && (!matches!(
                 tokio::time::timeout_at(bound, check.check(&pool, SubscriptionScope::All)).await,
@@ -114,12 +112,7 @@ async fn run(
             ) || Instant::now() >= bound)
         {
             check.failed(SubscriptionScope::All);
-            for signal in sessions
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entries
-                .values()
-            {
+            for signal in lock_ignoring_poison(&sessions).entries.values() {
                 signal.send_modify(|status| status.failed = true);
             }
         }
@@ -135,9 +128,7 @@ async fn pass(
     bound: Instant,
     #[cfg(test)] gate: &Mutex<Option<Arc<super::tests::Gate>>>,
 ) {
-    let snapshot: Vec<_> = sessions
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    let snapshot: Vec<_> = lock_ignoring_poison(sessions)
         .entries
         .iter()
         .filter(|(_, signal)| {
