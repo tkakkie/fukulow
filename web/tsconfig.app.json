@@ -6,6 +6,8 @@
     "module": "esnext",
     "types": ["svelte", "vite/client"],
     "allowArbitraryExtensions": true,
+    // Test helpers import web/scripts modules, which use `.ts` paths so Node can run them directly (#866).
+    "allowImportingTsExtensions": true,
     "noEmit": true,
     /**
      * Typecheck JS in `.svelte` and `.js` files by default.

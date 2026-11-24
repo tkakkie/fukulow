@@ -680,11 +680,25 @@ function checkRecords(checks: Record<string, Json>[] | undefined, messages: Mess
     }
 }
 
-/** Loads one client scenario of the committed fixtures by id (for client runners). */
+/** Which files of a fixture kind directory a loader reads. Each caller keeps the set it had before #866. */
+export type ScenarioFileSet = { jsonOnly: boolean; sorted: boolean }
+
+/** The one scenario-file loader: yields each file's scenarios lazily, so a lookup stops at its first match. */
+export function* scenarioFiles<T = ClientScenario>(kind: 'delivery' | 'client', set: ScenarioFileSet, dir: string = defaultDir): Generator<T[]> {
+  let names = readdirSync(join(dir, kind))
+  if (set.jsonOnly) names = names.filter((n) => n.endsWith('.json'))
+  if (set.sorted) names = names.sort()
+  for (const name of names) yield (JSON.parse(readFileSync(join(dir, kind, name), 'utf8')) as { scenarios: T[] }).scenarios
+}
+
+/** Every client scenario, `.json` files in name order (fixture clients, measurement traces). */
+export const loadClientScenarios = (dir: string = defaultDir): ClientScenario[] =>
+  [...scenarioFiles('client', { jsonOnly: true, sorted: true }, dir)].flat()
+
+/** Loads one client scenario of the committed fixtures by id (for client runners). Reads every file name. */
 export function loadClientScenario(id: string, dir: string = defaultDir): ClientScenario {
-  for (const name of readdirSync(join(dir, 'client'))) {
-    const file = JSON.parse(readFileSync(join(dir, 'client', name), 'utf8')) as { scenarios: ClientScenario[] }
-    const found = file.scenarios.find((s) => s.id === id)
+  for (const scenarios of scenarioFiles('client', { jsonOnly: false, sorted: false }, dir)) {
+    const found = scenarios.find((s) => s.id === id)
     if (found) return found
   }
   throw new Error(`no client scenario ${id}`)
@@ -699,9 +713,8 @@ if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
     process.exit(1)
   }
   console.log(`realtime fixtures OK (${dir})`)
-  for (const kind of ['delivery', 'client']) {
-    const all = readdirSync(join(dir, kind)).filter((n) => n.endsWith('.json'))
-      .flatMap((n) => (JSON.parse(readFileSync(join(dir, kind, n), 'utf8')) as { scenarios: { id: string; proposed?: Proposed }[] }).scenarios)
+  for (const kind of ['delivery', 'client'] as const) {
+    const all = [...scenarioFiles<{ id: string; proposed?: Proposed }>(kind, { jsonOnly: true, sorted: false }, dir)].flat()
     const { running, proposed } = partitionScenarios(all)
     console.log(`  ${kind}: ${running.length} running, ${proposed.length} proposed (not executed by production runners)`)
     for (const s of proposed) console.log(`    proposed ${s.id} (owner ${s.proposed!.owner.join(', ')})${s.proposed!.note ? `: ${s.proposed!.note}` : ''}`)
