@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -47,3 +47,25 @@ test('an empty, duplicate, absolute or escaping provenance list fails', () => {
   assert.throws(() => harnessHashes(['load/../../x.ts'], root), /must be repository-relative/);
 });
 
+test('a __proto__ entry is an own key of the result, and listing it twice fails', () => {
+  const root = tree();
+  writeFileSync(join(root, '__proto__'), 'p');
+  const hashes = harnessHashes(['__proto__', 'load/a.ts'], root);
+  assert.deepEqual(Object.keys(hashes), ['__proto__', 'load/a.ts']);
+  assert.ok(Object.hasOwn(hashes, '__proto__'));
+  assert.equal(hashes['__proto__'], sha('p'));
+  assert.equal(Object.getPrototypeOf(hashes), Object.prototype);
+  assert.throws(() => harnessHashes(['__proto__', '__proto__'], root), /listed twice: __proto__/);
+});
+
+test('a listed symlink is hashed through its target inside the checkout and rejected when it leaves it', () => {
+  const root = tree();
+  const outside = mkdtempSync(join(tmpdir(), 'harness-provenance-outside-'));
+  writeFileSync(join(outside, 'secret.ts'), 's');
+  symlinkSync(join(root, 'load/a.ts'), join(root, 'load/inside-link.ts'));
+  symlinkSync(join(outside, 'secret.ts'), join(root, 'load/outside-link.ts'));
+  symlinkSync(outside, join(root, 'load/outside-dir'));
+  assert.deepEqual(harnessHashes(['load/inside-link.ts'], root), { 'load/inside-link.ts': sha('a') });
+  assert.throws(() => harnessHashes(['load/outside-link.ts'], root), /resolves outside the checkout: load\/outside-link\.ts/);
+  assert.throws(() => harnessHashes(['load/outside-dir/secret.ts'], root), /resolves outside the checkout/);
+});
