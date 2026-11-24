@@ -8,7 +8,7 @@ import { judge, judgeRun, sessionProblems, type RunInput } from './stability-jud
 const t0 = Date.parse('2026-11-25T00:00:00Z');
 const cpus = [0, 1, 2, 3, 4, 5, 6, 7];
 const cpuSets = { server: [0, 2, 4, 6], client: [1, 3, 5, 7] };
-const host = { platform: 'linux', logicalCpus: 4, boost: '0', policyBoost: { 0: [0, 1, 2, 3] }, platformProfile: 'performance', fanControl: { 'hp/pwm1_enable': 0 } } as unknown as HostRecord;
+const host = { platform: 'linux', logicalCpus: 4, boost: '0', policyBoost: { 0: [0, 1, 2, 3] }, platformProfile: 'performance', fanControl: { 'hp/pwm1_enable': 2 } } as unknown as HostRecord; // fan automatic: L1 dropped
 const arms = ['current', 'final', 'final', 'current', 'current', 'final'];
 const idle = () => ({ busy: false, otherContainers: [] as string[] });
 const airflow = { airflow: { quote: '蓋を開けて台に載せた', date: '2026-11-25' } };
@@ -449,7 +449,6 @@ test('a missing lever, cool-down, launch check, procedure or thermal record make
   const cases: [Partial<RunInput>, RegExp][] = [
     [{ hostBefore: { ...host, boost: '1' } as HostRecord }, /lever: boost is 1/],
     [{ hostBefore: { ...host, policyBoost: { 0: [0, 1], 1: [2, 3] } } as unknown as HostRecord }, /lever: per-CPU boost is not 0 on every CPU/],
-    [{ hostBefore: { ...host, fanControl: { 'hp/pwm1_enable': 2 } } as HostRecord }, /lever: fan control/],
     [{ hostBefore: { ...host, platformProfile: 'balanced' } as HostRecord }, /lever: platform profile/],
     [{ hostBefore: null }, /no host record/],
     [{ cooldown: null }, /no passed cool-down/],
@@ -467,6 +466,29 @@ test('a missing lever, cool-down, launch check, procedure or thermal record make
     const r = jr(run('s1', over));
     assert.equal(r.valid, false, String(pattern));
     assert.match(r.invalid.join('\n'), pattern);
+  }
+});
+
+test('the fan mode never decides validity (L1 dropped on #796), while boost, per-CPU boost and platform profile still do', () => {
+  for (const fanControl of [{ 'hp/pwm1_enable': 2 }, { 'hp/pwm1_enable': 0 }, {}, null]) {
+    const record = { ...host, fanControl } as HostRecord;
+    const r = jr(run('s1', { hostBefore: { ...record, launchSession: sid }, launchCheck: { ok: true, tctlC: 48, record, launchSession: sid } }));
+    assert.deepEqual([r.valid, r.invalid], [true, []], JSON.stringify(fanControl));
+  }
+  const fan = { fanControl: { 'hp/pwm1_enable': 2 } };
+  const wrong: [Record<string, unknown>, RegExp][] = [
+    [{ boost: '1' }, /boost is 1, required 0/],
+    [{ policyBoost: { 0: [0, 1], 1: [2, 3] } }, /per-CPU boost is not 0 on every CPU/],
+    [{ platformProfile: 'balanced' }, /platform profile is balanced, required performance/],
+  ];
+  for (const [over, pattern] of wrong) {
+    const record = { ...host, ...fan, ...over } as unknown as HostRecord;
+    const before = jr(run('s1', { hostBefore: { ...record, launchSession: sid } }));
+    assert.equal(before.valid, false, String(pattern));
+    assert.match(before.invalid.join('\n'), new RegExp('lever: ' + pattern.source));
+    const atLaunch = jr(run('s1', { launchCheck: { ok: true, tctlC: 48, record, launchSession: sid } }));
+    assert.equal(atLaunch.valid, false, String(pattern));
+    assert.match(atLaunch.invalid.join('\n'), new RegExp('lever at launch: ' + pattern.source));
   }
 });
 

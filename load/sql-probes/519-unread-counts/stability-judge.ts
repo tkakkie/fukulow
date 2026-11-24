@@ -4,12 +4,13 @@ import type { PgbenchWindow } from './probe.ts';
 import type { Session } from '../../launcher/launcher.ts';
 
 // Second #796 stability check (pre-registered on #796 and approved 2026-11-24, before any run):
-// 3 consecutive runs of the #519 send diagnosis with cooling levers L1 (fan full speed), L2 (boost
-// off), L3 (airflow, confirmed by the maintainer and recorded in the launcher session) and L5
-// (cool-down gate). Pass criteria are the first check's. The lever, procedure and throttle rules
-// can only fail a run.
+// 3 consecutive runs of the #519 send diagnosis with cooling levers L2 (boost off), L3 (airflow,
+// confirmed by the maintainer and recorded in the launcher session) and L5 (cool-down gate). Pass
+// criteria are the first check's. The lever, procedure and throttle rules can only fail a run.
+// L1 (fan full speed) was dropped (maintainer decision on #796, 2026-11-24, option A: the firmware
+// rejects the write), so the fan stays automatic: the host record keeps its mode and speeds, never judged.
 
-export const levers = { boost: '0', policyBoost: '0', platformProfile: 'performance', fanControl: { 'hp/pwm1_enable': 0 } };
+export const levers = { boost: '0', policyBoost: '0', platformProfile: 'performance' };
 export const cooldown = { maxTctlC: 50, maxWaitSeconds: 1200 };
 export const sampleSeconds = 5;
 export const runsRequired = 3;
