@@ -15,6 +15,25 @@ Plumbing that every measurement harness needs, so a fix lands once. New harnesse
   - `linuxViolations` lists the unmet Linux measurement conditions.
   - `node load/host-record.ts --out FILE --check` exits 3 on any violation.
 - `cpusets.ts` (#796): `--cpu-sets "server=LIST;client=LIST"`, checked to be disjoint. Processes are pinned with `taskset`, and the pin is read back from `/proc/<pid>/status`.
+- `provenance.ts` (#866): `harnessHashes(paths)`, the SHA-256 of each listed file. A missing file, an empty or duplicate list, an absolute or escaping path, or a symlink resolving outside the checkout throws.
+- `provenance-coverage.ts` (#866, tests only): `missingFromProvenance(entries, list)` returns the entries and every local file they reach that the list lacks. It follows imports (type-only included) and `new URL('<literal>', import.meta.url)` loads, transitively. Any other `import.meta` form that may name a file (a non-literal URL, `import.meta.dirname`, a directory URL) throws; teach the walker the form or use the literal one. Working-directory reads such as `readFileSync('compose.yml')` are not seen, so those stay listed by hand.
+- `nearest-rank.ts` (#866): `nearestRank(sorted, fraction, outOfRange)` and `nearestRankIndex(length, fraction, outOfRange)` for samples that are not plain numbers (the #515 app rows, sorted by latency with an ID tie-break). Empty input gives `undefined`. `outOfRange` keeps each copy's clamping: `clamp`, `clamp-low`, `clamp-high` or `none`, listed per copy in the source; the default `reject` throws.
+- `checkout.ts` (#866): `outsideCheckout(path, checkout, symlinks)`. A relative path is never outside.
+
+Adoption (#866): a harness moves to these only when it next changes, never in a frozen file. It keeps a thin local wrapper for its scale and its empty-input result (null, NaN, 0, a throw), because those feed different INVALID / NOT EVALUATED rules. Each adoption adds a same-input equality test against the old copy. `nearest-rank.test.ts` and `checkout.test.ts` hold such wrappers for every current copy.
+
+`outsideCheckout` wrappers (checkout from the working directory, as today):
+- `proxy-target.ts` and its callers: `resolve` mode on the raw path; a symlink is followed both ways.
+- `dms-workload.ts` (dms-record, dms-seed, dms-instrument, dms-formal-seed) and `log-compare/options.ts`: `lexical` mode on `resolve(raw)`. Keep the `resolve`: dms-record accepts `../out/new` only through it.
+- `dms-formal-config.ts` `external`: keep its own realpath step (a missing parent throws), then `lexical` mode.
+- `signin.ts`, `signin-owner.ts`: `lexical` mode on `resolve(raw)`. One decision changes: a checkout child whose name starts with `..` (`<checkout>/..cache`) is accepted today and rejected by the kit. The adoption PR must say so.
+
+Medians are named here, not unified, because their even-count and empty results differ:
+- mean of the two middle values: `proxy-judgment.ts`, `signin-owner-burst-locks.ts`, `revocation-holds-memory.ts` (empty: NaN), `dms-formal-seed-samplers.ts` (empty: null), `thermal.ts`, `search-engines/diagnose-870/judge.ts`;
+- upper middle value `sorted[floor(n / 2)]`: `slice5/judge.ts`, `hot-plans/fanout.ts`;
+- middle of exactly three: `search-m1-report.ts`;
+- lower middle by nearest rank, clamped, empty throws: `sql-probes/519-unread-counts/probe.ts` (`quantile(xs, 0.5)`, the stop-rule median);
+- lower middle by nearest rank, empty `undefined`: `search-engines/summarize.ts` (frozen).
 
 ## Launching runs (#867)
 

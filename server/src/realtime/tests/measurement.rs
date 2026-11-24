@@ -83,22 +83,17 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
         }
         panic!("cold measurement socket ended before all live Messages");
     });
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
+    let gate = Arc::new(Gate::default());
     let holder = {
         let delivery = f.state.message_delivery.clone();
         let gate = gate.clone();
         let org = f.organization;
         let channel = f.channel;
         tokio::spawn(async move {
-            delivery
-                .hold_publication_cursor(org, channel, &gate.entered, &gate.release)
-                .await;
+            delivery.hold_publication_cursor(org, channel, &gate).await;
         })
     };
-    entered(&gate).await;
+    gate.entered().await;
     let start = std::time::Instant::now();
     let mut requests = tokio::task::JoinSet::new();
     for _ in 0..sends {
@@ -171,7 +166,7 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     }
     ready(&mut first, f.channel, accepted as i64).await;
     watch_close(&mut clients, first);
-    gate.release.add_permits(1);
+    gate.release();
     holder.await.unwrap();
     f.state.message_delivery.flush().await;
     let cursor = f
@@ -330,21 +325,18 @@ async fn organization_reservation_probe(
     let mut hot = Vec::new();
     for _ in 0..offered.div_ceil(40) {
         let channel = channel(&pool, f.organization, f.member, false).await;
-        let gate = Arc::new(Gate {
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        });
+        let gate = Arc::new(Gate::default());
         let holder = {
             let delivery = f.state.message_delivery.clone();
             let gate = gate.clone();
             let organization = f.organization;
             tokio::spawn(async move {
                 delivery
-                    .hold_publication_cursor(organization, channel, &gate.entered, &gate.release)
+                    .hold_publication_cursor(organization, channel, &gate)
                     .await;
             })
         };
-        entered(&gate).await;
+        gate.entered().await;
         holders.push((gate, holder));
         hot.push(channel);
     }
@@ -409,7 +401,7 @@ async fn organization_reservation_probe(
     }
     let replay_ms = start.elapsed().as_secs_f64() * 1000.0;
     for (gate, holder) in holders {
-        gate.release.add_permits(1);
+        gate.release();
         holder.await.unwrap();
     }
     f.state.message_delivery.flush().await;

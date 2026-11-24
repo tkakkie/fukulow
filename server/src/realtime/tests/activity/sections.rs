@@ -1,6 +1,6 @@
 use super::*;
 use crate::channels::{
-    activity::{Notice, Registration, TestFault, TestGate, fail, pause_member},
+    activity::{Notice, Registration, TestFault, fail, pause_member},
     tests::{body, extract_auth},
 };
 use sqlx::postgres::{PgPoolOptions, PgSslMode};
@@ -58,16 +58,8 @@ async fn quiet(registration: &Registration) {
     );
 }
 
-fn gate(f: &Fixture, phase: &'static str, member: Option<Uuid>) -> Arc<TestGate> {
+fn gate(f: &Fixture, phase: &'static str, member: Option<Uuid>) -> Arc<Gate> {
     pause_member(f.organization, Uuid::nil(), phase, member)
-}
-
-async fn reached(gate: &TestGate) {
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
 }
 
 #[fukulow_test::test]
@@ -214,13 +206,13 @@ async fn section_notices_are_private_even_for_guest_with_no_channels(pool: PgPoo
     let delivery = &f.state.message_delivery.channel_access.activity;
     let ready = gate(&f, "ready", Some(f.member));
     let mut guest = f.server.connect(&f.token).await;
-    reached(&ready).await;
+    ready.entered().await;
     assert_eq!(
         create(&f, Uuid::new_v4(), "Guest section").await.status(),
         StatusCode::CREATED
     );
     delivery.drained().await;
-    ready.release.add_permits(1);
+    ready.release();
     assert_eq!(
         raw_event(&mut guest).await,
         json!({"type":"activity_ready"})
@@ -272,11 +264,11 @@ async fn section_notices_deny_inactive_members_even_with_matching_revision(pool:
     let id = Uuid::new_v4();
     let write = create(&f, id, "Before deactivation");
     let transition = async {
-        reached(&snapshot).await;
+        snapshot.entered().await;
         let revision: i64 = sqlx::query_scalar("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2 RETURNING membership_revision")
             .bind(f.organization).bind(f.member).fetch_one(&pool).await.unwrap();
         assert_eq!(auth.membership_revision, revision);
-        snapshot.release.add_permits(1);
+        snapshot.release();
     };
     let (response, ()) = tokio::join!(write, transition);
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -331,10 +323,10 @@ async fn section_notices_fence_observed_loss_at_enqueue_and_first_handoff(pool: 
         } else {
             let paused = gate(&f, phase, None);
             let transition = async {
-                reached(&paused).await;
+                paused.entered().await;
                 assert_loss.await;
                 let fresh = connect(&f, &f.token).await;
-                paused.release.add_permits(1);
+                paused.release();
                 fresh
             };
             let (response, fresh) = tokio::join!(create(&f, id, "Before loss"), transition);
@@ -512,7 +504,7 @@ async fn assert_failed_section_publication(pool: &PgPool, failure: PublicationFa
     let response = tokio::time::timeout_at(prompt, async {
         let query_paused = async {
             if let Some(query) = &query {
-                reached(query).await;
+                query.entered().await;
             }
         };
         tokio::join!(create(&f, id, name), query_paused).0

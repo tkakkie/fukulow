@@ -201,11 +201,11 @@ export const openDm = (org: string, body: components['schemas']['OpenDmRequest']
   call<components['schemas']['Dm']>(f, `${orgPath(org)}/dms`, { ...json(body), signal }, true)
 
 /** No cursor = latest page; pages are ascending by seq. */
-export const listMessages = (organizationId: string, channelId: string, query: ListMessagesQuery = {}, f: typeof fetch = fetch) => {
+export const listMessages = (organizationId: string, channelId: string, query: ListMessagesQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) => {
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(query)) if (v !== undefined) qs.set(k, String(v))
   const suffix = qs.size > 0 ? `?${qs}` : ''
-  return call<MessagePage>(f, `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}/messages${suffix}`, { cache: 'no-store' }, true)
+  return call<MessagePage>(f, `${orgPath(organizationId)}/channels/${encodeURIComponent(channelId)}/messages${suffix}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 }
 
 export const sendMessage = (organizationId: string, channelId: string, body: SendMessageRequest, f: typeof fetch = fetch) =>
@@ -257,8 +257,8 @@ const querySuffix = (query: object) => {
   return qs.size ? `?${qs}` : ''
 }
 
-export const listTimeline = (organizationId: string, channelId: string, query: ListTimelineQuery = {}, f: typeof fetch = fetch) =>
-  call<TimelinePage>(f, `${channelPath(organizationId, channelId)}/timeline${querySuffix(query)}`, { cache: 'no-store' }, true)
+export const listTimeline = (organizationId: string, channelId: string, query: ListTimelineQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<TimelinePage>(f, `${channelPath(organizationId, channelId)}/timeline${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export const listTopics = (organizationId: string, channelId: string, query: ListTopicsQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
   call<TopicPage>(f, `${channelPath(organizationId, channelId)}/topics${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
@@ -266,8 +266,8 @@ export const listTopics = (organizationId: string, channelId: string, query: Lis
 export const getTopicSummary = (organizationId: string, channelId: string, topicId: string, f: typeof fetch = fetch, signal?: AbortSignal, query: NonNullable<import('./api-schema').operations['topic_summary']['parameters']['query']> = {}) =>
   call<TopicSummaryResponse>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
-export const listTopicMessages = (organizationId: string, channelId: string, topicId: string, query: TopicHistoryQuery = {}, f: typeof fetch = fetch) =>
-  call<MessagePage>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}/messages${querySuffix(query)}`, { cache: 'no-store' }, true)
+export const listTopicMessages = (organizationId: string, channelId: string, topicId: string, query: TopicHistoryQuery = {}, f: typeof fetch = fetch, signal?: AbortSignal) =>
+  call<MessagePage>(f, `${channelPath(organizationId, channelId)}/topics/${encodeURIComponent(topicId)}/messages${querySuffix(query)}`, { cache: 'no-store', ...(signal ? { signal } : {}) }, true)
 
 export type ReplyCountPage = components['schemas']['ReplyCountPage']
 export type ReplyCountRequest = components['schemas']['ReplyCountRequest']

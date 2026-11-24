@@ -249,8 +249,10 @@ it.each(['generation change', 'cursor clamp'])('reopens the result after a %s an
     else net.subscribed('A', 80)
     expect(anchor.get()).toMatchObject({ status: 'loading', messages: [] })
     await flush()
+    expect(read).toHaveBeenCalledTimes(3)
     delayed.resolve(page([record(20)], 100))
     await pending
+    await flush()
     expect(read).toHaveBeenCalledTimes(5)
     expect(read.mock.calls[3]?.[0]?.history_generation).toBe(readGeneration)
     expect(anchor.get()).toMatchObject({ status: 'ready', asOfSeq: 80 })

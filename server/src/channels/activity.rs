@@ -1839,16 +1839,14 @@ impl Drop for BatchLease {
 }
 
 #[cfg(test)]
-pub(crate) struct TestGate {
-    pub entered: Semaphore,
-    pub release: Semaphore,
-}
+use crate::test_support::{Gate, Gates};
+
 #[cfg(test)]
-type TestGates = Mutex<HashMap<(Uuid, Uuid, &'static str, Option<Uuid>), Arc<TestGate>>>;
+type ActivityGateKey = (Uuid, Uuid, &'static str, Option<Uuid>);
 #[cfg(test)]
-static TEST_GATES: std::sync::LazyLock<TestGates> = std::sync::LazyLock::new(Mutex::default);
+static TEST_GATES: Gates<ActivityGateKey> = Gates::new();
 #[cfg(test)]
-pub(crate) fn pause(organization: Uuid, channel: Uuid, phase: &'static str) -> Arc<TestGate> {
+pub(crate) fn pause(organization: Uuid, channel: Uuid, phase: &'static str) -> Arc<Gate> {
     pause_member(organization, channel, phase, None)
 }
 #[cfg(test)]
@@ -1857,16 +1855,8 @@ pub(crate) fn pause_member(
     channel: Uuid,
     phase: &'static str,
     member: Option<Uuid>,
-) -> Arc<TestGate> {
-    let gate = Arc::new(TestGate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    TEST_GATES
-        .lock()
-        .unwrap()
-        .insert((organization, channel, phase, member), gate.clone());
-    gate
+) -> Arc<Gate> {
+    TEST_GATES.register((organization, channel, phase, member))
 }
 #[cfg(test)]
 pub(crate) async fn test_pause(
@@ -1875,17 +1865,13 @@ pub(crate) async fn test_pause(
     phase: &'static str,
     member: Option<Uuid>,
 ) {
-    let gate = {
-        let mut gates = TEST_GATES.lock().unwrap();
-        // Independent socket gates must not replace each other at the same boundary.
-        gates
-            .remove(&(organization, channel, phase, member))
-            .or_else(|| gates.remove(&(organization, channel, phase, None)))
-    };
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    // Independent socket gates must not replace each other at the same boundary.
+    TEST_GATES
+        .pause_with_fallback(
+            (organization, channel, phase, member),
+            (organization, channel, phase, None),
+        )
+        .await;
 }
 #[cfg(test)]
 mod tests {

@@ -1,24 +1,11 @@
 use super::*;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-    time::Duration,
-};
-use tokio::sync::Semaphore;
+use crate::test_support::Gates;
+use std::time::Duration;
 
-struct HistoryGate {
-    entered: Semaphore,
-    release: Semaphore,
-}
-static HISTORY_GATES: LazyLock<Mutex<HashMap<Uuid, Arc<HistoryGate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static HISTORY_GATES: Gates<Uuid> = Gates::new();
 
 pub(crate) async fn pause_history(channel: Uuid) {
-    let gate = HISTORY_GATES.lock().unwrap().remove(&channel);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    HISTORY_GATES.pause(channel).await;
 }
 
 pub(super) async fn captured_auth(pool: &PgPool, token: &str) -> Auth {
@@ -264,11 +251,7 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
         let auth = captured_auth(&pool, &token).await;
         let next_auth = captured_auth(&pool, &token).await;
         let state = AppState::for_test(pool.clone()).await;
-        let gate = Arc::new(HistoryGate {
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        });
-        HISTORY_GATES.lock().unwrap().insert(channel, gate.clone());
+        let gate = HISTORY_GATES.register(channel);
         let history = list_messages(
             State(state.clone()),
             auth,
@@ -284,7 +267,7 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
         tokio::pin!(history);
         tokio::select! {
             _ = &mut history => panic!("history did not pause after authorization"),
-            permit = tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire()) => permit.unwrap().unwrap().forget(),
+            () = gate.entered() => {},
         }
         // Loss must commit while the page is paused: ordinary history holds no row lock.
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -304,7 +287,7 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
             sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) VALUES ($1,$2,$3,2,$4,$5,'after loss')")
                 .bind(organization).bind(Uuid::new_v4()).bind(channel).bind(sender).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
         }).await.unwrap();
-        gate.release.add_permits(1);
+        gate.release();
         let response = history.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let page = body(response).await;
