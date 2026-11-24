@@ -1,7 +1,9 @@
 #![cfg(test)]
 
 use std::{fs, path::Path};
-use syn::{Expr, ExprCall, ExprField, ExprStruct, Member, visit::Visit};
+use syn::{
+    Expr, ExprCall, ExprField, ExprStruct, FnArg, Ident, ItemFn, Member, Pat, Type, visit::Visit,
+};
 
 #[derive(Default)]
 struct AdminPoolReference(bool);
@@ -16,19 +18,61 @@ impl<'ast> Visit<'ast> for AdminPoolReference {
 }
 
 #[derive(Default)]
-struct AppPoolWiring(Vec<&'static str>);
+struct AppPoolWiring {
+    violations: Vec<&'static str>,
+    admin_parameters: Vec<Ident>,
+}
 
 impl AppPoolWiring {
     fn check_pool(&mut self, location: &'static str, pool: &Expr) {
         let mut admin = AdminPoolReference::default();
         admin.visit_expr(pool);
-        if admin.0 {
-            self.0.push(location);
+        if admin.0 || self.is_admin_parameter(pool) {
+            self.violations.push(location);
+        }
+    }
+
+    fn is_admin_parameter(&self, pool: &Expr) -> bool {
+        match pool {
+            Expr::Path(path) => path
+                .path
+                .get_ident()
+                .is_some_and(|name| self.admin_parameters.contains(name)),
+            Expr::Reference(reference) => self.is_admin_parameter(&reference.expr),
+            Expr::Paren(paren) => self.is_admin_parameter(&paren.expr),
+            Expr::Group(group) => self.is_admin_parameter(&group.expr),
+            Expr::MethodCall(call) if call.method == "clone" && call.args.is_empty() => {
+                self.is_admin_parameter(&call.receiver)
+            }
+            _ => false,
         }
     }
 }
 
 impl<'ast> Visit<'ast> for AppPoolWiring {
+    fn visit_item_fn(&mut self, function: &'ast ItemFn) {
+        let outer_parameters = std::mem::take(&mut self.admin_parameters);
+        if function.attrs.iter().any(|attr| {
+            let mut segments = attr.path().segments.iter();
+            matches!(
+                (segments.next(), segments.next(), segments.next()),
+                (Some(krate), Some(test), None) if krate.ident == "fukulow_test" && test.ident == "test"
+            )
+        }) {
+            for input in &function.sig.inputs {
+                if let FnArg::Typed(parameter) = input
+                    && let Pat::Ident(binding) = parameter.pat.as_ref()
+                    && let Type::Path(ty) = parameter.ty.as_ref()
+                    && ty.path.segments.last().is_some_and(|segment| segment.ident == "PgPool")
+                {
+                    self.admin_parameters.push(binding.ident.clone());
+                }
+            }
+        }
+        syn::visit::visit_item_fn(self, function);
+        self.admin_parameters = outer_parameters;
+    }
+
     fn visit_expr_struct(&mut self, expr: &'ast ExprStruct) {
         if expr
             .path
@@ -72,10 +116,10 @@ fn check_test_sources(directory: &Path) {
             let mut wiring = AppPoolWiring::default();
             wiring.visit_file(&syntax);
             assert!(
-                wiring.0.is_empty(),
+                wiring.violations.is_empty(),
                 "{}: use the restricted app pool in {}",
                 path.display(),
-                wiring.0.join(", ")
+                wiring.violations.join(", ")
             );
         }
     }
@@ -105,11 +149,50 @@ fn app_pool_wiring_check_detects_admin_pool_misuse() {
     let mut wiring = AppPoolWiring::default();
     wiring.visit_file(&syntax);
     assert_eq!(
-        wiring.0,
+        wiring.violations,
         [
             "router",
             "router_with_cookie_security",
             "AppState.pool",
+            "app_state"
+        ]
+    );
+}
+
+#[test]
+fn app_pool_wiring_check_detects_admin_test_parameters() {
+    let syntax = syn::parse_quote! {
+        #[fukulow_test::test]
+        async fn admin_parameter(admin: PgPool) {
+            seed(&admin);
+            router(&admin);
+            AppState { pool: admin.clone(), ..state };
+        }
+
+        #[::fukulow_test::test(migrations = false)]
+        async fn pool_parameter(pool: sqlx::PgPool) {
+            router(&pool);
+            router_with_cookie_security(&(pool.clone()), false);
+        }
+
+        #[fukulow_test::test]
+        async fn arbitrary_parameter(database: PgPool) {
+            app_state(&database, true);
+        }
+
+        fn restricted_pool_helper(pool: PgPool) {
+            router(&pool);
+        }
+    };
+    let mut wiring = AppPoolWiring::default();
+    wiring.visit_file(&syntax);
+    assert_eq!(
+        wiring.violations,
+        [
+            "router",
+            "AppState.pool",
+            "router",
+            "router_with_cookie_security",
             "app_state"
         ]
     );

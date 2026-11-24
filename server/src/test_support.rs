@@ -1,5 +1,5 @@
 use futures_util::FutureExt;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use std::{cell::RefCell, future::Future, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 use tokio::sync::OnceCell;
 
@@ -58,7 +58,26 @@ async fn close_app_pools(pools: Vec<AppPool>, close_timeout: Duration) -> Vec<St
     timeouts
 }
 
-const APP_ROLE: &str = "fukulow_sqlx_test_app";
+pub(crate) const APP_ROLE: &str = "fukulow_sqlx_test_app";
+
+pub(crate) async fn assert_restricted_role(connection: &mut PgConnection, role: &str) {
+    let restricted: bool = sqlx::query_scalar(
+        "SELECT rolcanlogin AND NOT (rolsuper OR rolbypassrls OR rolcreatedb OR
+            rolcreaterole OR rolinherit OR rolreplication)
+            AND NOT EXISTS (SELECT FROM pg_auth_members WHERE member = r.oid OR roleid = r.oid)
+            AND NOT EXISTS (SELECT FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass
+                AND refobjid = r.oid AND deptype = 'o')
+         FROM pg_roles r WHERE rolname = $1",
+    )
+    .bind(role)
+    .fetch_one(connection)
+    .await
+    .unwrap();
+    assert!(
+        restricted,
+        "test app role {role} must be restricted and own nothing"
+    );
+}
 
 /// Use `let pools = TestPools::new(pool).await` in a `#[fukulow_test::test]`.
 /// Pass `pools.app` to application state/queries; keep fixtures, migrations, DDL
@@ -126,23 +145,7 @@ impl TestPools {
         .execute(&mut *transaction)
         .await
         .unwrap();
-        // Fail rather than silently reuse a privileged, owning or member role.
-        let restricted: bool = sqlx::query_scalar(
-            "SELECT rolcanlogin AND NOT (rolsuper OR rolbypassrls OR rolcreatedb OR
-                rolcreaterole OR rolinherit OR rolreplication)
-                AND NOT EXISTS (SELECT FROM pg_auth_members WHERE member = r.oid OR roleid = r.oid)
-                AND NOT EXISTS (SELECT FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass
-                    AND refobjid = r.oid AND deptype = 'o')
-             FROM pg_roles r WHERE rolname = $1",
-        )
-        .bind(APP_ROLE)
-        .fetch_one(&mut *transaction)
-        .await
-        .unwrap();
-        assert!(
-            restricted,
-            "test app role must be restricted and own nothing"
-        );
+        assert_restricted_role(&mut transaction, APP_ROLE).await;
         // Production SQL hardcodes its role. Substitute only that identifier,
         // keeping database/schema/table/sequence/default grants single-sourced.
         let grants = include_str!("../../deploy/db-grants.sql").replace("fukulow_app", APP_ROLE);
