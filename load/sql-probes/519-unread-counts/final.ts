@@ -93,6 +93,9 @@ if (git('diff', '--name-status', commits.final, update, '--', `server/migrations
   throw new Error('update pin must add only the UPDATE-first migration and keep the A3 migration unchanged');
 writeFileSync(join(work, a3Update), git('show', `${update}:server/migrations/${a3Update}`) + '\n');
 cpSync(join(root, 'load/sql-probes/519-unread-counts/sql'), join(work, 'sql'), { recursive: true });
+// Readable whatever the host umask: the v3 sends open these as the container postgres user.
+chmodSync(join(work, 'sql'), 0o755);
+chmodSync(join(work, 'sql/bench.pgb'), 0o644);
 for (const arm of ['current', 'final'] as FinalArm[]) {
   writeFileSync(join(work, `sql/list-${arm}.sql`), extractListCounts(git('show', `${commits[arm]}:server/src/messages/unread.rs`)) + '\n');
 }
@@ -321,6 +324,9 @@ try {
   const violations = linuxViolations(recordBefore);
   if (!smoke && violations.length > 0) throw new Error(`measurement conditions not met: ${violations.join('; ')}`);
   if (request) {
+    // Fail before the frequency calibration if the send user cannot read the bench file (#796 control run 1).
+    if (spawnSync('docker', ['run', '--rm', '--label', workloadLabel, '--network', 'none', '--user', 'postgres', '-v', `${work}:/work:ro`,
+      '--entrypoint', 'test', image, '-r', '/work/sql/bench.pgb']).status !== 0) throw new Error('the container postgres user cannot read /work/sql/bench.pgb');
     frequency = frequencyRun(request, out);
     await frequency.start();
   }
@@ -335,9 +341,6 @@ try {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
   }
-  // Fail before any frequency phase if the send user cannot read the bench file (#796 control run 1).
-  if (request && spawnSync('docker', ['exec', '--user', 'postgres', container, 'test', '-r', '/work/sql/bench.pgb']).status !== 0)
-    throw new Error('the container postgres user cannot read /work/sql/bench.pgb');
   // Max frequencies per set make a swapped or mixed split visible in the record (Zen 5 vs Zen 5c).
   const maxKHz = (set: number[]) => [...new Set(set.map(c => Object.entries(recordBefore.maxFrequencyKHz ?? {}).find(([, cs]) => cs.includes(c))?.[0] ?? 'unknown'))];
   const cpuPins = cpuSets === undefined ? null : {
