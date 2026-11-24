@@ -30,7 +30,7 @@ test('a changed error code on one side fails', () => {
     'Some("snapshot_expired")', 'Some("snapshot_stale")')), /snapshot_expired: core no longer matches/)
   assert.throws(() => checkContract(edit('web/src/section-ui.ts',
     "result.error === 'section_limit'", "result.error === 'section_limits'")), /section_limit: web no longer matches/)
-  assert.throws(() => checkContract(edit('server/src/channels.rs',
+  assert.throws(() => checkContract(edit('server/src/auth.rs',
     '"channel name already exists"', '"channel name exists"')), /channel name already exists: server\/src product code never emits/)
 })
 
