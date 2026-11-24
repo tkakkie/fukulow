@@ -34,7 +34,7 @@ function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; w
     const block = Math.min(6, Math.max(1, Math.ceil(ms / 200_000)));
     const [server, client] = freq(block);
     const ticks = cpus.map(cpu => ({ khz: cpu % 2 === 0 ? server : client, busy: 0.9, ...opts.cpu?.(block, cpu, ms) }));
-    ticks.forEach((c, cpu) => { jiffies[cpu][0] += 500 * c.busy; jiffies[cpu][1] += 500 * (1 - c.busy); });
+    ticks.forEach((c, cpu) => { const j = Math.round(500 * c.busy); jiffies[cpu][0] += j; jiffies[cpu][1] += 500 - j; });
     samples.push({ at: new Date(t0 + ms).toISOString(), monoMs: ms, avgFreqKHz: ticks.map(c => c.khz), procStat: jiffies.map(([b, i]) => [b, 0, 0, i, 0, 0, 0, 0]),
       temperaturesC: { 'k10temp/Tctl': 70 }, fansRpm: {}, launchSession: sid });
   }
@@ -66,15 +66,15 @@ test('a WAL/send spread over 2 % alone FAILs; exactly 2 % passes', () => {
 
 test('throttle: a median per-CPU drop over 5 % on either set is INVALID; exactly 5.0 % and 4.9 % are not', () => {
   const r = jr(run('s1', {}, { freq: b => [b === 5 ? 1_898_000 : 2_000_000, 2_000_000] })); // 5.1 %
-  assert.deepEqual([r.valid, r.invalid], [false, ['block 5: throttled, server median per-CPU ratio 0.949 < 0.95 of block 1 (4 CPUs)']]);
-  assert.deepEqual(jr(run('s1', {}, { freq: b => [2_000_000, b === 6 ? 1_898_000 : 2_000_000] })).invalid, ['block 6: throttled, client median per-CPU ratio 0.949 < 0.95 of block 1 (4 CPUs)']);
+  assert.deepEqual([r.valid, r.invalid], [false, ['block 5: throttled, server median per-CPU ratio 0.9490 < 0.95 of block 1 (4 CPUs)']]);
+  assert.deepEqual(jr(run('s1', {}, { freq: b => [2_000_000, b === 6 ? 1_898_000 : 2_000_000] })).invalid, ['block 6: throttled, client median per-CPU ratio 0.9490 < 0.95 of block 1 (4 CPUs)']);
   assert.deepEqual(jr(run('s1', {}, { freq: b => [b === 3 ? 1_900_000 : 2_000_000, b === 4 ? 1_900_000 : 2_000_000] })).invalid, []); // exactly 5.0 %
   assert.deepEqual(jr(run('s1', {}, { freq: b => [b === 3 ? 1_902_000 : 2_000_000, b === 4 ? 1_902_000 : 2_000_000] })).invalid, []); // 4.9 %
   assert.equal(judge([run('s1', {}, { freq: b => [b > 3 ? 1_000_000 : 2_000_000, 2_000_000] }), run('s2'), run('s3')], session(), 'q796').result, 'FAIL');
   // The ratio is per CPU: two Zen 5 CPUs at 4.9 GHz and two Zen 5c at 3.47 GHz, each 6 % lower in
   // block 2, each compared with itself.
   const mixed = (b: number, cpu: number) => ({ khz: (cpu % 4 === 0 ? 4_900_000 : 3_470_000) * (b === 2 ? 0.94 : 1) });
-  assert.deepEqual(jr(run('s1', {}, { cpu: (b, cpu) => (cpu % 2 === 0 ? mixed(b, cpu) : {}) })).invalid, ['block 2: throttled, server median per-CPU ratio 0.940 < 0.95 of block 1 (4 CPUs)']);
+  assert.deepEqual(jr(run('s1', {}, { cpu: (b, cpu) => (cpu % 2 === 0 ? mixed(b, cpu) : {}) })).invalid, ['block 2: throttled, server median per-CPU ratio 0.9400 < 0.95 of block 1 (4 CPUs)']);
 });
 
 test('a change in which CPUs are busy between blocks is not throttling; idle CPUs at the placeholder never lower a value', () => {
@@ -132,14 +132,92 @@ test('missing frequency or /proc/stat data on an active CPU makes the run INVALI
     f(r.samples[index] as { avgFreqKHz: (number | null)[]; procStat?: (number[] | null)[] | null });
     return jr(r).invalid;
   };
-  assert.deepEqual(mutate(30, x => { x.avgFreqKHz[1] = null; }), ['block 1: client set: unreadable CPU frequency on CPU 1']);
-  assert.deepEqual(mutate(30, x => { x.procStat = null; }), ['block 1: server set: unreadable /proc/stat on CPU 0', 'block 1: client set: unreadable /proc/stat on CPU 1']);
-  assert.deepEqual(mutate(30, x => { delete x.procStat; }), ['block 1: server set: unreadable /proc/stat on CPU 0', 'block 1: client set: unreadable /proc/stat on CPU 1']);
-  assert.deepEqual(mutate(30, x => { x.procStat![6] = [0, 0, 0, 0, 0, 0, 0, 0]; }), ['block 1: server set: /proc/stat counters of CPU 6 went backwards or did not advance']);
+  // Each such tick also counts as failed; unreadable counters fail the next tick too (its predecessor).
+  assert.deepEqual(mutate(30, x => { x.avgFreqKHz[1] = null; }), ['block 1: 1 failed thermal samples', 'block 1: client set: unreadable CPU frequency on CPU 1']);
+  assert.deepEqual(mutate(30, x => { x.procStat = null; }), ['block 1: 2 failed thermal samples', 'block 1: server set: unreadable /proc/stat on CPU 0', 'block 1: client set: unreadable /proc/stat on CPU 1']);
+  assert.deepEqual(mutate(30, x => { delete x.procStat; }), ['block 1: 2 failed thermal samples', 'block 1: server set: unreadable /proc/stat on CPU 0', 'block 1: client set: unreadable /proc/stat on CPU 1']);
+  assert.deepEqual(mutate(30, x => { x.procStat![6] = [0, 0, 0, 0, 0, 0, 0, 0]; }), ['block 1: 1 failed thermal samples', 'block 1: server set: /proc/stat counters of CPU 6 went backwards or did not advance']);
+  // An idle CPU's frequency is checked too (F6: any CPU of the set).
+  assert.deepEqual(jr(run('s1', {}, { cpu: (b, cpu, ms) => (cpu === 6 ? { busy: 0.1, khz: ms === 150_000 ? null : 623_377 } : {}) })).invalid,
+    ['block 1: 1 failed thermal samples', 'block 1: server set: unreadable CPU frequency on CPU 6']);
   // A zero total delta: the counters did not advance since the previous tick.
   const r = run('s1');
   (r.samples[31] as { procStat: (number[] | null)[] }).procStat[5] = [...(r.samples[30] as { procStat: number[][] }).procStat[5]];
   assert.match(jr(r).invalid.join('\n'), /^block 1: client set: \/proc\/stat counters of CPU 5 went backwards or did not advance$/m);
+});
+
+type Line = { avgFreqKHz: unknown[]; procStat: unknown[][] | null };
+test('F6 (round-1 blocker 1): malformed frequencies and counters are unreadable, and every counter read must not go backwards', () => {
+  const at30 = (f: (x: Line) => void) => { const r = run('s1'); f(r.samples[30] as unknown as Line); return jr(r).invalid; };
+  assert.deepEqual(at30(x => { for (const c of [0, 2, 4, 6]) x.avgFreqKHz[c] = 0; }), ['block 1: 1 failed thermal samples', 'block 1: server set: unreadable CPU frequency on CPU 0']);
+  for (const bad of [-2_000_000, 1_999_999.5, '2000000', Infinity, NaN, true]) {
+    assert.deepEqual(at30(x => { x.avgFreqKHz[2] = bad; }), ['block 1: 1 failed thermal samples', 'block 1: server set: unreadable CPU frequency on CPU 2'], String(bad));
+  }
+  // A null, string, fractional or negative counter (here iowait) is unreadable; so is a short line.
+  for (const bad of [null, '7', 1.5, -1]) {
+    assert.deepEqual(at30(x => { x.procStat![1][4] = bad; }), ['block 1: 2 failed thermal samples', 'block 1: client set: unreadable /proc/stat on CPU 1'], String(bad));
+  }
+  assert.deepEqual(at30(x => { x.procStat![1] = x.procStat![1].slice(0, 7); }), ['block 1: 2 failed thermal samples', 'block 1: client set: unreadable /proc/stat on CPU 1']);
+  // Guest counters (beyond the 8 summed) going backwards, or a line whose length changed, fail closed.
+  const guest = (f: (lines: Line[]) => void) => {
+    const r = run('s1');
+    const lines = r.samples as unknown as Line[];
+    lines.forEach((x, i) => { x.procStat![3] = [...x.procStat![3], 10 * i, 0]; });
+    f(lines);
+    return jr(r).invalid;
+  };
+  assert.deepEqual(guest(() => {}), []);
+  assert.deepEqual(guest(l => { l[30].procStat![3][8] = 0; }), ['block 1: 1 failed thermal samples', 'block 1: client set: /proc/stat counters of CPU 3 went backwards or did not advance']);
+  assert.deepEqual(guest(l => { l[30].procStat![3] = l[30].procStat![3].slice(0, 8); }), ['block 1: 2 failed thermal samples', 'block 1: client set: /proc/stat counters of CPU 3 went backwards or did not advance']);
+});
+
+test('F4-F6 (round-1 blocker 2): an empty or malformed CPU set is INVALID, never a pass', () => {
+  const withSets = (server: number[]) => { const r = run('s1'); r.metadata.cpuSets = { server, client: [1, 3, 5, 7] }; return jr(r); };
+  const empty = withSets([]);
+  assert.equal(empty.valid, false);
+  assert.deepEqual(empty.invalid, ['server set is empty or not distinct CPU numbers: []']);
+  assert.deepEqual(withSets([0, 0, 2, 4]).invalid, ['server set is empty or not distinct CPU numbers: [0,0,2,4]']);
+  assert.equal(judge([run('s1', { metadata: { ...run('s1').metadata, cpuSets: { server: [], client: [1, 3, 5, 7] } } }), run('s2'), run('s3')], session(), 'q796').result, 'FAIL');
+});
+
+test('F5 (round-1 blocker 3): the baseline is block 1 itself; blocks numbered other than 1 to 6 are INVALID', () => {
+  const r = run('s1');
+  for (const s of r.sends) s.order += 1;
+  assert.deepEqual(jr(r).invalid, ['blocks numbered 2,3,4,5,6,7, not 1 to 6', 'server set: no block 1 to compare frequency with', 'client set: no block 1 to compare frequency with']);
+  const twice = run('s1');
+  twice.sends[5].order = 5;
+  assert.match(jr(twice).invalid.join('\n'), /^blocks numbered 1,2,3,4,5,5, not 1 to 6$/m);
+  // Block 1 listed last is still the baseline.
+  const shuffled = run('s1', {}, { freq: b => [b === 1 ? 2_200_000 : 2_000_000, 2_000_000] });
+  shuffled.sends.reverse();
+  assert.match(jr(shuffled).invalid.join('\n'), /block 2: throttled, server median per-CPU ratio 0\.9090 < 0\.95/);
+});
+
+test('F5 (round-1 blocker 4): the 0.95 boundary is exact, and the printed ratio is never a false inequality', () => {
+  // Two of four server CPUs qualify (6 and 4 idle); ratios 13,500,004 / 30,000,009 and 43,500,016 /
+  // 30,000,011. Their mean is 5.6e-17 below 0.95, which a floating-point median rounds to 0.95.
+  const values: Record<number, [number, number]> = { 0: [30_000_009, 13_500_004], 2: [30_000_011, 43_500_016] };
+  const fp = (b: number, cpu: number): CpuTick => (cpu === 4 || cpu === 6 ? { busy: 0.1 } : cpu in values ? { khz: values[cpu][b === 2 ? 1 : 0] } : {});
+  assert.deepEqual(jr(run('s1', {}, { cpu: fp })).invalid, ['block 2: throttled, server median per-CPU ratio 0.9499 < 0.95 of block 1 (2 CPUs)']);
+  // 2,000,000 -> 1,899,999 kHz: INVALID, printed rounded down.
+  assert.deepEqual(jr(run('s1', {}, { freq: b => [b === 2 ? 1_899_999 : 2_000_000, 2_000_000] })).invalid, ['block 2: throttled, server median per-CPU ratio 0.9499 < 0.95 of block 1 (4 CPUs)']);
+  // 0.94996 is not rounded up to 0.950.
+  assert.deepEqual(jr(run('s1', {}, { freq: b => [b === 2 ? 1_899_920 : 2_000_000, 2_000_000] })).invalid, ['block 2: throttled, server median per-CPU ratio 0.9499 < 0.95 of block 1 (4 CPUs)']);
+  // The median, not the mean, of the ratios: 1, 1, 1 and 0.7 is a median of 1 (mean 0.925).
+  assert.deepEqual(jr(run('s1', {}, { cpu: (b, cpu) => (cpu === 6 && b === 2 ? { khz: 1_400_000 } : {}) })).invalid, []);
+  // An even count takes the mean of the two middle ratios exactly: 0.94 and 0.96 with two at 1 -> 0.98.
+  assert.deepEqual(jr(run('s1', {}, { cpu: (b, cpu) => (b === 2 && cpu === 0 ? { khz: 1_880_000 } : b === 2 && cpu === 2 ? { khz: 1_920_000 } : {}) })).invalid, []);
+});
+
+test('F1, F3, F4 boundaries are wired to the approved values: busy 0.5, half the ticks, half of an odd-sized set rounded up', () => {
+  // Three of four server CPUs at busy 0.49 (245 of 500 jiffies): not active, 1 of 4 qualify. At 0.5: all qualify.
+  const busy = (x: number) => jr(run('s1', {}, { cpu: (_, cpu) => (cpu === 2 || cpu === 4 || cpu === 6 ? { busy: x } : {}) })).invalid;
+  assert.deepEqual(busy(0.49), [1, 2, 3, 4, 5, 6].map(b => `block ${b}: too few active CPUs to judge frequency, server set 1 of 4 qualify`));
+  assert.deepEqual(busy(0.5), []);
+  // A set of 3 needs 2 qualifying (1.5 rounded up), not 1.
+  const odd = (qualify: number[]) => { const r = run('s1', {}, { cpu: (_, cpu) => (cpu % 2 === 0 && !qualify.includes(cpu) ? { busy: 0.1 } : {}) }); r.metadata.cpuSets = { server: [0, 2, 4], client: [1, 3, 5, 7] }; return jr(r).invalid; };
+  assert.deepEqual(odd([0]), [1, 2, 3, 4, 5, 6].map(b => `block ${b}: too few active CPUs to judge frequency, server set 1 of 3 qualify`));
+  assert.deepEqual(odd([0, 2]), []);
 });
 
 const setFreq = (r: RunInput, from: number, to: number, khz: number) => {
@@ -155,7 +233,7 @@ test('the block is judged on pgbench\'s own interval, not on the run wrapper aro
   r.sends[4].measuredWindow = { startMs: t0 + 869_800, endMs: t0 + 1_011_000, monoMs: 141_200 };
   r.sends[4].pgbenchWindow = { startMs: t0 + 881_000, endMs: t0 + 1_000_000 };
   const j = jr(r);
-  assert.deepEqual(j.invalid, ['block 5: throttled, server median per-CPU ratio 0.890 < 0.95 of block 1 (4 CPUs)']);
+  assert.deepEqual(j.invalid, ['block 5: throttled, server median per-CPU ratio 0.8900 < 0.95 of block 1 (4 CPUs)']);
   assert.equal(j.blocks[4].thermal.samples, 24);
   // A healthy run with 11 s of Docker and connection overhead around the 120 s is not rejected.
   const slowStart = run('s1');
@@ -201,7 +279,7 @@ test('a wall-clock step over 50 ms makes the run INVALID; every tick in pgbench\
   setFreq(edgeSlow, 880_000, 940_000, 1_850_000);
   edgeSlow.sends[4].pgbenchWindow = { startMs: t0 + 880_000, endMs: t0 + 1_000_000 - 1 };
   edgeSlow.sends[4].measuredWindow = { startMs: t0 + 879_000, endMs: t0 + 1_001_000, monoMs: 122_000 };
-  assert.deepEqual([jr(edgeSlow).blocks[4].thermal.ticks, jr(edgeSlow).invalid], [24, ['block 5: throttled, server median per-CPU ratio 0.925 < 0.95 of block 1 (4 CPUs)']]);
+  assert.deepEqual([jr(edgeSlow).blocks[4].thermal.ticks, jr(edgeSlow).invalid], [24, ['block 5: throttled, server median per-CPU ratio 0.9250 < 0.95 of block 1 (4 CPUs)']]);
 });
 
 test('a wall-clock set in the journal during the run, or no readable journal check, makes the run INVALID', () => {
@@ -301,7 +379,7 @@ test('a cool-down record whose accepted reading is late or hot makes the run INV
 test('a failed, missing or torn thermal tick in a block makes the run INVALID (no allowance)', () => {
   const failedTick = run('s1');
   failedTick.samples[20] = { at: failedTick.samples[20].at, error: 'EIO' }; // 100 s, inside block 1
-  assert.match(jr(failedTick).invalid.join(), /block 1: 1 failed thermal samples.*block 1: server set: failed thermal tick/);
+  assert.match(jr(failedTick).invalid.join(), /block 1: 2 failed thermal samples.*block 1: server set: failed thermal tick/); // the next tick has no usable predecessor
   const missing = run('s1');
   missing.samples.splice(20, 1);
   const r = jr(missing);

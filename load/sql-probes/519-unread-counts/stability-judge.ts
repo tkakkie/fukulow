@@ -1,5 +1,5 @@
 import { requirementViolations, type HostRecord } from '../../harness-core/host-record.ts';
-import { blockThermal, median, type BlockThermal, type MeasuredWindow, type SampleLine } from '../../harness-core/thermal.ts';
+import { blockThermal, exactFraction, median, type BlockThermal, type MeasuredWindow, type SampleLine } from '../../harness-core/thermal.ts';
 import type { PgbenchWindow } from './probe.ts';
 import type { Session } from '../../launcher/launcher.ts';
 
@@ -23,7 +23,8 @@ export const limits = { tpsSpread: 0.05, walSpread: 0.02, throttle: 0.05 };
 // (F4). Throttle (F5): over the CPUs qualifying in both block 1 and block k (again >= minCpuShare of the
 // set, else INVALID), block k is throttled when the median of per-CPU value ratios k / 1 is
 // < 1 - limits.throttle; exactly 5.0 % is allowed. Comparing each CPU with itself keeps a change in
-// which CPUs are busy from looking like throttling. Missing data is INVALID (F6, blockThermal).
+// which CPUs are busy from looking like throttling. Missing data is INVALID (F6, blockThermal). Every
+// threshold is compared exactly in integers (exactFraction), never through floating-point rounding.
 export const activity = { minBusy: 0.5, minTickShare: 0.5, minCpuShare: 0.5 };
 // Lateness allowed on one tick. The launcher schedules tick k at k x 5 s on its monotonic clock (no
 // drift), so a tick is late only by event-loop delay, which does not add up across ticks. Every gap
@@ -103,15 +104,32 @@ const unsampled = { cpus: [], problem: 'no thermal window' };
 const empty: BlockThermal = { samples: 0, failed: 0, ticks: 0, windowMs: NaN, maxGapMs: Infinity, monoComplete: false, offsetSpreadMs: NaN, server: unsampled, client: unsampled, maxTctlC: null };
 type CpuSet = 'server' | 'client';
 
-// The qualifying CPUs of a set in a block (F3), by CPU number with their block values.
-function qualifying(t: BlockThermal, set: CpuSet): Map<number, number> {
-  return new Map(t[set].cpus.flatMap(c => (c.valueKHz !== null && c.activeTicks >= t.ticks * activity.minTickShare ? [[c.cpu, c.valueKHz] as const] : [])));
+// The qualifying CPUs of a set in a block (F3), by CPU number with twice their block value (the sum
+// of the two middle active readings), so ratios stay exact integers.
+// n / total >= share, in integers (no rounding at the boundary).
+const atLeast = (n: number, total: number, share: number) => { const [a, b] = exactFraction(share); return BigInt(n) * b >= a * BigInt(total); };
+function qualifying(t: BlockThermal, set: CpuSet): Map<number, bigint> {
+  return new Map(t[set].cpus.flatMap(c => (c.mid !== null && atLeast(c.activeTicks, t.ticks, activity.minTickShare) ? [[c.cpu, BigInt(c.mid[0]) + BigInt(c.mid[1])] as const] : [])));
 }
 
-// F4 and F5 for one set over the run's blocks (sorted, block 1 first).
-function frequencyProblems(blocks: { order: number; thermal: BlockThermal }[], set: CpuSet, size: number): string[] {
+type Ratio = [bigint, bigint]; // numerator, positive denominator
+const below = (a: Ratio, b: Ratio) => a[0] * b[1] < b[0] * a[1];
+// The median of exact ratios as an exact ratio: the middle one, or the mean of the two middle ones.
+function medianRatio(rs: Ratio[]): Ratio {
+  const s = [...rs].sort((a, b) => (below(a, b) ? -1 : below(b, a) ? 1 : 0));
+  const [a, b] = [s[(s.length - 1) >> 1], s[s.length >> 1]];
+  return [a[0] * b[1] + b[0] * a[1], 2n * a[1] * b[1]];
+}
+// A ratio rounded down to 4 decimals, so a printed "x < limit" is always true.
+const floor4 = (r: Ratio) => (Number((r[0] * 10_000n) / r[1]) / 10_000).toFixed(4);
+
+// F4 and F5 for one set over the run's blocks. The baseline is block 1 itself: without it nothing is
+// compared and the run is INVALID. An empty or malformed set is INVALID, never judged as passing.
+function frequencyProblems(blocks: { order: number; thermal: BlockThermal }[], set: CpuSet, cpus: number[]): string[] {
+  const size = cpus.length;
+  if (size === 0 || new Set(cpus).size !== size || !cpus.every(c => Number.isSafeInteger(c) && c >= 0)) return [`${set} set is empty or not distinct CPU numbers: [${cpus.join(',')}]`];
   const p: string[] = [];
-  const enough = (n: number) => n >= size * activity.minCpuShare;
+  const enough = (n: number) => atLeast(n, size, activity.minCpuShare);
   const judgeable = blocks.map(b => {
     const a = b.thermal[set];
     if (a.problem !== null) { p.push(`block ${b.order}: ${set} set: ${a.problem}`); return null; }
@@ -119,17 +137,18 @@ function frequencyProblems(blocks: { order: number; thermal: BlockThermal }[], s
     if (!enough(q.size)) { p.push(`block ${b.order}: too few active CPUs to judge frequency, ${set} set ${q.size} of ${size} qualify`); return null; }
     return q;
   });
-  const base = judgeable[0];
+  const i1 = blocks.findIndex(b => b.order === 1);
+  if (i1 < 0) return [...p, `${set} set: no block 1 to compare frequency with`];
+  const base = judgeable[i1];
   if (!base) return p; // block 1 is already INVALID; nothing to compare with
+  const keep = exactFraction(1 - limits.throttle);
   for (const [i, b] of blocks.entries()) {
     const got = judgeable[i];
-    if (i === 0 || !got) continue;
-    const ratios = [...got].flatMap(([cpu, v]) => (base.has(cpu) ? [v / base.get(cpu)!] : []));
-    if (!enough(ratios.length)) p.push(`block ${b.order}: ${set} set: ${ratios.length} of ${size} CPUs qualify in both block 1 and this block, too few to compare`);
-    else {
-      const ratio = median(ratios);
-      if (ratio < 1 - limits.throttle) p.push(`block ${b.order}: throttled, ${set} median per-CPU ratio ${ratio.toFixed(3)} < ${1 - limits.throttle} of block 1 (${ratios.length} CPUs)`);
-    }
+    if (i === i1 || !got) continue;
+    const ratios = [...got].flatMap(([cpu, v]): Ratio[] => (base.has(cpu) ? [[v, base.get(cpu)!]] : []));
+    if (!enough(ratios.length)) { p.push(`block ${b.order}: ${set} set: ${ratios.length} of ${size} CPUs qualify in both block 1 and this block, too few to compare`); continue; }
+    const m = medianRatio(ratios);
+    if (below(m, keep)) p.push(`block ${b.order}: throttled, ${set} median per-CPU ratio ${floor4(m)} < ${1 - limits.throttle} of block 1 (${ratios.length} CPUs)`);
   }
   return p;
 }
@@ -139,6 +158,8 @@ export function judgeRun(r: RunInput, bound: Binding) {
   if (!r.complete) invalid.push('run did not complete');
   if (r.metadata.mode !== 'diagnostic' || r.metadata.sendsOnly !== true) invalid.push('not the #519 send diagnosis (--diagnostic --sends-only)');
   if (r.sends.length !== blocksPerRun) invalid.push(`${r.sends.length} blocks, not ${blocksPerRun}`);
+  const orders = r.sends.map(s => s.order).sort((a, b) => a - b);
+  if (orders.join() !== Array.from({ length: r.sends.length }, (_, i) => i + 1).join()) invalid.push(`blocks numbered ${orders.join(',')}, not 1 to ${r.sends.length}`);
   const measured = r.metadata.sends.measuredSeconds;
   for (const s of r.sends) {
     for (const e of s.errors ?? []) invalid.push(`block ${s.order}: ${e}`);
@@ -181,7 +202,7 @@ export function judgeRun(r: RunInput, bound: Binding) {
     const expected = Math.floor((t.windowMs - tickToleranceMs - (Number.isFinite(t.offsetSpreadMs) ? t.offsetSpreadMs : 0)) / (sampleSeconds * 1000));
     if (!(t.ticks >= expected)) invalid.push(`block ${b.order}: ${t.ticks} thermal ticks, fewer than the ${expected} of a ${sampleSeconds} s cadence`);
   }
-  if (sets) for (const set of ['server', 'client'] as const) invalid.push(...frequencyProblems(blocks, set, sets[set].length));
+  if (sets) for (const set of ['server', 'client'] as const) invalid.push(...frequencyProblems(blocks, set, sets[set]));
   const arm = (a: string) => ({ tps: median(blocks.filter(b => b.arm === a).map(b => b.tps)), wal: median(blocks.filter(b => b.arm === a).map(b => b.walBytesPerSend)) });
   return { name: r.name, valid: invalid.length === 0, invalid, current: arm('current'), final: arm('final'), blocks };
 }

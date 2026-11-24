@@ -19,39 +19,70 @@ export type FailedSample = { at: string | null; error: string; launchSession?: s
 export type SampleLine = ThermalSample | FailedSample;
 export const isFailed = (s: SampleLine): s is FailedSample => !Array.isArray((s as ThermalSample).avgFreqKHz);
 
-const readNumber = (path: string) => {
-  try { const n = Number(readFileSync(path, 'utf8').trim()); return Number.isFinite(n) && n > 0 ? n : null; } catch { return null; }
-};
+// A frequency reading the judge accepts: a positive integer number of kHz, as sysfs writes it.
+export const validKHz = (f: unknown): f is number => Number.isSafeInteger(f) && (f as number) > 0;
+// A CPU's /proc/stat counters the judge accepts: at least the first 8 (through steal), every one a
+// non-negative integer. Anything else (null, a string, a fraction, a negative) is unreadable.
+export const validCounters = (c: unknown): c is number[] => Array.isArray(c) && c.length >= 8 && c.every(n => Number.isSafeInteger(n) && n >= 0);
 
-// The `cpuN` lines of /proc/stat. A line needs the first 8 counters (through steal) as non-negative integers.
+// The `cpuN` lines of /proc/stat, each kept whole when every counter is valid, else null.
 export function parseProcStat(text: string): ProcStat {
   const out: (number[] | null)[] = [];
   for (const line of text.split('\n')) {
     const m = /^cpu(\d+)\s+(.*)$/.exec(line);
     if (!m) continue;
-    const v = m[2].trim().split(/\s+/).map(Number);
-    out[Number(m[1])] = v.length >= 8 && v.every(n => Number.isSafeInteger(n) && n >= 0) ? v : null;
+    const v = m[2].trim().split(/\s+/).map(x => (/^\d+$/.test(x) ? Number(x) : NaN));
+    out[Number(m[1])] = validCounters(v) ? v : null;
   }
   return Array.from(out, x => x ?? null);
 }
-const readProcStat = () => { try { return parseProcStat(readFileSync('/proc/stat', 'utf8')); } catch { return null; } };
 
-// A CPU's busy fraction between two ticks: 1 - (idle + iowait delta) / (total delta), the total being
-// the first 8 counters (guest time is already in user and nice). null when a counter went backwards,
-// is missing, or the total did not advance: the activity is then unknown, never "idle".
+// A CPU's busy and total jiffies between two ticks, exactly: total = the first 8 counters' delta (guest
+// time is already in user and nice), busy = total - (idle + iowait delta). null (activity unknown,
+// never "idle") when either side is unreadable, the two lines differ in length, any counter read went
+// backwards (guest included), or the total did not advance.
+export function cpuDelta(prev: unknown, cur: unknown): { busy: bigint; total: bigint } | null {
+  if (!validCounters(prev) || !validCounters(cur) || prev.length !== cur.length) return null;
+  const d = cur.map((x, i) => BigInt(x) - BigInt(prev[i]));
+  if (d.some(x => x < 0n)) return null;
+  const total = d.slice(0, 8).reduce((a, b) => a + b, 0n);
+  return total > 0n ? { busy: total - d[3] - d[4], total } : null;
+}
+// The same as a fraction, for display and tests; the judge compares cpuDelta exactly (isActive).
 export function busyFraction(prev: number[], cur: number[]): number | null {
-  if (prev.length < 8 || cur.length < 8) return null;
-  const d = Array.from({ length: 8 }, (_, i) => cur[i] - prev[i]);
-  if (!d.every(x => Number.isFinite(x) && x >= 0)) return null;
-  const total = d.reduce((a, b) => a + b, 0);
-  return total > 0 ? 1 - (d[3] + d[4]) / total : null;
+  const d = cpuDelta(prev, cur);
+  return d === null ? null : Number(d.busy) / Number(d.total);
+}
+// A decimal threshold as an exact fraction over 10^6; one with more digits is refused, never rounded.
+export function exactFraction(x: number): [bigint, bigint] {
+  const n = Math.round(x * 1e6);
+  if (!(n / 1e6 === x && x >= 0 && x <= 1)) throw new Error(`threshold ${x} is not a fraction in [0, 1] with at most 6 decimals`);
+  return [BigInt(n), 1_000_000n];
+}
+// busy / total >= minBusy, in integers.
+export function isActive(d: { busy: bigint; total: bigint }, minBusy: number): boolean {
+  const [n, m] = exactFraction(minBusy);
+  return d.busy * m >= n * d.total;
+}
+
+// One file as text, or null when it cannot be read.
+const readText = (path: string) => { try { return readFileSync(path, 'utf8'); } catch { return null; } };
+const kHz = (text: string | null) => { const t = text?.trim() ?? ''; return /^\d+$/.test(t) && validKHz(Number(t)) ? Number(t) : null; };
+
+// The CPU part of a sample: cpuinfo_avg_freq only (F7; scaling_cur_freq is not used, not even as a
+// fallback) and /proc/stat. `read` and `count` are the file system and CPU count (injected in tests).
+export function cpuReadings(read: (path: string) => string | null, count: number): Pick<ThermalSample, 'avgFreqKHz' | 'procStat'> {
+  const stat = read('/proc/stat');
+  return {
+    avgFreqKHz: Array.from({ length: count }, (_, i) => kHz(read(`/sys/devices/system/cpu/cpu${i}/cpufreq/cpuinfo_avg_freq`))),
+    procStat: stat === null ? null : parseProcStat(stat),
+  };
 }
 
 export function thermalSample(now: Date): ThermalSample {
   return {
     at: now.toISOString(),
-    avgFreqKHz: cpus().map((_, i) => readNumber(`/sys/devices/system/cpu/cpu${i}/cpufreq/cpuinfo_avg_freq`)),
-    procStat: readProcStat(),
+    ...cpuReadings(readText, cpus().length),
     temperaturesC: hwmon(/^temp\d+_input$/, 1000),
     fansRpm: hwmon(/^fan\d+_input$/, 1),
   };
@@ -78,13 +109,15 @@ export function timed<T>(fn: () => T, clock = { wall: () => Date.now(), mono: ()
 }
 
 // One CPU in one block: the ticks it was active in (busy >= the judge's threshold since the previous
-// tick) and the median of its frequency in those ticks (null when it was never active). An idle CPU's
-// reading is the cpuinfo_min_freq placeholder, not a measurement, so it is recorded but never used.
-export type CpuBlock = { cpu: number; activeTicks: number; valueKHz: number | null };
+// tick) and the median of its frequency in those ticks (null when it was never active). mid holds the
+// two middle readings (the same one twice for an odd count), so the median is exact: (mid[0] + mid[1]) / 2.
+// An idle CPU's reading is the cpuinfo_min_freq placeholder, not a measurement: recorded, never used.
+export type CpuBlock = { cpu: number; activeTicks: number; valueKHz: number | null; mid: [number, number] | null };
 // A set in one block; problem is why its activity cannot be known (then cpus is empty).
 export type SetActivity = { cpus: CpuBlock[]; problem: string | null };
-// samples: usable samples inside the window; failed: failed ticks inside it; ticks: all ticks inside
-// it; windowMs: the window's length. The chain is the last tick before the window,
+// samples: usable ticks inside the window; failed: the others (an error line, or a tick whose
+// frequency or counters on a judged CPU are unreadable or whose deltas are invalid, F6); ticks: all
+// ticks inside it; windowMs: the window's length. The chain is the last tick before the window,
 // the ticks inside and the first after it. maxGapMs: the longest gap between consecutive ticks of the
 // chain on the sampler's monotonic clock when every chain tick has one (monoComplete), else on the
 // wall clock; Infinity when an edge tick is missing. offsetSpreadMs: how far wall minus monotonic
@@ -95,39 +128,54 @@ export type BlockThermal = {
 };
 
 type Placed = { l: SampleLine; t: number };
+type Delta = { busy: bigint; total: bigint };
 
-// One set's activity over the ticks inside a block. Each tick's busy fraction is taken against the tick
-// before it (for the first, the last tick before the window). Missing data fails the whole set, so it
-// can never look like an unthrottled block: a failed tick, no tick or no predecessor, an unreadable
-// frequency on any CPU of the set, unreadable /proc/stat, or counters that went backwards or did not advance.
+// Why tick i inside the block cannot be judged on these CPUs, or its per-CPU deltas. Each tick's
+// activity is taken against the tick before it (for the first, the last tick before the window).
+function tickReadings(inside: Placed[], before: Placed | undefined, i: number, set: number[]): string | Delta[] {
+  const cur = inside[i].l;
+  if (isFailed(cur)) return 'failed thermal tick';
+  const prev = i === 0 ? before?.l : inside[i - 1].l;
+  if (prev === undefined) return 'no tick before the block';
+  if (isFailed(prev)) return 'failed tick before the block';
+  const deltas: Delta[] = [];
+  for (const cpu of set) {
+    if (!validKHz(cur.avgFreqKHz[cpu])) return `unreadable CPU frequency on CPU ${cpu}`;
+    const a = Array.isArray(prev.procStat) ? prev.procStat[cpu] : null;
+    const b = Array.isArray(cur.procStat) ? cur.procStat[cpu] : null;
+    if (!validCounters(a) || !validCounters(b)) return `unreadable /proc/stat on CPU ${cpu}`;
+    const d = cpuDelta(a, b);
+    if (d === null) return `/proc/stat counters of CPU ${cpu} went backwards or did not advance`;
+    deltas.push(d);
+  }
+  return deltas;
+}
+
+// One set's activity over the ticks inside a block. Missing data fails the whole set, so it can never
+// look like an unthrottled block (F6): no CPUs, no tick, or any tick that tickReadings refuses.
 function setActivity(inside: Placed[], before: Placed | undefined, set: number[], minBusy: number): SetActivity {
   const fail = (problem: string): SetActivity => ({ cpus: [], problem });
+  if (set.length === 0) return fail('no CPUs in the set');
   if (inside.length === 0) return fail('no thermal ticks');
-  if (inside.some(x => isFailed(x.l))) return fail('failed thermal tick');
   const active = set.map(() => [] as number[]);
   for (let i = 0; i < inside.length; i++) {
-    const prev = i === 0 ? before?.l : inside[i - 1].l;
-    if (prev === undefined) return fail('no tick before the block');
-    if (isFailed(prev)) return fail('failed tick before the block');
-    const cur = inside[i].l as ThermalSample;
-    for (const [k, cpu] of set.entries()) {
-      const f = cur.avgFreqKHz[cpu] ?? null;
-      if (f === null) return fail(`unreadable CPU frequency on CPU ${cpu}`);
-      const a = Array.isArray(prev.procStat) ? prev.procStat[cpu] : null;
-      const b = Array.isArray(cur.procStat) ? cur.procStat[cpu] : null;
-      if (!Array.isArray(a) || !Array.isArray(b)) return fail(`unreadable /proc/stat on CPU ${cpu}`);
-      const busy = busyFraction(a, b);
-      if (busy === null) return fail(`/proc/stat counters of CPU ${cpu} went backwards or did not advance`);
-      if (busy >= minBusy) active[k].push(f);
-    }
+    const r = tickReadings(inside, before, i, set);
+    if (typeof r === 'string') return fail(r);
+    const f = (inside[i].l as ThermalSample).avgFreqKHz;
+    r.forEach((d, k) => { if (isActive(d, minBusy)) active[k].push(f[set[k]] as number); });
   }
-  return { cpus: set.map((cpu, k) => ({ cpu, activeTicks: active[k].length, valueKHz: active[k].length ? median(active[k]) : null })), problem: null };
+  return { cpus: set.map((cpu, k) => {
+    const s = [...active[k]].sort((a, b) => a - b);
+    const mid: [number, number] | null = s.length ? [s[(s.length - 1) >> 1], s[s.length >> 1]] : null;
+    return { cpu, activeTicks: s.length, valueKHz: mid ? (mid[0] + mid[1]) / 2 : null, mid };
+  }), problem: null };
 }
 
 // A block's thermal record from every tick inside [startMs, endMs]. A CPU counts as active in a tick
-// when its busy fraction is at least minBusy. No tick near an edge is dropped: a clock step that could
-// misplace one makes the block INVALID instead (offsetSpreadMs, judged by the caller).
+// when its busy fraction is at least minBusy (compared exactly). No tick near an edge is dropped: a
+// clock step that could misplace one makes the block INVALID instead (offsetSpreadMs, judged by the caller).
 export function blockThermal(lines: SampleLine[], startMs: number, endMs: number, sets: { server: number[]; client: number[] }, minBusy: number): BlockThermal {
+  exactFraction(minBusy);
   const from = startMs;
   const to = endMs;
   const placed = lines.map(l => ({ l, t: l.at === null ? NaN : Date.parse(l.at) })).filter(x => Number.isFinite(x.t)).sort((a, b) => a.t - b.t);
@@ -141,9 +189,10 @@ export function blockThermal(lines: SampleLine[], startMs: number, endMs: number
   const maxGapMs = before && after ? Math.max(...gaps) : Infinity;
   const offsets = chain.map(x => x.t - (x.l.monoMs ?? NaN));
   const offsetSpreadMs = monoComplete && chain.length > 0 ? Math.max(...offsets) - Math.min(...offsets) : NaN;
-  const ok = inside.map(x => x.l).filter((l): l is ThermalSample => !isFailed(l));
-  const temps = ok.map(tctl).filter((t): t is number => t !== null);
-  return { samples: ok.length, failed: inside.length - ok.length, ticks: inside.length, windowMs: to - from, maxGapMs, monoComplete, offsetSpreadMs,
+  const judged = [...sets.server, ...sets.client];
+  const ok = inside.filter((_, i) => typeof tickReadings(inside, before, i, judged) !== 'string').length;
+  const temps = inside.map(x => x.l).filter((l): l is ThermalSample => !isFailed(l)).map(tctl).filter((t): t is number => t !== null);
+  return { samples: ok, failed: inside.length - ok, ticks: inside.length, windowMs: to - from, maxGapMs, monoComplete, offsetSpreadMs,
     server: setActivity(inside, before, sets.server, minBusy), client: setActivity(inside, before, sets.client, minBusy), maxTctlC: temps.length ? Math.max(...temps) : null };
 }
 
