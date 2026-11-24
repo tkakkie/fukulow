@@ -8,6 +8,7 @@ import {
   defaultDir,
   expandSeqs,
   loadClientScenario,
+  loadClientScenarios,
   partitionScenarios,
   runClientScenario,
   type ClientScenario,
@@ -386,6 +387,33 @@ function pilotStandIn(bug: 'fills-at-once' | 'cursor-jumps-on-ack' | 'stale-time
     },
   }
 }
+
+// One loader, three file sets kept from before #866: the scenario list reads `.json` files in name order,
+// the by-id lookup reads every file, and the CLI summary reads `.json` files only.
+describe('realtime fixtures: scenario file sets', () => {
+  const extraClient = (name: string, id: string) => ({ file: `client/${name}`, text: JSON.stringify({ kind: 'client', scenarios: [{ ...client.scenarios[0], id }] }) })
+
+  it('lists client scenarios from .json files only, in file name order', () => {
+    const dir = fixtureDir(() => {}, extraClient('a-first.json', 'first-by-name'))
+    writeFileSync(join(dir, 'client/z.txt'), JSON.stringify({ kind: 'client', scenarios: [{ ...client.scenarios[0], id: 'not-json' }] }))
+    expect(loadClientScenarios(dir).map((s) => s.id)).toEqual(['first-by-name', 'valid-client'])
+  })
+
+  it('looks a client scenario up by id in every file, .json or not', () => {
+    const dir = fixtureDir(() => {}, extraClient('extra.txt', 'only-in-txt'))
+    expect(loadClientScenario('only-in-txt', dir).id).toBe('only-in-txt')
+    expect(() => loadClientScenario('missing', dir)).toThrow('no client scenario missing')
+  })
+
+  it('summarises .json files only in the CLI, so a hidden non-JSON file is not read', () => {
+    const dir = fixtureDir(() => {}, { file: 'client/.notes', text: 'not json' })
+    writeFileSync(join(dir, 'delivery/.notes'), 'not json')
+    const result = spawnSync(process.execPath, [script, dir], { encoding: 'utf8' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('delivery: 1 running, 0 proposed')
+    expect(result.stdout).toContain('client: 1 running, 0 proposed')
+  })
+})
 
 describe('realtime fixtures: client pilot (out-of-order 100, 102, 101 via ack and WebSocket)', () => {
   const pilot = loadClientScenario('out-of-order-ack-and-websocket')

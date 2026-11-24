@@ -24,7 +24,7 @@ test('server, client-core, web and openapi.json agree on shared error codes and 
 })
 
 test('a changed error code on one side fails', () => {
-  assert.throws(() => checkContract(edit('server/src/messages.rs',
+  assert.throws(() => checkContract(edit('server/src/messages/error.rs',
     '(StatusCode::CONFLICT, "snapshot_expired")', '(StatusCode::CONFLICT, "snapshot_stale")')), /snapshot_expired: server\/src product code never emits/)
   assert.throws(() => checkContract(edit('client-core/src/transitions.rs',
     'Some("snapshot_expired")', 'Some("snapshot_stale")')), /snapshot_expired: core no longer matches/)

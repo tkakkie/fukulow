@@ -56,6 +56,15 @@ export function dbBatchClock(stdout: Buffer | string | null | undefined): DbBatc
   return { dbClockStartMs, dbClockEndMs, dbClockSpanMs: Math.round((dbClockEndMs - dbClockStartMs) * 1000) / 1000, dbBackendPid };
 }
 
+// Message batches per Organization: every batch when unset or empty, else a positive integer up to that count.
+export function seedBatchLimit(value: string | undefined, pairCount: number) {
+  const all = Math.ceil(pairCount / 250);
+  if (value === undefined || value === '') return all;
+  const batches = Number(value);
+  if (!/^[1-9]\d*$/.test(value) || batches > all) throw new Error(`DM_FORMAL_SEED_BATCHES must be an integer from 1 to ${all}`);
+  return batches;
+}
+
 export function seed(diagnostic = false) {
   if (process.env.DM_FORMAL_SEED !== '1') throw new Error('Set DM_FORMAL_SEED=1 only on the dedicated disposable DB host (50M Messages)');
   const output = resolve(process.env.DM_FORMAL_OUT || '');
@@ -91,6 +100,9 @@ function seedFixture(output: string, container: string, trace?: SeedStop) {
   const scenario=process.env.DM_FORMAL_SCENARIO || 'main';
   if(scenario!=='main' && scenario!=='held200')throw new Error('Seed requires main or held200 scenario');
   const {historical:pairs,supplemental:extraPairs}=fixturePairs(scenario);
+  // The seed diagnostic rehearsal (#920) seeds Messages for the first DM_FORMAL_SEED_BATCHES batches only; unset, every
+  // historical pair gets its Messages, as before.
+  const batchPairs = pairs.slice(0, seedBatchLimit(process.env.DM_FORMAL_SEED_BATCHES, pairs.length) * 250);
   const smoke = process.env.DM_FORMAL_SMOKE === '1';
   const history = smoke ? 1 : 100;
   const timingPath = `${output}/seed-timing.jsonl`;
@@ -141,12 +153,12 @@ INSERT INTO channel_members(organization_id,channel_id,member_id,membership_revi
 INSERT INTO dm_discovery_counters(organization_id,member_id,membership_revision,position) SELECT '${org}',id,1,10300 FROM users WHERE organization_id='${org}';
 INSERT INTO dm_discovery(organization_id,member_id,membership_revision,channel_id,grant_id,birth_position,latest_position) SELECT organization_id,member_id,1,channel_id,grant_id,row_number() OVER(PARTITION BY member_id ORDER BY channel_id),10000+row_number() OVER(PARTITION BY member_id ORDER BY channel_id) FROM channel_members WHERE organization_id='${org}' AND dm_created_at IS NOT NULL AND membership_revision=1;
 INSERT INTO channel_message_sequences(organization_id,channel_id,seq) SELECT '${org}',id,${history} FROM channels WHERE organization_id='${org}' AND id=ANY(ARRAY[${pairs.map(([a,b])=>"'"+channelId(a,b)+"'::uuid").join(',')}]);`);
-    for (let start = 0; start < pairs.length; start += 250) {
+    for (let start = 0; start < batchPairs.length; start += 250) {
       const batchStart = performance.now();
       const batchIndex = start / 250;
       const startedAtMs = trace ? Date.now() : 0;
       if (trace) Object.assign(trace, { batchIndex, baselineMs: batchBaselineMs ?? null, startedAtMs });
-      const ids = pairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
+      const ids = batchPairs.slice(start,start+250).map(([a,b]) => channelId(a,b));
       batchSql(`INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body) SELECT '${org}',gen_random_uuid(),c.id,n,CASE WHEN n%2=0 THEN c.lower_member_id ELSE c.higher_member_id END,gen_random_uuid(),repeat('x',1024) FROM channels c CROSS JOIN generate_series(1,${history}) n WHERE c.organization_id='${org}' AND c.id=ANY(ARRAY[${ids.map(id => `'${id}'::uuid`).join(',')}]);
 ${createLog(org, ids)}`);
       const durationMs = performance.now() - batchStart;
@@ -162,12 +174,12 @@ ${createLog(org, ids)}`);
     }
     sql(`INSERT INTO channel_message_sequences VALUES('${org}','${ordinary}',1); INSERT INTO topics(organization_id,channel_id,id,name,first_seq,last_seq,message_count) VALUES('${org}','${ordinary}','${topic}','Topic',1,1,1); INSERT INTO messages(organization_id,id,channel_id,seq,sender,client_message_id,body,topic_id) VALUES('${org}',gen_random_uuid(),'${ordinary}',1,'${members[0].id}',gen_random_uuid(),'seed','${topic}');
 ${createLog(org, [ordinary])}`);
-    writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals, supplementalEmptyPairs:extraPairs.length, scenario, heldAssignment:heldCohorts(scenario as MixedScenario), fixture:{pairs:pairs.length+extraPairs.length,historicalPairs:pairs.length,messages:pairs.length*history} }), { mode: 0o600 });
+    writeFileSync(`${output}/org-${o}.json`, JSON.stringify({ organization: org, channel: ordinary, topic, members, renewals, supplementalEmptyPairs:extraPairs.length, scenario, heldAssignment:heldCohorts(scenario as MixedScenario), fixture:{pairs:pairs.length+extraPairs.length,historicalPairs:pairs.length,messages:batchPairs.length*history} }), { mode: 0o600 });
     const durationMs = performance.now() - organizationStart;
     const endedAtMs = trace ? Date.now() : 0;
     recordTiming({ kind: 'organization', organization: o, durationMs, ...(trace ? { startedAtMs: organizationStartedAtMs, endedAtMs } : {}) });
-    console.log(`${smoke ? 'SMOKE ONLY' : 'Formal'} scenario=${scenario} Organization ${o}: 1,000 Members (100 Guests), 1,100 Sessions, ${pairs.length+extraPairs.length} DMs (${extraPairs.length} supplemental empty pairs), ${50000*history} Messages; current revision 1, ${2*(pairs.length+extraPairs.length)-10000} usable + 10,000 old-revision grants, read_seq 0, alternating senders, zero Mentions; 10,000 prepared renewals; seeded in ${durationMs.toFixed(0)} ms`);
-    const lastBatchIndex = Math.ceil(pairs.length / 250) - 1;
+    console.log(`${smoke ? 'SMOKE ONLY' : 'Formal'} scenario=${scenario} Organization ${o}: 1,000 Members (100 Guests), 1,100 Sessions, ${pairs.length+extraPairs.length} DMs (${extraPairs.length} supplemental empty pairs), ${batchPairs.length*history} Messages; current revision 1, ${2*(pairs.length+extraPairs.length)-10000} usable + 10,000 old-revision grants, read_seq 0, alternating senders, zero Mentions; 10,000 prepared renewals; seeded in ${durationMs.toFixed(0)} ms`);
+    const lastBatchIndex = Math.ceil(batchPairs.length / 250) - 1;
     checkOrganization(o, lastBatchIndex, durationMs, organizationBaselineMs, trace && (limitMs => {
       Object.assign(trace, { rule: 'organization-total', batchIndex: lastBatchIndex, durationMs, limitMs, endedAtMs });
     }));
