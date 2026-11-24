@@ -21,6 +21,21 @@ export default defineConfig(({ mode }) => {
       ...(test ? [{ find: /^\.\/core-values$/, replacement: fileURLToPath(new URL('./scripts/core-test-values.ts', import.meta.url)) }] : []),
     ] },
     plugins: [
+      {
+        name: 'preload-sync-wasm', apply: 'build',
+        transformIndexHtml: {
+          order: 'post',
+          handler(_html, { bundle }) {
+            if (!bundle) return
+            const wasm = Object.values(bundle).find(item => item.type === 'asset' && item.fileName.endsWith('.wasm'))
+            if (!wasm) throw new Error('Missing wasm asset for the HTML preload')
+            // wasm-bindgen uses fetch(url), whose default credentials mode is same-origin.
+            return [{ tag: 'link', injectTo: 'head-prepend', attrs: {
+              rel: 'preload', as: 'fetch', type: 'application/wasm', crossorigin: 'anonymous', href: '/' + wasm.fileName,
+            } }]
+          },
+        },
+      },
       { name: 'precompressed-brotli', apply: 'build',
         async writeBundle(options) {
           if (!options.dir) throw new Error('Brotli assets require an output directory')
