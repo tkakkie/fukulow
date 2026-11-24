@@ -49,7 +49,7 @@ for (const role of ['owner', 'admin', 'member', 'guest'] as const) {
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
     try {
       await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)
-      await page.locator('summary').click()
+      await page.locator('details.member-list > summary').click()
       const panel = page.getByRole('region', { name: '未承諾の招待', exact: true })
       if (!allowed) { await expect(panel).toHaveCount(0); expect(pages).toEqual([]); return }
       await expect(panel.locator('li')).toHaveCount(100)

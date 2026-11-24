@@ -29,6 +29,14 @@
     return onhold()
   })
 
+  function handleSummaryClick(event: MouseEvent) {
+    if (disabled) event.preventDefault()
+  }
+
+  function handleSummaryKeydown(event: KeyboardEvent) {
+    if (disabled && (event.key === 'Enter' || event.key === ' ')) event.preventDefault()
+  }
+
   function handleToggle(event: Event & { currentTarget: HTMLDetailsElement }) {
     if (disabled) {
       event.currentTarget.open = false
@@ -42,10 +50,14 @@
   <details
     class="archived-list__details"
     open={open && !disabled}
-    inert={disabled}
     ontoggle={handleToggle}
   >
-    <summary class="archived-list__toggle">アーカイブ済みチャンネル</summary>
+    <summary
+      class="archived-list__toggle"
+      aria-disabled={disabled ? 'true' : undefined}
+      onclick={handleSummaryClick}
+      onkeydown={handleSummaryKeydown}
+    >アーカイブ済みチャンネル</summary>
 
     {#if open && !disabled}
       <div class="archived-list__body">
@@ -110,11 +122,11 @@
     transition: background-color var(--duration-fast) var(--ease-out);
   }
 
-  .archived-list__details:not([inert]) > .archived-list__toggle:hover {
+  .archived-list__toggle:not([aria-disabled='true']):hover {
     background-color: var(--hover);
   }
 
-  .archived-list__details[inert] > .archived-list__toggle {
+  .archived-list__toggle[aria-disabled='true'] {
     color: var(--muted);
     cursor: not-allowed;
   }

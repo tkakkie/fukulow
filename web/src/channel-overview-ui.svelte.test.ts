@@ -192,8 +192,6 @@ class MiniEl extends MiniNode {
   set value(v: string) { this._value = String(v ?? '') }
   get disabled(): boolean { return this.attrs.has('disabled') }
   set disabled(v: boolean) { if (v) this.attrs.set('disabled', ''); else this.attrs.delete('disabled') }
-  get inert(): boolean { return this.attrs.has('inert') }
-  set inert(v: boolean) { if (v) this.attrs.set('inert', ''); else this.attrs.delete('inert') }
   get open(): boolean { return this.attrs.has('open') }
   set open(v: boolean) {
     const next = Boolean(v)
@@ -201,14 +199,6 @@ class MiniEl extends MiniNode {
     if (next) this.attrs.set('open', '')
     else this.attrs.delete('open')
     if (this.localName === 'details' && next !== prev) this.dispatchEvent(new MiniEvent('toggle'))
-  }
-  private isInert(): boolean {
-    let cur: MiniNode | null = this
-    while (cur) {
-      if (cur instanceof MiniEl && cur.inert) return true
-      cur = cur.parentNode
-    }
-    return false
   }
   get className(): string { return this.attrs.get('class') ?? '' }
   set className(v: string) { this.setAttribute('class', v) }
@@ -227,7 +217,7 @@ class MiniEl extends MiniNode {
     if (!html || !this.ownerDocument) return
     appendAst(parse(html, { modern: true }).fragment.nodes, target, this.ownerDocument)
   }
-  focus(): void { if (!this.disabled && !this.isInert() && this.ownerDocument) this.ownerDocument.activeElement = this }
+  focus(): void { if (!this.disabled && this.ownerDocument) this.ownerDocument.activeElement = this }
   scrollIntoView(): void {}
   setSelectionRange(start: number): void { this.selectionStart = start }
   getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 } }
@@ -240,7 +230,7 @@ class MiniEl extends MiniNode {
     return null
   }
   click(): void {
-    if (this.disabled || this.isInert()) return
+    if (this.disabled) return
     this.focus()
     const ev = new MiniEvent('click')
     this.dispatchEvent(ev)
@@ -253,17 +243,13 @@ class MiniEl extends MiniNode {
     }
   }
   input(val: string): void {
-    if (this.disabled || this.isInert()) return
+    if (this.disabled) return
     this._value = val
     this.dispatchEvent(new MiniEvent('input'))
   }
   keydown(key: string, opts: { shiftKey?: boolean; isComposing?: boolean; keyCode?: number } = {}): void {
-    if (this.disabled || this.isInert()) return
-    const ev = new MiniEvent('keydown', { key, ...opts })
-    this.dispatchEvent(ev)
-    if (!ev.defaultPrevented && this.localName === 'summary' && (key === 'Enter' || key === ' ') && this.parentNode instanceof MiniEl && this.parentNode.localName === 'details') {
-      this.parentNode.open = !this.parentNode.open
-    }
+    if (this.disabled) return
+    this.dispatchEvent(new MiniEvent('keydown', { key, ...opts }))
   }
   querySelectorAll(sel: string): MiniEl[] { return findAll(this, sel) }
   querySelector(sel: string): MiniEl | null { return findAll(this, sel)[0] ?? null }
@@ -836,7 +822,7 @@ describe('ArchivedChannelList UI', () => {
     }
   })
 
-  it('opens and closes via click and keyboard (Enter/Space) and mounts content only when open', async () => {
+  it('opens and closes on click and mounts content only when open', async () => {
     await withDom(async (doc) => {
       const host = doc.createElement('div')
       doc.body.appendChild(host)
@@ -858,7 +844,8 @@ describe('ArchivedChannelList UI', () => {
       const details = host.querySelector('details')!
       const summary = host.querySelector('summary')!
       expect(details.open).toBe(false)
-      expect(details.inert).toBe(false)
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBeNull()
       expect(host.querySelector('.archived-list__body')).toBeNull()
       expect(onhold).not.toHaveBeenCalled()
 
@@ -877,37 +864,11 @@ describe('ArchivedChannelList UI', () => {
       expect(host.querySelector('.archived-list__body')).toBeNull()
       expect(release).toHaveBeenCalledTimes(1)
 
-      // Enter opens, Space closes
-      summary.keydown('Enter')
-      flushSync()
-      expect(details.open).toBe(true)
-      expect(host.querySelector('.archived-list__body')).not.toBeNull()
-      expect(onhold).toHaveBeenCalledTimes(2)
-
-      summary.keydown(' ')
-      flushSync()
-      expect(details.open).toBe(false)
-      expect(host.querySelector('.archived-list__body')).toBeNull()
-      expect(release).toHaveBeenCalledTimes(2)
-
-      // Space opens, Enter closes
-      summary.keydown(' ')
-      flushSync()
-      expect(details.open).toBe(true)
-      expect(host.querySelector('.archived-list__body')).not.toBeNull()
-      expect(onhold).toHaveBeenCalledTimes(3)
-
-      summary.keydown('Enter')
-      flushSync()
-      expect(details.open).toBe(false)
-      expect(host.querySelector('.archived-list__body')).toBeNull()
-      expect(release).toHaveBeenCalledTimes(3)
-
       await unmount(inst)
     })
   })
 
-  it('prevents opening while disabled and collapses/unmounts if disabled while open', async () => {
+  it('exposes aria-disabled without inert, prevents opening while disabled and collapses/unmounts if disabled while open', async () => {
     await withDom(async (doc) => {
       const host = doc.createElement('div')
       doc.body.appendChild(host)
@@ -930,14 +891,13 @@ describe('ArchivedChannelList UI', () => {
 
       const details = host.querySelector('details')!
       const summary = host.querySelector('summary')!
-      expect(details.inert).toBe(true)
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBe('true')
       expect(details.open).toBe(false)
       expect(host.querySelector('.archived-list__body')).toBeNull()
 
-      // Click and keyboard cannot open while disabled
+      // Click cannot open while disabled
       summary.click()
-      summary.keydown('Enter')
-      summary.keydown(' ')
       flushSync()
       expect(details.open).toBe(false)
       expect(host.querySelector('.archived-list__body')).toBeNull()
@@ -953,7 +913,8 @@ describe('ArchivedChannelList UI', () => {
       // Re-enabling allows opening; disabling again collapses, unmounts and releases hold
       state.disabled = false
       flushSync()
-      expect(details.inert).toBe(false)
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBeNull()
       summary.click()
       flushSync()
       expect(details.open).toBe(true)
@@ -962,7 +923,8 @@ describe('ArchivedChannelList UI', () => {
 
       state.disabled = true
       flushSync()
-      expect(details.inert).toBe(true)
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBe('true')
       expect(details.open).toBe(false)
       expect(host.querySelector('.archived-list__body')).toBeNull()
       expect(release).toHaveBeenCalledTimes(1)
