@@ -11,6 +11,10 @@ Plumbing that every measurement harness needs, so a fix lands once. New harnesse
   - Pinned, clean harness commit.
   - New output directory.
 - `stages.ts`: `--smoke | --rehearsal | --recorded`, plus `status.json` with `stage`, `sampling` and `outcome`.
+- `host-record.ts` (#796): the host record. It covers CPU model, governors, max frequency per CPU, boost, RAM and swap, AC, temperatures, disk, Docker, update jobs, sleep targets and the snap hold.
+  - `linuxViolations` lists the unmet Linux measurement conditions.
+  - `node load/host-record.ts --out FILE --check` exits 3 on any violation.
+- `cpusets.ts` (#796): `--cpu-sets "server=LIST;client=LIST"`, checked to be disjoint. Processes are pinned with `taskset`, and the pin is read back from `/proc/<pid>/status`.
 
 ## Run rules (maintainer decisions, 2026-11-21 and 2026-11-22, #769)
 
