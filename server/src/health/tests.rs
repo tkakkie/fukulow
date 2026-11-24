@@ -288,13 +288,45 @@ async fn health_ok() {
 async fn health_emits_clock_sample_only_with_measurement_enabled() {
     use tracing::instrument::WithSubscriber;
 
+    // Tracing caches callsite interest process-wide. A request on another test
+    // thread without a subscriber can cache Interest::never before we emit.
+    const CHILD: &str = "FUKULOW_TEST_HEALTH_CLOCK_SAMPLE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                concat!(
+                    module_path!(),
+                    "::health_emits_clock_sample_only_with_measurement_enabled"
+                )
+                .split_once("::")
+                .unwrap()
+                .1,
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let normal = observability::tests::Capture::default();
     let response = get("/api/v1/health")
         .with_subscriber(normal.subscriber())
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     let events = normal.events();
-    assert!(!events.is_empty(), "expected a normal health event");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["fields"]["event"] == "http_completed"),
+        "expected a normal health event"
+    );
     assert!(
         events
             .iter()
