@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,16 +60,18 @@ export function options(argv: string[], os = platform()) {
 
 // The maintainer's go for one stage (design rev 2 §3.4, §5.3, §8: each stage needs its own go). The record
 // names issue 870, the stage, the launcher job it was given for, the quoted go and its date. It is checked
-// against the stage and the job being started, and must not predate the earlier stage it builds on.
-export type Approval = {issue: 870; stage: Stage; job: string; quote: string; date: string};
+// against the stage and the job being started. `at` is when the go was given, an ISO 8601 timestamp with its
+// offset; it must not precede the finish timestamp of the earlier stage it builds on (not only its day).
+export type Approval = {issue: 870; stage: Stage; job: string; quote: string; at: string};
+const isoInstant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 export function approvalFor(file: string, stage: Stage, job: string | undefined, notBefore: string | null) {
   const a = readIf(file) as Partial<Approval> | null;
   assert.ok(a && a.issue === 870, `${file} is not an #870 approval record`);
   assert.equal(a.stage, stage, `The approval is for stage ${a.stage}, not ${stage}: each stage needs its own go`);
   assert.ok(typeof a.quote === 'string' && a.quote.trim().length > 0, 'The approval has no quoted go');
-  assert.ok(typeof a.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(a.date) && !Number.isNaN(Date.parse(a.date)), 'The approval has no valid date (YYYY-MM-DD)');
+  assert.ok(typeof a.at === 'string' && isoInstant.test(a.at) && !Number.isNaN(Date.parse(a.at)), 'The approval has no valid time (ISO 8601 with offset, e.g. 2026-11-26T09:30+09:00)');
   assert.ok(job !== undefined && a.job === job, `The approval is for job ${a.job}, not ${job}`);
-  assert.ok(notBefore === null || a.date >= notBefore, `The approval (${a.date}) predates the earlier stage it needs (${notBefore})`);
+  assert.ok(notBefore === null || Date.parse(a.at) >= Date.parse(notBefore), `The approval (${a.at}) predates the finish of the earlier stage it needs (${notBefore})`);
   return a as Approval;
 }
 
@@ -93,7 +95,8 @@ function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets:
   assert.equal(readIf(`${dir}/approval.json`)?.stage, stage, `${dir} has no recorded go for the ${name}`);
   assert.equal(JSON.stringify(metadata.cpuSets ?? null), JSON.stringify(parseCpuSets(cpuSets, logicalCpus)), `${dir} ran on other CPU sets`);
   assert.ok(typeof finished.at === 'string', `${dir} has no finish time`);
-  return {judgement, finishedOn: (finished.at as string).slice(0, 10)};
+  assert.ok(!Number.isNaN(Date.parse(finished.at)), `${dir} has no valid finish time`);
+  return {judgement, finishedAt: finished.at as string};
 }
 
 // Stage 2 pre-validation (§5.3, review item 5): Stage 1's recorded N, its source and its outcome must be
@@ -137,7 +140,7 @@ export function prerequisites(args: ReturnType<typeof options>, manifestHash: st
   const prior = args.stage === '1' ? finishedStage(args.smokeOut!, 'smoke', manifestHash, args.cpuSets, logicalCpus)
     : args.stage === '2' ? finishedStage(args.stage1Out!, '1', manifestHash, args.cpuSets, logicalCpus) : null;
   if (args.stage === '1') assert.equal(prior!.judgement.outcome, 'smoke passed', 'The smoke did not pass');
-  const approval = approvalFor(args.approval, args.stage, env.FUKULOW_LAUNCH_JOB, prior?.finishedOn ?? null);
+  const approval = approvalFor(args.approval, args.stage, env.FUKULOW_LAUNCH_JOB, prior?.finishedAt ?? null);
   if (args.stage !== '2') return {stage1Noise: null, approval};
   assert.ok(stage1Outcomes.includes(prior!.judgement.outcome), `Stage 1 has no recognized outcome: ${prior!.judgement.outcome}`);
   return {stage1Noise: stage1Noise(args.stage1Out!, prior!.judgement), approval};
@@ -148,10 +151,12 @@ const freeAt = (path: string) => { const s = statfsSync(path, {bigint: true}); r
 const freeOrNull = (path: string) => { try { return freeAt(path); } catch { return null; } };
 
 async function worker(env: NodeJS.ProcessEnv) {
+  const {frozen, sha256} = loadManifest();
+  // Before anything else: the prerequisites again, and this launch's one-time token (review round 5, item 1).
+  const {stage1Noise} = workerGate(env, sha256);
   const stage = env.DIAG870_STAGE as Stage;
   const out = env.DIAG870_OUT!;
   const sets: CpuSets | undefined = env.DIAG870_CPU_SETS ? parseCpuSets(env.DIAG870_CPU_SETS, cpus().length) : undefined;
-  const {frozen, sha256} = loadManifest();
   const {querySet, transactions, clients, warmupSweeps, rows, restoreRows} = frozen.performance;
   const container = ownedContainer(), volume = ownedVolume();
   assert.ok(container && volume, 'Missing supervised Docker resources');
@@ -212,7 +217,11 @@ async function worker(env: NodeJS.ProcessEnv) {
   const thermal = platform() === 'linux';
   const sampler = spawn(process.execPath, [fileURLToPath(new URL('./sampler.ts', import.meta.url)), '--out', samplesFile,
     '--container', container, ...(sets ? ['--client-cpus', cpuList(sets.client)] : []), ...(thermal ? ['--thermal'] : [])],
-  {stdio: ['ignore', 'inherit', 'inherit', 'ipc']});
+  {stdio: ['ignore', 'inherit', 'inherit', 'ipc'], detached: true});
+  // The sampler leads its own process group, so a stop reaches its in-flight commands too.
+  const samplerGroup = {get exitCode() { return sampler.exitCode; }, get signalCode() { return sampler.signalCode; },
+    kill: (signal: NodeJS.Signals) => { try { process.kill(-sampler.pid!, signal); return true; } catch { return false; } }};
+  const groupAlive = () => { try { process.kill(-sampler.pid!, 0); return true; } catch { return false; } };
   const time = sets ? pinnedBenchmark(sets.client) : benchmark;
   const windows = new Map<string, {start: number; end: number; blocks: Block[]; restart: Restart | null; checked: boolean}>();
   let previous: {id: string; end: number} | null = null;
@@ -229,7 +238,7 @@ async function worker(env: NodeJS.ProcessEnv) {
     while (!freshFast(readSamples(samplesFile), t) && Date.now() - t < freshWaitMs) await new Promise(r => setTimeout(r, 250));
     lastRestart = {at, fresh: freshFast(readSamples(samplesFile), t)};
   };
-  const reads = () => Number(owner('postgres', "SELECT pg_stat_clear_snapshot(); SELECT blks_read FROM pg_stat_database WHERE datname = 'measured';").split('\n').at(-1));
+  const reads = () => parseCount(owner('postgres', "SELECT pg_stat_clear_snapshot(); SELECT blks_read FROM pg_stat_database WHERE datname = 'measured';"));
   const stats = () => JSON.parse(owner('measured', `SELECT json_build_object(
     'io', (SELECT json_agg(row_to_json(i)) FROM pg_stat_io i WHERE reads > 0 OR hits > 0),
     'tables', (SELECT json_agg(row_to_json(t)) FROM pg_stat_user_tables t WHERE relname IN ('messages', 'message_search_terms')),
@@ -313,7 +322,7 @@ async function worker(env: NodeJS.ProcessEnv) {
       const latencies = results.map(r => 'error' in r ? {query: r.query, error: r.error}
         : 'p95' in r.sample ? {query: r.query, p95: r.sample.p95} : {query: r.query, error: r.sample.sqlError});
       const m: Measurement = {id: step.id, kind: step.kind, arm: step.arm, order: step.order, settle: step.kind === 'copy' && step.settle,
-        latencies, plans, sharedReads, invalid: ownReasons(results, load15), missingEvidence: missing,
+        latencies, plans, sharedReads, invalid: ownReasons(results, load15), missingEvidence: missing, samplerChecked: false,
         env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []}};
       // Option A: hot 2's EXPLAIN sweep stands for warm, hot 1 and hot 2 of its cache arm.
       const plansStandFor = step.kind === 'hot' && step.id.endsWith('.hot2') ? ['warm', 'hot1', 'hot2'].map(x => `${step.arm}.${x}`) : undefined;
@@ -332,6 +341,7 @@ async function worker(env: NodeJS.ProcessEnv) {
         if (!reached) facts.invalid.push('sampler coverage not reached by the deadline');
         m.invalid.push(...facts.invalid.filter(r => !m.invalid.includes(r)));
         m.env = facts.env;
+        m.samplerChecked = true;
         w.checked = true;
       }
     },
@@ -367,12 +377,8 @@ async function worker(env: NodeJS.ProcessEnv) {
   };
 
   let samplerStopped: Promise<{verified: boolean; how: string}> | null = null;
-  const stopSampler = () => samplerStopped ??= stopProcess(sampler).then(r => { save(`${out}/sampler-stop.json`, r); return r; });
-  const onSignal = (signal: NodeJS.Signals, code: number) => process.once(signal, () => {
-    sampler.kill('SIGKILL');
-    note(`${signal}: sampler killed; the stage ends`);
-    process.exit(code);
-  });
+  const stopSampler = () => samplerStopped ??= stopProcess(samplerGroup, 15_000, 5_000, groupAlive).then(r => { save(`${out}/sampler-stop.json`, r); return r; });
+  const onSignal = (signal: NodeJS.Signals, code: number) => process.once(signal, signalStop(signal, code, stopSampler, c => process.exit(c)));
   onSignal('SIGTERM', 143); onSignal('SIGINT', 130);
   let logTried = false;
   try {
@@ -387,7 +393,7 @@ async function worker(env: NodeJS.ProcessEnv) {
     const logMissing = postgresLog(container, out);
     if (logMissing) stageMissing.push(logMissing);
     const judgement = stage === '1' ? stage1(result.measurements, result.stopped, stageMissing)
-      : stage === '2' ? stage2(result.measurements, JSON.parse(env.DIAG870_STAGE1_NOISE!) as Noise, result.stopped, stageMissing)
+      : stage === '2' ? stage2(result.measurements, stage1Noise!, result.stopped, stageMissing)
       : smoke(result.measurements, result.stopped, stageMissing);
     save(`${out}/judgement.json`, {label, stage, stopped: result.stopped, cacheConstraint, ...judgement});
     note(`judgement: ${JSON.stringify('outcome' in judgement ? judgement.outcome : judgement.result)}`);
@@ -397,6 +403,35 @@ async function worker(env: NodeJS.ProcessEnv) {
     if (!r.verified) { note(`sampler did not exit: ${r.how}`); process.exitCode ||= stopExitCode; }
     if (!logTried) postgresLog(container, out);
   }
+}
+
+// The worker's own gate (SEARCH_WORKER=1 is only an environment variable, so it proves nothing): it parses
+// the launch's arguments and checks every prerequisite again, binds stage and output to them, and claims the
+// one-time token the launching process wrote into the output directory. A second worker, or one started
+// with inherited settings, finds the token claimed or missing and stops before Docker.
+export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logicalCpus = cpus().length, os = platform()) {
+  assert.ok(env.DIAG870_ARGV && env.DIAG870_TOKEN && env.DIAG870_OUT, 'Not a supervised #870 worker launch');
+  const args = options(JSON.parse(env.DIAG870_ARGV) as string[], os);
+  const checked = prerequisites(args, manifestHash, env, logicalCpus);
+  assert.ok(env.DIAG870_STAGE === args.stage && env.DIAG870_FROM === args.from && env.DIAG870_CPU_SETS === args.cpuSets,
+    'The worker settings do not match the launch arguments');
+  const file = `${env.DIAG870_OUT}/worker-token`, claimed = `${file}.claimed`;
+  try { renameSync(file, claimed); } catch { assert.fail('The worker token is missing or already claimed'); }
+  assert.equal(readFileSync(claimed, 'utf8'), env.DIAG870_TOKEN, 'The worker token does not match');
+  assert.equal(JSON.stringify(readIf(`${env.DIAG870_OUT}/approval.json`)), JSON.stringify(checked.approval), 'The recorded go is not this launch\'s');
+  return checked;
+}
+
+// A signal to the worker: stop the sampler (verified, or recorded as not) before exiting.
+export const signalStop = (signal: string, code: number, stop: () => Promise<{verified: boolean; how: string}>, exit: (code: number) => void) =>
+  () => { void stop().then(r => { note(`${signal}: sampler stop ${r.verified ? 'verified' : 'NOT verified'} (${r.how}); the stage ends`); exit(code); },
+    error => { note(`${signal}: sampler stop failed: ${String(error)}`); exit(code); }); };
+
+// A single non-negative integer on the last line of psql output; anything else is unreadable (Neon r5).
+export function parseCount(text: string) {
+  const last = text.trim().split('\n').at(-1)?.trim() ?? '';
+  if (!/^\d+$/.test(last)) throw new Error(`not a count: ${JSON.stringify(last)}`);
+  return Number(last);
 }
 
 // finish.json always; a normal finish writes completed.json (exit 0), anything else stopped.json with its
@@ -430,14 +465,16 @@ async function main() {
   const args = options(process.argv.slice(2));
   const {sha256} = loadManifest();
   // Everything in §3 and the stage's go, before any Docker or database work.
-  const {stage1Noise, approval} = prerequisites(args, sha256);
+  const {approval} = prerequisites(args, sha256);
   const out = outputPath(args.out);
   refuseLeftovers(docker);
   mkdirSync(out, {mode: 0o700});
   save(`${out}/approval.json`, approval);
+  const token = randomUUID();
+  writeFileSync(`${out}/worker-token`, token, {mode: 0o600, flag: 'wx'});
   Object.assign(process.env, {DIAG870_STAGE: args.stage, DIAG870_OUT: out, DIAG870_FROM: args.from,
-    DIAG870_CPU_SETS: args.cpuSets ?? '', DIAG870_STAGE1_NOISE: stage1Noise === null ? '' : JSON.stringify(stage1Noise),
-    DIAG870_QUALIFICATION: args.qualification ?? ''});
+    DIAG870_CPU_SETS: args.cpuSets ?? '', DIAG870_QUALIFICATION: args.qualification ?? '',
+    DIAG870_ARGV: JSON.stringify(process.argv.slice(2)), DIAG870_TOKEN: token});
   // The supervisor runs this file as the worker, owns the container and volume, and always removes them.
   await supervise(import.meta.url, out, sha256, () => note(`${label}: stage ${args.stage} finished (${out})`));
   sweepLeftovers(out);

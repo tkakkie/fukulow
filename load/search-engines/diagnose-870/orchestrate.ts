@@ -64,6 +64,9 @@ export async function settleWait(io: SettleIo, capMs: number) {
   io.checkpoint();
   const met = (r: ReturnType<SettleIo['reading']>) => r.dirtyWritebackBytes < settleDirtyBytes && r.autovacuumWorkers === 0;
   for (;;) {
+    // Past the cap (a CHECKPOINT or a sleep that overran it) no reading starts: INVALID, never a failed
+    // reading turned into a STOP.
+    if (elapsed() > capMs) return false;
     const r = io.reading();
     if (elapsed() > capMs) return false;
     if (met(r)) return true;

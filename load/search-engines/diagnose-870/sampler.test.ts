@@ -190,3 +190,25 @@ test('the sampler stop is SIGTERM, a bounded wait, SIGKILL, and a verified exit'
   assert.deepEqual(await stopProcess(gone), {verified: true, how: 'already exited'});
   assert.deepEqual(gone.signals, []);
 });
+
+test('an autovacuum reading whose interval overlaps a block counts for it, like workers and containers (Neon r5)', () => {
+  const av = {autovacuum: [{pid: 1, datname: 'measured', query: 'autovacuum: VACUUM public.messages'}]};
+  const blocks = [{query: 'q1', start: 40_000, end: 60_000}];
+  // Started 0.4 s before the block and returned inside it.
+  const s = [...steady(), {...fast(39_600, av), done: 40_200}];
+  assert.deepEqual(windowFacts(s, 20_000, 80_000, blocks, opts).env.autovacuumQueries, ['q1']);
+  const before = [...steady(), {...fast(39_000, av), done: 39_500}];
+  assert.deepEqual(windowFacts(before, 20_000, 80_000, blocks, opts).env.autovacuumQueries, []);
+});
+
+test('the sampler stop is verified only when its whole process group is gone', async () => {
+  // The sampler exits on SIGTERM but one of its commands keeps the group alive until SIGKILL.
+  const child = new FakeChild(['SIGTERM']);
+  let group = true;
+  const kill = child.kill.bind(child);
+  child.kill = (signal: NodeJS.Signals) => { if (signal === 'SIGKILL') group = false; return kill(signal); };
+  assert.deepEqual(await stopProcess(child, 30, 30, () => group), {verified: true, how: 'SIGKILL'});
+  assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL']);
+  const stuck = new FakeChild(['SIGTERM']);
+  assert.deepEqual(await stopProcess(stuck, 10, 10, () => true), {verified: false, how: 'its process group outlived SIGKILL'});
+});

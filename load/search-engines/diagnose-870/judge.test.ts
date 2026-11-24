@@ -21,7 +21,7 @@ function m(id: string, g: number, over: Partial<Measurement> = {}): Measurement 
     latencies: names.map(query => ({query, p95: query === 'scalar' ? 1 : g})),
     plans: plans(), sharedReads: 0,
     env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []},
-    invalid: [], missingEvidence: [], ...over};
+    invalid: [], missingEvidence: [], samplerChecked: true, ...over};
 }
 
 // A rising A1, no recovery after the cool-down, flat D, steady hot measurements, restart-only 3.25x warm
@@ -273,11 +273,43 @@ test('H6 is supported by a position effect in either direction, but only with th
 
 test('a normal Stage 1 has no abnormal reasons; each unmet minimum and a STOP are listed', () => {
   assert.deepEqual(stage1(scenario()).abnormal, []);
-  assert.deepEqual(stage1(scenario({}, {'A2.1': invalid})).abnormal, ['minimum not met: H2']);
-  assert.deepEqual(stage1(scenario({}, {'C1.hot2': invalid})).abnormal, ['minimum not met: H1']);
-  assert.deepEqual(stage1(scenario({}, {'D.settle2': invalid})).abnormal, ['minimum not met: H45']);
+  assert.deepEqual(stage1(scenario({}, {'A2.1': invalid})).abnormal, ['minimum not met: H2', 'INVALID: A2.1']);
+  assert.deepEqual(stage1(scenario({}, {'C1.hot2': invalid})).abnormal, ['minimum not met: H1', 'INVALID: C1.hot2']);
+  assert.deepEqual(stage1(scenario({}, {'D.settle2': invalid})).abnormal, ['minimum not met: H45', 'INVALID: D.settle2']);
   assert.deepEqual(stage1(scenario({}, {'A1.4': {plans: null}})).abnormal, ['minimum not met: H3']);
-  assert.deepEqual(stage1(scenario({}, {'A1.1': invalid, 'A1.2': invalid})).abnormal, ['minimum not met: A1', 'minimum not met: H2']);
+  assert.deepEqual(stage1(scenario({}, {'A1.1': invalid, 'A1.2': invalid})).abnormal,
+    ['minimum not met: A1', 'minimum not met: H2', 'INVALID: A1.1, A1.2']);
+});
+
+test('one INVALID measurement with every minimum still met is not a normal finish (review item 2)', () => {
+  const r = stage1(scenario({}, {'A1.3': invalid}));
+  assert.equal(minimums(scenario({}, {'A1.3': invalid})).A1, true);
+  // The judgement excludes it as §4.1 says; the stage still does not count as a normal finish.
+  assert.equal(r.outcome, 'cause established');
+  assert.deepEqual(r.abnormal, ['INVALID: A1.3']);
+  assert.deepEqual(stage2(b({}, {'B.post3': invalid}), C(1.05)).abnormal, ['INVALID: B.post3']);
+  assert.deepEqual(smoke([{...m('A1.1', 40, invalid), id: 'smoke.1'}], null).abnormal, ['minimum not met: one valid smoke round', 'INVALID: smoke.1']);
+});
+
+test('a window the sampler never checked (sampler death in the final validation) is incomplete evidence', () => {
+  const r = stage1(scenario({}, {'C2.restart': {samplerChecked: false}}), 'sampler validation: Error: the sampler process exited');
+  assert.equal(r.evidence.complete, false);
+  assert.deepEqual(r.evidence.missing, ['C2.restart: sampler window not checked']);
+  assert.equal(r.outcome, 'inconclusive');
+  assert.equal(r.attribution, null);
+  assert.equal(r.stage2, 'propose');
+});
+
+test('§4.2 and §5.3 thresholds hold under floating-point rounding: 23 queries at 100 -> 130 ms is 1.30', () => {
+  const many = (id: string, v: number) => {
+    const x = m(id, v);
+    x.latencies = Array.from({length: 23}, (_, i) => ({query: `fullwidth-${i}`, p95: v}));
+    return x;
+  };
+  const ms = b({}).map(x => x.id === 'B.pre' ? many('B.pre', 100) : x.id === 'B.post1' ? many('B.post1', 130) : x);
+  assert.equal(stage2(ms, C(1.05)).result, 'reproduced');
+  const just = b({}).map(x => x.id === 'B.pre' ? many('B.pre', 100) : x.id === 'B.post1' ? many('B.post1', 129.99) : x);
+  assert.equal(stage2(just, C(1.05)).result, 'inconclusive');
   assert.deepEqual(stage1(scenario(), 'more than 4 INVALID measurements').abnormal, ['STOP: more than 4 INVALID measurements']);
 });
 
@@ -334,8 +366,8 @@ test('Stage 2 boundaries are §5.3 literally: 1.30 reproduces, 1.15 is inconclus
 test('Stage 2 is not a normal finish when its minimum, B.post1 or any evidence is missing; it records N and its source', () => {
   assert.deepEqual(stage2(b({}), C(1.05)).abnormal, []);
   assert.deepEqual(stage2(b({}), C(1.05)).noise, {value: 1.05, source: 'C hot1/hot2'});
-  assert.deepEqual(stage2(b({}, {'B.post1': invalid}), C(1.05)).abnormal, ['minimum not met: B.post1 (the §5.3 contrast)']);
-  assert.deepEqual(stage2(b({}, {'B.cool1': invalid}), C(1.05)).abnormal, ['minimum not met: both cool-down rounds']);
+  assert.deepEqual(stage2(b({}, {'B.post1': invalid}), C(1.05)).abnormal, ['minimum not met: B.post1 (the §5.3 contrast)', 'INVALID: B.post1']);
+  assert.deepEqual(stage2(b({}, {'B.cool1': invalid}), C(1.05)).abnormal, ['minimum not met: both cool-down rounds', 'INVALID: B.cool1']);
   const partial = stage2(b({}, {'B.post2': {missingEvidence: ['EXPLAIN q1: timeout']}}), C(1.05));
   assert.deepEqual([partial.result, why(partial).reason, partial.abnormal], ['inconclusive', 'evidence incomplete', ['evidence incomplete']]);
   assert.deepEqual(stage2(b({}), C(1.05), 'B.post2: boom').abnormal.slice(0, 1), ['STOP: B.post2: boom']);

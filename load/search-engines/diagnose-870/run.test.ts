@@ -6,7 +6,7 @@ import test from 'node:test';
 import { qualifiedCpuSets } from './cluster.ts';
 import { stage1, type Measurement } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
-import { finishRecords, options, prerequisites, stopExitCode, sweepLeftovers } from './run.ts';
+import { finishRecords, options, parseCount, prerequisites, signalStop, stopExitCode, sweepLeftovers, workerGate } from './run.ts';
 
 const hash = 'h'.repeat(64);
 const sets = qualifiedCpuSets;
@@ -25,14 +25,14 @@ function host() {
 // The maintainer's go for one stage, as the operator records it before queueing the job.
 function approval(dir: string, stage: string, over: Record<string, unknown> = {}) {
   const file = join(mkdtempSync(join(dir, 'go-')), 'approval.json');
-  json(file, {issue: 870, stage, job: {smoke: 'smoke-870', '1': 'stage1-870', '2': 'stage2-870'}[stage], quote: 'go', date: '2026-11-26', ...over});
+  json(file, {issue: 870, stage, job: {smoke: 'smoke-870', '1': 'stage1-870', '2': 'stage2-870'}[stage], quote: 'go', at: '2026-11-26T09:00:00+09:00', ...over});
   return file;
 }
 // Stage 1 measurements with both cache replicates (N from C hot1/hot2) and a flat A1 (not reproduced).
 function stage1Measurements(): Measurement[] {
   return sequence('1').filter((s): s is MeasuredStep => s.kind !== 'idle' && s.kind !== 'scan').map(s => ({id: s.id, kind: s.kind,
     arm: s.arm, order: s.order, settle: s.kind === 'copy' && s.settle, latencies: [{query: 'fullwidth', p95: 40}],
-    plans: [{query: 'fullwidth', shapeHash: 'x', buffers: 1, sharedHit: 1, sharedRead: 0}], sharedReads: 0, invalid: [], missingEvidence: [],
+    plans: [{query: 'fullwidth', shapeHash: 'x', buffers: 1, sharedHit: 1, sharedRead: 0}], sharedReads: 0, invalid: [], missingEvidence: [], samplerChecked: true,
     env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []}}));
 }
 // A prior stage's records as the worker and the supervisor leave them.
@@ -45,7 +45,7 @@ function prior(dir: string, stage: string, judgement: Record<string, unknown>,
   json(join(out, 'judgement.json'), {stage, stopped: null, abnormal: normal ? [] : ['minimum not met: H2'], ...judgement});
   json(join(out, 'metadata.json'), {cpuSets: parsed});
   json(join(out, 'measurements.json'), {measurements, stopped: null});
-  json(join(out, 'approval.json'), {issue: 870, stage, job: 'x', quote: 'go', date: '2026-11-25'});
+  json(join(out, 'approval.json'), {issue: 870, stage, job: 'x', quote: 'go', at: '2026-11-25T09:00:00Z'});
   json(join(out, 'finish.json'), {normal, reasons: normal ? [] : ['minimum not met: H2']});
   if (finalized) {
     json(join(out, 'finished.json'), {manifestHash: hash, stage, at});
@@ -135,11 +135,16 @@ test('every stage needs its own approval record, for this stage and this job, no
   assert.throws(() => run(approval(h.dir, '1', {job: 'smoke-870'})), /approval is for stage 1, not smoke/);
   assert.throws(() => run(approval(h.dir, 'smoke', {job: 'stage1-870'})), /approval is for job stage1-870, not smoke-870/);
   assert.throws(() => run(approval(h.dir, 'smoke', {quote: '  '})), /no quoted go/);
-  assert.throws(() => run(approval(h.dir, 'smoke', {date: '26 Nov'})), /no valid date/);
-  // Stage 1's go must not predate the smoke it builds on (finished 2026-11-25).
+  assert.throws(() => run(approval(h.dir, 'smoke', {at: '26 Nov'})), /no valid time/);
+  assert.throws(() => run(approval(h.dir, 'smoke', {at: '2026-11-26'})), /no valid time/);
+  assert.throws(() => run(approval(h.dir, 'smoke', {at: '2026-11-26T09:00:00'})), /no valid time/);
+  // Stage 1's go must not precede the smoke's finish (2026-11-25T10:00Z), to the instant, not the day.
   const smokeOut = prior(mkdtempSync(join(h.dir, 'p')), 'smoke', {outcome: 'smoke passed'});
-  assert.doesNotThrow(() => run(approval(h.dir, '1', {date: '2026-11-25'}), '1', h.env, ['--smoke-out', smokeOut]));
-  assert.throws(() => run(approval(h.dir, '1', {date: '2026-11-24'}), '1', h.env, ['--smoke-out', smokeOut]), /predates the earlier stage/);
+  assert.doesNotThrow(() => run(approval(h.dir, '1', {at: '2026-11-25T10:00:00Z'}), '1', h.env, ['--smoke-out', smokeOut]));
+  assert.doesNotThrow(() => run(approval(h.dir, '1', {at: '2026-11-25T19:00:00+09:00'}), '1', h.env, ['--smoke-out', smokeOut]));
+  assert.throws(() => run(approval(h.dir, '1', {at: '2026-11-25T09:59:59Z'}), '1', h.env, ['--smoke-out', smokeOut]), /predates the finish/);
+  // Same day, morning go before an afternoon finish (JST): refused.
+  assert.throws(() => run(approval(h.dir, '1', {at: '2026-11-25T18:59:00+09:00'}), '1', h.env, ['--smoke-out', smokeOut]), /predates the finish/);
   // A smoke run without a recorded go is not a finished smoke.
   rmSync(join(smokeOut, 'approval.json'));
   assert.throws(() => run(approval(h.dir, '1'), '1', h.env, ['--smoke-out', smokeOut]), /no recorded go for the smoke/);
@@ -191,4 +196,48 @@ test('anything but a normal finish writes stopped.json, no completed.json, and e
     assert.deepEqual(read(dir, 'stopped.json').reasons, reasons);
     assert.equal(existsSync(join(dir, 'completed.json')), false);
   }
+});
+
+test('the worker checks the prerequisites itself and claims a one-time token; SEARCH_WORKER alone reaches nothing', () => {
+  const h = host();
+  const smokeEnv = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870'};
+  const go = approval(h.dir, 'smoke');
+  const args = argv(h, 'smoke', [], sets, go);
+  const out = mkdtempSync(join(h.dir, 'run-'));
+  const parsed = options(args, 'linux');
+  json(join(out, 'approval.json'), JSON.parse(readFileSync(go, 'utf8')));
+  writeFileSync(join(out, 'worker-token'), 'tok');
+  const env = {...smokeEnv, SEARCH_WORKER: '1', DIAG870_ARGV: JSON.stringify(args), DIAG870_TOKEN: 'tok', DIAG870_OUT: out,
+    DIAG870_STAGE: 'smoke', DIAG870_FROM: parsed.from, DIAG870_CPU_SETS: sets};
+  const gate = (e: Record<string, string>) => workerGate(e, hash, 16, 'linux');
+  // Inherited worker settings without a launch: refused.
+  assert.throws(() => gate({SEARCH_WORKER: '1', ...h.env}), /Not a supervised #870 worker launch/);
+  // A launch whose prerequisites no longer hold (HOST-BUSY gone): refused.
+  assert.throws(() => gate({...env, FUKULOW_HOST_BUSY: join(h.dir, 'gone')}), /HOST-BUSY is not held/);
+  assert.throws(() => gate({...env, DIAG870_STAGE: '1'}), /do not match the launch arguments/);
+  assert.throws(() => gate({...env, DIAG870_TOKEN: 'other'}), /token does not match/);
+  // The failed attempt above already claimed the token; a fresh one is claimed once only.
+  writeFileSync(join(out, 'worker-token'), 'tok');
+  assert.equal(gate(env).approval.stage, 'smoke');
+  assert.throws(() => gate(env), /missing or already claimed/);
+});
+
+test('a signal to the worker exits only after the sampler stop has finished', async () => {
+  const order: string[] = [];
+  let release!: () => void;
+  const stop = () => new Promise<{verified: boolean; how: string}>(r => { release = () => { order.push('stopped'); r({verified: true, how: 'SIGTERM'}); }; });
+  signalStop('SIGTERM', 143, stop, code => order.push(`exit ${code}`))();
+  await new Promise(r => setTimeout(r, 5));
+  assert.deepEqual(order, []);
+  release();
+  await new Promise(r => setTimeout(r, 5));
+  assert.deepEqual(order, ['stopped', 'exit 143']);
+});
+
+test('a read counter must be a single integer; empty or other output is unreadable (Neon r5)', () => {
+  assert.equal(parseCount('\n1234\n'), 1234);
+  assert.equal(parseCount('0'), 0);
+  assert.throws(() => parseCount(''), /not a count/);
+  assert.throws(() => parseCount('x\n'), /not a count/);
+  assert.throws(() => parseCount('12.5'), /not a count/);
 });

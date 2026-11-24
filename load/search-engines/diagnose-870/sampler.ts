@@ -104,22 +104,24 @@ export async function awaitCoverage(read: () => Sample[], end: number, thermal: 
   }
 }
 
-// Stops a child: SIGTERM, a bounded wait, then SIGKILL and a second bounded wait. `verified` is true only
-// when the exit was observed.
-export type Stoppable = {exitCode: number | null; signalCode: string | null; kill(signal: NodeJS.Signals): boolean;
-  once(event: 'exit', listener: () => void): unknown};
-export async function stopProcess(child: Stoppable, termMs = 15_000, killMs = 5_000) {
+// Stops a child and everything it started: SIGTERM, a bounded wait, then SIGKILL and a second bounded wait.
+// `verified` is true only when the child's exit was observed and `groupAlive` reports none of its process
+// group left (an in-flight sampler command does not outlive it).
+export type Stoppable = {exitCode: number | null; signalCode: string | null; kill(signal: NodeJS.Signals): boolean};
+export async function stopProcess(child: Stoppable, termMs = 15_000, killMs = 5_000, groupAlive: () => boolean = () => false) {
   const exited = () => child.exitCode !== null || child.signalCode !== null;
-  if (exited()) return {verified: true, how: 'already exited'};
+  const done = () => exited() && !groupAlive();
   const wait = (ms: number) => new Promise<boolean>(resolve => {
-    const timer = setTimeout(() => resolve(exited()), ms);
-    child.once('exit', () => { clearTimeout(timer); resolve(true); });
+    const until = Date.now() + ms;
+    const poll = () => done() ? resolve(true) : Date.now() >= until ? resolve(false) : setTimeout(poll, Math.min(25, ms));
+    poll();
   });
+  if (done()) return {verified: true, how: 'already exited'};
   child.kill('SIGTERM');
   if (await wait(termMs)) return {verified: true, how: 'SIGTERM'};
   child.kill('SIGKILL');
   if (await wait(killMs)) return {verified: true, how: 'SIGKILL'};
-  return {verified: false, how: 'did not exit after SIGKILL'};
+  return {verified: false, how: exited() ? 'its process group outlived SIGKILL' : 'did not exit after SIGKILL'};
 }
 
 // An observation's interval [at, done] overlaps the window. A worker or container seen in an observation
@@ -150,7 +152,8 @@ export function windowFacts(samples: Sample[], start: number, end: number, block
   // Frequency counts only from samples that read every server CPU; with no server set it is not used.
   const freqs = serverCpus === null ? [] : thermals.filter(s => serverCpus.every(c => Number.isFinite(s.frequencyKHz[String(c)])))
     .flatMap(s => serverCpus.map(c => s.frequencyKHz[String(c)]));
-  const autovacuumQueries = blocks.filter(b => fast.some(s => s.at >= b.start && s.at <= b.end &&
+  // As for workers and containers: a reading whose interval overlaps a block counts for that block.
+  const autovacuumQueries = blocks.filter(b => fast.some(s => overlaps(s, b.start, b.end) &&
     s.autovacuum.some(w => w.datname === 'measured'))).map(b => b.query);
   return {invalid: [...new Set(invalid)], env: {
     dirtyWritebackAtStartBytes: atStart ? atStart.dirtyBytes + atStart.writebackBytes : null,

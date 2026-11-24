@@ -19,6 +19,9 @@ export type Measurement = {
   invalid: string[];
   // Evidence this measurement should have saved but did not (statistics, read counters, EXPLAIN plans).
   missingEvidence: string[];
+  // The sampler check of this window ran (gaps, workers, containers, environment). Unchecked is incomplete
+  // evidence: its INVALID reasons and environment are unknown.
+  samplerChecked: boolean;
 };
 export type Verdict = 'supported' | 'ruled out' | 'withheld';
 export type Hypothesis = 'H1' | 'H2' | 'H3' | 'H4' | 'H5' | 'H6';
@@ -33,6 +36,12 @@ export function ownReasons(results: ({query: string} & ({sample: Sample} | {erro
     : fullySampled(r.sample) ? [] : [`${r.query} not fully sampled`]);
   return load15 > maxLoad15 ? [`load15 ${load15.toFixed(2)} > ${maxLoad15} at start`, ...reasons] : reasons;
 }
+// Threshold comparisons on computed ratios (§4.2, §5.3) allow for floating-point rounding only: a G95 ratio
+// that is mathematically 1.30 can compute as 1.2999999999999994. The tolerance is relative, 1e-9, far below
+// any measurable difference, so the thresholds themselves are unchanged.
+const tolerance = 1e-9;
+export const atLeast = (x: number, threshold: number) => x >= threshold - tolerance * Math.max(1, Math.abs(threshold));
+export const below = (x: number, threshold: number) => !atLeast(x, threshold);
 const valid = (m: Measurement | undefined): m is Measurement => m !== undefined && m.invalid.length === 0;
 const byId = (ms: Measurement[], id: string) => ms.find(m => m.id === id);
 const validIds = (ms: Measurement[], ids: string[]) => ids.map(id => byId(ms, id)).filter(valid);
@@ -121,8 +130,8 @@ export function reproduction(ms: Measurement[], n: number) {
   const r = G(last) / G(first);
   const rounds = a1Ids.map((id, i) => [i + 1, byId(ms, id)] as const).filter(([, m]) => valid(m));
   const rho = spearman(rounds.map(([i]) => i), rounds.map(([, m]) => G(m!)));
-  if (r >= 1.30 && rho !== null && rho >= 0.8 && r - 1 >= 3 * (n - 1)) return {result: 'reproduced' as const, r, rho};
-  if (r < 1.15) return {result: 'not reproduced' as const, r, rho};
+  if (atLeast(r, 1.30) && rho !== null && atLeast(rho, 0.8) && atLeast(r - 1, 3 * (n - 1))) return {result: 'reproduced' as const, r, rho};
+  if (below(r, 1.15)) return {result: 'not reproduced' as const, r, rho};
   return {result: 'inconclusive' as const, reason: 'between the reproduction thresholds', r, rho};
 }
 
@@ -229,14 +238,20 @@ export type Outcome = 'not reproduced' | 'cause established' | 'cause not establ
 // Evidence completeness over a stage: every measurement's own evidence, plus the stage records (the
 // PostgreSQL log, the sampler stop). Incomplete evidence never establishes a cause (review item 4).
 export function evidence(ms: Measurement[], stageMissing: string[] = []) {
-  const missing = [...ms.flatMap(m => m.missingEvidence.map(x => `${m.id}: ${x}`)), ...stageMissing];
+  const missing = [...ms.flatMap(m => [...m.missingEvidence, ...(m.samplerChecked ? [] : ['sampler window not checked'])].map(x => `${m.id}: ${x}`)),
+    ...stageMissing];
   return {complete: missing.length === 0, missing};
 }
 
 // Why a stage is not a normal finish (review item 2): a STOP, a §4.1 / §5.3 minimum not met, or incomplete
 // evidence. A non-empty list exits non-zero, so the launcher ends the queue.
-const abnormalOf = (stopped: string | null, unmet: string[], ev: ReturnType<typeof evidence>) =>
-  [...(stopped ? [`STOP: ${stopped}`] : []), ...unmet.map(x => `minimum not met: ${x}`), ...(ev.complete ? [] : ['evidence incomplete'])];
+// Any INVALID measurement is listed too: the judgement excludes it as §4.1 says, but the maintainer's review
+// (item 2) does not accept a stage with an INVALID measurement as a normal finish.
+const abnormalOf = (stopped: string | null, unmet: string[], ev: ReturnType<typeof evidence>, ms: Measurement[]) => {
+  const invalid = ms.filter(m => m.invalid.length > 0).map(m => m.id);
+  return [...(stopped ? [`STOP: ${stopped}`] : []), ...unmet.map(x => `minimum not met: ${x}`),
+    ...(invalid.length ? [`INVALID: ${invalid.join(', ')}`] : []), ...(ev.complete ? [] : ['evidence incomplete'])];
+};
 
 // §5.2. `stopped` is a STOP reason when the stage ended early.
 export function stage1(ms: Measurement[], stopped: string | null = null, stageMissing: string[] = []) {
@@ -244,7 +259,7 @@ export function stage1(ms: Measurement[], stopped: string | null = null, stageMi
   const repro = reproduction(ms, N.value);
   const min = minimums(ms);
   const ev = evidence(ms, stageMissing);
-  const abnormal = abnormalOf(stopped, Object.entries(min).filter(([, met]) => !met).map(([k]) => k), ev);
+  const abnormal = abnormalOf(stopped, Object.entries(min).filter(([, met]) => !met).map(([k]) => k), ev, ms);
   const base = {noise: N, reproduction: repro, minimums: min, stopped, evidence: ev, abnormal};
   // A STOP before the A1 minimum leaves reproduction inconclusive; after it, the A1 result stands.
   // Incomplete evidence is inconclusive whatever the numbers say: no cause from partial evidence.
@@ -268,7 +283,7 @@ export function stage1(ms: Measurement[], stopped: string | null = null, stageMi
 export function smoke(ms: Measurement[], stopped: string | null, stageMissing: string[] = []) {
   const ev = evidence(ms, stageMissing);
   const unmet = ms.length === 1 && ms[0].invalid.length === 0 ? [] : ['one valid smoke round'];
-  const abnormal = abnormalOf(stopped, unmet, ev);
+  const abnormal = abnormalOf(stopped, unmet, ev, ms);
   return {note: 'SMOKE: numbers are not used', evidence: ev, abnormal, outcome: abnormal.length ? 'smoke failed' : 'smoke passed'};
 }
 
@@ -291,12 +306,12 @@ export function stage2(ms: Measurement[], noise: Noise, stopped: string | null =
   const ev = evidence(ms, stageMissing);
   const unmet = [...(!valid(pre) ? ['B.pre'] : []), ...(post.length < 2 ? ['2 of 3 post-scan rounds'] : []),
     ...(cool.length < 2 ? ['both cool-down rounds'] : []), ...(!valid(first) ? ['B.post1 (the §5.3 contrast)'] : [])];
-  const base = {noise, stopped, evidence: ev, abnormal: abnormalOf(stopped, unmet, ev)};
+  const base = {noise, stopped, evidence: ev, abnormal: abnormalOf(stopped, unmet, ev, ms)};
   if (!ev.complete) return {...base, result: 'inconclusive' as const, reason: 'evidence incomplete', ratio: null};
   if (!valid(pre) || post.length < 2 || cool.length < 2) return {...base, result: 'inconclusive' as const, reason: 'Stage 2 minimum not met', ratio: null};
   if (!valid(first)) return {...base, result: 'inconclusive' as const, reason: 'B.post1 INVALID', ratio: null};
   const ratio = G(first) / G(pre);
-  if (ratio >= 1.30 && ratio >= 3 * (n - 1)) return {...base, result: 'reproduced' as const, ratio};
-  if (ratio < 1.15) return {...base, result: 'not reproduced' as const, ratio};
+  if (atLeast(ratio, 1.30) && atLeast(ratio, 3 * (n - 1))) return {...base, result: 'reproduced' as const, ratio};
+  if (below(ratio, 1.15)) return {...base, result: 'not reproduced' as const, ratio};
   return {...base, result: 'inconclusive' as const, reason: 'between the thresholds', ratio};
 }

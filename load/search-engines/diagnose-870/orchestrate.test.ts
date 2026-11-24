@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { Measurement } from './judge.ts';
-import { diskStop, execute, minDockerStartBytes, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
+import { evidence, type Measurement } from './judge.ts';
+import { diskStop, execute, maxInvalid, minDockerStartBytes, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
 import { sequence, settleCapMs } from './plan.ts';
 
 const GiB = 1024 ** 3;
@@ -21,9 +21,9 @@ function fake(over: Partial<Deps> & {invalidIds?: string[]; failOn?: string} = {
       calls.push(`measure ${step.id}${opts.explain ? ' +explain' : ''}`);
       return {id: step.id, kind: step.kind, arm: step.arm, order: step.order, settle: false, latencies: [], plans: null,
         sharedReads: 0, env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []},
-        invalid: over.invalidIds?.includes(step.id) ? ['fake'] : [], missingEvidence: []} satisfies Measurement;
+        invalid: over.invalidIds?.includes(step.id) ? ['fake'] : [], missingEvidence: [], samplerChecked: false} satisfies Measurement;
     },
-    validate: async () => undefined,
+    validate: async ms => { for (const m of ms) m.samplerChecked = true; },
     idle: async ms => { calls.push(`idle ${ms}`); },
     scan: async () => { calls.push('scan'); },
     log: () => undefined,
@@ -185,4 +185,39 @@ test('the settle wait: settled at 15 min exactly is valid; just over the cap is 
   assert.equal(await settleWait(busy, settleCapMs), false);
   t = 0;
   assert.equal(await settleWait({...busy, reading: () => ({dirtyWritebackBytes: 0, autovacuumWorkers: 1})}, settleCapMs), false);
+});
+
+test('the INVALID STOP counts across arms: 4 anywhere is not a STOP, a fifth anywhere is, at once', async () => {
+  assert.equal(maxInvalid, 4);
+  const spread = ['A1.2', 'A2.1', 'C1.hot1', 'D.settle2'];
+  const four = await execute(sequence('1'), fake({invalidIds: spread}).d);
+  assert.equal(four.stopped, null);
+  assert.equal(four.measurements.length, 20);
+  // The fifth is the very last measurement: still a STOP.
+  const last = await execute(sequence('1'), fake({invalidIds: [...spread, 'C2.restart']}).d);
+  assert.equal(last.stopped, 'more than 4 INVALID measurements');
+  // A fifth in the middle stops the stage right after it: nothing later runs.
+  const mid = fake({invalidIds: [...spread.slice(0, 3), 'D.current1', 'D.settle1']});
+  const r = await execute(sequence('1'), mid.d);
+  assert.equal(r.stopped, 'more than 4 INVALID measurements');
+  assert.equal(r.measurements.at(-1)!.id, 'D.settle1');
+  assert.equal(mid.calls.filter(c => c === 'copy').length, 11);
+});
+
+test('a sampler death during the final validation leaves the window unchecked: evidence incomplete', async () => {
+  // The validation of C2.restart's window is where the sampler dies, so that window stays unchecked.
+  const dying = fake({validate: async ms => {
+    if (ms.at(-1)!.id === 'C2.restart') throw new Error('the sampler process exited');
+    for (const m of ms) m.samplerChecked = true;
+  }});
+  const r = await execute(sequence('1'), dying.d);
+  assert.match(r.stopped!, /sampler process exited/);
+  assert.deepEqual(evidence(r.measurements).missing, ['C2.restart: sampler window not checked']);
+});
+
+test('after a CHECKPOINT that overran the cap no reading starts: INVALID, not a STOP', async () => {
+  let t = 0;
+  const io = {checkpoint: () => { t = settleCapMs + 1; }, now: () => t, sleep: async () => undefined,
+    reading: () => { throw new Error('docker exec: container busy'); }};
+  assert.equal(await settleWait(io, settleCapMs), false);
 });
