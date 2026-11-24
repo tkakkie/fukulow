@@ -1047,12 +1047,19 @@ export interface components {
         ListProjectionQuery: {
             /**
              * Format: int64
+             * @description Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+             *     Use the position returned at W; never use a live-moved position.
+             */
+            after_position?: number | null;
+            /**
+             * Format: int64
              * @description Omit on the initial page to choose W under the commit barrier; future W is invalid.
              */
             as_of_seq?: number | null;
             /**
              * Format: int64
-             * @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.
+             * @description Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
+             *     Use the position returned at W; never use a live-moved position.
              */
             before_position?: number | null;
             /** Format: uuid */
@@ -1517,10 +1524,11 @@ export interface components {
         TimelinePage: {
             /** Format: int64 */
             as_of_seq: number;
+            /** @description More items exist at W in the requested direction (older for the initial page). */
             has_more: boolean;
             /** Format: uuid */
             history_generation: string;
-            /** @description Ascending W-relative positions, newest last. Continue older with the first position. */
+            /** @description Ascending W-relative positions. Continue older from the first or newer from the last. */
             items: components["schemas"]["TimelineItem"][];
         };
         TimelineTopic: {
@@ -1534,9 +1542,11 @@ export interface components {
         TopicPage: {
             /** Format: int64 */
             as_of_seq: number;
+            /** @description More Topics exist at W in the requested direction (older for the initial page). */
             has_more: boolean;
             /** Format: uuid */
             history_generation: string;
+            /** @description Ascending W-relative positions. Continue older from the first or newer from the last. */
             topics: components["schemas"]["TopicSummary"][];
         };
         TopicSummary: {
@@ -3578,8 +3588,16 @@ export interface operations {
                 history_generation?: string;
                 /** @description Omit on the initial page to choose W under the commit barrier; future W is invalid. */
                 as_of_seq?: number;
-                /** @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position. */
+                /**
+                 * @description Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
+                 *     Use the position returned at W; never use a live-moved position.
+                 */
                 before_position?: number;
+                /**
+                 * @description Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+                 *     Use the position returned at W; never use a live-moved position.
+                 */
+                after_position?: number;
                 limit?: number;
             };
             header?: never;
@@ -3591,7 +3609,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Ascending W-relative positions; initial page fixes W, exclusive older continuation uses as_of_seq and before_position; cursor-neutral */
+            /** @description Ascending W-relative positions; initial page fixes W. Continue exclusively with as_of_seq and before_position (older) or after_position (newer); has_more follows the requested direction, older on the initial page; cursor-neutral */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3600,7 +3618,7 @@ export interface operations {
                     "application/json": components["schemas"]["TimelinePage"];
                 };
             };
-            /** @description Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200 */
+            /** @description Invalid Organization id, Channel id, negative/future W, boundary without W, conflicting boundaries, before_position below 1, after_position below 0 or limit outside 1..=200 */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3666,8 +3684,16 @@ export interface operations {
                 history_generation?: string;
                 /** @description Omit on the initial page to choose W under the commit barrier; future W is invalid. */
                 as_of_seq?: number;
-                /** @description Exclusive W-relative position. Requires as_of_seq; never use a live-moved position. */
+                /**
+                 * @description Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
+                 *     Use the position returned at W; never use a live-moved position.
+                 */
                 before_position?: number;
+                /**
+                 * @description Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+                 *     Use the position returned at W; never use a live-moved position.
+                 */
+                after_position?: number;
                 limit?: number;
             };
             header?: never;
@@ -3679,7 +3705,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description W-relative Topic summaries; default 50/max 200, ascending positions and exclusive older continuation; cursor-neutral */
+            /** @description Ascending W-relative Topic summaries; initial page fixes W. Continue exclusively with as_of_seq and before_position (older) or after_position (newer); has_more follows the requested direction, older on the initial page; cursor-neutral */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3688,7 +3714,7 @@ export interface operations {
                     "application/json": components["schemas"]["TopicPage"];
                 };
             };
-            /** @description Invalid Organization id, Channel id, negative/future W, boundary without W, nonpositive boundary or limit outside 1..=200 */
+            /** @description Invalid Organization id, Channel id, negative/future W, boundary without W, conflicting boundaries, before_position below 1, after_position below 0, limit outside 1..=200, or Topics in a DM */
             400: {
                 headers: {
                     [name: string]: unknown;
