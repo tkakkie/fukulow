@@ -6,7 +6,7 @@ import test from 'node:test';
 import { qualifiedCpuSets } from './cluster.ts';
 import { stage1, type Measurement } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
-import { finishRecords, limitedExitCode, options, parseCount, prerequisites, signalStop, stopExitCode, sweepLeftovers, workerGate } from './run.ts';
+import { finishRecords, limitedExitCode, options, parseCount, prerequisites, readCounterWaitMs, readsDelta, signalStop, stopExitCode, sweepLeftovers, workerGate } from './run.ts';
 
 const hash = 'h'.repeat(64);
 const sets = qualifiedCpuSets;
@@ -49,7 +49,7 @@ function prior(dir: string, stage: string, judgement: Record<string, unknown>,
   json(join(out, 'approval.json'), {issue: 870, stage, job: 'x', quote: 'go', at: '2026-11-25T09:00:00Z'});
   json(join(out, 'finish.json'), {normal, kind: normal ? 'normal' : limited ? 'limited' : 'blocked', reasons});
   if (limited || stopped) {
-    json(join(out, limited ? 'limited.json' : 'stopped.json'), {stage, reasons, at});
+    json(join(out, limited ? 'limited.json' : 'stopped.json'), limited ? {stage, shortfall: reasons, at} : {stage, reasons, at});
     json(join(out, 'run-status.json'), {manifestHash: hash, valid: false, cleanupVerified: true, exitCode: limited ? 3 : 2});
     if (swept) json(join(out, 'leftover-cleanup.json'), {verified: true, found: [], failures: []});
     return out;
@@ -290,6 +290,16 @@ test('a limited Stage 1 allows Stage 2 only with usable evidence, a computable N
   const n = run(record, fallback, ack).stage1Noise!;
   assert.deepEqual([n.source, n.stage1.kind, n.stage1.shortfall, n.spreads.length], ['A1 spread (fallback)', 'limited', f.finish.shortfall, 1]);
   assert.deepEqual(n.stage1.constraints, f.finish.stage2Constraints);
+  // A stale limited.json or finish.json naming another shortfall is refused, even when the judgement, the
+  // measurements and the go agree (sol final review).
+  const stale = (file: string, field: string) => {
+    const out = prior(mkdtempSync(join(h.dir, 's')), '1', record, {measurements: fallback, normal: false, limited: true});
+    const rec = JSON.parse(readFileSync(join(out, file), 'utf8'));
+    writeFileSync(join(out, file), JSON.stringify({...rec, [field]: ['INVALID: A1.2']}));
+    return () => prerequisites(options(argv(h, '2', ['--stage1-out', out], sets, approval(h.dir, '2', ack)), 'linux'), hash, env, 16);
+  };
+  assert.throws(stale('limited.json', 'shortfall'), /limited\.json shortfall is not what/);
+  assert.throws(stale('finish.json', 'reasons'), /finish\.json reasons are not what/);
   // Without the acknowledgement, or one naming another outcome or shortfall: refused.
   assert.throws(() => run(record, fallback, {}), /must name it/);
   assert.throws(() => run(record, fallback, {acceptsLimitedStage1: {outcome: f.outcome, shortfall: ['minimum not met: H2']}}), /must name it/);
@@ -332,4 +342,14 @@ test('finish records: a STOP is blocked (exit 2, stopped.json), a limited Stage 
   assert.equal(existsSync(join(out, 'limited.json')), false);
   assert.equal(existsSync(join(out, 'stopped.json')), true);
   assert.notEqual(limitedExitCode, 0);
+});
+
+test('shared reads are the read counter delta after the approved 1 s wait, never the cumulative value', () => {
+  assert.equal(readCounterWaitMs, 1_000);
+  assert.equal(readsDelta(900, 900), 0);
+  assert.equal(readsDelta(900, 950), 50);
+  assert.equal(readsDelta(null, 950), null);
+  assert.equal(readsDelta(900, null), null);
+  // A counter that went backwards (a reset) is not a delta.
+  assert.equal(readsDelta(950, 900), null);
 });

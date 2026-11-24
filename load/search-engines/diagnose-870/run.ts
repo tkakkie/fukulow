@@ -135,6 +135,11 @@ function stage1Noise(dir: string, judgement: Stage1Record, limited: boolean): St
   // the re-approval fix): a record whose finish disagrees with its own measurements is rejected.
   assert.ok(judgement.finish?.kind === again.finish.kind && JSON.stringify(judgement.finish.shortfall) === JSON.stringify(again.finish.shortfall),
     'Stage 1\'s recorded finish (kind or shortfall) is not what its measurements give');
+  // Every record of how Stage 1 ended carries the same recomputed shortfall (sol final review): finish.json's
+  // reasons, and for a limited finish limited.json's shortfall. A stale or edited record is refused.
+  const recomputed = JSON.stringify(again.abnormal);
+  assert.equal(JSON.stringify(readJson(`${dir}/finish.json`).reasons), recomputed, 'Stage 1\'s finish.json reasons are not what its measurements give');
+  if (limited) assert.equal(JSON.stringify(readJson(`${dir}/limited.json`).shortfall), recomputed, 'Stage 1\'s limited.json shortfall is not what its measurements give');
   assert.ok(limited || judgement.noise.source === 'C hot1/hot2', 'A normal Stage 1 has N from both cache replicates (C hot1/hot2)');
   // The exact spreads behind N, from Stage 1's stored p95s (review round 7): Stage 2 never uses the double.
   const spreads = noiseSpreads(ms);
@@ -354,10 +359,9 @@ async function worker(env: NodeJS.ProcessEnv) {
         blocks.push({query, start: b, end: Date.now()});
       }
       const end = Date.now();
-      await new Promise(r => setTimeout(r, 1_000));
-      
+      await new Promise(r => setTimeout(r, readCounterWaitMs));
       const readsAfter = capture('blks_read after', missing, reads);
-      const sharedReads = readsBefore === null || readsAfter === null || !Number.isFinite(readsAfter - readsBefore) ? null : readsAfter - readsBefore;
+      const sharedReads = readsDelta(readsBefore, readsAfter);
       
       const plans = opts.explain ? await explainAll(dest, missing) : null;
       
@@ -501,6 +505,14 @@ export function parseCount(text: string) {
 // reasons and no completed.json (exit 2), so the supervisor marks the run invalid and the queue ends.
 // A limited Stage 1 (`limited` given) writes limited.json with its shortfall, N source and Stage 2 constraints
 // instead of stopped.json, and exits limitedExitCode: the queue ends, and Stage 2 may follow only with its own go.
+// Decision 1: between hot 1 and hot 2 only the statistics reads, this wait for pg_stat_database's read
+// counter and the sampler check. Decision 4: shared reads are the counter's delta over the window
+// (database-wide supporting evidence), never its cumulative value; an unreadable or regressed reading is null.
+export const readCounterWaitMs = 1_000;
+export function readsDelta(before: number | null, after: number | null) {
+  return before === null || after === null || !Number.isFinite(after - before) || after < before ? null : after - before;
+}
+
 export function finishRecords(out: string, stage: Stage, manifestHash: string, stopped: string | null, abnormal: string[],
   limited: {nSource: string; constraints: string[]} | null = null) {
   const at = new Date().toISOString();

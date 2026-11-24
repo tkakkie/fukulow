@@ -146,6 +146,17 @@ test('H2 is supported by recovery after the cool-down that tracks temperature', 
   assert.equal(attribution(scenario(g), 1.05).H2, 'withheld');
 });
 
+test('H2 follows frequency only downward: lower frequency with higher G95 supports it, the reverse does not', () => {
+  const g = {'A2.1': 41, 'A2.2': 42};
+  const freq = (sign: 1 | -1) => {
+    const f: Record<string, Partial<Measurement>> = {};
+    for (const x of scenario(g)) if (x.kind === 'copy') f[x.id] = {env: {...x.env, meanTemperatureC: null, meanFrequencyKHz: 5_000_000 + sign * 10_000 * g95(x)!}};
+    return attribution(scenario(g, f), 1.05).H2;
+  };
+  assert.equal(freq(-1), 'supported');
+  assert.notEqual(freq(1), 'supported');
+});
+
 test('H2 is ruled out by a flat temperature and frequency while A1 rose', () => {
   const flat: Record<string, Partial<Measurement>> = {};
   for (const x of scenario({'A2.1': 41, 'A2.2': 42})) flat[x.id] = {env: {...x.env, meanTemperatureC: 60 + (x.id === 'A1.6' ? 4 : 0), meanFrequencyKHz: 5_000_000}};
