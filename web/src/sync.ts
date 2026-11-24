@@ -12,7 +12,7 @@ import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
 
 export type TimelineApi = {
   listChannelEvents(channel: string, query: api.ListChannelEventsQuery): Promise<Result<api.ChannelEventPage>>
-  listMessages(channel: string, query?: ListMessagesQuery): Promise<Result<MessagePage>>
+  listMessages(channel: string, query?: ListMessagesQuery, signal?: AbortSignal): Promise<Result<MessagePage>>
   sendMessage(channel: string, body: SendMessageRequest): Promise<Result<Message>>
 }
 type Wait = Extract<Effect, { type: 'wait' }>

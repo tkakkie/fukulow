@@ -654,7 +654,7 @@ const timelinePage = (items: TimelineItem[], as_of_seq: number, has_more = false
   ok({ history_generation: generation, as_of_seq, items, has_more })
 
 function timelineClient(
-  readTimeline: (query?: ListTimelineQuery) => Promise<Result<TimelinePage>>,
+  readTimeline: (query?: ListTimelineQuery, signal?: AbortSignal) => Promise<Result<TimelinePage>>,
   base = 500,
 ) {
   const net = fakeNetwork()
@@ -669,10 +669,10 @@ function timelineClient(
     ...options, selfId: 'me', onEnded: vi.fn(),
     topicsApi: {
       ...options.topicsApi!,
-      listTimeline: (channelId, query) =>
+      listTimeline: (channelId, query, signal) =>
         query?.before_position === undefined && query?.after_position === undefined && query?.limit === undefined
           ? defaultTimeline(channelId, query)
-          : readTimeline(query),
+          : readTimeline.length >= 2 ? readTimeline(query, signal) : readTimeline(query),
     },
     sync: {
       ...options.sync, random: () => 0,
@@ -2197,19 +2197,27 @@ it('keeps at most one in-flight Search transport across cancellation and 10-seco
     cA.session.close()
   }
 
-  // Probe 2b: stalled read past 10s deadline must not overlap an explicit retry, and late access loss still applies.
+  // Probe 2b: stalled read past 10s deadline aborts its signal so an explicit retry does not overlap.
   vi.useFakeTimers()
-  const stalled = deferred<Result<TimelinePage>>()
   let probeCalls = 0
   let inFlightB = 0
   let maxInFlightB = 0
-  const readB = vi.fn(async (query?: ListTimelineQuery) => {
+  let abortedFirst = false
+  const readB = vi.fn(async (query?: ListTimelineQuery, signal?: AbortSignal) => {
     inFlightB += 1
     maxInFlightB = Math.max(maxInFlightB, inFlightB)
     try {
       if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
         probeCalls += 1
-        return probeCalls === 1 ? await stalled.promise : timelinePage([], 100, false)
+        if (probeCalls === 1) {
+          return await new Promise<Result<TimelinePage>>(resolve => {
+            signal?.addEventListener('abort', () => {
+              abortedFirst = true
+              resolve({ ok: false, kind: 'network' })
+            }, { once: true })
+          })
+        }
+        return timelinePage([], 100, false)
       }
       if (query?.after_position === 39) return timelinePage([{ kind: 'message', message: record(40) }], 100, false)
       if (query?.before_position === 40) return timelinePage([{ kind: 'message', message: record(30) }], 100, false)
@@ -2225,32 +2233,28 @@ it('keeps at most one in-flight Search transport across cancellation and 10-seco
     await vi.advanceTimersByTimeAsync(10_000)
     await flush()
     expect(cB.anchor.get()?.status).toBe('error')
-    expect(inFlightB).toBe(1)
+    expect(abortedFirst).toBe(true)
+    expect(inFlightB).toBe(0)
 
-    const retryPromise = cB.anchor.retry()
-    await flush()
-    expect(inFlightB).toBe(1)
-    expect(maxInFlightB).toBe(1)
-    expect(probeCalls).toBe(1)
-
-    stalled.resolve({ ok: false, kind: 'network' })
-    await retryPromise
+    await cB.anchor.retry()
     await flush()
     expect(maxInFlightB).toBe(1)
     expect(inFlightB).toBe(0)
+    expect(probeCalls).toBe(2)
     expect(cB.anchor.get()).toMatchObject({ status: 'ready', asOfSeq: 100 })
     expect(cB.anchor.get()?.messages.map(m => m.created_seq)).toEqual([30, 40])
   } finally {
     cB.session.close()
   }
 
-  // Probe 2c: late 404 organization_unavailable on a timed-out transport still triggers Session access loss before queued retry runs.
+  // Probe 2c: late 404 organization_unavailable on a timed-out transport still triggers Session access loss.
   const stalled404 = deferred<Result<TimelinePage>>()
+  const retryPending = deferred<Result<TimelinePage>>()
   let probeCallsC = 0
   const readC = vi.fn(async (query?: ListTimelineQuery) => {
     if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
       probeCallsC += 1
-      return await stalled404.promise
+      return probeCallsC === 1 ? await stalled404.promise : await retryPending.promise
     }
     throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
   })
@@ -2264,13 +2268,11 @@ it('keeps at most one in-flight Search transport across cancellation and 10-seco
 
     const retryPromise = cC.anchor.retry()
     await flush()
-    expect(probeCallsC).toBe(1)
-
     stalled404.resolve({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
     await retryPromise
     await flush()
-    expect(probeCallsC).toBe(1)
     expect(cC.session.sync.get().organization).toBe('unavailable')
+    expect(cC.anchor.get()?.status).toBe('missing')
   } finally {
     cC.session.close()
   }
@@ -2326,6 +2328,203 @@ it('withholds unrevalidated Topic excerpts when a first refresh captures a newer
     expect(anchor.get()).toMatchObject({ status: 'ready', asOfSeq: 102 })
     expect(anchor.get()?.lines.some(l => l.kind === 'topic' && l.latestMessage.id === 'id35')).toBe(false)
     expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}`)).toEqual(['m:30', 'm:40'])
+  } finally {
+    session.close()
+  }
+})
+
+it('releases the Search queue when a transport never settles so Retry and opening another hit succeed within their own deadlines', async () => {
+  vi.useFakeTimers()
+  const hit70 = { ...target, messageId: 'id70', createdSeq: 70 }
+
+  // 1. Never-settling transport times out at 10s, then opening another hit loads within its own deadline;
+  //    a late settlement of the timed-out transport never publishes rows.
+  let callsA = 0
+  const lateA = deferred<Result<TimelinePage>>()
+  const readA = vi.fn(async (query?: ListTimelineQuery) => {
+    callsA += 1
+    if (callsA === 1) return lateA.promise
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      return timelinePage([], 100, false)
+    }
+    if (query?.after_position === 69) return timelinePage([{ kind: 'message', message: record(70) }], 100, false)
+    if (query?.before_position === 70) return timelinePage([{ kind: 'message', message: record(60) }], 100, false)
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const cA = timelineClient(readA, 100)
+  try {
+    await cA.ready()
+    cA.anchor.open(target)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await flush()
+    expect(cA.anchor.get()?.status).toBe('error')
+
+    cA.anchor.open(hit70)
+    await flush()
+    expect(cA.anchor.get()).toMatchObject({ target: hit70, status: 'ready', asOfSeq: 100 })
+    expect(cA.anchor.get()?.messages.map(m => m.created_seq)).toEqual([60, 70])
+
+    lateA.resolve(timelinePage([{ kind: 'message', message: record(40) }], 100, false))
+    await flush()
+    expect(cA.anchor.get()).toMatchObject({ target: hit70, status: 'ready', asOfSeq: 100 })
+    expect(cA.anchor.get()?.messages.map(m => m.created_seq)).toEqual([60, 70])
+  } finally {
+    cA.session.close()
+  }
+
+  // 2. Never-settling transport times out at 10s, then Retry succeeds within its own deadline.
+  let callsB = 0
+  const readB = vi.fn(async (query?: ListTimelineQuery) => {
+    callsB += 1
+    if (callsB === 1) return new Promise<Result<TimelinePage>>(() => {})
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      return timelinePage([], 100, false)
+    }
+    if (query?.after_position === 39) return timelinePage([{ kind: 'message', message: record(40) }], 100, false)
+    if (query?.before_position === 40) return timelinePage([{ kind: 'message', message: record(30) }], 100, false)
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const cB = timelineClient(readB, 100)
+  try {
+    await cB.ready()
+    cB.anchor.open(target)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await flush()
+    expect(cB.anchor.get()?.status).toBe('error')
+
+    const retried = cB.anchor.retry()
+    await flush()
+    await retried
+    expect(cB.anchor.get()).toMatchObject({ target, status: 'ready', asOfSeq: 100 })
+    expect(cB.anchor.get()?.messages.map(m => m.created_seq)).toEqual([30, 40])
+  } finally {
+    cB.session.close()
+  }
+
+  // 3. Opening another hit while a never-settling transport is in flight is bounded by the new hit's 10s deadline (covers queue waiting).
+  let callsC = 0
+  const readC = vi.fn(async (query?: ListTimelineQuery) => {
+    callsC += 1
+    if (callsC === 1) return new Promise<Result<TimelinePage>>(() => {})
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      return timelinePage([], 100, false)
+    }
+    if (query?.after_position === 69) return timelinePage([{ kind: 'message', message: record(70) }], 100, false)
+    if (query?.before_position === 70) return timelinePage([{ kind: 'message', message: record(60) }], 100, false)
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const cC = timelineClient(readC, 100)
+  try {
+    await cC.ready()
+    cC.anchor.open(target)
+    await vi.advanceTimersByTimeAsync(100)
+    cC.anchor.open(hit70)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await flush()
+    expect(cC.anchor.get()).toMatchObject({ target: hit70, status: 'error', paging: false })
+
+    const retried = cC.anchor.retry()
+    await flush()
+    await retried
+    expect(cC.anchor.get()).toMatchObject({ target: hit70, status: 'ready', asOfSeq: 100 })
+    expect(cC.anchor.get()?.messages.map(m => m.created_seq)).toEqual([60, 70])
+  } finally {
+    cC.session.close()
+  }
+})
+
+it.each(['older', 'newer'] as const)('withholds expired Topic excerpts immediately on %s snapshot_expired before the retry completes (C1)', async (direction) => {
+  let watermark = 100
+  const retryProbe = deferred<Result<TimelinePage>>()
+  let probeCalls = 0
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      probeCalls += 1
+      return probeCalls === 1 ? timelinePage([], watermark, false) : retryProbe.promise
+    }
+    if (query?.as_of_seq === 100) {
+      if (query.after_position === 39) return timelinePage([{ kind: 'message', message: record(40) }], 100, true)
+      if (query.before_position === 40) return timelinePage([topicItem('T1', '削除待ち', 25, 35, 2)], 100, true)
+      if (query.before_position === 35 || query.after_position === 40) {
+        watermark = 102
+        return expired
+      }
+    }
+    if (query?.as_of_seq === 102) {
+      if (query.before_position === 35 && query.limit === 25) return timelinePage([{ kind: 'message', message: record(20) }], 102, false)
+      if (query.after_position === 40 && query.limit === 25) return timelinePage([{ kind: 'message', message: record(50) }], 102, false)
+      if ((query.after_position === 34 || query.before_position === 41) && query.limit === 100) {
+        return timelinePage([{ kind: 'message', message: record(40) }], 102, false)
+      }
+    }
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const { anchor, cursor, session, ready } = timelineClient(readTimeline, 100)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    const visit = anchor.get()!.visit
+    expect(anchor.get()?.lines.some(l => l.kind === 'topic' && l.topicId === 'T1')).toBe(true)
+
+    // Delete T1 on the server (replay delayed); fixed-W continuation returns snapshot_expired.
+    const paging = direction === 'older' ? anchor.loadOlder() : anchor.loadNewer()
+    await flush()
+    expect(probeCalls).toBe(2)
+    // Immediately on expiry, before retry settles, the expired excerpt is withheld while visit is kept.
+    expect(anchor.get()).toMatchObject({ visit, status: 'loading', paging: true, lines: [], messages: [] })
+    expect(anchor.get()?.lines.some(l => l.kind === 'topic' && l.topicId === 'T1')).toBe(false)
+
+    retryProbe.resolve(timelinePage([], 102, false))
+    await paging
+    await flush()
+    expect(anchor.get()).toMatchObject({ visit, status: 'ready', asOfSeq: 102, paging: false })
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}`))
+      .toEqual(direction === 'older' ? ['m:20', 'm:40'] : ['m:40', 'm:50'])
+    expect(cursor()).toBe(100)
+  } finally {
+    session.close()
+  }
+})
+
+it('keeps expired Topic excerpts hidden if Organization access is lost during a snapshot_expired retry (C1)', async () => {
+  let watermark = 100
+  const retryProbe = deferred<Result<TimelinePage>>()
+  let probeCalls = 0
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      probeCalls += 1
+      return probeCalls === 1 ? timelinePage([], watermark, false) : retryProbe.promise
+    }
+    if (query?.as_of_seq === 100) {
+      if (query.after_position === 39) return timelinePage([{ kind: 'message', message: record(40) }], 100, true)
+      if (query.before_position === 40) return timelinePage([topicItem('T1', '削除待ち', 25, 35, 2)], 100, true)
+      if (query.before_position === 35) {
+        watermark = 102
+        return expired
+      }
+    }
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const { anchor, session, ready } = timelineClient(readTimeline, 100)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    expect(anchor.get()?.lines.some(l => l.kind === 'topic' && l.topicId === 'T1')).toBe(true)
+
+    const paging = anchor.loadOlder()
+    await flush()
+    expect(probeCalls).toBe(2)
+    expect(anchor.get()).toMatchObject({ status: 'loading', lines: [], messages: [] })
+
+    // Organization access is lost while the retry is in flight.
+    retryProbe.resolve({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+    await paging
+    await flush()
+    expect(session.sync.get().organization).toBe('unavailable')
+    expect(anchor.get()).toMatchObject({ status: 'missing', paging: false, hasOlder: false, hasNewer: false, lines: [], messages: [] })
+    expect(anchor.get()?.lines.some(l => l.kind === 'topic' && l.topicId === 'T1')).toBe(false)
   } finally {
     session.close()
   }

@@ -106,7 +106,7 @@ export function createSession(options: SessionOptions) {
   }
   const timeline = options.sync?.api ?? {
     listChannelEvents: (channel, query) => api.listChannelEvents(organizationId, channel, query),
-    listMessages: (channel, query) => api.listMessages(organizationId, channel, query),
+    listMessages: (channel, query, signal) => api.listMessages(organizationId, channel, query, undefined, signal),
     sendMessage: (channel, body) => api.sendMessage(organizationId, channel, body),
   } satisfies NonNullable<SyncOptions['api']>
   const topicSource = options.topicsApi ?? topicsApi(organizationId, () => history?.get().historyGeneration)
@@ -182,13 +182,20 @@ export function createSession(options: SessionOptions) {
     reply: (channel, message) => observe(replySource.listReplyChain(channel, message, { limit: 1 })),
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
+  const combineSignals = (a?: AbortSignal, b?: AbortSignal) =>
+    a && b ? AbortSignal.any([a, b]) : (a ?? b)
   const searchAnchor = createSearchAnchor(sync, {
-    messages: ({ channelId, topicId }, query) => observe(topicId
-      ? topicSource.listTopicMessages(channelId, topicId, query)
-      : timeline.listMessages(channelId, query)),
-    timeline: ({ channelId }, query) => observe(topicSource.listTimeline(channelId, query)),
-    reply: ({ channelId, messageId }, query) =>
-      observe(replySource.listReplyChain(channelId, messageId, query, options.accountSignal)),
+    messages: ({ channelId, topicId }, query, signal) => observe(topicId
+      ? (signal ? topicSource.listTopicMessages(channelId, topicId, query, signal) : topicSource.listTopicMessages(channelId, topicId, query))
+      : (signal ? timeline.listMessages(channelId, query, signal) : timeline.listMessages(channelId, query))),
+    timeline: ({ channelId }, query, signal) =>
+      observe(signal ? topicSource.listTimeline(channelId, query, signal) : topicSource.listTimeline(channelId, query)),
+    reply: ({ channelId, messageId }, query, signal) => {
+      const combined = combineSignals(options.accountSignal, signal)
+      return observe(combined
+        ? replySource.listReplyChain(channelId, messageId, query, combined)
+        : replySource.listReplyChain(channelId, messageId, query))
+    },
   })
   const stopSearchBudget = searchAnchor.subscribe(() => {
     const view = searchAnchor.get()

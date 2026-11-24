@@ -2,7 +2,7 @@ import type { ListMessagesQuery, ListTimelineQuery, Message, MessagePage, ReplyC
 import { knownMessageState } from './identity-order'
 import type { SearchResultTarget } from './navigation'
 import type { createSync } from './sync'
-import { MAIN_MESSAGE_LIMIT } from './protocol-types'
+import { MAIN_MESSAGE_LIMIT, type MoveVersion } from './protocol-types'
 import { linePosition, selectMainTimeline, type MainTimelineLine, type TopicBaseline } from './topic-selectors'
 
 export const PAGE_SIZE = 25
@@ -11,12 +11,11 @@ export const SEARCH_WINDOW_LIMIT = 100
 export type PageRead = 'older' | 'newer' | 'refresh'
 export type OpMode = 'initial' | PageRead
 export type Reads = {
-  messages(target: SearchResultTarget, query: ListMessagesQuery): Promise<Result<MessagePage>>
-  timeline(target: SearchResultTarget, query: ListTimelineQuery): Promise<Result<TimelinePage>>
-  reply(target: SearchResultTarget, query: ReplyChainQuery): Promise<Result<ReplyChainPage>>
+  messages(target: SearchResultTarget, query: ListMessagesQuery, signal?: AbortSignal): Promise<Result<MessagePage>>
+  timeline(target: SearchResultTarget, query: ListTimelineQuery, signal?: AbortSignal): Promise<Result<TimelinePage>>
+  reply(target: SearchResultTarget, query: ReplyChainQuery, signal?: AbortSignal): Promise<Result<ReplyChainPage>>
 }
 export type ChannelState = ReturnType<ReturnType<typeof createSync>['get']>['channels'][string] | undefined
-export type MoveRecord = { channel_id: string; root_id: string; destination_topic_id: string | null; version: number }
 
 export const initialView = (target: SearchResultTarget) => ({
   target, visit: Symbol(), status: 'loading' as 'loading' | 'ready' | 'missing' | 'error',
@@ -98,7 +97,7 @@ export function applyMainLiveUpdate(params: {
   view: SearchAnchorView
   channel: NonNullable<ChannelState>
   incoming: Message[]
-  moves: readonly MoveRecord[] | undefined
+  moves: readonly MoveVersion[] | undefined
   before: number
   refreshWatermark: number
   forwardWatermark: number

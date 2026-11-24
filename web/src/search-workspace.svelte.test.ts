@@ -237,11 +237,11 @@ describe('Workspace search integration (#153)', () => {
           channel: id, anchor: hit.id, query: expect.objectContaining({ after_seq: 36, limit: 1 }),
         })
       } else if (topicId) {
-        expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ after_seq: 36 }))
-        expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ before_seq: 37 }))
+        expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ after_seq: 36 }), expect.any(AbortSignal))
+        expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ before_seq: 37 }), expect.any(AbortSignal))
       } else {
-        expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ after_position: 36 }))
-        expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ before_position: 37 }))
+        expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ after_position: 36 }), expect.any(AbortSignal))
+        expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ before_position: 37 }), expect.any(AbortSignal))
       }
       const scope = replyRootId ? '#panel-content' : '#main-content'
       expect(ctx.host.querySelector(`${scope} .ui-message-row--search-match`)

@@ -12,7 +12,10 @@ import {
 
 export { SEARCH_WINDOW_LIMIT }
 
-type QueuedOp = { mode: OpMode; resolve: () => void }
+const REQUEST_TIMEOUT_MS = 10_000
+type Deadline = { until: Promise<Result<never>>; clear: () => void }
+type QueuedOp = { mode: OpMode; resolve: () => void; deadline: Deadline; timedOut: boolean }
+type InFlight = { request: Promise<unknown>; controller: AbortController }
 
 /** An authorized display projection. Only unfiltered sync can establish the Channel cursor. */
 export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: Reads) {
@@ -24,7 +27,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
   let liveMain: Message[] = []
   let activeToken: symbol | undefined
   let activeMode: OpMode | undefined
-  let inFlightTransport: Promise<unknown> | undefined
+  let inFlightTransport: InFlight | undefined
   const queue: QueuedOp[] = []
   let staleSeq = 0
   let staleHitMoved = false
@@ -41,11 +44,18 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     windowMessages = []; baselines = new Map(); liveMain = []
   }
 
+  function releaseTransport() {
+    const current = inFlightTransport
+    inFlightTransport = undefined
+    current?.controller.abort()
+  }
+
   function cancelAll() {
     activeToken = undefined
     activeMode = undefined
     staleSeq = 0
     staleHitMoved = false
+    inFlightTransport?.controller.abort()
     deadlines.cancel()
     for (const item of queue.splice(0)) item.resolve()
   }
@@ -54,6 +64,37 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     cancelAll()
     resetState()
     publish({ ...initialView(w.target), visit: w.visit, status: 'missing' })
+  }
+
+  function startOp(mode: OpMode, resolve: () => void): QueuedOp {
+    const op: QueuedOp = { mode, resolve, timedOut: false, deadline: undefined as unknown as Deadline }
+    op.deadline = deadlines.start<Result<never>>({ ok: false, kind: 'network' }, {
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      onTimeout: () => {
+        op.timedOut = true
+        releaseTransport()
+        const idx = queue.indexOf(op)
+        if (idx !== -1) {
+          queue.splice(idx, 1)
+          const w = view
+          if (w && sync.get().organization !== 'unavailable') {
+            if (op.mode === 'initial') {
+              resetState()
+              staleSeq = 0
+              staleHitMoved = false
+              publish({ ...initialView(w.target), visit: w.visit, status: 'error' })
+            } else if (w.status === 'ready') {
+              if (op.mode === 'refresh') staleSeq = 0
+              publish({ ...w, paging: false, pageError: op.mode as PageRead })
+            }
+          }
+          op.resolve()
+          if (!activeToken && !inFlightTransport) void drain()
+        }
+        return { ok: false, kind: 'network' }
+      },
+    })
+    return op
   }
 
   function enqueue(mode: OpMode): Promise<void> {
@@ -69,7 +110,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       })
     }
     return new Promise<void>(resolve => {
-      queue.push({ mode, resolve })
+      queue.push(startOp(mode, resolve))
       if (!activeToken && !inFlightTransport) void drain()
     })
   }
@@ -86,7 +127,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       if (inFlightTransport) return
       const w = view
       if (!w || sync.get().organization === 'unavailable' || !channelFor(w.target)?.watched) {
-        for (const item of queue.splice(0)) item.resolve()
+        for (const item of queue.splice(0)) { item.deadline.clear(); item.resolve() }
         staleSeq = 0
         staleHitMoved = false
         return
@@ -96,22 +137,25 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       if (staleHitMoved) {
         staleHitMoved = false
         staleSeq = 0
-        for (const item of queue.splice(0)) item.resolve()
-        next = { mode: 'initial', resolve: () => {} }
+        for (const item of queue.splice(0)) { item.deadline.clear(); item.resolve() }
+        next = startOp('initial', () => {})
       } else if (queue.length > 0) {
         next = queue.shift()!
       } else if (staleSeq > 0 && w.status === 'ready' && !w.pageError) {
         targetStaleSeq = staleSeq
         staleSeq = 0
-        next = { mode: 'refresh', resolve: () => {} }
+        next = startOp('refresh', () => {})
       } else {
         return
       }
+      if (next.timedOut) continue
       if (next.mode === 'older' && (w.status !== 'ready' || !w.hasOlder)) {
+        next.deadline.clear()
         next.resolve()
         continue
       }
       if (next.mode === 'newer' && (w.status !== 'ready' || !w.hasNewer)) {
+        next.deadline.clear()
         next.resolve()
         continue
       }
@@ -120,8 +164,9 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       activeMode = next.mode
       let cancelled = false
       try {
-        await executeOperation(token, next.mode, targetStaleSeq)
+        await executeOperation(token, next.mode, targetStaleSeq, next.deadline)
       } finally {
+        next.deadline.clear()
         cancelled = activeToken !== token
         if (!cancelled) {
           activeToken = undefined
@@ -133,7 +178,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     }
   }
 
-  async function executeOperation(token: symbol, mode: OpMode, targetStaleSeq: number): Promise<void> {
+  async function executeOperation(token: symbol, mode: OpMode, targetStaleSeq: number, deadline: Deadline): Promise<void> {
     const startView = view
     if (!startView || sync.get().organization === 'unavailable' || !channelFor(startView.target)?.watched) return
     const { target } = startView
@@ -145,16 +190,17 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     publish(startView.status === 'ready' || mode !== 'initial'
       ? { ...startView, paging: true, pageError: undefined }
       : { ...startView, status: 'loading' })
-    const deadline = deadlines.start<Result<never>>({ ok: false, kind: 'network' }, { timeoutMs: 10_000 })
     const safe = <T>(operation: () => Promise<Result<T>>): Promise<Result<T>> => {
       try { return operation().catch((): Result<T> => ({ ok: false, kind: 'network' })) }
       catch { return Promise.resolve({ ok: false, kind: 'network' }) }
     }
-    const run = <T>(operation: () => Promise<Result<T>>): Promise<Result<T>> => {
-      const request = safe(operation)
-      inFlightTransport = request
+    const run = <T>(operation: (signal: AbortSignal) => Promise<Result<T>>): Promise<Result<T>> => {
+      const controller = new AbortController()
+      const request = safe(() => operation(controller.signal))
+      const entry: InFlight = { request, controller }
+      inFlightTransport = entry
       void request.finally(() => {
-        if (inFlightTransport === request) {
+        if (inFlightTransport === entry) {
           inFlightTransport = undefined
           if (!activeToken) void drain()
         }
@@ -176,6 +222,11 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       }
     }
 
+    let savedUpperMain = upperBoundForMain(startView, after)
+    let savedUpperTopic = upperBoundForTopic(startView, after)
+    let savedHadHit = startView.messages.some(message => containsHit(target, message))
+    let savedTopicMessages = startView.messages
+
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         if (activeToken !== token || !view) return
@@ -192,8 +243,34 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             ? { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
             : result
         )
+        const withholdExpired = () => {
+          if (view) {
+            savedUpperMain = upperBoundForMain(view, after)
+            savedUpperTopic = upperBoundForTopic(view, after)
+            savedHadHit = savedHadHit || view.messages.some(message => containsHit(target, message))
+            savedTopicMessages = view.messages
+          }
+          windowMessages = []
+          baselines = new Map()
+          liveMain = []
+          if (view) {
+            publish({
+              ...view,
+              status: 'loading',
+              messages: [],
+              lines: [],
+              reply: undefined,
+              asOfSeq: undefined,
+              paging: true,
+              pageError: undefined,
+            })
+          }
+        }
         const handleFailure = (result: Exclude<Result<unknown>, { ok: true }>, invalidated = false): 'retry' | 'done' => {
-          if (result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) return 'retry'
+          if (result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) {
+            withholdExpired()
+            return 'retry'
+          }
           if (result.kind === 'http' && (result.status === 403 || result.status === 404)) {
             missing(w)
             if (!isOrganizationUnavailable(result) && result.error !== 'topic_not_found' && result.error !== 'reply_chain_not_found') {
@@ -216,7 +293,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
         }
 
         if (target.replyRootId) {
-          const result = await run(() => reads.reply(target, { ...query, after_seq: target.createdSeq - 1, limit: 1 }))
+          const result = await run(signal => reads.reply(target, { ...query, after_seq: target.createdSeq - 1, limit: 1 }, signal))
           if (activeToken !== token) return
           if (!result.ok) {
             if (handleFailure(result) === 'retry') continue
@@ -246,7 +323,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
           let failed: Exclude<Result<unknown>, { ok: true }> | undefined
 
           const readTimelinePage = async (q: ListTimelineQuery, checkFreshness = true): Promise<Result<TimelinePage> | undefined> => {
-            const res = await run(() => reads.timeline(target, q))
+            const res = await run(signal => reads.timeline(target, q, signal))
             if (activeToken !== token) return undefined
             if (res.ok) settlePage(res.data.history_generation, res.data.items.map(itemMessage))
             if (activeToken !== token) return undefined
@@ -315,7 +392,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
               })
               if (activeToken !== token || !retainedRes) return
               if (!retainedRes.ok) { if (handleFailure(retainedRes) === 'retry') continue; return }
-              const effectiveUpper = upperBoundForMain(view!, after)
+              const effectiveUpper = restarted ? savedUpperMain : upperBoundForMain(view!, after)
               const retainedItems = effectiveUpper < Infinity
                 ? retainedRes.data.items.filter(item => itemPosition(item) <= effectiveUpper)
                 : retainedRes.data.items
@@ -370,7 +447,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             })
             if (activeToken !== token || !res) return
             if (!res.ok) { if (handleFailure(res, true) === 'retry') continue; return }
-            const effectiveUpper = upperBoundForMain(view!, after)
+            const effectiveUpper = restarted ? savedUpperMain : upperBoundForMain(view!, after)
             pageItems = effectiveUpper < Infinity
               ? res.data.items.filter(item => itemPosition(item) <= effectiveUpper)
               : res.data.items
@@ -393,7 +470,8 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             replaceState ? [] : windowMessages,
             replaceState ? new Map<string, TopicBaseline>() : new Map(baselines),
           )
-          if ((mode === 'initial' || (refreshing && current.messages.some(message => containsHit(target, message)))) &&
+          const hadHit = restarted ? savedHadHit : current.messages.some(message => containsHit(target, message))
+          if ((mode === 'initial' || (refreshing && hadHit)) &&
               !applied.messages.some(message => containsHit(target, message))) {
             missing(w)
             return
@@ -419,11 +497,11 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
 
         // Topic-channel search
         const lower = w.hasOlder ? before - 1 : 0
-        const response = await run(() => reads.messages(target, {
+        const response = await run(signal => reads.messages(target, {
           ...query, limit: refreshing ? SEARCH_WINDOW_LIMIT + 1 : mode !== 'initial' ? PAGE_SIZE : PAGE_SIZE + 1,
           ...(fixed ? { as_of_seq: w.asOfSeq } : {}),
           ...(forward ? { after_seq: refreshing ? lower : mode !== 'initial' ? after : target.createdSeq - 1 } : { before_seq: before }),
-        }))
+        }, signal))
         if (activeToken !== token) return
         if (response.ok) settlePage(response.data.history_generation, response.data.messages)
         const page = fixed ? checked(response) : response
@@ -439,9 +517,9 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             missing(w)
             return
           }
-          const olderRes = await run(() => reads.messages(target, {
+          const olderRes = await run(signal => reads.messages(target, {
             history_generation: data.history_generation, as_of_seq: data.as_of_seq, before_seq: target.createdSeq, limit: PAGE_SIZE,
-          }))
+          }, signal))
           if (activeToken !== token) return
           if (olderRes.ok) settlePage(olderRes.data.history_generation, olderRes.data.messages)
           const result = checked(olderRes)
@@ -450,17 +528,18 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
         }
         const current = view!
         const state = channelFor(target)
-        const effectiveUpper = upperBoundForTopic(current, after)
+        const effectiveUpper = restarted ? savedUpperTopic : upperBoundForTopic(current, after)
         const pageMessages = refreshing ? data.messages.filter(message => message.created_seq <= effectiveUpper)
           : [...(older?.messages ?? []), ...data.messages]
-        let retained = mode !== 'initial' ? current.messages : []
+        let retained = mode !== 'initial' ? (restarted ? savedTopicMessages : current.messages) : []
         if (refreshing) {
           const covered = data.has_more ? Math.min(data.messages.at(-1)?.created_seq ?? lower, effectiveUpper) : effectiveUpper
           const returned = new Set(pageMessages.map(message => message.id))
           retained = retained.filter(message => message.created_seq > covered || message.version > data.as_of_seq || returned.has(message.id))
         }
         const messages = mergeMessages(state, target, pageMessages, retained)
-        if ((mode === 'initial' || (refreshing && current.messages.some(message => containsHit(target, message)))) &&
+        const hadHit = restarted ? savedHadHit : current.messages.some(message => containsHit(target, message))
+        if ((mode === 'initial' || (refreshing && hadHit)) &&
             !messages.some(message => containsHit(target, message))) {
           missing(w)
           return
