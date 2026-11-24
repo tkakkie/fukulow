@@ -46,7 +46,8 @@ export function createActivityTarget<T>(options: {
     const started = !inFlight, pending = execute()
     if (started && inFlight) {
       running = pending
-      void pending.finally(() => { if (running === pending) running = undefined })
+      // Callers observe the rejection on pending itself; the bookkeeping chain must not add another.
+      void pending.finally(() => { if (running === pending) running = undefined }).catch(() => {})
     }
     return pending
   }

@@ -912,3 +912,25 @@ it('an Unread summary joins a window summary read already in flight instead of f
     expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
   } finally { activity.close(); await c.sync.close() }
 })
+
+it('a failed Unread summary releases its demand so the next prune drops the target (#956)', async () => {
+  const { topicClient } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const heldKeys = new Set<string>(), hold = activity.hold.bind(activity)
+  vi.spyOn(activity, 'hold').mockImplementation((key, target) => {
+    heldKeys.add(key)
+    const release = hold(key, target)
+    return () => { heldKeys.delete(key); release() }
+  })
+  const c = topicClient(activity)
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'network' })
+    const result = await c.topics.activitySummary('A', 'U')
+    expect(result.ok).toBe(false)
+    expect(heldKeys.has('topic:A:U')).toBe(true)
+    void c.topics.loadTopic('A', 'T')
+    await flush()
+    expect(heldKeys.has('topic:A:U')).toBe(false)
+  } finally { activity.close(); await c.sync.close() }
+})
