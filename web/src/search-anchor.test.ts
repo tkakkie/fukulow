@@ -768,11 +768,20 @@ it('refreshes baselines on Move, detaches on live Topic activity without patchin
       )
     }
     if (query?.after_position === 0 && query?.limit === 101) {
-      return timelinePage([
-        { kind: 'message', message: record(30) },
-        { kind: 'message', message: record(40) },
-        topicItem('T1', '設計', 20, 101, 5),
-      ], watermark, false)
+      return timelinePage(
+        watermark === 101
+          ? [
+              { kind: 'message', message: record(30) },
+              { kind: 'message', message: record(40) },
+              topicItem('T1', '設計', 20, 101, 4),
+            ]
+          : [
+              { kind: 'message', message: record(30) },
+              { kind: 'message', message: record(40) },
+            ],
+        watermark,
+        false,
+      )
     }
     throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
   })
@@ -784,11 +793,14 @@ it('refreshes baselines on Move, detaches on live Topic activity without patchin
     expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
       .toEqual(['m:30', 't:T1@35:3', 'm:40'])
 
-    // Live Topic Message detaches cleanly instead of patching Topic baselines/counts on the client.
+    // Live Topic Message keeps following via a bounded projection refresh without patching Topic counts on the client.
+    watermark = 101
     net.event({ type: 'message', kind: 'create', seq: 101, message: { ...record(101), topic_id: 'T1' } })
-    expect(anchor.get()?.detached).toBe(true)
+    expect(anchor.get()?.detached).toBe(false)
+    await flush()
+    expect(anchor.get()?.asOfSeq).toBe(101)
     expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
-      .toEqual(['m:30', 't:T1@35:3', 'm:40'])
+      .toEqual(['m:30', 'm:40', 't:T1@101:4'])
     expect(cursor()).toBe(101)
 
     // Live Move into T1 refreshes baselines at W=103.
@@ -1105,7 +1117,9 @@ it('does not publish a deleted Topic body from an expired snapshot when 110 newe
 })
 
 it('leaves no deleted live evidence in a Topic line when a live Topic Message is created and then deleted', async () => {
+  let opened = false
   const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (opened) return { ok: false as const, kind: 'network' as const }
     if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) return timelinePage([], 100, false)
     if (query?.after_position === 39) return timelinePage([{ kind: 'message', message: record(40) }], 100, false)
     if (query?.before_position === 40) return timelinePage([{ kind: 'message', message: record(30) }, topicItem('T1', '設計', 31, 35, 3)], 100, false)
@@ -1116,8 +1130,9 @@ it('leaves no deleted live evidence in a Topic line when a live Topic Message is
     await ready()
     anchor.open(target)
     await flush()
+    opened = true
     net.event({ type: 'message', kind: 'create', seq: 102, message: { ...record(102), topic_id: 'T1' } })
-    expect(anchor.get()?.detached).toBe(true)
+    expect(anchor.get()?.detached).toBe(false)
     net.event({ type: 'message', kind: 'delete', seq: 103, message: { ...record(102), topic_id: 'T1', version: 103, deleted: true } })
     await flush()
     expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}:${l.latestMessage.id}`))
@@ -1246,6 +1261,438 @@ it('keeps distinct retained Message bodies within reserveSearch (100) across Top
     expect(anchor.get()?.detached).toBe(true)
     expect(anchor.get()?.lines).toHaveLength(100)
     expect(distinctBodies()).toBeLessThanOrEqual(100)
+  } finally {
+    session.close()
+  }
+})
+
+function serveTimelineFromMessages(allMessages: readonly Message[], asOfSeq: number, query?: ListTimelineQuery): Result<TimelinePage> {
+  const byTopic = new Map<string, Message[]>()
+  const items: TimelineItem[] = []
+  for (const m of allMessages) {
+    if (m.deleted || m.created_seq > asOfSeq) continue
+    if (m.topic_id === null) items.push({ kind: 'message', message: m })
+    else {
+      const list = byTopic.get(m.topic_id) ?? []
+      list.push(m)
+      byTopic.set(m.topic_id, list)
+    }
+  }
+  for (const [topicId, list] of byTopic) {
+    list.sort((a, b) => a.created_seq - b.created_seq)
+    const first = list[0]!, latest = list.at(-1)!
+    items.push({
+      kind: 'topic',
+      topic: {
+        id: topicId, name: `トピック-${topicId}`, first_seq: first.created_seq, last_seq: latest.created_seq,
+        message_count: list.length, latest_message: latest, read_seq: latest.created_seq, unread_count: 0, mention_unread_count: 0,
+      },
+    })
+  }
+  const pos = (i: TimelineItem) => i.kind === 'message' ? i.message.created_seq : i.topic.last_seq
+  items.sort((a, b) => pos(a) - pos(b))
+  const limit = query?.limit ?? 25
+  if (query?.after_position !== undefined) {
+    const filtered = items.filter(i => pos(i) > query.after_position!)
+    return timelinePage(filtered.slice(0, limit), asOfSeq, filtered.length > limit)
+  }
+  const filtered = query?.before_position !== undefined ? items.filter(i => pos(i) < query.before_position!) : items
+  const sliced = filtered.slice(-limit)
+  return timelinePage(sliced, asOfSeq, filtered.length > limit)
+}
+
+it('settles an own unknown send from an overtaken newer page even when the fresh retry probe fails', async () => {
+  let pendingId = ''
+  let probeCalls = 0
+  const newerPage = deferred<Result<TimelinePage>>()
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      probeCalls += 1
+      return probeCalls === 1 ? timelinePage([], 100, false) : { ok: false as const, kind: 'network' as const }
+    }
+    if (query?.after_position === 39 && query?.as_of_seq === 100) return timelinePage([{ kind: 'message', message: record(40) }], 100, true)
+    if (query?.before_position === 40 && query?.as_of_seq === 100) return timelinePage([], 100, false)
+    if (query?.after_position === 40 && query?.as_of_seq === 100) return newerPage.promise
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const { anchor, cursor, net, session, ready } = timelineClient(readTimeline, 100)
+  try {
+    await ready()
+    const send = session.sync.getTimeline('A').send('overtaken newer confirm')
+    net.sends[0].resolve({ ok: false, kind: 'network' })
+    await send
+    pendingId = session.sync.get().channels.A.pending[0]!.clientMessageId
+    expect(session.sync.get().channels.A.pending[0]?.state).toBe('unknown')
+
+    anchor.open(target)
+    await flush()
+
+    const pendingLoad = anchor.loadNewer()
+    await flush()
+    // An unrelated Edit overtakes W=100 while the newer page is in flight.
+    net.event({ type: 'message', kind: 'edit', seq: 101, message: { ...record(99), version: 101, body: 'edited' } })
+    expect(cursor()).toBe(101)
+
+    newerPage.resolve(timelinePage([
+      { kind: 'message', message: { ...record(90), sender: 'me', client_message_id: pendingId } },
+    ], 100, false))
+    await pendingLoad
+
+    expect(session.sync.get().channels.A.pending).toEqual([])
+    expect(cursor()).toBe(101)
+    expect(anchor.get()?.pageError).toBe('newer')
+  } finally {
+    session.close()
+  }
+})
+
+it.each([false, true])('retries refresh once at a fresh W after snapshot_expired and never leaves a deleted Topic excerpt visible (retryFails=%s)', async (retryFails) => {
+  let probeCalls = 0
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      probeCalls += 1
+      if (probeCalls === 1) return timelinePage([], 100, false)
+      if (probeCalls === 2) return timelinePage([], 101, false)
+      return retryFails ? { ok: false as const, kind: 'network' as const } : timelinePage([], 102, false)
+    }
+    if (query?.after_position === 39 && query?.as_of_seq === 100) return timelinePage([{ kind: 'message', message: record(40) }], 100, false)
+    if (query?.before_position === 40 && query?.as_of_seq === 100) {
+      return timelinePage([{ kind: 'message', message: record(30) }, topicItem('T1', '削除予定', 31, 35, 2)], 100, false)
+    }
+    if (query?.after_position === 0 && query?.limit === 101 && query?.as_of_seq === 101) {
+      // A Delete committed on the server after W=101 before the companion read, and has not replayed yet.
+      return expired
+    }
+    if (query?.after_position === 0 && query?.limit === 101 && query?.as_of_seq === 102) {
+      return timelinePage([{ kind: 'message', message: record(30) }, { kind: 'message', message: record(40) }], 102, false)
+    }
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const { anchor, net, session, ready } = timelineClient(readTimeline, 100)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    expect(anchor.get()?.lines.some(l => l.kind === 'topic' && l.topicId === 'T1')).toBe(true)
+
+    net.event({ ...moveEvent(101, 'id99'), source_topic_id: 'T-other', destination_topic_id: 'T-dest' })
+    await flush()
+
+    if (retryFails) {
+      expect(anchor.get()?.status).toBe('error')
+      expect(anchor.get()?.lines).toEqual([])
+      expect(anchor.get()?.messages).toEqual([])
+    } else {
+      expect(anchor.get()?.status).toBe('ready')
+      expect(anchor.get()?.asOfSeq).toBe(102)
+      expect(anchor.get()?.pageError).toBeUndefined()
+      expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}`))
+        .toEqual(['m:30', 'm:40'])
+    }
+    expect(anchor.get()?.lines.some(l => l.kind === 'topic' && l.topicId === 'T1')).toBe(false)
+  } finally {
+    session.close()
+  }
+})
+
+it.each(['move', 'delete'] as const)('coalesces a bounded projection refresh when an off-window %s brings an unheld Topic into the held range', async (kind) => {
+  const store: Message[] = [
+    record(10),
+    record(30),
+    { ...record(35), topic_id: 'T-off' },
+    record(40),
+    record(65),
+    { ...record(90), topic_id: 'T-off' },
+    record(95),
+  ]
+  let watermark = 100
+  const burstProbe = deferred<Result<TimelinePage>>()
+  let refreshProbes = 0
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      if (watermark > 100) {
+        refreshProbes += 1
+        if (refreshProbes === 2) return burstProbe.promise
+      }
+      return serveTimelineFromMessages(store, watermark, query)
+    }
+    if (query?.after_position === 39 && query?.as_of_seq === 100) {
+      return timelinePage([{ kind: 'message', message: record(40) }, { kind: 'message', message: record(65) }], 100, true)
+    }
+    if (query?.before_position === 40 && query?.as_of_seq === 100) {
+      return timelinePage([{ kind: 'message', message: record(30) }], 100, true)
+    }
+    return serveTimelineFromMessages(store, query?.as_of_seq ?? watermark, query)
+  })
+  const { anchor, cursor, net, session, ready } = timelineClient(readTimeline, 100)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    // Held range is [30, 65] with no held Topic baselines (T-off is at 90 > 65).
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}`))
+      .toEqual(['m:30', 'm:40', 'm:65'])
+
+    // Moving or deleting Message 90 drops T-off's last_seq from 90 to 35 inside [30, 65].
+    const idx90 = store.findIndex(m => m.created_seq === 90)
+    store[idx90] = kind === 'move'
+      ? { ...store[idx90]!, topic_id: 'T-other', version: 101 }
+      : { ...store[idx90]!, deleted: true, version: 101 }
+    watermark = 101
+    net.event(kind === 'move'
+      ? { ...moveEvent(101, 'id90'), source_topic_id: 'T-off', destination_topic_id: 'T-other' }
+      : { type: 'message', kind: 'delete', seq: 101, message: { ...record(90), topic_id: 'T-off', version: 101, deleted: true } })
+    await flush()
+    expect(anchor.get()?.asOfSeq).toBe(101)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 't:T-off@35:1', 'm:40', 'm:65'])
+    expect(cursor()).toBe(101)
+
+    // A burst of 5 off-window mutations while a refresh is in flight coalesces into at most one follow-up refresh.
+    watermark = 102
+    net.event({ type: 'message', kind: 'delete', seq: 102, message: { ...record(96), topic_id: 'T-burst', version: 102, deleted: true } })
+    await flush()
+    for (let seq = 103; seq <= 106; seq++) {
+      net.event({ type: 'message', kind: 'delete', seq, message: { ...record(seq), topic_id: 'T-burst', version: seq, deleted: true } })
+    }
+    watermark = 106
+    burstProbe.resolve(serveTimelineFromMessages(store, 102, { limit: 1 }))
+    await flush()
+    expect(refreshProbes).toBe(3)
+    expect(anchor.get()?.asOfSeq).toBe(106)
+  } finally {
+    session.close()
+  }
+})
+
+it('keeps following the live edge through live Topic Messages and across older paging until the capacity limit', async () => {
+  const store: Message[] = [record(20), record(30), record(40), record(50)]
+  let watermark = 100
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.before_position === 40 && query?.as_of_seq === 100) {
+      return timelinePage([{ kind: 'message', message: record(30) }], 100, true)
+    }
+    return serveTimelineFromMessages(store, query?.as_of_seq ?? watermark, query)
+  })
+  const { anchor, cursor, net, session, ready } = timelineClient(readTimeline, 100)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    expect(anchor.get()?.detached).toBe(false)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}`))
+      .toEqual(['m:30', 'm:40', 'm:50'])
+
+    // Live Topic Message at 101 refreshes without detaching; subsequent Channel-level Message 102 still appears.
+    const t101: Message = { ...record(101), topic_id: 'T1' }
+    store.push(t101)
+    watermark = 101
+    net.event({ type: 'message', kind: 'create', seq: 101, message: t101 })
+    expect(anchor.get()?.detached).toBe(false)
+    await flush()
+    expect(anchor.get()?.detached).toBe(false)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 'm:40', 'm:50', 't:T1@101:1'])
+
+    const m102 = record(102)
+    store.push(m102)
+    watermark = 102
+    net.event({ type: 'message', kind: 'create', seq: 102, message: m102 })
+    expect(anchor.get()?.detached).toBe(false)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 'm:40', 'm:50', 't:T1@101:1', 'm:102'])
+
+    // Older paging preserves live following.
+    await anchor.loadOlder()
+    expect(anchor.get()?.detached).toBe(false)
+    expect(anchor.get()?.hasOlder).toBe(false)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:20', 'm:30', 'm:40', 'm:50', 't:T1@101:1', 'm:102'])
+
+    // Live Topic Message 103 and Channel-level Message 104 keep arriving after older paging.
+    const t103: Message = { ...record(103), topic_id: 'T1' }
+    store.push(t103)
+    watermark = 103
+    net.event({ type: 'message', kind: 'create', seq: 103, message: t103 })
+    await flush()
+    const m104 = record(104)
+    store.push(m104)
+    watermark = 104
+    net.event({ type: 'message', kind: 'create', seq: 104, message: m104 })
+    expect(anchor.get()?.detached).toBe(false)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:20', 'm:30', 'm:40', 'm:50', 'm:102', 't:T1@103:2', 'm:104'])
+    expect(cursor()).toBe(104)
+
+    // Filling to 100 lines stays attached; a 101st live Topic Message for a new Topic detaches.
+    for (let seq = 105; seq <= 197; seq++) {
+      const m = record(seq)
+      store.push(m)
+      net.event({ type: 'message', kind: 'create', seq, message: m })
+    }
+    expect(anchor.get()?.lines).toHaveLength(100)
+    expect(anchor.get()?.detached).toBe(false)
+    net.event({ type: 'message', kind: 'create', seq: 198, message: { ...record(198), topic_id: 'T-overflow' } })
+    expect(anchor.get()?.detached).toBe(true)
+    expect(anchor.get()?.lines).toHaveLength(100)
+  } finally {
+    session.close()
+  }
+})
+
+it('carries one 10-second deadline across an initial attempt and its snapshot_expired retry', async () => {
+  vi.useFakeTimers()
+  let probeCalls = 0
+  const companion = deferred<Result<TimelinePage>>()
+  const stalledRetry = deferred<Result<TimelinePage>>()
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.limit === 1 && query.before_position === undefined && query.after_position === undefined) {
+      probeCalls += 1
+      return probeCalls === 1 ? timelinePage([], 100, false) : stalledRetry.promise
+    }
+    if (query?.after_position === 39) return companion.promise
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const { anchor, session, ready } = timelineClient(readTimeline, 100)
+  try {
+    await ready()
+    anchor.open(target)
+    await vi.advanceTimersByTimeAsync(9_900)
+    expect(anchor.get()?.status).toBe('loading')
+
+    companion.resolve(expired)
+    await flush()
+    expect(probeCalls).toBe(2)
+    expect(anchor.get()?.status).toBe('loading')
+
+    await vi.advanceTimersByTimeAsync(100)
+    await flush()
+    expect(anchor.get()?.status).toBe('error')
+    expect(anchor.get()?.paging).toBe(false)
+  } finally {
+    session.close()
+  }
+})
+
+it('settles an own unknown send beyond 200 raw Topic Messages in one after_position read (data-driven)', async () => {
+  let pendingId = ''
+  const store: Message[] = [
+    record(40),
+    ...Array.from({ length: 220 }, (_, i) => ({ ...record(41 + i), topic_id: 'T-busy' })),
+  ]
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => serveTimelineFromMessages(store, 300, query))
+  const { anchor, cursor, net, readMessages, session, ready } = timelineClient(readTimeline, 300)
+  try {
+    await ready()
+    const send = session.sync.getTimeline('A').send('beyond 200 raw cutoff')
+    net.sends[0].resolve({ ok: false, kind: 'network' })
+    await send
+    pendingId = session.sync.get().channels.A.pending[0]!.clientMessageId
+    store.push({ ...record(300), sender: 'me', client_message_id: pendingId })
+
+    anchor.open(target)
+    await flush()
+    expect(session.sync.get().channels.A.pending).toEqual([])
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:40', 't:T-busy@260:220', 'm:300'])
+    expect(readTimeline.mock.calls.filter(([q]) => q?.after_position !== undefined)).toHaveLength(1)
+    expect(readMessages.mock.calls.filter(([q]) => q?.after_seq !== undefined || q?.before_seq !== undefined)).toEqual([])
+    expect(cursor()).toBe(300)
+  } finally {
+    session.close()
+  }
+})
+
+it('completes the newer side in one after_position read over a dense 100-hidden-Topic store under 100 ms latency (data-driven)', async () => {
+  vi.useFakeTimers()
+  const store: Message[] = [
+    record(40),
+    // 100 Topics each have an older Message in 41..140 and a newer Message in 401..500 (hidden in 41..140).
+    ...Array.from({ length: 100 }, (_, i) => ({ ...record(41 + i), topic_id: `T-hid-${i + 1}` })),
+    ...records(141, 165),
+    ...Array.from({ length: 100 }, (_, i) => ({ ...record(401 + i), topic_id: `T-hid-${i + 1}` })),
+  ]
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    return serveTimelineFromMessages(store, 500, query)
+  })
+  const { anchor, cursor, readMessages, session, ready } = timelineClient(readTimeline, 500)
+  try {
+    await ready()
+    anchor.open(target)
+    await vi.advanceTimersByTimeAsync(350)
+    await flush()
+    expect(anchor.get()?.status).toBe('ready')
+    expect(anchor.get()?.lines).toHaveLength(26)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? l.message.created_seq : -1)).toEqual([40, ...Array.from({ length: 25 }, (_, i) => 141 + i)])
+    expect(readTimeline).toHaveBeenCalledTimes(3)
+    expect(readTimeline.mock.calls.filter(([q]) => q?.after_position !== undefined)).toHaveLength(1)
+    expect(readMessages.mock.calls.filter(([q]) => q?.after_seq !== undefined || q?.before_seq !== undefined)).toEqual([])
+    expect(cursor()).toBe(500)
+  } finally {
+    session.close()
+  }
+})
+
+it('keeps distinct retained Message bodies within reserveSearch (100) across live updates to 25 held Topic baselines (data-driven)', async () => {
+  const store: Message[] = [
+    ...records(1, 25),
+    record(40),
+    ...Array.from({ length: 25 }, (_, i) => ({ ...record(41 + i * 2), topic_id: `T-${i + 1}` })),
+    ...Array.from({ length: 25 }, (_, i) => ({ ...record(42 + i * 2), topic_id: `T-${i + 1}` })),
+    ...records(101, 149),
+  ]
+  let watermark = 150
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => serveTimelineFromMessages(store, query?.as_of_seq ?? watermark, query))
+  const { anchor, net, session, ready } = timelineClient(readTimeline, 150)
+  const distinctBodies = () => {
+    const ids = new Set<string>()
+    for (const line of anchor.get()?.lines ?? []) {
+      if (line.kind === 'message') ids.add(line.message.id)
+      else {
+        ids.add(line.latestMessage.id)
+        if (line.baseline) {
+          expect(line.latestMessage).toBe(line.baseline.summary.latest_message)
+          ids.add(line.baseline.summary.latest_message.id)
+        }
+      }
+    }
+    return ids.size
+  }
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    await anchor.loadNewer()
+    await anchor.loadNewer()
+    expect(anchor.get()?.lines).toHaveLength(100)
+    expect(anchor.get()?.detached).toBe(false)
+    expect(distinctBodies()).toBe(100)
+
+    // Live updates to all 25 held Topic baselines keep the window attached, coalesce refreshes, and stay within 100 distinct bodies.
+    readTimeline.mockClear()
+    for (let i = 0; i < 25; i++) {
+      const seq = 151 + i
+      const msg: Message = { ...record(seq), topic_id: `T-${i + 1}` }
+      store.push(msg)
+      watermark = seq
+      net.event({ type: 'message', kind: 'create', seq, message: msg })
+    }
+    await flush()
+    expect(anchor.get()?.detached).toBe(false)
+    expect(anchor.get()?.lines).toHaveLength(100)
+    expect(distinctBodies()).toBe(100)
+    // All 25 Topic baselines updated to count=3 and latest seq 151..175 in coalesced refreshes (far fewer than 25*2 reads).
+    const topicLines = (anchor.get()?.lines ?? []).filter(l => l.kind === 'topic')
+    expect(topicLines).toHaveLength(25)
+    expect(topicLines.every(l => l.messageCount === 3 && l.position >= 151 && l.position <= 175)).toBe(true)
+    expect(readTimeline.mock.calls.length).toBeLessThanOrEqual(4)
+
+    // A 101st distinct line (new unheld Topic T-26) detaches without exceeding 100 bodies.
+    net.event({ type: 'message', kind: 'create', seq: 176, message: { ...record(176), topic_id: 'T-26' } })
+    expect(anchor.get()?.detached).toBe(true)
+    expect(anchor.get()?.lines).toHaveLength(100)
+    expect(distinctBodies()).toBe(100)
   } finally {
     session.close()
   }
