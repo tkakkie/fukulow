@@ -55,7 +55,7 @@ impl ReactionEmojiSet {
                 ch.is_whitespace() || ch.is_control() || (ch != '\u{200d}' && is_format(ch))
             }) {
                 "emoji contains whitespace, a control, or a disallowed format character"
-            } else if label.is_empty() {
+            } else if label.trim().is_empty() {
                 "label must be nonempty"
             } else if set.contains(&emoji) {
                 "duplicate emoji"
@@ -189,6 +189,14 @@ mod tests {
     fn rejects_empty_label() {
         assert_rejected(
             r#"{"version":1,"emoji":[{"emoji":"👍","label":""}]}"#,
+            "label must be nonempty",
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_label() {
+        assert_rejected(
+            r#"{"version":1,"emoji":[{"emoji":"👍","label":" \t\u3000"}]}"#,
             "label must be nonempty",
         );
     }

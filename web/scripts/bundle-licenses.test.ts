@@ -70,6 +70,20 @@ describe('bundle package resolution', () => {
     expect(() => bundlePackages([join(root, 'elsewhere/x.js')], web, resolve)).toThrow(/outside the web app/)
   })
 
+  it('treats the repository contract as first-party', () => {
+    expect(bundlePackages([join(web, '../contract/reactions/emoji.json')], web, resolve)).toEqual([])
+  })
+
+  it('rejects sibling directories and traversal out of the contract', () => {
+    for (const id of [
+      join(web, '../contractx/reactions/emoji.json'),
+      `${root}/contract/../elsewhere/x.js`,
+      `${root}/contract/node_modules/../../elsewhere/x.js`,
+    ]) {
+      expect(() => bundlePackages([id], web, resolve), id).toThrow(/outside the web app/)
+    }
+  })
+
   it('reads NOTICE files but rejects a package whose LICENSE on disk is blank', () => {
     const packages = bundlePackages([join(web, 'node_modules/n/index.js')], web, resolve)
     expect(packages[0].texts.map(t => t.file)).toEqual(['LICENSE', 'NOTICE'])

@@ -1,7 +1,7 @@
 // #807: the npm packages whose code is in the shipped bundle, resolved from the bundler's module graph,
 // checked against deny.toml's license allow-list and written with their license texts for the third-party notice.
 import { readdirSync, readFileSync } from 'node:fs'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export type BundlePackage = { name: string, version: string, license: string, texts: { file: string, text: string }[] }
 
@@ -59,19 +59,25 @@ export function licenseAllowed(expression: string, allow: readonly string[]): bo
   return result
 }
 
-// Package directory for a module id, or undefined for the app's own files under `webRoot`.
+// Package directory for a module id, or undefined for first-party web and contract files.
 export function packageDirOf(id: string, webRoot: string, resolvePackage: (name: string) => string): string | undefined {
   for (const [prefix, name] of VIRTUAL_PACKAGES) if (id.startsWith(prefix)) return resolvePackage(name)
   if (id.startsWith('\0')) throw new Error(`bundle module ${JSON.stringify(id)} is virtual with no known package`)
-  const path = id.split('?')[0].replaceAll('\\', '/')
+  const filename = id.split('?')[0].replaceAll('\\', '/')
+  const outside = () => new Error(`bundle module ${id} is outside the web app and node_modules`)
+  if (!isAbsolute(filename)) throw outside()
+  const path = resolve(filename).replaceAll('\\', '/')
   const at = path.lastIndexOf('/node_modules/')
   if (at >= 0) {
     const parts = path.slice(at + '/node_modules/'.length).split('/')
     const length = parts[0].startsWith('@') ? 2 : 1
     return path.slice(0, at) + '/node_modules/' + parts.slice(0, length).join('/')
   }
-  const inside = relative(webRoot, path)
-  if (!isAbsolute(path) || inside.startsWith('..') || isAbsolute(inside)) throw new Error(`bundle module ${id} is outside the web app and node_modules`)
+  const firstParty = [webRoot, resolve(webRoot, '../contract')].some(root => {
+    const fromRoot = relative(root, path)
+    return fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot)
+  })
+  if (!firstParty) throw outside()
   return undefined
 }
 
