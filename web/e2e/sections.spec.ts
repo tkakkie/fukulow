@@ -681,3 +681,56 @@ test('section dialogs: modified Enter does not create or rename, and Enter on a 
     await cleanupCreatedSections(page, orgId, createdIds)
   }
 })
+
+test('section dialogs: Shift+Enter on focused Cancel button cancels while Shift+Enter in name field does not submit (#838)', async ({ page }) => {
+  const orgId = await signInOwner(page.request)
+  const createdIds = new Set<string>()
+  const suffix = crypto.randomUUID().slice(0, 8)
+  const ch = await createChannel(page.request, orgId, `sec-cancel-${suffix}`)
+  const sectionsRoute = `**/api/v1/orgs/${orgId}/me/**`
+  let mutationCount = 0
+
+  await page.route(sectionsRoute, async (route) => {
+    const req = route.request()
+    if (req.method() !== 'GET') {
+      mutationCount++
+      if (req.method() === 'POST') {
+        const body = req.postDataJSON() as Partial<CreateSection> | null
+        if (body?.id) createdIds.add(body.id)
+      }
+    }
+    await route.continue().catch(() => {})
+  })
+
+  try {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto(`/o/${orgId}/c/${ch.id}`)
+    const leftCol = page.locator('#channel-content')
+    await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    const createBtn = leftCol.getByRole('button', { name: 'セクションを作成', exact: true })
+    await expect(createBtn).toBeEnabled()
+
+    await createBtn.click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    const nameInput = dialog.getByLabel('セクション名', { exact: true })
+    await nameInput.fill(`キャンセル確認-${suffix}`)
+    await nameInput.focus()
+
+    // Shift+Enter in the name field does not submit.
+    await page.keyboard.press('Shift+Enter')
+    await expect(dialog).toBeVisible()
+    expect(mutationCount).toBe(0)
+
+    // Shift+Enter on the focused Cancel button cancels and closes the dialog.
+    const cancelBtn = dialog.getByRole('button', { name: 'キャンセル', exact: true })
+    await cancelBtn.focus()
+    await expect(cancelBtn).toBeFocused()
+    await page.keyboard.press('Shift+Enter')
+    await expect(dialog).toHaveCount(0)
+    expect(mutationCount).toBe(0)
+  } finally {
+    await page.unroute(sectionsRoute).catch(() => {})
+    await cleanupCreatedSections(page, orgId, createdIds)
+  }
+})

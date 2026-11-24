@@ -660,6 +660,16 @@ export class MiniElement extends MiniNode {
           form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
         }
       }
+    } else if (
+      notPrevented &&
+      event.type === 'keydown' &&
+      this.tagName === 'BUTTON' &&
+      !this.disabled &&
+      event.key === 'Enter' &&
+      !event.isComposing &&
+      event.keyCode !== 229
+    ) {
+      this.click()
     }
     return notPrevented
   }

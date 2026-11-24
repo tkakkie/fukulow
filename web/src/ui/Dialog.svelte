@@ -12,6 +12,25 @@
   const FOCUSABLE_SELECTOR =
     'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
 
+  const NON_TEXT_INPUT_TYPES = new Set([
+    'button',
+    'checkbox',
+    'color',
+    'file',
+    'hidden',
+    'image',
+    'radio',
+    'range',
+    'reset',
+    'submit',
+  ])
+
+  function isTextInputTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement) || target.tagName !== 'INPUT') return false
+    const type = (target.getAttribute('type') ?? 'text').toLowerCase()
+    return !NON_TEXT_INPUT_TYPES.has(type)
+  }
+
   let {
     open = false,
     busy = false,
@@ -92,11 +111,8 @@
         e.preventDefault()
         return
       }
-      if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) {
-        const tag = e.target instanceof HTMLElement ? e.target.tagName : ''
-        if (tag !== 'TEXTAREA') {
-          e.preventDefault()
-        }
+      if ((e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) && isTextInputTarget(e.target)) {
+        e.preventDefault()
       }
     }
   }

@@ -732,4 +732,81 @@ describe('Dialog form mode and SectionDialogs (#838)', () => {
 
     await unmount(instance)
   })
+
+  it('Shift+Enter on a focused Cancel button cancels while Shift+Enter in the name field does not submit', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const oncreate = vi.fn()
+    const onrename = vi.fn()
+    const ondelete = vi.fn()
+    const onmove = vi.fn()
+    const onclose = vi.fn()
+    const state = $state<{ mode: SectionDialogMode; busy: boolean }>({
+      mode: { kind: 'create' },
+      busy: false,
+    })
+
+    const instance = mount(SectionDialogs, {
+      target: host as unknown as Element,
+      props: {
+        get mode() { return state.mode },
+        get busy() { return state.busy },
+        oncreate,
+        onrename,
+        ondelete,
+        onmove,
+        onclose,
+      },
+    })
+    flushSync()
+
+    // Create dialog: Shift+Enter in name field is prevented and does not submit.
+    const createInput = host.querySelector('form.ui-dialog__form input[name="section_name"]')!
+    createInput.value = '開発'
+    createInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    const inputShiftEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true })
+    createInput.dispatchEvent(inputShiftEnter)
+    flushSync()
+    expect(inputShiftEnter.defaultPrevented).toBe(true)
+    expect(oncreate).not.toHaveBeenCalled()
+    expect(onclose).not.toHaveBeenCalled()
+
+    // Shift+Enter on focused Cancel button keeps native button activation and cancels.
+    const cancelBtn = host.querySelectorAll('button').find((b) => b.textContent.trim() === 'キャンセル')!
+    cancelBtn.focus()
+    const cancelShiftEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true })
+    cancelBtn.dispatchEvent(cancelShiftEnter)
+    flushSync()
+    expect(cancelShiftEnter.defaultPrevented).toBe(false)
+    expect(onclose).toHaveBeenCalledTimes(1)
+    expect(oncreate).not.toHaveBeenCalled()
+
+    // Rename dialog: Shift+Enter in name field does not submit; Shift+Enter on Cancel button cancels.
+    state.mode = { kind: 'rename', sectionId: 'sec-1', currentName: '旧名' }
+    flushSync()
+    const renameInput = host.querySelector('form.ui-dialog__form input[name="section_name"]')!
+    renameInput.value = '新名'
+    renameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    const renameInputShiftEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true })
+    renameInput.dispatchEvent(renameInputShiftEnter)
+    flushSync()
+    expect(renameInputShiftEnter.defaultPrevented).toBe(true)
+    expect(onrename).not.toHaveBeenCalled()
+    expect(onclose).toHaveBeenCalledTimes(1)
+
+    const renameCancelBtn = host.querySelectorAll('button').find((b) => b.textContent.trim() === 'キャンセル')!
+    renameCancelBtn.focus()
+    const renameCancelShiftEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', shiftKey: true })
+    renameCancelBtn.dispatchEvent(renameCancelShiftEnter)
+    flushSync()
+    expect(renameCancelShiftEnter.defaultPrevented).toBe(false)
+    expect(onclose).toHaveBeenCalledTimes(2)
+    expect(onrename).not.toHaveBeenCalled()
+
+    await unmount(instance)
+  })
 })
