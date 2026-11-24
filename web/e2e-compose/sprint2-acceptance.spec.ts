@@ -58,7 +58,9 @@ async function diag956(pages: Array<[string, Page]>, target?: Locator): Promise<
       return el && { top: el.scrollTop, h: el.clientHeight, sh: el.scrollHeight, gap: el.scrollHeight - el.scrollTop - el.clientHeight,
         newBelow: document.querySelector('.topic-view__new-below')?.textContent?.trim() ?? null, mounted: rows.length,
         last: rows.at(-1)?.getAttribute('data-message-id'), lastPos: rows.at(-1)?.closest('[aria-posinset]')?.getAttribute('aria-posinset'),
-        panel: !!document.querySelector('#panel-content .reply-panel__scroll') }
+        setsize: rows.at(-1)?.closest('[aria-setsize]')?.getAttribute('aria-setsize'), live: document.querySelector('[data-testid="live-status"]')?.getAttribute('data-live'),
+        status: [...document.querySelectorAll('[role=status]')].map(e => e.textContent?.trim()).filter(Boolean).join('|').slice(0, 200),
+        panel: !!document.querySelector('#panel-content .reply-panel__scroll'), panelRows: document.querySelectorAll('#panel-content [data-message-id]').length }
     }).catch(e => String(e))))
     if (target && p === target.page()) {
       out.push('target ' + JSON.stringify(await target.evaluate((b: HTMLElement) => {
