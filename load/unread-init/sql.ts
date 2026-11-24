@@ -39,12 +39,12 @@ SELECT ${org},md5('sender-probe')::uuid,${channel},seq,md5('member-0')::uuid,md5
 export const baselineRows=`SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY channel_id,member_id),'[]') FROM channel_read_positions p WHERE organization_id=${org};`;
 export const stats=`SELECT jsonb_object_agg(relname,jsonb_build_object('insert',n_tup_ins,'update',n_tup_upd,'delete',n_tup_del)) FROM pg_stat_user_tables WHERE relname IN ('channel_read_positions','topic_read_positions');`;
 // Use current production count SQL verbatim: this also measures Mention counts.
-export function countSql(){const text=readFileSync('server/src/messages/unread.rs','utf8');const sql=/const LIST_COUNTS_SQL: &str = r#"([\s\S]*?)"#;/.exec(text)?.[1];if(!sql)throw new Error('counts source drift');return sql;}
+export function countSql(){const text=readFileSync(new URL('../../server/src/messages/unread.rs',import.meta.url),'utf8');const sql=/const LIST_COUNTS_SQL: &str = r#"([\s\S]*?)"#;/.exec(text)?.[1];if(!sql)throw new Error('counts source drift');return sql;}
 // Same production projection including W-relative grouping, paging and Mention
 // counts. Replace Rust's visibility interpolation with the equivalent ordinary
 // Channel predicate for this fixture; assert ordinary Channels only in runner.
 export function projectionSql(){
-  const text=readFileSync('server/src/messages/topics/projection.rs','utf8');
+  const text=readFileSync(new URL('../../server/src/messages/topics/projection.rs',import.meta.url),'utf8');
   const sql=/r#"([\s\S]*?)"#,[\s\S]*?channels::member_visibility_sql/.exec(text)?.[1];if(!sql)throw new Error('projection source drift');
   return sql.replace('{}',`SELECT EXISTS (SELECT 1 FROM channels c JOIN users u ON u.organization_id=c.organization_id
     WHERE c.organization_id=$1 AND c.id=$4 AND u.id=$2 AND u.membership_revision=$3 AND u.deactivated_at IS NULL

@@ -3,8 +3,9 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { scaledLoad, localLimits, type LocalLimits } from './dms-formal-local.ts';
 import { outsideCheckout } from './dms-workload.ts';
 import { requiredScenarios, deferredNames, type Scenario } from './dms-formal-scenarios.ts';
+import { seedRehearsal } from './dms-formal-seed-diagnostic.ts';
 
-export type Config = { app: string; db: string; generator: string; sha: string; output: string; scenario: Scenario; attempts: number; mode: 'formal' | 'smoke'; deadline?: number; reviewedPatchSha256?:string; downloadRaw?: boolean; target?: 'ssh'|'local'; loadScale?:string; limits?:LocalLimits; pilot?:boolean; seedDiagnostic?:boolean; seedBaseline?:boolean; pilotSeconds?:number;pilotImage?:string };
+export type Config = { app: string; db: string; generator: string; sha: string; output: string; scenario: Scenario; attempts: number; mode: 'formal' | 'smoke'; deadline?: number; reviewedPatchSha256?:string; downloadRaw?: boolean; target?: 'ssh'|'local'; loadScale?:string; limits?:LocalLimits; pilot?:boolean; seedDiagnostic?:boolean; seedBaseline?:boolean; seedRehearsal?:boolean; pilotSeconds?:number;pilotImage?:string };
 export const quote = (s: string) => "'" + s.replaceAll("'", "'\\''") + "'";
 export function external(path: string, checkout: string): string {
   if (!isAbsolute(path)) throw new Error('Paths must be absolute');
@@ -12,15 +13,18 @@ export function external(path: string, checkout: string): string {
   if (!outsideCheckout(canonical, realpathSync(checkout))) throw new Error('Path must be outside checkout');
   return canonical;
 }
+const seedOptions = ['--seed-diagnostic', '--seed-diagnostic-baseline', '--seed-diagnostic-rehearsal', '--seed-diagnostic-baseline-rehearsal'];
+export const runUsage = `Expected <config> [--pilot | ${seedOptions.join(' | ')}]. The -rehearsal options run the same seed diagnostic arm `
+  + `with the collectors of the matching full arm (the instrumented arm also streams DB logs and runs the samplers) at small size: ${seedRehearsal.organizations} Organization, ${seedRehearsal.batchesPerOrganization} Message batches `
+  + `(${seedRehearsal.organizations * seedRehearsal.batchesPerOrganization * 25_000} Messages), about 2-5 minutes per arm on the Mac (estimate). A rehearsal is never pair evidence; `
+  + 'compare two rehearsal arms with dms-formal-seed-effect.ts --rehearsal.';
 export function readRunConfig(args: string[], checkout: string): Config {
   const [path = '', option] = args;
-  if (args.length > 2 || (option !== undefined && option !== '--pilot' && option !== '--seed-diagnostic' && option !== '--seed-diagnostic-baseline')) {
-    throw new Error('Expected <config> [--pilot | --seed-diagnostic | --seed-diagnostic-baseline]');
-  }
+  if (args.length > 2 || (option !== undefined && option !== '--pilot' && !seedOptions.includes(option))) throw new Error(runUsage);
   // The baseline arm is the seed diagnostic run with every instrumentation off: the formal seed, the formal DB command,
   // no samplers. It gives the matched seed time the instrumented arm is compared with (dms-formal-seed-effect.ts).
-  const config = readConfig(path, checkout, option === '--pilot', option === '--seed-diagnostic' || option === '--seed-diagnostic-baseline');
-  return option === '--seed-diagnostic-baseline' ? { ...config, seedBaseline: true } : config;
+  const config = readConfig(path, checkout, option === '--pilot', option !== undefined && seedOptions.includes(option));
+  return { ...config, ...(option?.startsWith('--seed-diagnostic-baseline') ? { seedBaseline: true } : {}), ...(option?.endsWith('-rehearsal') ? { seedRehearsal: true } : {}) };
 }
 
 export function requireSeedDiagnostic(config: Pick<Config, 'target'|'scenario'|'mode'|'pilot'>, scale: string) {

@@ -75,6 +75,7 @@ Product, stack, delivery, project rules, CI and AI process. Writing rules and th
 - #442 Feature work comes first until the chat app is usable. Premature tuning spends time and credit on changing code.
 - #442 Once per milestone, run large-scale measurement to find fixable/retestable bottlenecks within cost limits. Heavy runs are slow and costly, and one per milestone still catches regressions. Mac/single runs cannot establish exact capacity. Small CI `make load` remains the per-change regression check. Add `load/` files only when milestone measurement needs them. Unused harness code costs review and maintenance without adding evidence. The cadence batches heavy runs and preserves every acceptance gate, including #431 formal performance evaluation after the first rented-server deploy and #153 search-engine selection.
 - #475 Split server tests into nextest shards (four, by slice, since #800) because they set PR wall time. Keep the required `server` aggregator. Save Rust caches only from main. Caches readable only by their PR had overflowed the 10 GB limit and evicted main’s.
+- #926 Keep the Actions cache under 8 GB. One serialized workflow writes the Docker layer cache; parallel writers each exported the same layers under new digests. `e2e` stays PR-only and saves nothing; `e2e-cache` builds its steps on main so PRs restore main’s smoke Rust cache. A daily job deletes superseded main Rust keys unread for a day. Layer blobs are never deleted: builds read only the layers they need, so an unread blob may still be in use.
 
 ## Entries in other parts
 

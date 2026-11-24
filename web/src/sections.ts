@@ -156,7 +156,7 @@ export function createSections(options: {
     notice(event) {
       if (event.type !== 'sections_changed' || !socketReady) return
       const version = sectionGeneration(event.generation)
-      if (version === undefined || version < observed || version <= accepted) return
+      if (version === undefined || version <= observed || version <= accepted) return
       observed = version
       target.demandCoverage()
     },

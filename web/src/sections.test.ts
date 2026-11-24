@@ -118,6 +118,36 @@ it('repeated notices during layout reads keep the 200 ms follow-up without setti
   expect(c.sections.get().error).toBeUndefined()
 })
 
+it('repeated equal-generation notices enter A10 backoff after 3 rejections', async () => {
+  const c = await boot()
+  const reads = Array.from({ length: 3 }, () => deferred<Result<SectionLayout>>())
+  c.getLayout.mockClear()
+  for (const read of reads) c.getLayout.mockReturnValueOnce(read.promise)
+  c.event({ type: 'sections_changed', generation: '5' })
+  await advance()
+  for (const [index, read] of reads.entries()) {
+    expect(c.getLayout).toHaveBeenCalledTimes(index + 1)
+    c.event({ type: 'sections_changed', generation: '5' })
+    c.event({ type: 'sections_changed', generation: '4' })
+    read.resolve(ok(layout('1')))
+    await advance(100)
+    c.event({ type: 'sections_changed', generation: '5' })
+    if (index < 2) await advance(100)
+  }
+  // 3rd rejection enters A10 backoff (750 ms at random = 0.5): no 4th read at 200 ms.
+  await advance(100)
+  expect(c.getLayout).toHaveBeenCalledTimes(3)
+  expect(c.generation()).toBe('1')
+  expect(c.sections.get().error).toBeUndefined()
+  await advance(549)
+  expect(c.getLayout).toHaveBeenCalledTimes(3)
+  c.db.layout = layout('5')
+  await advance(1)
+  expect(c.getLayout).toHaveBeenCalledTimes(4)
+  expect(c.generation()).toBe('5')
+  expect(c.sections.get().error).toBeUndefined()
+})
+
 it('Channel creation refetches only the Channel list and sections layout', async () => {
   const c = await boot()
   const unrelated = { invalidate: vi.fn(), close: vi.fn() }

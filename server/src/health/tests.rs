@@ -1,7 +1,13 @@
-use super::*;
-use axum::body::to_bytes;
+use crate::{AppState, app, database, observability, tests::get};
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
+    response::Response,
+};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::sync::atomic::Ordering;
+use std::{future::Future, sync::atomic::Ordering, time::Duration};
+use tower::ServiceExt;
 
 mod relay;
 use relay::Relay;
@@ -271,4 +277,45 @@ async fn readiness_cancelled_caller_keeps_shared_check_until_cleanup(pool: PgPoo
     })
     .await
     .expect("caller cancellation must preserve single flight");
+}
+
+#[tokio::test]
+async fn health_ok() {
+    assert_eq!(get("/api/v1/health").await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn health_emits_clock_sample_only_with_measurement_enabled() {
+    use tracing::instrument::WithSubscriber;
+
+    let normal = observability::tests::Capture::default();
+    let response = get("/api/v1/health")
+        .with_subscriber(normal.subscriber())
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = normal.events();
+    assert!(!events.is_empty(), "expected a normal health event");
+    assert!(
+        events
+            .iter()
+            .all(|event| { event["fields"]["event"] != "revocation_clock_sample" })
+    );
+
+    let measurement = observability::tests::Capture::default();
+    let response = get("/api/v1/health")
+        .with_subscriber(measurement.measurement_subscriber())
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = measurement.events();
+    let samples: Vec<_> = events
+        .iter()
+        .filter(|event| event["fields"]["event"] == "revocation_clock_sample")
+        .collect();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(
+        samples[0]["target"],
+        observability::REVOCATION_MEASUREMENT_TARGET
+    );
+    let server_ms = samples[0]["fields"]["server_ms"].as_f64().unwrap();
+    assert!(server_ms.is_finite() && server_ms >= 0.0);
 }

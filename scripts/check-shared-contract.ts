@@ -80,7 +80,7 @@ type Limit = {
 
 export const textLimits: Record<string, Limit> = {
   'message body': {
-    server: { file: 'server/src/messages.rs', pattern: /self\.body\.chars\(\)\.count\(\) > (\d+)/g },
+    server: { file: 'server/src/messages/send.rs', pattern: /self\.body\.chars\(\)\.count\(\) > (\d+)/g },
     openapi: ['SendMessageRequest/properties/body'],
     web: { file: 'web/src/sync.ts', name: 'MESSAGE_BODY_MAX' },
   },

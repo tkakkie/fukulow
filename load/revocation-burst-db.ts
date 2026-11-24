@@ -58,7 +58,7 @@ GRANT EXECUTE ON FUNCTION public.fk592_gate() TO fukulow_app;`);
 }
 
 export type Seeded = { members: { id: string; token: string }[] };
-/** Members with Account Sessions, as load/activity-seed.ts; Channels and grants go through the API. */
+/** Members with Account Sessions inserted directly; Channels and grants go through the API. */
 export function seedMembers(db: Database, organization: string, count: number): Seeded {
   const members: Seeded['members'] = [];
   const lines = ['BEGIN;'];
