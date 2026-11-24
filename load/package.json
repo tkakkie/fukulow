@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test *.test.ts capacity/*.test.ts search-engines/*.test.ts search-engines/quality/*.test.ts log-compare/*.test.ts slice5/*.test.ts move/*.test.ts harness-core/*.test.ts launcher/*.test.ts sql-probes/515-replay/*.test.ts sql-probes/515-app/*.test.ts sql-probes/519-unread-counts/*.test.ts unread-init/*.test.ts"
+    "test": "node --test *.test.ts capacity/*.test.ts search-engines/*.test.ts search-engines/quality/*.test.ts search-engines/diagnose-870/*.test.ts log-compare/*.test.ts slice5/*.test.ts move/*.test.ts harness-core/*.test.ts launcher/*.test.ts sql-probes/515-replay/*.test.ts sql-probes/515-app/*.test.ts sql-probes/519-unread-counts/*.test.ts unread-init/*.test.ts"
   },
   "devDependencies": {
     "@types/k6": "2.3.1",

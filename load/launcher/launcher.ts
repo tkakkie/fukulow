@@ -101,7 +101,9 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   // A signal kills the running gate or job; HOST-BUSY is released only after it has exited (finally).
   d.onSignal(signal => { signalled = signal; log(`STOP: ${signal}`); child?.kill(); });
   const run = async (argv: string[], file: string, job: Job) => {
-    child = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: job.env });
+    // Each gate and job learns the HOST-BUSY this queue holds and its own name, so a harness can refuse to
+    // start outside the launcher.
+    child = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: { ...job.env, FUKULOW_HOST_BUSY: q.hostBusy, FUKULOW_LAUNCH_JOB: job.name } });
     try { return await child.done; } finally { child = null; }
   };
   const stop = (reason: string): Result => { log(`STOP: ${reason}`); return { outcome: 'stop', reason, jobs }; };
