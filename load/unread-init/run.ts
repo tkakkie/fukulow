@@ -21,8 +21,7 @@
  * desktop/other container activity. Wait for idle; do not stop others' containers.
  * Metadata records host/Docker allocation, versions, settings, source hashes and
  * competing containers; inspect them before comparing. Run alone tomorrow.
- * Checks: node --test load/unread-init/*.test.ts;
- *   load/node_modules/.bin/tsc -p load/unread-init/tsconfig.json
+ * Checks: npm --prefix load run check && npm --prefix load test (both cover unread-init).
  * SQLx is passed --no-dotenv. No secrets or environment files are loaded.
  * SIGINT/SIGTERM stop at the next safe boundary; finally removes only our own
  * container and anonymous volume. On hard kill: docker rm -fv <printed name>.
