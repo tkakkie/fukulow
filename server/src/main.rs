@@ -1,4 +1,4 @@
-use fukulow_server::AppState;
+use fukulow_server::{AppState, database::MigrationFailure};
 use sqlx::postgres::PgPoolOptions;
 
 mod init;
@@ -32,8 +32,16 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         [] => {}
         [command] if command == "migrate" => {
             let pool = migration_pool().await?;
-            fukulow_server::database::migrate_and_grant(&pool).await?;
-            return Ok(());
+            return fukulow_server::database::migrate_and_grant(&pool)
+                .await
+                .map_err(|failure| match failure {
+                    MigrationFailure::Precondition(error) => error,
+                    MigrationFailure::Database(operation, error) => {
+                        tracing::info_span!(target: "fukulow", "database", operation)
+                            .in_scope(|| fukulow_server::observability::database_failure(&error));
+                        "Database migration failed (diagnostics suppressed)".into()
+                    }
+                });
         }
         [command, action] if command == "migrate" && action == "roles" => {
             let password = std::env::var("POSTGRES_APP_PASSWORD")

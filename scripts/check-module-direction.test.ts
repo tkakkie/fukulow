@@ -31,29 +31,34 @@ test('module direction uses compiler resolution in production and tests', async 
   }
 
   await t.test('production table contains exactly the approved modules and direct edges', () => {
-    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime', 'fukulow_api', 'fukulow_client_core', 'database', 'shutdown'])
+    assert.deepEqual(names, ['auth', 'channels', 'messages', 'realtime', 'fukulow_api', 'fukulow_client_core', 'database', 'shutdown', 'observability'])
     assert.deepEqual(edges.toSorted(), [
-      'auth->database',
-      'channels->auth', 'channels->database',
+      'auth->database', 'auth->observability',
+      'channels->auth', 'channels->database', 'channels->observability',
       'fukulow_client_core->fukulow_api',
-      'messages->auth', 'messages->channels', 'messages->database', 'messages->fukulow_api', 'messages->shutdown',
-      'realtime->auth', 'realtime->channels', 'realtime->database', 'realtime->fukulow_api', 'realtime->messages', 'realtime->shutdown',
+      'messages->auth', 'messages->channels', 'messages->database', 'messages->fukulow_api', 'messages->observability', 'messages->shutdown',
+      'realtime->auth', 'realtime->channels', 'realtime->database', 'realtime->fukulow_api', 'realtime->messages', 'realtime->observability', 'realtime->shutdown',
     ])
   })
 
-  for (const [from, to, status] of [
+  for (const [from, to, status, tests = false] of [
     ['messages', 'database', 0],
     ['database', 'auth', 1],
     ['shutdown', 'messages', 1],
     ['realtime', 'database', 0],
     ['channels', 'shutdown', 1],
+    ['database', 'observability', 1],
+    ['database', 'observability', 1, true],
+    ['observability', 'database', 1],
+    ['observability', 'database', 1, true],
   ] as const) {
-    await t.test(`production leaf edge ${from} -> ${to} ${status === 0 ? 'passes' : 'fails'}`, () => {
+    await t.test(`${tests ? 'test' : 'production'} leaf edge ${from} -> ${to} ${status === 0 ? 'passes' : 'fails'}`, () => {
+      const body = `fn f(_: crate::${to}::Item) {}`
       const source = `pub mod ${to} { pub struct Item; }
-pub mod ${from} { fn f(_: crate::${to}::Item) {} }`
-      const baseline = compile(source, false)
+pub mod ${from} { ${tests ? `#[cfg(test)] mod tests { ${body} }` : body} }`
+      const baseline = compile(source, false, tests)
       assert.equal(baseline.status, 0, `invalid fixture: ${baseline.stderr}`)
-      const result = compile(source, true)
+      const result = compile(source, true, tests)
       assert.equal(result.status, status, result.stderr)
       if (status !== 0) assert.equal(result.stderr.split('\n')[0],
         `error: module direction: ${from} must not reference ${to} (${to}::Item)`, result.stderr)

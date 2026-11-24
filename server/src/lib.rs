@@ -11,6 +11,8 @@ pub mod shutdown;
 mod static_assets;
 
 #[cfg(test)]
+mod pool_stats_tests;
+#[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod websocket_test_support;
