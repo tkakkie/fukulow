@@ -125,6 +125,45 @@ describe('Input.svelte (#833)', () => {
     expect(input.getAttribute('aria-activedescendant')).toBeNull()
     await unmount(instance)
   })
+
+  it.each([
+    { multiline: false },
+    { multiline: true },
+  ])('updates aria-activedescendant reactively and clears when closed (multiline=$multiline)', async ({ multiline }) => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const state = $state<{ ariaControls?: string; ariaActiveDescendant?: string }>({
+      ariaControls: 'list-1',
+      ariaActiveDescendant: 'opt-1',
+    })
+
+    const instance = mount(Input, {
+      target: host as unknown as Element,
+      props: {
+        ariaLabel: '検索',
+        multiline,
+        get ariaControls() { return state.ariaControls },
+        get ariaActiveDescendant() { return state.ariaActiveDescendant },
+      },
+    })
+    flushSync()
+
+    const control = host.querySelector(multiline ? 'textarea' : 'input')!
+    expect(control.getAttribute('aria-activedescendant')).toBe('opt-1')
+
+    state.ariaActiveDescendant = 'opt-2'
+    flushSync()
+    expect(control.getAttribute('aria-activedescendant')).toBe('opt-2')
+
+    state.ariaControls = undefined
+    state.ariaActiveDescendant = undefined
+    flushSync()
+    expect(control.getAttribute('aria-activedescendant')).toBeNull()
+    expect(control.getAttribute('aria-controls')).toBeNull()
+    expect(control.getAttribute('aria-autocomplete')).toBeNull()
+
+    await unmount(instance)
+  })
 })
 
 describe('Composer.svelte IME composition (#833)', () => {
@@ -185,6 +224,56 @@ describe('Composer.svelte IME composition (#833)', () => {
 
     await unmount(instance)
   })
+
+  it('updates aria-activedescendant as Mention selection moves and clears when closed', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const props = $state({
+      body: '',
+      members: [
+        { id: '123e4567-e89b-12d3-a456-426614174000', name: '田中', role: 'member' as const },
+        { id: '123e4567-e89b-12d3-a456-426614174001', name: '鈴木', role: 'member' as const },
+      ],
+    })
+
+    const instance = mount(Composer, {
+      target: host as unknown as Element,
+      props: {
+        get value() { return props.body },
+        get members() { return props.members },
+        oninput: (body) => { props.body = body },
+        onsubmit: vi.fn(async () => true),
+      },
+    })
+    flushSync()
+
+    const textarea = host.querySelector('textarea')!
+    textarea.value = '@'
+    textarea.selectionStart = 1
+    textarea.selectionEnd = 1
+    textarea.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+
+    const options = host.querySelectorAll('[role="option"]')
+    expect(options).toHaveLength(2)
+    expect(textarea.getAttribute('aria-activedescendant')).toBe(options[0].id)
+
+    const down = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    down.key = 'ArrowDown'
+    textarea.dispatchEvent(down)
+    flushSync()
+    expect(options[1].getAttribute('aria-selected')).toBe('true')
+    expect(textarea.getAttribute('aria-activedescendant')).toBe(options[1].id)
+
+    const esc = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    esc.key = 'Escape'
+    textarea.dispatchEvent(esc)
+    flushSync()
+    expect(host.querySelector('[role="listbox"]')).toBeNull()
+    expect(textarea.getAttribute('aria-activedescendant')).toBeNull()
+
+    await unmount(instance)
+  })
 })
 
 describe('MessageRow.svelte timestamp formatting (#833)', () => {
@@ -212,5 +301,39 @@ describe('MessageRow.svelte timestamp formatting (#833)', () => {
     expect(timeEl.textContent).toBe(new Date(iso).toLocaleString('ja-JP'))
 
     await unmount(instance)
+  })
+
+  it('uses the current time zone at render time when TZ changes between formats', async () => {
+    const iso = '2026-01-02T03:04:05Z'
+    const prevTz = process.env.TZ
+    try {
+      process.env.TZ = 'Asia/Tokyo'
+      const hostTokyo = dom.doc.createElement('div')
+      dom.doc.body.appendChild(hostTokyo)
+      const tokyoRow = mount(MessageRow, {
+        target: hostTokyo as unknown as Element,
+        props: { body: '本文', createdAt: iso },
+      })
+      flushSync()
+      expect(hostTokyo.querySelector('time.ui-message-row__time')?.textContent).toBe('2026/1/2 12:04:05')
+      await unmount(tokyoRow)
+
+      process.env.TZ = 'America/Los_Angeles'
+      const hostLa = dom.doc.createElement('div')
+      dom.doc.body.appendChild(hostLa)
+      const laRow = mount(MessageRow, {
+        target: hostLa as unknown as Element,
+        props: { body: '本文', createdAt: iso },
+      })
+      flushSync()
+      expect(hostLa.querySelector('time.ui-message-row__time')?.textContent).toBe('2026/1/1 19:04:05')
+      await unmount(laRow)
+    } finally {
+      if (prevTz === undefined) {
+        delete process.env.TZ
+      } else {
+        process.env.TZ = prevTz
+      }
+    }
   })
 })
