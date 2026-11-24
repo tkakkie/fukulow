@@ -227,7 +227,7 @@ describe('channels', () => {
       const creating = c.create({ name: 'n', visibility: 'public' })
       c.close()
       created.resolve(ok(ch('n')))
-      expect(await creating).toEqual({ error: 'セッションが終了しました。' })
+      expect(await creating).toEqual({ error: 'セッションが終了しました。もう一度ログインしてください。' })
       expect(c.get().channels.map((x) => x.id)).toEqual(['a'])
       expect(c.get().selectedId).toBe('a')
     })
