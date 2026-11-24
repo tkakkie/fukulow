@@ -55,13 +55,13 @@ export type AuthDeps = {
   coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
-  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal) {
-    const session = createSession({ selfId, onEnded, organizationId, initialRole, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels) {
+    const session = createSession({ selfId, onEnded, organizationId, initialRole, initialCanCreateChannels, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
@@ -73,7 +73,7 @@ const defaults: AuthDeps = {
       searchSource: session.searchSource,
       onChannelRevoked: session.onChannelRevoked,
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
-      channels: channelsAdapter(session.channels),
+      channels: channelsAdapter(session.channels, session.channelCreation),
       sections: sectionsAdapter(session.sections),
       dms: dmsAdapter(session.dms),
       sync: syncAdapter(session.sync),
@@ -102,7 +102,6 @@ const defaults: AuthDeps = {
 export function createAuth(deps: AuthDeps = defaults) {
   let view = $state<AuthState>({ screen: 'loading' })
   let organization = $state<Identity | null>(null)
-  let capabilitiesPending = $state(false)
   let selectedOrganizationId = $state('')
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
@@ -123,7 +122,6 @@ export function createAuth(deps: AuthDeps = defaults) {
     members?.close(); members = null
     clearMessageFormatCache()
     organization = null
-    capabilitiesPending = false
     selectionGeneration++
     changes++
   }
@@ -154,11 +152,10 @@ export function createAuth(deps: AuthDeps = defaults) {
     organization = result.data
     session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
-      capabilitiesPending = identity === null
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
-    }, result.data.member.role, accountRequests.signal)
+    }, result.data.member.role, accountRequests.signal, result.data.organization.capabilities.can_create_channels.allowed)
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
@@ -215,7 +212,6 @@ export function createAuth(deps: AuthDeps = defaults) {
     get error() { subscribe(); return operations.get().error },
     get busy() { subscribe(); return operations.get().busy },
     get organization() { return organization },
-    get capabilitiesPending() { return capabilitiesPending },
     get members() { return members },
     get security() { return security },
     get selectedOrganizationId() { return selectedOrganizationId },

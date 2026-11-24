@@ -1,4 +1,5 @@
 import { createSubscriber } from 'svelte/reactivity'
+import type { ChannelCreation } from './channel-creation'
 import { channelNameTooLong, type ChannelsState, type createChannels } from './channels'
 
 export { channelNameTooLong, type Channel, type ChannelVisibility } from './channels'
@@ -9,8 +10,9 @@ type Channels = ReturnType<typeof createChannels>
  * Maps the Channel list controller to reactive reads and forwards user intents. Reads go to the controller;
  * `createSubscriber` only tells Svelte when to read again and releases its listener with the last observer.
  */
-export function channelsAdapter(channels: Channels) {
+export function channelsAdapter(channels: Channels, creation?: ChannelCreation) {
   const subscribe = createSubscriber(update => channels.subscribe(update))
+  const subscribeCreation = createSubscriber(update => creation?.subscribe(update))
   return {
     get state(): ChannelsState {
       subscribe()
@@ -19,7 +21,9 @@ export function channelsAdapter(channels: Channels) {
     load: () => channels.load(),
     select: (id: string) => channels.select(id),
     selectHint: (id: string) => channels.selectHint(id),
-    create: (name: string, visibility: 'public' | 'private') => channels.create({ name, visibility }),
+    get creationAccess() { subscribeCreation(); return creation?.get() ?? 'denied' },
+    create: (name: string, visibility: 'public' | 'private', signal?: AbortSignal) =>
+      creation?.submit({ name, visibility }, signal) ?? Promise.resolve(false as const),
     holdArchived: () => channels.holdArchived(),
     retryArchived: () => channels.retryArchived(),
     isArchived: (id: string) => { subscribe(); return channels.isArchived(id) },

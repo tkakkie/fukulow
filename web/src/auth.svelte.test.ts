@@ -37,20 +37,21 @@ function stack(over: Partial<AuthDeps> = {}, holdMemberLists = false, replyFetch
     setupAndSignIn: vi.fn(),
     signOut: vi.fn(async () => true),
     getOrganization: vi.fn(async () => ok(member(signedIn))),
-    openSession(selfId, onEnded, organizationId, drafts, _onIdentity, _initialRole, accountSignal): SessionModel {
+    openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels): SessionModel {
       if (drafts) stores.push(drafts)
       const net = fakeNetwork()
       nets.push(net)
       ended.push(onEnded)
       const options = net.options(selfId)
-      const session = createSession({ selfId, onEnded, ...options, organizationId, accountSignal, sync: { ...options.sync, drafts },
+      const session = createSession({ selfId, onEnded, ...options, organizationId, accountSignal, initialRole, initialCanCreateChannels,
+        onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { ...options.sync, drafts },
         repliesApi: replyFetch ? { listReplyChain: (channel, anchor, query, signal) =>
           listReplyChain(organizationId, channel, anchor, query, replyFetch, signal) } : options.repliesApi })
       sessions.push(session)
       net.socket.onReady()
       const close = vi.fn(() => session.close())
       closes.push(close)
-      return { holdActivity: holdMemberLists ? session.holdActivity : undefined, onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener), channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
+      return { holdActivity: holdMemberLists ? session.holdActivity : undefined, onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener), channels: channelsAdapter(session.channels, session.channelCreation), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close }
     },
     ...over,
   }
@@ -1339,4 +1340,36 @@ it('sign-out, expiry, 401, Account replacement and Organization switch clear the
     expect(tokenizeMessageBody(body), event).not.toBe(before)
     if (s.auth.view.screen === 'app') await s.auth.signOut()
   }
+})
+
+it('hides Invite, Role and deactivation Capabilities during routine Channel creation revalidation', async () => {
+  const s = stack()
+  await signInAs(s, 'owner')
+  try {
+    expect(s.auth.organization?.organization.capabilities).toMatchObject({
+      can_invite: { allowed: true }, can_manage_roles: { allowed: true }, can_deactivate_members: { allowed: true },
+    })
+    s.nets[0].socket.onEvent({ type: 'activity_ready' })
+    expect(s.auth.session?.channels.creationAccess).toBe('revalidating')
+    expect(s.auth.organization?.organization.capabilities).toMatchObject({
+      can_invite: { allowed: false }, can_manage_roles: { allowed: false }, can_deactivate_members: { allowed: false },
+    })
+  } finally { await s.auth.signOut() }
+})
+
+it.each(['Organization switch', 'Account replacement'] as const)('cancels a held Channel creation on %s', async replacement => {
+  const s = stack()
+  await signInAs(s, 'owner')
+  try {
+    const [old] = s.sessions
+    const [net] = s.nets
+    net.socket.onEvent({ type: 'activity_ready' })
+    expect(old.channelCreation.get()).toBe('revalidating')
+    const submission = s.auth.session!.channels.create('retired', 'private')
+    if (replacement === 'Organization switch') await s.auth.selectOrganization('other')
+    else await signInAs(s, 'another')
+    expect(await submission).toBe(false)
+    expect(net.creates).toHaveLength(0)
+    expect(s.auth.session?.channels.creationAccess).toBe('allowed')
+  } finally { await s.auth.signOut() }
 })

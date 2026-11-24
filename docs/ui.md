@@ -6,6 +6,7 @@ Write shared web UI rules beyond code and tests (#200), including layout, naviga
 - Left to right (§4 tokens): **rail** (`--rail-width`: logo, navigation, presence, settings, self), rounded **チャンネル column** (`--channel-col-width`, `--navbox`), fluid rounded **main** card (minimum `--main-min-width` only at widths >= 960px), rounded **right panel** card (`--panel-width`, opens/closes).
 - Separate surfaces by tone, radius and `--region-gap`, never lines.
 - Each チャンネル in the column is an accordion row. Open rows show that チャンネル's recent and Unread トピック first (up to 5), then `すべてのトピック(n)›` to open the panel's トピック tab. Leave room for personal sections (#204).
+- Place Channel creation before the チャンネル list so loading rows cannot move the form under the pointer. Reserve space for the permission hint so revalidation cannot move the rows.
 - Main shows one **view** (a チャンネル's main timeline or one トピック view). Its Composer is part of that view and posts to it.
 - The panel holds one **layer** (tabs トピック / 概要 / メンバー or a 返信のつながり).
 - Each timeline in main or the panel has its own scroll container. The page never scrolls. Prevent text forcing width with `min-width: 0` on flex/grid children and `overflow-wrap: anywhere` in Message bodies.
