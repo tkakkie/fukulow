@@ -30,9 +30,11 @@
   import type { UnreadAdapter } from './unread.svelte'
   import SearchAnchorStatus from './ui/SearchAnchorStatus.svelte'
   import Button from './ui/Button.svelte'
+  import ChannelUnavailableBanner from './ui/ChannelUnavailableBanner.svelte'
   import ReplaceDraftDialog from './ui/ReplaceDraftDialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import MessageRow from './ui/MessageRow.svelte'
+  import OrganizationUnavailableBanner from './ui/OrganizationUnavailableBanner.svelte'
   import ReadMarker from './ui/ReadMarker.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
@@ -544,27 +546,11 @@
 
   {#if organizationUnavailable}
     <div class="topic-view__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="この組織は利用できません。"
-        detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-        actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
-        onaction={onrecheckmembership}
-        secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
-        onsecondaryaction={onswitchorganization}
-      />
+      <OrganizationUnavailableBanner {onrecheckmembership} {onswitchorganization} />
     </div>
   {:else if channelUnavailable}
     <div class="topic-view__banner">
-      <StatusBanner
-        tone="danger"
-        role="alert"
-        message="このチャンネルは利用できません。"
-        detail="アクセス権がないか、削除された可能性があります。"
-        actionLabel={ongoToChannelList ? 'チャンネル一覧へ' : undefined}
-        onaction={ongoToChannelList}
-      />
+      <ChannelUnavailableBanner {ongoToChannelList} />
     </div>
   {:else if !search && !targetUnavailable && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
     <div class="topic-view__banner">

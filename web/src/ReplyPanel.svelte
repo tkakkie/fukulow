@@ -26,11 +26,13 @@
   } from './timeline-scroll'
   import type { TopicsAdapter } from './topics.svelte'
   import Button from './ui/Button.svelte'
+  import ChannelUnavailableBanner from './ui/ChannelUnavailableBanner.svelte'
   import Dialog from './ui/Dialog.svelte'
   import ReplaceDraftDialog from './ui/ReplaceDraftDialog.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import Input from './ui/Input.svelte'
   import MessageRow from './ui/MessageRow.svelte'
+  import OrganizationUnavailableBanner from './ui/OrganizationUnavailableBanner.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
@@ -671,27 +673,11 @@
   <div class="reply-panel__header">
     {#if organizationUnavailable}
       <div class="reply-panel__banner">
-        <StatusBanner
-          tone="danger"
-          role="alert"
-          message="この組織は利用できません。"
-          detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-          actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
-          onaction={onrecheckmembership}
-          secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
-          onsecondaryaction={onswitchorganization}
-        />
+        <OrganizationUnavailableBanner {onrecheckmembership} {onswitchorganization} />
       </div>
     {:else if channelUnavailable}
       <div class="reply-panel__banner">
-        <StatusBanner
-          tone="danger"
-          role="alert"
-          message="このチャンネルは利用できません。"
-          detail="チャンネルが削除されたか、アクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-          actionLabel={ongoToChannelList ? 'チャンネル一覧へ' : undefined}
-          onaction={ongoToChannelList}
-        />
+        <ChannelUnavailableBanner {ongoToChannelList} variant="replyPanel" />
       </div>
     {:else if hasError}
       <div class="reply-panel__banner">
