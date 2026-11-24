@@ -15,14 +15,22 @@ export const sampleSeconds = 5;
 export const runsRequired = 3;
 export const blocksPerRun = 6;
 export const limits = { tpsSpread: 0.05, walSpread: 0.02, throttle: 0.05 };
-// Lateness allowed on a 5 s tick: half a period. A missed tick leaves a gap of about 10 s, which this
-// always catches, while a tick delayed by anything under 2.5 s (a slow sysfs or ACPI read, a busy
-// event loop) is not mistaken for one.
-export const tickToleranceMs = 2500;
-// A measured run whose wall length differs from its monotonic length by more is a clock step. A
-// synchronised clock is slewed by at most 500 ppm (adjtimex), 65 ms over a 130 s run, so only a step,
-// or a clock off by a second or more, reaches it.
+// Lateness allowed on one tick. The launcher schedules tick k at k x 5 s on its monotonic clock (no
+// drift), so a tick is late only by event-loop delay, which does not add up across ticks. Every gap
+// must be at most 5 s + this, and a block needs at least floor((window - this - clock spread) / 5 s)
+// ticks: the fewest a 5 s cadence with that lateness can place in the window. A slower period, a
+// drifting timer or a missed tick fails one of the two.
+export const tickToleranceMs = 500;
+// A measured run whose wall length differs from its monotonic length by more, or a block along whose
+// thermal ticks wall minus monotonic moves by more, has a clock step. A synchronised clock is slewed
+// by at most 500 ppm (adjtimex), 65 ms over a 130 s run, so only a step, or a clock off by a second
+// or more, reaches it.
 export const clockStepToleranceMs = 1000;
+// pgbench stamps its log with monotonic time plus a wall offset taken at its start, the sampler with
+// wall time at each tick; a step under the tolerance above can shift one against the other by up to
+// it. The ticks within this of either end of pgbench's window are therefore never counted, so a tick
+// taken outside the measurement cannot enter it; only ticks taken inside it are judged.
+export const windowGuardMs = clockStepToleranceMs;
 // pgbench -T counts from its benchmark start, and its first transaction starts within milliseconds of
 // it (local connections), so its own interval is never shorter than -T by this much unless it was cut.
 export const pgbenchShortfallMs = 1000;
@@ -42,8 +50,10 @@ export type RunInput = {
   name: string; out: string; complete: boolean; statusSession: unknown; sends: Send[];
   metadata: { mode?: string; sendsOnly?: boolean; launchSession?: unknown; cpuSets: { server: number[]; client: number[] } | null; sends: { measuredSeconds: number } };
   hostBefore: (HostRecord & Bound) | null; cooldown: Cooldown; launchCheck: LaunchCheck;
-  samples: SampleLine[]; thermalSampleSeconds: number | undefined;
+  samples: SampleLine[];
 };
+// What the judged launcher session says: its id, and the sampling period it actually used for the run.
+export type Binding = { id: string | null; thermalSampleSeconds: unknown };
 
 const observationProblems = (o: Observation | null | undefined, when: string) => {
   if (o === null || typeof o !== 'object') return [`no host observation ${when}`];
@@ -80,10 +90,10 @@ function bindingProblems(r: RunInput, id: string | null): string[] {
   return p;
 }
 
-const empty: BlockThermal = { samples: 0, failed: 0, maxGapMs: Infinity, server: null, client: null, maxTctlC: null };
+const empty: BlockThermal = { samples: 0, failed: 0, ticks: 0, windowMs: NaN, maxGapMs: Infinity, monoComplete: false, offsetSpreadMs: NaN, server: null, client: null, maxTctlC: null };
 
-export function judgeRun(r: RunInput, sessionId: string | null) {
-  const invalid: string[] = bindingProblems(r, sessionId);
+export function judgeRun(r: RunInput, bound: Binding) {
+  const invalid: string[] = bindingProblems(r, bound.id);
   if (!r.complete) invalid.push('run did not complete');
   if (r.metadata.mode !== 'diagnostic' || r.metadata.sendsOnly !== true) invalid.push('not the #519 send diagnosis (--diagnostic --sends-only)');
   if (r.sends.length !== blocksPerRun) invalid.push(`${r.sends.length} blocks, not ${blocksPerRun}`);
@@ -107,19 +117,24 @@ export function judgeRun(r: RunInput, sessionId: string | null) {
   const lc = r.launchCheck;
   if (lc?.ok !== true || typeof lc.tctlC !== 'number' || lc.tctlC > cooldown.maxTctlC || !lc.record) invalid.push(`lever: no passed launch check (Tctl <= ${cooldown.maxTctlC} °C right before the start)`);
   else invalid.push(...requirementViolations(lc.record, levers).map(v => `lever at launch: ${v}`));
-  if (r.thermalSampleSeconds !== sampleSeconds) invalid.push(`thermal samples every ${r.thermalSampleSeconds ?? '(none)'} s, not ${sampleSeconds} s`);
+  if (bound.thermalSampleSeconds !== sampleSeconds) invalid.push(`thermal samples every ${String(bound.thermalSampleSeconds ?? '(none)')} s in the launcher session, not ${sampleSeconds} s`);
   const unplaced = r.samples.filter(s => s.at === null).length;
   if (unplaced > 0) invalid.push(`${unplaced} thermal lines without a time`);
   const sets = r.metadata.cpuSets;
   if (sets === null) invalid.push('no CPU sets in the run metadata');
   const blocks = [...r.sends].sort((a, b) => a.order - b.order).map(s => {
     const w = s.pgbenchWindow;
-    const t = sets && w ? blockThermal(r.samples, w.startMs, w.endMs, sets) : empty;
+    const t = sets && w ? blockThermal(r.samples, w.startMs, w.endMs, sets, windowGuardMs) : empty;
     return { order: s.order, arm: s.arm, tps: s.tps, walBytesPerSend: s.walBytesPerSend, thermal: t };
   });
   for (const b of blocks) {
     if (b.thermal.failed > 0) invalid.push(`block ${b.order}: ${b.thermal.failed} failed thermal samples`);
-    if (!(b.thermal.maxGapMs <= sampleSeconds * 1000 + tickToleranceMs)) invalid.push(`block ${b.order}: missing ${sampleSeconds} s thermal tick (gap ${b.thermal.maxGapMs} ms)`);
+    const t = b.thermal;
+    if (!t.monoComplete) invalid.push(`block ${b.order}: thermal ticks without a monotonic stamp`);
+    else if (!(t.offsetSpreadMs <= clockStepToleranceMs)) invalid.push(`block ${b.order}: wall clock stepped against the sampler's monotonic clock (${Math.round(t.offsetSpreadMs)} ms)`);
+    if (!(t.maxGapMs <= sampleSeconds * 1000 + tickToleranceMs)) invalid.push(`block ${b.order}: missing ${sampleSeconds} s thermal tick (gap ${t.maxGapMs} ms)`);
+    const expected = Math.floor((t.windowMs - tickToleranceMs - (Number.isFinite(t.offsetSpreadMs) ? t.offsetSpreadMs : 0)) / (sampleSeconds * 1000));
+    if (!(t.ticks >= expected)) invalid.push(`block ${b.order}: ${t.ticks} thermal ticks, fewer than the ${expected} of a ${sampleSeconds} s cadence`);
     if (b.thermal.server === null || b.thermal.client === null) invalid.push(`block ${b.order}: unreadable CPU frequency`);
   }
   const first = blocks[0]?.thermal;
@@ -163,7 +178,8 @@ const spread = (xs: number[]) => (Math.max(...xs) - Math.min(...xs)) / median(xs
 
 export function judge(runs: RunInput[], session: Session | null, queue: string) {
   const id = typeof session?.id === 'string' && session.id.trim() !== '' ? session.id : null;
-  const judged = runs.map(r => judgeRun(r, id));
+  // The sampling period is the launcher's own record of the run, never the queue handed to the judge.
+  const judged = runs.map(r => judgeRun(r, { id, thermalSampleSeconds: session?.jobs?.find(j => j.name === r.name)?.thermalSampleSeconds }));
   const reasons: string[] = sessionProblems(session, queue, runs);
   if (runs.length !== runsRequired) reasons.push(`${runs.length} runs, not ${runsRequired}`);
   for (const r of judged) if (!r.valid) reasons.push(`${r.name} INVALID`);

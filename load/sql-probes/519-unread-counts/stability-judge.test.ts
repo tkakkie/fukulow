@@ -12,12 +12,12 @@ const idle = () => ({ busy: false, otherContainers: [] as string[] });
 const airflow = { airflow: { quote: '蓋を開けて台に載せた', date: '2026-11-25' } };
 const sid = 'L1';
 const session = (names = ['s1', 's2', 's3'], over: Partial<Session> = {}): Session => ({ id: sid, queue: 'q796', outcome: 'done', hostBusy: 'released', workloadProblems: [],
-  finished: '2026-11-25T03:00:00Z', jobs: names.map(name => ({ name, exit: 0, out: '/runs/' + name, workloadLabel: 'io.fukulow.probe=519-final', confirmations: airflow })), ...over });
-const jr = (r: RunInput) => judgeRun(r, sid);
+  finished: '2026-11-25T03:00:00Z', jobs: names.map(name => ({ name, exit: 0, out: '/runs/' + name, workloadLabel: 'io.fukulow.probe=519-final', thermalSampleSeconds: 5, confirmations: airflow })), ...over });
+const jr = (r: RunInput, thermalSampleSeconds: unknown = 5) => judgeRun(r, { id: sid, thermalSampleSeconds });
 
 // Six 120 s pgbench intervals ending 200 s apart, each inside a slightly longer run wrapper, sampled
 // every 5 s; freq(block) gives the server and client kHz.
-function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number] } = {}): RunInput {
+function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number]; periodMs?: number } = {}): RunInput {
   const freq = opts.freq ?? (() => [2_000_000, 2_000_000]);
   const sends = arms.map((arm, i) => {
     const endMs = t0 + (i + 1) * 200_000;
@@ -25,22 +25,22 @@ function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; w
       measuredWindow: { startMs: endMs - 121_200, endMs: endMs + 300, monoMs: 121_500 }, pgbenchWindow: { startMs: endMs - 120_000, endMs }, host: idle(), hostAfter: idle() };
   });
   const samples: SampleLine[] = [];
-  for (let s = 0; s <= 1300; s += 5) {
-    const block = Math.min(6, Math.max(1, Math.ceil(s / 200)));
+  for (let ms = 0; ms <= 1_300_000; ms += opts.periodMs ?? 5000) {
+    const block = Math.min(6, Math.max(1, Math.ceil(ms / 200_000)));
     const [server, client] = freq(block);
-    samples.push({ at: new Date(t0 + s * 1000).toISOString(), avgFreqKHz: [server, client, server, client], temperaturesC: { 'k10temp/Tctl': 70 }, fansRpm: {}, launchSession: sid });
+    samples.push({ at: new Date(t0 + ms).toISOString(), monoMs: ms, avgFreqKHz: [server, client, server, client], temperaturesC: { 'k10temp/Tctl': 70 }, fansRpm: {}, launchSession: sid });
   }
   return { name, out: '/runs/' + name, complete: true, statusSession: sid, sends,
     metadata: { mode: 'diagnostic', sendsOnly: true, launchSession: sid, cpuSets: { server: [0, 2], client: [1, 3] }, sends: { measuredSeconds: 120 } },
     hostBefore: { ...host, launchSession: sid }, cooldown: { ok: true, maxTctlC: 50, maxWaitSeconds: 1200, readings: [{ elapsedMs: 30_000, tctlC: 49 }], launchSession: sid },
-    launchCheck: { ok: true, tctlC: 48, record: host, launchSession: sid }, samples, thermalSampleSeconds: 5, ...over };
+    launchCheck: { ok: true, tctlC: 48, record: host, launchSession: sid }, samples, ...over };
 }
 const three = () => [run('s1'), run('s2', {}, { tps: 10_200 }), run('s3', {}, { tps: 10_400 })];
 
 test('three valid runs of one completed session inside both spreads PASS', () => {
   const v = judge(three(), session(), 'q796');
   assert.deepEqual([v.result, v.reasons], ['PASS', []]);
-  assert.deepEqual([v.runs[0].blocks[0].thermal.samples, v.runs[0].blocks[0].thermal.maxGapMs], [25, 5000]);
+  assert.deepEqual([v.runs[0].blocks[0].thermal.samples, v.runs[0].blocks[0].thermal.maxGapMs], [23, 5000]); // 1 s guard at each end
 });
 
 test('a tps spread over 5 % FAILs, as in the first check', () => {
@@ -65,24 +65,44 @@ test('a block more than 5 % below block 1 on either set is throttled: the run is
   assert.equal(judge([run('s1', {}, { freq: b => [b > 3 ? 1_000_000 : 2_000_000, 2_000_000] }), run('s2'), run('s3')], session(), 'q796').result, 'FAIL');
 });
 
+const setFreq = (r: RunInput, from: number, to: number, khz: number) => {
+  for (const x of r.samples as { at: string; monoMs: number; avgFreqKHz: number[] }[]) if (x.monoMs >= from && x.monoMs <= to) x.avgFreqKHz = [khz, 2_000_000, khz, 2_000_000];
+};
+
 test('the block is judged on pgbench\'s own interval, not on the run wrapper around it', () => {
-  // Block 5's run wrapper starts at 879.8 s and includes a 2.00 GHz start-up tick at 880 s; pgbench's
-  // own interval (881-1000 s) has 12 ticks at 1.78 GHz and 12 at 2.00 GHz: median 1.89 GHz, throttled.
-  // With the wrapper as the window the start-up tick would lift the median to 2.00 GHz.
+  // Block 5: pgbench ran 881-1000 s; its guarded ticks (885-995 s) are 13 at 1.78 GHz and 10 at
+  // 2.00 GHz: throttled. Its run wrapper (869.8-1011 s) adds 2.00 GHz start-up and teardown ticks,
+  // which as the window would lift the median to 2.00 GHz.
   const r = run('s1');
-  for (const s of r.samples as { at: string; avgFreqKHz: number[] }[]) {
-    const t = Date.parse(s.at) - t0;
-    if (t >= 885_000 && t <= 940_000) s.avgFreqKHz = [1_780_000, 2_000_000, 1_780_000, 2_000_000];
-  }
-  r.sends[4].measuredWindow = { startMs: t0 + 879_800, endMs: t0 + 1_001_000, monoMs: 121_200 };
+  setFreq(r, 885_000, 945_000, 1_780_000);
+  r.sends[4].measuredWindow = { startMs: t0 + 869_800, endMs: t0 + 1_011_000, monoMs: 141_200 };
   r.sends[4].pgbenchWindow = { startMs: t0 + 881_000, endMs: t0 + 1_000_000 };
   const j = jr(r);
-  assert.deepEqual(j.invalid, ['block 5: throttled, server median 1890000 kHz < 95 % of block 1 (2000000 kHz)']);
-  assert.equal(j.blocks[4].thermal.samples, 24);
+  assert.deepEqual(j.invalid, ['block 5: throttled, server median 1780000 kHz < 95 % of block 1 (2000000 kHz)']);
+  assert.equal(j.blocks[4].thermal.samples, 23);
   // A healthy run with 11 s of Docker and connection overhead around the 120 s is not rejected.
   const slowStart = run('s1');
   slowStart.sends[0].measuredWindow = { startMs: t0 + 69_000, endMs: t0 + 200_500, monoMs: 131_500 };
   assert.deepEqual(jr(slowStart).invalid, []);
+});
+
+test('an undetected sub-second clock step cannot pull an outside tick into the window', () => {
+  // pgbench ran 880.5-1000.5 s (its log stamps on its start-time offset). The wall clock then stepped
+  // +0.9 s, so the sampler's ticks from 880 s on are stamped 0.9 s late: the 2.00 GHz tick taken 0.5 s
+  // before pgbench started is stamped inside its window. 12 of the 24 ticks taken during pgbench run
+  // at 1.85 GHz. Without the 1 s guard the outside tick makes the median 1.925 GHz (not throttled);
+  // with it the 23 ticks counted all ran during pgbench and the median is 1.85 GHz (throttled).
+  const r = run('s1');
+  setFreq(r, 885_000, 940_000, 1_850_000);
+  for (const x of r.samples as { at: string; monoMs: number }[]) if (x.monoMs >= 880_000) x.at = new Date(t0 + x.monoMs + 900).toISOString();
+  r.sends[4].pgbenchWindow = { startMs: t0 + 880_500, endMs: t0 + 1_000_500 };
+  r.sends[4].measuredWindow = { startMs: t0 + 879_000, endMs: t0 + 1_001_000, monoMs: 122_000 };
+  const j = jr(r);
+  assert.deepEqual(j.invalid, ['block 5: throttled, server median 1850000 kHz < 95 % of block 1 (2000000 kHz)']);
+  // A larger step along a block's ticks is caught by the sampler's own monotonic stamps.
+  const stepped = run('s1');
+  for (const x of stepped.samples as { at: string; monoMs: number }[]) if (x.monoMs >= 950_000) x.at = new Date(t0 + x.monoMs + 1500).toISOString();
+  assert.match(jr(stepped).invalid.join('\n'), /block 5: wall clock stepped against the sampler's monotonic clock \(1500 ms\)/);
 });
 
 test('a missing, cut, misplaced or clock-stepped pgbench window makes the run INVALID', () => {
@@ -106,13 +126,32 @@ test('a missing, cut, misplaced or clock-stepped pgbench window makes the run IN
   assert.deepEqual(jr(exact).invalid, []);
 });
 
-test('a late tick is not a missed tick; a missed one is', () => {
+test('cadence: a late tick passes, a missed tick, a slow period or a session period other than 5 s does not', () => {
+  const shift = (r: RunInput, index: number, ms: number) => {
+    const x = r.samples[index] as { at: string; monoMs: number };
+    x.monoMs += ms;
+    x.at = new Date(Date.parse(x.at) + ms).toISOString();
+  };
   const late = run('s1');
-  (late.samples[20] as { at: string }).at = new Date(t0 + 102_400).toISOString(); // 2.4 s late: gaps 7.4 s and 2.6 s
+  shift(late, 20, 400); // 0.4 s late: gaps 5.4 s and 4.6 s; the next tick is back on its target
   assert.deepEqual(jr(late).invalid, []);
   const later = run('s1');
-  (later.samples[20] as { at: string }).at = new Date(t0 + 102_600).toISOString();
-  assert.deepEqual(jr(later).invalid, ['block 1: missing 5 s thermal tick (gap 7600 ms)']);
+  shift(later, 20, 600);
+  assert.deepEqual(jr(later).invalid, ['block 1: missing 5 s thermal tick (gap 5600 ms)']);
+  // Every gap 5.4 s is within the per-tick lateness, but a block then has too few ticks.
+  const slow = jr(run('s1', {}, { periodMs: 5400 }));
+  assert.match(slow.invalid.join('\n'), /block 1: 22 thermal ticks, fewer than the 23 of a 5 s cadence/);
+  assert.doesNotMatch(slow.invalid.join('\n'), /missing 5 s thermal tick/);
+  // The period comes from the launcher session; a queue copy cannot supply it.
+  assert.match(jr(run('s1'), 7).invalid.join(), /thermal samples every 7 s in the launcher session, not 5 s/);
+  assert.match(jr(run('s1'), null).invalid.join(), /thermal samples every \(none\) s in the launcher session/);
+  const v = judge(three(), { ...session(), jobs: session().jobs.map((x, i) => (i === 1 ? { ...x, thermalSampleSeconds: 7 } : x)) }, 'q796');
+  assert.match(v.reasons.join(), /s2 INVALID/);
+  assert.match(v.runs[1].invalid.join(), /every 7 s in the launcher session/);
+  // Ticks without the sampler's monotonic stamp cannot be judged.
+  const noMono = run('s1');
+  delete (noMono.samples[18] as { monoMs?: number }).monoMs;
+  assert.match(jr(noMono).invalid.join(), /block 1: thermal ticks without a monotonic stamp/);
 });
 
 test('every artefact must carry the judged launcher session id', () => {
@@ -157,7 +196,7 @@ test('a failed, missing or torn thermal tick in a block makes the run INVALID (n
   const missing = run('s1');
   missing.samples.splice(20, 1);
   const r = jr(missing);
-  assert.deepEqual(r.invalid, ['block 1: missing 5 s thermal tick (gap 10000 ms)']);
+  assert.deepEqual(r.invalid, ['block 1: missing 5 s thermal tick (gap 10000 ms)', 'block 1: 22 thermal ticks, fewer than the 23 of a 5 s cadence']);
   const torn = run('s1');
   torn.samples.push({ at: null, error: 'unparseable line' });
   assert.match(jr(torn).invalid.join(), /1 thermal lines without a time/);
@@ -178,7 +217,6 @@ test('a missing lever, cool-down, launch check, procedure or thermal record make
     [{ launchCheck: null }, /no passed launch check/],
     [{ launchCheck: { ok: true, tctlC: 51, record: host } }, /no passed launch check/],
     [{ launchCheck: { ok: true, tctlC: 45, record: { ...host, boost: '1' } as HostRecord } }, /lever at launch: boost is 1/],
-    [{ thermalSampleSeconds: undefined }, /thermal samples every \(none\) s/],
     [{ samples: [] }, /block 1: missing 5 s thermal tick \(gap Infinity ms\)/],
     [{ metadata: { mode: 'diagnostic', sendsOnly: true, cpuSets: null, sends: { measuredSeconds: 120 } } }, /no CPU sets/],
     [{ metadata: { mode: 'diagnostic', sendsOnly: false, cpuSets: { server: [0, 2], client: [1, 3] }, sends: { measuredSeconds: 120 } } }, /not the #519 send diagnosis/],

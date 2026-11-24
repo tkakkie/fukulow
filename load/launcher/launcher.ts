@@ -38,7 +38,7 @@ export type Deps = {
   sleep(ms: number): Promise<void>;
   // Never cut short: the waits while confirming that a stopped job's workload has ended.
   pause(ms: number): Promise<void>;
-  // Calls fn every ms until the returned stop is called.
+  // Calls fn every ms until the returned stop is called, at fixed monotonic targets (fixedRate).
   every(ms: number, fn: () => void): () => void;
   onSignal(handler: (signal: string) => void): void;
 };
@@ -53,6 +53,12 @@ export const coolPollMs = 15_000;
 export const termGraceMs = 30_000;
 export const killGraceMs = 10_000;
 export const settlePollMs = 500;
+// After a job's process groups are gone, Docker is watched this long: a container whose start was
+// in flight when its client died can still appear, and then HOST-BUSY stays held.
+export const dockerSettleMs = 15_000;
+export const dockerPollMs = 1_000;
+// Container states that are, or can become, a running workload.
+const liveStates = new Set(['created', 'running', 'restarting', 'paused']);
 // Wall and monotonic elapsed time may differ by this much before it counts as a clock step. A
 // synchronised clock is slewed by at most 500 ppm (adjtimex; 0.6 s over the 20 min cool-down), so
 // only a step, or a clock off by a second or more, reaches it.
@@ -121,9 +127,26 @@ function sampleProblems(s: ThermalSample | null): string[] {
   return unreadable.length > 0 ? [`CPU frequency unreadable on CPU ${unreadable.join(',')}`] : [];
 }
 
+// Calls fn at start + k * ms on the monotonic clock: a late tick does not delay the later ones, so the
+// cadence never drifts; a target already passed (a blocked loop) is skipped and shows as a gap.
+export function fixedRate(ms: number, fn: () => void, t: { mono(): number; setTimeout(f: () => void, ms: number): unknown; clearTimeout(h: unknown): void }) {
+  const start = t.mono();
+  let k = 0;
+  let stopped = false;
+  let handle: unknown;
+  const arm = () => {
+    const now = t.mono();
+    do k++; while (start + k * ms <= now);
+    handle = t.setTimeout(() => { if (stopped) return; fn(); if (!stopped) arm(); }, start + k * ms - now);
+  };
+  arm();
+  return () => { stopped = true; t.clearTimeout(handle); };
+}
+
 export type Session = {
   id: string; queue: string; outcome: Result['outcome'] | 'error'; reason?: string;
-  jobs: (Result['jobs'][number] & { out?: string; workloadLabel?: string; confirmations?: Job['confirmations'] })[];
+  // thermalSampleSeconds: the period the launcher's sampler actually ran with for the job.
+  jobs: (Result['jobs'][number] & { out?: string; workloadLabel?: string; thermalSampleSeconds?: number; confirmations?: Job['confirmations'] })[];
   hostBusy: 'released' | 'kept' | 'never claimed'; workloadProblems: string[]; finished: string;
 };
 
@@ -138,6 +161,9 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   let claimed = false;
   let child: Child | null = null;
   const started: { child: Child; job: Job }[] = [];
+  // Containers that existed when HOST-BUSY was claimed (any state); anything else is the workload's.
+  let known: Set<string> | null = null;
+  const periods: Record<string, number> = {};
   let stopLogs: (() => void) | null = null;
   let aborted: string | null = null;
   let onAbort = () => {};
@@ -200,28 +226,45 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     for (const { child: c, job } of started) {
       try {
         if (await gone(c, 0)) continue;
-        kill(c, 'SIGTERM');
-        if (await gone(c, termGraceMs)) continue;
-        kill(c, 'SIGKILL');
-        if (!(await gone(c, killGraceMs))) problems.push(`${job.name}: process group still running after SIGKILL`);
+        // The same bounded stop as an abort; one an abort already ran is not repeated.
+        await escalate(c);
+        if (alive(c)) problems.push(`${job.name}: process group still running after SIGKILL`);
       } catch (e) { problems.push(`${job.name}: process group check failed: ${String(e)}`); }
     }
+    if (started.length > 0) problems.push(...(await dockerSettled()));
+    return problems;
+  };
+  // Labelled containers (any state) are removed and must be gone. Then Docker is watched for
+  // dockerSettleMs: any container created since HOST-BUSY was claimed that is live (created,
+  // running, restarting, paused) at any poll, or not gone at the last, is a workload that outlived
+  // the job (a missing or mistyped label, or a start in flight when its client died). Fail closed.
+  const dockerSettled = async () => {
+    const problems: string[] = [];
     for (const label of new Set(started.flatMap(s => (s.job.workloadLabel ? [s.job.workloadLabel] : [])))) {
-      const ps = () => d.exec(['docker', 'ps', '-q', '--filter', `label=${label}`]);
+      const ps = () => d.exec(['docker', 'ps', '-a', '-q', '--filter', `label=${label}`]);
       let ids = ps();
       if (ids.status === 0 && ids.stdout.trim() !== '') {
-        note(`containers with label ${label} still running; removing them`);
+        note(`containers with label ${label} still present; removing them`);
         d.exec(['docker', 'rm', '-f', ...ids.stdout.trim().split('\n')]);
         ids = ps();
       }
       if (ids.status !== 0) problems.push(`docker ps for label ${label} failed`);
-      else if (ids.stdout.trim() !== '') problems.push(`containers with label ${label} still running`);
+      else if (ids.stdout.trim() !== '') problems.push(`containers with label ${label} still present`);
     }
-    if (started.length > 0) {
-      const all = d.exec(['docker', 'ps', '-q']);
-      if (all.status !== 0) problems.push('docker ps failed');
-      else if (all.stdout.trim() !== '') problems.push(`containers still running (${all.stdout.trim().split('\n').length}) outside any workloadLabel`);
+    if (known === null) return [...problems, 'no container snapshot from the claim'];
+    const seen = new Map<string, string>();
+    let last: string[] = [];
+    for (let waited = 0; ; waited += dockerPollMs) {
+      const all = d.exec(['docker', 'ps', '-a', '--format', '{{.ID}} {{.State}}']);
+      if (all.status !== 0) return [...problems, 'docker ps -a failed'];
+      const fresh = all.stdout.split('\n').map(l => l.trim().split(/\s+/)).filter(([id, state]) => id && !known!.has(id) && state !== 'exited' && state !== 'dead');
+      for (const [id, state] of fresh) if (liveStates.has(state)) seen.set(id, state);
+      last = fresh.map(([id, state]) => `${id} ${state}`);
+      if (waited >= dockerSettleMs) break;
+      await d.pause(dockerPollMs);
     }
+    if (seen.size > 0) problems.push(`containers created since the claim were live after the job: ${[...seen].map(([id, st]) => `${id} ${st}`).join(', ')}`);
+    else if (last.length > 0) problems.push(`containers created since the claim still present: ${last.join(', ')}`);
     return problems;
   };
   const release = async (): Promise<{ hostBusy: Session['hostBusy']; problems: string[] }> => {
@@ -290,6 +333,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     const file = join(q.chainDir, `${job.name}-thermal.jsonl`);
     const take = (): string | null => {
       const at = d.now();
+      const monoMs = d.mono();
       let line: Record<string, unknown>;
       let problem: string | null;
       try {
@@ -297,11 +341,12 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
         line = s ?? { at: at.toISOString(), error: 'no thermal readings' };
         problem = sampleProblems(s).join('; ') || null;
       } catch (e) { line = { at: at.toISOString(), error: String(e) }; problem = `thermal sample failed: ${String(e)}`; }
-      try { d.append(file, JSON.stringify({ ...line, launchSession }) + '\n'); } catch (e) { return `thermal sample write failed: ${String(e)}`; }
+      try { d.append(file, JSON.stringify({ ...line, monoMs, launchSession }) + '\n'); } catch (e) { return `thermal sample write failed: ${String(e)}`; }
       return problem;
     };
     const first = take();
     if (first !== null) return first;
+    periods[job.name] = seconds;
     return d.every(seconds * 1000, () => { const p = take(); if (p?.startsWith('thermal sample write failed')) abort(p); });
   };
   // A job's chain records are written by this session only: an existing one (an earlier session's)
@@ -317,6 +362,9 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     }
     claimed = true;
     log('HOST-BUSY claimed');
+    const snapshot = d.exec(['docker', 'ps', '-a', '--format', '{{.ID}} {{.State}}']);
+    if (snapshot.status !== 0) return stop('docker ps -a failed; no container snapshot, nothing started');
+    known = new Set(snapshot.stdout.split('\n').map(l => l.trim().split(/\s+/)[0]).filter(Boolean));
     for (const job of q.jobs) {
       if (aborted) return stop(`${aborted}; ${job.name} not started`);
       const old = leftovers(job);
@@ -369,7 +417,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   // outputs, workload labels, exits and confirmations), and the release.
   const session: Session = {
     id: launchSession, queue: q.name, outcome: result?.outcome ?? 'error', reason: result?.reason ?? (failure ? String(failure.error) : undefined),
-    jobs: jobs.map(j => { const x = q.jobs.find(y => y.name === j.name); return { ...j, out: x?.out, workloadLabel: x?.workloadLabel, confirmations: x?.confirmations }; }),
+    jobs: jobs.map(j => { const x = q.jobs.find(y => y.name === j.name); return { ...j, out: x?.out, workloadLabel: x?.workloadLabel, thermalSampleSeconds: periods[j.name], confirmations: x?.confirmations }; }),
     hostBusy: released.hostBusy, workloadProblems: released.problems, finished: d.now().toISOString(),
   };
   try { d.write(join(q.chainDir, 'session.json'), JSON.stringify(session, null, 2) + '\n'); } catch (e) { note(`session.json: ${String(e)}`); }

@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs, promisify } from 'node:util';
 import { dockerFreeBytes, freeBytes } from './harness-core/host.ts';
-import { launch, type Child } from './launcher/launcher.ts';
+import { fixedRate, launch, type Child } from './launcher/launcher.ts';
 import { currentPlatform } from './launcher/platform.ts';
 import { parseQueue } from './launcher/queue.ts';
 
@@ -89,7 +89,7 @@ const result = await launch(queue, {
   freeBytes: p => safe(() => freeBytes(exec(['df', '-Pk', p]).stdout)), dockerFreeBytes: image => safe(() => dockerFreeBytes(image)),
   nodeVersion: process.version, pid: process.pid, sessionId: randomUUID, now: () => new Date(), mono: () => performance.now(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
   pause: ms => sleep(ms),
-  every: (ms, fn) => { const t = setInterval(fn, ms); return () => clearInterval(t); },
+  every: (ms, fn) => fixedRate(ms, fn, { mono: () => performance.now(), setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: h => clearTimeout(h as NodeJS.Timeout) }),
   onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => { signalled.abort(); handler(s); }); },
 });
 console.log(JSON.stringify(result));

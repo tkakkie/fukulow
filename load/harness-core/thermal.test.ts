@@ -10,7 +10,7 @@ const sample = (s: number, f: (number | null)[], t: number | null = 80): Thermal
 test('a block takes the median of per-sample set medians and the minimum of set minima, inside its window only', () => {
   const samples = [sample(0, [9, 9, 9, 9], 99), sample(10, [5000, 3000, 4800, 3400], 80), sample(15, [4000, 3200, 4200, 3300], 85), sample(20, [4400, 3500, 4600, 3100], 82), sample(30, [1, 1, 1, 1], 99)];
   const b = blockThermal(samples, Date.parse(at(10)), Date.parse(at(20)), sets);
-  assert.deepEqual([b.samples, b.failed, b.maxGapMs], [3, 0, 5000]);
+  assert.deepEqual([b.samples, b.failed, b.maxGapMs], [3, 0, 10_000]); // the tick before the window is at 0 s: no tick at 5 s
   assert.deepEqual(b.server, { medianKHz: 4500, minKHz: 4000 });
   assert.deepEqual(b.client, { medianKHz: 3250, minKHz: 3000 });
   assert.equal(b.maxTctlC, 85);
@@ -47,4 +47,17 @@ test('error, torn and timeless lines are kept as failed ticks; Tctl is read from
   assert.deepEqual(s.slice(1).map(l => l.at), [at(6), null, null]);
   assert.equal(tctl(s[0] as ThermalSample), 80);
   assert.equal(tctl(null), null);
+});
+
+test('the guard keeps edge ticks out; gaps and the clock-step spread use the sampler\'s monotonic stamps', () => {
+  const tick = (s: number, mono: number, f = 5000): ThermalSample => ({ ...sample(s, [f, f, f, f]), monoMs: mono });
+  // A +0.9 s wall step before the block: a tick taken 0.5 s before the start is stamped 0.4 s after it.
+  const lines = [tick(0, 0), { ...tick(10, 9_500, 1), at: new Date(Date.parse(at(10)) + 400).toISOString() }, tick(15, 14_100), tick(20, 19_100), tick(25, 24_100), tick(30, 29_100)];
+  const open = blockThermal(lines, Date.parse(at(10)), Date.parse(at(25)), sets);
+  assert.equal(open.server?.minKHz, 1); // without a guard the outside tick is counted
+  const guarded = blockThermal(lines, Date.parse(at(10)), Date.parse(at(25)), sets, 1000);
+  assert.deepEqual([guarded.ticks, guarded.windowMs, guarded.server?.minKHz, guarded.monoComplete, guarded.maxGapMs, guarded.offsetSpreadMs], [2, 13_000, 5000, true, 5000, 0]);
+  const stepped = blockThermal([tick(0, 0), tick(5, 5000), tick(10, 8_500), tick(15, 13_500)], Date.parse(at(4)), Date.parse(at(11)), sets);
+  assert.deepEqual([stepped.maxGapMs, stepped.offsetSpreadMs], [5000, 1500]);
+  assert.equal(blockThermal([sample(0, [1, 1, 1, 1]), tick(5, 5000), tick(10, 10_000)], Date.parse(at(4)), Date.parse(at(6)), sets).monoComplete, false);
 });

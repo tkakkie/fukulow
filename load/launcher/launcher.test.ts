@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { HostRecord } from '../harness-core/host-record.ts';
-import { launch, workers, type Deps } from './launcher.ts';
+import { fixedRate, launch, workers, type Deps } from './launcher.ts';
 import { darwin, linux, type Platform } from './platform.ts';
 import { parseQueue, type Queue } from './queue.ts';
 
@@ -27,11 +27,13 @@ type World = {
   // The env each spawn got; how far the monotonic clock is from the wall clock (a step moves the wall only);
   // and, when set, a child whose exit is only observed after the given signal (never, for 'none').
   envs: (Record<string, string> | undefined)[]; monoShift: number; exitsOn?: 'SIGKILL' | 'none';
+  // `docker ps -a --format '{{.ID}} {{.State}}'` answers, in order (the last repeats).
+  psAll: string[];
 };
 function world(over: Partial<World> = {}): World {
   return { files: new Map(), containers: '', ps: '1 /sbin/init\n', load: [0.5], violations: [], exits: [0, 0], head: 'abc1234def\n', dirty: '',
     node: '26.13.1\n', free: 100 * GiB, spawned: [], captured: [], stoppedLogs: 0, kills: 0, busyAtExit: [],
-    tctl: [40], clock: Date.parse('2026-11-24T00:00:00Z'), everyMs: [], samplerStops: 0, signals: [], labelled: [''], removed: [], envs: [], monoShift: 0, ...over };
+    tctl: [40], clock: Date.parse('2026-11-24T00:00:00Z'), everyMs: [], samplerStops: 0, signals: [], labelled: [''], removed: [], envs: [], monoShift: 0, psAll: [''], ...over };
 }
 function deps(w: World, platform?: Platform): Deps {
   const p: Platform = platform ?? { name: 'fake', inhibit: a => ['inhibit', ...a], violations: () => w.violations,
@@ -51,7 +53,8 @@ function deps(w: World, platform?: Platform): Deps {
       if (k === 'git rev-parse HEAD') return { status: 0, stdout: w.head };
       if (k === 'git status --porcelain') return { status: 0, stdout: w.dirty };
       if (k === 'cat .node-version') return { status: 0, stdout: w.node };
-      if (k.startsWith('docker ps -q --filter label=')) return { status: 0, stdout: w.labelled.length > 1 ? w.labelled.shift()! : w.labelled[0] };
+      if (k.startsWith('docker ps -a --format')) return { status: 0, stdout: w.psAll.length > 1 ? w.psAll.shift()! : w.psAll[0] };
+      if (k.startsWith('docker ps -a -q --filter label=')) return { status: 0, stdout: w.labelled.length > 1 ? w.labelled.shift()! : w.labelled[0] };
       if (k.startsWith('docker rm -f')) { w.removed.push(argv.slice(3)); return { status: 0, stdout: '' }; }
       return { status: null, stdout: '' };
     },
@@ -390,14 +393,14 @@ test('HOST-BUSY is released only after the job\'s process group and labelled con
   const stubborn = world({ alive: () => true });
   const r = await launch(queue([job('a')]), deps(stubborn));
   assert.match(r.reason ?? '', /HOST-BUSY kept: a: process group still running after SIGKILL/);
-  assert.deepEqual([stubborn.signals, stubborn.files.has('/runs/HOST-BUSY')], [['SIGTERM', 'SIGKILL', 'SIGTERM', 'SIGKILL'], true]); // after the job, then at the release
+  assert.deepEqual([stubborn.signals, stubborn.files.has('/runs/HOST-BUSY')], [['SIGTERM', 'SIGKILL'], true]); // after the job; the release does not repeat it
   assert.equal(JSON.parse(stubborn.files.get('/runs/chain/session.json') ?? '{}').hostBusy, 'kept');
   // The job's containers (by its workloadLabel) are removed, and must be gone afterwards.
   const left = world({ labelled: ['c1\nc2\n', ''], exits: [143] });
   assert.equal((await launch(queue([job('a', { workloadLabel: 'io.fukulow.probe=519-final' })]), deps(left))).outcome, 'stop');
   assert.deepEqual([left.removed, left.files.has('/runs/HOST-BUSY')], [[['c1', 'c2']], false]);
   const stuck = world({ labelled: ['c1\n'] });
-  assert.match((await launch(queue([job('a', { workloadLabel: 'io.fukulow.probe=519-final' })]), deps(stuck))).reason ?? '', /containers with label io\.fukulow\.probe=519-final still running/);
+  assert.match((await launch(queue([job('a', { workloadLabel: 'io.fukulow.probe=519-final' })]), deps(stuck))).reason ?? '', /containers with label io\.fukulow\.probe=519-final still present/);
   assert.equal(stuck.files.has('/runs/HOST-BUSY'), true);
 });
 
@@ -516,16 +519,66 @@ test('on a signal the stop escalates to SIGKILL on its own timer, even while the
 
 test('a container left without a matching workloadLabel keeps HOST-BUSY; a Docker job without a label is refused', async () => {
   for (const extra of [{}, { workloadLabel: 'io.fukulow.probe=519' }]) {
-    const w = world();
+    const w = world({ psAll: ['old1 exited\n'] });
     const d = deps(w);
     const spawn = d.spawn;
-    d.spawn = (argv, opts) => { w.containers = 'c1\n'; return spawn(argv, opts); }; // the job starts a container that outlives it
+    d.spawn = (argv, opts) => { w.psAll = ['old1 exited\nc1 running\n']; return spawn(argv, opts); }; // the job starts a container that outlives it
     const r = await launch(queue([job('a', extra), job('b')]), d);
-    assert.match(r.reason ?? '', /HOST-BUSY kept: containers still running \(1\) outside any workloadLabel/, JSON.stringify(extra));
-    assert.match(chain(w), /STOP: a workload still running: containers still running \(1\) outside any workloadLabel; the queue ends/);
+    assert.match(r.reason ?? '', /HOST-BUSY kept: containers created since the claim were live after the job: c1 running/, JSON.stringify(extra));
+    assert.match(chain(w), /STOP: a workload still running: containers created since the claim were live/);
     assert.deepEqual([w.spawned.length, w.files.has('/runs/HOST-BUSY')], [1, true]);
-    assert.match(JSON.parse(w.files.get('/runs/chain/session.json') ?? '{}').workloadProblems.join(), /outside any workloadLabel/);
+    assert.match(JSON.parse(w.files.get('/runs/chain/session.json') ?? '{}').workloadProblems.join(), /c1 running/);
   }
   assert.throws(() => queue([job('a', { image: 'postgres:18.6' })]), /a job with an image needs its workloadLabel/);
   assert.equal(queue([job('a', { image: 'postgres:18.6', workloadLabel: 'io.fukulow.probe=519-final' })]).jobs.length, 1);
+});
+
+test('a container whose start was in flight when the job died keeps HOST-BUSY, even if it appears seconds later', async () => {
+  // Docker is clean at the first polls after the job; the container appears (created, then running) later.
+  const w = world({ psAll: ['old1 exited\n'] });
+  const d = deps(w);
+  const spawn = d.spawn;
+  d.spawn = (argv, opts) => { w.psAll = ['', '', '', '', 'late1 created\n', 'late1 running\n']; return spawn(argv, opts); };
+  const r = await launch(queue([job('a', { workloadLabel: 'io.fukulow.probe=519-final' })]), d);
+  assert.match(r.reason ?? '', /containers created since the claim were live after the job: late1 running/);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), true);
+  // A container of the job that is only being removed, and gone before the settle ends, is not a workload.
+  const removing = world({ psAll: [''] });
+  const d2 = deps(removing);
+  const spawn2 = d2.spawn;
+  d2.spawn = (argv, opts) => { removing.psAll = ['x1 removing\n', 'x1 removing\n', '']; return spawn2(argv, opts); };
+  assert.equal((await launch(queue([job('a')]), d2)).outcome, 'done');
+  assert.equal(removing.files.has('/runs/HOST-BUSY'), false);
+  // One still present at the end of the settle, or a failed listing, keeps HOST-BUSY.
+  const stays = world();
+  const d3 = deps(stays);
+  const spawn3 = d3.spawn;
+  d3.spawn = (argv, opts) => { stays.psAll = ['x1 removing\n']; return spawn3(argv, opts); };
+  assert.match((await launch(queue([job('a')]), d3)).reason ?? '', /containers created since the claim still present: x1 removing/);
+  assert.equal(stays.files.has('/runs/HOST-BUSY'), true);
+});
+
+test('the sampler period actually used and each tick\'s monotonic time are recorded', async () => {
+  const w = world();
+  const r = await launch(queue([job('a', { thermalSampleSeconds: 5 }), job('b')]), deps(w));
+  assert.equal(r.outcome, 'done');
+  const session = JSON.parse(w.files.get('/runs/chain/session.json') ?? '{}');
+  assert.deepEqual(session.jobs.map((j: { thermalSampleSeconds?: number }) => j.thermalSampleSeconds), [5, undefined]);
+  const lines = files(w, '-thermal.jsonl')[0].trim().split('\n').map(l => JSON.parse(l));
+  assert.ok(lines.length === 2 && lines.every(l => l.monoMs === Date.parse(l.at))); // the fake monotonic clock runs with the wall clock
+});
+
+test('fixedRate keeps ticks on k x period: lateness does not add up, a passed target is skipped', () => {
+  let now = 0;
+  const timers: { f: () => void; at: number }[] = [];
+  const ticks: number[] = [];
+  const stop = fixedRate(5000, () => ticks.push(now), { mono: () => now, setTimeout: (f, ms) => { timers.push({ f, at: now + ms }); return timers.length; }, clearTimeout: () => {} });
+  const fire = (lateMs: number) => { const t = timers.shift()!; now = t.at + lateMs; t.f(); };
+  fire(300); fire(300); fire(0); fire(6000); fire(0);
+  assert.deepEqual(ticks, [5300, 10_300, 15_000, 26_000, 30_000]); // the 25 s target was passed while blocked
+  stop();
+  const pending = timers.shift()!;
+  now = pending.at;
+  pending.f();
+  assert.equal(ticks.length, 5);
 });
