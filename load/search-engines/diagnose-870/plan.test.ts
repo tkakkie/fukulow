@@ -23,9 +23,12 @@ test('copy rounds alternate F and R from F; same-copy measurements keep their co
     ['F', 'R', 'F', 'R', 'F', 'R', 'F', 'R']);
   assert.deepEqual(['C1.warm', 'C1.hot1', 'C1.hot2', 'C1.restart'].map(id => orderOf(steps, id)), ['F', 'F', 'F', 'F']);
   assert.deepEqual(['D.current1', 'D.settle1', 'D.settle2', 'D.current2', 'C2.warm', 'C2.restart'].map(id => orderOf(steps, id)),
-    ['R', 'F', 'R', 'F', 'R', 'R']);
-  // Each D condition runs once in each order, and each judged pair (settle i, current i) is one F and one R.
-  for (const ids of [['D.current1', 'D.current2'], ['D.settle1', 'D.settle2'], ['D.settle1', 'D.current1'], ['D.settle2', 'D.current2']])
+    ['F', 'F', 'R', 'R', 'R', 'R']);
+  // Each judged pair (settle i, current i) shares one order; the two pairs cover F and R, and each
+  // condition runs once in each order.
+  for (const i of [1, 2]) assert.equal(orderOf(steps, `D.settle${i}`), orderOf(steps, `D.current${i}`), `pair ${i}`);
+  assert.notEqual(orderOf(steps, 'D.settle1'), orderOf(steps, 'D.settle2'));
+  for (const ids of [['D.current1', 'D.current2'], ['D.settle1', 'D.settle2']])
     assert.deepEqual(ids.map(id => orderOf(steps, id)).sort(), ['F', 'R'], ids.join(' '));
 });
 

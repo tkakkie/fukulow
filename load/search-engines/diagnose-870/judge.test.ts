@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { attribution, g95, minimums, noise, ownReasons, reproduction, spearman, stage1, stage2, type Measurement, type Plan } from './judge.ts';
+import { attribution, evidence, fillPlans, g95, minimums, noise, ownReasons, reproduction, smoke, spearman, stage1, stage2, type Measurement, type Plan } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
 
+const why = (x: object) => (x as {reason?: string; inconclusiveReason?: string});
 const near = (a: number | null, b: number) => assert.ok(a !== null && Math.abs(a - b) < 1e-9, `${a} != ${b}`);
 
 // Three accepted (index) queries and one short query; every accepted query gets the same p95, so G95 = g.
@@ -20,7 +21,7 @@ function m(id: string, g: number, over: Partial<Measurement> = {}): Measurement 
     latencies: names.map(query => ({query, p95: query === 'scalar' ? 1 : g})),
     plans: plans(), sharedReads: 0,
     env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []},
-    invalid: [], ...over};
+    invalid: [], missingEvidence: [], ...over};
 }
 
 // A rising A1, no recovery after the cool-down, flat D, steady hot measurements, restart-only 3.25x warm
@@ -251,22 +252,98 @@ test('Stage 1 outcomes: not reproduced, several supported, none supported with o
     return x;
   };
   const h6 = stage1(scenario({'C1.restart': 40, 'C2.restart': 40}).map(x => x.id === 'A1.5' ? position('A1.5', 53) : x.id === 'A1.6' ? position('A1.6', 56) : x));
+  // H1-H5 ruled out is repetition-linked (§4.3) whatever H6 says: cause not established, nothing by elimination.
   assert.equal(h6.attribution!.H6, 'supported');
-  assert.equal(h6.repetitionLinked, false);
-  assert.equal(h6.outcome, 'cause established');
+  assert.equal(h6.repetitionLinked, true);
+  assert.equal(h6.outcome, 'cause not established');
+  assert.equal(h6.stage2, 'propose');
 });
 
+test('H6 is supported by a position effect in either direction, but only with the same sign in F and R', () => {
+  // Earlier positions rise more in both orders: q1 most in F rounds, q3 most in R rounds.
+  const early = (id: string, base: number) => {
+    const x = m(id, base);
+    const accepted = x.latencies.filter(l => l.query !== 'scalar').length;
+    x.latencies = x.latencies.map((l, i) => l.query === 'scalar' ? l : {...l, p95: base * (1 + 0.2 * (accepted - i))});
+    return x;
+  };
+  const ms = scenario().map(x => x.id === 'A1.5' ? early('A1.5', 53) : x.id === 'A1.6' ? early('A1.6', 56) : x);
+  assert.equal(attribution(ms, 1.05).H6, 'supported');
+});
+
+test('a normal Stage 1 has no abnormal reasons; each unmet minimum and a STOP are listed', () => {
+  assert.deepEqual(stage1(scenario()).abnormal, []);
+  assert.deepEqual(stage1(scenario({}, {'A2.1': invalid})).abnormal, ['minimum not met: H2']);
+  assert.deepEqual(stage1(scenario({}, {'C1.hot2': invalid})).abnormal, ['minimum not met: H1']);
+  assert.deepEqual(stage1(scenario({}, {'D.settle2': invalid})).abnormal, ['minimum not met: H45']);
+  assert.deepEqual(stage1(scenario({}, {'A1.4': {plans: null}})).abnormal, ['minimum not met: H3']);
+  assert.deepEqual(stage1(scenario({}, {'A1.1': invalid, 'A1.2': invalid})).abnormal, ['minimum not met: A1', 'minimum not met: H2']);
+  assert.deepEqual(stage1(scenario(), 'more than 4 INVALID measurements').abnormal, ['STOP: more than 4 INVALID measurements']);
+});
+
+test('incomplete evidence never establishes a cause: the outcome is inconclusive (evidence incomplete)', () => {
+  assert.equal(stage1(scenario()).outcome, 'cause established');
+  const partial = stage1(scenario({}, {'D.current1': {missingEvidence: ['stats-after: Error: psql']}}));
+  assert.deepEqual([partial.outcome, why(partial).inconclusiveReason, partial.attribution, partial.stage2], ['inconclusive', 'evidence incomplete', null, 'propose']);
+  assert.deepEqual(partial.evidence, {complete: false, missing: ['D.current1: stats-after: Error: psql']});
+  assert.deepEqual(partial.abnormal, ['evidence incomplete']);
+  const noLog = stage1(scenario(), null, ['postgres log: docker logs exited 1']);
+  assert.equal(noLog.outcome, 'inconclusive');
+  assert.deepEqual(evidence(scenario(), []), {complete: true, missing: []});
+});
+
+test('the smoke passes only with one valid round, no STOP and complete evidence', () => {
+  const one = (over: Partial<Measurement> = {}) => [{...m('A1.1', 40, over), id: 'smoke.1'}];
+  assert.equal(smoke(one(), null).outcome, 'smoke passed');
+  assert.deepEqual(smoke(one(), null).abnormal, []);
+  assert.equal(smoke(one(invalid), null).outcome, 'smoke failed');
+  assert.equal(smoke([], 'smoke.1: Error: boom').outcome, 'smoke failed');
+  assert.equal(smoke(one({missingEvidence: ['EXPLAIN session: x']}), null).outcome, 'smoke failed');
+  assert.equal(smoke(one(), null, ['sampler: did not exit after SIGKILL']).outcome, 'smoke failed');
+});
+
+const C = (value: number) => ({value, source: 'C hot1/hot2' as const});
+const b = (g: Record<string, number>, over: Record<string, Partial<Measurement>> = {}) => Object.entries({'B.pre': 40, 'B.post1': 56,
+  'B.post2': 56, 'B.post3': 56, 'B.cool1': 50, 'B.cool2': 50, ...g}).map(([id, v]) => m(id, v, over[id]));
+
 test('Stage 2: reproduced, not reproduced, and its minimum', () => {
-  const b = (g: Record<string, number>, over: Record<string, Partial<Measurement>> = {}) => Object.entries({'B.pre': 40, 'B.post1': 56,
-    'B.post2': 56, 'B.post3': 56, 'B.cool1': 50, 'B.cool2': 50, ...g}).map(([id, v]) => m(id, v, over[id]));
-  assert.equal(stage2(b({}), 1.05).result, 'reproduced');
+  assert.equal(stage2(b({}), C(1.05)).result, 'reproduced');
   // §5.3 as written: ratio >= 1.30 and ratio >= 3 x (N - 1). At N = 1.20 a 1.40 ratio reproduces.
-  assert.equal(stage2(b({}), 1.2).result, 'reproduced');
-  assert.equal(stage2(b({}), 1.5).result, 'inconclusive');
-  assert.equal(stage2(b({'B.post1': 44}), 1.05).result, 'not reproduced');
+  assert.equal(stage2(b({}), C(1.2)).result, 'reproduced');
+  assert.equal(stage2(b({}), C(1.5)).result, 'inconclusive');
+  assert.equal(stage2(b({'B.post1': 44}), C(1.05)).result, 'not reproduced');
   // The contrast is B.post1; an INVALID B.post1 is not replaced by B.post2.
-  assert.deepEqual(stage2(b({}, {'B.post1': invalid}), 1.05), {result: 'inconclusive', reason: 'B.post1 INVALID', ratio: null});
-  assert.equal(stage2(b({}, {'B.post1': invalid, 'B.post2': invalid}), 1.05).result, 'inconclusive');
-  assert.equal(stage2(b({}, {'B.cool2': invalid}), 1.05).result, 'inconclusive');
-  assert.equal(stage2(b({}, {'B.pre': invalid}), 1.05).result, 'inconclusive');
+  const p1 = stage2(b({}, {'B.post1': invalid}), C(1.05));
+  assert.deepEqual([p1.result, why(p1).reason, p1.ratio], ['inconclusive', 'B.post1 INVALID', null]);
+  assert.equal(stage2(b({}, {'B.post1': invalid, 'B.post2': invalid}), C(1.05)).result, 'inconclusive');
+  assert.equal(stage2(b({}, {'B.cool2': invalid}), C(1.05)).result, 'inconclusive');
+  assert.equal(stage2(b({}, {'B.pre': invalid}), C(1.05)).result, 'inconclusive');
+});
+
+test('Stage 2 boundaries are §5.3 literally: 1.30 reproduces, 1.15 is inconclusive, under 1.15 is not reproduced', () => {
+  assert.equal(stage2(b({'B.post1': 52}), C(1.05)).result, 'reproduced');
+  near(stage2(b({'B.post1': 52}), C(1.05)).ratio, 1.3);
+  assert.equal(stage2(b({'B.post1': 51.99}), C(1.05)).result, 'inconclusive');
+  assert.equal(stage2(b({'B.post1': 46}), C(1.05)).result, 'inconclusive');
+  assert.equal(stage2(b({'B.post1': 45.99}), C(1.05)).result, 'not reproduced');
+  // The noise condition is on the ratio itself: 1.40 >= 3 x (1.4667 - 1) = 1.40 reproduces, a larger N does not.
+  assert.equal(stage2(b({}), C(1 + 1.4 / 3)).result, 'reproduced');
+  assert.equal(stage2(b({}), C(1 + 1.4 / 3 + 1e-9)).result, 'inconclusive');
+});
+
+test('Stage 2 is not a normal finish when its minimum, B.post1 or any evidence is missing; it records N and its source', () => {
+  assert.deepEqual(stage2(b({}), C(1.05)).abnormal, []);
+  assert.deepEqual(stage2(b({}), C(1.05)).noise, {value: 1.05, source: 'C hot1/hot2'});
+  assert.deepEqual(stage2(b({}, {'B.post1': invalid}), C(1.05)).abnormal, ['minimum not met: B.post1 (the §5.3 contrast)']);
+  assert.deepEqual(stage2(b({}, {'B.cool1': invalid}), C(1.05)).abnormal, ['minimum not met: both cool-down rounds']);
+  const partial = stage2(b({}, {'B.post2': {missingEvidence: ['EXPLAIN q1: timeout']}}), C(1.05));
+  assert.deepEqual([partial.result, why(partial).reason, partial.abnormal], ['inconclusive', 'evidence incomplete', ['evidence incomplete']]);
+  assert.deepEqual(stage2(b({}), C(1.05), 'B.post2: boom').abnormal.slice(0, 1), ['STOP: B.post2: boom']);
+});
+
+test('a cut-short EXPLAIN sweep is never a partial plan list: missing queries get errors and H3 is withheld', () => {
+  const got = plans().filter(p => p.query === 'q1');
+  const filled = fillPlans(queries, got, 'EXPLAIN session failed before this query');
+  assert.deepEqual(filled.map(p => [p.query, 'error' in p]), [['q1', false], ['q2', true], ['q3', true]]);
+  assert.equal(attribution(scenario({}, {'A1.4': {plans: filled}}), 1.05).H3, 'withheld');
 });

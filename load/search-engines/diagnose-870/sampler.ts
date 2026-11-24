@@ -47,18 +47,20 @@ export function readSamples(file: string): Sample[] {
   return text.split('\n').filter(Boolean).flatMap(line => { try { return [JSON.parse(line) as Sample]; } catch { return []; } });
 }
 
-// Gaps over 30 s in a stream's successful samples across [start, end], counting the last sample before
-// the window and the first after it. A stream with no sample before the window has a gap at its start.
-export function gaps(samples: Sample[], stream: Stream, start: number, end: number) {
-  const times = samples.filter(s => s.stream === stream && ok(s)).map(s => s.at).sort((a, b) => a - b);
-  const before = times.filter(t => t <= start).at(-1) ?? -Infinity;
-  const after = times.find(t => t >= end) ?? Infinity;
-  const points = [before, ...times.filter(t => t > start && t < end), after];
-  const found: string[] = [];
-  for (let i = 1; i < points.length; i++) {
-    if (points[i] - points[i - 1] > maxGapMs) found.push(`${stream} sampler gap over ${maxGapMs / 1000} s`);
+// Gaps over 30 s in a stream across [start, end]. Each successful observation read at some moment in its
+// interval [at, done], so the gap between two observations is taken at its widest: from the earlier one's
+// `at` to the later one's `done`. The chain runs from the last observation started at or before `start`
+// to the first started at or after `end` (the one `covered` waits for). A failed reading covers nothing,
+// so it is part of a gap. A stream with no observation before the window has a gap at its start.
+export function gaps(samples: Sample[], stream: Stream, start: number, end: number, where = '') {
+  const obs = samples.filter(s => s.stream === stream && ok(s)).map(s => ({at: s.at, done: s.done ?? s.at})).sort((a, b) => a.at - b.at);
+  const before = obs.filter(o => o.at <= start).at(-1) ?? {at: -Infinity, done: -Infinity};
+  const after = obs.find(o => o.at >= end) ?? {at: Infinity, done: Infinity};
+  const chain = [before, ...obs.filter(o => o.at > start && o.at < end), after];
+  for (let i = 1; i < chain.length; i++) {
+    if (chain[i].done - chain[i - 1].at > maxGapMs) return [`${stream} sampler gap over ${maxGapMs / 1000} s${where}`];
   }
-  return [...new Set(found)];
+  return [];
 }
 
 const mean = (xs: number[]) => xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
@@ -83,6 +85,42 @@ export function covered(samples: Sample[], end: number, thermal: boolean, now: n
 // leading gap and its start environment come from the restarted server, not from before the restart.
 export const freshFast = (samples: Sample[], t: number) => samples.some(s => s.stream === 'fast' && ok(s) && s.at >= t);
 export const freshWaitMs = maxGapMs;
+// The restart before a window: when `docker restart` started, and whether a fresh fast sample came within
+// freshWaitMs of the server being ready. The gap across it is checked on its own (review item 3).
+export type Restart = {at: number; fresh: boolean};
+
+// Waits until the window is covered, and stops at once when the sampler process is gone (a STOP: no later
+// window could be covered). The wait is bounded from the call, whatever the window end says (an end in the
+// future or a clock step); `reached` is false at that bound.
+export async function awaitCoverage(read: () => Sample[], end: number, thermal: boolean,
+  io: {now(): number; sleep(ms: number): Promise<void>; alive(): boolean}, pollMs = 500) {
+  const deadline = io.now() + coverageDeadlineMs + 5_000;
+  for (;;) {
+    const samples = read();
+    if (covered(samples, end, thermal, io.now())) return {samples, reached: true};
+    if (!io.alive()) throw new Error('the sampler process exited');
+    if (io.now() >= deadline) return {samples, reached: false};
+    await io.sleep(pollMs);
+  }
+}
+
+// Stops a child: SIGTERM, a bounded wait, then SIGKILL and a second bounded wait. `verified` is true only
+// when the exit was observed.
+export type Stoppable = {exitCode: number | null; signalCode: string | null; kill(signal: NodeJS.Signals): boolean;
+  once(event: 'exit', listener: () => void): unknown};
+export async function stopProcess(child: Stoppable, termMs = 15_000, killMs = 5_000) {
+  const exited = () => child.exitCode !== null || child.signalCode !== null;
+  if (exited()) return {verified: true, how: 'already exited'};
+  const wait = (ms: number) => new Promise<boolean>(resolve => {
+    const timer = setTimeout(() => resolve(exited()), ms);
+    child.once('exit', () => { clearTimeout(timer); resolve(true); });
+  });
+  child.kill('SIGTERM');
+  if (await wait(termMs)) return {verified: true, how: 'SIGTERM'};
+  child.kill('SIGKILL');
+  if (await wait(killMs)) return {verified: true, how: 'SIGKILL'};
+  return {verified: false, how: 'did not exit after SIGKILL'};
+}
 
 // An observation's interval [at, done] overlaps the window. A worker or container seen in an observation
 // that overlaps the window counts against it: when it was seen within that interval is unknown, so the
@@ -90,10 +128,16 @@ export const freshWaitMs = maxGapMs;
 const overlaps = (s: Sample, start: number, end: number) => s.at <= end && (s.done ?? s.at) >= start;
 
 // Validity reasons from the samplers and the environment of one measurement window.
+// With a restart, the samplers must also be continuous from the restart to the window (no gap over 30 s
+// across it), and a fresh fast sample must have come after it.
 export function windowFacts(samples: Sample[], start: number, end: number, blocks: Block[],
-  {thermal, serverCpus}: {thermal: boolean; serverCpus: number[] | null}): {invalid: string[]; env: Environment} {
+  {thermal, serverCpus, restart = null}: {thermal: boolean; serverCpus: number[] | null; restart?: Restart | null}): {invalid: string[]; env: Environment} {
   const inWindow = samples.filter(s => s.at >= start && s.at <= end && ok(s));
   const invalid = sampled(thermal).flatMap(stream => gaps(samples, stream, start, end));
+  if (restart) {
+    invalid.push(...sampled(thermal).flatMap(stream => gaps(samples, stream, restart.at, start, ' across the restart')));
+    if (!restart.fresh) invalid.push(`no fresh fast sample within ${freshWaitMs / 1000} s after the restart`);
+  }
   for (const s of samples.filter(x => ok(x) && overlaps(x, start, end))) {
     if ('error' in s) continue;
     if (s.stream === 'process' && s.workers.length) invalid.push(`worker process during the measurement: ${s.workers[0]}`);

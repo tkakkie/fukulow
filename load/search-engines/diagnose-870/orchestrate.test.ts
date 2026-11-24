@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Measurement } from './judge.ts';
-import { diskStop, execute, type Deps } from './orchestrate.ts';
-import { sequence } from './plan.ts';
+import { diskStop, execute, minDockerStartBytes, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
+import { sequence, settleCapMs } from './plan.ts';
 
 const GiB = 1024 ** 3;
 
@@ -21,7 +21,7 @@ function fake(over: Partial<Deps> & {invalidIds?: string[]; failOn?: string} = {
       calls.push(`measure ${step.id}${opts.explain ? ' +explain' : ''}`);
       return {id: step.id, kind: step.kind, arm: step.arm, order: step.order, settle: false, latencies: [], plans: null,
         sharedReads: 0, env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []},
-        invalid: over.invalidIds?.includes(step.id) ? ['fake'] : []} satisfies Measurement;
+        invalid: over.invalidIds?.includes(step.id) ? ['fake'] : [], missingEvidence: []} satisfies Measurement;
     },
     validate: async () => undefined,
     idle: async ms => { calls.push(`idle ${ms}`); },
@@ -84,9 +84,12 @@ test('any filesystem under 40 GB (decimal) before a copy is a STOP; unreadable i
     assert.equal(measurements.length, 2);
     assert.equal(calls.filter(c => c === 'copy').length, 2);
   }
-  // 40 GB is decimal: exactly 40e9 bytes passes, though it is under 40 GiB.
+  // 40 GB is decimal: exactly 40e9 bytes passes, though it is under 40 GiB; one byte less is a STOP, on each target.
   assert.equal(diskStop({docker: 40e9, snapshot: 40e9, output: 40e9}), null);
-  assert.equal(diskStop({docker: 40e9 - 1, snapshot: 40e9, output: 40e9}), 'docker free 40.0 GB < 40 GB');
+  for (const key of ['docker', 'snapshot', 'output'] as const) {
+    assert.equal(diskStop({docker: 40e9, snapshot: 40e9, output: 40e9, [key]: 40e9 - 1}), `${key} free 40.0 GB < 40 GB`);
+    assert.equal(diskStop({docker: 40e9, snapshot: 40e9, output: 40e9, [key]: null}), `${key} free unreadable < 40 GB`);
+  }
   const unreadable = await execute(sequence('1'), fake({freeBytes: () => ({docker: 200 * GiB, snapshot: null, output: 200 * GiB})}).d);
   assert.equal(unreadable.stopped, 'A1.1: snapshot free unreadable < 40 GB');
 });
@@ -135,4 +138,51 @@ test('a failing step is a STOP with its id; earlier measurements are kept', asyn
   const r = await execute(sequence('1'), d);
   assert.equal(r.stopped, 'A1.3: Error: boom');
   assert.deepEqual(r.measurements.map(m => m.id), ['A1.1', 'A1.2']);
+});
+
+test('start disk preflight (§3.3): Docker >= 175 GB, snapshot and output filesystems >= 40 GB, exact decimal boundaries', () => {
+  const ok = {docker: 175e9, snapshot: 40e9, output: 40e9};
+  assert.equal(minDockerStartBytes, 175e9);
+  assert.deepEqual(startDiskProblems(ok), []);
+  assert.deepEqual(startDiskProblems({...ok, docker: 175e9 - 1}), [`Docker free ${175e9 - 1} < 175 GB`]);
+  assert.deepEqual(startDiskProblems({...ok, docker: null}), ['Docker free unreadable < 175 GB']);
+  for (const key of ['snapshot', 'output'] as const) {
+    assert.deepEqual(startDiskProblems({...ok, [key]: 40e9 - 1}), [`${key} filesystem free ${40e9 - 1} < 40 GB`]);
+    assert.deepEqual(startDiskProblems({...ok, [key]: null}), [`${key} filesystem free unreadable < 40 GB`]);
+  }
+  // 175 GiB would refuse 180 GB; the approved unit is decimal.
+  assert.deepEqual(startDiskProblems({...ok, docker: 180e9}), []);
+});
+
+// A fake clock: each reading takes `readMs`; the conditions are met from `settledAt` on.
+function settleClock(settledAt: number, readMs = 0, checkpointMs = 0) {
+  let t = 0;
+  const io = {
+    checkpoint: () => { t += checkpointMs; },
+    reading: () => { t += readMs; return t >= settledAt ? {dirtyWritebackBytes: 0, autovacuumWorkers: 0} : {dirtyWritebackBytes: 100 * 1024 ** 2, autovacuumWorkers: 0}; },
+    now: () => t,
+    sleep: async (ms: number) => { t += ms; },
+  };
+  return io;
+}
+
+test('the settle wait: settled at 15 min exactly is valid; just over the cap is INVALID', async () => {
+  assert.equal(settleCapMs, 15 * 60_000);
+  assert.equal(await settleWait(settleClock(0), settleCapMs), true);
+  assert.equal(await settleWait(settleClock(settleCapMs), settleCapMs), true);
+  assert.equal(await settleWait(settleClock(settleCapMs + 1), settleCapMs), false);
+  // A reading that returns after the cap does not count, even when it would have settled.
+  let r = 0;
+  const slow = {checkpoint: () => undefined, now: () => r, sleep: async () => { r = settleCapMs - 100; },
+    reading: () => { const first = r === 0; r += first ? 0 : 200; return {dirtyWritebackBytes: first ? 100 * 1024 ** 2 : 0, autovacuumWorkers: 0}; }};
+  assert.equal(await settleWait(slow, settleCapMs), false);
+  // The CHECKPOINT counts against the cap.
+  assert.equal(await settleWait(settleClock(0, 0, settleCapMs + 1), settleCapMs), false);
+  // Autovacuum alone keeps it unsettled; Dirty plus Writeback must be under 64 MiB, not at it.
+  let t = 0;
+  const busy = {checkpoint: () => undefined, reading: () => ({dirtyWritebackBytes: 64 * 1024 ** 2, autovacuumWorkers: 0}),
+    now: () => t, sleep: async (ms: number) => { t += ms; }};
+  assert.equal(await settleWait(busy, settleCapMs), false);
+  t = 0;
+  assert.equal(await settleWait({...busy, reading: () => ({dirtyWritebackBytes: 0, autovacuumWorkers: 1})}, settleCapMs), false);
 });

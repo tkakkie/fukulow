@@ -17,6 +17,8 @@ export type Measurement = {
   id: string; kind: 'copy' | 'hot' | 'restart-only'; arm: Arm; order: Order; settle: boolean;
   latencies: Latency[]; plans: Plan[] | null; sharedReads: number | null; env: Environment;
   invalid: string[];
+  // Evidence this measurement should have saved but did not (statistics, read counters, EXPLAIN plans).
+  missingEvidence: string[];
 };
 export type Verdict = 'supported' | 'ruled out' | 'withheld';
 export type Hypothesis = 'H1' | 'H2' | 'H3' | 'H4' | 'H5' | 'H6';
@@ -51,6 +53,11 @@ const acceptedOf = (m: Measurement) => m.latencies.map(l => l.query).filter(acce
 // Every accepted query has a plan (no EXPLAIN error, none missing).
 export const plansComplete = (m: Measurement) => m.plans !== null && acceptedOf(m).length > 0 &&
   acceptedOf(m).every(q => isPlan(m.plans!.find(p => p.query === q)));
+
+// After an EXPLAIN sweep: every accepted query without a plan gets an error entry, so a sweep cut short
+// (a failed session) never leaves a partial list that could read as complete.
+export const fillPlans = (accepted: string[], list: Plan[], error: string): Plan[] =>
+  [...list, ...accepted.filter(q => !list.some(p => p.query === q)).map(query => ({query, error}))];
 
 function ranks(xs: number[]) {
   const sorted = xs.map((x, i) => [x, i] as const).sort((a, b) => a[0] - b[0]);
@@ -209,31 +216,60 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
     });
     const rf = f.map(([, x]) => x), rr = queries.map(q => r.find(([x]) => x === q)?.[1] ?? NaN);
     const [pf, pr] = [spearman(position('F'), rf), spearman(position('R'), rr)];
-    out.H6 = verdict(pf !== null && pr !== null && pf >= 0.8 && pr >= 0.8, rf.every((x, i) => within(x / rr[i], n)));
+    // The rise follows the position in both orders, in either direction (later or earlier positions rise
+    // more), with the same sign in F and R (decision 5, |rho| >= 0.8).
+    const follows = pf !== null && pr !== null && ((pf >= 0.8 && pr >= 0.8) || (pf <= -0.8 && pr <= -0.8));
+    out.H6 = verdict(follows, rf.every((x, i) => within(x / rr[i], n)));
   }
   return out;
 }
 
 export type Outcome = 'not reproduced' | 'cause established' | 'cause not established' | 'inconclusive';
 
+// Evidence completeness over a stage: every measurement's own evidence, plus the stage records (the
+// PostgreSQL log, the sampler stop). Incomplete evidence never establishes a cause (review item 4).
+export function evidence(ms: Measurement[], stageMissing: string[] = []) {
+  const missing = [...ms.flatMap(m => m.missingEvidence.map(x => `${m.id}: ${x}`)), ...stageMissing];
+  return {complete: missing.length === 0, missing};
+}
+
+// Why a stage is not a normal finish (review item 2): a STOP, a §4.1 / §5.3 minimum not met, or incomplete
+// evidence. A non-empty list exits non-zero, so the launcher ends the queue.
+const abnormalOf = (stopped: string | null, unmet: string[], ev: ReturnType<typeof evidence>) =>
+  [...(stopped ? [`STOP: ${stopped}`] : []), ...unmet.map(x => `minimum not met: ${x}`), ...(ev.complete ? [] : ['evidence incomplete'])];
+
 // §5.2. `stopped` is a STOP reason when the stage ended early.
-export function stage1(ms: Measurement[], stopped: string | null = null) {
+export function stage1(ms: Measurement[], stopped: string | null = null, stageMissing: string[] = []) {
   const N = noise(ms);
   const repro = reproduction(ms, N.value);
-  const base = {noise: N, reproduction: repro, minimums: minimums(ms), stopped};
+  const min = minimums(ms);
+  const ev = evidence(ms, stageMissing);
+  const abnormal = abnormalOf(stopped, Object.entries(min).filter(([, met]) => !met).map(([k]) => k), ev);
+  const base = {noise: N, reproduction: repro, minimums: min, stopped, evidence: ev, abnormal};
   // A STOP before the A1 minimum leaves reproduction inconclusive; after it, the A1 result stands.
+  // Incomplete evidence is inconclusive whatever the numbers say: no cause from partial evidence.
+  if (!ev.complete) return {...base, outcome: 'inconclusive' as Outcome, inconclusiveReason: 'evidence incomplete', attribution: null, repetitionLinked: false, stage2: 'propose'};
   if (repro.result !== 'reproduced') {
     const outcome: Outcome = repro.result === 'not reproduced' ? 'not reproduced' : 'inconclusive';
     return {...base, outcome, attribution: null, repetitionLinked: false, stage2: 'propose'};
   }
   const att = attribution(ms, N.value);
   const verdicts = Object.values(att);
-  // "Repetition-linked" (§4.3): the rise grows with round count, H1-H5 are ruled out and position (H6) does
-  // not explain it. It is always "cause not established" (§5.2); nothing is attributed by elimination.
-  const repetitionLinked = (['H1', 'H2', 'H3', 'H4', 'H5'] as const).every(h => att[h] === 'ruled out') && att.H6 !== 'supported';
+  // "Repetition-linked" (§4.3): the rise grows with round count (reproduced) and H1-H5 are ruled out. It is
+  // always "cause not established" (§5.2), whatever the H6 position verdict: Stage 1 tests only the position
+  // part of H6, and nothing is attributed by elimination alone.
+  const repetitionLinked = (['H1', 'H2', 'H3', 'H4', 'H5'] as const).every(h => att[h] === 'ruled out');
   const established = !repetitionLinked && verdicts.filter(v => v === 'supported').length === 1 && verdicts.every(v => v !== 'withheld');
   const outcome: Outcome = established ? 'cause established' : 'cause not established';
   return {...base, outcome, attribution: att, repetitionLinked, stage2: established ? 'may be skipped' : 'propose'};
+}
+
+// The smoke passes only when its single round ran, is valid and saved all of its evidence; its numbers are not used.
+export function smoke(ms: Measurement[], stopped: string | null, stageMissing: string[] = []) {
+  const ev = evidence(ms, stageMissing);
+  const unmet = ms.length === 1 && ms[0].invalid.length === 0 ? [] : ['one valid smoke round'];
+  const abnormal = abnormalOf(stopped, unmet, ev);
+  return {note: 'SMOKE: numbers are not used', evidence: ev, abnormal, outcome: abnormal.length ? 'smoke failed' : 'smoke passed'};
 }
 
 // §6, stated in every judgement so a standalone record cannot be read as ruling out the OS page cache.
@@ -242,18 +278,25 @@ export const cacheConstraint = {
   h1Scope: 'H1 covers shared-buffer state and whether reads reach the OS. A cause in the OS page cache alone is withheld, never ruled out.',
 };
 
-// §5.3 Stage 2: first valid post-scan round against the pre-scan round, with Stage 1's N.
-// The contrast is B.post1 (the first round after the scan) against B.pre; an INVALID B.post1 leaves it
-// inconclusive. The noise condition is §5.3 as written: ratio >= 3 x (N - 1).
-export function stage2(ms: Measurement[], n: number) {
+// §5.3 Stage 2, as written: G95(first round after the scan) / G95(the first round), so B.post1 against
+// B.pre, never a later post-scan round in its place (an INVALID B.post1 is inconclusive). Reproduced when the
+// ratio is >= 1.30 and >= 3 x (N - 1), not reproduced when it is < 1.15, with Stage 1's recorded N.
+export type Noise = {value: number; source: 'C hot1/hot2' | 'A1 spread (fallback)'};
+export function stage2(ms: Measurement[], noise: Noise, stopped: string | null = null, stageMissing: string[] = []) {
+  const n = noise.value;
   const pre = byId(ms, 'B.pre');
+  const first = byId(ms, 'B.post1');
   const post = validIds(ms, ['B.post1', 'B.post2', 'B.post3']);
   const cool = validIds(ms, ['B.cool1', 'B.cool2']);
-  if (!valid(pre) || post.length < 2 || cool.length < 2) return {result: 'inconclusive' as const, reason: 'Stage 2 minimum not met', ratio: null};
-  const first = byId(ms, 'B.post1');
-  if (!valid(first)) return {result: 'inconclusive' as const, reason: 'B.post1 INVALID', ratio: null};
+  const ev = evidence(ms, stageMissing);
+  const unmet = [...(!valid(pre) ? ['B.pre'] : []), ...(post.length < 2 ? ['2 of 3 post-scan rounds'] : []),
+    ...(cool.length < 2 ? ['both cool-down rounds'] : []), ...(!valid(first) ? ['B.post1 (the §5.3 contrast)'] : [])];
+  const base = {noise, stopped, evidence: ev, abnormal: abnormalOf(stopped, unmet, ev)};
+  if (!ev.complete) return {...base, result: 'inconclusive' as const, reason: 'evidence incomplete', ratio: null};
+  if (!valid(pre) || post.length < 2 || cool.length < 2) return {...base, result: 'inconclusive' as const, reason: 'Stage 2 minimum not met', ratio: null};
+  if (!valid(first)) return {...base, result: 'inconclusive' as const, reason: 'B.post1 INVALID', ratio: null};
   const ratio = G(first) / G(pre);
-  if (ratio >= 1.30 && ratio >= 3 * (n - 1)) return {result: 'reproduced' as const, ratio};
-  if (ratio < 1.15) return {result: 'not reproduced' as const, ratio};
-  return {result: 'inconclusive' as const, reason: 'between the thresholds', ratio};
+  if (ratio >= 1.30 && ratio >= 3 * (n - 1)) return {...base, result: 'reproduced' as const, ratio};
+  if (ratio < 1.15) return {...base, result: 'not reproduced' as const, ratio};
+  return {...base, result: 'inconclusive' as const, reason: 'between the thresholds', ratio};
 }

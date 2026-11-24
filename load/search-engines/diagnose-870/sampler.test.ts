@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { covered, coverageDeadlineMs, freshFast, gaps, otherWorkers, parseMeminfo, windowFacts, type Sample } from './sampler.ts';
+import { EventEmitter } from 'node:events';
+import { awaitCoverage, covered, coverageDeadlineMs, freshFast, gaps, otherWorkers, parseMeminfo, stopProcess, windowFacts, type Sample } from './sampler.ts';
 
 const fast = (at: number, over: Partial<Extract<Sample, {stream: 'fast'; dirtyBytes: number}>> = {}): Sample =>
   ({at, stream: 'fast', dirtyBytes: 10, writebackBytes: 5, cachedBytes: 1, autovacuum: [], checkpointer: {}, wal: {}, ...over});
@@ -118,4 +119,74 @@ test('an observation whose interval overlaps the window counts against it, at ei
   assert.deepEqual(windowFacts([...steady(), seen(79_500, 81_000)], 20_000, 80_000, [], opts).invalid, ['other container during the measurement: other']);
   assert.deepEqual(windowFacts([...steady(), seen(18_000, 19_900)], 20_000, 80_000, [], opts).invalid, []);
   assert.deepEqual(windowFacts([...steady(), seen(80_100, 80_400)], 20_000, 80_000, [], opts).invalid, []);
+});
+
+test('gaps use each observation interval at its widest: from the earlier start to the later return', () => {
+  const o = (at: number, done: number) => ({...fast(at), done});
+  // Started 30 s apart, but the second returned 0.5 s later: up to 30.5 s between the readings.
+  assert.deepEqual(gaps([o(0, 0), o(30_000, 30_500), o(40_000, 40_000)], 'fast', 10_000, 35_000), ['fast sampler gap over 30 s']);
+  assert.deepEqual(gaps([o(0, 0), o(29_500, 30_000), o(40_000, 40_000)], 'fast', 10_000, 35_000), []);
+  // A failed reading in between covers nothing.
+  const failed = {at: 15_000, done: 15_100, stream: 'fast' as const, error: 'docker exec failed'};
+  assert.deepEqual(gaps([o(0, 0), failed, o(31_000, 31_000)], 'fast', 10_000, 20_000), ['fast sampler gap over 30 s']);
+});
+
+test('the gap across each restart is checked: over 30 s, or no fresh fast sample, makes the round INVALID', () => {
+  // Fast readings fail from 60 s while the server restarts; the window starts at 100 s.
+  const around = (lastBefore: number, firstAfter: number) => [
+    ...steady().filter(x => x.stream !== 'fast' || x.at <= lastBefore),
+    ...Array.from({length: 40}, (_, i) => fast(firstAfter + i * 1000))];
+  const restart = {at: 60_500, fresh: true};
+  const facts = (s: Sample[], r = restart) => windowFacts(s, 100_000, 120_000, [], {...opts, restart: r}).invalid;
+  // 30 s exactly between the last reading before and the first after the restart is valid; 1 ms more is INVALID.
+  assert.deepEqual(facts(around(60_000, 90_000)), []);
+  assert.deepEqual(facts(around(60_000, 90_001)), ['fast sampler gap over 30 s across the restart']);
+  // The window alone would look clean: the restart gap is what catches it.
+  assert.deepEqual(windowFacts(around(60_000, 95_000), 100_000, 120_000, [], opts).invalid, []);
+  assert.deepEqual(facts(around(60_000, 95_000)), ['fast sampler gap over 30 s across the restart']);
+  assert.deepEqual(facts(around(60_000, 90_000), {at: 60_500, fresh: false}), ['no fresh fast sample within 30 s after the restart']);
+});
+
+test('coverage waiting has a hard deadline and stops when the sampler process is gone', async () => {
+  let t = 100_000;
+  const io = (alive = true) => ({now: () => t, sleep: async (ms: number) => { t += ms; }, alive: () => alive});
+  const few = steady().filter(x => x.at <= 80_000);
+  t = 90_000;
+  const r = await awaitCoverage(() => few, 85_000, true, io(), 1_000);
+  assert.equal(r.reached, true);
+  assert.ok(t >= 85_000 + coverageDeadlineMs && t <= 85_000 + coverageDeadlineMs + 1_000);
+  // The stalled sampler leaves gaps once the deadline passes.
+  assert.deepEqual(windowFacts(r.samples, 60_000, 85_000, [], opts).invalid.length > 0, true);
+  t = 90_000;
+  await assert.rejects(awaitCoverage(() => few, 85_000, true, io(false)), /sampler process exited/);
+  // A hard deadline even when the clock never reaches the coverage deadline through `covered`.
+  let calls = 0;
+  const frozen = {now: () => (calls++ < 3 ? 0 : 1e12), sleep: async () => undefined, alive: () => true};
+  assert.equal((await awaitCoverage(() => [], 1e13, true, frozen)).reached, false);
+});
+
+class FakeChild extends EventEmitter {
+  exitCode: number | null = null; signalCode: string | null = null; signals: string[] = [];
+  exitOn: string[];
+  constructor(exitOn: string[]) { super(); this.exitOn = exitOn; }
+  kill(signal: NodeJS.Signals) {
+    this.signals.push(signal);
+    if (this.exitOn.includes(signal)) setTimeout(() => { this.signalCode = signal; this.emit('exit'); }, 1);
+    return true;
+  }
+}
+
+test('the sampler stop is SIGTERM, a bounded wait, SIGKILL, and a verified exit', async () => {
+  const term = new FakeChild(['SIGTERM']);
+  assert.deepEqual(await stopProcess(term, 50, 50), {verified: true, how: 'SIGTERM'});
+  assert.deepEqual(term.signals, ['SIGTERM']);
+  const stubborn = new FakeChild(['SIGKILL']);
+  assert.deepEqual(await stopProcess(stubborn, 10, 50), {verified: true, how: 'SIGKILL'});
+  assert.deepEqual(stubborn.signals, ['SIGTERM', 'SIGKILL']);
+  const stuck = new FakeChild([]);
+  assert.deepEqual(await stopProcess(stuck, 10, 10), {verified: false, how: 'did not exit after SIGKILL'});
+  const gone = new FakeChild([]);
+  gone.exitCode = 0;
+  assert.deepEqual(await stopProcess(gone), {verified: true, how: 'already exited'});
+  assert.deepEqual(gone.signals, []);
 });

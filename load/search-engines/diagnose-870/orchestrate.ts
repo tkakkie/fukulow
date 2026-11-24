@@ -7,6 +7,7 @@ import { settleCapMs, type MeasuredStep, type Step } from './plan.ts';
 // §3.3 thresholds are decimal GB, as approved.
 export const GB = 1e9;
 export const minFreeBytes = 40 * GB;
+export const minDockerStartBytes = 175 * GB;
 export const maxInvalid = 4;
 
 // Free bytes before each copy (§3.3): Docker storage and the host filesystems of the snapshot tar and of
@@ -38,6 +39,37 @@ export const explains = (step: MeasuredStep) => !((step.arm === 'C1' || step.arm
 export function diskStop(free: Free) {
   const low = (Object.entries(free) as [keyof Free, number | null][]).filter(([, b]) => b === null || b < minFreeBytes);
   return low.length ? low.map(([k, b]) => `${k} free ${b === null ? 'unreadable' : (b / GB).toFixed(1) + ' GB'} < 40 GB`).join('; ') : null;
+}
+
+// §3.3 at start: Docker storage >= 175 GB, and >= 40 GB on the host filesystems of the snapshot tar (beyond
+// the tar, which is already on it) and of the output. Unreadable is a failure.
+export function startDiskProblems(free: Free) {
+  const p: string[] = [];
+  if (free.docker === null || free.docker < minDockerStartBytes) p.push(`Docker free ${free.docker ?? 'unreadable'} < 175 GB`);
+  for (const k of ['snapshot', 'output'] as const) {
+    if (free[k] === null || free[k] < minFreeBytes) p.push(`${k} filesystem free ${free[k] ?? 'unreadable'} < 40 GB`);
+  }
+  return p;
+}
+
+// The settle wait (§2): CHECKPOINT, then poll until Dirty plus Writeback is under 64 MiB and no autovacuum
+// worker runs. A reading taken within the cap (15 min exactly included) that meets both ends the wait;
+// once more than the cap has passed it is false, and that round is INVALID.
+export const settleDirtyBytes = 64 * 1024 ** 2;
+export type SettleIo = {checkpoint(): void; reading(): {dirtyWritebackBytes: number; autovacuumWorkers: number};
+  now(): number; sleep(ms: number): Promise<void>};
+export async function settleWait(io: SettleIo, capMs: number) {
+  const start = io.now();
+  const elapsed = () => io.now() - start;
+  io.checkpoint();
+  const met = (r: ReturnType<SettleIo['reading']>) => r.dirtyWritebackBytes < settleDirtyBytes && r.autovacuumWorkers === 0;
+  for (;;) {
+    const r = io.reading();
+    if (elapsed() > capMs) return false;
+    if (met(r)) return true;
+    if (elapsed() >= capMs) return false;
+    await io.sleep(Math.min(1_000, capMs - elapsed()));
+  }
 }
 
 export async function execute(steps: Step[], d: Deps) {

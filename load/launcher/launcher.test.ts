@@ -148,6 +148,16 @@ test('a failed job ends the queue and is never rerun', async () => {
   assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
+test('a job that ends with exit 2 (the #870 driver: not a normal finish) ends the queue; the next job never starts', async () => {
+  const w = world({ exits: [2, 0] });
+  const r = await launch(queue(), deps(w));
+  assert.equal(r.outcome, 'stop');
+  assert.deepEqual(r.jobs, [{ name: 'a', exit: 2 }]);
+  assert.equal(w.spawned.length, 1);
+  assert.match(chain(w), /a exited 2; the queue ends \(no rerun\)/);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
+});
+
 test('a signal during a job kills it, keeps HOST-BUSY until it exits, then releases it and starts nothing else', async () => {
   const w = world({ signal: { at: 'job' }, exits: [143, 0] });
   const r = await launch(queue(), deps(w));
