@@ -40,7 +40,7 @@ const three = () => [run('s1'), run('s2', {}, { tps: 10_200 }), run('s3', {}, { 
 test('three valid runs of one completed session inside both spreads PASS', () => {
   const v = judge(three(), session(), 'q796');
   assert.deepEqual([v.result, v.reasons], ['PASS', []]);
-  assert.deepEqual([v.runs[0].blocks[0].thermal.samples, v.runs[0].blocks[0].thermal.maxGapMs], [23, 5000]); // 1 s guard at each end
+  assert.deepEqual([v.runs[0].blocks[0].thermal.samples, v.runs[0].blocks[0].thermal.maxGapMs], [25, 5000]); // every tick of pgbench's 120 s window, both edges included
 });
 
 test('a tps spread over 5 % FAILs, as in the first check', () => {
@@ -70,8 +70,8 @@ const setFreq = (r: RunInput, from: number, to: number, khz: number) => {
 };
 
 test('the block is judged on pgbench\'s own interval, not on the run wrapper around it', () => {
-  // Block 5: pgbench ran 881-1000 s; its guarded ticks (885-995 s) are 13 at 1.78 GHz and 10 at
-  // 2.00 GHz: throttled. Its run wrapper (869.8-1011 s) adds 2.00 GHz start-up and teardown ticks,
+  // Block 5: pgbench ran 881-1000 s; its ticks (885-1000 s) are 13 at 1.78 GHz and 11 at 2.00 GHz:
+  // throttled. Its run wrapper (869.8-1011 s) adds 2.00 GHz start-up and teardown ticks,
   // which as the window would lift the median to 2.00 GHz.
   const r = run('s1');
   setFreq(r, 885_000, 945_000, 1_780_000);
@@ -79,30 +79,51 @@ test('the block is judged on pgbench\'s own interval, not on the run wrapper aro
   r.sends[4].pgbenchWindow = { startMs: t0 + 881_000, endMs: t0 + 1_000_000 };
   const j = jr(r);
   assert.deepEqual(j.invalid, ['block 5: throttled, server median 1780000 kHz < 95 % of block 1 (2000000 kHz)']);
-  assert.equal(j.blocks[4].thermal.samples, 23);
+  assert.equal(j.blocks[4].thermal.samples, 24);
   // A healthy run with 11 s of Docker and connection overhead around the 120 s is not rejected.
   const slowStart = run('s1');
   slowStart.sends[0].measuredWindow = { startMs: t0 + 69_000, endMs: t0 + 200_500, monoMs: 131_500 };
   assert.deepEqual(jr(slowStart).invalid, []);
 });
 
-test('an undetected sub-second clock step cannot pull an outside tick into the window', () => {
-  // pgbench ran 880.5-1000.5 s (its log stamps on its start-time offset). The wall clock then stepped
-  // +0.9 s, so the sampler's ticks from 880 s on are stamped 0.9 s late: the 2.00 GHz tick taken 0.5 s
-  // before pgbench started is stamped inside its window. 12 of the 24 ticks taken during pgbench run
-  // at 1.85 GHz. Without the 1 s guard the outside tick makes the median 1.925 GHz (not throttled);
-  // with it the 23 ticks counted all ran during pgbench and the median is 1.85 GHz (throttled).
-  const r = run('s1');
-  setFreq(r, 885_000, 940_000, 1_850_000);
-  for (const x of r.samples as { at: string; monoMs: number }[]) if (x.monoMs >= 880_000) x.at = new Date(t0 + x.monoMs + 900).toISOString();
-  r.sends[4].pgbenchWindow = { startMs: t0 + 880_500, endMs: t0 + 1_000_500 };
-  r.sends[4].measuredWindow = { startMs: t0 + 879_000, endMs: t0 + 1_001_000, monoMs: 122_000 };
-  const j = jr(r);
-  assert.deepEqual(j.invalid, ['block 5: throttled, server median 1850000 kHz < 95 % of block 1 (2000000 kHz)']);
-  // A larger step along a block's ticks is caught by the sampler's own monotonic stamps.
-  const stepped = run('s1');
-  for (const x of stepped.samples as { at: string; monoMs: number }[]) if (x.monoMs >= 950_000) x.at = new Date(t0 + x.monoMs + 1500).toISOString();
-  assert.match(jr(stepped).invalid.join('\n'), /block 5: wall clock stepped against the sampler's monotonic clock \(1500 ms\)/);
+test('a wall-clock step over 50 ms makes the run INVALID; every tick in pgbench\'s window counts, none dropped at an edge', () => {
+  // The step along a block's thermal ticks, on the sampler's monotonic clock: from 950 s on (inside
+  // block 5) the sampler's stamps are off by `ms`. 50 ms passes, 51 ms either way is a step.
+  const stepAt = (ms: number) => {
+    const r = run('s1');
+    for (const x of r.samples as { at: string; monoMs: number }[]) if (x.monoMs >= 950_000) x.at = new Date(t0 + x.monoMs + ms).toISOString();
+    return jr(r);
+  };
+  assert.deepEqual(stepAt(50).invalid, []);
+  assert.deepEqual(stepAt(51).invalid, ['block 5: wall clock stepped against the sampler\'s monotonic clock (51 ms)']);
+  assert.deepEqual(stepAt(-51).invalid, ['block 5: wall clock stepped against the sampler\'s monotonic clock (51 ms)']);
+  // The #875 round-3 case: a +0.9 s step would pull a tick taken 0.5 s before pgbench into its window.
+  // The run is INVALID, never judged on the misplaced tick.
+  const pulled = run('s1');
+  setFreq(pulled, 885_000, 940_000, 1_850_000);
+  for (const x of pulled.samples as { at: string; monoMs: number }[]) if (x.monoMs >= 880_000) x.at = new Date(t0 + x.monoMs + 900).toISOString();
+  pulled.sends[4].pgbenchWindow = { startMs: t0 + 880_500, endMs: t0 + 1_000_500 };
+  pulled.sends[4].measuredWindow = { startMs: t0 + 879_000, endMs: t0 + 1_001_000, monoMs: 122_000 };
+  assert.match(jr(pulled).invalid.join('\n'), /block 5: wall clock stepped against the sampler's monotonic clock \(900 ms\)/);
+  // The step across one measured run, on the probe's own clocks: 50 ms passes, 51 ms either way does not.
+  const wrapper = (monoMs: number) => { const r = run('s1'); r.sends[1].measuredWindow = { ...r.sends[1].measuredWindow!, monoMs }; return jr(r).invalid; };
+  assert.deepEqual(wrapper(121_450), []);
+  assert.deepEqual(wrapper(121_550), []);
+  assert.deepEqual(wrapper(121_449), ['block 2: wall clock stepped (121500 ms wall, 121449 ms monotonic)']);
+  assert.deepEqual(wrapper(121_551), ['block 2: wall clock stepped (121500 ms wall, 121551 ms monotonic)']);
+  // The #875 round-3 blocker: a genuine failed tick 0.5 s before pgbench's end is counted, not dropped.
+  const edgeFail = run('s1');
+  edgeFail.sends[4].pgbenchWindow = { startMs: t0 + 880_500, endMs: t0 + 1_000_500 };
+  edgeFail.sends[4].measuredWindow = { startMs: t0 + 879_000, endMs: t0 + 1_001_000, monoMs: 122_000 };
+  const i = edgeFail.samples.findIndex(x => x.at === new Date(t0 + 1_000_000).toISOString());
+  edgeFail.samples[i] = { at: edgeFail.samples[i].at, error: 'EIO', launchSession: sid, monoMs: 1_000_000 };
+  assert.match(jr(edgeFail).invalid.join('\n'), /block 5: 1 failed thermal samples/);
+  // And a throttled tick right on the start edge counts toward the median.
+  const edgeSlow = run('s1');
+  setFreq(edgeSlow, 880_000, 940_000, 1_850_000);
+  edgeSlow.sends[4].pgbenchWindow = { startMs: t0 + 880_000, endMs: t0 + 1_000_000 - 1 };
+  edgeSlow.sends[4].measuredWindow = { startMs: t0 + 879_000, endMs: t0 + 1_001_000, monoMs: 122_000 };
+  assert.deepEqual([jr(edgeSlow).blocks[4].thermal.ticks, jr(edgeSlow).invalid], [24, ['block 5: throttled, server median 1850000 kHz < 95 % of block 1 (2000000 kHz)']]);
 });
 
 test('a missing, cut, misplaced or clock-stepped pgbench window makes the run INVALID', () => {
@@ -138,8 +159,8 @@ test('cadence: a late tick passes, a missed tick, a slow period or a session per
   const later = run('s1');
   shift(later, 20, 600);
   assert.deepEqual(jr(later).invalid, ['block 1: missing 5 s thermal tick (gap 5600 ms)']);
-  // Every gap 5.4 s is within the per-tick lateness, but a block then has too few ticks.
-  const slow = jr(run('s1', {}, { periodMs: 5400 }));
+  // Every gap 5.45 s is within the per-tick lateness, but a block then has too few ticks.
+  const slow = jr(run('s1', {}, { periodMs: 5450 }));
   assert.match(slow.invalid.join('\n'), /block 1: 22 thermal ticks, fewer than the 23 of a 5 s cadence/);
   assert.doesNotMatch(slow.invalid.join('\n'), /missing 5 s thermal tick/);
   // The period comes from the launcher session; a queue copy cannot supply it.
@@ -196,7 +217,7 @@ test('a failed, missing or torn thermal tick in a block makes the run INVALID (n
   const missing = run('s1');
   missing.samples.splice(20, 1);
   const r = jr(missing);
-  assert.deepEqual(r.invalid, ['block 1: missing 5 s thermal tick (gap 10000 ms)', 'block 1: 22 thermal ticks, fewer than the 23 of a 5 s cadence']);
+  assert.deepEqual(r.invalid, ['block 1: missing 5 s thermal tick (gap 10000 ms)']);
   const torn = run('s1');
   torn.samples.push({ at: null, error: 'unparseable line' });
   assert.match(jr(torn).invalid.join(), /1 thermal lines without a time/);

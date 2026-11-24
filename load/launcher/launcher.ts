@@ -161,8 +161,11 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   let claimed = false;
   let child: Child | null = null;
   const started: { child: Child; job: Job }[] = [];
-  // Containers that existed when HOST-BUSY was claimed (any state); anything else is the workload's.
+  // At the claim: every container (any state), and those live then. Release compares live state
+  // (maintainer decision on PR #875, option A): a container live now that was not live at the claim is
+  // the workload's, whether it is new or an old one (re)started; a new container still present is too.
   let known: Set<string> | null = null;
+  let liveAtClaim: Set<string> | null = null;
   const periods: Record<string, number> = {};
   let stopLogs: (() => void) | null = null;
   let aborted: string | null = null;
@@ -235,9 +238,10 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     return problems;
   };
   // Labelled containers (any state) are removed and must be gone. Then Docker is watched for
-  // dockerSettleMs: any container created since HOST-BUSY was claimed that is live (created,
-  // running, restarting, paused) at any poll, or not gone at the last, is a workload that outlived
-  // the job (a missing or mistyped label, or a start in flight when its client died). Fail closed.
+  // dockerSettleMs: any container live (created, running, restarting, paused) at any poll that was not
+  // live at the claim, new or an old stopped one started again, and any container created since the
+  // claim that is not gone at the last poll, is a workload that outlived the job (a missing or
+  // mistyped label, or a start in flight when its client died). HOST-BUSY stays held. Fail closed.
   const dockerSettled = async () => {
     const problems: string[] = [];
     for (const label of new Set(started.flatMap(s => (s.job.workloadLabel ? [s.job.workloadLabel] : [])))) {
@@ -251,19 +255,19 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       if (ids.status !== 0) problems.push(`docker ps for label ${label} failed`);
       else if (ids.stdout.trim() !== '') problems.push(`containers with label ${label} still present`);
     }
-    if (known === null) return [...problems, 'no container snapshot from the claim'];
+    if (known === null || liveAtClaim === null) return [...problems, 'no container snapshot from the claim'];
     const seen = new Map<string, string>();
     let last: string[] = [];
     for (let waited = 0; ; waited += dockerPollMs) {
       const all = d.exec(['docker', 'ps', '-a', '--format', '{{.ID}} {{.State}}']);
       if (all.status !== 0) return [...problems, 'docker ps -a failed'];
-      const fresh = all.stdout.split('\n').map(l => l.trim().split(/\s+/)).filter(([id, state]) => id && !known!.has(id) && state !== 'exited' && state !== 'dead');
-      for (const [id, state] of fresh) if (liveStates.has(state)) seen.set(id, state);
-      last = fresh.map(([id, state]) => `${id} ${state}`);
+      const rows = all.stdout.split('\n').map(l => l.trim().split(/\s+/)).filter(([id]) => id);
+      for (const [id, state] of rows) if (liveStates.has(state) && !liveAtClaim!.has(id)) seen.set(id, state);
+      last = rows.filter(([id, state]) => !known!.has(id) && state !== 'exited' && state !== 'dead').map(([id, state]) => `${id} ${state}`);
       if (waited >= dockerSettleMs) break;
       await d.pause(dockerPollMs);
     }
-    if (seen.size > 0) problems.push(`containers created since the claim were live after the job: ${[...seen].map(([id, st]) => `${id} ${st}`).join(', ')}`);
+    if (seen.size > 0) problems.push(`containers not live at the claim were live after the job: ${[...seen].map(([id, st]) => `${id} ${st}`).join(', ')}`);
     else if (last.length > 0) problems.push(`containers created since the claim still present: ${last.join(', ')}`);
     return problems;
   };
@@ -364,7 +368,9 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     log('HOST-BUSY claimed');
     const snapshot = d.exec(['docker', 'ps', '-a', '--format', '{{.ID}} {{.State}}']);
     if (snapshot.status !== 0) return stop('docker ps -a failed; no container snapshot, nothing started');
-    known = new Set(snapshot.stdout.split('\n').map(l => l.trim().split(/\s+/)[0]).filter(Boolean));
+    const claimRows = snapshot.stdout.split('\n').map(l => l.trim().split(/\s+/)).filter(([id]) => id);
+    known = new Set(claimRows.map(([id]) => id));
+    liveAtClaim = new Set(claimRows.filter(([, state]) => liveStates.has(state)).map(([id]) => id));
     for (const job of q.jobs) {
       if (aborted) return stop(`${aborted}; ${job.name} not started`);
       const old = leftovers(job);

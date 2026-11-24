@@ -524,8 +524,8 @@ test('a container left without a matching workloadLabel keeps HOST-BUSY; a Docke
     const spawn = d.spawn;
     d.spawn = (argv, opts) => { w.psAll = ['old1 exited\nc1 running\n']; return spawn(argv, opts); }; // the job starts a container that outlives it
     const r = await launch(queue([job('a', extra), job('b')]), d);
-    assert.match(r.reason ?? '', /HOST-BUSY kept: containers created since the claim were live after the job: c1 running/, JSON.stringify(extra));
-    assert.match(chain(w), /STOP: a workload still running: containers created since the claim were live/);
+    assert.match(r.reason ?? '', /HOST-BUSY kept: containers not live at the claim were live after the job: c1 running/, JSON.stringify(extra));
+    assert.match(chain(w), /STOP: a workload still running: containers not live at the claim were live/);
     assert.deepEqual([w.spawned.length, w.files.has('/runs/HOST-BUSY')], [1, true]);
     assert.match(JSON.parse(w.files.get('/runs/chain/session.json') ?? '{}').workloadProblems.join(), /c1 running/);
   }
@@ -540,7 +540,7 @@ test('a container whose start was in flight when the job died keeps HOST-BUSY, e
   const spawn = d.spawn;
   d.spawn = (argv, opts) => { w.psAll = ['', '', '', '', 'late1 created\n', 'late1 running\n']; return spawn(argv, opts); };
   const r = await launch(queue([job('a', { workloadLabel: 'io.fukulow.probe=519-final' })]), d);
-  assert.match(r.reason ?? '', /containers created since the claim were live after the job: late1 running/);
+  assert.match(r.reason ?? '', /containers not live at the claim were live after the job: late1 running/);
   assert.equal(w.files.has('/runs/HOST-BUSY'), true);
   // A container of the job that is only being removed, and gone before the settle ends, is not a workload.
   const removing = world({ psAll: [''] });
@@ -556,6 +556,55 @@ test('a container whose start was in flight when the job died keeps HOST-BUSY, e
   d3.spawn = (argv, opts) => { stays.psAll = ['x1 removing\n']; return spawn3(argv, opts); };
   assert.match((await launch(queue([job('a')]), d3)).reason ?? '', /containers created since the claim still present: x1 removing/);
   assert.equal(stays.files.has('/runs/HOST-BUSY'), true);
+});
+
+// Runs one job whose start sets the `docker ps -a` answers to `after`; `claim` is the answer at the claim.
+async function dockerCase(claim: string, after: string[], over: Partial<World> = {}) {
+  const w = world({ psAll: [claim], ...over });
+  const d = deps(w);
+  const spawn = d.spawn;
+  d.spawn = (argv, opts) => { w.psAll = after; return spawn(argv, opts); };
+  const r = await launch(queue([job('a', { workloadLabel: 'io.fukulow.probe=519-final' })]), d);
+  return { r, w, released: !w.files.has('/runs/HOST-BUSY'), session: JSON.parse(w.files.get('/runs/chain/session.json') ?? '{}') };
+}
+
+test('release compares the live containers at the claim with those after the job (#875 option A)', async () => {
+  // Restart: a container stopped at the claim and started by the job keeps HOST-BUSY, also when the
+  // start finishes after the client died (exited at the first polls, running later).
+  for (const after of [['old1 running\n'], ['old1 exited\n', 'old1 exited\n', 'old1 exited\n', 'old1 restarting\n', 'old1 running\n'], ['old1 paused\n']]) {
+    const c = await dockerCase('old1 exited\n', after);
+    assert.deepEqual([c.r.outcome, c.released, c.session.hostBusy], ['stop', false, 'kept'], after.join('|'));
+    assert.match(c.r.reason ?? '', /containers not live at the claim were live after the job: old1 (running|restarting|paused)/);
+  }
+  // Start: a new container that is still running keeps it.
+  const started = await dockerCase('old1 exited\n', ['old1 exited\nnew1 running\n']);
+  assert.deepEqual([started.released, started.session.workloadProblems.join()], [false, 'containers not live at the claim were live after the job: new1 running']);
+  // Stop: the job's container exited and the old one still stopped release it; so does one that was
+  // already running at the claim and still is, or has stopped since. (One live at the claim that the
+  // job stopped and started again looks the same; the preflight refuses a job while any runs.)
+  for (const [claim, after] of [['old1 exited\n', 'old1 exited\nnew1 exited\n'], ['old1 running\n', 'old1 running\n'], ['old1 running\n', 'old1 exited\n'], ['', '']]) {
+    const c = await dockerCase(claim, [after]);
+    assert.deepEqual([c.r.outcome, c.released, c.session.hostBusy], ['done', true, 'released'], `${claim}->${after}`);
+  }
+});
+
+test('a failed Docker listing at the claim starts nothing; one at the release keeps HOST-BUSY', async () => {
+  const w = world();
+  const d = deps(w);
+  const exec = d.exec;
+  d.exec = (argv, cwd) => (argv.join(' ').startsWith('docker ps -a --format') ? { status: 1, stdout: '' } : exec(argv, cwd));
+  const r = await launch(queue([job('a')]), d);
+  assert.deepEqual([r.outcome, r.reason, w.spawned.length, w.files.has('/runs/HOST-BUSY')], ['stop', 'docker ps -a failed; no container snapshot, nothing started', 0, false]);
+  const late = world({ psAll: [''] });
+  const d2 = deps(late);
+  const exec2 = d2.exec;
+  let failing = false;
+  d2.exec = (argv, cwd) => (failing && argv.join(' ').startsWith('docker ps -a --format') ? { status: null, stdout: '' } : exec2(argv, cwd));
+  const spawn2 = d2.spawn;
+  d2.spawn = (argv, opts) => { failing = true; return spawn2(argv, opts); };
+  const r2 = await launch(queue([job('a')]), d2);
+  assert.deepEqual([r2.outcome, late.files.has('/runs/HOST-BUSY')], ['stop', true]);
+  assert.match(r2.reason ?? '', /HOST-BUSY kept: docker ps -a failed/);
 });
 
 test('the sampler period actually used and each tick\'s monotonic time are recorded', async () => {

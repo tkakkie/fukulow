@@ -21,16 +21,13 @@ export const limits = { tpsSpread: 0.05, walSpread: 0.02, throttle: 0.05 };
 // ticks: the fewest a 5 s cadence with that lateness can place in the window. A slower period, a
 // drifting timer or a missed tick fails one of the two.
 export const tickToleranceMs = 500;
-// A measured run whose wall length differs from its monotonic length by more, or a block along whose
-// thermal ticks wall minus monotonic moves by more, has a clock step. A synchronised clock is slewed
-// by at most 500 ppm (adjtimex), 65 ms over a 130 s run, so only a step, or a clock off by a second
-// or more, reaches it.
-export const clockStepToleranceMs = 1000;
-// pgbench stamps its log with monotonic time plus a wall offset taken at its start, the sampler with
-// wall time at each tick; a step under the tolerance above can shift one against the other by up to
-// it. The ticks within this of either end of pgbench's window are therefore never counted, so a tick
-// taken outside the measurement cannot enter it; only ticks taken inside it are judged.
-export const windowGuardMs = clockStepToleranceMs;
+// Clock step (maintainer decision on PR #875, 2026-11-24, option A). Wall minus monotonic time may move
+// by at most this much: across a measured run (the probe's own clocks), and along a block's thermal ticks
+// (the sampler's). More is a wall-clock step and the run is INVALID, never judged. pgbench stamps its
+// log with monotonic time plus a wall offset taken at its start, the sampler each tick with wall time,
+// so a step between them would misplace ticks against pgbench's window; with both checks passed, every
+// tick inside that window is counted, none dropped near an edge.
+export const clockStepToleranceMs = 50;
 // pgbench -T counts from its benchmark start, and its first transaction starts within milliseconds of
 // it (local connections), so its own interval is never shorter than -T by this much unless it was cut.
 export const pgbenchShortfallMs = 1000;
@@ -124,7 +121,7 @@ export function judgeRun(r: RunInput, bound: Binding) {
   if (sets === null) invalid.push('no CPU sets in the run metadata');
   const blocks = [...r.sends].sort((a, b) => a.order - b.order).map(s => {
     const w = s.pgbenchWindow;
-    const t = sets && w ? blockThermal(r.samples, w.startMs, w.endMs, sets, windowGuardMs) : empty;
+    const t = sets && w ? blockThermal(r.samples, w.startMs, w.endMs, sets) : empty;
     return { order: s.order, arm: s.arm, tps: s.tps, walBytesPerSend: s.walBytesPerSend, thermal: t };
   });
   for (const b of blocks) {

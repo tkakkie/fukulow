@@ -49,14 +49,16 @@ test('error, torn and timeless lines are kept as failed ticks; Tctl is read from
   assert.equal(tctl(null), null);
 });
 
-test('the guard keeps edge ticks out; gaps and the clock-step spread use the sampler\'s monotonic stamps', () => {
+test('every tick inside the window counts, edges included; gaps and the clock-step spread use the sampler\'s monotonic stamps', () => {
   const tick = (s: number, mono: number, f = 5000): ThermalSample => ({ ...sample(s, [f, f, f, f]), monoMs: mono });
   // A +0.9 s wall step before the block: a tick taken 0.5 s before the start is stamped 0.4 s after it.
+  // It is counted (no edge guard), and the step shows as a 900 ms offset spread, which the judge refuses.
   const lines = [tick(0, 0), { ...tick(10, 9_500, 1), at: new Date(Date.parse(at(10)) + 400).toISOString() }, tick(15, 14_100), tick(20, 19_100), tick(25, 24_100), tick(30, 29_100)];
   const open = blockThermal(lines, Date.parse(at(10)), Date.parse(at(25)), sets);
-  assert.equal(open.server?.minKHz, 1); // without a guard the outside tick is counted
-  const guarded = blockThermal(lines, Date.parse(at(10)), Date.parse(at(25)), sets, 1000);
-  assert.deepEqual([guarded.ticks, guarded.windowMs, guarded.server?.minKHz, guarded.monoComplete, guarded.maxGapMs, guarded.offsetSpreadMs], [2, 13_000, 5000, true, 5000, 0]);
+  assert.deepEqual([open.ticks, open.windowMs, open.server?.minKHz, open.monoComplete, open.maxGapMs, open.offsetSpreadMs], [4, 15_000, 1, true, 9_500, 900]);
+  // Ticks exactly on both edges are inside.
+  const edges = blockThermal([tick(0, 0), tick(5, 5000), tick(10, 10_000), tick(15, 15_000)], Date.parse(at(5)), Date.parse(at(10)), sets);
+  assert.deepEqual([edges.ticks, edges.windowMs, edges.offsetSpreadMs], [2, 5000, 0]);
   const stepped = blockThermal([tick(0, 0), tick(5, 5000), tick(10, 8_500), tick(15, 13_500)], Date.parse(at(4)), Date.parse(at(11)), sets);
   assert.deepEqual([stepped.maxGapMs, stepped.offsetSpreadMs], [5000, 1500]);
   assert.equal(blockThermal([sample(0, [1, 1, 1, 1]), tick(5, 5000), tick(10, 10_000)], Date.parse(at(4)), Date.parse(at(6)), sets).monoComplete, false);

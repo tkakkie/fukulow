@@ -50,7 +50,7 @@ export function timed<T>(fn: () => T, clock = { wall: () => Date.now(), mono: ()
 
 export type SetStats = { medianKHz: number; minKHz: number };
 // samples: usable samples inside the window; failed: failed ticks inside it; ticks: all ticks inside
-// it; windowMs: the window's length after the guard. The chain is the last tick before the window,
+// it; windowMs: the window's length. The chain is the last tick before the window,
 // the ticks inside and the first after it. maxGapMs: the longest gap between consecutive ticks of the
 // chain on the sampler's monotonic clock when every chain tick has one (monoComplete), else on the
 // wall clock; Infinity when an edge tick is missing. offsetSpreadMs: how far wall minus monotonic
@@ -66,14 +66,14 @@ function setStats(s: ThermalSample, set: number[]) {
   return f.some(x => x === null) || f.length === 0 ? null : { median: median(f as number[]), min: Math.min(...(f as number[])) };
 }
 
-// A block's thermal record from the ticks inside [startMs + guardMs, endMs - guardMs]: per set, the
-// median of the per-sample set medians and the minimum of the per-sample set minima. A set is null when
-// any tick in the window failed or has an unreadable CPU, so missing data can never look like an
-// unthrottled block. The guard keeps out a tick that an undetected clock step of up to guardMs could
-// have stamped inside the window although it was taken outside the measurement.
-export function blockThermal(lines: SampleLine[], startMs: number, endMs: number, sets: { server: number[]; client: number[] }, guardMs = 0): BlockThermal {
-  const from = startMs + guardMs;
-  const to = endMs - guardMs;
+// A block's thermal record from every tick inside [startMs, endMs]: per set, the median of the
+// per-sample set medians and the minimum of the per-sample set minima. A set is null when any tick in
+// the window failed or has an unreadable CPU, so missing data can never look like an unthrottled block.
+// No tick near an edge is dropped: a clock step that could misplace one makes the block INVALID
+// instead (offsetSpreadMs, judged by the caller).
+export function blockThermal(lines: SampleLine[], startMs: number, endMs: number, sets: { server: number[]; client: number[] }): BlockThermal {
+  const from = startMs;
+  const to = endMs;
   const placed = lines.map(l => ({ l, t: l.at === null ? NaN : Date.parse(l.at) })).filter(x => Number.isFinite(x.t)).sort((a, b) => a.t - b.t);
   const inside = placed.filter(x => x.t >= from && x.t <= to);
   const before = placed.filter(x => x.t < from).at(-1);
