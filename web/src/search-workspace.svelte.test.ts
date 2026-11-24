@@ -182,6 +182,7 @@ describe('Workspace search integration (#153)', () => {
       page(query?.after_seq === 36 ? [hit] : query?.before_seq === 37 ? [] : [latest])
     const readMessages = vi.fn((_channel: string, query?: ListMessagesQuery) => read(query))
     const readTopicMessages = vi.fn((_channel: string, _topic: string, query?: ListMessagesQuery) => read(query))
+    const readTimeline = vi.fn<NonNullable<import('./session').SessionOptions['topicsApi']>['listTimeline']>()
     const searchResult = { channelId: id, topicId, replyRootId, messageId: hit.id, createdSeq: hit.created_seq }
     const ctx = await mountSearchWorkspace({
       href: replyRootId ? `/o/${ORG_ID}/c/${CH_ID}?panel=topics` : undefined,
@@ -200,6 +201,8 @@ describe('Workspace search integration (#153)', () => {
         net.pages[id] = page([latest])
         options.sync!.api!.listMessages = readMessages
         options.topicsApi!.listTopicMessages = readTopicMessages
+        const defaultTimeline = options.topicsApi!.listTimeline
+        options.topicsApi!.listTimeline = readTimeline.mockImplementation((channel, query) => defaultTimeline(channel, query))
         if (replyRootId) {
           net.replyChains[`${id}:${hit.id}`] = ok(replyPage({
             history_generation, as_of_seq: 80, root_id: replyRootId, messages: [hit], has_more: false,
@@ -234,7 +237,7 @@ describe('Workspace search integration (#153)', () => {
         expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ before_seq: 37 }))
       } else {
         expect(readMessages).toHaveBeenCalledWith(id, expect.objectContaining({ after_seq: 36 }))
-        expect(readMessages).toHaveBeenCalledWith(id, expect.objectContaining({ before_seq: 37 }))
+        expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ before_position: 37 }))
       }
       const scope = replyRootId ? '#panel-content' : '#main-content'
       expect(ctx.host.querySelector(`${scope} .ui-message-row--search-match`)

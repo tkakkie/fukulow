@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { channel, fakeNetwork, flush, ok, record } from './adapter-test-helpers.svelte'
-import type { ListMessagesQuery, Message, MessagePage, Result } from './api'
+import type { ListMessagesQuery, ListTimelineQuery, Message, MessagePage, Result, TimelineItem, TimelinePage, TopicSummary } from './api'
 import { createSession } from './session'
 import { deferred } from './topic-test-helpers'
 import { MAIN_MESSAGE_LIMIT, TOPIC_MESSAGE_LIMIT } from './protocol-types'
@@ -15,8 +15,26 @@ function client(read: (query?: ListMessagesQuery) => Promise<Result<MessagePage>
   const net = fakeNetwork()
   const options = net.options()
   net.pages.A = page([record(base - 1), record(base)], base)
+  const defaultTimeline = options.topicsApi!.listTimeline
   const session = createSession({ ...options, selfId: 'me', onEnded: vi.fn(),
-    topicsApi: { ...options.topicsApi!, listTopicMessages: (_channel, _topic, query) => read(query) },
+    topicsApi: { ...options.topicsApi!, listTopicMessages: (_channel, _topic, query) => read(query),
+      listTimeline: async (channelId, query) => {
+        if (query?.before_position === undefined && query?.limit === undefined) return defaultTimeline(channelId, query)
+        const result = await read({
+          history_generation: query.history_generation,
+          ...(query.as_of_seq !== undefined ? { as_of_seq: query.as_of_seq } : {}),
+          ...(query.before_position !== undefined ? { before_seq: query.before_position } : {}),
+          ...(query.limit !== undefined ? { limit: query.limit } : {}),
+        })
+        if (!result.ok) return result
+        return ok({
+          history_generation: result.data.history_generation,
+          as_of_seq: result.data.as_of_seq,
+          has_more: result.data.has_more,
+          items: result.data.messages.map(message => ({ kind: 'message' as const, message })),
+        })
+      },
+    },
     sync: { ...options.sync, random: () => 0, api: {
       ...options.sync!.api!, listMessages: (_channel, query) => read(query),
     } },
@@ -274,6 +292,7 @@ it.each([
     if (query?.before_seq === 30) return page([record(20)], watermark, true)
     if (query?.after_seq === 41) return page([record(50)], watermark, true)
     if (query?.before_seq === 20) return page([record(10)], query.as_of_seq ?? watermark)
+    if (query?.limit === 1 && query.before_seq === undefined && query.after_seq === undefined) return page([], watermark)
     if (query?.after_seq === 50) return query.as_of_seq ? expired : page([record(60)], watermark, true)
     throw new Error('Unexpected history query')
   })
@@ -299,7 +318,11 @@ it.each([
     expect(anchor.get()?.messages.map(m => m.created_seq)).toEqual(direction === 'older'
       ? [10, 20, 30, 40, 41, 50] : [20, 30, 40, 41, 50, 60])
     const bound = direction === 'older' ? { before_seq: 20 } : { after_seq: 50 }
-    expect(read.mock.calls.map(([query]) => query)).toEqual([
+    expect(read.mock.calls.map(([query]) => query)).toEqual(direction === 'older' ? [
+      { history_generation: generation, ...bound, limit: 25, as_of_seq: 100 },
+      { history_generation: generation, limit: 1 },
+      { history_generation: generation, ...bound, limit: 25, as_of_seq: 102 },
+    ] : [
       { history_generation: generation, ...bound, limit: 25, as_of_seq: 100 },
       { history_generation: generation, ...bound, limit: 25 },
     ])
@@ -381,7 +404,8 @@ it.each([false, true])('retries expired paging once, preserving the visit (fresh
   const read = vi.fn(async (query?: ListMessagesQuery) => {
     if (query?.after_seq === 39) return page([record(40)], 100)
     if (query?.before_seq === 40) return page([record(30)], 100, true)
-    return query?.as_of_seq || fails ? expired : page([record(20)], 102)
+    if (query?.limit === 1 && query.before_seq === undefined && query.after_seq === undefined) return fails ? expired : page([], 102)
+    return query?.as_of_seq === 100 || fails ? expired : page([record(20)], 102)
   })
   const { anchor, session, cursor, ready } = client(read)
   try {
@@ -392,7 +416,7 @@ it.each([false, true])('retries expired paging once, preserving the visit (fresh
     const pending = anchor.loadOlder()
     expect(anchor.get()).toMatchObject({ status: 'ready', messages: [record(30), record(40)] })
     await pending
-    expect(read.mock.calls.map(([query]) => query?.as_of_seq)).toEqual([undefined, 100, 100, undefined])
+    expect(read.mock.calls.map(([query]) => query?.as_of_seq)).toEqual(fails ? [undefined, 100, 100, undefined] : [undefined, 100, 100, undefined, 102])
     expect(anchor.get()).toMatchObject({ visit, status: 'ready', paging: false,
       pageError: fails ? 'older' : undefined, messages: fails ? [record(30), record(40)] : [record(20), record(30), record(40)],
     })
@@ -451,6 +475,10 @@ it.each([null, 'T'])('reserves and releases space for a full search window (Topi
   options.sync!.api!.listMessages = (_id, query) => read(query)
   options.topicsApi!.listTopicMessages = (_id, _topic, query) => read(query)
   options.topicsApi!.listTimeline = async (_id, query) => {
+    if (!topicId && query?.before_position !== undefined && query.before_position !== 401) {
+      const r = await read({ before_seq: query.before_position, limit: query.limit })
+      return ok({ ...r.data, items: r.data.messages.map(message => ({ kind: 'message' as const, message })) })
+    }
     const data = topicId ? page([record(600)], 600).data : normal(query?.before_position === 401).data
     return ok({ ...data, items: data.messages.map(message => ({ kind: 'message', message })) })
   }
@@ -548,6 +576,261 @@ it('keeps previously displayed search Messages on terminal Organization loss and
     expect(anchor.get()).toMatchObject({ status: 'ready', messages: [record(40)], hasNewer: false })
     await anchor.retry()
     expect(read).toHaveBeenCalledTimes(3)
+  } finally {
+    session.close()
+  }
+})
+
+const topicItem = (id: string, name: string, first_seq: number, last_seq: number, message_count: number): TimelineItem => ({
+  kind: 'topic',
+  topic: {
+    id, name, first_seq, last_seq, message_count,
+    latest_message: { ...record(last_seq), topic_id: id },
+    read_seq: last_seq, unread_count: 0, mention_unread_count: 0,
+  } satisfies TopicSummary,
+})
+const timelinePage = (items: TimelineItem[], as_of_seq: number, has_more = false): Result<TimelinePage> =>
+  ok({ history_generation: generation, as_of_seq, items, has_more })
+
+function timelineClient(
+  readMessages: (query?: ListMessagesQuery) => Promise<Result<MessagePage>>,
+  readTimeline: (query?: ListTimelineQuery) => Promise<Result<TimelinePage>>,
+  base = 500,
+) {
+  const net = fakeNetwork()
+  const options = net.options()
+  net.pages.A = page([record(base - 1), record(base)], base)
+  const defaultTimeline = options.topicsApi!.listTimeline
+  const session = createSession({
+    ...options, selfId: 'me', onEnded: vi.fn(),
+    topicsApi: {
+      ...options.topicsApi!,
+      listTimeline: (channelId, query) =>
+        query?.before_position === undefined && query?.limit === undefined
+          ? defaultTimeline(channelId, query)
+          : readTimeline(query),
+    },
+    sync: {
+      ...options.sync, random: () => 0,
+      api: { ...options.sync!.api!, listMessages: (_channel, query) => readMessages(query) },
+    },
+  })
+  return {
+    net, session, anchor: session.searchAnchor,
+    cursor: () => session.sync.get().channels.A.cursor,
+    async ready() {
+      net.socket.onReady()
+      net.lists[0].resolve(ok({ history_generation: generation, channels: [channel('A')] }))
+      await flush()
+      net.subscribed('A', base)
+      await flush()
+    },
+  }
+}
+
+it('shows Topic summary lines outside the live window in normal timeline order while staying cursor-neutral', async () => {
+  const tOld = topicItem('T-old', '古いトピック', 10, 35, 3)
+  const tMid = topicItem('T-mid', '中間のトピック', 42, 48, 2)
+  const tAncient = topicItem('T-ancient', 'さらに古いトピック', 1, 5, 4)
+  const readMessages = vi.fn(async (query?: ListMessagesQuery) => {
+    if (query?.after_seq === 39) {
+      return page([
+        record(40),
+        { ...record(42), topic_id: 'T-mid' },
+        { ...record(45), topic_id: 'T-live' },
+        { ...record(48), topic_id: 'T-mid' },
+        record(55),
+      ], 500, false)
+    }
+    throw new Error(`Unexpected listMessages query: ${JSON.stringify(query)}`)
+  })
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.before_position === 56) {
+      // T-live has last_seq 495 > 55, so list_timeline at W=500 omits T-live from [40, 55].
+      return timelinePage([
+        { kind: 'message', message: record(40) },
+        tMid,
+        { kind: 'message', message: record(55) },
+      ], 500, true)
+    }
+    if (query?.before_position === 40) {
+      return timelinePage([
+        { kind: 'message', message: record(30) },
+        tOld,
+      ], 500, true)
+    }
+    if (query?.before_position === 30) {
+      return timelinePage([tAncient], 500, false)
+    }
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const { anchor, cursor, session, ready } = timelineClient(readMessages, readTimeline, 500)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 't:T-old@35:3', 'm:40', 't:T-mid@48:2', 'm:55'])
+    expect(readTimeline.mock.calls.map(([q]) => q)).toEqual([
+      { history_generation: generation, as_of_seq: 500, before_position: 56, limit: 4 },
+      { history_generation: generation, as_of_seq: 500, before_position: 40, limit: 25 },
+    ])
+    expect(cursor()).toBe(500)
+
+    await anchor.loadOlder()
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['t:T-ancient@5:4', 'm:30', 't:T-old@35:3', 'm:40', 't:T-mid@48:2', 'm:55'])
+    expect(readTimeline).toHaveBeenLastCalledWith({ history_generation: generation, as_of_seq: 500, before_position: 30, limit: 25 })
+    expect(cursor()).toBe(500)
+  } finally {
+    session.close()
+  }
+})
+
+it('keeps Channel-level rows within bounds in a Topic-heavy Channel and caps raw scanning at 200', async () => {
+  // Older side: 20 Channel-level messages + 5 Topics = 25 timeline items.
+  const olderItems: TimelineItem[] = [
+    ...Array.from({ length: 20 }, (_, i) => ({ kind: 'message' as const, message: record(50 + i) })),
+    topicItem('T-1', 'T1', 70, 75, 10),
+    topicItem('T-2', 'T2', 76, 80, 10),
+    topicItem('T-3', 'T3', 81, 85, 10),
+    topicItem('T-4', 'T4', 86, 90, 10),
+    topicItem('T-5', 'T5', 91, 95, 10),
+  ]
+  // Newer side: hit at 100, 60 Topic messages in T-heavy (101..160), then 24 Channel-level messages (161..184).
+  const newerRaw: Message[] = [
+    record(100),
+    ...records(101, 160, 'T-heavy'),
+    ...records(161, 184, null),
+  ]
+  const newerTimeline: TimelineItem[] = [
+    { kind: 'message', message: record(100) },
+    topicItem('T-heavy', '重いトピック', 101, 160, 60),
+    ...records(161, 184, null).map(message => ({ kind: 'message' as const, message })),
+  ]
+  let totalRawRequested = 0
+  const readMessages = vi.fn(async (query?: ListMessagesQuery) => {
+    const after = query?.after_seq ?? 0
+    const limit = query?.limit ?? 25
+    totalRawRequested += limit
+    const slice = newerRaw.filter(m => m.created_seq > after).slice(0, limit)
+    const hasMore = slice.length > 0 && slice.at(-1)!.created_seq < 184
+    return page(slice, 500, hasMore)
+  })
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.before_position === 100) return timelinePage(olderItems, 500, true)
+    if (query?.before_position === 185) return timelinePage(newerTimeline, 500, true)
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const { anchor, cursor, session, ready } = timelineClient(readMessages, readTimeline, 500)
+  try {
+    await ready()
+    anchor.open({ channelId: 'A', messageId: 'id100', createdSeq: 100 })
+    await flush()
+    await flush()
+    expect(anchor.get()?.lines).toHaveLength(51)
+    expect(anchor.get()?.messages).toHaveLength(45)
+    expect(anchor.get()?.lines.filter(l => l.kind === 'topic').map(l => l.topicId)).toEqual(['T-1', 'T-2', 'T-3', 'T-4', 'T-5', 'T-heavy'])
+    expect(totalRawRequested).toBeLessThanOrEqual(200)
+    expect(cursor()).toBe(500)
+  } finally {
+    session.close()
+  }
+
+  // Pathological case: 250 consecutive Topic Messages must stop at the 200-record raw scan cap.
+  let rawFetched = 0
+  const cappedMessages = vi.fn(async (query?: ListMessagesQuery) => {
+    const after = query?.after_seq ?? 0
+    const limit = query?.limit ?? 25
+    const slice = after === 99
+      ? [record(100), ...records(101, 100 + limit - 1, 'T-flood')]
+      : records(after + 1, after + limit, 'T-flood')
+    rawFetched += slice.length
+    return page(slice, 500, true)
+  })
+  const cappedTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.before_position === 100) return timelinePage([], 500, false)
+    return timelinePage([{ kind: 'message', message: record(100) }], 500, false)
+  })
+  const second = timelineClient(cappedMessages, cappedTimeline, 500)
+  try {
+    await second.ready()
+    second.anchor.open({ channelId: 'A', messageId: 'id100', createdSeq: 100 })
+    await flush()
+    await flush()
+    expect(rawFetched).toBe(200)
+    expect(second.anchor.get()?.hasNewer).toBe(true)
+    expect(second.cursor()).toBe(500)
+  } finally {
+    second.session.close()
+  }
+})
+
+it('moves Topic summary lines on live Topic Messages, refreshes on Move, and clears baselines on cursor clamp', async () => {
+  vi.useFakeTimers()
+  let watermark = 100
+  const readMessages = vi.fn(async (query?: ListMessagesQuery) => {
+    if (query?.after_seq === 39) return page([record(40)], watermark, false)
+    if (query?.after_seq === 0) return page([record(30), record(40)], watermark, false)
+    throw new Error(`Unexpected listMessages query: ${JSON.stringify(query)}`)
+  })
+  const readTimeline = vi.fn(async (query?: ListTimelineQuery) => {
+    if (query?.before_position === 40) {
+      return timelinePage(
+        watermark === 80
+          ? [{ kind: 'message', message: record(30) }]
+          : [{ kind: 'message', message: record(30) }, topicItem('T1', '設計', 20, 35, 3)],
+        watermark,
+        false,
+      )
+    }
+    if (query?.before_position === 104) {
+      return timelinePage([
+        { kind: 'message', message: record(30) },
+        { kind: 'message', message: record(40) },
+        topicItem('T1', '設計', 20, 101, 5),
+      ], watermark, false)
+    }
+    throw new Error(`Unexpected listTimeline query: ${JSON.stringify(query)}`)
+  })
+  const { anchor, cursor, net, session, ready } = timelineClient(readMessages, readTimeline, 100)
+  try {
+    await ready()
+    anchor.open(target)
+    await flush()
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 't:T1@35:3', 'm:40'])
+
+    // Live Topic Message moves T1 past msg(40) and increments count (P4/P5).
+    net.event({ type: 'message', kind: 'create', seq: 101, message: { ...record(101), topic_id: 'T1' } })
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 'm:40', 't:T1@101:4'])
+    expect(cursor()).toBe(101)
+
+    // Live Topic Message in a new Topic adds a live-only Topic line with unknown count (P4).
+    net.event({ type: 'message', kind: 'create', seq: 102, message: { ...record(102), topic_id: 'T2' } })
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 'm:40', 't:T1@101:4', 't:T2@102:null'])
+
+    // Live Move into T1 refreshes baselines at W=103.
+    watermark = 103
+    net.event({ ...moveEvent(103, 'id99'), destination_topic_id: 'T1' })
+    await flush()
+    expect(anchor.get()?.asOfSeq).toBe(103)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 'm:40', 't:T1@101:5'])
+
+    // Cursor clamp clears baselines and re-reads cleanly.
+    net.socket.onClose(1001)
+    await vi.advanceTimersByTimeAsync(1000)
+    net.socket.onReady()
+    watermark = 80
+    net.timelines.A = timelinePage([{ kind: 'message', message: record(80) }], 80, false)
+    net.subscribed('A', 80)
+    await flush()
+    expect(anchor.get()?.asOfSeq).toBe(80)
+    expect(anchor.get()?.lines.map(l => l.kind === 'message' ? `m:${l.message.created_seq}` : `t:${l.topicId}@${l.position}:${l.messageCount}`))
+      .toEqual(['m:30', 'm:40'])
   } finally {
     session.close()
   }

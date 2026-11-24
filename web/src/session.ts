@@ -183,6 +183,7 @@ export function createSession(options: SessionOptions) {
     messages: ({ channelId, topicId }, query) => observe(topicId
       ? topicSource.listTopicMessages(channelId, topicId, query)
       : timeline.listMessages(channelId, query)),
+    timeline: ({ channelId }, query) => observe(topicSource.listTimeline(channelId, query)),
     reply: ({ channelId, messageId }, query) =>
       observe(replySource.listReplyChain(channelId, messageId, query, options.accountSignal)),
   })

@@ -159,7 +159,11 @@ export function fakeNetwork() {
         history.push({ channel, query: query?.before_position !== undefined ? { before_seq: query.before_position } : undefined })
         if (timelines[channel]) return timelines[channel]
         const page = pages[channel] ?? { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } }
-        return page.ok ? { ok: true, data: toTimelinePage(page.data, channel) } : page
+        if (!page.ok) return page
+        const tl = toTimelinePage(page.data, channel)
+        if (query?.before_position === undefined) return { ok: true, data: tl }
+        const items = tl.items.filter(item => (item.kind === 'message' ? item.message.created_seq : item.topic.last_seq) < query.before_position!)
+        return { ok: true, data: { ...tl, items, has_more: false } }
       },
       async listTopics(channel) {
         if (topicLists[channel]) return topicLists[channel]
