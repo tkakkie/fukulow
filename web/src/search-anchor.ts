@@ -24,6 +24,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
   let liveMain: Message[] = []
   let activeToken: symbol | undefined
   let activeMode: OpMode | undefined
+  let inFlightTransport: Promise<unknown> | undefined
   const queue: QueuedOp[] = []
   let staleSeq = 0
   let staleHitMoved = false
@@ -69,19 +70,20 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     }
     return new Promise<void>(resolve => {
       queue.push({ mode, resolve })
-      if (!activeToken) void drain()
+      if (!activeToken && !inFlightTransport) void drain()
     })
   }
 
   function markStale(triggerSeq: number, hitMoved = false) {
     if (hitMoved) staleHitMoved = true
     staleSeq = Math.max(staleSeq, triggerSeq)
-    if (!activeToken) void drain()
+    if (!activeToken && !inFlightTransport) void drain()
   }
 
   async function drain(): Promise<void> {
-    if (activeToken) return
+    if (activeToken || inFlightTransport) return
     while (true) {
+      if (inFlightTransport) return
       const w = view
       if (!w || sync.get().organization === 'unavailable' || !channelFor(w.target)?.watched) {
         for (const item of queue.splice(0)) item.resolve()
@@ -148,7 +150,17 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       try { return operation().catch((): Result<T> => ({ ok: false, kind: 'network' })) }
       catch { return Promise.resolve({ ok: false, kind: 'network' }) }
     }
-    const run = <T>(operation: () => Promise<Result<T>>) => Promise.race([safe(operation), deadline.until])
+    const run = <T>(operation: () => Promise<Result<T>>): Promise<Result<T>> => {
+      const request = safe(operation)
+      inFlightTransport = request
+      void request.finally(() => {
+        if (inFlightTransport === request) {
+          inFlightTransport = undefined
+          if (!activeToken) void drain()
+        }
+      })
+      return Promise.race([request, deadline.until])
+    }
 
     const settlePage = (historyGeneration: string | undefined, messages: Message[]) => {
       if (!messages.length) return
@@ -180,7 +192,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             ? { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
             : result
         )
-        const handleFailure = (result: Exclude<Result<unknown>, { ok: true }>): 'retry' | 'done' => {
+        const handleFailure = (result: Exclude<Result<unknown>, { ok: true }>, invalidated = false): 'retry' | 'done' => {
           if (result.kind === 'http' && result.error === 'snapshot_expired' && !restarted) return 'retry'
           if (result.kind === 'http' && (result.status === 403 || result.status === 404)) {
             missing(w)
@@ -189,7 +201,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             }
             return 'done'
           }
-          const rangeInvalidated = restarted || mode === 'initial' ||
+          const rangeInvalidated = invalidated || restarted || mode === 'initial' ||
             (result.kind === 'http' && (result.error === 'snapshot_expired' || result.error === 'history_generation_changed'))
           if (rangeInvalidated) {
             resetState()
@@ -237,11 +249,12 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             const res = await run(() => reads.timeline(target, q))
             if (activeToken !== token) return undefined
             if (res.ok) settlePage(res.data.history_generation, res.data.items.map(itemMessage))
+            if (activeToken !== token) return undefined
             return checkFreshness ? checked(res) : res
           }
           const probeFresh = async (): Promise<TimelinePage | undefined> => {
             const fresh = await readTimelinePage({ ...query, limit: 1 }, false)
-            if (!fresh) return undefined
+            if (activeToken !== token || !fresh) return undefined
             if (!fresh.ok) { failed = fresh; return undefined }
             if (overtaken(fresh.data.as_of_seq)) {
               failed = !restarted
@@ -254,13 +267,14 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
 
           if (mode === 'initial') {
             const fresh = await probeFresh()
+            if (activeToken !== token) return
             if (!fresh) { if (failed && handleFailure(failed) === 'retry') continue; return }
             watermark = fresh.as_of_seq
             const gen = fresh.history_generation
             const newerRes = await readTimelinePage({
               history_generation: gen, as_of_seq: watermark, after_position: target.createdSeq - 1, limit: PAGE_SIZE + 1,
             })
-            if (!newerRes) return
+            if (activeToken !== token || !newerRes) return
             if (!newerRes.ok) { if (handleFailure(newerRes) === 'retry') continue; return }
             if (!newerRes.data.items.some(item => item.kind === 'message' && containsHit(target, item.message))) {
               missing(w)
@@ -269,7 +283,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             const olderRes = await readTimelinePage({
               history_generation: gen, as_of_seq: watermark, before_position: target.createdSeq, limit: PAGE_SIZE,
             })
-            if (!olderRes) return
+            if (activeToken !== token || !olderRes) return
             if (!olderRes.ok) { if (handleFailure(olderRes) === 'retry') continue; return }
             olderTimeline = olderRes.data
             newerTimeline = newerRes.data
@@ -279,7 +293,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
           } else if (mode === 'older') {
             if (fixed) {
               const res = await readTimelinePage({ ...query, as_of_seq: w.asOfSeq, before_position: before, limit: PAGE_SIZE })
-              if (!res) return
+              if (activeToken !== token || !res) return
               if (!res.ok) { if (handleFailure(res) === 'retry') continue; return }
               olderTimeline = res.data
               watermark = olderTimeline.as_of_seq
@@ -287,18 +301,19 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
               hasOlderNext = olderTimeline.has_more
             } else {
               const fresh = await probeFresh()
+              if (activeToken !== token) return
               if (!fresh) { if (failed && handleFailure(failed) === 'retry') continue; return }
               watermark = fresh.as_of_seq
               const gen = fresh.history_generation
               const olderRes = await readTimelinePage({
                 history_generation: gen, as_of_seq: watermark, before_position: before, limit: PAGE_SIZE,
               })
-              if (!olderRes) return
+              if (activeToken !== token || !olderRes) return
               if (!olderRes.ok) { if (handleFailure(olderRes) === 'retry') continue; return }
               const retainedRes = await readTimelinePage({
                 history_generation: gen, as_of_seq: watermark, after_position: before - 1, limit: SEARCH_WINDOW_LIMIT,
               })
-              if (!retainedRes) return
+              if (activeToken !== token || !retainedRes) return
               if (!retainedRes.ok) { if (handleFailure(retainedRes) === 'retry') continue; return }
               const effectiveUpper = upperBoundForMain(view!, after)
               const retainedItems = effectiveUpper < Infinity
@@ -312,7 +327,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
           } else if (mode === 'newer') {
             if (fixed) {
               const res = await readTimelinePage({ ...query, as_of_seq: w.asOfSeq, after_position: after, limit: PAGE_SIZE })
-              if (!res) return
+              if (activeToken !== token || !res) return
               if (!res.ok) { if (handleFailure(res) === 'retry') continue; return }
               newerTimeline = res.data
               watermark = newerTimeline.as_of_seq
@@ -320,18 +335,19 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
               hasNewerNext = newerTimeline.has_more
             } else {
               const fresh = await probeFresh()
+              if (activeToken !== token) return
               if (!fresh) { if (failed && handleFailure(failed) === 'retry') continue; return }
               watermark = fresh.as_of_seq
               const gen = fresh.history_generation
               const newerRes = await readTimelinePage({
                 history_generation: gen, as_of_seq: watermark, after_position: after, limit: PAGE_SIZE,
               })
-              if (!newerRes) return
+              if (activeToken !== token || !newerRes) return
               if (!newerRes.ok) { if (handleFailure(newerRes) === 'retry') continue; return }
               const retainedRes = await readTimelinePage({
                 history_generation: gen, as_of_seq: watermark, before_position: after + 1, limit: SEARCH_WINDOW_LIMIT,
               })
-              if (!retainedRes) return
+              if (activeToken !== token || !retainedRes) return
               if (!retainedRes.ok) { if (handleFailure(retainedRes) === 'retry') continue; return }
               const retainedItems = w.hasOlder
                 ? retainedRes.data.items.filter(item => itemPosition(item) >= before)
@@ -345,14 +361,15 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             }
           } else {
             const fresh = await probeFresh()
+            if (activeToken !== token) return
             if (!fresh) { if (failed && handleFailure(failed) === 'retry') continue; return }
             watermark = fresh.as_of_seq
             const gen = fresh.history_generation
             const res = await readTimelinePage({
               history_generation: gen, as_of_seq: watermark, after_position: lower, limit: SEARCH_WINDOW_LIMIT + 1,
             })
-            if (!res) return
-            if (!res.ok) { if (handleFailure(res) === 'retry') continue; return }
+            if (activeToken !== token || !res) return
+            if (!res.ok) { if (handleFailure(res, true) === 'retry') continue; return }
             const effectiveUpper = upperBoundForMain(view!, after)
             pageItems = effectiveUpper < Infinity
               ? res.data.items.filter(item => itemPosition(item) <= effectiveUpper)
@@ -361,7 +378,12 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             hasNewerNext = res.data.has_more || pageItems.length < res.data.items.length
           }
 
-          const current = view!
+          if (activeToken !== token || !view) return
+          if (overtaken(watermark)) {
+            if (handleFailure({ ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }) === 'retry') continue
+            return
+          }
+          const current = view
           const state = channelFor(target)
           const applied = applyTimelineItems(
             state,
