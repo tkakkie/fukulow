@@ -17,7 +17,9 @@ const json = (path: string) => { const t = text(path); return t === null ? null 
 
 const runs: RunInput[] = q.jobs.map(job => ({
   name: job.name,
+  out: job.out,
   complete: json(join(job.out, 'status.json'))?.complete === true,
+  statusSession: json(join(job.out, 'status.json'))?.launchSession,
   sends: json(join(job.out, 'sends.json'))?.sends ?? [],
   metadata: json(join(job.out, 'metadata.json')) ?? { cpuSets: null, sends: { measuredSeconds: NaN } },
   hostBefore: json(join(q.chainDir, `${job.name}-host-before.json`)),

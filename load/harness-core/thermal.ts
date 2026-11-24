@@ -7,9 +7,10 @@ import { hwmon } from './host-record.ts';
 // Read-only sysfs, no root: the measured average frequency of every CPU (cpuinfo_avg_freq, not the
 // requested one), every hwmon temperature and fan. A missing reading is null, never an error.
 
-export type ThermalSample = { at: string; avgFreqKHz: (number | null)[]; temperaturesC: Record<string, number> | null; fansRpm: Record<string, number> | null };
+// launchSession: the launcher session that wrote the line (absent on a sample not yet written).
+export type ThermalSample = { at: string; avgFreqKHz: (number | null)[]; temperaturesC: Record<string, number> | null; fansRpm: Record<string, number> | null; launchSession?: string };
 // A tick that produced no sample. `at` is null when the line could not be placed in time (torn or unparseable).
-export type FailedSample = { at: string | null; error: string };
+export type FailedSample = { at: string | null; error: string; launchSession?: string };
 export type SampleLine = ThermalSample | FailedSample;
 export const isFailed = (s: SampleLine): s is FailedSample => !Array.isArray((s as ThermalSample).avgFreqKHz);
 
@@ -82,5 +83,6 @@ export const parseSamples = (jsonl: string): SampleLine[] => jsonl.split('\n').f
   let v: Record<string, unknown>;
   try { v = JSON.parse(l); } catch { return { at: null, error: 'unparseable line' }; }
   if (typeof v?.at !== 'string' || !Number.isFinite(Date.parse(v.at))) return { at: null, error: 'line without a time' };
-  return Array.isArray(v.avgFreqKHz) ? (v as unknown as ThermalSample) : { at: v.at, error: String(v.error ?? 'no frequencies') };
+  if (Array.isArray(v.avgFreqKHz)) return v as unknown as ThermalSample;
+  return { at: v.at, error: String(v.error ?? 'no frequencies'), ...(typeof v.launchSession === 'string' ? { launchSession: v.launchSession } : {}) };
 });

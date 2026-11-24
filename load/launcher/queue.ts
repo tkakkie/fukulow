@@ -51,6 +51,9 @@ function jobProblems(j: Record<string, unknown>, i: number): string[] {
   if (j.gate !== undefined && !isArgv(j.gate)) p.push(`${at}: gate must be a non-empty argv`);
   if (j.minFreeGiB !== undefined && !(typeof j.minFreeGiB === 'number' && j.minFreeGiB >= 0)) p.push(`${at}: minFreeGiB must be a number >= 0`);
   if (j.workloadLabel !== undefined && !(isString(j.workloadLabel) && /^[\w.\-/]+(=[\w.\-/]+)?$/.test(j.workloadLabel))) p.push(`${at}: workloadLabel must be key or key=value`);
+  // A job that uses Docker (it names its image) must name the label of its containers, so a stop can
+  // find and remove them; the release also fails closed on any container left (launcher.ts).
+  if (j.image !== undefined && j.workloadLabel === undefined) p.push(`${at}: a job with an image needs its workloadLabel`);
   const conf = j.confirmations as Record<string, unknown> | undefined;
   if (conf !== undefined && (typeof conf !== 'object' || conf === null || Object.keys(conf).length === 0
     || !Object.values(conf).every(c => isString((c as Record<string, unknown>)?.quote) && isString((c as Record<string, unknown>)?.date)))) {

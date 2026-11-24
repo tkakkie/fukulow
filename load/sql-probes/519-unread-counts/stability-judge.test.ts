@@ -10,26 +10,30 @@ const host = { platform: 'linux', logicalCpus: 4, boost: '0', policyBoost: { 0: 
 const arms = ['current', 'final', 'final', 'current', 'current', 'final'];
 const idle = () => ({ busy: false, otherContainers: [] as string[] });
 const airflow = { airflow: { quote: '蓋を開けて台に載せた', date: '2026-11-25' } };
-const session = (names = ['s1', 's2', 's3'], over: Partial<Session> = {}): Session => ({ queue: 'q796', outcome: 'done', hostBusy: 'released', workloadProblems: [],
-  finished: '2026-11-25T03:00:00Z', jobs: names.map(name => ({ name, exit: 0, confirmations: airflow })), ...over });
+const sid = 'L1';
+const session = (names = ['s1', 's2', 's3'], over: Partial<Session> = {}): Session => ({ id: sid, queue: 'q796', outcome: 'done', hostBusy: 'released', workloadProblems: [],
+  finished: '2026-11-25T03:00:00Z', jobs: names.map(name => ({ name, exit: 0, out: '/runs/' + name, workloadLabel: 'io.fukulow.probe=519-final', confirmations: airflow })), ...over });
+const jr = (r: RunInput) => judgeRun(r, sid);
 
-// Six 120 s measured windows ending 200 s apart, sampled every 5 s; freq(block) gives the server and client kHz.
+// Six 120 s pgbench intervals ending 200 s apart, each inside a slightly longer run wrapper, sampled
+// every 5 s; freq(block) gives the server and client kHz.
 function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; wal?: number; freq?: (block: number) => [number, number] } = {}): RunInput {
   const freq = opts.freq ?? (() => [2_000_000, 2_000_000]);
   const sends = arms.map((arm, i) => {
     const endMs = t0 + (i + 1) * 200_000;
     return { order: i + 1, arm, tps: (opts.tps ?? 10_000) + i, walBytesPerSend: opts.wal ?? 1787, crossed: false, errors: [] as string[],
-      measuredWindow: { startMs: endMs - 120_000, endMs, monoMs: 120_000 }, host: idle(), hostAfter: idle() };
+      measuredWindow: { startMs: endMs - 121_200, endMs: endMs + 300, monoMs: 121_500 }, pgbenchWindow: { startMs: endMs - 120_000, endMs }, host: idle(), hostAfter: idle() };
   });
   const samples: SampleLine[] = [];
   for (let s = 0; s <= 1300; s += 5) {
     const block = Math.min(6, Math.max(1, Math.ceil(s / 200)));
     const [server, client] = freq(block);
-    samples.push({ at: new Date(t0 + s * 1000).toISOString(), avgFreqKHz: [server, client, server, client], temperaturesC: { 'k10temp/Tctl': 70 }, fansRpm: {} });
+    samples.push({ at: new Date(t0 + s * 1000).toISOString(), avgFreqKHz: [server, client, server, client], temperaturesC: { 'k10temp/Tctl': 70 }, fansRpm: {}, launchSession: sid });
   }
-  return { name, complete: true, sends, metadata: { mode: 'diagnostic', sendsOnly: true, cpuSets: { server: [0, 2], client: [1, 3] }, sends: { measuredSeconds: 120 } },
-    hostBefore: host, cooldown: { ok: true, maxTctlC: 50, maxWaitSeconds: 1200 }, launchCheck: { ok: true, tctlC: 48, record: host },
-    samples, thermalSampleSeconds: 5, ...over };
+  return { name, out: '/runs/' + name, complete: true, statusSession: sid, sends,
+    metadata: { mode: 'diagnostic', sendsOnly: true, launchSession: sid, cpuSets: { server: [0, 2], client: [1, 3] }, sends: { measuredSeconds: 120 } },
+    hostBefore: { ...host, launchSession: sid }, cooldown: { ok: true, maxTctlC: 50, maxWaitSeconds: 1200, readings: [{ elapsedMs: 30_000, tctlC: 49 }], launchSession: sid },
+    launchCheck: { ok: true, tctlC: 48, record: host, launchSession: sid }, samples, thermalSampleSeconds: 5, ...over };
 }
 const three = () => [run('s1'), run('s2', {}, { tps: 10_200 }), run('s3', {}, { tps: 10_400 })];
 
@@ -53,46 +57,113 @@ test('a WAL/send spread over 2 % alone FAILs; exactly 2 % passes', () => {
 });
 
 test('a block more than 5 % below block 1 on either set is throttled: the run is INVALID and the check FAILs', () => {
-  const r = judgeRun(run('s1', {}, { freq: b => [b === 5 ? 1_890_000 : 2_000_000, 2_000_000] }));
+  const r = jr(run('s1', {}, { freq: b => [b === 5 ? 1_890_000 : 2_000_000, 2_000_000] }));
   assert.equal(r.valid, false);
   assert.match(r.invalid.join(), /block 5: throttled, server median 1890000 kHz < 95 % of block 1/);
-  assert.equal(judgeRun(run('s1', {}, { freq: b => [2_000_000, b === 6 ? 1_899_999 : 2_000_000] })).invalid.length, 1);
-  assert.equal(judgeRun(run('s1', {}, { freq: b => [b === 3 ? 1_900_000 : 2_000_000, 2_000_000] })).valid, true); // exactly 5 % is not throttled
+  assert.equal(jr(run('s1', {}, { freq: b => [2_000_000, b === 6 ? 1_899_999 : 2_000_000] })).invalid.length, 1);
+  assert.equal(jr(run('s1', {}, { freq: b => [b === 3 ? 1_900_000 : 2_000_000, 2_000_000] })).valid, true); // exactly 5 % is not throttled
   assert.equal(judge([run('s1', {}, { freq: b => [b > 3 ? 1_000_000 : 2_000_000, 2_000_000] }), run('s2'), run('s3')], session(), 'q796').result, 'FAIL');
 });
 
-test('the block is judged on its recorded pgbench window, not on its end time', () => {
-  // 13 of the 25 ticks in block 5's window at 1.78 GHz: throttled. The judge reads the recorded
-  // window only; a block without one is INVALID instead of judged on a window derived from its end.
-  const slow = (r: RunInput) => { for (const s of r.samples as { at: string; avgFreqKHz: number[] }[]) {
-    const t = Date.parse(s.at) - t0; if (t >= 880_000 && t < 945_000) s.avgFreqKHz = [1_780_000, 2_000_000, 1_780_000, 2_000_000];
-  } return r; };
-  assert.match(judgeRun(slow(run('s1'))).invalid.join(), /block 5: throttled, server median 1780000/);
-  const noWindow = run('s1');
-  delete noWindow.sends[4].measuredWindow;
-  assert.match(judgeRun(slow(noWindow)).invalid.join(), /block 5: no measured window/);
-  const stepped = run('s1');
-  stepped.sends[1].measuredWindow = { ...stepped.sends[1].measuredWindow!, monoMs: 118_000 };
-  assert.match(judgeRun(stepped).invalid.join(), /block 2: wall clock stepped .*block 2: measured window 118000 ms is not 120 s/);
-  const long = run('s1');
-  long.sends[0].measuredWindow = { startMs: t0 + 60_000, endMs: t0 + 200_000, monoMs: 140_000 };
-  assert.match(judgeRun(long).invalid.join(), /block 1: measured window 140000 ms is not 120 s \(\+10 s\)/);
+test('the block is judged on pgbench\'s own interval, not on the run wrapper around it', () => {
+  // Block 5's run wrapper starts at 879.8 s and includes a 2.00 GHz start-up tick at 880 s; pgbench's
+  // own interval (881-1000 s) has 12 ticks at 1.78 GHz and 12 at 2.00 GHz: median 1.89 GHz, throttled.
+  // With the wrapper as the window the start-up tick would lift the median to 2.00 GHz.
+  const r = run('s1');
+  for (const s of r.samples as { at: string; avgFreqKHz: number[] }[]) {
+    const t = Date.parse(s.at) - t0;
+    if (t >= 885_000 && t <= 940_000) s.avgFreqKHz = [1_780_000, 2_000_000, 1_780_000, 2_000_000];
+  }
+  r.sends[4].measuredWindow = { startMs: t0 + 879_800, endMs: t0 + 1_001_000, monoMs: 121_200 };
+  r.sends[4].pgbenchWindow = { startMs: t0 + 881_000, endMs: t0 + 1_000_000 };
+  const j = jr(r);
+  assert.deepEqual(j.invalid, ['block 5: throttled, server median 1890000 kHz < 95 % of block 1 (2000000 kHz)']);
+  assert.equal(j.blocks[4].thermal.samples, 24);
+  // A healthy run with 11 s of Docker and connection overhead around the 120 s is not rejected.
+  const slowStart = run('s1');
+  slowStart.sends[0].measuredWindow = { startMs: t0 + 69_000, endMs: t0 + 200_500, monoMs: 131_500 };
+  assert.deepEqual(jr(slowStart).invalid, []);
+});
+
+test('a missing, cut, misplaced or clock-stepped pgbench window makes the run INVALID', () => {
+  const cases: [(r: RunInput) => void, RegExp][] = [
+    [r => { delete r.sends[4].pgbenchWindow; }, /^block 5: no pgbench window$/],
+    [r => { r.sends[4].pgbenchWindow = null; }, /^block 5: no pgbench window$/],
+    [r => { delete r.sends[4].measuredWindow; }, /^block 5: no measured window$/],
+    [r => { r.sends[1].measuredWindow = { ...r.sends[1].measuredWindow!, monoMs: 120_000 }; }, /^block 2: wall clock stepped \(121500 ms wall, 120000 ms monotonic\)$/],
+    [r => { r.sends[2].pgbenchWindow = { startMs: t0 + 400_000, endMs: t0 + 600_000 - 0 }; r.sends[2].measuredWindow = { startMs: t0 + 480_000, endMs: t0 + 601_000, monoMs: 121_000 }; }, /^block 3: pgbench window outside the measured run$/],
+    [r => { r.sends[3].pgbenchWindow = { startMs: t0 + 681_000 + 1, endMs: t0 + 800_000 }; }, /^block 4: pgbench ran 118999 ms, not 120 s$/],
+  ];
+  for (const [mutate, pattern] of cases) {
+    const r = run('s1');
+    mutate(r);
+    const j = jr(r);
+    assert.equal(j.valid, false, String(pattern));
+    assert.match(j.invalid[0], pattern);
+  }
+  const exact = run('s1');
+  exact.sends[3].pgbenchWindow = { startMs: t0 + 681_000, endMs: t0 + 800_000 }; // 1 s short: pgbench's start-up allowance
+  assert.deepEqual(jr(exact).invalid, []);
+});
+
+test('a late tick is not a missed tick; a missed one is', () => {
+  const late = run('s1');
+  (late.samples[20] as { at: string }).at = new Date(t0 + 102_400).toISOString(); // 2.4 s late: gaps 7.4 s and 2.6 s
+  assert.deepEqual(jr(late).invalid, []);
+  const later = run('s1');
+  (later.samples[20] as { at: string }).at = new Date(t0 + 102_600).toISOString();
+  assert.deepEqual(jr(later).invalid, ['block 1: missing 5 s thermal tick (gap 7600 ms)']);
+});
+
+test('every artefact must carry the judged launcher session id', () => {
+  const other = 'L0';
+  const cases: [(r: RunInput) => void, RegExp][] = [
+    [r => { r.metadata.launchSession = other; }, /^metadata\.json is not from launcher session L1$/],
+    [r => { r.statusSession = undefined; }, /^status\.json is not from launcher session L1$/],
+    [r => { r.hostBefore = { ...host, launchSession: other }; }, /^host-before is not from launcher session L1$/],
+    [r => { r.cooldown = { ...r.cooldown!, launchSession: other }; }, /^cool-down is not from launcher session L1$/],
+    [r => { r.launchCheck = { ...r.launchCheck!, launchSession: undefined }; }, /^launch check is not from launcher session L1$/],
+    // An earlier session's samples left in the same file (appended to) are mixed ids.
+    [r => { r.samples.unshift({ at: new Date(t0 - 5_000).toISOString(), avgFreqKHz: [1, 1, 1, 1], temperaturesC: null, fansRpm: null, launchSession: other }); }, /^1 thermal lines not from launcher session L1$/],
+    [r => { r.samples[3] = { at: r.samples[3].at, error: 'EIO' }; }, /^1 thermal lines not from launcher session L1$/],
+  ];
+  for (const [mutate, pattern] of cases) {
+    const r = run('s1');
+    mutate(r);
+    const j = jr(r);
+    assert.equal(j.valid, false, String(pattern));
+    assert.match(j.invalid[0], pattern);
+    assert.equal(judge([r, run('s2'), run('s3')], session(), 'q796').result, 'FAIL');
+  }
+  // No session id at all: nothing binds, every run is INVALID and the session is refused.
+  const v = judge(three(), session(undefined, { id: '' }), 'q796');
+  assert.equal(v.result, 'FAIL');
+  assert.match(v.reasons.join('\n'), /launcher session has no id[\s\S]*s1 INVALID/);
+  assert.match(v.runs[0].invalid.join(), /metadata\.json is not from launcher session \(none\)/);
+});
+
+test('a cool-down record whose accepted reading is late or hot makes the run INVALID', () => {
+  for (const readings of [[{ elapsedMs: 1_200_001, tctlC: 49 }], [{ elapsedMs: 1_000, tctlC: 51 }], []]) {
+    const r = run('s1');
+    r.cooldown = { ...r.cooldown!, readings };
+    assert.match(jr(r).invalid.join(), /the cool-down's accepted reading is not <= 50 °C within 1200 s/, JSON.stringify(readings));
+  }
 });
 
 test('a failed, missing or torn thermal tick in a block makes the run INVALID (no allowance)', () => {
   const failedTick = run('s1');
   failedTick.samples[20] = { at: failedTick.samples[20].at, error: 'EIO' }; // 100 s, inside block 1
-  assert.match(judgeRun(failedTick).invalid.join(), /block 1: 1 failed thermal samples.*block 1: unreadable CPU frequency/);
+  assert.match(jr(failedTick).invalid.join(), /block 1: 1 failed thermal samples.*block 1: unreadable CPU frequency/);
   const missing = run('s1');
   missing.samples.splice(20, 1);
-  const r = judgeRun(missing);
+  const r = jr(missing);
   assert.deepEqual(r.invalid, ['block 1: missing 5 s thermal tick (gap 10000 ms)']);
   const torn = run('s1');
   torn.samples.push({ at: null, error: 'unparseable line' });
-  assert.match(judgeRun(torn).invalid.join(), /1 thermal lines without a time/);
+  assert.match(jr(torn).invalid.join(), /1 thermal lines without a time/);
   const unreadable = run('s1');
   unreadable.samples[30] = { ...unreadable.samples[30], avgFreqKHz: [null, 1, 1, 1] } as SampleLine;
-  assert.match(judgeRun(unreadable).invalid.join(), /unreadable CPU frequency/);
+  assert.match(jr(unreadable).invalid.join(), /unreadable CPU frequency/);
 });
 
 test('a missing lever, cool-down, launch check, procedure or thermal record makes the run INVALID', () => {
@@ -115,7 +186,7 @@ test('a missing lever, cool-down, launch check, procedure or thermal record make
     [{ complete: false }, /did not complete/],
   ];
   for (const [over, pattern] of cases) {
-    const r = judgeRun(run('s1', over));
+    const r = jr(run('s1', over));
     assert.equal(r.valid, false, String(pattern));
     assert.match(r.invalid.join('\n'), pattern);
   }
@@ -132,7 +203,7 @@ test('each host observation must be present and idle, before and after every blo
   for (const [mutate, pattern] of cases) {
     const r = run('s1');
     mutate(r);
-    const j = judgeRun(r);
+    const j = jr(r);
     assert.deepEqual([j.valid, j.invalid.length], [false, 1], String(pattern));
     assert.match(j.invalid[0], pattern);
   }
@@ -140,7 +211,8 @@ test('each host observation must be present and idle, before and after every blo
 
 test('the verdict needs one completed session that ran exactly the three jobs, released HOST-BUSY and recorded L3', () => {
   const names = ['s1', 's2', 's3'];
-  assert.deepEqual(sessionProblems(session(), 'q796', names), []);
+  const runs = names.map(name => ({ name, out: '/runs/' + name }));
+  assert.deepEqual(sessionProblems(session(), 'q796', runs), []);
   const cases: [Session | null, RegExp][] = [
     [null, /no launcher session record/],
     [session(names, { queue: 'other' }), /session is for queue other/],
@@ -150,6 +222,11 @@ test('the verdict needs one completed session that ran exactly the three jobs, r
     [{ ...session(), jobs: session().jobs.map((j, i) => (i === 1 ? { ...j, exit: 1 } : j)) }, /s2 exited 1/],
     [{ ...session(), jobs: session().jobs.map((j, i) => (i === 2 ? { ...j, confirmations: undefined } : j)) }, /s3: no L3 airflow confirmation/],
     [{ ...session(), jobs: session().jobs.map(j => ({ ...j, confirmations: { airflow: { quote: ' ', date: '2026-11-25' } } })) }, /s1: no L3 airflow confirmation/],
+    // An output from another session's queue, pointed at by the queue given to the judge.
+    [{ ...session(), jobs: session().jobs.map((j, i) => (i === 0 ? { ...j, out: '/runs/old-s1' } : j)) }, /s1: session output \/runs\/old-s1 is not the judged \/runs\/s1/],
+    // A missing or mistyped workload label: the cleanup could not have found the container by it.
+    [{ ...session(), jobs: session().jobs.map((j, i) => (i === 1 ? { ...j, workloadLabel: undefined } : j)) }, /s2: workloadLabel \(none\) is not io\.fukulow\.probe=519-final/],
+    [{ ...session(), jobs: session().jobs.map((j, i) => (i === 2 ? { ...j, workloadLabel: 'io.fukulow.probe=519' } : j)) }, /s3: workloadLabel io\.fukulow\.probe=519 is not/],
   ];
   for (const [s, pattern] of cases) {
     const v = judge(three(), s, 'q796');
@@ -161,10 +238,10 @@ test('the verdict needs one completed session that ran exactly the three jobs, r
 test('block problems and a wrong run count FAIL the check', () => {
   const bad = run('s1');
   bad.sends[2] = { ...bad.sends[2], crossed: true, errors: ['latency log'] };
-  const r = judgeRun(bad);
+  const r = jr(bad);
   assert.match(r.invalid.join(), /block 3: latency log.*block 3: crossed/);
   assert.match(judge([run('s1'), run('s2')], session(['s1', 's2']), 'q796').reasons.join(), /2 runs, not 3/);
   const five = run('s1');
   five.sends.pop();
-  assert.match(judgeRun(five).invalid.join(), /5 blocks, not 6/);
+  assert.match(jr(five).invalid.join(), /5 blocks, not 6/);
 });

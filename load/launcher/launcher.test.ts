@@ -24,11 +24,14 @@ type World = {
   // Workload fakes: the process group's liveness, the signals sent to it, `docker ps --filter label=`
   // answers (the last repeats) and the removed containers.
   alive?: (signals: string[]) => boolean; signals: string[]; labelled: string[]; removed: string[][];
+  // The env each spawn got; how far the monotonic clock is from the wall clock (a step moves the wall only);
+  // and, when set, a child whose exit is only observed after the given signal (never, for 'none').
+  envs: (Record<string, string> | undefined)[]; monoShift: number; exitsOn?: 'SIGKILL' | 'none';
 };
 function world(over: Partial<World> = {}): World {
   return { files: new Map(), containers: '', ps: '1 /sbin/init\n', load: [0.5], violations: [], exits: [0, 0], head: 'abc1234def\n', dirty: '',
     node: '26.13.1\n', free: 100 * GiB, spawned: [], captured: [], stoppedLogs: 0, kills: 0, busyAtExit: [],
-    tctl: [40], clock: Date.parse('2026-11-24T00:00:00Z'), everyMs: [], samplerStops: 0, signals: [], labelled: [''], removed: [], ...over };
+    tctl: [40], clock: Date.parse('2026-11-24T00:00:00Z'), everyMs: [], samplerStops: 0, signals: [], labelled: [''], removed: [], envs: [], monoShift: 0, ...over };
 }
 function deps(w: World, platform?: Platform): Deps {
   const p: Platform = platform ?? { name: 'fake', inhibit: a => ['inhibit', ...a], violations: () => w.violations,
@@ -52,11 +55,15 @@ function deps(w: World, platform?: Platform): Deps {
       if (k.startsWith('docker rm -f')) { w.removed.push(argv.slice(3)); return { status: 0, stdout: '' }; }
       return { status: null, stdout: '' };
     },
-    spawn: argv => {
+    spawn: (argv, opts) => {
       w.spawned.push(argv);
+      w.envs.push(opts.env);
       const code = w.exits.shift() ?? 0;
-      const child = { done: Promise.resolve().then(() => { w.busyAtExit.push(w.files.has('/runs/HOST-BUSY')); return code; }),
-        kill: (signal = 'SIGTERM') => { w.kills++; w.signals.push(signal); }, alive: () => w.alive?.(w.signals) ?? false };
+      let exited = () => {};
+      const signalled = new Promise<void>(resolve => { exited = resolve; });
+      const done = (w.exitsOn ? signalled : Promise.resolve()).then(() => { w.busyAtExit.push(w.files.has('/runs/HOST-BUSY')); return code; });
+      const child = { done,
+        kill: (signal = 'SIGTERM') => { w.kills++; w.signals.push(signal); if (signal === w.exitsOn) exited(); }, alive: () => w.alive?.(w.signals) ?? false };
       const isJob = argv[0] === 'inhibit';
       if ((w.signal?.at === 'job' && isJob) || (w.signal?.at === 'gate' && !isJob)) queueMicrotask(() => w.signal?.handler?.('SIGTERM'));
       return child;
@@ -68,7 +75,7 @@ function deps(w: World, platform?: Platform): Deps {
     append: (path, text) => { w.files.set(path, (w.files.get(path) ?? '') + text); },
     write: (path, text) => { w.files.set(path, text); },
     freeBytes: () => w.free, dockerFreeBytes: () => (w.dockerFree === undefined ? w.free : w.dockerFree),
-    nodeVersion: 'v26.13.1', pid: 42, now: () => new Date(w.clock),
+    nodeVersion: 'v26.13.1', pid: 42, sessionId: () => 'sess-1', now: () => new Date(w.clock), mono: () => w.clock + w.monoShift,
     sleep: async ms => { w.clock += ms; if (w.signal?.at === 'wait') w.signal.handler?.('SIGINT'); },
     pause: async ms => { w.clock += ms; },
     every: (ms, fn) => { w.everyMs.push(ms); fn(); return () => { w.samplerStops++; }; },
@@ -119,8 +126,8 @@ test('each preflight STOP ends the queue before launch and releases HOST-BUSY', 
     [{ node: '26.12.0\n' }, {}, /node v26\.13\.1 is not the pinned 26\.12\.0/],
     [{ violations: ['not on AC power'] }, {}, /not on AC power/],
     [{ free: 10 * GiB }, {}, /host free 10\.0 GiB < 40 GiB/],
-    [{ free: null }, { image: 'postgres:18.6' }, /host free unreadable.*Docker free unreadable/],
-    [{ dockerFree: 5 * GiB }, { image: 'postgres:18.6' }, /Docker free 5\.0 GiB < 40 GiB/],
+    [{ free: null }, { image: 'postgres:18.6', workloadLabel: 'l' }, /host free unreadable.*Docker free unreadable/],
+    [{ dockerFree: 5 * GiB }, { image: 'postgres:18.6', workloadLabel: 'l' }, /Docker free 5\.0 GiB < 40 GiB/],
     // A worker that starts after the idle check (the first ps) is caught by the preflight (the second).
     [{ psLater: '1 /sbin/init\n77 cargo test --all\n' }, {}, /workers running: 77 cargo test/],
   ];
@@ -400,4 +407,125 @@ test('maintainer confirmations go to the chain log and the session record', asyn
   await launch(queue([job('a', { confirmations })]), deps(w));
   assert.match(chain(w), /a: confirmed airflow: "蓋を開けて台に載せた" \(2026-11-25\)/);
   assert.deepEqual(JSON.parse(w.files.get('/runs/chain/session.json') ?? '{}').jobs[0].confirmations, confirmations);
+});
+
+const files = (w: World, suffix: string) => [...w.files.entries()].filter(([k]) => k.endsWith(suffix)).map(([, v]) => v);
+
+test('every artefact, the HOST-BUSY marker and each spawn carry the one launch session id', async () => {
+  const w = world({ tctl: [45], record: { boost: '0' } as unknown as HostRecord });
+  const label = { workloadLabel: 'io.fukulow.probe=519-final', requireHost: { boost: '0' }, ...cooling, thermalSampleSeconds: 5, gate: ['node', 'gate.ts'] };
+  const d = deps(w);
+  let marker = '';
+  const claim = d.claim;
+  d.claim = (path, text) => { marker = text; return claim(path, text); };
+  assert.equal((await launch(queue([job('a', label)]), d)).outcome, 'done');
+  assert.match(marker, /session sess-1/);
+  assert.deepEqual(w.envs.map(e => e?.FUKULOW_LAUNCH_SESSION), ['sess-1', 'sess-1']); // gate and job
+  for (const f of ['a-cooldown.json', 'a-host-before.json', 'a-launch-check.json', 'a-host-after.json']) {
+    assert.equal(JSON.parse(w.files.get('/runs/chain/' + f) ?? '{}').launchSession, 'sess-1', f);
+  }
+  const lines = files(w, '-thermal.jsonl')[0].trim().split('\n').map(l => JSON.parse(l));
+  assert.deepEqual(lines.map(l => l.launchSession), ['sess-1', 'sess-1']);
+  const session = JSON.parse(w.files.get('/runs/chain/session.json') ?? '{}');
+  assert.deepEqual([session.id, session.jobs[0].out, session.jobs[0].workloadLabel], ['sess-1', '/runs/out-a', 'io.fukulow.probe=519-final']);
+});
+
+test('chain records an earlier session left for the job are a STOP, never appended to', async () => {
+  for (const f of ['a-thermal.jsonl', 'a-cooldown.json', 'a-host-before.json']) {
+    const w = world();
+    w.files.set('/runs/chain/' + f, '{"launchSession":"old"}\n');
+    const r = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), deps(w));
+    assert.match(r.reason ?? '', new RegExp(`a: chain records from another session exist: /runs/chain/${f}`));
+    assert.deepEqual([w.spawned.length, w.files.get('/runs/chain/' + f), w.files.has('/runs/HOST-BUSY')], [0, '{"launchSession":"old"}\n', false]);
+  }
+});
+
+test('the cool-down deadline is monotonic, taken after the Tctl read: a slow read that ends after 1200 s fails', async () => {
+  const w = world();
+  const d = deps(w);
+  const start = w.clock;
+  // Each read takes 2 s; a read that starts at 1199 s (cool from 1195 s) ends at 1201 s.
+  d.platform = { ...d.platform, thermal: now => { w.clock += 2000; return { at: now.toISOString(), avgFreqKHz: [1], temperaturesC: { 'k10temp/Tctl': now.getTime() - start >= 1_195_000 ? 49 : 51 }, fansRpm: {} }; } };
+  const r = await launch(queue([job('a', cooling)]), d);
+  assert.match(r.reason ?? '', /a cool-down: no reading <= 50 °C within 1200 s \(last 49 after 1201 s\)/);
+  const record = JSON.parse(w.files.get('/runs/chain/a-cooldown.json') ?? '{}');
+  assert.deepEqual([record.ok, record.readings.at(-1).elapsedMs, w.spawned.length], [false, 1_201_000, 0]);
+});
+
+test('a wall-clock step during the cool-down is a STOP, even with a cool reading', async () => {
+  for (const stepMs of [-60_000, 5_000]) {
+    const w = world({ tctl: [70, 45] });
+    const d = deps(w);
+    let n = 0;
+    const thermal = d.platform.thermal;
+    d.platform = { ...d.platform, thermal: now => { if (++n === 2) { w.clock += stepMs; w.monoShift -= stepMs; } return thermal(now); } };
+    const r = await launch(queue([job('a', cooling)]), d);
+    assert.match(r.reason ?? '', new RegExp(`a cool-down: wall clock stepped ${stepMs} ms against the monotonic clock`));
+    assert.deepEqual([w.spawned.length, w.files.has('/runs/HOST-BUSY')], [0, false]);
+  }
+  // A drift within the tolerance is not a step.
+  const w = world({ tctl: [70, 45] });
+  const d = deps(w);
+  d.sleep = async ms => { w.clock += ms; w.monoShift -= 900; };
+  assert.equal((await launch(queue([job('a', cooling)]), d)).outcome, 'done');
+});
+
+test('a failed first sampler read after a passed preflight blocks the spawn', async () => {
+  const cases: [(n: number) => 'throw' | 'unreadable' | 'none' | 'ok', RegExp][] = [
+    [n => (n === 2 ? 'throw' : 'ok'), /a first thermal sample: thermal sample failed: Error: EIO; job not started/],
+    [n => (n === 2 ? 'unreadable' : 'ok'), /a first thermal sample: CPU frequency unreadable on CPU 0; job not started/],
+    [n => (n === 2 ? 'none' : 'ok'), /a first thermal sample: no thermal readings on this platform; job not started/],
+  ];
+  for (const [mode, pattern] of cases) {
+    const w = world();
+    const d = deps(w);
+    let n = 0;
+    d.platform = { ...d.platform, thermal: now => {
+      const m = mode(++n);
+      if (m === 'throw') throw new Error('EIO');
+      if (m === 'none') return null;
+      return { at: now.toISOString(), avgFreqKHz: [m === 'unreadable' ? null : 3_000_000], temperaturesC: {}, fansRpm: {} };
+    } };
+    const r = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), d);
+    assert.match(r.reason ?? '', pattern);
+    assert.deepEqual([w.spawned.length, w.everyMs, w.files.has('/runs/HOST-BUSY')], [0, [], false]);
+    assert.equal((files(w, '-thermal.jsonl')[0] ?? '').trim().split('\n').length, 1); // the failed sample is kept
+  }
+  const w = world();
+  const d = deps(w);
+  const append = d.append;
+  d.append = (path, text) => { if (path.endsWith('-thermal.jsonl')) throw new Error('ENOSPC'); append(path, text); };
+  assert.match((await launch(queue([job('a', { thermalSampleSeconds: 5 })]), d)).reason ?? '', /a first thermal sample: thermal sample write failed: Error: ENOSPC/);
+  assert.equal(w.spawned.length, 0);
+});
+
+test('on a signal the stop escalates to SIGKILL on its own timer, even while the child has not exited', { timeout: 10_000 }, async () => {
+  // The child exits only on SIGKILL; it stays alive until then.
+  const w = world({ signal: { at: 'job' }, exitsOn: 'SIGKILL', exits: [137], alive: s => !s.includes('SIGKILL') });
+  const r = await launch(queue([job('a'), job('b')]), deps(w));
+  assert.match(r.reason ?? '', /SIGTERM during a/);
+  assert.deepEqual([w.signals, w.spawned.length, w.busyAtExit, w.files.has('/runs/HOST-BUSY')], [['SIGTERM', 'SIGKILL'], 1, [true], false]);
+  assert.match(chain(w), /process group alive 30 s after SIGTERM; SIGKILL/);
+  // A child that survives SIGKILL and never reports an exit: the launcher still ends, HOST-BUSY kept.
+  const stuck = world({ signal: { at: 'job' }, exitsOn: 'none', alive: () => true });
+  const s = await launch(queue([job('a')]), deps(stuck));
+  assert.equal(s.outcome, 'stop');
+  assert.deepEqual([s.jobs, stuck.files.has('/runs/HOST-BUSY')], [[{ name: 'a', exit: null }], true]);
+  assert.equal(JSON.parse(stuck.files.get('/runs/chain/session.json') ?? '{}').hostBusy, 'kept');
+});
+
+test('a container left without a matching workloadLabel keeps HOST-BUSY; a Docker job without a label is refused', async () => {
+  for (const extra of [{}, { workloadLabel: 'io.fukulow.probe=519' }]) {
+    const w = world();
+    const d = deps(w);
+    const spawn = d.spawn;
+    d.spawn = (argv, opts) => { w.containers = 'c1\n'; return spawn(argv, opts); }; // the job starts a container that outlives it
+    const r = await launch(queue([job('a', extra), job('b')]), d);
+    assert.match(r.reason ?? '', /HOST-BUSY kept: containers still running \(1\) outside any workloadLabel/, JSON.stringify(extra));
+    assert.match(chain(w), /STOP: a workload still running: containers still running \(1\) outside any workloadLabel; the queue ends/);
+    assert.deepEqual([w.spawned.length, w.files.has('/runs/HOST-BUSY')], [1, true]);
+    assert.match(JSON.parse(w.files.get('/runs/chain/session.json') ?? '{}').workloadProblems.join(), /outside any workloadLabel/);
+  }
+  assert.throws(() => queue([job('a', { image: 'postgres:18.6' })]), /a job with an image needs its workloadLabel/);
+  assert.equal(queue([job('a', { image: 'postgres:18.6', workloadLabel: 'io.fukulow.probe=519-final' })]).jobs.length, 1);
 });

@@ -1,5 +1,7 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs, promisify } from 'node:util';
 import { dockerFreeBytes, freeBytes } from './harness-core/host.ts';
@@ -85,7 +87,7 @@ const result = await launch(queue, {
   platform: currentPlatform(), exec, spawn: run, captureLogs,
   exists: existsSync, claim, remove: p => rmSync(p, { force: true }), append: appendFileSync, write: writeFileSync,
   freeBytes: p => safe(() => freeBytes(exec(['df', '-Pk', p]).stdout)), dockerFreeBytes: image => safe(() => dockerFreeBytes(image)),
-  nodeVersion: process.version, pid: process.pid, now: () => new Date(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
+  nodeVersion: process.version, pid: process.pid, sessionId: randomUUID, now: () => new Date(), mono: () => performance.now(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
   pause: ms => sleep(ms),
   every: (ms, fn) => { const t = setInterval(fn, ms); return () => clearInterval(t); },
   onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => { signalled.abort(); handler(s); }); },

@@ -1,5 +1,6 @@
 import { requirementViolations, type HostRecord } from '../../harness-core/host-record.ts';
 import { blockThermal, median, type BlockThermal, type MeasuredWindow, type SampleLine } from '../../harness-core/thermal.ts';
+import type { PgbenchWindow } from './probe.ts';
 import type { Session } from '../../launcher/launcher.ts';
 
 // Second #796 stability check (pre-registered on #796 and approved 2026-11-24, before any run):
@@ -14,23 +15,33 @@ export const sampleSeconds = 5;
 export const runsRequired = 3;
 export const blocksPerRun = 6;
 export const limits = { tpsSpread: 0.05, walSpread: 0.02, throttle: 0.05 };
-// Timer jitter allowed on a 5 s tick; a missed tick (a 10 s gap) is never allowed.
-export const tickToleranceMs = 1000;
-// A measured window whose wall length differs from its monotonic length by more is a clock step.
+// Lateness allowed on a 5 s tick: half a period. A missed tick leaves a gap of about 10 s, which this
+// always catches, while a tick delayed by anything under 2.5 s (a slow sysfs or ACPI read, a busy
+// event loop) is not mistaken for one.
+export const tickToleranceMs = 2500;
+// A measured run whose wall length differs from its monotonic length by more is a clock step. A
+// synchronised clock is slewed by at most 500 ppm (adjtimex), 65 ms over a 130 s run, so only a step,
+// or a clock off by a second or more, reaches it.
 export const clockStepToleranceMs = 1000;
-// pgbench start-up (docker exec, connections) inside the window; a longer window is not the measurement.
-export const windowSlackSeconds = 10;
+// pgbench -T counts from its benchmark start, and its first transaction starts within milliseconds of
+// it (local connections), so its own interval is never shorter than -T by this much unless it was cut.
+export const pgbenchShortfallMs = 1000;
+// The workload label final.ts puts on its container; the session must have used it for the cleanup.
+export const workloadLabel = 'io.fukulow.probe=519-final';
 
 type Observation = { busy?: unknown; otherContainers?: unknown };
 type Send = {
   order: number; arm: string; tps: number; walBytesPerSend: number; crossed: boolean; errors?: string[];
-  measuredWindow?: MeasuredWindow; host?: Observation | null; hostAfter?: Observation | null;
+  measuredWindow?: MeasuredWindow; pgbenchWindow?: PgbenchWindow | null; host?: Observation | null; hostAfter?: Observation | null;
 };
-export type LaunchCheck = { ok?: boolean; tctlC?: number | null; record?: HostRecord } | null;
+// Every launcher record carries the id of the launcher session that wrote it (launchSession).
+type Bound = { launchSession?: unknown };
+export type LaunchCheck = (Bound & { ok?: boolean; tctlC?: number | null; record?: HostRecord }) | null;
+export type Cooldown = (Bound & { ok?: boolean; maxTctlC?: number; maxWaitSeconds?: number; readings?: { elapsedMs?: number; tctlC?: number | null }[] }) | null;
 export type RunInput = {
-  name: string; complete: boolean; sends: Send[];
-  metadata: { mode?: string; sendsOnly?: boolean; cpuSets: { server: number[]; client: number[] } | null; sends: { measuredSeconds: number } };
-  hostBefore: HostRecord | null; cooldown: { ok?: boolean; maxTctlC?: number; maxWaitSeconds?: number } | null; launchCheck: LaunchCheck;
+  name: string; out: string; complete: boolean; statusSession: unknown; sends: Send[];
+  metadata: { mode?: string; sendsOnly?: boolean; launchSession?: unknown; cpuSets: { server: number[]; client: number[] } | null; sends: { measuredSeconds: number } };
+  hostBefore: (HostRecord & Bound) | null; cooldown: Cooldown; launchCheck: LaunchCheck;
   samples: SampleLine[]; thermalSampleSeconds: number | undefined;
 };
 
@@ -43,18 +54,36 @@ const observationProblems = (o: Observation | null | undefined, when: string) =>
   return p;
 };
 
-function windowProblems(w: MeasuredWindow | undefined, measuredSeconds: number): string[] {
-  if (!w || ![w.startMs, w.endMs, w.monoMs].every(Number.isFinite)) return ['no measured window'];
+// The thermal window is pgbench's own interval (from its log). The wrapper around the run exposes a
+// clock step and must contain that interval, which ties pgbench's stamps to this run.
+function windowProblems(s: Send, measuredSeconds: number): string[] {
+  const w = s.measuredWindow;
+  const g = s.pgbenchWindow;
   const p: string[] = [];
-  if (Math.abs(w.endMs - w.startMs - w.monoMs) > clockStepToleranceMs) p.push(`wall clock stepped (${w.endMs - w.startMs} ms wall, ${Math.round(w.monoMs)} ms monotonic)`);
-  if (w.monoMs < measuredSeconds * 1000 || w.monoMs > (measuredSeconds + windowSlackSeconds) * 1000) p.push(`measured window ${Math.round(w.monoMs)} ms is not ${measuredSeconds} s (+${windowSlackSeconds} s)`);
+  if (!w || ![w.startMs, w.endMs, w.monoMs].every(Number.isFinite)) p.push('no measured window');
+  else if (Math.abs(w.endMs - w.startMs - w.monoMs) > clockStepToleranceMs) p.push(`wall clock stepped (${w.endMs - w.startMs} ms wall, ${Math.round(w.monoMs)} ms monotonic)`);
+  if (!g || ![g.startMs, g.endMs].every(Number.isFinite)) return [...p, 'no pgbench window'];
+  if (w && (g.startMs < w.startMs || g.endMs > w.endMs)) p.push('pgbench window outside the measured run');
+  if (g.endMs - g.startMs < measuredSeconds * 1000 - pgbenchShortfallMs) p.push(`pgbench ran ${Math.round(g.endMs - g.startMs)} ms, not ${measuredSeconds} s`);
+  return p;
+}
+
+// Every artefact must come from the one session being judged; a missing or other id is INVALID.
+function bindingProblems(r: RunInput, id: string | null): string[] {
+  const p: string[] = [];
+  const own = (v: unknown) => id !== null && v === id;
+  const named: [string, unknown][] = [['metadata.json', r.metadata.launchSession], ['status.json', r.statusSession], ['host-before', r.hostBefore?.launchSession],
+    ['cool-down', r.cooldown?.launchSession], ['launch check', r.launchCheck?.launchSession]];
+  for (const [what, v] of named) if (!own(v)) p.push(`${what} is not from launcher session ${id ?? '(none)'}`);
+  const foreign = r.samples.filter(s => !own(s.launchSession)).length;
+  if (foreign > 0) p.push(`${foreign} thermal lines not from launcher session ${id ?? '(none)'}`);
   return p;
 }
 
 const empty: BlockThermal = { samples: 0, failed: 0, maxGapMs: Infinity, server: null, client: null, maxTctlC: null };
 
-export function judgeRun(r: RunInput) {
-  const invalid: string[] = [];
+export function judgeRun(r: RunInput, sessionId: string | null) {
+  const invalid: string[] = bindingProblems(r, sessionId);
   if (!r.complete) invalid.push('run did not complete');
   if (r.metadata.mode !== 'diagnostic' || r.metadata.sendsOnly !== true) invalid.push('not the #519 send diagnosis (--diagnostic --sends-only)');
   if (r.sends.length !== blocksPerRun) invalid.push(`${r.sends.length} blocks, not ${blocksPerRun}`);
@@ -63,12 +92,17 @@ export function judgeRun(r: RunInput) {
     for (const e of s.errors ?? []) invalid.push(`block ${s.order}: ${e}`);
     if (s.crossed) invalid.push(`block ${s.order}: crossed a checkpoint`);
     for (const p of [...observationProblems(s.host, 'before'), ...observationProblems(s.hostAfter, 'after')]) invalid.push(`block ${s.order}: ${p}`);
-    for (const p of windowProblems(s.measuredWindow, measured)) invalid.push(`block ${s.order}: ${p}`);
+    for (const p of windowProblems(s, measured)) invalid.push(`block ${s.order}: ${p}`);
   }
   if (r.hostBefore === null) invalid.push('no host record before the run');
   else invalid.push(...requirementViolations(r.hostBefore, levers).map(v => `lever: ${v}`));
   if (r.cooldown?.ok !== true || r.cooldown.maxTctlC !== cooldown.maxTctlC || r.cooldown.maxWaitSeconds !== cooldown.maxWaitSeconds) {
     invalid.push(`lever: no passed cool-down gate (Tctl <= ${cooldown.maxTctlC} °C within ${cooldown.maxWaitSeconds} s)`);
+  } else {
+    const last = r.cooldown.readings?.at(-1);
+    if (!(typeof last?.elapsedMs === 'number' && last.elapsedMs <= cooldown.maxWaitSeconds * 1000 && typeof last.tctlC === 'number' && last.tctlC <= cooldown.maxTctlC)) {
+      invalid.push(`lever: the cool-down's accepted reading is not <= ${cooldown.maxTctlC} °C within ${cooldown.maxWaitSeconds} s`);
+    }
   }
   const lc = r.launchCheck;
   if (lc?.ok !== true || typeof lc.tctlC !== 'number' || lc.tctlC > cooldown.maxTctlC || !lc.record) invalid.push(`lever: no passed launch check (Tctl <= ${cooldown.maxTctlC} °C right before the start)`);
@@ -79,7 +113,7 @@ export function judgeRun(r: RunInput) {
   const sets = r.metadata.cpuSets;
   if (sets === null) invalid.push('no CPU sets in the run metadata');
   const blocks = [...r.sends].sort((a, b) => a.order - b.order).map(s => {
-    const w = s.measuredWindow;
+    const w = s.pgbenchWindow;
     const t = sets && w ? blockThermal(r.samples, w.startMs, w.endMs, sets) : empty;
     return { order: s.order, arm: s.arm, tps: s.tps, walBytesPerSend: s.walBytesPerSend, thermal: t };
   });
@@ -104,9 +138,11 @@ export function judgeRun(r: RunInput) {
 
 // The runs must be the jobs of one completed launcher session that released HOST-BUSY, each with
 // the maintainer's L3 airflow confirmation recorded.
-export function sessionProblems(session: Session | null, queue: string, names: string[]): string[] {
+export function sessionProblems(session: Session | null, queue: string, runs: { name: string; out: string }[]): string[] {
   if (session === null) return ['no launcher session record'];
+  const names = runs.map(r => r.name);
   const p: string[] = [];
+  if (typeof session.id !== 'string' || session.id.trim() === '') p.push('launcher session has no id');
   if (session.queue !== queue) p.push(`session is for queue ${session.queue}, not ${queue}`);
   if (session.outcome !== 'done') p.push(`launcher session did not complete (${session.outcome}${session.reason ? `: ${session.reason}` : ''})`);
   if (session.hostBusy !== 'released') p.push(`HOST-BUSY ${session.hostBusy}, not released`);
@@ -114,6 +150,9 @@ export function sessionProblems(session: Session | null, queue: string, names: s
   if (ran.join('\n') !== names.join('\n')) p.push(`session ran ${ran.join(', ') || '(nothing)'}, not ${names.join(', ')}`);
   for (const j of session.jobs ?? []) {
     if (j.exit !== 0) p.push(`${j.name} exited ${j.exit}`);
+    const out = runs.find(r => r.name === j.name)?.out;
+    if (out !== undefined && j.out !== out) p.push(`${j.name}: session output ${j.out ?? '(none)'} is not the judged ${out}`);
+    if (j.workloadLabel !== workloadLabel) p.push(`${j.name}: workloadLabel ${j.workloadLabel ?? '(none)'} is not ${workloadLabel}`);
     const airflow = j.confirmations?.airflow;
     if (!airflow?.quote?.trim() || !airflow.date?.trim()) p.push(`${j.name}: no L3 airflow confirmation in the session`);
   }
@@ -123,8 +162,9 @@ export function sessionProblems(session: Session | null, queue: string, names: s
 const spread = (xs: number[]) => (Math.max(...xs) - Math.min(...xs)) / median(xs);
 
 export function judge(runs: RunInput[], session: Session | null, queue: string) {
-  const judged = runs.map(judgeRun);
-  const reasons: string[] = sessionProblems(session, queue, runs.map(r => r.name));
+  const id = typeof session?.id === 'string' && session.id.trim() !== '' ? session.id : null;
+  const judged = runs.map(r => judgeRun(r, id));
+  const reasons: string[] = sessionProblems(session, queue, runs);
   if (runs.length !== runsRequired) reasons.push(`${runs.length} runs, not ${runsRequired}`);
   for (const r of judged) if (!r.valid) reasons.push(`${r.name} INVALID`);
   const arms = Object.fromEntries((['current', 'final'] as const).map(a => {

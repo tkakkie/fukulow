@@ -8,8 +8,7 @@ import { parseArgs } from 'node:util';
 import { outsideCheckout } from '../../proxy-target.ts';
 import { allowedCpus, cpuList, parseCpuSets, pinned } from '../../harness-core/cpusets.ts';
 import { hostRecord, linuxViolations } from '../../harness-core/host-record.ts';
-import { timed } from '../../harness-core/thermal.ts';
-import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, extractListCounts, logLatenciesMs, member, migrationOutcome, organization, pgbench, planSummary,
+import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, extractListCounts, measuredPgbench, member, migrationOutcome, organization, pgbench, planSummary,
   quantile, runBlock, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
@@ -27,6 +26,8 @@ const checkTimeout = '45min';
 // §10 step 1 runs under the shared host-busy marker; the diagnostic mode records it.
 const markerPath = process.env.FUKULOW_HOST_BUSY;
 const marker = markerPath ? readFileSync(markerPath, 'utf8').trim() : null;
+// The launcher session that started this run (#796): recorded so a judge binds the output to it.
+const launchSession = process.env.FUKULOW_LAUNCH_SESSION ?? null;
 if (!smoke && !marker) throw new Error('--diagnostic needs FUKULOW_HOST_BUSY=<path of the held host-busy marker>');
 // Linux host (#796 item 3, maintainer decision 2026-11-24): PostgreSQL and pgbench run on fixed,
 // disjoint CPU sets, required for --diagnostic there. macOS runs are unchanged.
@@ -193,19 +194,21 @@ function sendBlock(db: string, label: string) {
       pgbench(run('docker', [...pgbenchArgs(warmSeconds), db]));
       const before = walStats(db);
       const prefix = `/tmp/pgb-${label}`;
-      // The measured pgbench run's own interval (#796): the thermal judge reads the launcher's samples
-      // inside it. Wall clock as the sampler stamps it, plus the monotonic length to expose a clock step.
-      const { value: output, window: measuredWindow } = timed(() => run('docker', [...pgbenchArgs(measuredSeconds), '-l', `--log-prefix=${prefix}`, db]));
-      const after = walStats(db);
+      // #796: measuredWindow is the wrapper around the measured pgbench run (wall and monotonic, to
+      // expose a clock step); pgbenchWindow is pgbench's own interval from its log, the one the
+      // thermal judge reads the launcher's samples inside.
+      const m = measuredPgbench({
+        run: () => run('docker', [...pgbenchArgs(measuredSeconds), '-l', `--log-prefix=${prefix}`, db]),
+        after: () => walStats(db),
+        log: () => run('docker', ['exec', container, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]),
+      });
+      const { output, measuredWindow, pgbenchWindow, after, latencies, errors } = m;
       blockEndMs = after.atMs;
       const ended = new Date().toISOString();
       const result = pgbench(output);
-      const errors: string[] = [];
-      let latencies: number[] = [];
-      try {
-        latencies = logLatenciesMs(run('docker', ['exec', container, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]));
-        writeFileSync(join(out, `latency/${label}.txt`), latencies.join('\n') + '\n');
-      } catch (e) { errors.push(`latency log: ${e instanceof Error ? e.message : String(e)}`); }
+      if (errors.length === 0) {
+        try { writeFileSync(join(out, `latency/${label}.txt`), latencies.join('\n') + '\n'); } catch (e) { errors.push(`latency log: ${e instanceof Error ? e.message : String(e)}`); }
+      }
       if (latencies.length !== result.transactions) errors.push(`${latencies.length} log lines for ${result.transactions} transactions`);
       const walBytes = Number(after.lsnBytes) - Number(before.lsnBytes);
       const records = after.records - before.records;
@@ -213,7 +216,7 @@ function sendBlock(db: string, label: string) {
       const checkpoints = { warm: before.checkpoints - start.checkpoints, measured: after.checkpoints - before.checkpoints, redoMoved: after.redo !== start.redo };
       const crossed = checkpoints.warm !== 0 || checkpoints.measured !== 0 || checkpoints.redoMoved;
       const latency = (q: number) => latencies.length > 0 ? quantile(latencies, q) : NaN;
-      return { crossed, errors, ended, measuredWindow, ...result, p95Ms: latency(0.95), p99Ms: latency(0.99), walBytes,
+      return { crossed, errors, ended, measuredWindow, pgbenchWindow, ...result, p95Ms: latency(0.95), p99Ms: latency(0.99), walBytes,
         walBytesPerSend: walBytes / result.transactions, statWalBytes: Number(after.bytes) - Number(before.bytes),
         walRecords: records, fpiRecords: fpi, imagesPerWalRecord: records > 0 ? fpi / records : 0, checkpoints };
     },
@@ -297,7 +300,7 @@ try {
       ('server_version','shared_buffers','work_mem','jit','plan_cache_mode','synchronous_commit','fsync','autovacuum','default_transaction_isolation','max_wal_size','checkpoint_timeout','log_checkpoints',
       'log_line_prefix','log_timezone');`)),
     host: { platform: platform(), release: release(), cpus: cpus().length, memoryBytes: totalmem() }, preflight, cpuSets: cpuPins,
-    hostBusyMarker: marker, cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts: sendsOnly ? [] : cuts,
+    hostBusyMarker: marker, launchSession, cache: 'warm: one discarded EXPLAIN and one discarded EXECUTE per measured cell', samplesPerCell: samples, cuts: sendsOnly ? [] : cuts,
     walNotes: 'WAL bytes = cluster insert-LSN delta (and pg_stat_wal.wal_bytes); cluster-wide, so idle databases can add background WAL; ' +
       (sendsOnly ? 'one fresh send database per block, cloned from a vacuumed per-arm template and dropped after the block' : 'send DBs are reused across pairs'),
     sends: { clients: 8, threads: 4, warmSeconds, measuredSeconds, benchOrder, freshDatabasePerBlock: sendsOnly },
@@ -367,6 +370,6 @@ try {
   // Each write is attempted on its own, so a failed record or checks write cannot skip status.json.
   try { save('host-record-after.json', hostRecord(out)); } catch (e) { console.error('host record after the run:', e); }
   try { save('checks.json', checks); } catch (e) { failed = true; console.error('checks.json:', e); }
-  save('status.json', { complete: !failed, finished: new Date().toISOString() });
+  save('status.json', { complete: !failed, launchSession, finished: new Date().toISOString() });
 }
 process.exit(failed ? 1 : 0);
