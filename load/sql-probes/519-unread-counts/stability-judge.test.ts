@@ -3,10 +3,10 @@ import test from 'node:test';
 import { sleepUnits, timerServices, updateUnits, type HostRecord } from '../../harness-core/host-record.ts';
 import type { SampleLine } from '../../harness-core/thermal.ts';
 import type { Session } from '../../launcher/launcher.ts';
-import { judgeChain, judgeRun as judgeV3, replayLegacyRun as judgeRun, sessionProblems, type RunInput } from './stability-judge.ts';
+import { judgeRun as judgeV3, replayLegacyRun as judgeRun, type RunInput } from './stability-judge.ts';
 
 import { block, evidence, floors, sets796 } from './frequency-fixture.ts';
-import { limits } from './stability-judge.ts';
+import { judgeChain, limits, sessionProblems } from './stability-chain.ts';
 
 const judge = (runs: RunInput[], session: Session | null, queue: string) => judgeChain(runs, session, queue, judgeRun);
 

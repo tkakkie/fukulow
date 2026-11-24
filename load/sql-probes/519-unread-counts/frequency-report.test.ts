@@ -3,7 +3,7 @@ import test from 'node:test';
 import { cpus796 } from './frequency-evidence.ts';
 import { block, evidence, session, sets796 } from './frequency-fixture.ts';
 import { judgeFrequency } from './frequency-judge.ts';
-import { controlSpotCheck } from './frequency-report.ts';
+import { controlSpotCheck } from './frequency-turbostat.ts';
 
 test('capped spot check requires a spanning turbostat pair on each CPU and compares raw ratios', () => {
   const baseline = block(1, { control: true });

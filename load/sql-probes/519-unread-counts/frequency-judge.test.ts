@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { block, evidence, floors, session, sets796 } from './frequency-fixture.ts';
 import { judgeFrequency } from './frequency-judge.ts';
-import { below, restore } from './frequency-ratios.ts';
-import { legacyDisagreements } from './frequency-report.ts';
+import { below, restore, type StoredRatio } from './frequency-ratios.ts';
+import { legacyDisagreements } from './frequency-legacy-report.ts';
 
 const judge = (blocks: ReturnType<typeof block>[], host = evidence, min = floors) => judgeFrequency(blocks, sets796, host, session, min);
 const work = (cpu: number) => cpu < 8 ? 2_800_000_000n : 0n;
@@ -120,12 +120,48 @@ test('control flags every idle-only voter and 4/8 housekeeping coverage independ
   assert.deepEqual(idle.cpusAtFloor, [0, 1, 3, 5, 7]);
   assert.deepEqual(idle.couldQualify, { server: false, client: true });
   const { c0Ns, projectedC0Ns, blockSpanNs, idleSpanNs, qualifies, projectedQualifies } = idle.perCpu[1];
+  const preTailSpan = BigInt(c.counters.idle!.reads[1].monoNs) - BigInt(c.counters.open.reads[1].monoNs);
+  assert.equal(BigInt(blockSpanNs), preTailSpan);
   assert.equal(idleSpanNs, '10000000000');
   assert.equal(BigInt(c0Ns[0]), 5_000_000n * BigInt(c0Ns[1]));
-  assert.equal(BigInt(projectedC0Ns[0]) * BigInt(idleSpanNs), 5_000_000n * BigInt(blockSpanNs) * BigInt(projectedC0Ns[1]));
+  assert.equal(BigInt(projectedC0Ns[0]) * BigInt(idleSpanNs), 5_000_000n * preTailSpan * BigInt(projectedC0Ns[1]));
   assert.equal(qualifies, false);
   assert.equal(projectedQualifies, true);
   assert.match(got.reasons.join(), /projected idle-only C0 reached 20 ms/);
+});
+
+test('control flags projected idle-only C0 at 20 ms but excludes 1 ns below', () => {
+  const host = structuredClone(evidence);
+  for (const [cpu, close] of host.calibration.close.entries()) {
+    close.count = String(BigInt(host.calibration.open[cpu].count) + 3_000_500_000n);
+  }
+  const c = block(1, { control: true, idleMperf: cpu => cpu < 2 ? 5_000_000n : 0n });
+  // At 3.0005 GHz over the 10 s tail, 5 million ticks project to 1 ns per 6,001 ns of pre-tail span.
+  for (const open of c.counters.open.reads.slice(1)) {
+    open.monoNs = String(BigInt(open.monoNs) + 6_000n);
+  }
+  const got = judgeFrequency([c], sets796, host, session, null, true);
+  const idle = got.blocks[0].idle;
+  assert.ok(idle, got.reasons.join(', '));
+  for (const [cpu, expectedNs] of [20_000_000n, 19_999_999n].entries()) {
+    const [numerator, denominator]: StoredRatio = idle.perCpu[cpu].projectedC0Ns;
+    assert.equal(BigInt(numerator), expectedNs * BigInt(denominator));
+  }
+  assert.deepEqual(idle.perCpu.slice(0, 2).map(cpu => cpu.projectedQualifies), [true, false]);
+  assert.deepEqual(idle.cpusAtFloor, [0]);
+  assert.deepEqual(got.reasons, ['block 1: projected idle-only C0 reached 20 ms on CPUs 0']);
+});
+
+test('control server housekeeping could qualify at 4 of 8 CPUs but fails at 3 of 8', () => {
+  for (const count of [3, 4]) {
+    const voters = sets796.server.slice(0, count);
+    const c = block(1, { control: true, idleMperf: cpu => voters.includes(cpu) ? 10_000_000n : 0n });
+    const got = judgeFrequency([c], sets796, evidence, session, null, true);
+    const idle = got.blocks[0].idle;
+    assert.ok(idle, got.reasons.join(', '));
+    assert.deepEqual(idle.cpusAtFloor, voters);
+    assert.deepEqual(idle.couldQualify, { server: count === 4, client: false }, `${count} of 8 server CPUs`);
+  }
 });
 
 test('control clears housekeeping below the projected floor on all CPUs', () => {

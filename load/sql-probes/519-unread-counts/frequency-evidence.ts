@@ -1,3 +1,4 @@
+// Validates raw collector evidence before it can be used to derive per-CPU work.
 import type { PolicySnapshot } from '../../harness-core/cpu-policy.ts';
 import { below, multiply, store, unsigned, type Ratio } from './frequency-ratios.ts';
 

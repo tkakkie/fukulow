@@ -3,9 +3,12 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { parseQueue } from '../../launcher/queue.ts';
 import { parseSamples } from '../../harness-core/thermal.ts';
-import { judgeChain, judgeRun, replayLegacyRun, sessionProblems, type RunInput } from './stability-judge.ts';
+import { judgeRun, replayLegacyRun, type RunInput } from './stability-judge.ts';
+import { judgeChain, sessionProblems } from './stability-chain.ts';
 import { controlFloors, frozenFloors } from './frequency-approval.ts';
-import { clientCpuEquivalents, controlSpotCheck, legacyDisagreements } from './frequency-report.ts';
+import { clientCpuEquivalents } from './frequency-report.ts';
+import { controlSpotCheck } from './frequency-turbostat.ts';
+import { legacyDisagreements } from './frequency-legacy-report.ts';
 
 const usage = 'node load/sql-probes/519-unread-counts/stability.ts --stage control|rehearsal2|formal --queue QUEUE_FILE --out NEW_REPORT [--control-review FILE]';
 const { values } = parseArgs({ options: { stage: { type: 'string' }, queue: { type: 'string' }, out: { type: 'string' },
