@@ -187,7 +187,7 @@ async fn cancelled_lookup_releases_admission_and_throttle_without_token_entropy(
     let state = credential_tests::fixture(pool.clone()).await;
     let isolated = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(pool.connect_options().as_ref().clone())
+        .connect_with(state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();
     let connection = isolated.acquire().await.unwrap();
