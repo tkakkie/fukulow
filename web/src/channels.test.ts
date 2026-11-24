@@ -231,6 +231,18 @@ describe('channels', () => {
       expect(c.get().channels.map((x) => x.id)).toEqual(['a'])
       expect(c.get().selectedId).toBe('a')
     })
+    it('a Channel update before or after close reports the full session-ended copy', async () => {
+      const pending = held<Result<undefined>>()
+      const updateChannel = vi.fn(() => pending.promise)
+      const c = createChannels({ listChannels: vi.fn(), createChannel: vi.fn(), updateChannel })
+      const renaming = c.rename('a', 'n')
+      c.close()
+      pending.resolve({ ok: true, data: undefined })
+      expect(await renaming).toBe('セッションが終了しました。もう一度ログインしてください。')
+      for (const update of [() => c.rename('a', 'n'), () => c.archive('a'), () => c.restore('a')])
+        expect(await update()).toBe('セッションが終了しました。もう一度ログインしてください。')
+      expect(updateChannel).toHaveBeenCalledOnce()
+    })
     it('a new list is not affected by the closed one', async () => {
       const old = held<ReturnType<typeof ok<{ history_generation: string;  channels: ReturnType<typeof ch>[] }>>>()
       const first = createChannels({ listChannels: () => old.promise, createChannel: vi.fn() })
