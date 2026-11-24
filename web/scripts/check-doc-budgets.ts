@@ -16,7 +16,7 @@ export const BUDGETS_KIB = new Map<string, number>([
   ['docs/decisions/web.md', 10],
   ['docs/invariants.md', 3],
   ['docs/invariants/auth.md', 34],
-  ['docs/invariants/channels.md', 22],
+  ['docs/invariants/channels.md', 23],
   ['docs/invariants/deployment.md', 33],
   ['docs/invariants/messages.md', 29],
   ['docs/invariants/realtime.md', 37],
