@@ -1,6 +1,6 @@
 import { execFile, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, e
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
 import type { CounterBlock } from './frequency-evidence.ts';
-import { stageSql } from './stage-sql.ts';
+import { makeTraversable, stageSql } from './stage-sql.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
@@ -77,7 +77,7 @@ if (git('rev-parse', commits.final + '^') !== commits.current) throw new Error('
 const work = mkdtempSync(join(realpathSync(tmpdir()), 'fk519f-'));
 // mkdtemp gives 0700; the v3 sends run as the container's postgres user, which must read the bind-mounted
 // files (repository SQL only, nothing secret).
-chmodSync(work, 0o755);
+makeTraversable(work);
 const container = 'fk519f-' + randomUUID();
 // The launcher's workloadLabel for this probe: a stopped run's container is found and removed by it.
 const workloadLabel = 'io.fukulow.probe=519-final';

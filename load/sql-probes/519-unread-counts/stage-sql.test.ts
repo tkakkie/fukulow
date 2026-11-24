@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
-import { stageSql, stagedSql } from './stage-sql.ts';
+import { makeTraversable, stageSql, stagedSql } from './stage-sql.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const mode = (path: string) => statSync(path).mode & 0o777;
 
 function fixture(t: { after: (fn: () => void) => void }) {
-  const base = mkdtempSync(join(tmpdir(), 'stage-sql-'));
+  const base = mkdtempSync(join(realpathSync(tmpdir()), 'stage-sql-'));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const source = join(base, 'source');
   const work = join(base, 'work');
@@ -54,8 +55,38 @@ test('a source that is not a regular file throws', t => {
 test('a symlinked source directory throws', t => {
   const { base, source, work } = fixture(t);
   symlinkSync(source, join(base, 'linked'));
-  assert.throws(() => stageSql(join(base, 'linked'), work, ['a.sql']), /not a directory/);
+  assert.throws(() => stageSql(join(base, 'linked'), work, ['a.sql']), /canonical path/);
   assert.equal(existsSync(join(work, 'sql')), false);
+});
+
+test('a symlinked ancestor of the source throws', t => {
+  const { base, work } = fixture(t);
+  symlinkSync(base, join(base, 'alias'));
+  assert.throws(() => stageSql(join(base, 'alias', 'source'), work, ['a.sql']), /canonical path/);
+  assert.equal(existsSync(join(work, 'sql')), false);
+});
+
+test('a symlinked work root or work ancestor throws and leaves the target directory alone', t => {
+  const { base, source, work } = fixture(t);
+  chmodSync(work, 0o700);
+  symlinkSync(work, join(base, 'work-link'));
+  symlinkSync(base, join(base, 'alias'));
+  for (const linked of [join(base, 'work-link'), join(base, 'alias', 'work')]) {
+    assert.throws(() => stageSql(source, linked, ['a.sql']), /canonical path/, linked);
+    assert.equal(mode(work), 0o700);
+    assert.equal(existsSync(join(work, 'sql')), false);
+  }
+});
+
+test('a FIFO input is rejected without blocking', t => {
+  const { source, work } = fixture(t);
+  if (spawnSync('mkfifo', [join(source, 'pipe.sql')]).status !== 0) return t.skip('mkfifo unavailable');
+  // A child process, so a blocking open fails the test by timeout instead of hanging the runner.
+  const script = `import { stageSql } from ${JSON.stringify(pathToFileURL(join(here, 'stage-sql.ts')).href)};
+try { stageSql(${JSON.stringify(source)}, ${JSON.stringify(work)}, ['pipe.sql']); } catch (e) { console.log(String(e)); }`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(child.signal, null, 'stageSql blocked on the FIFO');
+  assert.match(child.stdout, /not a regular file/);
 });
 
 test('a missing file throws', t => {
@@ -74,6 +105,18 @@ test('an existing work sql directory throws', t => {
   const { source, work } = fixture(t);
   mkdirSync(join(work, 'sql'));
   assert.throws(() => stageSql(source, work, ['a.sql']), { code: 'EEXIST' });
+});
+
+test('makeTraversable opens a 0700 work root to 0755 and refuses a symlink', t => {
+  const { base, work } = fixture(t);
+  chmodSync(work, 0o700);
+  symlinkSync(work, join(base, 'work-link'));
+  symlinkSync(base, join(base, 'alias'));
+  assert.throws(() => makeTraversable(join(base, 'work-link')));
+  assert.throws(() => makeTraversable(join(base, 'alias', 'work')), /canonical path/);
+  assert.equal(mode(work), 0o700);
+  makeTraversable(work);
+  assert.equal(mode(work), 0o755);
 });
 
 test('stagedSql exists in the checkout and covers every sql path final.ts opens', t => {
