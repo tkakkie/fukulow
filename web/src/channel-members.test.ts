@@ -4,7 +4,14 @@ import { createChannelMembers, channelMemberError } from './channel-members'
 import { channelMembersAdapter } from './channel-members.svelte'
 import ChannelMembers from './ChannelMembers.svelte'
 import * as api from './api'
-import { withMiniDom } from './svelte-dom-test-helpers'
+import { withMiniDom, type MiniDomOptions } from './svelte-dom-test-helpers'
+
+const CHANNEL_MEMBERS_DOM_OPTIONS: MiniDomOptions = {
+  stopBubbleAtDocument: true,
+  allowDetachedFocus: true,
+  dispatchFocusIn: false,
+  clickSubmit: 'never',
+}
 
 afterEach(() => vi.useRealTimers())
 function fixture(memberListRole?: () => api.Role | null) {
@@ -302,7 +309,7 @@ it('renders チャンネル管理者 in the メンバー tab, hides controls wit
     }
 
     await unmount(inst)
-  })
+  }, CHANNEL_MEMBERS_DOM_OPTIONS)
 })
 
 it('a committed self notice during a grant mutation fences the list without leaving the action busy', async () => {

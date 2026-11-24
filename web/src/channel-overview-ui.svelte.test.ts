@@ -10,10 +10,25 @@ import Composer from './Composer.svelte'
 import { dm } from './dm-test-helpers'
 import ReplyPanel from './ReplyPanel.svelte'
 import { createSession } from './session'
-import { MiniDomEvent, withMiniDom as withDom } from './svelte-dom-test-helpers'
+import { MiniDomEvent, withMiniDom, type MiniDocument, type MiniDomOptions, type MiniWindow } from './svelte-dom-test-helpers'
 import { syncAdapter } from './sync.svelte'
 import { repliesAdapter } from './replies.svelte'
 import { deferred, http, row } from './unread-test-helpers'
+
+const CHANNEL_OVERVIEW_DOM_OPTIONS: MiniDomOptions = {
+  observers: true,
+  initialScrollHeight: 600,
+  initialClientHeight: 600,
+  zeroRect: true,
+  stopBubbleAtDocument: true,
+  invokeDelegatedProp: true,
+  allowDetachedFocus: true,
+  dispatchFocusIn: false,
+  clickSubmit: 'always',
+}
+
+const withDom = <T>(fn: (doc: MiniDocument, win: MiniWindow) => Promise<T>): Promise<T> =>
+  withMiniDom(fn, CHANNEL_OVERVIEW_DOM_OPTIONS)
 
 const makeChannel = (overrides: Partial<Channel> = {}): Channel => ({
   id: 'ch-1',

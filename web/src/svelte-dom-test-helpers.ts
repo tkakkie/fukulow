@@ -118,14 +118,25 @@ export class MiniEventTarget {
 
   private invokeListeners(event: MiniDomEvent, capture: boolean): void {
     const list = this.listeners.get(event.type)
-    if (!list || list.length === 0) return
-    for (const entry of [...list]) {
-      if (entry.capture !== capture) continue
-      Object.defineProperty(event, 'currentTarget', {
-        configurable: true,
-        get: () => this,
-      })
-      entry.fn.call(this, event)
+    if (list && list.length > 0) {
+      for (const entry of [...list]) {
+        if (entry.capture !== capture) continue
+        Object.defineProperty(event, 'currentTarget', {
+          configurable: true,
+          get: () => this,
+        })
+        entry.fn.call(this, event)
+      }
+    }
+    if (!capture && this instanceof MiniNode && this.ownerDocument?.options.invokeDelegatedProp) {
+      const prop = (this as unknown as Record<string, unknown>)[`__${event.type}`]
+      if (typeof prop === 'function') {
+        Object.defineProperty(event, 'currentTarget', {
+          configurable: true,
+          get: () => this,
+        })
+        ;(prop as (e: MiniDomEvent) => void).call(this, event)
+      }
     }
   }
 }
@@ -185,7 +196,10 @@ export class MiniNode extends MiniEventTarget {
     if (this.nodeType === 3 || this.nodeType === 8) {
       return (this as unknown as MiniCharacterData).data
     }
-    return this.childNodes.map((c) => c.textContent).join('')
+    return this.childNodes
+      .filter((c) => c.nodeType !== 8)
+      .map((c) => c.textContent)
+      .join('')
   }
 
   set textContent(value: string) {
@@ -298,7 +312,12 @@ export class MiniNode extends MiniEventTarget {
       path.push(cur)
       cur = cur.parentNode
     }
-    if (this.ownerDocument && path[path.length - 1] === this.ownerDocument && this.ownerDocument.defaultView) {
+    if (
+      this.ownerDocument &&
+      !this.ownerDocument.options.stopBubbleAtDocument &&
+      path[path.length - 1] === this.ownerDocument &&
+      this.ownerDocument.defaultView
+    ) {
       path.push(this.ownerDocument.defaultView)
     }
     return path
@@ -411,6 +430,8 @@ export class MiniElement extends MiniNode {
     super(1, upper, ownerDocument)
     this.tagName = upper
     this.localName = tagName.toLowerCase()
+    this.scrollHeight = ownerDocument?.options.initialScrollHeight ?? 0
+    this.clientHeight = ownerDocument?.options.initialClientHeight ?? 0
     this.content = new MiniDocumentFragment(ownerDocument)
   }
 
@@ -552,20 +573,31 @@ export class MiniElement extends MiniNode {
   }
 
   focus(): void {
-    if (this.disabled || !this.isConnected || !this.ownerDocument) return
+    const opts = this.ownerDocument?.options
+    if (this.disabled || !this.ownerDocument) return
+    if (!opts?.allowDetachedFocus && !this.isConnected) return
     const changed = this.ownerDocument.activeElement !== this
     this.ownerDocument.activeElement = this
-    if (changed) {
+    if (changed && (opts?.dispatchFocusIn ?? true)) {
       this.dispatchEvent(new MiniDomEvent('focusin', { bubbles: true }))
     }
   }
 
   click(): void {
     if (this.disabled) return
-    this.focus()
+    const opts = this.ownerDocument?.options
+    if (opts?.focusOnClick ?? true) {
+      this.focus()
+    }
     const evt = new MiniDomEvent('click', { bubbles: true, cancelable: true })
     this.dispatchEvent(evt)
-    if (!evt.defaultPrevented && this.tagName === 'BUTTON' && (this.getAttribute('type') ?? 'submit') === 'submit') {
+    const submitMode = opts?.clickSubmit ?? 'default'
+    if (
+      submitMode !== 'never' &&
+      (submitMode === 'always' || !evt.defaultPrevented) &&
+      this.tagName === 'BUTTON' &&
+      (this.getAttribute('type') ?? 'submit') === 'submit'
+    ) {
       const form = this.closest('form')
       form?.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
     }
@@ -574,7 +606,7 @@ export class MiniElement extends MiniNode {
   input(val: string): void {
     if (this.disabled) return
     this._value = val
-    this.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    this.dispatchEvent(new MiniDomEvent('input', { bubbles: true, cancelable: true }))
   }
 
   keydown(
@@ -598,6 +630,7 @@ export class MiniElement extends MiniNode {
   // Minimal non-emulated box so components that check connection/non-zero rect work in Node.
   // Real geometry, CSS visibility and viewport breakpoints are covered by Playwright in web/e2e/.
   getBoundingClientRect() {
+    if (this.ownerDocument?.options.zeroRect) return ZERO_RECT
     return this.isConnected ? UNIT_RECT : ZERO_RECT
   }
 
@@ -640,16 +673,31 @@ export class MiniElement extends MiniNode {
   }
 }
 
+export interface MiniDomOptions {
+  observers?: boolean
+  initialScrollHeight?: number
+  initialClientHeight?: number
+  zeroRect?: boolean
+  stopBubbleAtDocument?: boolean
+  invokeDelegatedProp?: boolean
+  focusOnClick?: boolean
+  allowDetachedFocus?: boolean
+  dispatchFocusIn?: boolean
+  clickSubmit?: 'default' | 'always' | 'never'
+}
+
 export class MiniDocument extends MiniNode {
   readonly documentElement: MiniElement
   readonly head: MiniElement
   readonly body: MiniElement
+  readonly options: MiniDomOptions
   activeElement: MiniElement | null = null
   defaultView: MiniWindow | null = null
   visibilityState = 'visible'
 
-  constructor() {
+  constructor(options: MiniDomOptions = {}) {
     super(9, '#document', null)
+    this.options = options
     this.ownerDocument = this
     this.documentElement = new MiniElement('html', this)
     this.head = new MiniElement('head', this)
@@ -906,10 +954,10 @@ const GLOBAL_KEYS = [
   'Comment',
   'DocumentFragment',
   'MutationObserver',
-  'ResizeObserver',
-  'IntersectionObserver',
   'CSS',
 ] as const
+
+const OBSERVER_GLOBAL_KEYS = ['ResizeObserver', 'IntersectionObserver'] as const
 
 class StubObserver {
   observe() {}
@@ -917,12 +965,13 @@ class StubObserver {
   disconnect() {}
 }
 
-function installGlobals(): { doc: MiniDocument; win: MiniWindow; restore: () => void } {
+function installGlobals(options: MiniDomOptions = {}): { doc: MiniDocument; win: MiniWindow; restore: () => void } {
+  const keys = options.observers ? [...GLOBAL_KEYS, ...OBSERVER_GLOBAL_KEYS] : [...GLOBAL_KEYS]
   const savedGlobals = new Map<string, PropertyDescriptor | undefined>()
-  for (const key of GLOBAL_KEYS) {
+  for (const key of keys) {
     savedGlobals.set(key, Object.getOwnPropertyDescriptor(globalThis, key))
   }
-  const doc = new MiniDocument()
+  const doc = new MiniDocument(options)
   const win = new MiniWindow(doc)
   const patches: Record<string, unknown> = {
     window: win,
@@ -946,9 +995,11 @@ function installGlobals(): { doc: MiniDocument; win: MiniWindow; restore: () => 
         return []
       }
     },
-    ResizeObserver: StubObserver,
-    IntersectionObserver: StubObserver,
     CSS: { escape: (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '\\$&') },
+  }
+  if (options.observers) {
+    patches.ResizeObserver = StubObserver
+    patches.IntersectionObserver = StubObserver
   }
   for (const [k, v] of Object.entries(patches)) {
     Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true })
@@ -962,8 +1013,11 @@ function installGlobals(): { doc: MiniDocument; win: MiniWindow; restore: () => 
   return { doc, win, restore }
 }
 
-export async function withMiniDom<T>(fn: (doc: MiniDocument, win: MiniWindow) => Promise<T>): Promise<T> {
-  const { doc, win, restore } = installGlobals()
+export async function withMiniDom<T>(
+  fn: (doc: MiniDocument, win: MiniWindow) => Promise<T>,
+  options?: MiniDomOptions,
+): Promise<T> {
+  const { doc, win, restore } = installGlobals(options)
   try {
     return await fn(doc, win)
   } finally {
@@ -976,13 +1030,13 @@ export interface MiniDomEnv {
   readonly win: MiniWindow
 }
 
-export function installMiniDom(): MiniDomEnv {
+export function installMiniDom(options?: MiniDomOptions): MiniDomEnv {
   let doc!: MiniDocument
   let win!: MiniWindow
   let restore: (() => void) | null = null
 
   beforeAll(() => {
-    const installed = installGlobals()
+    const installed = installGlobals(options)
     doc = installed.doc
     win = installed.win
     restore = installed.restore

@@ -6,7 +6,17 @@ import SearchResults from './SearchResults.svelte'
 import { createSearchController, type SearchState, type SearchTarget } from './search'
 import { searchAdapter } from './search.svelte'
 import { createMockSearchSource, makeSearchHit } from './search-test-helpers'
-import { withMiniDom as withDom } from './svelte-dom-test-helpers'
+import { withMiniDom, type MiniDocument, type MiniDomOptions, type MiniWindow } from './svelte-dom-test-helpers'
+
+const SEARCH_UI_DOM_OPTIONS: MiniDomOptions = {
+  stopBubbleAtDocument: true,
+  invokeDelegatedProp: true,
+  focusOnClick: false,
+  clickSubmit: 'always',
+}
+
+const withDom = <T>(fn: (doc: MiniDocument, win: MiniWindow) => Promise<T>): Promise<T> =>
+  withMiniDom(fn, SEARCH_UI_DOM_OPTIONS)
 
 function baseState(overrides: Partial<SearchState> = {}): SearchState {
   return {
