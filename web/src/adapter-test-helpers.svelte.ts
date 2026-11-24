@@ -161,9 +161,16 @@ export function fakeNetwork() {
         const page = pages[channel] ?? { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 0,  messages: [], has_more: false } }
         if (!page.ok) return page
         const tl = toTimelinePage(page.data, channel)
-        if (query?.before_position === undefined) return { ok: true, data: tl }
-        const items = tl.items.filter(item => (item.kind === 'message' ? item.message.created_seq : item.topic.last_seq) < query.before_position!)
-        return { ok: true, data: { ...tl, items, has_more: false } }
+        const pos = (item: TimelineItem) => item.kind === 'message' ? item.message.created_seq : item.topic.last_seq
+        if (query?.before_position !== undefined) {
+          const items = tl.items.filter(item => pos(item) < query.before_position!)
+          return { ok: true, data: { ...tl, items, has_more: false } }
+        }
+        if (query?.after_position !== undefined) {
+          const items = tl.items.filter(item => pos(item) > query.after_position!)
+          return { ok: true, data: { ...tl, items, has_more: false } }
+        }
+        return { ok: true, data: tl }
       },
       async listTopics(channel) {
         if (topicLists[channel]) return topicLists[channel]

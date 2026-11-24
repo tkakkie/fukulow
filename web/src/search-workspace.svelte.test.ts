@@ -202,7 +202,11 @@ describe('Workspace search integration (#153)', () => {
         options.sync!.api!.listMessages = readMessages
         options.topicsApi!.listTopicMessages = readTopicMessages
         const defaultTimeline = options.topicsApi!.listTimeline
-        options.topicsApi!.listTimeline = readTimeline.mockImplementation((channel, query) => defaultTimeline(channel, query))
+        options.topicsApi!.listTimeline = readTimeline.mockImplementation(async (channel, query) => {
+          if (query?.after_position === 36) return ok({ history_generation, as_of_seq: 80, items: [{ kind: 'message', message: hit }], has_more: false })
+          if (query?.before_position === 37) return ok({ history_generation, as_of_seq: 80, items: [], has_more: false })
+          return defaultTimeline(channel, query)
+        })
         if (replyRootId) {
           net.replyChains[`${id}:${hit.id}`] = ok(replyPage({
             history_generation, as_of_seq: 80, root_id: replyRootId, messages: [hit], has_more: false,
@@ -236,7 +240,7 @@ describe('Workspace search integration (#153)', () => {
         expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ after_seq: 36 }))
         expect(readTopicMessages).toHaveBeenCalledWith(id, topicId, expect.objectContaining({ before_seq: 37 }))
       } else {
-        expect(readMessages).toHaveBeenCalledWith(id, expect.objectContaining({ after_seq: 36 }))
+        expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ after_position: 36 }))
         expect(readTimeline).toHaveBeenCalledWith(id, expect.objectContaining({ before_position: 37 }))
       }
       const scope = replyRootId ? '#panel-content' : '#main-content'

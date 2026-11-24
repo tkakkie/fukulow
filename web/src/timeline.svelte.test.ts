@@ -695,14 +695,22 @@ describe('Search result navigation', () => {
     options.topicsApi!.listTopicMessages = (_channel, _topic, query) => read(query)
     const defaultTimeline = options.topicsApi!.listTimeline
     options.topicsApi!.listTimeline = async (channelId, query) => {
-      if (query?.before_position !== 4) return defaultTimeline(channelId, query)
-      const res = await older.promise
-      return res.ok ? ok({
-        history_generation: res.data.history_generation,
-        as_of_seq: res.data.as_of_seq,
-        has_more: res.data.has_more,
-        items: res.data.messages.map(m => ({ kind: 'message' as const, message: m })),
-      }) : res
+      if (query?.before_position === 4) {
+        const res = await older.promise
+        return res.ok ? ok({
+          history_generation: res.data.history_generation,
+          as_of_seq: res.data.as_of_seq,
+          has_more: res.data.has_more,
+          items: res.data.messages.map(m => ({ kind: 'message' as const, message: m })),
+        }) : res
+      }
+      if (query?.after_position === 3) {
+        return ok({
+          history_generation, as_of_seq: 100, has_more: false,
+          items: [message(4), message(5), message(6)].map(m => ({ kind: 'message' as const, message: m })),
+        })
+      }
+      return defaultTimeline(channelId, query)
     }
     const app = openWorkspace(net, options)
     try {
@@ -727,10 +735,12 @@ describe('Search result navigation', () => {
     const options = net.options()
     const history_generation = record(1).history_generation
     net.pages.A = ok({ history_generation, as_of_seq: 100, messages: [record(100)], has_more: false })
-    options.sync!.api!.listMessages = async (_id, query) => ok({
-      history_generation, as_of_seq: 100, messages: query?.after_seq === 39 ? [record(40)] : [],
-      has_more: query?.after_seq === 39,
-    })
+    const defaultTimeline = options.topicsApi!.listTimeline
+    options.topicsApi!.listTimeline = async (id, query) => {
+      if (query?.after_position === 39) return ok({ history_generation, as_of_seq: 100, items: [{ kind: 'message', message: record(40) }], has_more: true })
+      if (query?.before_position === 40) return ok({ history_generation, as_of_seq: 100, items: [], has_more: false })
+      return defaultTimeline(id, query)
+    }
     const app = openWorkspace(net, options)
     try {
       await settle()
@@ -804,15 +814,6 @@ describe('Search result navigation', () => {
       read_seq: last_seq, unread_count: 0, mention_unread_count: 0,
     })
     net.pages.A = ok({ history_generation, as_of_seq: 500, messages: [record(500)], has_more: false })
-    options.sync!.api!.listMessages = async (_channel, query) => {
-      if (query?.after_seq === 39) {
-        return ok({
-          history_generation, as_of_seq: 500, has_more: false,
-          messages: [record(40), { ...record(45), topic_id: 'T-mid' }, record(50)],
-        })
-      }
-      return ok({ history_generation, as_of_seq: 500, messages: [record(500)], has_more: false })
-    }
     const defaultTimeline = options.topicsApi!.listTimeline
     options.topicsApi!.listTimeline = async (channelId, query) => {
       if (query?.before_position === 40) {
@@ -824,9 +825,9 @@ describe('Search result navigation', () => {
           ],
         })
       }
-      if (query?.before_position === 51) {
+      if (query?.after_position === 39) {
         return ok({
-          history_generation, as_of_seq: 500, has_more: true,
+          history_generation, as_of_seq: 500, has_more: false,
           items: [
             { kind: 'message', message: record(40) },
             { kind: 'topic', topic: topicSummary('T-mid', 'リリース準備', 42, 45, 2) },
@@ -864,20 +865,6 @@ describe('Search result navigation', () => {
       read_seq: last_seq, unread_count: 0, mention_unread_count: 0,
     })
     net.pages.A = ok({ history_generation, as_of_seq: 500, messages: [record(500)], has_more: false })
-    const heavyNewer: api.Message[] = [
-      record(100),
-      ...Array.from({ length: 30 }, (_, i) => ({ ...record(101 + i), topic_id: 'T-heavy' })),
-      record(131),
-      record(132),
-    ]
-    options.sync!.api!.listMessages = async (_channel, query) => {
-      if (query?.after_seq !== undefined) {
-        const slice = heavyNewer.filter(m => m.created_seq > query.after_seq!).slice(0, query.limit ?? 25)
-        const hasMore = slice.length > 0 && slice.at(-1)!.created_seq < 132
-        return ok({ history_generation, as_of_seq: 500, messages: slice, has_more: hasMore })
-      }
-      return ok({ history_generation, as_of_seq: 500, messages: [record(500)], has_more: false })
-    }
     const defaultTimeline = options.topicsApi!.listTimeline
     options.topicsApi!.listTimeline = async (channelId, query) => {
       if (query?.before_position === 100) {
@@ -889,7 +876,7 @@ describe('Search result navigation', () => {
           ],
         })
       }
-      if (query?.before_position === 133) {
+      if (query?.after_position === 99) {
         return ok({
           history_generation, as_of_seq: 500, has_more: false,
           items: [

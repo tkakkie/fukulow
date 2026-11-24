@@ -4,12 +4,10 @@ import type { SearchResultTarget } from './navigation'
 import type { createSync } from './sync'
 import { createRequestDeadlines } from './request-deadlines'
 import { MAIN_MESSAGE_LIMIT } from './protocol-types'
-import { boundTopicEvidence, rememberTopicMessages, topicEvidence, type TopicEvidence } from './message-window'
 import { linePosition, selectMainTimeline, type MainTimelineLine, type TopicBaseline } from './topic-selectors'
 
 const PAGE_SIZE = 25
 export const SEARCH_WINDOW_LIMIT = 100
-const MAX_RAW_SCAN = 200
 type PageRead = 'older' | 'newer' | 'refresh'
 type Reads = {
   messages(target: SearchResultTarget, query: ListMessagesQuery): Promise<Result<MessagePage>>
@@ -27,10 +25,6 @@ const isMainChannel = (target: SearchResultTarget) => !target.replyRootId && !ta
 const itemPosition = (item: TimelineItem) => item.kind === 'message' ? item.message.created_seq : item.topic.last_seq
 const itemMessage = (item: TimelineItem) => item.kind === 'message' ? item.message : item.topic.latest_message
 const messagesFromLines = (lines: MainTimelineLine[]) => lines.flatMap(l => l.kind === 'message' ? [l.message] : [])
-const cloneEvidence = (evidence: TopicEvidence): TopicEvidence => ({
-  floor: evidence.floor,
-  sequences: new Map([...evidence.sequences].map(([id, ranges]) => [id, ranges.map(r => ({ ...r }))])),
-})
 
 /** An authorized display projection. Only unfiltered sync can establish the Channel cursor. */
 export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: Reads) {
@@ -39,20 +33,16 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
   let refreshWatermark = 0, forwardWatermark = 0
   let windowMessages: Message[] = []
   let baselines = new Map<string, TopicBaseline>()
-  let liveMain = new Map<string, Message>()
-  let liveTopicLatest = new Map<string, Message>()
-  let liveEvidence = topicEvidence()
+  let liveMain: Message[] = []
   let request: symbol | undefined
   let previous = sync.get()
   const deadlines = createRequestDeadlines()
   const listeners = new Set<() => void>()
   const publish = (next: View | undefined) => { view = next; listeners.forEach(listener => listener()) }
-  const liveMessages = (main: Map<string, Message>, topics: Map<string, Message>) => [...main.values(), ...topics.values()]
   function cancel() { request = undefined; deadlines.cancel() }
   function resetState() {
     before = 0; after = 0; refreshWatermark = 0; forwardWatermark = 0
-    windowMessages = []; baselines = new Map()
-    liveMain = new Map(); liveTopicLatest = new Map(); liveEvidence = topicEvidence()
+    windowMessages = []; baselines = new Map(); liveMain = []
   }
   function missing(w: View) {
     cancel()
@@ -76,46 +66,6 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       else records.delete(message.id)
     }
     return [...records.values()].sort((a, b) => a.created_seq - b.created_seq)
-  }
-
-  function mergeLiveSuffix(
-    channelId: string,
-    startingMain: Map<string, Message>,
-    startingTopics: Map<string, Message>,
-    startingEvidence: TopicEvidence,
-    incoming: Message[],
-  ) {
-    const channel = sync.get().channels[channelId]
-    const nextMain = new Map(startingMain)
-    const nextTopics = new Map(startingTopics)
-    const nextEvidence = cloneEvidence(startingEvidence)
-    const topicIncoming: Message[] = []
-    for (const message of incoming) {
-      if (message.channel_id !== channelId) continue
-      const existing = message.topic_id === null
-        ? nextMain.get(message.id)
-        : (nextTopics.get(message.topic_id)?.id === message.id ? nextTopics.get(message.topic_id) : undefined)
-      const current = knownMessageState(channel, existing, message)
-      if (!current || current.deleted) {
-        nextMain.delete(message.id)
-        if (message.topic_id && nextTopics.get(message.topic_id)?.id === message.id) nextTopics.delete(message.topic_id)
-        continue
-      }
-      if (current.topic_id === null) {
-        nextMain.set(current.id, current)
-      } else {
-        topicIncoming.push(current)
-        const prev = nextTopics.get(current.topic_id)
-        if (!prev || current.created_seq > prev.created_seq || (current.created_seq === prev.created_seq && current.version >= prev.version)) {
-          nextTopics.set(current.topic_id, current)
-        }
-      }
-    }
-    if (topicIncoming.length) {
-      rememberTopicMessages(nextEvidence, topicIncoming)
-      boundTopicEvidence(nextEvidence)
-    }
-    return { main: nextMain, topics: nextTopics, evidence: nextEvidence }
   }
 
   function mergeBaseline(channel: ReturnType<typeof channelFor>, target: Map<string, TopicBaseline>, asOfSeq: number, summary: TopicSummary) {
@@ -196,215 +146,174 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       if (isMainChannel(target)) {
         const lower = w.hasOlder ? before - 1 : 0
         const upper = w.hasNewer || w.detached ? Math.max(after, w.lines.length ? linePosition(w.lines.at(-1)!) : 0) : Infinity
-        let watermark = 0, olderTimeline: TimelinePage | undefined, pageItems: TimelineItem[] = [], settleMessages: Message[] = []
-        let probeMessages: Message[] = []
-        let forwardUpper: number | undefined, forwardHasMore = false, refreshTruncatedUpper = false
-        let refreshedRetained = false, refreshedLower = lower, refreshedUpper = 0, refreshedLiveEdge = false
-        const failWithProbe = (result: Exclude<Result<unknown>, { ok: true }>) => {
+        let watermark = 0
+        let olderTimeline: TimelinePage | undefined
+        let newerTimeline: TimelinePage | undefined
+        let pageItems: TimelineItem[] = []
+        const settleMessages: Message[] = []
+        const replaceState = !mode || refreshing || restarted
+        let hasOlderNext = w.hasOlder
+        let hasNewerNext = w.hasNewer
+        const settleOnExit = () => {
+          if (settleMessages.length) void sync.settleHistory(channel, settleMessages)
+        }
+        const failWithSettle = (result: Exclude<Result<unknown>, { ok: true }>) => {
           const out = fail(result)
-          if (probeMessages.length) void sync.settleHistory(channel, probeMessages)
+          settleOnExit()
           return out
         }
+        const probeFresh = async () => {
+          const fresh = await run(() => reads.timeline(target, { ...query, limit: 1 }))
+          if (request !== token) return undefined
+          if (!fresh.ok) { fail(fresh); return undefined }
+          settleMessages.push(...fresh.data.items.map(itemMessage))
+          if (overtaken(fresh.data.as_of_seq)) {
+            failWithSettle(!restarted && !refreshing
+              ? { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' }
+              : { ok: false, kind: 'network' })
+            return undefined
+          }
+          return fresh.data
+        }
 
-        if (mode === 'older') {
-          let res: Result<TimelinePage>
-          let retainedItems: TimelineItem[] = []
+        if (!mode) {
+          const fresh = await probeFresh()
+          if (!fresh) return
+          watermark = fresh.as_of_seq
+          const gen = fresh.history_generation
+          const newerRes = checked(await run(() => reads.timeline(target, {
+            history_generation: gen, as_of_seq: watermark, after_position: target.createdSeq - 1, limit: PAGE_SIZE + 1,
+          })))
+          if (request !== token) return
+          if (!newerRes.ok) return failWithSettle(newerRes)
+          settleMessages.push(...newerRes.data.items.map(itemMessage))
+          if (!newerRes.data.items.some(item => item.kind === 'message' && contains(target, item.message))) {
+            missing(w)
+            settleOnExit()
+            return
+          }
+          const olderRes = checked(await run(() => reads.timeline(target, {
+            history_generation: gen, as_of_seq: watermark, before_position: target.createdSeq, limit: PAGE_SIZE,
+          })))
+          if (request !== token) return
+          if (!olderRes.ok) return failWithSettle(olderRes)
+          settleMessages.push(...olderRes.data.items.map(itemMessage))
+          olderTimeline = olderRes.data
+          newerTimeline = newerRes.data
+          pageItems = [...olderTimeline.items, ...newerTimeline.items]
+          hasOlderNext = olderTimeline.has_more
+          hasNewerNext = newerTimeline.has_more
+        } else if (mode === 'older') {
           if (fixed) {
-            res = checked(await run(() => reads.timeline(target, { ...query, as_of_seq: w.asOfSeq, before_position: before, limit: PAGE_SIZE })))
+            const res = checked(await run(() => reads.timeline(target, {
+              ...query, as_of_seq: w.asOfSeq, before_position: before, limit: PAGE_SIZE,
+            })))
             if (request !== token) return
             if (!res.ok) return fail(res)
+            olderTimeline = res.data
+            watermark = olderTimeline.as_of_seq
+            pageItems = olderTimeline.items
+            settleMessages.push(...pageItems.map(itemMessage))
+            hasOlderNext = olderTimeline.has_more
           } else {
-            const fresh = await run(() => reads.timeline(target, { ...query, limit: 1 }))
-            if (request !== token) return
-            if (!fresh.ok) return fail(fresh)
-            probeMessages = fresh.data.items.map(itemMessage)
-            if (overtaken(fresh.data.as_of_seq)) return failWithProbe({ ok: false, kind: 'network' })
-            res = checked(await run(() => reads.timeline(target, {
-              history_generation: fresh.data.history_generation, as_of_seq: fresh.data.as_of_seq, before_position: before, limit: PAGE_SIZE,
-            })))
-            if (request !== token) return
-            if (!res.ok) return failWithProbe(res)
-            const retainedUpper = w.hasNewer || w.detached ? upper : fresh.data.as_of_seq
-            if (retainedUpper >= before) {
-              const retainedRes = checked(await run(() => reads.timeline(target, {
-                history_generation: fresh.data.history_generation, as_of_seq: fresh.data.as_of_seq,
-                before_position: retainedUpper + 1, limit: SEARCH_WINDOW_LIMIT + 1,
-              })))
-              if (request !== token) return
-              if (!retainedRes.ok) return failWithProbe(retainedRes)
-              retainedItems = retainedRes.data.items.filter(item => {
-                const pos = itemPosition(item)
-                return pos >= before && pos <= retainedUpper
-              })
-              refreshedRetained = true
-              refreshedLower = retainedRes.data.has_more && retainedRes.data.items[0]
-                ? Math.max(before - 1, itemPosition(retainedRes.data.items[0]) - 1)
-                : before - 1
-              refreshedUpper = retainedUpper
-              if (!w.hasNewer && !w.detached) refreshedLiveEdge = true
-            }
-          }
-          olderTimeline = res.data; watermark = olderTimeline.as_of_seq
-          pageItems = [...olderTimeline.items, ...retainedItems]
-          settleMessages = [...probeMessages, ...pageItems.map(itemMessage)]
-        } else if (refreshing) {
-          if (upper === Infinity) {
-            const res = await run(() => reads.timeline(target, { ...query, limit: SEARCH_WINDOW_LIMIT + 1 }))
-            if (request !== token) return
-            if (!res.ok) return fail(res)
-            probeMessages = res.data.items.map(itemMessage)
-            if (overtaken(res.data.as_of_seq)) return failWithProbe({ ok: false, kind: 'network' })
-            watermark = res.data.as_of_seq
-            if (res.data.has_more && res.data.items.length > 0 && itemPosition(res.data.items[0]) > lower + 1) {
-              const anchorUpper = Math.max(after, w.lines.length ? linePosition(w.lines.at(-1)!) : 0, target.createdSeq)
-              const tlRes = checked(await run(() => reads.timeline(target, {
-                history_generation: res.data.history_generation, as_of_seq: watermark,
-                before_position: anchorUpper + 1, limit: SEARCH_WINDOW_LIMIT + 1,
-              })))
-              if (request !== token) return
-              if (!tlRes.ok) return failWithProbe(tlRes)
-              pageItems = tlRes.data.items.filter(item => { const pos = itemPosition(item); return pos > lower && pos <= anchorUpper })
-              refreshTruncatedUpper = true
-              refreshedLower = tlRes.data.has_more && tlRes.data.items[0] ? Math.max(lower, itemPosition(tlRes.data.items[0]) - 1) : lower
-              refreshedUpper = anchorUpper
-              forwardUpper = Math.max(anchorUpper, pageItems.length ? itemPosition(pageItems.at(-1)!) : 0)
-            } else {
-              pageItems = res.data.items.filter(item => itemPosition(item) > lower)
-              refreshedLower = lower
-              refreshedUpper = watermark
-              forwardUpper = pageItems.length ? itemPosition(pageItems.at(-1)!) : watermark
-            }
-          } else {
-            const fresh = await run(() => reads.timeline(target, { ...query, limit: 1 }))
-            if (request !== token) return
-            if (!fresh.ok) return fail(fresh)
-            probeMessages = fresh.data.items.map(itemMessage)
-            if (overtaken(fresh.data.as_of_seq)) return failWithProbe({ ok: false, kind: 'network' })
-            watermark = fresh.data.as_of_seq
-            const tlRes = checked(await run(() => reads.timeline(target, {
-              history_generation: fresh.data.history_generation, as_of_seq: watermark,
-              before_position: upper + 1, limit: SEARCH_WINDOW_LIMIT + 1,
-            })))
-            if (request !== token) return
-            if (!tlRes.ok) return failWithProbe(tlRes)
-            pageItems = tlRes.data.items.filter(item => { const pos = itemPosition(item); return pos > lower && pos <= upper })
-            const latestPos = fresh.data.items[0] ? itemPosition(fresh.data.items[0]) : 0
-            forwardHasMore = latestPos > upper
-            refreshedLower = tlRes.data.has_more && tlRes.data.items[0] ? Math.max(lower, itemPosition(tlRes.data.items[0]) - 1) : lower
-            refreshedUpper = upper
-            forwardUpper = Math.max(upper, pageItems.length ? itemPosition(pageItems.at(-1)!) : 0)
-          }
-          refreshedRetained = true
-          settleMessages = [...probeMessages, ...pageItems.map(itemMessage)]
-        } else {
-          const needed = mode ? PAGE_SIZE : PAGE_SIZE + 1, startAfter = mode ? after : target.createdSeq - 1
-          let scanAfter = startAfter, rawScanned = 0, mainCount = 0, scanGen: string | undefined, scanW: number | undefined
-          const seenTopics = new Set<string>(), rawAccepted: Message[] = []
-          let newerItems: TimelineItem[] = [], buffered: Message[] = [], lastPageHasMore = false
-          const touchedTopics = new Set<string>()
-          let addedMain = 0, addedMainMsgs: Message[] = []
-          while (true) {
-            if (buffered.length === 0 && rawScanned < MAX_RAW_SCAN) {
-              const isFirst = scanW === undefined
-              const limit = isFirst ? needed : Math.min(PAGE_SIZE, MAX_RAW_SCAN - rawScanned)
-              const res = await run(() => reads.messages(target, {
-                history_generation: scanGen ?? query.history_generation, limit, after_seq: scanAfter,
-                ...(isFirst ? (fixed ? { as_of_seq: w.asOfSeq } : {}) : { as_of_seq: scanW }),
-              }))
-              if (request !== token) return
-              const page = (!isFirst || fixed) ? checked(res) : res
-              if (!page.ok) return fail(page)
-              const data = page.data
-              if (isFirst && mode && !fixed && overtaken(data.as_of_seq)) return fail({ ok: false, kind: 'network' })
-              if (isFirst) {
-                scanGen = data.history_generation; scanW = data.as_of_seq
-                if (!mode && !data.messages.some(message => contains(target, message))) { missing(w); return }
-              }
-              rawScanned += data.messages.length
-              lastPageHasMore = data.has_more && data.messages.length > 0
-              buffered = [...data.messages]
-              if (data.messages.length > 0) scanAfter = data.messages.at(-1)!.created_seq
-            }
-            let cut = false
-            while (buffered.length > 0) {
-              const m = buffered.shift()!
-              if (m.topic_id === null) { mainCount += 1; addedMain += 1; addedMainMsgs.push(m) }
-              else { seenTopics.add(m.topic_id); touchedTopics.add(m.topic_id) }
-              rawAccepted.push(m)
-              if (newerItems.length + addedMain + touchedTopics.size >= needed) { cut = true; break }
-            }
-            const hasMoreRaw = buffered.length > 0 || lastPageHasMore
-            const exhausted = !hasMoreRaw || (buffered.length === 0 && (rawScanned >= MAX_RAW_SCAN || seenTopics.size === 0))
-            if (cut || exhausted) {
-              const upperSeq = rawAccepted.at(-1)?.created_seq
-              if (touchedTopics.size > 0 && upperSeq !== undefined) {
-                const tlRes = checked(await run(() => reads.timeline(target, {
-                  history_generation: scanGen!, as_of_seq: scanW!, before_position: upperSeq + 1,
-                  limit: Math.min(MAX_RAW_SCAN, mainCount + seenTopics.size),
-                })))
-                if (request !== token) return
-                if (!tlRes.ok) return fail(tlRes)
-                newerItems = tlRes.data.items.filter(item => itemPosition(item) > startAfter)
-              } else if (addedMainMsgs.length > 0) {
-                newerItems = [...newerItems, ...addedMainMsgs.map(message => ({ kind: 'message' as const, message }))]
-              }
-              addedMain = 0; addedMainMsgs = []; touchedTopics.clear()
-              forwardHasMore = hasMoreRaw
-              if (newerItems.length >= needed || exhausted) break
-            }
-          }
-          watermark = scanW!; forwardUpper = rawAccepted.at(-1)?.created_seq
-          let retainedItems: TimelineItem[] = []
-          if (mode === 'newer' && !fixed && after >= 1) {
-            const retainedRes = checked(await run(() => reads.timeline(target, {
-              history_generation: scanGen!, as_of_seq: watermark, before_position: after + 1, limit: SEARCH_WINDOW_LIMIT + 1,
-            })))
-            if (request !== token) return
-            if (!retainedRes.ok) return fail(retainedRes)
-            retainedItems = retainedRes.data.items.filter(item => { const pos = itemPosition(item); return pos > lower && pos <= after })
-            refreshedRetained = true
-            refreshedLower = retainedRes.data.has_more && retainedRes.data.items[0] ? Math.max(lower, itemPosition(retainedRes.data.items[0]) - 1) : lower
-            refreshedUpper = after
-          }
-          if (!mode) {
+            const fresh = await probeFresh()
+            if (!fresh) return
+            watermark = fresh.as_of_seq
+            const gen = fresh.history_generation
             const olderRes = checked(await run(() => reads.timeline(target, {
-              history_generation: scanGen!, as_of_seq: watermark, before_position: target.createdSeq, limit: PAGE_SIZE,
+              history_generation: gen, as_of_seq: watermark, before_position: before, limit: PAGE_SIZE,
             })))
             if (request !== token) return
-            if (!olderRes.ok) return fail(olderRes)
+            if (!olderRes.ok) return failWithSettle(olderRes)
+            settleMessages.push(...olderRes.data.items.map(itemMessage))
+            const retainedRes = checked(await run(() => reads.timeline(target, {
+              history_generation: gen, as_of_seq: watermark, after_position: before - 1, limit: SEARCH_WINDOW_LIMIT,
+            })))
+            if (request !== token) return
+            if (!retainedRes.ok) return failWithSettle(retainedRes)
+            settleMessages.push(...retainedRes.data.items.map(itemMessage))
+            const retainedItems = upper < Infinity
+              ? retainedRes.data.items.filter(item => itemPosition(item) <= upper)
+              : retainedRes.data.items
             olderTimeline = olderRes.data
+            pageItems = [...olderTimeline.items, ...retainedItems]
+            hasOlderNext = olderTimeline.has_more
+            hasNewerNext = retainedRes.data.has_more || retainedItems.length < retainedRes.data.items.length
           }
-          pageItems = [...(olderTimeline?.items ?? []), ...retainedItems, ...newerItems]
-          settleMessages = [...rawAccepted, ...pageItems.map(itemMessage)]
+        } else if (mode === 'newer') {
+          if (fixed) {
+            const res = checked(await run(() => reads.timeline(target, {
+              ...query, as_of_seq: w.asOfSeq, after_position: after, limit: PAGE_SIZE,
+            })))
+            if (request !== token) return
+            if (!res.ok) return fail(res)
+            newerTimeline = res.data
+            watermark = newerTimeline.as_of_seq
+            pageItems = newerTimeline.items
+            settleMessages.push(...pageItems.map(itemMessage))
+            hasNewerNext = newerTimeline.has_more
+          } else {
+            const fresh = await probeFresh()
+            if (!fresh) return
+            watermark = fresh.as_of_seq
+            const gen = fresh.history_generation
+            const newerRes = checked(await run(() => reads.timeline(target, {
+              history_generation: gen, as_of_seq: watermark, after_position: after, limit: PAGE_SIZE,
+            })))
+            if (request !== token) return
+            if (!newerRes.ok) return failWithSettle(newerRes)
+            settleMessages.push(...newerRes.data.items.map(itemMessage))
+            const retainedRes = checked(await run(() => reads.timeline(target, {
+              history_generation: gen, as_of_seq: watermark, before_position: after + 1, limit: SEARCH_WINDOW_LIMIT,
+            })))
+            if (request !== token) return
+            if (!retainedRes.ok) return failWithSettle(retainedRes)
+            settleMessages.push(...retainedRes.data.items.map(itemMessage))
+            const retainedItems = w.hasOlder
+              ? retainedRes.data.items.filter(item => itemPosition(item) >= before)
+              : retainedRes.data.items
+            const retainedTruncatedOlder = retainedRes.data.has_more &&
+              (!w.hasOlder || (retainedRes.data.items[0] !== undefined && itemPosition(retainedRes.data.items[0]) > before))
+            newerTimeline = newerRes.data
+            pageItems = [...retainedItems, ...newerTimeline.items]
+            hasOlderNext = w.hasOlder || retainedTruncatedOlder
+            hasNewerNext = newerTimeline.has_more
+          }
+        } else {
+          const fresh = await probeFresh()
+          if (!fresh) return
+          watermark = fresh.as_of_seq
+          const gen = fresh.history_generation
+          const res = checked(await run(() => reads.timeline(target, {
+            history_generation: gen, as_of_seq: watermark, after_position: lower, limit: SEARCH_WINDOW_LIMIT + 1,
+          })))
+          if (request !== token) return
+          if (!res.ok) return failWithSettle(res)
+          settleMessages.push(...res.data.items.map(itemMessage))
+          pageItems = upper < Infinity
+            ? res.data.items.filter(item => itemPosition(item) <= upper)
+            : res.data.items
+          hasOlderNext = w.hasOlder
+          hasNewerNext = res.data.has_more || pageItems.length < res.data.items.length
         }
 
         const current = view!
-        let retainedMessages = mode ? windowMessages : []
-        let retainedBaselines = mode ? new Map(baselines) : new Map<string, TopicBaseline>()
-        if (refreshedRetained) {
-          const returnedMsgIds = new Set(pageItems.flatMap(item => item.kind === 'message' ? [item.message.id] : []))
-          const returnedTopicIds = new Set(pageItems.flatMap(item => item.kind === 'topic' ? [item.topic.id] : []))
-          retainedMessages = retainedMessages.filter(m =>
-            m.created_seq <= refreshedLower || m.created_seq > refreshedUpper || m.version > watermark || returnedMsgIds.has(m.id))
-          for (const [id, b] of retainedBaselines) {
-            if (b.summary.last_seq > refreshedLower && b.summary.last_seq <= refreshedUpper && b.asOfSeq <= watermark && !returnedTopicIds.has(id)) {
-              retainedBaselines.delete(id)
-            }
-          }
-        }
-        const applied = applyTimelineItems(current, pageItems, watermark, retainedMessages, retainedBaselines)
+        const applied = applyTimelineItems(
+          current,
+          pageItems,
+          watermark,
+          replaceState ? [] : windowMessages,
+          replaceState ? new Map<string, TopicBaseline>() : new Map(baselines),
+        )
         if ((!mode || (refreshing && current.messages.some(message => contains(target, message)))) &&
             !applied.messages.some(message => contains(target, message))) {
           missing(w)
+          settleOnExit()
           return
         }
-        if (!mode || refreshing || refreshedRetained) refreshWatermark = watermark
-        if (forward || refreshedLiveEdge) forwardWatermark = watermark
-        if (!mode) before = target.createdSeq
-        if (olderTimeline?.items[0]) before = itemPosition(olderTimeline.items[0])
+        if (replaceState) refreshWatermark = watermark
+        if (forward || (mode === 'older' && restarted && !hasNewerNext)) forwardWatermark = watermark
         const baseLines = selectMainTimeline([], applied.messages, applied.baselines.values())
-        if (refreshing && !w.hasOlder && baseLines[0]) before = linePosition(baseLines[0])
-        if (forward && forwardUpper !== undefined) after = forwardUpper
         const trimmed = baseLines.length > SEARCH_WINDOW_LIMIT
         const keepStart = mode === 'older' || refreshing
         const keptLines = keepStart ? baseLines.slice(0, SEARCH_WINDOW_LIMIT) : baseLines.slice(-SEARCH_WINDOW_LIMIT)
@@ -412,20 +321,26 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
         const keptTopicIds = new Set(keptLines.flatMap(l => l.kind === 'topic' ? [l.topicId] : []))
         windowMessages = applied.messages.filter(m => keptMsgIds.has(m.id))
         baselines = new Map([...applied.baselines].filter(([id]) => keptTopicIds.has(id)))
-        const preserveLive = mode === 'older' && !refreshedLiveEdge
-        if (!preserveLive) {
-          liveMain = new Map(); liveTopicLatest = new Map(); liveEvidence = topicEvidence()
+        if (!mode) {
+          before = olderTimeline?.items[0] ? itemPosition(olderTimeline.items[0]) : target.createdSeq
+          after = newerTimeline?.items.at(-1) ? itemPosition(newerTimeline.items.at(-1)!) : target.createdSeq
+        } else {
+          if (olderTimeline?.items[0]) before = itemPosition(olderTimeline.items[0])
+          else if (replaceState && !w.hasOlder && keptLines[0]) before = linePosition(keptLines[0])
+          if (newerTimeline?.items.at(-1)) after = itemPosition(newerTimeline.items.at(-1)!)
+          else if (replaceState && keptLines.length) after = linePosition(keptLines.at(-1)!)
         }
         if (trimmed && keepStart && keptLines.length) after = linePosition(keptLines.at(-1)!)
         if (trimmed && !keepStart && keptLines.length) before = linePosition(keptLines[0])
+        const preserveLive = mode === 'older' && !restarted
+        if (!preserveLive) liveMain = []
         const next = {
           ...current, status: 'ready' as const,
           messages: messagesFromLines(keptLines),
           lines: keptLines,
           paging: false, asOfSeq: watermark,
-          hasOlder: (olderTimeline?.has_more ?? current.hasOlder) || (trimmed && !keepStart),
-          hasNewer: (forward ? forwardHasMore : current.hasNewer) || (trimmed && keepStart) ||
-            (refreshing && refreshTruncatedUpper),
+          hasOlder: hasOlderNext || (trimmed && !keepStart),
+          hasNewer: hasNewerNext || (trimmed && keepStart),
         }
         const state = channelFor(target)
         // A fresh projection can cover ahead of the cursor. A later bootstrap cannot fill its old prefix.
@@ -434,22 +349,28 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
           : Boolean(state && state.messages.length >= MAIN_MESSAGE_LIMIT && state.messages[0].created_seq > forwardWatermark + 1))
         if (!next.hasNewer && !next.detached) {
           const suffix = preserveLive
-            ? { main: liveMain, topics: liveTopicLatest, evidence: liveEvidence }
-            : mergeLiveSuffix(channel, new Map(), new Map(), topicEvidence(), (state?.messages ?? []).filter(m => m.created_seq > forwardWatermark))
-          const combined = selectMainTimeline(liveMessages(suffix.main, suffix.topics), windowMessages, baselines.values(), suffix.evidence)
-          if (combined.length > SEARCH_WINDOW_LIMIT) {
+            ? liveMain
+            : (state?.messages ?? []).filter(m => !m.deleted && m.created_seq > forwardWatermark)
+          if (suffix.some(m => m.topic_id !== null)) {
             next.detached = true
-            liveMain = new Map(); liveTopicLatest = new Map(); liveEvidence = topicEvidence()
+            liveMain = []
           } else {
-            liveMain = suffix.main; liveTopicLatest = suffix.topics; liveEvidence = suffix.evidence
-            next.lines = combined
-            next.messages = messagesFromLines(combined)
+            const mergedLive = preserveLive ? liveMain : merge(current, suffix, [])
+            const combined = selectMainTimeline(mergedLive, windowMessages, baselines.values())
+            if (combined.length > SEARCH_WINDOW_LIMIT) {
+              next.detached = true
+              liveMain = []
+            } else {
+              liveMain = mergedLive
+              next.lines = combined
+              next.messages = messagesFromLines(combined)
+            }
           }
         } else {
-          liveMain = new Map(); liveTopicLatest = new Map(); liveEvidence = topicEvidence()
+          liveMain = []
         }
         publish(next)
-        void sync.settleHistory(channel, settleMessages)
+        settleOnExit()
         return
       }
 
@@ -579,14 +500,15 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
 
     if (isMainChannel(w.target)) {
       const heldWindowIds = new Set(windowMessages.map(m => m.id))
+      const heldLiveIds = new Set(liveMain.map(m => m.id))
       const windowUpdates = incoming.filter(m => heldWindowIds.has(m.id))
-      let nextWindow = windowUpdates.length ? merge(w, windowUpdates, windowMessages) : windowMessages
+      const liveUpdates = incoming.filter(m => heldLiveIds.has(m.id))
+      const nextWindow = windowUpdates.length ? merge(w, windowUpdates, windowMessages) : windowMessages
+      let nextLiveMain = liveUpdates.length ? merge(w, liveUpdates, liveMain) : liveMain
       let nextBaselines = baselines
-      let nextLiveMain = liveMain
-      let nextLiveTopics = liveTopicLatest
-      let nextLiveEvidence = liveEvidence
       let needsRefresh = false
-      let dirty = nextWindow.length !== windowMessages.length || nextWindow.some((m, i) => m !== windowMessages[i])
+      let dirty = nextWindow.length !== windowMessages.length || nextWindow.some((m, i) => m !== windowMessages[i]) ||
+        nextLiveMain.length !== liveMain.length || nextLiveMain.some((m, i) => m !== liveMain[i])
       for (const m of incoming) {
         if (m.channel_id !== id) continue
         for (const [topicId, b] of nextBaselines) {
@@ -606,40 +528,14 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
             needsRefresh = true
           }
         }
-        if (nextLiveMain.has(m.id)) {
-          const canonical = knownMessageState(channel, nextLiveMain.get(m.id), m)
-          if (nextLiveMain === liveMain) nextLiveMain = new Map(liveMain)
-          if (!canonical || canonical.deleted || canonical.topic_id !== null) nextLiveMain.delete(m.id)
-          else nextLiveMain.set(m.id, canonical)
-          dirty = true
-        }
-        for (const [topicId, latest] of nextLiveTopics) {
-          if (latest.id === m.id) {
-            const canonical = knownMessageState(channel, latest, m)
-            if (!canonical || canonical.deleted || canonical.topic_id !== topicId) {
-              if (nextLiveTopics === liveTopicLatest) nextLiveTopics = new Map(liveTopicLatest)
-              nextLiveTopics.delete(topicId)
-              needsRefresh = true
-              dirty = true
-            } else if (canonical !== latest) {
-              if (nextLiveTopics === liveTopicLatest) nextLiveTopics = new Map(liveTopicLatest)
-              nextLiveTopics.set(topicId, canonical)
-              dirty = true
-            }
-          } else if (m.deleted && m.topic_id === topicId && m.created_seq > forwardWatermark) {
-            needsRefresh = true
-          }
-        }
       }
       if (needsRefresh) {
         windowMessages = nextWindow
         baselines = nextBaselines
         liveMain = nextLiveMain
-        liveTopicLatest = nextLiveTopics
-        liveEvidence = nextLiveEvidence
         cancel()
         if (dirty) {
-          const lines = selectMainTimeline(liveMessages(liveMain, liveTopicLatest), windowMessages, baselines.values(), liveEvidence)
+          const lines = selectMainTimeline(liveMain, windowMessages, baselines.values())
           publish({ ...w, messages: messagesFromLines(lines), lines })
         }
         void read('refresh')
@@ -649,23 +545,24 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
         const hit = canonicalHit ?? heldHit
         const hitMoved = affectedByMove(hit?.reply_root_id ?? w.target.messageId, hit?.version ?? watermark)
         const visibleWindow = nextWindow.filter(m => !affectedByMove(m.reply_root_id ?? m.id, m.version))
-        const visibleLiveMain = new Map([...nextLiveMain].filter(([, m]) => !affectedByMove(m.reply_root_id ?? m.id, m.version)))
-        const visibleLiveTopics = new Map([...nextLiveTopics].filter(([, m]) => !affectedByMove(m.reply_root_id ?? m.id, m.version)))
+        const visibleLiveMain = nextLiveMain.filter(m => !affectedByMove(m.reply_root_id ?? m.id, m.version))
+        let visibleBaselines = nextBaselines
+        for (const [topicId, b] of nextBaselines) {
+          if (affectedByMove(b.summary.latest_message.reply_root_id ?? b.summary.latest_message.id, b.summary.latest_message.version)) {
+            if (visibleBaselines === nextBaselines) visibleBaselines = new Map(nextBaselines)
+            visibleBaselines.delete(topicId)
+          }
+        }
         const mainMove = moves.some(move => move.channel_id === id && move.version > refreshWatermark && (
           move.destination_topic_id === null ||
-          nextBaselines.has(move.destination_topic_id) ||
-          nextLiveTopics.has(move.destination_topic_id)
+          nextBaselines.size > 0
         ))
-        const baselineMoved = [...nextBaselines.values()].some(b =>
-          affectedByMove(b.summary.latest_message.reply_root_id ?? b.summary.latest_message.id, b.summary.latest_message.version))
-        if (hitMoved || mainMove || baselineMoved || visibleWindow.length !== nextWindow.length ||
-            visibleLiveMain.size !== nextLiveMain.size || visibleLiveTopics.size !== nextLiveTopics.size) {
+        if (hitMoved || mainMove || visibleBaselines.size !== nextBaselines.size ||
+            visibleWindow.length !== nextWindow.length || visibleLiveMain.length !== nextLiveMain.length) {
           windowMessages = visibleWindow
-          baselines = nextBaselines
+          baselines = visibleBaselines
           liveMain = visibleLiveMain
-          liveTopicLatest = visibleLiveTopics
-          liveEvidence = nextLiveEvidence
-          const lines = selectMainTimeline(liveMessages(liveMain, liveTopicLatest), windowMessages, baselines.values(), liveEvidence)
+          const lines = selectMainTimeline(liveMain, windowMessages, baselines.values())
           cancel()
           publish({ ...w, messages: messagesFromLines(lines), lines })
           void read(hitMoved ? undefined : 'refresh')
@@ -675,16 +572,18 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       let detached = w.detached || (channel.streamBase ?? 0) > forwardWatermark
       if (!w.hasNewer && !detached) {
         const suffix = incoming.filter(m =>
-          !heldWindowIds.has(m.id) && !nextLiveMain.has(m.id) && !m.deleted && m.created_seq > forwardWatermark)
+          !heldWindowIds.has(m.id) && !heldLiveIds.has(m.id) && !m.deleted && m.created_seq > forwardWatermark)
         if (suffix.length) {
-          const candidate = mergeLiveSuffix(id, nextLiveMain, nextLiveTopics, nextLiveEvidence, suffix)
-          const combined = selectMainTimeline(liveMessages(candidate.main, candidate.topics), nextWindow, nextBaselines.values(), candidate.evidence)
-          if (combined.length > SEARCH_WINDOW_LIMIT) detached = true
-          else {
-            nextLiveMain = candidate.main
-            nextLiveTopics = candidate.topics
-            nextLiveEvidence = candidate.evidence
-            dirty = true
+          if (suffix.some(m => m.topic_id !== null)) {
+            detached = true
+          } else {
+            const candidateLive = merge(w, suffix, nextLiveMain)
+            const combined = selectMainTimeline(candidateLive, nextWindow, nextBaselines.values())
+            if (combined.length > SEARCH_WINDOW_LIMIT) detached = true
+            else {
+              nextLiveMain = candidateLive
+              dirty = true
+            }
           }
         }
       }
@@ -692,9 +591,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
         windowMessages = nextWindow
         baselines = nextBaselines
         liveMain = nextLiveMain
-        liveTopicLatest = nextLiveTopics
-        liveEvidence = nextLiveEvidence
-        const lines = selectMainTimeline(liveMessages(liveMain, liveTopicLatest), windowMessages, baselines.values(), liveEvidence)
+        const lines = selectMainTimeline(liveMain, windowMessages, baselines.values())
         publish({ ...w, messages: messagesFromLines(lines), lines, detached })
       }
       return
