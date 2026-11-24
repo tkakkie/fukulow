@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform } from 'node:os';
@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { cpuList, parseCpuSets, type CpuSets } from '../../harness-core/cpusets.ts';
-import { benchmark, boundedCommand, command, CommandTimeoutError, docker, save, sql } from '../bench.ts';
+import { CommandTimeoutError, docker as rawDocker, save } from '../bench.ts';
 import { resolveImage } from '../manifest.ts';
 import { ownedContainer, ownedVolume, ownershipLabel, refuseLeftovers, supervise, timeouts } from '../runtime.ts';
 import { literal } from '../seed.ts';
@@ -20,8 +20,9 @@ import { outputPath, recordedWarmup } from '../d3r/run.ts';
 import { verifyRls } from '../d3r/rls.ts';
 import { loadBackfill } from '../d3r/snapshot.ts';
 import { timeQuery } from '../d3r/timing.ts';
-import { checkPins, diagnosticSettings, expectedSnapshotSha256, launchArgs, pinnedBenchmark, pinnedSession, planShape, qualifiedCpuSets } from './cluster.ts';
-import { cacheConstraint, fillPlans, ownReasons, smoke, stage1, stage2, type Block, type Measurement, type Noise, type Plan } from './judge.ts';
+import { diagnosticSettings, expectedSnapshotSha256, launchArgs, planShape, qualifiedCpuSets } from './cluster.ts';
+import { gatedIo, rawIo, type Io } from './io.ts';
+import { cacheConstraint, fillPlans, noiseSpreads, ownReasons, smoke, stage1, stage2, type Block, type Measurement, type Noise, type Plan } from './judge.ts';
 import { abortableIdle, execute, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
 import { ownedResources } from '../runtime.ts';
 import { ordered, sequence, type MeasuredStep, type Stage } from './plan.ts';
@@ -111,7 +112,10 @@ function stage1Noise(dir: string, judgement: {outcome: string; noise: Noise}) {
     'Stage 1\'s recorded N is not what its measurements give');
   assert.ok(judgement.noise.source === 'C hot1/hot2' && Number.isFinite(judgement.noise.value) && judgement.noise.value >= 1.05,
     'Stage 2 needs N from both Stage 1 cache replicates (C hot1/hot2, >= 1.05); a fallback N needs a re-plan');
-  return judgement.noise;
+  // The exact spreads behind N, from Stage 1's stored p95s (review round 7): Stage 2 never uses the double.
+  const spreads = noiseSpreads(ms);
+  assert.ok(spreads !== null, 'Stage 1\'s N has a missing G95');
+  return {...judgement.noise, spreads};
 }
 
 // The HOST-BUSY the launcher claimed for this queue names this job (the launcher passes both). This stops an
@@ -151,6 +155,11 @@ const freeAt = (path: string) => { const s = statfsSync(path, {bigint: true}); r
 const freeOrNull = (path: string) => { try { return freeAt(path); } catch { return null; } };
 
 async function worker(env: NodeJS.ProcessEnv) {
+  // Set by a signal (review rounds 6 and 7). The worker's only I/O is the gated set below, so no SQL,
+  // docker command, session, statement or pgbench starts once it is set.
+  let abortReason: string | null = null;
+  const io = gatedIo(rawIo, () => abortReason);
+  const {sql, docker, command, boundedCommand, checkPins, benchmark, pinnedBenchmark, pinnedSession} = io;
   const {frozen, sha256} = loadManifest();
   // Before anything else: the prerequisites again, and this launch's one-time token (review round 5, item 1).
   const {stage1Noise} = workerGate(env, sha256);
@@ -224,10 +233,6 @@ async function worker(env: NodeJS.ProcessEnv) {
   const groupAlive = () => { try { process.kill(-sampler.pid!, 0); return true; } catch { return false; } };
   const time = sets ? pinnedBenchmark(sets.client) : benchmark;
   const windows = new Map<string, {start: number; end: number; blocks: Block[]; restart: Restart | null; checked: boolean}>();
-  // Set by a signal (review round 6). Every Docker or database action below checks it first, so no new
-  // step, copy or query starts once a signal has arrived.
-  let abortReason: string | null = null;
-  const guard = () => { if (abortReason !== null) throw new Error(`aborted by ${abortReason}`); };
   let previous: {id: string; end: number} | null = null;
   let lastRestart: Restart | null = null;
   const app = <T>(body: (search: (text: string) => Promise<string>) => Promise<T>) => pinnedSession(container, 'measured', true, sets?.client, body);
@@ -257,7 +262,7 @@ async function worker(env: NodeJS.ProcessEnv) {
 
   const deps: Deps = {
     freeBytes: () => ({docker: dockerFree(), snapshot: freeOrNull(source.snapshotDirectory), output: freeOrNull(out)}),
-    copy: async () => { guard(); owner('postgres', 'DROP DATABASE IF EXISTS measured;'); guard(); owner('postgres', 'CREATE DATABASE measured TEMPLATE base;'); },
+    copy: async () => { owner('postgres', 'DROP DATABASE IF EXISTS measured;'); owner('postgres', 'CREATE DATABASE measured TEMPLATE base;'); },
     // Every command gets the time left before the cap; passing the cap, or a command timing out at it, is
     // false (that round is INVALID), never a STOP. The rule itself is settleWait (tested with a fake clock).
     settle: async capMs => {
@@ -267,9 +272,9 @@ async function worker(env: NodeJS.ProcessEnv) {
         '-U', 'fukulow', '-d', 'postgres'], left(), text).trim();
       try {
         return await settleWait({
-          checkpoint: () => { guard(); owned('CHECKPOINT;'); },
+          checkpoint: () => { owned('CHECKPOINT;'); },
           reading: () => {
-            guard();
+            
             const mem = boundedCommand('docker', ['exec', container, 'cat', '/proc/meminfo'], Math.min(left(), timeouts.docker));
             // An unreadable field is NaN, which never settles: the wait runs to its cap (INVALID), not a STOP.
             const kib = (k: string) => Number(new RegExp(`^${k}:\\s+(\\d+) kB$`, 'm').exec(mem)?.[1] ?? NaN) * 1024;
@@ -306,7 +311,7 @@ async function worker(env: NodeJS.ProcessEnv) {
       // reads, the read-counter wait and the sampler check, and the interval is recorded).
       const sincePrevious = previous && {id: previous.id, endedAt: previous.end, ms: start - previous.end};
       for (const [query, raw] of ordered(querySet, step.order)) {
-        guard();
+        
         const b = Date.now();
         try {
           const sample = await timeQuery(container, 'measured', path.page, query, raw, !accepts(query), `${dest}/${query}`, transactions, clients, time);
@@ -319,12 +324,12 @@ async function worker(env: NodeJS.ProcessEnv) {
       }
       const end = Date.now();
       await new Promise(r => setTimeout(r, 1_000));
-      guard();
+      
       const readsAfter = capture('blks_read after', missing, reads);
       const sharedReads = readsBefore === null || readsAfter === null || !Number.isFinite(readsAfter - readsBefore) ? null : readsAfter - readsBefore;
-      guard();
+      
       const plans = opts.explain ? await explainAll(dest, missing) : null;
-      guard();
+      
       const after = capture('stats-after', missing, stats);
       if (after !== null) save(`${dest}/stats-after.json`, after);
       windows.set(step.id, {start, end, blocks, restart: restartBefore, checked: false});
@@ -357,7 +362,7 @@ async function worker(env: NodeJS.ProcessEnv) {
     idle: ms => abortableIdle(ms, () => abortReason, Date.now, ms => new Promise(r => setTimeout(r, ms))),
     // A scan that could not page through every result did not do the §5.3 work: a STOP.
     scan: async () => {
-      guard();
+      
       const report = await app(async search => { await search(prepare(path.page)); return completeness(search); });
       save(`${out}/B.scan.json`, report);
       const broken = report.flatMap(q => q.actors.filter(a => a.paginationError).map(a => `${q.query}/${a.actor}`));
@@ -376,7 +381,7 @@ async function worker(env: NodeJS.ProcessEnv) {
       await app(async search => {
         await search(prepare(path.page));
         for (const [query, raw] of accepted) {
-          guard();
+          
           try {
             const {explain} = await explainPage(search, raw);
             save(`${dest}/${query}-plan.json`, explain);
@@ -400,15 +405,13 @@ async function worker(env: NodeJS.ProcessEnv) {
   try {
     const result = await execute(sequence(stage), deps);
     save(`${out}/measurements.json`, result);
-    // After a signal the handler records the abnormal finish and exits; no judgement, no `docker logs`.
-    if (abortReason !== null) return;
     // Every record is complete before the judgement (review item 4): the samples (sampler stopped), and the
     // PostgreSQL log. A missing one is incomplete evidence, never a judgement on part of the evidence.
     const stageMissing: string[] = [];
     const stopped = await stopSampler();
     if (!stopped.verified) stageMissing.push(`sampler: ${stopped.how}`);
     logTried = true;
-    const logMissing = postgresLog(container, out);
+    const logMissing = postgresLog(io, container, out);
     if (logMissing) stageMissing.push(logMissing);
     const judgement = stage === '1' ? stage1(result.measurements, result.stopped, stageMissing)
       : stage === '2' ? stage2(result.measurements, stage1Noise!, result.stopped, stageMissing)
@@ -419,7 +422,7 @@ async function worker(env: NodeJS.ProcessEnv) {
   } finally {
     const r = await stopSampler();
     if (!r.verified) { note(`sampler did not exit: ${r.how}`); process.exitCode ||= stopExitCode; }
-    if (!logTried && abortReason === null) postgresLog(container, out);
+    if (!logTried) postgresLog(io, container, out);
   }
 }
 
@@ -477,10 +480,11 @@ export function finishRecords(out: string, stage: Stage, manifestHash: string, s
   return stopExitCode;
 }
 
-// The PostgreSQL log, both streams (it logs to stderr). Returns null when saved, else what is missing.
-function postgresLog(container: string, out: string) {
+// The PostgreSQL log, both streams (it logs to stderr). Returns null when saved, else what is missing;
+// after a signal the gated command refuses, so the log is skipped and recorded as missing.
+export function postgresLog(io: Pick<Io, 'spawnSync'>, container: string, out: string) {
   try {
-    const logs = spawnSync('docker', ['logs', container], {encoding: 'utf8', timeout: timeouts.docker, maxBuffer: 1024 ** 3});
+    const logs = io.spawnSync('docker', ['logs', container], {encoding: 'utf8', timeout: timeouts.docker, maxBuffer: 1024 ** 3});
     const text = `${logs.stdout ?? ''}${logs.stderr ?? ''}`;
     writeFileSync(`${out}/postgres.log`, text);
     if (logs.error || logs.status !== 0) return `postgres log: docker logs ${logs.error ? String(logs.error) : `exited ${logs.status}`}`;
@@ -496,7 +500,7 @@ async function main() {
   // Everything in §3 and the stage's go, before any Docker or database work.
   const {approval} = prerequisites(args, sha256);
   const out = outputPath(args.out);
-  refuseLeftovers(docker);
+  refuseLeftovers(rawDocker);
   mkdirSync(out, {mode: 0o700});
   save(`${out}/approval.json`, approval);
   const token = randomUUID();
@@ -516,7 +520,7 @@ if (import.meta.main) await main();
 // After the supervisor: any harness-labelled resource still present is this run's (refuseLeftovers found
 // none at start), such as a throwaway disk probe interrupted mid-run. It is removed and recorded; if the
 // listing, a removal or the check afterwards fails, the run is not valid and the queue ends.
-export function sweepLeftovers(out: string, d: (...args: string[]) => string = docker) {
+export function sweepLeftovers(out: string, d: (...args: string[]) => string = rawDocker) {
   let found: {kind: string; name: string}[] = [];
   const failures: string[] = [];
   try { found = ownedResources(d); } catch (error) { failures.push(`listing failed: ${String(error)}`); }

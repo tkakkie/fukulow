@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { attribution, evidence, fillPlans, g95, minimums, noise, ownReasons, reproduction, smoke, spearman, stage1, stage2, type Measurement, type Plan } from './judge.ts';
+import { attribution, evidence, fillPlans, g95, minimums, noise, noiseSpreads, ownReasons, reproduction, smoke, spearman, stage1, stage2, type Measurement, type Plan } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
+import { rational, ratio } from './exact.ts';
 
 const why = (x: object) => (x as {reason?: string; inconclusiveReason?: string});
 const near = (a: number | null, b: number) => assert.ok(a !== null && Math.abs(a - b) < 1e-9, `${a} != ${b}`);
@@ -361,7 +362,8 @@ test('the smoke passes only with one valid round, no STOP and complete evidence'
   assert.equal(smoke(one(), null, ['sampler: did not exit after SIGKILL']).outcome, 'smoke failed');
 });
 
-const C = (value: number) => ({value, source: 'C hot1/hot2' as const});
+// A recorded N whose one exact spread is the double itself.
+const C = (value: number) => ({value, source: 'C hot1/hot2' as const, spreads: [{q: rational(value), k: 1n}]});
 const b = (g: Record<string, number>, over: Record<string, Partial<Measurement>> = {}) => Object.entries({'B.pre': 40, 'B.post1': 56,
   'B.post2': 56, 'B.post3': 56, 'B.cool1': 50, 'B.cool2': 50, ...g}).map(([id, v]) => m(id, v, over[id]));
 
@@ -405,4 +407,40 @@ test('a cut-short EXPLAIN sweep is never a partial plan list: missing queries ge
   const filled = fillPlans(queries, got, 'EXPLAIN session failed before this query');
   assert.deepEqual(filled.map(p => [p.query, 'error' in p]), [['q1', false], ['q2', true], ['q3', true]]);
   assert.equal(attribution(scenario({}, {'A1.4': {plans: filled}}), 1.05).H3, 'withheld');
+});
+
+test('Stage 2 uses the exact spreads behind N, never the rounded double (review round 7)', () => {
+  // A 23-query hot replicate whose exact spread is just above 1.5 while its G95 double ratio is below 1.5.
+  const many = (id: string, values: number[]) => {
+    const x = m(id, values[0]);
+    x.latencies = values.map((p95, i) => ({query: `fullwidth-${i}`, p95}));
+    return x;
+  };
+  // hot2 = 1.5 x hot1 per query (exact), with its first p95 two ulps higher: the exact N is above 1.5.
+  const hot1 = [53, 45, 51, 35, 39, 35, 34, 55, 35, 34, 30, 41, 58, 60, 39, 41, 37, 47, 50, 48, 31, 67, 35];
+  const hot2 = [79.50000000000003, ...hot1.slice(1).map(x => x * 1.5)];
+  const ms = scenario().map(x => x.id === 'C1.hot1' ? many('C1.hot1', hot1) : x.id === 'C1.hot2' ? many('C1.hot2', hot2) : x);
+  const N = noise(ms);
+  const spreads = noiseSpreads(ms)!;
+  assert.equal(N.value, 1.4999999999999991);
+  assert.ok(ratio(spreads[0], {q: rational(1.5), k: 1n}).q.n > ratio(spreads[0], {q: rational(1.5), k: 1n}).q.d);
+  // B.post1 / B.pre = 60 / 40 = 1.5 exactly: below 3 x (N - 1) for the exact N, so not reproduced as written.
+  assert.equal(stage2(b({'B.post1': 60}), {...N, spreads}).result, 'inconclusive');
+  // With the rounded double as the spread it would have reproduced.
+  assert.equal(stage2(b({'B.post1': 60}), C(N.value)).result, 'reproduced');
+  assert.deepEqual(stage2(b({'B.post1': 60}), {...N, spreads}).noise, N);
+});
+
+test('the reported rho is computed from the exact G95 ranks used for the decision', () => {
+  const r = reproduction(scenario(), 1.05);
+  assert.equal(r.rho, 1);
+  // A1.3 (F) and A1.4 (R) hold the same p95s in opposite query orders: the same exact G95, though the
+  // doubles differ in the last bits. They tie in rank, in the decision and in the reported rho.
+  const p95 = {q1: 59.54, q2: 55.29, q3: 59.57} as Record<string, number>;
+  const same = (x: Measurement) => ({...x, latencies: x.latencies.map(l => l.query === 'scalar' ? l : {...l, p95: p95[l.query]})});
+  const ms = scenario({'A1.5': 60, 'A1.6': 62}).map(x => x.id === 'A1.3' || x.id === 'A1.4' ? same(x) : x);
+  const [a3, a4] = ['A1.3', 'A1.4'].map(id => ms.find(x => x.id === id)!);
+  assert.notEqual(a3.order, a4.order);
+  assert.notEqual(g95(a3), g95(a4));
+  assert.equal(reproduction(ms, 1.05).rho, spearman([1, 2, 3, 4, 5, 6], [1, 2, 3.5, 3.5, 5, 6]));
 });

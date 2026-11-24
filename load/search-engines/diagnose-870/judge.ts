@@ -146,13 +146,16 @@ export function reproduction(ms: Measurement[], n: number, spreads: Root[] | nul
   const last = validIds(ms, ['A1.5', 'A1.6']).at(-1)!;
   const r = G(last) / G(first);
   const rounds = a1Ids.map((id, i) => [i + 1, byId(ms, id)] as const).filter(([, m]) => valid(m));
-  const rho = spearman(rounds.map(([i]) => i), rounds.map(([, m]) => G(m!)));
   const [gl, gf, gs] = [g95Root(last), g95Root(first), rounds.map(([, m]) => g95Root(m!))];
-  if (gl === null || gf === null || gs.some(g => g === null)) return {result: 'inconclusive' as const, reason: 'a G95 is missing', r, rho};
+  if (gl === null || gf === null || gs.some(g => g === null)) return {result: 'inconclusive' as const, reason: 'a G95 is missing', r, rho: null};
+  // The reported rho comes from the same exact G95 ranks as the decision (ranks of ranks are the ranks).
+  const [ri, rg] = [ranks(rounds.map(([i]) => i)), ranks(gs as Root[], byRoot)];
+  const rho = spearman(ri, rg);
   const R = ratio(gl, gf);
-  const rhoMet = rounds.length >= 3 && rhoAtLeast(ranks(rounds.map(([i]) => i)), ranks(gs as Root[], byRoot), q(4, 5));
+  const rhoMet = rounds.length >= 3 && rhoAtLeast(ri, rg, q(4, 5));
   // r - 1 >= 3 (N - 1): r >= 3n - 2 for the rational n, and r + 2 >= 3 x spread for each root.
-  const nq = rational(n);
+  // 1.05 is the approved decimal floor, taken as exactly 21/20 rather than its double.
+  const nq = n === minNoise ? q(21, 20) : rational(n);
   const noiseMet = atLeast(R, {n: 3n * nq.n - 2n * nq.d, d: nq.d}) && spreads !== null && spreads.every(s => sumAtLeast(R, q(2), q(3), s) === true);
   if (atLeast(R, q(13, 10)) && rhoMet && noiseMet) return {result: 'reproduced' as const, r, rho};
   if (below(R, q(23, 20))) return {result: 'not reproduced' as const, r, rho};
@@ -323,8 +326,11 @@ export const cacheConstraint = {
 // B.pre, never a later post-scan round in its place (an INVALID B.post1 is inconclusive). Reproduced when the
 // ratio is >= 1.30 and >= 3 x (N - 1), not reproduced when it is < 1.15, with Stage 1's recorded N.
 export type Noise = {value: number; source: 'C hot1/hot2' | 'A1 spread (fallback)'};
-export function stage2(ms: Measurement[], noise: Noise, stopped: string | null = null, stageMissing: string[] = []) {
-  const n = noise.value;
+// Stage 1's N for Stage 2: the recorded value and source, and the exact spreads behind it, recomputed from
+// Stage 1's stored p95s (review round 7), so the threshold never uses the rounded double.
+export type Stage1N = Noise & {spreads: Root[]};
+export function stage2(ms: Measurement[], stage1N: Stage1N, stopped: string | null = null, stageMissing: string[] = []) {
+  const noise: Noise = {value: stage1N.value, source: stage1N.source};
   const pre = byId(ms, 'B.pre');
   const first = byId(ms, 'B.post1');
   const post = validIds(ms, ['B.post1', 'B.post2', 'B.post3']);
@@ -339,10 +345,11 @@ export function stage2(ms: Measurement[], noise: Noise, stopped: string | null =
   const value = G(first) / G(pre);
   const [gp, gq] = [g95Root(first), g95Root(pre)];
   if (gp === null || gq === null) return {...base, result: 'inconclusive' as const, reason: 'a G95 is missing', ratio: value};
-  // Decided exactly on the stored p95s and the recorded N as a rational (exact.ts); the double is reported.
+  // Decided exactly on the stored p95s (exact.ts); the double is reported. With N = max(1.05, spreads),
+  // ratio >= 3 (N - 1) is ratio >= 3 x 0.05 and ratio + 3 >= 3 x spread for each exact spread.
   const R = ratio(gp, gq);
-  const nq = rational(n);
-  if (atLeast(R, q(13, 10)) && atLeast(R, {n: 3n * (nq.n - nq.d), d: nq.d})) return {...base, result: 'reproduced' as const, ratio: value};
+  const noiseMet = atLeast(R, q(3, 20)) && stage1N.spreads.every(s => sumAtLeast(R, q(3), q(3), s) === true);
+  if (atLeast(R, q(13, 10)) && noiseMet) return {...base, result: 'reproduced' as const, ratio: value};
   if (below(R, q(23, 20))) return {...base, result: 'not reproduced' as const, ratio: value};
   return {...base, result: 'inconclusive' as const, reason: 'between the thresholds', ratio: value};
 }

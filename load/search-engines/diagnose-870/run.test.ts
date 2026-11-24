@@ -110,7 +110,10 @@ test('Stage 2 needs a finalized Stage 1 whose recorded outcome and N are what it
     const out = prior(mkdtempSync(join(h.dir, 's')), '1', judgement, {measurements, normal});
     return prerequisites(options(argv(h, '2', ['--stage1-out', out]), 'linux'), hash, env, 16);
   };
-  assert.deepEqual(run({outcome: good.outcome, noise: good.noise}).stage1Noise, {value: 1.05, source: 'C hot1/hot2'});
+  const n = run({outcome: good.outcome, noise: good.noise}).stage1Noise!;
+  assert.deepEqual([n.value, n.source], [1.05, 'C hot1/hot2']);
+  // The exact spreads are recomputed from Stage 1's stored p95s for Stage 2 (review round 7).
+  assert.equal(n.spreads.length, 2);
   assert.throws(() => run({outcome: 'smoke passed', noise: good.noise}), /no recognized outcome: smoke passed/);
   assert.throws(() => run({outcome: 'cause established', noise: good.noise}), /not what its measurements give/);
   assert.throws(() => run({outcome: good.outcome, noise: {value: 1.08, source: 'C hot1/hot2'}}), /recorded N is not what its measurements give/);
