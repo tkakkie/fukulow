@@ -24,7 +24,8 @@ The launcher:
 - waits for an idle host, then claims `HOST-BUSY` and releases it on every exit;
 - runs the preflight (pinned clean tree, Node, containers, platform conditions, free disk) and the job's own gate;
 - captures PostgreSQL logs;
-- runs each job once and writes one `chain.log`.
+- runs each job once and writes one `chain.log`;
+- passes each gate and job `FUKULOW_HOST_BUSY` (the held marker) and `FUKULOW_LAUNCH_JOB` (its name), so a harness can refuse to start outside the launcher.
 
 A STOP or a failed job ends the queue. Nothing reruns: a `setup-failure` rerun under the rules below is a new queue entry with its own quoted go. Sleep prevention is `caffeinate` on macOS. On Linux it is the masked sleep targets, which are a preflight condition.
 
