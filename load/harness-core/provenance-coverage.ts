@@ -38,6 +38,10 @@ function metaFileLoads(file: string, source: string, root: string): string[] {
     throw new Error(`${toRepo(root, file)}:${line} ${why}: ${node.getText(parsed)}`);
   };
   const visit = (node: ts.Node): void => {
+    if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword && !ts.isPropertyAccessExpression(node.parent)) {
+      // `import.meta['url']`, `(import.meta).url`, `const { url } = import.meta` and the like.
+      fail(node.parent, 'may load a file the provenance walker cannot resolve');
+    }
     if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword && ts.isPropertyAccessExpression(node.parent)) {
       const access = node.parent, use = access.parent;
       if (access.name.text === 'url' && ts.isNewExpression(use) && ts.isIdentifier(use.expression) && use.expression.text === 'URL'

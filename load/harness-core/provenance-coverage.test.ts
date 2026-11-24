@@ -94,6 +94,9 @@ test('an import.meta form the walker cannot resolve fails loudly instead of bein
     ["const f = readFileSync(resolve(import.meta.dirname, 'x.sql'));", /may load a file the provenance walker cannot resolve: import\.meta\.dirname/],
     ["supervise(import.meta.url);", /may load a file .*: import\.meta\.url/],
     ["const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');", /may load a file .*: import\.meta\.url/],
+    ["const f = readFileSync(new URL('./query.sql', import.meta['url']));", /load\/run\.ts:1 may load a file .*: import\.meta\['url'\]/],
+    ["const f = readFileSync(new URL('./query.sql', (import.meta).url));", /may load a file .*: \(import\.meta\)/],
+    ["const { url } = import.meta;", /may load a file .*: \{ url \} = import\.meta/],
   ];
   for (const [source, error] of cases) assert.throws(() => localImports('load/run.ts', tree({ 'load/run.ts': source })), error, source);
 });

@@ -8,6 +8,7 @@ import { stats as replyCountsStats } from '../reply-counts-model.ts';
 import { percentile as revocationBurst } from '../revocation-burst-judgment.ts';
 import { distribution as signinDistribution } from '../signin-summary.ts';
 import { quantile as probe519 } from '../sql-probes/519-unread-counts/probe.ts';
+import { quantiles as replay515 } from '../sql-probes/515-replay/measure.ts';
 import { percentile as unreadInit } from '../unread-init/model.ts';
 
 test('nearest rank is the smallest sample with at least the fraction at or below it', () => {
@@ -74,8 +75,6 @@ test('kit wrappers equal the clamping copies on every input, including out-of-ra
       same(`unread ${at} ${f}`, () => unreadInit(values, f), () => { if (!values.length) throw new Error('empty distribution'); return nearestRank(ascending(values), f, 'clamp-low'); });
       // log-compare/measure.ts percentile (private): clamp below only, out of range or empty 0.
       same(`log-compare ${at} ${f}`, () => sorted[Math.max(0, Math.ceil(sorted.length * f) - 1)] ?? 0, () => nearestRank(sorted, f, 'clamp-low') ?? 0);
-      // sql-probes/515-replay/measure.ts `at` (private): no clamping.
-      same(`515-replay ${at} ${f}`, () => sorted[Math.ceil(sorted.length * f) - 1], () => nearestRank(sorted, f, 'none'));
       // web/scripts/aggregate-wasm-core.ts (private): either scale, clamp both sides, empty 0.
       const aggregate = (q: number) => { if (values.length === 0) return 0; const ratio = q > 1 ? q / 100 : q; return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(ratio * sorted.length) - 1))]; };
       same(`aggregate ${at} ${f}`, () => aggregate(f), () => values.length === 0 ? 0 : nearestRank(sorted, f > 1 ? f / 100 : f, 'clamp'));
@@ -95,12 +94,20 @@ test('kit wrappers equal the clamping copies on every input, including out-of-ra
 test('kit wrappers equal the fixed-fraction copies, including each empty-input outcome', () => {
   for (const values of inputs) {
     const sorted = ascending(values), at = `[${values}]`;
+    // sql-probes/515-replay/measure.ts quantiles: no clamping, empty or invalid samples throw.
+    same(`515-replay ${at}`, () => replay515(values), () => { if (!values.length || values.some(x => !Number.isFinite(x) || x < 0)) throw new Error('Invalid latency samples'); return { n: sorted.length, p50: nearestRank(sorted, 0.5, 'none'), p95: nearestRank(sorted, 0.95, 'none') }; });
     // signin-summary.ts distribution: no clamping, empty null.
     same(`signin ${at}`, () => signinDistribution(values), () => ({ count: sorted.length, ...Object.fromEntries((['p50', 'p95', 'p99'] as const).map((k, i) => [k, sorted.length ? nearestRank(sorted, [0.5, 0.95, 0.99][i]!, 'none') : null])) }));
     // move/diagnostic-evidence.ts distributions: no clamping, empty null.
     same(`move ${at}`, () => moveDistributions(values), () => ({ count: sorted.length, p50: nearestRank(sorted, 0.5, 'none') ?? null, p95: nearestRank(sorted, 0.95, 'none') ?? null, p99: nearestRank(sorted, 0.99, 'none') ?? null, max: sorted.at(-1) ?? null }));
     // reply-counts-model.ts stats: no clamping, empty throws.
     same(`reply-counts ${at}`, () => replyCountsStats(values), () => { if (!values.length) throw new Error('invalid latency samples'); return { n: values.length, p50: nearestRank(sorted, 0.5, 'none'), p95: nearestRank(sorted, 0.95, 'none'), p99: nearestRank(sorted, 0.99, 'none'), max: sorted.at(-1)! }; });
+  }
+});
+
+test('the sql-probes/515-replay wrapper keeps its empty and invalid-sample checks', () => {
+  for (const bad of [[], [1, Number.NaN], [1, -1], [Number.POSITIVE_INFINITY]]) {
+    assert.throws(() => replay515(bad), /Invalid latency samples/, `[${bad}]`);
   }
 });
 
