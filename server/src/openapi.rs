@@ -160,16 +160,7 @@ impl Modify for SectionResponseHeaders {
             {
                 continue;
             }
-            for operation in [
-                &mut item.get,
-                &mut item.post,
-                &mut item.patch,
-                &mut item.delete,
-                &mut item.put,
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for operation in operations_mut(item) {
                 for response in operation.responses.responses.values_mut() {
                     if let RefOr::T(response) = response {
                         response.headers.insert(
@@ -368,6 +359,36 @@ impl Modify for WebSocketDiscriminators {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use utoipa::openapi::path::HttpMethod;
+
+    #[test]
+    fn operations_mut_visits_each_operation_once() {
+        let operation = |id| Operation::builder().operation_id(Some(id)).build();
+        let mut item = PathItem::builder()
+            .operation(HttpMethod::Get, operation("get"))
+            .operation(HttpMethod::Put, operation("put"))
+            .operation(HttpMethod::Post, operation("post"))
+            .operation(HttpMethod::Delete, operation("delete"))
+            .operation(HttpMethod::Options, operation("options"))
+            .operation(HttpMethod::Head, operation("head"))
+            .operation(HttpMethod::Patch, operation("patch"))
+            .operation(HttpMethod::Trace, operation("trace"))
+            .query(Some(operation("query")))
+            .additional_operation("connect", operation("connect"))
+            .build();
+
+        let mut visited: Vec<_> = operations_mut(&mut item)
+            .map(|operation| operation.operation_id.as_deref().unwrap())
+            .collect();
+        visited.sort_unstable();
+        assert_eq!(
+            visited,
+            [
+                "connect", "delete", "get", "head", "options", "patch", "post", "put", "query",
+                "trace",
+            ]
+        );
+    }
 
     #[test]
     #[should_panic(expected = "Invalid OpenAPI domain crate::health for /api/v1/health")]
