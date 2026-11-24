@@ -520,6 +520,18 @@ test('a failed first sampler read after a passed preflight blocks the spawn', as
   assert.equal(w.spawned.length, 0);
 });
 
+test('the preflight alone needs /proc/stat counters: a preflight-only read failure stops before the spawn', async () => {
+  const w = world({ freqs: [3_000_000, 3_000_000] });
+  const d = deps(w);
+  let n = 0;
+  const thermal = d.platform.thermal;
+  d.platform = { ...d.platform, thermal: now => { const s = thermal(now)!; return ++n === 1 ? { ...s, procStat: null } : s; } };
+  const r = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), d);
+  assert.match(r.reason ?? '', /\/proc\/stat unreadable/);
+  assert.doesNotMatch(r.reason ?? '', /first thermal sample/);
+  assert.deepEqual([n, w.spawned.length, w.everyMs, w.files.has('/runs/HOST-BUSY')], [1, 0, [], false]);
+});
+
 test('the first recorded sample needs /proc/stat counters too, even after a passed preflight', async () => {
   const cases: [(number[] | null)[] | null, RegExp][] = [
     [null, /a first thermal sample: \/proc\/stat unreadable; job not started/],
