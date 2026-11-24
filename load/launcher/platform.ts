@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { loadavg, platform } from 'node:os';
 import { hostRecord, linuxViolations, type HostRecord } from '../harness-core/host-record.ts';
+import { thermalSample, type ThermalSample } from '../harness-core/thermal.ts';
 
 // The platform parts of a measurement launch (#867). Everything else in the launcher is shared.
 export type Platform = {
@@ -11,6 +12,8 @@ export type Platform = {
   violations(record: HostRecord): string[];
   load15(): number;
   record(diskPath: string): HostRecord;
+  // Thermal sample for the cool-down wait and the job sampler; null where the platform has none.
+  thermal(now: Date): ThermalSample | null;
 };
 
 const macAc = () => {
@@ -24,6 +27,7 @@ export const darwin: Platform = {
   violations: () => (macAc() ? [] : ['not on AC power']),
   load15: () => loadavg()[2],
   record: hostRecord,
+  thermal: () => null,
 };
 
 // On Linux the sleep targets are masked (a preflight condition), so no inhibitor lock is taken:
@@ -34,6 +38,7 @@ export const linux: Platform = {
   violations: linuxViolations,
   load15: () => loadavg()[2],
   record: hostRecord,
+  thermal: thermalSample,
 };
 
 export function currentPlatform(): Platform {

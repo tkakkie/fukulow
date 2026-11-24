@@ -175,7 +175,6 @@
           <Workspace
             {session}
             {navigation}
-            canCreateChannels={auth.capabilitiesPending ? null : organization.organization.capabilities.can_create_channels.allowed}
             members={auth.members}
             {organization}
             organizations={identity.organizations}

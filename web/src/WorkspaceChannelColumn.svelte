@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { Identity } from './api'
   import type { Organization } from './api-schema.d.ts'
+  import type { ChannelCreationAccess, ChannelCreationBlocked } from './channel-creation'
+  import ChannelCreationPermission from './ChannelCreationPermission.svelte'
   import ArchivedChannelList from './ArchivedChannelList.svelte'
   import ChannelList from './ChannelList.svelte'
   import type { Channel, ChannelVisibility } from './channels.svelte'
@@ -19,6 +21,7 @@
     name: string
     visibility: ChannelVisibility
     error: string
+    permissionError: ChannelCreationBlocked['blocked'] | null
     busy: boolean
   }
 
@@ -52,8 +55,7 @@
     channelMentionUnreadCount,
     topicUnreadCounts = {},
     sections,
-    showCreateChannel = false,
-    createChannelDisabled = false,
+    creationAccess = 'denied',
     createChannelDraft,
     archivedList,
     dms = null,
@@ -97,8 +99,7 @@
     channelMentionUnreadCount?: (channelId: string) => number | null
     topicUnreadCounts?: Readonly<Record<string, { readonly unreadCount: number | null; readonly mentionUnreadCount?: number | null }>>
     sections?: SectionsAdapter
-    showCreateChannel?: boolean
-    createChannelDisabled?: boolean
+    creationAccess?: ChannelCreationAccess
     createChannelDraft?: ChannelCreationDraft
     archivedList?: { status: 'loading' | 'ready' | 'error'; channels: Channel[] }
     dms?: DmListView | null
@@ -113,7 +114,7 @@
     onselectchannel: (id: string) => void
     onselecttopic?: (topicId: string) => void
     onopenalltopics?: (opener: HTMLElement | null) => void
-    oncreatechannel: (name: string, visibility: ChannelVisibility) => Promise<string | null>
+    oncreatechannel: (name: string, visibility: ChannelVisibility) => Promise<string | ChannelCreationBlocked | null | false>
     onholdarchived: () => () => void
     onretryarchived: () => void
     ondmmore?: () => void
@@ -122,6 +123,12 @@
     onopendm?: (memberId: string) => void
     onmemberchanged: (id: string) => void
   } = $props()
+
+  const creationPermissionError = $derived.by(() => {
+    if (organizationUnavailable) return
+    if (creationAccess === 'denied' && (createChannelDraft?.name || createChannelDraft?.permissionError)) return 'denied'
+    if (creationAccess === 'hidden') return createChannelDraft?.permissionError
+  })
 </script>
 
 <div class="channel-column__header">
@@ -165,6 +172,9 @@
 </div>
 
 <div class="channel-column__scroll">
+  {#if !organizationUnavailable && creationAccess !== 'denied'}
+    <CreateChannelForm oncreate={oncreatechannel} draft={createChannelDraft} disabled={creationAccess === 'hidden'} />
+  {/if}
   {#if !organizationUnavailable && (channelListStatus === 'error' || (channelListStatus === 'loading' && channels.length === 0 && channelListTimedOut))}
     <StatusBanner
       tone="danger"
@@ -194,9 +204,6 @@
     {onselecttopic}
     {onopenalltopics}
   />
-  {#if !organizationUnavailable && showCreateChannel}
-    <CreateChannelForm oncreate={oncreatechannel} draft={createChannelDraft} disabled={createChannelDisabled} />
-  {/if}
   <ArchivedChannelList
     list={archivedList}
     {selectedId}
@@ -234,9 +241,14 @@
   {/if}
 </div>
 
-{#if authError}
+{#if creationPermissionError || authError}
   <div class="channel-column__footer">
-    <StatusBanner tone="danger" role="alert" message={authError} />
+    {#if creationPermissionError}
+      <ChannelCreationPermission kind="alert" reason={creationPermissionError} />
+    {/if}
+    {#if authError}
+      <StatusBanner tone="danger" role="alert" message={authError} />
+    {/if}
   </div>
 {/if}
 
@@ -249,6 +261,7 @@
 
   .channel-column__scroll {
     overflow-y: auto;
+    scrollbar-gutter: stable;
     display: flex;
     flex-direction: column;
     gap: var(--space-12);
@@ -257,6 +270,8 @@
   }
 
   .channel-column__footer {
+    display: grid;
+    gap: var(--space-8);
     min-width: 0;
   }
 

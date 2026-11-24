@@ -1,4 +1,5 @@
 // Pure helpers for the #519 Channel-list counts probe (run.ts does the I/O).
+import { timed } from '../../harness-core/thermal.ts';
 
 export const organization = '00000000-0000-4000-8000-00000000000a';
 export const member = "md5('user-2')::uuid";
@@ -70,6 +71,41 @@ export function logLatenciesMs(log: string): number[] {
     if (fields.length < 6 || !Number.isFinite(us)) throw new Error(`bad pgbench log line: ${line}`);
     return us / 1000;
   });
+}
+
+// pgbench's own measured interval from its per-transaction log (`client tx latency_us script
+// epoch_s epoch_us`, the stamp being the transaction's end): the earliest transaction start to the
+// latest end, on the kernel wall clock the launcher's thermal sampler also stamps (#796).
+export type PgbenchWindow = { startMs: number; endMs: number };
+export function logWindow(log: string): PgbenchWindow {
+  let startMs = Infinity;
+  let endMs = -Infinity;
+  for (const line of log.split('\n').filter(l => l.trim() !== '')) {
+    const f = line.trim().split(/\s+/).map(Number);
+    if (f.length < 6 || !f.slice(0, 6).every(Number.isFinite)) throw new Error(`bad pgbench log line: ${line}`);
+    const end = f[4] * 1000 + f[5] / 1000;
+    startMs = Math.min(startMs, end - f[2] / 1000);
+    endMs = Math.max(endMs, end);
+  }
+  if (!Number.isFinite(startMs)) throw new Error('empty pgbench log');
+  return { startMs, endMs };
+}
+
+// One measured pgbench run of a send block, in the order final.ts needs: the run itself (timed,
+// so the wrapper window covers the run only), then the post-run step (the WAL query), then the
+// per-transaction log, whose latencies and window are the block's records.
+export function measuredPgbench<T>(steps: { run: () => string; after: () => T; log: () => string }, clock?: Parameters<typeof timed>[1]) {
+  const { value: output, window: measuredWindow } = timed(steps.run, clock);
+  const after = steps.after();
+  const errors: string[] = [];
+  let latencies: number[] = [];
+  let pgbenchWindow: PgbenchWindow | null = null;
+  try {
+    const log = steps.log();
+    latencies = logLatenciesMs(log);
+    pgbenchWindow = logWindow(log);
+  } catch (e) { errors.push(`latency log: ${e instanceof Error ? e.message : String(e)}`); }
+  return { output, measuredWindow, after, latencies, pgbenchWindow, errors };
 }
 
 // §10 step 1 stop rule, fixed before the run: per pair, a3-final against current;

@@ -29,6 +29,29 @@ const HTTP_METHODS: [&str; 8] = [
 const EXPECTED_API_OPERATIONS: usize = 53;
 const EXPECTED_RESPONSE_OBJECT_COUNT: usize = 398;
 
+#[test]
+fn newer_projection_openapi_documents_the_shared_continuation() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for route in ["timeline", "topics"] {
+        let get =
+            &document["paths"][format!("/api/v1/orgs/{{org}}/channels/{{id}}/{route}")]["get"];
+        let after = get["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|param| param["name"] == "after_position")
+            .unwrap();
+        assert_eq!(after["in"], "query");
+        assert_eq!(after["required"], false);
+        assert_eq!(after["schema"]["minimum"], 0);
+        let description = after["description"].as_str().unwrap();
+        assert!(description.contains("Requires as_of_seq and excludes before_position"));
+        let success = get["responses"]["200"]["description"].as_str().unwrap();
+        assert!(success.contains("after_position (newer)"));
+        assert!(success.contains("has_more follows the requested direction"));
+    }
+}
+
 fn unique_operation_ids(document: &Value) -> bool {
     let mut ids = BTreeSet::new();
     document["paths"].as_object().unwrap().values().all(|item| {

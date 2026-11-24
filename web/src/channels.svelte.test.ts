@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createChannelCreation } from './channel-creation'
 import { createChannels } from './channels'
 import { channelsAdapter } from './channels.svelte'
 import { channel, mount, ok, settle, type Deferred } from './adapter-test-helpers.svelte'
@@ -20,7 +21,7 @@ function setup() {
     const release = subscribe(listener)
     return () => { count.active--; return release() }
   })
-  return { controller, adapter: channelsAdapter(controller), lists, creates, count }
+  return { controller, adapter: channelsAdapter(controller, createChannelCreation(true, controller.create)), lists, creates, count }
 }
 
 describe('channels adapter', () => {

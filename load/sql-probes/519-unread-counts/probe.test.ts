@@ -187,3 +187,30 @@ test('a block is kept before its closing CHECKPOINT or docker events failure is 
   assert.equal(eventsSince(11_000), 10);
   assert.ok(eventsSince(11_500) * 1000 <= 11_500 - 1000);
 });
+
+test('pgbench\'s own interval is read from its log: earliest transaction start to latest end (#796)', async () => {
+  const { logWindow } = await import('./probe.ts');
+  // Ends at 1700000000.500 (1.5 ms) and 1700000120.250 (250 ms): start 1700000000498.5 ms, end 1700000120250 ms.
+  assert.deepEqual(logWindow('0 1 1500 0 1700000000 500000\n3 9 250000 0 1700000120 250000\n'), { startMs: 1_700_000_000_498.5, endMs: 1_700_000_120_250 });
+  assert.throws(() => logWindow(''), /empty pgbench log/);
+  assert.throws(() => logWindow('0 1 5 0 x 1\n'), /bad pgbench log line/);
+});
+
+test('the measured send keeps the wrapper around the pgbench run only; its thermal window comes from the log', async () => {
+  const { measuredPgbench } = await import('./probe.ts');
+  let wall = 1_000;
+  let mono = 0;
+  const clock = { wall: () => wall, mono: () => mono };
+  const order: string[] = [];
+  const m = measuredPgbench({
+    run: () => { order.push('run'); wall += 121_000; mono += 121_000; return 'out'; },
+    // The post-run WAL query and the log read take time that must not widen the wrapper.
+    after: () => { order.push('after'); wall += 5_000; mono += 5_000; return { atMs: 7 }; },
+    log: () => { order.push('log'); wall += 2_000; mono += 2_000; return '0 1 1000 0 1 120000\n'; },
+  }, clock);
+  assert.deepEqual(order, ['run', 'after', 'log']);
+  assert.deepEqual([m.output, m.after, m.measuredWindow, m.pgbenchWindow, m.latencies, m.errors],
+    ['out', { atMs: 7 }, { startMs: 1_000, endMs: 122_000, monoMs: 121_000 }, { startMs: 1_119, endMs: 1_120 }, [1], []]);
+  const bad = measuredPgbench({ run: () => 'out', after: () => null, log: () => { throw new Error('docker exec failed'); } }, clock);
+  assert.deepEqual([bad.pgbenchWindow, bad.latencies, bad.errors], [null, [], ['latency log: docker exec failed']]);
+});
