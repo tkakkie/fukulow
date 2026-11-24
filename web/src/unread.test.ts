@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { chooseBaseline, chooseChannelBaseline, scopeCount, sequenceToSubmit } from './unread-counts'
 import { deferred, flush, http, main, msg, ok, row, summary, unreadClient } from './unread-test-helpers'
 import { createUnreadSync } from './unread-sync'
-import type { ChannelList, ReadPosition, Result, TimelinePage, TopicPage, TopicSummaryResponse } from './api'
+import type { ChannelList, ReadPosition, Result, TimelinePage, TopicSummaryResponse } from './api'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -645,21 +645,6 @@ it('submits presented reads once stale-list recovery succeeds even after latest 
   expect(c.unread.get('A').main.error).toBe(false)
   await c.sync.close()
 })
-it('blocks read submission and keeps badges hidden during a retryable Topic summary failure, then submits on recovery', async () => {
-  const c = unreadClient(); await c.boot(); const id = await c.enter('T')
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
-  c.unread.activityRead('A', 'T'); await flush()
-  expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
-  expect(c.unread.get('A').topics.T.mentionUnreadCount).toBeNull()
-  c.unread.presented(id, [2]); await flush()
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
-  expect(c.unread.get('A').topics.T.mentionUnreadCount).toBeNull()
-  await vi.advanceTimersByTimeAsync(500); await flush()
-  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
-  expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
-  await c.sync.close()
-})
 it('blocks new read submission while an ahead-of-intent mark position awaits recovery, then submits on recovery', async () => {
   const c = unreadClient(); await c.boot(); const id = await c.enter()
   c.event(msg(4)); c.event(msg(5)); c.event(msg(6))
@@ -717,54 +702,6 @@ it('submits a read queued before recovery started once recovery succeeds without
   expect(c.unread.get('A').main.unreadCount).toBe(0)
   await c.sync.close()
 })
-it('keeps Topic badges hidden, preserves summary backoff, and blocks markRead when a stale projection arrives during 503 backoff', async () => {
-  const c = unreadClient(); await c.boot(); const id = await c.enter('T')
-  const stale = deferred<Result<TopicPage>>()
-  c.topicsApi.listTopics.mockReturnValueOnce(stale.promise)
-  const loading = c.topics.loadList('A'); await flush()
-  c.unreadApi.getTopicSummary.mockClear()
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
-  c.unread.activityRead('A', 'T'); await flush()
-  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(1)
-  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-  c.unread.presented(id, [2]); await flush()
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  // Older projection with the same watermark and read position must not clear the 503 latch.
-  stale.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, topics: [summary('T', 2, 0, 1)] }))
-  await loading; await flush()
-  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  // The scheduled backoff retry still runs and submits the retained presentation once it succeeds.
-  await vi.advanceTimersByTimeAsync(500); await flush()
-  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(2)
-  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
-  expect(c.unread.get('A').topics.T).toMatchObject({ position: 2, unreadCount: 0, mentionUnreadCount: 0, error: false })
-  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
-})
-it('does not release a queued mark or restore Topic badges when an in-flight mark succeeds during a separate 503', async () => {
-  const c = unreadClient(); await c.boot()
-  c.event(msg(4, 'T')); await flush()
-  const id = await c.enter('T')
-  const firstMark = deferred<Result<ReadPosition>>()
-  c.unreadApi.markRead.mockReturnValueOnce(firstMark.promise)
-  c.unread.presented(id, [2]); await flush()
-  c.unread.presented(id, [4]); await flush()
-  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
-  c.unreadApi.getTopicSummary.mockClear()
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
-  c.unread.activityRead('A', 'T'); await flush()
-  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-  // In-flight mark 2 succeeds at its requested position while the 503 summary retry is still pending.
-  firstMark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 2 })); await flush()
-  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
-  expect(c.unread.get('A').topics.T).toMatchObject({ position: 2, unreadCount: null, mentionUnreadCount: null, error: true })
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, 2, 1) }))
-  await vi.advanceTimersByTimeAsync(500); await flush()
-  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(2)
-  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2, 4])
-  expect(c.unread.get('A').topics.T).toMatchObject({ position: 4, unreadCount: 0, mentionUnreadCount: 0, error: false })
-  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
-})
 it('does not submit pre-hide presentations on count recovery after visibility returns until a fresh presentation arrives', async () => {
   const c = unreadClient(); await c.boot(); const id = await c.enter()
   expect(c.unread.get('A').entry?.boundary).toBe(0)
@@ -784,167 +721,6 @@ it('does not submit pre-hide presentations on count recovery after visibility re
   c.unread.presented(id, [1]); await flush()
   expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
   expect(c.unread.get('A').main).toMatchObject({ position: 1, unreadCount: 0 })
-  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
-})
-it('keeps the 503 latch when a higher-watermark Topic projection predates another device read, then recovers on a covering summary', async () => {
-  const c = unreadClient()
-  const mention = [{ member_id: 'me', name: 'Reader' }]
-  const tSummary = (w: number, p: number, count: number, mentions = count) => ({ ...summary('T', w, p, count), mention_unread_count: mentions })
-  c.history.splice(0, c.history.length, { ...msg(1, 'T'), mentions: mention }, { ...msg(2, 'T'), mentions: mention })
-  c.rows[0] = row({ as_of_seq: 2, read_seq: 0, main_unread_count: 0, unread_count: 2, main_mention_unread_count: 0, mention_unread_count: 2 })
-  c.summaries.set('T', tSummary(2, 0, 2, 2))
-  c.unreadApi.getTopicSummary.mockImplementation(async (_c, t) => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, topic: c.summaries.get(t)! }))
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, has_more: false, items: [{ kind: 'topic', topic: tSummary(2, 0, 2, 2) }] }))
-  await c.sync.start(); c.handlers[0].onReady(); await c.sync.watch('A'); await flush()
-  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 2 }); await flush()
-  c.event({ ...msg(3, 'T'), mentions: mention }); await flush()
-  const id = await c.enter('T')
-  const staleProjection = deferred<Result<TopicPage>>()
-  c.topicsApi.listTopics.mockReturnValueOnce(staleProjection.promise)
-  const loading = c.topics.loadList('A'); await flush()
-  c.unreadApi.getTopicSummary.mockClear()
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
-  c.unread.activityRead('A', 'T', 2); await flush()
-  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(1)
-  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-  c.unread.presented(id, [1]); await flush()
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  // Higher watermark 3 with read_seq 0 predates another device's read of 2.
-  staleProjection.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, topics: [tSummary(3, 0, 3, 3)] }))
-  await loading; await flush()
-  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  c.unread.presented(id, [3]); await flush()
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  const mark = deferred<Result<ReadPosition>>()
-  c.unreadApi.markRead.mockReturnValueOnce(mark.promise)
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: tSummary(3, 2, 1, 1) }))
-  await vi.advanceTimersByTimeAsync(500); await flush()
-  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(2)
-  expect(c.unread.get('A').topics.T).toMatchObject({ position: 2, unreadCount: 1, mentionUnreadCount: 1, error: false })
-  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([3])
-  mark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 3 })); await flush()
-  expect(c.unread.get('A').topics.T).toMatchObject({ position: 3, unreadCount: 0, mentionUnreadCount: 0, error: false })
-  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
-})
-it('requires a post-invalidation summary response for a no-position Topic read invalidation even after a higher-watermark projection', async () => {
-  const c = unreadClient()
-  const tSummary = (w: number, p: number, count: number) => summary('T', w, p, count)
-  c.history.splice(0, c.history.length, msg(1, 'T'), msg(2, 'T'))
-  c.rows[0] = row({ as_of_seq: 2, read_seq: 0, main_unread_count: 0, unread_count: 2 })
-  c.summaries.set('T', tSummary(2, 0, 2))
-  c.unreadApi.getTopicSummary.mockImplementation(async (_c, t) => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, topic: c.summaries.get(t)! }))
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, has_more: false, items: [{ kind: 'topic', topic: tSummary(2, 0, 2) }] }))
-  await c.sync.start(); c.handlers[0].onReady(); await c.sync.watch('A'); await flush()
-  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 2 }); await flush()
-  c.event(msg(3, 'T')); await flush()
-  const id = await c.enter('T')
-  c.unreadApi.getTopicSummary.mockClear()
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
-  c.unread.activityRead('A', 'T'); await flush()
-  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-  c.unread.presented(id, [1]); await flush()
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, topics: [tSummary(3, 0, 3)] }))
-  await c.topics.loadList('A'); await flush()
-  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: tSummary(3, 0, 3) }))
-  await vi.advanceTimersByTimeAsync(500); await flush()
-  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(2)
-  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
-  expect(c.unread.get('A').topics.T).toMatchObject({ position: 1, unreadCount: 2, error: false })
-  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
-})
-it('keeps the 503 latch and retry pending when the shared Topic summary adapter only has cached data during backoff', async () => {
-  const { createSession } = await import('./session')
-  const mention = [{ member_id: 'me', name: 'Reader' }]
-  const tSummary = (w: number, p: number, count: number, mentions = count) => ({ ...summary('T', w, p, count), mention_unread_count: mentions })
-  let socket!: import('./realtime').RealtimeHandlers
-  const getTopicSummary = vi.fn<() => Promise<Result<TopicSummaryResponse>>>()
-    .mockResolvedValueOnce(http(503))
-    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, topic: tSummary(3, 2, 1, 1) }))
-  const markCalls: number[] = []
-  const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-    if (init?.method === 'PUT' && url.includes('/read')) {
-      const body = JSON.parse(String(init.body)) as { read_seq: number }
-      markCalls.push(body.read_seq)
-      return new Response(JSON.stringify({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: body.read_seq }), { status: 200, headers: { 'content-type': 'application/json' } })
-    }
-    return new Response(JSON.stringify({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 2, read_seq: 0, main_unread_count: 0, unread_count: 2, main_mention_unread_count: 0, mention_unread_count: 2 })] }), { status: 200, headers: { 'content-type': 'application/json' } })
-  })
-  const listChannels = vi.fn(async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 2, read_seq: 0, main_unread_count: 0, unread_count: 2, main_mention_unread_count: 0, mention_unread_count: 2 })] }))
-  const session = createSession({
-    selfId: 'me', onEnded() {},
-    channelsApi: { listChannels, createChannel: async () => ({ ok: false, kind: 'network' }) },
-    replyCountsApi: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, counts: [] }),
-    topicsApi: {
-      getTopicSummary,
-      listTimeline: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, has_more: false, items: [{ kind: 'topic', topic: tSummary(2, 0, 2, 2) }] }),
-      listTopics: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, has_more: false, topics: [tSummary(2, 0, 2, 2)] }),
-      listTopicMessages: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, has_more: false, messages: [{ ...msg(1, 'T'), mentions: mention }, { ...msg(2, 'T'), mentions: mention }] }),
-    },
-    sync: {
-      random: () => 0.5,
-      connect(h) { socket = h; return { send() {}, close() {} } },
-      api: {
-        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
-        listMessages: async () => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, has_more: false, messages: [{ ...msg(1, 'T'), mentions: mention }, { ...msg(2, 'T'), mentions: mention }] }),
-        sendMessage: async () => ({ ok: false, kind: 'network' }),
-      },
-    },
-  })
-  try {
-    socket.onReady(); await session.sync.watch('A'); await flush()
-    socket.onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 2 }); await flush()
-    await session.topics.loadTopic('A', 'T'); await flush()
-    socket.onEvent({ type: 'message', seq: 3, kind: 'create', message: { ...msg(3, 'T'), mentions: mention } }); await flush()
-    session.unread.visibility(true)
-    const id = await session.unread.enter({ channel: 'A', topicId: 'T' })
-    expect(id).toBeDefined()
-    session.unread.activityRead('A', 'T', 2); await flush()
-    expect(getTopicSummary).toHaveBeenCalledTimes(1)
-    expect(session.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-    session.unread.presented(id!, [1]); await flush()
-    expect(markCalls).toEqual([])
-    // Unread's 500ms retry fires while the shared Topic summary target is still in backoff (~750ms).
-    await vi.advanceTimersByTimeAsync(500); await flush()
-    expect(getTopicSummary).toHaveBeenCalledTimes(1)
-    expect(session.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-    expect(markCalls).toEqual([])
-    // Once the shared target backoff expires, the covering summary clears the latch with badge 1.
-    await vi.advanceTimersByTimeAsync(1000); await flush()
-    expect(getTopicSummary).toHaveBeenCalledTimes(2)
-    expect(session.unread.get('A').topics.T).toMatchObject({ position: 2, unreadCount: 1, mentionUnreadCount: 1, error: false })
-  } finally { fetchSpy.mockRestore(); session.close() }
-})
-it('clears the 503 latch and cancels summary backoff when a covering Topic projection arrives', async () => {
-  const c = unreadClient()
-  const mention = [{ member_id: 'me', name: 'Reader' }]
-  const tSummary = (w: number, p: number, count: number, mentions = count) => ({ ...summary('T', w, p, count), mention_unread_count: mentions })
-  c.history.splice(0, c.history.length, { ...msg(1, 'T'), mentions: mention }, { ...msg(2, 'T'), mentions: mention })
-  c.rows[0] = row({ as_of_seq: 2, read_seq: 0, main_unread_count: 0, unread_count: 2, main_mention_unread_count: 0, mention_unread_count: 2 })
-  c.summaries.set('T', tSummary(2, 0, 2, 2))
-  c.unreadApi.getTopicSummary.mockImplementation(async (_c, t) => ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, topic: c.summaries.get(t)! }))
-  c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 2, has_more: false, items: [{ kind: 'topic', topic: tSummary(2, 0, 2, 2) }] }))
-  await c.sync.start(); c.handlers[0].onReady(); await c.sync.watch('A'); await flush()
-  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 2 }); await flush()
-  c.event({ ...msg(3, 'T'), mentions: mention }); await flush()
-  const id = await c.enter('T')
-  c.unreadApi.getTopicSummary.mockClear()
-  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
-  c.unread.activityRead('A', 'T', 2); await flush()
-  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
-  c.unread.presented(id, [3]); await flush()
-  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
-  // A projection covering both the watermark (3) and the notice read_seq (2) clears the latch.
-  c.topicsApi.listTopics.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, topics: [tSummary(3, 2, 1, 1)] }))
-  await c.topics.loadList('A'); await flush()
-  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([3])
-  expect(c.unread.get('A').topics.T).toMatchObject({ position: 3, unreadCount: 0, mentionUnreadCount: 0, error: false })
-  await vi.advanceTimersByTimeAsync(2000); await flush()
-  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(1)
   await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
 it('retains pre-hide seen evidence for the same visit so a fresh presentation after return bridges the prefix', async () => {
@@ -971,6 +747,21 @@ it('retains pre-hide seen evidence for the same visit so a fresh presentation af
   c.unread.presented(id, [3]); await flush()
   expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1, 3])
   expect(c.unread.get('A').main).toMatchObject({ position: 3, unreadCount: 0 })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+it('does not trigger a mark when a Topic visit leaves recovery without a fresh presentation', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter('T')
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
+  c.unread.activityRead('A', 'T'); await flush()
+  expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
+  c.unread.presented(id, [2]); await flush()
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(500); await flush()
+  expect(c.unread.get('A').topics.T.unreadCount).toBe(1)
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  c.unread.presented(id, [2]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
   await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
 it('requires older projection coverage for first Unread and never marks across a window gap', async () => {

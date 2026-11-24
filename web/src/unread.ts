@@ -23,10 +23,10 @@ export const unreadApi = (org: string, generation: () => string | undefined = ()
 })
 // At most the union of sync, main and the active Topic bodies, plus one visit marker.
 export const UNREAD_RECORD_LIMIT = MAIN_MESSAGE_LIMIT * 2 + TOPIC_MESSAGE_LIMIT
-type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: number; stopped: boolean; error: boolean; summaryError: boolean;
-  summaryInvalidation: number; summaryCoveredInvalidation: number; topicMissing?: true;
+type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: number; stopped: boolean; error: boolean;
+  topicMissing?: true;
   operation?: symbol; intent?: MarkReadRequest; queued?: MarkReadRequest; timer?: ReturnType<typeof setTimeout>; attempt: number }
-const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, summaryError: false, summaryInvalidation: 0, summaryCoveredInvalidation: 0, attempt: 0 })
+const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, attempt: 0 })
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
   archived: undefined as boolean | undefined,
   records: new Map<number, UnreadRecord>(), lostThrough: 0, aggregate: undefined as AggregateBaseline | undefined, accepted: 0, requiredAfter: 0, requiredAggregateAfter: 0, requiredBase: 0,
@@ -257,9 +257,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     if (queuedList) { queuedList = false; void refresh() }
   }
-  const needsRecovery = (c: Channel, s: Scope) => s.error || s.summaryError ||
-    s.summaryCoveredInvalidation < s.summaryInvalidation ||
-    (s.baseline !== undefined && (s.baseline.asOfSeq < c.requiredBase || s.baseline.readSeq < s.requiredPosition))
+  const needsRecovery = (c: Channel, s: Scope) => s.error || (s.baseline !== undefined &&
+    (s.baseline.asOfSeq < c.requiredBase || s.baseline.readSeq < s.requiredPosition))
   const listNeedsRecovery = (c: Channel) => needsRecovery(c, c.main) || (c.aggregate !== undefined && c.aggregate.as_of_seq < c.requiredBase)
   function count(id: string, c: Channel, topic: string | null, records: Iterable<UnreadRecord> = c.records.values(), mention = false): number | null {
     const s = getScope(c, topic)
@@ -301,9 +300,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     return true
   }
   const isVisit = (v: Visit) => visit === v && visible && watched(v.scope.channel)
-  const visitBlocked = () => visit !== undefined && visit.boundary !== null &&
-    count(visit.scope.channel, getChannel(visit.scope.channel), visit.scope.topicId) === null
+  const visitBlocked = () => visit !== undefined && visit.scope.topicId === null && visit.boundary !== null &&
+    count(visit.scope.channel, getChannel(visit.scope.channel), null) === null
   function recordVisitCoverage(v: Visit) {
+    if (v.scope.topicId !== null) return
     const lost = channels.get(v.scope.channel)?.lostThrough ?? 0
     const merged: Coverage[] = []
     for (const range of [...v.covered, ...coverage(v.scope)].sort((a, b) => a.after - b.after)) {
@@ -317,8 +317,9 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     v.covered = merged
   }
   function visitCoverage(v: Visit): Coverage[] {
-    const lost = channels.get(v.scope.channel)?.lostThrough ?? 0
     const ranges = coverage(v.scope)
+    if (v.scope.topicId !== null) return ranges
+    const lost = channels.get(v.scope.channel)?.lostThrough ?? 0
     for (const range of v.covered) {
       const after = Math.max(range.after, lost)
       if (after < range.through) ranges.push({ after, through: range.through })
@@ -349,7 +350,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         if (!c.heldPositions.has(v.scope.topicId)) c.heldPositions.set(v.scope.topicId, s.position)
         c.requiredAfter = issue + 1
       }
-      s.position = Math.max(s.position, r.data.read_seq); s.error = s.baseline !== undefined && s.baseline.readSeq < s.requiredPosition; s.intent = undefined; s.attempt = 0
+      s.position = Math.max(s.position, r.data.read_seq); s.error = false; s.intent = undefined; s.attempt = 0
       if (r.data.read_seq > intent.read_seq) {
         s.requiredPosition = Math.max(s.requiredPosition, r.data.read_seq)
         s.error = true
@@ -363,7 +364,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         if (v.scope.topicId === null) void refresh()
         else void refreshTopic(v.scope.channel, v.scope.topicId)
       }
-      if (s.queued && count(v.scope.channel, c, v.scope.topicId) === null) s.queued = undefined
+      if (v.scope.topicId === null && s.queued && count(v.scope.channel, c, null) === null) s.queued = undefined
       if (v.scope.topicId !== null) void refresh()
       notify(v.scope.channel)
       if (s.queued) void submit(v, c, s)
@@ -385,26 +386,17 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (retry !== undefined) { clearTimeout(retry); c.summaryTimers.delete(topic) }
     const operation = Symbol()
     const recoveryPosition = s.error ? s.requiredPosition : undefined
-    const startedInvalidation = s.summaryInvalidation
     c.summaryReads.set(topic, operation)
     const r = await request(() => options.api.getTopicSummary(id, topic), id)
     if (!watched(id) || c.token !== token || c.summaryReads.get(topic) !== operation) return
     c.summaryReads.delete(topic)
-    const blocked = visitBlocked()
     if (r.ok && r.data.topic.id === topic) {
       acceptScope(s, topicBaseline(r.data.as_of_seq, r.data.topic))
       if (s.baseline && s.baseline.asOfSeq < c.requiredBase) s.error = true
-      if (!s.error) {
-        s.summaryCoveredInvalidation = Math.max(s.summaryCoveredInvalidation, startedInvalidation)
-        if (s.summaryCoveredInvalidation >= s.summaryInvalidation) {
-          s.summaryError = false; s.topicMissing = undefined; c.summaryAttempts.delete(topic)
-        }
-      }
+      if (!s.error) { s.topicMissing = undefined; c.summaryAttempts.delete(topic) }
     } else {
       s.error = true
-      if (retryable(r)) s.summaryError = true
-      else {
-        s.summaryError = false
+      if (!retryable(r)) {
         s.stopped = true
         if (!r.ok && r.kind === 'http' && r.status === 404 && r.error === 'topic_not_found') s.topicMissing = true
         if (!r.ok && !api.isOrganizationUnavailable(r) && r.kind === 'http' && r.status === 404 && r.error !== 'topic_not_found') {
@@ -415,15 +407,14 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     // Pending recovery absorbs notifications; only a successful read made stale by
     // new requirements needs an immediate follow-up. Failures always use backoff.
     const queued = c.queuedSummaries.delete(topic)
-    const rerun = queued && r.ok && (recoveryPosition === undefined || s.requiredPosition > recoveryPosition || s.summaryInvalidation > startedInvalidation)
-    if ((s.error || s.summaryError || s.summaryCoveredInvalidation < s.summaryInvalidation) && !s.stopped && !rerun) {
+    const rerun = queued && r.ok && (recoveryPosition === undefined || s.requiredPosition > recoveryPosition)
+    if (s.error && !s.stopped && !rerun) {
       const attempt = c.summaryAttempts.get(topic) ?? 0
       c.summaryAttempts.set(topic, attempt + 1)
       c.summaryTimers.set(topic, setTimeout(() => { c.summaryTimers.delete(topic); void refreshTopic(id, topic) }, retryDelay(attempt, r)))
     }
     const changed = new Set([id])
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
-    else if (blocked && visit) enqueue(visit)
     prune(c); notify(changed)
     if (rerun) void refreshTopic(id, topic)
   }
@@ -439,16 +430,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         c.observedBaselines.add(line.baseline)
         const hadTopic = c.topics.has(line.topicId)
         const s = getScope(c, line.topicId)
-        const previous = s.baseline, prevPos = s.position, prevErr = s.error, prevSummaryErr = s.summaryError, prevStop = s.stopped
-        const incoming = topicBaseline(line.baseline.asOfSeq, line.baseline.summary)
-        acceptScope(s, incoming)
-        if (s.summaryError && s.summaryCoveredInvalidation >= s.summaryInvalidation &&
-          s.baseline && s.baseline.asOfSeq >= c.requiredBase && s.baseline.readSeq >= s.requiredPosition && !s.error &&
-          (!previous || incoming.asOfSeq > previous.asOfSeq || (incoming.asOfSeq === previous.asOfSeq && incoming.readSeq > previous.readSeq))) {
-          s.summaryError = false
-        }
+        const previous = s.baseline, prevPos = s.position, prevErr = s.error, prevStop = s.stopped
+        acceptScope(s, topicBaseline(line.baseline.asOfSeq, line.baseline.summary))
         if (s.topicMissing && line.baseline.asOfSeq >= c.requiredBase) { s.topicMissing = undefined; s.stopped = false }
-        baselineChanged ||= !hadTopic || s.baseline !== previous || s.position !== prevPos || s.error !== prevErr || s.summaryError !== prevSummaryErr || s.stopped !== prevStop
+        baselineChanged ||= !hadTopic || s.baseline !== previous || s.position !== prevPos || s.error !== prevErr || s.stopped !== prevStop
         observed.push(line.topicId)
       }
     }
@@ -459,9 +444,9 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     for (const topic of observed) {
       const s = getScope(c, topic)
-      if (s.baseline && needsRecovery(c, s)) {
+      if (s.baseline && (s.baseline.asOfSeq < c.requiredBase || s.error)) {
         if (!c.summaryTimers.has(topic)) void refreshTopic(id, topic)
-      } else if (!needsRecovery(c, s) && !s.stopped) {
+      } else if (!s.error && !s.stopped) {
         // A current projection supersedes summary work, including a completion still in flight.
         const retry = c.summaryTimers.get(topic)
         if (retry !== undefined) clearTimeout(retry)
@@ -493,7 +478,6 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (!next.running || next.organization !== 'available') { if (before.running) reset(); return }
     if (before.historyEpoch !== next.historyEpoch) reset()
     let rebootstrap = false, moveRefresh = false
-    const blocked = visitBlocked()
     const changed = new Set<string>()
     const selfChanged = before.selfId !== next.selfId
     if (selfChanged) {
@@ -562,7 +546,6 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (channelChanged) changed.add(id)
     }
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
-    else if (blocked && visit) enqueue(visit)
     notify(changed)
     if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); deadlines.cancel() }
     if (moveRefresh && !rebootstrap) void refresh()
@@ -574,7 +557,6 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   const unsubscribe = sync.subscribe(reconcile)
   const unsubscribeTopics = options.topics?.subscribe(topicChannels => {
     if (!active()) return
-    const blocked = visitBlocked()
     const changed = new Set<string>()
     const targets = topicChannels && topicChannels.size > 0 ? topicChannels : channels.keys()
     for (const id of targets) {
@@ -583,7 +565,6 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (collect(id, c) || visit?.scope.channel === id) changed.add(id)
     }
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
-    else if (blocked && visit) enqueue(visit)
     notify(changed)
   })
   function snapshot(id: string) {
@@ -610,7 +591,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   }
   function scopeSnapshot(id: string, c: Channel, topic: string | null, records?: Iterable<UnreadRecord>) {
     const s = getScope(c, topic)
-    return { position: s.baseline ? s.position : null, unreadCount: c.archived ? null : count(id, c, topic, records), mentionUnreadCount: c.archived ? null : count(id, c, topic, records, true), stopped: s.stopped, error: s.error || s.summaryError }
+    return { position: s.baseline ? s.position : null, unreadCount: c.archived ? null : count(id, c, topic, records), mentionUnreadCount: c.archived ? null : count(id, c, topic, records, true), stopped: s.stopped, error: s.error }
   }
   function leave(id?: symbol) {
     if (!visit || (id !== undefined && visit.id !== id)) return
@@ -648,11 +629,6 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   return {
     subscribe,
     activityMainCoverage(id: string) { const row = channels.get(id)?.aggregate; return row && completeCountFields(row) ? row.read_seq : -1 },
-    activityTopicMinimum(id: string, topic: string) {
-      const s = channels.get(id)?.topics.get(topic)
-      if (!s) return 0
-      return s.summaryCoveredInvalidation < s.summaryInvalidation ? Infinity : Math.max(s.position, s.requiredPosition)
-    },
     activitySnapshot(rows: UnreadChannel[]) {
       if (!active()) return
       const blocked = visitBlocked()
@@ -707,19 +683,9 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (c) fence(id, c)
       channels.delete(id); notify(id)
     },
-    activityRead(id: string, topic: string | null, readSeq?: number) {
+    activityRead(id: string, topic: string | null) {
       if (!watched(id)) return
-      if (topic !== null && channels.get(id)?.topics.has(topic)) {
-        const c = getChannel(id), s = getScope(c, topic)
-        if (readSeq !== undefined) {
-          s.requiredPosition = Math.max(s.requiredPosition, readSeq)
-          if (s.baseline && s.baseline.readSeq < s.requiredPosition) s.error = true
-        } else {
-          s.summaryInvalidation++
-        }
-        notify(id)
-        void refreshTopic(id, topic)
-      }
+      if (topic !== null && (channels.get(id)?.topics.has(topic))) void refreshTopic(id, topic)
     },
     get(id: string) { let s = snapshots.get(id); if (!s) snapshots.set(id, s = snapshot(id)); return s },
     refresh: () => refresh(),
@@ -728,7 +694,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (!active() || !sync.get().channels[scope.channel]?.watched || sync.get().channels[scope.channel]?.state === 'unavailable') return
       let c = getChannel(scope.channel)
       if (c.stopped) { fence(scope.channel, c); channels.set(scope.channel, c = channelState()); void refresh() }
-      const s = getScope(c, scope.topicId), wasStopped = s.stopped || s.error || s.summaryError
+      const s = getScope(c, scope.topicId), wasStopped = s.stopped || s.error
       s.stopped = false; s.error = wasStopped
       visit = { id: Symbol(), scope: { ...scope }, boundary: null, unreadAtEntry: null, presented: new Set(), covered: [], needsPresentation: false }
       const id = visit.id

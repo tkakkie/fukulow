@@ -93,7 +93,6 @@ export function createActivityTarget<T>(options: {
     // An in-flight snapshot can cover a newer notice if it passes covers().
     demandCoverage() { if (!inFlight) invalidate() },
     failure: () => failure,
-    retrying: () => retry,
     ensure() { if (!closed && !stopped && !dirty && !inFlight && timer === undefined && !retry) { dirty = true; return run() } },
     refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; dirty = true; return run() },

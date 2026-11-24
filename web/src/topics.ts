@@ -801,18 +801,18 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       if (!current(channel, w)) return { ok: false, kind: 'network' }
       const target = holdSummary(w, topic)
       const cached = w.baselines.get(topic)
-      if (cached && !target?.failure() && !target?.retrying() && cached.asOfSeq >= (sync.get().channels[channel]?.cursor ?? 0) && cached.summary.read_seq >= minimumPosition) {
-        return { ok: true, data: { history_generation: cached.summary.latest_message.history_generation, as_of_seq: cached.asOfSeq, topic: cached.summary } }
-      }
+      if (cached && cached.asOfSeq >= (sync.get().channels[channel]?.cursor ?? 0) && cached.summary.read_seq >= minimumPosition) return { ok: true, data: { history_generation: cached.summary.latest_message.history_generation, as_of_seq: cached.asOfSeq, topic: cached.summary } }
       // Return accepted REST evidence even if display trimming immediately evicts its body.
       let accepted: TopicSummaryResponse | undefined
       const stop = activityTargets.get(`topic:${channel}:${topic}`)?.observeSummary?.(response => { accepted = response })
       try {
-        if (cached) await target?.refresh()
-        else await target?.ensure()
+        if (cached) { target?.invalidate(); await target?.refresh() } else await target?.ensure()
       } finally { stop?.() }
       if (accepted && current(channel, w)) return { ok: true, data: accepted }
-      return target?.failure() ?? { ok: false, kind: 'network' }
+      const failed = target?.failure()
+      if (failed) return failed
+      const baseline = w.baselines.get(topic)
+      return baseline && current(channel, w) ? { ok: true, data: { history_generation: baseline.summary.latest_message.history_generation, as_of_seq: baseline.asOfSeq, topic: baseline.summary } } : { ok: false, kind: 'network' }
     },
     get(channel: string) {
       if (!closed) reconcileSync()
