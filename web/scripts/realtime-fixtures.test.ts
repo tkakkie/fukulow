@@ -130,6 +130,13 @@ describe('realtime fixtures: validation', () => {
     expect(problemsOf((f) => (f.client.scenarios[0].steps[1].input.has_more = 'no'))).toContain('expected boolean')
   })
 
+  it('requires every rust.existing_tests entry to be a path.rs::test_name citation (#904)', () => {
+    const cite = (entry: string) => problemsOf((f) => (f.delivery.scenarios[0].rust.existing_tests = [entry]))
+    expect(cite('server/tests/a.rs::some_test')).toBe('')
+    for (const bad of ['server/tests/a.rs:some_test', 'some_test', 'web/src/a.test.ts::some_test', 'server/tests/a.rs::'])
+      expect(cite(bad)).toContain(`${JSON.stringify(bad)} does not match`)
+  })
+
   it('rejects a non-fixture file and a kind that does not match its directory', () => {
     expect(problemsOf(() => {}, { file: 'client/notes.txt', text: 'x' })).toContain('only .json files')
     expect(problemsOf((f) => (f.client.kind = 'delivery'))).toContain('does not match the directory')
