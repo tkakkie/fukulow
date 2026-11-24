@@ -1,3 +1,4 @@
+use crate::allowed_host::csp_safe_authority;
 use axum::{
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, header},
@@ -11,14 +12,10 @@ const PERMISSIONS_POLICY: &str = "accelerometer=(), autoplay=(), camera=(), clip
 fn websocket_source(headers: &HeaderMap, secure: bool) -> Option<String> {
     let mut hosts = headers.get_all(header::HOST).iter();
     let host = hosts.next()?.to_str().ok()?;
-    if hosts.next().is_some()
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
-    {
+    if hosts.next().is_some() {
         return None;
     }
-    let authority: axum::http::uri::Authority = host.parse().ok()?;
+    let authority = csp_safe_authority(host)?;
     if authority.host().is_empty() {
         return None;
     }
@@ -177,5 +174,51 @@ mod tests {
         );
         headers.append(header::HOST, "evil.example".parse().unwrap());
         assert!(websocket_source(&headers, true).is_none());
+    }
+
+    #[test]
+    fn host_values_preserve_config_and_websocket_source_decisions() {
+        let mut headers = HeaderMap::new();
+        for (host, configured, reflected) in [
+            ("Chat-1.example.", true, true),
+            ("127.0.0.1", true, true),
+            ("chat.example:1", true, true),
+            ("chat.example:65535", true, true),
+            ("[::1]", true, true),
+            ("[2001:db8::1]:8443", true, true),
+            ("chat.example'", false, false),
+            ("chat.example\"", false, false),
+            ("chat.example;", false, false),
+            ("chat.example other.example", false, false),
+            ("chat.example,other.example", false, false),
+            ("chat.example/path", false, false),
+            ("user@chat.example:443", false, false),
+            ("café.example", false, false),
+            ("", false, false),
+            (":443", false, false),
+            ("[::1", false, false),
+            ("2001:db8::1", false, false),
+            ("[invalid]", false, true),
+            ("-chat.example", false, true),
+            ("chat.example:", false, true),
+            ("chat.example:0", false, true),
+            ("chat.example:65536", false, true),
+            ("chat.example:https", false, true),
+        ] {
+            assert_eq!(
+                crate::AllowedHost::configured(host).is_ok(),
+                configured,
+                "configured Host {host:?}"
+            );
+            headers.insert(
+                header::HOST,
+                HeaderValue::from_bytes(host.as_bytes()).unwrap(),
+            );
+            assert_eq!(
+                websocket_source(&headers, true).is_some(),
+                reflected,
+                "reflected Host {host:?}"
+            );
+        }
     }
 }
