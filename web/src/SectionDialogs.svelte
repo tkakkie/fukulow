@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { isImeComposing } from './composer-keys'
   import type { FocusableTarget } from './focus-management'
   import { buildMoveDestinations, OTHER_CHANNELS_LABEL, validateSectionName } from './section-ui'
   import Dialog from './ui/Dialog.svelte'
@@ -116,18 +115,12 @@
     }
     onmove(mode.channelId, moveTarget)
   }
-
-  function handleNameKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !isImeComposing(e) && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
-      e.preventDefault()
-      handleConfirm()
-    }
-  }
 </script>
 
 <Dialog
   open={mode !== null}
   {busy}
+  form
   {title}
   {description}
   {confirmLabel}
@@ -147,7 +140,6 @@
           validationError = ''
           oninputchange?.()
         }}
-        onkeydown={handleNameKeydown}
       />
     {:else if mode?.kind === 'move'}
       <fieldset class="section-dialog__choices" disabled={busy}>

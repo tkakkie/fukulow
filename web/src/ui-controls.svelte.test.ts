@@ -1,7 +1,9 @@
 import { flushSync, mount, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import Composer from './Composer.svelte'
+import SectionDialogs, { type SectionDialogMode } from './SectionDialogs.svelte'
 import { installMiniDom, MiniDomEvent } from './svelte-dom-test-helpers'
+import Dialog from './ui/Dialog.svelte'
 import Input from './ui/Input.svelte'
 import MessageRow from './ui/MessageRow.svelte'
 
@@ -387,5 +389,173 @@ describe('MessageRow.svelte timestamp formatting (#833)', () => {
         process.env.TZ = prevTz
       }
     }
+  })
+})
+
+describe('Dialog form mode and SectionDialogs (#838)', () => {
+  it('renders without <form> by default and wraps body and actions in <form> when form=true', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const onconfirm = vi.fn()
+    const oncancel = vi.fn()
+    const state = $state({ form: false, busy: false })
+
+    const instance = mount(Dialog, {
+      target: host as unknown as Element,
+      props: {
+        open: true,
+        get form() { return state.form },
+        get busy() { return state.busy },
+        title: 'テスト',
+        confirmLabel: '確定',
+        onconfirm,
+        oncancel,
+      },
+    })
+    flushSync()
+
+    // Default: no <form>, confirm button is type="button".
+    expect(host.querySelector('form')).toBeNull()
+    const buttonsDefault = host.querySelectorAll('button')
+    expect(buttonsDefault).toHaveLength(2)
+    expect(buttonsDefault[0].getAttribute('type')).toBe('button')
+    expect(buttonsDefault[1].getAttribute('type')).toBe('button')
+    buttonsDefault[1].click()
+    expect(onconfirm).toHaveBeenCalledTimes(1)
+
+    // form=true: wraps actions (and body) in <form>, confirm button is type="submit".
+    onconfirm.mockClear()
+    state.form = true
+    flushSync()
+
+    const formEl = host.querySelector('form.ui-dialog__form')
+    expect(formEl).not.toBeNull()
+    expect(formEl?.querySelector('.ui-dialog__actions')).not.toBeNull()
+    const buttonsForm = formEl!.querySelectorAll('button')
+    expect(buttonsForm).toHaveLength(2)
+    expect(buttonsForm[0].getAttribute('type')).toBe('button')
+    expect(buttonsForm[1].getAttribute('type')).toBe('submit')
+
+    // Clicking submit button fires onconfirm exactly once.
+    buttonsForm[1].click()
+    expect(onconfirm).toHaveBeenCalledTimes(1)
+
+    // Clicking cancel button fires oncancel and not onconfirm.
+    buttonsForm[0].click()
+    expect(oncancel).toHaveBeenCalledTimes(1)
+    expect(onconfirm).toHaveBeenCalledTimes(1)
+
+    // Form submit event calls preventDefault and onconfirm.
+    const submitEv = new MiniDomEvent('submit', { bubbles: true, cancelable: true })
+    formEl!.dispatchEvent(submitEv)
+    expect(submitEv.defaultPrevented).toBe(true)
+    expect(onconfirm).toHaveBeenCalledTimes(2)
+
+    // While busy, form submit does nothing and buttons are disabled.
+    state.busy = true
+    flushSync()
+    expect(buttonsForm[0].disabled).toBe(true)
+    expect(buttonsForm[1].disabled).toBe(true)
+    const busySubmit = new MiniDomEvent('submit', { bubbles: true, cancelable: true })
+    formEl!.dispatchEvent(busySubmit)
+    expect(busySubmit.defaultPrevented).toBe(true)
+    expect(onconfirm).toHaveBeenCalledTimes(2)
+
+    await unmount(instance)
+  })
+
+  it('SectionDialogs validates on form submit, guards busy, and has no Enter keydown handler', async () => {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const oncreate = vi.fn()
+    const onrename = vi.fn()
+    const ondelete = vi.fn()
+    const onmove = vi.fn()
+    const onclose = vi.fn()
+    const state = $state<{ mode: SectionDialogMode; busy: boolean }>({
+      mode: { kind: 'create' },
+      busy: false,
+    })
+
+    const instance = mount(SectionDialogs, {
+      target: host as unknown as Element,
+      props: {
+        get mode() { return state.mode },
+        get busy() { return state.busy },
+        oncreate,
+        onrename,
+        ondelete,
+        onmove,
+        onclose,
+      },
+    })
+    flushSync()
+
+    const formEl = host.querySelector('form.ui-dialog__form')
+    expect(formEl).not.toBeNull()
+    const input = formEl!.querySelector('input[name="section_name"]')!
+    expect(input).not.toBeNull()
+    const submitBtn = formEl!.querySelector('button[type="submit"]')!
+    expect(submitBtn).not.toBeNull()
+    expect(submitBtn.textContent).toContain('作成する')
+
+    // Invalid empty name shows validateSectionName error and does not call oncreate.
+    formEl!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    flushSync()
+    expect(oncreate).not.toHaveBeenCalled()
+    expect(formEl!.querySelector('[role="alert"]')?.textContent).toContain('セクション名を入力してください。')
+
+    // Valid name submits via form and calls oncreate once.
+    input.value = '開発'
+    input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    expect(formEl!.querySelector('[role="alert"]')).toBeNull()
+
+    // IME composition Enter does not submit.
+    const composingEnter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    composingEnter.key = 'Enter'
+    composingEnter.isComposing = true
+    input.dispatchEvent(composingEnter)
+    expect(oncreate).not.toHaveBeenCalled()
+
+    const keyCode229Enter = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    keyCode229Enter.key = 'Enter'
+    keyCode229Enter.keyCode = 229
+    input.dispatchEvent(keyCode229Enter)
+    expect(oncreate).not.toHaveBeenCalled()
+
+    // Plain Enter confirms via native implicit form submit (no JS keydown preventDefault).
+    const enterKey = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+    enterKey.key = 'Enter'
+    input.dispatchEvent(enterKey)
+    flushSync()
+    expect(enterKey.defaultPrevented).toBe(false)
+    expect(oncreate).toHaveBeenCalledTimes(1)
+    expect(oncreate).toHaveBeenCalledWith('開発')
+
+    // While busy, Enter and form submit do nothing.
+    state.busy = true
+    flushSync()
+    expect(input.disabled).toBe(true)
+    expect(submitBtn.disabled).toBe(true)
+    input.dispatchEvent(Object.assign(new MiniDomEvent('keydown', { bubbles: true, cancelable: true }), { key: 'Enter' }))
+    formEl!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    flushSync()
+    expect(oncreate).toHaveBeenCalledTimes(1)
+
+    // Rename mode submits via form and calls onrename.
+    state.busy = false
+    state.mode = { kind: 'rename', sectionId: 'sec-1', currentName: '旧名' }
+    flushSync()
+    const renameInput = host.querySelector('form.ui-dialog__form input[name="section_name"]')!
+    renameInput.value = '新名'
+    renameInput.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+    flushSync()
+    host.querySelector('form.ui-dialog__form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+    flushSync()
+    expect(onrename).toHaveBeenCalledTimes(1)
+    expect(onrename).toHaveBeenCalledWith('sec-1', '新名')
+
+    await unmount(instance)
   })
 })

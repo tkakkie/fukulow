@@ -477,3 +477,130 @@ test('two-tab convergence without reload', async ({ page, context }) => {
     await cleanupCreatedSections(page, orgId, createdIds)
   }
 })
+
+test('section dialog native form submit: valid Enter confirms, invalid shows error, busy ignores Enter, IME composing Enter does not confirm (#838)', async ({ page, browserName }) => {
+  const orgId = await signInOwner(page.request)
+  const createdIds = new Set<string>()
+  const suffix = crypto.randomUUID().slice(0, 8)
+  const ch = await createChannel(page.request, orgId, `sec-form-${suffix}`)
+  const layoutPath = `/api/v1/orgs/${orgId}/me/sections`
+  let postCount = 0
+  let releaseFirstPost: () => void = () => {}
+  let firstPostSeen: () => void = () => {}
+  const firstPostArrived = new Promise<void>((resolve) => { firstPostSeen = resolve })
+  const firstPostReleased = new Promise<void>((resolve) => { releaseFirstPost = resolve })
+
+  await page.route(`**${layoutPath}`, async (route) => {
+    const req = route.request()
+    if (req.method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    postCount++
+    const body = req.postDataJSON() as Partial<CreateSection> | null
+    if (body?.id) createdIds.add(body.id)
+    if (postCount === 1) {
+      firstPostSeen()
+      await firstPostReleased
+    }
+    await route.continue().catch(() => {})
+  })
+
+  try {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto(`/o/${orgId}/c/${ch.id}`)
+    const leftCol = page.locator('#channel-content')
+    await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
+    const createBtn = leftCol.getByRole('button', { name: 'セクションを作成', exact: true })
+    await expect(createBtn).toBeEnabled()
+
+    await createBtn.click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    const form = dialog.locator('form.ui-dialog__form')
+    await expect(form).toBeVisible()
+    const submitBtn = dialog.getByRole('button', { name: '作成する', exact: true })
+    await expect(submitBtn).toHaveAttribute('type', 'submit')
+    const nameInput = dialog.getByLabel('セクション名', { exact: true })
+    await expect(nameInput).toBeFocused()
+
+    // 1. Invalid empty name + Enter shows validateSectionName error and sends no request.
+    await page.keyboard.press('Enter')
+    await expect(dialog.getByRole('alert')).toHaveText('セクション名を入力してください。')
+    expect(postCount).toBe(0)
+
+    // Invalid surrounding whitespace + Enter shows exact error copy.
+    await nameInput.fill(' 空白 ')
+    await page.keyboard.press('Enter')
+    await expect(dialog.getByRole('alert')).toHaveText('セクション名の前後に空白は入れられません。空白を取り除いて入力してください。')
+    expect(postCount).toBe(0)
+
+    // 2. IME composition Enter does not confirm.
+    await nameInput.fill('')
+    await nameInput.focus()
+    if (browserName === 'chromium') {
+      const cdp = await page.context().newCDPSession(page)
+      try {
+        await cdp.send('Input.imeSetComposition', {
+          text: 'にほんご',
+          selectionStart: 4,
+          selectionEnd: 4,
+        })
+        await cdp.send('Input.dispatchKeyEvent', {
+          type: 'rawKeyDown',
+          key: 'Process',
+          code: 'Enter',
+          windowsVirtualKeyCode: 229,
+          nativeVirtualKeyCode: 229,
+        })
+        await cdp.send('Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          key: 'Enter',
+          code: 'Enter',
+          windowsVirtualKeyCode: 13,
+          nativeVirtualKeyCode: 13,
+        })
+        await cdp.send('Input.imeSetComposition', {
+          text: '',
+          selectionStart: 0,
+          selectionEnd: 0,
+        })
+      } finally {
+        await cdp.detach()
+      }
+    } else {
+      await nameInput.evaluate((el) => {
+        el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }))
+        el.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: 'にほんご' }))
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229, bubbles: true, cancelable: true }))
+        el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: 'にほんご' }))
+      })
+    }
+    await expect(dialog).toBeVisible()
+    expect(postCount).toBe(0)
+
+    // 3. Valid name + Enter confirms via native form submit; Enter while busy does nothing.
+    const validName = `フォーム確認-${suffix}`
+    await nameInput.fill(validName)
+    await page.keyboard.press('Enter')
+    await firstPostArrived
+    expect(postCount).toBe(1)
+
+    await expect(nameInput).toBeDisabled()
+    await expect(submitBtn).toBeDisabled()
+    await page.keyboard.press('Enter')
+    await form.evaluate((el) => {
+      el.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    expect(postCount).toBe(1)
+
+    releaseFirstPost()
+    await expect(dialog).toHaveCount(0)
+    await expect(leftCol.locator(`section[aria-label="${validName}"]`)).toBeVisible()
+    expect(postCount).toBe(1)
+  } finally {
+    releaseFirstPost()
+    await page.unroute(`**${layoutPath}`).catch(() => {})
+    await cleanupCreatedSections(page, orgId, createdIds)
+  }
+})
