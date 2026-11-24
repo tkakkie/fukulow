@@ -25,6 +25,7 @@ const runs: RunInput[] = q.jobs.map(job => ({
   hostBefore: json(join(q.chainDir, `${job.name}-host-before.json`)),
   cooldown: json(join(q.chainDir, `${job.name}-cooldown.json`)),
   launchCheck: json(join(q.chainDir, `${job.name}-launch-check.json`)),
+  clockEvents: json(join(q.chainDir, `${job.name}-clock-events.json`)),
   samples: parseSamples(text(join(q.chainDir, `${job.name}-thermal.jsonl`)) ?? ''),
 }));
 const verdict = judge(runs, json(join(q.chainDir, 'session.json')), q.name);

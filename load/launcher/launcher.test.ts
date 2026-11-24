@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { HostRecord } from '../harness-core/host-record.ts';
-import { fixedRate, launch, workers, type Deps } from './launcher.ts';
+import { clockEvents, fixedRate, launch, workers, type Deps } from './launcher.ts';
 import { darwin, linux, type Platform } from './platform.ts';
 import { parseQueue, type Queue } from './queue.ts';
 
@@ -29,6 +29,8 @@ type World = {
   envs: (Record<string, string> | undefined)[]; monoShift: number; exitsOn?: 'SIGKILL' | 'none';
   // `docker ps -a --format '{{.ID}} {{.State}}'` answers, in order (the last repeats).
   psAll: string[];
+  // `journalctl` answers: the cursor line (null: the call fails) and the entries after it.
+  journalCursor?: string | null; journal?: string; journalFails?: boolean;
 };
 function world(over: Partial<World> = {}): World {
   return { files: new Map(), containers: '', ps: '1 /sbin/init\n', load: [0.5], violations: [], exits: [0, 0], head: 'abc1234def\n', dirty: '',
@@ -55,6 +57,8 @@ function deps(w: World, platform?: Platform): Deps {
       if (k === 'cat .node-version') return { status: 0, stdout: w.node };
       if (k.startsWith('docker ps -a --format')) return { status: 0, stdout: w.psAll.length > 1 ? w.psAll.shift()! : w.psAll[0] };
       if (k.startsWith('docker ps -a -q --filter label=')) return { status: 0, stdout: w.labelled.length > 1 ? w.labelled.shift()! : w.labelled[0] };
+      if (k === 'journalctl -n 0 --show-cursor --no-pager') return w.journalCursor === null ? { status: 1, stdout: '' } : { status: 0, stdout: `-- No entries --\n-- cursor: ${w.journalCursor ?? 's=1;i=2'}\n` };
+      if (k.startsWith('journalctl --after-cursor ')) return w.journalFails ? { status: 1, stdout: '' } : { status: 0, stdout: w.journal ?? '' };
       if (k.startsWith('docker rm -f')) { w.removed.push(argv.slice(3)); return { status: 0, stdout: '' }; }
       return { status: null, stdout: '' };
     },
@@ -569,6 +573,10 @@ async function dockerCase(claim: string, after: string[], over: Partial<World> =
 }
 
 test('release compares the live containers at the claim with those after the job (#875 option A)', async () => {
+  // Created only at the claim, never run, then running after the job: the job started it.
+  const created = await dockerCase('old1 created\n', ['old1 running\n']);
+  assert.deepEqual([created.r.outcome, created.released], ['stop', false]);
+  assert.match(created.r.reason ?? '', /containers not live at the claim were live after the job: old1 running/);
   // Restart: a container stopped at the claim and started by the job keeps HOST-BUSY, also when the
   // start finishes after the client died (exited at the first polls, running later).
   for (const after of [['old1 running\n'], ['old1 exited\n', 'old1 exited\n', 'old1 exited\n', 'old1 restarting\n', 'old1 running\n'], ['old1 paused\n']]) {
@@ -586,6 +594,36 @@ test('release compares the live containers at the claim with those after the job
     const c = await dockerCase(claim, [after]);
     assert.deepEqual([c.r.outcome, c.released, c.session.hostBusy], ['done', true, 'released'], `${claim}->${after}`);
   }
+});
+
+const entry = (id: string, message: unknown) => JSON.stringify({ SYSLOG_IDENTIFIER: id, MESSAGE: message, __CURSOR: 'c' });
+
+test('journal clock events: steps, detected jumps, clock changes and clock commands count; other entries do not', () => {
+  const events = [entry('chronyd', 'System clock was stepped by -0.900000 seconds'), entry('chronyd', 'System clock wrong by 1.2 seconds'),
+    entry('chronyd', 'Backward time jump detected!'), entry('systemd', 'Time has been changed'), entry('systemd-timedated', 'Changed local time to Tue 2026-11-24'),
+    entry('sudo', 'tomoya : TTY=pts/0 ; PWD=/home/tomoya ; USER=root ; COMMAND=/usr/bin/date -s 12:00'), entry('sudo', 'tomoya : USER=root ; COMMAND=/usr/bin/timedatectl set-time 12:00')];
+  assert.equal(clockEvents(events.join('\n')).events.length, events.length);
+  const quiet = [entry('chronyd', 'Selected source 185.125.190.122'), entry('systemd-logind', 'Time has been changed'), entry('sudo', 'tomoya : COMMAND=/usr/bin/docker ps'), entry('kernel', 'x')];
+  assert.deepEqual(clockEvents(quiet.join('\n')), { events: [], unparsed: 0 });
+  // A torn line or a binary MESSAGE cannot be matched, so it is reported, never skipped silently.
+  assert.deepEqual(clockEvents(`{"MESSAGE":\n${entry('chronyd', [83, 121])}\n`), { events: [], unparsed: 2 });
+});
+
+test('a thermal job records the journal clock events after its cursor; an unreadable cursor starts nothing', async () => {
+  const w = world({ journalCursor: 's=ab;i=7', journal: [entry('chronyd', 'Selected source x'), entry('chronyd', 'System clock was stepped by 0.9 seconds')].join('\n') });
+  const r = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), deps(w));
+  assert.equal(r.outcome, 'done');
+  const rec = JSON.parse(w.files.get('/runs/chain/a-clock-events.json') ?? '{}');
+  assert.deepEqual([rec.cursor, rec.ok, rec.events, typeof rec.launchSession], ['s=ab;i=7', true, ['chronyd: System clock was stepped by 0.9 seconds'], 'string']);
+  const failing = world({ journalFails: true });
+  await launch(queue([job('a', { thermalSampleSeconds: 5 })]), deps(failing));
+  assert.deepEqual(JSON.parse(failing.files.get('/runs/chain/a-clock-events.json') ?? '{}').ok, false);
+  const noCursor = world({ journalCursor: null });
+  const n = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), deps(noCursor));
+  assert.deepEqual([n.outcome, n.reason, noCursor.spawned.length], ['stop', 'a: journal cursor unreadable (clock check); job not started', 0]);
+  // A job without thermal sampling does not touch the journal.
+  const plain = world({ journalCursor: null });
+  assert.equal((await launch(queue([job('a')]), deps(plain))).outcome, 'done');
 });
 
 test('a failed Docker listing at the claim starts nothing; one at the release keeps HOST-BUSY', async () => {

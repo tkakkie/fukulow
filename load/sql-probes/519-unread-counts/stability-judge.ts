@@ -42,11 +42,13 @@ type Send = {
 // Every launcher record carries the id of the launcher session that wrote it (launchSession).
 type Bound = { launchSession?: unknown };
 export type LaunchCheck = (Bound & { ok?: boolean; tctlC?: number | null; record?: HostRecord }) | null;
+// The launcher's journal check for wall-clock set events during the job (PR #875, option 1b).
+export type ClockEvents = (Bound & { ok?: boolean; events?: unknown; problem?: unknown }) | null;
 export type Cooldown = (Bound & { ok?: boolean; maxTctlC?: number; maxWaitSeconds?: number; readings?: { elapsedMs?: number; tctlC?: number | null }[] }) | null;
 export type RunInput = {
   name: string; out: string; complete: boolean; statusSession: unknown; sends: Send[];
   metadata: { mode?: string; sendsOnly?: boolean; launchSession?: unknown; cpuSets: { server: number[]; client: number[] } | null; sends: { measuredSeconds: number } };
-  hostBefore: (HostRecord & Bound) | null; cooldown: Cooldown; launchCheck: LaunchCheck;
+  hostBefore: (HostRecord & Bound) | null; cooldown: Cooldown; launchCheck: LaunchCheck; clockEvents: ClockEvents;
   samples: SampleLine[];
 };
 // What the judged launcher session says: its id, and the sampling period it actually used for the run.
@@ -80,7 +82,7 @@ function bindingProblems(r: RunInput, id: string | null): string[] {
   const p: string[] = [];
   const own = (v: unknown) => id !== null && v === id;
   const named: [string, unknown][] = [['metadata.json', r.metadata.launchSession], ['status.json', r.statusSession], ['host-before', r.hostBefore?.launchSession],
-    ['cool-down', r.cooldown?.launchSession], ['launch check', r.launchCheck?.launchSession]];
+    ['cool-down', r.cooldown?.launchSession], ['launch check', r.launchCheck?.launchSession], ['clock events', r.clockEvents?.launchSession]];
   for (const [what, v] of named) if (!own(v)) p.push(`${what} is not from launcher session ${id ?? '(none)'}`);
   const foreign = r.samples.filter(s => !own(s.launchSession)).length;
   if (foreign > 0) p.push(`${foreign} thermal lines not from launcher session ${id ?? '(none)'}`);
@@ -114,6 +116,9 @@ export function judgeRun(r: RunInput, bound: Binding) {
   const lc = r.launchCheck;
   if (lc?.ok !== true || typeof lc.tctlC !== 'number' || lc.tctlC > cooldown.maxTctlC || !lc.record) invalid.push(`lever: no passed launch check (Tctl <= ${cooldown.maxTctlC} °C right before the start)`);
   else invalid.push(...requirementViolations(lc.record, levers).map(v => `lever at launch: ${v}`));
+  const ce = r.clockEvents;
+  if (ce?.ok !== true || !Array.isArray(ce.events)) invalid.push(`no readable journal clock check for the run (${String(ce?.problem ?? 'missing')})`);
+  else if (ce.events.length > 0) invalid.push(`wall clock set during the run: ${ce.events.join(' | ')}`);
   if (bound.thermalSampleSeconds !== sampleSeconds) invalid.push(`thermal samples every ${String(bound.thermalSampleSeconds ?? '(none)')} s in the launcher session, not ${sampleSeconds} s`);
   const unplaced = r.samples.filter(s => s.at === null).length;
   if (unplaced > 0) invalid.push(`${unplaced} thermal lines without a time`);

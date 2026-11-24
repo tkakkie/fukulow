@@ -33,7 +33,7 @@ function run(name: string, over: Partial<RunInput> = {}, opts: { tps?: number; w
   return { name, out: '/runs/' + name, complete: true, statusSession: sid, sends,
     metadata: { mode: 'diagnostic', sendsOnly: true, launchSession: sid, cpuSets: { server: [0, 2], client: [1, 3] }, sends: { measuredSeconds: 120 } },
     hostBefore: { ...host, launchSession: sid }, cooldown: { ok: true, maxTctlC: 50, maxWaitSeconds: 1200, readings: [{ elapsedMs: 30_000, tctlC: 49 }], launchSession: sid },
-    launchCheck: { ok: true, tctlC: 48, record: host, launchSession: sid }, samples, ...over };
+    launchCheck: { ok: true, tctlC: 48, record: host, launchSession: sid }, clockEvents: { ok: true, events: [], launchSession: sid }, samples, ...over };
 }
 const three = () => [run('s1'), run('s2', {}, { tps: 10_200 }), run('s3', {}, { tps: 10_400 })];
 
@@ -96,6 +96,7 @@ test('a wall-clock step over 50 ms makes the run INVALID; every tick in pgbench\
   };
   assert.deepEqual(stepAt(50).invalid, []);
   assert.deepEqual(stepAt(51).invalid, ['block 5: wall clock stepped against the sampler\'s monotonic clock (51 ms)']);
+  assert.deepEqual(stepAt(-50).invalid, []);
   assert.deepEqual(stepAt(-51).invalid, ['block 5: wall clock stepped against the sampler\'s monotonic clock (51 ms)']);
   // The #875 round-3 case: a +0.9 s step would pull a tick taken 0.5 s before pgbench into its window.
   // The run is INVALID, never judged on the misplaced tick.
@@ -124,6 +125,16 @@ test('a wall-clock step over 50 ms makes the run INVALID; every tick in pgbench\
   edgeSlow.sends[4].pgbenchWindow = { startMs: t0 + 880_000, endMs: t0 + 1_000_000 - 1 };
   edgeSlow.sends[4].measuredWindow = { startMs: t0 + 879_000, endMs: t0 + 1_001_000, monoMs: 122_000 };
   assert.deepEqual([jr(edgeSlow).blocks[4].thermal.ticks, jr(edgeSlow).invalid], [24, ['block 5: throttled, server median 1850000 kHz < 95 % of block 1 (2000000 kHz)']]);
+});
+
+test('a wall-clock set in the journal during the run, or no readable journal check, makes the run INVALID', () => {
+  // The #875 final-review case: a step undone between two ticks leaves no offset, but the journal keeps it.
+  const set = jr(run('s1', { clockEvents: { ok: true, events: ['chronyd: System clock was stepped by -0.900000 seconds'], launchSession: sid } }));
+  assert.deepEqual(set.invalid, ['wall clock set during the run: chronyd: System clock was stepped by -0.900000 seconds']);
+  assert.deepEqual(jr(run('s1', { clockEvents: null })).invalid, ['clock events is not from launcher session L1', 'no readable journal clock check for the run (missing)']);
+  assert.deepEqual(jr(run('s1', { clockEvents: { ok: false, events: [], problem: 'journalctl failed', launchSession: sid } })).invalid, ['no readable journal clock check for the run (journalctl failed)']);
+  assert.deepEqual(jr(run('s1', { clockEvents: { ok: true, events: [], launchSession: 'L0' } })).invalid, ['clock events is not from launcher session L1']);
+  assert.equal(judge([run('s1', { clockEvents: null }), run('s2'), run('s3')], session(), 'q796').result, 'FAIL');
 });
 
 test('a missing, cut, misplaced or clock-stepped pgbench window makes the run INVALID', () => {

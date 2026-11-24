@@ -59,6 +59,9 @@ export const dockerSettleMs = 15_000;
 export const dockerPollMs = 1_000;
 // Container states that are, or can become, a running workload.
 const liveStates = new Set(['created', 'running', 'restarting', 'paused']);
+// States that count as live at the claim: a container only created then has never run, so its later
+// start is the workload's (final check of PR #875, option 1a).
+const runningStates = new Set(['running', 'restarting', 'paused']);
 // Wall and monotonic elapsed time may differ by this much before it counts as a clock step. A
 // synchronised clock is slewed by at most 500 ppm (adjtimex; 0.6 s over the 20 min cool-down), so
 // only a step, or a clock off by a second or more, reaches it.
@@ -125,6 +128,31 @@ function sampleProblems(s: ThermalSample | null): string[] {
   const unreadable = s.avgFreqKHz.flatMap((f, cpu) => (f === null ? [cpu] : []));
   if (s.avgFreqKHz.length === 0) return ['no CPU frequencies in the thermal sample'];
   return unreadable.length > 0 ? [`CPU frequency unreadable on CPU ${unreadable.join(',')}`] : [];
+}
+
+// Wall-clock set events in the system journal (maintainer decision on PR #875, option 1b). A step
+// that is undone between two clock comparisons leaves no offset behind, but the journal keeps it:
+// chronyd's steps and detected jumps, systemd's and timedated's clock changes, and a clock command run
+// through sudo. Entries come from `journalctl --after-cursor`, so the window does not depend on the
+// wall clock itself. Fail closed: any match is an event.
+export const clockEventPatterns: { identifier: RegExp; message: RegExp }[] = [
+  { identifier: /^chronyd$/, message: /System clock was stepped|System clock wrong by|time jump detected/i },
+  { identifier: /^systemd(-timedated|-timesyncd)?$/, message: /Time has been changed|Changed local time to|clock change detected/i },
+  { identifier: /^sudo$/, message: /COMMAND=\S*\/(date|timedatectl|hwclock|chronyc|adjtimex)\b/ },
+];
+export function clockEvents(jsonLines: string): { events: string[]; unparsed: number } {
+  const events: string[] = [];
+  let unparsed = 0;
+  for (const line of jsonLines.split('\n').map(l => l.trim()).filter(Boolean)) {
+    let e: { SYSLOG_IDENTIFIER?: unknown; MESSAGE?: unknown; __REALTIME_TIMESTAMP?: unknown };
+    try { e = JSON.parse(line); } catch { unparsed++; continue; }
+    const id = typeof e.SYSLOG_IDENTIFIER === 'string' ? e.SYSLOG_IDENTIFIER : '';
+    // A MESSAGE journald stores as bytes is an array; it is not text we can match, so it counts.
+    if (typeof e.MESSAGE !== 'string') { if (e.MESSAGE !== undefined && e.MESSAGE !== null) unparsed++; continue; }
+    const message = e.MESSAGE;
+    if (clockEventPatterns.some(p => p.identifier.test(id) && p.message.test(message))) events.push(`${id}: ${message}`);
+  }
+  return { events, unparsed };
 }
 
 // Calls fn at start + k * ms on the monotonic clock: a late tick does not delay the later ones, so the
@@ -355,7 +383,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   };
   // A job's chain records are written by this session only: an existing one (an earlier session's)
   // would be mixed with this session's, so it is a STOP.
-  const leftovers = (job: Job) => ['cooldown.json', 'host-before.json', 'launch-check.json', 'thermal.jsonl', 'host-after.json']
+  const leftovers = (job: Job) => ['cooldown.json', 'host-before.json', 'launch-check.json', 'thermal.jsonl', 'host-after.json', 'clock-events.json']
     .map(f => join(q.chainDir, `${job.name}-${f}`)).filter(f => d.exists(f));
   const body = async (): Promise<Result> => {
     log(`queue ${q.name} (launch session ${launchSession}): ${q.jobs.map(j => `${j.name} (#${j.issue})`).join(', ')}; waiting for an idle host`);
@@ -370,7 +398,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     if (snapshot.status !== 0) return stop('docker ps -a failed; no container snapshot, nothing started');
     const claimRows = snapshot.stdout.split('\n').map(l => l.trim().split(/\s+/)).filter(([id]) => id);
     known = new Set(claimRows.map(([id]) => id));
-    liveAtClaim = new Set(claimRows.filter(([, state]) => liveStates.has(state)).map(([id]) => id));
+    liveAtClaim = new Set(claimRows.filter(([, state]) => runningStates.has(state)).map(([id]) => id));
     for (const job of q.jobs) {
       if (aborted) return stop(`${aborted}; ${job.name} not started`);
       const old = leftovers(job);
@@ -393,6 +421,13 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       }
       const late = launchCheck(job);
       if (late.length > 0) return stop(`${job.name} launch check: ${late.join('; ')}; job not started`);
+      // A thermal job's clock check starts at the journal's current cursor (option 1b).
+      let cursor: string | null = null;
+      if (job.thermalSampleSeconds !== undefined) {
+        const c = d.exec(['journalctl', '-n', '0', '--show-cursor', '--no-pager']);
+        cursor = c.status === 0 ? (/^-- cursor: (\S+)\s*$/m.exec(c.stdout)?.[1] ?? null) : null;
+        if (cursor === null) return stop(`${job.name}: journal cursor unreadable (clock check); job not started`);
+      }
       if (job.postgresLogLabel) stopLogs = d.captureLogs(job.postgresLogLabel, join(q.chainDir, `${job.name}-postgres.log`));
       const sampling = job.thermalSampleSeconds === undefined ? null : sampleThermal(job, job.thermalSampleSeconds);
       if (typeof sampling === 'string') return stop(`${job.name} first thermal sample: ${sampling}; job not started`);
@@ -403,6 +438,12 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       endLogs();
       jobs.push({ name: job.name, exit });
       record(`${job.name}-host-after.json`, d.platform.record(q.chainDir) as unknown as Record<string, unknown>);
+      if (cursor !== null) {
+        const j = d.exec(['journalctl', '--after-cursor', cursor, '--no-pager', '-o', 'json', '--output-fields=SYSLOG_IDENTIFIER,MESSAGE']);
+        const found = j.status === 0 ? clockEvents(j.stdout) : null;
+        record(`${job.name}-clock-events.json`, { cursor, ok: found !== null && found.unparsed === 0, events: found?.events ?? [], unparsed: found?.unparsed ?? null,
+          problem: found === null ? 'journalctl failed' : found.unparsed > 0 ? `${found.unparsed} journal entries unreadable` : null });
+      }
       const left = d.exec(['docker', 'ps', '-q']).stdout.trim().split('\n').filter(Boolean).length;
       log(`${job.name}: exit=${exit ?? 'not observed'}; containers left: ${left}`);
       if (aborted) return stop(`${aborted} during ${job.name}; the queue ends (no rerun)`);
