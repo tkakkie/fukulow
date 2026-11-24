@@ -8,7 +8,7 @@ const lines = (n: number) => 'x\n'.repeat(n)
 test('test files are recognised by directory or name; everything else is product', () => {
   for (const path of ['server/tests/schema.rs', 'server/src/auth/cleanup/tests.rs', 'server/src/auth/admission_tests.rs',
     'server/src/auth/invites/tests/management.rs', 'server/src/auth/security/test_support.rs', 'web/src/sync.test.ts',
-    'web/e2e/smoke.spec.ts', 'web/src/svelte-dom-test-helpers.ts', 'client-core/tests/differential.rs'])
+    'web/e2e/smoke.spec.ts', 'web/e2e-compose/helpers.ts', 'web/src/svelte-dom-test-helpers.ts', 'client-core/tests/differential.rs'])
     assert.equal(kindOf(path), 'test', path)
   for (const path of ['server/src/messages/log.rs', 'web/src/Workspace.svelte', 'load/slice5/fixture.ts',
     'server/src/contest.rs', 'web/src/latest.ts', 'server/src/attestation.rs'])
@@ -41,7 +41,7 @@ test('generated files and other extensions are excluded', () => {
   assert.equal(isGenerated(`${lines(5)}// Do not edit\n`), false, 'only the first five lines count')
 })
 
-test('line counts match wc -l, with or without a trailing newline', () => {
+test('line counts are newline-separated lines, counting a final line without a trailing newline', () => {
   assert.equal(lineCount(''), 0)
   assert.equal(lineCount('a'), 1)
   assert.equal(lineCount('a\n'), 1)

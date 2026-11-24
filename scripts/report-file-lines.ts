@@ -8,7 +8,7 @@ export type Kind = keyof typeof GUIDANCE
 export type Row = { path: string, kind: Kind, lines: number, changed: boolean }
 
 const SOURCE = /\.(rs|ts|svelte)$/
-const TEST_DIR = /(^|\/)(tests?|e2e)\//
+const TEST_DIR = /(^|\/)(tests?|e2e(-compose)?)\//
 const TEST_NAME = /(^|[._-])tests?([._-]|$)|test_support|\.spec\./
 // Matches the markers that generators write in a file's first lines (e.g. openapi-typescript).
 const GENERATED = /auto-?generated|@generated|do not edit/i
