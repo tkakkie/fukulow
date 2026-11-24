@@ -6,11 +6,14 @@ import { settleCapMs, type MeasuredStep, type Step } from './plan.ts';
 
 // §3.3 thresholds are decimal GB, as approved.
 export const GB = 1e9;
-export const minDockerFreeBytes = 40 * GB;
+export const minFreeBytes = 40 * GB;
 export const maxInvalid = 4;
 
+// Free bytes before each copy (§3.3): Docker storage and the host filesystems of the snapshot tar and of
+// the output. null is unreadable.
+export type Free = {docker: number | null; snapshot: number | null; output: number | null};
 export type Deps = {
-  dockerFreeBytes(): number | null;
+  freeBytes(): Free;
   // Drops any earlier copy and creates `measured` from the restored `base` template.
   copy(): Promise<void>;
   // CHECKPOINT, then wait for dirty memory and autovacuum to settle; false when the cap was reached.
@@ -27,9 +30,15 @@ export type Deps = {
   log(line: string): void;
 };
 
-// EXPLAIN runs after every measurement except a cache arm's hot 1, so hot 2 follows hot 1 with nothing
-// but the per-measurement statistics and the sampler check between them (N is their spread).
-const explains = (step: MeasuredStep) => !(step.kind === 'hot' && step.id.endsWith('.hot1'));
+// EXPLAIN runs after every measurement except a cache arm's warm and hot 1 (decision 2026-11-24, option
+// A): nothing touches the copy between warm, hot 1 and hot 2 but the per-measurement statistics, the
+// read-counter wait and the sampler check. The sweep after hot 2 stands for all three; restart-only has its own.
+export const explains = (step: MeasuredStep) => !((step.arm === 'C1' || step.arm === 'C2') && /\.(warm|hot1)$/.test(step.id));
+
+export function diskStop(free: Free) {
+  const low = (Object.entries(free) as [keyof Free, number | null][]).filter(([, b]) => b === null || b < minFreeBytes);
+  return low.length ? low.map(([k, b]) => `${k} free ${b === null ? 'unreadable' : (b / GB).toFixed(1) + ' GB'} < 40 GB`).join('; ') : null;
+}
 
 export async function execute(steps: Step[], d: Deps) {
   const measurements: Measurement[] = [];
@@ -41,11 +50,8 @@ export async function execute(steps: Step[], d: Deps) {
       if (step.kind === 'scan') { d.log(`${step.id}: completeness scan`); await d.scan(); continue; }
       let settleCapped = false;
       if (step.kind === 'copy') {
-        const free = d.dockerFreeBytes();
-        if (free === null || free < minDockerFreeBytes) {
-          stopped = `${step.id}: Docker free ${free === null ? 'unreadable' : (free / GB).toFixed(1) + ' GB'} < 40 GB`;
-          break;
-        }
+        const low = diskStop(d.freeBytes());
+        if (low) { stopped = `${step.id}: ${low}`; break; }
         await d.copy();
         if (step.settle) settleCapped = !await d.settle(settleCapMs);
       }

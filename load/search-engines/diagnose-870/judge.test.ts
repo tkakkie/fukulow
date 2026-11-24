@@ -153,8 +153,13 @@ test('H2 is ruled out by a flat temperature and frequency while A1 rose', () => 
 test('H3 is supported by a plan change for a query that rose; a change in a flat query only withholds it', () => {
   const changed = {'A1.6': {plans: plans(q => ({shapeHash: q === 'q1' ? 'other' : 'same'}))}};
   assert.equal(attribution(scenario({}, changed), 1.05).H3, 'supported');
-  const buffers = {'A1.3': {plans: plans(q => ({buffers: q === 'q2' ? 111 : 100}))}};
+  const buffers = {'A1.3': {plans: plans(q => ({sharedHit: q === 'q2' ? 111 : 100}))}};
   assert.equal(attribution(scenario({}, buffers), 1.05).H3, 'supported');
+  // 10% exactly is not a change.
+  assert.equal(attribution(scenario({}, {'A1.3': {plans: plans(q => ({sharedHit: q === 'q2' ? 110 : 100}))}}), 1.05).H3, 'ruled out');
+  // Hits and reads are compared on their own: 100/0 -> 80/20 keeps the sum but is a change.
+  const split = {'A1.6': {plans: plans(q => q === 'q1' ? {sharedHit: 80, sharedRead: 20} : {})}};
+  assert.equal(attribution(scenario({}, split), 1.05).H3, 'supported');
   const flat = m('A1.6', 56);
   flat.latencies = flat.latencies.map(l => l.query === 'q1' ? {...l, p95: 40} : l);
   const ms = scenario({}, changed).map(x => x.id === 'A1.6' ? {...flat, plans: changed['A1.6'].plans} : x);
@@ -176,6 +181,17 @@ test('H4 needs settle/current <= 0.80 in both pairs and dirty memory at the star
   assert.equal(attribution(scenario(g, dirty), 1.05).H4, 'supported');
   assert.equal(attribution(scenario(g), 1.05).H4, 'withheld');
   assert.equal(attribution(scenario({'D.settle1': 39}, dirty), 1.05).H4, 'withheld');
+});
+
+test('H2 also needs the A1 minimum; the cache minimum needs every one of warm, hot 1, hot 2 and restart-only', () => {
+  const noA1 = {'A1.1': invalid, 'A1.2': invalid};
+  assert.equal(minimums(scenario({}, noA1)).A1, false);
+  assert.equal(minimums(scenario({}, noA1)).H2, false);
+  assert.equal(minimums(scenario()).H2, true);
+  for (const id of ['C1.warm', 'C1.hot1', 'C2.warm', 'C2.hot1', 'C2.hot2', 'C2.restart']) {
+    assert.equal(minimums(scenario({}, {[id]: invalid})).H1, false, id);
+  }
+  assert.equal(minimums(scenario()).H1, true);
 });
 
 test('the H4/H5 minimum needs both current rounds and both settle rounds; H2 needs both A2 rounds', () => {

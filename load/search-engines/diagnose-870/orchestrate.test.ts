@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Measurement } from './judge.ts';
-import { execute, type Deps } from './orchestrate.ts';
+import { diskStop, execute, type Deps } from './orchestrate.ts';
 import { sequence } from './plan.ts';
 
 const GiB = 1024 ** 3;
@@ -10,7 +10,7 @@ function fake(over: Partial<Deps> & {invalidIds?: string[]; failOn?: string} = {
   const calls: string[] = [];
   let current = '';
   const d: Deps = {
-    dockerFreeBytes: () => 200 * GiB,
+    freeBytes: () => ({docker: 200 * GiB, snapshot: 200 * GiB, output: 200 * GiB}),
     copy: async () => { calls.push('copy'); },
     settle: async () => { calls.push('settle'); return true; },
     restart: async () => { calls.push('restart'); },
@@ -40,11 +40,11 @@ test('the smoke is copy, settle, restart, warm-up, measure with EXPLAIN', async 
   assert.equal(measurements.length, 1);
 });
 
-test('hot only measures; restart-only restarts and skips the warm-up; only hot 1 skips EXPLAIN', async () => {
+test('hot only measures; restart-only restarts and skips the warm-up; no EXPLAIN between warm, hot 1 and hot 2', async () => {
   const {d, calls} = fake();
   await execute(sequence('1'), d);
-  const c1 = calls.slice(calls.indexOf('measure C1.warm +explain') - 3, calls.indexOf('measure C1.restart +explain') + 1);
-  assert.deepEqual(c1, ['copy', 'restart', 'warmup F', 'measure C1.warm +explain', 'measure C1.hot1', 'measure C1.hot2 +explain',
+  const c1 = calls.slice(calls.indexOf('measure C1.warm') - 3, calls.indexOf('measure C1.restart +explain') + 1);
+  assert.deepEqual(c1, ['copy', 'restart', 'warmup F', 'measure C1.warm', 'measure C1.hot1', 'measure C1.hot2 +explain',
     'restart', 'measure C1.restart +explain']);
 });
 
@@ -55,7 +55,8 @@ test('Stage 1 runs every step once in order, settle only in the settle rounds, n
   assert.equal(calls.filter(c => c === 'settle').length, 2);
   assert.equal(calls.filter(c => c.startsWith('measure')).length, 20);
   assert.deepEqual(calls.filter(c => c.startsWith('idle')), [`idle ${30 * 60_000}`]);
-  assert.deepEqual(calls.filter(c => c.startsWith('measure') && !c.endsWith('+explain')), ['measure C1.hot1', 'measure C2.hot1']);
+  assert.deepEqual(calls.filter(c => c.startsWith('measure') && !c.endsWith('+explain')),
+    ['measure C1.warm', 'measure C1.hot1', 'measure C2.warm', 'measure C2.hot1']);
   const settle = calls.indexOf('settle');
   assert.deepEqual(calls.slice(settle - 1, settle + 4), ['copy', 'settle', 'restart', 'warmup F', 'measure D.settle1 +explain']);
 });
@@ -73,16 +74,21 @@ test('a capped settle wait makes that round INVALID and the stage goes on', asyn
   assert.deepEqual(measurements[0].invalid, ['settle wait hit its cap']);
 });
 
-test('Docker free under 40 GB before a copy is a STOP; unreadable is a STOP', async () => {
-  let free = 200 * GiB;
-  const {d, calls} = fake({dockerFreeBytes: () => free});
-  const run = execute(sequence('1'), {...d, measure: async (s, o) => { if (s.id === 'A1.2') free = 39.9e9; return d.measure(s, o); }});
-  const {measurements, stopped} = await run;
-  assert.match(stopped!, /^A1\.3: Docker free 39\.9 GB < 40 GB$/);
-  assert.equal(measurements.length, 2);
-  assert.equal(calls.filter(c => c === 'copy').length, 2);
-  const unreadable = await execute(sequence('1'), fake({dockerFreeBytes: () => null}).d);
-  assert.match(unreadable.stopped!, /unreadable/);
+test('any filesystem under 40 GB (decimal) before a copy is a STOP; unreadable is a STOP', async () => {
+  for (const key of ['docker', 'snapshot', 'output'] as const) {
+    let free = 200 * GiB;
+    const {d, calls} = fake({freeBytes: () => ({docker: 200 * GiB, snapshot: 200 * GiB, output: 200 * GiB, [key]: free})});
+    const run = execute(sequence('1'), {...d, measure: async (s, o) => { if (s.id === 'A1.2') free = 39.9e9; return d.measure(s, o); }});
+    const {measurements, stopped} = await run;
+    assert.equal(stopped, `A1.3: ${key} free 39.9 GB < 40 GB`);
+    assert.equal(measurements.length, 2);
+    assert.equal(calls.filter(c => c === 'copy').length, 2);
+  }
+  // 40 GB is decimal: exactly 40e9 bytes passes, though it is under 40 GiB.
+  assert.equal(diskStop({docker: 40e9, snapshot: 40e9, output: 40e9}), null);
+  assert.equal(diskStop({docker: 40e9 - 1, snapshot: 40e9, output: 40e9}), 'docker free 40.0 GB < 40 GB');
+  const unreadable = await execute(sequence('1'), fake({freeBytes: () => ({docker: 200 * GiB, snapshot: null, output: 200 * GiB})}).d);
+  assert.equal(unreadable.stopped, 'A1.1: snapshot free unreadable < 40 GB');
 });
 
 test('more than 4 INVALID measurements is a STOP; 4 is not; nothing is rerun', async () => {

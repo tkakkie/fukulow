@@ -12,17 +12,19 @@ import type { Block, Environment } from './judge.ts';
 // functions below, which the tests exercise.
 
 // process (ps and load average) and containers (docker ps) share one 10 s loop, but each observation
-// carries the time it was taken.
+// carries its own times: `at` when its command started and `done` when it returned. What a command saw
+// could be from any moment between the two.
 export const streams = {fast: 1_000, thermal: 5_000, process: 10_000, containers: 10_000} as const;
 export type Stream = keyof typeof streams;
 export const maxGapMs = 30_000;
-export type Sample =
-  | {at: number; stream: 'fast'; dirtyBytes: number; writebackBytes: number; cachedBytes: number;
+type Times = {at: number; done?: number};
+export type Sample = Times & (
+  | {stream: 'fast'; dirtyBytes: number; writebackBytes: number; cachedBytes: number;
     autovacuum: {pid: number; datname: string | null; query: string}[]; checkpointer: unknown; wal: unknown}
-  | {at: number; stream: 'thermal'; temperaturesC: Record<string, number>; frequencyKHz: Record<string, number>}
-  | {at: number; stream: 'process'; load: number[]; workers: string[]; processes: string[]}
-  | {at: number; stream: 'containers'; containers: string[]}
-  | {at: number; stream: Stream; error: string};
+  | {stream: 'thermal'; temperaturesC: Record<string, number>; frequencyKHz: Record<string, number>}
+  | {stream: 'process'; load: number[]; workers: string[]; processes: string[]}
+  | {stream: 'containers'; containers: string[]}
+  | {stream: Stream; error: string});
 
 const ok = (s: Sample) => !('error' in s);
 export const marker = 'search-engines/diagnose-870/';
@@ -69,19 +71,30 @@ const cpuTemperature = (t: Record<string, number>) => {
 
 // Streams this run samples (thermal only on Linux).
 export const sampled = (thermal: boolean): Stream[] => thermal ? ['fast', 'process', 'containers', 'thermal'] : ['fast', 'process', 'containers'];
-// A window is covered once every sampled stream has an observation (good or failed) at or after its end,
-// so its trailing gap is known. Past the deadline a stream without one has a gap (a stalled sampler).
+// A window is covered once every sampled stream has a successful observation at or after its end, so its
+// trailing gap is known (a failed reading is missing, as in gaps). Past the deadline a stream without one
+// has a gap (a stalled or failing sampler).
 export const coverageDeadlineMs = maxGapMs + 15_000;
 export function covered(samples: Sample[], end: number, thermal: boolean, now: number) {
-  return now >= end + coverageDeadlineMs || sampled(thermal).every(stream => samples.some(s => s.stream === stream && s.at >= end));
+  return now >= end + coverageDeadlineMs || sampled(thermal).every(stream => samples.some(s => s.stream === stream && ok(s) && s.at >= end));
 }
+
+// A successful fast sample taken at or after `t`. After a restart, the next window waits for one, so its
+// leading gap and its start environment come from the restarted server, not from before the restart.
+export const freshFast = (samples: Sample[], t: number) => samples.some(s => s.stream === 'fast' && ok(s) && s.at >= t);
+export const freshWaitMs = maxGapMs;
+
+// An observation's interval [at, done] overlaps the window. A worker or container seen in an observation
+// that overlaps the window counts against it: when it was seen within that interval is unknown, so the
+// measurement is not accepted as clean.
+const overlaps = (s: Sample, start: number, end: number) => s.at <= end && (s.done ?? s.at) >= start;
 
 // Validity reasons from the samplers and the environment of one measurement window.
 export function windowFacts(samples: Sample[], start: number, end: number, blocks: Block[],
   {thermal, serverCpus}: {thermal: boolean; serverCpus: number[] | null}): {invalid: string[]; env: Environment} {
   const inWindow = samples.filter(s => s.at >= start && s.at <= end && ok(s));
   const invalid = sampled(thermal).flatMap(stream => gaps(samples, stream, start, end));
-  for (const s of inWindow) {
+  for (const s of samples.filter(x => ok(x) && overlaps(x, start, end))) {
     if ('error' in s) continue;
     if (s.stream === 'process' && s.workers.length) invalid.push(`worker process during the measurement: ${s.workers[0]}`);
     if (s.stream === 'containers' && s.containers.length) invalid.push(`other container during the measurement: ${s.containers[0]}`);
@@ -159,9 +172,10 @@ async function main() {
   const out = values.out!, container = values.container!;
   const pin = values['client-cpus'] ? ['taskset', '-c', values['client-cpus']] : [];
   const write = (s: Sample) => appendFileSync(out, JSON.stringify(s) + '\n');
-  const sample = async (stream: Stream, read: () => Promise<Omit<Extract<Sample, {stream: typeof stream}>, 'at' | 'stream'>>) => {
+  const sample = async (stream: Stream, read: () => Promise<Omit<Extract<Sample, {stream: typeof stream}>, 'at' | 'done' | 'stream'>>) => {
     const at = Date.now();
-    try { write({at, stream, ...await read()} as Sample); } catch (error) { write({at, stream, error: String(error)}); }
+    try { const r = await read(); write({at, done: Date.now(), stream, ...r} as Sample); }
+    catch (error) { write({at, done: Date.now(), stream, error: String(error)}); }
   };
   const loop = async (stream: Stream, read: Parameters<typeof sample>[1]) => {
     for (;;) {

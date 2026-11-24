@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { covered, coverageDeadlineMs, gaps, otherWorkers, parseMeminfo, windowFacts, type Sample } from './sampler.ts';
+import { covered, coverageDeadlineMs, freshFast, gaps, otherWorkers, parseMeminfo, windowFacts, type Sample } from './sampler.ts';
 
 const fast = (at: number, over: Partial<Extract<Sample, {stream: 'fast'; dirtyBytes: number}>> = {}): Sample =>
   ({at, stream: 'fast', dirtyBytes: 10, writebackBytes: 5, cachedBytes: 1, autovacuum: [], checkpointer: {}, wal: {}, ...over});
@@ -87,4 +87,35 @@ test('meminfo parsing and the worker filter that skips this diagnostic', () => {
   const ps = ['1 node load/search-engines/diagnose-870/run.ts --stage 1', '2 node /x/load/search-engines/diagnose-870/sampler.ts',
     '3 codex exec review', '4 node load/other.ts'].join('\n');
   assert.deepEqual(otherWorkers(ps, 999), ['3 codex exec review', '4 node load/other.ts']);
+});
+
+test('a failed reading after the end does not cover the window; the next good one does', () => {
+  // Good process samples at 85 s and 105 s, a failed one at 95 s, window end 90 s: the real gap is 20 s.
+  const s = [...steady().filter(x => x.stream !== 'process' || x.at <= 80_000), proc(85_000),
+    {at: 95_000, stream: 'process' as const, error: 'ps failed'}];
+  assert.equal(covered(s, 90_000, true, 96_000), false);
+  const later = [...s, proc(105_000)];
+  assert.equal(covered(later, 90_000, true, 106_000), true);
+  assert.deepEqual(windowFacts(later, 30_000, 90_000, [], opts).invalid, []);
+});
+
+test('after a restart over 30 s, a fresh fast sample keeps the restart-only window valid and sets its start', () => {
+  // The server is down from 60 s to 100 s (fast readings fail); the window starts at 101.5 s.
+  const down = steady().filter(x => x.stream !== 'fast' || x.at <= 60_000 || x.at > 120_000);
+  const window = (extra: Sample[]) => windowFacts([...down, ...extra, ...Array.from({length: 20}, (_, i) => fast(102_000 + i * 1000))],
+    101_500, 120_000, [], opts);
+  assert.deepEqual(window([]).invalid, ['fast sampler gap over 30 s']);
+  assert.equal(freshFast(down, 100_000), false);
+  const fresh = fast(100_800, {dirtyBytes: 7, writebackBytes: 0});
+  assert.equal(freshFast([...down, fresh], 100_000), true);
+  assert.deepEqual(window([fresh]).invalid, []);
+  assert.equal(window([fresh]).env.dirtyWritebackAtStartBytes, 7);
+});
+
+test('an observation whose interval overlaps the window counts against it, at either edge', () => {
+  const seen = (at: number, done: number): Sample => ({at, done, stream: 'containers', containers: ['other']});
+  assert.deepEqual(windowFacts([...steady(), seen(19_000, 20_500)], 20_000, 80_000, [], opts).invalid, ['other container during the measurement: other']);
+  assert.deepEqual(windowFacts([...steady(), seen(79_500, 81_000)], 20_000, 80_000, [], opts).invalid, ['other container during the measurement: other']);
+  assert.deepEqual(windowFacts([...steady(), seen(18_000, 19_900)], 20_000, 80_000, [], opts).invalid, []);
+  assert.deepEqual(windowFacts([...steady(), seen(80_100, 80_400)], 20_000, 80_000, [], opts).invalid, []);
 });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,8 +23,9 @@ import { timeQuery } from '../d3r/timing.ts';
 import { checkPins, diagnosticSettings, expectedSnapshotSha256, launchArgs, pinnedBenchmark, pinnedSession, planShape, qualifiedCpuSets } from './cluster.ts';
 import { cacheConstraint, ownReasons, stage1, stage2, type Block, type Measurement, type Plan } from './judge.ts';
 import { execute, GB, type Deps } from './orchestrate.ts';
+import { ownedResources } from '../runtime.ts';
 import { ordered, sequence, type MeasuredStep, type Stage } from './plan.ts';
-import { covered, readSamples, windowFacts } from './sampler.ts';
+import { covered, freshFast, freshWaitMs, readSamples, windowFacts } from './sampler.ts';
 
 // #870 diagnostic driver (design rev 2, approved 2026-11-24). One launch runs one stage once on the
 // verified #689 snapshot; nothing reruns. Its records are diagnosis only and never #689 evidence.
@@ -37,9 +38,13 @@ export const minHostFreeBytes = 40 * GB;
 // A STOP or a failed smoke ends the launcher queue (non-zero exit); the records stay.
 export const stopExitCode = 2;
 const note = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
+// A STOP or a failed smoke ends the run: stopped.json, no completed.json, exit 2, and the launcher ends the queue.
+export const ends = (stopped: string | null, judgement: object) =>
+  stopped !== null || ('outcome' in judgement && judgement.outcome === 'smoke failed');
 const readJson = (file: string) => JSON.parse(readFileSync(file, 'utf8'));
 
-export function options(argv: string[]) {
+// The diagnosis runs only on the #796-qualified Linux host (§3.1).
+export function options(argv: string[], os = platform()) {
   const {values} = parseArgs({args: argv, options: {stage: {type: 'string'}, 'from-backfill': {type: 'string'},
     out: {type: 'string'}, 'cpu-sets': {type: 'string'}, 'stage1-out': {type: 'string'}, 'smoke-out': {type: 'string'},
     qualification: {type: 'string'}}});
@@ -48,51 +53,66 @@ export function options(argv: string[]) {
   assert.ok(values['from-backfill'] && values.out, '--from-backfill and --out are required');
   assert.ok(stage !== '1' || values['smoke-out'], 'Stage 1 needs --smoke-out (a passed smoke, §3.4)');
   assert.ok(stage !== '2' || values['stage1-out'], 'Stage 2 needs --stage1-out (its N comes from Stage 1)');
-  if (platform() === 'linux') {
-    assert.ok(values['cpu-sets'] && values.qualification, 'On Linux the #796 CPU sets and --qualification are required (§3.1)');
-  }
-  return {stage, from: resolve(values['from-backfill']), out: values.out, cpuSets: values['cpu-sets'],
+  assert.equal(os, 'linux', 'The #870 diagnosis runs only on the #796-qualified Linux host (§3.1)');
+  assert.ok(values['cpu-sets'] && values.qualification, 'The #796 CPU sets and --qualification are required (§3.1)');
+  return {stage, from: resolve(values['from-backfill']), out: values.out, cpuSets: values['cpu-sets']!,
     stage1Out: values['stage1-out'] && resolve(values['stage1-out']), smokeOut: values['smoke-out'] && resolve(values['smoke-out']),
     qualification: values.qualification && resolve(values.qualification)};
 }
 
-// A finished earlier stage of this diagnosis: completed under this manifest, not stopped, same CPU sets.
-function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets: string | undefined) {
-  const completed = readJson(`${dir}/completed.json`), judgement = readJson(`${dir}/judgement.json`), metadata = readJson(`${dir}/metadata.json`);
-  assert.ok(completed.manifestHash === manifestHash && completed.stage === stage && judgement.stage === stage && judgement.stopped === null,
-    `${dir} is not a finished ${stage === 'smoke' ? 'smoke' : `Stage ${stage}`} of this manifest`);
-  assert.equal(JSON.stringify(metadata.cpuSets ?? null), JSON.stringify(cpuSets ? parseCpuSets(cpuSets, cpus().length) : null),
-    `${dir} ran on other CPU sets`);
+// A finished earlier stage of this diagnosis: finalized by the supervisor (finished.json, and run-status.json
+// valid with cleanup verified), under this manifest, not stopped, same CPU sets. The worker's completed.json
+// alone is not enough: it is written before teardown.
+const readIf = (file: string) => existsSync(file) ? readJson(file) : null;
+function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets: string, logicalCpus: number) {
+  const name = stage === 'smoke' ? 'smoke' : `Stage ${stage}`;
+  const finished = readIf(`${dir}/finished.json`), status = readIf(`${dir}/run-status.json`);
+  assert.ok(finished && status?.valid === true && status.cleanupVerified === true && status.manifestHash === manifestHash,
+    `${dir} is not a finalized, valid ${name} run (finished.json and a valid run-status.json are required)`);
+  const judgement = readJson(`${dir}/judgement.json`), metadata = readJson(`${dir}/metadata.json`);
+  assert.ok(finished.manifestHash === manifestHash && finished.stage === stage && judgement.stage === stage && judgement.stopped === null,
+    `${dir} is not a finished ${name} of this manifest`);
+  assert.ok(!existsSync(`${dir}/stopped.json`), `${dir} stopped`);
+  assert.equal(JSON.stringify(metadata.cpuSets ?? null), JSON.stringify(parseCpuSets(cpuSets, logicalCpus)), `${dir} ran on other CPU sets`);
   return judgement;
+}
+const stage1Outcomes = ['not reproduced', 'cause established', 'cause not established', 'inconclusive'];
+const noiseSources = ['C hot1/hot2', 'A1 spread (fallback)'];
+
+// The HOST-BUSY the launcher claimed for this queue names this job (the launcher passes both).
+function launchedJob(env: NodeJS.ProcessEnv) {
+  const file = env.FUKULOW_HOST_BUSY, job = env.FUKULOW_LAUNCH_JOB;
+  if (!file || !job || !existsSync(file)) return false;
+  const m = /^[^:]+: (.+) \S+$/.exec(readFileSync(file, 'utf8').split('\n')[0] ?? '');
+  return m !== null && m[1].split(', ').includes(job);
 }
 
 // §3 prerequisites, checked before the supervisor starts anything. Each missing one is a STOP before start.
-export function prerequisites(args: ReturnType<typeof options>, manifestHash: string, env = process.env) {
-  // §3.2: the launcher holds HOST-BUSY for this run.
-  assert.ok(env.FUKULOW_HOST_BUSY && existsSync(env.FUKULOW_HOST_BUSY), 'Start through the launcher: HOST-BUSY is not held');
-  if (args.cpuSets) {
-    const [given, fixed] = [args.cpuSets, qualifiedCpuSets].map(t => parseCpuSets(t, cpus().length));
-    assert.ok(cpuList(given.server) === cpuList(fixed.server) && cpuList(given.client) === cpuList(fixed.client),
-      `CPU sets must be the #796 sets ${qualifiedCpuSets}`);
-  }
+export function prerequisites(args: ReturnType<typeof options>, manifestHash: string, env = process.env, logicalCpus = cpus().length) {
+  // §3.2: the launcher holds HOST-BUSY for this queue and this job (it also ran the preflight and logged the go).
+  assert.ok(launchedJob(env), 'Start through the launcher: HOST-BUSY is not held for this job');
+  const [given, fixed] = [args.cpuSets, qualifiedCpuSets].map(t => parseCpuSets(t, logicalCpus));
+  assert.ok(cpuList(given.server) === cpuList(fixed.server) && cpuList(given.client) === cpuList(fixed.client),
+    `CPU sets must be the #796 sets ${qualifiedCpuSets}`);
   // §3.1: the #796 qualification record, PASS, on these sets.
-  if (args.qualification) {
-    const q = readJson(args.qualification);
-    assert.ok(q.issue === 796 && q.result === 'PASS' && q.cpuSets === qualifiedCpuSets, 'The #796 qualification is not recorded as PASS on the #796 CPU sets');
-  }
+  const q = readJson(args.qualification!);
+  assert.ok(q.issue === 796 && q.result === 'PASS' && q.cpuSets === qualifiedCpuSets, 'The #796 qualification is not recorded as PASS on the #796 CPU sets');
   if (args.stage === '1') {
-    const smoke = finishedStage(args.smokeOut!, 'smoke', manifestHash, args.cpuSets);
+    const smoke = finishedStage(args.smokeOut!, 'smoke', manifestHash, args.cpuSets, logicalCpus);
     assert.equal(smoke.outcome, 'smoke passed', 'The smoke did not pass');
   }
   if (args.stage === '2') {
-    const s1 = finishedStage(args.stage1Out!, '1', manifestHash, args.cpuSets);
-    assert.ok(Number.isFinite(s1.noise?.value) && s1.noise.value >= 1.05, 'Stage 1 has no usable N');
+    const s1 = finishedStage(args.stage1Out!, '1', manifestHash, args.cpuSets, logicalCpus);
+    assert.ok(stage1Outcomes.includes(s1.outcome), `Stage 1 has no recognized outcome: ${s1.outcome}`);
+    assert.ok(noiseSources.includes(s1.noise?.source) && Number.isFinite(s1.noise?.value) && s1.noise.value >= 1.05,
+      'Stage 1 has no usable N (value >= 1.05 from a recognized source)');
     return {stage1Noise: s1.noise.value as number};
   }
   return {stage1Noise: null};
 }
 
 const freeAt = (path: string) => { const s = statfsSync(path, {bigint: true}); return Number(s.bavail * s.bsize); };
+const freeOrNull = (path: string) => { try { return freeAt(path); } catch { return null; } };
 
 async function worker(env: NodeJS.ProcessEnv) {
   const stage = env.DIAG870_STAGE as Stage;
@@ -165,7 +185,14 @@ async function worker(env: NodeJS.ProcessEnv) {
   const windows = new Map<string, {start: number; end: number; blocks: Block[]; checked: boolean}>();
   let previous: {id: string; end: number} | null = null;
   const app = <T>(body: (search: (text: string) => Promise<string>) => Promise<T>) => pinnedSession(container, 'measured', true, sets?.client, body);
-  const restart = async () => { docker('restart', container); await ready(); };
+  // After a restart, wait (up to 30 s) for a fast sample from the restarted server, so the next window's
+  // leading gap and start environment are not read from before the restart. Without one the gap rule decides.
+  const restart = async () => {
+    docker('restart', container);
+    await ready();
+    const t = Date.now();
+    while (!freshFast(readSamples(samplesFile), t) && Date.now() - t < freshWaitMs) await new Promise(r => setTimeout(r, 250));
+  };
   const reads = () => Number(owner('postgres', "SELECT pg_stat_clear_snapshot(); SELECT blks_read FROM pg_stat_database WHERE datname = 'measured';").split('\n').at(-1));
   const stats = () => owner('measured', `SELECT json_build_object(
     'io', (SELECT json_agg(row_to_json(i)) FROM pg_stat_io i WHERE reads > 0 OR hits > 0),
@@ -176,7 +203,7 @@ async function worker(env: NodeJS.ProcessEnv) {
     'checkpointer', (SELECT row_to_json(c) FROM pg_stat_checkpointer c), 'wal', (SELECT row_to_json(w) FROM pg_stat_wal w));`);
 
   const deps: Deps = {
-    dockerFreeBytes: dockerFree,
+    freeBytes: () => ({docker: dockerFree(), snapshot: freeOrNull(source.snapshotDirectory), output: freeOrNull(out)}),
     copy: async () => { owner('postgres', 'DROP DATABASE IF EXISTS measured;'); owner('postgres', 'CREATE DATABASE measured TEMPLATE base;'); },
     // Every command gets the time left before the cap; reaching the cap, or a command timing out at it,
     // is false (that round is INVALID), never a STOP.
@@ -256,7 +283,9 @@ async function worker(env: NodeJS.ProcessEnv) {
         : 'p95' in r.sample ? {query: r.query, p95: r.sample.p95} : {query: r.query, error: r.sample.sqlError});
       const m: Measurement = {id: step.id, kind: step.kind, arm: step.arm, order: step.order, settle: step.kind === 'copy' && step.settle,
         latencies, plans, sharedReads, invalid: ownReasons(results, load15), env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []}};
-      save(`${dest}/measurement.json`, {...m, window: {start, end, blocks}, sincePrevious, load15});
+      // Option A: hot 2's EXPLAIN sweep stands for warm, hot 1 and hot 2 of its cache arm.
+      const plansStandFor = step.kind === 'hot' && step.id.endsWith('.hot2') ? ['warm', 'hot1', 'hot2'].map(x => `${step.arm}.${x}`) : undefined;
+      save(`${dest}/measurement.json`, {...m, window: {start, end, blocks}, sincePrevious, plansStandFor, load15});
       previous = {id: step.id, end};
       note(`${step.id} measured`);
       return m;
@@ -300,7 +329,7 @@ async function worker(env: NodeJS.ProcessEnv) {
     note(`judgement: ${JSON.stringify('outcome' in judgement ? judgement.outcome : judgement.result)}`);
     // A STOP or a failed smoke keeps every record but writes no completed.json, so the supervisor marks the
     // run invalid and the launcher ends the queue.
-    if (result.stopped || ('outcome' in judgement && judgement.outcome === 'smoke failed')) {
+    if (ends(result.stopped, judgement)) {
       save(`${out}/stopped.json`, {label, stage, stopped: result.stopped, at: new Date().toISOString()});
       process.exitCode = stopExitCode;
       return;
@@ -310,13 +339,6 @@ async function worker(env: NodeJS.ProcessEnv) {
     sampler.kill('SIGTERM');
     await Promise.race([samplerExit, new Promise(r => setTimeout(r, 15_000))]);
     if (sampler.exitCode === null && sampler.signalCode === null) sampler.kill('SIGKILL');
-    // Throwaway disk probes carry the ownership label; remove any left behind (the run's own container
-    // and volume are the supervisor's).
-    try {
-      const left = docker('ps', '-aq', '--filter', `label=${ownershipLabel}`).split('\n').map(x => x.trim()).filter(Boolean);
-      const own = docker('ps', '-aq', '--filter', `name=^${container}$`).trim();
-      for (const c of left.filter(c => c !== own)) docker('rm', '-f', c);
-    } catch (error) { note(`probe cleanup failed: ${String(error)}`); }
     // Both streams: PostgreSQL logs to stderr.
     try {
       const logs = spawnSync('docker', ['logs', container], {encoding: 'utf8', timeout: timeouts.docker, maxBuffer: 1024 ** 3});
@@ -339,8 +361,34 @@ async function main() {
     DIAG870_QUALIFICATION: args.qualification ?? ''});
   // The supervisor runs this file as the worker, owns the container and volume, and always removes them.
   await supervise(import.meta.url, out, sha256, () => note(`${label}: stage ${args.stage} finished (${out})`));
+  sweepLeftovers(out);
   if (process.exitCode === 0 || process.exitCode === undefined) return;
   note(`${label}: stage ${args.stage} did not finish (see ${out}/stopped.json or the log); the queue ends`);
 }
 
 if (import.meta.main) await main();
+
+// After the supervisor: any harness-labelled resource still present is this run's (refuseLeftovers found
+// none at start), such as a throwaway disk probe interrupted mid-run. It is removed and recorded; if the
+// listing, a removal or the check afterwards fails, the run is not valid and the queue ends.
+export function sweepLeftovers(out: string, d: (...args: string[]) => string = docker) {
+  let found: {kind: string; name: string}[] = [];
+  const failures: string[] = [];
+  try { found = ownedResources(d); } catch (error) { failures.push(`listing failed: ${String(error)}`); }
+  for (const r of found) {
+    try { d(...(r.kind === 'container' ? ['rm', '-fv', r.name] : ['volume', 'rm', '-f', r.name])); } catch (error) { failures.push(`${r.kind} ${r.name}: ${String(error)}`); }
+  }
+  try {
+    const remain = ownedResources(d);
+    if (remain.length) failures.push(`still present: ${remain.map(r => `${r.kind} ${r.name}`).join(', ')}`);
+  } catch (error) { failures.push(`verification failed: ${String(error)}`); }
+  if (found.length || failures.length) save(`${out}/leftover-cleanup.json`, {found, failures});
+  if (!failures.length) return true;
+  const statusFile = `${out}/run-status.json`;
+  const status = existsSync(statusFile) ? readJson(statusFile) : {};
+  writeFileSync(statusFile, JSON.stringify({...status, valid: false, leftoverFailures: failures}) + '\n');
+  rmSync(`${out}/finished.json`, {force: true});
+  note(`${label}: harness cleanup failed (${failures.join('; ')}); the run is not valid`);
+  if (!process.exitCode) process.exitCode = 1;
+  return false;
+}

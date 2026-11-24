@@ -167,13 +167,13 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
   // H3: plan shape or buffer change for a query whose p95 rose at least 1.25x across A1.
   if (!min.H3) out.H3 = 'withheld';
   else {
-    // Plans are complete here (the H3 minimum). Buffers are the root's shared hit + read; the hit/read split
-    // is kept in the records for H1.
+    // Plans are complete here (the H3 minimum). Each buffer count (the root's shared hit and shared read
+    // blocks) is compared on its own: a change of more than 10% in either is a change.
     const queries = acceptedOf(a1[0]);
+    const beyond10 = (xs: number[]) => Math.max(...xs) > 1.10 * Math.min(...xs);
     const changed = (query: string) => {
       const plans = a1.map(m => m.plans!.find(p => p.query === query)).filter(isPlan);
-      const buffers = plans.map(p => p.buffers);
-      return new Set(plans.map(p => p.shapeHash)).size > 1 || Math.max(...buffers) > 1.10 * Math.min(...buffers);
+      return new Set(plans.map(p => p.shapeHash)).size > 1 || beyond10(plans.map(p => p.sharedHit)) || beyond10(plans.map(p => p.sharedRead));
     };
     const rose = (query: string) => (p95Of(last, query) ?? 0) >= 1.25 * (p95Of(first, query) ?? Infinity);
     out.H3 = verdict(queries.some(q => rose(q) && changed(q)), queries.every(q => !changed(q)));
