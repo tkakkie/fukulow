@@ -1,3 +1,26 @@
+<script module lang="ts">
+  // One formatter for every row. It formats in UTC the instant whose UTC fields equal the
+  // current local fields, so the output follows a time-zone change without a new formatter.
+  const messageTimeFormatter = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'UTC',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+  })
+
+  function formatMessageTime(createdAt: string): string {
+    const d = new Date(createdAt)
+    if (Number.isNaN(d.getTime())) return 'Invalid Date'
+    const local = new Date(0)
+    local.setUTCFullYear(d.getFullYear(), d.getMonth(), d.getDate())
+    local.setUTCHours(d.getHours(), d.getMinutes(), d.getSeconds())
+    return messageTimeFormatter.format(local)
+  }
+</script>
+
 <script lang="ts">
   import { shouldOpenRepliesFromRowKey } from '../composer-keys'
   import Button from './Button.svelte'
@@ -69,7 +92,7 @@
   )
 
   const formattedTime = $derived(
-    createdAt ? new Date(createdAt).toLocaleString('ja-JP') : '',
+    createdAt ? formatMessageTime(createdAt) : '',
   )
 
   function handleFocus(e: FocusEvent) {

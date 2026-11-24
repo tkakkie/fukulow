@@ -303,6 +303,48 @@ describe('MessageRow.svelte timestamp formatting (#833)', () => {
     await unmount(instance)
   })
 
+  function renderedTime(createdAt: string): string | null | undefined {
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const row = mount(MessageRow, { target: host as unknown as Element, props: { body: '本文', createdAt } })
+    flushSync()
+    const text = host.querySelector('time.ui-message-row__time')?.textContent
+    void unmount(row)
+    return text
+  }
+
+  it.each([
+    ['America/Los_Angeles', '2026-03-08T09:59:59Z'],
+    ['America/Los_Angeles', '2026-03-08T10:00:00Z'],
+    ['America/Los_Angeles', '2026-11-01T08:30:00Z'],
+    ['Asia/Tokyo', '1880-01-01T00:00:00Z'],
+    ['Asia/Kolkata', '2026-06-15T18:29:30Z'],
+    ['Pacific/Chatham', '2026-04-05T02:44:59Z'],
+  ])('matches toLocaleString("ja-JP") in %s at %s (DST edges, non-minute offsets)', (tz, iso) => {
+    const prevTz = process.env.TZ
+    try {
+      process.env.TZ = tz
+      expect(renderedTime(iso)).toBe(new Date(iso).toLocaleString('ja-JP'))
+    } finally {
+      if (prevTz === undefined) delete process.env.TZ
+      else process.env.TZ = prevTz
+    }
+  })
+
+  it('renders Invalid Date like toLocaleString for an unparsable time', () => {
+    expect(renderedTime('not-a-date')).toBe(new Date('not-a-date').toLocaleString('ja-JP'))
+  })
+
+  it('builds no formatter per row', () => {
+    const spy = vi.spyOn(Intl, 'DateTimeFormat')
+    try {
+      for (let i = 0; i < 5; i++) renderedTime('2026-01-02T03:04:05Z')
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('uses the current time zone at render time when TZ changes between formats', async () => {
     const iso = '2026-01-02T03:04:05Z'
     const prevTz = process.env.TZ
