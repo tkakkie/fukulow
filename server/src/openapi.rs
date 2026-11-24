@@ -116,12 +116,14 @@ impl Modify for DomainTags<'_> {
             assert!(previous.is_none(), "Duplicate OpenAPI domain for {path}");
         }
         for (path, item) in &mut openapi.paths.paths {
-            let domain = domains.get(path.as_str()).copied();
+            let domain = domains.remove(path.as_str());
             assert!(domain.is_some(), "Missing OpenAPI domain for {path}");
             for operation in operations_mut(item) {
                 operation.tags = domain.map(|tag| vec![tag.into()]);
             }
         }
+        let stale: Vec<_> = domains.into_keys().collect();
+        assert!(stale.is_empty(), "Stale OpenAPI domain for {stale:?}");
     }
 }
 
@@ -384,5 +386,13 @@ mod tests {
     fn duplicate_openapi_domain_is_rejected() {
         DomainTags(&[("/api/v1/health", "system"), ("/api/v1/health", "auth")])
             .modify(&mut ApiDoc::openapi());
+    }
+
+    #[test]
+    #[should_panic(expected = "Stale OpenAPI domain for [\"/api/v1/removed\"]")]
+    fn stale_openapi_domain_is_rejected() {
+        let mut domains = PATH_DOMAINS.to_vec();
+        domains.push(("/api/v1/removed", "system"));
+        DomainTags(&domains).modify(&mut ApiDoc::openapi());
     }
 }
