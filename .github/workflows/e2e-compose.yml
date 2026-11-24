@@ -32,8 +32,9 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build isolated image with existing CI layer cache
         id: build-image
-        # Run bake inside the action so the cache-writing runtime token reaches only
-        # this child process, never later steps running npm and browser code.
+        # Run bake inside the action so the cache runtime token reaches only this child
+        # process, never later steps running npm and browser code. Read-only: both legs
+        # exported the same layers with different digests; docker-cache.yml writes (#926).
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -42,8 +43,7 @@ jobs:
             }
             await exec.exec("docker", ["buildx", "bake", "--load",
               "--file", "compose.dev.yml",
-              "--set", "app.cache-from=type=gha,scope=docker",
-              "--set", "app.cache-to=type=gha,scope=docker,mode=max"]);
+              "--set", "app.cache-from=type=gha,scope=docker"]);
       - name: Pebble HTTPS probe, browser acceptance, proxy parity and certificate lifecycle
         # Step-scoped, so the cache-credential build step never inherits these.
         env:

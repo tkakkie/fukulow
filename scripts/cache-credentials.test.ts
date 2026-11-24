@@ -12,7 +12,9 @@ const credentials = /ACTIONS_(?:RUNTIME_TOKEN|RESULTS_URL)/
 const privilegedAction = /actions\/github-script/
 const action = 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'
 const allowed = new Set(['ci.yml/docker/build-image', 'ci.yml/docker/build-upgrade-image',
-  'e2e-compose.yml/acceptance/build-image'])
+  'e2e-compose.yml/acceptance/build-image', 'docker-cache.yml/export/build-image'])
+// #926: the one step that writes scope=docker; every other credential step only reads it.
+const writer = 'docker-cache.yml/export/build-image'
 const guard = 'if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {'
 const inheritedEnvKeys = new Set(['COMPOSE_PROJECT_NAME', 'COMPOSE_PROFILES', 'POSTGRES_PASSWORD',
   'POSTGRES_APP_PASSWORD', 'FUKULOW_SETUP_TOKEN', 'FUKULOW_COOKIE_SECURE', 'FUKULOW_DOMAIN'])
@@ -142,8 +144,8 @@ test('rejects job/workflow env, unrelated steps, renamed actions, and credential
   }
   assert.throws(() => checkWorkflow('ci.yml', workflow.replace('id: build-image', 'id: checks')), /allowed build steps/)
   assert.throws(() => checkWorkflow('ci.yml', workflow.replace(action, 'actions/github-script@v9')), /stay pinned/)
-  assert.throws(() => checkWorkflow('ci.yml', workflow.replace('await exec.exec("docker", args);',
-    'await exec.exec("node", ["scripts/check-db-upgrade.ts"]);')), /only build commands/)
+  assert.throws(() => checkWorkflow('ci.yml', workflow.replace('await exec.exec("docker", ["buildx", "bake",',
+    'await exec.exec("node", ["scripts/check-db-upgrade.ts",')), /only build commands/)
   for (const source of [
     '      - uses: actions/github-script@v9\n        with:\n          script: await exec.exec("node", ["scripts/check-db-upgrade.ts"]);',
     '      - uses:  actions/github-script@v9',
@@ -302,7 +304,7 @@ test('child-environment guard rejects implicit credentials on archive helpers an
 
 test('PR and push builds retain cache policy; old-image helpers never receive credentials', async () => {
   for (const event of ['pull_request', 'push']) {
-    for (const file of ['ci.yml', 'e2e-compose.yml']) {
+    for (const file of ['ci.yml', 'e2e-compose.yml', 'docker-cache.yml']) {
       for (const [key, script] of checkWorkflow(file, read(`.github/workflows/${file}`))) {
         const calls = await buildCalls(script, event)
         const builds = calls.filter(call => call.credentials)
@@ -311,12 +313,24 @@ test('PR and push builds retain cache policy; old-image helpers never receive cr
         assert.ok(build.args.some(arg => arg.includes('cache-from=type=gha,scope=docker')) ||
           build.args.includes('--cache-from') && build.args.includes('type=gha,scope=docker'))
         const writes = build.args.includes('app.cache-to=type=gha,scope=docker,mode=max')
-        assert.equal(writes, key.endsWith('build-upgrade-image') ? false : file === 'e2e-compose.yml' || event === 'push')
+        assert.equal(writes, key === writer, `${key} must ${key === writer ? '' : 'not '}write the layer cache`)
+        assert.ok(!build.args.some(arg => /cache-to/.test(arg)) || writes, `${key} may not export any cache`)
         if (key.endsWith('build-upgrade-image')) {
           checkOldImageBuild(calls)
         }
       }
     }
+  }
+})
+
+test('the layer-cache writer runs only for main pushes, one at a time, and never cancels a running export', () => {
+  const workflow = read('.github/workflows/docker-cache.yml')
+  assert.match(workflow, /^on:\n  push:\n    branches: \[main\]\npermissions:\n  contents: read\n/m,
+    'only main pushes may write the cache the PRs read')
+  assert.match(workflow, /^concurrency:\n  group: docker-cache\n  cancel-in-progress: false\n/m)
+  // Verification never shares the writer's concurrency group, so queueing cannot cancel a check.
+  for (const file of readdirSync(new URL('../.github/workflows/', import.meta.url)).filter(file => file !== 'docker-cache.yml')) {
+    assert.doesNotMatch(read(`.github/workflows/${file}`), /group: docker-cache\b/, file)
   }
 })
 
