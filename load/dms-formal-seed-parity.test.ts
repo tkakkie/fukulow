@@ -82,6 +82,11 @@ for (const mode of modes) test(`formal seed (${mode.name}) matches the origin/ma
   } else assert.equal(current, originDigests[mode.name]);
 });
 
+// The full-size diagnostic seed (#920): the rehearsal's batch limit must not change it. Pinned from the seed at a17fc978.
+test('the full-size diagnostic seed keeps its pinned command and clock transcript', t => {
+  assert.equal(transcript(t, modes[0]!, () => seed(true)), '8d06a65f8b9e47011829f872f9136ea443b29d8ce0e2529567c360ff7f6e3ef3');
+});
+
 test('the diagnostic seed differs from the formal transcript, so the parity check can fail', t => {
   const mode = modes[0]!;
   assert.notEqual(transcript(t, mode, () => seed(true)), transcript(t, mode, () => seed()));

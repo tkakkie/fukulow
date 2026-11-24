@@ -20,8 +20,8 @@ import { scaledLoad, localIdentity, localCopy, sha256File, dockerfileBases, harn
 import { reportPilot } from './dms-formal-pilot.ts';
 import { reportAttempt } from './dms-formal-results.ts';
 import { failureDetails, restoreSpace, workerLog, writeDiagnostic, type DiagnosticWriter, type ProbeDocker } from './dms-formal-diagnostics.ts';
-import { postgresCommand } from './dms-formal-seed-diagnostic.ts';
-export type HostState = { seedDiagnostic?:boolean; seedBaseline?:boolean; target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
+import { postgresCommand, seedRehearsal } from './dms-formal-seed-diagnostic.ts';
+export type HostState = { seedDiagnostic?:boolean; seedBaseline?:boolean; seedRehearsal?:boolean; target?:'local'|'ssh';loadScale?:string;limits:LocalLimits;sourceCheckout?:string;localRoot?:string;pilot?:boolean;pilotSeconds?:number;pilotImage?:string;label?:string; overhead?:boolean; patchSha256?:string; id: string; sha: string; role: 'app' | 'db' | 'generator'; mode: 'formal' | 'smoke'; scenario: MixedScenario; appAddress: string; dbAddress: string; dbPassword: string; appPassword: string; setupToken: string; k6: string; postgres: string; caddy: string; nodeVersion: string; generatorTarget:string; attempts:number };
 const root = resolve(import.meta.dirname,'../..');
 const statePath = `${root}/state.json`;
 let cleaning = false;
@@ -42,6 +42,13 @@ const save = (path: string, value: unknown) => writeFileSync(path, typeof value 
 export const instrumentedSeed = (s: Pick<HostState,'seedDiagnostic'|'seedBaseline'>) => !!s.seedDiagnostic && !s.seedBaseline;
 export const dbPostgresCommand = (s: Pick<HostState,'seedDiagnostic'|'seedBaseline'>) => postgresCommand(instrumentedSeed(s));
 export const seedScriptArgs = (s: Pick<HostState,'seedDiagnostic'|'seedBaseline'>, script: string) => instrumentedSeed(s) && script==='dms-formal-seed' ? ['--seed-diagnostic'] : [];
+// The seed size: the formal fixture (10 Organizations, 5,000,000 Messages each), the smoke fixture (1 Organization) and
+// the pilot fixture (10 Organizations) with one Message per DM pair, or the seed diagnostic rehearsal.
+type SeedSizeState = Pick<HostState,'mode'|'pilot'|'seedRehearsal'>;
+export const seedOrganizations = (s: SeedSizeState) => s.seedRehearsal ? seedRehearsal.organizations : s.mode==='smoke' ? 1 : 10;
+export const seedMessagesPerOrganization = (s: SeedSizeState) => s.seedRehearsal ? seedRehearsal.batchesPerOrganization*250*100 : s.mode==='smoke'||s.pilot ? 50000 : 5000000;
+export const seedSizeEnv = (s: SeedSizeState) => ({ DM_FORMAL_SMOKE:s.mode === 'smoke'||s.pilot ? '1' : '0', DM_FORMAL_SEED_ORGS:s.pilot?'10':'',
+  ...(s.seedRehearsal ? { DM_FORMAL_SEED_ORGS:String(seedRehearsal.organizations), DM_FORMAL_SEED_BATCHES:String(seedRehearsal.batchesPerOrganization) } : {}) });
 export const buildsBaseline = (s: Pick<HostState,'overhead'|'pilot'|'seedDiagnostic'>) => !!s.overhead && !s.pilot && !s.seedDiagnostic;
 function state(): HostState { return JSON.parse(readFileSync(statePath,'utf8')); }
 const image = (s: HostState) => `${s.id}:release`;
@@ -142,14 +149,14 @@ async function launchApp(s:HostState,tag=image(s)) {
 }
 async function seed(s: HostState) {
   const started = Date.now();
-  const env = { ...process.env, DM_DB_CONTAINER:`${s.id}-db-1`, DM_FORMAL_SEED:'1', DM_FORMAL_SCENARIO:s.scenario, DM_FORMAL_SMOKE:s.mode === 'smoke'||s.pilot ? '1' : '0', DM_FORMAL_SEED_ORGS:s.pilot?'10':'', DM_FORMAL_OUT:`${root}/formal`, DM_SEED_OUT:`${root}/deep.json`, DM_OUTPUT:root, BASE_URL:`https://${s.appAddress}`, NODE_EXTRA_CA_CERTS:`${root}/ca.crt`, DM_QUERY_SOURCE:`${root}/source`, DM_PROBE_SAMPLES:'1', DM_SEND_PROBE_SAMPLES:'1' };
+  const env = { ...process.env, DM_DB_CONTAINER:`${s.id}-db-1`, DM_FORMAL_SEED:'1', DM_FORMAL_SCENARIO:s.scenario, ...seedSizeEnv(s), DM_FORMAL_OUT:`${root}/formal`, DM_SEED_OUT:`${root}/deep.json`, DM_OUTPUT:root, BASE_URL:`https://${s.appAddress}`, NODE_EXTRA_CA_CERTS:`${root}/ca.crt`, DM_QUERY_SOURCE:`${root}/source`, DM_PROBE_SAMPLES:'1', DM_SEND_PROBE_SAMPLES:'1' };
   const run = async (script: string) => {
     // Spawned seed/probe children inherit only this private configuration; their output is private.
     await checked(execute,{program:process.execPath,args:[`${root}/harness/load/${script}.ts`,...seedScriptArgs(s,script)],env,timeout:24*60*60*1000,log:s.seedDiagnostic?undefined:`${root}/${script}.log`});
   };
   await run('dms-formal-seed'); await run('dms-seed'); await run('dms-probe');
   const checks=[];
-  for(let o=0;o<(s.mode==='smoke'?1:10);o++) {
+  for(let o=0;o<seedOrganizations(s);o++) {
     const fixture=JSON.parse(readFileSync(`${root}/formal/org-${o}.json`,'utf8'));
     const request=async(index:number,path:string,expected:number,body?:unknown)=>{
       const response=await fetch(`https://${s.appAddress}/api/v1/orgs/${fixture.organization}${path}`,{method:body?'POST':'GET',signal:AbortSignal.timeout(10000),headers:{Authorization:`Bearer ${fixture.members[index].token}`,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
@@ -167,9 +174,9 @@ async function seed(s: HostState) {
   save(`${root}/fixture-checks.json`,checks);
   await sql(s,'VACUUM(ANALYZE);');
   save(`${root}/fixture-histograms.json`,await sql(s,histogramsSql));
-  const seeded=await sql(s,countsSql), actual=JSON.parse(seeded), orgs=s.mode==='smoke'?1:10;
+  const seeded=await sql(s,countsSql), actual=JSON.parse(seeded), orgs=seedOrganizations(s);
   const {historical,supplemental}=fixturePairs(s.scenario),pairCount=historical.length+supplemental.length;
-  const expected={organizations:orgs+1,members:orgs*1000+10000,dms:orgs*pairCount+14999,grants:orgs*pairCount*2+29998,messages:orgs*(s.mode==='smoke'||s.pilot?50000:5000000)+3*orgs+2};
+  const expected={organizations:orgs+1,members:orgs*1000+10000,dms:orgs*pairCount+14999,grants:orgs*pairCount*2+29998,messages:orgs*seedMessagesPerOrganization(s)+3*orgs+2};
   save(`${root}/fixture-count-check.json`,{actual,expected});
   if(Object.entries(expected).some(([key,value])=>actual[key]!==value))throw new Error('Seed row counts differ from the explicit fixture/probe additions');
   save(`${root}/seed-counts.json`,seeded);

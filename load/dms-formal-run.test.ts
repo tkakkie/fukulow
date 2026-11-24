@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, cpSync, existsSync, utimesSync, appendFileSync, renameSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, cpSync, existsSync, utimesSync, appendFileSync, renameSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { readConfig, readRunConfig, type Config } from './dms-formal-config.ts';
@@ -592,13 +592,42 @@ test('seed diagnostic CLI accepts only local pool-overhead at pair scale with a 
   }
 });
 
+test('the rehearsal options mark the same seed diagnostic arms; the full-size arms keep their current config', t => {
+  const path=temporary(t), file=path+'/config.env', patch='a'.repeat(64);
+  const overhead=`DM_FORMAL_SCENARIO=pool-overhead\nDM_FORMAL_REVIEWED_PATCH_SHA256=${patch}\n`, local='DM_FORMAL_TARGET=local\n';
+  writeFileSync(file,env(path,local+overhead),{mode:0o600});
+  // Pinned from the config reader at a17fc978: the full-size instrumented and baseline arms.
+  const full={seedDiagnostic:true,pilotImage:undefined,target:'local',loadScale:'1/25',
+    limits:{appCpu:2,appMemory:'2g',dbCpu:2,dbMemory:'4g',generatorCpu:1,generatorMemory:'1g'},pilot:false,pilotSeconds:60,
+    reviewedPatchSha256:patch,app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:realpathSync(path)+'/output',
+    mode:'formal',scenario:'pool-overhead',attempts:3,deadline:undefined,downloadRaw:false};
+  assert.deepEqual(readRunConfig([file,'--seed-diagnostic'],checkout),full);
+  assert.deepEqual(readRunConfig([file,'--seed-diagnostic-baseline'],checkout),{...full,seedBaseline:true});
+  assert.deepEqual(readRunConfig([file,'--seed-diagnostic-rehearsal'],checkout),{...full,seedRehearsal:true});
+  assert.deepEqual(readRunConfig([file,'--seed-diagnostic-baseline-rehearsal'],checkout),{...full,seedBaseline:true,seedRehearsal:true});
+  assert.throws(()=>readRunConfig([file,'--rehearsal'],checkout),/Expected .*1 Organization, 5 Message batches \(125000 Messages\)/);
+  assert.throws(()=>readRunConfig([file,'--seed-diagnostic','--seed-diagnostic-rehearsal'],checkout),/Expected/);
+  // The rehearsal has the seed diagnostic's own conditions: local pool-overhead, a formal fixture and load scale 1/25.
+  for (const extra of [overhead,local+'DM_FORMAL_SCENARIO=smoke\nDM_FORMAL_MODE=smoke\n',local+overhead+'DM_FORMAL_LOAD_SCALE=1/10\n',local+overhead+'DM_FORMAL_MODE=smoke\n']) {
+    writeFileSync(file,env(path,extra));
+    for(const option of ['--seed-diagnostic-rehearsal','--seed-diagnostic-baseline-rehearsal'])assert.throws(()=>readRunConfig([file,option],checkout),/requires/);
+  }
+});
+
+test('a rehearsal is refused outside a seed diagnostic arm', async t => {
+  const path=temporary(t);
+  const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedRehearsal:true};
+  await assert.rejects(run(config,{exec:async()=>{throw new Error('no host contact');},transfer:async()=>{},on:()=>{},off:()=>{}}),/Rehearsal requires a seed diagnostic arm/);
+  assert.ok(!existsSync(config.output));
+});
+
 // The rows and DB log a seed diagnostic writes: per Organization 200 batches and its Organization row; each instrumented
 // batch logs its five statement durations inside its clock window. A stopped seed ends at Organization 6 batch 124.
-function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean) {
+function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean,shape={organizations:10,batchesPerOrganization:200}) {
   const base=Date.parse('2026-11-22T00:00:00Z'), rows:string[]=[], log:string[]=[];
   const at=(ms:number)=>new Date(ms).toISOString().replace('T',' ').replace('Z',' UTC');
-  for(let o=0;o<10;o++) {
-    for(let b=0;b<200;b++) {
+  for(let o=0;o<shape.organizations;o++) {
+    for(let b=0;b<shape.batchesPerOrganization;b++) {
       const index=o*201+b, startMs=base+index*1000, stop=stopped && o===6 && b===124, durationMs=stop?12166:b===0?2000:1000;
       rows.push(JSON.stringify(arm==='baseline'?{kind:'batch',organization:o,batchIndex:b,durationMs}
         :{kind:'batch',organization:o,batchIndex:b,durationMs,startedAtMs:startMs,endedAtMs:startMs+durationMs,dbClockStartMs:startMs,dbClockEndMs:startMs+900,dbClockSpanMs:900,dbBackendPid:1000+index,recorderMs:0.1}));
@@ -611,15 +640,18 @@ function diagnosticSeedRecords(arm:'instrumented'|'baseline',stopped:boolean) {
   return {timing:rows.join('\n')+'\n',dbLog:log};
 }
 
-for (const outcome of ['success','stop-rule','interrupted','collection-failure','interrupted-late','baseline','vm-gap','baseline-vm-gap']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
+// One seed diagnostic arm against fakes (no Docker): a full-size arm, or a rehearsal arm (#920) with the same collectors.
+// Returns the arm's output directory.
+async function seedDiagnosticArm(t:TestContext,outcome:string,rehearsal=false) {
   const path=temporary(t), events:string[]=[], listeners=new Map<string,()=>void>();
+  const shape=rehearsal?{organizations:1,batchesPerOrganization:5}:{organizations:10,batchesPerOrganization:200};
   const config:Config={app:'app',db:'db',generator:'generator',sha:'a'.repeat(40),output:path+'/output',
-    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,...(outcome.startsWith('baseline')?{seedBaseline:true}:{}),
+    scenario:'pool-overhead',attempts:3,mode:'formal',target:'local',seedDiagnostic:true,...(outcome.startsWith('baseline')?{seedBaseline:true}:{}),...(rehearsal?{seedRehearsal:true}:{}),
     reviewedPatchSha256:createHash('sha256').update(readFileSync(checkout+'/load/pool-overhead-baseline.patch')).digest('hex')};
   const stop={organization:6,batchIndex:124,durationMs:12166,baselineMs:983.941,rule:'message-batch',
     limitMs:2951.823,startedAtMs:100,endedAtMs:12266};
   const baseline=outcome.startsWith('baseline'), vmGap=outcome.endsWith('vm-gap'), interrupted=outcome==='interrupted'||outcome==='interrupted-late', stopped=outcome==='stop-rule'||interrupted;
-  const {timing,dbLog}=diagnosticSeedRecords(baseline?'baseline':'instrumented',stopped);
+  const {timing,dbLog}=diagnosticSeedRecords(baseline?'baseline':'instrumented',stopped,shape);
   const vmLogDirectory=path+'/vm';mkdirSync(vmLogDirectory);writeFileSync(vmLogDirectory+'/console.log','1970-01-01T00:00:00Z kernel: ok\n');
   const collectionFailure=outcome==='collection-failure'||vmGap;
   // vm-gap: the init.log followed since the seed start is rotated and removed before the collector reads it (retention
@@ -690,6 +722,7 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
           assert.equal(workerState.seedBaseline,baseline?true:undefined);
           assert.equal(workerState.pilot,false);
           assert.equal(workerState.loadScale,'1/25');
+          assert.equal(workerState.seedRehearsal,rehearsal?true:undefined);
           mkdirSync(roleRoot+'/formal');
           writeFileSync(roleRoot+'/formal/seed-timing.jsonl',timing,{mode:0o600});
           if(outcome==='stop-rule')writeFileSync(roleRoot+'/formal/seed-stop.json',JSON.stringify(stop));
@@ -725,10 +758,17 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
   assert.ok(!existsSync(config.output+'/overhead-comparison.json'));
   const summary=JSON.parse(readFileSync(config.output+'/summary.json','utf8'));
   const status=JSON.parse(readFileSync(config.output+'/status.json','utf8'));
-  for(const record of [summary,status]) {
-    assert.equal(record.label,'DIAGNOSTIC');
-    assert.equal(record.status,'NOT EVALUATED');
+  const metadata=JSON.parse(readFileSync(config.output+'/metadata.json','utf8'));
+  const failed=existsSync(config.output+'/failure.json')?[JSON.parse(readFileSync(config.output+'/failure.json','utf8'))]:[];
+  for(const record of [summary,status,metadata,...failed]) {
+    assert.equal(record.label,rehearsal?'DIAGNOSTIC REHEARSAL':'DIAGNOSTIC');
+    // A rehearsal is marked in every record; a full-size arm's records carry no rehearsal field at all.
+    assert.equal(record.rehearsal,rehearsal?true:undefined);
+    assert.equal('rehearsal' in record,rehearsal);
   }
+  for(const record of [summary,status,...failed])assert.equal(record.status,'NOT EVALUATED');
+  // The seed size the arm expects: the full fixture (10 Organizations of 200 batches) or the rehearsal's.
+  assert.deepEqual(summary.conditions.shape,shape);
   assert.deepEqual(summary.attempts,[]);
   assert.deepEqual(summary.collectionFailures,vmGap?['docker-vm: partial']:collectionFailure?['db-samples.txt: postgres: sample timing missing']
     :outcome==='interrupted'?['host.log: failed']:outcome==='interrupted-late'?['db.log: redaction cut short: no time left before cleanup','db.log: server duration missing or incomplete on 1325 of 1325 batches','docker-vm: failed','host.log: failed']:[]);
@@ -746,14 +786,14 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
     assert.ok(existsSync(config.output+'/formal/docker-vm/init.log.partial')&&!existsSync(config.output+'/formal/docker-vm/init.log'));
   }
   assert.equal(summary.hostLog.status,interrupted?'failed':'complete');
-  const batches=stopped?6*200+125:2000;
+  const batches=stopped?6*200+125:shape.organizations*shape.batchesPerOrganization;
   assert.deepEqual([summary.overhead.batches.batches,summary.overhead.batches.missingRows,summary.overhead.batches.unexpectedRows],[batches,0,0]);
   if(baseline) {
     assert.deepEqual([summary.samplers,summary.hostSamples,summary.overhead.dockerExecs,summary.overhead.recorderMs],[null,null,null,null]);
     assert.equal(summary.overhead.instrumentationEffect,'baseline-arm');
     assert.equal(summary.overhead.batches.medianMs,1000);
     assert.ok(!existsSync(config.output+'/formal/seed-batch-server.jsonl'));
-    return;
+    return config.output;
   }
   assert.equal(summary.samplers.kernel.samples,1);
   assert.equal(summary.samplers.postgres.samples,3);
@@ -787,5 +827,35 @@ for (const outcome of ['success','stop-rule','interrupted','collection-failure',
       assert.equal(failure.seedStop.organization,null);
       assert.ok(failure.seedStop.endedAtMs>=failure.seedStop.startedAtMs);
     }
+  }
+  return config.output;
+}
+for (const outcome of ['success','stop-rule','interrupted','collection-failure','interrupted-late','baseline','vm-gap','baseline-vm-gap']) test('seed diagnostic captures logs before cleanup on '+outcome, async t => {
+  await seedDiagnosticArm(t,outcome);
+});
+// The rehearsal keeps every collector and the same collection checks: a collector failure still fails the arm.
+for (const outcome of ['success','collection-failure','vm-gap','baseline','baseline-vm-gap']) test('seed diagnostic rehearsal runs every collector and captures logs before cleanup on '+outcome, async t => {
+  await seedDiagnosticArm(t,outcome,true);
+});
+
+test('both rehearsal arms run and are compared as a rehearsal only; a rehearsal is never pair evidence or mixed with a full arm', async t => {
+  // Instrumented arms first: the baseline arm mocks setTimeout for the rest of the test.
+  const full=await seedDiagnosticArm(t,'success'), instrumented=await seedDiagnosticArm(t,'success',true), baseline=await seedDiagnosticArm(t,'baseline',true);
+  const effect=(...args:string[])=>{
+    const result=spawnSync(process.execPath,[checkout+'/load/dms-formal-seed-effect.ts',...args],{encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const rehearsed=effect('--rehearsal',instrumented,baseline);
+  assert.deepEqual([rehearsed.status,rehearsed.rehearsal,rehearsed.reasons,rehearsed.medianBatchDeltaMs],['rehearsal-compared',true,[],0]);
+  assert.deepEqual([rehearsed.instrumented.batches,rehearsed.baseline.batches],[5,5]);
+  assert.match(rehearsed.evidence,/never pair evidence/);
+  const pair=effect(instrumented,baseline);
+  assert.deepEqual([pair.status,pair.reasons],['unevaluated',['instrumented arm is a rehearsal, never pair evidence','baseline arm is a rehearsal, never pair evidence']]);
+  assert.equal('medianBatchDeltaMs' in pair,false);
+  for(const args of [[full,baseline],['--rehearsal',full,baseline]]) {
+    const mixed=effect(...args);
+    assert.equal(mixed.status,'unevaluated');
+    assert.ok(mixed.reasons.includes('a rehearsal arm and a full-size arm are never compared'),mixed.reasons.join('; '));
   }
 });

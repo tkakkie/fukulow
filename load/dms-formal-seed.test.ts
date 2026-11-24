@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createLog } from './channel-log.ts';
-import { checkMessageBatch, checkOrganization, dbBatchClock, messageBatchBaselineMs, seed } from './dms-formal-seed.ts';
-import { batchServerStatements } from './dms-formal-seed-diagnostic.ts';
+import { checkMessageBatch, checkOrganization, dbBatchClock, messageBatchBaselineMs, seed, seedBatchLimit } from './dms-formal-seed.ts';
+import { batchServerStatements, seedRehearsal } from './dms-formal-seed-diagnostic.ts';
+import { seedMessagesPerOrganization, seedOrganizations, seedSizeEnv } from './dms-formal-host.ts';
 import { batchSummaryFailures, seedBatchSummary, seedShape } from './dms-formal-seed-samplers.ts';
 
 test('Message batch baseline excludes the first batch and uses the median', () => {
@@ -181,4 +182,50 @@ test('DB batch clock reads only the two clock rows and marks anything else missi
   for (const stdout of [undefined, null, '', 'db-start|1000|7\n', 'db-start|2000|7\ndb-end|1000\n', 'db-start|x|7\ndb-end|1\n', 'db-start|1000\ndb-end|1001\n']) {
     assert.deepEqual(dbBatchClock(stdout), { dbClock: 'missing' });
   }
+});
+
+test('the seed sizes: full-size, smoke and pilot keep their current values; the rehearsal is one Organization of five batches', () => {
+  // Pinned from the host worker at a17fc978 (the seed diagnostic arms are formal, not pilot).
+  const formal = { mode: 'formal' as const }, smoke = { mode: 'smoke' as const }, pilot = { mode: 'formal' as const, pilot: true };
+  assert.deepEqual([formal, smoke, pilot].map(s => [seedOrganizations(s), seedMessagesPerOrganization(s), seedSizeEnv(s)]), [
+    [10, 5_000_000, { DM_FORMAL_SMOKE: '0', DM_FORMAL_SEED_ORGS: '' }],
+    [1, 50_000, { DM_FORMAL_SMOKE: '1', DM_FORMAL_SEED_ORGS: '' }],
+    [10, 50_000, { DM_FORMAL_SMOKE: '1', DM_FORMAL_SEED_ORGS: '10' }],
+  ]);
+  assert.deepEqual(seedShape('main'), { organizations: 10, batchesPerOrganization: 200 });
+  const rehearsal = { ...formal, seedRehearsal: true };
+  assert.deepEqual(seedRehearsal, { organizations: 1, batchesPerOrganization: 5 });
+  assert.deepEqual([seedOrganizations(rehearsal), seedMessagesPerOrganization(rehearsal), seedSizeEnv(rehearsal)],
+    [1, 125_000, { DM_FORMAL_SMOKE: '0', DM_FORMAL_SEED_ORGS: '1', DM_FORMAL_SEED_BATCHES: '5' }]);
+  assert.equal(seedBatchLimit(undefined, 50_000), 200);
+  assert.equal(seedBatchLimit('', 50_000), 200);
+  assert.equal(seedBatchLimit('5', 50_000), 5);
+  for (const value of ['0', '201', '-1', '1.5', ' 5', 'x']) assert.throws(() => seedBatchLimit(value, 50_000), /DM_FORMAL_SEED_BATCHES/);
+});
+
+for (const diagnostic of [false, true]) test(`${diagnostic ? 'diagnostic' : 'formal'} rehearsal seed writes one Organization of five Message batches and every timing row`, t => {
+  const output = mkdtempSync(join(tmpdir(), 'dm-formal-seed-test-'));
+  t.after(() => rmSync(output, { recursive: true, force: true }));
+  t.mock.method(console, 'log', () => {});
+  const config = { DM_FORMAL_SEED: '1', DM_FORMAL_OUT: output, DM_DB_CONTAINER: 'stub', DM_FORMAL_SCENARIO: 'main', ...seedSizeEnv({ mode: 'formal', seedRehearsal: true }) };
+  for (const [key, value] of Object.entries(config)) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+  }
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const events: string[] = [];
+  const docker = t.mock.method(childProcess, 'execFileSync', (_program: string, _args: string[], { input }: { input: string }) => {
+    now += 1_000;
+    const batch = input.includes('INSERT INTO messages(') && !input.includes("'seed'");
+    if (batch || input.startsWith('INSERT INTO organizations(') || input === 'VACUUM(ANALYZE);') events.push(batch ? 'batch' : input.slice(0, 25));
+    return diagnostic && batch ? Buffer.from(`db-start|${now}.000|42\ndb-end|${now + 500}.000\n`) : undefined;
+  });
+  syncBuiltinESMExports();
+  try { seed(diagnostic); } finally { docker.mock.restore(); syncBuiltinESMExports(); }
+  assert.deepEqual(events, ['INSERT INTO organizations', ...Array.from({ length: 5 }, () => 'batch'), 'VACUUM(ANALYZE);']);
+  const timing = seedBatchSummary(readFileSync(join(output, 'seed-timing.jsonl'), 'utf8'), undefined, { shape: seedRehearsal, arm: diagnostic ? 'instrumented' : 'baseline' });
+  assert.deepEqual([timing.batches, timing.expectedRows, timing.missingRows, timing.unexpectedRows, timing.malformedLines], [5, 6, 0, 0, 0]);
+  assert.equal(JSON.parse(readFileSync(join(output, 'org-0.json'), 'utf8')).fixture.messages, 125_000);
 });
