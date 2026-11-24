@@ -2,6 +2,7 @@ mod allowed_host;
 pub mod auth;
 pub mod channels;
 pub mod database;
+mod health;
 pub mod messages;
 pub mod observability;
 pub mod openapi;
@@ -21,9 +22,9 @@ pub use allowed_host::AllowedHost;
 use axum::{
     Router,
     extract::State,
-    http::{StatusCode, header},
+    http::header,
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::get,
 };
 use shutdown::Shutdown;
@@ -139,14 +140,14 @@ fn configured_app(
             state.message_delivery.channel_access.clone(),
         ));
     let cookie_secure = state.cookie_secure;
-    let readiness = Readiness {
+    let readiness = health::Readiness {
         pool: state.pool.clone(),
         sessions: state.session_changes.clone(),
         flight: Default::default(),
     };
     Router::new()
-        .route("/api/v1/health", get(health))
-        .route("/api/v1/ready", get(ready).with_state(readiness))
+        .route("/api/v1/health", get(health::health))
+        .route("/api/v1/ready", get(health::ready).with_state(readiness))
         .route("/api/v1/setup", get(auth::setup_status).post(auth::setup))
         .route(
             "/api/v1/session",
@@ -391,80 +392,11 @@ pub fn signal() -> std::io::Result<impl Future<Output = ()>> {
     })
 }
 
-#[utoipa::path(get, path = "/api/v1/health", responses((status = 200, description = "Server is responding; returns the plain-text body ok", body = String, content_type = "text/plain")))]
-async fn health() -> Result<&'static str, auth::ApiError> {
-    auth::authorization::require(
-        auth::Actor::Anonymous,
-        auth::Action::Public,
-        auth::Resource::Global,
-    )?;
-    tracing::trace!(
-        target: observability::REVOCATION_MEASUREMENT_TARGET,
-        event = "revocation_clock_sample",
-        server_ms = observability::measurement_ms()
-    );
-    Ok("ok")
-}
-
-#[derive(Clone)]
-struct Readiness {
-    pool: sqlx::PgPool,
-    sessions: auth::SessionChanges,
-    flight: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<bool>>>>>,
-}
-
-impl Readiness {
-    async fn check(&self) -> bool {
-        let mut flight = self.flight.lock().await;
-        let mut result = match flight.as_ref() {
-            Some(result) if result.borrow().is_none() && result.has_changed().is_ok() => {
-                result.clone()
-            }
-            _ => {
-                let (sender, result) = tokio::sync::watch::channel(None);
-                let pool = self.pool.clone();
-                let sessions = self.sessions.clone();
-                // The bounded check outlives any individual HTTP caller. Completed
-                // results are replaced on the next call, never cached across checks.
-                tokio::spawn(async move {
-                    let healthy = sessions.fallback_available()
-                        && database::ready(&pool).await
-                        && sessions.fallback_available();
-                    let _ = sender.send(Some(healthy));
-                });
-                *flight = Some(result.clone());
-                result
-            }
-        };
-        drop(flight);
-        matches!(result.wait_for(|value| value.is_some()).await, Ok(value) if *value == Some(true))
-    }
-}
-
-#[utoipa::path(get, path = "/api/v1/ready", responses(
-    (status = 200, description = "Database check succeeded, connection cleanup completed and the fallback supervisor has not observed an abnormal worker exit (not a progress watchdog); returns plain-text ok", body = String, content_type = "text/plain"),
-    (status = 503, description = "Readiness unavailable: error not_ready (Retry-After: 1); database check failed, acquisition/query/connection cleanup timed out, or the fallback supervisor observed an abnormal worker exit", body = auth::ErrorBody)
-))]
-async fn ready(State(readiness): State<Readiness>) -> Response {
-    if readiness.check().await {
-        return "ok".into_response();
-    }
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [(header::RETRY_AFTER, "1")],
-        axum::Json(auth::ErrorBody {
-            error: "not_ready".into(),
-        }),
-    )
-        .into_response()
-}
-
 #[cfg(test)]
 mod tests {
-    mod readiness;
     mod test_pool;
     use super::*;
-    use axum::{body::Body, http::Request};
+    use axum::{body::Body, http::Request, response::Response};
     use tower::ServiceExt;
 
     pub(super) async fn get(path: &str) -> Response {
@@ -495,46 +427,5 @@ mod tests {
         .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap()
-    }
-
-    #[tokio::test]
-    async fn health_ok() {
-        assert_eq!(get("/api/v1/health").await.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn health_emits_clock_sample_only_with_measurement_enabled() {
-        use tracing::instrument::WithSubscriber;
-
-        let normal = observability::tests::Capture::default();
-        let response = get("/api/v1/health")
-            .with_subscriber(normal.subscriber())
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let events = normal.events();
-        assert!(!events.is_empty(), "expected a normal health event");
-        assert!(
-            events
-                .iter()
-                .all(|event| { event["fields"]["event"] != "revocation_clock_sample" })
-        );
-
-        let measurement = observability::tests::Capture::default();
-        let response = get("/api/v1/health")
-            .with_subscriber(measurement.measurement_subscriber())
-            .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let events = measurement.events();
-        let samples: Vec<_> = events
-            .iter()
-            .filter(|event| event["fields"]["event"] == "revocation_clock_sample")
-            .collect();
-        assert_eq!(samples.len(), 1);
-        assert_eq!(
-            samples[0]["target"],
-            observability::REVOCATION_MEASUREMENT_TARGET
-        );
-        let server_ms = samples[0]["fields"]["server_ms"].as_f64().unwrap();
-        assert!(server_ms.is_finite() && server_ms >= 0.0);
     }
 }
