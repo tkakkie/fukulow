@@ -64,11 +64,7 @@ async fn mention_send_before_revoke_or_deactivate_holds_authority_through_commit
         let sending = tokio::spawn(async move {
             sent(&work_app, &work_author, channel, input(key, &work_text)).await
         });
-        tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered_within(Duration::from_secs(3)).await;
         // These locks, independent of the #135 barrier, prove the Member and
         // grant authority itself is retained until COMMIT.
         for sql in [
@@ -96,7 +92,7 @@ async fn mention_send_before_revoke_or_deactivate_holds_authority_through_commit
         });
         waiting(&pool).await;
         assert!(!losing.is_finished());
-        gate.release.add_permits(1);
+        gate.release();
         let accepted = sending.await.unwrap();
         losing.await.unwrap();
         assert_eq!(

@@ -96,7 +96,7 @@ async fn account_sockets(pool: PgPool, operation: usize, cancel: bool) {
     }
     let gate = pause(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     let mut blocker = pool.begin().await.unwrap();
     crate::auth::security::test_support::lock_account(&mut blocker, account).await;
     let pending = {

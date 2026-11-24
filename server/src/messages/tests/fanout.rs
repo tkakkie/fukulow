@@ -110,11 +110,7 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
             delivery
                 .notification(org, channel_id, 102)
                 .spawn(pool.clone(), page_two_target);
-            tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            gate.entered().await;
             if private {
                 sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
                 .bind(org).bind(channel_id).bind(revoked_between_pages).execute(&pool).await.unwrap();
@@ -128,7 +124,7 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
                 .await
                 .unwrap();
             }
-            gate.release.add_permits(1);
+            gate.release();
             delivery.flush().await;
             let last = replay_page(&pool, org, channel_id, 120, 121)
                 .await

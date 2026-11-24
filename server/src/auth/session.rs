@@ -58,7 +58,7 @@ pub struct SessionChanges {
     #[cfg(test)]
     default_fatal_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     #[cfg(test)]
-    gate: Arc<Mutex<Option<Arc<tests::Gate>>>>,
+    gate: Arc<tests::SessionGates>,
 }
 impl Default for SessionChanges {
     fn default() -> Self {

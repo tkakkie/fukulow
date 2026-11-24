@@ -1,5 +1,6 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 
 async fn lock_waiters(pool: &PgPool, holder: i32) -> i64 {
     sqlx::query_scalar(
@@ -379,7 +380,7 @@ async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
         let gate = confirmation.then(|| pause(target));
         if let Some(gate) = &gate {
             subscribe(&mut socket, target, 0).await;
-            entered(gate).await;
+            gate.entered().await;
         }
         let mut held = Vec::new();
         for index in 0..if global { 8 } else { 4 } {
@@ -400,7 +401,7 @@ async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
         // No SQL or COMMIT is blocked: only admission can reject this socket.
         // Keep every permit until after Close, so host speed cannot release it.
         if let Some(gate) = gate {
-            gate.release.add_permits(1);
+            gate.release();
         } else {
             subscribe(&mut socket, target, 0).await;
         }

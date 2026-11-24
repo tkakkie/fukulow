@@ -55,7 +55,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
         let mut during = f.server.connect(&f.token).await;
         let replay = pause(f.channel);
         subscribe(&mut during, f.channel, initial_seq).await;
-        entered(&replay).await;
+        replay.entered().await;
 
         let key = Uuid::new_v4();
         let pending = messages::ambiguous_commit(key);

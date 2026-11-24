@@ -85,11 +85,7 @@ async fn measure_fanout_and_reorder(pool: PgPool) {
     let key = Uuid::new_v4();
     let gate = messages::pause_publication(key);
     send(&f, &f.token, f.channel, key, "held first").await;
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     let before = sql_counts(&pool).await;
     let start = std::time::Instant::now();
     let sent = post(&f, f.channel).await;
@@ -101,7 +97,7 @@ async fn measure_fanout_and_reorder(pool: PgPool) {
         assert_eq!(event(socket).await["message"], sent);
     }
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     let after = sql_counts(&pool).await;
     let mut total = 0;
