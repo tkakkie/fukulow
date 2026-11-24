@@ -4,6 +4,7 @@
 // Optional {#id} Rule prefixes are globally unique, must be referenced, and do not count as Rule text.
 // Also checks the required docs/decisions.md index and every docs/decisions/*.md part:
 // structure, unique single-line entries and cross-reference prefixes when present.
+// Also checks the test citations in contract/realtime/**/*.json the same way (#892).
 // Per-file byte budgets are checked separately by check-doc-budgets.ts.
 // Run: node web/scripts/check-invariants.ts   (from the repository root)
 //
@@ -938,6 +939,44 @@ function checkCrossReferences(tokens: string, target: string, rows: Row[], refer
   return errors
 }
 
+/** Test citations in the contract/realtime JSON files (#892): every JSON string in `path.(rs|ts)::name` form must name a
+ * test that runs in CI, resolved like an invariants row. The "rule" in a message is the citing scenario's `id`. */
+export function checkContractCitations(root: string, known: Known): string[] {
+  const dir = join(root, 'contract/realtime')
+  if (!existsSync(dir)) return []
+  const errors: string[] = []
+  for (const path of walk(dir, new Set()).filter((p) => p.endsWith('.json')).sort()) {
+    const file = relative(root, path).split(sep).join('/')
+    const text = readFileSync(path, 'utf8')
+    let json: unknown
+    try {
+      json = JSON.parse(text)
+    } catch (e) {
+      errors.push(file + ': line 1: invalid JSON: ' + (e as Error).message)
+      continue
+    }
+    const rows: Row[] = []
+    // A test cited in several scenarios is found again after its previous occurrence, so each row gets its own line.
+    const next = new Map<string, number>()
+    const visit = (value: unknown, scenario: string) => {
+      if (typeof value === 'string') {
+        if (!/^[^\s:]+\.(rs|ts)::/.test(value)) return
+        const needle = JSON.stringify(value)
+        const at = text.indexOf(needle, next.get(needle) ?? 0)
+        if (at >= 0) next.set(needle, at + needle.length)
+        rows.push({ line: at < 0 ? 1 : text.slice(0, at).split('\n').length, rule: scenario, names: [value], todo: false })
+      } else if (Array.isArray(value)) value.forEach((v) => visit(v, scenario))
+      else if (value && typeof value === 'object') {
+        const id = (value as { id?: unknown }).id
+        for (const v of Object.values(value)) visit(v, typeof id === 'string' ? id : scenario)
+      }
+    }
+    visit(json, '(file)')
+    errors.push(...checkRows(rows, known).map((e) => file + ': ' + e.replace(/ \(rule: /, ' (scenario: ')))
+  }
+  return errors
+}
+
 /** Checks parts, Rule text/IDs and unambiguous cross-references, then the decisions index and parts.
  * Test definitions use a static scan, reconciled with the real cargo list when `listed` is given.
  */
@@ -1021,7 +1060,7 @@ export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
   }
   for (const [id, at] of ids)
     if (!referencedIds.has(id)) errors.push(at + ': rule ID is never referenced: #' + id)
-  return [...errors, ...checkDecisionDocs(root)]
+  return [...errors, ...checkContractCitations(root, known), ...checkDecisionDocs(root)]
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
@@ -1036,5 +1075,5 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
   const errors = checkInvariants(root, listed)
   for (const e of errors) console.error(e)
   if (errors.length > 0) process.exit(1)
-  console.log('invariants: index and parts checked, and every named test exists and runs in CI. Decisions: index, all parts, unique single-line entries and optional cross-references checked.')
+  console.log('invariants: index and parts checked, and every named test (and every contract/realtime test citation) exists and runs in CI. Decisions: index, all parts, unique single-line entries and optional cross-references checked.')
 }

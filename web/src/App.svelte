@@ -15,6 +15,7 @@
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
   import Input from './ui/Input.svelte'
+  import OrganizationUnavailableBanner from './ui/OrganizationUnavailableBanner.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
   import Workspace from './Workspace.svelte'
@@ -174,7 +175,6 @@
           <Workspace
             {session}
             {navigation}
-            canCreateChannels={auth.capabilitiesPending ? null : organization.organization.capabilities.can_create_channels.allowed}
             members={auth.members}
             {organization}
             organizations={identity.organizations}
@@ -216,15 +216,9 @@
           </header>
 
           {#if auth.organizationStatus === 'unavailable'}
-            <StatusBanner
-              tone="danger"
-              role="alert"
-              message="この組織は利用できません。"
-              detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-              actionLabel="メンバー資格を再確認"
-              onaction={() => void auth.selectOrganization(auth.selectedOrganizationId)}
-              secondaryActionLabel={otherOrg ? '組織を切り替える' : undefined}
-              onsecondaryaction={otherOrg ? () => void auth.selectOrganization(otherOrg.organization_id) : undefined}
+            <OrganizationUnavailableBanner
+              onrecheckmembership={() => void auth.selectOrganization(auth.selectedOrganizationId)}
+              onswitchorganization={otherOrg ? () => void auth.selectOrganization(otherOrg.organization_id) : undefined}
             />
           {:else if auth.organizationStatus === 'error' || loadingTimedOut}
             <StatusBanner
@@ -507,7 +501,7 @@
     font-size: var(--font-size-14);
   }
 
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .app-fallback {
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: 1fr auto;

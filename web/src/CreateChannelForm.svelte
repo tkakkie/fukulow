@@ -1,40 +1,54 @@
 <script lang="ts">
+  import ChannelCreationPermission from './ChannelCreationPermission.svelte'
   import { channelNameTooLong, type ChannelVisibility } from './channels.svelte'
+  import type { ChannelCreationBlocked } from './channel-creation'
   import Button from './ui/Button.svelte'
   import Input from './ui/Input.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
-  const local = $state({ name: '', visibility: 'public' as ChannelVisibility, error: '', busy: false })
+  const local = $state({ name: '', visibility: 'public' as ChannelVisibility, error: '',
+    permissionError: null as ChannelCreationBlocked['blocked'] | null, busy: false })
   let {
     oncreate,
     draft = local,
     disabled = false,
   }: {
-    oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null>
+    oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | ChannelCreationBlocked | null | false>
     draft?: typeof local
     disabled?: boolean
   } = $props()
 
+  const permissionHintId = $props.id()
+  const showPermissionHint = $derived(disabled && !draft.busy && !draft.permissionError)
+
   async function submit(e: Event) {
     e.preventDefault()
     if (disabled || draft.busy) return
+    draft.permissionError = null
     const tooLong = channelNameTooLong(draft.name)
     if (tooLong) {
       draft.error = tooLong
       return
     }
+    const { name, visibility } = draft
+    draft.error = ''
     draft.busy = true
-    const err = await oncreate(draft.name, draft.visibility)
+    const err = await oncreate(name, visibility)
     draft.busy = false
+    if (err === false) return
+    if (err && typeof err === 'object') {
+      draft.permissionError = err.blocked
+      return
+    }
     draft.error = err ?? ''
     if (!err) {
-      draft.name = ''
+      if (draft.name === name) draft.name = ''
       draft.visibility = 'public'
     }
   }
 </script>
 
-<form class="create-channel-form" onsubmit={submit}>
+<form class="create-channel-form" aria-busy={draft.busy} onsubmit={submit}>
   <Input label="チャンネル名" name="channel_name" required bind:value={draft.name} />
   <fieldset disabled={draft.busy}>
     <legend>公開範囲</legend>
@@ -50,14 +64,19 @@
   {#if draft.error}
     <StatusBanner tone="danger" role="alert" message={draft.error} />
   {/if}
-  <Button variant="primary" type="submit" disabled={disabled || draft.busy || draft.name === ''}>チャンネルを作成</Button>
+  <Button
+    variant="primary"
+    type="submit"
+    disabled={disabled || draft.busy || draft.name === ''}
+    ariaDescribedBy={showPermissionHint ? permissionHintId : undefined}
+  >チャンネルを作成</Button>
+  <ChannelCreationPermission kind="hint" id={permissionHintId} visible={showPermissionHint} />
 </form>
 
 <style>
   .create-channel-form {
     display: grid;
     gap: var(--space-8);
-    padding-top: var(--space-12);
     min-width: 0;
   }
 

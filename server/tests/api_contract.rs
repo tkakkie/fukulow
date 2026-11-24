@@ -52,6 +52,27 @@ fn every_openapi_operation_id_is_unique() {
 }
 
 #[test]
+fn every_openapi_operation_has_one_stable_domain_tag() {
+    let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    let domains = ["auth", "channels", "messages", "realtime", "system"];
+    let mut count = 0;
+    for (path, item) in document["paths"].as_object().unwrap() {
+        for (method, operation) in item.as_object().unwrap() {
+            if operation.get("operationId").is_none() {
+                continue;
+            }
+            count += 1;
+            let tags = operation["tags"].as_array().unwrap();
+            assert_eq!(tags.len(), 1, "{method} {path}");
+            let tag = tags[0].as_str().unwrap();
+            assert!(!tag.contains("::"), "{method} {path}: {tag}");
+            assert!(domains.contains(&tag), "{method} {path}: {tag}");
+        }
+    }
+    assert_eq!(count, EXPECTED_API_OPERATIONS);
+}
+
+#[test]
 fn duplicate_operation_id_is_rejected() {
     let mut document = serde_json::to_value(ApiDoc::openapi()).unwrap();
     assert!(unique_operation_ids(&document));

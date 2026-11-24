@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createChannelCreation } from './channel-creation'
 import { createChannels } from './channels'
 import { channelsAdapter } from './channels.svelte'
 import { channel, mount, ok, settle, type Deferred } from './adapter-test-helpers.svelte'
@@ -20,7 +21,7 @@ function setup() {
     const release = subscribe(listener)
     return () => { count.active--; return release() }
   })
-  return { controller, adapter: channelsAdapter(controller), lists, creates, count }
+  return { controller, adapter: channelsAdapter(controller, createChannelCreation(true, controller.create)), lists, creates, count }
 }
 
 describe('channels adapter', () => {
@@ -136,7 +137,7 @@ describe('channels adapter', () => {
     controller.close()
     lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('old')] }))
     creates[0].resolve(ok(channel('late')))
-    expect(await created).toEqual({ error: 'セッションが終了しました。' })
+    expect(await created).toEqual({ error: 'セッションが終了しました。もう一度ログインしてください。' })
     await settle()
     expect(adapter.state.channels.map((c) => c.id)).toEqual(['a'])
     expect(view.last.channels.map((c) => c.id)).toEqual(['a'])

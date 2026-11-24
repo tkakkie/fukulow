@@ -14,6 +14,7 @@
   import type { UnreadAdapter } from './unread.svelte'
   import Button from './ui/Button.svelte'
   import EmptyState from './ui/EmptyState.svelte'
+  import OrganizationUnavailableBanner from './ui/OrganizationUnavailableBanner.svelte'
   import Skeleton from './ui/Skeleton.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
@@ -305,16 +306,7 @@
   </div>
 {:else if organizationUnavailable}
   <div class="main-card__empty">
-    <StatusBanner
-      tone="danger"
-      role="alert"
-      message="この組織は利用できません。"
-      detail="この組織へのアクセス権がなくなりました。送信中のメッセージが送信されたかどうかは確認できませんでした。"
-      actionLabel={onrecheckmembership ? 'メンバー資格を再確認' : undefined}
-      onaction={onrecheckmembership}
-      secondaryActionLabel={onswitchorganization ? '組織を切り替える' : undefined}
-      onsecondaryaction={onswitchorganization}
-    />
+    <OrganizationUnavailableBanner {onrecheckmembership} {onswitchorganization} />
   </div>
 {:else if channelListStatus === 'ready'}
   <div class="main-card__empty">
@@ -349,7 +341,7 @@
     min-width: 0;
   }
 
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .main-card__search {
       max-width: none;
     }
@@ -438,7 +430,7 @@
     display: none;
   }
 
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .mobile-only {
       display: inline-flex;
     }

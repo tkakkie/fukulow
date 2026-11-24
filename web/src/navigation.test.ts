@@ -83,7 +83,7 @@ describe('History navigation table', () => {
     { name: 'same Channel id in another Organization pushes', intent: { type: 'channel', organizationId: 'other', channelId: 'channel' }, history: 'push', focus: 'composer', nextPanel: null },
     { name: 'Channel keeps tab', panel: 'members', intent: { type: 'channel', organizationId: 'org', channelId: 'next' }, history: 'push', focus: 'composer', nextPanel: 'members' },
     { name: 'Channel closes Reply', panel: 'reply:a', intent: { type: 'channel', organizationId: 'org', channelId: 'next' }, history: 'push', focus: 'composer', nextPanel: null },
-    { name: 'Topic keeps panel', panel: 'overview', intent: { type: 'topic', topicId: 'topic' }, history: 'push', focus: 'composer', nextPanel: 'overview' },
+    { name: 'Topic keeps panel', panel: 'overview', intent: { type: 'topic', topicId: 'topic', phone: false }, history: 'push', focus: 'composer', nextPanel: 'overview' },
     { name: 'phone Topic drops panel', panel: 'topics', intent: { type: 'topic', topicId: 'topic', phone: true }, history: 'push', focus: 'composer', nextPanel: null },
     { name: 'Topic back keeps panel', topicId: 'topic', panel: 'members', intent: { type: 'topic-back' }, history: 'replace', focus: 'topic-summary', nextPanel: 'members' },
     { name: 'open tab', intent: { type: 'tab', tab: 'topics' }, history: 'push', focus: 'heading', nextPanel: 'topics' },
@@ -168,7 +168,7 @@ it('Back from a Topic targets its summary and preserves panel state without writ
 it('keeps the Channel list URL free of view/panel layers and focuses the list on Browser Back', () => {
   const { nav, calls, pop } = harness({ ...base, channelId: null })
   nav.navigate({ type: 'tab', tab: 'topics' })
-  nav.navigate({ type: 'topic', topicId: 'topic' })
+  nav.navigate({ type: 'topic', topicId: 'topic', phone: false })
   expect(nav.get().target).toEqual({ ...base, channelId: null })
   expect(calls).toEqual([])
   nav.navigate({ type: 'channel', organizationId: 'org', channelId: 'channel' })

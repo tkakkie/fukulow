@@ -4,6 +4,7 @@ import { createNavigationTargets } from './navigation-targets'
 import { createSearchAnchor, SEARCH_WINDOW_LIMIT } from './search-anchor'
 import { createDefaultSearchSource } from './search-source'
 import * as api from './api'
+import { createChannelCreation } from './channel-creation'
 import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
 import { createChannels, type ChannelsApi } from './channels'
@@ -35,6 +36,7 @@ export type SessionOptions = {
   dmsApi?: DmsApi
   sectionsApi?: SectionsApi
   initialRole?: api.Role
+  initialCanCreateChannels?: boolean
   onIdentity?: (identity: api.Identity) => void
   onIdentityInvalidated?: () => void
   sync?: Partial<SyncOptions>
@@ -50,6 +52,7 @@ export function createSession(options: SessionOptions) {
     if (ended || options.accountSignal?.aborted) return
     ended = true
     closeSections?.()
+    channelCreation.close()
     activity.close()
     options.onEnded()
   }
@@ -230,6 +233,7 @@ export function createSession(options: SessionOptions) {
       },
     },
   )
+  const channelCreation = createChannelCreation(options.initialCanCreateChannels ?? false, channels.create)
   const sections = createSections({
     api: options.sectionsApi ?? sectionsApi(organizationId), activity, list: channels.authorizedList, observeAccess,
     random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs,
@@ -260,6 +264,7 @@ export function createSession(options: SessionOptions) {
   function terminate() {
     if (unavailable) return
     unavailable = true
+    channelCreation.close()
     activity.close(); capabilities.close()
     channels.close()
     sections.close()
@@ -275,12 +280,16 @@ export function createSession(options: SessionOptions) {
       // Resume held lists after revalidation. A confirmed Guest starts with no rows.
       activity.invalidateMemberLists()
       options.onIdentity?.(identity)
+      channelCreation.confirm(identity.organization.capabilities.can_create_channels.allowed)
     },
-    hide: () => {
+    hide: reason => {
       if (listAccess !== null) listAccess = listAccess === 'guest' ? null : 'revalidating'
       options.onIdentityInvalidated?.()
+      channelCreation.invalidate(reason)
     },
     error: () => {
+      options.onIdentityInvalidated?.()
+      channelCreation.failed()
       if (listAccess === null) return
       listAccess = null
       activity.invalidateMemberLists()
@@ -355,7 +364,7 @@ export function createSession(options: SessionOptions) {
   void channels.load()
   sections.hold()
   return {
-    sync, topics, replies, moveChain, replyCounts, unread, channels, sections, dms, navigationTargets, searchAnchor, searchSource,
+    sync, topics, replies, moveChain, replyCounts, unread, channels, channelCreation, sections, dms, navigationTargets, searchAnchor, searchSource,
     memberListAccess,
     onChannelRevoked(listener: (channelId: string) => void) {
       channelRevokeListeners.add(listener)
@@ -393,6 +402,7 @@ export function createSession(options: SessionOptions) {
     },
     close() {
       closed = true
+      channelCreation.close()
       stopActivity(); activity.close(); capabilities.close()
       navigationTargets.close(); replyCounts.close()
       stopSearchBudget(); searchAnchor.close()

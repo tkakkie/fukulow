@@ -7,7 +7,7 @@ import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.svelte'
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
-import { restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
+import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
 import { getOrganizationMe, isOrganizationUnavailable, type Identity, type Role } from './api'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
@@ -55,13 +55,13 @@ export type AuthDeps = {
   coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
-  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal) {
-    const session = createSession({ selfId, onEnded, organizationId, initialRole, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels) {
+    const session = createSession({ selfId, onEnded, organizationId, initialRole, initialCanCreateChannels, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
@@ -73,7 +73,7 @@ const defaults: AuthDeps = {
       searchSource: session.searchSource,
       onChannelRevoked: session.onChannelRevoked,
       onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
-      channels: channelsAdapter(session.channels),
+      channels: channelsAdapter(session.channels, session.channelCreation),
       sections: sectionsAdapter(session.sections),
       dms: dmsAdapter(session.dms),
       sync: syncAdapter(session.sync),
@@ -98,13 +98,10 @@ const defaults: AuthDeps = {
     }
   },
 }
-const sessionEndedNotice = 'セッションが終了しました。もう一度ログインしてください。'
-
 /** Account lifetime owns the 401 fence; each Organization selection owns a separate data generation. */
 export function createAuth(deps: AuthDeps = defaults) {
   let view = $state<AuthState>({ screen: 'loading' })
   let organization = $state<Identity | null>(null)
-  let capabilitiesPending = $state(false)
   let selectedOrganizationId = $state('')
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
@@ -125,12 +122,11 @@ export function createAuth(deps: AuthDeps = defaults) {
     members?.close(); members = null
     clearMessageFormatCache()
     organization = null
-    capabilitiesPending = false
     selectionGeneration++
     changes++
   }
   function ended(generation: number) {
-    if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedNotice })
+    if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedMessage })
   }
   async function selectOrganization(id: string) {
     if (view.screen !== 'app') return
@@ -156,11 +152,10 @@ export function createAuth(deps: AuthDeps = defaults) {
     organization = result.data
     session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
-      capabilitiesPending = identity === null
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
-    }, result.data.member.role, accountRequests.signal)
+    }, result.data.member.role, accountRequests.signal, result.data.organization.capabilities.can_create_channels.allowed)
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
@@ -217,7 +212,6 @@ export function createAuth(deps: AuthDeps = defaults) {
     get error() { subscribe(); return operations.get().error },
     get busy() { subscribe(); return operations.get().busy },
     get organization() { return organization },
-    get capabilitiesPending() { return capabilitiesPending },
     get members() { return members },
     get security() { return security },
     get selectedOrganizationId() { return selectedOrganizationId },

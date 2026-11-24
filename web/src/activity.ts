@@ -2,6 +2,7 @@ import type { Result, ServerEvent } from './api'
 
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
+export type FencedInvalidation = Exclude<Invalidation, 'notice'>
 export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
@@ -10,7 +11,7 @@ export function createActivityTarget<T>(options: {
   load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   covers?(value: T): boolean
-  hide?(): void
+  hide?(reason: FencedInvalidation): void
   error?(result: Exclude<Result<T>, { ok: true }>): void
   terminal?(result: Result<T>): boolean
   random?: () => number
@@ -80,7 +81,7 @@ export function createActivityTarget<T>(options: {
   }
   function invalidate(reason: Invalidation = 'notice', delay = 200) {
     if (closed) return
-    if (reason !== 'notice') { fence(); options.hide?.() }
+    if (reason !== 'notice') { fence(); options.hide?.(reason) }
     stopped = false; failure = undefined; dirty = true
     if (inFlight) { queued = true; return }
     // Multi-lane admission may make other work eligible before a retained retry deadline.

@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   confirmReplaceDraftWithFailedSend,
+  createPendingFocus,
   createTopicSummaryFocusController,
   decideEditAndResend,
   discardAndFocusComposer,
   focusAfterPanelClose,
   focusDialogOnOpen,
   focusIfVisible,
+  isResetOrDisconnectedActive,
   isTargetVisible,
   resolveChannelListNavigation,
   resolveMainTimelineFocusStatus,
@@ -188,23 +190,23 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
 
   it('resolves the skip link target ID to the visible primary region at every phone level and desktop/tablet breakpoint', () => {
     // Phone (< 600px): targets the active screen's region at each level
-    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'channels', panelOpen: false })).toBe(
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'channels', panelOpen: false })).toBe(
       'channel-content',
     )
-    expect(resolveSkipLinkTargetId({ viewportWidth: 599, mobileLevel: 'channels', panelOpen: true })).toBe(
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'channels', panelOpen: true })).toBe(
       'channel-content',
     )
-    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'view', panelOpen: false })).toBe('main-content')
-    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'panel', panelOpen: true })).toBe('panel-content')
-    expect(resolveSkipLinkTargetId({ viewportWidth: 375, mobileLevel: 'panel', panelOpen: false })).toBe(
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'view', panelOpen: false })).toBe('main-content')
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'panel', panelOpen: true })).toBe('panel-content')
+    expect(resolveSkipLinkTargetId({ viewport: 'phone', mobileLevel: 'panel', panelOpen: false })).toBe(
       'main-content',
     )
 
     // Tablet and desktop (>= 600px): main-content stays visible across all mobileLevel and panelOpen states
-    for (const viewportWidth of [600, 768, 960, 1280, 1400]) {
+    for (const viewport of ['tablet', 'desktop'] as const) {
       for (const mobileLevel of ['channels', 'view', 'panel'] as const) {
         for (const panelOpen of [false, true]) {
-          expect(resolveSkipLinkTargetId({ viewportWidth, mobileLevel, panelOpen })).toBe('main-content')
+          expect(resolveSkipLinkTargetId({ viewport, mobileLevel, panelOpen })).toBe('main-content')
         }
       }
     }
@@ -212,17 +214,11 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
 
   it('opens the Channel drawer only at tablet widths and focuses the Channel list on チャンネル一覧へ', () => {
     // Phone (< 600px): switches to 'channels' screen without opening tablet drawer
-    for (const width of [320, 375, 599]) {
-      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
-    }
+    expect(resolveChannelListNavigation('phone')).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
     // Tablet (600-959px): opens the Channel drawer
-    for (const width of [600, 768, 959]) {
-      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: true, mobileLevel: 'channels' })
-    }
+    expect(resolveChannelListNavigation('tablet')).toEqual({ drawerOpen: true, mobileLevel: 'channels' })
     // Desktop (>= 960px): Channel column is permanently visible, drawer stays closed
-    for (const width of [960, 1280, 1440]) {
-      expect(resolveChannelListNavigation(width)).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
-    }
+    expect(resolveChannelListNavigation('desktop')).toEqual({ drawerOpen: false, mobileLevel: 'channels' })
 
     const visibleHeading = {
       focus: vi.fn(),
@@ -403,6 +399,29 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     )
   })
 
+  it('createTopicSummaryFocusController resumes after destroy: the Workspace effect may restart on the same instance', () => {
+    const body = {}
+    let activeElement: unknown = body
+    const fakeDoc: FocusDocument = {
+      get activeElement() {
+        return activeElement
+      },
+      body,
+      addEventListener() {},
+      removeEventListener() {},
+    }
+    const ctrl = createTopicSummaryFocusController(() => fakeDoc)
+    const summary = { isConnected: true, focus: vi.fn(() => { activeElement = summary }) }
+    const composer = { isConnected: true, focus: vi.fn(() => { activeElement = composer }) }
+    ctrl.syncNavigation({ revision: 1, focus: 'topic-summary' }, 't-1')
+    ctrl.destroy()
+    expect(ctrl.isPending(1)).toBe(false)
+    ctrl.syncNavigation({ revision: 2, focus: 'topic-summary' }, 't-1')
+    expect(ctrl.step({ revision: 2, status: 'ready', findSummary: () => summary, composer })).toBe('focused_summary')
+    expect(summary.focus).toHaveBeenCalledOnce()
+    expect(composer.focus).not.toHaveBeenCalled()
+  })
+
   it('createTopicSummaryFocusController waits for delayed summary render, falls back only when ready/error, and cancels on navigation or user focus change', () => {
     const body = {}
     let activeElement: unknown = body
@@ -486,5 +505,236 @@ describe('focus-management: focus after discard, edit-and-resend, dialog and pan
     expect(ctrl.isPending(4)).toBe(false)
     expect(ctrl.step({ revision: 4, status: 'ready', findSummary: () => summary, composer })).toBe('cancelled')
     expect(focusInListeners.size).toBe(0)
+  })
+
+  it('createPendingFocus applies focus to the first matching candidate and falls back when earlier candidates are ineligible', () => {
+    const body = {}
+    const documentElement = {}
+    let activeElement: unknown = body
+    const listeners = new Map<string, Set<(event: { target?: unknown }) => void>>()
+    const fakeDoc: FocusDocument = {
+      get activeElement() {
+        return activeElement
+      },
+      body,
+      documentElement,
+      addEventListener(type, listener) {
+        let set = listeners.get(type)
+        if (!set) {
+          set = new Set()
+          listeners.set(type, set)
+        }
+        set.add(listener)
+      },
+      removeEventListener(type, listener) {
+        listeners.get(type)?.delete(listener)
+      },
+    }
+    const emit = (type: string, target?: unknown) => {
+      for (const l of listeners.get(type) ?? []) l({ target })
+    }
+    const makeTarget = (extra: Partial<VisibleFocusableTarget> = {}) => {
+      const el: VisibleFocusableTarget = {
+        isConnected: true,
+        focus: vi.fn(() => {
+          activeElement = el
+          emit('focusin', el)
+        }),
+        ...extra,
+      }
+      return el
+    }
+
+    const onUserCancel = vi.fn()
+    const pending = createPendingFocus({ getDoc: () => fakeDoc, requireVisible: true, onUserCancel })
+
+    // 1. Skips null, disconnected, disabled, and zero-rect hidden candidates; focuses first visible match
+    const disconnected = makeTarget({ isConnected: false, getClientRects: () => [{ width: 40, height: 20 }] })
+    const disabled = makeTarget({ disabled: true, getClientRects: () => [{ width: 40, height: 20 }] })
+    const hidden = makeTarget({ getClientRects: () => [] })
+    const match = makeTarget({ getClientRects: () => [{ width: 40, height: 20 }] })
+    const later = makeTarget({ getClientRects: () => [{ width: 40, height: 20 }] })
+    const fallback = makeTarget({ getClientRects: () => [{ width: 40, height: 20 }] })
+
+    const token1 = pending.begin()
+    expect(pending.isActive(token1)).toBe(true)
+    expect(
+      pending.apply([null, () => disconnected, disabled, hidden, () => match, later], {
+        token: token1,
+        fallback: [fallback],
+      }),
+    ).toBe(true)
+    expect(disconnected.focus).not.toHaveBeenCalled()
+    expect(disabled.focus).not.toHaveBeenCalled()
+    expect(hidden.focus).not.toHaveBeenCalled()
+    expect(match.focus).toHaveBeenCalledOnce()
+    expect(later.focus).not.toHaveBeenCalled()
+    expect(fallback.focus).not.toHaveBeenCalled()
+    expect(onUserCancel).not.toHaveBeenCalled()
+    expect(pending.isActive()).toBe(false)
+    expect(listeners.get('focusin')?.size ?? 0).toBe(0)
+
+    // 2. Falls back when all primary candidates fail
+    const token2 = pending.begin()
+    expect(
+      pending.apply([null, disconnected, disabled, hidden], {
+        token: token2,
+        fallback: [null, fallback],
+      }),
+    ).toBe(true)
+    expect(fallback.focus).toHaveBeenCalledOnce()
+    expect(pending.isActive()).toBe(false)
+  })
+
+  it('createPendingFocus cancels on user focus move or pointerdown and ignores reset/disconnected active elements', () => {
+    const body = {}
+    const documentElement = {}
+    let activeElement: unknown = body
+    const listeners = new Map<string, Set<(event: { target?: unknown }) => void>>()
+    const fakeDoc: FocusDocument = {
+      get activeElement() {
+        return activeElement
+      },
+      body,
+      documentElement,
+      addEventListener(type, listener) {
+        let set = listeners.get(type)
+        if (!set) {
+          set = new Set()
+          listeners.set(type, set)
+        }
+        set.add(listener)
+      },
+      removeEventListener(type, listener) {
+        listeners.get(type)?.delete(listener)
+      },
+    }
+    const emit = (type: string, target?: unknown) => {
+      for (const l of listeners.get(type) ?? []) l({ target })
+    }
+
+    expect(isResetOrDisconnectedActive(null, fakeDoc)).toBe(true)
+    expect(isResetOrDisconnectedActive(body, fakeDoc)).toBe(true)
+    expect(isResetOrDisconnectedActive(documentElement, fakeDoc)).toBe(true)
+    expect(isResetOrDisconnectedActive({ isConnected: false }, fakeDoc)).toBe(true)
+    expect(isResetOrDisconnectedActive({ isConnected: true }, fakeDoc)).toBe(false)
+
+    const onUserCancel = vi.fn()
+    const pending = createPendingFocus({ getDoc: () => fakeDoc, cancelOnPointerDown: true, onUserCancel })
+    const opener = { isConnected: true, focus: vi.fn() }
+    const allowedExtra = { isConnected: true, focus: vi.fn() }
+    const otherControl = { isConnected: true, focus: vi.fn() }
+    const target = { isConnected: true, focus: vi.fn() }
+
+    // 1. Focus reset to body / documentElement / disconnected node or allowed element does NOT cancel
+    activeElement = opener
+    const token1 = pending.begin([allowedExtra])
+    activeElement = body
+    emit('focusin', body)
+    emit('focusin', documentElement)
+    emit('focusin', { isConnected: false })
+    emit('focusin', allowedExtra)
+    expect(pending.isActive(token1)).toBe(true)
+    expect(pending.hasUserMovedFocus(token1)).toBe(false)
+    expect(onUserCancel).not.toHaveBeenCalled()
+
+    // 2. focusin to another connected element cancels immediately and detaches listeners
+    activeElement = otherControl
+    emit('focusin', otherControl)
+    expect(pending.isActive(token1)).toBe(false)
+    expect(onUserCancel).toHaveBeenCalledTimes(1)
+    expect(listeners.get('focusin')?.size ?? 0).toBe(0)
+    expect(listeners.get('pointerdown')?.size ?? 0).toBe(0)
+    expect(pending.apply([target], { token: token1 })).toBe(false)
+    expect(target.focus).not.toHaveBeenCalled()
+
+    // 3. pointerdown cancels even if activeElement falls back to body
+    activeElement = opener
+    const token2 = pending.begin()
+    emit('pointerdown')
+    activeElement = body
+    expect(pending.isActive(token2)).toBe(false)
+    expect(onUserCancel).toHaveBeenCalledTimes(2)
+    expect(pending.apply([target], { token: token2 })).toBe(false)
+    expect(target.focus).not.toHaveBeenCalled()
+
+    // 4. activeElement moved without focusin is also caught on apply()
+    activeElement = opener
+    const token3 = pending.begin()
+    activeElement = otherControl
+    expect(pending.hasUserMovedFocus(token3)).toBe(true)
+    expect(pending.apply([target], { token: token3 })).toBe(false)
+    expect(target.focus).not.toHaveBeenCalled()
+    expect(onUserCancel).toHaveBeenCalledTimes(3)
+    expect(pending.isActive()).toBe(false)
+
+    // 5. A disconnected activeElement (no focusin) at apply() is a reset, not a user move: the candidate gets focus
+    activeElement = opener
+    const token4 = pending.begin()
+    activeElement = { isConnected: false }
+    expect(pending.hasUserMovedFocus(token4)).toBe(false)
+    expect(pending.apply([target], { token: token4 })).toBe(true)
+    expect(target.focus).toHaveBeenCalledOnce()
+    expect(onUserCancel).toHaveBeenCalledTimes(3)
+  })
+
+  it('createPendingFocus does nothing after cancel/reset, destroy/disconnect, or when all targets are disconnected', () => {
+    const body = {}
+    const listeners = new Map<string, Set<(event: { target?: unknown }) => void>>()
+    const fakeDoc: FocusDocument = {
+      activeElement: body,
+      body,
+      addEventListener(type, listener) {
+        let set = listeners.get(type)
+        if (!set) {
+          set = new Set()
+          listeners.set(type, set)
+        }
+        set.add(listener)
+      },
+      removeEventListener(type, listener) {
+        listeners.get(type)?.delete(listener)
+      },
+    }
+
+    const pending = createPendingFocus({ getDoc: () => fakeDoc, cancelOnPointerDown: true })
+    const target = { isConnected: true, focus: vi.fn() }
+    const disconnectedCandidate = { isConnected: false, focus: vi.fn() }
+    const disconnectedFallback = { isConnected: false, focus: vi.fn() }
+
+    // 1. All candidates and fallbacks disconnected -> focuses nothing and clears pending
+    const t1 = pending.begin()
+    expect(pending.apply([disconnectedCandidate], { token: t1, fallback: [disconnectedFallback] })).toBe(false)
+    expect(disconnectedCandidate.focus).not.toHaveBeenCalled()
+    expect(disconnectedFallback.focus).not.toHaveBeenCalled()
+    expect(pending.isActive()).toBe(false)
+
+    // 2. After cancel() (reset), apply does nothing and listeners are removed
+    const t2 = pending.begin()
+    pending.cancel()
+    expect(pending.isActive(t2)).toBe(false)
+    expect(listeners.get('focusin')?.size ?? 0).toBe(0)
+    expect(listeners.get('pointerdown')?.size ?? 0).toBe(0)
+    expect(pending.apply([target], { token: t2 })).toBe(false)
+    expect(target.focus).not.toHaveBeenCalled()
+
+    // 3. Stale token after a newer begin() does nothing
+    const t3 = pending.begin()
+    const t4 = pending.begin()
+    expect(pending.apply([target], { token: t3 })).toBe(false)
+    expect(target.focus).not.toHaveBeenCalled()
+    expect(pending.isActive(t4)).toBe(true)
+
+    // 4. After destroy() (unmount/disconnect), apply and subsequent begin do nothing
+    pending.destroy()
+    expect(pending.isActive()).toBe(false)
+    expect(listeners.get('focusin')?.size ?? 0).toBe(0)
+    expect(listeners.get('pointerdown')?.size ?? 0).toBe(0)
+    expect(pending.apply([target], { token: t4 })).toBe(false)
+    const t5 = pending.begin()
+    expect(t5).toBe(0)
+    expect(pending.isActive()).toBe(false)
+    expect(pending.apply([target])).toBe(false)
+    expect(target.focus).not.toHaveBeenCalled()
   })
 })
