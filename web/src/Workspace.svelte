@@ -195,9 +195,6 @@
     }),
   )
   const isPhone = $derived(viewport === 'phone')
-  $effect(() => {
-    if (viewport !== 'tablet') drawerOpen = false
-  })
 
   let channelListHeadingRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
@@ -809,7 +806,7 @@
           if (isPhone) {
             drawerOpen = false
             nav.navigate({ type: 'list' })
-          } else if (viewport === 'tablet') {
+          } else {
             drawerOpen = !drawerOpen
           }
         }}
@@ -1102,7 +1099,7 @@
   }
 
   /* 960px - 1279px: right panel overlays main from the right (docs/ui.md §3) */
-  @media (min-width: 960px) and (max-width: 1279px) {
+  @media (960px <= width < 1280px) {
     .workspace,
     .workspace[data-panel-open='true'] {
       grid-template-columns: var(--rail-width) var(--channel-col-width) minmax(var(--main-min-width), 1fr);
@@ -1119,7 +1116,7 @@
   }
 
   /* 600px - 959px: channel column is a drawer; right panel overlays min(420px, 100%) (docs/ui.md §3) */
-  @media (min-width: 600px) and (max-width: 959px) {
+  @media (600px <= width < 960px) {
     .workspace,
     .workspace[data-panel-open='true'] {
       grid-template-columns: var(--rail-width) minmax(0, 1fr);
@@ -1150,7 +1147,7 @@
   }
 
   /* < 600px (phone): one screen at a time, bottom tab bar only at channels level (docs/ui.md §3) */
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .workspace,
     .workspace[data-panel-open='true'] {
       grid-template-columns: minmax(0, 1fr);

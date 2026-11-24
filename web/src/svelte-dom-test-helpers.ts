@@ -768,6 +768,17 @@ export class MiniDocument extends MiniNode {
   }
 }
 
+function compareWidth(lhs: number, op: string, rhs: number): boolean {
+  switch (op) {
+    case '<': return lhs < rhs
+    case '<=': return lhs <= rhs
+    case '>': return lhs > rhs
+    case '>=': return lhs >= rhs
+    case '=': return lhs === rhs
+    default: return false
+  }
+}
+
 function evaluateWidthMediaQuery(query: string, width: number): boolean {
   const clauses = query.split(/\s+and\s+/i)
   let hasCondition = false
@@ -783,6 +794,27 @@ function evaluateWidthMediaQuery(query: string, width: number): boolean {
     if (max) {
       hasCondition = true
       if (width > Number(max[1])) return false
+      continue
+    }
+    const bounded = trimmed.match(
+      /^\(\s*(\d+(?:\.\d+)?)px\s*(<=|<|>=|>)\s*width\s*(<=|<|>=|>)\s*(\d+(?:\.\d+)?)px\s*\)$/i,
+    )
+    if (bounded) {
+      hasCondition = true
+      if (!compareWidth(Number(bounded[1]), bounded[2], width)) return false
+      if (!compareWidth(width, bounded[3], Number(bounded[4]))) return false
+      continue
+    }
+    const widthLeft = trimmed.match(/^\(\s*width\s*(<=|<|>=|>|=)\s*(\d+(?:\.\d+)?)px\s*\)$/i)
+    if (widthLeft) {
+      hasCondition = true
+      if (!compareWidth(width, widthLeft[1], Number(widthLeft[2]))) return false
+      continue
+    }
+    const widthRight = trimmed.match(/^\(\s*(\d+(?:\.\d+)?)px\s*(<=|<|>=|>|=)\s*width\s*\)$/i)
+    if (widthRight) {
+      hasCondition = true
+      if (!compareWidth(Number(widthRight[1]), widthRight[2], width)) return false
       continue
     }
     return false

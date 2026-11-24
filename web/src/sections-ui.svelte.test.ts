@@ -18,7 +18,6 @@ const dom = installMiniDom()
 function memoryBrowser(url = 'http://localhost/'): NavigationBrowser {
   const location = { href: url }
   return {
-    innerWidth: 1280,
     location: location as Location,
     history: {
       pushState: (_data: unknown, _unused: string, next?: string | URL | null) => { if (next) location.href = new URL(String(next), location.href).toString() },
