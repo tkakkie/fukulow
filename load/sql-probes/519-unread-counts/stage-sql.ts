@@ -10,7 +10,8 @@ const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_
 // Symlink-free (any component) so every later path below it resolves inside it. Paths are opened by
 // name after this check: the checkout is ours, and the work root is a 0700 mkdtemp directory owned by
 // this uid inside the realpath'd tmpdir, which another user cannot rename in a sticky or per-user
-// temp directory, so the remaining check-to-use window is not reachable by anyone else.
+// temp directory. A process running as this uid can still race the check-to-use window (Node has no
+// openat/mkdirat); that same-uid residual is accepted (PR #959, option A).
 function canonicalDirectory(path: string, what: string) {
   if (realpathSync(path) !== path) throw new Error(`${what} must be a canonical path without symlinks: ${path}`);
 }
@@ -33,8 +34,10 @@ export function makeTraversable(work: string) {
 
 // Copies `names` from `source` into a new `<work>/sql` readable by the container postgres user
 // (directory 0755, files 0644) whatever the umask. A source that is a symlink or not a regular file
-// throws, and every mode change acts on a descriptor this function just created or verified, so
-// nothing outside the work directory changes.
+// throws, and every mode change acts on a descriptor this function just created or verified as owned
+// by this uid. Against other users that keeps every change inside the work directory; a same-uid
+// process racing the check-to-use window above could redirect it to another directory or regular
+// file this uid owns (accepted residual).
 export function stageSql(source: string, work: string, names: readonly string[] = stagedSql) {
   canonicalDirectory(source, 'SQL source');
   canonicalDirectory(work, 'work root');
