@@ -106,7 +106,7 @@ export function createSession(options: SessionOptions) {
   }
   const timeline = options.sync?.api ?? {
     listChannelEvents: (channel, query) => api.listChannelEvents(organizationId, channel, query),
-    listMessages: (channel, query) => api.listMessages(organizationId, channel, query),
+    listMessages: (channel, query, signal) => api.listMessages(organizationId, channel, query, undefined, signal),
     sendMessage: (channel, body) => api.sendMessage(organizationId, channel, body),
   } satisfies NonNullable<SyncOptions['api']>
   const topicSource = options.topicsApi ?? topicsApi(organizationId, () => history?.get().historyGeneration)
@@ -183,11 +183,14 @@ export function createSession(options: SessionOptions) {
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
   const searchAnchor = createSearchAnchor(sync, {
-    messages: ({ channelId, topicId }, query) => observe(topicId
-      ? topicSource.listTopicMessages(channelId, topicId, query)
-      : timeline.listMessages(channelId, query)),
-    reply: ({ channelId, messageId }, query) =>
-      observe(replySource.listReplyChain(channelId, messageId, query, options.accountSignal)),
+    messages: ({ channelId, topicId }, query, signal) => observe(topicId
+      ? topicSource.listTopicMessages(channelId, topicId, query, signal)
+      : timeline.listMessages(channelId, query, signal)),
+    reply: ({ channelId, messageId }, query, signal) => {
+      const account = options.accountSignal
+      const combined = account && signal ? AbortSignal.any([account, signal]) : account ?? signal
+      return observe(replySource.listReplyChain(channelId, messageId, query, combined))
+    },
   })
   const stopSearchBudget = searchAnchor.subscribe(() => {
     const view = searchAnchor.get()
