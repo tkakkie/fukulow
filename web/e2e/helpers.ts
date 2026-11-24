@@ -1,4 +1,4 @@
-import { expect, type APIRequestContext } from '@playwright/test'
+import { expect, type APIRequestContext, type Locator } from '@playwright/test'
 import type { components } from '../src/api-schema.d.ts'
 
 export const owner = { email: 'owner@example.com', password: 'correct horse battery' }
@@ -36,4 +36,10 @@ export async function createChannel(request: APIRequestContext, org: string, nam
   const response = await secretSafe(() => request.post(`/api/v1/orgs/${org}/channels`, { data }))
   expect(response.status()).toBe(201)
   return await secretSafe(() => response.json()) as components['schemas']['Channel']
+}
+
+export async function waitForAnimations(locator: Locator): Promise<void> {
+  await locator.evaluate(async (el) => {
+    await Promise.allSettled(el.getAnimations({ subtree: true }).map((a) => a.finished))
+  })
 }

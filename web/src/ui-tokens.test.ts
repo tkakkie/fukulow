@@ -399,9 +399,9 @@ describe('component token-only styles and accessibility structure (docs/ui.md §
     expect(reducedBody).toMatch(/--duration-panel:\s*0ms;/)
     expect(reducedBody).not.toContain('!important')
 
-    const workspaceCss = readFileSync(join(webDir, 'src/Workspace.svelte'), 'utf8')
-    expect(workspaceCss).toMatch(/@starting-style\s*\{[\s\S]*?\.right-panel-slot[\s\S]*?transform:\s*translateX\(100%\);/)
-    expect(workspaceCss).toMatch(/transition:\s*transform\s+var\(--duration-panel\)\s+var\(--ease-out\);/)
+    const panelCss = readFileSync(join(webDir, 'src/ui/Panel.svelte'), 'utf8')
+    expect(panelCss).toMatch(/@starting-style\s*\{[\s\S]*?\.ui-panel[\s\S]*?transform:\s*translateX\(100%\);/)
+    expect(panelCss).toMatch(/transition:\s*transform\s+var\(--duration-panel\)\s+var\(--ease-out\);/)
 
     const badgeCss = readFileSync(join(webDir, 'src/ui/Badge.svelte'), 'utf8')
     expect(badgeCss).toMatch(/@starting-style\s*\{[\s\S]*?\.ui-badge[\s\S]*?transform:\s*scale\(0\.8\);/)

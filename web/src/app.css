@@ -130,7 +130,7 @@ body {
   height: 100%;
   background-color: var(--app);
   color: var(--text);
-  overflow: hidden;
+  overflow: clip;
 }
 
 #app {

@@ -123,6 +123,14 @@
     color: var(--text);
     border-radius: var(--radius-16);
     overflow: hidden;
+    transform: translateX(0);
+    transition: transform var(--duration-panel) var(--ease-out);
+  }
+
+  @starting-style {
+    .ui-panel {
+      transform: translateX(100%);
+    }
   }
 
   .ui-panel--reply {

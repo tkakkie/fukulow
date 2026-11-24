@@ -6,17 +6,17 @@ test('prefers-reduced-motion: reduce zeroes computed transition duration for pan
   await page.emulateMedia({ reducedMotion: 'no-preference' })
   await page.goto('/e2e-component/reduced-motion.html')
 
-  const panelSlot = page.locator('.right-panel-slot')
+  const panel = page.locator('.ui-panel')
   const badge = page.locator('.ui-badge').first()
 
-  await expect(panelSlot).toBeVisible()
+  await expect(panel).toBeVisible()
   await expect(badge).toBeVisible()
 
-  await expect(panelSlot).toHaveCSS('transition-duration', '0.2s')
+  await expect(panel).toHaveCSS('transition-duration', '0.2s')
   await expect(badge).toHaveCSS('transition-duration', '0.12s')
 
   await page.emulateMedia({ reducedMotion: 'reduce' })
 
-  await expect(panelSlot).toHaveCSS('transition-duration', '0s')
+  await expect(panel).toHaveCSS('transition-duration', '0s')
   await expect(badge).toHaveCSS('transition-duration', '0s')
 })
