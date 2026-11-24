@@ -163,6 +163,7 @@ async function worker(env: NodeJS.ProcessEnv) {
   const samplerExit = new Promise<void>(r => sampler.once('exit', () => r()));
   const time = sets ? pinnedBenchmark(sets.client) : benchmark;
   const windows = new Map<string, {start: number; end: number; blocks: Block[]; checked: boolean}>();
+  let previous: {id: string; end: number} | null = null;
   const app = <T>(body: (search: (text: string) => Promise<string>) => Promise<T>) => pinnedSession(container, 'measured', true, sets?.client, body);
   const restart = async () => { docker('restart', container); await ready(); };
   const reads = () => Number(owner('postgres', "SELECT pg_stat_clear_snapshot(); SELECT blks_read FROM pg_stat_database WHERE datname = 'measured';").split('\n').at(-1));
@@ -214,6 +215,9 @@ async function worker(env: NodeJS.ProcessEnv) {
       const blocks: Block[] = [];
       const results: Parameters<typeof ownReasons>[0] = [];
       const start = Date.now();
+      // The actual interval since the previous measurement ended (decision 1: "at once" allows the statistics
+      // reads, the read-counter wait and the sampler check, and the interval is recorded).
+      const sincePrevious = previous && {id: previous.id, endedAt: previous.end, ms: start - previous.end};
       for (const [query, raw] of ordered(querySet, step.order)) {
         const b = Date.now();
         try {
@@ -252,7 +256,8 @@ async function worker(env: NodeJS.ProcessEnv) {
         : 'p95' in r.sample ? {query: r.query, p95: r.sample.p95} : {query: r.query, error: r.sample.sqlError});
       const m: Measurement = {id: step.id, kind: step.kind, arm: step.arm, order: step.order, settle: step.kind === 'copy' && step.settle,
         latencies, plans, sharedReads, invalid: ownReasons(results, load15), env: {dirtyWritebackAtStartBytes: null, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []}};
-      save(`${dest}/measurement.json`, {...m, window: {start, end, blocks}, load15});
+      save(`${dest}/measurement.json`, {...m, window: {start, end, blocks}, sincePrevious, load15});
+      previous = {id: step.id, end};
       note(`${step.id} measured`);
       return m;
     },

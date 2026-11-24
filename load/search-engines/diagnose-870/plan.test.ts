@@ -8,7 +8,7 @@ const orderOf = (steps: Step[], id: string) => (steps.find(s => s.id === id) as 
 test('Stage 1 is the fixed rev 2 sequence: 14 copy rounds and 6 same-copy measurements', () => {
   const steps = sequence('1');
   assert.deepEqual(ids(steps), ['A1.1', 'A1.2', 'A1.3', 'A1.4', 'A1.5', 'A1.6', 'A2.idle', 'A2.1', 'A2.2',
-    'C1.warm', 'C1.hot1', 'C1.hot2', 'C1.restart', 'D.current1', 'D.settle1', 'D.current2', 'D.settle2',
+    'C1.warm', 'C1.hot1', 'C1.hot2', 'C1.restart', 'D.current1', 'D.settle1', 'D.settle2', 'D.current2',
     'C2.warm', 'C2.hot1', 'C2.hot2', 'C2.restart']);
   assert.equal(steps.filter(s => s.kind === 'copy').length, 14);
   assert.equal(steps.filter(s => s.kind === 'hot' || s.kind === 'restart-only').length, 6);
@@ -22,8 +22,11 @@ test('copy rounds alternate F and R from F; same-copy measurements keep their co
   assert.deepEqual(['A1.1', 'A1.2', 'A1.3', 'A1.4', 'A1.5', 'A1.6', 'A2.1', 'A2.2'].map(id => orderOf(steps, id)),
     ['F', 'R', 'F', 'R', 'F', 'R', 'F', 'R']);
   assert.deepEqual(['C1.warm', 'C1.hot1', 'C1.hot2', 'C1.restart'].map(id => orderOf(steps, id)), ['F', 'F', 'F', 'F']);
-  assert.deepEqual(['D.current1', 'D.settle1', 'D.current2', 'D.settle2', 'C2.warm', 'C2.restart'].map(id => orderOf(steps, id)),
+  assert.deepEqual(['D.current1', 'D.settle1', 'D.settle2', 'D.current2', 'C2.warm', 'C2.restart'].map(id => orderOf(steps, id)),
     ['R', 'F', 'R', 'F', 'R', 'R']);
+  // Each D condition runs once in each order, and each judged pair (settle i, current i) is one F and one R.
+  for (const ids of [['D.current1', 'D.current2'], ['D.settle1', 'D.settle2'], ['D.settle1', 'D.current1'], ['D.settle2', 'D.current2']])
+    assert.deepEqual(ids.map(id => orderOf(steps, id)).sort(), ['F', 'R'], ids.join(' '));
 });
 
 test('Stage 2 has the scan after one round, then 3 rounds, a cool-down and 2 rounds', () => {

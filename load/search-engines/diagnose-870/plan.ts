@@ -46,7 +46,8 @@ export function sequence(stage: Stage): Step[] {
       ...[1, 2, 3, 4, 5, 6].map(i => copy(`A1.${i}`, 'A1')),
       {kind: 'idle', id: 'A2.idle', ms: coolDownMs}, copy('A2.1', 'A2'), copy('A2.2', 'A2'),
       ...cache('C1'),
-      copy('D.current1', 'D'), copy('D.settle1', 'D', true), copy('D.current2', 'D'), copy('D.settle2', 'D', true),
+      // D is current, settle, settle, current (approved 2026-11-24), so each condition runs once in F and once in R.
+      copy('D.current1', 'D'), copy('D.settle1', 'D', true), copy('D.settle2', 'D', true), copy('D.current2', 'D'),
       ...cache('C2'),
     ]);
   }
