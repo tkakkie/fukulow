@@ -26,16 +26,14 @@ jobs:
       # One value for both the job limit and the harness deadline (load/proxy-run.ts jobDeadlineMs).
       minutes: ${{ inputs.preset == 'smoke' && 90 || inputs.preset == 'preflight' && 240 || 355 }}
     steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
       - id: plan
         env:
           SCENARIOS: ${{ inputs.scenarios }}
-        run: |
-          node -e '
-            const listed = process.env.SCENARIOS.split(",").map(Number);
-            if (!listed.length || !listed.every(n => Number.isInteger(n) && n >= 1 && n <= 6)) throw new Error("scenarios must be comma-separated 1..6");
-            const expanded = [...new Set(listed.flatMap(n => n === 6 ? [2, 3, 4] : [n]))].sort();
-            require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "scenarios=" + JSON.stringify(expanded) + "\n");
-          '
+        run: node load/proxy-scenarios.ts
   compare:
     needs: plan
     runs-on: ubuntu-latest
