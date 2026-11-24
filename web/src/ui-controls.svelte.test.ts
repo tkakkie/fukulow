@@ -320,6 +320,13 @@ describe('MessageRow.svelte timestamp formatting (#833)', () => {
     ['Asia/Tokyo', '1880-01-01T00:00:00Z'],
     ['Asia/Kolkata', '2026-06-15T18:29:30Z'],
     ['Pacific/Chatham', '2026-04-05T02:44:59Z'],
+    ['America/Los_Angeles', '2026-11-01T09:30:00Z'],
+    ['Asia/Tokyo', '0050-06-01T00:00:00Z'],
+    ['Asia/Tokyo', '0099-12-31T23:00:00Z'],
+    ['Asia/Tokyo', '-000500-03-01T00:00:00Z'],
+    ['Asia/Tokyo', '+012345-07-08T09:10:11Z'],
+    ['Asia/Tokyo', '+275760-09-13T00:00:00.000Z'],
+    ['America/Los_Angeles', '-271821-04-20T00:00:00.000Z'],
   ])('matches toLocaleString("ja-JP") in %s at %s (DST edges, non-minute offsets)', (tz, iso) => {
     const prevTz = process.env.TZ
     try {
@@ -335,13 +342,16 @@ describe('MessageRow.svelte timestamp formatting (#833)', () => {
     expect(renderedTime('not-a-date')).toBe(new Date('not-a-date').toLocaleString('ja-JP'))
   })
 
-  it('builds no formatter per row', () => {
-    const spy = vi.spyOn(Intl, 'DateTimeFormat')
+  it('formats rows with the shared formatter, not a per-row formatter', () => {
+    const ctor = vi.spyOn(Intl, 'DateTimeFormat')
+    const perRow = vi.spyOn(Date.prototype, 'toLocaleString')
     try {
       for (let i = 0; i < 5; i++) renderedTime('2026-01-02T03:04:05Z')
-      expect(spy).not.toHaveBeenCalled()
+      expect(ctor).not.toHaveBeenCalled()
+      expect(perRow).not.toHaveBeenCalled()
     } finally {
-      spy.mockRestore()
+      ctor.mockRestore()
+      perRow.mockRestore()
     }
   })
 

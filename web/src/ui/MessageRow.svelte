@@ -17,7 +17,8 @@
     const local = new Date(0)
     local.setUTCFullYear(d.getFullYear(), d.getMonth(), d.getDate())
     local.setUTCHours(d.getHours(), d.getMinutes(), d.getSeconds())
-    return messageTimeFormatter.format(local)
+    // Local wall time can fall outside the Date range at its very edges.
+    return Number.isNaN(local.getTime()) ? d.toLocaleString('ja-JP') : messageTimeFormatter.format(local)
   }
 </script>
 
