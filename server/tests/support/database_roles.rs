@@ -132,8 +132,8 @@ pub(super) async fn check_app_role(owner: PgPool) {
             "{statement}: {error}"
         );
     }
-    let identity = check_member_identity(app.clone()).await;
-    check_member_truncate(app.clone(), identity, "42501").await;
+    let identity = check_member_identity(&app, &app).await;
+    check_member_truncate(&app, identity, "42501").await;
     // The existing tenant check sets up its own Organization.
     app.close().await;
 
@@ -141,7 +141,7 @@ pub(super) async fn check_app_role(owner: PgPool) {
     sqlx::raw_sql("ALTER TABLE users DISABLE TRIGGER protect_member_truncate; TRUNCATE organizations, accounts CASCADE; ALTER TABLE users ENABLE TRIGGER protect_member_truncate;")
         .execute(&owner).await.unwrap();
     let app = app_pool(&owner, original).await.unwrap();
-    check_tenant_denials(app.clone()).await;
+    check_tenant_denials(&app).await;
 
     // Default grants cover objects created later by the migration owner.
     sqlx::raw_sql(

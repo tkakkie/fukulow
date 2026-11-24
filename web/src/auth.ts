@@ -16,6 +16,8 @@ export type AuthState =
   | { screen: 'signin'; notice?: string }
   | { screen: 'app'; identity: AccountIdentity }
 
+export const sessionEndedMessage = 'セッションが終了しました。もう一度ログインしてください。'
+
 type Fetch = typeof fetch
 
 /** Japanese message for a failed call; `context` selects the wording per screen. */

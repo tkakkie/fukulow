@@ -13,7 +13,7 @@
     "/api/v1/health": {
       "get": {
         "tags": [
-          "crate"
+          "system"
         ],
         "operationId": "health",
         "responses": {
@@ -59,7 +59,7 @@
     "/api/v1/me": {
       "get": {
         "tags": [
-          "crate::auth"
+          "auth"
         ],
         "operationId": "me",
         "responses": {
@@ -133,7 +133,7 @@
     "/api/v1/me/password": {
       "put": {
         "tags": [
-          "crate::auth::security"
+          "auth"
         ],
         "description": "Lock Account FOR UPDATE, then recheck current Session, verify password and update/delete Sessions through COMMIT; shared with web/native sign-in. Signal revoked tokens after COMMIT.",
         "operationId": "change_password",
@@ -271,7 +271,7 @@
     "/api/v1/me/sessions/revoke-others": {
       "post": {
         "tags": [
-          "crate::auth::security"
+          "auth"
         ],
         "description": "Lock Account FOR UPDATE, then recheck current Session, verify password and delete other Sessions through COMMIT; shared with web/native sign-in. Signal each revoked token after COMMIT, including on HTTP cancellation.",
         "operationId": "revoke_others",
@@ -409,7 +409,7 @@
     "/api/v1/native/session": {
       "post": {
         "tags": [
-          "crate::auth"
+          "auth"
         ],
         "operationId": "native_sign_in",
         "requestBody": {
@@ -535,7 +535,7 @@
     "/api/v1/orgs/{org}/channels": {
       "get": {
         "tags": [
-          "crate::messages::unread"
+          "channels"
         ],
         "summary": "List visible Channels with the current Member's read positions and Unread counts.",
         "description": "Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.",
@@ -669,7 +669,7 @@
       },
       "post": {
         "tags": [
-          "crate::channels"
+          "channels"
         ],
         "summary": "Create a public or private channel with an organization-unique name.\nNames are compared with ASCII case folding; non-ASCII characters are unchanged.\nA private channel includes its creator as a member in the same transaction.",
         "operationId": "create_channel",
@@ -826,7 +826,7 @@
     "/api/v1/orgs/{org}/channels/{id}": {
       "get": {
         "tags": [
-          "crate::channels::archive"
+          "channels"
         ],
         "summary": "Read one accessible ordinary Channel, including archived Channels.",
         "operationId": "get_channel",
@@ -939,7 +939,7 @@
       },
       "patch": {
         "tags": [
-          "crate::channels::archive"
+          "channels"
         ],
         "summary": "Supply exactly one of name or archived. An authorized no-op returns 204.",
         "operationId": "update_channel",
@@ -1097,7 +1097,7 @@
     "/api/v1/orgs/{org}/channels/{id}/events": {
       "get": {
         "tags": [
-          "crate::messages::log"
+          "messages"
         ],
         "summary": "Read event positions for C3 gap recovery. Auth extraction and query validation\nprecede Channel visibility, exactly as on the history GET.",
         "operationId": "list_channel_events",
@@ -1255,7 +1255,7 @@
     "/api/v1/orgs/{org}/channels/{id}/members": {
       "get": {
         "tags": [
-          "crate::channels::members"
+          "channels"
         ],
         "operationId": "list",
         "parameters": [
@@ -1367,7 +1367,7 @@
       },
       "post": {
         "tags": [
-          "crate::channels::members"
+          "channels"
         ],
         "operationId": "add",
         "parameters": [
@@ -1514,7 +1514,7 @@
     "/api/v1/orgs/{org}/channels/{id}/members/{member_id}": {
       "delete": {
         "tags": [
-          "crate::channels::members"
+          "channels"
         ],
         "operationId": "remove",
         "parameters": [
@@ -1648,7 +1648,7 @@
       },
       "patch": {
         "tags": [
-          "crate::channels::members"
+          "channels"
         ],
         "operationId": "change_manager",
         "parameters": [
@@ -1814,7 +1814,7 @@
     "/api/v1/orgs/{org}/channels/{id}/messages": {
       "get": {
         "tags": [
-          "crate::messages"
+          "messages"
         ],
         "summary": "List visible channel messages using exclusive per-channel sequence cursors.\nafter_seq and before_seq are mutually exclusive; neither selects the latest page.\nPages are always ascending seq. Continue after_seq with the last seq, or before_seq\n(including older history from the latest page) with the first seq. has_more refers\nto that direction. limit defaults to 50 and is bounded to 1..=200; invalid queries\nreturn 400. Identity and organization come only from the authenticated session.",
         "operationId": "list_messages",
@@ -1993,7 +1993,7 @@
       },
       "post": {
         "tags": [
-          "crate::messages"
+          "messages"
         ],
         "summary": "Send a Message, optionally joining/creating a Topic by name in the same transaction.\nFor all sends, Account Session authentication precedes input validation (400/413/415),\nwhich precedes organization_unavailable (404) and Channel authorization, then the\nper-Member send limit (429), then admission (503).\nThe session supplies organization and sender. A successful retry returns the same\ncanonical message with 201, allocating no new sequence and publishing no new event.\nA reused client_message_id with different body, Channel, normalized Topic name or reply target returns 409.",
         "operationId": "send_message",
@@ -2170,7 +2170,7 @@
     "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain": {
       "get": {
         "tags": [
-          "crate::messages::replies"
+          "messages"
         ],
         "summary": "Fetch the root and all descendants from any anchor in the chain. No depth cap.\nafter_seq defaults to 0 and is exclusive; limit defaults to 50, maximum 200.\nA page is a projection, never evidence of Channel-log contiguity.",
         "operationId": "reply_chain",
@@ -2350,7 +2350,7 @@
     "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move": {
       "post": {
         "tags": [
-          "crate::messages::move_topic"
+          "messages"
         ],
         "summary": "Move the entire Reply chain identified by a root or descendant Message.",
         "operationId": "move_chain",
@@ -2525,7 +2525,7 @@
     "/api/v1/orgs/{org}/channels/{id}/read": {
       "put": {
         "tags": [
-          "crate::messages::unread"
+          "messages"
         ],
         "operationId": "mark_channel_read",
         "parameters": [
@@ -2679,7 +2679,7 @@
     "/api/v1/orgs/{org}/channels/{id}/reply-counts": {
       "post": {
         "tags": [
-          "crate::messages::replies::counts"
+          "messages"
         ],
         "operationId": "reply_counts",
         "parameters": [
@@ -2835,7 +2835,7 @@
     "/api/v1/orgs/{org}/channels/{id}/timeline": {
       "get": {
         "tags": [
-          "crate::messages::topics::projection"
+          "messages"
         ],
         "summary": "Main timeline projection at a fixed W. Topic Messages are represented once by their summary.",
         "operationId": "list_timeline",
@@ -3003,7 +3003,7 @@
     "/api/v1/orgs/{org}/channels/{id}/topics": {
       "get": {
         "tags": [
-          "crate::messages::topics::projection"
+          "messages"
         ],
         "summary": "Topic summaries as of W, ordered by their W-relative latest activity.",
         "operationId": "list_topics",
@@ -3171,7 +3171,7 @@
     "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}": {
       "get": {
         "tags": [
-          "crate::messages::topics::projection"
+          "messages"
         ],
         "summary": "Current bounded baseline for a Topic first encountered through live delivery.",
         "operationId": "topic_summary",
@@ -3314,7 +3314,7 @@
     "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/messages": {
       "get": {
         "tags": [
-          "crate::messages::topics"
+          "messages"
         ],
         "summary": "Topic-filtered history is cursor-neutral; use unfiltered GET /messages for gap fill.",
         "operationId": "topic_history",
@@ -3502,7 +3502,7 @@
     "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/read": {
       "put": {
         "tags": [
-          "crate::messages::unread"
+          "messages"
         ],
         "operationId": "mark_topic_read",
         "parameters": [
@@ -3665,7 +3665,7 @@
     "/api/v1/orgs/{org}/dms": {
       "get": {
         "tags": [
-          "crate::messages::dms"
+          "messages"
         ],
         "operationId": "list_dms",
         "parameters": [
@@ -3810,7 +3810,7 @@
       },
       "post": {
         "tags": [
-          "crate::messages::dms"
+          "messages"
         ],
         "operationId": "open_dm",
         "parameters": [
@@ -3965,7 +3965,7 @@
     "/api/v1/orgs/{org}/dms/changes": {
       "get": {
         "tags": [
-          "crate::channels::dms::discovery"
+          "channels"
         ],
         "operationId": "dm_changes",
         "parameters": [
@@ -4088,7 +4088,7 @@
     "/api/v1/orgs/{org}/invites": {
       "get": {
         "tags": [
-          "crate::auth::invites::management"
+          "auth"
         ],
         "operationId": "list_invites",
         "parameters": [
@@ -4211,7 +4211,7 @@
       },
       "post": {
         "tags": [
-          "crate::auth::invites"
+          "auth"
         ],
         "operationId": "create_invite",
         "parameters": [
@@ -4367,7 +4367,7 @@
     "/api/v1/orgs/{org}/invites/accept": {
       "post": {
         "tags": [
-          "crate::auth::invites"
+          "auth"
         ],
         "operationId": "accept_invite",
         "parameters": [
@@ -4516,7 +4516,7 @@
     "/api/v1/orgs/{org}/invites/{id}": {
       "delete": {
         "tags": [
-          "crate::auth::invites::management"
+          "auth"
         ],
         "operationId": "revoke_invite",
         "parameters": [
@@ -4635,7 +4635,7 @@
     "/api/v1/orgs/{org}/me": {
       "get": {
         "tags": [
-          "crate::auth"
+          "auth"
         ],
         "operationId": "organization_me",
         "parameters": [
@@ -4741,7 +4741,7 @@
     "/api/v1/orgs/{org}/me/channel-sections/{channel_id}": {
       "get": {
         "tags": [
-          "crate::channels::sections::read"
+          "channels"
         ],
         "operationId": "placement",
         "parameters": [
@@ -4911,7 +4911,7 @@
       },
       "put": {
         "tags": [
-          "crate::channels::sections::write"
+          "channels"
         ],
         "operationId": "move_channel",
         "parameters": [
@@ -5122,7 +5122,7 @@
     "/api/v1/orgs/{org}/me/section-channel-order": {
       "put": {
         "tags": [
-          "crate::channels::sections::write"
+          "channels"
         ],
         "operationId": "channel_order",
         "parameters": [
@@ -5324,7 +5324,7 @@
     "/api/v1/orgs/{org}/me/sections": {
       "get": {
         "tags": [
-          "crate::channels::sections::read"
+          "channels"
         ],
         "operationId": "layout",
         "parameters": [
@@ -5467,7 +5467,7 @@
       },
       "post": {
         "tags": [
-          "crate::channels::sections::write"
+          "channels"
         ],
         "operationId": "create",
         "parameters": [
@@ -5694,7 +5694,7 @@
     "/api/v1/orgs/{org}/me/sections/order": {
       "put": {
         "tags": [
-          "crate::channels::sections::write"
+          "channels"
         ],
         "operationId": "section_order",
         "parameters": [
@@ -5896,7 +5896,7 @@
     "/api/v1/orgs/{org}/me/sections/{id}": {
       "get": {
         "tags": [
-          "crate::channels::sections::read"
+          "channels"
         ],
         "operationId": "section",
         "parameters": [
@@ -6048,7 +6048,7 @@
       },
       "delete": {
         "tags": [
-          "crate::channels::sections::write"
+          "channels"
         ],
         "operationId": "delete",
         "parameters": [
@@ -6193,7 +6193,7 @@
       },
       "patch": {
         "tags": [
-          "crate::channels::sections::write"
+          "channels"
         ],
         "operationId": "rename",
         "parameters": [
@@ -6386,7 +6386,7 @@
     "/api/v1/orgs/{org}/members": {
       "get": {
         "tags": [
-          "crate::auth::members"
+          "auth"
         ],
         "operationId": "list_members",
         "parameters": [
@@ -6492,7 +6492,7 @@
     "/api/v1/orgs/{org}/members/{id}/deactivate": {
       "post": {
         "tags": [
-          "crate::auth::members"
+          "auth"
         ],
         "operationId": "deactivate",
         "parameters": [
@@ -6621,7 +6621,7 @@
     "/api/v1/orgs/{org}/members/{id}/role": {
       "patch": {
         "tags": [
-          "crate::auth::members"
+          "auth"
         ],
         "operationId": "change_role",
         "parameters": [
@@ -6787,7 +6787,7 @@
     "/api/v1/orgs/{org}/message-authors": {
       "post": {
         "tags": [
-          "crate::messages::authors"
+          "messages"
         ],
         "summary": "Resolve historical authors without widening the active Member directory.\nAuthorization, authorship and identities share a non-locking REPEATABLE READ snapshot.",
         "operationId": "lookup_authors",
@@ -6924,7 +6924,7 @@
     "/api/v1/orgs/{org}/search": {
       "get": {
         "tags": [
-          "crate::messages::search"
+          "messages"
         ],
         "summary": "Search readable Messages, newest first by creation time and then Message id.\nEach page checks current Channel and DM visibility in its own snapshot.",
         "operationId": "search",
@@ -7069,7 +7069,7 @@
     "/api/v1/orgs/{org}/ws": {
       "get": {
         "tags": [
-          "crate::realtime"
+          "realtime"
         ],
         "summary": "Upgrade to WebSocket. ClientMessage and ServerEvent are the message schema roots.\nAuthenticate with the session cookie or Authorization: Bearer, never a query token.\nCookie auth requires a matching allowed Origin (configured, same-origin by default);\nreject a missing/foreign Origin with 403. Bearer clients need no Origin header.",
         "description": "On subscribe: first register the live subscription, queueing events per connection;\nreplay committed messages with seq > after_seq ascending in pages of up to 50\nmessages; flush queued live events with seq > last replayed;\nthen send subscribed with caught_up_seq. Clients dedupe by (channel_id, seq):\nduplicates are harmless, gaps are forbidden. Publish only committed new messages.\nQueue overflow closes with 4008 (never silently drops an event); reconnect and\nre-subscribe from the last seq per channel. Expiry/sign-out closes with 4001;\nstop protected delivery and go to Sign in. Membership loss closes only this\nOrganization with 4003: terminal unavailable, never reconnect/resubscribe/retry sends.\nA rejected handshake has no close code: check GET /api/v1/orgs/{org}/me.\nEvery text or binary frame (subscribe, unsubscribe, invalid) is charged to a\nper-connection and a per-Account budget before any database access; over\nbudget closes with 4029: reconnect with backoff. A subscribe for a Channel\nalready subscribed on this connection is ignored (no reply), whatever its after_seq.",
@@ -7180,7 +7180,7 @@
     "/api/v1/ready": {
       "get": {
         "tags": [
-          "crate"
+          "system"
         ],
         "operationId": "ready",
         "responses": {
@@ -7226,7 +7226,7 @@
     "/api/v1/session": {
       "post": {
         "tags": [
-          "crate::auth"
+          "auth"
         ],
         "operationId": "sign_in",
         "requestBody": {
@@ -7358,7 +7358,7 @@
       },
       "delete": {
         "tags": [
-          "crate::auth"
+          "auth"
         ],
         "operationId": "sign_out",
         "responses": {
@@ -7439,7 +7439,7 @@
     "/api/v1/setup": {
       "get": {
         "tags": [
-          "crate::auth"
+          "auth"
         ],
         "summary": "Report whether the first organization still needs to be created.\nAccessible without authentication or a setup token; reveals only setup_required.",
         "operationId": "setup_status",
@@ -7503,7 +7503,7 @@
       },
       "post": {
         "tags": [
-          "crate::auth"
+          "auth"
         ],
         "summary": "Create the first organization and Owner.",
         "description": "Body extraction precedes setup-token verification: malformed JSON or invalid field\ntypes return 400, oversized bodies return 413, and unsupported content types return\n415 even when the setup token is missing or invalid. After extraction, the token is\nchecked before semantic input validation, password hashing, or database access.",

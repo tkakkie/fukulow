@@ -15,6 +15,7 @@ const queue = (jobs = [job('a'), job('b')]): Queue => parseQueue(JSON.stringify(
 type World = {
   files: Map<string, string>; containers: string; ps: string; load: number[]; violations: string[]; exits: number[];
   head: string; dirty: string; node: string; free: number | null; dockerFree?: number | null; spawned: string[][]; captured: string[]; stoppedLogs: number;
+  envs?: (Record<string, string> | undefined)[];
   kills: number; busyAtExit: boolean[]; psLater?: string;
   signal?: { at: 'wait' | 'job' | 'gate'; handler?: (s: string) => void };
 };
@@ -36,8 +37,9 @@ function deps(w: World, platform?: Platform): Deps {
       if (k === 'cat .node-version') return { status: 0, stdout: w.node };
       return { status: null, stdout: '' };
     },
-    spawn: argv => {
+    spawn: (argv, opts) => {
       w.spawned.push(argv);
+      (w.envs ??= []).push(opts.env);
       const code = w.exits.shift() ?? 0;
       const child = { done: Promise.resolve().then(() => { w.busyAtExit.push(w.files.has('/runs/HOST-BUSY')); return code; }), kill: () => { w.kills++; } };
       const isJob = argv[0] === 'inhibit';
@@ -146,6 +148,16 @@ test('a failed job ends the queue and is never rerun', async () => {
   assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
+test('a job that ends with exit 2 (the #870 driver: not a normal finish) ends the queue; the next job never starts', async () => {
+  const w = world({ exits: [2, 0] });
+  const r = await launch(queue(), deps(w));
+  assert.equal(r.outcome, 'stop');
+  assert.deepEqual(r.jobs, [{ name: 'a', exit: 2 }]);
+  assert.equal(w.spawned.length, 1);
+  assert.match(chain(w), /a exited 2; the queue ends \(no rerun\)/);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
+});
+
 test('a signal during a job kills it, keeps HOST-BUSY until it exits, then releases it and starts nothing else', async () => {
   const w = world({ signal: { at: 'job' }, exits: [143, 0] });
   const r = await launch(queue(), deps(w));
@@ -210,4 +222,14 @@ test('platform parts: sleep prevention and conditions', () => {
   assert.deepEqual(darwin.inhibit(['node', 'x']), ['caffeinate', '-dimsu', 'node', 'x']);
   assert.deepEqual(linux.inhibit(['node', 'x']), ['node', 'x']);
   assert.ok(linux.violations({ platform: 'linux', logicalCpus: 1, governors: null, ac: null, updateUnits: null, sleepUnits: null, snapHold: null } as unknown as HostRecord).length > 0);
+});
+
+test('each gate and job is told the HOST-BUSY this queue holds and its own name', async () => {
+  const w = world({ exits: [0, 0, 0] });
+  await launch(queue([job('a', { gate: ['node', 'gate.ts'], env: { X: '1' } }), job('b')]), deps(w));
+  assert.deepEqual(w.envs, [
+    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a' },
+    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a' },
+    { FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'b' },
+  ]);
 });

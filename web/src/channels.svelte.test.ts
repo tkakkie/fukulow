@@ -136,7 +136,7 @@ describe('channels adapter', () => {
     controller.close()
     lists[1].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('old')] }))
     creates[0].resolve(ok(channel('late')))
-    expect(await created).toEqual({ error: 'セッションが終了しました。' })
+    expect(await created).toEqual({ error: 'セッションが終了しました。もう一度ログインしてください。' })
     await settle()
     expect(adapter.state.channels.map((c) => c.id)).toEqual(['a'])
     expect(view.last.channels.map((c) => c.id)).toEqual(['a'])

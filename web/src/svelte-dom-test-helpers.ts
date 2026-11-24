@@ -768,17 +768,129 @@ export class MiniDocument extends MiniNode {
   }
 }
 
+function compareWidth(lhs: number, op: string, rhs: number): boolean {
+  switch (op) {
+    case '<': return lhs < rhs
+    case '<=': return lhs <= rhs
+    case '>': return lhs > rhs
+    case '>=': return lhs >= rhs
+    case '=': return lhs === rhs
+    default: return false
+  }
+}
+
+function evaluateWidthMediaQuery(query: string, width: number): boolean {
+  const clauses = query.split(/\s+and\s+/i)
+  let hasCondition = false
+  for (const raw of clauses) {
+    const trimmed = raw.trim()
+    const min = trimmed.match(/^\(\s*min-width\s*:\s*(\d+(?:\.\d+)?)px\s*\)$/i)
+    if (min) {
+      hasCondition = true
+      if (width < Number(min[1])) return false
+      continue
+    }
+    const max = trimmed.match(/^\(\s*max-width\s*:\s*(\d+(?:\.\d+)?)px\s*\)$/i)
+    if (max) {
+      hasCondition = true
+      if (width > Number(max[1])) return false
+      continue
+    }
+    const bounded = trimmed.match(
+      /^\(\s*(\d+(?:\.\d+)?)px\s*(<=|<|>=|>)\s*width\s*(<=|<|>=|>)\s*(\d+(?:\.\d+)?)px\s*\)$/i,
+    )
+    if (bounded) {
+      hasCondition = true
+      if (!compareWidth(Number(bounded[1]), bounded[2], width)) return false
+      if (!compareWidth(width, bounded[3], Number(bounded[4]))) return false
+      continue
+    }
+    const widthLeft = trimmed.match(/^\(\s*width\s*(<=|<|>=|>|=)\s*(\d+(?:\.\d+)?)px\s*\)$/i)
+    if (widthLeft) {
+      hasCondition = true
+      if (!compareWidth(width, widthLeft[1], Number(widthLeft[2]))) return false
+      continue
+    }
+    const widthRight = trimmed.match(/^\(\s*(\d+(?:\.\d+)?)px\s*(<=|<|>=|>|=)\s*width\s*\)$/i)
+    if (widthRight) {
+      hasCondition = true
+      if (!compareWidth(Number(widthRight[1]), widthRight[2], width)) return false
+      continue
+    }
+    return false
+  }
+  return hasCondition
+}
+
+export class MiniMediaQueryList extends MiniEventTarget {
+  readonly media: string
+  onchange: ((this: MediaQueryList, ev: MediaQueryListEvent) => unknown) | null = null
+  private _matches: boolean
+  private readonly getWidth: () => number
+
+  constructor(media: string, getWidth: () => number) {
+    super()
+    this.media = media
+    this.getWidth = getWidth
+    this._matches = evaluateWidthMediaQuery(media, getWidth())
+  }
+
+  get matches(): boolean {
+    return evaluateWidthMediaQuery(this.media, this.getWidth())
+  }
+
+  addListener(listener: ((this: MediaQueryList, ev: MediaQueryListEvent) => unknown) | null): void {
+    if (listener) this.addEventListener('change', listener as unknown as (event: MiniDomEvent) => void)
+  }
+
+  removeListener(listener: ((this: MediaQueryList, ev: MediaQueryListEvent) => unknown) | null): void {
+    if (listener) this.removeEventListener('change', listener as unknown as (event: MiniDomEvent) => void)
+  }
+
+  sync(): void {
+    const next = evaluateWidthMediaQuery(this.media, this.getWidth())
+    if (next === this._matches) return
+    this._matches = next
+    const event = Object.assign(new MiniDomEvent('change'), { matches: next, media: this.media })
+    this.dispatchEvent(event)
+    this.onchange?.call(this as unknown as MediaQueryList, event as unknown as MediaQueryListEvent)
+  }
+}
+
 export class MiniWindow extends MiniEventTarget {
   readonly document: MiniDocument
-  innerWidth = 1280
+  private _innerWidth = 1280
   innerHeight = 800
   scrollX = 0
   scrollY = 0
+  private readonly mediaQueries = new Set<MiniMediaQueryList>()
 
   constructor(doc: MiniDocument) {
     super()
     this.document = doc
     doc.defaultView = this
+  }
+
+  get innerWidth(): number {
+    return this._innerWidth
+  }
+
+  set innerWidth(value: number) {
+    if (this._innerWidth === value) return
+    this._innerWidth = value
+    for (const mql of this.mediaQueries) mql.sync()
+  }
+
+  matchMedia(query: string): MiniMediaQueryList {
+    const mql = new MiniMediaQueryList(query, () => this._innerWidth)
+    this.mediaQueries.add(mql)
+    return mql
+  }
+
+  reset(): void {
+    this._innerWidth = 1280
+    this.innerHeight = 800
+    this.mediaQueries.clear()
   }
 }
 
@@ -1060,8 +1172,7 @@ export function installMiniDom(options?: MiniDomOptions): MiniDomEnv {
 
   beforeEach(() => {
     doc.reset()
-    win.innerWidth = 1280
-    win.innerHeight = 800
+    win.reset()
   })
 
   afterAll(() => {

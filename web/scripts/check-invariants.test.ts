@@ -414,6 +414,51 @@ describe('split invariants', () => {
     expect(checkInvariants(root)).toEqual([error])
   })
 
+  describe('contract/realtime test citations (#892)', () => {
+    const contract = (refs: string[]) =>
+      JSON.stringify({ kind: 'k', scenarios: [{ id: 'scenario-a', rust: { existing_tests: refs } }] }, null, 2) + '\n'
+    it('accepts citations of running tests', () => {
+      const { root, put } = fixture()
+      put('contract/realtime/delivery/x.json', contract(['server/tests/a.rs::ok_test']))
+      expect(checkInvariants(root)).toEqual([])
+    })
+    it('rejects a citation of a missing test (negative)', () => {
+      const { root, put } = fixture()
+      put('contract/realtime/delivery/x.json', contract(['server/tests/a.rs::ok_test', 'server/tests/a.rs::moved_away']))
+      expect(checkInvariants(root)).toEqual([
+        'contract/realtime/delivery/x.json: line 9: `server/tests/a.rs::moved_away` is not a test definition at that path (scenario: scenario-a)',
+      ])
+    })
+    it('reports the own line of each scenario when one missing test is cited twice (negative)', () => {
+      const { root, put } = fixture()
+      const two = { kind: 'k', scenarios: [
+        { id: 'first', rust: { existing_tests: ['server/tests/a.rs::moved_away'] } },
+        { id: 'second', rust: { existing_tests: ['server/tests/a.rs::moved_away'] } },
+      ] }
+      put('contract/realtime/delivery/x.json', JSON.stringify(two, null, 2) + '\n')
+      expect(checkInvariants(root).map((e) => e.replace(/: `.*/, ''))).toEqual([
+        'contract/realtime/delivery/x.json: line 8',
+        'contract/realtime/delivery/x.json: line 16',
+      ])
+    })
+    it('rejects a citation of a skipped test and invalid JSON (negative)', () => {
+      const { root, put } = fixture()
+      put('contract/realtime/x.json', contract(['web/x.test.ts::skipped']))
+      put('contract/realtime/y.json', '{')
+      const errors = checkInvariants(root)
+      expect(errors).toHaveLength(2)
+      expect(errors[0]).toMatch(/^contract\/realtime\/x\.json: line 8: `web\/x\.test\.ts::skipped` does not count: skipped/)
+      expect(errors[1]).toMatch(/^contract\/realtime\/y\.json: line 1: invalid JSON/)
+    })
+    it('rejects a citation the cargo list does not run (negative)', () => {
+      const { root, put } = fixture()
+      put('contract/realtime/x.json', contract(['server/tests/a.rs::other_test']))
+      const errors = checkInvariants(root, [{ binary: 'tests/a.rs', name: 'ok_test' }])
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toMatch(/^contract\/realtime\/x\.json: line \d+: `server\/tests\/a\.rs::other_test`.*\(scenario: scenario-a\)/)
+    })
+  })
+
   it('rejects cargo omission only in second part (negative)', () => {
     const { root, put } = fixture()
     put('docs/invariants/b.md', table('second', 'server/tests/a.rs::other_test'))

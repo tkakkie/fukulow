@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
+
 use utoipa::{
     Modify, OpenApi,
     openapi::{
         RefOr,
+        path::{Operation, PathItem},
         schema::{AllOfBuilder, Discriminator, ObjectBuilder, OneOfBuilder, Ref, Schema},
         security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme},
     },
@@ -26,9 +29,120 @@ use utoipa::{
         crate::channels::members::AddChannelMemberRequest, crate::channels::members::ChangeChannelManagerRequest, crate::channels::members::ChannelMember, crate::channels::members::ChannelMemberList, crate::channels::Channel, crate::channels::ChannelCapabilities, crate::channels::ChannelVisibility, crate::channels::CreateChannelRequest, crate::channels::archive::UpdateChannelRequest, crate::messages::ChannelList, crate::messages::UnreadChannel, crate::messages::MarkReadRequest, crate::messages::ReadPosition,
         crate::auth::members::DisplayIdentity, crate::messages::authors::AuthorLookupRequest, crate::messages::authors::AuthorIdentities, crate::messages::Message, crate::messages::SendMessageRequest, crate::messages::ListMessagesQuery, crate::messages::MessagePage, crate::messages::ReplyChainPage, crate::messages::ReplyChainQuery, crate::messages::ReplyCountRequest, crate::messages::ReplyCount, crate::messages::ReplyCountPage, crate::messages::ListProjectionQuery, crate::messages::TimelineItem, crate::messages::TimelinePage, crate::messages::TopicPage, crate::messages::TopicSummary, crate::messages::TopicSummaryResponse,
         crate::realtime::ClientMessage, crate::realtime::ServerEvent)),
-    modifiers(&Security, &MoveDestination, &WebSocketDiscriminators, &ShutdownResponses, &SectionResponseHeaders)
+    modifiers(&Security, &MoveDestination, &WebSocketDiscriminators, &ShutdownResponses, &SectionResponseHeaders, &DOMAIN_TAGS)
 )]
 pub struct ApiDoc;
+
+const DOMAINS: [&str; 5] = ["auth", "channels", "messages", "realtime", "system"];
+
+const PATH_DOMAINS: &[(&str, &str)] = &[
+    ("/api/v1/health", "system"),
+    ("/api/v1/me", "auth"),
+    ("/api/v1/me/password", "auth"),
+    ("/api/v1/me/sessions/revoke-others", "auth"),
+    ("/api/v1/native/session", "auth"),
+    // GET lives in messages for unread state; both operations share the Channel collection path.
+    ("/api/v1/orgs/{org}/channels", "channels"),
+    ("/api/v1/orgs/{org}/channels/{id}", "channels"),
+    ("/api/v1/orgs/{org}/channels/{id}/events", "messages"),
+    ("/api/v1/orgs/{org}/channels/{id}/members", "channels"),
+    (
+        "/api/v1/orgs/{org}/channels/{id}/members/{member_id}",
+        "channels",
+    ),
+    ("/api/v1/orgs/{org}/channels/{id}/messages", "messages"),
+    (
+        "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/chain",
+        "messages",
+    ),
+    (
+        "/api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move",
+        "messages",
+    ),
+    ("/api/v1/orgs/{org}/channels/{id}/read", "messages"),
+    ("/api/v1/orgs/{org}/channels/{id}/reply-counts", "messages"),
+    ("/api/v1/orgs/{org}/channels/{id}/timeline", "messages"),
+    ("/api/v1/orgs/{org}/channels/{id}/topics", "messages"),
+    (
+        "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}",
+        "messages",
+    ),
+    (
+        "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/messages",
+        "messages",
+    ),
+    (
+        "/api/v1/orgs/{org}/channels/{id}/topics/{topic_id}/read",
+        "messages",
+    ),
+    ("/api/v1/orgs/{org}/dms", "messages"),
+    ("/api/v1/orgs/{org}/dms/changes", "channels"),
+    ("/api/v1/orgs/{org}/invites", "auth"),
+    ("/api/v1/orgs/{org}/invites/accept", "auth"),
+    ("/api/v1/orgs/{org}/invites/{id}", "auth"),
+    ("/api/v1/orgs/{org}/me", "auth"),
+    (
+        "/api/v1/orgs/{org}/me/channel-sections/{channel_id}",
+        "channels",
+    ),
+    ("/api/v1/orgs/{org}/me/section-channel-order", "channels"),
+    ("/api/v1/orgs/{org}/me/sections", "channels"),
+    ("/api/v1/orgs/{org}/me/sections/order", "channels"),
+    ("/api/v1/orgs/{org}/me/sections/{id}", "channels"),
+    ("/api/v1/orgs/{org}/members", "auth"),
+    ("/api/v1/orgs/{org}/members/{id}/deactivate", "auth"),
+    ("/api/v1/orgs/{org}/members/{id}/role", "auth"),
+    ("/api/v1/orgs/{org}/message-authors", "messages"),
+    ("/api/v1/orgs/{org}/search", "messages"),
+    ("/api/v1/orgs/{org}/ws", "realtime"),
+    ("/api/v1/ready", "system"),
+    ("/api/v1/session", "auth"),
+    ("/api/v1/setup", "auth"),
+];
+
+struct DomainTags<'a>(&'a [(&'a str, &'a str)]);
+
+const DOMAIN_TAGS: DomainTags<'static> = DomainTags(PATH_DOMAINS);
+
+impl Modify for DomainTags<'_> {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let mut domains = BTreeMap::new();
+        for &(path, domain) in self.0 {
+            assert!(
+                DOMAINS.contains(&domain),
+                "Invalid OpenAPI domain {domain} for {path}"
+            );
+            let previous = domains.insert(path, domain);
+            assert!(previous.is_none(), "Duplicate OpenAPI domain for {path}");
+        }
+        for (path, item) in &mut openapi.paths.paths {
+            let domain = domains.remove(path.as_str());
+            assert!(domain.is_some(), "Missing OpenAPI domain for {path}");
+            for operation in operations_mut(item) {
+                operation.tags = domain.map(|tag| vec![tag.into()]);
+            }
+        }
+        let stale: Vec<_> = domains.into_keys().collect();
+        assert!(stale.is_empty(), "Stale OpenAPI domain for {stale:?}");
+    }
+}
+
+fn operations_mut(item: &mut PathItem) -> impl Iterator<Item = &mut Operation> {
+    [
+        &mut item.get,
+        &mut item.put,
+        &mut item.post,
+        &mut item.delete,
+        &mut item.options,
+        &mut item.head,
+        &mut item.patch,
+        &mut item.trace,
+        &mut item.query,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(item.additional_operations.values_mut())
+}
 
 struct SectionResponseHeaders;
 impl Modify for SectionResponseHeaders {
@@ -93,21 +207,7 @@ impl Modify for ShutdownResponses {
                 .build())
             .build();
         for item in openapi.paths.paths.values_mut() {
-            for operation in [
-                &mut item.get,
-                &mut item.put,
-                &mut item.post,
-                &mut item.delete,
-                &mut item.options,
-                &mut item.head,
-                &mut item.patch,
-                &mut item.trace,
-                &mut item.query,
-            ]
-            .into_iter()
-            .filter_map(Option::as_mut)
-            .chain(item.additional_operations.values_mut())
-            {
+            for operation in operations_mut(item) {
                 let mut response = shutdown.clone();
                 if let Some(RefOr::T(admission)) = operation.responses.responses.get("503") {
                     response.description = format!(
@@ -262,5 +362,37 @@ impl Modify for WebSocketDiscriminators {
                 .schemas
                 .insert(root.into(), Schema::OneOf(schema).into());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "Invalid OpenAPI domain crate::health for /api/v1/health")]
+    fn invalid_openapi_domain_is_rejected() {
+        DomainTags(&[("/api/v1/health", "crate::health")]).modify(&mut ApiDoc::openapi());
+    }
+
+    #[test]
+    #[should_panic(expected = "Missing OpenAPI domain for /api/v1/health")]
+    fn missing_openapi_domain_is_rejected() {
+        DomainTags(&PATH_DOMAINS[1..]).modify(&mut ApiDoc::openapi());
+    }
+
+    #[test]
+    #[should_panic(expected = "Duplicate OpenAPI domain for /api/v1/health")]
+    fn duplicate_openapi_domain_is_rejected() {
+        DomainTags(&[("/api/v1/health", "system"), ("/api/v1/health", "auth")])
+            .modify(&mut ApiDoc::openapi());
+    }
+
+    #[test]
+    #[should_panic(expected = "Stale OpenAPI domain for [\"/api/v1/removed\"]")]
+    fn stale_openapi_domain_is_rejected() {
+        let mut domains = PATH_DOMAINS.to_vec();
+        domains.push(("/api/v1/removed", "system"));
+        DomainTags(&domains).modify(&mut ApiDoc::openapi());
     }
 }

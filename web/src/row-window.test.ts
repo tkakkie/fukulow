@@ -45,3 +45,26 @@ it('keeps one observer with per-row attach detach and preserves an anchor across
   expect(lost).toHaveBeenCalledTimes(1)
   close(); expect(disconnect).toHaveBeenCalledTimes(1)
 })
+
+it('does not jump scrollTop past content above the list when ResizeObserver measures top rows at scrollTop 0', () => {
+  let onResize: ((entries: ResizeObserverEntry[]) => void) | undefined
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(cb: (entries: ResizeObserverEntry[]) => void) { onResize = cb }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  })
+  vi.stubGlobal('document', { activeElement: null })
+  const root = { scrollTop: 0, clientHeight: 600, offsetTop: 0,
+    addEventListener() {}, removeEventListener() {} } as unknown as HTMLElement
+  const controller = createRowWindow(vi.fn(), vi.fn(), vi.fn())
+  controller.setRows(['m1', 'm2', 'm3'])
+  const close = controller.connect(root, { offsetTop: 48 } as HTMLElement)
+  const target = { dataset: { windowId: 'm1' } } as unknown as HTMLElement
+  onResize!([{ target, borderBoxSize: [{ blockSize: 72 }], contentRect: { height: 72 } } as unknown as ResizeObserverEntry])
+  expect(root.scrollTop).toBe(0)
+  root.scrollTop = 12
+  onResize!([{ target, borderBoxSize: [{ blockSize: 80 }], contentRect: { height: 80 } } as unknown as ResizeObserverEntry])
+  expect(root.scrollTop).toBe(12)
+  close()
+})
