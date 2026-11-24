@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { compareSeedArms } from './dms-formal-seed-effect.ts';
-import { dbPostgresCommand, seedScriptArgs } from './dms-formal-host.ts';
+import { compareSeedArms, effectArgs } from './dms-formal-seed-effect.ts';
+import { dbPostgresCommand, preflightMarks, seedScriptArgs } from './dms-formal-host.ts';
 import { postgresCommand } from './dms-formal-seed-diagnostic.ts';
 
 const conditions = { sha: 'a'.repeat(40), machine: 'm1', load: '1/25', limits: { dbCpu: 2 }, scenario: 'main', mode: 'formal', postgres: 'postgres:18',
@@ -80,4 +81,26 @@ test('the rehearsal arms use the same DB command and seed script arguments as th
   assert.deepEqual(dbPostgresCommand({ seedDiagnostic: true, seedBaseline: true, seedRehearsal: true } as never), postgresCommand(false));
   assert.deepEqual(seedScriptArgs({ seedDiagnostic: true, seedRehearsal: true } as never, 'dms-formal-seed'), ['--seed-diagnostic']);
   assert.deepEqual(seedScriptArgs({ seedDiagnostic: true, seedBaseline: true, seedRehearsal: true } as never, 'dms-formal-seed'), []);
+});
+
+test('the comparison CLI takes exactly two outputs, or --rehearsal first and two outputs; anything else is a usage error', () => {
+  assert.deepEqual(effectArgs(['a', 'b']), { rehearsal: false, instrumented: 'a', baseline: 'b' });
+  assert.deepEqual(effectArgs(['--rehearsal', 'a', 'b']), { rehearsal: true, instrumented: 'a', baseline: 'b' });
+  for (const args of [[], ['a'], ['a', 'b', '--rehearsal'], ['a', 'b', 'c'], ['--rehearsal', 'a'], ['--rehearsal', 'a', 'b', 'c'], ['a', '--rehearsal', 'b'], ['--rehearsal', '--rehearsal', 'a'], ['', 'b']])
+    assert.equal(effectArgs(args), undefined, JSON.stringify(args));
+  // Full-size outputs with a trailing flag must fail with usage, not compare in pair mode.
+  const run = spawnSync(process.execPath, [new URL('./dms-formal-seed-effect.ts', import.meta.url).pathname, 'instrumented', 'baseline', '--rehearsal'], { encoding: 'utf8' });
+  assert.equal(run.status, 1);
+  assert.equal(run.stdout, '');
+  assert.match(run.stderr, /^Usage: dms-formal-seed-effect\.ts \[--rehearsal\]/);
+});
+
+test('the local preflight record carries the run label, and a rehearsal adds the rehearsal marker', () => {
+  assert.deepEqual(preflightMarks({ seedDiagnostic: true, seedRehearsal: true, label: 'DIAGNOSTIC REHEARSAL' }), { label: 'DIAGNOSTIC REHEARSAL', rehearsal: true });
+  assert.deepEqual(preflightMarks({ seedDiagnostic: true, seedBaseline: true, seedRehearsal: true, label: 'DIAGNOSTIC REHEARSAL' } as never), { label: 'DIAGNOSTIC REHEARSAL', rehearsal: true });
+  // Full-size diagnostic and local MAC-RELATIVE records are unchanged: the same label and no rehearsal key.
+  assert.deepEqual(preflightMarks({ seedDiagnostic: true, label: 'DIAGNOSTIC' }), { label: 'DIAGNOSTIC' });
+  assert.deepEqual(preflightMarks({ label: 'MAC-RELATIVE' }), { label: 'MAC-RELATIVE' });
+  assert.deepEqual(preflightMarks({ seedDiagnostic: true }), { label: 'DIAGNOSTIC' });
+  assert.deepEqual(preflightMarks({}), { label: 'MAC-RELATIVE' });
 });

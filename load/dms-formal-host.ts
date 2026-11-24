@@ -47,8 +47,12 @@ export const seedScriptArgs = (s: Pick<HostState,'seedDiagnostic'|'seedBaseline'
 type SeedSizeState = Pick<HostState,'mode'|'pilot'|'seedRehearsal'>;
 export const seedOrganizations = (s: SeedSizeState) => s.seedRehearsal ? seedRehearsal.organizations : s.mode==='smoke' ? 1 : 10;
 export const seedMessagesPerOrganization = (s: SeedSizeState) => s.seedRehearsal ? seedRehearsal.batchesPerOrganization*250*100 : s.mode==='smoke'||s.pilot ? 50000 : 5000000;
-export const seedSizeEnv = (s: SeedSizeState) => ({ DM_FORMAL_SMOKE:s.mode === 'smoke'||s.pilot ? '1' : '0', DM_FORMAL_SEED_ORGS:s.pilot?'10':'',
+// DM_FORMAL_SEED_BATCHES is always set ('' is every batch) so an exported shell value cannot shrink a full-size seed.
+export const seedSizeEnv = (s: SeedSizeState) => ({ DM_FORMAL_SMOKE:s.mode === 'smoke'||s.pilot ? '1' : '0', DM_FORMAL_SEED_ORGS:s.pilot?'10':'', DM_FORMAL_SEED_BATCHES:'',
   ...(s.seedRehearsal ? { DM_FORMAL_SEED_ORGS:String(seedRehearsal.organizations), DM_FORMAL_SEED_BATCHES:String(seedRehearsal.batchesPerOrganization) } : {}) });
+// The local preflight record carries the run's label and, for a rehearsal, the rehearsal marker.
+export const preflightMarks = (s: Pick<HostState,'label'|'seedDiagnostic'|'seedRehearsal'>) =>
+  ({ label:s.label ?? (s.seedDiagnostic?'DIAGNOSTIC':'MAC-RELATIVE'), ...(s.seedRehearsal?{ rehearsal:true as const }:{}) });
 export const buildsBaseline = (s: Pick<HostState,'overhead'|'pilot'|'seedDiagnostic'>) => !!s.overhead && !s.pilot && !s.seedDiagnostic;
 function state(): HostState { return JSON.parse(readFileSync(statePath,'utf8')); }
 const image = (s: HostState) => `${s.id}:release`;
@@ -66,7 +70,7 @@ async function preflight(s: HostState) {
     const report = s.seedDiagnostic
       ? { CgroupVersion:info.CgroupVersion, NCPU:info.NCPU, MemTotal:info.MemTotal, Driver:info.Driver, ServerVersion:info.ServerVersion }
       : info;
-    const record={...localIdentity(),docker:report,node,label:s.seedDiagnostic?'DIAGNOSTIC':'MAC-RELATIVE',limits:s.limits,load:scaledLoad(s.loadScale)};save(root+'/preflight.json',record);return record;
+    const record={...localIdentity(),docker:report,node,...preflightMarks(s),limits:s.limits,load:scaledLoad(s.loadScale)};save(root+'/preflight.json',record);return record;
   }
   const machine = await command('cat',['/etc/machine-id']);
   const memory = Number((await command('cat',['/proc/meminfo'])).match(/MemTotal:\s+(\d+)/)?.[1])*1024;

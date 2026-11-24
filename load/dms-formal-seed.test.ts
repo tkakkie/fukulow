@@ -188,10 +188,13 @@ test('the seed sizes: full-size, smoke and pilot keep their current values; the 
   // Pinned from the host worker at a17fc978 (the seed diagnostic arms are formal, not pilot).
   const formal = { mode: 'formal' as const }, smoke = { mode: 'smoke' as const }, pilot = { mode: 'formal' as const, pilot: true };
   assert.deepEqual([formal, smoke, pilot].map(s => [seedOrganizations(s), seedMessagesPerOrganization(s), seedSizeEnv(s)]), [
-    [10, 5_000_000, { DM_FORMAL_SMOKE: '0', DM_FORMAL_SEED_ORGS: '' }],
-    [1, 50_000, { DM_FORMAL_SMOKE: '1', DM_FORMAL_SEED_ORGS: '' }],
-    [10, 50_000, { DM_FORMAL_SMOKE: '1', DM_FORMAL_SEED_ORGS: '10' }],
+    [10, 5_000_000, { DM_FORMAL_SMOKE: '0', DM_FORMAL_SEED_ORGS: '', DM_FORMAL_SEED_BATCHES: '' }],
+    [1, 50_000, { DM_FORMAL_SMOKE: '1', DM_FORMAL_SEED_ORGS: '', DM_FORMAL_SEED_BATCHES: '' }],
+    [10, 50_000, { DM_FORMAL_SMOKE: '1', DM_FORMAL_SEED_ORGS: '10', DM_FORMAL_SEED_BATCHES: '' }],
   ]);
+  // The worker spreads the shell environment first: an exported DM_FORMAL_SEED_BATCHES never shrinks these seeds.
+  const shell: Record<string, string> = { DM_FORMAL_SEED_BATCHES: '5' };
+  for (const s of [formal, smoke, pilot]) assert.equal(seedBatchLimit({ ...shell, ...seedSizeEnv(s) }.DM_FORMAL_SEED_BATCHES, 50_000), 200);
   assert.deepEqual(seedShape('main'), { organizations: 10, batchesPerOrganization: 200 });
   const rehearsal = { ...formal, seedRehearsal: true };
   assert.deepEqual(seedRehearsal, { organizations: 1, batchesPerOrganization: 5 });

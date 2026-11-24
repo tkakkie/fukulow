@@ -48,11 +48,18 @@ export const readSummary = (directory: string): ArmSummary | undefined => {
   try { return JSON.parse(readFileSync(`${directory}/summary.json`, 'utf8')) as ArmSummary; } catch { return undefined; }
 };
 
+// Exactly two output directories, or `--rehearsal` first and then two; anything else is a usage error.
+export function effectArgs(args: string[]) {
+  const rehearsal = args[0] === '--rehearsal', paths = rehearsal ? args.slice(1) : args;
+  if (paths.length !== 2 || paths.some(path => !path || path.startsWith('--'))) return undefined;
+  return { rehearsal, instrumented: paths[0], baseline: paths[1] };
+}
+
 if (process.argv[1] === import.meta.filename) {
-  const args = process.argv.slice(2), rehearsal = args[0] === '--rehearsal', [instrumented, baseline] = rehearsal ? args.slice(1) : args;
-  if (!instrumented || !baseline) {
+  const parsed = effectArgs(process.argv.slice(2));
+  if (!parsed) {
     console.error('Usage: dms-formal-seed-effect.ts [--rehearsal] <instrumented output> <baseline output> (--rehearsal: two rehearsal arms, '
       + 'never pair evidence)');
     process.exitCode = 1;
-  } else console.log(JSON.stringify(compareSeedArms(readSummary(instrumented), readSummary(baseline), { rehearsal }), null, 2));
+  } else console.log(JSON.stringify(compareSeedArms(readSummary(parsed.instrumented), readSummary(parsed.baseline), { rehearsal: parsed.rehearsal }), null, 2));
 }
