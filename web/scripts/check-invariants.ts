@@ -956,11 +956,15 @@ export function checkContractCitations(root: string, known: Known): string[] {
       continue
     }
     const rows: Row[] = []
+    // A test cited in several scenarios is found again after its previous occurrence, so each row gets its own line.
+    const next = new Map<string, number>()
     const visit = (value: unknown, scenario: string) => {
       if (typeof value === 'string') {
         if (!/^[^\s:]+\.(rs|ts)::/.test(value)) return
-        const at = text.indexOf(JSON.stringify(value))
-        rows.push({ line: text.slice(0, at).split('\n').length, rule: scenario, names: [value], todo: false })
+        const needle = JSON.stringify(value)
+        const at = text.indexOf(needle, next.get(needle) ?? 0)
+        if (at >= 0) next.set(needle, at + needle.length)
+        rows.push({ line: at < 0 ? 1 : text.slice(0, at).split('\n').length, rule: scenario, names: [value], todo: false })
       } else if (Array.isArray(value)) value.forEach((v) => visit(v, scenario))
       else if (value && typeof value === 'object') {
         const id = (value as { id?: unknown }).id

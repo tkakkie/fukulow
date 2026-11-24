@@ -429,6 +429,18 @@ describe('split invariants', () => {
         'contract/realtime/delivery/x.json: line 9: `server/tests/a.rs::moved_away` is not a test definition at that path (scenario: scenario-a)',
       ])
     })
+    it('reports the own line of each scenario when one missing test is cited twice (negative)', () => {
+      const { root, put } = fixture()
+      const two = { kind: 'k', scenarios: [
+        { id: 'first', rust: { existing_tests: ['server/tests/a.rs::moved_away'] } },
+        { id: 'second', rust: { existing_tests: ['server/tests/a.rs::moved_away'] } },
+      ] }
+      put('contract/realtime/delivery/x.json', JSON.stringify(two, null, 2) + '\n')
+      expect(checkInvariants(root).map((e) => e.replace(/: `.*/, ''))).toEqual([
+        'contract/realtime/delivery/x.json: line 8',
+        'contract/realtime/delivery/x.json: line 16',
+      ])
+    })
     it('rejects a citation of a skipped test and invalid JSON (negative)', () => {
       const { root, put } = fixture()
       put('contract/realtime/x.json', contract(['web/x.test.ts::skipped']))
@@ -441,7 +453,9 @@ describe('split invariants', () => {
     it('rejects a citation the cargo list does not run (negative)', () => {
       const { root, put } = fixture()
       put('contract/realtime/x.json', contract(['server/tests/a.rs::other_test']))
-      expect(checkInvariants(root, [{ binary: 'tests/a.rs', name: 'ok_test' }])).toHaveLength(1)
+      const errors = checkInvariants(root, [{ binary: 'tests/a.rs', name: 'ok_test' }])
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toMatch(/^contract\/realtime\/x\.json: line \d+: `server\/tests\/a\.rs::other_test`.*\(scenario: scenario-a\)/)
     })
   })
 
