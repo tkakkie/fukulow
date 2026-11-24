@@ -44,11 +44,11 @@ test('checkpoint fails closed: SQL error, failed read, unproven completion, unre
 type M = Measured & { tag: string };
 // The explicit checkpoint of fakeOps: redo record at 0/2 and completion record at 0/3; the window ends at 0/5000000.
 const explicit: WalRecord[] = [{ lsn: '0/2', type: 'CHECKPOINT_REDO' }, { lsn: '0/3', type: 'CHECKPOINT_ONLINE' }];
-const after = (): Control => ({ lsn: '0/1', redo: '0/2', checkpoint: '0/3', time: 't' });
+const after = (): Control => ({ lsn: '0/4', redo: '0/2', checkpoint: '0/3', time: 't' });
 function fakeOps(o: { checkpoint?: (w: Window) => CheckpointRecord; measured?: (cp: string) => M; verified?: boolean;
   wal?: (from: string, to: string) => WalCheckpoints } = {}) {
   const log: string[] = [], records: unknown[] = [];
-  const ok = (): CheckpointRecord => ({ ok: true, startedAt: 's', ms: 1, before: control('0/1'), after: after() });
+  const ok = (): CheckpointRecord => ({ ok: true, startedAt: 's', ms: 1, before: control('0/1', '0/1'), after: after() });
   const ops: WindowOps<M, { note: string }> = {
     async prepare(w) { log.push(`prepare ${w.id}`); },
     async warm(w) { log.push(`warm ${w.id}`); },
@@ -77,7 +77,7 @@ test('every window of the plan, base included, takes the checkpoint after warm-u
 test('a failed checkpoint makes the window INVALID: not measured or verified, cleaned up and recorded; later windows still run', async () => {
   const [first, second] = windows(false);
   const { ops, log, records } = fakeOps({ checkpoint: w => w === first ? { ok: false, startedAt: 's', ms: 3, reason: 'boom' }
-    : { ok: true, startedAt: 's', ms: 1, before: control('0/1'), after: after() } });
+    : { ok: true, startedAt: 's', ms: 1, before: control('0/1', '0/1'), after: after() } });
   const r = await runWindow(first, ops);
   assert.equal(r.valid, false);
   assert.deepEqual(r.reasons, ['checkpoint: boom']);
@@ -145,12 +145,39 @@ test('another checkpoint starting or completing in WAL between the explicit chec
   assert.deepEqual(await run((from, to) => ({ ok: true, from, to, records: [...explicit, { lsn: '0/4000000', type: 'CHECKPOINT_SHUTDOWN' }] })), [other]);
   // The explicit checkpoint's records match by LSN and type, not by type alone.
   assert.deepEqual(await run((from, to) => ({ ok: true, from, to, records: [explicit[0], { lsn: '0/9', type: 'CHECKPOINT_ONLINE' }] })),
-    ['explicit checkpoint records not found in WAL', other]);
-  assert.deepEqual(await run((from, to) => ({ ok: true, from, to, records: [] })), ['explicit checkpoint records not found in WAL']);
+    ['explicit checkpoint records not found exactly once in WAL', other]);
+  assert.deepEqual(await run((from, to) => ({ ok: true, from, to, records: [] })), ['explicit checkpoint records not found exactly once in WAL']);
   assert.deepEqual(await run(() => ({ ok: false, reason: 'window WAL not flushed' })), ['checkpoint WAL evidence: window WAL not flushed']);
-  assert.deepEqual(await run((_from, to) => ({ ok: true, from: '0/1', to, records: explicit })), ['checkpoint WAL evidence covers the wrong range']);
-  // The range runs from the explicit checkpoint's redo record to the insert position after the window.
+  assert.deepEqual(await run((_from, to) => ({ ok: true, from: '0/2', to, records: explicit })), ['checkpoint WAL evidence covers the wrong range']);
+  // The range runs from the insert position before CHECKPOINT to the insert position after the window.
   const seen: string[] = [];
   assert.deepEqual(await run((from, to) => { seen.push(from, to); return { ok: true, from, to, records: explicit }; }), []);
-  assert.deepEqual(seen, ['0/2', '0/5000000']);
+  assert.deepEqual(seen, ['0/1', '0/5000000']);
+});
+
+test('two checkpoints completing before the control read make the window INVALID', async () => {
+  const [w] = windows(false);
+  const second: WalRecord[] = [{ lsn: '0/5', type: 'CHECKPOINT_REDO' }, { lsn: '0/6', type: 'CHECKPOINT_ONLINE' }];
+  const controlAfterSecond = { lsn: '0/7', redo: '0/5', checkpoint: '0/6', time: 't' };
+  let completed: WalRecord[] = [];
+  const sql: Sql = query => {
+    if (query === controlSQL) return JSON.stringify(completed.length ? controlAfterSecond : control('0/1', '0/1'));
+    if (query === 'CHECKPOINT;') {
+      completed = [...explicit, ...second];
+      return '';
+    }
+    if (query.startsWith('SELECT pg_wal_lsn_diff') || query === flushedSQL('0/5000000')) return 't';
+    if (query === checkpointRecordsSQL('0/1', '0/5000000')) return JSON.stringify(completed);
+    if (query === checkpointRecordsSQL('0/5', '0/5000000')) return JSON.stringify(second);
+    throw new Error(`unexpected SQL: ${query}`);
+  };
+  const { ops } = fakeOps({
+    checkpoint: () => checkpoint(sql),
+    measured: () => ({ accepted: 1, controlBefore: controlAfterSecond,
+      controlAfter: { ...controlAfterSecond, lsn: '0/5000000' }, tag: 'm' }),
+    wal: (from, to) => walCheckpoints(sql, from, to),
+  });
+  const r = await runWindow(w, ops);
+  assert.equal(r.valid, false);
+  assert.deepEqual(r.reasons, ['another checkpoint started or completed between the explicit checkpoint and the end of the window']);
 });

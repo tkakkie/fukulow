@@ -8,7 +8,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { balanced, windows, type Window } from './plan.ts';
-import { decide, topLevel, type Result, type Statement } from './validity.ts';
+import { decide, hasLoadCounts, hasMeasurementStats, hasStatementFields, hasVerificationShape, isDecision, topLevel,
+  type Decision, type Result, type Statement } from './validity.ts';
 
 export type { Result, Statement } from './validity.ts';
 
@@ -23,7 +24,7 @@ export const METRICS = [...Object.values(FAMILIES).flat(), 'log_heap_bytes', 'lo
 export const LOAD = ['accepted', 'errors', 'dropped', 'warm_accepted'] as const;
 const STATEMENT_METRICS = ['calls', 'exec_us_per_send', 'wal_records_per_send', 'wal_bytes_per_send', 'wal_fpi_per_send'];
 
-export type Manifest = { smoke: boolean; windows: Window[]; c2Compatibility?: { cases: number; mismatches: number } };
+export type Manifest = { smoke: boolean; windows: Window[]; results?: Decision[]; c2Compatibility?: { cases: number; mismatches: number } };
 type Row = Record<string, string | number | boolean | null>;
 type Tables = Record<string, Row[]>;
 
@@ -93,22 +94,34 @@ export function analyze(manifest: Manifest, read: (w: Window) => { result: Resul
   if (JSON.stringify(manifest.windows) !== JSON.stringify(plan)) problems.push('recorded window order differs from the plan');
   if (!manifest.smoke && !balanced(manifest.windows)) problems.push('arm order is not balanced');
   if (manifest.c2Compatibility?.cases !== 1400 || manifest.c2Compatibility.mismatches !== 0) problems.push('C2 compatibility record missing');
+  const decisions = new Map<string, Decision[]>();
+  if (Array.isArray(manifest.results)) for (const decision of manifest.results) {
+    if (typeof decision?.id === 'string') decisions.set(decision.id, [...(decisions.get(decision.id) ?? []), decision]);
+  }
   const rows: Row[] = [], statements: Row[] = [], invalid: { id: string; reasons: string[] }[] = [];
   for (const w of manifest.windows) {
     const read1 = read(w);
     const tags: Row = { id: w.id, phase: w.phase, shape: w.shape, round: w.round, arm: w.arm, position: w.position, positions: w.order.length, order: w.order.join('>') };
     if (!read1) { invalid.push({ id: w.id, reasons: ['window missing'] }); continue; }
     const { result: r, statements: stats } = read1;
-    const m = r.measured, top = topLevel(stats);
-    // The same decision run.ts recorded in result.json and the manifest; re-applied, never relaxed.
-    const { valid, reasons } = decide(r, stats);
+    const m = r.measured;
+    const { reasons } = decide(r, stats);
+    const recorded = decisions.get(w.id) ?? [];
+    if (recorded.length === 0) reasons.push('manifest decision missing');
+    else if (recorded.length !== 1 || !isDecision(recorded[0])) reasons.push('manifest decision duplicated or malformed');
+    else if (!isDecision(r) || r.id !== w.id || recorded[0].valid !== r.valid
+      || JSON.stringify(recorded[0].reasons) !== JSON.stringify(r.reasons)) {
+      reasons.push('manifest and result decisions conflict');
+    }
+    const valid = reasons.length === 0;
     if (!valid) invalid.push({ id: w.id, reasons });
     const cp = r.checkpoint;
     const row: Row = { ...tags, valid, reasons: reasons.join('; '), checkpoint_started_at: cp?.startedAt ?? null, checkpoint_ms: cp?.ms ?? null,
-      checkpoint_redo_lsn: cp?.ok ? cp.after.redo : null };
-    if (m && r.verification) {
+      checkpoint_redo_lsn: cp?.ok === true ? cp.after?.redo ?? null : null };
+    if (hasMeasurementStats(m) && hasVerificationShape(r.verification) && hasStatementFields(stats)) {
+      const top = topLevel(stats);
       const a = m.accepted, sum = (f: (s: Statement) => number) => top.reduce((t, s) => t + f(s), 0);
-      Object.assign(row, { accepted: a, errors: m.load.errors, dropped: m.load.dropped, warm_accepted: r.warmup?.accepted ?? null,
+      Object.assign(row, { accepted: a, errors: m.load.errors, dropped: m.load.dropped, warm_accepted: hasLoadCounts(r.warmup) ? r.warmup.accepted : null,
         exec_us_per_send: perSend(1000 * sum(s => s.total_exec_time), a), sql_per_send: perSend(sum(s => s.calls), a),
         db_cpu_us_per_send: perSend(m.cpuUsec, a),
         wal_bytes_per_send: perSend(m.walBytes, a),
@@ -135,11 +148,14 @@ export function analyze(manifest: Manifest, read: (w: Window) => { result: Resul
   const arm = ['phase', 'shape', 'arm'], window = ['phase', 'shape', 'round'], stmt = ['toplevel', 'query'];
   const deltas = pairs(good, window, METRICS);
   const loadDeltas = pairs(good, window, LOAD);
-  const validIds = new Set(rows.filter(r => r.valid).map(r => r.id));
   const suppressed = (phase: unknown, shape: unknown) => {
     if (manifest.smoke) return 'suppressed: smoke run (not a complete square)';
     const square = plan.filter(w => w.phase === phase && w.shape === shape);
-    return square.every(w => validIds.has(w.id)) && balanced(square) ? null : 'suppressed: not a complete balanced square of valid windows';
+    const actual = good.filter(row => row.phase === phase && row.shape === shape);
+    const complete = actual.length === square.length && square.every(w =>
+      actual.filter(row => row.id === w.id && row.position === w.position && row.positions === w.order.length
+        && row.round === w.round && row.arm === w.arm && row.order === w.order.join('>')).length === 1);
+    return complete && balanced(square) ? null : 'suppressed: not a complete balanced square of valid windows';
   };
   const statementDeltas = pairs(statements, [...window, ...stmt], STATEMENT_METRICS);
   const tables: Tables = {

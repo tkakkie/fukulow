@@ -210,15 +210,16 @@ function buildSeed(arm: string) {
 const dropSeed = (arm: string) => psql('postgres', `DROP DATABASE seed_${arm};`, `drop ${arm} seed`);
 
 type MeasuredWindow = { accepted: number; load: Load; controlBefore: Control; controlAfter: Control; cpuUsec: number; walBytes: number;
-  statWal: Wal; statementInfo: unknown };
+  statWal: Wal; statementInfo: { dealloc: number } };
+type Verification = { integrity: Integrity; shapeAfter: Shape; seeded: number; expected: number };
 const db = 'diag';
-type Decided = WindowResult<MeasuredWindow, unknown> & { warmup: Load | null };
+type Decided = WindowResult<MeasuredWindow, Verification> & { warmup: Load | null };
 async function sample(w: Window): Promise<Decided> {
   const dir = resolve(output, w.id);
   mkdirSync(dir);
   console.log(`Window ${w.index}`, w.phase, w.round, w.shape, w.arm, `position ${w.position}/${w.order.length}`);
   let app: App | null = null, warmup: Load | null = null, statements: Statement[] = [], decided: Decided | null = null;
-  await runWindow<MeasuredWindow, unknown>(w, {
+  await runWindow<MeasuredWindow, Verification>(w, {
     async prepare() {
       if (w.arm !== 'base') {
         const built = buildSeed(w.arm);

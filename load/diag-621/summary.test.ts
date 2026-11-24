@@ -11,12 +11,12 @@ const armValues = (arm: string): Values => ({ execUs: 100 + (arm === 'base' ? 0 
 
 // Explicit checkpoint: redo record at 0/2, completion at 0/3; the window ends at 0/500.
 const control = (lsn: string): Control => ({ lsn, redo: '0/2', checkpoint: '0/3', time: 't' });
-const explicitWal = { ok: true as const, from: '0/2', to: '0/500', records: [{ lsn: '0/2', type: 'CHECKPOINT_REDO' }, { lsn: '0/3', type: 'CHECKPOINT_ONLINE' }] };
+const explicitWal = { ok: true as const, from: '0/1', to: '0/500', records: [{ lsn: '0/2', type: 'CHECKPOINT_REDO' }, { lsn: '0/3', type: 'CHECKPOINT_ONLINE' }] };
 
 function fixture(w: Window, v: Values, o: Partial<Result> = {}): { result: Result; statements: Statement[] } {
   const load = { accepted, attempts: accepted, iterations: accepted, errors: 0, dropped: 0 };
   return {
-    result: { id: w.id, valid: true, reasons: [], checkpoint: { ok: true, startedAt: 's', ms: 40 + w.position, before: control('0/1'), after: control('0/1') },
+    result: { id: w.id, valid: true, reasons: [], checkpoint: { ok: true, startedAt: 's', ms: 40 + w.position, before: control('0/1'), after: control('0/4') },
       warmup: { ...load, accepted: 750, attempts: 750, iterations: 750 }, walCheckpoints: explicitWal,
       measured: { accepted, load, controlBefore: control('0/4'), controlAfter: control('0/500'), cpuUsec: v.cpuUs * accepted, walBytes: v.walBytes * accepted,
         statWal: { records: 16 * accepted, fpi: v.statFpi * accepted, bytes: v.statWal * accepted }, statementInfo: { dealloc: 0 } },
@@ -28,7 +28,11 @@ function fixture(w: Window, v: Values, o: Partial<Result> = {}): { result: Resul
     ],
   };
 }
-const manifest = (smoke = false): Manifest => ({ smoke, windows: windows(smoke), c2Compatibility: { cases: 1400, mismatches: 0 } });
+function manifest(smoke = false, invalid?: { id: string; reasons: string[] }): Manifest {
+  const plan = windows(smoke);
+  const results = plan.map(({ id }) => id === invalid?.id ? { ...invalid, valid: false } : { id, valid: true, reasons: [] });
+  return { smoke, windows: plan, results, c2Compatibility: { cases: 1400, mismatches: 0 } };
+}
 
 test('FPI, WAL, DB CPU and executor time are separate families with separate per-window columns and sections', () => {
   const all = Object.values(FAMILIES).flat();
@@ -77,7 +81,7 @@ test('the order-position effect is estimated from the balanced design', () => {
 
 test('INVALID windows are listed, fail the summary and are never paired', () => {
   const bad = windows(false).find(w => w.phase === 'C1' && w.round === 1 && w.shape === 'many-17' && w.arm === 'base')!;
-  const r = analyze(manifest(), w => w.id === bad.id
+  const r = analyze(manifest(false, { id: bad.id, reasons: ['checkpoint: boom'] }), w => w.id === bad.id
     ? { result: { ...fixture(w, armValues(w.arm)).result, valid: false, reasons: ['checkpoint: boom'], measured: null, verification: null }, statements: [] }
     : fixture(w, armValues(w.arm)));
   assert.equal(r.ok, false);
@@ -103,14 +107,14 @@ test('a window recorded valid without checkpoint, warm-up or statement evidence 
   const plan = windows(false);
   const cases: [(f: ReturnType<typeof fixture>) => void, string][] = [
     [f => { f.result.checkpoint = null; }, 'checkpoint evidence missing'],
-    [f => { f.result.warmup = null; }, 'warm-up evidence missing'],
+    [f => { f.result.warmup = null; }, 'warm-up evidence missing or malformed'],
     [f => { f.statements = []; }, 'statement evidence missing'],
     [f => { f.statements = f.statements.filter(s => s.query === 'SELECT 1'); }, 'statement evidence missing'],
     [f => { f.result.walCheckpoints = null; }, 'checkpoint WAL evidence missing'],
     [f => { f.result.walCheckpoints = { ...explicitWal, records: [...explicitWal.records, { lsn: '0/400', type: 'CHECKPOINT_REDO' }] }; },
       'another checkpoint started or completed between the explicit checkpoint and the end of the window'],
     [f => { f.result.measured = null; }, 'measurement missing'],
-    [f => { f.result.verification = null; }, 'integrity evidence missing'],
+    [f => { f.result.verification = null; }, 'integrity evidence missing or malformed'],
   ];
   for (const [mutate, reason] of cases) {
     const r = analyze(manifest(), w => { const f = fixture(w, armValues(w.arm)); if (w.id === plan[0].id) mutate(f); return f; });
@@ -121,9 +125,56 @@ test('a window recorded valid without checkpoint, warm-up or statement evidence 
   }
 });
 
+function assertPartialEvidenceInvalid(overrides: Partial<Result>, reason: string) {
+  const m = manifest();
+  const [bad] = m.windows;
+  const r = analyze(m, w => fixture(w, armValues(w.arm), w.id === bad.id ? overrides : {}));
+  assert.equal(r.tables.windows.find(row => row.id === bad.id)?.valid, false);
+  assert.deepEqual(r.invalid, [{ id: bad.id, reasons: [reason] }]);
+}
+
+test('empty warm-up counts make the window INVALID', () => {
+  assertPartialEvidenceInvalid({ warmup: {} as NonNullable<Result['warmup']> }, 'warm-up evidence missing or malformed');
+});
+
+test('a missing verified field makes the window INVALID', () => {
+  const verification = { shapeAfter: { heap_bytes: 8192, index_bytes: 4096 } } as NonNullable<Result['verification']>;
+  assertPartialEvidenceInvalid({ verification }, 'integrity verification failed');
+});
+
+test('duplicate checkpoint redo with no completion record makes the window INVALID', () => {
+  assertPartialEvidenceInvalid({ walCheckpoints: { ...explicitWal, records: [explicitWal.records[0], explicitWal.records[0]] } },
+    'explicit checkpoint records not found exactly once in WAL');
+});
+
+test('an INVALID manifest decision excludes a valid result from pairs', () => {
+  const [bad] = windows(false);
+  const m = manifest(false, { id: bad.id, reasons: ['checkpoint: boom'] });
+  const r = analyze(m, w => fixture(w, armValues(w.arm)));
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.invalid, [{ id: bad.id, reasons: ['manifest and result decisions conflict'] }]);
+  assert.equal(r.tables['paired-deltas'].some(x => x.phase === bad.phase && x.shape === bad.shape && x.round === bad.round), false);
+});
+
+test('missing or conflicting manifest decisions exclude otherwise valid windows', () => {
+  const m = manifest();
+  const [missing, duplicate, wrongId, wrongReasons] = m.windows;
+  m.results = m.results!.filter(d => d.id !== missing.id);
+  m.results.push({ id: duplicate.id, valid: true, reasons: [] });
+  m.results.find(d => d.id === wrongReasons.id)!.reasons = ['unexpected reason'];
+  const r = analyze(m, w => fixture(w, armValues(w.arm), w.id === wrongId.id ? { id: missing.id } : {}));
+  assert.deepEqual(r.invalid, [
+    { id: missing.id, reasons: ['manifest decision missing'] },
+    { id: duplicate.id, reasons: ['manifest decision duplicated or malformed'] },
+    { id: wrongId.id, reasons: ['manifest and result decisions conflict'] },
+    { id: wrongReasons.id, reasons: ['manifest and result decisions conflict'] },
+  ]);
+  assert.equal(r.tables['paired-deltas'].some(x => x.phase === missing.phase && x.shape === missing.shape && x.round === missing.round), false);
+});
+
 test('a window the runner recorded INVALID keeps its recorded reasons; one recorded valid passes unchanged', () => {
   const [w] = windows(false);
-  const r = analyze(manifest(), x => x.id === w.id
+  const r = analyze(manifest(false, { id: w.id, reasons: ['k6 counts do not reconcile'] }), x => x.id === w.id
     ? { ...fixture(x, armValues(x.arm)), result: { ...fixture(x, armValues(x.arm)).result, valid: false, reasons: ['k6 counts do not reconcile'] } }
     : fixture(x, armValues(x.arm)));
   assert.deepEqual(r.invalid, [{ id: w.id, reasons: ['k6 counts do not reconcile'] }]);
@@ -160,6 +211,21 @@ test('the position effect is suppressed for smoke runs and for a phase and shape
     assert.equal(x.range, null);
     assert.equal(x.note, 'suppressed: smoke run (not a complete square)');
   }
+});
+
+test('duplicate manifest window rows suppress the position estimate for their phase and shape', () => {
+  const m = manifest();
+  const [first] = m.windows;
+  m.windows.push({ ...first });
+  const r = analyze(m, w => fixture(w, { ...armValues(w.arm), cpuUs: armValues(w.arm).cpuUs + (w.round === 1 ? 24 : 0) }));
+  assert.ok(r.problems.includes('recorded window order differs from the plan'));
+  const effects = r.tables['position-effects'].filter(x => x.phase === first.phase && x.shape === first.shape);
+  assert.equal(effects.length, METRICS.length);
+  for (const e of effects) {
+    assert.equal(e.range, null);
+    assert.equal(e.note, 'suppressed: not a complete balanced square of valid windows');
+  }
+  assert.ok(r.tables['position-effects'].some(x => x.phase === first.phase && x.shape !== first.shape && x.note === null));
 });
 
 test('load accounting: accepted sends, errors and dropped iterations per arm and paired against base', () => {
