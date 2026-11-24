@@ -190,12 +190,13 @@ export async function checkVerifiedTls(port: number, root: string, untrustedCa: 
   return verified.serial
 }
 
-export function checkReuse(before: { serial: string, orders: number, accounts: number }, after: { serial: string, orders: number, accounts: number }) {
-  assert.ok(before.orders > 0 && before.accounts > 0, 'CA observation must be active')
+export type ReuseObservation = { serial: string, orders: number, accounts: number, validations: number }
+
+export function checkReuse(before: ReuseObservation, after: ReuseObservation) {
+  assert.ok(before.orders > 0 && before.accounts > 0 && before.validations > 0, 'CA observation must be active')
   assert.deepEqual(after, before, 'restart/recreation must reuse certificate and account without a new order')
 }
 
-type ReuseObservation = { serial: string, orders: number, accounts: number, validations: number }
 
 export function lifetimeRenewalNotBefore(cert: { starts: number, expires: number }): number {
   // nginx-acme 0.4.1 state/certificate.rs: half-life minus 2%; time.rs

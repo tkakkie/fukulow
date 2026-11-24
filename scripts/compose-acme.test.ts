@@ -49,6 +49,7 @@ test('certificate reuse requires the same serial and no new CA orders or account
   }
   assert.throws(() => checkReuse({ ...before, orders: 0 }, { ...before, orders: 0 }), /observation must be active/)
   assert.throws(() => checkReuse({ ...before, accounts: 0 }, { ...before, accounts: 0 }), /observation must be active/)
+  assert.throws(() => checkReuse({ ...before, validations: 0 }, { ...before, validations: 0 }), /observation must be active/)
 })
 
 test('CA activity distinguishes existing account lookup from account creation', () => {
@@ -124,17 +125,22 @@ test('full Compose acceptance runs both profiles only on main or manual dispatch
 })
 
 function checkRenewalPebble(dockerfile: string, fixture: string, security: string) {
+  // No `# syntax=` line: it would pull an unpinned BuildKit frontend image.
+  assert.doesNotMatch(dockerfile, /^#\s*syntax=/im)
   const froms = [...dockerfile.matchAll(/^FROM (\S+)/gm)].map(match => match[1])
   assert.deepEqual(froms.length, 2)
   assert.match(froms[0], /^golang:\d+\.\d+\.\d+-bookworm@sha256:[a-f0-9]{64}$/, 'Go builder must pin exact tag and digest')
   // The runtime stage is the pinned release image itself, passed in from pebbleImage.
   assert.equal(froms[1], '${PEBBLE_IMAGE}')
   assert.match(dockerfile, /^ARG PEBBLE_COMMIT=[a-f0-9]{40}$/m)
+  assert.match(dockerfile, /git fetch --quiet --depth 1 https:\/\/github\.com\/letsencrypt\/pebble "\$PEBBLE_COMMIT"/)
   assert.match(dockerfile, /test "\$\(git rev-parse HEAD\)" = "\$PEBBLE_COMMIT"/)
   // Exactly the reuse comparison changes, nothing else.
   assert.match(dockerfile, /s\/rand\.Intn\(100\) > wfe\.authzReusePercent\/rand\.Intn\(100\) >= wfe\.authzReusePercent\//)
   assert.match(dockerfile, /git diff --numstat \| awk '\{ print \$1 \+ \$2 \}'\)" = 2/)
-  assert.match(dockerfile, /GOTOOLCHAIN=local GOFLAGS=-mod=vendor go build/)
+  assert.match(dockerfile, /GOPROXY=off GOTOOLCHAIN=local GOFLAGS=-mod=vendor go build/)
+  // The rebuilt binary replaces the release binary; without this the image runs unpatched Pebble.
+  assert.match(dockerfile, /^COPY --from=build \/pebble \/app$/m)
   assert.match(fixture, /PEBBLE_AUTHZREUSE: "0"/)
   assert.match(fixture, /^\s+image: \$\{ca\}$/m)
   assert.match(security, /if \(lifecycle\) ca = buildRenewalPebble\(directory, run\)/)
@@ -153,6 +159,10 @@ test('the renewal check uses Pebble rebuilt so authorization reuse 0 means never
     ['dockerfile', (text: string) => text.replace(' && test "$(git rev-parse HEAD)" = "$PEBBLE_COMMIT"', '')],
     ['dockerfile', (text: string) => text.replace('>= wfe.authzReusePercent/', '> wfe.authzReusePercent/')],
     ['dockerfile', (text: string) => text.replace(/ \\\n && test "\$\(git diff --numstat[^\n]*/, '')],
+    ['dockerfile', (text: string) => text.replace('COPY --from=build /pebble /app', '')],
+    ['dockerfile', (text: string) => text.replace('https://github.com/letsencrypt/pebble', 'https://github.com/example/pebble')],
+    ['dockerfile', (text: string) => text.replace('GOPROXY=off ', '')],
+    ['dockerfile', (text: string) => `# syntax=docker/dockerfile:1\n${text}`],
     ['fixture', (text: string) => text.replace('PEBBLE_AUTHZREUSE: "0"', 'PEBBLE_AUTHZREUSE: "1"')],
     ['security', (text: string) => text.replace('if (lifecycle) ca = buildRenewalPebble(directory, run)', '')],
   ] as const) {
