@@ -18,7 +18,7 @@ import { membersAdapter } from './members.svelte'
 import { channelMembersAdapter } from './channel-members.svelte'
 import Workspace from './Workspace.svelte'
 import { replyPage } from './topic-test-helpers'
-import { buttonsByText, installMiniDom, MiniDomEvent, MiniElement, queryAll } from './svelte-dom-test-helpers'
+import { buttonsByText, installMiniDom, MiniElement, queryAll } from './svelte-dom-test-helpers'
 
 const dom = installMiniDom()
 
@@ -65,18 +65,15 @@ describe('Guest Workspace member panels and author resolution', () => {
     await settle()
     shared = true // Remote grant changes emit no channel_access_lost.
     expect(memberController.get().members).toEqual([self])
-    const details = host.querySelector('details') as MiniElement & { open: boolean }
+    const details = host.querySelector('details.member-list') as MiniElement & { open: boolean }
     details.open = true
-    details.dispatchEvent(new MiniDomEvent('toggle'))
     await settle()
     expect(memberController.get().members).toEqual([self, peer])
     expect(details.textContent).toContain(peer.name)
     details.open = false
-    details.dispatchEvent(new MiniDomEvent('toggle'))
     await settle()
     shared = false
     details.open = true
-    details.dispatchEvent(new MiniDomEvent('toggle'))
     await settle()
     expect(memberController.get().members).toEqual([self])
     shared = true

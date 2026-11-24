@@ -1,4 +1,5 @@
 use super::*;
+use crate::lock_ignoring_poison;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex, Weak},
@@ -82,10 +83,7 @@ pub(crate) struct AccessWatch {
 impl Drop for AccessWatch {
     fn drop(&mut self) {
         if let Some(registry) = self.registry.upgrade() {
-            registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&self.id);
+            lock_ignoring_poison(&registry).remove(&self.id);
         }
     }
 }
@@ -143,10 +141,7 @@ impl AccessChanges {
         });
         let id = Uuid::new_v4();
         let changed = entry.status.subscribe();
-        self.entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, entry.clone());
+        lock_ignoring_poison(&self.entries).insert(id, entry.clone());
         let result = AccessWatch {
             id,
             registry: Arc::downgrade(&self.entries),
@@ -161,10 +156,7 @@ impl AccessChanges {
     }
     pub(crate) fn observe_loss(&self, organization: Uuid, channel: Uuid, member: (Uuid, i64)) {
         self.activity.retire(organization, member.0);
-        for entry in self
-            .entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        for entry in lock_ignoring_poison(&self.entries)
             .snapshot(auth::SubscriptionScope::Channel(organization, channel))
         {
             if entry.organization == organization
@@ -190,10 +182,7 @@ impl auth::SubscriptionRecheck for AccessChanges {
         scope: auth::SubscriptionScope,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>
     {
-        let entries: Vec<_> = self
-            .entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let entries: Vec<_> = lock_ignoring_poison(&self.entries)
             .snapshot(scope)
             .into_iter()
             .filter(|e| *e.status.borrow() == 0)
@@ -204,12 +193,7 @@ impl auth::SubscriptionRecheck for AccessChanges {
         })
     }
     fn failed(&self, scope: auth::SubscriptionScope) {
-        for entry in self
-            .entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .snapshot(scope)
-        {
+        for entry in lock_ignoring_poison(&self.entries).snapshot(scope) {
             entry.status.send_if_modified(|status| {
                 if *status == 0 {
                     *status = 2;
@@ -231,7 +215,7 @@ async fn check_entries(
     for (entry, (visible, grant, current)) in entries.iter().zip(rows) {
         // A public shortcut is continuous without its redundant grant. A
         // subscription originally dependent on a grant retains its lifetime.
-        let mut captured = entry.grant.lock().unwrap_or_else(|e| e.into_inner());
+        let mut captured = lock_ignoring_poison(&entry.grant);
         let lost = !visible || (captured.is_some() && grant.is_some() && *captured != grant);
         if !current {
             activity.retire_membership(entry.organization, entry.member);

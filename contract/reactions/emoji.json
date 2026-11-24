@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "emoji": [
+    {
+      "emoji": "👍",
+      "label": "いいね"
+    },
+    {
+      "emoji": "👎",
+      "label": "よくない"
+    },
+    {
+      "emoji": "❤️",
+      "label": "ハート"
+    },
+    {
+      "emoji": "😂",
+      "label": "笑い"
+    },
+    {
+      "emoji": "😮",
+      "label": "驚き"
+    },
+    {
+      "emoji": "😢",
+      "label": "悲しい"
+    },
+    {
+      "emoji": "🎉",
+      "label": "お祝い"
+    },
+    {
+      "emoji": "🙏",
+      "label": "ありがとう"
+    },
+    {
+      "emoji": "👀",
+      "label": "見ています"
+    },
+    {
+      "emoji": "✅",
+      "label": "完了"
+    },
+    {
+      "emoji": "❌",
+      "label": "だめ"
+    },
+    {
+      "emoji": "🤔",
+      "label": "考え中"
+    },
+    {
+      "emoji": "👏",
+      "label": "拍手"
+    },
+    {
+      "emoji": "🙌",
+      "label": "やったね"
+    },
+    {
+      "emoji": "🔥",
+      "label": "すごい"
+    },
+    {
+      "emoji": "💯",
+      "label": "満点"
+    },
+    {
+      "emoji": "🚀",
+      "label": "リリース"
+    },
+    {
+      "emoji": "⭐",
+      "label": "スター"
+    },
+    {
+      "emoji": "⚠️",
+      "label": "注意"
+    },
+    {
+      "emoji": "🆗",
+      "label": "OK"
+    }
+  ]
+}

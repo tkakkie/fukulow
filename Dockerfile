@@ -36,6 +36,7 @@ COPY web/package*.json ./
 RUN npm ci
 # The build's bundle-licenses plugin checks bundled npm packages against this allow-list (#807).
 COPY deny.toml /app/deny.toml
+COPY contract/reactions/emoji.json /app/contract/reactions/emoji.json
 COPY web/ ./
 COPY --from=wasm /app/web/wasm wasm/
 # The pinned Rust stage already generated the artifact.
@@ -65,6 +66,7 @@ RUN mkdir -p server/src server/test-macros/src api-types/src client-core/src && 
 COPY server/ server/
 COPY api-types/ api-types/
 COPY client-core/ client-core/
+COPY contract/reactions/emoji.json contract/reactions/emoji.json
 COPY deploy/db-*.sql deploy/
 RUN find server/src api-types/src client-core/src -name "*.rs" -exec touch {} +
 COPY --from=web /app/web/dist web/dist

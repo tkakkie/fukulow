@@ -42,7 +42,7 @@ impl Capacity {
     }
 
     fn reserve(self: &Arc<Self>, entry: &Arc<Entry>, id: u64, expires: Instant) -> Option<Permit> {
-        let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reservations = lock_ignoring_poison(&self.reservations);
         if reservations.owners.len() >= self.limit {
             return None;
         }
@@ -59,17 +59,13 @@ impl Capacity {
     }
 
     fn expired(&self, now: Instant) -> Option<(HoldKey, Weak<Entry>)> {
-        let reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        let reservations = lock_ignoring_poison(&self.reservations);
         let (&key, entry) = reservations.owners.first_key_value()?;
         (key.0 <= now).then(|| (key, entry.clone()))
     }
 
     fn release(&self, key: HoldKey) {
-        self.reservations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .owners
-            .remove(&key);
+        lock_ignoring_poison(&self.reservations).owners.remove(&key);
     }
 
     pub(super) fn count_retry_attempt(&self) {
@@ -77,7 +73,7 @@ impl Capacity {
     }
 
     fn sample(&self) -> RevocationHoldCounts {
-        let reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        let reservations = lock_ignoring_poison(&self.reservations);
         RevocationHoldCounts {
             active_holds: reservations.owners.len(),
             high_water_mark: reservations.high_water_mark,
@@ -108,7 +104,7 @@ impl Drop for Permit {
 
 pub(super) fn lock_for_admission(entry: &Arc<Entry>) -> (MutexGuard<'_, Buffer>, Instant) {
     loop {
-        let mut b = entry.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut b = lock_ignoring_poison(&entry.buffer);
         let now = Instant::now();
         let Buffer {
             holds, revocations, ..
@@ -122,7 +118,7 @@ pub(super) fn lock_for_admission(entry: &Arc<Entry>) -> (MutexGuard<'_, Buffer>,
         // admitting more holds, without nesting buffer locks or holding the index lock.
         drop(b);
         if let Some(owner) = owner.upgrade() {
-            let mut b = owner.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut b = lock_ignoring_poison(&owner.buffer);
             let Buffer {
                 holds, revocations, ..
             } = &mut *b;

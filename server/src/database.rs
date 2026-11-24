@@ -16,6 +16,8 @@ pub(crate) use stats::{acquire, begin};
 #[cfg(test)]
 pub(crate) use stats::{test_acquisitions, test_inherit_acquisitions};
 
+pub(crate) const LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '5s'";
+
 pub(crate) const READY_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) const READY_RETURN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
@@ -223,7 +225,7 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
 
 pub async fn grants(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SET LOCAL lock_timeout = '5s'")
+    sqlx::query(LOCK_TIMEOUT_SQL)
         .execute(&mut *transaction)
         .await?;
     sqlx::raw_sql(include_str!("../../deploy/db-grants.sql"))
@@ -246,7 +248,7 @@ pub async fn roles(pool: &PgPool, password: &str) -> Result<(), Box<dyn std::err
 
 async fn update_roles(pool: &PgPool, password: &str) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SET LOCAL lock_timeout = '5s'")
+    sqlx::query(LOCK_TIMEOUT_SQL)
         .execute(&mut *transaction)
         .await?;
     sqlx::raw_sql(include_str!("../../deploy/db-role-settings.sql"))
