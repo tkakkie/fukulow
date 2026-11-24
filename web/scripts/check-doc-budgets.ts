@@ -40,7 +40,7 @@ export const BUDGETS_KIB = new Map<string, number>([
 
 // #562 final size (8def9c2: 636,734 bytes over 29 files) plus 10%, rounded up to whole KiB. Fixed, never recomputed per PR (#603).
 export const TOTAL_BUDGET_KIB = 684
-export const RAISE_LABEL = 'docs:budget-raise'
+const RAISE_LABEL = 'docs:budget-raise'
 const RAISE_RULE = `needs the ${RAISE_LABEL} label and a linked maintainer approval (docs/workflow.md §13)`
 
 export function checkDocBudgets(

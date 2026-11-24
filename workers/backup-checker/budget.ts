@@ -2,8 +2,8 @@ import type { DurableStorage, StorageTransaction } from './bindings.ts'
 
 // Three external attempts and eighty internal operations remain for reporting,
 // fenced state persistence and lease release after normal work stops.
-export const externalLimit = 12, failureAttempts = 3
-export const internalLimit = 800, internalWorkLimit = 720
+const externalLimit = 12, failureAttempts = 3
+const internalLimit = 800, internalWorkLimit = 720
 export class RunBudget {
   externalUsed = 0
   internalUsed = 0

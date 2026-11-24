@@ -2,7 +2,6 @@
 // Usage: node web/scripts/aggregate-wasm-core.ts <dir> [--seed 466]
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
 
 export type Arm = 'B' | 'W' | 'R'
 export type MetricConfig = { thresholdPct: number; minDetectableFloor: number; baselineSpreadFloor: number }
@@ -29,7 +28,7 @@ export function medianOf(values: number[]): number {
   return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
 }
 
-export const summarizeRounds = (values: number[]): ArmSummary =>
+const summarizeRounds = (values: number[]): ArmSummary =>
   values.length === 0 ? { median: 0, min: 0, max: 0, rounds: [] }
     : { median: medianOf(values), min: Math.min(...values), max: Math.max(...values), rounds: [...values] }
 
@@ -45,7 +44,7 @@ export function olsSlope(xs: number[], ys: number[]): number {
 }
 
 /** Deterministic Mulberry32 PRNG. */
-export function createRng(seed = 466): () => number {
+function createRng(seed = 466): () => number {
   let state = seed >>> 0
   return () => {
     state = (state + 0x6d2b79f5) >>> 0
@@ -347,7 +346,7 @@ export function aggregateDirectory(dir: string, seed = 466, roundCounts: readonl
   return summary
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (import.meta.main) {
   const args = process.argv.slice(2), dir = args.find((a) => !a.startsWith('--'))
   if (!dir) { console.error('Usage: node web/scripts/aggregate-wasm-core.ts <dir> [--seed 466]'); process.exit(1) }
   const seedIdx = args.indexOf('--seed')

@@ -4,10 +4,9 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 
 export const imageRepository = 'ghcr.io/tkakkie/fukulow'
-export const sourceUrl = 'https://github.com/tkakkie/fukulow'
+const sourceUrl = 'https://github.com/tkakkie/fukulow'
 const manifestType = 'application/vnd.oci.image.manifest.v1+json'
 export const indexType = 'application/vnd.oci.image.index.v1+json'
 // UID/GID of the Dockerfile's fukulow user; the release must never run as root.
@@ -69,7 +68,7 @@ export function extractLayout(archive: string): Layout {
   }
 }
 
-export function ociLabels(expected: Expected): Record<string, string> {
+function ociLabels(expected: Expected): Record<string, string> {
   return { 'org.opencontainers.image.source': sourceUrl, 'org.opencontainers.image.version': expected.version,
     'org.opencontainers.image.revision': expected.revision, 'org.opencontainers.image.licenses': expected.license }
 }
@@ -104,7 +103,7 @@ export function workspaceLicense(cargoToml: string): string | undefined {
   return section && /^license\s*=\s*"([^"]+)"\s*$/m.exec(section)?.[1]
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (import.meta.main) {
   const [command, archive, architecture, version, revision, license] = process.argv.slice(2)
   if (command === 'license') {
     const value = workspaceLicense(readFileSync('Cargo.toml', 'utf8'))

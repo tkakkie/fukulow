@@ -1,6 +1,5 @@
 // Deletes superseded rust-cache keys on main (#926); dry run unless --apply.
 import { execFileSync } from 'node:child_process'
-import { pathToFileURL } from 'node:url'
 
 export type CacheEntry = { id: number, key: string, ref: string, size_in_bytes: number,
   created_at: string, last_accessed_at: string }
@@ -57,4 +56,4 @@ function run(argv: string[]) {
   if (argv.includes('--apply')) prune(gh, repo, prunable, line => console.log(line))
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) run(process.argv.slice(2))
+if (import.meta.main) run(process.argv.slice(2))

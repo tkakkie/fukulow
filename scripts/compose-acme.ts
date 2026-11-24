@@ -152,7 +152,7 @@ export type VerifiedTls = { authorized: boolean, error?: string, serial?: string
 // Full verification: chain to `ca` and hostname match for `testDomain`
 // (rejectUnauthorized + Node's default checkServerIdentity). `identity`
 // overrides only the name checked, to prove the hostname check is active.
-export async function verifiedCertificate(port: number, ca: string, identity = testDomain): Promise<VerifiedTls> {
+async function verifiedCertificate(port: number, ca: string, identity = testDomain): Promise<VerifiedTls> {
   return new Promise(resolve => {
     const socket = connect({ host: '127.0.0.1', port, servername: testDomain, ca, rejectUnauthorized: true,
       checkServerIdentity: (_host, cert) => checkServerIdentity(identity, cert) })

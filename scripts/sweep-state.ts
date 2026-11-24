@@ -68,7 +68,7 @@ function listAll<T extends Listed>(gh: Gh, kind: 'pr' | 'issue', fields: string)
 }
 
 // Green needs every check the main ruleset requires; reported checks alone are not enough.
-export function ciState(view: Viewed, listedHead: string, required: string[]): string {
+function ciState(view: Viewed, listedHead: string, required: string[]): string {
   if (view.headRefOid !== listedHead) return 'head-changed'
   const checks = view.statusCheckRollup ?? []
   const reported = new Set(checks.map(c => c.name ?? c.context))
@@ -79,7 +79,7 @@ export function ciState(view: Viewed, listedHead: string, required: string[]): s
   return checks.every(c => ['SUCCESS', 'SKIPPED', 'NEUTRAL'].includes(result(c))) ? 'green' : 'unknown'
 }
 
-export function copilotState(view: Viewed): string {
+function copilotState(view: Viewed): string {
   const copilot = (name = '') => /copilot/i.test(name)
   // A pending request wins over an older finished review (re-requested after a push).
   if (view.reviewRequests.some(r => copilot(r.login) || copilot(r.name))) return 'pending'

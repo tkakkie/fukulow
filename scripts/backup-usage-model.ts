@@ -6,7 +6,7 @@ export interface AnalyticsClient {
 export interface UsageCache { month: string; days: Record<string, OperationUsage> }
 export interface UsageState { usageCache?: UsageCache }
 export const analyticsLag = 6 * 60 * 60 * 1000
-export const uncachedDaysPerRun = 3
+const uncachedDaysPerRun = 3
 export function validUsageCache(value: unknown): value is UsageCache {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join() !== 'days,month') return false
   const cache = value as UsageCache
