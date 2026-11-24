@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test'
-import { secretSafe } from './helpers.ts'
+import { ensureSetup, secretSafe } from './helpers.ts'
 import type { Channel, Member } from '../src/api-schema.d.ts'
 
-// auth.spec.ts bootstraps the shared disposable database before this file.
 test('Owner creates an Invite link; new Guest accepts, signs in and sees no implicit public Channels', async ({ page, browser }) => {
+  await ensureSetup(page.request)
   await page.goto('/')
   await page.getByLabel('メールアドレス', { exact: true }).fill('owner@example.com')
   await page.getByLabel('パスワード', { exact: true }).fill('correct horse battery')
@@ -12,7 +12,7 @@ test('Owner creates an Invite link; new Guest accepts, signs in and sees no impl
   await page.getByLabel('チャンネル名', { exact: true }).fill('Members public control')
   await page.getByRole('button', { name: 'チャンネルを作成', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Members public control' })).toBeVisible()
-  await page.locator('summary').click()
+  await page.locator('details.member-list > summary').click()
   const email = `guest-${crypto.randomUUID()}@example.invalid`
   await page.getByLabel('メールアドレス', { exact: true }).fill(email)
   await page.getByLabel('招待するロール', { exact: true }).selectOption('guest')
@@ -41,7 +41,7 @@ test('Owner creates an Invite link; new Guest accepts, signs in and sees no impl
     await expect(guest.getByRole('heading', { name: 'Members public control' })).toHaveCount(0)
     await expect(guest.getByRole('button', { name: 'チャンネルを作成' })).toHaveCount(0)
     await expect(guest.getByRole('group', { name: '公開範囲' })).toHaveCount(0)
-    await guest.locator('summary').click()
+    await guest.locator('details.member-list > summary').click()
     await expect(guest.getByText('招待ゲスト（ゲスト）')).toBeVisible()
     const directory = guest.locator('.member-list')
     await expect(directory.locator('li')).toHaveCount(1)
@@ -65,16 +65,16 @@ test('Owner creates an Invite link; new Guest accepts, signs in and sees no impl
     await expect(guest.getByRole('heading', { name: 'Members public control', exact: true })).toBeVisible()
     const message = guest.locator('article').filter({ hasText: '共有前の過去の投稿315' })
     await expect(message.locator('.ui-message-row__sender')).toHaveText('Alice')
-    await guest.locator('summary').click()
+    await guest.locator('details.member-list > summary').click()
     // Public access without an explicit grant does not make Alice shared.
     await expect(directory.locator('li')).toHaveCount(1)
     expect((await secretSafe(() => page.request.post(grants, { data: { member_id: ownerId } }))).ok()).toBe(true)
-    await guest.locator('summary').click()
-    await guest.locator('summary').click()
+    await guest.locator('details.member-list > summary').click()
+    await guest.locator('details.member-list > summary').click()
     await expect(directory).toContainText('Alice（オーナー）')
     expect((await secretSafe(() => page.request.delete(`${grants}/${ownerId}`))).ok()).toBe(true)
-    await guest.locator('summary').click()
-    await guest.locator('summary').click()
+    await guest.locator('details.member-list > summary').click()
+    await guest.locator('details.member-list > summary').click()
     await expect(directory.locator('li')).toHaveCount(1)
     await expect(directory).not.toContainText('Alice')
     await expect(message.locator('.ui-message-row__sender')).toHaveText('Alice')

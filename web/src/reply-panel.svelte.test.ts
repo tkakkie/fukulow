@@ -133,9 +133,6 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      get innerWidth() {
-        return dom.win.innerWidth
-      },
       location: {
         get href() {
           return href
@@ -365,7 +362,6 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: {
         get href() {
           return href
@@ -559,7 +555,6 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: {
         get href() {
           return href
@@ -794,7 +789,6 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     let href = `/o/org-1/c/c1?panel=reply:${rDesc2.id}`
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: {
         get href() {
           return href
@@ -965,7 +959,6 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     const pushSpy = vi.fn()
     const replaceSpy = vi.fn()
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: {
         get href() {
           return href
@@ -1160,7 +1153,6 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: {
         get href() {
           return href
@@ -1324,7 +1316,6 @@ describe('ReplyPanel states, paging, focus and scroll', () => {
     let href = `/o/org-1/c/c1?panel=reply:${topicRoot.id}`
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: {
         get href() {
           return href

@@ -1,3 +1,4 @@
+use crate::lock_ignoring_poison;
 use std::{
     collections::HashMap,
     future::{Future, poll_fn},
@@ -84,36 +85,27 @@ impl Failures {
     }
 
     pub(super) fn signal(&self, key: ChannelKey) {
-        let registry = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let registry = lock_ignoring_poison(&self.0);
         if let Some(channel) = registry.get(&key) {
             channel.signal.fail();
         }
     }
 
     pub(super) fn subscribe(&self, key: ChannelKey, watch: &FailureWatch) {
-        let mut registry = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut registry = lock_ignoring_poison(&self.0);
         let channel = registry.entry(key).or_default();
         // Old subscribers retain the latched failure; later subscribers start fresh.
         if channel.signal.failed.load(Ordering::SeqCst) {
             channel.signal = Arc::default();
         }
         channel.subscribers += 1;
-        watch
-            .signals
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.1, channel.signal.clone());
+        lock_ignoring_poison(&watch.signals).insert(key.1, channel.signal.clone());
         watch.subscriptions_changed.send_replace(());
     }
 
     pub(super) fn unsubscribe(&self, key: ChannelKey, watch: &FailureWatch) {
-        let mut registry = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(signal) = watch
-            .signals
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&key.1)
-        {
+        let mut registry = lock_ignoring_poison(&self.0);
+        if let Some(signal) = lock_ignoring_poison(&watch.signals).remove(&key.1) {
             // Unsubscribe must not erase a failure that preceded it.
             if signal.failed.load(Ordering::SeqCst) {
                 watch.failed.store(true, Ordering::SeqCst);
@@ -141,10 +133,7 @@ impl FailureWatch {
 
     pub(crate) fn is_failed(&self) -> bool {
         self.failed.load(Ordering::SeqCst)
-            || self
-                .signals
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+            || lock_ignoring_poison(&self.signals)
                 .values()
                 .any(|signal| signal.failed.load(Ordering::SeqCst))
     }
@@ -158,10 +147,7 @@ impl FailureWatch {
             if self.is_failed() {
                 return;
             }
-            let signals: Vec<_> = self
-                .signals
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+            let signals: Vec<_> = lock_ignoring_poison(&self.signals)
                 .values()
                 .cloned()
                 .collect();

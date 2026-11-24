@@ -7,7 +7,7 @@ import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.svelte'
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
-import { restore, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
+import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
 import { getOrganizationMe, isOrganizationUnavailable, type Identity, type Role } from './api'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
@@ -98,8 +98,6 @@ const defaults: AuthDeps = {
     }
   },
 }
-const sessionEndedNotice = 'セッションが終了しました。もう一度ログインしてください。'
-
 /** Account lifetime owns the 401 fence; each Organization selection owns a separate data generation. */
 export function createAuth(deps: AuthDeps = defaults) {
   let view = $state<AuthState>({ screen: 'loading' })
@@ -130,7 +128,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     changes++
   }
   function ended(generation: number) {
-    if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedNotice })
+    if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedMessage })
   }
   async function selectOrganization(id: string) {
     if (view.screen !== 'app') return

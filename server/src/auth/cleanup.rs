@@ -1,3 +1,4 @@
+use crate::lock_ignoring_poison;
 use std::{
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
@@ -40,7 +41,7 @@ impl Default for State {
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
-    state.lock().unwrap_or_else(|poison| poison.into_inner())
+    lock_ignoring_poison(state)
 }
 
 /// Single-flight guard: dropped when the task completes, fails, times out or is cancelled.

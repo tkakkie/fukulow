@@ -244,8 +244,10 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   d.onSignal(signal => abort(signal));
   // The child's exit code; null when it was stopped and its exit was not observed after the bounded
   // stop (its group is checked again at the release, which keeps HOST-BUSY if it still runs).
+  // Each gate and job learns the HOST-BUSY this queue holds, its own name and the launch session, so a
+  // harness can refuse to start outside the launcher.
   const run = async (argv: string[], file: string, job: Job): Promise<number | null> => {
-    const c = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: { ...job.env, FUKULOW_LAUNCH_SESSION: launchSession } });
+    const c = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: { ...job.env, FUKULOW_HOST_BUSY: q.hostBusy, FUKULOW_LAUNCH_JOB: job.name, FUKULOW_LAUNCH_SESSION: launchSession } });
     child = c;
     started.push({ child: c, job });
     let stopRunning = () => {};

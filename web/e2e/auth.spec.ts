@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test'
 import { secretSafe } from './helpers.ts'
 
-// The server and its database are shared and start empty (CI service / fresh local DB),
+// The first file in the run (alphabetical), so its worker's database is still empty
+// (each CI worker has its own; locally a fresh DB),
 // so these tests run serially in state order: not set up -> setup -> set up.
 test.describe.configure({ mode: 'serial' })
 

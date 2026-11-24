@@ -24,7 +24,8 @@ The launcher:
 - waits for an idle host, then claims `HOST-BUSY` and releases it on every exit;
 - runs the preflight (pinned clean tree, Node, containers, platform conditions, free disk) and the job's own gate;
 - captures PostgreSQL logs;
-- runs each job once and writes one `chain.log`.
+- runs each job once and writes one `chain.log`;
+- passes each gate and job `FUKULOW_HOST_BUSY` (the held marker) and `FUKULOW_LAUNCH_JOB` (its name), so a harness can refuse to start outside the launcher.
 - for a job with cooling fields (#796):
   - `requireHost` lists boost, per-CPU boost, platform profile and hwmon fan-control values that must hold before the job; unreadable or different is a STOP;
   - `cooldown` waits until k10temp Tctl is at most `maxTctlC`, and STOPs after `maxWaitSeconds`; every reading goes to `<job>-cooldown.json`;

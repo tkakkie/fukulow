@@ -38,6 +38,7 @@ Write shared web UI rules beyond code and tests (#200), including layout, naviga
 | 600-959px | shown | drawer from rail's チャンネル button; closes on selection or `Esc` | shown | overlays, `min(var(--panel-narrow-max), 100%)` wide |
 | < 600px (phone) | bottom tab bar | its own screen | its own screen | its own full screen |
 
+- Script reads these widths only through `MediaQuery` (`svelte/reactivity`) with the CSS media query strings, from one shared definition (target until #836 merges).
 - When the right panel overlays main, use no scrim and keep main usable and scrollable.
 - Phone (A2-4): one screen at a time (チャンネル list -> view -> panel layer). Header `‹` always goes up one level, replacing the entry if the previous entry is not that parent (§2). Browser/OS Back pops real history: up a level after in-app navigation, possibly out of app from a direct link. Show the bottom tab bar only at the チャンネル list level.
 - At 320 CSS px, cards, dialogs and Composers fit with no horizontal scroll or clipped actions (WCAG 1.4.10). At 200% text zoom all actions remain reachable. Touch targets measure at least `--touch-target` on each axis (phone and other defaults in `web/src/app.css`).
@@ -46,7 +47,7 @@ Write shared web UI rules beyond code and tests (#200), including layout, naviga
 - Sign-out, Account Session replacement and Account switching clear all drafts. Drafts never enter web storage. Reload or browser termination loses them. `beforeunload` prompts for non-empty drafts and pending sends are best effort, especially on phones.
 
 ## 4. Design tokens
-Values in `web/src/app.css` under `:root`, with dark overrides under `prefers-color-scheme: dark` and manual theme (§7). Components use tokens only. No literal colours, radii or font sizes.
+Values in `web/src/app.css` under `:root`; each colour token is declared once with `light-dark()`, and `color-scheme` keeps both the system setting and the manual theme working (§7). Components use tokens only. No literal colours, radii or font sizes.
 
 | Token | Use |
 |---|---|
@@ -72,17 +73,20 @@ Values in `web/src/app.css` under `:root`, with dark overrides under `prefers-co
 - Type: `--font-sans` (Inter for Latin and digits, then CSS fallbacks). Root size in §7, rem scale `--font-size-12` (meta), `--font-size-13`, `--font-size-14`, `--font-size-15` (body), `--font-size-17` (view title), `--font-size-20` (page title). Use `--line-height-message` for Messages. Weights: `--font-weight-regular`, `--font-weight-medium`, `--font-weight-semibold`.
 - Spacing scale: `--space-4`, `--space-8`, `--space-12`, `--space-16`, `--space-24`. Radii: `--radius-8` for rows/inputs, `--radius-10` or `--radius-12` for buttons/chips/Messages, `--radius-16` for regions/Composer and `--radius-avatar` for avatars.
 - Always show `--focus-ring` with `--focus-offset` on `:focus-visible` only.
+- Style state from its ARIA attribute (e.g. `aria-selected`, `aria-current`, `aria-expanded`), never a parallel class (target until #839 merges).
 - Panel slide, hover and badge pop use the `--duration-fast`, `--duration-normal`, `--duration-panel` scale and `--ease-out`. No motion under `prefers-reduced-motion: reduce`.
 
 ## 5. Components and states
 Compose screens from the shared components (one per kind) in `web/src/ui/`: Button (primary, secondary, quiet, icon), Input/Textarea, Chip, Badge (Unread count, @), ListRow (チャンネル, トピック), MessageRow, ReadMarker, TopicSummaryLine, Panel (back/close header, tabs), Dialog, StatusBanner, EmptyState, Skeleton. Give one-off styles a PR reason.
+
+- Use the native element when it provides the behaviour (`<dialog>`, `<details>`, `<form>` submit, `required`); script only the rules in this doc (IME, busy, focus targets). A native element never relaxes §6 or §9.
 
 - `Button` accepts optional `tabindex` (`0 | -1`) and `buttonRef` so composite widgets can exclude secondary pointer buttons from `Tab` while keeping a programmatic return-focus target.
 - `MessageRow` accepts `focusable`, `rovingTabindex` (`0 | -1`), `onrowfocus`, `onrowkeydown`, `onopenreplies(opener)`. Each timeline gives exactly one confirmed row `rovingTabindex={0}` (active, otherwise latest, §9). `Tab` enters without clearing the Composer draft. Row `Enter`/`R` passes `rowRef` as opener; clicking the inline reply Button (`tabindex={-1}`) passes `buttonRef`.
 - `Timeline`, `TopicView` and `ReplyPanel` share `createTimelineScrollController`, `measureTimelineItems`, `handleTimelineContainerScroll` and `applyTimelineScrollAction` from `web/src/timeline-scroll.ts` for pinned tracking, anchoring, own-send scroll to bottom and `新着 n件 ↓` (§8).
 - Sender labels: see §10 for deactivated authors. Use `メンバー` for unknown authors.
 
-Render states consistently everywhere (A2-2).
+Render states consistently everywhere (A2-2). Each state with fixed copy is one component, and views pass only its actions (target until #835 merges).
 
 | State | Shows | Rules |
 |---|---|---|

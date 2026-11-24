@@ -11,7 +11,7 @@ export type SearchResultTarget = {
 
 export type NavigationIntent =
   | { type: 'channel'; organizationId: string; channelId: string }
-  | { type: 'topic'; topicId: string; phone?: boolean }
+  | { type: 'topic'; topicId: string; phone: boolean }
   | { type: 'topic-back' }
   | { type: 'tab'; tab: PanelTab }
   | { type: 'reply'; messageId: string }
@@ -20,7 +20,7 @@ export type NavigationIntent =
   | { type: 'list' }
 export type NavigationFocus = 'composer' | 'topic-summary' | 'heading' | 'tab' | 'reply-composer' | 'opener' | 'list'
 export type NavigationSnapshot = { target: NavigationTarget | null; searchResult?: SearchResultTarget; previousTab: PanelTab | null; focus: NavigationFocus; revision: number }
-export type NavigationBrowser = Pick<Window, 'location' | 'history' | 'innerWidth' | 'addEventListener' | 'removeEventListener'>
+export type NavigationBrowser = Pick<Window, 'location' | 'history' | 'addEventListener' | 'removeEventListener'>
 
 function historyEntry(browser: NavigationBrowser, target: NavigationTarget | null) {
   const state = browser.history.state as { navigationPreviousTab?: PanelTab; searchResult?: SearchResultTarget } | null
@@ -104,7 +104,7 @@ export function createNavigation(browser: NavigationBrowser = window) {
       let previousTab = snapshot.previousTab
       switch (intent.type) {
         case 'channel': target = { organizationId: intent.organizationId, channelId: intent.channelId, topicId: null, panel: old?.panel?.startsWith('reply:') ? null : old?.panel ?? null }; method = 'pushState'; previousTab = null; break
-        case 'topic': target.topicId = intent.topicId; if (intent.phone ?? browser.innerWidth < 600) { target.panel = null; previousTab = null }; method = 'pushState'; break
+        case 'topic': target.topicId = intent.topicId; if (intent.phone) { target.panel = null; previousTab = null }; method = 'pushState'; break
         case 'topic-back': target.topicId = null; focus = 'topic-summary'; break
         case 'tab': method = target.panel ? 'replaceState' : 'pushState'; focus = target.panel ? 'tab' : 'heading'; target.panel = intent.tab; previousTab = null; break
         case 'reply': method = target.panel?.startsWith('reply:') ? 'replaceState' : 'pushState'; if (target.panel && !target.panel.startsWith('reply:')) previousTab = target.panel as PanelTab; target.panel = `reply:${intent.messageId}`; focus = 'reply-composer'; break

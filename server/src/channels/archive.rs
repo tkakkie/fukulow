@@ -145,7 +145,7 @@ async fn update(
     input: UpdateChannelRequest,
 ) -> Result<bool, ApiError> {
     let org = auth.identity.organization.organization_id;
-    sqlx::query("SET LOCAL lock_timeout='5s'")
+    sqlx::query(crate::database::LOCK_TIMEOUT_SQL)
         .execute(&mut *tx)
         .await?;
     auth::members::lock_organization(tx, org).await?;

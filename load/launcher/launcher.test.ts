@@ -184,6 +184,16 @@ test('a failed job ends the queue and is never rerun', async () => {
   assert.equal(w.files.has('/runs/HOST-BUSY'), false);
 });
 
+test('a job that ends with exit 2 (the #870 driver: not a normal finish) ends the queue; the next job never starts', async () => {
+  const w = world({ exits: [2, 0] });
+  const r = await launch(queue(), deps(w));
+  assert.equal(r.outcome, 'stop');
+  assert.deepEqual(r.jobs, [{ name: 'a', exit: 2 }]);
+  assert.equal(w.spawned.length, 1);
+  assert.match(chain(w), /a exited 2; the queue ends \(no rerun\)/);
+  assert.equal(w.files.has('/runs/HOST-BUSY'), false);
+});
+
 test('a signal during a job kills it, keeps HOST-BUSY until it exits, then releases it and starts nothing else', async () => {
   const w = world({ signal: { at: 'job' }, exits: [143, 0] });
   const r = await launch(queue(), deps(w));
@@ -692,4 +702,14 @@ test('a signal during a later job stops only that job; a job that already exited
   assert.equal(r.outcome, 'stop');
   // Job a exited 0 before b started; the abort during b must not reach a's (possibly reused) process group.
   assert.deepEqual(perChild, [[], ['SIGTERM']]);
+});
+
+test('each gate and job is told the HOST-BUSY this queue holds and its own name', async () => {
+  const w = world({ exits: [0, 0, 0] });
+  await launch(queue([job('a', { gate: ['node', 'gate.ts'], env: { X: '1' } }), job('b')]), deps(w));
+  assert.deepEqual(w.envs, [
+    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1' },
+    { X: '1', FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'a', FUKULOW_LAUNCH_SESSION: 'sess-1' },
+    { FUKULOW_HOST_BUSY: '/runs/HOST-BUSY', FUKULOW_LAUNCH_JOB: 'b', FUKULOW_LAUNCH_SESSION: 'sess-1' },
+  ]);
 });

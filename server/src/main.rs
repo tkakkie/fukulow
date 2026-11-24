@@ -63,6 +63,7 @@ async fn server_main(command: Vec<String>) -> Result<(), Box<dyn std::error::Err
         }
         _ => return Err(USAGE.into()),
     }
+    fukulow_server::messages::reactions::ReactionEmojiSet::load_embedded()?;
     let setup_token = std::env::var("FUKULOW_SETUP_TOKEN")
         .ok()
         .filter(|value| !matches!(value.trim(), "" | "setup-token-local-test-only"))
