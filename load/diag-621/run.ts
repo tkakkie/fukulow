@@ -2,7 +2,9 @@
 // harness: one app image (post-#677, fk621d:post), measurement-only SQL overlays applied to disposable
 // clones only, warm app, planning tracking off, many-17 and hot-17, tmpfs. Changes approved on
 // 2026-11-24: rotated arm order (plan.ts), an explicit checkpoint before every measured window
-// (window.ts), and FPI, WAL, DB CPU and executor time reported separately (summary.ts).
+// (window.ts), and FPI, WAL, DB CPU and executor time reported separately (summary.ts). Added before any
+// run: a checkpoint start or completion in WAL during the window makes it INVALID (pg_walinspect in the
+// maintenance database only, so the measured fixture is unchanged), and one validity decision (validity.ts).
 // Usage: node load/diag-621/run.ts <new-output-dir> <build-dir> [--smoke]
 // <build-dir> holds the image's `revision` file and its `deploy/` directory.
 import { execFile, spawnSync } from 'node:child_process';
@@ -16,7 +18,8 @@ import { autovacuumSQL, channelLogSQL, checksumSQL, prefillSQL, settleSQL } from
 import { seed, type Stack } from '../slice5/stack.ts';
 import { conditions, OVERLAY_ARMS, PHASES, windows, type Window } from './plan.ts';
 import { summarize } from './summary.ts';
-import { checkpoint, controlSQL, runWindow, type Control, type WindowResult } from './window.ts';
+import { decide, type Statement } from './validity.ts';
+import { checkpoint, controlSQL, runWindow, walCheckpoints, type Control, type WindowResult } from './window.ts';
 
 const [outputArg, buildArg, ...flags] = process.argv.slice(2);
 if (!outputArg || !buildArg || flags.some(f => f !== '--smoke')) throw new Error('usage: run.ts <new-output-dir> <build-dir> [--smoke]');
@@ -30,6 +33,9 @@ const pg = 'fk621c-pg';
 const pgImage = 'postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42';
 const k6Image = 'grafana/k6:1.8.2';
 const imageTag = 'fk621d:post';
+// The post-#677 image of the 2026-11-23 run (#621): squash revision and the image ID it recorded.
+const pinnedRevision = 'f7c9e2d3a56d9a16b39e5212a6ac6f8197eea5e9';
+const pinnedImageId = 'sha256:c159dc07304bf2a80ec5c151ed3ffaca7db4a98a6b829066ff70d2133db5a511';
 const password = randomUUID(), setupToken = randomUUID();
 const fixturePath = resolve(scratch, 'fixture.json');
 const driverPath = fileURLToPath(new URL('./driver.ts', import.meta.url));
@@ -206,12 +212,13 @@ const dropSeed = (arm: string) => psql('postgres', `DROP DATABASE seed_${arm};`,
 type MeasuredWindow = { accepted: number; load: Load; controlBefore: Control; controlAfter: Control; cpuUsec: number; walBytes: number;
   statWal: Wal; statementInfo: unknown };
 const db = 'diag';
-async function sample(w: Window): Promise<WindowResult<MeasuredWindow, unknown>> {
+type Decided = WindowResult<MeasuredWindow, unknown> & { warmup: Load | null };
+async function sample(w: Window): Promise<Decided> {
   const dir = resolve(output, w.id);
   mkdirSync(dir);
   console.log(`Window ${w.index}`, w.phase, w.round, w.shape, w.arm, `position ${w.position}/${w.order.length}`);
-  let app: App | null = null, warmup: Load | null = null;
-  return runWindow<MeasuredWindow, unknown>(w, {
+  let app: App | null = null, warmup: Load | null = null, statements: Statement[] = [], decided: Decided | null = null;
+  await runWindow<MeasuredWindow, unknown>(w, {
     async prepare() {
       if (w.arm !== 'base') {
         const built = buildSeed(w.arm);
@@ -241,7 +248,9 @@ async function sample(w: Window): Promise<WindowResult<MeasuredWindow, unknown>>
       // Cluster pg_stat_wal; backends flush it about once a second, so its edges are approximate.
       const walAfter = JSON.parse(psql(db, walSQL, 'read pg_stat_wal after window')) as Wal;
       const statWal = { records: walAfter.records - walBefore.records, fpi: walAfter.fpi - walBefore.fpi, bytes: walAfter.bytes - walBefore.bytes };
-      writeFileSync(resolve(dir, 'pg_stat_statements.json'), psql(db, statementSQL, 'snapshot statement statistics') + '\n');
+      const snapshot = psql(db, statementSQL, 'snapshot statement statistics');
+      writeFileSync(resolve(dir, 'pg_stat_statements.json'), snapshot + '\n');
+      statements = JSON.parse(snapshot) as Statement[];
       const statementInfo = JSON.parse(psql(db, 'SELECT row_to_json(i) FROM pg_stat_statements_info i;', 'read statement eviction count'));
       return { accepted: load.accepted, load, controlBefore, controlAfter, cpuUsec, walBytes, statWal, statementInfo };
     },
@@ -254,16 +263,21 @@ async function sample(w: Window): Promise<WindowResult<MeasuredWindow, unknown>>
       return { integrity: checks, shapeAfter, seeded: base.seeded, expected,
         verified: integrityPassed(checks, expected, shapeAfter, fixtures[w.arm].shape, w.arm) };
     },
+    walCheckpoints: (_w, from, to) => walCheckpoints((query, operation) => psql('postgres', query, operation), from, to),
     cleanup() {
       if (app) stopApp(app);
       app = null;
       rmSync(fixturePath, { force: true });
       psql('postgres', `DROP DATABASE IF EXISTS ${db};`, 'drop fixture clone');
     },
+    // result.json and the manifest carry the same decision the summary re-applies.
     record(_w, result) {
-      dump(dir, 'result.json', { ...result, window: w, image, warmup });
+      decided = { ...result, warmup, ...decide({ ...result, warmup }, statements) };
+      dump(dir, 'result.json', { ...decided, window: w, image });
     },
   });
+  if (!decided) throw new Error(`window ${w.id} not recorded`);
+  return decided;
 }
 
 async function main() {
@@ -271,7 +285,8 @@ async function main() {
   const revision = readFileSync(resolve(build, 'revision'), 'utf8').trim();
   const [id, actualRev] = docker('inspect app image', ['image', 'inspect', imageTag, '--format',
     '{{.Id}} {{index .Config.Labels "org.opencontainers.image.revision"}}']).split(' ');
-  if (revision !== actualRev) throw new Error('Image revision mismatch');
+  if (revision !== actualRev || actualRev !== pinnedRevision) throw new Error('Image revision mismatch');
+  if (id !== pinnedImageId) throw new Error('Image ID mismatch');
   image = { tag: imageTag, revision, id };
   blocks = overlays(readFileSync(new URL('./overlays.sql', import.meta.url), 'utf8'));
   if (JSON.stringify(Object.keys(blocks).sort()) !== JSON.stringify([...OVERLAY_ARMS].sort())) throw new Error('Overlay arms mismatch');
@@ -288,6 +303,8 @@ async function main() {
     '-c', 'max_wal_size=8GB', '-c', 'checkpoint_timeout=30min']);
   await waitFor('PostgreSQL', () => spawnSync('docker', ['exec', pg, 'pg_isready', '-h', '127.0.0.1',
     '-U', 'fukulow', '-d', 'postgres'], { stdio: 'ignore', timeout: 3000 }).status === 0);
+  // Reads checkpoint records from WAL after each window (window.ts walCheckpoints); WAL is cluster-wide.
+  psql('postgres', 'CREATE EXTENSION pg_walinspect;', 'install pg_walinspect');
   const settings = JSON.parse(psql('postgres', `SELECT json_object_agg(name,setting) FROM pg_settings
     WHERE name IN ('server_version','shared_buffers','fsync','synchronous_commit','max_wal_size','checkpoint_timeout',
     'jit','pg_stat_statements.track','pg_stat_statements.track_planning','compute_query_id','full_page_writes');`));

@@ -1,19 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { windows, type Window } from './plan.ts';
-import { analyze, FAMILIES, METRICS, type Manifest, type Result, type Statement } from './summary.ts';
+import { analyze, FAMILIES, LOAD, METRICS, type Manifest, type Result, type Statement } from './summary.ts';
+import type { Control } from './window.ts';
 
 const accepted = 2000;
 type Values = { execUs: number; calls: number; cpuUs: number; walBytes: number; stmtWal: number; stmtFpi: number; statFpi: number; statWal: number };
 const armValues = (arm: string): Values => ({ execUs: 100 + (arm === 'base' ? 0 : 10), calls: 26, cpuUs: 900 + (arm === 'base' ? 0 : 50),
   walBytes: 1700 + (arm === 'base' ? 0 : 200), stmtWal: 1600, stmtFpi: arm === 'base' ? 0 : 0.03, statFpi: arm === 'base' ? 0.01 : 0.05, statWal: 1650 });
 
+// Explicit checkpoint: redo record at 0/2, completion at 0/3; the window ends at 0/500.
+const control = (lsn: string): Control => ({ lsn, redo: '0/2', checkpoint: '0/3', time: 't' });
+const explicitWal = { ok: true as const, from: '0/2', to: '0/500', records: [{ lsn: '0/2', type: 'CHECKPOINT_REDO' }, { lsn: '0/3', type: 'CHECKPOINT_ONLINE' }] };
+
 function fixture(w: Window, v: Values, o: Partial<Result> = {}): { result: Result; statements: Statement[] } {
   const load = { accepted, attempts: accepted, iterations: accepted, errors: 0, dropped: 0 };
   return {
-    result: { id: w.id, valid: true, reasons: [], checkpoint: { ok: true, startedAt: 's', ms: 40 + w.position, before: {} as never, after: { redo: '0/1' } as never },
-      warmup: { ...load, accepted: 750, attempts: 750, iterations: 750 },
-      measured: { accepted, load, cpuUsec: v.cpuUs * accepted, walBytes: v.walBytes * accepted,
+    result: { id: w.id, valid: true, reasons: [], checkpoint: { ok: true, startedAt: 's', ms: 40 + w.position, before: control('0/1'), after: control('0/1') },
+      warmup: { ...load, accepted: 750, attempts: 750, iterations: 750 }, walCheckpoints: explicitWal,
+      measured: { accepted, load, controlBefore: control('0/4'), controlAfter: control('0/500'), cpuUsec: v.cpuUs * accepted, walBytes: v.walBytes * accepted,
         statWal: { records: 16 * accepted, fpi: v.statFpi * accepted, bytes: v.statWal * accepted }, statementInfo: { dealloc: 0 } },
       verification: { verified: true, shapeAfter: { heap_bytes: 8192, index_bytes: 4096 } }, ...o },
     statements: [
@@ -63,6 +68,7 @@ test('the order-position effect is estimated from the balanced design', () => {
   assert.ok(Math.abs((e.position_1 as number) - 3.2) < 1e-9);
   for (const p of [2, 3, 4, 5]) assert.ok(Math.abs((e[`position_${p}`] as number) + 0.8) < 1e-9);
   assert.ok(Math.abs((e.range as number) - 4) < 1e-9);
+  assert.equal(e.note, null);
   const flat = r.tables['position-effects'].find(x => x.phase === 'C1' && x.shape === 'hot-17' && x.metric === 'exec_us_per_send')!;
   assert.equal(flat.range, 0);
   assert.match(r.markdown, /## Arm order per round/);
@@ -90,7 +96,38 @@ test('the 2026-11-23 checks still invalidate a window: k6 counts, captured stati
     if (w.id === plan[2].id) f.result.verification!.verified = false;
     return w.id === plan[3].id ? null : f;
   });
-  assert.deepEqual(r.invalid.map(i => i.reasons), [['k6 counts do not reconcile'], ['statistics not captured'], ['not verified'], ['window missing']]);
+  assert.deepEqual(r.invalid.map(i => i.reasons), [['k6 counts do not reconcile'], ['statistics not captured'], ['integrity verification failed'], ['window missing']]);
+});
+
+test('a window recorded valid without checkpoint, warm-up or statement evidence is INVALID and fails the summary', () => {
+  const plan = windows(false);
+  const cases: [(f: ReturnType<typeof fixture>) => void, string][] = [
+    [f => { f.result.checkpoint = null; }, 'checkpoint evidence missing'],
+    [f => { f.result.warmup = null; }, 'warm-up evidence missing'],
+    [f => { f.statements = []; }, 'statement evidence missing'],
+    [f => { f.statements = f.statements.filter(s => s.query === 'SELECT 1'); }, 'statement evidence missing'],
+    [f => { f.result.walCheckpoints = null; }, 'checkpoint WAL evidence missing'],
+    [f => { f.result.walCheckpoints = { ...explicitWal, records: [...explicitWal.records, { lsn: '0/400', type: 'CHECKPOINT_REDO' }] }; },
+      'another checkpoint started or completed between the explicit checkpoint and the end of the window'],
+    [f => { f.result.measured = null; }, 'measurement missing'],
+    [f => { f.result.verification = null; }, 'integrity evidence missing'],
+  ];
+  for (const [mutate, reason] of cases) {
+    const r = analyze(manifest(), w => { const f = fixture(w, armValues(w.arm)); if (w.id === plan[0].id) mutate(f); return f; });
+    assert.equal(r.ok, false, reason);
+    assert.equal(r.invalid.length, 1, reason);
+    assert.ok(r.invalid[0].reasons.includes(reason), `${reason}: ${r.invalid[0].reasons.join('; ')}`);
+    assert.equal(r.tables.windows.find(x => x.id === plan[0].id)!.valid, false);
+  }
+});
+
+test('a window the runner recorded INVALID keeps its recorded reasons; one recorded valid passes unchanged', () => {
+  const [w] = windows(false);
+  const r = analyze(manifest(), x => x.id === w.id
+    ? { ...fixture(x, armValues(x.arm)), result: { ...fixture(x, armValues(x.arm)).result, valid: false, reasons: ['k6 counts do not reconcile'] } }
+    : fixture(x, armValues(x.arm)));
+  assert.deepEqual(r.invalid, [{ id: w.id, reasons: ['k6 counts do not reconcile'] }]);
+  assert.equal(analyze(manifest(), x => fixture(x, armValues(x.arm))).ok, true);
 });
 
 test('a recorded order that differs from the plan, or an unbalanced one, is a run problem', () => {
@@ -100,4 +137,41 @@ test('a recorded order that differs from the plan, or an unbalanced one, is a ru
   assert.equal(r.ok, false);
   assert.deepEqual(r.problems, ['recorded window order differs from the plan', 'arm order is not balanced']);
   assert.deepEqual(analyze({ ...m, c2Compatibility: undefined }, w => fixture(w, armValues(w.arm))).problems, ['C2 compatibility record missing']);
+});
+
+test('the position effect is suppressed for smoke runs and for a phase and shape that is not a complete square of valid windows', () => {
+  // Round 1 is slower for every arm: a complete square cancels it, a square missing one window does not.
+  const values = (w: Window) => ({ ...armValues(w.arm), cpuUs: armValues(w.arm).cpuUs + (w.round === 1 ? 24 : 0) });
+  const find = (r: ReturnType<typeof analyze>, shape: string) =>
+    r.tables['position-effects'].find(x => x.phase === 'C1' && x.shape === shape && x.metric === 'db_cpu_us_per_send')!;
+  const full = analyze(manifest(), w => fixture(w, values(w)));
+  assert.ok(Math.abs(find(full, 'many-17').range as number) < 1e-9);
+  const gone = windows(false).find(w => w.phase === 'C1' && w.round === 1 && w.shape === 'many-17' && w.arm === 'base')!;
+  const partial = analyze(manifest(), w => w.id === gone.id ? null : fixture(w, values(w)));
+  const e = find(partial, 'many-17');
+  assert.equal(e.range, null);
+  assert.equal(e.position_1, undefined);
+  assert.equal(e.note, 'suppressed: not a complete balanced square of valid windows');
+  assert.equal(find(partial, 'hot-17').note, null);
+  assert.match(partial.markdown, /suppressed: not a complete balanced square of valid windows/);
+  const smoke = analyze(manifest(true), w => fixture(w, values(w)));
+  assert.ok(smoke.tables['position-effects'].length > 0);
+  for (const x of smoke.tables['position-effects']) {
+    assert.equal(x.range, null);
+    assert.equal(x.note, 'suppressed: smoke run (not a complete square)');
+  }
+});
+
+test('load accounting: accepted sends, errors and dropped iterations per arm and paired against base', () => {
+  const r = analyze(manifest(), w => {
+    const f = fixture(w, armValues(w.arm));
+    if (w.arm === 'pk') Object.assign(f.result.measured!, { accepted: 1990 }, { load: { ...f.result.measured!.load, accepted: 1990, errors: 3, dropped: 7 } });
+    return f;
+  });
+  assert.deepEqual([...LOAD], ['accepted', 'errors', 'dropped', 'warm_accepted']);
+  const pk = r.tables['load-medians'].find(x => x.phase === 'C1' && x.shape === 'hot-17' && x.arm === 'pk')!;
+  assert.deepEqual([pk.n, pk.accepted, pk.errors, pk.dropped, pk.warm_accepted], [5, 1990, 3, 7, 750]);
+  const d = r.tables['load-paired-medians'].find(x => x.phase === 'C1' && x.shape === 'hot-17' && x.candidate === 'pk')!;
+  assert.deepEqual([d.n, d.accepted, d.errors, d.dropped], [5, -10, 3, 7]);
+  assert.match(r.markdown, /^## load accounting$/m);
 });

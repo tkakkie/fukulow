@@ -16,14 +16,23 @@ export type Window = { id: string; index: number; phase: Phase; round: number; s
 
 export const rotation = (arms: readonly string[], by: number) => arms.map((_, i) => arms[(i + by) % arms.length]);
 
-// Round r runs rotation r-1 for both shapes; shape order alternates by round as before.
+// Rotation of a round: square s (0-based) runs the rotations 0..n-1, every odd square in reverse. With shape
+// order alternating by round, C2's second square (rounds 3-4: inline>base, then base>inline) makes arm
+// position orthogonal to shape order; plain rotations made base first exactly when many-17 ran first.
+// C1 is one square, so its rotations are unchanged.
+export const shift = (arms: number, round: number) => {
+  const square = Math.floor((round - 1) / arms), within = (round - 1) % arms;
+  return square % 2 ? arms - 1 - within : within;
+};
+
+// Round r runs rotation shift(r) for both shapes; shape order alternates by round as before.
 // Smoke: many-17 only, the first two rounds of each phase (exercises the rotation, not balanced).
 export function windows(smoke: boolean): Window[] {
   const out: Window[] = [];
   for (const [phase, arms] of PHASES) {
     const rounds = smoke ? 2 : arms.length * squares[phase];
     for (let round = 1; round <= rounds; round++) {
-      const order = rotation(arms, round - 1);
+      const order = rotation(arms, shift(arms.length, round));
       const shapes: Shape[] = smoke ? ['many-17'] : round % 2 ? ['many-17', 'hot-17'] : ['hot-17', 'many-17'];
       for (const shape of shapes) order.forEach((arm, i) => out.push({
         id: `${phase}-r${round}-${shape}-${arm}`, index: out.length + 1, phase, round, shape, arm, position: i + 1, order }));

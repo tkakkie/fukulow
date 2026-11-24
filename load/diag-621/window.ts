@@ -3,6 +3,8 @@
 // window. In the 2026-11-23 run only the overlay arms dropped their seed database after the clone, which
 // likely forced a checkpoint for them alone. A failed or unproven checkpoint, or a checkpoint that
 // completes inside the measured window, makes the window INVALID (fail-closed); it is never measured or paired.
+// So does any other checkpoint that starts or completes in WAL between the explicit checkpoint and the end of
+// the window, or WAL evidence that cannot be read (walCheckpoints, added before any run of the 66-window plan).
 import type { Window } from './plan.ts';
 
 export type Sql = (query: string, operation: string) => string;
@@ -34,6 +36,44 @@ export function checkpoint(sql: Sql, now = () => performance.now(), clock = () =
   }
 }
 
+// PostgreSQL 18 CreateCheckPoint (xlog.c): an online checkpoint starts by inserting XLOG CHECKPOINT_REDO,
+// whose start LSN becomes its redo pointer (pg_control redo_lsn), and completes with CHECKPOINT_ONLINE at
+// pg_control checkpoint_lsn; a shutdown checkpoint writes only CHECKPOINT_SHUTDOWN. pg_walinspect reads
+// records only up to the flush LSN and only those ending at or before end_lsn, so the window's end must be
+// flushed first. Needs the pg_walinspect extension in the database the query runs in.
+export const flushedSQL = (to: string) => `SELECT pg_current_wal_flush_lsn() >= '${to}'::pg_lsn;`;
+export const checkpointRecordsSQL = (from: string, to: string) => `SELECT coalesce(json_agg(json_build_object(
+  'lsn',start_lsn::text,'type',record_type) ORDER BY start_lsn),'[]') FROM pg_get_wal_records_info('${from}','${to}')
+  WHERE resource_manager='XLOG' AND record_type LIKE 'CHECKPOINT%';`;
+export type WalRecord = { lsn: string; type: string };
+export type WalCheckpoints = { ok: true; from: string; to: string; records: WalRecord[] } | { ok: false; reason: string };
+
+// Every checkpoint record from the explicit checkpoint's redo record to the insert position after the window.
+export function walCheckpoints(sql: Sql, from: string, to: string): WalCheckpoints {
+  try {
+    if (![from, to].every(v => lsn.test(v))) return { ok: false, reason: 'unreadable WAL range' };
+    if (sql(flushedSQL(to), 'check window WAL is flushed') !== 't') return { ok: false, reason: 'window WAL not flushed' };
+    const records = JSON.parse(sql(checkpointRecordsSQL(from, to), 'read checkpoint records from WAL')) as WalRecord[];
+    if (!Array.isArray(records)) return { ok: false, reason: 'unreadable checkpoint records' };
+    return { ok: true, from, to, records };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : 'WAL read failed' };
+  }
+}
+
+// Only the explicit checkpoint's own two records, matched by LSN, may appear; their absence means the WAL
+// read does not cover the range, so it fails closed too.
+export function walReasons(cp: CheckpointRecord & { ok: true }, measured: Measured, wal: WalCheckpoints | null): string[] {
+  if (!wal) return ['checkpoint WAL evidence missing'];
+  if (!wal.ok) return [`checkpoint WAL evidence: ${wal.reason}`];
+  if (wal.from !== cp.after.redo || wal.to !== measured.controlAfter.lsn) return ['checkpoint WAL evidence covers the wrong range'];
+  const own = (r: WalRecord) => (r.lsn === cp.after.redo && r.type === 'CHECKPOINT_REDO') || (r.lsn === cp.after.checkpoint && r.type === 'CHECKPOINT_ONLINE');
+  const out: string[] = [];
+  if (wal.records.filter(own).length !== 2) out.push('explicit checkpoint records not found in WAL');
+  if (wal.records.some(r => !own(r))) out.push('another checkpoint started or completed between the explicit checkpoint and the end of the window');
+  return out;
+}
+
 export type Measured = { accepted: number; controlBefore: Control; controlAfter: Control };
 export type WindowOps<M extends Measured, V> = {
   prepare(w: Window): Promise<void>;
@@ -41,17 +81,19 @@ export type WindowOps<M extends Measured, V> = {
   checkpoint(w: Window): CheckpointRecord;
   measure(w: Window): Promise<M>;
   verify(w: Window, measured: M): V & { verified: boolean };
+  walCheckpoints(w: Window, from: string, to: string): WalCheckpoints;
   cleanup(w: Window): void;
   record(w: Window, result: WindowResult<M, V>): void;
 };
 export type WindowResult<M, V> = { id: string; valid: boolean; reasons: string[]; checkpoint: CheckpointRecord | null;
-  measured: M | null; verification: (V & { verified: boolean }) | null };
+  measured: M | null; verification: (V & { verified: boolean }) | null; walCheckpoints: WalCheckpoints | null };
 
-export function reasons(cp: CheckpointRecord, measured: Measured | null, verified: boolean | null): string[] {
+export function reasons(cp: CheckpointRecord, measured: Measured | null, verified: boolean | null, wal: WalCheckpoints | null): string[] {
   const out: string[] = [];
   if (!cp.ok) out.push(`checkpoint: ${cp.reason}`);
   if (measured && measured.controlBefore.checkpoint !== measured.controlAfter.checkpoint) out.push('checkpoint completed inside the measured window');
   if (cp.ok && measured && measured.controlBefore.checkpoint !== cp.after.checkpoint) out.push('checkpoint between the explicit checkpoint and the window');
+  if (cp.ok && measured) out.push(...walReasons(cp, measured, wal));
   if (verified === false) out.push('integrity verification failed');
   return out;
 }
@@ -63,12 +105,14 @@ export async function runWindow<M extends Measured, V>(w: Window, ops: WindowOps
     await ops.warm(w);
     const cp = ops.checkpoint(w);
     if (!cp.ok) {
-      result = { id: w.id, valid: false, reasons: reasons(cp, null, null), checkpoint: cp, measured: null, verification: null };
+      result = { id: w.id, valid: false, reasons: reasons(cp, null, null, null), checkpoint: cp, measured: null, verification: null,
+        walCheckpoints: null };
     } else {
       const measured = await ops.measure(w);
       const verification = ops.verify(w, measured);
-      const why = reasons(cp, measured, verification.verified);
-      result = { id: w.id, valid: why.length === 0, reasons: why, checkpoint: cp, measured, verification };
+      const wal = ops.walCheckpoints(w, cp.after.redo, measured.controlAfter.lsn);
+      const why = reasons(cp, measured, verification.verified, wal);
+      result = { id: w.id, valid: why.length === 0, reasons: why, checkpoint: cp, measured, verification, walCheckpoints: wal };
     }
   } finally {
     ops.cleanup(w);

@@ -1,12 +1,16 @@
 // #621 C1/C2 diagnostic summary (diagnosis only, no PASS/FAIL). Ported from the 2026-11-23 summarize.py.
 // FPI, WAL, DB CPU and executor time are separate metric families. Each gets per-window values, medians
 // per arm with their spread, paired-delta medians (candidate - base in the same phase, shape and round)
-// with their spread, and an order-position effect estimate. INVALID windows are listed and never paired.
+// with their spread, and an order-position effect estimate, next to per-arm and paired load accounting
+// (accepted sends, errors, dropped iterations). INVALID windows are listed and never paired. The position
+// effect is reported only for a complete balanced square of valid windows (never for smoke).
 // Usage: node load/diag-621/summary.ts <output-dir>
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { balanced, windows, type Window } from './plan.ts';
-import type { CheckpointRecord } from './window.ts';
+import { decide, topLevel, type Result, type Statement } from './validity.ts';
+
+export type { Result, Statement } from './validity.ts';
 
 export const FAMILIES = {
   executor: ['exec_us_per_send', 'sql_per_send'],
@@ -15,15 +19,10 @@ export const FAMILIES = {
   fpi: ['stmt_wal_fpi_per_send', 'stat_wal_fpi_per_send'],
 } as const;
 export const METRICS = [...Object.values(FAMILIES).flat(), 'log_heap_bytes', 'log_index_bytes'];
+// Load accounting: two arms can reconcile their k6 counts while delivering different amounts of load.
+export const LOAD = ['accepted', 'errors', 'dropped', 'warm_accepted'] as const;
 const STATEMENT_METRICS = ['calls', 'exec_us_per_send', 'wal_records_per_send', 'wal_bytes_per_send', 'wal_fpi_per_send'];
 
-export type Statement = { toplevel: boolean; queryid: string | number; calls: number; total_exec_time: number;
-  wal_records: number; wal_bytes: number | string; wal_fpi: number; query: string };
-type Load = { accepted: number; attempts: number; iterations: number; errors: number; dropped: number };
-export type Result = { id: string; valid: boolean; reasons: string[]; checkpoint: CheckpointRecord | null; warmup: Load | null;
-  measured: null | { accepted: number; load: Load; cpuUsec: number; walBytes: number; statWal: { records: number; fpi: number; bytes: number };
-    statementInfo: { dealloc: number } };
-  verification: null | { verified: boolean; shapeAfter: { heap_bytes: number; index_bytes: number } } };
 export type Manifest = { smoke: boolean; windows: Window[]; c2Compatibility?: { cases: number; mismatches: number } };
 type Row = Record<string, string | number | boolean | null>;
 type Tables = Record<string, Row[]>;
@@ -70,17 +69,20 @@ function pairs(rows: Row[], keys: string[], metrics: readonly string[]): Row[] {
 }
 
 // Balanced order: each arm takes each position equally often, so the mean residual (value minus that
-// arm's mean in the phase and shape) at a position estimates the order-position effect.
-function positionEffects(rows: Row[], metrics: readonly string[]): Row[] {
+// arm's mean in the phase and shape) at a position estimates the order-position effect. That holds only for
+// a complete square: with a window missing, round drift leaks into it, so it is suppressed (null, with a note).
+function positionEffects(rows: Row[], metrics: readonly string[], suppressed: (phase: unknown, shape: unknown) => string | null): Row[] {
   const out: Row[] = [];
   for (const g of groupBy(rows, ['phase', 'shape'])) for (const m of metrics) {
+    const note = suppressed(g[0].phase, g[0].shape);
+    if (note) { out.push({ phase: g[0].phase, shape: g[0].shape, metric: m, range: null, note }); continue; }
     const armMean = new Map(groupBy(g, ['arm']).map(a => [a[0].arm, mean(nums(a, m))]));
     const positions = Math.max(...g.map(r => r.positions as number));
     const effects = Array.from({ length: positions }, (_, p) => mean(g.filter(r => r.position === p + 1 && typeof r[m] === 'number')
       .map(r => (r[m] as number) - (armMean.get(r.arm) as number))));
     const known = effects.filter((e): e is number => e !== null);
     out.push({ phase: g[0].phase, shape: g[0].shape, metric: m, ...Object.fromEntries(effects.map((e, p) => [`position_${p + 1}`, e])),
-      range: known.length ? Math.max(...known) - Math.min(...known) : null });
+      range: known.length ? Math.max(...known) - Math.min(...known) : null, note: null });
   }
   return out;
 }
@@ -94,18 +96,13 @@ export function analyze(manifest: Manifest, read: (w: Window) => { result: Resul
   const rows: Row[] = [], statements: Row[] = [], invalid: { id: string; reasons: string[] }[] = [];
   for (const w of manifest.windows) {
     const read1 = read(w);
-    const tags: Row = { phase: w.phase, shape: w.shape, round: w.round, arm: w.arm, position: w.position, positions: w.order.length, order: w.order.join('>') };
+    const tags: Row = { id: w.id, phase: w.phase, shape: w.shape, round: w.round, arm: w.arm, position: w.position, positions: w.order.length, order: w.order.join('>') };
     if (!read1) { invalid.push({ id: w.id, reasons: ['window missing'] }); continue; }
     const { result: r, statements: stats } = read1;
-    const m = r.measured, top = stats.filter(s => s.toplevel && s.query.trim() !== 'SELECT 1');
-    const reasons = [...r.reasons];
-    if (r.valid && m && r.warmup) {
-      // The 2026-11-23 summary checks: k6 counts reconcile and statistics were captured.
-      if (![r.warmup, m.load].every(l => l.iterations === l.attempts)) reasons.push('k6 counts do not reconcile');
-      if (!(top.length && m.accepted && m.cpuUsec > 0 && m.walBytes > 0)) reasons.push('statistics not captured');
-    }
-    const valid = r.valid && reasons.length === 0 && !!m && !!r.verification?.verified;
-    if (!valid) invalid.push({ id: w.id, reasons: reasons.length ? reasons : ['not verified'] });
+    const m = r.measured, top = topLevel(stats);
+    // The same decision run.ts recorded in result.json and the manifest; re-applied, never relaxed.
+    const { valid, reasons } = decide(r, stats);
+    if (!valid) invalid.push({ id: w.id, reasons });
     const cp = r.checkpoint;
     const row: Row = { ...tags, valid, reasons: reasons.join('; '), checkpoint_started_at: cp?.startedAt ?? null, checkpoint_ms: cp?.ms ?? null,
       checkpoint_redo_lsn: cp?.ok ? cp.after.redo : null };
@@ -137,13 +134,23 @@ export function analyze(manifest: Manifest, read: (w: Window) => { result: Resul
   const good = rows.filter(r => r.valid);
   const arm = ['phase', 'shape', 'arm'], window = ['phase', 'shape', 'round'], stmt = ['toplevel', 'query'];
   const deltas = pairs(good, window, METRICS);
+  const loadDeltas = pairs(good, window, LOAD);
+  const validIds = new Set(rows.filter(r => r.valid).map(r => r.id));
+  const suppressed = (phase: unknown, shape: unknown) => {
+    if (manifest.smoke) return 'suppressed: smoke run (not a complete square)';
+    const square = plan.filter(w => w.phase === phase && w.shape === shape);
+    return square.every(w => validIds.has(w.id)) && balanced(square) ? null : 'suppressed: not a complete balanced square of valid windows';
+  };
   const statementDeltas = pairs(statements, [...window, ...stmt], STATEMENT_METRICS);
   const tables: Tables = {
     windows: rows,
     medians: spread(good, arm, METRICS),
     'paired-deltas': deltas,
     'paired-medians': spread(deltas, ['phase', 'shape', 'baseline', 'candidate'], METRICS),
-    'position-effects': positionEffects(good, METRICS),
+    'position-effects': positionEffects(good, METRICS, suppressed),
+    'load-medians': spread(good, arm, LOAD),
+    'load-paired-deltas': loadDeltas,
+    'load-paired-medians': spread(loadDeltas, ['phase', 'shape', 'baseline', 'candidate'], LOAD),
     statements,
     'statement-medians': spread(statements, [...arm, ...stmt], STATEMENT_METRICS),
     'statement-paired-medians': spread(statementDeltas, ['phase', 'shape', 'baseline', 'candidate', ...stmt], STATEMENT_METRICS),
@@ -172,11 +179,13 @@ function markdown(manifest: Manifest, rows: Row[], t: Tables, problems: string[]
   for (const [family, metrics] of Object.entries(FAMILIES)) {
     out.push(`## ${family}`, '', '### Per arm', '', table(['phase', 'shape', 'arm', 'n', ...metrics], t.medians, ranged), '',
       '### Paired-delta medians (candidate - base)', '', table(['phase', 'shape', 'candidate', 'n', ...metrics], t['paired-medians'], ranged), '',
-      '### Order-position effect (mean residual by position)', '');
+      '### Order-position effect (mean residual by position; only for a complete balanced square of valid windows)', '');
     const effects = t['position-effects'].filter(r => (metrics as readonly string[]).includes(r.metric as string));
     const positions = Math.max(0, ...effects.flatMap(r => Object.keys(r).filter(k => k.startsWith('position_')).map(k => Number(k.slice(9)))));
-    out.push(table(['phase', 'shape', 'metric', ...Array.from({ length: positions }, (_, p) => `position_${p + 1}`), 'range'], effects), '');
+    out.push(table(['phase', 'shape', 'metric', ...Array.from({ length: positions }, (_, p) => `position_${p + 1}`), 'range', 'note'], effects), '');
   }
+  out.push('## load accounting', '', '### Per arm', '', table(['phase', 'shape', 'arm', 'n', ...LOAD], t['load-medians'], ranged), '',
+    '### Paired-delta medians (candidate - base)', '', table(['phase', 'shape', 'candidate', 'n', ...LOAD], t['load-paired-medians'], ranged), '');
   return out.join('\n');
 }
 

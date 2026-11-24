@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { balanced, conditions, PHASES, positionCounts, rotation, SHAPES, windows, type Window } from './plan.ts';
+import { balanced, conditions, PHASES, positionCounts, rotation, SHAPES, shift, windows, type Window } from './plan.ts';
 
 test('every arm takes every position equally often in each phase and shape', () => {
   const plan = windows(false);
@@ -39,6 +39,31 @@ test('an unbalanced order is detected (forward/reverse/forward of the 2026-11-23
   }
   assert.equal(balanced(old), false);
   assert.equal(balanced(windows(false).filter(w => w.round !== 3)), false);
+});
+
+test('in C2, arm position is orthogonal to shape order: each arm takes each position equally often whether its shape ran first or second', () => {
+  const plan = windows(false);
+  const c2 = plan.filter(w => w.phase === 'C2');
+  assert.equal(c2.length, 16);
+  assert.equal(plan.length, 66);
+  const firstShape = (w: Window) => c2.find(x => x.round === w.round)!.shape;
+  for (const shape of SHAPES) for (const arm of ['base', 'inline']) {
+    const cells = new Map<string, number>();
+    for (const w of c2.filter(x => x.shape === shape && x.arm === arm)) {
+      const key = `${firstShape(w) === shape ? 'first' : 'second'}/${w.position}`;
+      cells.set(key, (cells.get(key) ?? 0) + 1);
+    }
+    assert.deepEqual([...cells.entries()].sort(), [['first/1', 1], ['first/2', 1], ['second/1', 1], ['second/2', 1]], `${shape}/${arm}`);
+  }
+  // At least 3 base/inline pairs per shape.
+  for (const shape of SHAPES) assert.ok(new Set(c2.filter(w => w.shape === shape).map(w => w.round)).size >= 3);
+  assert.deepEqual([1, 2, 3, 4].map(round => c2.find(w => w.round === round)!.order.join('>')),
+    ['base>inline', 'inline>base', 'inline>base', 'base>inline']);
+});
+
+test('rotation shift: the first square in order, the second reversed; C1 keeps plain rotations', () => {
+  assert.deepEqual([1, 2, 3, 4].map(r => shift(2, r)), [0, 1, 1, 0]);
+  assert.deepEqual([1, 2, 3, 4, 5].map(r => shift(5, r)), [0, 1, 2, 3, 4]);
 });
 
 test('rotation keeps every arm once', () => {
