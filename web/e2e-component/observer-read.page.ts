@@ -1,12 +1,14 @@
 // Test page for e2e-component/observer-read.spec.ts (#449): the real Timeline in a real layout, with static fakes for
-// the Channel sync and Unread sources. Only `presented` calls made inside the row window's IntersectionObserver
-// callback advance readSeq, so no other read-update path (scroll handler, effects) can satisfy the test.
+// the Channel sync and Unread sources. After the spec calls `stop()`, only `presented` calls made inside the row
+// window's IntersectionObserver callback are applied, so no other read-update path (scroll handler, effects) can
+// satisfy the test. readSeq uses the production rule, which stops at the first unseen eligible Message.
 import { mount } from 'svelte'
 import '../src/app.css'
 import type { Message } from '../src/api'
 import type { ChannelSync } from '../src/sync.svelte'
 import type { UnreadAdapter } from '../src/unread.svelte'
 import Timeline from '../src/Timeline.svelte'
+import { recordCoverage, sequenceToSubmit } from '../src/unread-counts'
 import type { ObserverReadProbe } from './observer-read-probe'
 
 const CHANNEL = '00000000-0000-4000-8000-000000000001'
@@ -21,8 +23,13 @@ const messages: Message[] = Array.from({ length: MESSAGE_COUNT }, (_, i) => ({
   body: `メッセージ ${i + 1}`, reply_root_id: null, reply_to: null, sender: OTHER, topic_id: null, version: i + 1,
 }))
 
-const probe: ObserverReadProbe = { observerSeqs: [], readSeq: 0, otherReports: 0, everMounted: [], scrollEnds: 0 }
-Object.assign(globalThis, { observerRead: probe })
+const probe: ObserverReadProbe = {
+  presented: [], afterStop: [], readSeq: 0, otherReports: 0, everMounted: [], scrolls: 0, scrollEnds: 0, stopped: null,
+}
+const stop = () => {
+  probe.stopped = { mounted: [...probe.everMounted], scrolls: probe.scrolls, scrollEnds: probe.scrollEnds, readSeq: probe.readSeq }
+}
+Object.assign(globalThis, { observerRead: probe, stop })
 
 // The native observer computes every intersection; the subclass only marks when its callback is running.
 let inObserverCallback = 0
@@ -35,6 +42,8 @@ globalThis.IntersectionObserver = class extends NativeIntersectionObserver {
     }, options)
   }
 }
+
+const coverage = recordCoverage(messages)
 
 // Static state: nothing here changes after mount, so no reactive effect reruns because of a read report.
 const visitId = Symbol('visit')
@@ -53,9 +62,12 @@ const unread: UnreadAdapter = {
   refresh: async () => {},
   presented(visit: symbol, seqs: number[]) {
     if (visit !== visitId) return
-    if (inObserverCallback === 0) { probe.otherReports++; return }
-    for (const seq of seqs) if (!probe.observerSeqs.includes(seq)) probe.observerSeqs.push(seq)
-    probe.readSeq = Math.max(probe.readSeq, ...seqs)
+    if (probe.stopped && inObserverCallback === 0) { probe.otherReports++; return }
+    for (const seq of seqs) {
+      if (!probe.presented.includes(seq)) probe.presented.push(seq)
+      if (probe.stopped && !probe.afterStop.includes(seq)) probe.afterStop.push(seq)
+    }
+    probe.readSeq = sequenceToSubmit(0, messages, coverage, new Set(probe.presented), { channel: CHANNEL, topicId: null }, SELF)
   },
 }
 
@@ -69,7 +81,8 @@ const channel: Pick<ChannelSync, 'timeline' | 'composer' | 'loadLatest' | 'loadO
 }
 
 const target = document.getElementById('app')!
-target.style.height = '720px'
+// Follows the viewport, so the spec can mount rows without scrolling by making the window taller.
+target.style.height = 'calc(100vh - 180px)'
 const mounts = new MutationObserver(() => {
   for (const row of target.querySelectorAll<HTMLElement>('[data-confirmed-seq]')) {
     const seq = Number(row.dataset.confirmedSeq)
@@ -78,4 +91,6 @@ const mounts = new MutationObserver(() => {
 })
 mounts.observe(target, { childList: true, subtree: true })
 mount(Timeline, { target, props: { channel: channel as ChannelSync, unread, channelId: CHANNEL, selfId: SELF } })
-document.querySelector('.timeline-scroll')!.addEventListener('scrollend', () => { probe.scrollEnds++ })
+const scroller = document.querySelector('.timeline-scroll')!
+scroller.addEventListener('scroll', () => { probe.scrolls++ })
+scroller.addEventListener('scrollend', () => { probe.scrollEnds++ })

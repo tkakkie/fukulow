@@ -9,6 +9,8 @@ process.env.PLAYWRIGHT_NO_COPY_PROMPT = '1'
 
 export default defineConfig({
   testDir: './e2e-component',
+  // Own directory: Playwright empties outputDir at startup, so sharing test-results/ would erase other suites' results.
+  outputDir: './test-results/component',
   workers: 1,
   timeout: 30_000,
   preserveOutput: 'never',
