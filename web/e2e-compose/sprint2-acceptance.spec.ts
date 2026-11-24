@@ -60,6 +60,7 @@ async function diag956(pages: Array<[string, Page]>, target?: Locator): Promise<
         last: rows.at(-1)?.getAttribute('data-message-id'), lastPos: rows.at(-1)?.closest('[aria-posinset]')?.getAttribute('aria-posinset'),
         setsize: rows.at(-1)?.closest('[aria-setsize]')?.getAttribute('aria-setsize'), live: document.querySelector('[data-testid="live-status"]')?.getAttribute('data-live'),
         status: [...document.querySelectorAll('[role=status]')].map(e => e.textContent?.trim()).filter(Boolean).join('|').slice(0, 200),
+        url: location.pathname, rows: rows.map(r => (r.closest('[aria-posinset]')?.getAttribute('aria-posinset') ?? '?') + ':' + (r.getAttribute('data-message-id') ?? '').slice(0, 8) + ':' + ((r as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').slice(0, 40)),
         panel: !!document.querySelector('#panel-content .reply-panel__scroll'), panelRows: document.querySelectorAll('#panel-content [data-message-id]').length }
     }).catch(e => String(e))))
     if (target && p === target.page()) {
@@ -469,7 +470,9 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
       const total = Number(await topicScroll.locator('[aria-setsize]').first().getAttribute('aria-setsize'))
       await revealVirtualRow(topicScroll, total)
       const visibleTopicRow = p.locator(`#main-content [data-message-id="${chainMessages[51].id}"]`)
-      await expect(visibleTopicRow).toBeVisible()
+      try { await expect(visibleTopicRow).toBeVisible() } catch (e) {
+        throw new Error(`DIAG956 visible ${p === ownerPage ? 'owner' : 'peer'} total=${total} want=${chainMessages[51].id.slice(0, 8)}\n${await diag956([['owner', ownerPage], ['peer', peerPage]])}\n${String(e)}`)
+      }
       const replyButton = visibleTopicRow.getByRole('button', { name: /返信/ })
       try { await replyButton.click({ timeout: 30_000 }) } catch (e) {
         throw new Error(`DIAG956 click\n${await diag956([['owner', ownerPage], ['peer', peerPage]], replyButton)}\n${String(e)}`)

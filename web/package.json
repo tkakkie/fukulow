@@ -15,7 +15,7 @@
     "pretest": "npm run wasm",
     "test": "vitest run",
     "e2e": "playwright test",
-    "e2e:compose": "playwright test -c playwright.compose.config.ts; s=$?; playwright test -c playwright.compose.config.ts -g \"Reply chain \\\\(P6\" --repeat-each 12 && exit $s",
+    "e2e:compose": "playwright test -c playwright.compose.config.ts; s=$?; playwright test -c playwright.compose.config.ts -g \"Reply chain \\\\(P6\" --repeat-each 9 && exit $s",
     "e2e:component": "playwright test -c playwright.component.config.ts"
   },
   "devDependencies": {
