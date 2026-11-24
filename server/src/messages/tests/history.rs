@@ -77,7 +77,7 @@ async fn page_watermarks_share_the_mutation_snapshot_after_the_commit_barrier(po
             sqlx::query("UPDATE messages SET version=$3,body='edited' WHERE organization_id=$1 AND channel_id=$2")
                 .bind(org).bind(channel).bind(w).execute(&mut *tx).await.unwrap();
             tx.commit().await.unwrap();
-            gate.release.add_permits(1);
+            gate.release();
             let response = read.await.unwrap();
             assert_eq!(
                 response.status(),
@@ -132,7 +132,7 @@ async fn mutation_after_snapshot_watermark_cannot_replace_the_page_body(pool: Pg
         sqlx::query("UPDATE channel_message_sequences SET seq=2,mutation_seq=2 WHERE organization_id=$1 AND channel_id=$2").bind(org).bind(channel).execute(&mut *tx).await.unwrap();
         sqlx::query("UPDATE messages SET body='edited',version=2 WHERE organization_id=$1 AND channel_id=$2").bind(org).bind(channel).execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
-        gate.release.add_permits(1);
+        gate.release();
         let response = read.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let data = body(response).await;
@@ -301,7 +301,7 @@ async fn send_checks_generation_again_after_preflight_and_returns_write_generati
             .await
             .unwrap();
         assert_ne!(current, old);
-        gate.release.add_permits(1);
+        gate.release();
         let response = pending.await.unwrap();
         if with_generation {
             assert_eq!(response.status(), StatusCode::CONFLICT);

@@ -22,7 +22,7 @@ async fn reply_waiting_on_move_rereads_parent_and_inherits_destination(pool: PgP
     };
     parent.entered_within(Duration::from_secs(3)).await;
     parent.release();
-    gate.release.add_permits(1);
+    gate.release();
     let outcome = moved(move_task.await.unwrap()).await;
     let reply = reply_task.await.unwrap();
     assert_eq!(outcome.move_seq, Some(2));
@@ -51,7 +51,7 @@ async fn move_waiting_on_reply_includes_committed_reply(pool: PgPool) {
         })
     };
     wait_for_lock(&pool, "%pg_advisory_xact_lock(hashtextextended%135)%").await;
-    gate.release.add_permits(1);
+    gate.release();
     let reply = reply_task.await.unwrap();
     assert!(reply["topic_id"].is_null());
     let result = moved(task.await.unwrap()).await;
@@ -150,7 +150,7 @@ async fn move_holds_manager_grant_until_commit_and_rechecks_before_retry(pool: P
         })
     };
     wait_for_lock(&pool, "DELETE FROM channel_members%").await;
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(moved(task.await.unwrap()).await.move_seq, Some(2));
     assert_eq!(revoke.await.unwrap().rows_affected(), 1);
     let before = state(&pool, f.org, private).await;
@@ -198,7 +198,7 @@ async fn concurrent_move_operation_key_across_channels_leaves_loser_unchanged(po
     .await
     .unwrap();
     assert_eq!(untouched_counter, 1);
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(moved(winner.await.unwrap()).await.move_seq, Some(2));
     error(
         loser.await.unwrap(),

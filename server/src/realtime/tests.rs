@@ -713,7 +713,7 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
     for _ in 0..5 {
         post(&f, f.channel).await;
     }
-    gate.release.add_permits(1);
+    gate.release();
     for seq in 8..=125 {
         let value = event(&mut socket).await;
         assert_eq!(value["type"], "message");
@@ -1132,7 +1132,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
     f.state.message_delivery.flush().await;
     let mut silence = tokio::task::JoinSet::new();

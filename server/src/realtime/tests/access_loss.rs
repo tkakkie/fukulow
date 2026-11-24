@@ -183,7 +183,7 @@ async fn observed_loss_discards_queued_live_and_fetched_replay_before_and_during
                 assert_eq!(event(&mut socket).await["message"]["created_seq"], 1);
             }
             loss(&f, &pool, reader, c, case == "role").await;
-            g.release.add_permits(1);
+            g.release();
             access_lost(&mut socket, c).await;
             silent(&mut socket).await;
             // An explicit re-grant requires a new subscribe; old queued/fetched
@@ -510,7 +510,7 @@ async fn subscribe_registration_racing_removal_never_hands_off_a_stale_subscript
     subscribe(&mut socket, f.channel, 0).await;
     g.entered().await;
     loss(&f, &pool, reader, f.channel, false).await;
-    g.release.add_permits(1);
+    g.release();
     access_lost(&mut socket, f.channel).await;
     silent(&mut socket).await;
     subscribe(&mut socket, f.channel, 0).await;
@@ -688,7 +688,7 @@ async fn replay_snapshot_after_removal_commit_denies_even_without_a_fast_signal(
         subscribe(&mut socket, target, 0).await;
         g.entered().await;
         sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(f.organization).bind(target).bind(reader).execute(&pool).await.unwrap();
-        g.release.add_permits(1);
+        g.release();
         access_lost(&mut socket, target).await;
         silent(&mut socket).await;
         let mut control = f.server.connect(&f.token).await;

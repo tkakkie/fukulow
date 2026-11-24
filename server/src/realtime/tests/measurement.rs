@@ -166,7 +166,7 @@ async fn measure_cursor_starvation_and_burst_reconnects(pool: PgPool) {
     }
     ready(&mut first, f.channel, accepted as i64).await;
     watch_close(&mut clients, first);
-    gate.release.add_permits(1);
+    gate.release();
     holder.await.unwrap();
     f.state.message_delivery.flush().await;
     let cursor = f
@@ -401,7 +401,7 @@ async fn organization_reservation_probe(
     }
     let replay_ms = start.elapsed().as_secs_f64() * 1000.0;
     for (gate, holder) in holders {
-        gate.release.add_permits(1);
+        gate.release();
         holder.await.unwrap();
     }
     f.state.message_delivery.flush().await;

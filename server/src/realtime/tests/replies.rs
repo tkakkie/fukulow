@@ -30,7 +30,7 @@ async fn reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_m
     assert_eq!(second["reply_to"], first["id"]);
     assert_eq!(second["reply_root_id"], root["id"]);
     assert_eq!(second["topic_id"], root["topic_id"]);
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     for suffix in [
         "messages?after_seq=0".to_owned(),
@@ -230,7 +230,7 @@ async fn reply_live_replay_member_revision_and_removed_grant_denials_have_positi
                 .unwrap();
             }
         }
-        gate.release.add_permits(1);
+        gate.release();
         if loss == "grant" {
             access_loss::access_lost(&mut replay, target).await;
         } else {

@@ -288,7 +288,7 @@ async fn dm_loss_retires_paused_query_enqueue_and_first_handoff_without_revival(
         gate.entered().await;
         // Conservative A8 epoch retirement is irreversible even when current access exists again.
         delivery.retire(f.organization, peer);
-        gate.release.add_permits(1);
+        gate.release();
         delivery.drained().await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), allowed.next())
@@ -351,7 +351,7 @@ async fn dm_fallback_retires_lost_grant_provenance_before_regrant_and_fresh_work
             crate::auth::SubscriptionScope::Member(f.organization, peer),
         )
         .await;
-    gate.release.add_permits(1);
+    gate.release();
     delivery.drained().await;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), allowed.next())
@@ -527,7 +527,7 @@ async fn dm_notice_first_handoff_yields_to_known_session_and_membership_loss(poo
         .await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
         raw_closed(&mut denied, code).await;
-        gate.release.add_permits(1);
+        gate.release();
         assert!(notices(&f, &mut allowed).await.contains(&changed()));
     }
 }

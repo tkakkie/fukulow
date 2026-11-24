@@ -699,7 +699,7 @@ mod tests {
             assert!(handoff.as_mut().now_or_never().is_none());
             assert_eq!(gate.pending_entries(), 1);
             assert_eq!(capacity.sample().retry_attempts, attempt as u64);
-            gate.release.add_permits(1);
+            gate.release();
             assert_eq!(handoff.await, None::<()>);
             assert_eq!(capacity.sample().retry_attempts, attempt as u64 + 1);
         }

@@ -146,7 +146,7 @@ async fn subscribe_handoff_generation_recheck_preserves_access_and_organization_
                 .await
                 .unwrap();
         }
-        gate.release.add_permits(1);
+        gate.release();
         if loss == "grant" {
             assert_eq!(
                 event(&mut socket).await,

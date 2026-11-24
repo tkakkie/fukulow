@@ -67,7 +67,7 @@ async fn topic_ack_history_live_reconnect_and_shared_gap_payloads_are_identical(
     assert_eq!(event(&mut live).await["message"], second);
     assert!(first["topic_id"].is_string());
     assert_eq!(first["topic_id"], second["topic_id"]);
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     let history = request(
         &f.app,
@@ -168,7 +168,7 @@ async fn topic_live_replay_member_revision_and_removed_grant_denials_have_positi
                 .unwrap();
             }
         }
-        gate.release.add_permits(1);
+        gate.release();
         if loss == "grant" {
             access_loss::access_lost(&mut replay, target).await;
         } else {

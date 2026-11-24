@@ -401,7 +401,7 @@ async fn watermark_admission_expiry_closes_with_internal_error(pool: PgPool) {
         // No SQL or COMMIT is blocked: only admission can reject this socket.
         // Keep every permit until after Close, so host speed cannot release it.
         if let Some(gate) = gate {
-            gate.release.add_permits(1);
+            gate.release();
         } else {
             subscribe(&mut socket, target, 0).await;
         }

@@ -450,7 +450,7 @@ async fn lost_membership_signal_and_reactivation_still_close_stale_idle_and_repl
             fallback_close(&mut replay, CLOSE_ORGANIZATION_UNAVAILABLE)
         );
         assert!(started.elapsed() < Duration::from_secs(3));
-        gate.release.add_permits(1);
+        gate.release();
         if reactivate {
             let mut current = server.connect(&f.token).await;
             subscribe(&mut current, f.channel, 0).await;
@@ -547,7 +547,7 @@ async fn stale_revision_cannot_subscribe_replay_or_receive_before_fallback(pool:
         .execute(&pool)
         .await
         .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     closed(&mut replay, CLOSE_ORGANIZATION_UNAVAILABLE).await;
     subscribe(&mut idle, f.channel, 0).await;
     closed(&mut idle, CLOSE_ORGANIZATION_UNAVAILABLE).await;

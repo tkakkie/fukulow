@@ -26,7 +26,7 @@ async fn mention_live_and_replay_follow_current_names_and_never_accept_later_gra
     );
     sqlx::query("UPDATE users SET name='Current',deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2").bind(f.organization).bind(target).execute(&pool).await.unwrap();
     grant(&pool, f.organization, c, denied).await;
-    gate.release.add_permits(1);
+    gate.release();
     let received = event(&mut live).await;
     assert_eq!(received["type"], "message");
     assert_eq!(received["message"]["body"], text);
@@ -106,7 +106,7 @@ async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(p
             .status(),
             StatusCode::NO_CONTENT
         );
-        gate.release.add_permits(1);
+        gate.release();
         access_loss::access_lost(&mut socket, c).await;
         silent(&mut socket).await;
         for seq in 1..=3 {

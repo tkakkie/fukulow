@@ -216,7 +216,7 @@ async fn delete_grant_reports_revocation_with_and_without_an_active_subscription
             Box::pin(async move {
                 let result = self.access.check(pool, scope).await;
                 for gate in &self.gates {
-                    gate.release.add_permits(1);
+                    gate.release();
                 }
                 result
             })
@@ -303,7 +303,7 @@ async fn delete_grant_reports_revocation_with_and_without_an_active_subscription
             .activity
             .drained()
             .await;
-        handoff.release.add_permits(1);
+        handoff.release();
         let received = frames(&f, &mut socket).await;
         eprintln!("subscribed={subscribed}: {received:?}");
         let mut expected = vec![
@@ -484,7 +484,7 @@ async fn two_senders_coalesce_without_losing_each_others_activity(pool: PgPool) 
         send(&f, first, private, Uuid::new_v4(), "First").await;
         gate.entered().await;
         send(&f, second, private, Uuid::new_v4(), "Second").await;
-        gate.release.add_permits(1);
+        gate.release();
         for socket in [&mut alice, &mut alice2] {
             assert_eq!(
                 notices(&f, socket).await,
@@ -678,23 +678,23 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
         // Finish every fresh transition publisher before resuming or collecting old work.
         delivery.drained().await;
         if let Some((unproved, publication)) = unproved {
-            unproved.release.add_permits(1);
+            unproved.release();
             // Joining proves the unrelated paused publisher has completed, not merely been released.
             tokio::time::timeout(Duration::from_secs(5), publication)
                 .await
                 .unwrap()
                 .unwrap();
         }
-        gate.release.add_permits(1);
+        gate.release();
         // Joining completes enqueue; in handoff the released gate is ready before the collection Ping.
         tokio::time::timeout(Duration::from_secs(5), publication)
             .await
             .unwrap()
             .unwrap();
         if let Some(dequeue) = denied_dequeue {
-            dequeue.release.add_permits(1);
+            dequeue.release();
         }
-        allowed_dequeue.release.add_permits(1);
+        allowed_dequeue.release();
         let before = notices(&f, &mut denied).await;
         assert!(
             !before.iter().any(|notice| matches!(
@@ -745,7 +745,7 @@ async fn mutation_notice_is_not_observable_before_confirmed_commit(pool: PgPool)
     });
     gate.entered().await;
     assert!(notices(&f, &mut reader).await.is_empty());
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(task.await.unwrap().status(), StatusCode::CREATED);
     assert_eq!(notices(&f, &mut reader).await, vec![activity(f.channel, 1)]);
 }
@@ -979,7 +979,7 @@ async fn batch_measurement(pool: &PgPool, readers: usize) -> Value {
     post(&f, f.channel).await;
     send(&f, &bob_token, f.channel, Uuid::new_v4(), "Bob 4").await;
     let start = std::time::Instant::now();
-    gate.release.add_permits(1);
+    gate.release();
     let mut tasks = tokio::task::JoinSet::new();
     for (mut socket, expected) in sockets {
         tasks.spawn(async move {
@@ -1357,7 +1357,7 @@ async fn fallback_fences_first_in_flight_notice_without_buffered_provenance(pool
             }
             // A new grant must not revive the paused first authorization.
             grant(&pool, &f, private, target).await;
-            gate.release.add_permits(1);
+            gate.release();
             assert!(
                 notices(&f, &mut denied).await.is_empty(),
                 "{phase}, watched={watched}"
@@ -1451,7 +1451,7 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                 } else {
                     None
                 };
-                query.release.add_permits(1);
+                query.release();
                 publication.await.unwrap();
                 if fence_first {
                     delivery
@@ -1469,10 +1469,10 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                 // dropped before the old unproved snapshot fences the winning token.
                 // Access, grant and registration have remained unchanged throughout.
                 if let Some((fallback, check)) = check {
-                    fallback.release.add_permits(1);
+                    fallback.release();
                     check.await.unwrap();
                 }
-                dequeue.release.add_permits(1);
+                dequeue.release();
                 let expected = if fence {
                     json!({"type":"activity_reset"})
                 } else {
@@ -1543,7 +1543,7 @@ async fn fallback_unproved_snapshot_rejects_authorization_completed_before_regra
         fallback.entered().await;
         // Fallback copied None; publication establishes G1, possibly enqueueing it
         // and dropping its query guard before fallback observes G2.
-        query.release.add_permits(1);
+        query.release();
         authorized.entered().await;
         // Replace G1 with G2 without mutation hooks or fast signals, before fallback SQL.
         sqlx::query(
@@ -1556,9 +1556,9 @@ async fn fallback_unproved_snapshot_rejects_authorization_completed_before_regra
     .await
     .unwrap();
         grant(&pool, &f, private, target).await;
-        fallback.release.add_permits(1);
+        fallback.release();
         check.await.unwrap();
-        authorized.release.add_permits(1);
+        authorized.release();
         assert!(notices(&f, &mut denied).await.is_empty());
         assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 1)]);
         post(&f, private).await;
@@ -1605,7 +1605,7 @@ async fn subscription_refresh_loss_retires_a_first_notice_after_activity_check_s
     watch.refresh(&f.state.pool).await.unwrap();
     assert_eq!(watch.status(), 1);
     grant(&pool, &f, private, target).await;
-    gate.release.add_permits(1);
+    gate.release();
     assert!(notices(&f, &mut denied).await.is_empty());
     assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 1)]);
 }
@@ -1646,7 +1646,7 @@ async fn durable_grant_comparison_retires_buffered_activity_after_lost_fast_sign
             crate::auth::SubscriptionScope::Member(f.organization, target),
         )
         .await;
-    gate.release.add_permits(1);
+    gate.release();
     assert!(notices(&f, &mut own).await.is_empty());
     assert_eq!(notices(&f, &mut allowed).await, vec![activity(private, 2)]);
     post(&f, private).await;
@@ -1780,7 +1780,7 @@ async fn guest_directory_loss_discards_older_authorized_notice_but_keeps_fresh_p
         fresh,
         "the removal must publish a fresh directory invalidation"
     );
-    gate.release.add_permits(1);
+    gate.release();
     let later = notices(&f, &mut guest_socket).await;
     assert!(
         !later.contains(&json!({"type":"members_changed"})),
@@ -1865,7 +1865,7 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
                 }
                 let result = self.access.check(pool, scope).await;
                 assert!(result.is_ok(), "mutation recheck failed: {result:?}");
-                self.gate.release.add_permits(1);
+                self.gate.release();
                 result
             })
         }
@@ -2090,7 +2090,7 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
                 }
             }
         }
-        gate.release.add_permits(1);
+        gate.release();
         let mut changed = gained;
         changed.extend(notices(&f, &mut own).await);
         assert!(
@@ -2192,7 +2192,7 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
         crate::channels::activity::pause_member(f.organization, private, "snapshot", Some(target));
     delayed.release();
     gate.entered().await;
-    gate.release.add_permits(1);
+    gate.release();
 
     assert!(
         notices(&f, &mut before)
@@ -2313,7 +2313,7 @@ async fn moves_share_one_pending_activity_batch_and_notify_the_mover(pool: PgPoo
         activity.queries.load(std::sync::atomic::Ordering::SeqCst),
         initial
     );
-    pause.release.add_permits(1);
+    pause.release();
     for socket in [&mut mover, &mut reader] {
         let events = notices(&f, socket).await;
         assert_eq!(

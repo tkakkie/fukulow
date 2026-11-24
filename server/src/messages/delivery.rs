@@ -292,7 +292,7 @@ impl Notification {
         #[cfg(test)]
         {
             if let Some(gate) = gate {
-                *gate.data.lock().unwrap() = Some(task.abort_handle());
+                *gate.hook_state.abort_handle.lock().unwrap() = Some(task.abort_handle());
             }
             delivery.tasks.lock().unwrap().push(task);
         }
@@ -679,7 +679,10 @@ impl Delivery {
 use crate::test_support::{Gate, Gates};
 
 #[cfg(test)]
-type PublicationTask = Mutex<Option<tokio::task::AbortHandle>>;
+#[derive(Default)]
+pub(crate) struct PublicationTask {
+    pub(crate) abort_handle: Mutex<Option<tokio::task::AbortHandle>>,
+}
 #[cfg(test)]
 static PUBLICATION_GATES: Gates<Uuid, PublicationTask> = Gates::new();
 
@@ -1011,7 +1014,7 @@ mod tests {
                 assert!(!cold.notification_failed.is_failed());
                 assert_eq!(delivery.notification_reservations(), (1, 1));
             }
-            if let Some(task) = gate.data.lock().unwrap().as_ref() {
+            if let Some(task) = gate.hook_state.abort_handle.lock().unwrap().as_ref() {
                 task.abort();
             }
             for task in tasks {
@@ -1095,7 +1098,7 @@ mod tests {
         gate.entered().await;
         assert_eq!(delivery.notification_reservations(), (1, 1));
         // The test-only publication gate unwraps a closed semaphore, unwinding the task.
-        gate.release.close();
+        gate.close();
         let task = delivery.tasks.lock().unwrap().pop().unwrap();
         assert!(task.await.unwrap_err().is_panic());
         assert!(affected.notification_failed.is_failed());

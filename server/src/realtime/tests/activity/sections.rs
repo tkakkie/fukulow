@@ -212,7 +212,7 @@ async fn section_notices_are_private_even_for_guest_with_no_channels(pool: PgPoo
         StatusCode::CREATED
     );
     delivery.drained().await;
-    ready.release.add_permits(1);
+    ready.release();
     assert_eq!(
         raw_event(&mut guest).await,
         json!({"type":"activity_ready"})
@@ -268,7 +268,7 @@ async fn section_notices_deny_inactive_members_even_with_matching_revision(pool:
         let revision: i64 = sqlx::query_scalar("UPDATE users SET deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2 RETURNING membership_revision")
             .bind(f.organization).bind(f.member).fetch_one(&pool).await.unwrap();
         assert_eq!(auth.membership_revision, revision);
-        snapshot.release.add_permits(1);
+        snapshot.release();
     };
     let (response, ()) = tokio::join!(write, transition);
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -326,7 +326,7 @@ async fn section_notices_fence_observed_loss_at_enqueue_and_first_handoff(pool: 
                 paused.entered().await;
                 assert_loss.await;
                 let fresh = connect(&f, &f.token).await;
-                paused.release.add_permits(1);
+                paused.release();
                 fresh
             };
             let (response, fresh) = tokio::join!(create(&f, id, "Before loss"), transition);

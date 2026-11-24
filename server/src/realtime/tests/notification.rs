@@ -90,7 +90,7 @@ async fn measure_idle_sockets_and_notification_failure_latency(pool: PgPool) {
         latency[count - 1]
     );
     for gate in gates {
-        gate.release.add_permits(1);
+        gate.release();
     }
     f.state.message_delivery.flush().await;
 }
@@ -140,7 +140,7 @@ async fn http_response_does_not_wait_for_notification_and_concurrent_sends_recov
     while let Some(result) = sends.join_next().await {
         assert_eq!(result.unwrap().status(), StatusCode::CREATED);
     }
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     let next = post(&f, f.channel).await;
     assert_eq!(event(&mut socket).await["message"], next);
@@ -199,7 +199,7 @@ async fn held_hot_cursor_preserves_cold_channel_live_delivery_and_scoped_saturat
     for socket in &mut cold_sockets {
         assert_eq!(event(socket).await["message"], own);
     }
-    gate.release.add_permits(1);
+    gate.release();
     holder.await.unwrap();
     f.state.message_delivery.flush().await;
     let mut recovered = f.server.connect(&f.token).await;
@@ -271,7 +271,7 @@ async fn saturated_notifications_close_only_affected_sockets_and_reconnect_repla
     }
     ready(&mut reconnect, f.channel, committed.len() as i64).await;
     for gate in gates {
-        gate.release.add_permits(1);
+        gate.release();
     }
     f.state.message_delivery.flush().await;
     let next = post(&f, f.channel).await;
@@ -334,7 +334,7 @@ async fn saturated_http_response_with_many_subscribers_never_takes_recipients_lo
         assert!(!*queue.overflow.borrow());
     }
     for gate in gates {
-        gate.release.add_permits(1);
+        gate.release();
     }
     f.state.message_delivery.flush().await;
 }
@@ -366,14 +366,17 @@ async fn interrupted_or_timed_out_notification_closes_affected_sockets_and_recon
         let committed = send(&f, &f.token, f.channel, key, "response before failure").await;
         gate.entered().await;
         match failure {
-            "abort" => gate.data.lock().unwrap().as_ref().unwrap().abort(),
+            "abort" => {
+                let abort_handle = &gate.hook_state.abort_handle;
+                abort_handle.lock().unwrap().as_ref().unwrap().abort();
+            }
             "timeout" => {
                 tokio::time::pause();
                 tokio::time::advance(messages::NOTIFICATION_TIMEOUT).await;
                 tokio::time::resume();
             }
             // Fail inside the notification future, rather than the HTTP worker.
-            _ => gate.release.close(),
+            _ => gate.close(),
         }
         // No later publication is needed to expose this missing notification.
         closed(&mut live, 1011).await;
@@ -410,7 +413,8 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
     let late = messages::pause_publication(late_key);
     send(&f, &f.token, f.channel, late_key, "late notification").await;
     late.entered().await;
-    dropped.data.lock().unwrap().as_ref().unwrap().abort();
+    let abort_handle = &dropped.hook_state.abort_handle;
+    abort_handle.lock().unwrap().as_ref().unwrap().abort();
     closed(&mut before_failure, 1011).await;
 
     let through = LIVE_QUEUE_CAPACITY as i64 + 44;
@@ -457,7 +461,7 @@ async fn dropped_notification_large_gap_never_overflows_undrained_subscribers_an
         assert_eq!(event(&mut recovered).await["message"]["created_seq"], seq);
     }
     ready(&mut recovered, f.channel, through + 1).await;
-    late.release.add_permits(1);
+    late.release();
     f.state.message_delivery.flush().await;
     // A late old notification is suppressed, and the advanced cursor permits live delivery.
     let next = post(&f, f.channel).await;
@@ -481,7 +485,7 @@ async fn notification_authorization_failure_closes_with_4008_and_reconnect_repla
         .execute(&pool)
         .await
         .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     closed(&mut socket, CLOSE_QUEUE_OVERFLOW).await;
     f.state.message_delivery.flush().await;
     sqlx::query("ALTER TABLE channels RENAME COLUMN unavailable_visibility TO visibility")
@@ -513,7 +517,7 @@ async fn notification_rechecks_public_visibility_after_http_response(pool: PgPoo
     .execute(&pool)
     .await
     .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     access_loss::access_lost(&mut socket, f.channel).await;
     // An authorized public Channel supplies a FIFO silence barrier after fan-out finishes.

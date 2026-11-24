@@ -65,7 +65,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
         subscribe(&mut socket, f.channel, 0).await;
         gate.entered().await;
         f.state.pool.close().await;
-        gate.release.add_permits(1);
+        gate.release();
         closed(&mut socket, 1011).await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), completion.recv())

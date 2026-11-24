@@ -51,7 +51,7 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
         [1, 2, 3, 4]
     );
     assert!(queue.events.try_recv().is_err());
-    gate.release.add_permits(1);
+    gate.release();
     let list = response.await;
     let c = &list["channels"][0];
     assert_eq!(c["as_of_seq"], 2);
@@ -151,7 +151,7 @@ async fn unread_reconnect_baselines_distinguish_new_messages_from_new_positions(
     mark(&app, &viewer, channel, None, 2).await;
     let read = channels(&fresh_app, &viewer).await;
     // Reconnect refetches have completed before the older request returns.
-    gate.release.add_permits(1);
+    gate.release();
     let old = old.await;
     let old = &old["channels"][0];
     let newer = &newer["channels"][0];

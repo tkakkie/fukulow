@@ -7,13 +7,11 @@ use std::{
 use tokio::{sync::Semaphore, time::timeout};
 
 const ENTER_TIMEOUT: Duration = Duration::from_secs(5);
-// Some tests advance virtual time while holding a gate across several deadlines.
-const RELEASE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) struct Gate<T = ()> {
     entered: Semaphore,
-    pub(crate) release: Semaphore,
-    pub(crate) data: T,
+    release: Semaphore,
+    pub(crate) hook_state: T,
 }
 
 impl<T: Default> Default for Gate<T> {
@@ -21,7 +19,7 @@ impl<T: Default> Default for Gate<T> {
         Self {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
-            data: T::default(),
+            hook_state: T::default(),
         }
     }
 }
@@ -51,13 +49,13 @@ impl<T> Gate<T> {
         self.release.add_permits(1);
     }
 
+    pub(crate) fn close(&self) {
+        self.release.close();
+    }
+
     pub(crate) async fn pause(&self) {
         self.signal_entered();
-        timeout(RELEASE_TIMEOUT, self.release.acquire())
-            .await
-            .expect("test gate was not released within 60s")
-            .unwrap()
-            .forget();
+        self.release.acquire().await.unwrap().forget();
     }
 }
 
@@ -173,5 +171,53 @@ mod tests {
         assert!(Arc::ptr_eq(&gates.take(&1).unwrap(), &first));
         second.release();
         assert!(hook.await);
+    }
+
+    #[tokio::test]
+    async fn pause_with_fallback_prefers_member_then_uses_channel_gate() {
+        let gates = Gates::<_>::new();
+        let member_key = (1, Some(2));
+        let channel_key = (1, None);
+        let member_gate = gates.register(member_key);
+        let channel_gate = gates.register(channel_key);
+        let mut cx = Context::from_waker(Waker::noop());
+
+        let mut hook = std::pin::pin!(gates.pause_with_fallback(member_key, channel_key));
+        assert!(hook.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(member_gate.pending_entries(), 1);
+        assert_eq!(channel_gate.pending_entries(), 0);
+        member_gate.release();
+        assert!(hook.as_mut().poll(&mut cx).is_ready());
+
+        let mut hook = std::pin::pin!(gates.pause_with_fallback(member_key, channel_key));
+        assert!(hook.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(channel_gate.pending_entries(), 1);
+        channel_gate.release();
+        assert!(hook.as_mut().poll(&mut cx).is_ready());
+
+        assert!(gates.get(&member_key).is_none());
+        assert!(gates.get(&channel_key).is_none());
+    }
+
+    #[tokio::test]
+    async fn register_replacing_keeps_only_the_latest_phase_per_instance() {
+        let gates = Gates::<_>::new();
+        let other_gates = Gates::<_>::new();
+        let other_gate = other_gates.register_replacing("first");
+        let first = gates.register_replacing("first");
+        let second = gates.register_replacing("second");
+        let mut cx = Context::from_waker(Waker::noop());
+
+        let mut unmatched = std::pin::pin!(gates.pause("first"));
+        assert_eq!(
+            unmatched.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(false)
+        );
+        assert_eq!(first.pending_entries(), 0);
+        assert!(Arc::ptr_eq(&gates.take(&"second").unwrap(), &second));
+        assert!(Arc::ptr_eq(
+            &other_gates.take(&"first").unwrap(),
+            &other_gate
+        ));
     }
 }

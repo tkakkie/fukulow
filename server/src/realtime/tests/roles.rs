@@ -94,7 +94,7 @@ async fn delivery_reads_role_after_subscription_and_after_http_response(pool: Pg
         .execute(&pool)
         .await
         .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     access_loss::access_lost(&mut socket, f.channel).await;
     silent(&mut socket).await;

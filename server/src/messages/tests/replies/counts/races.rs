@@ -26,7 +26,7 @@ async fn reply_counts_bound_anchors_and_descendants_by_watermark_in_data_snapsho
     .await
     .unwrap();
     seed_channel_log(&pool).await;
-    gate.release.add_permits(1);
+    gate.release();
     let result = read.await.unwrap();
     assert_eq!(result["as_of_seq"], 2);
     assert_eq!(result["counts"].as_array().unwrap().len(), 2);

@@ -45,7 +45,7 @@ async fn live_serialization_is_once_per_fanout_including_shared_gap_recovery(poo
             3 * expected
         );
         assert_eq!(delivery.live_refills.load(Ordering::Relaxed), 0);
-        gate.release.add_permits(1);
+        gate.release();
         delivery.flush().await;
         // The delayed duplicate publication must neither serialize nor deliver again.
         let last = send(&f, &f.token, f.channel, Uuid::new_v4(), "after duplicate").await;
@@ -176,7 +176,7 @@ async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed
         .execute(&pool)
         .await
         .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     let enriched = queues[0].events.try_recv().unwrap();
     assert!(Arc::ptr_eq(

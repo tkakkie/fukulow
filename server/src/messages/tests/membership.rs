@@ -287,7 +287,7 @@ async fn history_authorization_and_page_share_a_nonlocking_snapshot(pool: PgPool
             sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) VALUES ($1,$2,$3,2,$4,$5,'after loss')")
                 .bind(organization).bind(Uuid::new_v4()).bind(channel).bind(sender).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
         }).await.unwrap();
-        gate.release.add_permits(1);
+        gate.release();
         let response = history.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let page = body(response).await;

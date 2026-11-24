@@ -36,7 +36,7 @@ impl Drop for Runner {
     fn drop(&mut self) {
         for (channel, gate) in &self.gates {
             REPLAY_GATES.take(channel);
-            gate.release.add_permits(1);
+            gate.release();
         }
     }
 }
@@ -244,11 +244,7 @@ impl Runner {
             }
             Step::ReleaseReplay { channel } => {
                 for label in channel.labels() {
-                    self.gates
-                        .remove(&self.channels[&label])
-                        .unwrap()
-                        .release
-                        .add_permits(1);
+                    self.gates.remove(&self.channels[&label]).unwrap().release();
                 }
             }
             Step::RemoveMembership { member, channel } => {

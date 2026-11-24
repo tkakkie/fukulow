@@ -45,7 +45,7 @@ impl SessionChanges {
         // The worker reaches this hook on its next recheck tick.
         gate.entered_within(self.interval + Duration::from_secs(5))
             .await;
-        gate.release.add_permits(1);
+        gate.release();
         registration
             .changed
             .wait_for(|status| status.failed)
@@ -185,7 +185,7 @@ async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
             .await
             .unwrap();
         state.session_changes.revoked(auth.token_hash.clone());
-        gate.release.add_permits(1);
+        gate.release();
         assert!(watch.await.unwrap().is_none());
         assert!(
             state

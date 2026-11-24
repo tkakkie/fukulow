@@ -124,7 +124,7 @@ async fn shared_gap_pages_preserve_all_visibility_denials_and_deduplicate_late_p
                 .await
                 .unwrap();
             }
-            gate.release.add_permits(1);
+            gate.release();
             delivery.flush().await;
             let last = replay_page(&pool, org, channel_id, 120, 121)
                 .await

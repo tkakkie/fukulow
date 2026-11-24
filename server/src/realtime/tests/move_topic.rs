@@ -226,7 +226,7 @@ async fn move_live_gap_and_subscribe_replay_converge_topics_chain_unread_and_men
     let next = post(&f, f.channel).await;
     assert_eq!(event(&mut live).await, expected);
     assert_eq!(event(&mut live).await["message"], next);
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     silent(&mut live).await;
     let mut replay = f.server.connect(&reader_token).await;

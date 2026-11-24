@@ -97,7 +97,7 @@ async fn measure_fanout_and_reorder(pool: PgPool) {
         assert_eq!(event(socket).await["message"], sent);
     }
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     let after = sql_counts(&pool).await;
     let mut total = 0;

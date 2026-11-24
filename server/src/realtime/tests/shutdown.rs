@@ -132,14 +132,14 @@ async fn disconnected_http_send_stays_in_drain_until_persistence_and_notificatio
             .await
             .is_err()
     );
-    persistence.release.add_permits(1);
+    persistence.release();
     notification.entered().await;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), delivery.drained())
             .await
             .is_err()
     );
-    notification.release.add_permits(1);
+    notification.release();
     tokio::time::timeout(Duration::from_secs(5), delivery.drained())
         .await
         .unwrap();
@@ -231,7 +231,7 @@ async fn signal_child() {
         assert!(!f.state.pool.is_closed());
         tokio::time::resume();
     } else {
-        persistence.release.add_permits(1);
+        persistence.release();
         let second = pending.await.unwrap();
         assert_eq!(second["created_seq"], 2);
         tokio::time::timeout(
@@ -247,7 +247,7 @@ async fn signal_child() {
             "HTTP drained but notification is still held"
         );
         assert!(!f.state.pool.is_closed());
-        notification.release.add_permits(1);
+        notification.release();
         assert!(serving.await.unwrap().unwrap());
         assert!(f.state.pool.is_closed());
         assert!(start.elapsed() < deadline);
@@ -279,9 +279,9 @@ async fn signal_child() {
         restarted_pool.close().await;
         return;
     }
-    persistence.release.add_permits(1);
+    persistence.release();
     pending.await.unwrap();
-    notification.release.add_permits(1);
+    notification.release();
     f.state.message_delivery.drained().await;
     pool.close().await;
 }
@@ -367,7 +367,7 @@ async fn send_load_child(pool: PgPool, sends: usize) {
     f.state.shutdown.cancelled().await;
     let started = observed_signal.await.unwrap();
     for gate in held {
-        gate.release.add_permits(1);
+        gate.release();
     }
     closed(&mut socket, 1001).await;
     let mut committed = HashMap::new();

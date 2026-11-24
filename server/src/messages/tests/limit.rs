@@ -188,7 +188,7 @@ async fn concurrent_identical_requests_consume_one_token_and_share_one_message(p
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!second.is_finished());
-    gate.release.add_permits(1);
+    gate.release();
     let (first, second) = (first.await.unwrap(), second.await.unwrap());
     assert_eq!(first.status(), StatusCode::CREATED);
     assert_eq!(second.status(), StatusCode::CREATED);
@@ -227,7 +227,7 @@ async fn waiters_settle_with_a_failed_leader_without_paying_or_taking_its_free_r
     .await
     .expect("the identical request waits on the leader");
     assert!(!waiter.is_finished());
-    gate.release.add_permits(1);
+    gate.release();
     // Transaction::drop closes the socket, rolling back any surviving transaction.
     // This also works if PostgreSQL's 8 s lifetime expired while the gate was held.
     // No assertion depends on keeping that transaction alive as a lock fence.
@@ -274,7 +274,7 @@ async fn a_waiter_with_another_intent_executes_itself_and_pays_without_the_free_
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!other.is_finished());
-    gate.release.add_permits(1);
+    gate.release();
     assert_error(leader.await.unwrap(), StatusCode::INTERNAL_SERVER_ERROR).await;
     pending.await.unwrap().rollback().await.unwrap();
     // The other intent does not inherit the leader's failure: it runs and pays.
@@ -482,7 +482,7 @@ async fn a_charged_leader_refused_by_admission_charges_its_identical_waiters_not
     .expect("all four requests wait on the leader");
     assert!(identical.iter().all(|waiter| !waiter.is_finished()));
     assert!(!another.is_finished());
-    gate.release.add_permits(1);
+    gate.release();
     let settle = |task: tokio::task::JoinHandle<Response>| async move {
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
@@ -571,7 +571,7 @@ async fn identical_waiter_rechecks_archive_before_replaying_admission_refusal(po
     .await
     .expect("archive commits while the leader is paused");
     assert_eq!(archived.status(), StatusCode::NO_CONTENT);
-    gate.release.add_permits(1);
+    gate.release();
 
     let (leader, waiter) = tokio::time::timeout(timeout, async { tokio::join!(leader, waiter) })
         .await

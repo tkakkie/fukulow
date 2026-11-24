@@ -65,7 +65,7 @@ async fn assert_both_commit_orders(pool: &PgPool, writer: Writer) {
     });
     races::wait_for_lock(pool, "%archived_at%FOR NO KEY UPDATE").await;
     assert_eq!(state(pool, f.org, f.channel).await, before);
-    gate.release.add_permits(1);
+    gate.release();
     let response = write_task.await.unwrap();
     assert_eq!(
         response.status(),

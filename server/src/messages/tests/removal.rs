@@ -91,7 +91,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
             if blocked {break;} tokio::task::yield_now().await;
         }}).await.unwrap();
         assert!(!revoke.is_finished());
-        gate.release.add_permits(1);
+        gate.release();
         assert_eq!(send.await.unwrap().status(), StatusCode::CREATED);
         revoke.await.unwrap();
         let r = request(
@@ -209,7 +209,7 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
             })
         };
         tokio::time::timeout(Duration::from_secs(2),async {loop {let wait:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM channel_members%')").fetch_one(&pool).await.unwrap();if wait {break;}tokio::task::yield_now().await;}}).await.unwrap();
-        gate.release.add_permits(1);
+        gate.release();
         assert_eq!(mark.await.unwrap().status(), StatusCode::OK);
         remove.await.unwrap();
         for suffix in ["read".into(), format!("topics/{topic_id}/read")] {
@@ -292,7 +292,7 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
         if waiting {break;} tokio::task::yield_now().await;
     }}).await.unwrap();
     assert!(!deactivating.is_finished());
-    gate.release.add_permits(1);
+    gate.release();
     let sent = sending.await.unwrap();
     assert_eq!(sent.status(), StatusCode::CREATED);
     let canonical = body(sent).await;

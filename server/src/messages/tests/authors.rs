@@ -325,7 +325,7 @@ async fn author_lookup_authorization_and_identities_share_a_nonlocking_snapshot(
     })
     .await
     .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(
         body(lookup.await.unwrap()).await,
         json!({"identities":[{"id":author,"name":"Member","deactivated":false}]})
