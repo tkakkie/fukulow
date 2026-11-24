@@ -669,3 +669,23 @@ test('fixedRate keeps ticks on k x period: lateness does not add up, a passed ta
   pending.f();
   assert.equal(ticks.length, 5);
 });
+
+test('a signal during a later job stops only that job; a job that already exited is never signalled', async () => {
+  const w = world({ exits: [0, 143] });
+  const d = deps(w);
+  let handler: ((s: string) => void) | undefined;
+  d.onSignal = h => { handler = h; };
+  const perChild: string[][] = [];
+  const spawn = d.spawn;
+  d.spawn = (argv, opts) => {
+    const c = spawn(argv, opts);
+    const mine: string[] = [];
+    perChild.push(mine);
+    if (perChild.length === 2) queueMicrotask(() => handler?.('SIGTERM'));
+    return { ...c, kill: (signal?: 'SIGTERM' | 'SIGKILL') => { mine.push(signal ?? 'SIGTERM'); c.kill(signal); } };
+  };
+  const r = await launch(queue(), d);
+  assert.equal(r.outcome, 'stop');
+  // Job a exited 0 before b started; the abort during b must not reach a's (possibly reused) process group.
+  assert.deepEqual(perChild, [[], ['SIGTERM']]);
+});

@@ -197,8 +197,9 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   const periods: Record<string, number> = {};
   let stopLogs: (() => void) | null = null;
   let aborted: string | null = null;
-  let onAbort = () => {};
-  const abortedP = new Promise<void>(resolve => { onAbort = resolve; });
+  // Stop callbacks of the gate or job running now. Each run() removes its own when its child ends, so an
+  // abort during a later job never signals a process group that already exited (its id may be reused).
+  const onAbort = new Set<() => void>();
   const endLogs = () => { const s = stopLogs; stopLogs = null; try { s?.(); } catch (e) { note(`log capture stop failed: ${String(e)}`); } };
   const alive = (c: Child) => { try { return c.alive(); } catch { return true; } };
   const gone = async (c: Child, ms: number) => {
@@ -232,7 +233,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   const abort = (reason: string) => {
     aborted ??= reason;
     if (child) void escalate(child);
-    onAbort();
+    for (const stopRunning of [...onAbort]) stopRunning();
     note(`STOP: ${reason}`);
   };
   d.onSignal(signal => abort(signal));
@@ -242,11 +243,14 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
     const c = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: { ...job.env, FUKULOW_LAUNCH_SESSION: launchSession } });
     child = c;
     started.push({ child: c, job });
+    let stopRunning = () => {};
+    const stopped = new Promise<null>(resolve => { stopRunning = () => { void escalate(c).then(() => resolve(null)); }; });
+    onAbort.add(stopRunning);
+    if (aborted) stopRunning();
     try {
-      const stopped = abortedP.then(() => escalate(c)).then(() => null);
       const first = await Promise.race([c.done, stopped]);
       return first ?? (await Promise.race([c.done, Promise.resolve(null)]));
-    } finally { child = null; }
+    } finally { onAbort.delete(stopRunning); child = null; }
   };
   const stop = (reason: string): Result => { log(`STOP: ${reason}`); return { outcome: 'stop', reason, jobs }; };
   // Every process group the launcher started has ended, and no container is running: none ran when
