@@ -1,6 +1,6 @@
 import { execFile, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,6 +74,9 @@ const git = (...args: string[]) => run('git', args).trim();
 const commits = { current: git('rev-parse', pins.current + '^{commit}'), final: git('rev-parse', pins.final + '^{commit}') };
 if (git('rev-parse', commits.final + '^') !== commits.current) throw new Error('final pin must be the direct child of current');
 const work = mkdtempSync(join(realpathSync(tmpdir()), 'fk519f-'));
+// mkdtemp gives 0700; the v3 sends run as the container's postgres user, which must read the bind-mounted
+// files (repository SQL only, nothing secret).
+chmodSync(work, 0o755);
 const container = 'fk519f-' + randomUUID();
 // The launcher's workloadLabel for this probe: a stopped run's container is found and removed by it.
 const workloadLabel = 'io.fukulow.probe=519-final';
@@ -332,6 +335,9 @@ try {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
   }
+  // Fail before any frequency phase if the send user cannot read the bench file (#796 control run 1).
+  if (request && spawnSync('docker', ['exec', '--user', 'postgres', container, 'test', '-r', '/work/sql/bench.pgb']).status !== 0)
+    throw new Error('the container postgres user cannot read /work/sql/bench.pgb');
   // Max frequencies per set make a swapped or mixed split visible in the record (Zen 5 vs Zen 5c).
   const maxKHz = (set: number[]) => [...new Set(set.map(c => Object.entries(recordBefore.maxFrequencyKHz ?? {}).find(([, cs]) => cs.includes(c))?.[0] ?? 'unknown'))];
   const cpuPins = cpuSets === undefined ? null : {
