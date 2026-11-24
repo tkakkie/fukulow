@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { Identity } from './api'
   import type { Organization } from './api-schema.d.ts'
-  import type { ChannelCreationBlocked } from './channel-creation'
+  import type { ChannelCreationAccess, ChannelCreationBlocked } from './channel-creation'
+  import ChannelCreationPermission from './ChannelCreationPermission.svelte'
   import ArchivedChannelList from './ArchivedChannelList.svelte'
   import ChannelList from './ChannelList.svelte'
   import type { Channel, ChannelVisibility } from './channels.svelte'
@@ -23,12 +24,6 @@
     permissionError: ChannelCreationBlocked['blocked'] | null
     busy: boolean
   }
-
-  const creationPermissionMessages = {
-    'access-changed': 'チャンネルを作成する権限が変更された可能性があります。確認が終わってから、もう一度お試しください。',
-    denied: 'チャンネルを作成する権限がありません。',
-    'check-failed': 'チャンネルを作成する権限を確認できませんでした。時間をおいて、もう一度お試しください。',
-  } satisfies Record<ChannelCreationBlocked['blocked'], string>
 
   type DmListView = {
     rows: DmRow[]
@@ -60,8 +55,7 @@
     channelMentionUnreadCount,
     topicUnreadCounts = {},
     sections,
-    showCreateChannel = false,
-    createChannelDisabled = false,
+    creationAccess = 'denied',
     createChannelDraft,
     archivedList,
     dms = null,
@@ -105,8 +99,7 @@
     channelMentionUnreadCount?: (channelId: string) => number | null
     topicUnreadCounts?: Readonly<Record<string, { readonly unreadCount: number | null; readonly mentionUnreadCount?: number | null }>>
     sections?: SectionsAdapter
-    showCreateChannel?: boolean
-    createChannelDisabled?: boolean
+    creationAccess?: ChannelCreationAccess
     createChannelDraft?: ChannelCreationDraft
     archivedList?: { status: 'loading' | 'ready' | 'error'; channels: Channel[] }
     dms?: DmListView | null
@@ -132,8 +125,9 @@
   } = $props()
 
   const creationPermissionError = $derived.by(() => {
-    if (!showCreateChannel && (createChannelDraft?.name || createChannelDraft?.permissionError)) return 'denied'
-    if (createChannelDraft?.permissionError !== 'denied') return createChannelDraft?.permissionError
+    if (organizationUnavailable) return
+    if (creationAccess === 'denied' && (createChannelDraft?.name || createChannelDraft?.permissionError)) return 'denied'
+    if (creationAccess === 'hidden') return createChannelDraft?.permissionError
   })
 </script>
 
@@ -178,11 +172,8 @@
 </div>
 
 <div class="channel-column__scroll">
-  {#if !organizationUnavailable && showCreateChannel}
-    <CreateChannelForm oncreate={oncreatechannel} draft={createChannelDraft} disabled={createChannelDisabled} />
-  {/if}
-  {#if !organizationUnavailable && creationPermissionError}
-    <StatusBanner tone="danger" role="alert" message={creationPermissionMessages[creationPermissionError]} />
+  {#if !organizationUnavailable && creationAccess !== 'denied'}
+    <CreateChannelForm oncreate={oncreatechannel} draft={createChannelDraft} disabled={creationAccess === 'hidden'} />
   {/if}
   {#if !organizationUnavailable && (channelListStatus === 'error' || (channelListStatus === 'loading' && channels.length === 0 && channelListTimedOut))}
     <StatusBanner
@@ -250,9 +241,14 @@
   {/if}
 </div>
 
-{#if authError}
+{#if creationPermissionError || authError}
   <div class="channel-column__footer">
-    <StatusBanner tone="danger" role="alert" message={authError} />
+    {#if creationPermissionError}
+      <ChannelCreationPermission kind="alert" reason={creationPermissionError} />
+    {/if}
+    {#if authError}
+      <StatusBanner tone="danger" role="alert" message={authError} />
+    {/if}
   </div>
 {/if}
 
@@ -274,6 +270,8 @@
   }
 
   .channel-column__footer {
+    display: grid;
+    gap: var(--space-8);
     min-width: 0;
   }
 

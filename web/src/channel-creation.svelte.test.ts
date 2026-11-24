@@ -221,8 +221,13 @@ describe('Channel creation visibility', () => {
       await settle()
       expect(draft().value).toBe('入力済み')
       expect(button().disabled).toBe(false)
-      if (reason === 'denial') expect(host.querySelector('[role="alert"]')).toBeNull()
+      expect(host.querySelector('[role="alert"]')).toBeNull()
       expect(net.creates).toHaveLength(0)
+
+      access.invalidate('access')
+      await settle()
+      expect(host.querySelector('[role="alert"]')).toBeNull()
+      expect(button().getAttribute('aria-describedby')).toBeTruthy()
     } finally { await close() }
   })
 

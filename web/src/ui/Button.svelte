@@ -8,6 +8,7 @@
     type = 'button',
     disabled = false,
     ariaLabel,
+    ariaDescribedBy,
     ariaCurrent,
     ariaExpanded,
     ariaControls,
@@ -23,6 +24,7 @@
     type?: 'button' | 'submit' | 'reset'
     disabled?: boolean
     ariaLabel?: string
+    ariaDescribedBy?: string
     ariaCurrent?: 'page' | 'step' | 'location' | 'date' | 'time' | 'true' | 'false'
     ariaExpanded?: boolean
     ariaControls?: string
@@ -42,6 +44,7 @@
   {type}
   {disabled}
   aria-label={ariaLabel}
+  aria-describedby={ariaDescribedBy}
   aria-current={ariaCurrent}
   aria-expanded={ariaExpanded}
   aria-controls={ariaControls}

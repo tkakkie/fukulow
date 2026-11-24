@@ -113,6 +113,40 @@ describe('Channel creation capability in a Session', () => {
     expect(await newSubmission).toEqual({ channel: created })
   })
 
+  it.each(['reconcile', 'periodic'] as const)('keeps submission held after a stale allowed /me crosses a %s fence', async reason => {
+    const { net, creation } = open()
+    const stale = deferred<api.Result<api.Identity>>()
+    const current = deferred<api.Result<api.Identity>>()
+    const getMe = vi.spyOn(api, 'getOrganizationMe')
+      .mockResolvedValueOnce(ok(allowed)).mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise)
+    net.socket.onEvent({ type: 'activity_ready' })
+    // Start the stale read just before the first periodic fence at 15 seconds.
+    await vi.advanceTimersByTimeAsync(13_000)
+    net.socket.onEvent({ type: 'activity_reset' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(getMe).toHaveBeenCalledTimes(2)
+    const submission = creation.submit(draft)
+    const settled = vi.fn()
+    void submission.then(settled)
+
+    if (reason === 'reconcile') net.socket.onEvent({ type: 'activity_reset' })
+    else await vi.advanceTimersByTimeAsync(1_000)
+    stale.resolve(ok(allowed))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(getMe).toHaveBeenCalledTimes(3)
+    expect(creation.get()).toBe('revalidating')
+    expect(settled).not.toHaveBeenCalled()
+    expect(net.creates).toHaveLength(0)
+
+    current.resolve(ok(allowed))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(creation.get()).toBe('allowed')
+    expect(net.creates).toHaveLength(1)
+    const created = channel('new', draft.name)
+    net.creates[0].resolve(ok(created))
+    expect(await submission).toEqual({ channel: created })
+  })
+
   it.each([400, 503])('settles the held submit when /me returns %i', async status => {
     const { net, creation } = open()
     vi.spyOn(api, 'getOrganizationMe').mockResolvedValue({ ok: false, kind: 'http', status })

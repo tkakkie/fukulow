@@ -178,7 +178,7 @@ test('capability reconciliation preserves creation focus between selection and t
   let socket: WebSocketRoute | undefined
   await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => { ws.connectToServer(); socket = ws })
   const org = await signIn(page)
-  await createChannel(page, nextChannelName('creation-baseline'))
+  const baseline = await createChannel(page, nextChannelName('creation-baseline'))
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()
   const name = nextChannelName('creation-reconcile')
   await page.getByRole('radio', { name: '非公開', exact: true }).check()
@@ -200,7 +200,15 @@ test('capability reconciliation preserves creation focus between selection and t
     await creationGate.promise
     await route.fulfill({ response })
   })
-  const row = page.getByRole('navigation', { name: 'チャンネル' }).getByRole('button', { name })
+  const nav = page.getByRole('navigation', { name: 'チャンネル' })
+  const baselineRow = nav.getByRole('button', { name: baseline.name })
+  await expect(baselineRow).toBeVisible()
+  const before = await baselineRow.boundingBox()
+  expect(before).not.toBeNull()
+  const permissionHint = 'チャンネルを作成する権限を確認できるまで、作成できません。'
+  const hint = nav.getByText(permissionHint, { exact: true })
+  await expect(hint).toBeHidden()
+  const row = nav.getByRole('button', { name })
   try {
     // Evidence-based invalidation keeps focus, disables submit and blocks Enter.
     try {
@@ -211,11 +219,17 @@ test('capability reconciliation preserves creation focus between selection and t
       await page.keyboard.insertText(name)
       await expect(input).toHaveValue(name)
       await expect(button).toBeDisabled()
+      await expect(hint).toBeVisible()
+      await expect(button).toHaveAccessibleDescription(permissionHint)
+      expect(await baselineRow.boundingBox()).toEqual(before)
       await input.press('Enter')
     } finally { identityGate.resolve() }
     await expect(input).toHaveValue(name)
     await expect(page.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()
     await expect(button).toBeEnabled()
+    await expect(hint).toBeHidden()
+    await expect(button).not.toHaveAttribute('aria-describedby')
+    expect(await baselineRow.boundingBox()).toEqual(before)
     expect(postCount).toBe(0)
 
     // Routine revalidation keeps the button enabled and holds the draft until /me confirms.
@@ -227,6 +241,7 @@ test('capability reconciliation preserves creation focus between selection and t
       await expect(button).toBeEnabled()
       await button.click()
       await expect(button).toBeDisabled()
+      expect(await baselineRow.boundingBox()).toEqual(before)
       expect(postCount).toBe(0)
     } finally { identityGate.resolve() }
 

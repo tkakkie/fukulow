@@ -82,6 +82,9 @@
   const creationAccess = $derived(channels.creationAccess)
   const channelCreation = $state({ name: '', visibility: 'public' as ChannelVisibility, error: '',
     permissionError: null as ChannelCreationBlocked['blocked'] | null, busy: false })
+  $effect(() => {
+    if (creationAccess === 'allowed' && channelCreation.permissionError) channelCreation.permissionError = null
+  })
   const creationLifetime = new AbortController()
   onDestroy(() => creationLifetime.abort())
   // One adapter read per derived: every read of the adapter registers a listener effect.
@@ -848,8 +851,7 @@
       {channelMentionUnreadCount}
       topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
       sections={session.sections}
-      showCreateChannel={creationAccess !== 'denied'}
-      createChannelDisabled={creationAccess === 'hidden'}
+      {creationAccess}
       createChannelDraft={channelCreation}
       archivedList={s.archivedList}
       dms={dmState && session.dms

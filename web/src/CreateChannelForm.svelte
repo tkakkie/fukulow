@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChannelCreationPermission from './ChannelCreationPermission.svelte'
   import { channelNameTooLong, type ChannelVisibility } from './channels.svelte'
   import type { ChannelCreationBlocked } from './channel-creation'
   import Button from './ui/Button.svelte'
@@ -16,6 +17,9 @@
     draft?: typeof local
     disabled?: boolean
   } = $props()
+
+  const permissionHintId = $props.id()
+  const showPermissionHint = $derived(disabled && !draft.busy && !draft.permissionError)
 
   async function submit(e: Event) {
     e.preventDefault()
@@ -60,10 +64,13 @@
   {#if draft.error}
     <StatusBanner tone="danger" role="alert" message={draft.error} />
   {/if}
-  <Button variant="primary" type="submit" disabled={disabled || draft.busy || draft.name === ''}>チャンネルを作成</Button>
-  {#if disabled && !draft.busy && !draft.permissionError}
-    <p class="creation-permission">チャンネルを作成する権限を確認できるまで、作成できません。</p>
-  {/if}
+  <Button
+    variant="primary"
+    type="submit"
+    disabled={disabled || draft.busy || draft.name === ''}
+    ariaDescribedBy={showPermissionHint ? permissionHintId : undefined}
+  >チャンネルを作成</Button>
+  <ChannelCreationPermission kind="hint" id={permissionHintId} visible={showPermissionHint} />
 </form>
 
 <style>
@@ -78,12 +85,6 @@
     padding: 0;
     border: 0;
     min-width: 0;
-  }
-
-  .creation-permission {
-    margin: 0;
-    color: var(--text2);
-    font-size: var(--font-size-13);
   }
 
   legend {
