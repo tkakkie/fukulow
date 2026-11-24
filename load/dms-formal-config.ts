@@ -15,7 +15,7 @@ export function external(path: string, checkout: string): string {
 }
 const seedOptions = ['--seed-diagnostic', '--seed-diagnostic-baseline', '--seed-diagnostic-rehearsal', '--seed-diagnostic-baseline-rehearsal'];
 export const runUsage = `Expected <config> [--pilot | ${seedOptions.join(' | ')}]. The -rehearsal options run the same seed diagnostic arm `
-  + `with every collector on at small size: ${seedRehearsal.organizations} Organization, ${seedRehearsal.batchesPerOrganization} Message batches `
+  + `with the collectors of the matching full arm (the instrumented arm also streams DB logs and runs the samplers) at small size: ${seedRehearsal.organizations} Organization, ${seedRehearsal.batchesPerOrganization} Message batches `
   + `(${seedRehearsal.organizations * seedRehearsal.batchesPerOrganization * 25_000} Messages), about 2-5 minutes per arm on the Mac (estimate). A rehearsal is never pair evidence; `
   + 'compare two rehearsal arms with dms-formal-seed-effect.ts --rehearsal.';
 export function readRunConfig(args: string[], checkout: string): Config {

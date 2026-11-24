@@ -36,7 +36,8 @@ const originDigests: Record<string, string> = {
 function transcript(t: TestContext, mode: Mode, run: () => void) {
   const output = mkdtempSync(join(tmpdir(), 'dm-seed-parity-'));
   t.after(() => rmSync(output, { recursive: true, force: true }));
-  const env = { DM_FORMAL_SEED: '1', DM_FORMAL_OUT: output, DM_DB_CONTAINER: 'stub', ...mode.env };
+  // DM_FORMAL_SEED_BATCHES is cleared as the full-size worker does, so an exported shell value cannot shorten the transcript.
+  const env = { DM_FORMAL_SEED: '1', DM_FORMAL_OUT: output, DM_DB_CONTAINER: 'stub', DM_FORMAL_SEED_BATCHES: '', ...mode.env };
   const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   Object.assign(process.env, env);
   const hash = createHash('sha256'), add = (line: string) => hash.update(line + '\n');
