@@ -9,6 +9,13 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+mod c3_tests;
+
+#[cfg(test)]
+static RECEIPT_MISS: crate::test_support::Gates<Uuid, std::sync::OnceLock<bool>> =
+    crate::test_support::Gates::new();
+
 pub(in crate::messages) async fn existing<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     organization_id: Uuid,
@@ -94,6 +101,13 @@ async fn persist_admitted(
             .await?
             .ok_or(MessageError::Database(sqlx::Error::RowNotFound));
     }
+    #[cfg(test)]
+    let write_probe = if let Some(gate) = RECEIPT_MISS.take(&input.client_message_id) {
+        gate.pause().await;
+        Some(gate)
+    } else {
+        None
+    };
     let targets = mentions::extract(&input.body);
     let accepted = if let Some((grants, accepted)) = channels::dms::send_locks(
         tx.connection()?,
@@ -194,9 +208,13 @@ async fn persist_admitted(
     ).bind(organization_id).bind(Uuid::new_v4()).bind(channel_id).bind(seq).bind(sender)
         .bind(input.client_message_id).bind(&input.body).bind(topic_id).bind(input.reply_to).bind(reply_root_id).bind(history_generation).try_map(|row| message_from_row(&row))
         .fetch_optional(tx.connection()?).await?;
+    #[cfg(test)]
+    if let Some(gate) = write_probe {
+        gate.hook_state.set(message.is_none()).unwrap();
+    }
     if let Some(mut message) = message {
-        search::SearchEngine::index_send(&mut tx, organization_id, message.id).await?;
         log::create(tx.connection()?, organization_id, &message).await?;
+        search::SearchEngine::index_send(&mut tx, organization_id, message.id).await?;
         mentions::store(tx.connection()?, organization_id, &mut message, &accepted).await?;
         topics::record(tx.connection()?, organization_id, topic_id, seq).await?;
         // Arm before COMMIT: cancellation or an ambiguous commit error must not leave
