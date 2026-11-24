@@ -11,10 +11,25 @@ const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.ur
 const credentials = /ACTIONS_(?:RUNTIME_TOKEN|RESULTS_URL)/
 const privilegedAction = /actions\/github-script/
 const action = 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'
-const allowed = new Set(['ci.yml/docker/build-image', 'ci.yml/docker/build-upgrade-image',
-  'e2e-compose.yml/acceptance/build-image', 'docker-cache.yml/export/build-image'])
+const allowed = new Set(['ci.yml/docker-proxy/build-image', 'ci.yml/docker-ops/build-image',
+  'ci.yml/docker-ops/build-upgrade-image', 'e2e-compose.yml/acceptance/build-image', 'docker-cache.yml/export/build-image'])
 // #926: the one step that writes scope=docker; every other credential step only reads it.
 const writer = 'docker-cache.yml/export/build-image'
+// Jobs that hold a credential build step, per workflow.
+const credentialJobs: Record<string, string[]> = { 'ci.yml': ['docker-proxy', 'docker-ops'], 'e2e-compose.yml': ['acceptance'], 'docker-cache.yml': ['export'] }
+// Each variant replaces exactly one occurrence, so every credential step is mutated on its own.
+function eachReplacement(text: string, from: string, to: string) {
+  const variants: string[] = []
+  for (let at = text.indexOf(from); at >= 0; at = text.indexOf(from, at + 1)) variants.push(text.slice(0, at) + to + text.slice(at + from.length))
+  assert.ok(variants.length > 0, `missing ${JSON.stringify(from)}`)
+  return variants
+}
+// Replaces the first match at or after the job header, so identical blocks in other jobs stay untouched.
+function replaceInJob(text: string, job: string, from: string, to: string) {
+  const at = text.indexOf(from, text.indexOf(`  ${job}:\n`))
+  assert.ok(text.indexOf(`  ${job}:\n`) >= 0 && at >= 0, `missing ${JSON.stringify(from)} in ${job}`)
+  return text.slice(0, at) + to + text.slice(at + from.length)
+}
 const guard = 'if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {'
 const inheritedEnvKeys = new Set(['COMPOSE_PROJECT_NAME', 'COMPOSE_PROFILES', 'POSTGRES_PASSWORD',
   'POSTGRES_APP_PASSWORD', 'FUKULOW_SETUP_TOKEN', 'FUKULOW_COOKIE_SECURE', 'FUKULOW_DOMAIN'])
@@ -121,14 +136,16 @@ test('rejects credential exports and file/output stores in any workflow, includi
       `fs.writeFileSync("cache-token", process.env.${variable});`,
       `core.setOutput("token", process.env.${variable});`,
     ]) {
-      assert.throws(() => checkWorkflow('ci.yml', workflow.replace(guard, `${source}\n            ${guard}`)), /credentials/)
+      for (const mutated of eachReplacement(workflow, guard, `${source}\n            ${guard}`))
+        assert.throws(() => checkWorkflow('ci.yml', mutated), /credentials/)
       const extra = `name: test\njobs:\n  check:\n    steps:\n      - run: |\n          ${source}\n`
       assert.throws(() => checkWorkflow('new.yaml', extra), /allowed build steps/)
     }
   }
   // An alias must not bypass the store check after a whole-environment read.
-  assert.throws(() => checkWorkflow('ci.yml', workflow.replace(guard,
-    `const env = process.env;\n            core.exportVariable("alias", env);\n            ${guard}`)), /stored or exported/)
+  for (const mutated of eachReplacement(workflow, guard,
+    `const env = process.env;\n            core.exportVariable("alias", env);\n            ${guard}`))
+    assert.throws(() => checkWorkflow('ci.yml', mutated), /stored or exported/)
 })
 
 test('rejects job/workflow env, unrelated steps, renamed actions, and credential-enabled repository commands', () => {
@@ -136,16 +153,18 @@ test('rejects job/workflow env, unrelated steps, renamed actions, and credential
   for (const variable of ['ACTIONS_RUNTIME_TOKEN', 'ACTIONS_RESULTS_URL']) {
     for (const source of [
       workflow.replace('jobs:', `env: { ${variable}: test-only }\njobs:`),
-      workflow.replace('  docker:\n', `  docker:\n    env: { ${variable}: test-only }\n`),
+      ...credentialJobs['ci.yml'].map(job => workflow.replace(`  ${job}:\n`, `  ${job}:\n    env: { ${variable}: test-only }\n`)),
       workflow + `\n      - run: node scripts/check-db-upgrade.ts\n        env: { ${variable}: test-only }\n`,
       workflow + `\n      - uses: actions/github-script@v9\n        with:\n          script: console.log(process.env.${variable})\n`,
-      workflow.replace(guard, `${guard}\n              console.log(process.env.${variable});`),
+      ...eachReplacement(workflow, guard, `${guard}\n              console.log(process.env.${variable});`),
     ]) assert.throws(() => checkWorkflow('ci.yml', source), /credentials|allowed build steps/)
   }
-  assert.throws(() => checkWorkflow('ci.yml', workflow.replace('id: build-image', 'id: checks')), /allowed build steps/)
-  assert.throws(() => checkWorkflow('ci.yml', workflow.replace(action, 'actions/github-script@v9')), /stay pinned/)
-  assert.throws(() => checkWorkflow('ci.yml', workflow.replace('await exec.exec("docker", ["buildx", "bake",',
-    'await exec.exec("node", ["scripts/check-db-upgrade.ts",')), /only build commands/)
+  for (const source of eachReplacement(workflow, 'id: build-image', 'id: checks'))
+    assert.throws(() => checkWorkflow('ci.yml', source), /allowed build steps/)
+  for (const source of eachReplacement(workflow, action, 'actions/github-script@v9'))
+    assert.throws(() => checkWorkflow('ci.yml', source), /stay pinned/)
+  for (const source of eachReplacement(workflow, 'await exec.exec("docker", ["buildx", "bake",',
+    'await exec.exec("node", ["scripts/check-db-upgrade.ts",')) assert.throws(() => checkWorkflow('ci.yml', source), /only build commands/)
   for (const source of [
     '      - uses: actions/github-script@v9\n        with:\n          script: await exec.exec("node", ["scripts/check-db-upgrade.ts"]);',
     '      - uses:  actions/github-script@v9',
@@ -163,37 +182,38 @@ test('credential actions reject startup env at every scope and inputs other than
     ['BASH_ENV', './repository.sh'], ['ENV', './repository.sh'],
     ['PYTHONPATH', './scripts'], ['PATH', './scripts'],
   ]
-  for (const file of ['ci.yml', 'e2e-compose.yml']) {
+  for (const file of ['ci.yml', 'e2e-compose.yml']) for (const job of credentialJobs[file]) {
     const workflow = read(`.github/workflows/${file}`)
-    const job = file === 'ci.yml' ? 'docker' : 'acceptance'
     const jobEnv = workflow.slice(workflow.indexOf(`  ${job}:\n`))
       .match(/^    env:[^\n]*(?:\n(?: {6}[^\n]*|[ \t]*$))*/m)![0]
     for (const [variable, value] of preloads) {
       for (const env of [`env:\n          ${variable}: ${value}`, `env: { ${variable}: "${value}" }`]) {
         for (const id of file === 'ci.yml' ? ['build-image', 'build-upgrade-image'] : ['build-image']) {
-          assert.throws(() => checkWorkflow(file, workflow.replace(`id: ${id}\n`, `id: ${id}\n        ${env}\n`)), /no step env/)
+          for (const source of eachReplacement(workflow, `id: ${id}\n`, `id: ${id}\n        ${env}\n`))
+            assert.throws(() => checkWorkflow(file, source), /no step env/)
         }
       }
       for (const env of [`env:\n  ${variable}: ${value}\n`, `env: { ${variable}: "${value}" }\n`]) {
         assert.throws(() => checkWorkflow(file, workflow.replace('jobs:', `${env}jobs:`)), /inherited environment/)
       }
       for (const env of [`env:\n      ${variable}: ${value}\n`, `env: { ${variable}: "${value}" }\n`]) {
-        assert.throws(() => checkWorkflow(file, workflow.replace(jobEnv, `    ${env}`)), /inherited environment/)
+        assert.throws(() => checkWorkflow(file, replaceInJob(workflow, job, jobEnv, `    ${env}`)), /inherited environment/)
       }
     }
     for (const extra of ['env: {}', 'env: *startup', 'env: ${{ vars.STARTUP }}',
       'with: { require: ./scripts/check-db-upgrade.ts }']) {
-      assert.throws(() => checkWorkflow(file, workflow.replace('id: build-image\n', `id: build-image\n        ${extra}\n`)), /no step env/)
+      for (const source of eachReplacement(workflow, 'id: build-image\n', `id: build-image\n        ${extra}\n`))
+        assert.throws(() => checkWorkflow(file, source), /no step env/)
     }
     for (const input of ['require', 'pre-script', 'post-script', 'github-token']) {
-      assert.throws(() => checkWorkflow(file, workflow.replace('          script: |',
-        `          ${input}: ./scripts/check-db-upgrade.ts\n          script: |`)), /only metadata and the script input/)
+      for (const source of eachReplacement(workflow, '          script: |', `          ${input}: ./scripts/check-db-upgrade.ts\n          script: |`))
+        assert.throws(() => checkWorkflow(file, source), /only metadata and the script input/)
     }
     for (const env of ['env: *startup', 'env: ${{ vars.STARTUP }}', 'env:\n  <<: *startup',
       'env:\n  "NODE_OPTIONS": --import ./scripts/check-db-upgrade.ts',
       '"env": { NODE_OPTIONS: "--import ./scripts/check-db-upgrade.ts" }', '<<: *startup']) {
       assert.throws(() => checkWorkflow(file, workflow.replace('jobs:', `${env}\njobs:`)), /inherited environment/)
-      assert.throws(() => checkWorkflow(file, workflow.replace(jobEnv,
+      assert.throws(() => checkWorkflow(file, replaceInJob(workflow, job, jobEnv,
         `    ${env.replaceAll('\n', '\n    ')}\n`)), /inherited environment/)
     }
   }
@@ -206,13 +226,12 @@ test('startup restrictions leave unrelated steps and jobs alone and allow known 
     .replace('    steps:\n', '    steps:\n      - uses: unrelated/action@v1\n        env: { NODE_PATH: ./scripts }\n        with: { require: ./scripts/unrelated.ts }\n')
     .replace('      - name: Fetch upgrade source\n',
       '      - run: node scripts/unrelated.ts\n        env: { BASH_ENV: ./unrelated.sh }\n      - name: Fetch upgrade source\n')
-  assert.equal(checkWorkflow('ci.yml', workflow).size, 2)
+  assert.equal(checkWorkflow('ci.yml', workflow).size, 3)
 })
 
 test('inherited env scans past comments at every indent and fails closed on unclassified lines', () => {
-  for (const file of ['ci.yml', 'e2e-compose.yml']) {
+  for (const file of ['ci.yml', 'e2e-compose.yml']) for (const job of credentialJobs[file]) {
     const workflow = read(`.github/workflows/${file}`)
-    const job = file === 'ci.yml' ? 'docker' : 'acceptance'
     const jobEnv = workflow.slice(workflow.indexOf(`  ${job}:\n`))
       .match(/^    env:[^\n]*(?:\n(?: {6}[^\n]*|[ \t]*$))*/m)![0]
     const expected = [...checkWorkflow(file, workflow).keys()]
@@ -220,7 +239,7 @@ test('inherited env scans past comments at every indent and fails closed on uncl
       const prefix = ' '.repeat(indent)
       const insert = (env: string) => indent === 0
         ? workflow.replace('jobs:', `${env}jobs:`)
-        : workflow.replace(jobEnv, env)
+        : replaceInJob(workflow, job, jobEnv, env)
       // Cover workflow/job parent indentation, env indentation and entry indentation.
       for (const commentIndent of new Set([0, Math.max(0, indent - 2), indent, indent + 2])) {
         for (const betweenEntries of [false, true]) {
@@ -287,7 +306,7 @@ function checkOldImageCleanup(calls: { args: string[] }[], image: string) {
 }
 
 test('old-image identity guard rejects a changed archive revision or build tag', async () => {
-  const script = checkWorkflow('ci.yml', read('.github/workflows/ci.yml')).get('ci.yml/docker/build-upgrade-image')!
+  const script = checkWorkflow('ci.yml', read('.github/workflows/ci.yml')).get('ci.yml/docker-ops/build-upgrade-image')!
   for (const [from, to] of [['"origin/main"', '"HEAD"'], ['"fukulow-upgrade-main"', '"wrong-image"']]) {
     const calls = await buildCalls(script.replace(from, to), 'push')
     assert.throws(() => checkOldImageBuild(calls), /origin\/main|fukulow-upgrade-main/)
@@ -296,9 +315,9 @@ test('old-image identity guard rejects a changed archive revision or build tag',
 
 test('child-environment guard rejects implicit credentials on archive helpers and non-build docker commands', async () => {
   const scripts = checkWorkflow('ci.yml', read('.github/workflows/ci.yml'))
-  const oldBuild = scripts.get('ci.yml/docker/build-upgrade-image')!
+  const oldBuild = scripts.get('ci.yml/docker-ops/build-upgrade-image')!
   await assert.rejects(() => buildCalls(oldBuild.replaceAll(', { env });', ');'), 'push'), /only docker builds/)
-  const mainBuild = scripts.get('ci.yml/docker/build-image')!
+  const mainBuild = scripts.get('ci.yml/docker-ops/build-image')!
   await assert.rejects(() => buildCalls(mainBuild.replace('"buildx", "bake"', '"compose", "up"'), 'push'), /buildx/)
 })
 

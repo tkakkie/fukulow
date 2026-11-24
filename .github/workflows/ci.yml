@@ -104,7 +104,8 @@ jobs:
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
       # Keep the build flags in sync with cargo nextest list in web/scripts/check-invariants.ts.
       - run: cargo nextest run --locked --features fukulow-client-core/wasm --no-fail-fast --partition slice:${{ matrix.shard }}/4
-      - if: matrix.shard == 1
+      # Doctests (10-14 s) run on shard 4, whose slice is the lightest; shard 1 already runs check-invariants.
+      - if: matrix.shard == 4
         run: cargo test --locked --doc # nextest does not run doctests
       - if: matrix.shard == 1
         run: node web/scripts/check-invariants.ts # Lists runnable tests across all shards using the same nextest build. Requires cargo and nextest.
@@ -162,7 +163,9 @@ jobs:
         run: |
           node --test scripts/check-versions.test.ts
           node scripts/check-versions.ts
-  docker:
+  # #800 PR 4: the proxy spoofing check (~107 s) runs beside the other image checks instead of before them.
+  # Both jobs build the same image from main's layer cache; `docker` (the required check) needs both.
+  docker-proxy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -188,10 +191,9 @@ jobs:
               throw new Error("Actions cache credentials are not available");
             }
             // compose.dev.yml is the explicit source-build override (#808); compose.yml pulls releases.
-            await exec.exec("docker", ["buildx", "bake", "--load", "--file", "compose.dev.yml",
-              "--set", "app.cache-from=type=gha,scope=docker"]);
-      - name: Image ships the license texts, copyright notice and third-party notices (#807)
-        run: bash scripts/check-image-licenses.sh fukulow-app
+            const args = ["buildx", "bake", "--load", "--file", "compose.dev.yml",
+              "--set", "app.cache-from=type=gha,scope=docker"];
+            await exec.exec("docker", args);
       # The profiles run side by side as separate Compose projects with ephemeral ports (~130 s in sequence).
       # Distinct edge subnets keep the two projects apart.
       - name: Both proxy profiles reject forwarded-IP spoofing
@@ -205,6 +207,34 @@ jobs:
           exit "$status"
         env:
           CHECK_COMPOSE_IMAGE: fukulow-app
+  docker-ops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      POSTGRES_PASSWORD: ci-compose-only
+      POSTGRES_APP_PASSWORD: ci-compose-app-only
+      FUKULOW_SETUP_TOKEN: ci-setup-test-only
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version-file: .node-version }
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Read-only: docker-cache.yml is the only writer of scope=docker (#926). A PR export once hung for 17 minutes.
+      - name: Build image with GitHub Actions layer cache
+        id: build-image
+        timeout-minutes: 20
+        # Like e2e-compose, only the action's build child inherits cache credentials.
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {
+              throw new Error("Actions cache credentials are not available");
+            }
+            // compose.dev.yml is the explicit source-build override (#808); compose.yml pulls releases.
+            await exec.exec("docker", ["buildx", "bake", "--load", "--file", "compose.dev.yml",
+              "--set", "app.cache-from=type=gha,scope=docker"]);
+      - name: Image ships the license texts, copyright notice and third-party notices (#807)
+        run: bash scripts/check-image-licenses.sh fukulow-app
       - name: Database roles fail closed and never export passwords to logs or SQL snapshots
         run: node scripts/check-db-roles.ts
         env:
@@ -269,3 +299,12 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci-compose-only
           FUKULOW_VERSION: 0.0.0-dev
+  docker:
+    needs: [docker-proxy, docker-ops]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PROXY: ${{ needs.docker-proxy.result }}
+          OPS: ${{ needs.docker-ops.result }}
+        run: test "$PROXY" = success && test "$OPS" = success

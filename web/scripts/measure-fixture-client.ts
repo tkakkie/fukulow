@@ -1,24 +1,22 @@
-// Fixture client for the #466 measurement harness: replays contract/realtime/client
-// scenarios on the wasm core so their inputs can be recorded as traces.
+// Fixture protocol client: maps contract/realtime/client scenario inputs to protocol `Input`s on an
+// injected driver. The only copy (#866): the #466 measurement harness records its inputs as traces, and
+// web/src/protocol-test-helpers.ts wraps it for the protocol tests.
 // Kept outside measure-wasm-core.ts (which runs on import) so a test can prove every
 // fixture input type is handled (#545).
-import { readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { components } from '../src/api-schema.d.ts'
-import type { Input, State } from '../src/protocol-types.ts'
-import { defaultDir, fixtureEvents, fixtureMove, type ClientScenario, type Effect as FixtureEffect, type Observed, type ResolvedInput } from './realtime-fixtures.ts'
+import type { Input, SyncView } from '../src/protocol-types.ts'
+import { fixtureEvents, fixtureMove, type Effect as FixtureEffect, type Observed, type ResolvedInput } from './realtime-fixtures.ts'
+
+export { loadClientScenarios } from './realtime-fixtures.ts'
 
 type Message = components['schemas']['Message']
 const GENERATION = '00000000-0000-4000-8000-000000000515'
 
-export const loadClientScenarios = (): ClientScenario[] => readdirSync(join(defaultDir, 'client')).filter((n) => n.endsWith('.json')).sort()
-  .flatMap((n) => (JSON.parse(readFileSync(join(defaultDir, 'client', n), 'utf8')) as { scenarios: ClientScenario[] }).scenarios)
-
-const msgFromFixture = (m: ResolvedInput['message'], channel: string): Message => ({
+export const msgFromFixture = (m: ResolvedInput['message'], channel: string): Message => ({
   mentions: [], ...m!, channel_id: channel, topic_id: m?.topic ?? null, reply_to: m?.reply_to ?? null, reply_root_id: m?.reply_root_id ?? null,
 })
 
-const observe = (state: State): Observed => ({
+export const observe = (state: SyncView): Observed => ({
   session: state.session, organization: state.organization,
   channels: Object.fromEntries(Object.entries(state.channels).map(([id, c]) => [id, {
     state: c.state, cursor: c.cursor, messages: c.messages,
