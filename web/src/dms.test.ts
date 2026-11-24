@@ -129,14 +129,46 @@ it('unknown open outcome traverses authorized pages while definitive refusals ne
 
 it('stale open cannot select or restore a row and current list recovery selects only after authorization', async () => {
   const c = client(); await c.ready()
-  const old = held<Result<Dm>>(); c.api.open.mockReturnValueOnce(old.promise)
+  const old = held<Result<Dm>>(), again = held<Result<Dm>>()
+  c.api.open.mockReturnValueOnce(old.promise).mockReturnValueOnce(again.promise)
   const opening = c.dms.open('peer-A')
   c.activity.notice({ type: 'dm_list_changed' })
-  old.resolve(ok(dm('A'))); await opening
+  old.resolve(ok(dm('A'))); await opening; await flush()
+  // The one re-resolution is fenced too, so only list recovery may select.
+  expect(c.api.open).toHaveBeenCalledTimes(2)
+  c.activity.notice({ type: 'dm_list_changed' })
+  again.resolve(ok(dm('A'))); await flush()
   expect(c.select).not.toHaveBeenCalled(); expect(c.dms.get().rows).toEqual([])
   c.rows = [dm('A')]; await vi.advanceTimersByTimeAsync(2000)
   expect(c.select).toHaveBeenCalledWith('A')
+  expect(c.api.open).toHaveBeenCalledTimes(2)
   c.close()
+})
+
+it('a fenced open re-resolves once under current authority and selects without waiting for an O5 list slot (#956)', async () => {
+  for (const renew of [false, true]) {
+    const c = client(); c.rows = [dm('M')]; await c.ready()
+    if (renew) c.dms.peerRefusal('M', { ok: false, kind: 'http', status: 409, error: 'dm_peer_access_lapsed' })
+    // Another DM notice spends this O5 run's shared slots, so list recovery would wait for the next run.
+    c.activity.notice({ type: 'dm_list_changed' }); await vi.advanceTimersByTimeAsync(1000)
+    const target = renew ? 'M' : 'G'
+    const first = held<Result<Dm>>(); c.api.open.mockReturnValueOnce(first.promise).mockResolvedValueOnce(ok(dm(target)))
+    const opening = c.dms.open(`peer-${target}`, renew)
+    c.rows = [dm('M'), dm('G')]
+    // The open's own commit notice arrives before its response and fences the snapshot.
+    c.activity.notice({ type: 'dm_list_changed' }); await vi.advanceTimersByTimeAsync(300)
+    expect(c.dms.get().budget).toBe(0)
+    const lists = c.api.list.mock.calls.length + c.api.changes.mock.calls.length
+    first.resolve(ok(dm(target))); await opening; await flush()
+    expect(c.api.open.mock.calls.map(([body]) => body)).toEqual([
+      { member_id: `peer-${target}`, ...(renew ? { renew: true } : {}) }, { member_id: `peer-${target}`, ...(renew ? { renew: true } : {}) }])
+    expect(c.select).toHaveBeenCalledWith(target)
+    expect(c.dms.get().rows.some(row => row.identity.id === target)).toBe(true)
+    if (renew) expect(c.dms.get().sendBlocks.M).toBeUndefined()
+    expect(c.dms.get().busy).toBe(false)
+    expect(c.api.list.mock.calls.length + c.api.changes.mock.calls.length).toBe(lists)
+    c.close()
+  }
 })
 
 it('peer refusal never automatically resends or renews and only explicit renewal clears its send block', async () => {
@@ -182,10 +214,13 @@ it('disconnect fences responses and close cancels abort-ignoring work across Org
 it('a confirmed renewal with a fenced POST snapshot clears the send block only after current list recovery', async () => {
   const c = client(); c.rows = [dm('A')]; await c.ready()
   c.dms.peerRefusal('A', { ok: false, kind: 'http', status: 409, error: 'dm_peer_access_lapsed' })
-  const response = held<Result<Dm>>(); c.api.open.mockReturnValueOnce(response.promise)
+  const response = held<Result<Dm>>(), again = held<Result<Dm>>()
+  c.api.open.mockReturnValueOnce(response.promise).mockReturnValueOnce(again.promise)
   const renewing = c.dms.open('peer-A', true)
   c.activity.notice({ type: 'dm_list_changed' })
-  response.resolve(ok(dm('A'))); await renewing
+  response.resolve(ok(dm('A'))); await renewing; await flush()
+  c.activity.notice({ type: 'dm_list_changed' })
+  again.resolve(ok(dm('A'))); await flush()
   expect(c.dms.get().sendBlocks.A).toBe('dm_peer_access_lapsed')
   await vi.advanceTimersByTimeAsync(2000)
   expect(c.select).toHaveBeenCalledWith('A')

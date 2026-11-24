@@ -29,7 +29,7 @@ export function createDms(options: {
   random?: () => number; timeoutMs?: number
 }) {
   let state = dmListState(), busy = false, error = '', mutation: api.OpenDmRequest | undefined
-  let mutationGeneration = 0, active: DmRequest | undefined, closed = false
+  let mutationGeneration = 0, active: DmRequest | undefined, closed = false, reresolve = false, reresolved = false
   const random = options.random ?? Math.random
   const listeners = new Set<() => void>()
   const notify = () => listeners.forEach(listener => listener())
@@ -95,7 +95,8 @@ export function createDms(options: {
       if (current) {
         dispatch({ type: 'opened', generation: mutationGeneration, dm, renewed: mutation?.renew === true })
         options.select(dm.id)
-      } else dispatch({ type: 'recover', peer: dm.peer.id, renewed: mutation?.renew === true })
+      } else if (!reresolved && !state.paused) reresolve = true
+      else dispatch({ type: 'recover', peer: dm.peer.id, renewed: mutation?.renew === true })
       invalidate('access')
     },
     error(result) {
@@ -104,7 +105,13 @@ export function createDms(options: {
       if (retryable(result) && mutation) dispatch({ type: 'recover', peer: mutation.member_id })
       if (terminal(result)) close()
     },
-    settled() { busy = false; notify(); plan() },
+    settled() {
+      // The open's own commit notice usually fences its snapshot. Repeating the same body once is a
+      // resolution-only no-op that publishes nothing (B2.5), so the fresh reply can select without
+      // waiting for list recovery's next O5 slot (#956).
+      if (reresolve) { reresolve = false; reresolved = true; mutationGeneration = state.generation; void mutationTarget.refresh(); return }
+      busy = false; reresolved = false; notify(); plan()
+    },
   })
   function close() {
     if (closed) return
@@ -118,7 +125,7 @@ export function createDms(options: {
     resetHistory() {
       if (closed) return
       target.suspend(); mutationTarget.suspend()
-      active = undefined; mutation = undefined; busy = false; error = ''
+      active = undefined; mutation = undefined; busy = false; error = ''; reresolve = false; reresolved = false
       dispatch({ type: 'history_reset' })
     },
     ready() { dispatch({ type: 'resume' }); invalidate('reconcile') },
