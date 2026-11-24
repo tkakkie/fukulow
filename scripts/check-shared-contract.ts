@@ -64,7 +64,7 @@ export const sharedCodes: Record<string, ('core' | 'web')[]> = {
 }
 
 // Values web compares an `error` against that are not server codes.
-export const webOnlyCodes: Record<string, string> = {
+const webOnlyCodes: Record<string, string> = {
   incorrect: 'account-security.ts SecurityError, mapped from current_password_incorrect',
   invalid: 'account-security.ts SecurityError, mapped from any other 400',
   invalid_new: 'account-security.ts SecurityError, mapped from invalid_new_password',
@@ -78,7 +78,7 @@ type Limit = {
   web: { file: string, name: string },
 }
 
-export const textLimits: Record<string, Limit> = {
+const textLimits: Record<string, Limit> = {
   'message body': {
     server: { file: 'server/src/messages/send.rs', pattern: /self\.body\.chars\(\)\.count\(\) > (\d+)/g },
     openapi: ['SendMessageRequest/properties/body'],
@@ -101,13 +101,13 @@ export const textLimits: Record<string, Limit> = {
   },
 }
 
-export const coreLimits = ['MAIN_MESSAGE_LIMIT', 'TOPIC_MESSAGE_LIMIT', 'REPLY_MESSAGE_LIMIT',
+const coreLimits = ['MAIN_MESSAGE_LIMIT', 'TOPIC_MESSAGE_LIMIT', 'REPLY_MESSAGE_LIMIT',
   'INACTIVE_CHANNEL_MESSAGE_LIMIT', 'INACTIVE_CHANNEL_LIMIT', 'TOTAL_MESSAGE_LIMIT', 'SYNC_MESSAGE_LIMIT']
 const coreFile = 'client-core/src/types.rs'
 const webCoreFile = 'web/src/protocol-types.ts'
 
 // Rust source with comments and string contents blanked, plus its string literals.
-export function lexRust(source: string): { code: string, strings: { value: string, start: number, end: number }[] } {
+function lexRust(source: string): { code: string, strings: { value: string, start: number, end: number }[] } {
   let code = ''
   const strings: { value: string, start: number, end: number }[] = []
   let i = 0
@@ -163,7 +163,7 @@ function moduleDir(path: string): string {
 const lexCache = new Map<string, ReturnType<typeof lexRust>>()
 
 // Non-test Rust files under `root` and the string literals outside `#[cfg(test)] mod` blocks.
-export function rustProduct(files: Record<string, string>, root: string) {
+function rustProduct(files: Record<string, string>, root: string) {
   const testDirs: string[] = []
   const lexed = new Map<string, ReturnType<typeof lexRust>>()
   for (const [path, source] of Object.entries(files)) {
@@ -201,7 +201,7 @@ export function serverCodes(repo: Repo): Set<string> {
   return codes
 }
 
-export function coreMatchedCodes(repo: Repo): Set<string> {
+function coreMatchedCodes(repo: Repo): Set<string> {
   const codes = new Set<string>()
   for (const { source, strings } of rustProduct(repo.files, 'client-core/src').values()) {
     for (const { value, start, end } of strings) {
@@ -216,7 +216,7 @@ export function coreMatchedCodes(repo: Repo): Set<string> {
 const webProduct = (path: string) => /^web\/src\/.*\.(?:ts|svelte)$/.test(path) &&
   !/\.test\.ts$|test-helpers|\.d\.ts$/.test(path)
 
-export function webMatchedCodes(repo: Repo): Set<string> {
+function webMatchedCodes(repo: Repo): Set<string> {
   const codes = new Set<string>()
   for (const [path, source] of Object.entries(repo.files)) {
     if (!webProduct(path)) continue

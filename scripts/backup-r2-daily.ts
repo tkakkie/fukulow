@@ -6,7 +6,7 @@ import { acquireLocalLock, diagnostic, privateDirectory, SafeFailure, safeFailur
 export interface DailyConfig {
   directory: string; recipientFile: string; curlConfigFile: string; baseUrl: string; notifierConfigFile: string
 }
-export async function readDailyConfig(path: string): Promise<DailyConfig> {
+async function readDailyConfig(path: string): Promise<DailyConfig> {
   const value = JSON.parse(await readPrivateFile(path))
   if (!value || !['directory', 'recipientFile', 'curlConfigFile', 'notifierConfigFile'].every(key =>
     typeof value[key] === 'string' && isAbsolute(value[key])) || typeof value.baseUrl !== 'string') throw new Error('Invalid operator configuration')

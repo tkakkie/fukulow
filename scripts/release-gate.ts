@@ -1,5 +1,4 @@
 // Publish gate (#808): the tagged commit is on main and its main push CI succeeded.
-import { pathToFileURL } from 'node:url'
 
 // The workflows that verify a main push. Their jobs include all required checks that
 // main commits get (web, server, docker, lint, migrations, checks, scan); budget-changes
@@ -33,7 +32,7 @@ async function api(path: string): Promise<unknown> {
   return response.json()
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (import.meta.main) {
   const { GITHUB_REPOSITORY: repository, RELEASE_SHA: sha } = process.env
   if (!repository || !sha || !/^[0-9a-f]{40}$/.test(sha) || !process.env.GITHUB_TOKEN) {
     throw new Error('GITHUB_REPOSITORY, RELEASE_SHA (40 hex) and GITHUB_TOKEN are required')

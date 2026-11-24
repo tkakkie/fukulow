@@ -55,7 +55,7 @@ export function checkE2EInvariants(root: string, reportPath = join(root, 'web/te
   return errors
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
+if (import.meta.main) {
   const errors = checkE2EInvariants(resolve(import.meta.dirname, '../..'), process.argv[2])
   for (const error of errors) console.error(error)
   if (errors.length) process.exit(1)

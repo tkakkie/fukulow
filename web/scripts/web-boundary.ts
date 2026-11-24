@@ -34,9 +34,9 @@ import { parse } from 'svelte/compiler'
 import ts from 'typescript'
 
 /** The only files that may open connections (the API layer). */
-export const NETWORK_FILES = ['src/api.ts', 'src/realtime.ts']
+const NETWORK_FILES = ['src/api.ts', 'src/realtime.ts']
 /** The only file that may touch web storage (the UI-settings helper). */
-export const STORAGE_FILES = ['src/ui-settings.ts']
+const STORAGE_FILES = ['src/ui-settings.ts']
 
 const NETWORK = new Set([
   'fetch',

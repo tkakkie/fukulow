@@ -1,16 +1,9 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { checkInventory, checkVersions, type Entry } from './check-versions.ts'
+import { checkInventory, checkVersions, readRepoFile, readVersionInputs, type Entry } from './check-versions.ts'
 
-const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
-const files = { rust: read('rust-toolchain.toml'), node: read('.node-version'),
-  webNode: JSON.parse(read('web/package.json')).engines.node,
-  loadNode: JSON.parse(read('load/package.json')).engines.node, dockerfile: read('Dockerfile'),
-  playwright: JSON.parse(read('web/package.json')).devDependencies['@playwright/test'],
-  webLock: read('web/package-lock.json'), e2e: read('.github/workflows/e2e.yml'),
-  makefile: read('Makefile'), dmsRecord: read('load/dms-record.ts'),
-  compose: read('compose.yml'), acme: read('scripts/compose-acme.ts'), core: read('client-core/Cargo.toml'), wasmBuild: read('scripts/build-wasm.ts'), ci: read('.github/workflows/ci.yml') }
+const read = readRepoFile
+const files = readVersionInputs()
 
 test('versions agree with tag-only and tag-plus-digest Docker bases', () => {
   checkVersions(files)

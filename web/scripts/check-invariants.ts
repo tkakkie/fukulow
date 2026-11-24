@@ -218,7 +218,7 @@ function checkCrossReferences(tokens: string, target: string, rows: Row[], refer
 
 /** Test citations in the contract/realtime JSON files (#892): every JSON string in `path.(rs|ts)::name` form must name a
  * test that runs in CI, resolved like an invariants row. The "rule" in a message is the citing scenario's `id`. */
-export function checkContractCitations(root: string, known: Known): string[] {
+function checkContractCitations(root: string, known: Known): string[] {
   const dir = join(root, 'contract/realtime')
   if (!existsSync(dir)) return []
   const errors: string[] = []
@@ -340,7 +340,7 @@ export function checkInvariants(root: string, listed?: ListedTest[]): string[] {
   return [...errors, ...checkContractCitations(root, known), ...checkDecisionDocs(root)]
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
+if (import.meta.main) {
   const root = resolve(import.meta.dirname, '../..')
   let listed: ListedTest[]
   try {
