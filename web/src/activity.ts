@@ -2,6 +2,7 @@ import type { Result, ServerEvent } from './api'
 
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
+export type FencedInvalidation = Exclude<Invalidation, 'notice'>
 export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
@@ -10,7 +11,7 @@ export function createActivityTarget<T>(options: {
   load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   covers?(value: T): boolean
-  hide?(reason: Invalidation): void
+  hide?(reason: FencedInvalidation): void
   error?(result: Exclude<Result<T>, { ok: true }>): void
   terminal?(result: Result<T>): boolean
   random?: () => number

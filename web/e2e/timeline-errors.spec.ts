@@ -26,6 +26,12 @@ test.afterEach(async ({ page }) => {
 let channelSeq = 0
 const nextChannelName = (prefix: string) => `${prefix}-${++channelSeq}-${Date.now()}`
 
+function gate<T = void>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+
 async function signIn(page: Page): Promise<string> {
   const statusRes = await secretSafe(() => page.request.get('/api/v1/setup'))
   expect(statusRes.ok()).toBe(true)
@@ -94,6 +100,80 @@ async function reselectChannel(page: Page, viaName: string, targetName: string):
   await expect(page.getByRole('heading', { name: targetName })).toBeVisible()
 }
 
+test('the first Channel creation press survives initial list loading and activity_ready', async ({ page }) => {
+  const org = await signIn(page)
+  const seed = await secretSafe(() => page.request.post(`/api/v1/orgs/${org}/channels`, {
+    data: { name: nextChannelName('initial-list'), visibility: 'public' } satisfies CreateChannelRequest,
+  }))
+  expect(seed.status()).toBe(201)
+  expect((await secretSafe(() => page.request.delete('/api/v1/session'))).status()).toBe(204)
+  await page.goto('about:blank')
+
+  const list = gate()
+  const sections = gate()
+  const identity = gate()
+  const deliverReady = gate<() => void>()
+  const orgPath = `**/api/v1/orgs/${org}`
+  let meReads = 0
+  let postCount = 0
+  await page.route(orgPath + '/channels', async route => {
+    if (route.request().method() === 'POST') postCount++
+    else await list.promise
+    await route.continue()
+  })
+  await page.route(orgPath + '/me/sections', async route => { await sections.promise; await route.continue() })
+  await page.route(orgPath + '/me', async route => {
+    if (++meReads > 1) await identity.promise
+    await route.continue()
+  })
+  await page.routeWebSocket(orgPath + '/ws', ws => {
+    const server = ws.connectToServer()
+    server.onMessage(raw => {
+      const event = JSON.parse(String(raw)) as ServerEvent
+      if (event.type === 'activity_ready') deliverReady.resolve(() => ws.send(raw))
+      else ws.send(raw)
+    })
+  })
+
+  try {
+    await signIn(page)
+    const name = nextChannelName('first-press')
+    const button = page.getByRole('button', { name: 'チャンネルを作成' })
+    await page.getByLabel('チャンネル名').fill(name)
+    await expect(page.getByLabel('チャンネルを読み込み中')).toBeVisible()
+    await expect(button).toBeEnabled()
+    const before = (await button.boundingBox())!
+    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2)
+    await page.mouse.down()
+
+    list.resolve()
+    await expect(page.getByLabel('チャンネルを読み込み中')).toHaveCount(0)
+    await expect(page.getByLabel('セクションを読み込み中')).toBeVisible()
+    sections.resolve()
+    await expect(page.getByLabel('セクションを読み込み中')).toHaveCount(0)
+    expect(await button.boundingBox()).toEqual(before)
+
+    const refreshing = page.waitForRequest(orgPath + '/me')
+    const ready = await deliverReady.promise
+    ready()
+    await refreshing
+    await expect(button).toBeEnabled()
+    await page.mouse.up()
+    await expect(button).toBeDisabled()
+    expect(postCount).toBe(0)
+
+    const created = page.waitForResponse(response => response.url().endsWith('/channels') && response.request().method() === 'POST')
+    identity.resolve()
+    expect((await created).status()).toBe(201)
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+    expect(postCount).toBe(1)
+  } finally {
+    list.resolve()
+    sections.resolve()
+    identity.resolve()
+  }
+})
+
 test('capability reconciliation preserves creation focus between selection and text insertion and notice-before-POST discovery keeps one Channel row', async ({ page }) => {
   let socket: WebSocketRoute | undefined
   await page.routeWebSocket('**/api/v1/orgs/*/ws', ws => { ws.connectToServer(); socket = ws })
@@ -103,55 +183,57 @@ test('capability reconciliation preserves creation focus between selection and t
   const name = nextChannelName('creation-reconcile')
   await page.getByRole('radio', { name: '非公開', exact: true }).check()
   const input = page.getByLabel('チャンネル名')
+  const button = page.getByRole('button', { name: 'チャンネルを作成' })
   // fill() focuses/selects first, then inserts text in a separate browser command.
   // Reconcile exactly between those commands, before there is any draft to retain.
   await input.focus()
-  // Evidence-based invalidation (members_changed) keeps focus, disables submit and blocks Enter.
-  let releaseIdentity!: () => void
-  let identityGate = new Promise<void>(resolve => { releaseIdentity = resolve })
-  await page.route(`**/api/v1/orgs/${org}/me`, async route => { await identityGate; await route.continue() })
-  try {
-    const refreshing = page.waitForRequest(`**/api/v1/orgs/${org}/me`)
-    socket!.send(JSON.stringify({ type: 'members_changed' } satisfies ServerEvent))
-    await refreshing
-    await expect(input).toBeFocused()
-    await page.keyboard.insertText(name)
-    await expect(input).toHaveValue(name)
-    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeDisabled()
-    await input.press('Enter')
-  } finally { releaseIdentity() }
-  await expect(page.getByLabel('チャンネル名')).toHaveValue(name)
-  await expect(page.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()
-  await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeEnabled()
 
-  // No-evidence revalidation (activity_reset) keeps the button enabled, holds the submit until
-  // /me settles (no POST while pending), then sends the draft once allowed.
+  const identityPath = `**/api/v1/orgs/${org}/me`
+  let identityGate = gate()
+  await page.route(identityPath, async route => { await identityGate.promise; await route.continue() })
   let postCount = 0
-  let releaseCreation!: () => void
-  const creationGate = new Promise<void>(resolve => { releaseCreation = resolve })
+  const creationGate = gate()
   await page.route(`**/api/v1/orgs/${org}/channels`, async route => {
     if (route.request().method() !== 'POST') return route.continue()
     postCount++
     const response = await route.fetch()
-    await creationGate
+    await creationGate.promise
     await route.fulfill({ response })
   })
-  identityGate = new Promise<void>(resolve => { releaseIdentity = resolve })
   const row = page.getByRole('navigation', { name: 'チャンネル' }).getByRole('button', { name })
   try {
-    const refreshing = page.waitForRequest(`**/api/v1/orgs/${org}/me`)
-    socket!.send(JSON.stringify({ type: 'activity_reset' } satisfies ServerEvent))
-    await refreshing
-    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeEnabled()
-    await page.getByRole('button', { name: 'チャンネルを作成' }).click()
-    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeDisabled()
+    // Evidence-based invalidation keeps focus, disables submit and blocks Enter.
+    try {
+      const refreshing = page.waitForRequest(identityPath)
+      socket!.send(JSON.stringify({ type: 'members_changed' } satisfies ServerEvent))
+      await refreshing
+      await expect(input).toBeFocused()
+      await page.keyboard.insertText(name)
+      await expect(input).toHaveValue(name)
+      await expect(button).toBeDisabled()
+      await input.press('Enter')
+    } finally { identityGate.resolve() }
+    await expect(input).toHaveValue(name)
+    await expect(page.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()
+    await expect(button).toBeEnabled()
     expect(postCount).toBe(0)
-  } finally { releaseIdentity() }
-  try {
+
+    // Routine revalidation keeps the button enabled and holds the draft until /me confirms.
+    identityGate = gate()
+    try {
+      const refreshing = page.waitForRequest(identityPath)
+      socket!.send(JSON.stringify({ type: 'activity_reset' } satisfies ServerEvent))
+      await refreshing
+      await expect(button).toBeEnabled()
+      await button.click()
+      await expect(button).toBeDisabled()
+      expect(postCount).toBe(0)
+    } finally { identityGate.resolve() }
+
     // The committed mutation is discovered through its notice while its HTTP acknowledgement is held.
     await expect(row).toHaveCount(1)
     expect(postCount).toBe(1)
-  } finally { releaseCreation() }
+  } finally { creationGate.resolve() }
   await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
   await expect(row).toHaveCount(1)
   await expect(page.getByText('リアルタイム接続済み')).toBeVisible()

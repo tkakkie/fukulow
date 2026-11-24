@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte'
+  import { onDestroy, tick, untrack } from 'svelte'
   import type { Navigation } from './navigation'
   import { navigationAdapter } from './navigation.svelte'
   import type { SearchPresentation } from './search-anchor.svelte'
@@ -8,7 +8,8 @@
   import { createAnnouncementController } from './announcements'
   import type { MentionName } from './mentions'
   import { senderName } from './authors'
-  import type { Channel, DmDiscovery, Identity, Message, SearchHit } from './api'
+  import type { Channel, ChannelVisibility, DmDiscovery, Identity, Message, SearchHit } from './api'
+  import type { ChannelCreationBlocked } from './channel-creation'
   import Logo from './Logo.svelte'
   import type { Organization } from './api-schema.d.ts'
   import type { SessionModel } from './auth.svelte'
@@ -46,7 +47,6 @@
   let {
     session,
     navigation,
-    canCreateChannels = true,
     members = null,
     organization = null,
     organizations = [],
@@ -63,7 +63,6 @@
   }: {
     navigation: Navigation
     session: SessionModel
-    canCreateChannels?: boolean | 'revalidating' | null
     members?: ReturnType<typeof membersAdapter> | null
     organization?: Identity | null
     organizations?: Organization[]
@@ -80,33 +79,11 @@
   } = $props()
 
   const channels = $derived(session.channels)
-  const channelCreation = $state({ name: '', visibility: 'public' as Channel['visibility'], error: '', busy: false })
-  let creationAllowed = $state(false)
-  let resolvePendingCreation: ((allowed: boolean) => void) | null = null
-  $effect(() => {
-    if (canCreateChannels === true || canCreateChannels === false) {
-      creationAllowed = canCreateChannels
-      if (resolvePendingCreation) {
-        const resolve = resolvePendingCreation
-        resolvePendingCreation = null
-        resolve(canCreateChannels)
-      }
-    }
-  })
-  $effect(() => {
-    if (organizationUnavailable && resolvePendingCreation) {
-      const resolve = resolvePendingCreation
-      resolvePendingCreation = null
-      resolve(false)
-    }
-  })
-  $effect(() => () => {
-    if (resolvePendingCreation) {
-      const resolve = resolvePendingCreation
-      resolvePendingCreation = null
-      resolve(false)
-    }
-  })
+  const creationAccess = $derived(channels.creationAccess)
+  const channelCreation = $state({ name: '', visibility: 'public' as ChannelVisibility, error: '',
+    permissionError: null as ChannelCreationBlocked['blocked'] | null, busy: false })
+  const creationLifetime = new AbortController()
+  onDestroy(() => creationLifetime.abort())
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
   const sectionsState = $derived(session.sections?.state)
@@ -665,15 +642,10 @@
     }
   }
 
-  async function handleCreateChannel(name: string, visibility: 'public' | 'private'): Promise<string | null | false> {
-    if (canCreateChannels !== true) {
-      if (canCreateChannels !== 'revalidating') return false
-      const allowed = await new Promise<boolean>((resolve) => {
-        resolvePendingCreation = resolve
-      })
-      if (!allowed) return false
-    }
-    const result = await channels.create(name, visibility)
+  async function handleCreateChannel(name: string, visibility: ChannelVisibility): Promise<string | ChannelCreationBlocked | null | false> {
+    const result = await channels.create(name, visibility, creationLifetime.signal)
+    if (!result || creationLifetime.signal.aborted) return false
+    if ('blocked' in result) return result
     if ('error' in result) return result.error
     handleSelectChannel(result.channel.id)
     return null
@@ -876,8 +848,8 @@
       {channelMentionUnreadCount}
       topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
       sections={session.sections}
-      showCreateChannel={canCreateChannels === true || canCreateChannels === 'revalidating' || (canCreateChannels === null && creationAllowed)}
-      createChannelDisabled={canCreateChannels !== true && canCreateChannels !== 'revalidating'}
+      showCreateChannel={creationAccess !== 'denied'}
+      createChannelDisabled={creationAccess === 'hidden'}
       createChannelDraft={channelCreation}
       archivedList={s.archivedList}
       dms={dmState && session.dms

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Identity } from './api'
   import type { Organization } from './api-schema.d.ts'
+  import type { ChannelCreationBlocked } from './channel-creation'
   import ArchivedChannelList from './ArchivedChannelList.svelte'
   import ChannelList from './ChannelList.svelte'
   import type { Channel, ChannelVisibility } from './channels.svelte'
@@ -19,8 +20,15 @@
     name: string
     visibility: ChannelVisibility
     error: string
+    permissionError: ChannelCreationBlocked['blocked'] | null
     busy: boolean
   }
+
+  const creationPermissionMessages = {
+    'access-changed': 'チャンネルを作成する権限が変更された可能性があります。確認が終わってから、もう一度お試しください。',
+    denied: 'チャンネルを作成する権限がありません。',
+    'check-failed': 'チャンネルを作成する権限を確認できませんでした。時間をおいて、もう一度お試しください。',
+  } satisfies Record<ChannelCreationBlocked['blocked'], string>
 
   type DmListView = {
     rows: DmRow[]
@@ -113,7 +121,7 @@
     onselectchannel: (id: string) => void
     onselecttopic?: (topicId: string) => void
     onopenalltopics?: (opener: HTMLElement | null) => void
-    oncreatechannel: (name: string, visibility: ChannelVisibility) => Promise<string | null | false>
+    oncreatechannel: (name: string, visibility: ChannelVisibility) => Promise<string | ChannelCreationBlocked | null | false>
     onholdarchived: () => () => void
     onretryarchived: () => void
     ondmmore?: () => void
@@ -122,6 +130,11 @@
     onopendm?: (memberId: string) => void
     onmemberchanged: (id: string) => void
   } = $props()
+
+  const creationPermissionError = $derived.by(() => {
+    if (!showCreateChannel && (createChannelDraft?.name || createChannelDraft?.permissionError)) return 'denied'
+    if (createChannelDraft?.permissionError !== 'denied') return createChannelDraft?.permissionError
+  })
 </script>
 
 <div class="channel-column__header">
@@ -167,6 +180,9 @@
 <div class="channel-column__scroll">
   {#if !organizationUnavailable && showCreateChannel}
     <CreateChannelForm oncreate={oncreatechannel} draft={createChannelDraft} disabled={createChannelDisabled} />
+  {/if}
+  {#if !organizationUnavailable && creationPermissionError}
+    <StatusBanner tone="danger" role="alert" message={creationPermissionMessages[creationPermissionError]} />
   {/if}
   {#if !organizationUnavailable && (channelListStatus === 'error' || (channelListStatus === 'loading' && channels.length === 0 && channelListTimedOut))}
     <StatusBanner
@@ -249,6 +265,7 @@
 
   .channel-column__scroll {
     overflow-y: auto;
+    scrollbar-gutter: stable;
     display: flex;
     flex-direction: column;
     gap: var(--space-12);

@@ -1,16 +1,18 @@
 <script lang="ts">
   import { channelNameTooLong, type ChannelVisibility } from './channels.svelte'
+  import type { ChannelCreationBlocked } from './channel-creation'
   import Button from './ui/Button.svelte'
   import Input from './ui/Input.svelte'
   import StatusBanner from './ui/StatusBanner.svelte'
 
-  const local = $state({ name: '', visibility: 'public' as ChannelVisibility, error: '', busy: false })
+  const local = $state({ name: '', visibility: 'public' as ChannelVisibility, error: '',
+    permissionError: null as ChannelCreationBlocked['blocked'] | null, busy: false })
   let {
     oncreate,
     draft = local,
     disabled = false,
   }: {
-    oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null | false>
+    oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | ChannelCreationBlocked | null | false>
     draft?: typeof local
     disabled?: boolean
   } = $props()
@@ -18,24 +20,31 @@
   async function submit(e: Event) {
     e.preventDefault()
     if (disabled || draft.busy) return
+    draft.permissionError = null
     const tooLong = channelNameTooLong(draft.name)
     if (tooLong) {
       draft.error = tooLong
       return
     }
+    const { name, visibility } = draft
+    draft.error = ''
     draft.busy = true
-    const err = await oncreate(draft.name, draft.visibility)
+    const err = await oncreate(name, visibility)
     draft.busy = false
     if (err === false) return
+    if (err && typeof err === 'object') {
+      draft.permissionError = err.blocked
+      return
+    }
     draft.error = err ?? ''
     if (!err) {
-      draft.name = ''
+      if (draft.name === name) draft.name = ''
       draft.visibility = 'public'
     }
   }
 </script>
 
-<form class="create-channel-form" onsubmit={submit}>
+<form class="create-channel-form" aria-busy={draft.busy} onsubmit={submit}>
   <Input label="チャンネル名" name="channel_name" required bind:value={draft.name} />
   <fieldset disabled={draft.busy}>
     <legend>公開範囲</legend>
@@ -52,6 +61,9 @@
     <StatusBanner tone="danger" role="alert" message={draft.error} />
   {/if}
   <Button variant="primary" type="submit" disabled={disabled || draft.busy || draft.name === ''}>チャンネルを作成</Button>
+  {#if disabled && !draft.busy && !draft.permissionError}
+    <p class="creation-permission">チャンネルを作成する権限を確認できるまで、作成できません。</p>
+  {/if}
 </form>
 
 <style>
@@ -66,6 +78,12 @@
     padding: 0;
     border: 0;
     min-width: 0;
+  }
+
+  .creation-permission {
+    margin: 0;
+    color: var(--text2);
+    font-size: var(--font-size-13);
   }
 
   legend {
