@@ -699,10 +699,10 @@ it('consecutive below-floor rejections switch to A10 backoff after 3 rejections 
   target.invalidate('notice'); target.invalidate('access'); target.invalidate('reconcile')
   await vi.advanceTimersByTimeAsync(499); expect(load).toHaveBeenCalledTimes(3)
   await vi.advanceTimersByTimeAsync(1); expect(load).toHaveBeenCalledTimes(4)
+  let expected = 4
   for (const delay of [1000, 2000, 4000, 8000, 15_000]) {
-    await vi.advanceTimersByTimeAsync(delay - 1); expect(load).toHaveBeenCalledTimes(load.mock.calls.length)
-    const before = load.mock.calls.length
-    await vi.advanceTimersByTimeAsync(1); expect(load).toHaveBeenCalledTimes(before + 1)
+    await vi.advanceTimersByTimeAsync(delay - 1); expect(load).toHaveBeenCalledTimes(expected)
+    await vi.advanceTimersByTimeAsync(1); expect(load).toHaveBeenCalledTimes(++expected)
   }
   const saturated = load.mock.calls.length
   await vi.advanceTimersByTimeAsync(60_000)
@@ -793,18 +793,16 @@ it('reconnect resets the consecutive below-floor count, clears backoff and conve
   expect(load).toHaveBeenCalledTimes(3)
   // Reconnect: suspend target, reset floor on fresh socket, then activity_ready.
   activity.disconnected(); target.suspend()
-  floor = 0
+  floor = 2
   activity.notice({ type: 'activity_ready' })
+  // Check the fresh streak BEFORE any covering response is accepted: 1st rejection stays at 200 ms.
   await vi.advanceTimersByTimeAsync(200)
   expect(load).toHaveBeenCalledTimes(4)
-  expect(accept).toHaveBeenCalledExactlyOnceWith(1)
-  // Consecutive count was reset on reconnect: a new single rejection on the fresh socket converges at 200 ms.
-  floor = 3; value = 2
-  target.invalidate()
-  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(5)
-  value = 3
-  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(6)
-  expect(accept).toHaveBeenLastCalledWith(3)
+  expect(accept).not.toHaveBeenCalled()
+  value = 2
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
   expect(error).not.toHaveBeenCalled()
   activity.close()
 })
@@ -826,5 +824,49 @@ it('below-floor rejections preserve A10 Retry-After on subsequent 429 responses'
   await vi.advanceTimersByTimeAsync(1)
   expect(load).toHaveBeenCalledTimes(4)
   expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  target.close()
+})
+
+it('non-ok response resets the below-floor streak', async () => {
+  const load = vi.fn<() => Promise<Result<number>>>()
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 500, error: 'boom' })
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValue(ok(2))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= 2, random: () => 0 })
+  target.invalidate()
+  // 2 below-floor rejections at 200 ms, then 500 at 200 ms -> resets belowFloor and schedules 500 ms backoff.
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  expect(error).toHaveBeenCalledOnce()
+  // Backoff fires at 500 ms -> 4th call is below floor, but streak was reset so follow-up is 200 ms.
+  await vi.advanceTimersByTimeAsync(500)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  target.close()
+})
+
+it('retryNow resets the below-floor streak', async () => {
+  let value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= 2, random: () => 0 })
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  // retryNow clears backoff and resets belowFloor; a below-floor response starts a fresh 200 ms streak.
+  await target.retryNow()
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).not.toHaveBeenCalled()
+  value = 2
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled()
   target.close()
 })
