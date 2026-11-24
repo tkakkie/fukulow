@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 use crate::{
     messages,
     test_support::{Gate, Gates},
@@ -1065,13 +1066,17 @@ async fn publication_waits_for_commit_even_when_http_request_is_cancelled(pool: 
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND classid = 0 AND objid = 1818 AND NOT granted)").fetch_one(&pool).await.unwrap();
-            if waiting { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::Advisory(Advisory::Key {
+            class_id: Some(0),
+            object_id: 1818,
+            current_database: false,
+        }),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
     assert!(
         queue.events.try_recv().is_err(),
         "nothing may publish while commit is blocked"

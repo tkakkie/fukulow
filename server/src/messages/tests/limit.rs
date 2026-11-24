@@ -1,6 +1,7 @@
 //! #306: per-(Organization, Member) send limit, through the send endpoint.
 use super::*;
 use crate::messages::limiter::BURST;
+use crate::test_support::eventually;
 use std::time::Duration;
 
 struct Limited {
@@ -219,13 +220,10 @@ async fn waiters_settle_with_a_failed_leader_without_paying_or_taking_its_free_r
     // Authentication and visibility checks precede limiter registration. A sleep
     // can release the leader before this request actually becomes a waiter.
     let limiter = &l.state.message_delivery.send_limiter;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while limiter.waiters((l.organization, l.member, key)) != 1 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+    eventually(Duration::from_secs(5), || {
+        limiter.waiters((l.organization, l.member, key)) == 1
     })
-    .await
-    .expect("the identical request waits on the leader");
+    .await;
     assert!(!waiter.is_finished());
     gate.release();
     // Transaction::drop closes the socket, rolling back any surviving transaction.
@@ -473,13 +471,10 @@ async fn a_charged_leader_refused_by_admission_charges_its_identical_waiters_not
     let identical = [spawn("once"), spawn("once"), spawn("once")];
     let another = spawn("other");
     let limiter = &delivery.send_limiter;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while limiter.waiters((l.organization, l.member, key)) < 4 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+    eventually(Duration::from_secs(5), || {
+        limiter.waiters((l.organization, l.member, key)) >= 4
     })
-    .await
-    .expect("all four requests wait on the leader");
+    .await;
     assert!(identical.iter().all(|waiter| !waiter.is_finished()));
     assert!(!another.is_finished());
     gate.release();
@@ -550,13 +545,10 @@ async fn identical_waiter_rechecks_archive_before_replaying_admission_refusal(po
     gate.entered().await;
     let waiter = spawn();
     let limiter = &delivery.send_limiter;
-    tokio::time::timeout(timeout, async {
-        while limiter.waiters((l.organization, l.member, key)) != 1 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+    eventually(timeout, || {
+        limiter.waiters((l.organization, l.member, key)) == 1
     })
-    .await
-    .expect("the identical request waits on the leader");
+    .await;
 
     let archived = tokio::time::timeout(
         timeout,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked as wait_for_blocked};
 use sqlx::{Postgres, Transaction};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -21,26 +22,16 @@ async fn wait_blocked_count(f: &Fixture, query: &str, minimum: i64) {
 }
 
 async fn wait_blocked_matching(f: &Fixture, query: &str, minimum: i64, blocker: Option<i32>) {
-    tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database()
-                 AND wait_event_type='Lock' AND query LIKE $1
-                 AND ($2::integer IS NULL OR $2=ANY(pg_blocking_pids(pid)))",
-            )
-            .bind(query)
-            .bind(blocker)
-            .fetch_one(&f.pools.admin)
-            .await
-            .unwrap();
-            if waiting >= minimum {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("did not wait on {query} (blocker {blocker:?})"));
+    wait_for_blocked(
+        &f.pools.admin,
+        match blocker {
+            Some(pid) => Blocked::LockQueryBehind(query, pid),
+            None => Blocked::LockQuery(query),
+        },
+        Count::AtLeast(minimum),
+        Duration::from_secs(4),
+    )
+    .await;
 }
 
 async fn pause(f: &Fixture, event: &str, table: &str) -> Transaction<'static, Postgres> {

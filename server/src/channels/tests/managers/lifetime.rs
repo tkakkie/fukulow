@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked_or};
 
 #[fukulow_test::test]
 async fn channel_manager_last_manager_denials_and_unmanaged_controls(pool: PgPool) {
@@ -471,13 +472,17 @@ async fn channel_manager_public_visibility_race_cannot_commit_a_right_on_public(
             })
             .await
         });
-        tokio::time::timeout(std::time::Duration::from_secs(3),async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'INSERT INTO channel_members%' OR query LIKE 'UPDATE channels SET visibility=%'))").fetch_one(&f.pools.admin).await.unwrap();
-                if waiting || pending.is_finished() {break;}
-                tokio::task::yield_now().await;
-            }
-        }).await.unwrap();
+        wait_blocked_or(
+            &f.pools.admin,
+            Blocked::LockQueries(&[
+                "INSERT INTO channel_members%",
+                "UPDATE channels SET visibility=%",
+            ]),
+            Count::AtLeast(1),
+            std::time::Duration::from_secs(3),
+            || pending.is_finished(),
+        )
+        .await;
         assert!(
             !pending.is_finished(),
             "visibility and manager writes must serialize"

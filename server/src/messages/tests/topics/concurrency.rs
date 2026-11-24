@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 use std::time::Duration;
 
 #[fukulow_test::test]
@@ -31,14 +32,17 @@ async fn send_completes_while_topic_projection_query_is_paused(pool: PgPool) {
         let token = token.clone();
         tokio::spawn(async move { get(&app, &token, channel, "timeline").await })
     };
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND locktype='advisory' AND objid=202137 AND NOT granted)")
-                .fetch_one(&pool).await.unwrap();
-            if waiting { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::Advisory(Advisory::Key {
+            class_id: None,
+            object_id: 202137,
+            current_database: true,
+        }),
+        Count::AtLeast(1),
+        Duration::from_secs(2),
+    )
+    .await;
     let message = tokio::time::timeout(
         Duration::from_secs(2),
         sent(
