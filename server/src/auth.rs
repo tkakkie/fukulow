@@ -1045,6 +1045,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn typed_auth_error_matches_ignore_error_text() {
+        let mut typed = ApiError::organization_unavailable();
+        typed.1 = "renamed";
+        assert!(
+            DeferredOrganizationAuth::from_auth_result(Err(typed)).is_ok_and(|d| d.0.is_none())
+        );
+        let untyped = ApiError(StatusCode::NOT_FOUND, "organization_unavailable", None);
+        assert!(DeferredOrganizationAuth::from_auth_result(Err(untyped)).is_err());
+
+        let mut typed = ApiError::lock_contention();
+        typed.1 = "renamed";
+        assert!(typed.is_lock_contention());
+        assert!(
+            !ApiError(StatusCode::SERVICE_UNAVAILABLE, "lock_contention", None)
+                .is_lock_contention()
+        );
+    }
+
     // The real app uses the process-global PASSWORD_WORKERS. These saturation tests
     // need an isolated semaphore so holding every permit cannot stall parallel tests.
     // This router uses the same handlers and extractors as crate::app, passing only
