@@ -23,14 +23,14 @@ async fn reply_ack_history_live_replay_shared_gap_and_unloaded_parent_payloads_m
     let key = Uuid::new_v4();
     let gate = messages::pause_publication(key);
     let first = reply_send(&f, &f.token, f.channel, key, &root).await;
-    gate.entered.acquire().await.unwrap().forget();
+    gate.entered().await;
     let second = reply_send(&f, &f.token, f.channel, Uuid::new_v4(), &first).await;
     assert_eq!(event(&mut live).await["message"], first);
     assert_eq!(event(&mut live).await["message"], second);
     assert_eq!(second["reply_to"], first["id"]);
     assert_eq!(second["reply_root_id"], root["id"]);
     assert_eq!(second["topic_id"], root["topic_id"]);
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     for suffix in [
         "messages?after_seq=0".to_owned(),
@@ -209,7 +209,7 @@ async fn reply_live_replay_member_revision_and_removed_grant_denials_have_positi
         let mut replay = f.server.connect(&token).await;
         let gate = pause(target);
         subscribe(&mut replay, target, 0).await;
-        entered(&gate).await;
+        gate.entered().await;
         if loss == "grant" {
             sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(f.organization).bind(target).bind(viewer).execute(&pool).await.unwrap();
         } else {
@@ -230,7 +230,7 @@ async fn reply_live_replay_member_revision_and_removed_grant_denials_have_positi
                 .unwrap();
             }
         }
-        gate.release.add_permits(1);
+        gate.release();
         if loss == "grant" {
             access_loss::access_lost(&mut replay, target).await;
         } else {

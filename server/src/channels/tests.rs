@@ -13,6 +13,7 @@ use tower::ServiceExt;
 pub(super) mod archive;
 mod guest_members;
 mod managers;
+mod member_access;
 mod membership;
 mod name_length;
 mod name_nonempty;

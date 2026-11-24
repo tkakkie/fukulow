@@ -1,29 +1,16 @@
 use super::*;
 use crate::auth::SessionChanges;
 type GateKey = (Uuid, String, i64);
-static LOSS_GATES: LazyLock<Mutex<HashMap<GateKey, Arc<Gate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static LOSS_GATES: Gates<GateKey> = Gates::new();
+
 pub(super) fn gate(channel: Uuid, phase: &str, seq: i64) -> Arc<Gate> {
-    let g = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    LOSS_GATES
-        .lock()
-        .unwrap()
-        .insert((channel, phase.into(), seq), g.clone());
-    g
+    LOSS_GATES.register((channel, phase.into(), seq))
 }
+
 pub(crate) async fn pause(channel: Uuid, phase: &str, seq: i64) {
-    let g = LOSS_GATES
-        .lock()
-        .unwrap()
-        .remove(&(channel, phase.into(), seq));
-    if let Some(g) = g {
-        g.entered.add_permits(1);
-        g.release.acquire().await.unwrap().forget();
-    }
+    LOSS_GATES.pause((channel, phase.into(), seq)).await;
 }
+
 async fn grant(pool: &PgPool, org: Uuid, channel: Uuid, member: Uuid) {
     sqlx::query(
         "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
@@ -191,12 +178,12 @@ async fn observed_loss_discards_queued_live_and_fetched_replay_before_and_during
             if phase != "live" {
                 subscribe(&mut socket, c, 0).await;
             }
-            entered(&g).await;
+            g.entered().await;
             if phase == "frame" {
                 assert_eq!(event(&mut socket).await["message"]["created_seq"], 1);
             }
             loss(&f, &pool, reader, c, case == "role").await;
-            g.release.add_permits(1);
+            g.release();
             access_lost(&mut socket, c).await;
             silent(&mut socket).await;
             // An explicit re-grant requires a new subscribe; old queued/fetched
@@ -521,9 +508,9 @@ async fn subscribe_registration_racing_removal_never_hands_off_a_stale_subscript
     let g = gate(f.channel, "registered", 0);
     let mut socket = f.server.connect(&token).await;
     subscribe(&mut socket, f.channel, 0).await;
-    entered(&g).await;
+    g.entered().await;
     loss(&f, &pool, reader, f.channel, false).await;
-    g.release.add_permits(1);
+    g.release();
     access_lost(&mut socket, f.channel).await;
     silent(&mut socket).await;
     subscribe(&mut socket, f.channel, 0).await;
@@ -699,9 +686,9 @@ async fn replay_snapshot_after_removal_commit_denies_even_without_a_fast_signal(
         let g = gate(target, "snapshot", 0);
         let mut socket = f.server.connect(&token).await;
         subscribe(&mut socket, target, 0).await;
-        entered(&g).await;
+        g.entered().await;
         sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(f.organization).bind(target).bind(reader).execute(&pool).await.unwrap();
-        g.release.add_permits(1);
+        g.release();
         access_lost(&mut socket, target).await;
         silent(&mut socket).await;
         let mut control = f.server.connect(&f.token).await;

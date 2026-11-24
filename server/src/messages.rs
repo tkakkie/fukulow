@@ -60,7 +60,7 @@ pub(crate) use delivery::LIVE_QUEUE_CAPACITY;
 #[cfg(test)]
 pub(crate) use delivery::{
     MAX_IN_FLIGHT_NOTIFICATIONS, MAX_ORGANIZATION_NOTIFICATIONS, NOTIFICATION_TIMEOUT,
-    PublicationGate, pause_publication,
+    pause_publication,
 };
 pub use topics::{
     ListProjectionQuery, TimelineItem, TimelinePage, TopicPage, TopicSummary, TopicSummaryResponse,

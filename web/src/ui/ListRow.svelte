@@ -33,7 +33,6 @@
   <button
     type="button"
     class="ui-list-row"
-    class:ui-list-row--selected={selected}
     aria-current={selected ? 'true' : undefined}
     aria-expanded={expanded}
     {onclick}
@@ -97,7 +96,6 @@
     background-color: var(--hover);
   }
 
-  .ui-list-row--selected,
   .ui-list-row[aria-current='true'] {
     background-color: var(--tint);
     color: var(--on-tint);

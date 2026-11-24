@@ -44,8 +44,15 @@
     font-size: var(--font-size-12);
     font-weight: var(--font-weight-semibold);
     line-height: var(--line-height-base);
+    transform: scale(1);
     transition: transform var(--duration-fast) var(--ease-out);
     flex-shrink: 0;
+  }
+
+  @starting-style {
+    .ui-badge {
+      transform: scale(0.8);
+    }
   }
 
   .ui-badge--unread {

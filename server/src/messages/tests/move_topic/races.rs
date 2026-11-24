@@ -1,13 +1,5 @@
 use super::*;
 
-async fn entered(gate: &PublicationGate) {
-    tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-}
-
 #[fukulow_test::test]
 async fn reply_waiting_on_move_rereads_parent_and_inherits_destination(pool: PgPool) {
     let f = Fixture::new(&pool).await;
@@ -18,21 +10,19 @@ async fn reply_waiting_on_move_rereads_parent_and_inherits_destination(pool: PgP
         let (app, token, channel, root) = (f.app.clone(), f.token.clone(), f.channel, id(&root));
         tokio::spawn(async move { move_request(&app, &token, channel, root, operation).await })
     };
-    entered(&gate).await;
+    gate.entered_within(Duration::from_secs(3)).await;
     // Independent admission lets the Reply read the old committed parent while
     // Move holds the database writer barrier.
     let reply_app = router(&pool).await;
     let key = Uuid::new_v4();
-    let (read_parent, release_reply) = history::pause_reply_parent(key);
+    let parent = history::pause_reply_parent(key);
     let reply_task = {
         let (token, channel) = (f.token.clone(), f.channel);
         tokio::spawn(async move { sent(&reply_app, &token, channel, reply(key, &root)).await })
     };
-    tokio::time::timeout(Duration::from_secs(3), read_parent)
-        .await
-        .unwrap();
-    release_reply();
-    gate.release.add_permits(1);
+    parent.entered_within(Duration::from_secs(3)).await;
+    parent.release();
+    gate.release();
     let outcome = moved(move_task.await.unwrap()).await;
     let reply = reply_task.await.unwrap();
     assert_eq!(outcome.move_seq, Some(2));
@@ -52,7 +42,7 @@ async fn move_waiting_on_reply_includes_committed_reply(pool: PgPool) {
             (f.app.clone(), f.token.clone(), f.channel, reply(key, &root));
         tokio::spawn(async move { sent(&app, &token, channel, input).await })
     };
-    entered(&gate).await;
+    gate.entered_within(Duration::from_secs(3)).await;
     let move_app = router(&pool).await;
     let task = {
         let (token, channel, anchor) = (f.token.clone(), f.channel, id(&root));
@@ -61,7 +51,7 @@ async fn move_waiting_on_reply_includes_committed_reply(pool: PgPool) {
         })
     };
     wait_for_lock(&pool, "%pg_advisory_xact_lock(hashtextextended%135)%").await;
-    gate.release.add_permits(1);
+    gate.release();
     let reply = reply_task.await.unwrap();
     assert!(reply["topic_id"].is_null());
     let result = moved(task.await.unwrap()).await;
@@ -151,7 +141,7 @@ async fn move_holds_manager_grant_until_commit_and_rechecks_before_retry(pool: P
             (f.app.clone(), token.clone(), id(&root), intent.clone());
         tokio::spawn(async move { move_request(&app, &token, private, anchor, intent).await })
     };
-    entered(&gate).await;
+    gate.entered_within(Duration::from_secs(3)).await;
     let revoke = {
         let (pool, org) = (pool.clone(), f.org);
         tokio::spawn(async move {
@@ -160,7 +150,7 @@ async fn move_holds_manager_grant_until_commit_and_rechecks_before_retry(pool: P
         })
     };
     wait_for_lock(&pool, "DELETE FROM channel_members%").await;
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(moved(task.await.unwrap()).await.move_seq, Some(2));
     assert_eq!(revoke.await.unwrap().rows_affected(), 1);
     let before = state(&pool, f.org, private).await;
@@ -193,7 +183,7 @@ async fn concurrent_move_operation_key_across_channels_leaves_loser_unchanged(po
         );
         tokio::spawn(async move { move_request(&app, &token, channel, anchor, input).await })
     };
-    entered(&gate).await;
+    gate.entered_within(Duration::from_secs(3)).await;
     let loser = {
         let (app, token, anchor) = (f.app.clone(), f.token.clone(), id(&second));
         tokio::spawn(async move { move_request(&app, &token, another, anchor, input).await })
@@ -208,7 +198,7 @@ async fn concurrent_move_operation_key_across_channels_leaves_loser_unchanged(po
     .await
     .unwrap();
     assert_eq!(untouched_counter, 1);
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(moved(winner.await.unwrap()).await.move_seq, Some(2));
     error(
         loser.await.unwrap(),

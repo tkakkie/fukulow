@@ -389,4 +389,42 @@ describe('component token-only styles and accessibility structure (docs/ui.md §
     expect(badLive.logRoles).toHaveLength(1)
     expect(badLive.outputElements).toHaveLength(1)
   })
+
+  it('uses one reduced-motion mechanism (duration tokens to 0ms) and @starting-style entry transitions (#839)', () => {
+    const reducedBlocks = [...appCss.matchAll(/@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)\s*\{([\s\S]*?)\n\}/g)]
+    expect(reducedBlocks).toHaveLength(1)
+    const reducedBody = reducedBlocks[0]![1]!
+    expect(reducedBody).toMatch(/--duration-fast:\s*0ms;/)
+    expect(reducedBody).toMatch(/--duration-normal:\s*0ms;/)
+    expect(reducedBody).toMatch(/--duration-panel:\s*0ms;/)
+    expect(reducedBody).not.toContain('!important')
+
+    const panelCss = readFileSync(join(webDir, 'src/ui/Panel.svelte'), 'utf8')
+    expect(panelCss).toMatch(/@starting-style\s*\{[\s\S]*?\.ui-panel[\s\S]*?transform:\s*translateX\(100%\);/)
+    expect(panelCss).toMatch(/transition:\s*transform\s+var\(--duration-panel\)\s+var\(--ease-out\);/)
+
+    const badgeCss = readFileSync(join(webDir, 'src/ui/Badge.svelte'), 'utf8')
+    expect(badgeCss).toMatch(/@starting-style\s*\{[\s\S]*?\.ui-badge[\s\S]*?transform:\s*scale\(0\.8\);/)
+    expect(badgeCss).toMatch(/transition:\s*transform\s+var\(--duration-fast\)\s+var\(--ease-out\);/)
+
+    // Every transition/animation duration in app.css and .svelte files must use --duration-* tokens
+    const styleSources: { file: string; css: string }[] = [
+      { file: 'src/app.css', css: appCss },
+      ...walkSvelte(join(webDir, 'src')).map((f) => ({
+        file: relative(webDir, f),
+        css: [...readFileSync(f, 'utf8').matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join('\n'),
+      })),
+    ]
+    const literalDurations: string[] = []
+    for (const { file, css } of styleSources) {
+      const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '')
+      for (const decl of stripped.matchAll(/\b(transition|transition-duration|animation|animation-duration)\s*:\s*([^;{}]+);/gi)) {
+        const val = decl[2]!.trim()
+        if (/\b\d+(?:\.\d+)?m?s\b/.test(val)) {
+          literalDurations.push(`${file}: ${decl[1]}: ${val}`)
+        }
+      }
+    }
+    expect(literalDurations).toEqual([])
+  })
 })

@@ -68,10 +68,7 @@
       <ul class="topic-list-panel__list" aria-label="トピック一覧">
         {#each orderedTopics as t (t.topicId)}
           {@const topicUnread = uState?.topics[t.topicId]?.unreadCount ?? null}
-          <li
-            class="topic-list-panel__item"
-            class:topic-list-panel__item--active={activeTopicId === t.topicId}
-          >
+          <li class="topic-list-panel__item">
             <TopicSummaryLine
               topicId={t.topicId}
               selected={activeTopicId === t.topicId}
@@ -146,7 +143,7 @@
     min-width: 0;
   }
 
-  .topic-list-panel__item--active {
+  .topic-list-panel__item:has(:global([aria-current='true'])) {
     border-radius: var(--radius-10);
     outline: 2px solid var(--primary);
     outline-offset: 1px;

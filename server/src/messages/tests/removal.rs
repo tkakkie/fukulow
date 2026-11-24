@@ -1,22 +1,9 @@
 use super::*;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-    time::Duration,
-};
-use tokio::sync::Semaphore;
-struct Gate {
-    entered: Semaphore,
-    release: Semaphore,
-}
-static GATES: LazyLock<Mutex<HashMap<Uuid, Arc<Gate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+use crate::test_support::Gates;
+use std::time::Duration;
+static GATES: Gates<Uuid> = Gates::new();
 pub(crate) async fn pause(key: Uuid) {
-    let gate = GATES.lock().unwrap().remove(&key);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    GATES.pause(key).await;
 }
 
 #[fukulow_test::test]
@@ -53,11 +40,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
         let state = AppState::for_test(pool.clone()).await;
         let app = crate::app(state.clone());
         let key = Uuid::new_v4();
-        let gate = Arc::new(Gate {
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        });
-        GATES.lock().unwrap().insert(key, gate.clone());
+        let gate = GATES.register(key);
         let send = {
             let app = app.clone();
             let token = token.clone();
@@ -72,7 +55,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
                 .await
             })
         };
-        gate.entered.acquire().await.unwrap().forget();
+        gate.entered().await;
         let revoke = {
             let pool = pool.clone();
             let app = app.clone();
@@ -108,7 +91,7 @@ async fn send_grant_and_role_locks_order_removal_after_commit_and_deny_removal_f
             if blocked {break;} tokio::task::yield_now().await;
         }}).await.unwrap();
         assert!(!revoke.is_finished());
-        gate.release.add_permits(1);
+        gate.release();
         assert_eq!(send.await.unwrap().status(), StatusCode::CREATED);
         revoke.await.unwrap();
         let r = request(
@@ -203,11 +186,7 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
         assert_eq!(tr.status(), StatusCode::CREATED);
         let tr = body(tr).await;
         let topic_id = tr["topic_id"].as_str().unwrap();
-        let gate = Arc::new(Gate {
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        });
-        GATES.lock().unwrap().insert(sender, gate.clone());
+        let gate = GATES.register(sender);
         let mark = {
             let app = app.clone();
             let token = token.clone();
@@ -222,7 +201,7 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
                 .await
             })
         };
-        gate.entered.acquire().await.unwrap().forget();
+        gate.entered().await;
         let remove = {
             let pool = pool.clone();
             tokio::spawn(async move {
@@ -230,7 +209,7 @@ async fn unread_mark_and_removal_serialize_without_recreating_revoked_positions(
             })
         };
         tokio::time::timeout(Duration::from_secs(2),async {loop {let wait:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'DELETE FROM channel_members%')").fetch_one(&pool).await.unwrap();if wait {break;}tokio::task::yield_now().await;}}).await.unwrap();
-        gate.release.add_permits(1);
+        gate.release();
         assert_eq!(mark.await.unwrap().status(), StatusCode::OK);
         remove.await.unwrap();
         for suffix in ["read".into(), format!("topics/{topic_id}/read")] {
@@ -278,11 +257,7 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
         .await
         .unwrap();
     let key = Uuid::new_v4();
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    GATES.lock().unwrap().insert(key, gate.clone());
+    let gate = GATES.register(key);
     let sending = {
         let app = app.clone();
         let token = token.clone();
@@ -296,11 +271,7 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
             .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     let deactivating = {
         let app = app.clone();
         let ot = ot.clone();
@@ -321,7 +292,7 @@ async fn deactivation_send_first_commits_authorship_and_deactivation_first_denie
         if waiting {break;} tokio::task::yield_now().await;
     }}).await.unwrap();
     assert!(!deactivating.is_finished());
-    gate.release.add_permits(1);
+    gate.release();
     let sent = sending.await.unwrap();
     assert_eq!(sent.status(), StatusCode::CREATED);
     let canonical = body(sent).await;
