@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { flushSync, mount, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import { installMiniDom, MiniDomEvent } from './svelte-dom-test-helpers'
@@ -38,6 +40,8 @@ describe('OrganizationUnavailableBanner (#835)', () => {
     ])
 
     buttons[0].dispatchEvent(new MiniDomEvent('click', { bubbles: true }))
+    expect(onrecheckmembership).toHaveBeenCalledTimes(1)
+    expect(onswitchorganization).not.toHaveBeenCalled()
     buttons[1].dispatchEvent(new MiniDomEvent('click', { bubbles: true }))
     expect(onrecheckmembership).toHaveBeenCalledTimes(1)
     expect(onswitchorganization).toHaveBeenCalledTimes(1)
@@ -119,6 +123,9 @@ describe('ChannelUnavailableBanner (#835)', () => {
   })
 
   it('keeps the reply panel detail copy unchanged', async () => {
+    // The Reply Panel must keep passing the variant; the copy below is only reached through it.
+    const replyPanelSrc = readFileSync(join(import.meta.dirname, 'ReplyPanel.svelte'), 'utf8')
+    expect(replyPanelSrc).toMatch(/<ChannelUnavailableBanner [^>]*variant="replyPanel"/)
     const host = dom.doc.createElement('div')
     dom.doc.body.appendChild(host)
 

@@ -347,11 +347,11 @@ describe('UI controllers under Svelte 5 $effect.root: one step per update, no ef
     expect(appSrc).toContain('{#if session && organization}')
     expect(appSrc).not.toContain("auth.organizationStatus !== 'unavailable' && auth.organizationStatus !== 'error'")
     expect(appSrc).toContain('{#key pageAnnouncement.id}')
-    expect(appSrc).toContain('<OrganizationUnavailableBanner')
+    expect(appSrc).toMatch(/<OrganizationUnavailableBanner\s+onrecheckmembership=\{\(\) => void auth\.selectOrganization\(auth\.selectedOrganizationId\)\}/)
     expect(appSrc).toContain('<InviteAccept')
 
     const timelineSrc = readFileSync(join(webDir, 'src/Timeline.svelte'), 'utf8')
-    expect(timelineSrc).toMatch(/\{#if organizationUnavailable\}[\s\S]*?<OrganizationUnavailableBanner[\s\S]*?\{:else if s\.status === 'unavailable'\}/)
+    expect(timelineSrc).toMatch(/\{#if organizationUnavailable\}[\s\S]*?<OrganizationUnavailableBanner \{onrecheckmembership\}[\s\S]*?\{:else if s\.status === 'unavailable'\}/)
 
     const workspaceSrc = readFileSync(join(webDir, 'src/Workspace.svelte'), 'utf8')
     expect(workspaceSrc).toContain('session.sync.hasUnsavedChanges()')
