@@ -520,6 +520,23 @@ test('a failed first sampler read after a passed preflight blocks the spawn', as
   assert.equal(w.spawned.length, 0);
 });
 
+test('the first recorded sample needs /proc/stat counters too, even after a passed preflight', async () => {
+  const cases: [(number[] | null)[] | null, RegExp][] = [
+    [null, /a first thermal sample: \/proc\/stat unreadable; job not started/],
+    [[[1, 0, 0, 1, 0, 0, 0, 0], null], /a first thermal sample: \/proc\/stat counters unreadable on CPU 1; job not started/],
+  ];
+  for (const [procStat, pattern] of cases) {
+    const w = world({ freqs: [3_000_000, 3_000_000] });
+    const d = deps(w);
+    let n = 0;
+    const thermal = d.platform.thermal;
+    d.platform = { ...d.platform, thermal: now => { const s = thermal(now)!; return ++n === 2 ? { ...s, procStat } : s; } };
+    const r = await launch(queue([job('a', { thermalSampleSeconds: 5 })]), d);
+    assert.match(r.reason ?? '', pattern);
+    assert.deepEqual([w.spawned.length, w.everyMs, w.files.has('/runs/HOST-BUSY')], [0, [], false]);
+  }
+});
+
 test('on a signal the stop escalates to SIGKILL on its own timer, even while the child has not exited', { timeout: 10_000 }, async () => {
   // The child exits only on SIGKILL; it stays alive until then.
   const w = world({ signal: { at: 'job' }, exitsOn: 'SIGKILL', exits: [137], alive: s => !s.includes('SIGKILL') });
