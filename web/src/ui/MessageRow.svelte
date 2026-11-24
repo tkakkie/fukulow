@@ -1,3 +1,19 @@
+<script module lang="ts">
+  const messageTimeFormatter = new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+  })
+
+  function formatMessageTime(createdAt: string): string {
+    const date = new Date(createdAt)
+    return Number.isNaN(date.getTime()) ? 'Invalid Date' : messageTimeFormatter.format(date)
+  }
+</script>
+
 <script lang="ts">
   import { shouldOpenRepliesFromRowKey } from '../composer-keys'
   import Button from './Button.svelte'
@@ -69,7 +85,7 @@
   )
 
   const formattedTime = $derived(
-    createdAt ? new Date(createdAt).toLocaleString('ja-JP') : '',
+    createdAt ? formatMessageTime(createdAt) : '',
   )
 
   function handleFocus(e: FocusEvent) {
