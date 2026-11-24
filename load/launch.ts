@@ -1,9 +1,11 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, openSync, closeSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs, promisify } from 'node:util';
 import { dockerFreeBytes, freeBytes } from './harness-core/host.ts';
-import { launch, type Child } from './launcher/launcher.ts';
+import { fixedRate, launch, type Child } from './launcher/launcher.ts';
 import { currentPlatform } from './launcher/platform.ts';
 import { parseQueue } from './launcher/queue.ts';
 
@@ -20,14 +22,23 @@ const exec = (argv: string[], cwd?: string) => {
   return { status: c.error || c.signal ? null : c.status, stdout: c.stdout ?? '' };
 };
 
+// The job runs in its own process group (detached), so a stop reaches every process it started,
+// for example a `docker exec` client, and alive() can tell when the whole group has ended.
 function run(argv: string[], opts: { cwd: string; log: string; env?: Record<string, string> }): Child {
   const fd = openSync(opts.log, 'a');
-  const c = spawn(argv[0], argv.slice(1), { cwd: opts.cwd, env: { ...process.env, ...opts.env }, stdio: ['ignore', fd, fd] });
+  const c = spawn(argv[0], argv.slice(1), { cwd: opts.cwd, env: { ...process.env, ...opts.env }, stdio: ['ignore', fd, fd], detached: true });
   const done = new Promise<number>(resolve => {
     c.on('error', e => { writeSync(fd, `spawn failed: ${e.message}\n`); resolve(127); });
     c.on('exit', (code, signal) => resolve(code ?? (signal ? 128 : 1)));
   }).finally(() => closeSync(fd));
-  return { done, kill: () => { c.kill('SIGTERM'); } };
+  const group = (signal: NodeJS.Signals | 0) => {
+    if (c.pid === undefined) return false;
+    try { process.kill(-c.pid, signal); return true; } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ESRCH') return false;
+      throw e;
+    }
+  };
+  return { done, kill: (signal = 'SIGTERM') => { group(signal); }, alive: () => group(0) };
 }
 
 const execAsync = promisify(execFile);
@@ -76,7 +87,9 @@ const result = await launch(queue, {
   platform: currentPlatform(), exec, spawn: run, captureLogs,
   exists: existsSync, claim, remove: p => rmSync(p, { force: true }), append: appendFileSync, write: writeFileSync,
   freeBytes: p => safe(() => freeBytes(exec(['df', '-Pk', p]).stdout)), dockerFreeBytes: image => safe(() => dockerFreeBytes(image)),
-  nodeVersion: process.version, pid: process.pid, now: () => new Date(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
+  nodeVersion: process.version, pid: process.pid, sessionId: randomUUID, now: () => new Date(), mono: () => performance.now(), sleep: ms => sleep(ms, undefined, { signal: signalled.signal }).catch(() => {}),
+  pause: ms => sleep(ms),
+  every: (ms, fn) => fixedRate(ms, fn, { mono: () => performance.now(), setTimeout: (f, ms) => setTimeout(f, ms), clearTimeout: h => clearTimeout(h as NodeJS.Timeout) }),
   onSignal: handler => { for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(s, () => { signalled.abort(); handler(s); }); },
 });
 console.log(JSON.stringify(result));
