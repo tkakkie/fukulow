@@ -4,7 +4,7 @@ on:
 permissions:
   contents: read
 # #449: browser component tests (web/e2e-component) on Vite's dev server; no server, database or wasm build.
-# Separate from e2e.yml, whose smoke job check-invariants.ts verifies as the only Playwright run.
+# Separate from e2e.yml, whose smoke job check-invariants.ts (via playwright-ci.ts) verifies as the only Playwright run.
 jobs:
   chromium:
     runs-on: ubuntu-24.04

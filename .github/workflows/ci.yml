@@ -102,7 +102,7 @@ jobs:
       - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with: { tool: cargo-nextest@0.9.151 }
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
-      # Keep the build flags in sync with cargo nextest list in web/scripts/check-invariants.ts.
+      # Keep the build flags in sync with cargo nextest list in web/scripts/cargo-list.ts.
       - run: cargo nextest run --locked --features fukulow-client-core/wasm --no-fail-fast --partition slice:${{ matrix.shard }}/4
       # Doctests (10-14 s) run on shard 4, whose slice is the lightest; shard 1 already runs check-invariants.
       - if: matrix.shard == 4
