@@ -20,6 +20,8 @@ export const sharedCodes: Record<string, ('core' | 'web')[]> = {
   channel_grant_not_found: ['web'],
   channel_manager_guest: ['web'],
   channel_manager_private_only: ['web'],
+  'channel name already exists': ['web'],
+  'channel not found': ['web'],
   channel_not_found: ['core', 'web'],
   chain_too_large: ['web'],
   current_password_incorrect: ['web'],
@@ -73,26 +75,24 @@ export const webOnlyCodes: Record<string, string> = {
 type Capture = { file: string, pattern: RegExp }
 type Limit = {
   server: Capture, openapi: string[],
-  // Web text limits already compared with openapi.json by a web test, named here so the pair stays visible.
-  web?: { file: string, name: string } | { coveredBy: string, assertion: string },
+  web: { file: string, name: string },
 }
 
-const webTest = (coveredBy: string, assertion: string) => ({ coveredBy, assertion })
 export const textLimits: Record<string, Limit> = {
   'message body': {
     server: { file: 'server/src/messages.rs', pattern: /self\.body\.chars\(\)\.count\(\) > (\d+)/g },
     openapi: ['SendMessageRequest/properties/body'],
-    web: webTest('web/src/messages-body.test.ts', 'expect(body.maxLength).toBe(MESSAGE_BODY_MAX)'),
+    web: { file: 'web/src/sync.ts', name: 'MESSAGE_BODY_MAX' },
   },
   'Topic name': {
     server: { file: 'server/src/messages/topics.rs', pattern: /name\.chars\(\)\.count\(\) <= (\d+)/g },
     openapi: ['SendMessageRequest/properties/topic_name', 'MoveChainRequest/allOf/0/properties/topic_name'],
-    web: webTest('web/src/messages-body.test.ts', 'expect(topicName.maxLength).toBe(TOPIC_NAME_MAX)'),
+    web: { file: 'web/src/sync.ts', name: 'TOPIC_NAME_MAX' },
   },
   'Channel name': {
     server: { file: 'server/src/channels.rs', pattern: /name\.chars\(\)\.count\(\) > (\d+)/g },
     openapi: ['CreateChannelRequest/properties/name', 'UpdateChannelRequest/oneOf/0/properties/name', 'Channel/properties/name'],
-    web: webTest('web/src/channels-name.test.ts', '.properties.name.maxLength).toBe(CHANNEL_NAME_MAX)'),
+    web: { file: 'web/src/channels.ts', name: 'CHANNEL_NAME_MAX' },
   },
   'Section name': {
     server: { file: 'server/src/channels/sections.rs', pattern: /name\.chars\(\)\.count\(\) > (\d+)/g },
@@ -186,7 +186,8 @@ export function rustProduct(files: Record<string, string>, root: string) {
   return product
 }
 
-const snake = /^[a-z][a-z0-9_]*$/
+// Codes are lower-case words joined by `_` or, for a few older codes such as `channel not found`, single spaces.
+const codeShape = /^[a-z][a-z0-9_]*(?: [a-z0-9_]+)*$/
 
 const emitted = /(?:StatusCode::[A-Z_]+|\bSelf::error\(\s*socket\s*,\s*(?:None|Some\(\w+\)))\s*,\s*$/
 
@@ -194,7 +195,7 @@ export function serverCodes(repo: Repo): Set<string> {
   const codes = new Set<string>()
   for (const { source, strings } of rustProduct(repo.files, 'server/src').values()) {
     for (const { value, start } of strings) {
-      if (snake.test(value) && emitted.test(source.slice(Math.max(0, start - 80), start))) codes.add(value)
+      if (codeShape.test(value) && emitted.test(source.slice(Math.max(0, start - 80), start))) codes.add(value)
     }
   }
   return codes
@@ -206,7 +207,7 @@ export function coreMatchedCodes(repo: Repo): Set<string> {
     for (const { value, start, end } of strings) {
       const compared = /(?:==|!=|Some\()\s*$/.test(source.slice(Math.max(0, start - 8), start)) ||
         /^\s*(?:=>|\|)/.test(source.slice(end, end + 4))
-      if (compared && snake.test(value)) codes.add(value)
+      if (compared && codeShape.test(value)) codes.add(value)
     }
   }
   return codes
@@ -219,14 +220,14 @@ export function webMatchedCodes(repo: Repo): Set<string> {
   const codes = new Set<string>()
   for (const [path, source] of Object.entries(repo.files)) {
     if (!webProduct(path)) continue
-    for (const match of source.matchAll(/(?<![\w$])(?:error|code)\s*[!=]==\s*'([a-z][a-z0-9_]*)'/g)) {
+    for (const match of source.matchAll(/(?<![\w$])(?:error|code)\s*[!=]==\s*'([a-z][a-z0-9_]*(?: [a-z0-9_]+)*)'/g)) {
       if (!/typeof\s+(?:[\w$]+\??\.)*$/.test(source.slice(Math.max(0, match.index - 60), match.index))) codes.add(match[1])
     }
     for (const match of source.matchAll(/switch\s*\(([^)]*)\)\s*\{/g)) {
       if (!/(?:^|[.\s])(?:error|code)$/.test(match[1].trim())) continue
       const open = match.index + match[0].length - 1
       const body = source.slice(open, matchingBrace(source, open))
-      for (const label of body.matchAll(/case\s+'([a-z][a-z0-9_]*)'\s*:/g)) codes.add(label[1])
+      for (const label of body.matchAll(/case\s+'([a-z][a-z0-9_]*(?: [a-z0-9_]+)*)'\s*:/g)) codes.add(label[1])
     }
   }
   return codes
@@ -289,14 +290,9 @@ export function checkContract(repo: Repo): string[] {
       assert.equal(maxLength(repo, path), value, `${name}: ${limit.server.file} allows ${value}, openapi.json ${path} maxLength differs`)
       pairs.push(`${name} ${value}: ${limit.server.file} = openapi.json ${path}`)
     }
-    if (limit.web && 'coveredBy' in limit.web) {
-      assert.ok(repo.files[limit.web.coveredBy]?.includes(limit.web.assertion), `${name}: ${limit.web.coveredBy} must keep ${limit.web.assertion}`)
-      pairs.push(`${name}: openapi.json = web (asserted in ${limit.web.coveredBy})`)
-    } else if (limit.web) {
-      const webValue = constants(repo.files[limit.web.file] ?? '', false).get(limit.web.name)
-      assert.equal(webValue, value, `${name}: ${limit.web.file} ${limit.web.name} differs from the server limit ${value}`)
-      pairs.push(`${name} ${value}: openapi.json = ${limit.web.file} ${limit.web.name}`)
-    }
+    const webValue = constants(repo.files[limit.web.file] ?? '', false).get(limit.web.name)
+    assert.equal(webValue, value, `${name}: ${limit.web.file} ${limit.web.name} differs from the server limit ${value}`)
+    pairs.push(`${name} ${value}: openapi.json = ${limit.web.file} ${limit.web.name}`)
   }
 
   const coreValues = constants(repo.files[coreFile] ?? '', true)

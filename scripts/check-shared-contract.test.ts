@@ -17,6 +17,8 @@ test('server, client-core, web and openapi.json agree on shared error codes and 
     'error code history_generation_changed: server = core = web',
     'message body 4000: server/src/messages.rs = openapi.json SendMessageRequest/properties/body',
     'Section name 60: openapi.json = web/src/section-ui.ts SECTION_NAME_MAX',
+    'message body 4000: openapi.json = web/src/sync.ts MESSAGE_BODY_MAX',
+    'error code channel not found: server = web',
     'SYNC_MESSAGE_LIMIT 600: client-core/src/types.rs = web/src/protocol-types.ts',
   ]) assert.ok(pairs.includes(expected), expected)
 })
@@ -28,6 +30,8 @@ test('a changed error code on one side fails', () => {
     'Some("snapshot_expired")', 'Some("snapshot_stale")')), /snapshot_expired: core no longer matches/)
   assert.throws(() => checkContract(edit('web/src/section-ui.ts',
     "result.error === 'section_limit'", "result.error === 'section_limits'")), /section_limit: web no longer matches/)
+  assert.throws(() => checkContract(edit('server/src/channels.rs',
+    '"channel name already exists"', '"channel name exists"')), /channel name already exists: server\/src product code never emits/)
 })
 
 test('a code web or client-core matches but the server does not emit fails', () => {
@@ -51,8 +55,10 @@ test('a changed limit on one side fails', () => {
     'self.body.chars().count() > 4000', 'self.body.chars().count() > 5000')), /message body: server\/src\/messages.rs allows 5000/)
   assert.throws(() => checkContract(edit('server/src/channels.rs',
     'name.chars().count() > 128', 'name.chars().count() > 100')), /Channel name: server\/src\/channels.rs allows 100/)
-  assert.throws(() => checkContract(edit('web/src/messages-body.test.ts',
-    'expect(body.maxLength).toBe(MESSAGE_BODY_MAX)', '')), /message body: web\/src\/messages-body.test.ts must keep/)
+  assert.throws(() => checkContract(edit('web/src/sync.ts',
+    'TOPIC_NAME_MAX = 60', 'TOPIC_NAME_MAX = 64')), /Topic name: web\/src\/sync.ts TOPIC_NAME_MAX differs/)
+  assert.throws(() => checkContract(edit('web/src/channels.ts',
+    'CHANNEL_NAME_MAX = 128', 'CHANNEL_NAME_MAX = 120')), /Channel name: web\/src\/channels.ts CHANNEL_NAME_MAX differs/)
 })
 
 test('server codes ignore comments, descriptions and test modules', () => {
