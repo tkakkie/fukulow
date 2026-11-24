@@ -1,5 +1,5 @@
 use super::*;
-use crate::messages::topics::projection::{page_sql, reference};
+use crate::messages::topics::projection::{page_sql, page_sql_in_direction, reference};
 
 fn page_scans<'a>(plan: &'a Value, scans: &mut Vec<&'a Value>) {
     if matches!(plan["Relation Name"].as_str(), Some("messages" | "topics"))
@@ -76,9 +76,11 @@ async fn topic_pages_bound_message_and_topic_buffers_in_both_plan_modes(pool: Pg
     sqlx::raw_sql(&format!(
         "SET LOCAL jit=off;
          PREPARE page_before AS {};
-         PREPARE page_after AS {};",
+         PREPARE page_after AS {};
+         PREPARE page_newer AS {};",
         reference::page_sql(),
-        page_sql()
+        page_sql(),
+        page_sql_in_direction(true)
     ))
     .execute(&mut *tx)
     .await
@@ -88,26 +90,47 @@ async fn topic_pages_bound_message_and_topic_buffers_in_both_plan_modes(pool: Pg
             .execute(&mut *tx)
             .await
             .unwrap();
-        for (label, w, before, topics_only, filter) in [
-            ("latest", 60004, "NULL", false, "NULL".into()),
-            ("older", 60000, "60000", false, "NULL".into()),
-            ("deep", 60000, "55005", false, "NULL".into()),
-            ("filtered", 60000, "NULL", true, format!("'{topic}'")),
+        for (statement, label, w, boundary, topics_only, filter) in [
+            ("page_after", "latest", 60004, "NULL", false, "NULL".into()),
+            ("page_after", "older", 60000, "60000", false, "NULL".into()),
+            ("page_after", "deep", 60000, "55005", false, "NULL".into()),
+            (
+                "page_after",
+                "filtered",
+                60000,
+                "NULL",
+                true,
+                format!("'{topic}'"),
+            ),
+            ("page_newer", "latest", 60004, "59999", false, "NULL".into()),
+            ("page_newer", "older", 60000, "59990", false, "NULL".into()),
+            ("page_newer", "deep", 60000, "0", false, "NULL".into()),
+            (
+                "page_newer",
+                "filtered",
+                60000,
+                "55000",
+                true,
+                format!("'{topic}'"),
+            ),
         ] {
             let args = format!(
-                "('{org}','{viewer}',0,'{channel_id}',{w},{before},3,{topics_only},{filter})"
+                "('{org}','{viewer}',0,'{channel_id}',{w},{boundary},3,{topics_only},{filter})"
             );
-            let old = explain(&mut tx, &format!("EXECUTE page_before{args}")).await;
-            let new = explain(&mut tx, &format!("EXECUTE page_after{args}")).await;
+            let new = explain(&mut tx, &format!("EXECUTE {statement}{args}")).await;
             let buffers = |plan: &Value| {
                 plan["Shared Hit Blocks"].as_u64().unwrap()
                     + plan["Shared Read Blocks"].as_u64().unwrap()
             };
             let mut scans = Vec::new();
             page_scans(&new, &mut scans);
+            if statement == "page_after" {
+                let old = explain(&mut tx, &format!("EXECUTE page_before{args}")).await;
+                eprintln!("{mode} {label}: reference={} buffers", buffers(&old));
+                assert!(buffers(&old) > 1_000, "{mode} {label}: {old}");
+            }
             eprintln!(
-                "{mode} {label}: old={} new={} buffers; scans: {:?}",
-                buffers(&old),
+                "{mode} {statement} {label}: {} buffers; scans: {:?}",
                 buffers(&new),
                 scans
                     .iter()
@@ -119,11 +142,10 @@ async fn topic_pages_bound_message_and_topic_buffers_in_both_plan_modes(pool: Pg
                     ))
                     .collect::<Vec<_>>()
             );
-            assert!(buffers(&old) > 1_000, "{mode} {label}: {old}");
-            assert!(buffers(&new) < 200, "{mode} {label}: {new}");
+            assert!(buffers(&new) < 200, "{mode} {statement} {label}: {new}");
             assert!(
                 scans.iter().all(|scan| scan["Index Cond"].is_string()),
-                "{mode} {label}: {new}"
+                "{mode} {statement} {label}: {new}"
             );
         }
     }

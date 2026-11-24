@@ -11,6 +11,8 @@ pub mod shutdown;
 mod static_assets;
 
 #[cfg(test)]
+mod pool_stats_tests;
+#[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod websocket_test_support;
@@ -88,24 +90,30 @@ impl AppState {
     }
 }
 
-/// The restricted application pool for `admin`, or `admin` itself when it is
-/// already non-superuser (e.g. `TestPools::app`).
+/// Convert a superuser pool to the restricted application pool. Reuse a
+/// non-superuser pool only if it meets the test app role restrictions.
 #[cfg(test)]
-pub(crate) async fn test_app_pool(admin: sqlx::PgPool) -> sqlx::PgPool {
+pub(crate) async fn test_app_pool(pool: sqlx::PgPool) -> sqlx::PgPool {
     // A pool that never connects must use `AppState::with_test_pool`: probing it
     // here waits out sqlx's 30 s acquire timeout, so an inspection error fails.
-    let superuser: bool = sqlx::query_scalar(
-        "SELECT rolsuper FROM pg_roles WHERE rolname = current_user",
+    let inspection_error =
+        "inspect the test pool role (use AppState::with_test_pool for a pool that never connects)";
+    let mut connection = pool.acquire().await.expect(inspection_error);
+    let (role, superuser, bypass_rls): (String, bool, bool) = sqlx::query_as(
+        "SELECT rolname::text, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
     )
-    .fetch_one(&admin)
+    .fetch_one(&mut *connection)
     .await
-    .expect(
-        "inspect the test pool role (use AppState::with_test_pool for a pool that never connects)",
-    );
+    .expect(inspection_error);
+    if !superuser {
+        assert!(!bypass_rls, "test app pool role {role} has BYPASSRLS");
+        test_support::assert_restricted_role(&mut connection, &role).await;
+    }
+    drop(connection);
     if superuser {
-        test_support::TestPools::new(admin).await.app
+        test_support::TestPools::new(pool).await.app
     } else {
-        admin
+        pool
     }
 }
 
@@ -454,6 +462,7 @@ async fn ready(State(readiness): State<Readiness>) -> Response {
 #[cfg(test)]
 mod tests {
     mod readiness;
+    mod test_pool;
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;

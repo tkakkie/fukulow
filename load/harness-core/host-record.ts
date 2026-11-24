@@ -22,6 +22,7 @@ export type HostRecord = {
   maxFrequencyKHz: Record<string, number[]> | null; boost: string | null; policyBoost: Record<string, number[]> | null;
   powerProfile: string | null; memoryBytes: number; meminfoKiB: Record<string, number> | null; swappiness: string | null;
   loadAverage: number[]; ac: { supply: string; online: boolean }[] | null; temperaturesC: Record<string, number> | null;
+  fanControl: Record<string, number> | null; fansRpm: Record<string, number> | null; platformProfile: string | null;
   disk: { path: string; freeBytes: number } | null; docker: { server: string; cpus: string | null } | null;
   updateUnits: UnitState[] | null; sleepUnits: UnitState[] | null;
   // 'absent' when snap is not installed; null when it is installed but its state could not be read.
@@ -71,19 +72,20 @@ function acSupplies() {
   return supplies.filter(s => read(join(dir, s, 'type')) === 'Mains').map(s => ({ supply: s, online: read(join(dir, s, 'online')) === '1' }));
 }
 
-function temperatures() {
-  const dir = '/sys/class/hwmon';
+// hwmon readings named `${monitor}/${label}`, for example `k10temp/Tctl`, `acpi_fan/fan1` or `hp/pwm1_enable`.
+// Readings without a numeric value are left out; an unreadable hwmon directory is null.
+export function hwmon(file: RegExp, scale: number, dir = '/sys/class/hwmon'): Record<string, number> | null {
   const monitors = list(dir);
   if (monitors === null) return null;
   const out: Record<string, number> = {};
   for (const h of monitors) {
     const name = read(join(dir, h, 'name'));
     if (name === null) continue;
-    for (const f of (list(join(dir, h)) ?? []).filter(f => /^temp\d+_input$/.test(f))) {
+    for (const f of (list(join(dir, h)) ?? []).filter(f => file.test(f))) {
       const raw = read(join(dir, h, f));
       if (raw === null || raw === '' || !Number.isFinite(Number(raw))) continue;
-      const label = read(join(dir, h, f.replace('_input', '_label'))) ?? f.replace('_input', '');
-      out[`${name}/${label}`] = Number(raw) / 1000;
+      const label = f.endsWith('_input') ? read(join(dir, h, f.replace('_input', '_label'))) ?? f.replace('_input', '') : f;
+      out[`${name}/${label}`] = Number(raw) / scale;
     }
   }
   return out;
@@ -128,7 +130,10 @@ export function hostRecord(diskPath: string): HostRecord {
     powerProfile: linux ? cmd('powerprofilesctl', ['get']) : null,
     memoryBytes: totalmem(), meminfoKiB: linux ? parseMeminfo(read('/proc/meminfo') ?? '') : null,
     swappiness: linux ? read('/proc/sys/vm/swappiness') : null, loadAverage: loadavg(),
-    ac: linux ? acSupplies() : null, temperaturesC: linux ? temperatures() : null,
+    ac: linux ? acSupplies() : null, temperaturesC: linux ? hwmon(/^temp\d+_input$/, 1000) : null,
+    // #796 cooling levers: fan mode (hp-wmi: 0 full speed, 2 automatic), fan speed and the ACPI platform profile.
+    fanControl: linux ? hwmon(/^pwm\d+_enable$/, 1) : null, fansRpm: linux ? hwmon(/^fan\d+_input$/, 1) : null,
+    platformProfile: linux ? read('/sys/firmware/acpi/platform_profile') : null,
     disk: diskFree(diskPath), docker: docker(),
     updateUnits: linux ? units([...updateUnits, ...timerServices]) : null, sleepUnits: linux ? units(sleepUnits) : null,
     snapHold: linux ? snapHold() : null,
@@ -160,5 +165,24 @@ export function linuxViolations(r: HostRecord): string[] {
   v.push(...unitViolations(r.sleepUnits, sleepUnits, u => u.enabled === 'masked', 'sleep target'));
   if (r.snapHold === null) v.push('snap refresh state unreadable');
   else if (r.snapHold !== 'absent' && r.snapHold !== 'forever') v.push(`snap refreshes are not held: ${r.snapHold}`);
+  return v;
+}
+
+// Host settings a job requires (#796 cooling levers), compared with the record before the job. An
+// unreadable setting is a violation. policyBoost must hold the value on every CPU.
+export type HostRequirements = { boost?: string; policyBoost?: string; platformProfile?: string; fanControl?: Record<string, number> };
+export function requirementViolations(r: HostRecord, req: HostRequirements | undefined): string[] {
+  if (!req) return [];
+  const v: string[] = [];
+  if (req.boost !== undefined && r.boost !== req.boost) v.push(`boost is ${r.boost ?? 'unreadable'}, required ${req.boost}`);
+  if (req.policyBoost !== undefined) {
+    const cpus = r.policyBoost?.[req.policyBoost] ?? [];
+    if (cpus.length !== r.logicalCpus || cpus.some((c, i) => c !== i)) v.push(`per-CPU boost is not ${req.policyBoost} on every CPU: ${JSON.stringify(r.policyBoost ?? 'unreadable')}`);
+  }
+  if (req.platformProfile !== undefined && r.platformProfile !== req.platformProfile) v.push(`platform profile is ${r.platformProfile ?? 'unreadable'}, required ${req.platformProfile}`);
+  for (const [key, value] of Object.entries(req.fanControl ?? {})) {
+    const got = r.fanControl?.[key];
+    if (got !== value) v.push(`fan control ${key} is ${got ?? 'unreadable'}, required ${value}`);
+  }
   return v;
 }

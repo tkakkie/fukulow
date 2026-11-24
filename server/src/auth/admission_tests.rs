@@ -187,10 +187,17 @@ async fn cancelled_lookup_releases_admission_and_throttle_without_token_entropy(
     let state = credential_tests::fixture(pool.clone()).await;
     let isolated = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(pool.connect_options().as_ref().clone())
+        .connect_with(state.pool.connect_options().as_ref().clone())
         .await
         .unwrap();
-    let connection = isolated.acquire().await.unwrap();
+    let mut connection = isolated.acquire().await.unwrap();
+    let role: (String, bool, bool) = sqlx::query_as(
+        "SELECT rolname::text, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(role, (crate::test_support::APP_ROLE.into(), false, false));
     let workers: &'static PasswordWorkers = Box::leak(Box::new(PasswordWorkers::new()));
     for path in ["/api/v1/session", "/api/v1/native/session"] {
         let state = AppState {

@@ -12,9 +12,29 @@
   const FOCUSABLE_SELECTOR =
     'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
 
+  const NON_TEXT_INPUT_TYPES = new Set([
+    'button',
+    'checkbox',
+    'color',
+    'file',
+    'hidden',
+    'image',
+    'radio',
+    'range',
+    'reset',
+    'submit',
+  ])
+
+  function isTextInputTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement) || target.tagName !== 'INPUT') return false
+    const type = (target.getAttribute('type') ?? 'text').toLowerCase()
+    return !NON_TEXT_INPUT_TYPES.has(type)
+  }
+
   let {
     open = false,
     busy = false,
+    form = false,
     title,
     description,
     confirmLabel,
@@ -26,6 +46,7 @@
   }: {
     open?: boolean
     busy?: boolean
+    form?: boolean
     title: string
     description?: string
     confirmLabel?: string
@@ -83,9 +104,47 @@
         ? document.activeElement
         : null
       stepDialogTab(getFocusableControls(), active, e.shiftKey, dialogEl)
+      return
+    }
+    if (form && e.key === 'Enter') {
+      if (isImeComposing(e)) {
+        e.preventDefault()
+        return
+      }
+      if ((e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) && isTextInputTarget(e.target)) {
+        e.preventDefault()
+      }
     }
   }
+
+  function handleFormSubmit(e: SubmitEvent) {
+    e.preventDefault()
+    if (!open || busy) return
+    onconfirm?.()
+  }
 </script>
+
+{#snippet dialogContent()}
+  {#if children}
+    <div class="ui-dialog__body">
+      {@render children()}
+    </div>
+  {/if}
+  {#if onconfirm || oncancel}
+    <footer class="ui-dialog__actions">
+      {#if oncancel}
+        <Button variant="secondary" disabled={busy} onclick={oncancel}>{cancelLabel}</Button>
+      {/if}
+      {#if onconfirm && confirmLabel}
+        {#if form}
+          <Button variant="primary" type="submit" disabled={busy}>{confirmLabel}</Button>
+        {:else}
+          <Button variant="primary" disabled={busy} onclick={onconfirm}>{confirmLabel}</Button>
+        {/if}
+      {/if}
+    </footer>
+  {/if}
+{/snippet}
 
 {#if open}
   <div class="ui-dialog-backdrop">
@@ -104,20 +163,12 @@
       {#if description}
         <p class="ui-dialog__description">{description}</p>
       {/if}
-      {#if children}
-        <div class="ui-dialog__body">
-          {@render children()}
-        </div>
-      {/if}
-      {#if onconfirm || oncancel}
-        <footer class="ui-dialog__actions">
-          {#if oncancel}
-            <Button variant="secondary" disabled={busy} onclick={oncancel}>{cancelLabel}</Button>
-          {/if}
-          {#if onconfirm && confirmLabel}
-            <Button variant="primary" disabled={busy} onclick={onconfirm}>{confirmLabel}</Button>
-          {/if}
-        </footer>
+      {#if form}
+        <form class="ui-dialog__form" onsubmit={handleFormSubmit}>
+          {@render dialogContent()}
+        </form>
+      {:else}
+        {@render dialogContent()}
       {/if}
     </div>
   </div>
@@ -172,6 +223,15 @@
     font-size: var(--font-size-14);
     color: var(--text2);
     overflow-wrap: anywhere;
+  }
+
+  .ui-dialog__form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-12);
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
   }
 
   .ui-dialog__body {

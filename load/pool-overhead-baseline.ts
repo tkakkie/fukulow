@@ -11,7 +11,7 @@ export function baselineSource(path:string, source:string):string {
       const start=source.indexOf(item);if(start<0)throw new Error('Missing instrumentation item');
       source=source.slice(0,start)+'#[cfg(test)]\n'+source.slice(start);
     }
-    replace('pub async fn report_pool_periodically(pool: PgPool) {\n    report(&STATS, &pool).await;\n}\n\n','');
+    replace('pub async fn report_pool_periodically(pool: PgPool) {\n    #[cfg(test)]\n    if let Ok(stats) = TEST_STATS.try_with(std::sync::Arc::clone) {\n        return report(&stats, &pool).await;\n    }\n    report(&STATS, &pool).await;\n}\n\n','');
     replace('    STATS.acquire(pool).await','    #[cfg(test)]\n    return STATS.acquire(pool).await;\n    #[cfg(not(test))]\n    pool.acquire().await');
   } else if(path===baselinePaths[1]) replace('pub use stats::report_pool_periodically;\n','');
   else if(path===baselinePaths[2]) {

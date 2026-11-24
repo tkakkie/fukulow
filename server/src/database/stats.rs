@@ -161,6 +161,10 @@ impl Drop for Wait<'_> {
 }
 
 pub async fn report_pool_periodically(pool: PgPool) {
+    #[cfg(test)]
+    if let Ok(stats) = TEST_STATS.try_with(std::sync::Arc::clone) {
+        return report(&stats, &pool).await;
+    }
     report(&STATS, &pool).await;
 }
 

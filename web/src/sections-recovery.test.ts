@@ -334,3 +334,30 @@ it.each([false, true])('an old Organization result cannot affect its replacement
   expect(first.groups()).toEqual([[null, []]])
   expect(current.groups()).toEqual([['S', ['A']], [null, []]])
 })
+
+it('consecutive below-floor section layouts back off without showing an error and converge on reconnect', async () => {
+  const c = await ready()
+  c.getLayout.mockClear()
+  c.event({ type: 'sections_changed', generation: '5' })
+  // Server keeps returning generation '1' (below observed floor '5').
+  await advance(200); expect(c.getLayout).toHaveBeenCalledTimes(1)
+  await advance(200); expect(c.getLayout).toHaveBeenCalledTimes(2)
+  await advance(200); expect(c.getLayout).toHaveBeenCalledTimes(3)
+  expect(c.sections.get().error).toBeUndefined()
+  expect(c.generation()).toBe('1')
+  // In A10 backoff (random=0.5 -> 750 ms), no eager 200 ms follow-up fires.
+  await advance(749); expect(c.getLayout).toHaveBeenCalledTimes(3)
+  await advance(1); expect(c.getLayout).toHaveBeenCalledTimes(4)
+  expect(c.sections.get().error).toBeUndefined()
+  // Reconnect resets version floors and backoff, converging on a post-restore lower baseline.
+  c.socket().onclose?.({ code: 1006 })
+  await advance(5000)
+  expect(c.getLayout).toHaveBeenCalledTimes(4)
+  c.db.layout = layout('2', ['A'])
+  c.socket().onopen?.()
+  c.event({ type: 'activity_ready' })
+  await advance(200)
+  expect(c.getLayout).toHaveBeenCalledTimes(5)
+  expect(c.generation()).toBe('2')
+  expect(c.sections.get().error).toBeUndefined()
+})

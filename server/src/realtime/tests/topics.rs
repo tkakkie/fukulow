@@ -14,6 +14,44 @@ pub(super) async fn topic_send(f: &Fixture, token: &str, channel: Uuid, key: Uui
 }
 
 #[fukulow_test::test]
+async fn newer_projections_leave_replay_cursor_unchanged(pool: PgPool) {
+    let f = fixture(&pool).await;
+    topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
+    let mut live = f.server.connect(&f.token).await;
+    subscribe(&mut live, f.channel, 1).await;
+    ready(&mut live, f.channel, 1).await;
+    drop(live);
+
+    let second = topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
+    let third = topic_send(&f, &f.token, f.channel, Uuid::new_v4()).await;
+    for (route, field) in [("timeline", "items"), ("topics", "topics")] {
+        let response = request(
+            &f.app,
+            "GET",
+            &format!(
+                "/api/v1/channels/{}/{route}?as_of_seq=3&after_position=1",
+                f.channel
+            ),
+            &f.token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(page["as_of_seq"], 3);
+        assert_eq!(page[field].as_array().unwrap().len(), 1);
+    }
+
+    let mut reconnect = f.server.connect(&f.token).await;
+    subscribe(&mut reconnect, f.channel, 1).await;
+    assert_eq!(event(&mut reconnect).await["message"], second);
+    assert_eq!(event(&mut reconnect).await["message"], third);
+    ready(&mut reconnect, f.channel, 3).await;
+}
+
+#[fukulow_test::test]
 async fn topic_ack_history_live_reconnect_and_shared_gap_payloads_are_identical(pool: PgPool) {
     let f = fixture(&pool).await;
     let mut live = f.server.connect(&f.token).await;

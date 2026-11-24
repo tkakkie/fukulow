@@ -685,3 +685,188 @@ it('DM and ordinary Channel notices route independently while unknown kinds inva
   expect(members.invalidate).toHaveBeenCalledOnce()
   activity.close()
 })
+
+it('consecutive below-floor rejections switch to A10 backoff after 3 rejections without accepting or showing an error', async () => {
+  const load = vi.fn(async (): Promise<Result<number>> => ok(1))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: value => value >= 2, random: () => 0 })
+  target.invalidate()
+  // First 2 rejections use the normal 200 ms follow-up; the 3rd enters A10 backoff.
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(2)
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(3)
+  // Pending A10 backoff absorbs invalidations without bypassing backoff.
+  target.invalidate('notice'); target.invalidate('access'); target.invalidate('reconcile')
+  await vi.advanceTimersByTimeAsync(499); expect(load).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(1); expect(load).toHaveBeenCalledTimes(4)
+  let expected = 4
+  for (const delay of [1000, 2000, 4000, 8000, 15_000]) {
+    await vi.advanceTimersByTimeAsync(delay - 1); expect(load).toHaveBeenCalledTimes(expected)
+    await vi.advanceTimersByTimeAsync(1); expect(load).toHaveBeenCalledTimes(++expected)
+  }
+  const saturated = load.mock.calls.length
+  await vi.advanceTimersByTimeAsync(60_000)
+  // Capped at 30 s (15 s minimum jitter): at most 4 reads per minute.
+  expect(load).toHaveBeenCalledTimes(saturated + 4)
+  expect(accept).not.toHaveBeenCalled()
+  expect(error).not.toHaveBeenCalled()
+  expect(target.failure()).toBeUndefined()
+  target.close()
+})
+
+it('one below-floor rejection followed by a covering response converges at 200 ms and resets the consecutive count', async () => {
+  let floor = 2, value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= floor, random: () => 0 })
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(1); expect(accept).not.toHaveBeenCalled()
+  expect(error).not.toHaveBeenCalled(); expect(target.failure()).toBeUndefined()
+  value = 2
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(2); expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled(); expect(target.failure()).toBeUndefined()
+  // Count reset on acceptance: 2 more rejections still use the 200 ms follow-up.
+  floor = 4; value = 3
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(200); expect(load).toHaveBeenCalledTimes(4)
+  value = 4
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5); expect(accept).toHaveBeenLastCalledWith(4)
+  expect(error).not.toHaveBeenCalled()
+  target.close()
+})
+
+it.each(['notice', 'access', 'activity_ready', 'activity_reset', 'periodic'] as const)('below-floor backoff re-evaluates and converges on %s without bypassing A10 backoff', async trigger => {
+  let value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= 2, random: () => 0 })
+  const activity = createActivity({ watched: () => false, random: () => 0.5, periodMs: 30_000 })
+  activity.hold('sections', target)
+  if (trigger === 'periodic') {
+    const invalidateSpy = vi.spyOn(target, 'invalidate')
+    activity.notice({ type: 'activity_ready' })
+    // First O5 periodic run is at 15_000 ms (random = 0.5). Advance to t = 8_100 where next backoff is due at 16_100 ms.
+    await vi.advanceTimersByTimeAsync(600 + 500 + 1000 + 2000 + 4000)
+    expect(load).toHaveBeenCalledTimes(7)
+    value = 2
+    // At t = 15_000, O5 fires invalidate('periodic', 200) while backoff is still pending until 16_100 ms.
+    await vi.advanceTimersByTimeAsync(6900)
+    expect(invalidateSpy).toHaveBeenCalledWith('periodic', 200)
+    expect(load).toHaveBeenCalledTimes(7)
+    await vi.advanceTimersByTimeAsync(1099)
+    expect(load).toHaveBeenCalledTimes(7)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(load).toHaveBeenCalledTimes(8)
+    expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+    expect(error).not.toHaveBeenCalled()
+    activity.close()
+    return
+  }
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  value = 2
+  if (trigger === 'notice' || trigger === 'access') target.invalidate(trigger)
+  else activity.notice({ type: trigger })
+  await vi.advanceTimersByTimeAsync(499)
+  expect(load).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled()
+  activity.close()
+})
+
+it('reconnect resets the consecutive below-floor count, clears backoff and converges at 200 ms', async () => {
+  let floor = 5, value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= floor, random: () => 0 })
+  const activity = createActivity({ watched: () => false, random: () => 0.5 })
+  activity.hold('sections', target)
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  // Reconnect: suspend target, reset floor on fresh socket, then activity_ready.
+  activity.disconnected(); target.suspend()
+  floor = 2
+  activity.notice({ type: 'activity_ready' })
+  // Check the fresh streak BEFORE any covering response is accepted: 1st rejection stays at 200 ms.
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).not.toHaveBeenCalled()
+  value = 2
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled()
+  activity.close()
+})
+
+it('below-floor rejections preserve A10 Retry-After on subsequent 429 responses', async () => {
+  const load = vi.fn<() => Promise<Result<number>>>()
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 429, retryAfterMs: 5000 })
+    .mockResolvedValue(ok(2))
+  const accept = vi.fn()
+  const target = createActivityTarget({ load, accept, covers: v => v >= 2, random: () => 0 })
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  target.invalidate('notice'); target.invalidate('reconcile')
+  await vi.advanceTimersByTimeAsync(4999)
+  expect(load).toHaveBeenCalledTimes(3)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  target.close()
+})
+
+it('non-ok response resets the below-floor streak', async () => {
+  const load = vi.fn<() => Promise<Result<number>>>()
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 500, error: 'boom' })
+    .mockResolvedValueOnce(ok(1))
+    .mockResolvedValue(ok(2))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= 2, random: () => 0 })
+  target.invalidate()
+  // 2 below-floor rejections at 200 ms, then 500 at 200 ms -> resets belowFloor and schedules 500 ms backoff.
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  expect(error).toHaveBeenCalledOnce()
+  // Backoff fires at 500 ms -> 4th call is below floor, but streak was reset so follow-up is 200 ms.
+  await vi.advanceTimersByTimeAsync(500)
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  target.close()
+})
+
+it('retryNow resets the below-floor streak', async () => {
+  let value = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(value))
+  const accept = vi.fn(), error = vi.fn()
+  const target = createActivityTarget({ load, accept, error, covers: v => v >= 2, random: () => 0 })
+  target.invalidate()
+  await vi.advanceTimersByTimeAsync(600)
+  expect(load).toHaveBeenCalledTimes(3)
+  // retryNow clears backoff and resets belowFloor; a below-floor response starts a fresh 200 ms streak.
+  await target.retryNow()
+  expect(load).toHaveBeenCalledTimes(4)
+  expect(accept).not.toHaveBeenCalled()
+  value = 2
+  await vi.advanceTimersByTimeAsync(200)
+  expect(load).toHaveBeenCalledTimes(5)
+  expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+  expect(error).not.toHaveBeenCalled()
+  target.close()
+})
