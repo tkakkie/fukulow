@@ -8,6 +8,7 @@ export type SetName = typeof setNames[number];
 export const controlIdleMs = 10_000;
 const slackNs = 3_000_000_000n;
 const million = 1_000_000n;
+const c0Floor: Ratio = [20_000_000n, 1n];
 
 export type Identity = {
   bootId: string; kernel: string; version: string; pmuType: number; online: string;
@@ -89,8 +90,8 @@ function workBetween(a: Sweep, b: Sweep, hz: Ratio[]) {
     const mperf = unsigned(close.mperf) - unsigned(open.mperf);
     requireEvidence(aperf >= 0n && mperf >= 0n && (aperf === 0n) === (mperf === 0n), `F3 CPU ${cpu}: negative or inconsistent counter deltas`);
     const c0Ns = multiply([mperf * 1_000_000_000n, 1n], [hz[cpu][1], hz[cpu][0]]);
-    return { cpu, aperf, mperf, c0Ns, busyHz: mperf === 0n ? null : multiply(hz[cpu], [aperf, mperf]),
-      qualifies: !below(c0Ns, [20_000_000n, 1n]) };
+    return { cpu, aperf, mperf, c0Ns, interval, busyHz: mperf === 0n ? null : multiply(hz[cpu], [aperf, mperf]),
+      qualifies: !below(c0Ns, c0Floor) };
   });
 }
 
@@ -136,8 +137,8 @@ export function counterWork(block: CounterBlock, order: number, pgbenchMs: numbe
     last(block.close) <= first(idle) + idleNs + 100_000_000n,
     'F2 idle tail did not start after pgbench or missed its 10 s target');
   // Validate both intervals independently so a reset at the extra sweep also fails.
-  workBetween(block.open, idle, rates);
-  return { work, idle: workBetween(idle, block.close, rates) };
+  const measured = workBetween(block.open, idle, rates);
+  return { work, idle: idleCoverage(workBetween(idle, block.close, rates), measured) };
 }
 
 type CpuWork = ReturnType<typeof workBetween>[number];
@@ -145,8 +146,14 @@ export const reportWork = (w: CpuWork) => ({
   cpu: w.cpu, aperf: String(w.aperf), mperf: String(w.mperf), c0Ns: store(w.c0Ns),
   busyHz: w.busyHz && store(w.busyHz), qualifies: w.qualifies,
 });
-export function idleCoverage(work: CpuWork[]) {
-  const cpus = work.filter(w => w.qualifies).map(w => w.cpu);
-  return { perCpu: work.map(reportWork), cpusAtFloor: cpus,
+function idleCoverage(work: CpuWork[], measured: CpuWork[]) {
+  const perCpu = work.map((w, cpu) => {
+    const blockSpanNs = measured[cpu].interval;
+    const projectedC0Ns = multiply(w.c0Ns, [blockSpanNs, w.interval]);
+    return { ...reportWork(w), blockSpanNs: String(blockSpanNs), idleSpanNs: String(w.interval),
+      projectedC0Ns: store(projectedC0Ns), projectedQualifies: !below(projectedC0Ns, c0Floor) };
+  });
+  const cpus = perCpu.filter(w => w.projectedQualifies).map(w => w.cpu);
+  return { perCpu, cpusAtFloor: cpus,
     couldQualify: Object.fromEntries(setNames.map(set => [set, sets796[set].filter(cpu => cpus.includes(cpu)).length >= 4])) };
 }

@@ -1,4 +1,4 @@
-import { counterWork, idleCoverage, referenceRates, reportWork, same, setNames, sets796, validatePolicy,
+import { counterWork, referenceRates, reportWork, same, setNames, sets796, validatePolicy,
   type CounterBlock, type FrequencyEvidence, type SetName } from './frequency-evidence.ts';
 import { below, keepFrequency, medianRatio, multiply, restore, store, type Ratio, type StoredRatio } from './frequency-ratios.ts';
 import type { CpuSets } from '../../harness-core/cpusets.ts';
@@ -45,8 +45,8 @@ export function judgeFrequency(blocks: FrequencyBlock[], sets: CpuSets | null, e
   if (!base) reasons.push('F4 missing block 1');
   const proposed: Partial<Floors> = {};
   const details = judged.map(b => {
-    const idle = b.idle && idleCoverage(b.idle);
-    if (idle?.cpusAtFloor.length) reasons.push(`block ${b.order}: idle-only C0 reached 20 ms on CPUs ${idle.cpusAtFloor.join(',')}`);
+    const idle = b.idle;
+    if (idle?.cpusAtFloor.length) reasons.push(`block ${b.order}: projected idle-only C0 reached 20 ms on CPUs ${idle.cpusAtFloor.join(',')}`);
     const sets = setNames.map(set => {
       const qualified = b.work.filter(w => sets796[set].includes(w.cpu) && w.qualifies);
       const common = qualified.flatMap(w => {

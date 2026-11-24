@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { restore } from './frequency-ratios.ts';
-import { checkPermissionEvidence, setNames } from './frequency-evidence.ts';
+import { checkPermissionEvidence, same, setNames } from './frequency-evidence.ts';
 import type { Floors } from './frequency-judge.ts';
 
 export type FrequencyStage = 'control' | 'rehearsal2' | 'formal';
@@ -26,7 +26,10 @@ export function frozenFloors(file = reviewedFloorsUrl) {
     const record = JSON.parse(raw.toString());
     if (record.version !== 3 || !isReview(record.control) || !isReview(record.rehearsal2) ||
       record.control.sha256 === record.rehearsal2.sha256) throw new Error('missing control or Rehearsal 2 review');
-    return { floors: validateFloors(record.floors), sha256: digest(raw) };
+    const floors = validateFloors(record.floors);
+    const proposal = reviewedControlFloors(record.control).floors;
+    if (!setNames.every(set => same(floors[set], proposal[set]))) throw new Error('frozen floors differ from the reviewed control proposal');
+    return { floors, sha256: digest(raw) };
   } catch (e) { throw new Error(`STOP: formal #796 requires frozen block-1 floors and reviewed Rehearsal 2 (${String(e)})`); }
 }
 
@@ -43,8 +46,11 @@ export function permissionCheck(path: string | undefined) {
 
 export function controlFloors(reviewPath: string | undefined) {
   if (!reviewPath || !isAbsolute(reviewPath)) throw new Error('STOP: Rehearsal 2 needs --control-review with an absolute path');
-  const review = JSON.parse(readFileSync(reviewPath, 'utf8'));
-  if (!isReview(review) || typeof review.report !== 'string' || !isAbsolute(review.report)) throw new Error('STOP: no documented control review');
+  return reviewedControlFloors(JSON.parse(readFileSync(reviewPath, 'utf8')));
+}
+
+function reviewedControlFloors(review: (Review & { report?: unknown }) | null | undefined) {
+  if (typeof review?.report !== 'string' || !isAbsolute(review.report) || !isReview(review)) throw new Error('STOP: no documented control review');
   const raw = readFileSync(review.report);
   if (digest(raw) !== review.sha256) throw new Error('STOP: control report hash differs from its review');
   const report = JSON.parse(raw.toString());

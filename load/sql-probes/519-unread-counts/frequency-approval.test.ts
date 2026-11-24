@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { controlFloors, permissionCheck } from './frequency-approval.ts';
+import { pathToFileURL } from 'node:url';
+import { controlFloors, frozenFloors, permissionCheck } from './frequency-approval.ts';
 import { block, floors } from './frequency-fixture.ts';
 
 function artifacts(t: TestContext) {
@@ -12,17 +13,18 @@ function artifacts(t: TestContext) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const report = join(dir, 'report.json');
   const record = join(dir, 'record.json');
-  return (value: unknown, fields: Record<string, unknown> = {}) => {
+  const write = (value: unknown, fields: Record<string, unknown> = {}) => {
     const raw = JSON.stringify(value);
     writeFileSync(report, raw);
     writeFileSync(record, JSON.stringify({ report, date: '2026-11-24', quote: 'go',
       sha256: createHash('sha256').update(raw).digest('hex'), ...fields }));
     return record;
   };
+  return { write, report };
 }
 
 test('control requires a separate successful, complete permission-check record', t => {
-  const write = artifacts(t);
+  const { write } = artifacts(t);
   const { open, close } = block(1).counters;
   for (const [cpu, x] of close.reads.entries()) {
     const start = open.reads[cpu];
@@ -36,9 +38,24 @@ test('control requires a separate successful, complete permission-check record',
 });
 
 test('Rehearsal 2 requires a reviewed control report with matching digest and valid floors', t => {
-  const write = artifacts(t);
+  const { write } = artifacts(t);
   const r = { stage: 'control', valid: true, frequency: { floorProposal: floors } };
   assert.deepEqual(controlFloors(write(r)).floors, floors);
   assert.throws(() => controlFloors(write(r, { sha256: 'f'.repeat(64) })), /hash differs/);
   assert.throws(() => controlFloors(write({ ...r, valid: false })), /did not validate/);
+});
+
+test('formal binds frozen floors to the valid reviewed control report', t => {
+  const { write, report } = artifacts(t);
+  const valid = { stage: 'control', valid: true, frequency: { floorProposal: floors } };
+  const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const file = (value: unknown, sha256 = hash(valid), frozen = floors) => pathToFileURL(write(value, {
+    version: 3, floors: frozen, control: { report, quote: 'control reviewed', date: '2026-11-24', sha256 },
+    rehearsal2: { quote: 'rehearsal reviewed', date: '2026-11-25', sha256: 'f'.repeat(64) },
+  }));
+  assert.deepEqual(frozenFloors(file(valid)).floors, floors);
+  assert.throws(() => frozenFloors(file(valid, hash(valid), { ...floors, client: ['1', '1'] })), /floors differ/);
+  const wrongStage = { ...valid, stage: 'rehearsal2' };
+  assert.throws(() => frozenFloors(file(wrongStage)), /hash differs/);
+  assert.throws(() => frozenFloors(file(wrongStage, hash(wrongStage))), /did not validate/);
 });

@@ -551,7 +551,7 @@ test('block problems and a wrong run count FAIL the check', () => {
   assert.match(jr(five).invalid.join(), /5 blocks, not 6/);
 });
 
-test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency has no vote', () => {
+test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency has no vote', async t => {
   const r = run('s1', {}, { ncpu: 16, cpu: () => ({ busy: 0.005, khz: null }) });
   const go = { quote: 'go', date: '2026-11-25' };
   r.metadata = { ...r.metadata, frequencyStage: 'rehearsal2', frequencyApproval: 'control-digest', frequencyGo: go };
@@ -583,4 +583,11 @@ test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency ha
   assert.match(assess(changed).invalid.join(), /F6.*failed thermal samples/);
   const gap = { ...r, samples: r.samples.filter(s => s.at !== new Date(t0 + 90_000).toISOString()) };
   assert.match(assess(gap).invalid.join(), /missing 5 s thermal tick/);
+  await t.test('v3 requires affinity evidence only in Rehearsal 2', () => {
+    const noAffinity = structuredClone(r);
+    delete noAffinity.sends[0].affinity;
+    assert.match(assess(noAffinity).invalid.join(), /block 1:.*CPU masks missing or incorrect/);
+    noAffinity.metadata.frequencyStage = 'formal';
+    assert.deepEqual(judgeV3(noAffinity, { id: sid, thermalSampleSeconds: 5, go }, floors, 'formal', 'control-digest').invalid, []);
+  });
 });

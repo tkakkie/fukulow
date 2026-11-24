@@ -230,16 +230,20 @@ function sendBlock(db: string, label: string, order: number) {
           };
           const captured = await frequency.measure(order, prepare, () => {
             const workload = exec('docker', argv, { signal, timeout: (measuredSeconds + 10) * 1000, maxBuffer });
-            observed = readAffinity(container, prefix, db, affinitySignal).catch(error => new Error(String(error)));
+            if (request?.stage === 'rehearsal2') {
+              observed = readAffinity(container, prefix, db, affinitySignal).catch(error => new Error(String(error)));
+            }
             return workload.then(result => result.stdout);
           });
           before = captured.preparation;
           counters = captured.counters;
           m = pgbenchEvidence(captured.output, captured.measuredWindow, steps);
-          const pin = await observed;
-          if (pin instanceof Error) m.errors.push(pin.message);
-          else affinity = pin;
-          m.errors.push(...affinityProblems(affinity));
+          if (observed) {
+            const pin = await observed;
+            if (pin instanceof Error) m.errors.push(pin.message);
+            else affinity = pin;
+            m.errors.push(...affinityProblems(affinity));
+          }
         } finally { affinityAbort.abort(); }
       } else {
         pgbench(run('docker', warmArgv));

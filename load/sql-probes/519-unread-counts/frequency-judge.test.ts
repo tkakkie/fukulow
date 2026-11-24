@@ -68,6 +68,22 @@ test('F1 binds the helper metadata, true event IDs, full counting time and CPU p
   assert.match(judge([block(1)], jitter).reasons.join(), /F1 TSC calibration bracket exceeds 1 ms/);
 });
 
+test('F1 rejects event IDs reused across otherwise valid blocks', () => {
+  const first = block(1), second = block(2);
+  assert.deepEqual(judge([first, second]).reasons, []);
+  second.counters.open.reads[0].aperfId = second.counters.close.reads[0].aperfId = first.counters.open.reads[0].aperfId;
+  assert.ok(judge([first, second]).reasons.includes('block 2: F1 reused event IDs or stale block'));
+});
+
+test('F1 rejects a block that opens before the previous block closes', () => {
+  const first = block(1), second = block(2);
+  const shift = BigInt(second.counters.open.reads[0].monoNs) - BigInt(first.counters.close.reads.at(-1)!.monoNs) + 1n;
+  for (const read of [...second.counters.open.reads, ...second.counters.close.reads]) read.monoNs = String(BigInt(read.monoNs) - shift);
+  second.counters.startNs = String(BigInt(second.counters.startNs) - shift);
+  second.counters.exitNs = String(BigInt(second.counters.exitNs) - shift);
+  assert.ok(judge([first, second]).reasons.includes('block 2: F1 reused event IDs or stale block'));
+});
+
 test('F2 bounds perf slack and requires opening before launch and closing after exit', () => {
   assert.deepEqual(judge([block(1, { slack: 2_979_999_985n })]).reasons, []); // exactly 3 s total
   assert.match(judge([block(1, { slack: 2_979_999_986n })]).reasons.join(), /F2.*3 s slack/);
@@ -98,9 +114,24 @@ test('F7 hardware at the policy endpoint can vote and block 1 uses the exact abs
 });
 
 test('control flags every idle-only voter and 4/8 housekeeping coverage independently', () => {
-  const c = block(1, { control: true, idleMperf: cpu => cpu < 7 ? 40_000_000n : 39_999_999n });
+  const c = block(1, { control: true, idleMperf: cpu => cpu === 0 || (cpu < 8 && cpu % 2 === 1) ? 10_000_000n : 0n });
   const got = judgeFrequency([c], sets796, evidence, session, null, true);
-  assert.deepEqual(got.blocks[0].idle?.cpusAtFloor, [0, 1, 2, 3, 4, 5, 6]);
-  assert.deepEqual(got.blocks[0].idle?.couldQualify, { server: true, client: false });
-  assert.match(got.reasons.join(), /idle-only C0 reached 20 ms/);
+  const idle = got.blocks[0].idle!;
+  assert.deepEqual(idle.cpusAtFloor, [0, 1, 3, 5, 7]);
+  assert.deepEqual(idle.couldQualify, { server: false, client: true });
+  const { c0Ns, projectedC0Ns, blockSpanNs, idleSpanNs, qualifies, projectedQualifies } = idle.perCpu[1];
+  assert.equal(idleSpanNs, '10000000000');
+  assert.equal(BigInt(c0Ns[0]), 5_000_000n * BigInt(c0Ns[1]));
+  assert.equal(BigInt(projectedC0Ns[0]) * BigInt(idleSpanNs), 5_000_000n * BigInt(blockSpanNs) * BigInt(projectedC0Ns[1]));
+  assert.equal(qualifies, false);
+  assert.equal(projectedQualifies, true);
+  assert.match(got.reasons.join(), /projected idle-only C0 reached 20 ms/);
+});
+
+test('control clears housekeeping below the projected floor on all CPUs', () => {
+  const c = block(1, { control: true, idleMperf: () => 2_000_000n });
+  const got = judgeFrequency([c], sets796, evidence, session, null, true);
+  assert.deepEqual(got.reasons, []);
+  assert.deepEqual(got.blocks[0].idle?.cpusAtFloor, []);
+  assert.deepEqual(got.blocks[0].idle?.couldQualify, { server: false, client: false });
 });

@@ -175,7 +175,7 @@ export function judgeRun(r: RunInput, bound: Binding, floors: Floors | null, sta
   if (!r.hostAfter || r.hostAfter.platform !== 'linux' || r.hostAfter.launchSession !== bound.id) invalid.push('missing launcher host-after record');
   else invalid.push(...linuxViolations(r.hostAfter), ...requirementViolations(r.hostAfter, levers));
   for (const s of r.sends) {
-    invalid.push(...affinityProblems(s.affinity).map(problem => `block ${s.order}: ${problem}`));
+    if (stage === 'rehearsal2') invalid.push(...affinityProblems(s.affinity).map(problem => `block ${s.order}: ${problem}`));
     if (s.counters && s.measuredWindow) {
       try {
         const monotonicMs = Number(BigInt(s.counters.exitNs) - BigInt(s.counters.startNs)) / 1e6;

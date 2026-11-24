@@ -27,7 +27,7 @@ export function block(order: number, options: {
   const offset = BigInt(order) * 200_000_000_000n;
   const start = offset + 10_000_000n;
   const exit = start + 120_000_000_000n;
-  const close = exit + (options.control ? 10_020_000_000n : 10_000_000n) + (options.slack ?? 0n);
+  const close = exit + (options.control ? 10_010_000_000n : 10_000_000n) + (options.slack ?? 0n);
   const policy = options.control && order === 2
     ? { ...evidence.before, policies: evidence.before.policies.map(p => ({ ...p, max: '1700000' })) }
     : evidence.before;
@@ -39,7 +39,7 @@ export function block(order: number, options: {
       const idle = phase === 'close' ? options.idleMperf?.(cpu) ?? 0n : 0n;
       const count = phase === 'open' ? 0n : work + idle;
       return { cpu, aperfId: String(order * 100 + cpu * 2), mperfId: String(order * 100 + cpu * 2 + 1),
-        aperf: String(1n + count * a / b), mperf: String(1n + count), monoNs: String(stamp + BigInt(cpu)),
+        aperf: String(1n + count * a / b), mperf: String(1n + count), monoNs: String(stamp + (options.control && phase !== 'open' ? 0n : BigInt(cpu))),
         running: String(stamp - offset + 500n), enabled: String(stamp - offset + 500n) };
     }),
   });
