@@ -13,16 +13,16 @@ import { latestMessageCopy, knownMessageState } from './identity-order'
 
 type Sync = ReturnType<typeof createSync>
 export type TopicsApi = {
-  listTimeline(channel: string, query?: ListTimelineQuery): Promise<Result<TimelinePage>>
+  listTimeline(channel: string, query?: ListTimelineQuery, signal?: AbortSignal): Promise<Result<TimelinePage>>
   listTopics(channel: string, query?: ListTopicsQuery, signal?: AbortSignal): Promise<Result<TopicPage>>
   getTopicSummary(channel: string, topic: string, signal?: AbortSignal): Promise<Result<TopicSummaryResponse>>
-  listTopicMessages(channel: string, topic: string, query?: TopicHistoryQuery): Promise<Result<MessagePage>>
+  listTopicMessages(channel: string, topic: string, query?: TopicHistoryQuery, signal?: AbortSignal): Promise<Result<MessagePage>>
 }
 export const topicsApi = (organizationId: string, generation: () => string | undefined = () => undefined): TopicsApi => ({
-  listTimeline: (c, q) => api.listTimeline(organizationId, c, { history_generation: generation(), ...q }),
+  listTimeline: (c, q, signal) => api.listTimeline(organizationId, c, { history_generation: generation(), ...q }, undefined, signal),
   listTopics: (c, q, signal) => api.listTopics(organizationId, c, { history_generation: generation(), ...q }, undefined, signal),
   getTopicSummary: (c, t, signal) => api.getTopicSummary(organizationId, c, t, undefined, signal, { history_generation: generation() }),
-  listTopicMessages: (c, t, q) => api.listTopicMessages(organizationId, c, t, q),
+  listTopicMessages: (c, t, q, signal) => api.listTopicMessages(organizationId, c, t, q, undefined, signal),
 })
 const MAX_SUMMARY_RETRIES = 4
 type Paging = { asOfSeq?: number; before?: number; through?: number; hasMore: boolean; hasNewer: boolean; following: boolean; newerCount: number; loading: boolean; error: boolean }
