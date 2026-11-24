@@ -22,6 +22,12 @@ function eachReplacement(text: string, from: string, to: string) {
   assert.ok(variants.length > 0, `missing ${JSON.stringify(from)}`)
   return variants
 }
+// Replaces the first match at or after the job header, so identical blocks in other jobs stay untouched.
+function replaceInJob(text: string, job: string, from: string, to: string) {
+  const at = text.indexOf(from, text.indexOf(`  ${job}:\n`))
+  assert.ok(text.indexOf(`  ${job}:\n`) >= 0 && at >= 0, `missing ${JSON.stringify(from)} in ${job}`)
+  return text.slice(0, at) + to + text.slice(at + from.length)
+}
 const guard = 'if (!process.env.ACTIONS_RESULTS_URL || !process.env.ACTIONS_RUNTIME_TOKEN) {'
 const inheritedEnvKeys = new Set(['COMPOSE_PROJECT_NAME', 'COMPOSE_PROFILES', 'POSTGRES_PASSWORD',
   'POSTGRES_APP_PASSWORD', 'FUKULOW_SETUP_TOKEN', 'FUKULOW_COOKIE_SECURE', 'FUKULOW_DOMAIN'])
@@ -66,7 +72,7 @@ function checkActionInputs(step: string, body: string) {
   }
 }
 
-// Deliberately accepts only the repo's block-style steps/scripts at these three
+// Deliberately accepts only the repo's block-style steps/scripts at these four
 // locations. Other YAML forms containing credential references fail closed.
 // github-script also gets credentials implicitly, even without naming them.
 function checkWorkflow(file: string, workflow: string) {
@@ -128,14 +134,16 @@ test('rejects credential exports and file/output stores in any workflow, includi
       `fs.writeFileSync("cache-token", process.env.${variable});`,
       `core.setOutput("token", process.env.${variable});`,
     ]) {
-      assert.throws(() => checkWorkflow('ci.yml', workflow.replace(guard, `${source}\n            ${guard}`)), /credentials/)
+      for (const mutated of eachReplacement(workflow, guard, `${source}\n            ${guard}`))
+        assert.throws(() => checkWorkflow('ci.yml', mutated), /credentials/)
       const extra = `name: test\njobs:\n  check:\n    steps:\n      - run: |\n          ${source}\n`
       assert.throws(() => checkWorkflow('new.yaml', extra), /allowed build steps/)
     }
   }
   // An alias must not bypass the store check after a whole-environment read.
-  assert.throws(() => checkWorkflow('ci.yml', workflow.replace(guard,
-    `const env = process.env;\n            core.exportVariable("alias", env);\n            ${guard}`)), /stored or exported/)
+  for (const mutated of eachReplacement(workflow, guard,
+    `const env = process.env;\n            core.exportVariable("alias", env);\n            ${guard}`))
+    assert.throws(() => checkWorkflow('ci.yml', mutated), /stored or exported/)
 })
 
 test('rejects job/workflow env, unrelated steps, renamed actions, and credential-enabled repository commands', () => {
@@ -146,12 +154,13 @@ test('rejects job/workflow env, unrelated steps, renamed actions, and credential
       ...credentialJobs['ci.yml'].map(job => workflow.replace(`  ${job}:\n`, `  ${job}:\n    env: { ${variable}: test-only }\n`)),
       workflow + `\n      - run: node scripts/check-db-upgrade.ts\n        env: { ${variable}: test-only }\n`,
       workflow + `\n      - uses: actions/github-script@v9\n        with:\n          script: console.log(process.env.${variable})\n`,
-      workflow.replace(guard, `${guard}\n              console.log(process.env.${variable});`),
+      ...eachReplacement(workflow, guard, `${guard}\n              console.log(process.env.${variable});`),
     ]) assert.throws(() => checkWorkflow('ci.yml', source), /credentials|allowed build steps/)
   }
   for (const source of eachReplacement(workflow, 'id: build-image', 'id: checks'))
     assert.throws(() => checkWorkflow('ci.yml', source), /allowed build steps/)
-  assert.throws(() => checkWorkflow('ci.yml', workflow.replace(action, 'actions/github-script@v9')), /stay pinned/)
+  for (const source of eachReplacement(workflow, action, 'actions/github-script@v9'))
+    assert.throws(() => checkWorkflow('ci.yml', source), /stay pinned/)
   for (const source of eachReplacement(workflow, 'await exec.exec("docker", args);',
     'await exec.exec("node", ["scripts/check-db-upgrade.ts"]);')) assert.throws(() => checkWorkflow('ci.yml', source), /only build commands/)
   for (const source of [
@@ -186,7 +195,7 @@ test('credential actions reject startup env at every scope and inputs other than
         assert.throws(() => checkWorkflow(file, workflow.replace('jobs:', `${env}jobs:`)), /inherited environment/)
       }
       for (const env of [`env:\n      ${variable}: ${value}\n`, `env: { ${variable}: "${value}" }\n`]) {
-        assert.throws(() => checkWorkflow(file, workflow.replace(jobEnv, `    ${env}`)), /inherited environment/)
+        assert.throws(() => checkWorkflow(file, replaceInJob(workflow, job, jobEnv, `    ${env}`)), /inherited environment/)
       }
     }
     for (const extra of ['env: {}', 'env: *startup', 'env: ${{ vars.STARTUP }}',
@@ -202,7 +211,7 @@ test('credential actions reject startup env at every scope and inputs other than
       'env:\n  "NODE_OPTIONS": --import ./scripts/check-db-upgrade.ts',
       '"env": { NODE_OPTIONS: "--import ./scripts/check-db-upgrade.ts" }', '<<: *startup']) {
       assert.throws(() => checkWorkflow(file, workflow.replace('jobs:', `${env}\njobs:`)), /inherited environment/)
-      assert.throws(() => checkWorkflow(file, workflow.replace(jobEnv,
+      assert.throws(() => checkWorkflow(file, replaceInJob(workflow, job, jobEnv,
         `    ${env.replaceAll('\n', '\n    ')}\n`)), /inherited environment/)
     }
   }
@@ -228,7 +237,7 @@ test('inherited env scans past comments at every indent and fails closed on uncl
       const prefix = ' '.repeat(indent)
       const insert = (env: string) => indent === 0
         ? workflow.replace('jobs:', `${env}jobs:`)
-        : workflow.replace(jobEnv, env)
+        : replaceInJob(workflow, job, jobEnv, env)
       // Cover workflow/job parent indentation, env indentation and entry indentation.
       for (const commentIndent of new Set([0, Math.max(0, indent - 2), indent, indent + 2])) {
         for (const betweenEntries of [false, true]) {
