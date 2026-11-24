@@ -7,6 +7,13 @@ Compare runs only at the same send-limit settings and publishing Member count.
 
 Raw logs, artifact directories and local paths outside Git may be gone ([2026-11-18 check](../load/measurements-archive.md#raw-data-check-2026-11-18)). See the [archive](../load/measurements-archive.md), including [#442 pointers](../load/measurements-archive.md#moved-records-442-2026-11-15).
 
+## Measurement hosts (#796)
+
+- **Mac (Apple M5):** formal today. #689, #519 and #426 B7 keep their Mac conditions and results.
+- **Ubuntu (Zen 5 + Zen 5c):** investigation only (not formal, never compared with Mac baselines or used for a gate) until it passes the #796 stability check; then formal; the Mac is for development.
+- **Ubuntu conditions:** `load/host-record.ts --check` passes (AC, sleep masked, governor `performance`, update jobs off, snap held), boost on, `HOST-BUSY`, CPU sets `server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15`. Runs attach the sets and before/after host records; their temperatures and frequencies show throttling ([harness](../load/harness-core/README.md)).
+- **Moving a series:** never for a bad Mac result; it restarts with an Ubuntu baseline and criteria fixed first.
+
 ## Topic projection paging (#137)
 
 2026-11-11. Four response-paced readers, 50 items/page, concurrent sends every 50 ms. At 210,000 mixed Channel Messages, recent/deep p95 was 32.342/32.235 ms for reads and 11.249/6.345 ms for sends. A proportional projection put the prefix query's 100 ms read p95 at ~649k Messages.
@@ -27,7 +34,7 @@ In a separate source Compose project, run `node scripts/backup.ts /absolute/priv
 
 ## Channel-list Unread ranges (#142)
 
-2026-11-11 (review B1, `d1d5aaf`). Across 20 public Channels and 200 Topics at 1,000,000 Messages, before/after SQL p95 was 174.414 → 11.157 ms fully read and 255.727 → 14.202 ms with 2,000 unread. Evidence for [skipping read ranges](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8). #356 below covers the later RLS bound.
+2026-11-11 (review B1, `d1d5aaf`). Across 20 public Channels and 200 Topics at 1,000,000 Messages, before/after SQL p95 was 174.414 → 11.157 ms fully read and 255.727 → 14.202 ms with 2,000 unread. Evidence for [skipping read ranges](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
 
 With disposable PostgreSQL 18.6 in `DATABASE_URL`, run `cargo test --release -p fukulow-server --lib measure_unread_list_read_position_ranges -- --ignored --nocapture`. Warm sequential SQL, JIT at 1M, no HTTP or writers. [Full record](../load/measurements-archive.md#channel-list-unread-read-position-ranges-142-review-b1-2026-11-11)
 
@@ -91,17 +98,15 @@ Run overnight on an otherwise idle Mac with Node 26.13.1: `node load/search-m1.t
 
 ## Channel log design evidence (#160)
 
-2026-11-17 JST (PR #499). Settled Mac WAL at 250 ops/s, baseline/events-ids/log-ids: 5,190/5,197/5,434 B/op for create-1-17 and 42,511/42,703/43,051 B/op for mixed90-200-4000. Run `node load/log-compare/run.ts --diagnose --out /private/tmp/i160-diagnose --settle-fixture`. Two workloads at 50/250 ops/s, host-to-psql transport included.
+2026-11-17 JST (PR #499). Settled Mac WAL at 250 ops/s, baseline/events-ids/log-ids: 5,190/5,197/5,434 B/op for create-1-17 and 42,511/42,703/43,051 B/op for mixed90-200-4000. Run `node load/log-compare/run.ts --diagnose --out <dir> --settle-fixture`. Two workloads at 50/250 ops/s, host-to-psql transport included.
 
-Reference for the [Channel log decision](spec/realtime.md#measurement-status), from the INVALID full run. A cold recent 50-entry deleted-range page at 1M positions used 235/34,126/209 shared buffers across baseline/events-ids/log-ids. At 1M Messages, log-ids cutover blocked for about 3.7 s (455 MiB WAL, +153 MiB storage). Command at `1662d5d`: `node load/log-compare/run.ts --full --out /private/tmp/i160-full --rates 50,250,1000 --seconds 30 --max-seconds 15 --clients 16 --rounds 3`. Timing spread exceeded the rule. [Settled WAL](../load/measurements-archive.md#160-log-comparison-wal-variance-diagnose-2026-11-17-jst) · [Replay and migration](../load/measurements-archive.md#160-log-comparison-replay-and-migration-reference-2026-11-17)
+Reference for the [Channel log decision](spec/realtime.md#measurement-status), from the INVALID full run. A cold recent 50-entry deleted-range page at 1M positions used 235/34,126/209 shared buffers across baseline/events-ids/log-ids. At 1M Messages, log-ids cutover blocked for about 3.7 s (455 MiB WAL, +153 MiB storage). Command at `1662d5d`: `node load/log-compare/run.ts --full --out <dir> --rates 50,250,1000 --seconds 30 --max-seconds 15 --clients 16 --rounds 3`. Timing spread exceeded the rule. [Settled WAL](../load/measurements-archive.md#160-log-comparison-wal-variance-diagnose-2026-11-17-jst) · [Replay and migration](../load/measurements-archive.md#160-log-comparison-replay-and-migration-reference-2026-11-17)
 
 ## Channel log send and replay (#515 slice 5)
 
 Mac-relative, B `b975ffa` vs A `f7fe08a`, harness `df695bc`; separate from #431. Night 1 (2026-11-19 JST) Part A: FAIL in all 4 cells. Night 2 (2026-11-20) Part B max accepted/s (≥ 0.90): FAIL hot-17 0.878, many-17 0.885, hot-16000 0.865; PASS many-16000 0.923. Part C REST replay: INVALID in all cells; A mostly completed 8–28 of 1,000 requests at p95 2.9–4.9 s vs B 1.5–2.0 ms (candidate-only regression under investigation). Part D (#137 timeline): `boundary=Some(190000)` PASS at 49.0 ms; `boundary=None` INVALID (B spread 10.8 %). [Record](../load/measurements-archive.md#channel-log-send-and-replay-515-slice-5-2026-11-19-to-2026-11-20-jst-mac)
 
 Build, then run each night: `node load/slice5/run.ts --help`.
-
-F1 diagnostic, not evidence; #515 stays FAIL. Under REPEATABLE READ a generic plan cut A HTTP p50 1.68 → 1.33 ms (1M-recent); the PR now uses READ COMMITTED, untimed. Values are not reproducible; the tests verify function only. [Record](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic)
 
 ## Unread candidate bounds (#355)
 
@@ -131,13 +136,7 @@ Run `node load/pool-before-after.ts --out <dir>` at `ee36849` with the external 
 
 2026-11-18 JST, run 4 at `d3a9b28`. Open-loop HTTP with RLS, 16 requests per 100 ms, three repeats per shape with 10,000 successes each. Scheduled-start p95 was 27.508–28.282 ms for normal batches and 29.456–30.185 / 33.788–34.142 ms with 10,000/100,000-Reply chains. All met the [Reply count](spec/realtime.md#topic-reply-and-unread-projections-owners-137-topics-server-138-topics-web-139-replies-server-140-replies-web-142-unread) gate.
 
-Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out /private/tmp/fk409p-formal4-409`. Warm loopback on shared Mac, no writes, subscribers or proxy/TLS. [Full record](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst)
-
-## Unread Topic-count index bound under RLS (#356)
-
-2026-11-17 JST, `4fa2ba0` vs the materialized-bound rewrite. At 25 unread/Topic across 20 Topics, rows examined 50,500 → 500 in all modes and Generic median 32.470 → 1.419 ms. Evidence for restoring the lower Index Cond under the [Unread rules](decisions/messages.md#topics-replies-and-unread-planned-spec-p1-p8).
-
-Use the archived fixture and restricted-role `EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) EXECUTE name(...)`. Runner and raw artifacts were not retained. Superseded by #519 A3 (guard: `unread_list_counts_never_read_messages_in_any_plan_mode`). Warm SQL, one Channel, no writers or Mentions. Cost grows with unread backlog. [Full record](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst)
+Run `mise exec node@26.13.1 -- node load/reply-counts-run.ts --formal --out <dir>`. Warm loopback on shared Mac, no writes, subscribers or proxy/TLS. [Full record](../load/measurements-archive.md#reply-count-http-p95-verification-409-2026-11-18-jst)
 
 ## Revocation hold retry bursts (#592)
 
@@ -157,6 +156,8 @@ Run `node load/signin-owner-burst.ts --recorded` ×3 and its `-aggregate.ts`. [R
 - [Topic-only paging](../load/measurements-archive.md#topic-projection-paging-feasibility-137-2026-11-11) — superseded by the mixed paging run.
 - Search preliminary [engine](../load/measurements-archive.md#search-engine-comparison-153-2026-11-15-jst-preliminary-mac) and [quality](../load/measurements-archive.md#search-quality-comparison-153-2026-11-15-jst) comparisons — superseded by frozen-manifest runs (quality scores reproduced).
 - [Search evaluation freeze and lifecycle](../load/measurements-archive.md#search-evaluation-freeze-and-lifecycle-procedure-153-2026-11-15-jst) — procedure and smoke validation only.
+- [Unread Topic-count index bound under RLS (#356)](../load/measurements-archive.md#unread-topic-count-seq-index-bound-under-rls-356-2026-11-17-jst) — superseded by #519 A3 (guard `unread_list_counts_never_read_messages_in_any_plan_mode`).
+- [Replay page generic plan (#515 F1)](../load/measurements-archive.md#replay-page-generic-plan-515-f1-2026-11-23-jst-mac-diagnostic) — diagnostic only, not evidence; #515 stays FAIL.
 - [Search frozen v1](../load/measurements-archive.md#search-engine-comparison-frozen-manifest-v1-153-2026-11-17-jst-mac) — superseded for the selection gate by P2.
 - [DM Q4 offered work and overhead procedure](../load/measurements-archive.md#dm-q4-concurrent-offered-work-evidence-151-2026-11-15) — procedure only. See `load/dms-formal-run.ts`.
 - [DM instrumentation-overhead attempts](../load/measurements-archive.md#426-mac-relative-instrumentation-overhead-attempts-not-evaluated-2026-11-16-jst) — NOT EVALUATED after build and setup failures.
