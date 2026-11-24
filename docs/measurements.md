@@ -9,10 +9,11 @@ Raw logs, artifact directories and local paths outside Git may be gone ([2026-11
 
 ## Measurement hosts (#796)
 
-- **Mac (Apple M5):** formal today. #689, #519 and #426 B7 keep their Mac conditions and results.
-- **Ubuntu (Zen 5 + Zen 5c):** investigation only (not formal, never compared with Mac baselines or used for a gate) until it passes the #796 stability check; then formal; the Mac is for development.
-- **Ubuntu conditions:** `load/host-record.ts --check` passes (AC, sleep masked, governor `performance`, update jobs off, snap held), boost on, `HOST-BUSY`, CPU sets `server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15`. Runs attach the sets and before/after host records; their temperatures and frequencies show throttling ([harness](../load/harness-core/README.md)).
-- **Moving a series:** never for a bad Mac result; it restarts with an Ubuntu baseline and criteria fixed first.
+- **Mac (M5):** formal today. #689, #519 and #426 B7 keep their Mac conditions and results.
+- **Ubuntu (Zen 5/Zen 5c):** investigation only until #796 PASS. No Mac comparison or gate. After PASS, Ubuntu is formal and Mac is for development.
+- **Ubuntu conditions:** AC, sleep masked, performance governor, updates held, HOST-BUSY, fixed even/odd CPU sets and before/after host records. Boost on except for #796 cooling.
+- **#796:** first FAIL stands. V3 uses hardware counters. Control and Rehearsal 2 need separate goes. Go B STOPs pending review and frozen floors. [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
+- Move a series only with a new Ubuntu baseline and fixed criteria, never for a bad Mac result.
 
 ## Topic projection paging (#137)
 

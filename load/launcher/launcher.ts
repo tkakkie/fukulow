@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { requirementViolations, type HostRecord } from '../harness-core/host-record.ts';
 import { tctl, type ThermalSample } from '../harness-core/thermal.ts';
 import type { Platform } from './platform.ts';
+import type { PolicySnapshot } from '../harness-core/cpu-policy.ts';
 import type { Job, Queue } from './queue.ts';
 
 // One measurement launcher for macOS and Linux (#867). It does the shared steps of every hand-written
@@ -179,7 +180,7 @@ export function fixedRate(ms: number, fn: () => void, t: { mono(): number; setTi
 export type Session = {
   id: string; queue: string; outcome: Result['outcome'] | 'error'; reason?: string;
   // thermalSampleSeconds: the period the launcher's sampler actually ran with for the job.
-  jobs: (Result['jobs'][number] & { out?: string; workloadLabel?: string; thermalSampleSeconds?: number; confirmations?: Job['confirmations'] })[];
+  jobs: (Result['jobs'][number] & { out?: string; workloadLabel?: string; thermalSampleSeconds?: number; confirmations?: Job['confirmations']; frequencyGo?: Job['go'] })[];
   hostBusy: 'released' | 'kept' | 'never claimed'; workloadProblems: string[]; finished: string;
 };
 
@@ -246,8 +247,14 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   // stop (its group is checked again at the release, which keeps HOST-BUSY if it still runs).
   // Each gate and job learns the HOST-BUSY this queue holds, its own name and the launch session, so a
   // harness can refuse to start outside the launcher.
-  const run = async (argv: string[], file: string, job: Job): Promise<number | null> => {
-    const c = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: { ...job.env, FUKULOW_HOST_BUSY: q.hostBusy, FUKULOW_LAUNCH_JOB: job.name, FUKULOW_LAUNCH_SESSION: launchSession } });
+  const run = async (argv: string[], file: string, job: Job, policy?: PolicySnapshot): Promise<number | null> => {
+    const frequency = job.issue === 796 ? JSON.stringify({
+      issue: job.issue, go: job.go, airflow: job.confirmations?.airflow, sampleSeconds: job.thermalSampleSeconds,
+      maxTctlC: job.cooldown?.maxTctlC, maxWaitSeconds: job.cooldown?.maxWaitSeconds,
+      boost: job.requireHost?.boost, policyBoost: job.requireHost?.policyBoost, profile: job.requireHost?.platformProfile, policy,
+    }) : undefined;
+    const c = d.spawn(argv, { cwd: job.worktree, log: join(q.chainDir, file), env: { ...job.env, FUKULOW_HOST_BUSY: q.hostBusy,
+      FUKULOW_LAUNCH_JOB: job.name, FUKULOW_LAUNCH_SESSION: launchSession, ...(frequency ? { FUKULOW_LAUNCH_FREQUENCY: frequency } : {}) } });
     child = c;
     started.push({ child: c, job });
     let stopRunning = () => {};
@@ -274,6 +281,11 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       } catch (e) { problems.push(`${job.name}: process group check failed: ${String(e)}`); }
     }
     if (started.length > 0) problems.push(...(await dockerSettled()));
+    for (const { job } of started) {
+      if (job.issue === 796 && d.exists(join(job.out, 'frequency-restore-pending.json'))) {
+        problems.push(`${job.name}: cpufreq restoration is unconfirmed`);
+      }
+    }
     return problems;
   };
   // Labelled containers (any state) are removed and must be gone. Then Docker is watched for
@@ -354,8 +366,10 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   };
   // Right before the spawn (after the host record, preflight and gate): the levers and Tctl again,
   // so a slow gate or a lever changed meanwhile cannot start the job. Kept in <job>-launch-check.json.
-  const launchCheck = (job: Job): string[] => {
-    if (!job.cooldown && !job.requireHost) return [];
+  const launchCheck = (job: Job) => {
+    const frequency = job.issue === 796 && job.command.some(arg => arg === '--frequency-v3' || arg.startsWith('--frequency-v3='));
+    let policy: PolicySnapshot | undefined;
+    if (!job.cooldown && !job.requireHost && !frequency) return { problems: [], policy };
     const at = d.now();
     const host = d.platform.record(q.chainDir);
     const problems = requirementViolations(host, job.requireHost);
@@ -365,8 +379,12 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       if (t === null) problems.push('Tctl unreadable');
       else if (t > job.cooldown.maxTctlC) problems.push(`Tctl ${t} °C > ${job.cooldown.maxTctlC} °C`);
     }
-    record(`${job.name}-launch-check.json`, { at: at.toISOString(), tctlC: t, maxTctlC: job.cooldown?.maxTctlC ?? null, ok: problems.length === 0, problems, record: host });
-    return problems;
+    if (frequency) {
+      try { policy = d.platform.cpuPolicy?.(); } catch { /* absence is a STOP below */ }
+      if (!policy) problems.push('F1 CPU policies unreadable');
+    }
+    record(`${job.name}-launch-check.json`, { at: at.toISOString(), tctlC: t, maxTctlC: job.cooldown?.maxTctlC ?? null, ok: problems.length === 0, problems, record: host, frequencyPolicy: policy });
+    return { problems, policy };
   };
   // One sample before the spawn, then every thermalSampleSeconds, into <job>-thermal.jsonl. The first
   // sample must succeed with every CPU's frequency and counters readable, or the job does not start (the string
@@ -431,7 +449,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
         if (gate !== 0) return stop(`${job.name} gate did not pass; job not started`);
       }
       const late = launchCheck(job);
-      if (late.length > 0) return stop(`${job.name} launch check: ${late.join('; ')}; job not started`);
+      if (late.problems.length > 0) return stop(`${job.name} launch check: ${late.problems.join('; ')}; job not started`);
       // A thermal job's clock check starts at the journal's current cursor (option 1b).
       let cursor: string | null = null;
       if (job.thermalSampleSeconds !== undefined) {
@@ -445,7 +463,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
       if (aborted) { sampling?.(); return stop(`${aborted}; ${job.name} not started`); }
       log(`${job.name}: start (once, no rerun)`);
       let exit: number | null;
-      try { exit = await run(d.platform.inhibit(job.command), `${job.name}.log`, job); } finally { sampling?.(); }
+      try { exit = await run(d.platform.inhibit(job.command), `${job.name}.log`, job, late.policy); } finally { sampling?.(); }
       endLogs();
       jobs.push({ name: job.name, exit });
       record(`${job.name}-host-after.json`, d.platform.record(q.chainDir) as unknown as Record<string, unknown>);
@@ -475,7 +493,7 @@ export async function launch(q: Queue, d: Deps): Promise<Result> {
   // outputs, workload labels, exits and confirmations), and the release.
   const session: Session = {
     id: launchSession, queue: q.name, outcome: result?.outcome ?? 'error', reason: result?.reason ?? (failure ? String(failure.error) : undefined),
-    jobs: jobs.map(j => { const x = q.jobs.find(y => y.name === j.name); return { ...j, out: x?.out, workloadLabel: x?.workloadLabel, thermalSampleSeconds: periods[j.name], confirmations: x?.confirmations }; }),
+    jobs: jobs.map(j => { const x = q.jobs.find(y => y.name === j.name); return { ...j, out: x?.out, workloadLabel: x?.workloadLabel, thermalSampleSeconds: periods[j.name], confirmations: x?.confirmations, frequencyGo: x?.issue === 796 ? x.go : undefined }; }),
     hostBusy: released.hostBusy, workloadProblems: released.problems, finished: d.now().toISOString(),
   };
   try { d.write(join(q.chainDir, 'session.json'), JSON.stringify(session, null, 2) + '\n'); } catch (e) { note(`session.json: ${String(e)}`); }

@@ -96,6 +96,11 @@ export function logWindow(log: string): PgbenchWindow {
 // per-transaction log, whose latencies and window are the block's records.
 export function measuredPgbench<T>(steps: { run: () => string; after: () => T; log: () => string }, clock?: Parameters<typeof timed>[1]) {
   const { value: output, window: measuredWindow } = timed(steps.run, clock);
+  return pgbenchEvidence(output, measuredWindow, steps);
+}
+
+export function pgbenchEvidence<T>(output: string, measuredWindow: ReturnType<typeof timed>['window'],
+  steps: { after: () => T; log: () => string }) {
   const after = steps.after();
   const errors: string[] = [];
   let latencies: number[] = [];
@@ -215,7 +220,12 @@ export type BlockOutcome<H> = { crossed: boolean; checkpointLog: CheckpointWindo
 export function runBlock<R extends { crossed: boolean; errors: string[] }, H extends { busy: boolean }>(steps: {
   label: string; measure: () => R; closeCheckpoint: () => CheckpointWindow; hostAfter?: () => H; keep: (row: R & BlockOutcome<H>) => void;
 }): R & BlockOutcome<H> {
-  const measured = steps.measure();
+  return finishBlock(steps.measure(), steps);
+}
+
+export function finishBlock<R extends { crossed: boolean; errors: string[] }, H extends { busy: boolean }>(measured: R, steps: {
+  label: string; closeCheckpoint: () => CheckpointWindow; hostAfter?: () => H; keep: (row: R & BlockOutcome<H>) => void;
+}): R & BlockOutcome<H> {
   const row: R & BlockOutcome<H> = { ...measured, checkpointLog: null, hostAfter: null, errors: [...measured.errors] };
   try {
     row.checkpointLog = steps.closeCheckpoint();
