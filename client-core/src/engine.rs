@@ -257,7 +257,7 @@ impl<'a> Step<'a> {
     }
     pub fn gap(c: &ChannelView) -> bool {
         c.cursor.is_some_and(|cursor| {
-            c.held_through.unwrap_or(0) > cursor + 1
+            c.held_through.unwrap_or(0) > cursor.saturating_add(1)
                 || c.forgotten_through.unwrap_or(0) > cursor
                 || c.subscription
                     .as_ref()
@@ -463,5 +463,21 @@ impl<'a> Step<'a> {
             || !self.out.changed_channels.is_empty()
             || self.before != self.core.session;
         self.out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gap_is_false_at_maximum_cursor() {
+        let channel = ChannelView {
+            cursor: Some(i64::MAX),
+            held_through: Some(i64::MAX),
+            forgotten_through: Some(i64::MAX),
+            ..ChannelView::default()
+        };
+        assert!(!Step::gap(&channel));
     }
 }
