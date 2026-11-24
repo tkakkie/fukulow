@@ -262,7 +262,7 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
   return out;
 }
 
-export type Outcome = 'not reproduced' | 'cause established' | 'cause not established' | 'inconclusive';
+export type Outcome = 'not reproduced' | 'cause established' | 'cause not established' | 'repetition-linked, cause not established' | 'inconclusive';
 
 // Evidence completeness over a stage: every measurement's own evidence, plus the stage records (the
 // PostgreSQL log, the sampler stop). Incomplete evidence never establishes a cause (review item 4).
@@ -282,6 +282,23 @@ const abnormalOf = (stopped: string | null, unmet: string[], ev: ReturnType<type
     ...(invalid.length ? [`INVALID: ${invalid.join(', ')}`] : []), ...(ev.complete ? [] : ['evidence incomplete'])];
 };
 
+// How a stage ended (maintainer decision on PR #871, re-approval question 2). "blocked": a safety STOP (any
+// STOP) or incomplete evidence; nothing may follow it. "limited": no STOP and complete evidence, but INVALID
+// measurements or a minimum not met; still not a normal finish (the queue ends), and Stage 2 may follow only
+// with its own go that names this limited Stage 1, and only when N can be computed. "normal": neither.
+export type FinishKind = 'normal' | 'limited' | 'blocked';
+export const finishKindOf = (stopped: string | null, ev: {complete: boolean}, abnormal: string[]): FinishKind =>
+  stopped !== null || !ev.complete ? 'blocked' : abnormal.length ? 'limited' : 'normal';
+
+// What a Stage 2 after this Stage 1 can and cannot conclude, recorded in both stages' results.
+export function stage2Constraints(kind: FinishKind, source: Noise['source'], shortfall: string[]) {
+  return [
+    ...(kind === 'limited' ? [`Stage 1 was a limited finish (${shortfall.join('; ')}): its attribution (H1-H6) stays as recorded, withheld or partial, and Stage 2 does not complete it.`,
+      'Stage 2 decides only the §5.3 scan contrast (B.post1 / B.pre: reproduced, not reproduced or inconclusive); it cannot establish a cause.'] : []),
+    ...(source === 'A1 spread (fallback)' ? ['N is the A1 spread (fallback, §4.1), not the C hot1/hot2 spread. It contains any A1 rise, so it can exceed the noise: "reproduced" (>= 3 x (N - 1)) is harder to reach, and "not reproduced" (< 1.15) does not use N.'] : []),
+  ];
+}
+
 // §5.2. `stopped` is a STOP reason when the stage ended early.
 export function stage1(ms: Measurement[], stopped: string | null = null, stageMissing: string[] = []) {
   const N = noise(ms);
@@ -289,7 +306,13 @@ export function stage1(ms: Measurement[], stopped: string | null = null, stageMi
   const min = minimums(ms);
   const ev = evidence(ms, stageMissing);
   const abnormal = abnormalOf(stopped, Object.entries(min).filter(([, met]) => !met).map(([k]) => k), ev, ms);
-  const base = {noise: N, reproduction: repro, minimums: min, stopped, evidence: ev, abnormal};
+  const kind = finishKindOf(stopped, ev, abnormal);
+  const spreads = noiseSpreads(ms);
+  const nComputable = spreads !== null && spreads.length > 0;
+  const finish = {kind, shortfall: kind === 'normal' ? [] : abnormal, nSource: N.source, nComputable,
+    stage2: kind === 'normal' ? 'with its own go' : kind === 'limited' && nComputable ? 'only with its own go naming this limited Stage 1' : 'refused',
+    stage2Constraints: kind === 'blocked' ? [] : stage2Constraints(kind, N.source, abnormal)};
+  const base = {noise: N, reproduction: repro, minimums: min, stopped, evidence: ev, abnormal, finish};
   // A STOP before the A1 minimum leaves reproduction inconclusive; after it, the A1 result stands.
   // Incomplete evidence is inconclusive whatever the numbers say: no cause from partial evidence.
   if (!ev.complete) return {...base, outcome: 'inconclusive' as Outcome, inconclusiveReason: 'evidence incomplete', attribution: null, repetitionLinked: false, stage2: 'propose'};
@@ -299,12 +322,13 @@ export function stage1(ms: Measurement[], stopped: string | null = null, stageMi
   }
   const att = attribution(ms, N.value);
   const verdicts = Object.values(att);
-  // "Repetition-linked" (§4.3): the rise grows with round count (reproduced) and H1-H5 are ruled out. It is
-  // always "cause not established" (§5.2), whatever the H6 position verdict: Stage 1 tests only the position
+  // "Repetition-linked" (§4.3): the rise grows with round count (reproduced) and H1-H5 are ruled out. Its
+  // outcome is "repetition-linked, cause not established" whatever the H6 position verdict, H6 supported
+  // alone included (maintainer decision on PR #871, re-approval question 3): Stage 1 tests only the position
   // part of H6, and nothing is attributed by elimination alone.
   const repetitionLinked = (['H1', 'H2', 'H3', 'H4', 'H5'] as const).every(h => att[h] === 'ruled out');
   const established = !repetitionLinked && verdicts.filter(v => v === 'supported').length === 1 && verdicts.every(v => v !== 'withheld');
-  const outcome: Outcome = established ? 'cause established' : 'cause not established';
+  const outcome: Outcome = established ? 'cause established' : repetitionLinked ? 'repetition-linked, cause not established' : 'cause not established';
   return {...base, outcome, attribution: att, repetitionLinked, stage2: established ? 'may be skipped' : 'propose'};
 }
 
@@ -328,7 +352,8 @@ export const cacheConstraint = {
 export type Noise = {value: number; source: 'C hot1/hot2' | 'A1 spread (fallback)'};
 // Stage 1's N for Stage 2: the recorded value and source, and the exact spreads behind it, recomputed from
 // Stage 1's stored p95s (review round 7), so the threshold never uses the rounded double.
-export type Stage1N = Noise & {spreads: Root[]};
+// `stage1` is how Stage 1 ended, what it fell short of, and the constraints that carries into Stage 2.
+export type Stage1N = Noise & {spreads: Root[]; stage1: {kind: 'normal' | 'limited'; shortfall: string[]; constraints: string[]}};
 export function stage2(ms: Measurement[], stage1N: Stage1N, stopped: string | null = null, stageMissing: string[] = []) {
   const noise: Noise = {value: stage1N.value, source: stage1N.source};
   const pre = byId(ms, 'B.pre');
@@ -338,7 +363,7 @@ export function stage2(ms: Measurement[], stage1N: Stage1N, stopped: string | nu
   const ev = evidence(ms, stageMissing);
   const unmet = [...(!valid(pre) ? ['B.pre'] : []), ...(post.length < 2 ? ['2 of 3 post-scan rounds'] : []),
     ...(cool.length < 2 ? ['both cool-down rounds'] : []), ...(!valid(first) ? ['B.post1 (the §5.3 contrast)'] : [])];
-  const base = {noise, stopped, evidence: ev, abnormal: abnormalOf(stopped, unmet, ev, ms)};
+  const base = {noise, stage1: stage1N.stage1, stopped, evidence: ev, abnormal: abnormalOf(stopped, unmet, ev, ms)};
   if (!ev.complete) return {...base, result: 'inconclusive' as const, reason: 'evidence incomplete', ratio: null};
   if (!valid(pre) || post.length < 2 || cool.length < 2) return {...base, result: 'inconclusive' as const, reason: 'Stage 2 minimum not met', ratio: null};
   if (!valid(first)) return {...base, result: 'inconclusive' as const, reason: 'B.post1 INVALID', ratio: null};

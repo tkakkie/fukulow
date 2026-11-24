@@ -22,7 +22,7 @@ import { loadBackfill } from '../d3r/snapshot.ts';
 import { timeQuery } from '../d3r/timing.ts';
 import { diagnosticSettings, expectedSnapshotSha256, launchArgs, planShape, qualifiedCpuSets } from './cluster.ts';
 import { gatedIo, rawIo, type Io } from './io.ts';
-import { cacheConstraint, fillPlans, noiseSpreads, ownReasons, smoke, stage1, stage2, type Block, type Measurement, type Noise, type Plan } from './judge.ts';
+import { cacheConstraint, fillPlans, noiseSpreads, ownReasons, smoke, stage1, stage2, type Block, type Measurement, type Noise, type Plan, type Stage1N } from './judge.ts';
 import { abortableIdle, execute, settleWait, startDiskProblems, type Deps } from './orchestrate.ts';
 import { ownedResources } from '../runtime.ts';
 import { ordered, sequence, type MeasuredStep, type Stage } from './plan.ts';
@@ -37,6 +37,9 @@ export const label = 'DIAGNOSTIC #870 / NOT #689 EVIDENCE';
 // its records, writes stopped.json and no completed.json, and exits 2, so the supervisor marks the run
 // invalid and the launcher ends the queue (launcher.ts: a non-zero exit is a STOP, no rerun).
 export const stopExitCode = 2;
+// A limited Stage 1 (INVALID measurements or a minimum not met, no STOP, complete evidence): not a normal
+// finish, so the queue still ends, but distinct from a STOP (maintainer decision on PR #871, question 2).
+export const limitedExitCode = 3;
 const note = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
 const readJson = (file: string) => JSON.parse(readFileSync(file, 'utf8'));
 const readIf = (file: string) => existsSync(file) ? readJson(file) : null;
@@ -63,9 +66,13 @@ export function options(argv: string[], os = platform()) {
 // names issue 870, the stage, the launcher job it was given for, the quoted go and its date. It is checked
 // against the stage and the job being started. `at` is when the go was given, an ISO 8601 timestamp with its
 // offset; it must not precede the finish timestamp of the earlier stage it builds on (not only its day).
-export type Approval = {issue: 870; stage: Stage; job: string; quote: string; at: string};
+// A Stage 2 after a limited Stage 1 also needs `acceptsLimitedStage1`: the Stage 1 outcome and shortfall the
+// go accepts, exactly as Stage 1 recorded them.
+export type Approval = {issue: 870; stage: Stage; job: string; quote: string; at: string;
+  acceptsLimitedStage1?: {outcome: string; shortfall: string[]}};
 const isoInstant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
-export function approvalFor(file: string, stage: Stage, job: string | undefined, notBefore: string | null) {
+export function approvalFor(file: string, stage: Stage, job: string | undefined, notBefore: string | null,
+  limitedStage1: {outcome: string; shortfall: string[]} | null = null) {
   const a = readIf(file) as Partial<Approval> | null;
   assert.ok(a && a.issue === 870, `${file} is not an #870 approval record`);
   assert.equal(a.stage, stage, `The approval is for stage ${a.stage}, not ${stage}: each stage needs its own go`);
@@ -73,6 +80,8 @@ export function approvalFor(file: string, stage: Stage, job: string | undefined,
   assert.ok(typeof a.at === 'string' && isoInstant.test(a.at) && !Number.isNaN(Date.parse(a.at)), 'The approval has no valid time (ISO 8601 with offset, e.g. 2026-11-26T09:30+09:00)');
   assert.ok(job !== undefined && a.job === job, `The approval is for job ${a.job}, not ${job}`);
   assert.ok(notBefore === null || Date.parse(a.at) >= Date.parse(notBefore), `The approval (${a.at}) predates the finish of the earlier stage it needs (${notBefore})`);
+  if (limitedStage1) assert.equal(JSON.stringify(a.acceptsLimitedStage1 ?? null), JSON.stringify(limitedStage1),
+    'Stage 1 was a limited finish: the Stage 2 go must name it (acceptsLimitedStage1 with its outcome and shortfall as recorded)');
   return a as Approval;
 }
 
@@ -80,42 +89,54 @@ export function approvalFor(file: string, stage: Stage, job: string | undefined,
 // valid with cleanup verified), swept afterwards with nothing left (leftover-cleanup.json verified), a normal
 // finish (finish.json), approved for that stage, under this manifest, same CPU sets. The worker's
 // completed.json alone is not enough: it is written before teardown.
-function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets: string, logicalCpus: number) {
+// A limited Stage 1 (allowLimited, Stage 2 only) is accepted instead when the supervisor recorded its exit as
+// limitedExitCode with cleanup verified, and the worker wrote limited.json and finish.json kind "limited";
+// a STOP (stopped.json) never is.
+function finishedStage(dir: string, stage: Stage, manifestHash: string, cpuSets: string, logicalCpus: number, allowLimited = false) {
   const name = stage === 'smoke' ? 'smoke' : `Stage ${stage}`;
   const finished = readIf(`${dir}/finished.json`), status = readIf(`${dir}/run-status.json`);
-  assert.ok(finished && status?.valid === true && status.cleanupVerified === true && status.manifestHash === manifestHash,
+  const finish = readIf(`${dir}/finish.json`), limitedRecord = readIf(`${dir}/limited.json`);
+  const limited = allowLimited && !finished && finish?.kind === 'limited' && limitedRecord !== null;
+  assert.ok(status?.cleanupVerified === true && status.manifestHash === manifestHash &&
+    (limited ? status.valid === false && status.exitCode === limitedExitCode : finished && status.valid === true),
     `${dir} is not a finalized, valid ${name} run (finished.json and a valid run-status.json are required)`);
   assert.ok(readIf(`${dir}/leftover-cleanup.json`)?.verified === true,
     `${dir} is not a finalized, valid ${name} run (the leftover sweep did not verify a clean host)`);
   const judgement = readJson(`${dir}/judgement.json`), metadata = readJson(`${dir}/metadata.json`);
-  assert.ok(finished.manifestHash === manifestHash && finished.stage === stage && judgement.stage === stage && judgement.stopped === null,
+  const record = limited ? limitedRecord : finished;
+  assert.ok((limited || finished.manifestHash === manifestHash) && record.stage === stage && judgement.stage === stage && judgement.stopped === null,
     `${dir} is not a finished ${name} of this manifest`);
   assert.ok(!existsSync(`${dir}/stopped.json`), `${dir} stopped`);
-  assert.ok(readIf(`${dir}/finish.json`)?.normal === true && Array.isArray(judgement.abnormal) && judgement.abnormal.length === 0,
-    `${dir} is not a normal finish of the ${name}`);
+  assert.ok(Array.isArray(judgement.abnormal) && (limited
+    ? finish.normal === false && judgement.finish?.kind === 'limited' && judgement.abnormal.length > 0
+    : finish?.normal === true && judgement.abnormal.length === 0), `${dir} is not a normal finish of the ${name}`);
   assert.equal(readIf(`${dir}/approval.json`)?.stage, stage, `${dir} has no recorded go for the ${name}`);
   assert.equal(JSON.stringify(metadata.cpuSets ?? null), JSON.stringify(parseCpuSets(cpuSets, logicalCpus)), `${dir} ran on other CPU sets`);
-  assert.ok(typeof finished.at === 'string', `${dir} has no finish time`);
-  assert.ok(!Number.isNaN(Date.parse(finished.at)), `${dir} has no valid finish time`);
-  return {judgement, finishedAt: finished.at as string};
+  assert.ok(typeof record.at === 'string', `${dir} has no finish time`);
+  assert.ok(!Number.isNaN(Date.parse(record.at)), `${dir} has no valid finish time`);
+  return {judgement, finishedAt: record.at as string, limited};
 }
 
-// Stage 2 pre-validation (§5.3, review item 5): Stage 1's recorded N, its source and its outcome must be
-// what its own measurements give. N must come from the C replicates: a fallback N exists only when the
-// H1 minimum was not met, and such a Stage 1 is not a normal finish (review item 2), so it never reaches
-// here; a Stage 2 on a fallback N needs a re-plan (§5.2 "Inconclusive": a Stage 2 or re-plan proposal).
-function stage1Noise(dir: string, judgement: {outcome: string; noise: Noise}) {
+// Stage 2 pre-validation (§5.3, review item 5): Stage 1's recorded outcome, finish, N and its source must be
+// what its own measurements give. A normal Stage 1 has N from the C replicates. A limited Stage 1 (maintainer
+// decision on PR #871, question 2) may give the A1 fallback N; its evidence must be complete and N computable
+// (an exact spread from valid rounds), else Stage 2 is refused.
+type Stage1Record = {outcome: string; noise: Noise; abnormal: string[]; evidence?: {complete: boolean}; finish?: {kind: string; shortfall: string[]}};
+function stage1Noise(dir: string, judgement: Stage1Record, limited: boolean): Stage1N {
   const ms = (readJson(`${dir}/measurements.json`) as {measurements: Measurement[]}).measurements;
   const again = stage1(ms, null);
   assert.equal(judgement.outcome, again.outcome, `Stage 1's recorded outcome ${judgement.outcome} is not what its measurements give (${again.outcome})`);
   assert.ok(judgement.noise?.source === again.noise.source && judgement.noise.value === again.noise.value,
     'Stage 1\'s recorded N is not what its measurements give');
-  assert.ok(judgement.noise.source === 'C hot1/hot2' && Number.isFinite(judgement.noise.value) && judgement.noise.value >= 1.05,
-    'Stage 2 needs N from both Stage 1 cache replicates (C hot1/hot2, >= 1.05); a fallback N needs a re-plan');
+  assert.equal(JSON.stringify(judgement.abnormal), JSON.stringify(again.abnormal), 'Stage 1\'s recorded shortfall is not what its measurements give');
+  assert.ok(judgement.evidence?.complete === true && again.evidence.complete, 'Stage 1\'s evidence is incomplete: unusable for Stage 2');
+  assert.equal(again.finish.kind, limited ? 'limited' : 'normal', `Stage 1's measurements give a ${again.finish.kind} finish`);
+  assert.ok(limited || judgement.noise.source === 'C hot1/hot2', 'A normal Stage 1 has N from both cache replicates (C hot1/hot2)');
   // The exact spreads behind N, from Stage 1's stored p95s (review round 7): Stage 2 never uses the double.
   const spreads = noiseSpreads(ms);
-  assert.ok(spreads !== null, 'Stage 1\'s N has a missing G95');
-  return {...judgement.noise, spreads};
+  assert.ok(spreads !== null && spreads.length > 0 && Number.isFinite(judgement.noise.value) && judgement.noise.value >= 1.05,
+    'Stage 1\'s N cannot be computed (no valid C replicates and no valid A1 rounds with every G95): Stage 2 is refused');
+  return {...judgement.noise, spreads, stage1: {kind: limited ? 'limited' : 'normal', shortfall: again.finish.shortfall, constraints: again.finish.stage2Constraints}};
 }
 
 // The HOST-BUSY the launcher claimed for this queue names this job (the launcher passes both). This stops an
@@ -142,14 +163,15 @@ export function prerequisites(args: ReturnType<typeof options>, manifestHash: st
   assert.ok(q?.issue === 796 && q.result === 'PASS' && q.cpuSets === qualifiedCpuSets, 'The #796 qualification is not recorded as PASS on the #796 CPU sets');
   // §3.4: a passed smoke before Stage 1; §5.3: a finished Stage 1 before Stage 2.
   const prior = args.stage === '1' ? finishedStage(args.smokeOut!, 'smoke', manifestHash, args.cpuSets, logicalCpus)
-    : args.stage === '2' ? finishedStage(args.stage1Out!, '1', manifestHash, args.cpuSets, logicalCpus) : null;
+    : args.stage === '2' ? finishedStage(args.stage1Out!, '1', manifestHash, args.cpuSets, logicalCpus, true) : null;
   if (args.stage === '1') assert.equal(prior!.judgement.outcome, 'smoke passed', 'The smoke did not pass');
-  const approval = approvalFor(args.approval, args.stage, env.FUKULOW_LAUNCH_JOB, prior?.finishedAt ?? null);
+  const limitedStage1 = prior?.limited ? {outcome: prior.judgement.outcome as string, shortfall: prior.judgement.finish.shortfall as string[]} : null;
+  const approval = approvalFor(args.approval, args.stage, env.FUKULOW_LAUNCH_JOB, prior?.finishedAt ?? null, limitedStage1);
   if (args.stage !== '2') return {stage1Noise: null, approval};
   assert.ok(stage1Outcomes.includes(prior!.judgement.outcome), `Stage 1 has no recognized outcome: ${prior!.judgement.outcome}`);
-  return {stage1Noise: stage1Noise(args.stage1Out!, prior!.judgement), approval};
+  return {stage1Noise: stage1Noise(args.stage1Out!, prior!.judgement, prior!.limited), approval};
 }
-const stage1Outcomes = ['not reproduced', 'cause established', 'cause not established', 'inconclusive'];
+const stage1Outcomes = ['not reproduced', 'cause established', 'cause not established', 'repetition-linked, cause not established', 'inconclusive'];
 
 const freeAt = (path: string) => { const s = statfsSync(path, {bigint: true}); return Number(s.bavail * s.bsize); };
 const freeOrNull = (path: string) => { try { return freeAt(path); } catch { return null; } };
@@ -418,7 +440,9 @@ async function worker(env: NodeJS.ProcessEnv) {
       : smoke(result.measurements, result.stopped, stageMissing);
     save(`${out}/judgement.json`, {label, stage, stopped: result.stopped, cacheConstraint, ...judgement});
     note(`judgement: ${JSON.stringify('outcome' in judgement ? judgement.outcome : judgement.result)}`);
-    process.exitCode = finishRecords(out, stage, sha256, result.stopped, judgement.abnormal);
+    const limited = 'finish' in judgement && judgement.finish.kind === 'limited'
+      ? {nSource: judgement.finish.nSource, constraints: judgement.finish.stage2Constraints} : null;
+    process.exitCode = finishRecords(out, stage, sha256, result.stopped, judgement.abnormal, limited);
   } finally {
     const r = await stopSampler();
     if (!r.verified) { note(`sampler did not exit: ${r.how}`); process.exitCode ||= stopExitCode; }
@@ -466,13 +490,24 @@ export function parseCount(text: string) {
 
 // finish.json always; a normal finish writes completed.json (exit 0), anything else stopped.json with its
 // reasons and no completed.json (exit 2), so the supervisor marks the run invalid and the queue ends.
-export function finishRecords(out: string, stage: Stage, manifestHash: string, stopped: string | null, abnormal: string[]) {
+// A limited Stage 1 (`limited` given) writes limited.json with its shortfall, N source and Stage 2 constraints
+// instead of stopped.json, and exits limitedExitCode: the queue ends, and Stage 2 may follow only with its own go.
+export function finishRecords(out: string, stage: Stage, manifestHash: string, stopped: string | null, abnormal: string[],
+  limited: {nSource: string; constraints: string[]} | null = null) {
   const at = new Date().toISOString();
-  save(`${out}/finish.json`, {normal: abnormal.length === 0, reasons: abnormal});
-  if (abnormal.length === 0) {
+  const kind = abnormal.length === 0 ? 'normal' : limited && stopped === null ? 'limited' : 'blocked';
+  save(`${out}/finish.json`, {normal: kind === 'normal', kind, reasons: abnormal});
+  if (kind === 'normal') {
     save(`${out}/completed.json`, {manifestHash, label, stage, at});
     return 0;
   }
+  if (kind === 'limited') {
+    rmSync(`${out}/completed.json`, {force: true});
+    save(`${out}/limited.json`, {label, stage, shortfall: abnormal, ...limited, at});
+    note(`not a normal finish (limited: ${abnormal.join('; ')}); Stage 2 only with its own go naming this Stage 1`);
+    return limitedExitCode;
+  }
+  rmSync(`${out}/limited.json`, {force: true});
   // A signal after a normal finish turns it abnormal: completed.json goes, so no record says otherwise.
   rmSync(`${out}/completed.json`, {force: true});
   save(`${out}/stopped.json`, {label, stage, stopped, reasons: abnormal, at});
@@ -512,7 +547,7 @@ async function main() {
   await supervise(import.meta.url, out, sha256, () => note(`${label}: stage ${args.stage} finished (${out})`));
   sweepLeftovers(out);
   if (process.exitCode === 0 || process.exitCode === undefined) return;
-  note(`${label}: stage ${args.stage} did not finish normally (see ${out}/stopped.json or the log); the queue ends`);
+  note(`${label}: stage ${args.stage} did not finish normally (see ${out}/stopped.json, limited.json or the log); the queue ends`);
 }
 
 if (import.meta.main) await main();

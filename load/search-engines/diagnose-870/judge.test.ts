@@ -102,7 +102,7 @@ test('cause established: exactly one supported, all others ruled out; Stage 2 ma
 test('all of H1-H5 ruled out is "repetition-linked, cause not established"', () => {
   const r = stage1(scenario({'C1.restart': 40, 'C2.restart': 40}));
   assert.equal(r.attribution!.H1, 'ruled out');
-  assert.equal(r.outcome, 'cause not established');
+  assert.equal(r.outcome, 'repetition-linked, cause not established');
   assert.equal(r.repetitionLinked, true);
   assert.equal(r.stage2, 'propose');
 });
@@ -249,17 +249,18 @@ test('Stage 1 outcomes: not reproduced, several supported, none supported with o
   assert.equal(Object.values(none.attribution!).includes('supported'), false);
   assert.equal(none.outcome, 'cause not established');
   assert.equal(none.repetitionLinked, false);
-  // H1-H5 ruled out and position supported: one cause, so not "repetition-linked".
   const position = (id: string, base: number) => {
     const x = m(id, base);
     x.latencies = x.latencies.map((l, i) => l.query === 'scalar' ? l : {...l, p95: base * (1 + 0.2 * i)});
     return x;
   };
   const h6 = stage1(scenario({'C1.restart': 40, 'C2.restart': 40}).map(x => x.id === 'A1.5' ? position('A1.5', 53) : x.id === 'A1.6' ? position('A1.6', 56) : x));
-  // H1-H5 ruled out is repetition-linked (§4.3) whatever H6 says: cause not established, nothing by elimination.
+  // H6 supported alone with H1-H5 ruled out: "repetition-linked, cause not established" (maintainer decision
+  // on PR #871, re-approval question 3), never "cause established"; nothing by elimination.
+  assert.deepEqual(Object.values(h6.attribution!).filter(v => v === 'supported').length, 1);
   assert.equal(h6.attribution!.H6, 'supported');
   assert.equal(h6.repetitionLinked, true);
-  assert.equal(h6.outcome, 'cause not established');
+  assert.equal(h6.outcome, 'repetition-linked, cause not established');
   assert.equal(h6.stage2, 'propose');
 });
 
@@ -363,7 +364,8 @@ test('the smoke passes only with one valid round, no STOP and complete evidence'
 });
 
 // A recorded N whose one exact spread is the double itself.
-const C = (value: number) => ({value, source: 'C hot1/hot2' as const, spreads: [{q: rational(value), k: 1n}]});
+const normalStage1 = {kind: 'normal' as const, shortfall: [], constraints: []};
+const C = (value: number) => ({value, source: 'C hot1/hot2' as const, spreads: [{q: rational(value), k: 1n}], stage1: normalStage1});
 const b = (g: Record<string, number>, over: Record<string, Partial<Measurement>> = {}) => Object.entries({'B.pre': 40, 'B.post1': 56,
   'B.post2': 56, 'B.post3': 56, 'B.cool1': 50, 'B.cool2': 50, ...g}).map(([id, v]) => m(id, v, over[id]));
 
@@ -425,10 +427,10 @@ test('Stage 2 uses the exact spreads behind N, never the rounded double (review 
   assert.equal(N.value, 1.4999999999999991);
   assert.ok(ratio(spreads[0], {q: rational(1.5), k: 1n}).q.n > ratio(spreads[0], {q: rational(1.5), k: 1n}).q.d);
   // B.post1 / B.pre = 60 / 40 = 1.5 exactly: below 3 x (N - 1) for the exact N, so not reproduced as written.
-  assert.equal(stage2(b({'B.post1': 60}), {...N, spreads}).result, 'inconclusive');
+  assert.equal(stage2(b({'B.post1': 60}), {...N, spreads, stage1: normalStage1}).result, 'inconclusive');
   // With the rounded double as the spread it would have reproduced.
   assert.equal(stage2(b({'B.post1': 60}), C(N.value)).result, 'reproduced');
-  assert.deepEqual(stage2(b({'B.post1': 60}), {...N, spreads}).noise, N);
+  assert.deepEqual(stage2(b({'B.post1': 60}), {...N, spreads, stage1: normalStage1}).noise, N);
 });
 
 test('the reported rho is computed from the exact G95 ranks used for the decision', () => {

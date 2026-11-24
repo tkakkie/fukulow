@@ -6,7 +6,7 @@ import test from 'node:test';
 import { qualifiedCpuSets } from './cluster.ts';
 import { stage1, type Measurement } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
-import { finishRecords, options, parseCount, prerequisites, signalStop, stopExitCode, sweepLeftovers, workerGate } from './run.ts';
+import { finishRecords, limitedExitCode, options, parseCount, prerequisites, signalStop, stopExitCode, sweepLeftovers, workerGate } from './run.ts';
 
 const hash = 'h'.repeat(64);
 const sets = qualifiedCpuSets;
@@ -36,17 +36,25 @@ function stage1Measurements(): Measurement[] {
     env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: [], autovacuumInsideQueries: []}}));
 }
 // A prior stage's records as the worker and the supervisor leave them.
+// `limited` leaves the records of a limited Stage 1 (exit 3, limited.json); `stopped` those of a STOP (exit 2).
 function prior(dir: string, stage: string, judgement: Record<string, unknown>,
-  {finalized = true, valid = true, swept = true, normal = true, measurements = [] as Measurement[]} = {}) {
+  {finalized = true, valid = true, swept = true, normal = true, measurements = [] as Measurement[], limited = false, stopped = false} = {}) {
   const out = join(dir, `out-${stage}`);
   mkdirSync(out);
   const at = '2026-11-25T10:00:00.000Z';
-  json(join(out, 'completed.json'), {manifestHash: hash, stage, at});
-  json(join(out, 'judgement.json'), {stage, stopped: null, abnormal: normal ? [] : ['minimum not met: H2'], ...judgement});
+  const reasons = normal ? [] : (judgement.abnormal as string[] | undefined) ?? ['minimum not met: H2'];
+  json(join(out, 'judgement.json'), {stage, stopped: null, abnormal: reasons, evidence: {complete: true, missing: []}, ...judgement});
   json(join(out, 'metadata.json'), {cpuSets: parsed});
   json(join(out, 'measurements.json'), {measurements, stopped: null});
   json(join(out, 'approval.json'), {issue: 870, stage, job: 'x', quote: 'go', at: '2026-11-25T09:00:00Z'});
-  json(join(out, 'finish.json'), {normal, reasons: normal ? [] : ['minimum not met: H2']});
+  json(join(out, 'finish.json'), {normal, kind: normal ? 'normal' : limited ? 'limited' : 'blocked', reasons});
+  if (limited || stopped) {
+    json(join(out, limited ? 'limited.json' : 'stopped.json'), {stage, reasons, at});
+    json(join(out, 'run-status.json'), {manifestHash: hash, valid: false, cleanupVerified: true, exitCode: limited ? 3 : 2});
+    if (swept) json(join(out, 'leftover-cleanup.json'), {verified: true, found: [], failures: []});
+    return out;
+  }
+  json(join(out, 'completed.json'), {manifestHash: hash, stage, at});
   if (finalized) {
     json(join(out, 'finished.json'), {manifestHash: hash, stage, at});
     json(join(out, 'run-status.json'), {manifestHash: hash, valid, cleanupVerified: valid, exitCode: valid ? 0 : 1});
@@ -118,11 +126,13 @@ test('Stage 2 needs a finalized Stage 1 whose recorded outcome and N are what it
   assert.throws(() => run({outcome: 'cause established', noise: good.noise}), /not what its measurements give/);
   assert.throws(() => run({outcome: good.outcome, noise: {value: 1.08, source: 'C hot1/hot2'}}), /recorded N is not what its measurements give/);
   assert.throws(() => run({outcome: good.outcome, noise: {value: 1.05, source: 'typed by hand'}}), /recorded N is not what/);
-  // A fallback N (C replicate incomplete) is not accepted, even if its record were marked normal.
+  // A fallback N (C replicate incomplete) is not accepted from a record marked normal.
   const fallback = ms.map(m => m.id === 'C1.hot2' ? {...m, invalid: ['fake']} : m);
   const f = stage1(fallback);
   assert.equal(f.noise.source, 'A1 spread (fallback)');
-  assert.throws(() => run({outcome: f.outcome, noise: f.noise}, fallback), /needs N from both Stage 1 cache replicates/);
+  assert.throws(() => run({outcome: f.outcome, noise: f.noise}, fallback), /recorded shortfall is not what its measurements give/);
+  // Its real records are a limited finish, which needs the limited path and its own acknowledging go.
+  assert.throws(() => run({outcome: f.outcome, noise: f.noise, abnormal: f.abnormal}, fallback), /not a normal finish of the Stage 1/);
   // A Stage 1 that was not a normal finish (a minimum not met) never feeds Stage 2.
   assert.throws(() => run({outcome: good.outcome, noise: good.noise}, ms, false), /not a normal finish of the Stage 1/);
 });
@@ -184,18 +194,19 @@ test('the sweep always records whether it verified a clean host; a failed remova
   } finally { process.exitCode = code; }
 });
 
-test('anything but a normal finish writes stopped.json, no completed.json, and exits 2; a normal finish exits 0', () => {
+test('anything but a normal or limited finish writes stopped.json, no completed.json, and exits 2; a normal finish exits 0', () => {
   assert.equal(stopExitCode, 2);
   const read = (dir: string, file: string) => JSON.parse(readFileSync(join(dir, file), 'utf8'));
   const normal = mkdtempSync(join(tmpdir(), 'diag870-'));
   assert.equal(finishRecords(normal, '1', hash, null, []), 0);
-  assert.deepEqual(read(normal, 'finish.json'), {normal: true, reasons: []});
+  assert.deepEqual(read(normal, 'finish.json'), {normal: true, kind: 'normal', reasons: []});
   assert.equal(read(normal, 'completed.json').manifestHash, hash);
   assert.equal(existsSync(join(normal, 'stopped.json')), false);
   for (const reasons of [['STOP: A1.3: docker free 39.9 GB < 40 GB'], ['minimum not met: H2'], ['evidence incomplete']]) {
     const dir = mkdtempSync(join(tmpdir(), 'diag870-'));
     assert.equal(finishRecords(dir, '1', hash, null, reasons), stopExitCode, reasons[0]);
-    assert.deepEqual(read(dir, 'finish.json'), {normal: false, reasons});
+    // Without a limited Stage 1 record (smoke, Stage 2, a STOP, incomplete evidence) it is blocked.
+    assert.deepEqual(read(dir, 'finish.json'), {normal: false, kind: 'blocked', reasons});
     assert.deepEqual(read(dir, 'stopped.json').reasons, reasons);
     assert.equal(existsSync(join(dir, 'completed.json')), false);
   }
@@ -244,7 +255,7 @@ test('a signal records an abnormal finish: stopped.json, no completed.json, fini
   // Even after a normal finish was recorded, a later signal leaves no completed.json behind.
   assert.equal(finishRecords(out, '1', hash, null, []), 0);
   assert.equal(finishRecords(out, '1', hash, 'signal SIGTERM', ['STOP: signal SIGTERM']), stopExitCode);
-  assert.deepEqual(JSON.parse(readFileSync(join(out, 'finish.json'), 'utf8')), {normal: false, reasons: ['STOP: signal SIGTERM']});
+  assert.deepEqual(JSON.parse(readFileSync(join(out, 'finish.json'), 'utf8')), {normal: false, kind: 'blocked', reasons: ['STOP: signal SIGTERM']});
   assert.equal(existsSync(join(out, 'completed.json')), false);
   assert.equal(JSON.parse(readFileSync(join(out, 'stopped.json'), 'utf8')).stopped, 'signal SIGTERM');
 });
@@ -255,4 +266,63 @@ test('a read counter must be a single integer; empty or other output is unreadab
   assert.throws(() => parseCount(''), /not a count/);
   assert.throws(() => parseCount('x\n'), /not a count/);
   assert.throws(() => parseCount('12.5'), /not a count/);
+});
+
+// Maintainer decision on PR #871, re-approval question 2: a limited Stage 1 is distinct from a safety STOP.
+test('a limited Stage 1 allows Stage 2 only with usable evidence, a computable N and a go naming it; a STOP never does', () => {
+  const h = host();
+  const env = {...h.env, FUKULOW_LAUNCH_JOB: 'stage2-870'};
+  const fallback = stage1Measurements().map(m => m.id === 'C1.hot2' ? {...m, invalid: ['fake']} : m);
+  const f = stage1(fallback);
+  assert.equal(f.finish.kind, 'limited');
+  assert.deepEqual(f.finish.shortfall, ['minimum not met: H1', 'INVALID: C1.hot2']);
+  assert.equal(f.finish.nSource, 'A1 spread (fallback)');
+  assert.match(f.finish.stage2Constraints.join(' '), /cannot establish a cause.*A1 spread \(fallback/s);
+  const record = {outcome: f.outcome, noise: f.noise, abnormal: f.abnormal, finish: f.finish};
+  const ack = {acceptsLimitedStage1: {outcome: f.outcome, shortfall: f.finish.shortfall}};
+  const run = (judgement: Record<string, unknown>, ms: Measurement[], go: Record<string, unknown>, kind: {limited?: boolean; stopped?: boolean} = {limited: true}) => {
+    const out = prior(mkdtempSync(join(h.dir, 'l')), '1', judgement, {measurements: ms, normal: false, ...kind});
+    return prerequisites(options(argv(h, '2', ['--stage1-out', out], sets, approval(h.dir, '2', go)), 'linux'), hash, env, 16);
+  };
+  const n = run(record, fallback, ack).stage1Noise!;
+  assert.deepEqual([n.source, n.stage1.kind, n.stage1.shortfall, n.spreads.length], ['A1 spread (fallback)', 'limited', f.finish.shortfall, 1]);
+  assert.deepEqual(n.stage1.constraints, f.finish.stage2Constraints);
+  // Without the acknowledgement, or one naming another outcome or shortfall: refused.
+  assert.throws(() => run(record, fallback, {}), /must name it/);
+  assert.throws(() => run(record, fallback, {acceptsLimitedStage1: {outcome: f.outcome, shortfall: ['minimum not met: H2']}}), /must name it/);
+  // Unusable evidence: a measurement with missing evidence.
+  // Unusable evidence (a measurement with missing evidence) is a blocked finish; records claiming limited are refused.
+  const partial = fallback.map(m => m.id === 'A1.3' ? {...m, missingEvidence: ['stats-after: Error: psql']} : m);
+  const p = stage1(partial);
+  assert.equal(p.finish.kind, 'blocked');
+  assert.throws(() => run({outcome: p.outcome, noise: p.noise, abnormal: p.abnormal, finish: {...p.finish, kind: 'limited'}, evidence: {complete: true}}, partial,
+    {acceptsLimitedStage1: {outcome: p.outcome, shortfall: p.finish.shortfall}}), /evidence is incomplete/);
+  // N cannot be computed: no valid C replicate and no valid A1 round.
+  const none = fallback.map(m => m.id.startsWith('A1.') ? {...m, invalid: ['fake']} : m);
+  const g = stage1(none);
+  assert.equal(g.finish.nComputable, false);
+  assert.equal(g.finish.stage2, 'refused');
+  assert.throws(() => run({outcome: g.outcome, noise: g.noise, abnormal: g.abnormal, finish: g.finish}, none,
+    {acceptsLimitedStage1: {outcome: g.outcome, shortfall: g.finish.shortfall}}), /N cannot be computed/);
+  // A safety STOP: stopped.json, exit 2. Refused even with an acknowledging go and usable measurements.
+  assert.throws(() => run(record, fallback, ack, {stopped: true}), /not a finalized, valid Stage 1 run/);
+  // A STOP recorded on top of limited records is still refused.
+  const both = prior(mkdtempSync(join(h.dir, 'b')), '1', record, {measurements: fallback, normal: false, limited: true});
+  writeFileSync(join(both, 'stopped.json'), '{}');
+  assert.throws(() => prerequisites(options(argv(h, '2', ['--stage1-out', both], sets, approval(h.dir, '2', ack)), 'linux'), hash, env, 16), /stopped/);
+});
+
+test('finish records: a STOP is blocked (exit 2, stopped.json), a limited Stage 1 exits 3 with limited.json; both end the queue', () => {
+  const out = mkdtempSync(join(tmpdir(), 'diag870-kind-'));
+  const limited = {nSource: 'A1 spread (fallback)', constraints: ['c']};
+  assert.equal(finishRecords(out, '1', hash, null, ['INVALID: A1.2'], limited), limitedExitCode);
+  assert.deepEqual(JSON.parse(readFileSync(join(out, 'finish.json'), 'utf8')), {normal: false, kind: 'limited', reasons: ['INVALID: A1.2']});
+  assert.equal(JSON.parse(readFileSync(join(out, 'limited.json'), 'utf8')).nSource, 'A1 spread (fallback)');
+  assert.equal(existsSync(join(out, 'stopped.json')), false);
+  // A STOP is never limited, whatever else is recorded: blocked, and limited.json goes.
+  assert.equal(finishRecords(out, '1', hash, 'A1.3: disk', ['STOP: A1.3: disk', 'INVALID: A1.2'], limited), stopExitCode);
+  assert.equal(JSON.parse(readFileSync(join(out, 'finish.json'), 'utf8')).kind, 'blocked');
+  assert.equal(existsSync(join(out, 'limited.json')), false);
+  assert.equal(existsSync(join(out, 'stopped.json')), true);
+  assert.notEqual(limitedExitCode, 0);
 });
