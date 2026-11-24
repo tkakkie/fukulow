@@ -26,9 +26,26 @@
   let list = $state<HTMLElement | null>(null)
   let range = $state<RowRange>({ start: 0, end: 12, top: 0, bottom: 0 })
   let revealing = false
+  let focusedBeforeReorder: HTMLElement | null = null
   const window = createRowWindow(next => { range = next }, () => onvisible(), () => onfocuslost(), () => {
     if (revealing || !untrack(() => followBottom)) return
     void tick().then(() => { if (!revealing && container) container.scrollTop = container.scrollHeight }).catch(console.error)
+  })
+  // Moving a keyed <li> via insertBefore blurs a focused descendant in Chromium; restore it unless focus moved intentionally.
+  $effect.pre(() => {
+    void items.slice(range.start, range.end).map(rowId)
+    const active = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null
+    focusedBeforeReorder = active && typeof active.focus === 'function' && list?.contains(active) ? active : null
+  })
+  $effect(() => {
+    void items.slice(range.start, range.end).map(rowId)
+    const target = focusedBeforeReorder
+    focusedBeforeReorder = null
+    if (!target || target.isConnected === false || !list?.contains(target)) return
+    const active = typeof document !== 'undefined' ? document.activeElement : null
+    if (active === null || active === document.body || active === document.documentElement) {
+      target.focus({ preventScroll: true })
+    }
   })
   $effect(() => {
     const ids = [...items.map(rowId), ...pendingItems.map(item => `pending:${pendingId(item)}`)]

@@ -24,12 +24,18 @@ jobs:
       # covered by the server tests.
       FUKULOW_SEND_BURST: '10000'
       FUKULOW_SEND_REFILL_PER_SECOND: '1000'
+      # #800: databases for the 4 Playwright workers (the CI default in web/playwright.config.ts).
+      E2E_WORKERS: '4'
       # #800 PR 1: CI reads no debuginfo (no RUST_BACKTRACE; panics keep file:line). Release, wasm-release and Docker builds are unchanged. Part of the rust-cache key.
       CARGO_PROFILE_DEV_DEBUG: '0'
       # A Playwright bump must update the tag and digest together.
       PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
     steps:
       - uses: actions/checkout@v7
+      # #800: overlap the image download with the builds. The smoke step still runs its bounded,
+      # digest-pinned pull (a no-op once this finishes) and `--pull never`.
+      - name: Prefetch the Playwright image in the background
+        run: nohup docker pull --quiet "$PLAYWRIGHT_IMAGE" > /dev/null 2> /dev/null &
       - uses: actions/setup-node@v7
         with: { node-version-file: .node-version, cache: npm, cache-dependency-path: web/package-lock.json }
       - run: rustup toolchain install --profile minimal
@@ -42,11 +48,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - name: Provision least-privilege connection and run one-shot migrations
+        shell: bash
         env:
           POSTGRES_APP_PASSWORD: ci-e2e-app-only
         run: |
+          set -euo pipefail
           target/debug/fukulow-server migrate roles
           target/debug/fukulow-server migrate
+          # Worker 0 uses postgres; worker i uses postgres_w<i>.
+          for i in $(seq 1 $((E2E_WORKERS - 1))); do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE postgres_w${i}"
+            DATABASE_URL="${DATABASE_URL}_w${i}" target/debug/fukulow-server migrate
+          done
       - name: Use only the app role for browser tests
         run: echo 'DATABASE_URL=postgres://fukulow_app:ci-e2e-app-only@127.0.0.1:5432/postgres' >> "$GITHUB_ENV"
       # Keep Rust and its cache on the runner; only the browser tests need the image's libraries.

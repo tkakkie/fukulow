@@ -607,6 +607,326 @@ it('retains a visit boundary while positions advance and takes a new boundary on
   expect(c.unread.get('A').entry).toMatchObject({ boundary: 1, unreadAtEntry: 0, firstUnread: null })
   await c.sync.close()
 })
+it('submits presented reads once stale-list recovery succeeds even after latest window shift and keeps badges hidden until then', async () => {
+  const c = unreadClient()
+  // Initial sync only covers 5..6; older page 1..4 comes from main projection.
+  c.history.splice(0, c.history.length, msg(5), msg(6))
+  c.rows[0] = row({ as_of_seq: 6, read_seq: 0, main_unread_count: 6, unread_count: 6 })
+  c.topicsApi.listTimeline
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, has_more: false, items: [msg(1), msg(2), msg(3), msg(4)].map(message => ({ kind: 'message' as const, message })) }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, has_more: true, items: [msg(5), msg(6)].map(message => ({ kind: 'message' as const, message })) }))
+  await c.sync.start(); c.handlers[0].onReady(); await c.sync.watch('A'); await flush()
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 6 }); await flush()
+  const id = await c.enter()
+  c.unread.presented(id, [1, 2]); await flush()
+  expect(c.unread.get('A').main.position).toBe(2)
+  // An in-flight Channel list snapshot started before PUT /read returns read_seq: 0.
+  c.unread.activitySnapshot([row({ as_of_seq: 6, read_seq: 0, main_unread_count: 6, unread_count: 6 })])
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  expect(c.unread.get('A').main.mentionUnreadCount).toBeNull()
+  expect(c.unread.get('A').unreadCount).toBeNull()
+  expect(c.unread.get('A').mentionUnreadCount).toBeNull()
+  expect(c.unread.get('A').main.error).toBe(true)
+  // Present 3..4 while recovery is pending: blocked, badges stay hidden.
+  c.unread.presented(id, [3, 4]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  // Shift main projection to latest 5..6 before recovery completes (as clicking load-latest does).
+  await c.topics.loadMainLatest('A')
+  c.unread.presented(id, [5, 6]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  expect(c.unread.get('A').unreadCount).toBeNull()
+  // Once recovery succeeds, retained presentations + coverage submit through 6 without re-presenting.
+  c.unread.activitySnapshot([row({ as_of_seq: 6, read_seq: 2, main_unread_count: 4, unread_count: 4 })]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2, 6])
+  expect(c.unread.get('A').main.position).toBe(6)
+  expect(c.unread.get('A').main.unreadCount).toBe(0)
+  expect(c.unread.get('A').unreadCount).toBe(0)
+  expect(c.unread.get('A').main.error).toBe(false)
+  await c.sync.close()
+})
+it('stops recovered main-scope read at the row before an unseen row in the retained range', async () => {
+  const c = unreadClient()
+  c.history.splice(0, c.history.length, msg(5), msg(6))
+  c.rows[0] = row({ as_of_seq: 6, read_seq: 0, main_unread_count: 6, unread_count: 6 })
+  c.topicsApi.listTimeline
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, has_more: false, items: [msg(1), msg(2), msg(3), msg(4)].map(message => ({ kind: 'message' as const, message })) }))
+    .mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 6, has_more: true, items: [msg(5), msg(6)].map(message => ({ kind: 'message' as const, message })) }))
+  await c.sync.start(); c.handlers[0].onReady(); await c.sync.watch('A'); await flush()
+  c.handlers[0].onEvent({ history_generation: '00000000-0000-4000-8000-000000000515', type: 'subscribed', channel_id: 'A', caught_up_seq: 6 }); await flush()
+  const id = await c.enter()
+  c.unread.presented(id, [1, 2]); await flush()
+  expect(c.unread.get('A').main.position).toBe(2)
+  // Stale snapshot puts main scope into recovery.
+  c.unread.activitySnapshot([row({ as_of_seq: 6, read_seq: 0, main_unread_count: 6, unread_count: 6 })])
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  // Present 3 (leaving 4 unseen), shift to latest 5..6, and present 5..6.
+  c.unread.presented(id, [3]); await flush()
+  await c.topics.loadMainLatest('A')
+  c.unread.presented(id, [5, 6]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  // Recovery submits through 3 and stops before unseen Message 4.
+  c.unread.activitySnapshot([row({ as_of_seq: 6, read_seq: 2, main_unread_count: 4, unread_count: 4 })]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2, 3])
+  expect(c.unread.get('A').main).toMatchObject({ position: 3, unreadCount: 3 })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+it('blocks new read submission while an ahead-of-intent mark position awaits recovery, then submits on recovery', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter()
+  c.event(msg(4)); c.event(msg(5)); c.event(msg(6))
+  const list = deferred<Result<ChannelList>>()
+  c.unreadApi.listChannels.mockReturnValueOnce(list.promise)
+  c.unreadApi.markRead.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 5 }))
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unread.get('A').main.position).toBe(5)
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  c.unread.presented(id, [6]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  list.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 6, read_seq: 5, main_unread_count: 1, unread_count: 3 })] })); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1, 6])
+  expect(c.unread.get('A').main.position).toBe(6)
+  expect(c.unread.get('A').main.unreadCount).toBe(0)
+  await c.sync.close()
+})
+it('blocks read submission during a stale baseline that predates a deletion, then submits on recovery', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter()
+  c.event(msg(4))
+  c.event(msg(5))
+  c.event({ ...msg(4), version: 6, deleted: true })
+  // Snapshot at watermark 5 includes Message 4 but predates its deletion at version 6.
+  c.unread.activitySnapshot([row({ as_of_seq: 5, read_seq: 0, main_unread_count: 3, unread_count: 5 })])
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  c.unread.activitySnapshot([row({ as_of_seq: 6, read_seq: 0, main_unread_count: 2, unread_count: 4 })]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  expect(c.unread.get('A').main.position).toBe(1)
+  await c.sync.close()
+})
+it('submits a read queued before recovery started once recovery succeeds without a new presentation', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter()
+  c.event(msg(4)); c.event(msg(5)); c.event(msg(6))
+  const firstMark = deferred<Result<ReadPosition>>()
+  const list = deferred<Result<ChannelList>>()
+  c.unreadApi.markRead.mockReturnValueOnce(firstMark.promise)
+  c.unreadApi.listChannels.mockReturnValueOnce(list.promise)
+  // Start mark for 1, then present 6 while 1 is in flight so 6 is queued.
+  c.unread.presented(id, [1]); await flush()
+  c.unread.presented(id, [4, 5, 6]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  // Mark 1 resolves ahead of intent (persisted 5), starting recovery; queued 6 must wait.
+  firstMark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 5 })); await flush()
+  expect(c.unread.get('A').main.position).toBe(5)
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  // When recovery completes, 6 is submitted without any new presentation.
+  list.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [row({ as_of_seq: 6, read_seq: 5, main_unread_count: 1, unread_count: 3 })] })); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1, 6])
+  expect(c.unread.get('A').main.position).toBe(6)
+  expect(c.unread.get('A').main.unreadCount).toBe(0)
+  await c.sync.close()
+})
+it('does not submit pre-hide presentations on count recovery after visibility returns until a fresh presentation arrives', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter()
+  expect(c.unread.get('A').entry?.boundary).toBe(0)
+  c.unreadApi.listChannels.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  await c.unread.refresh(); await flush()
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  c.unread.visibility(false)
+  c.unread.visibility(true)
+  // Valid Channel snapshot recovers counts after return without a fresh presented() call.
+  c.unread.activitySnapshot([row()]); await flush()
+  expect(c.unread.get('A').entry?.boundary).toBe(0)
+  expect(c.unread.get('A').main.unreadCount).toBe(1)
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  // A fresh presentation after return submits the read.
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  expect(c.unread.get('A').main).toMatchObject({ position: 1, unreadCount: 0 })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+it('retains pre-hide seen evidence for the same visit so a fresh presentation after return bridges the prefix', async () => {
+  const c = unreadClient()
+  c.history.splice(0, c.history.length, msg(1), msg(2), msg(3))
+  c.rows[0] = row({ as_of_seq: 3, read_seq: 0, main_unread_count: 3, unread_count: 3 })
+  await c.boot()
+  const id = await c.enter()
+  const firstMark = deferred<Result<ReadPosition>>()
+  c.unreadApi.markRead.mockReturnValueOnce(firstMark.promise)
+  // Hold mark 1 in flight, present 2 so it queues, then hide.
+  c.unread.presented(id, [1]); await flush()
+  c.unread.presented(id, [2]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  c.unread.visibility(false)
+  // Mark 1 persists and a fresh snapshot confirms position 1 while hidden.
+  firstMark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })); await flush()
+  c.unread.activitySnapshot([row({ as_of_seq: 3, read_seq: 1, main_unread_count: 2, unread_count: 2 })]); await flush()
+  expect(c.unread.get('A').main).toMatchObject({ position: 1, unreadCount: 2 })
+  // Return to the tab: no mark until a fresh presentation arrives.
+  c.unread.visibility(true); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  // Presenting 3 bridges over retained seen evidence for 2 and submits mark 3.
+  c.unread.presented(id, [3]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1, 3])
+  expect(c.unread.get('A').main).toMatchObject({ position: 3, unreadCount: 0 })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+it('submits pre-hide seen read in a Channel main visit when returning and presenting only an already-read row', async () => {
+  const c = unreadClient()
+  c.history.splice(0, c.history.length, msg(1), msg(2), msg(3))
+  c.rows[0] = row({ as_of_seq: 3, read_seq: 0, main_unread_count: 3, unread_count: 3 })
+  await c.boot()
+  const id = await c.enter()
+  const firstMark = deferred<Result<ReadPosition>>()
+  c.unreadApi.markRead.mockReturnValueOnce(firstMark.promise)
+  // Hold mark 1 in flight, present 2 so it queues, then hide.
+  c.unread.presented(id, [1]); await flush()
+  c.unread.presented(id, [2]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  c.unread.visibility(false)
+  // Mark 1 persists and a baseline accepts position 1 while hidden.
+  firstMark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })); await flush()
+  c.unread.activitySnapshot([row({ as_of_seq: 3, read_seq: 1, main_unread_count: 2, unread_count: 2 })]); await flush()
+  expect(c.unread.get('A').main).toMatchObject({ position: 1, unreadCount: 2 })
+  // Return to the tab and present only already-read Message 1: queued mark 2 is sent.
+  c.unread.visibility(true); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1, 2])
+  expect(c.unread.get('A').main).toMatchObject({ position: 2, unreadCount: 1 })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+it('submits pre-hide seen read in a Topic visit when returning and presenting only an already-read row', async () => {
+  const c = unreadClient()
+  c.history.splice(0, c.history.length, msg(1, 'T'), msg(2, 'T'), msg(3, 'T'))
+  c.rows[0] = row({ as_of_seq: 3, read_seq: 0, main_unread_count: 0, unread_count: 3 })
+  c.summaries.set('T', summary('T', 3, 0, 3))
+  await c.boot()
+  const id = await c.enter('T')
+  const firstMark = deferred<Result<ReadPosition>>()
+  c.unreadApi.markRead.mockReturnValueOnce(firstMark.promise)
+  // Hold mark 1 in flight, present 2 so it queues, then hide.
+  c.unread.presented(id, [1]); await flush()
+  c.unread.presented(id, [2]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  c.unread.visibility(false)
+  // Mark 1 persists and a Topic baseline accepts position 1 while hidden.
+  firstMark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 1 })); await flush()
+  c.summaries.set('T', summary('T', 3, 1, 2))
+  c.unread.activityRead('A', 'T'); await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 1, unreadCount: 2 })
+  // Return to the tab and present only already-read Message 1: queued mark 2 is sent.
+  c.unread.visibility(true); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1, 2])
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 2, unreadCount: 1 })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+async function setupPreHideQueuedMark(topicId: string | null, extraSelf = false) {
+  const c = unreadClient()
+  c.history.splice(0, c.history.length, msg(1, topicId), msg(2, topicId), msg(3, topicId))
+  c.summaries.clear()
+  if (topicId === null) {
+    c.rows[0] = row({ as_of_seq: 3, read_seq: 1, main_unread_count: 2, unread_count: 2 })
+  } else {
+    c.rows[0] = row({ as_of_seq: 3, read_seq: 0, main_unread_count: 0, unread_count: 2 })
+    c.summaries.set(topicId, summary(topicId, 3, 1, 2))
+  }
+  await c.boot()
+  if (extraSelf) {
+    c.event(msg(4, topicId, 'me')); await flush()
+  }
+  const id = await c.enter(topicId)
+  const firstMark = deferred<Result<ReadPosition>>()
+  c.unreadApi.markRead.mockReturnValueOnce(firstMark.promise)
+  // Enter at position 1, hold mark 2 in flight, present 3 so it queues, then hide.
+  c.unread.presented(id, [2]); await flush()
+  c.unread.presented(id, [3]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  c.unread.visibility(false)
+  // Mark 2 persists and a baseline accepts position 2 while hidden.
+  firstMark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 2 })); await flush()
+  if (topicId === null) {
+    c.rows[0] = row({ as_of_seq: 3, read_seq: 2, main_unread_count: 1, unread_count: 1 })
+    c.unread.activitySnapshot([c.rows[0]]); await flush()
+    expect(c.unread.get('A').main).toMatchObject({ position: 2, unreadCount: 1 })
+  } else {
+    c.summaries.set(topicId, summary(topicId, 3, 2, 1))
+    c.unread.activityRead('A', topicId); await flush()
+    expect(c.unread.get('A').topics[topicId]).toMatchObject({ position: 2, unreadCount: 1 })
+  }
+  return { c, id }
+}
+it.each([['Channel main', null], ['Topic', 'T']] as const)(
+  'submits pre-hide seen read in a %s visit when returning and presenting only the entry-boundary row',
+  async (_label, topicId) => {
+    const { c, id } = await setupPreHideQueuedMark(topicId)
+    c.unread.visibility(true); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+    c.unread.presented(id, [1]); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2, 3])
+    const scope = topicId === null ? c.unread.get('A').main : c.unread.get('A').topics[topicId]
+    expect(scope).toMatchObject({ position: 3, unreadCount: 0 })
+    await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+  },
+)
+it.each([['Channel main', null], ['Topic', 'T']] as const)(
+  'submits pre-hide seen read in a %s visit when returning and presenting only a self-authored row',
+  async (_label, topicId) => {
+    const { c, id } = await setupPreHideQueuedMark(topicId, true)
+    c.unread.visibility(true); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+    c.unread.presented(id, [4]); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2, 3])
+    const scope = topicId === null ? c.unread.get('A').main : c.unread.get('A').topics[topicId]
+    expect(scope).toMatchObject({ position: 3, unreadCount: 0 })
+    await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+  },
+)
+it.each([['Channel main', null], ['Topic', 'T']] as const)(
+  'keeps pre-hide latch in a %s visit when returning with an empty presented list and counts recover',
+  async (_label, topicId) => {
+    const { c, id } = await setupPreHideQueuedMark(topicId)
+    c.unread.visibility(true); await flush()
+    c.unread.presented(id, []); await flush()
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+    if (topicId === null) {
+      c.unreadApi.listChannels.mockResolvedValueOnce(http(503))
+      void c.unread.refresh(); await flush()
+      expect(c.unread.get('A').main.unreadCount).toBeNull()
+      await vi.advanceTimersByTimeAsync(500); await flush()
+      expect(c.unread.get('A').main).toMatchObject({ position: 2, unreadCount: 1 })
+    } else {
+      c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
+      c.unread.activityRead('A', topicId); await flush()
+      expect(c.unread.get('A').topics[topicId].unreadCount).toBeNull()
+      await vi.advanceTimersByTimeAsync(500); await flush()
+      expect(c.unread.get('A').topics[topicId]).toMatchObject({ position: 2, unreadCount: 1 })
+    }
+    expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+    await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+  },
+)
+it('does not trigger a mark when a Topic visit leaves recovery without a fresh presentation', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter('T')
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
+  c.unread.activityRead('A', 'T'); await flush()
+  expect(c.unread.get('A').topics.T.unreadCount).toBeNull()
+  c.unread.presented(id, [2]); await flush()
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(500); await flush()
+  expect(c.unread.get('A').topics.T.unreadCount).toBe(1)
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  c.unread.presented(id, [2]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  expect(c.unread.get('A').topics.T.unreadCount).toBe(0)
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
 it('requires older projection coverage for first Unread and never marks across a window gap', async () => {
   const c = unreadClient()
   c.topicsApi.listTimeline.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: true, items: [{ kind: 'message', message: msg(3) }] }))

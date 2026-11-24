@@ -3,7 +3,8 @@
   import type { Navigation } from './navigation'
   import { navigationAdapter } from './navigation.svelte'
   import type { SearchPresentation } from './search-anchor.svelte'
-  import { createSubscriber } from 'svelte/reactivity'
+  import { createSubscriber, MediaQuery } from 'svelte/reactivity'
+  import { BREAKPOINT_QUERIES, resolveViewportClass, type ViewportClass } from './breakpoints'
   import { createAnnouncementController } from './announcements'
   import type { MentionName } from './mentions'
   import { senderName } from './authors'
@@ -17,7 +18,6 @@
     focusAfterPanelClose,
     focusIfVisible,
     focusTarget,
-    MOBILE_BREAKPOINT_PX,
     resolveChannelListNavigation,
     resolveMainTimelineFocusStatus,
     resolveSkipLinkTargetId,
@@ -184,7 +184,17 @@
   $effect(() => {
     if (shouldClosePanelForDm(selected?.kind, () => route?.panel)) nav.navigate({ type: 'close' })
   })
-  let viewportWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1280)
+  const phoneQuery = new MediaQuery(BREAKPOINT_QUERIES.phone, false)
+  const tabletQuery = new MediaQuery(BREAKPOINT_QUERIES.tablet, false)
+  const desktopQuery = new MediaQuery(BREAKPOINT_QUERIES.desktop, true)
+  const viewport = $derived<ViewportClass>(
+    resolveViewportClass({
+      phone: phoneQuery.current,
+      tablet: tabletQuery.current,
+      desktop: desktopQuery.current,
+    }),
+  )
+  const isPhone = $derived(viewport === 'phone')
 
   let channelListHeadingRef = $state<HTMLElement | null>(null)
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
@@ -218,11 +228,11 @@
   const searchOpen = $derived(Boolean(searchState?.open && !organizationUnavailable))
   const effectiveMobileLevel = $derived(resolveMobileLevel(route, () => searchOpen))
   const mainViewSelected = $derived(
-    viewportWidth >= MOBILE_BREAKPOINT_PX || effectiveMobileLevel === 'view',
+    !isPhone || effectiveMobileLevel === 'view',
   )
   const currentSkipTargetId = $derived(
     resolveSkipLinkTargetId({
-      viewportWidth,
+      viewport,
       mobileLevel: effectiveMobileLevel,
       panelOpen,
     }),
@@ -345,7 +355,7 @@
 
   $effect(() => {
     if (s.status !== 'ready' || !currentOrganizationId) return
-    nav.initialize({ organizationId: currentOrganizationId, channelId: viewportWidth < MOBILE_BREAKPOINT_PX ? null : s.selectedId, topicId: null, panel: null })
+    nav.initialize({ organizationId: currentOrganizationId, channelId: isPhone ? null : s.selectedId, topicId: null, panel: null })
   })
 
   $effect(() => {
@@ -591,7 +601,7 @@
     nav.navigate({
       type: 'topic',
       topicId,
-      phone: viewportWidth < MOBILE_BREAKPOINT_PX,
+      phone: isPhone,
     })
     if (wasSameTopic && currentUnread && (currentUnread.state.stopped || currentUnread.state.topics[topicId]?.stopped)) {
       void currentUnread.enter(topicId)
@@ -618,10 +628,10 @@
           channelId: selected.id,
         }),
       )
-      if (viewportWidth < MOBILE_BREAKPOINT_PX && route.panel) {
+      if (isPhone && route.panel) {
         navigated = Boolean(nav.navigate({ type: 'close' })) || navigated
       }
-    } else if (viewportWidth < MOBILE_BREAKPOINT_PX && panelOpen) {
+    } else if (isPhone && panelOpen) {
       focusTopicInputNext = true
       navigated = Boolean(nav.navigate({ type: 'close' }))
     }
@@ -653,11 +663,9 @@
   function closePanel() { nav.navigate({ type: 'close' }) }
   function togglePanel() { if (panelOpen) closePanel(); else openPanel() }
   function goToChannelList() {
-    const width = typeof window !== 'undefined' ? window.innerWidth : viewportWidth
-    viewportWidth = width
-    const next = resolveChannelListNavigation(width)
+    const next = resolveChannelListNavigation(viewport)
     drawerOpen = next.drawerOpen
-    if (width < MOBILE_BREAKPOINT_PX && nav.navigate({ type: 'list' })) {
+    if (isPhone && nav.navigate({ type: 'list' })) {
       return
     }
     void tick().then(() => {
@@ -727,7 +735,7 @@
     searchModel?.close()
     void tick().then(() => {
       const target =
-        viewportWidth < MOBILE_BREAKPOINT_PX && !route?.channelId
+        isPhone && !route?.channelId
           ? channelListSearchInputRef
           : searchInputRef
       focusTarget(target)
@@ -775,7 +783,6 @@
 </script>
 
 <svelte:window
-  bind:innerWidth={viewportWidth}
   onkeydown={handleWindowKeydown}
   onbeforeunload={handleBeforeUnload}
 />
@@ -796,7 +803,7 @@
         ariaLabel="チャンネル一覧"
         ariaExpanded={drawerOpen}
         onclick={() => {
-          if (viewportWidth < MOBILE_BREAKPOINT_PX) {
+          if (isPhone) {
             drawerOpen = false
             nav.navigate({ type: 'list' })
           } else {
@@ -824,7 +831,7 @@
       {currentOrganizationId}
       {organization}
       {organizationUnavailable}
-      showMobileSearch={viewportWidth < MOBILE_BREAKPOINT_PX && effectiveMobileLevel === 'channels' && Boolean(searchModel && searchState)}
+      showMobileSearch={isPhone && effectiveMobileLevel === 'channels' && Boolean(searchModel && searchState)}
       searchInput={searchState?.input ?? ''}
       {searchOpen}
       searchDisabled={organizationUnavailable || !currentOrganizationId}
@@ -930,7 +937,7 @@
       onloadmoresearch={() => { void searchModel?.loadMore() }}
       onretrysearch={() => { void searchModel?.retry() }}
       onbacktochannels={() => {
-        if (viewportWidth < MOBILE_BREAKPOINT_PX) nav.navigate({ type: 'list' })
+        if (isPhone) nav.navigate({ type: 'list' })
       }}
       onbacktochannel={() => nav.navigate({ type: 'topic-back' })}
       ontogglepanel={togglePanel}
@@ -954,7 +961,7 @@
         title={selected ? `${selected.kind === 'dm' ? '' : '# '}${conversationName}` : '詳細'}
         activeTab={activePanelTab}
         mode={route?.panel?.startsWith('reply:') ? 'reply' : 'tabs'}
-        showBack={!!nav.state.previousTab || viewportWidth < MOBILE_BREAKPOINT_PX}
+        showBack={!!nav.state.previousTab || isPhone}
         onback={() => nav.navigate({ type: selected?.kind !== 'dm' && nav.state.previousTab ? 'reply-back' : 'close' })}
         bind:headingRef={panelHeadingRef}
         onselecttab={(tab) => {
@@ -1092,7 +1099,7 @@
   }
 
   /* 960px - 1279px: right panel overlays main from the right (docs/ui.md §3) */
-  @media (min-width: 960px) and (max-width: 1279px) {
+  @media (960px <= width < 1280px) {
     .workspace,
     .workspace[data-panel-open='true'] {
       grid-template-columns: var(--rail-width) var(--channel-col-width) minmax(var(--main-min-width), 1fr);
@@ -1109,7 +1116,7 @@
   }
 
   /* 600px - 959px: channel column is a drawer; right panel overlays min(420px, 100%) (docs/ui.md §3) */
-  @media (min-width: 600px) and (max-width: 959px) {
+  @media (600px <= width < 960px) {
     .workspace,
     .workspace[data-panel-open='true'] {
       grid-template-columns: var(--rail-width) minmax(0, 1fr);
@@ -1140,7 +1147,7 @@
   }
 
   /* < 600px (phone): one screen at a time, bottom tab bar only at channels level (docs/ui.md §3) */
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .workspace,
     .workspace[data-panel-open='true'] {
       grid-template-columns: minmax(0, 1fr);

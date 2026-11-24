@@ -84,7 +84,7 @@
   color-scheme: dark;
 }
 
-@media (max-width: 599px) {
+@media (width < 600px) {
   :root {
     --touch-target: 44px;
   }

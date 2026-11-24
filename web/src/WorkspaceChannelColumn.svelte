@@ -310,7 +310,7 @@
     display: none;
   }
 
-  @media (max-width: 599px) {
+  @media (width < 600px) {
     .mobile-only {
       display: inline-flex;
     }
