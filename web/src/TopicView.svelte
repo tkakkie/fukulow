@@ -331,6 +331,7 @@
     if (enteredTarget && stopped) return
     let cancelled = false
     u.visibility(isDocumentVisible())
+    console.info(`D956 ${Math.round(performance.now())} topicview enter entered=${enteredTarget} stopped=${stopped} gen=${String(generation)}`)
     const promise = u.enter(tId)
     const syncVid = untrack(() =>
       u.state.entry?.scope.topicId === tId ? u.state.entry.id : undefined,
@@ -463,6 +464,7 @@
           }).catch(console.error)
           return
         }
+        console.info(`D956 ${Math.round(performance.now())} topicview scroll ${deferred.action} unread=${targetFirstUnreadId?.slice(0, 8)}`)
         applyScrollAction(deferred.action, deferred.anchor, targetFirstUnreadId)
         if (deferred.action === 'scroll_first_unread' && targetFirstUnreadId) {
           scrolledFirstUnreadId = targetFirstUnreadId

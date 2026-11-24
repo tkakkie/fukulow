@@ -49,8 +49,10 @@ async function revealVirtualRow(container: Locator, position: number): Promise<L
 
 
 // DIAGNOSTIC ONLY (#956): never merged.
+const diagLogs: string[] = []
 async function diag956(pages: Array<[string, Page]>, target?: Locator): Promise<string> {
   const out: string[] = []
+  out.push('logs:\n' + diagLogs.slice(-80).join('\n'))
   for (const [name, p] of pages) {
     out.push(name + ' ' + JSON.stringify(await p.evaluate(() => {
       const el = document.querySelector('#main-content .topic-view__scroll') as HTMLElement | null
@@ -60,7 +62,7 @@ async function diag956(pages: Array<[string, Page]>, target?: Locator): Promise<
         last: rows.at(-1)?.getAttribute('data-message-id'), lastPos: rows.at(-1)?.closest('[aria-posinset]')?.getAttribute('aria-posinset'),
         setsize: rows.at(-1)?.closest('[aria-setsize]')?.getAttribute('aria-setsize'), live: document.querySelector('[data-testid="live-status"]')?.getAttribute('data-live'),
         status: [...document.querySelectorAll('[role=status]')].map(e => e.textContent?.trim()).filter(Boolean).join('|').slice(0, 200),
-        url: location.pathname, rows: rows.map(r => (r.closest('[aria-posinset]')?.getAttribute('aria-posinset') ?? '?') + ':' + (r.getAttribute('data-message-id') ?? '').slice(0, 8) + ':' + ((r as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').slice(0, 40)),
+        now: Math.round(performance.now()), url: location.pathname, rows: rows.map(r => (r.closest('[aria-posinset]')?.getAttribute('aria-posinset') ?? '?') + ':' + (r.getAttribute('data-message-id') ?? '').slice(0, 8) + ':' + ((r as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').slice(0, 40)),
         panel: !!document.querySelector('#panel-content .reply-panel__scroll'), panelRows: document.querySelectorAll('#panel-content [data-message-id]').length }
     }).catch(e => String(e))))
     if (target && p === target.page()) {
@@ -419,6 +421,9 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
     const peer = await inviteAndSignInPeerViaUi(ownerPage, browser, baseURL!, 'member', suffix)
     peerContext = peer.context
     const peerPage = peer.page
+    diagLogs.length = 0
+    for (const [n, pg] of [['owner', ownerPage], ['peer', peerPage]] as const) pg.on('console', m => { if (m.text().startsWith('D956')) diagLogs.push(n + ' ' + m.text()) })
+    const mark = (label: string) => Promise.all([ownerPage, peerPage].map(pg => pg.evaluate(l => console.info(`D956 ${Math.round(performance.now())} mark ${l}`), label)))
 
     // Seed a Topic root Message with 51 replies (including descendants and siblings) so the chain
     // requires paging ("さらに返信を読み込む", limit 50: root + 49 replies, leaving 2 for the second page),
@@ -463,6 +468,7 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
     await expect(ownerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     await expect(peerPage.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
 
+    await mark('live')
     // Open from the latest Message without loading older Topic history. The chain
     // starts around that descendant; its older-history action restarts at the root.
     for (const p of [ownerPage, peerPage]) {
@@ -479,6 +485,7 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
       }
     }
 
+    await mark('panels-open')
     const ownerPanel = ownerPage.locator('#panel-content')
     const peerPanel = peerPage.locator('#panel-content')
     for (const panel of [ownerPanel, peerPanel]) {
@@ -505,6 +512,7 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
     }
 
     // Owner replies through the panel Composer; verify the Reply inherits the Topic and root, and appears live in Peer's panel and Topic view.
+    await mark('owner-post')
     const ownerReplyBody = `オーナーパネル返信-${suffix}`
     const ownerPostPromise = ownerPage.waitForResponse(
       (res) => new URL(res.url()).pathname.endsWith(`/channels/${channel.id}/messages`) && res.request().method() === 'POST',

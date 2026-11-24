@@ -278,6 +278,21 @@ export function createSync(options: SyncOptions) {
     const previousRequest = input.type === 'history_failed' ? core.request(input.request) : undefined
     const result = core.step(input)
     state = core.get()
+    // DIAGNOSTIC ONLY (#956)
+    {
+      const d: string[] = []
+      if (previous.historyEpoch !== state.historyEpoch) d.push(`epoch ${previous.historyEpoch}->${state.historyEpoch}`)
+      for (const [cid, now] of Object.entries(state.channels)) {
+        const old = previous.channels[cid]
+        if (!old) continue
+        if (old.cursor != null && now.cursor === null) d.push(`cursor-null ${cid.slice(0, 8)} was ${old.cursor}`)
+        if (old.watched !== now.watched) d.push(`watched ${cid.slice(0, 8)} ${old.watched}->${now.watched}`)
+        if (old.state !== now.state) d.push(`state ${cid.slice(0, 8)} ${old.state}->${now.state}`)
+        if (old.versionEpoch !== now.versionEpoch) d.push(`versionEpoch ${cid.slice(0, 8)}`)
+        if (old.moveEpoch !== now.moveEpoch) d.push(`moveEpoch ${cid.slice(0, 8)}`)
+      }
+      if (d.length) console.info(`D956 ${Math.round(performance.now())} sync ${input.type}${input.type === 'event' ? ':' + input.event.type : ''} ${d.join('; ')}`)
+    }
     const extraChanged = new Set<string>()
     const changedComposers = new Set<string>()
     const changedTopicComposers = new Set<string>()

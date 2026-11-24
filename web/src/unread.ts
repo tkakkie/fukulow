@@ -512,6 +512,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const archived = c.archived
         fence(id, c); channels.set(id, c = { ...channelState(), archived }); rebootstrap = true
         for (const b of oldBaselines) { c.ignoredBaselines.add(b); getScope(c, b.summary.id) }
+        if (oldVisit) console.info(`D956 ${Math.round(performance.now())} unread revisit resetHistory=${resetHistory} selected=${selected}`)
         if (oldVisit) visit = { id: Symbol(), scope: oldVisit.scope, boundary: null, unreadAtEntry: null, presented: new Set(), covered: [], needsPresentation: false }
         channelChanged = true
       }
@@ -696,6 +697,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       if (c.stopped) { fence(scope.channel, c); channels.set(scope.channel, c = channelState()); void refresh() }
       const s = getScope(c, scope.topicId), wasStopped = s.stopped || s.error
       s.stopped = false; s.error = wasStopped
+      console.info(`D956 ${Math.round(performance.now())} unread enter ${scope.topicId?.slice(0, 8) ?? 'main'}`)
       visit = { id: Symbol(), scope: { ...scope }, boundary: null, unreadAtEntry: null, presented: new Set(), covered: [], needsPresentation: false }
       const id = visit.id
       collect(scope.channel, c); resolveBoundary(); notify(scope.channel)
