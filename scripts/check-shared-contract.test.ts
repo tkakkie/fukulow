@@ -15,7 +15,7 @@ test('server, client-core, web and openapi.json agree on shared error codes and 
   for (const pair of pairs) t.diagnostic(pair)
   for (const expected of [
     'error code history_generation_changed: server = core = web',
-    'message body 4000: server/src/messages.rs = openapi.json SendMessageRequest/properties/body',
+    'message body 4000: server/src/messages/send.rs = openapi.json SendMessageRequest/properties/body',
     'Section name 60: openapi.json = web/src/section-ui.ts SECTION_NAME_MAX',
     'message body 4000: openapi.json = web/src/sync.ts MESSAGE_BODY_MAX',
     'error code channel not found: server = web',
@@ -51,8 +51,8 @@ test('a changed limit on one side fails', () => {
     'TOTAL_MESSAGE_LIMIT = 1500', 'TOTAL_MESSAGE_LIMIT = 1600')), /TOTAL_MESSAGE_LIMIT: web\/src\/protocol-types.ts differs/)
   assert.throws(() => checkContract(edit('web/src/section-ui.ts',
     'SECTION_NAME_MAX = 60', 'SECTION_NAME_MAX = 61')), /Section name: web\/src\/section-ui.ts SECTION_NAME_MAX differs/)
-  assert.throws(() => checkContract(edit('server/src/messages.rs',
-    'self.body.chars().count() > 4000', 'self.body.chars().count() > 5000')), /message body: server\/src\/messages.rs allows 5000/)
+  assert.throws(() => checkContract(edit('server/src/messages/send.rs',
+    'self.body.chars().count() > 4000', 'self.body.chars().count() > 5000')), /message body: server\/src\/messages\/send.rs allows 5000/)
   assert.throws(() => checkContract(edit('server/src/channels.rs',
     'name.chars().count() > 128', 'name.chars().count() > 100')), /Channel name: server\/src\/channels.rs allows 100/)
   assert.throws(() => checkContract(edit('web/src/sync.ts',
