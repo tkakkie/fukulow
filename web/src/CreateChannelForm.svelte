@@ -10,7 +10,7 @@
     draft = local,
     disabled = false,
   }: {
-    oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null>
+    oncreate: (name: string, visibility: ChannelVisibility) => Promise<string | null | false>
     draft?: typeof local
     disabled?: boolean
   } = $props()
@@ -26,6 +26,7 @@
     draft.busy = true
     const err = await oncreate(draft.name, draft.visibility)
     draft.busy = false
+    if (err === false) return
     draft.error = err ?? ''
     if (!err) {
       draft.name = ''
@@ -57,7 +58,6 @@
   .create-channel-form {
     display: grid;
     gap: var(--space-8);
-    padding-top: var(--space-12);
     min-width: 0;
   }
 

@@ -1,5 +1,5 @@
 import { completeCountFields } from './unread-counts'
-import { createActivity, createActivityTarget, type ActivityTarget } from './activity'
+import { createActivity, createActivityTarget, type ActivityTarget, type Invalidation } from './activity'
 import { createNavigationTargets } from './navigation-targets'
 import { createSearchAnchor, SEARCH_WINDOW_LIMIT } from './search-anchor'
 import { createDefaultSearchSource } from './search-source'
@@ -36,7 +36,7 @@ export type SessionOptions = {
   sectionsApi?: SectionsApi
   initialRole?: api.Role
   onIdentity?: (identity: api.Identity) => void
-  onIdentityInvalidated?: () => void
+  onIdentityInvalidated?: (reason: Invalidation) => void
   sync?: Partial<SyncOptions>
 }
 
@@ -276,11 +276,12 @@ export function createSession(options: SessionOptions) {
       activity.invalidateMemberLists()
       options.onIdentity?.(identity)
     },
-    hide: () => {
+    hide: reason => {
       if (listAccess !== null) listAccess = listAccess === 'guest' ? null : 'revalidating'
-      options.onIdentityInvalidated?.()
+      options.onIdentityInvalidated?.(reason)
     },
     error: () => {
+      options.onIdentityInvalidated?.('access')
       if (listAccess === null) return
       listAccess = null
       activity.invalidateMemberLists()

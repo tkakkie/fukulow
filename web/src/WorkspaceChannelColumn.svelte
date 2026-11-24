@@ -113,7 +113,7 @@
     onselectchannel: (id: string) => void
     onselecttopic?: (topicId: string) => void
     onopenalltopics?: (opener: HTMLElement | null) => void
-    oncreatechannel: (name: string, visibility: ChannelVisibility) => Promise<string | null>
+    oncreatechannel: (name: string, visibility: ChannelVisibility) => Promise<string | null | false>
     onholdarchived: () => () => void
     onretryarchived: () => void
     ondmmore?: () => void
@@ -165,6 +165,9 @@
 </div>
 
 <div class="channel-column__scroll">
+  {#if !organizationUnavailable && showCreateChannel}
+    <CreateChannelForm oncreate={oncreatechannel} draft={createChannelDraft} disabled={createChannelDisabled} />
+  {/if}
   {#if !organizationUnavailable && (channelListStatus === 'error' || (channelListStatus === 'loading' && channels.length === 0 && channelListTimedOut))}
     <StatusBanner
       tone="danger"
@@ -194,9 +197,6 @@
     {onselecttopic}
     {onopenalltopics}
   />
-  {#if !organizationUnavailable && showCreateChannel}
-    <CreateChannelForm oncreate={oncreatechannel} draft={createChannelDraft} disabled={createChannelDisabled} />
-  {/if}
   <ArchivedChannelList
     list={archivedList}
     {selectedId}

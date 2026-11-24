@@ -212,5 +212,136 @@ describe('Channel creation visibility', () => {
       expect(host.querySelector('input[name="channel_name"]')!.value).toBe('入力中')
     } finally { await unmount(instance); navigation.destroy(); raw.close() }
   })
+
+  it('keeps the submit button enabled during no-evidence revalidation, holds submission without POST until confirmed allowed, and sends the draft once', async () => {
+    const props = $state({ allowed: true as boolean | 'revalidating' | null })
+    const net = fakeNetwork()
+    const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.lists[0]!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }))
+    const navigation = createNavigation({
+      location: { href: 'http://localhost/' }, history: { state: null, pushState() {}, replaceState() {} },
+      innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, get canCreateChannels() { return props.allowed },
+      session: { channels: channelsAdapter(raw.channels), sync: syncAdapter(raw.sync),
+        topics: id => topicsAdapter(raw.topics, id), close: raw.close },
+    } })
+    try {
+      await settle()
+      const input = host.querySelector('input[name="channel_name"]')!
+      input.value = '保留チャンネル'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      const privateRadio = host.querySelector('input[value="private"]')!
+      privateRadio.checked = true
+      privateRadio.dispatchEvent(new MiniDomEvent('change', { bubbles: true }))
+      await settle()
+
+      // No-evidence revalidation keeps the button enabled.
+      props.allowed = 'revalidating'
+      await settle()
+      const button = buttonsByText(host, 'チャンネルを作成')[0]!
+      expect(button.disabled).toBe(false)
+
+      // Submitting during revalidation makes the form busy and sends no POST yet.
+      button.click()
+      await settle()
+      expect(button.disabled).toBe(true)
+      expect(net.creates).toHaveLength(0)
+
+      // Repeated submit events while held do not queue a second request.
+      host.querySelector('form.create-channel-form')!.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+      await settle()
+      expect(net.creates).toHaveLength(0)
+
+      // Once confirmed allowed, the held draft is sent exactly once.
+      props.allowed = true
+      await settle()
+      expect(net.creates).toHaveLength(1)
+      expect(net.creates[0]!.name).toBe('保留チャンネル')
+      net.creates[0]!.resolve(ok({ ...channel('c-new', '保留チャンネル'), visibility: 'private' }))
+      await settle()
+      expect(input.value).toBe('')
+    } finally { await unmount(instance); navigation.destroy(); raw.close() }
+  })
+
+  it('holds submission during no-evidence revalidation and removes the form without POST on a confirmed denial', async () => {
+    const props = $state({ allowed: true as boolean | 'revalidating' | null })
+    const net = fakeNetwork()
+    const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    net.lists[0]!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }))
+    const navigation = createNavigation({
+      location: { href: 'http://localhost/' }, history: { state: null, pushState() {}, replaceState() {} },
+      innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, get canCreateChannels() { return props.allowed },
+      session: { channels: channelsAdapter(raw.channels), sync: syncAdapter(raw.sync),
+        topics: id => topicsAdapter(raw.topics, id), close: raw.close },
+    } })
+    try {
+      await settle()
+      const input = host.querySelector('input[name="channel_name"]')!
+      input.value = '拒否されるチャンネル'
+      input.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
+      await settle()
+
+      props.allowed = 'revalidating'
+      await settle()
+      const button = buttonsByText(host, 'チャンネルを作成')[0]!
+      expect(button.disabled).toBe(false)
+      button.click()
+      await settle()
+      expect(net.creates).toHaveLength(0)
+
+      // Confirmed denial removes the form and never sends POST /channels.
+      props.allowed = false
+      await settle()
+      expect(host.querySelector('form.create-channel-form')).toBeNull()
+      expect(net.creates).toHaveLength(0)
+
+      // Re-allowing later preserves the unsent draft rather than wiping it.
+      props.allowed = true
+      await settle()
+      expect(host.querySelector('input[name="channel_name"]')!.value).toBe('拒否されるチャンネル')
+      expect(net.creates).toHaveLength(0)
+    } finally { await unmount(instance); navigation.destroy(); raw.close() }
+  })
+
+  it('places the creation form before the channel-list skeleton so initial list load does not shift it', async () => {
+    const net = fakeNetwork()
+    const raw = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
+    const navigation = createNavigation({
+      location: { href: 'http://localhost/' }, history: { state: null, pushState() {}, replaceState() {} },
+      innerWidth: 1280, addEventListener() {}, removeEventListener() {},
+    } as unknown as NavigationBrowser)
+    const host = dom.doc.createElement('div')
+    dom.doc.body.appendChild(host)
+    const instance = mount(Workspace, { target: host as unknown as Element, props: {
+      navigation, canCreateChannels: true,
+      session: { channels: channelsAdapter(raw.channels), sync: syncAdapter(raw.sync),
+        topics: id => topicsAdapter(raw.topics, id), close: raw.close },
+    } })
+    try {
+      await settle()
+      const scroll = host.querySelector('.channel-column__scroll')!
+      const form = scroll.querySelector('form.create-channel-form')!
+      const skeleton = scroll.querySelector('[aria-busy="true"]')!
+      expect(form).not.toBeNull()
+      expect(skeleton).not.toBeNull()
+      const childrenBefore = scroll.children
+      expect(childrenBefore.indexOf(form)).toBe(0)
+      expect(childrenBefore.indexOf(form)).toBeLessThan(childrenBefore.indexOf(skeleton))
+
+      net.lists[0]!.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('a', 'general')] }))
+      await settle()
+      expect(scroll.querySelector('[aria-busy="true"]')).toBeNull()
+      expect(scroll.children.indexOf(form)).toBe(0)
+    } finally { await unmount(instance); navigation.destroy(); raw.close() }
+  })
 })
 

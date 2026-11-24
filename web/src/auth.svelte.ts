@@ -1,4 +1,4 @@
-import type { ActivityTarget } from './activity'
+import type { ActivityTarget, Invalidation } from './activity'
 import { createSubscriber } from 'svelte/reactivity'
 import { createAuthOperations } from './auth-operations'
 import { createAccountSecurity } from './account-security'
@@ -26,6 +26,7 @@ import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 import type { SearchSource } from './search-source'
 
 export type { AuthState } from './auth'
+export type CapabilitiesState = 'confirmed' | 'revalidating' | 'hidden'
 export type SessionModel = {
   holdActivity?(key: string, target: ActivityTarget): unknown
   dms?: DmsAdapter
@@ -55,13 +56,13 @@ export type AuthDeps = {
   coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null, reason?: Invalidation) => void, initialRole?: Role, accountSignal?: AbortSignal): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
   openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal) {
-    const session = createSession({ selfId, onEnded, organizationId, initialRole, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+    const session = createSession({ selfId, onEnded, organizationId, initialRole, onIdentity, accountSignal, onIdentityInvalidated: reason => onIdentity?.(null, reason), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
@@ -102,7 +103,7 @@ const defaults: AuthDeps = {
 export function createAuth(deps: AuthDeps = defaults) {
   let view = $state<AuthState>({ screen: 'loading' })
   let organization = $state<Identity | null>(null)
-  let capabilitiesPending = $state(false)
+  let capabilitiesState = $state<CapabilitiesState>('confirmed')
   let selectedOrganizationId = $state('')
   let organizationStatus = $state<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
   let session: SessionModel | null = null
@@ -123,7 +124,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     members?.close(); members = null
     clearMessageFormatCache()
     organization = null
-    capabilitiesPending = false
+    capabilitiesState = 'confirmed'
     selectionGeneration++
     changes++
   }
@@ -152,12 +153,18 @@ export function createAuth(deps: AuthDeps = defaults) {
       if (account !== accountGeneration || selection !== selectionGeneration) return
     }
     organization = result.data
-    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
+    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), (identity, reason) => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
-      capabilitiesPending = identity === null
-      if (identity) organization = identity
-      else if (organization) organization = { ...organization, organization: { ...organization.organization,
-        capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
+      if (identity) {
+        capabilitiesState = 'confirmed'
+        organization = identity
+      } else if (reason === 'reconcile' || reason === 'periodic') {
+        if (capabilitiesState !== 'hidden') capabilitiesState = 'revalidating'
+      } else {
+        capabilitiesState = 'hidden'
+        if (organization) organization = { ...organization, organization: { ...organization.organization,
+          capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
+      }
     }, result.data.member.role, accountRequests.signal)
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
@@ -215,7 +222,8 @@ export function createAuth(deps: AuthDeps = defaults) {
     get error() { subscribe(); return operations.get().error },
     get busy() { subscribe(); return operations.get().busy },
     get organization() { return organization },
-    get capabilitiesPending() { return capabilitiesPending },
+    get capabilitiesPending() { return capabilitiesState !== 'confirmed' },
+    get capabilitiesState() { return capabilitiesState },
     get members() { return members },
     get security() { return security },
     get selectedOrganizationId() { return selectedOrganizationId },

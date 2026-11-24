@@ -1340,3 +1340,49 @@ it('sign-out, expiry, 401, Account replacement and Organization switch clear the
     if (s.auth.view.screen === 'app') await s.auth.signOut()
   }
 })
+
+it('keeps confirmed capabilities shown on reconcile/periodic revalidation, hides on access notice or probe error, and never un-hides while hidden', async () => {
+  let onIdentity!: (identity: ReturnType<typeof member> | null, reason?: import('./activity').Invalidation) => void
+  const s = stack({
+    openSession(selfId, onEnded, organizationId, drafts, identityCb, _initialRole, accountSignal): SessionModel {
+      onIdentity = identityCb as typeof onIdentity
+      const net = fakeNetwork()
+      const options = net.options(selfId)
+      const session = createSession({ selfId, onEnded, ...options, organizationId, accountSignal, sync: { ...options.sync, drafts } })
+      return { channels: channelsAdapter(session.channels), sync: syncAdapter(session.sync), topics: id => topicsAdapter(session.topics, id), close: session.close }
+    },
+  })
+  await signInAs(s, 'owner')
+  expect(s.auth.capabilitiesState).toBe('confirmed')
+  expect(s.auth.organization!.organization.capabilities.can_create_channels.allowed).toBe(true)
+  expect(s.auth.organization!.organization.capabilities.can_invite.allowed).toBe(true)
+
+  // No-evidence revalidation (reconcile / periodic) keeps already-confirmed capabilities shown.
+  for (const reason of ['reconcile', 'periodic'] as const) {
+    onIdentity(null, reason)
+    expect(s.auth.capabilitiesState, reason).toBe('revalidating')
+    expect(s.auth.capabilitiesPending, reason).toBe(true)
+    expect(s.auth.organization!.organization.capabilities.can_create_channels.allowed, reason).toBe(true)
+    expect(s.auth.organization!.organization.capabilities.can_invite.allowed, reason).toBe(true)
+    onIdentity(member('owner'))
+    expect(s.auth.capabilitiesState, reason).toBe('confirmed')
+    expect(s.auth.capabilitiesPending, reason).toBe(false)
+  }
+
+  // Evidence-based invalidation (access) hides capabilities, and a subsequent reconcile does not un-hide them.
+  onIdentity(null, 'access')
+  expect(s.auth.capabilitiesState).toBe('hidden')
+  expect(s.auth.capabilitiesPending).toBe(true)
+  expect(s.auth.organization!.organization.capabilities.can_create_channels.allowed).toBe(false)
+  expect(s.auth.organization!.organization.capabilities.can_invite.allowed).toBe(false)
+
+  onIdentity(null, 'reconcile')
+  expect(s.auth.capabilitiesState).toBe('hidden')
+  expect(s.auth.organization!.organization.capabilities.can_create_channels.allowed).toBe(false)
+
+  // Confirmed identity restores capabilities.
+  onIdentity(member('owner'))
+  expect(s.auth.capabilitiesState).toBe('confirmed')
+  expect(s.auth.organization!.organization.capabilities.can_create_channels.allowed).toBe(true)
+  await s.auth.signOut()
+})

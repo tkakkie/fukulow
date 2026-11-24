@@ -10,7 +10,7 @@ export function createActivityTarget<T>(options: {
   load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   covers?(value: T): boolean
-  hide?(): void
+  hide?(reason: Invalidation): void
   error?(result: Exclude<Result<T>, { ok: true }>): void
   terminal?(result: Result<T>): boolean
   random?: () => number
@@ -80,7 +80,7 @@ export function createActivityTarget<T>(options: {
   }
   function invalidate(reason: Invalidation = 'notice', delay = 200) {
     if (closed) return
-    if (reason !== 'notice') { fence(); options.hide?.() }
+    if (reason !== 'notice') { fence(); options.hide?.(reason) }
     stopped = false; failure = undefined; dirty = true
     if (inFlight) { queued = true; return }
     // Multi-lane admission may make other work eligible before a retained retry deadline.

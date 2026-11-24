@@ -106,12 +106,13 @@ test('capability reconciliation preserves creation focus between selection and t
   // fill() focuses/selects first, then inserts text in a separate browser command.
   // Reconcile exactly between those commands, before there is any draft to retain.
   await input.focus()
+  // Evidence-based invalidation (members_changed) keeps focus, disables submit and blocks Enter.
   let releaseIdentity!: () => void
-  const identityGate = new Promise<void>(resolve => { releaseIdentity = resolve })
+  let identityGate = new Promise<void>(resolve => { releaseIdentity = resolve })
   await page.route(`**/api/v1/orgs/${org}/me`, async route => { await identityGate; await route.continue() })
   try {
     const refreshing = page.waitForRequest(`**/api/v1/orgs/${org}/me`)
-    socket!.send(JSON.stringify({ type: 'activity_reset' } satisfies ServerEvent))
+    socket!.send(JSON.stringify({ type: 'members_changed' } satisfies ServerEvent))
     await refreshing
     await expect(input).toBeFocused()
     await page.keyboard.insertText(name)
@@ -121,20 +122,35 @@ test('capability reconciliation preserves creation focus between selection and t
   } finally { releaseIdentity() }
   await expect(page.getByLabel('チャンネル名')).toHaveValue(name)
   await expect(page.getByRole('radio', { name: '非公開', exact: true })).toBeChecked()
+  await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeEnabled()
 
+  // No-evidence revalidation (activity_reset) keeps the button enabled, holds the submit until
+  // /me settles (no POST while pending), then sends the draft once allowed.
+  let postCount = 0
   let releaseCreation!: () => void
   const creationGate = new Promise<void>(resolve => { releaseCreation = resolve })
   await page.route(`**/api/v1/orgs/${org}/channels`, async route => {
     if (route.request().method() !== 'POST') return route.continue()
+    postCount++
     const response = await route.fetch()
     await creationGate
     await route.fulfill({ response })
   })
+  identityGate = new Promise<void>(resolve => { releaseIdentity = resolve })
   const row = page.getByRole('navigation', { name: 'チャンネル' }).getByRole('button', { name })
-  await page.getByRole('button', { name: 'チャンネルを作成' }).click()
+  try {
+    const refreshing = page.waitForRequest(`**/api/v1/orgs/${org}/me`)
+    socket!.send(JSON.stringify({ type: 'activity_reset' } satisfies ServerEvent))
+    await refreshing
+    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeEnabled()
+    await page.getByRole('button', { name: 'チャンネルを作成' }).click()
+    await expect(page.getByRole('button', { name: 'チャンネルを作成' })).toBeDisabled()
+    expect(postCount).toBe(0)
+  } finally { releaseIdentity() }
   try {
     // The committed mutation is discovered through its notice while its HTTP acknowledgement is held.
     await expect(row).toHaveCount(1)
+    expect(postCount).toBe(1)
   } finally { releaseCreation() }
   await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
   await expect(row).toHaveCount(1)

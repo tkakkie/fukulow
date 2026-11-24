@@ -63,7 +63,7 @@
   }: {
     navigation: Navigation
     session: SessionModel
-    canCreateChannels?: boolean | null
+    canCreateChannels?: boolean | 'revalidating' | null
     members?: ReturnType<typeof membersAdapter> | null
     organization?: Identity | null
     organizations?: Organization[]
@@ -82,8 +82,30 @@
   const channels = $derived(session.channels)
   const channelCreation = $state({ name: '', visibility: 'public' as Channel['visibility'], error: '', busy: false })
   let creationAllowed = $state(false)
+  let resolvePendingCreation: ((allowed: boolean) => void) | null = null
   $effect(() => {
-    if (canCreateChannels !== null) creationAllowed = canCreateChannels
+    if (canCreateChannels === true || canCreateChannels === false) {
+      creationAllowed = canCreateChannels
+      if (resolvePendingCreation) {
+        const resolve = resolvePendingCreation
+        resolvePendingCreation = null
+        resolve(canCreateChannels)
+      }
+    }
+  })
+  $effect(() => {
+    if (organizationUnavailable && resolvePendingCreation) {
+      const resolve = resolvePendingCreation
+      resolvePendingCreation = null
+      resolve(false)
+    }
+  })
+  $effect(() => () => {
+    if (resolvePendingCreation) {
+      const resolve = resolvePendingCreation
+      resolvePendingCreation = null
+      resolve(false)
+    }
   })
   // One adapter read per derived: every read of the adapter registers a listener effect.
   const s = $derived(channels.state)
@@ -643,7 +665,14 @@
     }
   }
 
-  async function handleCreateChannel(name: string, visibility: 'public' | 'private'): Promise<string | null> {
+  async function handleCreateChannel(name: string, visibility: 'public' | 'private'): Promise<string | null | false> {
+    if (canCreateChannels !== true) {
+      if (canCreateChannels !== 'revalidating') return false
+      const allowed = await new Promise<boolean>((resolve) => {
+        resolvePendingCreation = resolve
+      })
+      if (!allowed) return false
+    }
     const result = await channels.create(name, visibility)
     if ('error' in result) return result.error
     handleSelectChannel(result.channel.id)
@@ -847,8 +876,8 @@
       {channelMentionUnreadCount}
       topicUnreadCounts={selectedChannelUnreadState?.topics ?? {}}
       sections={session.sections}
-      showCreateChannel={Boolean(canCreateChannels ?? creationAllowed)}
-      createChannelDisabled={canCreateChannels !== true}
+      showCreateChannel={canCreateChannels === true || canCreateChannels === 'revalidating' || (canCreateChannels === null && creationAllowed)}
+      createChannelDisabled={canCreateChannels !== true && canCreateChannels !== 'revalidating'}
       createChannelDraft={channelCreation}
       archivedList={s.archivedList}
       dms={dmState && session.dms

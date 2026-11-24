@@ -955,3 +955,48 @@ it('composes unread, replies and topics over a single sync instance and fences r
     session.close()
   }
 })
+
+it('forwards capability invalidation reasons (reconcile, periodic, access) and escalates probe failure to access', async () => {
+  vi.useFakeTimers()
+  const net = fakeNetwork()
+  const identity: api.Identity = {
+    member: { id: 'me', name: '本人', role: 'member' },
+    organization: {
+      organization_id: 'org', name: '組織',
+      capabilities: {
+        can_invite: { allowed: false }, can_manage_roles: { allowed: false },
+        can_deactivate_members: { allowed: false }, can_create_channels: { allowed: true },
+      },
+    },
+  }
+  const getMe = vi.spyOn(api, 'getOrganizationMe')
+    .mockResolvedValueOnce(ok(identity))
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 503, retryAfterMs: 1_000 })
+    .mockResolvedValue(ok(identity))
+  const reasons: string[] = []
+  const options = net.options()
+  const session = createSession({
+    selfId: 'me', onEnded: vi.fn(), ...options,
+    sync: { ...options.sync, random: () => 0.5 }, initialRole: 'member',
+    onIdentityInvalidated: reason => reasons.push(reason),
+  })
+  try {
+    net.socket.onReady()
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [] }))
+    net.socket.onEvent({ type: 'activity_ready' })
+    expect(reasons).toEqual(['reconcile'])
+    await vi.advanceTimersByTimeAsync(200)
+
+    // Periodic fires at 0.5 * 30_000 = 15_000 ms (14_800 ms after t=200); its /me returns 503 and escalates to 'access'.
+    await vi.advanceTimersByTimeAsync(14_800)
+    expect(reasons).toEqual(['reconcile', 'periodic'])
+    await vi.advanceTimersByTimeAsync(200)
+    expect(reasons).toEqual(['reconcile', 'periodic', 'access'])
+
+    // members_changed invalidates with 'access'.
+    net.socket.onEvent({ type: 'members_changed' })
+    expect(reasons).toEqual(['reconcile', 'periodic', 'access', 'access'])
+  } finally {
+    session.close(); getMe.mockRestore(); vi.useRealTimers()
+  }
+})
