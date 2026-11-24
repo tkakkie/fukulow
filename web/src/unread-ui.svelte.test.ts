@@ -93,7 +93,6 @@ describe('Unread badges, enter/leave lifecycle and recovery', () => {
     let href = '/o/org-1/c/c1?panel=topics'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: { get href() { return href } } as Location,
       history: {
         get state() { return historyState },
@@ -265,7 +264,6 @@ describe('Unread badges, enter/leave lifecycle and recovery', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: { get href() { return href } } as Location,
       history: {
         get state() { return historyState },
@@ -450,7 +448,6 @@ describe('Unread badges, enter/leave lifecycle and recovery', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: { get href() { return href } } as Location,
       history: {
         get state() { return historyState },
@@ -669,7 +666,6 @@ describe('Unread badges, enter/leave lifecycle and recovery', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: { get href() { return href } } as Location,
       history: {
         get state() { return historyState },
@@ -779,7 +775,6 @@ describe('Unread badges, enter/leave lifecycle and recovery', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: { get href() { return href } } as Location,
       history: {
         get state() { return historyState },
@@ -936,7 +931,6 @@ describe('Unread badges, enter/leave lifecycle and recovery', () => {
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 375,
       location: { get href() { return href } } as Location,
       history: {
         get state() { return historyState },

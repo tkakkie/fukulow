@@ -11,6 +11,9 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "support/pools.rs"]
+mod test_support;
+
 const MIGRATION: &str = include_str!("../migrations/202611100146_account_members.sql");
 const PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$MDEyMzQ1Njc4OWFiY2RlZg$gy5SuVm5Z7Vw7keB9se9p87QGcomaseB/S2U1OhTsM0";
 
@@ -60,30 +63,32 @@ async fn schema_snapshot(pool: &PgPool) -> Vec<(String, String, String, String)>
     sqlx::query_as("SELECT table_name::text,column_name::text,data_type::text,is_nullable::text FROM information_schema.columns WHERE table_schema='public' ORDER BY table_name,ordinal_position").fetch_all(pool).await.unwrap()
 }
 
-#[sqlx::test(migrations = false)]
-async fn account_migration_preserves_single_organization_and_requires_new_sign_in(pool: PgPool) {
-    old_schema(&pool).await;
-    let (organization, member, old_token) = old_member(&pool, "owner@example.com").await;
+#[fukulow_test::test(migrations = false)]
+async fn account_migration_preserves_single_organization_and_requires_new_sign_in(admin: PgPool) {
+    old_schema(&admin).await;
+    let (organization, member, old_token) = old_member(&admin, "owner@example.com").await;
     let channel = Uuid::new_v4();
     let message = Uuid::new_v4();
-    sqlx::query("INSERT INTO channels (organization_id,id,name,visibility) VALUES ($1,$2,'History','private')").bind(organization).bind(channel).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO channels (organization_id,id,name,visibility) VALUES ($1,$2,'History','private')").bind(organization).bind(channel).execute(&admin).await.unwrap();
     sqlx::query(
         "INSERT INTO channel_members (organization_id,channel_id,member_id) VALUES ($1,$2,$3)",
     )
     .bind(organization)
     .bind(channel)
     .bind(member)
-    .execute(&pool)
+    .execute(&admin)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) VALUES ($1,$2,$3,1,$4,$5,'Historical message')").bind(organization).bind(message).bind(channel).bind(member).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
-    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO messages (organization_id,id,channel_id,seq,sender,client_message_id,body) VALUES ($1,$2,$3,1,$4,$5,'Historical message')").bind(organization).bind(message).bind(channel).bind(member).bind(Uuid::new_v4()).execute(&admin).await.unwrap();
+    let mut transaction = admin.begin().await.unwrap();
     sqlx::raw_sql(MIGRATION)
         .execute(&mut *transaction)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    let row:(Uuid,Uuid,String,String,String)=sqlx::query_as("SELECT u.id,u.account_id,u.name,u.role,a.email FROM users u JOIN accounts a ON a.id=u.account_id WHERE u.organization_id=$1").bind(organization).fetch_one(&pool).await.unwrap();
+    // This migration predates tenant RLS. Keep its schema and use production grants.
+    let pools = test_support::TestPools::new(admin).await;
+    let row:(Uuid,Uuid,String,String,String)=sqlx::query_as("SELECT u.id,u.account_id,u.name,u.role,a.email FROM users u JOIN accounts a ON a.id=u.account_id WHERE u.organization_id=$1").bind(organization).fetch_one(&pools.admin).await.unwrap();
     assert_eq!(row.0, member);
     assert_eq!(
         (row.2, row.3, row.4),
@@ -93,10 +98,10 @@ async fn account_migration_preserves_single_organization_and_requires_new_sign_i
             "owner@example.com".into()
         )
     );
-    let preserved:(Uuid,Uuid)=sqlx::query_as("SELECT m.sender,cm.member_id FROM messages m JOIN channel_members cm USING (organization_id,channel_id) WHERE m.id=$1").bind(message).fetch_one(&pool).await.unwrap();
+    let preserved:(Uuid,Uuid)=sqlx::query_as("SELECT m.sender,cm.member_id FROM messages m JOIN channel_members cm USING (organization_id,channel_id) WHERE m.id=$1").bind(message).fetch_one(&pools.admin).await.unwrap();
     assert_eq!(preserved, (member, member));
     let app = app(AppState {
-        pool: pool.clone(),
+        pool: pools.app,
         cookie_secure: false,
         setup_token: "setup-token-test-only".into(),
         sign_in_throttle: Default::default(),

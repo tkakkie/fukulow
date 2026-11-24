@@ -22,10 +22,11 @@ export function createRowWindow(update: (range: RowRange) => void, visible: () =
   const listTop = () => root && list ? (list.offsetTop ?? 0) - (root.offsetTop ?? 0) : 0
   const relativeTop = () => Math.max(0, (root?.scrollTop ?? 0) - listTop())
   const anchor = () => {
-    const top = relativeTop()
+    const rawTop = (root?.scrollTop ?? 0) - listTop()
+    const top = Math.max(0, rawTop)
     let index = 0
     while (index + 1 < offsets.length && offsets[index + 1] <= top) index++
-    return { id: ids[index], offset: top - offsets[index] }
+    return { id: ids[index], offset: rawTop - offsets[index] }
   }
   const refresh = () => {
     const next = rowRange(offsets, relativeTop(), root?.clientHeight || 640)
@@ -38,7 +39,7 @@ export function createRowWindow(update: (range: RowRange) => void, visible: () =
     for (const id of ids) offsets.push(offsets.at(-1)! + (heights.get(id) ?? ROW_ESTIMATE) + 4)
     if (root && saved?.id) {
       const index = ids.indexOf(saved.id)
-      if (index >= 0) root.scrollTop = listTop() + offsets[index] + saved.offset
+      if (index >= 0) root.scrollTop = Math.max(0, listTop() + offsets[index] + saved.offset)
     }
     refresh()
     laidOut()

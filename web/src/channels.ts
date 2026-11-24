@@ -1,4 +1,5 @@
 import { completeCountFields } from './unread-counts'
+import { sessionEndedMessage } from './auth'
 import { createActivityTarget, type Activity } from './activity'
 import { isOrganizationUnavailable, type Channel, type ChannelList, type ChannelVisibility, type CreateChannelRequest, type Result, type UpdateChannelRequest } from './api'
 
@@ -33,8 +34,6 @@ export function channelError(r: Extract<Result<unknown>, { ok: false }>): string
   if (r.status === 409) return '同じ名前のチャンネルがすでにあります。'
   return genericError
 }
-
-const sessionEndedError = 'セッションが終了しました。'
 
 function updateError(r: Extract<Result<unknown>, { ok: false }>): string {
   if (r.kind === 'network') return channelError(r)
@@ -194,10 +193,10 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   const release = target && activity?.hold('channels', target)
   const isOrdinary = (id: string) => (id === state.selectedId && selectedKind === 'channel') || state.channels.some(c => c.id === id) || !!state.archivedList?.channels.some(c => c.id === id)
   async function update(id: string, body: UpdateChannelRequest): Promise<string | null> {
-    if (closed) return sessionEndedError
+    if (closed) return sessionEndedMessage
     if (!api.updateChannel) return genericError
     const result = await api.updateChannel(id, body)
-    if (closed) return sessionEndedError
+    if (closed) return sessionEndedMessage
     if (!result.ok) return updateError(result)
     activity?.notice({ type: 'channel_list_changed' })
     return null
@@ -295,7 +294,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     /** Creates the channel and selects it; returns an error message on failure. The name is sent unchanged (#72: the server rejects surrounding whitespace; never trim here). */
     async create(req: CreateChannelRequest): Promise<{ error: string } | { channel: Channel }> {
       const r = await api.createChannel(req)
-      if (closed) return { error: sessionEndedError }
+      if (closed) return { error: sessionEndedMessage }
       if (!r.ok) return { error: channelError(r) }
       generation++
       target?.invalidate('access')

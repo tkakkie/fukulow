@@ -559,7 +559,6 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md ยง3, ย
     let href = '/o/org-1/c/c1'
     let historyState: unknown = null
     const browser: NavigationBrowser = {
-      innerWidth: 1280,
       location: {
         get href() {
           return href
