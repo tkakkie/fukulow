@@ -338,17 +338,7 @@ impl Step<'_> {
                     end: seq,
                 }),
         );
-        ranges.sort_by_key(|r| r.start);
-        let mut merged: Vec<Range> = Vec::new();
-        for range in ranges {
-            if let Some(last) = merged.last_mut()
-                && range.start <= last.end + 1
-            {
-                last.end = last.end.max(range.end);
-            } else {
-                merged.push(range);
-            }
-        }
+        let mut merged = coalesce(ranges);
         if (source == Source::Stream || source == Source::Events)
             && let Some(mut cursor) = c.cursor
             && positions.contains(&(cursor + 1))
@@ -410,17 +400,7 @@ impl Step<'_> {
         if !retired.is_empty() {
             let ranges = Rc::make_mut(&mut c.retired_versions);
             ranges.extend(retired);
-            ranges.sort_by_key(|r| r.start);
-            let mut merged: Vec<Range> = Vec::new();
-            for range in ranges.drain(..) {
-                if let Some(last) = merged.last_mut()
-                    && range.start <= last.end + 1
-                {
-                    last.end = last.end.max(range.end);
-                } else {
-                    merged.push(range);
-                }
-            }
+            let merged = coalesce(std::mem::take(ranges));
             let overflow = merged.len() > MAIN_MESSAGE_LIMIT;
             if overflow || c.retired_through.is_some() {
                 c.retired_through = Some(
@@ -447,11 +427,52 @@ impl Step<'_> {
     }
 }
 
+/// Sorts by start and merges ranges that overlap or touch (`start <= last.end + 1`).
+fn coalesce(mut ranges: Vec<Range>) -> Vec<Range> {
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<Range> = Vec::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end + 1
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::responses::HistoryPage;
     use serde_json::json;
+
+    fn r(start: i64, end: i64) -> Range {
+        Range { start, end }
+    }
+
+    #[test]
+    fn coalesce_merges_overlapping_and_touching_ranges_and_keeps_gaps() {
+        assert_eq!(coalesce(Vec::new()), Vec::new());
+        assert_eq!(coalesce(vec![r(1, 4), r(3, 6)]), vec![r(1, 6)]);
+        assert_eq!(coalesce(vec![r(1, 9), r(2, 3)]), vec![r(1, 9)]);
+        assert_eq!(coalesce(vec![r(1, 2), r(3, 3)]), vec![r(1, 3)]);
+        assert_eq!(coalesce(vec![r(1, 2), r(4, 4)]), vec![r(1, 2), r(4, 4)]);
+        assert_eq!(
+            coalesce(vec![r(10, 10), r(1, 1), r(5, 6), r(2, 2), r(7, 7)]),
+            vec![r(1, 2), r(5, 7), r(10, 10)]
+        );
+        assert_eq!(
+            coalesce(vec![r(i64::MAX, i64::MAX), r(i64::MAX - 1, i64::MAX - 1)]),
+            vec![r(i64::MAX - 1, i64::MAX)]
+        );
+        assert_eq!(
+            coalesce(vec![r(i64::MAX, i64::MAX), r(i64::MAX - 2, i64::MAX - 2)]),
+            vec![r(i64::MAX - 2, i64::MAX - 2), r(i64::MAX, i64::MAX)]
+        );
+    }
 
     #[test]
     fn retired_move_floor_fences_ack_and_delivers_unrelated_create_from_covering_gap_page() {
