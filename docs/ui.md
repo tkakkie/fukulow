@@ -74,7 +74,7 @@ Values in `web/src/app.css` under `:root`; each colour token is declared once wi
 - Type: `--font-sans` (Inter for Latin and digits, then CSS fallbacks). Root size in §7, rem scale `--font-size-12` (meta), `--font-size-13`, `--font-size-14`, `--font-size-15` (body), `--font-size-17` (view title), `--font-size-20` (page title). Use `--line-height-message` for Messages. Weights: `--font-weight-regular`, `--font-weight-medium`, `--font-weight-semibold`.
 - Spacing scale: `--space-4`, `--space-8`, `--space-12`, `--space-16`, `--space-24`. Radii: `--radius-8` for rows/inputs, `--radius-10` or `--radius-12` for buttons/chips/Messages, `--radius-16` for regions/Composer and `--radius-avatar` for avatars.
 - Always show `--focus-ring` with `--focus-offset` on `:focus-visible` only.
-- Style state from its ARIA attribute (e.g. `aria-selected`, `aria-current`, `aria-expanded`), never a parallel class (target until #839 merges).
+- Style state from its ARIA attribute (e.g. `aria-selected`, `aria-current`, `aria-expanded`), never a parallel class.
 - Panel slide, hover and badge pop use the `--duration-fast`, `--duration-normal`, `--duration-panel` scale and `--ease-out`. No motion under `prefers-reduced-motion: reduce`.
 
 ## 5. Components and states

@@ -1098,7 +1098,14 @@
     height: 100%;
     min-height: 0;
     min-width: 0;
+    transform: translateX(0);
     transition: transform var(--duration-panel) var(--ease-out);
+  }
+
+  @starting-style {
+    .right-panel-slot {
+      transform: translateX(100%);
+    }
   }
 
   /* 960px - 1279px: right panel overlays main from the right (docs/ui.md §3) */
