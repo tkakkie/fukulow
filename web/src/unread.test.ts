@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { chooseBaseline, chooseChannelBaseline, scopeCount, sequenceToSubmit } from './unread-counts'
 import { deferred, flush, http, main, msg, ok, row, summary, unreadClient } from './unread-test-helpers'
 import { createUnreadSync } from './unread-sync'
-import type { ChannelList, ReadPosition, Result, TimelinePage, TopicSummaryResponse } from './api'
+import type { ChannelList, ReadPosition, Result, TimelinePage, TopicPage, TopicSummaryResponse } from './api'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -716,6 +716,75 @@ it('submits a read queued before recovery started once recovery succeeds without
   expect(c.unread.get('A').main.position).toBe(6)
   expect(c.unread.get('A').main.unreadCount).toBe(0)
   await c.sync.close()
+})
+it('keeps Topic badges hidden, preserves summary backoff, and blocks markRead when a stale projection arrives during 503 backoff', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter('T')
+  const stale = deferred<Result<TopicPage>>()
+  c.topicsApi.listTopics.mockReturnValueOnce(stale.promise)
+  const loading = c.topics.loadList('A'); await flush()
+  c.unreadApi.getTopicSummary.mockClear()
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
+  c.unread.activityRead('A', 'T'); await flush()
+  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(1)
+  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
+  c.unread.presented(id, [2]); await flush()
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  // Older projection with the same watermark and read position must not clear the 503 latch.
+  stale.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 3, has_more: false, topics: [summary('T', 2, 0, 1)] }))
+  await loading; await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  // The scheduled backoff retry still runs and submits the retained presentation once it succeeds.
+  await vi.advanceTimersByTimeAsync(500); await flush()
+  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 2, unreadCount: 0, mentionUnreadCount: 0, error: false })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+it('does not release a queued mark or restore Topic badges when an in-flight mark succeeds during a separate 503', async () => {
+  const c = unreadClient(); await c.boot()
+  c.event(msg(4, 'T')); await flush()
+  const id = await c.enter('T')
+  const firstMark = deferred<Result<ReadPosition>>()
+  c.unreadApi.markRead.mockReturnValueOnce(firstMark.promise)
+  c.unread.presented(id, [2]); await flush()
+  c.unread.presented(id, [4]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  c.unreadApi.getTopicSummary.mockClear()
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(http(503))
+  c.unread.activityRead('A', 'T'); await flush()
+  expect(c.unread.get('A').topics.T).toMatchObject({ unreadCount: null, mentionUnreadCount: null, error: true })
+  // In-flight mark 2 succeeds at its requested position while the 503 summary retry is still pending.
+  firstMark.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', read_seq: 2 })); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2])
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 2, unreadCount: null, mentionUnreadCount: null, error: true })
+  c.unreadApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 4, topic: summary('T', 4, 2, 1) }))
+  await vi.advanceTimersByTimeAsync(500); await flush()
+  expect(c.unreadApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([2, 4])
+  expect(c.unread.get('A').topics.T).toMatchObject({ position: 4, unreadCount: 0, mentionUnreadCount: 0, error: false })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
+})
+it('does not submit pre-hide presentations on count recovery after visibility returns until a fresh presentation arrives', async () => {
+  const c = unreadClient(); await c.boot(); const id = await c.enter()
+  expect(c.unread.get('A').entry?.boundary).toBe(0)
+  c.unreadApi.listChannels.mockResolvedValueOnce({ ok: false, kind: 'network' })
+  await c.unread.refresh(); await flush()
+  expect(c.unread.get('A').main.unreadCount).toBeNull()
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  c.unread.visibility(false)
+  c.unread.visibility(true)
+  // Valid Channel snapshot recovers counts after return without a fresh presented() call.
+  c.unread.activitySnapshot([row()]); await flush()
+  expect(c.unread.get('A').entry?.boundary).toBe(0)
+  expect(c.unread.get('A').main.unreadCount).toBe(1)
+  expect(c.unreadApi.markRead).not.toHaveBeenCalled()
+  // A fresh presentation after return submits the read.
+  c.unread.presented(id, [1]); await flush()
+  expect(c.unreadApi.markRead.mock.calls.map(x => x[1].read_seq)).toEqual([1])
+  expect(c.unread.get('A').main).toMatchObject({ position: 1, unreadCount: 0 })
+  await c.sync.close(); expect(vi.getTimerCount()).toBe(0)
 })
 it('requires older projection coverage for first Unread and never marks across a window gap', async () => {
   const c = unreadClient()
