@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { allowedCpus, cpuList, pinned, type CpuSets } from '../../harness-core/cpusets.ts';
@@ -11,6 +12,10 @@ import { snapshotLaunch } from '../d3r/snapshot.ts';
 
 // The #689 snapshot this diagnosis restores (receipt in the #689 backfill directory).
 export const expectedSnapshotSha256 = '087a24f896f7f2e05a9e67b820edd47205c1ca63cad6a741f01a746700edbdac';
+// The #796 CPU sets fixed before qualification (2026-11-24): PostgreSQL on the Zen 5 CPUs, the clients on
+// the Zen 5c CPUs. A Linux run uses exactly these, so a swapped or other split is refused.
+export const qualifiedCpuSets = 'server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15';
+
 // Diagnostic logging only; every frozen setting stays as it is and is checked after start.
 export const diagnosticSettings = ['-c', 'log_autovacuum_min_duration=0', '-c', 'log_checkpoints=on'];
 
@@ -56,7 +61,7 @@ export function pinnedBenchmark(client: number[]) {
       child.on('error', error => { clearTimeout(timer); reject(error); });
       child.on('close', code => {
         clearTimeout(timer);
-        writeFileSync(`${dest}.txt`, result);
+        try { writeFileSync(`${dest}.txt`, result); } catch (error) { reject(error); return; }
         if (/ERROR:\s*57014:|canceling statement due to statement timeout/.test(result)) reject(new Error('SQL statement_timeout (SQLSTATE 57014)'));
         else if (code !== 0 || /number of failed transactions:\s+[1-9]/.test(result)) reject(new Error('docker pgbench failed; entire run invalid'));
         else resolve(result);
@@ -78,12 +83,48 @@ export function pinnedBenchmark(client: number[]) {
 type Node = {'Node Type': string; 'Relation Name'?: string; 'Index Name'?: string; 'Join Type'?: string;
   Strategy?: string; 'Shared Hit Blocks'?: number; 'Shared Read Blocks'?: number; Plans?: Node[]};
 
-// Plan shape without costs, timings or row counts, and the root's shared buffers (hit + read).
+// Plan shape without costs, timings or row counts, and the root's shared buffers (hit + read, and each).
 export function planShape(explain: [{Plan: Node}]) {
   const shape = (n: Node): unknown => [n['Node Type'], n['Relation Name'] ?? null, n['Index Name'] ?? null,
     n['Join Type'] ?? null, n.Strategy ?? null, (n.Plans ?? []).map(shape)];
   const root = explain[0].Plan;
   return {shapeHash: createHash('sha256').update(JSON.stringify(shape(root))).digest('hex'),
     buffers: (root['Shared Hit Blocks'] ?? 0) + (root['Shared Read Blocks'] ?? 0),
-    sharedReads: root['Shared Read Blocks'] ?? 0};
+    sharedHit: root['Shared Hit Blocks'] ?? 0, sharedRead: root['Shared Read Blocks'] ?? 0};
+}
+
+// d3r/session.ts `withSession` (frozen), with psql pinned to the client CPU set when one is given, so the
+// warm-up, EXPLAIN and the scan run on the client CPUs as pgbench does.
+export async function pinnedSession<T>(container: string, db: string, app: boolean, client: number[] | undefined,
+  work: (sql: (text: string) => Promise<string>) => Promise<T>) {
+  const psql = ['psql', '-XqAt', '-v', 'ON_ERROR_STOP=1', '-U', app ? 'fukulow_app' : 'fukulow', '-d', db];
+  const child = spawn('docker', ['exec', '-i', ...(app ? appSessionArguments : []), container, ...(client ? pinned(client, psql) : psql)]);
+  const lines = createInterface({input: child.stdout})[Symbol.asyncIterator]();
+  child.stderr.resume();
+  child.stdin.on('error', () => child.kill());
+  const done = new Promise<number | null>(resolve => { child.on('error', () => resolve(null)); child.on('close', resolve); });
+  const marker = 'D870_QUERY_DONE';
+  let completed = false;
+  try {
+    const result = await work(async text => {
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeouts.psql);
+      try {
+        child.stdin.write(`${text}\n\\echo ${marker}\n`);
+        const rows: string[] = [];
+        for (;;) {
+          const line = await lines.next();
+          if (line.done) throw new Error('psql stopped before completing the statement');
+          if (line.value === marker) return rows.join('\n');
+          rows.push(line.value);
+        }
+      } finally { clearTimeout(timer); }
+    });
+    completed = true;
+    return result;
+  } finally {
+    child.stdin.end();
+    if (!completed) child.kill();
+    const code = await done;
+    if (completed && code !== 0) throw new Error('psql did not exit cleanly');
+  }
 }

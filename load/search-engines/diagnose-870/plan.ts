@@ -37,9 +37,9 @@ const cache = (arm: 'C1' | 'C2') => [copy(`${arm}.warm`, arm), same('hot', `${ar
 
 export function sequence(stage: Stage): Step[] {
   if (stage === 'smoke') {
-    // One copy round that exercises every new path once (restore, samplers, settle, hot, restart-only).
-    return build([copy('smoke.settle', 'smoke', true), same('hot', 'smoke.hot', 'smoke'),
-      same('restart-only', 'smoke.restart', 'smoke')]);
+    // The approved one-round smoke (§3.4): one copy round with the settle wait, so the restore, the samplers,
+    // the settle wait, EXPLAIN and the restart all run once. Its numbers are not used.
+    return build([copy('smoke.1', 'smoke', true)]);
   }
   if (stage === '1') {
     return build([

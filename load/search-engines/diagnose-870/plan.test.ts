@@ -32,8 +32,8 @@ test('Stage 2 has the scan after one round, then 3 rounds, a cool-down and 2 rou
   assert.equal(steps.filter(s => s.kind === 'copy').length, 6);
 });
 
-test('the smoke is one copy round that touches settle, hot and restart-only once', () => {
-  assert.deepEqual(sequence('smoke').map(s => [s.id, s.kind]), [['smoke.settle', 'copy'], ['smoke.hot', 'hot'], ['smoke.restart', 'restart-only']]);
+test('the smoke is the approved single copy round, with the settle wait', () => {
+  assert.deepEqual(sequence('smoke'), [{kind: 'copy', id: 'smoke.1', arm: 'smoke', settle: true, order: 'F'}]);
 });
 
 test('R reverses the frozen query order without changing it', () => {

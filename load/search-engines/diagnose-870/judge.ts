@@ -6,7 +6,8 @@ import type { Arm, Order } from './plan.ts';
 
 export type Block = {query: string; start: number; end: number};
 export type Latency = {query: string; p95?: number; error?: string};
-export type Plan = {query: string; shapeHash: string; buffers: number};
+// One accepted query's EXPLAIN (ANALYZE, BUFFERS): shape hash and root shared hit and read blocks, or the error.
+export type Plan = {query: string; shapeHash: string; buffers: number; sharedHit: number; sharedRead: number} | {query: string; error: string};
 export type Environment = {
   dirtyWritebackAtStartBytes: number | null; meanTemperatureC: number | null; meanFrequencyKHz: number | null;
   // Queries whose block overlapped an autovacuum worker on `measured`.
@@ -44,8 +45,12 @@ export function g95(m: Measurement) {
 }
 const G = (m: Measurement) => g95(m) as number;
 const within = (ratio: number, n: number) => ratio <= n && ratio >= 1 / n;
-// A ratio beyond the noise: the change is at least 3x the noise band, as in §4.2's r - 1 >= 3(N - 1).
-const beyond = (ratio: number, n: number) => ratio - 1 >= 3 * (n - 1);
+const isPlan = (p: Plan | undefined): p is Extract<Plan, {shapeHash: string}> => p !== undefined && 'shapeHash' in p;
+// The accepted queries, from the frozen set as measured.
+const acceptedOf = (m: Measurement) => m.latencies.map(l => l.query).filter(accepts);
+// Every accepted query has a plan (no EXPLAIN error, none missing).
+export const plansComplete = (m: Measurement) => m.plans !== null && acceptedOf(m).length > 0 &&
+  acceptedOf(m).every(q => isPlan(m.plans!.find(p => p.query === q)));
 
 function ranks(xs: number[]) {
   const sorted = xs.map((x, i) => [x, i] as const).sort((a, b) => a[0] - b[0]);
@@ -83,7 +88,7 @@ export function minimums(ms: Measurement[]) {
     H2: A1 && ['A2.1', 'A2.2'].every(id => valid(byId(ms, id))),
     H1: cacheComplete(ms, 'C1') && cacheComplete(ms, 'C2'),
     H45: validIds(ms, ['D.current1', 'D.current2']).length === 2 && validIds(ms, ['D.settle1', 'D.settle2']).length === 2,
-    H3: validIds(ms, a1Ids).every(m => m.plans !== null && m.plans.length > 0),
+    H3: validIds(ms, a1Ids).every(plansComplete),
   };
 }
 
@@ -109,7 +114,7 @@ export function reproduction(ms: Measurement[], n: number) {
   const r = G(last) / G(first);
   const rounds = a1Ids.map((id, i) => [i + 1, byId(ms, id)] as const).filter(([, m]) => valid(m));
   const rho = spearman(rounds.map(([i]) => i), rounds.map(([, m]) => G(m!)));
-  if (r >= 1.30 && rho !== null && rho >= 0.8 && beyond(r, n)) return {result: 'reproduced' as const, r, rho};
+  if (r >= 1.30 && rho !== null && rho >= 0.8 && r - 1 >= 3 * (n - 1)) return {result: 'reproduced' as const, r, rho};
   if (r < 1.15) return {result: 'not reproduced' as const, r, rho};
   return {result: 'inconclusive' as const, reason: 'between the reproduction thresholds', r, rho};
 }
@@ -125,7 +130,8 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
   const last = validIds(ms, ['A1.5', 'A1.6']).at(-1)!;
   const out = {} as Record<Hypothesis, Verdict>;
 
-  // H1: restart-only vs warm on each copy; or shared reads in the slower half of A1.
+  // H1 (§4.3 as written): restart-only / warm >= 1.25 and >= 3 x N in both replicates, or shared reads in
+  // every valid A1 round above the median G95.
   if (!min.H1) out.H1 = 'withheld';
   else {
     const ratios = (['C1', 'C2'] as const).map(arm => G(byId(ms, `${arm}.restart`)!) / G(byId(ms, `${arm}.warm`)!));
@@ -134,7 +140,7 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
     const slow = a1.filter(m => G(m) > median);
     const readsKnown = a1.every(m => m.sharedReads !== null);
     const readsInSlow = readsKnown && slow.length > 0 && slow.every(m => (m.sharedReads as number) > 0);
-    out.H1 = !readsKnown ? 'withheld' : verdict(ratios.every(x => x >= 1.25 && beyond(x, n)) || readsInSlow,
+    out.H1 = !readsKnown ? 'withheld' : verdict(ratios.every(x => x >= 1.25 && x >= 3 * n) || readsInSlow,
       ratios.every(x => within(x, n)) && a1.every(m => m.sharedReads === 0));
   }
 
@@ -161,12 +167,13 @@ export function attribution(ms: Measurement[], n: number): Record<Hypothesis, Ve
   // H3: plan shape or buffer change for a query whose p95 rose at least 1.25x across A1.
   if (!min.H3) out.H3 = 'withheld';
   else {
-    const queries = [...new Set(a1.flatMap(m => m.plans!.map(p => p.query)))];
+    // Plans are complete here (the H3 minimum). Buffers are the root's shared hit + read; the hit/read split
+    // is kept in the records for H1.
+    const queries = acceptedOf(a1[0]);
     const changed = (query: string) => {
-      const plans = a1.map(m => m.plans!.find(p => p.query === query));
-      if (plans.some(p => p === undefined)) return true;
-      const buffers = plans.map(p => p!.buffers);
-      return new Set(plans.map(p => p!.shapeHash)).size > 1 || Math.max(...buffers) > 1.10 * Math.min(...buffers);
+      const plans = a1.map(m => m.plans!.find(p => p.query === query)).filter(isPlan);
+      const buffers = plans.map(p => p.buffers);
+      return new Set(plans.map(p => p.shapeHash)).size > 1 || Math.max(...buffers) > 1.10 * Math.min(...buffers);
     };
     const rose = (query: string) => (p95Of(last, query) ?? 0) >= 1.25 * (p95Of(first, query) ?? Infinity);
     out.H3 = verdict(queries.some(q => rose(q) && changed(q)), queries.every(q => !changed(q)));
@@ -221,20 +228,32 @@ export function stage1(ms: Measurement[], stopped: string | null = null) {
   }
   const att = attribution(ms, N.value);
   const verdicts = Object.values(att);
-  const established = verdicts.filter(v => v === 'supported').length === 1 && verdicts.every(v => v !== 'withheld');
-  const repetitionLinked = (['H1', 'H2', 'H3', 'H4', 'H5'] as const).every(h => att[h] === 'ruled out');
+  // "Repetition-linked" (§4.3): the rise grows with round count, H1-H5 are ruled out and position (H6) does
+  // not explain it. It is always "cause not established" (§5.2); nothing is attributed by elimination.
+  const repetitionLinked = (['H1', 'H2', 'H3', 'H4', 'H5'] as const).every(h => att[h] === 'ruled out') && att.H6 !== 'supported';
+  const established = !repetitionLinked && verdicts.filter(v => v === 'supported').length === 1 && verdicts.every(v => v !== 'withheld');
   const outcome: Outcome = established ? 'cause established' : 'cause not established';
   return {...base, outcome, attribution: att, repetitionLinked, stage2: established ? 'may be skipped' : 'propose'};
 }
 
+// §6, stated in every judgement so a standalone record cannot be read as ruling out the OS page cache.
+export const cacheConstraint = {
+  statement: 'No privileged container and no drop_caches. Restart-only empties PostgreSQL shared buffers only; the OS page cache may still hold the relation files, so it is not a cold-cache measurement. The OS cache state is recorded, not controlled.',
+  h1Scope: 'H1 covers shared-buffer state and whether reads reach the OS. A cause in the OS page cache alone is withheld, never ruled out.',
+};
+
 // §5.3 Stage 2: first valid post-scan round against the pre-scan round, with Stage 1's N.
+// The contrast is B.post1 (the first round after the scan) against B.pre; an INVALID B.post1 leaves it
+// inconclusive. The noise condition is §5.3 as written: ratio >= 3 x (N - 1).
 export function stage2(ms: Measurement[], n: number) {
   const pre = byId(ms, 'B.pre');
   const post = validIds(ms, ['B.post1', 'B.post2', 'B.post3']);
   const cool = validIds(ms, ['B.cool1', 'B.cool2']);
   if (!valid(pre) || post.length < 2 || cool.length < 2) return {result: 'inconclusive' as const, reason: 'Stage 2 minimum not met', ratio: null};
-  const ratio = G(post[0]) / G(pre);
-  if (ratio >= 1.30 && beyond(ratio, n)) return {result: 'reproduced' as const, ratio};
+  const first = byId(ms, 'B.post1');
+  if (!valid(first)) return {result: 'inconclusive' as const, reason: 'B.post1 INVALID', ratio: null};
+  const ratio = G(first) / G(pre);
+  if (ratio >= 1.30 && ratio >= 3 * (n - 1)) return {result: 'reproduced' as const, ratio};
   if (ratio < 1.15) return {result: 'not reproduced' as const, ratio};
   return {result: 'inconclusive' as const, reason: 'between the thresholds', ratio};
 }

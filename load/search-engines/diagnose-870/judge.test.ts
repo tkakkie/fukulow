@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { attribution, g95, minimums, noise, ownReasons, reproduction, spearman, stage1, stage2, type Measurement } from './judge.ts';
+import { attribution, g95, minimums, noise, ownReasons, reproduction, spearman, stage1, stage2, type Measurement, type Plan } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
 
 const near = (a: number | null, b: number) => assert.ok(a !== null && Math.abs(a - b) < 1e-9, `${a} != ${b}`);
@@ -9,22 +9,26 @@ const near = (a: number | null, b: number) => assert.ok(a !== null && Math.abs(a
 const queries = ['q1', 'q2', 'q3'];
 const steps = new Map([...sequence('1'), ...sequence('2')].filter((s): s is MeasuredStep => s.kind !== 'idle' && s.kind !== 'scan').map(s => [s.id, s]));
 
+const plans = (over: (q: string) => Partial<Plan> = () => ({})): Plan[] =>
+  queries.map(query => ({query, shapeHash: 'same', buffers: 100, sharedHit: 100, sharedRead: 0, ...over(query)}) as Plan);
+
 function m(id: string, g: number, over: Partial<Measurement> = {}): Measurement {
   const s = steps.get(id)!;
   const order = over.order ?? s.order;
   const names = order === 'F' ? [...queries, 'scalar'] : ['scalar', ...[...queries].reverse()];
   return {id, kind: s.kind, arm: s.arm, order, settle: s.kind === 'copy' && s.settle,
     latencies: names.map(query => ({query, p95: query === 'scalar' ? 1 : g})),
-    plans: queries.map(query => ({query, shapeHash: 'same', buffers: 100})), sharedReads: 0,
+    plans: plans(), sharedReads: 0,
     env: {dirtyWritebackAtStartBytes: 0, meanTemperatureC: null, meanFrequencyKHz: null, autovacuumQueries: []},
     invalid: [], ...over};
 }
 
-// A rising A1, no recovery after the cool-down, flat D, steady hot measurements, restart-only slower.
+// A rising A1, no recovery after the cool-down, flat D, steady hot measurements, restart-only 3.25x warm
+// (beyond 3 x N at N = 1.05, §4.3 as written).
 function scenario(values: Partial<Record<string, number>> = {}, over: Record<string, Partial<Measurement>> = {}) {
   const g: Record<string, number> = {'A1.1': 40, 'A1.2': 44, 'A1.3': 48, 'A1.4': 50, 'A1.5': 53, 'A1.6': 56, 'A2.1': 56, 'A2.2': 56,
-    'C1.warm': 40, 'C1.hot1': 40, 'C1.hot2': 40, 'C1.restart': 60, 'D.current1': 50, 'D.settle1': 50, 'D.current2': 50, 'D.settle2': 50,
-    'C2.warm': 40, 'C2.hot1': 40, 'C2.hot2': 40, 'C2.restart': 60};
+    'C1.warm': 40, 'C1.hot1': 40, 'C1.hot2': 40, 'C1.restart': 130, 'D.current1': 50, 'D.settle1': 50, 'D.current2': 50, 'D.settle2': 50,
+    'C2.warm': 40, 'C2.hot1': 40, 'C2.hot2': 40, 'C2.restart': 130};
   Object.assign(g, values);
   return Object.entries(g).map(([id, v]) => m(id, v, over[id]));
 }
@@ -120,6 +124,12 @@ test('both replicates must agree: one slow restart-only alone withholds H1', () 
   assert.equal(attribution(scenario({'C2.restart': 40}), 1.05).H1, 'withheld');
 });
 
+test('H1 support needs restart-only / warm >= 1.25 and >= 3 x N (§4.3 as written), not only beyond the noise', () => {
+  assert.equal(attribution(scenario({'C1.restart': 125, 'C2.restart': 125}), 1.05).H1, 'withheld');
+  assert.equal(attribution(scenario({'C1.restart': 127, 'C2.restart': 127}), 1.05).H1, 'supported');
+  assert.equal(attribution(scenario({'C1.restart': 80, 'C2.restart': 80}), 1.05).H1, 'withheld');
+});
+
 test('H1 is supported by shared reads in every A1 round above the median', () => {
   const reads = Object.fromEntries(['A1.4', 'A1.5', 'A1.6'].map(id => [id, {sharedReads: 10}]));
   assert.equal(attribution(scenario({'C1.restart': 40, 'C2.restart': 40}, reads), 1.05).H1, 'supported');
@@ -141,14 +151,22 @@ test('H2 is ruled out by a flat temperature and frequency while A1 rose', () => 
 });
 
 test('H3 is supported by a plan change for a query that rose; a change in a flat query only withholds it', () => {
-  const changed = {'A1.6': {plans: queries.map(query => ({query, shapeHash: query === 'q1' ? 'other' : 'same', buffers: 100}))}};
+  const changed = {'A1.6': {plans: plans(q => ({shapeHash: q === 'q1' ? 'other' : 'same'}))}};
   assert.equal(attribution(scenario({}, changed), 1.05).H3, 'supported');
-  const buffers = {'A1.3': {plans: queries.map(query => ({query, shapeHash: 'same', buffers: query === 'q2' ? 111 : 100}))}};
+  const buffers = {'A1.3': {plans: plans(q => ({buffers: q === 'q2' ? 111 : 100}))}};
   assert.equal(attribution(scenario({}, buffers), 1.05).H3, 'supported');
   const flat = m('A1.6', 56);
   flat.latencies = flat.latencies.map(l => l.query === 'q1' ? {...l, p95: 40} : l);
   const ms = scenario({}, changed).map(x => x.id === 'A1.6' ? {...flat, plans: changed['A1.6'].plans} : x);
   assert.equal(attribution(ms, 1.05).H3, 'withheld');
+});
+
+test('H3 is withheld when an A1 plan is missing or its EXPLAIN failed, never read as a change', () => {
+  const missing = {'A1.4': {plans: plans().filter(p => p.query !== 'q2')}};
+  assert.equal(minimums(scenario({}, missing)).H3, false);
+  assert.equal(attribution(scenario({}, missing), 1.05).H3, 'withheld');
+  const failed = {'A1.4': {plans: plans().map(p => p.query === 'q2' ? {query: 'q2', error: 'timeout'} : p)}};
+  assert.equal(attribution(scenario({}, failed), 1.05).H3, 'withheld');
 });
 
 test('H4 needs settle/current <= 0.80 in both pairs and dirty memory at the start of the current rounds', () => {
@@ -158,6 +176,13 @@ test('H4 needs settle/current <= 0.80 in both pairs and dirty memory at the star
   assert.equal(attribution(scenario(g, dirty), 1.05).H4, 'supported');
   assert.equal(attribution(scenario(g), 1.05).H4, 'withheld');
   assert.equal(attribution(scenario({'D.settle1': 39}, dirty), 1.05).H4, 'withheld');
+});
+
+test('the H4/H5 minimum needs both current rounds and both settle rounds; H2 needs both A2 rounds', () => {
+  assert.equal(minimums(scenario({}, {'D.current2': invalid})).H45, false);
+  assert.equal(attribution(scenario({}, {'D.current1': invalid}), 1.05).H4, 'withheld');
+  assert.equal(minimums(scenario({}, {'A2.2': invalid})).H2, false);
+  assert.equal(attribution(scenario({}, {'A2.2': invalid}), 1.05).H2, 'withheld');
 });
 
 test('H5: an autovacuum worker over a slow block supports it; any overlap stops it being ruled out', () => {
@@ -177,13 +202,54 @@ test('H6: a rise that follows the position in the round, in F and in R rounds, s
   assert.equal(attribution(ms, 1.05).H6, 'supported');
 });
 
+test('H6 is ruled out when the same query rises in F and R rounds wherever it sits', () => {
+  // q1 rises 1.5x in both orders (first in F rounds, last in R rounds); the others do not.
+  const query = (id: string, base: number) => {
+    const x = m(id, base);
+    x.latencies = x.latencies.map(l => l.query === 'q1' ? {...l, p95: base * 1.5} : l);
+    return x;
+  };
+  const ms = scenario({'A1.2': 40}).map(x => ['A1.5', 'A1.6'].includes(x.id) ? query(x.id, 40) : x);
+  assert.equal(attribution(ms, 1.05).H6, 'ruled out');
+});
+
+test('Stage 1 outcomes: not reproduced, several supported, none supported with one withheld, H6 alone', () => {
+  const flat = Object.fromEntries([1, 2, 3, 4, 5, 6].map(i => [`A1.${i}`, 40 + i * 0.5]));
+  const nr = stage1(scenario(flat));
+  assert.equal(nr.outcome, 'not reproduced');
+  assert.equal(nr.stage2, 'propose');
+  // H1 and H3 both supported.
+  const two = stage1(scenario({}, {'A1.6': {plans: plans(q => ({shapeHash: q === 'q1' ? 'other' : 'same'}))}}));
+  assert.equal(two.attribution!.H1, 'supported');
+  assert.equal(two.attribution!.H3, 'supported');
+  assert.equal(two.outcome, 'cause not established');
+  // None supported, H2 withheld (A2.1 INVALID): not established, not repetition-linked.
+  const none = stage1(scenario({'C1.restart': 40, 'C2.restart': 40}, {'A2.1': invalid}));
+  assert.equal(Object.values(none.attribution!).includes('supported'), false);
+  assert.equal(none.outcome, 'cause not established');
+  assert.equal(none.repetitionLinked, false);
+  // H1-H5 ruled out and position supported: one cause, so not "repetition-linked".
+  const position = (id: string, base: number) => {
+    const x = m(id, base);
+    x.latencies = x.latencies.map((l, i) => l.query === 'scalar' ? l : {...l, p95: base * (1 + 0.2 * i)});
+    return x;
+  };
+  const h6 = stage1(scenario({'C1.restart': 40, 'C2.restart': 40}).map(x => x.id === 'A1.5' ? position('A1.5', 53) : x.id === 'A1.6' ? position('A1.6', 56) : x));
+  assert.equal(h6.attribution!.H6, 'supported');
+  assert.equal(h6.repetitionLinked, false);
+  assert.equal(h6.outcome, 'cause established');
+});
+
 test('Stage 2: reproduced, not reproduced, and its minimum', () => {
   const b = (g: Record<string, number>, over: Record<string, Partial<Measurement>> = {}) => Object.entries({'B.pre': 40, 'B.post1': 56,
     'B.post2': 56, 'B.post3': 56, 'B.cool1': 50, 'B.cool2': 50, ...g}).map(([id, v]) => m(id, v, over[id]));
   assert.equal(stage2(b({}), 1.05).result, 'reproduced');
-  assert.equal(stage2(b({}), 1.2).result, 'inconclusive');
+  // §5.3 as written: ratio >= 1.30 and ratio >= 3 x (N - 1). At N = 1.20 a 1.40 ratio reproduces.
+  assert.equal(stage2(b({}), 1.2).result, 'reproduced');
+  assert.equal(stage2(b({}), 1.5).result, 'inconclusive');
   assert.equal(stage2(b({'B.post1': 44}), 1.05).result, 'not reproduced');
-  near(stage2(b({}, {'B.post1': invalid}), 1.05).ratio, 56 / 40);
+  // The contrast is B.post1; an INVALID B.post1 is not replaced by B.post2.
+  assert.deepEqual(stage2(b({}, {'B.post1': invalid}), 1.05), {result: 'inconclusive', reason: 'B.post1 INVALID', ratio: null});
   assert.equal(stage2(b({}, {'B.post1': invalid, 'B.post2': invalid}), 1.05).result, 'inconclusive');
   assert.equal(stage2(b({}, {'B.cool2': invalid}), 1.05).result, 'inconclusive');
   assert.equal(stage2(b({}, {'B.pre': invalid}), 1.05).result, 'inconclusive');

@@ -11,14 +11,17 @@ import type { Block, Environment } from './judge.ts';
 // error and counts as missing. Validity and the per-measurement environment are read back by the pure
 // functions below, which the tests exercise.
 
-export const streams = {fast: 1_000, thermal: 5_000, process: 10_000} as const;
+// process (ps and load average) and containers (docker ps) share one 10 s loop, but each observation
+// carries the time it was taken.
+export const streams = {fast: 1_000, thermal: 5_000, process: 10_000, containers: 10_000} as const;
 export type Stream = keyof typeof streams;
 export const maxGapMs = 30_000;
 export type Sample =
   | {at: number; stream: 'fast'; dirtyBytes: number; writebackBytes: number; cachedBytes: number;
     autovacuum: {pid: number; datname: string | null; query: string}[]; checkpointer: unknown; wal: unknown}
   | {at: number; stream: 'thermal'; temperaturesC: Record<string, number>; frequencyKHz: Record<string, number>}
-  | {at: number; stream: 'process'; load: number[]; workers: string[]; containers: string[]}
+  | {at: number; stream: 'process'; load: number[]; workers: string[]; processes: string[]}
+  | {at: number; stream: 'containers'; containers: string[]}
   | {at: number; stream: Stream; error: string};
 
 const ok = (s: Sample) => !('error' in s);
@@ -64,23 +67,32 @@ const cpuTemperature = (t: Record<string, number>) => {
   return all.length ? Math.max(...all) : null;
 };
 
+// Streams this run samples (thermal only on Linux).
+export const sampled = (thermal: boolean): Stream[] => thermal ? ['fast', 'process', 'containers', 'thermal'] : ['fast', 'process', 'containers'];
+// A window is covered once every sampled stream has an observation (good or failed) at or after its end,
+// so its trailing gap is known. Past the deadline a stream without one has a gap (a stalled sampler).
+export const coverageDeadlineMs = maxGapMs + 15_000;
+export function covered(samples: Sample[], end: number, thermal: boolean, now: number) {
+  return now >= end + coverageDeadlineMs || sampled(thermal).every(stream => samples.some(s => s.stream === stream && s.at >= end));
+}
+
 // Validity reasons from the samplers and the environment of one measurement window.
 export function windowFacts(samples: Sample[], start: number, end: number, blocks: Block[],
   {thermal, serverCpus}: {thermal: boolean; serverCpus: number[] | null}): {invalid: string[]; env: Environment} {
   const inWindow = samples.filter(s => s.at >= start && s.at <= end && ok(s));
-  const invalid = [...gaps(samples, 'fast', start, end), ...gaps(samples, 'process', start, end),
-    ...(thermal ? gaps(samples, 'thermal', start, end) : [])];
+  const invalid = sampled(thermal).flatMap(stream => gaps(samples, stream, start, end));
   for (const s of inWindow) {
-    if (s.stream !== 'process' || 'error' in s) continue;
-    if (s.workers.length) invalid.push(`worker process during the measurement: ${s.workers[0]}`);
-    if (s.containers.length) invalid.push(`other container during the measurement: ${s.containers[0]}`);
+    if ('error' in s) continue;
+    if (s.stream === 'process' && s.workers.length) invalid.push(`worker process during the measurement: ${s.workers[0]}`);
+    if (s.stream === 'containers' && s.containers.length) invalid.push(`other container during the measurement: ${s.containers[0]}`);
   }
   const fast = samples.filter((s): s is Extract<Sample, {stream: 'fast'; dirtyBytes: number}> => s.stream === 'fast' && ok(s));
   const atStart = fast.filter(s => s.at <= start).at(-1);
   const thermals = inWindow.filter((s): s is Extract<Sample, {stream: 'thermal'; temperaturesC: object}> => s.stream === 'thermal');
   const temps = thermals.map(s => cpuTemperature(s.temperaturesC)).filter((t): t is number => t !== null);
-  const freqs = thermals.flatMap(s => Object.entries(s.frequencyKHz)
-    .filter(([cpu]) => serverCpus === null || serverCpus.includes(Number(cpu))).map(([, f]) => f));
+  // Frequency counts only from samples that read every server CPU; with no server set it is not used.
+  const freqs = serverCpus === null ? [] : thermals.filter(s => serverCpus.every(c => Number.isFinite(s.frequencyKHz[String(c)])))
+    .flatMap(s => serverCpus.map(c => s.frequencyKHz[String(c)]));
   const autovacuumQueries = blocks.filter(b => fast.some(s => s.at >= b.start && s.at <= b.end &&
     s.autovacuum.some(w => w.datname === 'measured'))).map(b => b.query);
   return {invalid: [...new Set(invalid)], env: {
@@ -91,8 +103,12 @@ export function windowFacts(samples: Sample[], start: number, end: number, block
 
 // ---- The sampler process ----
 
+// Children in flight, killed when the sampler stops so no docker exec outlives it.
+const children = new Set<ReturnType<typeof spawn>>();
 const run = (argv: string[], input?: string) => new Promise<string>((resolve, reject) => {
   const child = spawn(argv[0], argv.slice(1), {stdio: ['pipe', 'pipe', 'pipe']});
+  children.add(child);
+  child.on('exit', () => children.delete(child));
   let out = '';
   const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
   child.stdout.on('data', d => { out += String(d); });
@@ -162,11 +178,28 @@ async function main() {
     return {...parseMeminfo(mem), autovacuum: activity.autovacuum, checkpointer: activity.checkpointer, wal: activity.wal};
   });
   if (values.thermal) void loop('thermal', async () => thermalSample());
-  void loop('process', async () => {
-    const ps = await run(['ps', '-Ao', 'pid=,command=']);
-    const names = (await run(['docker', 'ps', '--format', '{{.Names}}'])).split('\n').map(s => s.trim()).filter(Boolean);
-    return {load: loadavg(), workers: otherWorkers(ps, process.pid), containers: names.filter(n => n !== container)};
-  });
+  void (async () => {
+    for (;;) {
+      const t = Date.now();
+      await sample('process', async () => {
+        const ps = await run(['ps', '-Ao', 'pid=,pcpu=,command=']);
+        const lines = ps.split('\n').map(l => l.trim()).filter(Boolean);
+        // The worker pattern reads pid and command; pcpu stays in the persisted process list.
+        const commands = lines.map(l => l.replace(/^(\d+)\s+\S+\s+/, '$1 ')).join('\n');
+        return {load: loadavg(), workers: otherWorkers(commands, process.pid), processes: lines};
+      });
+      await sample('containers', async () => {
+        const names = (await run(['docker', 'ps', '--format', '{{.Names}}'])).split('\n').map(s => s.trim()).filter(Boolean);
+        return {containers: names.filter(n => n !== container)};
+      });
+      await new Promise(r => setTimeout(r, Math.max(0, streams.process - (Date.now() - t))));
+    }
+  })();
+  // Stop with the worker: on SIGTERM, and when the IPC channel to the worker closes (the worker exited
+  // or crashed without its finally).
+  const stop = () => { for (const c of children) c.kill('SIGKILL'); process.exit(0); };
+  process.on('SIGTERM', stop);
+  process.on('disconnect', stop);
 }
 
 if (import.meta.main) await main();
