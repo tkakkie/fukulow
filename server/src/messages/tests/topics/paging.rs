@@ -122,6 +122,54 @@ async fn projections_page_newer_at_fixed_w(pool: PgPool) {
         last,
         json!({"as_of_seq":8,"topics":topics[2..],"has_more":false})
     );
+
+    for name in ["E", "F", "G", "H"] {
+        sent(&app, &token, channel, topic_input(Uuid::new_v4(), name)).await;
+    }
+    sent(&app, &token, channel, input(Uuid::new_v4(), "main at W")).await;
+    let w = 16;
+    for name in ["A", "F", "G", "H"] {
+        sent(&app, &later, channel, topic_input(Uuid::new_v4(), name)).await;
+    }
+    // At W, B/C/D/E are unchanged, A/F/G/H need positioning, and four Messages are in main.
+    let positions = [2, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let mut older = Vec::new();
+    let mut before = w + 1;
+    for expected in positions.rchunks(2) {
+        let page = get(
+            &app,
+            &token,
+            channel,
+            &format!("timeline?as_of_seq={w}&before_position={before}&limit=2"),
+        )
+        .await;
+        assert_eq!(page["as_of_seq"], w);
+        assert_eq!(page["has_more"], expected[0] != positions[0]);
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.iter().map(position).collect::<Vec<_>>(), expected);
+        before = position(&items[0]);
+        older.extend(items.iter().rev().cloned());
+    }
+    older.reverse();
+
+    let mut newer = Vec::new();
+    let mut after = 0;
+    for expected in positions.chunks(2) {
+        let page = get(
+            &app,
+            &token,
+            channel,
+            &format!("timeline?as_of_seq={w}&after_position={after}&limit=2"),
+        )
+        .await;
+        assert_eq!(page["as_of_seq"], w);
+        assert_eq!(page["has_more"], expected.last() != positions.last());
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.iter().map(position).collect::<Vec<_>>(), expected);
+        after = position(items.last().unwrap());
+        newer.extend_from_slice(items);
+    }
+    assert_eq!(newer, older);
 }
 
 #[fukulow_test::test]

@@ -66,10 +66,12 @@ pub struct ListProjectionQuery {
     #[schema(minimum = 0)]
     pub as_of_seq: Option<i64>,
     /// Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
+    /// Use the position returned at W; never use a live-moved position.
     #[param(minimum = 1)]
     #[schema(minimum = 1)]
     pub before_position: Option<i64>,
     /// Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+    /// Use the position returned at W; never use a live-moved position.
     #[param(minimum = 0)]
     #[schema(minimum = 0)]
     pub after_position: Option<i64>,

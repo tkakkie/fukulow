@@ -2881,7 +2881,7 @@
           {
             "name": "before_position",
             "in": "query",
-            "description": "Exclusive older W-relative position. Requires as_of_seq and excludes after_position.",
+            "description": "Exclusive older W-relative position. Requires as_of_seq and excludes after_position.\nUse the position returned at W; never use a live-moved position.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -2892,7 +2892,7 @@
           {
             "name": "after_position",
             "in": "query",
-            "description": "Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.",
+            "description": "Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.\nUse the position returned at W; never use a live-moved position.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -3060,7 +3060,7 @@
           {
             "name": "before_position",
             "in": "query",
-            "description": "Exclusive older W-relative position. Requires as_of_seq and excludes after_position.",
+            "description": "Exclusive older W-relative position. Requires as_of_seq and excludes after_position.\nUse the position returned at W; never use a live-moved position.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -3071,7 +3071,7 @@
           {
             "name": "after_position",
             "in": "query",
-            "description": "Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.",
+            "description": "Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.\nUse the position returned at W; never use a live-moved position.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -8606,7 +8606,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.",
+            "description": "Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.\nUse the position returned at W; never use a live-moved position.",
             "minimum": 0
           },
           "as_of_seq": {
@@ -8624,7 +8624,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Exclusive older W-relative position. Requires as_of_seq and excludes after_position.",
+            "description": "Exclusive older W-relative position. Requires as_of_seq and excludes after_position.\nUse the position returned at W; never use a live-moved position.",
             "minimum": 1
           },
           "history_generation": {

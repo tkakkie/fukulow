@@ -1048,6 +1048,7 @@ export interface components {
             /**
              * Format: int64
              * @description Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+             *     Use the position returned at W; never use a live-moved position.
              */
             after_position?: number | null;
             /**
@@ -1058,6 +1059,7 @@ export interface components {
             /**
              * Format: int64
              * @description Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
+             *     Use the position returned at W; never use a live-moved position.
              */
             before_position?: number | null;
             /** Format: uuid */
@@ -3586,9 +3588,15 @@ export interface operations {
                 history_generation?: string;
                 /** @description Omit on the initial page to choose W under the commit barrier; future W is invalid. */
                 as_of_seq?: number;
-                /** @description Exclusive older W-relative position. Requires as_of_seq and excludes after_position. */
+                /**
+                 * @description Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
+                 *     Use the position returned at W; never use a live-moved position.
+                 */
                 before_position?: number;
-                /** @description Exclusive newer W-relative position. Requires as_of_seq and excludes before_position. */
+                /**
+                 * @description Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+                 *     Use the position returned at W; never use a live-moved position.
+                 */
                 after_position?: number;
                 limit?: number;
             };
@@ -3676,9 +3684,15 @@ export interface operations {
                 history_generation?: string;
                 /** @description Omit on the initial page to choose W under the commit barrier; future W is invalid. */
                 as_of_seq?: number;
-                /** @description Exclusive older W-relative position. Requires as_of_seq and excludes after_position. */
+                /**
+                 * @description Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
+                 *     Use the position returned at W; never use a live-moved position.
+                 */
                 before_position?: number;
-                /** @description Exclusive newer W-relative position. Requires as_of_seq and excludes before_position. */
+                /**
+                 * @description Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+                 *     Use the position returned at W; never use a live-moved position.
+                 */
                 after_position?: number;
                 limit?: number;
             };

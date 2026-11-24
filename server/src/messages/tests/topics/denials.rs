@@ -120,31 +120,65 @@ async fn newer_projection_denies_cross_organization(pool: PgPool) {
     let (app, org, _, channel, token) = fixture(&pool).await;
     let other = organization(&pool).await;
     let foreign = member(&pool, other, Uuid::new_v4()).await;
-    let query = "as_of_seq=0&after_position=0";
+    let initial = "as_of_seq=0&after_position=0";
     for route in ["timeline", "topics"] {
         assert_eq!(
-            projection(&app, &token, channel, route, query)
+            projection(&app, &token, channel, route, initial)
                 .await
                 .status(),
             StatusCode::OK
         );
-        let response = projection(&app, &foreign, channel, route, query).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(body(response).await, json!({"error":"channel not found"}));
+    }
+    let root = sent(&app, &token, channel, topic_input(Uuid::new_v4(), "Source")).await;
+    let moved = request(
+        &app,
+        "POST",
+        &format!(
+            "/api/v1/channels/{channel}/messages/{}/move",
+            root["id"].as_str().unwrap()
+        ),
+        &token,
+        json!({"operation_id":Uuid::new_v4(),"expected_version":1,"topic_name":"Destination"}),
+    )
+    .await;
+    assert_eq!(moved.status(), StatusCode::OK);
 
-        let response = request(
-            &app,
-            "GET",
-            &format!("/api/v1/orgs/{org}/channels/{channel}/{route}?{query}"),
-            &foreign,
-            Value::Null,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            body(response).await,
-            json!({"error":"organization_unavailable"})
-        );
+    let stale = format!(
+        "as_of_seq=2&after_position=0&history_generation={}",
+        Uuid::new_v4()
+    );
+    let expired = format!(
+        "as_of_seq=1&after_position=0&history_generation={}",
+        root["history_generation"].as_str().unwrap()
+    );
+    for route in ["timeline", "topics"] {
+        for (query, error) in [
+            (&stale, "history_generation_changed"),
+            (&expired, "snapshot_expired"),
+        ] {
+            let response = projection(&app, &token, channel, route, query).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(body(response).await, json!({"error":error}));
+        }
+        for query in [initial, &stale, &expired] {
+            let response = projection(&app, &foreign, channel, route, query).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}?{query}");
+            assert_eq!(body(response).await, json!({"error":"channel not found"}));
+
+            let response = request(
+                &app,
+                "GET",
+                &format!("/api/v1/orgs/{org}/channels/{channel}/{route}?{query}"),
+                &foreign,
+                Value::Null,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}?{query}");
+            assert_eq!(
+                body(response).await,
+                json!({"error":"organization_unavailable"})
+            );
+        }
     }
 }
 

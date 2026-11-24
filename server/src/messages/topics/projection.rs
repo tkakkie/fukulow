@@ -15,7 +15,7 @@ pub(in crate::messages) fn page_sql() -> String {
     page_sql_in_direction(false)
 }
 
-fn page_sql_in_direction(newer: bool) -> String {
+pub(in crate::messages) fn page_sql_in_direction(newer: bool) -> String {
     let order = if newer { "ASC" } else { "DESC" };
     let range = |position: &str, bigint: &str| {
         if newer {
