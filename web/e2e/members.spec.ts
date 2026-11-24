@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test'
-import { secretSafe } from './helpers.ts'
+import { ensureSetup, secretSafe } from './helpers.ts'
 import type { Channel, Member } from '../src/api-schema.d.ts'
 
-// auth.spec.ts bootstraps the shared disposable database before this file.
 test('Owner creates an Invite link; new Guest accepts, signs in and sees no implicit public Channels', async ({ page, browser }) => {
+  await ensureSetup(page.request)
   await page.goto('/')
   await page.getByLabel('メールアドレス', { exact: true }).fill('owner@example.com')
   await page.getByLabel('パスワード', { exact: true }).fill('correct horse battery')
