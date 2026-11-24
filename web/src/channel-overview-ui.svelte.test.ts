@@ -192,6 +192,14 @@ class MiniEl extends MiniNode {
   set value(v: string) { this._value = String(v ?? '') }
   get disabled(): boolean { return this.attrs.has('disabled') }
   set disabled(v: boolean) { if (v) this.attrs.set('disabled', ''); else this.attrs.delete('disabled') }
+  get open(): boolean { return this.attrs.has('open') }
+  set open(v: boolean) {
+    const next = Boolean(v)
+    const prev = this.attrs.has('open')
+    if (next) this.attrs.set('open', '')
+    else this.attrs.delete('open')
+    if (this.localName === 'details' && next !== prev) this.dispatchEvent(new MiniEvent('toggle'))
+  }
   get className(): string { return this.attrs.get('class') ?? '' }
   set className(v: string) { this.setAttribute('class', v) }
   get id(): string { return this.attrs.get('id') ?? '' }
@@ -224,7 +232,11 @@ class MiniEl extends MiniNode {
   click(): void {
     if (this.disabled) return
     this.focus()
-    this.dispatchEvent(new MiniEvent('click'))
+    const ev = new MiniEvent('click')
+    this.dispatchEvent(ev)
+    if (!ev.defaultPrevented && this.localName === 'summary' && this.parentNode instanceof MiniEl && this.parentNode.localName === 'details') {
+      this.parentNode.open = !this.parentNode.open
+    }
     if (this.localName === 'button' && (this.getAttribute('type') === 'submit' || !this.hasAttribute('type'))) {
       const form = this.closest('form')
       if (form) form.dispatchEvent(new MiniEvent('submit'))
@@ -236,6 +248,7 @@ class MiniEl extends MiniNode {
     this.dispatchEvent(new MiniEvent('input'))
   }
   keydown(key: string, opts: { shiftKey?: boolean; isComposing?: boolean; keyCode?: number } = {}): void {
+    if (this.disabled) return
     this.dispatchEvent(new MiniEvent('keydown', { key, ...opts }))
   }
   querySelectorAll(sel: string): MiniEl[] { return findAll(this, sel) }
@@ -299,6 +312,9 @@ function matchesSelector(c: MiniEl, sel: string): boolean {
   if (sel === 'input') return c.localName === 'input'
   if (sel === 'textarea') return c.localName === 'textarea'
   if (sel === 'li') return c.localName === 'li'
+  if (sel === 'details') return c.localName === 'details'
+  if (sel === 'summary') return c.localName === 'summary'
+  if (sel === '.archived-list__body') return c.classList.contains('archived-list__body')
   if (sel === '[role="dialog"]') return c.getAttribute('role') === 'dialog'
   if (sel === '[role="alert"]') return c.getAttribute('role') === 'alert'
   if (sel === '.ui-chip') return c.classList.contains('ui-chip')
@@ -759,8 +775,9 @@ describe('ArchivedChannelList UI', () => {
           flushSync()
 
           // Initially collapsed: archived list is NOT held or fetched
-          const toggle = host.querySelector('button')!
-          expect(toggle.getAttribute('aria-expanded')).toBe('false')
+          const details = host.querySelector('details')!
+          const toggle = host.querySelector('summary')!
+          expect(details.open).toBe(false)
           expect(listArchivedChannels).not.toHaveBeenCalled()
 
           // Expand: holds target and fetches archived channels
@@ -768,7 +785,7 @@ describe('ArchivedChannelList UI', () => {
           flushSync()
           await vi.advanceTimersByTimeAsync(200)
           flushSync()
-          expect(toggle.getAttribute('aria-expanded')).toBe('true')
+          expect(details.open).toBe(true)
           expect(listArchivedChannels).toHaveBeenCalledTimes(1)
 
           const items = host.querySelectorAll('li')
@@ -787,6 +804,7 @@ describe('ArchivedChannelList UI', () => {
           // Collapse: releases hold and clears archivedList
           toggle.click()
           flushSync()
+          expect(details.open).toBe(false)
           expect(adapter.state.archivedList).toBeUndefined()
           listArchivedChannels.mockClear()
           net.event({ type: 'channel_list_changed' })
@@ -802,6 +820,117 @@ describe('ArchivedChannelList UI', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('opens and closes on click and mounts content only when open', async () => {
+    await withDom(async (doc) => {
+      const host = doc.createElement('div')
+      doc.body.appendChild(host)
+      const release = vi.fn()
+      const onhold = vi.fn(() => release)
+      const archivedRow = { ...row({ id: 'arch-1', name: 'archived-room' }), archived: true }
+      const inst = mount(ArchivedChannelList, {
+        target: host as unknown as Element,
+        props: {
+          list: { status: 'ready', channels: [archivedRow] },
+          selectedId: null,
+          onhold,
+          onretry: vi.fn(),
+          onselect: vi.fn(),
+        },
+      })
+      flushSync()
+
+      const details = host.querySelector('details')!
+      const summary = host.querySelector('summary')!
+      expect(details.open).toBe(false)
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBeNull()
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(onhold).not.toHaveBeenCalled()
+
+      // Click opens and mounts content
+      summary.click()
+      flushSync()
+      expect(details.open).toBe(true)
+      expect(host.querySelector('.archived-list__body')).not.toBeNull()
+      expect(host.querySelectorAll('li')).toHaveLength(1)
+      expect(onhold).toHaveBeenCalledTimes(1)
+
+      // Click closes and unmounts content
+      summary.click()
+      flushSync()
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(release).toHaveBeenCalledTimes(1)
+
+      await unmount(inst)
+    })
+  })
+
+  it('exposes aria-disabled without inert, prevents opening while disabled and collapses/unmounts if disabled while open', async () => {
+    await withDom(async (doc) => {
+      const host = doc.createElement('div')
+      doc.body.appendChild(host)
+      const release = vi.fn()
+      const onhold = vi.fn(() => release)
+      const archivedRow = { ...row({ id: 'arch-1', name: 'archived-room' }), archived: true }
+      const state = $state({ disabled: true })
+      const inst = mount(ArchivedChannelList, {
+        target: host as unknown as Element,
+        props: {
+          list: { status: 'ready', channels: [archivedRow] },
+          selectedId: null,
+          get disabled() { return state.disabled },
+          onhold,
+          onretry: vi.fn(),
+          onselect: vi.fn(),
+        },
+      })
+      flushSync()
+
+      const details = host.querySelector('details')!
+      const summary = host.querySelector('summary')!
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBe('true')
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+
+      // Click cannot open while disabled
+      summary.click()
+      flushSync()
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(onhold).not.toHaveBeenCalled()
+
+      // Even a direct open mutation is rejected while disabled
+      details.open = true
+      flushSync()
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(onhold).not.toHaveBeenCalled()
+
+      // Re-enabling allows opening; disabling again collapses, unmounts and releases hold
+      state.disabled = false
+      flushSync()
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBeNull()
+      summary.click()
+      flushSync()
+      expect(details.open).toBe(true)
+      expect(host.querySelector('.archived-list__body')).not.toBeNull()
+      expect(onhold).toHaveBeenCalledTimes(1)
+
+      state.disabled = true
+      flushSync()
+      expect(details.hasAttribute('inert')).toBe(false)
+      expect(summary.getAttribute('aria-disabled')).toBe('true')
+      expect(details.open).toBe(false)
+      expect(host.querySelector('.archived-list__body')).toBeNull()
+      expect(release).toHaveBeenCalledTimes(1)
+
+      await unmount(inst)
+    })
   })
 })
 
@@ -852,7 +981,7 @@ describe('ArchivedChannelList retry', () => {
             },
           })
           flushSync()
-          host.querySelector('button')!.click()
+          host.querySelector('summary')!.click()
           flushSync()
           await vi.advanceTimersByTimeAsync(300)
           flushSync()
