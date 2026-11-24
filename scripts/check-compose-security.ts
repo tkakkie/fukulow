@@ -5,7 +5,7 @@ import { randomInt, randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { acmeFixture, certificate, challengeResponses, checkCertificateLifecycle, checkVerifiedTls, nodeImage, pebbleIssuingRoot, poll, testDomain } from './compose-acme.ts'
+import { acmeFixture, buildRenewalPebble, certificate, challengeResponses, checkCertificateLifecycle, checkVerifiedTls, nodeImage, pebbleImage, pebbleIssuingRoot, poll, testDomain } from './compose-acme.ts'
 import { fileURLToPath } from 'node:url'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -36,6 +36,9 @@ const run = (args: string[], input?: string) => {
   return (result.stdout + (args[0] === 'logs' ? result.stderr : '')).trim()
 }
 const dc = (...args: string[]) => run([...compose, ...args])
+const lifecycle = process.env.CHECK_COMPOSE_ACCEPTANCE === '1' || process.env.CHECK_COMPOSE_RENEWAL === '1'
+// Only the renewal check depends on Pebble never reusing an authorization (#939).
+let ca = pebbleImage
 const owner = { email: 'owner@example.com', password: 'correct horse battery' }
 const permissionsPolicy = 'accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()'
 const baseOverride = `services:
@@ -53,7 +56,7 @@ writeFileSync(override, baseOverride)
 async function check(profile: string) {
   const proxy = (...args: string[]) => dc('--profile', profile, ...args)
   try {
-    writeFileSync(override, baseOverride + acmeFixture(directory, profile, run))
+    writeFileSync(override, baseOverride + acmeFixture(directory, profile, run, { ca }))
     proxy('up', '-d', '--no-build', '--wait')
     const tlsPort = () => Number(proxy('port', profile, '443').split(':').at(-1))
     let url = `https://${testDomain}:${tlsPort()}`
@@ -149,7 +152,7 @@ async function check(profile: string) {
       const reference = run(['inspect', '--format', '{{.Config.Image}}', proxy('ps', '-q', profile)])
       run(['run', '--rm', '--network', 'none', '--entrypoint', 'sh', reference, '-c', 'test ! -e /var/lib/nginx/acme'])
     }
-    if (process.env.CHECK_COMPOSE_ACCEPTANCE === '1' || process.env.CHECK_COMPOSE_RENEWAL === '1') {
+    if (lifecycle) {
       await checkCertificateLifecycle(profile, proxy, tlsPort, checkHttp, run)
       // The renewed certificate must verify the same way.
       console.log(`PASS ${profile}: verified renewed TLS chain and hostname, serial ${await checkVerifiedTls(tlsPort(), issuingRoot, untrustedCa)}`)
@@ -343,6 +346,7 @@ try {
     assert.match(result.stderr, /FUKULOW_SETUP_TOKEN must/)
     assert.equal(result.stdout, '')
   }
+  if (lifecycle) ca = buildRenewalPebble(directory, run)
   for (const profile of process.env.CHECK_COMPOSE_PROFILE ? [process.env.CHECK_COMPOSE_PROFILE] : ['caddy', 'nginx']) {
     assert.ok(['caddy', 'nginx'].includes(profile))
     await check(profile)

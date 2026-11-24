@@ -1,6 +1,6 @@
 // Shared disposable CA fixture for the existing Compose security/acceptance guard.
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { checkServerIdentity, connect } from 'node:tls'
 import { fileURLToPath } from 'node:url'
@@ -8,6 +8,17 @@ import { setTimeout } from 'node:timers/promises'
 
 export const pebbleImage = 'ghcr.io/letsencrypt/pebble:2.8.0@sha256:d9080f68f6cb6af8d82134ab26de0aaaf312ac9cba42aecc6d3aede6cb63007b'
 export const testDomain = 'fukulow.test'
+// #939: the pinned release rebuilt so PEBBLE_AUTHZREUSE=0 never reuses an authorization (see the Dockerfile).
+export const renewalPebbleImage = 'fukulow-ci-pebble:no-authz-reuse'
+
+// Builds renewalPebbleImage from compose-acme-pebble.Dockerfile on top of pebbleImage. Its context is empty.
+export function buildRenewalPebble(directory: string, run: (args: string[]) => string): string {
+  const context = join(directory, 'pebble-build')
+  mkdirSync(context)
+  run(['build', '--quiet', '--load', '--build-arg', `PEBBLE_IMAGE=${pebbleImage}`, '-t', renewalPebbleImage,
+    '-f', fileURLToPath(new URL('./compose-acme-pebble.Dockerfile', import.meta.url)), context])
+  return renewalPebbleImage
+}
 export const nodeImage = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8').match(/^FROM (node:\S+) AS web$/m)?.[1] ?? ''
 assert.match(nodeImage, /^node:\d+\.\d+\.\d+-slim@sha256:[a-f0-9]{64}$/, 'reuse the pinned Node toolchain image')
 
@@ -25,17 +36,18 @@ export async function poll<T>(label: string, observe: () => Promise<T> | T, acce
 
 // `proxies` adds every listed proxy's fixture block; `profile` owns the ACME directory.
 export function acmeFixture(directory: string, profile: string, run: (args: string[]) => string,
-  { proxies = [profile], validity = 600 }: { proxies?: string[], validity?: number } = {}): string {
+  { proxies = [profile], validity = 600, ca = pebbleImage }: { proxies?: string[], validity?: number, ca?: string } = {}): string {
   const config = {
     pebble: { listenAddress: '0.0.0.0:14000', managementListenAddress: '0.0.0.0:15000',
       certificate: 'test/certs/localhost/cert.pem', privateKey: 'test/certs/localhost/key.pem',
       httpPort: 80, tlsPort: 443, certificateValidityPeriod: validity,
       profiles: { default: { description: 'CI short-lived certificate', validityPeriod: validity } },
-      // Force fresh HTTP-01 validation on renewal, not cached authorizations.
-      authorizationValidityPeriod: 1, retryAfter: { authz: 1, order: 1 } },
+      // Pebble has no authorization lifetime setting: a validated authorization stays reusable for an hour.
+      // Fresh HTTP-01 validation on renewal comes from PEBBLE_AUTHZREUSE=0 with renewalPebbleImage (#939).
+      retryAfter: { authz: 1, order: 1 } },
   }
   writeFileSync(join(directory, 'pebble.json'), JSON.stringify(config))
-  const extract = run(['create', pebbleImage])
+  const extract = run(['create', ca])
   try {
     // Public CA certificate only. Never extract/read a private key or ACME state.
     run(['cp', `${extract}:/test/certs/pebble.minica.pem`, join(directory, 'pebble-ca.pem')])
@@ -84,7 +96,7 @@ export function acmeFixture(directory: string, profile: string, run: (args: stri
       - ${directory}/pebble-ca.pem:/etc/pebble-ca.pem:ro
       - ${directory}/${proxy === 'nginx' ? 'nginx.conf:/etc/nginx/templates/nginx.conf.template' : 'Caddyfile:/etc/caddy/Caddyfile'}:ro`).join('') + `
   pebble:
-    image: ${pebbleImage}
+    image: ${ca}
     command: ["-config", "/pebble.json", "-dnsserver", "127.0.0.11:53"]
     environment:
       PEBBLE_VA_NOSLEEP: "1"
@@ -178,12 +190,13 @@ export async function checkVerifiedTls(port: number, root: string, untrustedCa: 
   return verified.serial
 }
 
-export function checkReuse(before: { serial: string, orders: number, accounts: number }, after: { serial: string, orders: number, accounts: number }) {
-  assert.ok(before.orders > 0 && before.accounts > 0, 'CA observation must be active')
+export type ReuseObservation = { serial: string, orders: number, accounts: number, validations: number }
+
+export function checkReuse(before: ReuseObservation, after: ReuseObservation) {
+  assert.ok(before.orders > 0 && before.accounts > 0 && before.validations > 0, 'CA observation must be active')
   assert.deepEqual(after, before, 'restart/recreation must reuse certificate and account without a new order')
 }
 
-type ReuseObservation = { serial: string, orders: number, accounts: number }
 
 export function lifetimeRenewalNotBefore(cert: { starts: number, expires: number }): number {
   // nginx-acme 0.4.1 state/certificate.rs: half-life minus 2%; time.rs
@@ -206,14 +219,18 @@ export function checkLifetimeRenewal(before: ReuseObservation, after: ReuseObser
   if (observedAt < renewalNotBefore) checkReuse(before, observed)
   if (after.serial === before.serial) return false
   assert.ok(after.orders > before.orders, 'renewal creates a fresh CA order')
+  // A reused authorization would issue without HTTP-01 (#939); the proxy log check then proves who answered.
+  assert.ok(after.validations > before.validations, 'renewal validates a fresh authorization by challenge')
   // The CA stamps notBefore at issuance (whole seconds; the window is whole
   // seconds too), so a certificate ordered before the window cannot pass late.
   assert.ok(starts >= renewalNotBefore, 'renewed certificate was issued within the lifetime renewal window')
   return true
 }
 
-export function caActivity(log: string): { orders: number, accounts: number } {
+export function caActivity(log: string): { orders: number, accounts: number, validations: number } {
   return { orders: (log.match(/POST \/order-plz/g) ?? []).length,
+    // Pebble va.go: one line per authorization a completed challenge made valid. Reuse logs none.
+    validations: (log.match(/authz \S+ set VALID by completed challenge/g) ?? []).length,
     // newAccount also looks up an existing account (HTTP 200). Count actual
     // stored accounts, not requests to that endpoint.
     accounts: Math.max(0, ...[...log.matchAll(/There are now (\d+) accounts in memory/g)].map(match => Number(match[1]))) }
