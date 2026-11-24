@@ -4,6 +4,179 @@ const SURFACES: [&str; 7] = [
     "new", "existing", "retry", "timeline", "topics", "summary", "history",
 ];
 
+async fn projection(
+    app: &Router,
+    token: &str,
+    channel: Uuid,
+    route: &str,
+    query: &str,
+) -> Response {
+    request(
+        app,
+        "GET",
+        &format!("/api/v1/channels/{channel}/{route}?{query}"),
+        token,
+        Value::Null,
+    )
+    .await
+}
+
+#[fukulow_test::test]
+async fn newer_projection_validates_bounds(pool: PgPool) {
+    let (app, _, _, channel, token) = fixture(&pool).await;
+    for route in ["timeline", "topics"] {
+        for query in [
+            "after_position=0",
+            "as_of_seq=0&before_position=1&after_position=0",
+            "as_of_seq=0&after_position=-1",
+            "as_of_seq=-1&after_position=0",
+            "as_of_seq=1&after_position=0",
+            "as_of_seq=0&after_position=0&limit=0",
+            "as_of_seq=0&after_position=0&limit=201",
+        ] {
+            let response = projection(&app, &token, channel, route, query).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{route}?{query}"
+            );
+            assert_eq!(body(response).await, json!({"error":"invalid input"}));
+        }
+    }
+}
+
+#[fukulow_test::test]
+async fn newer_projection_checks_epoch_before_expiry(pool: PgPool) {
+    let (app, _, _, channel, token) = fixture(&pool).await;
+    let root = sent(&app, &token, channel, topic_input(Uuid::new_v4(), "Source")).await;
+    let generation = root["history_generation"].as_str().unwrap();
+    let query = |w, epoch| format!("as_of_seq={w}&after_position=0&history_generation={epoch}");
+    for route in ["timeline", "topics"] {
+        let page = projection(&app, &token, channel, route, &query(1, generation)).await;
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(body(page).await["as_of_seq"], 1);
+    }
+    let moved = request(
+        &app,
+        "POST",
+        &format!(
+            "/api/v1/channels/{channel}/messages/{}/move",
+            root["id"].as_str().unwrap()
+        ),
+        &token,
+        json!({"operation_id":Uuid::new_v4(),"expected_version":1,"topic_name":"Destination"}),
+    )
+    .await;
+    assert_eq!(moved.status(), StatusCode::OK);
+    let stale = Uuid::new_v4().to_string();
+    for route in ["timeline", "topics"] {
+        for (epoch, error) in [
+            (generation, "snapshot_expired"),
+            (&stale, "history_generation_changed"),
+        ] {
+            let response = projection(&app, &token, channel, route, &query(1, epoch)).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(body(response).await, json!({"error":error}));
+        }
+        let fresh = projection(&app, &token, channel, route, &query(2, generation)).await;
+        assert_eq!(fresh.status(), StatusCode::OK);
+        assert_eq!(body(fresh).await["as_of_seq"], 2);
+    }
+}
+
+#[fukulow_test::test]
+async fn newer_projection_hides_private_and_unknown_channels(pool: PgPool) {
+    let (app, org, owner, _, token) = fixture(&pool).await;
+    let private = Uuid::new_v4();
+    channel(&pool, org, private, owner, true).await;
+    let viewer = member(&pool, org, Uuid::new_v4()).await;
+    let unknown = Uuid::new_v4();
+    for route in ["timeline", "topics"] {
+        let query = "as_of_seq=0&after_position=0";
+        assert_eq!(
+            projection(&app, &token, private, route, query)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let query = format!("{query}&history_generation={}", Uuid::new_v4());
+        let mut bodies = Vec::new();
+        for id in [private, unknown] {
+            let response = projection(&app, &viewer, id, route, &query).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            bodies.push(to_bytes(response.into_body(), 1024).await.unwrap());
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bodies[0]).unwrap(),
+            json!({"error":"channel not found"})
+        );
+    }
+}
+
+#[fukulow_test::test]
+async fn newer_projection_denies_cross_organization(pool: PgPool) {
+    let (app, org, _, channel, token) = fixture(&pool).await;
+    let other = organization(&pool).await;
+    let foreign = member(&pool, other, Uuid::new_v4()).await;
+    let query = "as_of_seq=0&after_position=0";
+    for route in ["timeline", "topics"] {
+        assert_eq!(
+            projection(&app, &token, channel, route, query)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let response = projection(&app, &foreign, channel, route, query).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(response).await, json!({"error":"channel not found"}));
+
+        let response = request(
+            &app,
+            "GET",
+            &format!("/api/v1/orgs/{org}/channels/{channel}/{route}?{query}"),
+            &foreign,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body(response).await,
+            json!({"error":"organization_unavailable"})
+        );
+    }
+}
+
+#[fukulow_test::test]
+async fn newer_timeline_accepts_dm_but_topic_list_rejects_it(pool: PgPool) {
+    let (app, org, _, _, token) = fixture(&pool).await;
+    let peer = Uuid::new_v4();
+    member(&pool, org, peer).await;
+    let opened = request(
+        &app,
+        "POST",
+        "/api/v1/dms",
+        &token,
+        json!({"member_id":peer}),
+    )
+    .await;
+    assert_eq!(opened.status(), StatusCode::CREATED);
+    let dm: Uuid = serde_json::from_value(body(opened).await["id"].clone()).unwrap();
+    let message = sent(&app, &token, dm, input(Uuid::new_v4(), "DM")).await;
+    let query = "as_of_seq=1&after_position=0";
+    let timeline = projection(&app, &token, dm, "timeline", query).await;
+    assert_eq!(timeline.status(), StatusCode::OK);
+    assert_eq!(
+        body(timeline).await["items"],
+        json!([{"kind":"message","message":message}])
+    );
+
+    let topics = projection(&app, &token, dm, "topics", query).await;
+    assert_eq!(topics.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body(topics).await, json!({"error":"dm_topics_not_allowed"}));
+}
+
 async fn surface(
     app: &Router,
     token: &str,
@@ -208,6 +381,7 @@ async fn topic_stale_member_revision_denies_every_rest_surface_after_auth(pool: 
                     history_generation: None,
                     as_of_seq: None,
                     before_position: None,
+                    after_position: None,
                     limit: None,
                 }))
             };

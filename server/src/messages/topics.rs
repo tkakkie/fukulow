@@ -33,8 +33,9 @@ pub enum TimelineItem {
 pub struct TimelinePage {
     pub history_generation: Uuid,
     pub as_of_seq: i64,
-    /// Ascending W-relative positions, newest last. Continue older with the first position.
+    /// Ascending W-relative positions. Continue older from the first or newer from the last.
     pub items: Vec<TimelineItem>,
+    /// More items exist at W in the requested direction (older for the initial page).
     pub has_more: bool,
 }
 
@@ -42,7 +43,9 @@ pub struct TimelinePage {
 pub struct TopicPage {
     pub history_generation: Uuid,
     pub as_of_seq: i64,
+    /// Ascending W-relative positions. Continue older from the first or newer from the last.
     pub topics: Vec<TopicSummary>,
+    /// More Topics exist at W in the requested direction (older for the initial page).
     pub has_more: bool,
 }
 
@@ -62,10 +65,14 @@ pub struct ListProjectionQuery {
     #[param(minimum = 0)]
     #[schema(minimum = 0)]
     pub as_of_seq: Option<i64>,
-    /// Exclusive W-relative position. Requires as_of_seq; never use a live-moved position.
+    /// Exclusive older W-relative position. Requires as_of_seq and excludes after_position.
     #[param(minimum = 1)]
     #[schema(minimum = 1)]
     pub before_position: Option<i64>,
+    /// Exclusive newer W-relative position. Requires as_of_seq and excludes before_position.
+    #[param(minimum = 0)]
+    #[schema(minimum = 0)]
+    pub after_position: Option<i64>,
     #[param(minimum = 1, maximum = 200, default = 50)]
     #[schema(minimum = 1, maximum = 200)]
     pub limit: Option<u16>,
@@ -77,7 +84,9 @@ impl ListProjectionQuery {
         if !(1..=200).contains(&limit)
             || self.as_of_seq.is_some_and(|w| w < 0)
             || self.before_position.is_some_and(|p| p < 1)
-            || (self.before_position.is_some() && self.as_of_seq.is_none())
+            || self.after_position.is_some_and(|p| p < 0)
+            || (self.before_position.is_some() && self.after_position.is_some())
+            || (self.before_position.or(self.after_position).is_some() && self.as_of_seq.is_none())
         {
             return Err(MessageError::InvalidInput);
         }

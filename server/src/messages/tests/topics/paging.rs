@@ -9,6 +9,122 @@ fn position(item: &Value) -> i64 {
 }
 
 #[fukulow_test::test]
+async fn projections_page_newer_at_fixed_w(pool: PgPool) {
+    let (app, org, _, channel, token) = fixture(&pool).await;
+    for name in [
+        Some("A"),
+        None,
+        Some("B"),
+        Some("A"),
+        None,
+        Some("C"),
+        Some("B"),
+        Some("C"),
+    ] {
+        let key = Uuid::new_v4();
+        let message = name.map_or_else(|| input(key, "main"), |name| topic_input(key, name));
+        sent(&app, &token, channel, message).await;
+    }
+    let latest = get(&app, &token, channel, "timeline?limit=2").await;
+    assert_eq!(latest["as_of_seq"], 8);
+    assert_eq!(latest["has_more"], true);
+
+    // A Topic moves beyond W, and new Topics and main Messages stay outside W.
+    let later = member(&pool, org, Uuid::new_v4()).await;
+    sent(&app, &later, channel, topic_input(Uuid::new_v4(), "A")).await;
+    sent(&app, &later, channel, topic_input(Uuid::new_v4(), "D")).await;
+    sent(&app, &later, channel, input(Uuid::new_v4(), "later main")).await;
+
+    let mut newer = Vec::new();
+    for (after, positions, has_more) in [
+        (0, &[2, 4][..], true),
+        (4, &[5, 7][..], true),
+        (7, &[8][..], false),
+        (8, &[][..], false),
+        (i64::MAX, &[][..], false),
+    ] {
+        let page = get(
+            &app,
+            &token,
+            channel,
+            &format!("timeline?as_of_seq=8&after_position={after}&limit=2"),
+        )
+        .await;
+        assert_eq!(page["as_of_seq"], 8);
+        assert_eq!(page["has_more"], has_more);
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.iter().map(position).collect::<Vec<_>>(), positions);
+        newer.extend_from_slice(items);
+    }
+    let middle = get(
+        &app,
+        &token,
+        channel,
+        "timeline?as_of_seq=8&before_position=7&limit=2",
+    )
+    .await;
+    let oldest = get(
+        &app,
+        &token,
+        channel,
+        "timeline?as_of_seq=8&before_position=4&limit=2",
+    )
+    .await;
+    let older = [&oldest, &middle, &latest]
+        .into_iter()
+        .flat_map(|page| page["items"].as_array().unwrap().iter().cloned())
+        .collect::<Vec<_>>();
+    assert_eq!(newer, older);
+    let exact = get(
+        &app,
+        &token,
+        channel,
+        "timeline?as_of_seq=8&after_position=5&limit=2",
+    )
+    .await;
+    assert_eq!(
+        exact,
+        json!({"as_of_seq":8,"items":newer[3..],"has_more":false})
+    );
+
+    let topics = newer
+        .iter()
+        .filter(|item| item["kind"] == "topic")
+        .map(|item| item["topic"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        topics
+            .iter()
+            .map(|topic| topic["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["A", "B", "C"]
+    );
+    assert!(topics.iter().all(|topic| topic["message_count"] == 2));
+    let first = get(
+        &app,
+        &token,
+        channel,
+        "topics?as_of_seq=8&after_position=0&limit=2",
+    )
+    .await;
+    assert_eq!(
+        first,
+        json!({"as_of_seq":8,"topics":topics[..2],"has_more":true})
+    );
+    let last = get(
+        &app,
+        &token,
+        channel,
+        "topics?as_of_seq=8&after_position=7&limit=2",
+    )
+    .await;
+    assert_eq!(
+        last,
+        json!({"as_of_seq":8,"topics":topics[2..],"has_more":false})
+    );
+}
+
+#[fukulow_test::test]
 async fn topic_projection_paging_preserves_w_counts_positions_and_unfiltered_holes(pool: PgPool) {
     let (app, _, _, channel, token) = fixture(&pool).await;
     let a = sent(&app, &token, channel, topic_input(Uuid::new_v4(), "A")).await;
