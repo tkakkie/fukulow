@@ -1,27 +1,14 @@
 use super::*;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-};
-use tokio::sync::Semaphore;
+use crate::test_support::Gates;
 
 mod contract;
 mod denials;
 mod plans;
 mod races;
 
-struct Gate {
-    entered: Semaphore,
-    release: Semaphore,
-}
-static GATES: LazyLock<Mutex<HashMap<Uuid, Arc<Gate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GATES: Gates<Uuid> = Gates::new();
 pub(crate) async fn pause(channel: Uuid) {
-    let gate = GATES.lock().unwrap().remove(&channel);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    GATES.pause(channel).await;
 }
 
 async fn query(app: &Router, token: &str, channel: Uuid, ids: &[Uuid]) -> Response {

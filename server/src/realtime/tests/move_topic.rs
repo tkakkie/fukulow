@@ -102,11 +102,7 @@ async fn move_live_gap_and_subscribe_replay_converge_topics_chain_unread_and_men
         json!({"operation_id":operation,"expected_version":3,"topic_id":destination,"history_generation":root["history_generation"]})).await;
     let receipt = json_reply(response, StatusCode::OK).await;
     assert_eq!(receipt["move_seq"], 4);
-    tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered_within(Duration::from_secs(3)).await;
     let expected = json!({
         "type":"message","kind":"move","history_generation":root["history_generation"],"channel_id":f.channel,
         "seq":4,"version":4,"root_id":root["id"],"source_topic_id":source,"destination_topic_id":destination,

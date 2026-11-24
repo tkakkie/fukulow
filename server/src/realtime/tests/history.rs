@@ -135,7 +135,7 @@ async fn subscribe_handoff_generation_recheck_preserves_access_and_organization_
         let gate = access_loss::gate(private, "handoff_generation", 0);
         let mut socket = f.server.connect(&f.token).await;
         subscribe(&mut socket, private, 0).await;
-        entered(&gate).await;
+        gate.entered().await;
         if loss == "grant" {
             sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(f.organization).bind(private).bind(f.member).execute(&pool).await.unwrap();
         } else {

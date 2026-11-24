@@ -1,24 +1,11 @@
 use super::super::authors::{AuthorLookupRequest, lookup_authors};
 use super::*;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-    time::Duration,
-};
-use tokio::sync::Semaphore;
+use crate::test_support::Gates;
+use std::time::Duration;
 
-struct Gate {
-    entered: Semaphore,
-    release: Semaphore,
-}
-static GATES: LazyLock<Mutex<HashMap<Uuid, Arc<Gate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GATES: Gates<Uuid> = Gates::new();
 pub(crate) async fn pause(organization: Uuid) {
-    let gate = GATES.lock().unwrap().remove(&organization);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    GATES.pause(organization).await;
 }
 
 async fn lookup(app: &Router, token: &str, ids: &[Uuid]) -> Value {
@@ -311,11 +298,7 @@ async fn author_lookup_authorization_and_identities_share_a_nonlocking_snapshot(
     let auth = membership::captured_auth(&pools.app, &token).await;
     let next_auth = membership::captured_auth(&pools.app, &token).await;
     let state = AppState::for_test(pools.app.clone()).await;
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    GATES.lock().unwrap().insert(org, gate.clone());
+    let gate = GATES.register(org);
     let lookup = lookup_authors(
         State(state.clone()),
         auth,
@@ -326,7 +309,7 @@ async fn author_lookup_authorization_and_identities_share_a_nonlocking_snapshot(
     tokio::pin!(lookup);
     tokio::select! {
         _ = &mut lookup => panic!("lookup did not pause"),
-        permit = tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire()) => permit.unwrap().unwrap().forget(),
+        () = gate.entered() => {},
     }
     // Neither authorization nor identity reads lock Member or grant rows.
     tokio::time::timeout(Duration::from_secs(5), async {

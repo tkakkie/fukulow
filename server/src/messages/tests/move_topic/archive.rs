@@ -58,11 +58,7 @@ async fn assert_both_commit_orders(pool: &PgPool, writer: Writer) {
         let f = f.clone();
         async move { write(&f, root, writer).await }
     });
-    tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered_within(Duration::from_secs(3)).await;
     let archive_task = tokio::spawn({
         let f = f.clone();
         async move { patch_archive(&f.app, &f.token, f.channel, true).await }

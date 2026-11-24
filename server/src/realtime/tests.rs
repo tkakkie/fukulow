@@ -1,5 +1,8 @@
 use super::*;
-use crate::messages;
+use crate::{
+    messages,
+    test_support::{Gate, Gates},
+};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -9,10 +12,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::Semaphore,
     task::JoinHandle,
 };
 use tokio_tungstenite::{
@@ -24,33 +26,12 @@ use tower::ServiceExt;
 type Client = WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 
 // Test-only pause after registration and the history snapshot, before replay/handoff.
-struct Gate {
-    entered: Semaphore,
-    release: Semaphore,
-}
-static GATES: LazyLock<Mutex<HashMap<Uuid, Arc<Gate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static REPLAY_GATES: Gates<Uuid> = Gates::new();
 fn pause(channel: Uuid) -> Arc<Gate> {
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    GATES.lock().unwrap().insert(channel, gate.clone());
-    gate
+    REPLAY_GATES.register(channel)
 }
 pub(super) async fn replay_gate(channel: Uuid) {
-    let gate = GATES.lock().unwrap().remove(&channel);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
-}
-async fn entered(gate: &Gate) {
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    REPLAY_GATES.pause(channel).await;
 }
 
 /// A socket to a server whose `Server` handle another task owns.
@@ -727,7 +708,7 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
     let mut socket = f.server.connect(&f.token).await;
     let gate = pause(f.channel);
     subscribe(&mut socket, f.channel, 7).await;
-    entered(&gate).await;
+    gate.entered().await;
     // These commit after the history high-water mark and must survive the handoff.
     for _ in 0..5 {
         post(&f, f.channel).await;
@@ -806,7 +787,7 @@ async fn overflow_closes_socket_and_reconnect_replays_every_committed_message(po
     let mut socket = f.server.connect(&f.token).await;
     let gate = pause(f.channel);
     subscribe(&mut socket, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     for _ in 0..257 {
         post(&f, f.channel).await;
     }
@@ -833,7 +814,7 @@ async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_us
     let mut replay = f.server.connect(&f.token).await;
     let gate = pause(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     let mut other = f.server.connect(&other_token).await;
     subscribe(&mut other, f.channel, 0).await;
     ready(&mut other, f.channel, 0).await;
@@ -902,7 +883,7 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
         let mut replay = f.server.connect(&f.token).await;
         let gate = pause(f.channel);
         subscribe(&mut replay, f.channel, 0).await;
-        entered(&gate).await;
+        gate.entered().await;
         fallback.entered().await;
         let remaining: f64 = sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM (expires_at - clock_timestamp()))::float8 FROM account_sessions WHERE token_hash = $1")
             .bind(Sha256::digest(f.token.as_bytes()).to_vec())
@@ -1134,11 +1115,7 @@ async fn out_of_order_publication_fills_committed_gaps_without_duplicate_deliver
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     let second = post(&f, f.channel).await;
     assert_eq!(second["created_seq"], 2);
     // seq 2 publishes first; fan-out recovers the prefix once for all subscribers.

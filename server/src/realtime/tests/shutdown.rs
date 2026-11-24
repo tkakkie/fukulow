@@ -123,7 +123,7 @@ async fn disconnected_http_send_stays_in_drain_until_persistence_and_notificatio
         )
         .await
     });
-    super::notification::publication_entered(&persistence).await;
+    persistence.entered().await;
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
     let delivery = f.state.message_delivery.clone();
@@ -133,7 +133,7 @@ async fn disconnected_http_send_stays_in_drain_until_persistence_and_notificatio
             .is_err()
     );
     persistence.release.add_permits(1);
-    super::notification::publication_entered(&notification).await;
+    notification.entered().await;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), delivery.drained())
             .await
@@ -197,11 +197,11 @@ async fn signal_child() {
     let first_key = Uuid::new_v4();
     let notification = messages::pause_publication(first_key);
     let first = http_send(address, f.token.clone(), f.channel, first_key).await;
-    super::notification::publication_entered(&notification).await;
+    notification.entered().await;
     let key = Uuid::new_v4();
     let persistence = messages::pause_commit(key);
     let pending = tokio::spawn(http_send(address, f.token.clone(), f.channel, key));
-    super::notification::publication_entered(&persistence).await;
+    persistence.entered().await;
     println!("READY_FOR_SIGNAL");
     f.state.shutdown.cancelled().await;
     let start = tokio::time::Instant::now();
@@ -345,7 +345,7 @@ async fn send_load_child(pool: PgPool, sends: usize) {
             *channel,
             key,
         ));
-        super::notification::publication_entered(&gate).await;
+        gate.entered().await;
         held.push(gate);
     }
     for index in channels.len()..sends {

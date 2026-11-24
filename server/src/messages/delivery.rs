@@ -262,11 +262,7 @@ impl Notification {
             super::log::Payload::Move(event) => event.operation_id,
         };
         #[cfg(test)]
-        let gate = PUBLICATION_GATES
-            .lock()
-            .unwrap()
-            .get(&publication_key)
-            .cloned();
+        let gate = PUBLICATION_GATES.get(&publication_key);
         let work = self.delivery.work.enter();
         let task = tokio::spawn(async move {
             let _work = work;
@@ -296,7 +292,7 @@ impl Notification {
         #[cfg(test)]
         {
             if let Some(gate) = gate {
-                *gate.task.lock().unwrap() = Some(task.abort_handle());
+                *gate.data.lock().unwrap() = Some(task.abort_handle());
             }
             delivery.tasks.lock().unwrap().push(task);
         }
@@ -347,13 +343,11 @@ impl Delivery {
         &self,
         organization: Uuid,
         channel: Uuid,
-        entered: &Semaphore,
-        release: &Semaphore,
+        gate: &Gate,
     ) {
         let lease = self.channel((organization, channel));
         let _cursor = lease.fanout.published.lock().await;
-        entered.add_permits(1);
-        release.acquire().await.unwrap().forget();
+        gate.pause().await;
     }
 
     #[cfg(test)]
@@ -682,34 +676,21 @@ impl Delivery {
 }
 
 #[cfg(test)]
-static PUBLICATION_GATES: std::sync::LazyLock<Mutex<HashMap<Uuid, Arc<PublicationGate>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+use crate::test_support::{Gate, Gates};
 
 #[cfg(test)]
-pub(crate) struct PublicationGate {
-    pub entered: tokio::sync::Semaphore,
-    pub release: tokio::sync::Semaphore,
-    pub task: Mutex<Option<tokio::task::AbortHandle>>,
-}
+type PublicationTask = Mutex<Option<tokio::task::AbortHandle>>;
+#[cfg(test)]
+static PUBLICATION_GATES: Gates<Uuid, PublicationTask> = Gates::new();
 
 #[cfg(test)]
-pub(crate) fn pause_publication(key: Uuid) -> Arc<PublicationGate> {
-    let gate = Arc::new(PublicationGate {
-        entered: tokio::sync::Semaphore::new(0),
-        release: tokio::sync::Semaphore::new(0),
-        task: Mutex::new(None),
-    });
-    PUBLICATION_GATES.lock().unwrap().insert(key, gate.clone());
-    gate
+pub(crate) fn pause_publication(key: Uuid) -> Arc<Gate<PublicationTask>> {
+    PUBLICATION_GATES.register(key)
 }
 
 #[cfg(test)]
 async fn publication_gate(key: Uuid) {
-    let gate = PUBLICATION_GATES.lock().unwrap().remove(&key);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    PUBLICATION_GATES.pause(key).await;
 }
 
 impl LiveQueue {
@@ -855,19 +836,17 @@ mod tests {
             let channel = Uuid::new_v4();
             let mut affected = delivery.queue(organization, (Uuid::new_v4(), 0), 1);
             affected.subscribe(channel);
-            let entered = Arc::new(Semaphore::new(0));
-            let release = Arc::new(Semaphore::new(0));
+            let gate = Arc::new(Gate::default());
             let holder = {
                 let delivery = delivery.clone();
-                let entered = entered.clone();
-                let release = release.clone();
+                let gate = gate.clone();
                 tokio::spawn(async move {
                     delivery
-                        .hold_publication_cursor(organization, channel, &entered, &release)
+                        .hold_publication_cursor(organization, channel, &gate)
                         .await;
                 })
             };
-            entered.acquire().await.unwrap().forget();
+            gate.entered().await;
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
                 .unwrap();
@@ -908,7 +887,7 @@ mod tests {
                 delivery.channel_notification_permits(organization, channel),
                 MAX_IN_FLIGHT_NOTIFICATIONS
             );
-            release.add_permits(1);
+            gate.release();
             holder.await.unwrap();
             drop(affected);
             assert!(delivery.recipients.lock().unwrap().is_empty());
@@ -1000,7 +979,7 @@ mod tests {
             // On this current-thread runtime the entered permit cannot be observed
             // until that poll (including the timeout check) has returned.
             for gate in gates {
-                gate.entered.acquire().await.unwrap().forget();
+                gate.entered().await;
             }
             if hold_timeout {
                 assert_eq!(
@@ -1026,13 +1005,13 @@ mod tests {
                 // Cap rejection signals 1011/replay on this Channel too.
                 assert!(cold.notification_failed.is_failed());
             } else {
-                gate.entered.acquire().await.unwrap().forget();
+                gate.entered().await;
                 // The stale 512 snapshot cannot require a close: this send was
                 // admitted, and expired hot Channels cannot fail the cold Channel.
                 assert!(!cold.notification_failed.is_failed());
                 assert_eq!(delivery.notification_reservations(), (1, 1));
             }
-            if let Some(task) = gate.task.lock().unwrap().as_ref() {
+            if let Some(task) = gate.data.lock().unwrap().as_ref() {
                 task.abort();
             }
             for task in tasks {
@@ -1040,7 +1019,7 @@ mod tests {
                 let _ = task.await;
             }
             delivery.flush().await;
-            PUBLICATION_GATES.lock().unwrap().remove(&key);
+            PUBLICATION_GATES.take(&key);
             assert_eq!(delivery.notification_reservations(), (0, 0));
         }
     }
@@ -1113,7 +1092,7 @@ mod tests {
         delivery
             .notification(organization, channel, 1)
             .spawn(pool, message);
-        gate.entered.acquire().await.unwrap().forget();
+        gate.entered().await;
         assert_eq!(delivery.notification_reservations(), (1, 1));
         // The test-only publication gate unwraps a closed semaphore, unwinding the task.
         gate.release.close();
@@ -1246,7 +1225,7 @@ mod tests {
                 mentions: Some(Vec::new()),
             },
         );
-        gate.entered.acquire().await.unwrap().forget();
+        gate.entered().await;
         assert_eq!(
             delivery.notifications.available_permits(),
             MAX_IN_FLIGHT_NOTIFICATIONS

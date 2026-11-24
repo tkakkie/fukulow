@@ -180,7 +180,7 @@ async fn concurrent_identical_requests_consume_one_token_and_share_one_message(p
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
         tokio::spawn(async move { send(&app, &token, channel, input(key, "once")).await })
     };
-    gate.entered.acquire().await.unwrap().forget();
+    gate.entered().await;
     // The duplicate waits for the in-flight leader without a token of its own.
     let second = {
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
@@ -211,7 +211,7 @@ async fn waiters_settle_with_a_failed_leader_without_paying_or_taking_its_free_r
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
         tokio::spawn(async move { send(&app, &token, channel, input(key, "maybe")).await })
     };
-    gate.entered.acquire().await.unwrap().forget();
+    gate.entered().await;
     let waiter = {
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
         tokio::spawn(async move { send(&app, &token, channel, input(key, "maybe")).await })
@@ -267,7 +267,7 @@ async fn a_waiter_with_another_intent_executes_itself_and_pays_without_the_free_
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
         tokio::spawn(async move { send(&app, &token, channel, input(key, "maybe")).await })
     };
-    gate.entered.acquire().await.unwrap().forget();
+    gate.entered().await;
     let other = {
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
         tokio::spawn(async move { send(&app, &token, channel, input(key, "other")).await })
@@ -469,7 +469,7 @@ async fn a_charged_leader_refused_by_admission_charges_its_identical_waiters_not
     };
     let leader = spawn("once");
     // The leader has paid its token and holds the key; admission is full.
-    gate.entered.acquire().await.unwrap().forget();
+    gate.entered().await;
     let identical = [spawn("once"), spawn("once"), spawn("once")];
     let another = spawn("other");
     let limiter = &delivery.send_limiter;
@@ -547,11 +547,7 @@ async fn identical_waiter_rechecks_archive_before_replaying_admission_refusal(po
     };
     let leader = spawn();
     let timeout = Duration::from_secs(5);
-    tokio::time::timeout(timeout, gate.entered.acquire())
-        .await
-        .expect("the leader reaches the gate after charging")
-        .unwrap()
-        .forget();
+    gate.entered().await;
     let waiter = spawn();
     let limiter = &delivery.send_limiter;
     tokio::time::timeout(timeout, async {

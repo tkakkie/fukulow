@@ -19,11 +19,7 @@ async fn mention_live_and_replay_follow_current_names_and_never_accept_later_gra
     let gate = messages::pause_publication(key);
     let text = format!("@{{member:{target}}} @{{member:{denied}}}");
     let message = send(&f, &f.token, c, key, &text).await;
-    tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered_within(Duration::from_secs(3)).await;
     assert_eq!(
         message["mentions"],
         json!([{"member_id":target,"name":"Member"}])
@@ -92,7 +88,7 @@ async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(p
         if phase != "live" {
             subscribe(&mut socket, c, 0).await;
         }
-        entered(&gate).await;
+        gate.entered().await;
         let mut control = f.server.connect(&f.token).await;
         subscribe(&mut control, c, 0).await;
         if phase == "frame" {

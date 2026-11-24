@@ -79,7 +79,7 @@ async fn run(
     interval: Duration,
     timeout: Duration,
     subscriptions: Arc<Mutex<Option<Arc<dyn SubscriptionRecheck>>>>,
-    #[cfg(test)] gate: Arc<Mutex<Option<Arc<super::tests::Gate>>>>,
+    #[cfg(test)] gate: Arc<super::tests::SessionGates>,
 ) {
     let mut ticks = tokio::time::interval_at(Instant::now() + interval, interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -126,7 +126,7 @@ async fn pass(
     sessions: &Mutex<Sessions>,
     pool: &PgPool,
     bound: Instant,
-    #[cfg(test)] gate: &Mutex<Option<Arc<super::tests::Gate>>>,
+    #[cfg(test)] gate: &super::tests::SessionGates,
 ) {
     let snapshot: Vec<_> = lock_ignoring_poison(sessions)
         .entries

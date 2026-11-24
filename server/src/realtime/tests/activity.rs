@@ -199,12 +199,12 @@ async fn other_organization_socket_of_same_account_receives_nothing(pool: PgPool
 #[fukulow_test::test]
 async fn delete_grant_reports_revocation_with_and_without_an_active_subscription(pool: PgPool) {
     use crate::auth::{SubscriptionRecheck, SubscriptionScope};
-    use crate::channels::activity::{TestGate, pause_member};
+    use crate::channels::activity::pause_member;
 
     struct RecheckBeforePublication {
         access: crate::channels::AccessChanges,
         // Not an array: the module-direction driver ICEs on array lengths in local items.
-        gates: Vec<Arc<TestGate>>,
+        gates: Vec<Arc<Gate>>,
     }
     impl SubscriptionRecheck for RecheckBeforePublication {
         fn check<'a>(
@@ -296,11 +296,7 @@ async fn delete_grant_reports_revocation_with_and_without_an_active_subscription
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered().await;
         f.state
             .message_delivery
             .channel_access
@@ -486,11 +482,7 @@ async fn two_senders_coalesce_without_losing_each_others_activity(pool: PgPool) 
         };
         let gate = crate::channels::activity::pause(f.organization, private, "authorized");
         send(&f, first, private, Uuid::new_v4(), "First").await;
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered().await;
         send(&f, second, private, Uuid::new_v4(), "Second").await;
         gate.release.add_permits(1);
         for socket in [&mut alice, &mut alice2] {
@@ -609,11 +601,7 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
         let mut allowed = connect(&f, &other).await;
         for dequeue in denied_dequeue.iter().chain([&allowed_dequeue]) {
             // Hold dequeue before publication so transition notices and control activity stay buffered.
-            tokio::time::timeout(Duration::from_secs(5), dequeue.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            dequeue.entered().await;
         }
         // Join these publishers separately: drained() can then finish the permission-change
         // tasks while the old publication stays paused outside the spawn capacity semaphore.
@@ -644,11 +632,7 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
         );
         let publication = publish(old_activity(), None);
         // The selected boundary has captured old work before either permission transition.
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered().await;
         // A concurrent member-list publisher must not let its unproved query
         // retire the control's independently authorized activity work.
         let unproved = if matches!(phase, "snapshot" | "authorized") {
@@ -660,11 +644,7 @@ async fn paused_query_then_observed_revoke_regrant_rejects_late_publication(pool
                 None,
             );
             // The recheck must encounter this unproved query alongside the old activity work.
-            tokio::time::timeout(Duration::from_secs(5), unproved.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            unproved.entered().await;
             Some((unproved, publication))
         } else {
             None
@@ -763,7 +743,7 @@ async fn mutation_notice_is_not_observable_before_confirmed_commit(pool: PgPool)
             .await
         }
     });
-    gate.entered.acquire().await.unwrap().forget();
+    gate.entered().await;
     assert!(notices(&f, &mut reader).await.is_empty());
     gate.release.add_permits(1);
     assert_eq!(task.await.unwrap().status(), StatusCode::CREATED);
@@ -901,11 +881,7 @@ async fn failed_publication_never_resets_unproven_recipients(pool: PgPool) {
         }
         post(&f, private).await;
         if let Some(gate) = &gate {
-            tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            gate.entered().await;
             if failure == "cancel" {
                 delivery.cancel(f.organization, private)
             }
@@ -998,11 +974,7 @@ async fn batch_measurement(pool: &PgPool, readers: usize) -> Value {
     }
     let gate = crate::channels::activity::pause(f.organization, f.channel, "authorized");
     post(&f, f.channel).await;
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     send(&f, &bob_token, f.channel, Uuid::new_v4(), "Bob 2").await;
     post(&f, f.channel).await;
     send(&f, &bob_token, f.channel, Uuid::new_v4(), "Bob 4").await;
@@ -1367,11 +1339,7 @@ async fn fallback_fences_first_in_flight_notice_without_buffered_provenance(pool
             }
             let gate = crate::channels::activity::pause(f.organization, private, phase);
             post(&f, private).await;
-            tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            gate.entered().await;
             if watched {
                 assert_eq!(raw_event(&mut denied).await["type"], "message");
             }
@@ -1421,11 +1389,7 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                 // Keep both publications buffered, as when another socket write is busy.
                 let dequeue = pause_member(f.organization, Uuid::nil(), "dequeue", Some(f.member));
                 let mut socket = connect(&f, &f.token).await;
-                tokio::time::timeout(Duration::from_secs(5), dequeue.entered.acquire())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .forget();
+                dequeue.entered().await;
                 let notice = |value| {
                     if read_position {
                         Notice::ReadPositionChanged {
@@ -1464,11 +1428,7 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                         .await
                         .unwrap();
                 });
-                tokio::time::timeout(Duration::from_secs(5), query.entered.acquire())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .forget();
+                query.entered().await;
                 let check = if fence {
                     let fallback = pause_member(
                         f.organization,
@@ -1486,11 +1446,7 @@ async fn coalesced_query_fence_preserves_independent_activity_and_read_positions
                             )
                             .await;
                     });
-                    tokio::time::timeout(Duration::from_secs(5), fallback.entered.acquire())
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .forget();
+                    fallback.entered().await;
                     Some((fallback, check))
                 } else {
                     None
@@ -1572,11 +1528,7 @@ async fn fallback_unproved_snapshot_rejects_authorization_completed_before_regra
             Some(target),
         );
         post(&f, private).await;
-        tokio::time::timeout(Duration::from_secs(5), query.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        query.entered().await;
         let checker = f.state.message_delivery.channel_access.activity.clone();
         let check_pool = f.state.pool.clone();
         let organization = f.organization;
@@ -1588,19 +1540,11 @@ async fn fallback_unproved_snapshot_rejects_authorization_completed_before_regra
                 )
                 .await;
         });
-        tokio::time::timeout(Duration::from_secs(5), fallback.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        fallback.entered().await;
         // Fallback copied None; publication establishes G1, possibly enqueueing it
         // and dropping its query guard before fallback observes G2.
         query.release.add_permits(1);
-        tokio::time::timeout(Duration::from_secs(5), authorized.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        authorized.entered().await;
         // Replace G1 with G2 without mutation hooks or fast signals, before fallback SQL.
         sqlx::query(
         "DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3",
@@ -1643,11 +1587,7 @@ async fn subscription_refresh_loss_retires_a_first_notice_after_activity_check_s
     let mut allowed = connect(&f, &other).await;
     let gate = crate::channels::activity::pause(f.organization, private, "authorized");
     post(&f, private).await;
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     // The Activity part of fallback can precede the loss; the subsequent subscription read must fence it too.
     access
         .activity
@@ -1686,11 +1626,7 @@ async fn durable_grant_comparison_retires_buffered_activity_after_lost_fast_sign
     let gate =
         crate::channels::activity::pause_member(f.organization, private, "handoff", Some(target));
     post(&f, private).await;
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     sqlx::query(
         "DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3",
     )
@@ -1821,11 +1757,7 @@ async fn guest_directory_loss_discards_older_authorized_notice_but_keeps_fresh_p
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
 
     let response = request(
         &f.app,
@@ -1863,7 +1795,7 @@ async fn guest_directory_loss_discards_older_authorized_notice_but_keeps_fresh_p
 
 fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
     use crate::auth::{SubscriptionRecheck, SubscriptionScope, activity::*};
-    use crate::channels::activity::{Activity, TestGate, pause};
+    use crate::channels::activity::{Activity, pause};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -1916,7 +1848,7 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
     struct OrderedRecheck {
         access: crate::channels::AccessChanges,
         started: Arc<AtomicBool>,
-        gate: Arc<TestGate>,
+        gate: Arc<Gate>,
     }
     impl SubscriptionRecheck for OrderedRecheck {
         fn check<'a>(
@@ -1929,11 +1861,7 @@ fn order_permission_change(f: &Fixture, channel: Uuid, phase: &'static str) {
                 // Force a publisher started before this recheck to expose its unproved
                 // query. A publisher started afterwards passes the already released gate.
                 if self.started.load(Ordering::SeqCst) {
-                    tokio::time::timeout(Duration::from_secs(5), self.gate.entered.acquire())
-                        .await
-                        .expect("a publisher started before the recheck never reached the gate")
-                        .unwrap()
-                        .forget();
+                    self.gate.entered().await;
                 }
                 let result = self.access.check(pool, scope).await;
                 assert!(result.is_ok(), "mutation recheck failed: {result:?}");
@@ -2141,11 +2069,7 @@ async fn regrant_rejects_a_paused_old_revocation_before_enqueue_and_handoff(pool
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered().await;
         let response = request(
             &f.app,
             "POST",
@@ -2197,13 +2121,11 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
     };
     struct DelayedChanges {
         activity: crate::channels::activity::Activity,
-        entered: std::sync::Arc<tokio::sync::Semaphore>,
-        release: std::sync::Arc<tokio::sync::Semaphore>,
+        gate: Arc<Gate>,
     }
     struct DelayedChange {
         change: Box<dyn ActivityChange>,
-        entered: std::sync::Arc<tokio::sync::Semaphore>,
-        release: std::sync::Arc<tokio::sync::Semaphore>,
+        gate: Arc<Gate>,
     }
     impl ActivityChanges for DelayedChanges {
         fn channel(&self, pool: PgPool, organization: Uuid, change: ChannelChange) {
@@ -2222,8 +2144,7 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
                         .activity
                         .capture(tx, organization, target, scope)
                         .await?,
-                    entered: self.entered.clone(),
-                    release: self.release.clone(),
+                    gate: self.gate.clone(),
                 }) as Box<dyn ActivityChange>)
             })
         }
@@ -2237,8 +2158,7 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
         }
         fn committed(self: Box<Self>, pool: PgPool) {
             tokio::spawn(async move {
-                self.entered.add_permits(1);
-                self.release.acquire().await.unwrap().forget();
+                self.gate.pause().await;
                 self.change.committed(pool);
             });
         }
@@ -2250,14 +2170,12 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
     grant(&pool, &f, private, target).await;
     let mut before = connect(&f, &token).await;
     let mut control = connect(&f, &f.token).await;
-    let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let delayed = Arc::new(Gate::default());
     f.state
         .session_changes
         .set_activity(std::sync::Arc::new(DelayedChanges {
             activity: f.state.message_delivery.channel_access.activity.clone(),
-            entered: entered.clone(),
-            release: release.clone(),
+            gate: delayed.clone(),
         }));
     let response = request(
         &f.app,
@@ -2268,20 +2186,12 @@ async fn socket_registered_after_access_removal_receives_no_old_revocation(pool:
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    tokio::time::timeout(Duration::from_secs(5), entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    delayed.entered().await;
     let mut after = connect(&f, &token).await;
     let gate =
         crate::channels::activity::pause_member(f.organization, private, "snapshot", Some(target));
-    release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    delayed.release();
+    gate.entered().await;
     gate.release.add_permits(1);
 
     assert!(
@@ -2341,11 +2251,7 @@ async fn failed_directory_publication_never_resets_invisible_guests(pool: PgPool
         }
         delivery.directory(f.state.pool.clone(), f.organization, target);
         if let Some(gate) = &gate {
-            tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            gate.entered().await;
             if failure == "cancel" {
                 delivery.cancel(f.organization, Uuid::nil());
             }
@@ -2399,11 +2305,7 @@ async fn moves_share_one_pending_activity_batch_and_notify_the_mover(pool: PgPoo
         ).await;
         assert_eq!(response.status(), StatusCode::OK);
         if expected_version == 1 {
-            tokio::time::timeout(Duration::from_secs(5), pause.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            pause.entered().await;
         }
     }
     activity.drained_except(1).await;

@@ -1,7 +1,7 @@
 use super::*;
-use tokio::sync::Semaphore;
+use crate::test_support::{Gate, Gates};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Phase {
     Registered,
     Checked,
@@ -10,23 +10,8 @@ pub(super) enum Phase {
     Snapshot,
     Queried,
 }
-pub(crate) struct Gate {
-    phase: Phase,
-    entered: Semaphore,
-    release: Semaphore,
-}
-impl Gate {
-    pub(crate) async fn entered(&self) {
-        tokio::time::timeout(Duration::from_secs(5), self.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
-    }
-    pub(crate) fn release(&self) {
-        self.release.add_permits(1);
-    }
-}
+pub(super) type SessionGates = Gates<Phase>;
+
 impl SessionChanges {
     pub(crate) fn assert_no_default_fatal(&self) {
         if let Some(calls) = &self.default_fatal_calls {
@@ -43,13 +28,7 @@ impl SessionChanges {
     }
 
     pub(super) fn pause(&self, phase: Phase) -> Arc<Gate> {
-        let gate = Arc::new(Gate {
-            phase,
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        });
-        *self.gate.lock().unwrap() = Some(gate.clone());
-        gate
+        self.gate.register_replacing(phase)
     }
     pub(super) async fn pause_check(&self, phase: Phase) {
         pause_gate(&self.gate, phase).await;
@@ -63,7 +42,9 @@ impl SessionChanges {
         );
         let mut registration = self.register((Uuid::new_v4(), vec![]));
         let gate = self.pause(Phase::Worker);
-        gate.entered.acquire().await.unwrap().forget();
+        // The worker reaches this hook on its next recheck tick.
+        gate.entered_within(self.interval + Duration::from_secs(5))
+            .await;
         gate.release.add_permits(1);
         registration
             .changed
@@ -74,18 +55,8 @@ impl SessionChanges {
     }
 }
 
-pub(super) async fn pause_gate(gates: &Mutex<Option<Arc<Gate>>>, phase: Phase) {
-    let gate = {
-        let mut gate = gates.lock().unwrap();
-        if gate.as_ref().is_some_and(|gate| gate.phase == phase) {
-            gate.take()
-        } else {
-            None
-        }
-    };
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
+pub(super) async fn pause_gate(gates: &SessionGates, phase: Phase) {
+    if gates.pause(phase).await {
         assert!(phase != Phase::Worker, "injected fallback worker panic");
     }
 }
@@ -193,7 +164,7 @@ async fn register_then_check_has_no_revocation_gap(pool: PgPool) {
         tokio::pin!(watch);
         tokio::select! {
             _ = &mut watch => panic!("session check did not pause"),
-            permit = gate.entered.acquire() => permit.unwrap().forget(),
+            () = gate.entered() => {},
         }
         assert!(
             state

@@ -91,7 +91,7 @@ async fn dm_deactivation_closes_idle_and_replaying_sockets_and_reactivation_does
     let mut replay = f.server.connect(&peer_token).await;
     let gate = pause(c);
     subscribe(&mut replay, c, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     let (owner, owner_token) = member(&pool, f.organization).await;
     sqlx::query("UPDATE users SET role='owner' WHERE organization_id=$1 AND id=$2")
         .bind(f.organization)
@@ -187,11 +187,7 @@ async fn dm_two_client_discovery_without_notices_sees_delayed_send_commit_and_re
             .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     let delta_path = format!("{path}&cursor={}", initial["next_cursor"].as_str().unwrap());
     let early = body(request(&f.app, "GET", &delta_path, &peer_token, Value::Null).await).await;
     assert_eq!(early["dms"], json!([]));
@@ -319,7 +315,7 @@ async fn dm_stale_revision_cannot_subscribe_replay_or_receive_even_after_explici
     let mut replay = server.connect(&pt).await;
     let gate = pause(c);
     subscribe(&mut replay, c, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     fallback.entered().await;
     sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
         .bind(f.organization)
@@ -506,7 +502,7 @@ async fn dm_mention_access_loss_fences_live_replay_and_rest_counts_and_renewal_b
         if phase != "live" {
             subscribe(&mut socket, c, 0).await;
         }
-        entered(&gate).await;
+        gate.entered().await;
         let r = request(
             &f.app,
             "GET",

@@ -1,25 +1,11 @@
 use super::*;
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-    time::Duration,
-};
-use tokio::sync::Semaphore;
+use crate::test_support::Gates;
+use std::time::Duration;
 
-struct ListGate {
-    entered: Semaphore,
-    release: Semaphore,
-}
-
-static LIST_GATES: LazyLock<Mutex<HashMap<Uuid, Arc<ListGate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static LIST_GATES: Gates<Uuid> = Gates::new();
 
 pub(crate) async fn pause_list(member: Uuid) {
-    let gate = LIST_GATES.lock().unwrap().remove(&member);
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    LIST_GATES.pause(member).await;
 }
 
 #[fukulow_test::test]
@@ -34,16 +20,12 @@ async fn unread_list_baseline_and_counts_share_snapshot_across_message_commit(po
     let app = crate::app(state);
     let before_main = mention_post(&app, &owner, channel, viewer_id, None).await;
     let before_topic = mention_post(&app, &owner, channel, viewer_id, Some("Hidden")).await;
-    let gate = Arc::new(ListGate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    LIST_GATES.lock().unwrap().insert(viewer_id, gate.clone());
+    let gate = LIST_GATES.register(viewer_id);
     let response = channels(&app, &viewer);
     tokio::pin!(response);
     tokio::select! {
         _ = &mut response => panic!("list did not pause after its snapshot started"),
-        permit = tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire()) => permit.unwrap().unwrap().forget(),
+        () = gate.entered() => {},
     }
     // These commits complete while the actual REST handler is paused between
     // visibility and counts. Neither counts nor positions may see them.
@@ -156,16 +138,12 @@ async fn unread_reconnect_baselines_distinguish_new_messages_from_new_positions(
     let viewer_id = Uuid::new_v4();
     let viewer = member(&pool, org, viewer_id).await;
     mention_post(&app, &owner, channel, viewer_id, None).await;
-    let gate = Arc::new(ListGate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    LIST_GATES.lock().unwrap().insert(viewer_id, gate.clone());
+    let gate = LIST_GATES.register(viewer_id);
     let old = channels(&app, &viewer);
     tokio::pin!(old);
     tokio::select! {
         _ = &mut old => panic!("old list did not pause after its snapshot started"),
-        permit = tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire()) => permit.unwrap().unwrap().forget(),
+        () = gate.entered() => {},
     }
     let message = mention_post(&app, &owner, channel, viewer_id, None).await;
     let fresh_app = router(&pool).await;

@@ -1,41 +1,17 @@
 use super::*;
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
-use tokio::sync::Semaphore;
+use crate::test_support::{Gate, Gates};
+use std::sync::Arc;
 use tracing::instrument::WithSubscriber;
 
-struct Gate {
-    entered: Semaphore,
-    release: Semaphore,
-}
 type GateKey = (Uuid, &'static str);
-static GATES: LazyLock<Mutex<HashMap<GateKey, Arc<Gate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-pub(super) fn pause_reply_parent(
-    key: Uuid,
-) -> (impl std::future::Future<Output = ()>, impl FnOnce()) {
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    GATES
-        .lock()
-        .unwrap()
-        .insert((key, "reply_parent"), gate.clone());
-    let entered = gate.clone();
-    (
-        async move { entered.entered.acquire().await.unwrap().forget() },
-        move || gate.release.add_permits(1),
-    )
+static GATES: Gates<GateKey> = Gates::new();
+
+pub(super) fn pause_reply_parent(key: Uuid) -> Arc<Gate> {
+    GATES.register((key, "reply_parent"))
 }
 
 pub(crate) async fn pause(channel: Uuid, phase: &'static str) {
-    let gate = GATES.lock().unwrap().remove(&(channel, phase));
-    if let Some(gate) = gate {
-        gate.entered.add_permits(1);
-        gate.release.acquire().await.unwrap().forget();
-    }
+    GATES.pause((channel, phase)).await;
 }
 
 #[fukulow_test::test]
@@ -64,14 +40,7 @@ async fn page_watermarks_share_the_mutation_snapshot_after_the_commit_barrier(po
             if route == "reply-counts" && fixed {
                 continue;
             }
-            let gate = Arc::new(Gate {
-                entered: Semaphore::new(0),
-                release: Semaphore::new(0),
-            });
-            GATES
-                .lock()
-                .unwrap()
-                .insert((channel, "barrier"), gate.clone());
+            let gate = GATES.register((channel, "barrier"));
             let read = {
                 let (app, token, route, id) =
                     (app.clone(), token.clone(), route.clone(), id.to_owned());
@@ -99,11 +68,7 @@ async fn page_watermarks_share_the_mutation_snapshot_after_the_commit_barrier(po
                     .await
                 })
             };
-            tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            gate.entered().await;
             // An Edit commits after the barrier read of W and before page BEGIN.
             w += 1;
             let mut tx = pool.begin().await.unwrap();
@@ -145,14 +110,7 @@ async fn mutation_after_snapshot_watermark_cannot_replace_the_page_body(pool: Pg
     for fixed in [false, true] {
         let (app, org, _, channel, token) = fixture(&pool).await;
         sent(&app, &token, channel, input(Uuid::new_v4(), "original")).await;
-        let gate = Arc::new(Gate {
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        });
-        GATES
-            .lock()
-            .unwrap()
-            .insert((channel, "snapshot"), gate.clone());
+        let gate = GATES.register((channel, "snapshot"));
         let read = {
             let (app, token) = (app.clone(), token.clone());
             tokio::spawn(async move {
@@ -169,11 +127,7 @@ async fn mutation_after_snapshot_watermark_cannot_replace_the_page_body(pool: Pg
                 .await
             })
         };
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered().await;
         let mut tx = pool.begin().await.unwrap();
         sqlx::query("UPDATE channel_message_sequences SET seq=2,mutation_seq=2 WHERE organization_id=$1 AND channel_id=$2").bind(org).bind(channel).execute(&mut *tx).await.unwrap();
         sqlx::query("UPDATE messages SET body='edited',version=2 WHERE organization_id=$1 AND channel_id=$2").bind(org).bind(channel).execute(&mut *tx).await.unwrap();
@@ -335,11 +289,7 @@ async fn send_checks_generation_again_after_preflight_and_returns_write_generati
             let (app, token, request) = (app.clone(), token.clone(), request.clone());
             async move { send(&app, &token, channel, request).await }
         });
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered().await;
         // Preflight accepted the request. Rotate before persistence can start.
         assert_eq!(
             crate::auth::history::rotate(&pool, Some(org))

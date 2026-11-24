@@ -1,4 +1,4 @@
-#[path = "../../src/test_support.rs"]
+#[path = "../../src/test_support/pools.rs"]
 mod pools;
 
 pub use pools::{TestPools, run};
