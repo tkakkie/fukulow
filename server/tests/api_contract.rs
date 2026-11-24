@@ -449,13 +449,12 @@ async fn check_openapi_routes(
     Ok(checked)
 }
 
-#[tokio::test]
-async fn every_committed_openapi_operation_is_routed() {
+async fn offline_app() -> Router {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
     pool.close().await;
-    let router = app(AppState {
+    app(AppState {
         pool,
         shutdown: Default::default(),
         cookie_secure: true,
@@ -467,11 +466,51 @@ async fn every_committed_openapi_operation_is_routed() {
         session_cleanup: Default::default(),
         ws_allowed_origins: Default::default(),
         socket_gate: Default::default(),
-    });
+    })
+}
+
+#[tokio::test]
+async fn every_committed_openapi_operation_is_routed() {
+    let router = offline_app().await;
     let committed: Value = serde_json::from_str(include_str!("../../openapi.json")).unwrap();
     assert_eq!(
         check_openapi_routes(router, committed["paths"].as_object().unwrap()).await,
         Ok(EXPECTED_API_OPERATIONS)
+    );
+}
+
+#[tokio::test]
+async fn openapi_route_check_on_the_real_app_rejects_unrouted_and_accepts_json_404() {
+    use axum::routing::get;
+
+    // An undocumented path reaches the real router's bare API fallback.
+    let missing = json!({ "/api/v1/not-a-route": { "get": {} } });
+    assert_eq!(
+        check_openapi_routes(offline_app().await, missing.as_object().unwrap()).await,
+        Err("GET /api/v1/not-a-route: 404 Not Found".into())
+    );
+    // A documented method the real route does not serve is a 405.
+    let wrong_method = json!({ "/api/v1/health": { "delete": {} } });
+    assert_eq!(
+        check_openapi_routes(offline_app().await, wrong_method.as_object().unwrap()).await,
+        Err("DELETE /api/v1/health: 405 Method Not Allowed".into())
+    );
+    // A handler's JSON 404 (ErrorBody) means the route exists.
+    let path = "/api/v1/things/{id}";
+    let documented = json!({ (path): { "get": {} } });
+    let router = Router::new().route(
+        "/api/v1/things/{id}",
+        get(|| async {
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "application/json")],
+                r#"{"error":"not_found"}"#,
+            )
+        }),
+    );
+    assert_eq!(
+        check_openapi_routes(router, documented.as_object().unwrap()).await,
+        Ok(1)
     );
 }
 
