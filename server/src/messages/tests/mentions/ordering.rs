@@ -1,13 +1,15 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use std::time::Duration;
 
 async fn waiting(pool: &PgPool) {
-    tokio::time::timeout(Duration::from_secs(3),async {
-        loop {
-            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND pid<>pg_backend_pid())").fetch_one(pool).await.unwrap();
-            if blocked {break;} tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        pool,
+        Blocked::OtherLock,
+        Count::AtLeast(1),
+        Duration::from_secs(3),
+    )
+    .await;
 }
 
 async fn loss(app: &Router, author: &str, channel: Uuid, target: Uuid, deactivate: bool) {

@@ -1,5 +1,6 @@
 use super::super::management::{ListInvitesQuery, list_invites, revoke_invite};
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use axum::extract::Query;
 use std::time::Duration;
 
@@ -69,14 +70,13 @@ async fn seed(pool: &sqlx::PgPool, org: Uuid, issuer: Uuid, count: i32, owner: b
 }
 
 async fn waiting(pool: &sqlx::PgPool, pattern: &str) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1)")
-                .bind(pattern).fetch_one(pool).await.unwrap();
-            if exists { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        pool,
+        Blocked::LockQuery(pattern),
+        Count::AtLeast(1),
+        Duration::from_secs(10),
+    )
+    .await;
 }
 
 mod cleanup;

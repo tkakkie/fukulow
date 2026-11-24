@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 pub(super) async fn topic_send(f: &Fixture, token: &str, channel: Uuid, key: Uuid) -> Value {
     let response = request(
@@ -223,14 +224,13 @@ async fn websocket_subscribe_succeeds_while_topic_projection_queries_are_in_flig
             .await
         });
     }
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND relation='topics'::regclass AND NOT granted")
-                .fetch_one(&pool).await.unwrap();
-            if waiting == 4 { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::Relation("topics"),
+        Count::Exactly(4),
+        Duration::from_secs(2),
+    )
+    .await;
     let mut socket = f.server.connect(&f.token).await;
     subscribe(&mut socket, f.channel, 0).await;
     tokio::time::timeout(Duration::from_secs(2), ready(&mut socket, f.channel, 0))

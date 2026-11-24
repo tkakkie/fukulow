@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 pub(super) async fn fallback_close(socket: &mut Client, code: u16) {
     let frame = tokio::time::timeout(Duration::from_secs(3), delivery_next(socket, None))
@@ -294,11 +295,13 @@ async fn endpoint_membership_loss(pool: PgPool, cancel: bool) {
             .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(5),async { loop {
-        let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT organization_id%FOR NO KEY UPDATE')")
-            .fetch_one(&pool).await.unwrap();
-        if waiting {break;} tokio::task::yield_now().await;
-    }}).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::LockQuery("SELECT organization_id%FOR NO KEY UPDATE"),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
     if cancel {
         pending.abort();
     }

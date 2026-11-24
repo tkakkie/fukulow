@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 pub(super) async fn mutation(
     app: &Router,
@@ -645,14 +646,13 @@ async fn mutation_locks_channel_before_actor_member(pool: PgPool) {
             let token = token.clone();
             tokio::spawn(async move { mutation(&app, &token, c, owner, add).await })
         };
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT COALESCE(visibility=%FOR NO KEY UPDATE')")
-                    .fetch_one(&pool).await.unwrap();
-                if waiting { break; }
-                tokio::task::yield_now().await;
-            }
-        }).await.unwrap();
+        wait_blocked(
+            &pool,
+            Blocked::LockQuery("SELECT COALESCE(visibility=%FOR NO KEY UPDATE"),
+            Count::AtLeast(1),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
         // A #231 transaction holding Channel before Member must be able to
         // finish: the waiting mutation must not already hold its actor Member.
         let mut member_lock = pool.begin().await.unwrap();

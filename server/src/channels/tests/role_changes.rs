@@ -1,5 +1,6 @@
 use super::management::{grant, mutation, snapshot};
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -346,14 +347,13 @@ async fn role_demotion_counts_only_usable_scoped_managers_with_allowed_controls(
 }
 
 async fn wait_for_lock(pool: &PgPool, pattern: &str, count: i64) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1")
-                .bind(pattern).fetch_one(pool).await.unwrap();
-            if waiting == count { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        pool,
+        Blocked::LockQuery(pattern),
+        Count::Exactly(count),
+        Duration::from_secs(3),
+    )
+    .await;
 }
 
 #[fukulow_test::test]

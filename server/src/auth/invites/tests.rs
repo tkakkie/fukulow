@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -259,14 +260,13 @@ async fn invite_acceptance_rechecks_issuer_after_waiting_for_organization_lock(p
             let input = accept_input(&i, &email);
             async move { assert_issuer_denied(&app, &pool, org, Some(&recipient), input).await }
         });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT organization_id FROM organizations%')")
-                    .fetch_one(&pool).await.unwrap();
-                if waiting { break; }
-                tokio::task::yield_now().await;
-            }
-        }).await.unwrap();
+        wait_blocked(
+            &pool,
+            Blocked::LockQuery("SELECT organization_id FROM organizations%"),
+            Count::AtLeast(1),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         tx.commit().await.unwrap();
         task.await.unwrap();
     }
