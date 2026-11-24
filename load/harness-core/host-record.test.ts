@@ -38,6 +38,7 @@ test('each unmet Linux condition is a violation', () => {
     [withUnit('sleepUnits', { unit: 'suspend.target', enabled: 'static', active: 'inactive' }), /sleep target suspend\.target/],
     [{ snapHold: 'none' }, /snap refreshes are not held/],
     [{ snapHold: null }, /snap refresh state unreadable/],
+    [{ logicalCpus: 0, governors: null }, /governor/], // no CPUs enumerated
   ];
   for (const [change, pattern] of cases) {
     const v = linuxViolations({ ...ready, ...change });

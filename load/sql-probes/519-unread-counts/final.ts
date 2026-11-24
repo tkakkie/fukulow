@@ -359,8 +359,9 @@ try {
 } finally {
   spawnSync('docker', ['rm', '-f', container]);
   rmSync(work, { recursive: true, force: true });
+  // Each write is attempted on its own, so a failed record or checks write cannot skip status.json.
   try { save('host-record-after.json', hostRecord(out)); } catch (e) { console.error('host record after the run:', e); }
-  save('checks.json', checks);
+  try { save('checks.json', checks); } catch (e) { failed = true; console.error('checks.json:', e); }
   save('status.json', { complete: !failed, finished: new Date().toISOString() });
 }
 process.exit(failed ? 1 : 0);

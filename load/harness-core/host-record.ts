@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { cpus, loadavg, platform, release, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { freeBytes } from './host.ts';
@@ -94,9 +94,11 @@ function units(names: string[]): UnitState[] | null {
   return names.map(unit => ({ unit, enabled: cmd('systemctl', ['is-enabled', unit], true) ?? 'unknown', active: cmd('systemctl', ['is-active', unit], true) ?? 'unknown' }));
 }
 
+// Absent only when snap is not installed at its fixed paths, so a PATH without it cannot hide an installed snapd.
+const snapPaths = ['/usr/bin/snap', '/snap/bin', '/var/lib/snapd'];
 function snapHold() {
-  const child = exec('snap', ['refresh', '--time']);
-  if ((child.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return 'absent';
+  if (!snapPaths.some(p => existsSync(p))) return 'absent';
+  const child = exec(existsSync('/usr/bin/snap') ? '/usr/bin/snap' : 'snap', ['refresh', '--time']);
   if (child.error || child.signal || child.status !== 0 || !child.stdout) return null;
   return parseSnapHold(child.stdout);
 }
@@ -149,7 +151,7 @@ export function linuxViolations(r: HostRecord): string[] {
   if (r.platform !== 'linux') return [];
   const v: string[] = [];
   const performance = r.governors?.performance ?? [];
-  if (performance.length !== r.logicalCpus || performance.some((c, i) => c !== i)) {
+  if (r.logicalCpus < 1 || performance.length !== r.logicalCpus || performance.some((c, i) => c !== i)) {
     v.push(`CPU governor is not performance on every CPU: ${JSON.stringify(r.governors ?? 'unreadable')}`);
   }
   if (!r.ac?.some(s => s.online)) v.push('not on AC power');
