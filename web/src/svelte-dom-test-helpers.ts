@@ -634,6 +634,46 @@ export class MiniElement extends MiniNode {
     return evt
   }
 
+  override dispatchEvent(event: MiniDomEvent): boolean {
+    const notPrevented = super.dispatchEvent(event)
+    if (
+      notPrevented &&
+      event.type === 'keydown' &&
+      this.tagName === 'INPUT' &&
+      !this.disabled &&
+      event.key === 'Enter' &&
+      !event.isComposing &&
+      event.keyCode !== 229 &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey
+    ) {
+      const form = this.closest('form')
+      const defaultSubmit = form?.querySelectorAll('button').find(
+        (btn) => (btn.getAttribute('type') ?? 'submit') === 'submit',
+      )
+      if (form && defaultSubmit && !defaultSubmit.disabled) {
+        const clickEvt = new MiniDomEvent('click', { bubbles: true, cancelable: true })
+        defaultSubmit.dispatchEvent(clickEvt)
+        const submitMode = this.ownerDocument?.options.clickSubmit ?? 'default'
+        if (submitMode !== 'never' && (submitMode === 'always' || !clickEvt.defaultPrevented)) {
+          form.dispatchEvent(new MiniDomEvent('submit', { bubbles: true, cancelable: true }))
+        }
+      }
+    } else if (
+      notPrevented &&
+      event.type === 'keydown' &&
+      this.tagName === 'BUTTON' &&
+      !this.disabled &&
+      event.key === 'Enter' &&
+      !event.isComposing &&
+      event.keyCode !== 229
+    ) {
+      this.click()
+    }
+    return notPrevented
+  }
+
   get hidden(): boolean {
     return this.attrs.has('hidden')
   }
