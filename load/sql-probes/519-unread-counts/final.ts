@@ -1,6 +1,6 @@
 import { execFile, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,7 @@ import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, e
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
 import type { CounterBlock } from './frequency-evidence.ts';
+import { stageSql } from './stage-sql.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
@@ -92,10 +93,9 @@ if (spawnSync('git', ['merge-base', '--is-ancestor', commits.final, update]).sta
 if (git('diff', '--name-status', commits.final, update, '--', `server/migrations/${a3Migration}`, `server/migrations/${a3Update}`) !== `A\tserver/migrations/${a3Update}`)
   throw new Error('update pin must add only the UPDATE-first migration and keep the A3 migration unchanged');
 writeFileSync(join(work, a3Update), git('show', `${update}:server/migrations/${a3Update}`) + '\n');
-cpSync(join(root, 'load/sql-probes/519-unread-counts/sql'), join(work, 'sql'), { recursive: true });
-// Readable whatever the host umask: the v3 sends open these as the container postgres user.
-chmodSync(join(work, 'sql'), 0o755);
-chmodSync(join(work, 'sql/bench.pgb'), 0o644);
+// Only the SQL this probe opens, readable by the container postgres user whatever the umask; a
+// symlinked input throws (stage-sql.ts).
+stageSql(join(root, 'load/sql-probes/519-unread-counts/sql'), work);
 for (const arm of ['current', 'final'] as FinalArm[]) {
   writeFileSync(join(work, `sql/list-${arm}.sql`), extractListCounts(git('show', `${commits[arm]}:server/src/messages/unread.rs`)) + '\n');
 }
