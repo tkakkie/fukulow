@@ -104,7 +104,8 @@ jobs:
       # nextest schedules tests of all binaries in one pool (cargo test runs lib, main and tests/*.rs one after another).
       # Keep the build flags in sync with cargo nextest list in web/scripts/check-invariants.ts.
       - run: cargo nextest run --locked --features fukulow-client-core/wasm --no-fail-fast --partition slice:${{ matrix.shard }}/4
-      - if: matrix.shard == 1
+      # Doctests (10-14 s) run on shard 4, whose slice is the lightest; shard 1 already runs check-invariants.
+      - if: matrix.shard == 4
         run: cargo test --locked --doc # nextest does not run doctests
       - if: matrix.shard == 1
         run: node web/scripts/check-invariants.ts # Lists runnable tests across all shards using the same nextest build. Requires cargo and nextest.
