@@ -133,11 +133,11 @@ it('stale open cannot select or restore a row and current list recovery selects 
   c.api.open.mockReturnValueOnce(old.promise).mockReturnValueOnce(again.promise)
   const opening = c.dms.open('peer-A')
   c.activity.notice({ type: 'dm_list_changed' })
-  old.resolve(ok(dm('A'))); await opening; await flush()
+  old.resolve(ok(dm('A'))); await flush()
   // The one re-resolution is fenced too, so only list recovery may select.
   expect(c.api.open).toHaveBeenCalledTimes(2)
   c.activity.notice({ type: 'dm_list_changed' })
-  again.resolve(ok(dm('A'))); await flush()
+  again.resolve(ok(dm('A'))); await opening; await flush()
   expect(c.select).not.toHaveBeenCalled(); expect(c.dms.get().rows).toEqual([])
   c.rows = [dm('A')]; await vi.advanceTimersByTimeAsync(2000)
   expect(c.select).toHaveBeenCalledWith('A')
@@ -152,16 +152,22 @@ it('a fenced open re-resolves once under current authority and selects without w
     // Another DM notice spends this O5 run's shared slots, so list recovery would wait for the next run.
     c.activity.notice({ type: 'dm_list_changed' }); await vi.advanceTimersByTimeAsync(1000)
     const target = renew ? 'M' : 'G'
-    const first = held<Result<Dm>>(); c.api.open.mockReturnValueOnce(first.promise).mockResolvedValueOnce(ok(dm(target)))
-    const opening = c.dms.open(`peer-${target}`, renew)
+    const first = held<Result<Dm>>(), second = held<Result<Dm>>()
+    c.api.open.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    let returned = false
+    const opening = c.dms.open(`peer-${target}`, renew).then(() => { returned = true })
     c.rows = [dm('M'), dm('G')]
     // The open's own commit notice arrives before its response and fences the snapshot.
     c.activity.notice({ type: 'dm_list_changed' }); await vi.advanceTimersByTimeAsync(300)
     expect(c.dms.get().budget).toBe(0)
     const lists = c.api.list.mock.calls.length + c.api.changes.mock.calls.length
-    first.resolve(ok(dm(target))); await opening; await flush()
+    first.resolve(ok(dm(target))); await flush()
     expect(c.api.open.mock.calls.map(([body]) => body)).toEqual([
       { member_id: `peer-${target}`, ...(renew ? { renew: true } : {}) }, { member_id: `peer-${target}`, ...(renew ? { renew: true } : {}) }])
+    // The caller (Workspace.handleOpenDm) navigates from the selection open() leaves, so it must wait for the reply.
+    expect(returned).toBe(false); expect(c.dms.get().busy).toBe(true)
+    second.resolve(ok(dm(target))); await opening
+    expect(c.dms.get().selected).toBe(target)
     expect(c.select).toHaveBeenCalledWith(target)
     expect(c.dms.get().rows.some(row => row.identity.id === target)).toBe(true)
     if (renew) expect(c.dms.get().sendBlocks.M).toBeUndefined()
@@ -218,9 +224,9 @@ it('a confirmed renewal with a fenced POST snapshot clears the send block only a
   c.api.open.mockReturnValueOnce(response.promise).mockReturnValueOnce(again.promise)
   const renewing = c.dms.open('peer-A', true)
   c.activity.notice({ type: 'dm_list_changed' })
-  response.resolve(ok(dm('A'))); await renewing; await flush()
+  response.resolve(ok(dm('A'))); await flush()
   c.activity.notice({ type: 'dm_list_changed' })
-  again.resolve(ok(dm('A'))); await flush()
+  again.resolve(ok(dm('A'))); await renewing; await flush()
   expect(c.dms.get().sendBlocks.A).toBe('dm_peer_access_lapsed')
   await vi.advanceTimersByTimeAsync(2000)
   expect(c.select).toHaveBeenCalledWith('A')

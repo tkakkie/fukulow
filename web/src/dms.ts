@@ -106,10 +106,7 @@ export function createDms(options: {
       if (terminal(result)) close()
     },
     settled() {
-      // The open's own commit notice usually fences its snapshot. Repeating the same body once is a
-      // resolution-only no-op that publishes nothing (B2.5), so the fresh reply can select without
-      // waiting for list recovery's next O5 slot (#956).
-      if (reresolve) { reresolve = false; reresolved = true; mutationGeneration = state.generation; void mutationTarget.refresh(); return }
+      if (reresolve) return
       busy = false; reresolved = false; notify(); plan()
     },
   })
@@ -143,6 +140,13 @@ export function createDms(options: {
       if (closed || busy) return
       busy = true; error = ''; mutation = { member_id: memberId, ...(renew ? { renew: true } : {}) }
       invalidate('access'); mutationGeneration = state.generation; notify()
+      await mutationTarget.refresh()
+      // The open's own commit notice usually fences its snapshot. Repeating the same body once is a
+      // resolution-only no-op that publishes nothing (B2.5), so the fresh reply can select without
+      // waiting for list recovery's next O5 slot (#956). open() resolves only after that reply, because
+      // the caller navigates from the selection it leaves.
+      if (closed || !reresolve) return
+      reresolve = false; reresolved = true; mutationGeneration = state.generation
       await mutationTarget.refresh()
     },
     close() { close(); release() },
