@@ -8,7 +8,9 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 /// Check visibility before returning the pending history snapshot read.
-/// Callers can run pre-admission checks or apply a work deadline before polling it.
+/// The cheap check runs eagerly so a denied caller never takes a watermark slot;
+/// wrap only the returned read in `within_work_deadline`. Admission resolves prior
+/// ambiguous commits, and W is then selected inside the page snapshot.
 pub(super) async fn prepare_snapshot<T>(
     state: &AppState,
     auth: &Auth,
