@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 use auth::members::list_members;
 
 async fn directory(app: &Router, token: &str) -> Value {
@@ -353,14 +354,13 @@ async fn guest_directory_role_grants_and_results_share_one_nonlocking_snapshot(p
             .await
             .unwrap()
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE '%FROM pg_advisory_xact_lock(315,315)%')")
-                .fetch_one(&pools.admin).await.unwrap();
-            if waiting { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pools.admin,
+        Blocked::Advisory(Advisory::Query("%FROM pg_advisory_xact_lock(315,315)%")),
+        Count::AtLeast(1),
+        std::time::Duration::from_secs(5),
+    )
+    .await;
     // These writes must commit while the reader is paused: it retains no Member/grant locks.
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         revoke(&pools.admin, org, channel, guest).await;

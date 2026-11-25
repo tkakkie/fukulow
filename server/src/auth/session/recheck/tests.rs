@@ -2,6 +2,7 @@ use super::*;
 use crate::auth::session::tests::{Phase, fixture};
 
 mod exit;
+mod revocation_trace;
 
 #[fukulow_test::test]
 async fn readiness_rejects_abnormal_worker_until_process_replacement(pool: PgPool) {
@@ -55,10 +56,8 @@ async fn active_checks(pool: &PgPool) -> i64 {
 }
 
 async fn wait_for_check(pool: &PgPool) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while active_checks(pool).await == 0 {
-            tokio::task::yield_now().await;
-        }
+    crate::test_support::poll_until(Duration::from_secs(2), async || {
+        (active_checks(pool).await > 0).then_some(())
     })
     .await
     .unwrap();

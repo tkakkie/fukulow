@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::poll_until;
 use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -118,10 +119,10 @@ async fn process_restart_keeps_reconciling_a_commit_that_survives_the_old_proces
         body.len()
     );
     pending.write_all(bytes.as_bytes()).await.unwrap();
-    let backend = tokio::time::timeout(Duration::from_secs(5), async { loop {
-        let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND query='COMMIT' AND wait_event='advisory'").fetch_optional(&pool).await.unwrap();
-        if let Some(pid) = pid { return pid; } tokio::time::sleep(Duration::from_millis(10)).await;
-    }}).await.unwrap();
+    let backend: i32 = poll_until(Duration::from_secs(5), async || {
+        sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND query='COMMIT' AND wait_event='advisory'")
+            .fetch_optional(&pool).await.unwrap()
+    }).await.unwrap();
     assert_eq!(list_count(address, &reader_token, f.channel).await, 0);
     old.child.kill().unwrap();
     old.child.wait().unwrap();

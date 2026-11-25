@@ -30,6 +30,8 @@ export function createDms(options: {
 }) {
   let state = dmListState(), busy = false, error = '', mutation: api.OpenDmRequest | undefined
   let mutationGeneration = 0, active: DmRequest | undefined, closed = false
+  // A confirmed open whose POST snapshot a boundary fenced; re-read once by id (B2.5, #956).
+  let fenced: api.Dm | undefined, rereadGeneration = 0
   const random = options.random ?? Math.random
   const listeners = new Set<() => void>()
   const notify = () => listeners.forEach(listener => listener())
@@ -71,14 +73,15 @@ export function createDms(options: {
     },
     settled() { active = undefined; plan() },
   })
-  function invalidate(reason: Invalidation = 'notice', delay = 200) {
+  function invalidate(reason: Invalidation = 'notice', delay = 200, notice = false) {
     if (closed) return
-    dispatch({ type: 'demand', boundary: reason !== 'notice', periodic: reason === 'periodic',
+    dispatch({ type: 'demand', boundary: reason !== 'notice', periodic: reason === 'periodic', notice,
       replace: reason === 'reconcile' || reason === 'periodic' ? state.rows.filter(r => !options.watched(r.identity.id)).map(r => r.identity.id) : [] })
     plan(delay)
   }
   const activityTarget: ActivityTarget = {
-    invalidate,
+    // Server notices that may reveal an undiscovered DM spend the run's notice delta; ready, reset, O5 and own work never do.
+    invalidate: (reason = 'notice', delay, discovery = false) => invalidate(reason, delay, discovery && (reason === 'notice' || reason === 'access')),
     disconnected() { if (!state.paused) { dispatch({ type: 'pause' }); target.suspend() } },
     close,
   }
@@ -95,7 +98,7 @@ export function createDms(options: {
       if (current) {
         dispatch({ type: 'opened', generation: mutationGeneration, dm, renewed: mutation?.renew === true })
         options.select(dm.id)
-      } else dispatch({ type: 'recover', peer: dm.peer.id, renewed: mutation?.renew === true })
+      } else fenced = dm
       invalidate('access')
     },
     error(result) {
@@ -104,11 +107,37 @@ export function createDms(options: {
       if (retryable(result) && mutation) dispatch({ type: 'recover', peer: mutation.member_id })
       if (terminal(result)) close()
     },
-    settled() { busy = false; notify(); plan() },
+    settled() { if (!fenced) finish() },
   })
+  const rereadTarget = createActivityTarget<api.DmList>({
+    manualRetry: true, timeoutMs: options.timeoutMs,
+    load: async signal => {
+      const result = await options.api.list({ channel_id: [fenced!.id] }, signal)
+      return result.ok && !completeCountFields(result.data) ? { ok: false, kind: 'network' } : result
+    },
+    accept(list) {
+      const confirmed = fenced!; fenced = undefined
+      const dm = list.dms.find(d => d.id === confirmed.id && d.peer.id === confirmed.peer.id)
+      if (dm && rereadGeneration === state.generation && !state.paused) {
+        dispatch({ type: 'opened', generation: rereadGeneration, dm, renewed: mutation?.renew === true && dm.peer.active })
+        options.select(dm.id)
+      } else recover(confirmed)
+    },
+    error(result) {
+      recover(fenced!); fenced = undefined
+      if (terminal(result)) close()
+    },
+    settled() {
+      if (fenced) { recover(fenced); fenced = undefined }
+      finish()
+    },
+  })
+  // The POST already committed, so recovery keeps a confirmed renewal's send-block clearing.
+  function recover(dm: api.Dm) { dispatch({ type: 'recover', peer: dm.peer.id, renewed: mutation?.renew === true }) }
+  function finish() { busy = false; notify(); plan() }
   function close() {
     if (closed) return
-    closed = true; dispatch({ type: 'close' }); target.close(); mutationTarget.close(); listeners.clear()
+    closed = true; dispatch({ type: 'close' }); target.close(); mutationTarget.close(); rereadTarget.close(); listeners.clear()
   }
   plan()
   return {
@@ -117,8 +146,8 @@ export function createDms(options: {
     activityTarget,
     resetHistory() {
       if (closed) return
-      target.suspend(); mutationTarget.suspend()
-      active = undefined; mutation = undefined; busy = false; error = ''
+      target.suspend(); mutationTarget.suspend(); rereadTarget.suspend()
+      active = undefined; mutation = undefined; busy = false; error = ''; fenced = undefined
       dispatch({ type: 'history_reset' })
     },
     ready() { dispatch({ type: 'resume' }); invalidate('reconcile') },
@@ -137,6 +166,14 @@ export function createDms(options: {
       busy = true; error = ''; mutation = { member_id: memberId, ...(renew ? { renew: true } : {}) }
       invalidate('access'); mutationGeneration = state.generation; notify()
       await mutationTarget.refresh()
+      // The open's own commit notice usually fences its snapshot. A read-only GET of that DM under current
+      // authority lets it select without waiting for list recovery's next O5 slot. Repeating the POST would
+      // not be read-only: with renew it can renew again or meet a deactivated peer. open() resolves only
+      // after the re-read, because the caller navigates from the selection it leaves.
+      if (closed || !fenced) return
+      if (state.paused) { recover(fenced); fenced = undefined; finish(); return }
+      rereadGeneration = state.generation
+      await rereadTarget.refresh()
     },
     close() { close(); release() },
   }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 use std::time::Duration;
 
 #[fukulow_test::test]
@@ -58,13 +59,13 @@ async fn unread_grant_excludes_uncommitted_send_and_mark_waits_for_commit_barrie
 
 // Observe the actual SQL wait, rather than inferring admission from elapsed time.
 pub(super) async fn waiting(pool: &PgPool, query: &str) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE $1)").bind(query).fetch_one(pool).await.unwrap();
-            if waiting { break; }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        pool,
+        Blocked::Advisory(Advisory::Query(query)),
+        Count::AtLeast(1),
+        Duration::from_secs(3),
+    )
+    .await;
 }
 
 #[fukulow_test::test]
@@ -119,13 +120,13 @@ async fn unread_mark_rechecks_revoked_access_after_barrier_wait(pool: PgPool) {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(3),async {
-            loop {
-                let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE '%135%')").fetch_one(&pool).await.unwrap();
-                if waiting {break;}
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }).await.unwrap();
+        wait_blocked(
+            &pool,
+            Blocked::Advisory(Advisory::Query("%135%")),
+            Count::AtLeast(1),
+            Duration::from_secs(3),
+        )
+        .await;
         if deactivate {
             sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
                 .bind(org)
@@ -156,13 +157,13 @@ async fn unread_concurrent_member_and_channel_creation_initialize_access_once(po
     let task_pool = pool.clone();
     let viewer_id = Uuid::new_v4();
     let task = tokio::spawn(async move { member(&task_pool, org, viewer_id).await });
-    tokio::time::timeout(Duration::from_secs(3),async {
-        loop {
-            let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE 'INSERT INTO users%')").fetch_one(&pool).await.unwrap();
-            if waiting {break;}
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::Advisory(Advisory::Query("INSERT INTO users%")),
+        Count::AtLeast(1),
+        Duration::from_secs(3),
+    )
+    .await;
     tx.commit().await.unwrap();
     let viewer = task.await.unwrap();
     let c = channels(&router(&pool).await, &viewer).await;

@@ -1,15 +1,15 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use std::time::Duration;
 
 async fn wait_for_organization(pool: &PgPool, count: i64) {
-    tokio::time::timeout(Duration::from_secs(3),async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT organization_id%FOR NO KEY UPDATE'")
-                .fetch_one(pool).await.unwrap();
-            if waiting >= count { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        pool,
+        Blocked::LockQuery("SELECT organization_id%FOR NO KEY UPDATE"),
+        Count::AtLeast(count),
+        Duration::from_secs(3),
+    )
+    .await;
 }
 
 #[fukulow_test::test]
@@ -131,13 +131,13 @@ async fn channel_manager_mutation_locks_members_before_grants(pool: PgPool) {
     let token = f.token.clone();
     let c = f.channel;
     let pending = tokio::spawn(async move { manager(&app, &token, c, target, true).await });
-    tokio::time::timeout(Duration::from_secs(3),async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT name,role,membership_revision%FOR NO KEY UPDATE')").fetch_one(&f.pools.admin).await.unwrap();
-            if waiting {break;}
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &f.pools.admin,
+        Blocked::LockQuery("SELECT name,role,membership_revision%FOR NO KEY UPDATE"),
+        Count::AtLeast(1),
+        Duration::from_secs(3),
+    )
+    .await;
     // Waiting for a target Member must not hold even the actor's grant yet.
     sqlx::query("SELECT member_id FROM channel_members WHERE organization_id=$1 AND channel_id=$2 FOR UPDATE NOWAIT").bind(f.org).bind(c).execute(&mut *blocker).await.unwrap();
     blocker.commit().await.unwrap();
@@ -162,13 +162,13 @@ async fn channel_manager_guest_change_and_send_never_invert_member_grant_locks(p
     let app = f.app.clone();
     let target = f.creator;
     let role_change = tokio::spawn(async move { change(&app, &ot, target, "guest").await });
-    tokio::time::timeout(Duration::from_secs(3),async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'UPDATE channel_members SET manager=false%')").fetch_one(&f.pools.admin).await.unwrap();
-            if waiting {break;}
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &f.pools.admin,
+        Blocked::LockQuery("UPDATE channel_members SET manager=false%"),
+        Count::AtLeast(1),
+        Duration::from_secs(3),
+    )
+    .await;
     let blocked =
         sqlx::query("SELECT id FROM users WHERE organization_id=$1 AND id=$2 FOR SHARE NOWAIT")
             .bind(f.org)
@@ -193,13 +193,19 @@ async fn channel_manager_guest_change_and_send_never_invert_member_grant_locks(p
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(3),async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'UPDATE channel_members SET manager=false%' OR query LIKE 'SELECT role FROM (%' OR query LIKE 'SELECT member_id FROM channel_members%' OR query LIKE 'SELECT visibility=%' OR query LIKE 'SELECT id,membership_revision,role FROM users%')").fetch_one(&f.pools.admin).await.unwrap();
-            if waiting >= 2 {break;}
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &f.pools.admin,
+        Blocked::LockQueries(&[
+            "UPDATE channel_members SET manager=false%",
+            "SELECT role FROM (%",
+            "SELECT member_id FROM channel_members%",
+            "SELECT visibility=%",
+            "SELECT id,membership_revision,role FROM users%",
+        ]),
+        Count::AtLeast(2),
+        Duration::from_secs(3),
+    )
+    .await;
     blocker.commit().await.unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), role_change)

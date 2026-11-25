@@ -4,11 +4,16 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { unsigned } from './frequency-ratios.ts';
 
 const ready = 'FUKULOW_TURBOSTAT_READY';
-// Command mode takes its opening sample before spawning the fixed stdin barrier.
-export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSignal, keep: (raw: unknown) => void) {
-  const child = spawn('sudo', ['-n', '/usr/bin/turbostat', '--quiet', '--show', 'CPU,TSC_MHz',
-    '--add', 'msr0xe8,u64,cpu,delta,APERF', '--add', 'msr0xe7,u64,cpu,delta,MPERF',
-    '--', '/bin/sh', '-c', `printf '%s\\n' ${ready}; IFS= read -r marker`], { signal });
+// The exact argv the scoped sudoers entry allows. sudo-rs matches sudoers arguments word by word, so no
+// element may contain whitespace (a `/bin/sh -c` script never matches).
+export const turbostatArgv = ['/usr/bin/turbostat', '--quiet', '--show', 'CPU,TSC_MHz',
+  '--add', 'msr0xe8,u64,cpu,delta,APERF', '--add', 'msr0xe7,u64,cpu,delta,MPERF', '--', '/usr/bin/cat'];
+// Command mode takes its opening sample before spawning cat, the stdin barrier. The ready line written to
+// stdin comes back on stdout only once cat runs; ending stdin ends cat and takes the closing sample.
+// `command` is replaceable only so tests can drive this control flow without sudo or turbostat (#979).
+export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSignal, keep: (raw: SpotCheck) => void,
+  command: readonly [string, ...string[]] = ['sudo', '-n', ...turbostatArgv]) {
+  const child = spawn(command[0], command.slice(1), { signal });
   let stdout = '', stderr = '';
   let startNs: string | null = null, stopNs: string | null = null;
   child.stdin.on('error', () => {});
@@ -22,6 +27,7 @@ export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSign
     });
   });
   child.stderr.setEncoding('utf8').on('data', data => { stderr += data; });
+  child.stdin.write(`${ready}\n`);
   const exit = new Promise<number | null>(resolve => {
     child.once('error', () => resolve(null));
     child.once('close', resolve);
@@ -47,7 +53,7 @@ export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSign
   }
 }
 
-export type SpotCheck = { startNs: string; stopNs: string; stdout: string; stderr: string };
+export type SpotCheck = { startNs: string | null; stopNs: string | null; stdout: string; stderr: string };
 export function spotReadings(raw: SpotCheck) {
   const rows = `${raw.stdout}\n${raw.stderr}`.trim().split('\n').map(l => l.trim().split(/\s+/));
   const fields = ['CPU', 'TSC_MHz', 'APERF', 'MPERF'];

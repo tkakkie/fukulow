@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 type AccessRow = (bool, Option<Uuid>, bool);
@@ -583,16 +584,12 @@ async fn bounded_fanout_cancellation_discards_context_in_both_plan_modes(pool: P
                 }
             };
             let mut pending = Box::pin(future);
-            let blocked = async {
-                loop {
-                    let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE pid=$1 AND wait_event='advisory')")
-                        .bind(pid).fetch_one(&pools.admin).await.unwrap();
-                    if waiting {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            };
+            let blocked = wait_blocked(
+                &pools.admin,
+                Blocked::PidEvent(pid, "advisory"),
+                Count::AtLeast(1),
+                std::time::Duration::from_secs(10),
+            );
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 tokio::select! {
                     result = &mut pending => panic!("query escaped locked grant: {result:?}"),

@@ -1,14 +1,14 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 async fn waiting(pool: &PgPool, pattern: &str, count: i64) {
-    tokio::time::timeout(Duration::from_secs(5),async {
-        loop {
-            let n:i64=sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1")
-                .bind(pattern).fetch_one(pool).await.unwrap();
-            if n>=count { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        pool,
+        Blocked::LockQuery(pattern),
+        Count::AtLeast(count),
+        Duration::from_secs(5),
+    )
+    .await;
 }
 
 #[fukulow_test::test]

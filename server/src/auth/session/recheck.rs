@@ -1,5 +1,6 @@
 use super::*;
 use crate::lock_ignoring_poison;
+use crate::observability::revocation_trace::Worker;
 use sqlx::PgConnection;
 use std::sync::Weak;
 
@@ -22,6 +23,7 @@ impl SessionChanges {
                 interval,
                 timeout,
                 subscriptions,
+                Worker::current(),
                 #[cfg(test)]
                 self.gate.clone(),
             ));
@@ -79,7 +81,8 @@ async fn run(
     interval: Duration,
     timeout: Duration,
     subscriptions: Arc<Mutex<Option<Arc<dyn SubscriptionRecheck>>>>,
-    #[cfg(test)] gate: Arc<Mutex<Option<Arc<super::tests::Gate>>>>,
+    mut measurement: Option<Worker>,
+    #[cfg(test)] gate: Arc<super::tests::SessionGates>,
 ) {
     let mut ticks = tokio::time::interval_at(Instant::now() + interval, interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -96,6 +99,7 @@ async fn run(
         let bound = Instant::now() + timeout;
         #[cfg(test)]
         super::tests::pause_gate(&gate, super::tests::Phase::Worker).await;
+        let mut tick = measurement.as_mut().map(Worker::tick);
         pass(
             &sessions,
             &pool,
@@ -104,17 +108,35 @@ async fn run(
             &gate,
         )
         .await;
+        if let Some(tick) = &mut tick {
+            tick.sessions_checked();
+        }
         let check = lock_ignoring_poison(&subscriptions).clone();
-        if let Some(check) = check
-            && (!matches!(
-                tokio::time::timeout_at(bound, check.check(&pool, SubscriptionScope::All)).await,
-                Ok(Ok(()))
-            ) || Instant::now() >= bound)
-        {
-            check.failed(SubscriptionScope::All);
-            for signal in lock_ignoring_poison(&sessions).entries.values() {
-                signal.send_modify(|status| status.failed = true);
+        if let Some(check) = check {
+            let work = tokio::time::timeout_at(bound, check.check(&pool, SubscriptionScope::All));
+            let result = if let Some(tick) = &mut tick {
+                tick.check(work).await
+            } else {
+                work.await
+            };
+            let failed = !matches!(result, Ok(Ok(()))) || Instant::now() >= bound;
+            if let Some(tick) = &mut tick {
+                tick.subscription_checked(|| match result {
+                    Ok(Ok(())) if failed => "late",
+                    Ok(Ok(())) => "ok",
+                    Ok(Err(_)) => "error",
+                    Err(_) => "timeout",
+                });
             }
+            if failed {
+                check.failed(SubscriptionScope::All);
+                for signal in lock_ignoring_poison(&sessions).entries.values() {
+                    signal.send_modify(|status| status.failed = true);
+                }
+            }
+        }
+        if let Some(tick) = tick {
+            tick.finish();
         }
         if closed {
             return;
@@ -126,7 +148,7 @@ async fn pass(
     sessions: &Mutex<Sessions>,
     pool: &PgPool,
     bound: Instant,
-    #[cfg(test)] gate: &Mutex<Option<Arc<super::tests::Gate>>>,
+    #[cfg(test)] gate: &super::tests::SessionGates,
 ) {
     let snapshot: Vec<_> = lock_ignoring_poison(sessions)
         .entries

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::eventually;
 
 #[fukulow_test::test]
 async fn reply_unknown_foreign_channel_and_foreign_organization_parent_and_anchor_are_identical(
@@ -242,13 +243,10 @@ async fn reply_stale_member_and_queued_access_loss_deny_send_retry_and_chain(poo
             );
             tokio::spawn(async move { send(&app, &token, channel, intent).await })
         };
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while delivery.admission(&pool).queued_sends() == 0 {
-                tokio::task::yield_now().await;
-            }
+        eventually(Duration::from_secs(2), || {
+            delivery.admission(&pool).queued_sends() > 0
         })
-        .await
-        .unwrap();
+        .await;
         if denial == "grant" {
             sqlx::query("DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3").bind(org).bind(channel).bind(viewer).execute(&pool).await.unwrap();
         } else {

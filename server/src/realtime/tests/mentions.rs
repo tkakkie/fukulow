@@ -19,18 +19,14 @@ async fn mention_live_and_replay_follow_current_names_and_never_accept_later_gra
     let gate = messages::pause_publication(key);
     let text = format!("@{{member:{target}}} @{{member:{denied}}}");
     let message = send(&f, &f.token, c, key, &text).await;
-    tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered_within(Duration::from_secs(3)).await;
     assert_eq!(
         message["mentions"],
         json!([{"member_id":target,"name":"Member"}])
     );
     sqlx::query("UPDATE users SET name='Current',deactivated_at=clock_timestamp() WHERE organization_id=$1 AND id=$2").bind(f.organization).bind(target).execute(&pool).await.unwrap();
     grant(&pool, f.organization, c, denied).await;
-    gate.release.add_permits(1);
+    gate.release();
     let received = event(&mut live).await;
     assert_eq!(received["type"], "message");
     assert_eq!(received["message"]["body"], text);
@@ -92,7 +88,7 @@ async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(p
         if phase != "live" {
             subscribe(&mut socket, c, 0).await;
         }
-        entered(&gate).await;
+        gate.entered().await;
         let mut control = f.server.connect(&f.token).await;
         subscribe(&mut control, c, 0).await;
         if phase == "frame" {
@@ -110,7 +106,7 @@ async fn mention_lost_channel_live_and_fetched_replay_never_handoff_identities(p
             .status(),
             StatusCode::NO_CONTENT
         );
-        gate.release.add_permits(1);
+        gate.release();
         access_loss::access_lost(&mut socket, c).await;
         silent(&mut socket).await;
         for seq in 1..=3 {

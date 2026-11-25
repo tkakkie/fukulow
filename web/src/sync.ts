@@ -12,7 +12,7 @@ import type { ChannelState, Effect, Input, MoveVersion } from './protocol-types'
 
 export type TimelineApi = {
   listChannelEvents(channel: string, query: api.ListChannelEventsQuery): Promise<Result<api.ChannelEventPage>>
-  listMessages(channel: string, query?: ListMessagesQuery): Promise<Result<MessagePage>>
+  listMessages(channel: string, query?: ListMessagesQuery, signal?: AbortSignal): Promise<Result<MessagePage>>
   sendMessage(channel: string, body: SendMessageRequest): Promise<Result<Message>>
 }
 type Wait = Extract<Effect, { type: 'wait' }>
@@ -104,7 +104,7 @@ type SyncListener = (changedChannels: ReadonlySet<string>, records?: ReadonlyMap
 export function createSync(options: SyncOptions) {
   const transport = options.api ?? {
     listChannelEvents: (channel: string, query: api.ListChannelEventsQuery) => api.listChannelEvents(options.organizationId ?? '', channel, query),
-    listMessages: (channel: string, query?: ListMessagesQuery) => api.listMessages(options.organizationId ?? '', channel, query),
+    listMessages: (channel: string, query?: ListMessagesQuery, signal?: AbortSignal) => api.listMessages(options.organizationId ?? '', channel, query, undefined, signal),
     sendMessage: (channel: string, body: SendMessageRequest) => api.sendMessage(options.organizationId ?? '', channel, body),
   }
   const connect = options.connect ?? (handlers => connectRealtime(handlers, undefined, options.organizationId))

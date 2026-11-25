@@ -1,5 +1,6 @@
 use super::*;
 use crate::realtime::connection::Lifecycle;
+use std::sync::Mutex;
 use tokio::sync::oneshot;
 
 // Keep explicit clock jumps below the session monitor's independent 30 s SQL recheck.
@@ -160,10 +161,10 @@ async fn post_replay_ping(f: &Fixture, socket: &mut Client) {
     assert_eq!(event(socket).await["message"], canonical);
     let gate = pause(f.channel);
     resubscribe(socket, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     // No client frame is sent while replay prevents the first heartbeat Ping.
     advance(IDLE_TIMEOUT + PING_INTERVAL).await;
-    gate.release.add_permits(1);
+    gate.release();
     assert_eq!(event(socket).await["message"], canonical);
     ready(socket, f.channel, 1).await;
     assert!(matches!(frame(socket).await, tungstenite::Message::Ping(_)));
@@ -237,13 +238,13 @@ async fn pong_queued_during_replay_clears_outstanding_ping(pool: PgPool) {
     ));
     let gate = pause(f.channel);
     resubscribe(&mut socket, f.channel, 0).await;
-    entered(&gate).await;
+    gate.entered().await;
     socket
         .send(tungstenite::Message::Pong(vec![1].into()))
         .await
         .unwrap();
     advance(IDLE_TIMEOUT + PING_INTERVAL).await;
-    gate.release.add_permits(1);
+    gate.release();
     ready(&mut socket, f.channel, 0).await;
     let canonical = post(&f, f.channel).await;
     assert_eq!(event(&mut socket).await["message"], canonical);

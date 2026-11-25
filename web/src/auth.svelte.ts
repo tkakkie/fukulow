@@ -11,7 +11,7 @@ import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type Aut
 import { getOrganizationMe, isOrganizationUnavailable, type Identity, type Role } from './api'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
-import { createSession } from './session'
+import { createSession, startInitialChannels, type SessionOptions } from './session'
 import { initCore } from '#sync-core'
 import { dmsAdapter, type DmsAdapter } from './dms.svelte'
 import { createMembers, watchMemberAccess, type MemberListAccess } from './members'
@@ -51,17 +51,19 @@ export type AuthDeps = {
   setupAndSignIn: typeof setupAndSignIn
   signOut: typeof signOut
   getOrganization: typeof getOrganizationMe
+  readInitialChannels?: typeof startInitialChannels
   /** Resolves once the sync core is ready; rejects if it never will (main.ts shows the startup error). */
   coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean, initialChannels?: SessionOptions['initialChannels']): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
+  readInitialChannels: startInitialChannels,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
-  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels) {
-    const session = createSession({ selfId, onEnded, organizationId, initialRole, initialCanCreateChannels, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
+    const session = createSession({ selfId, onEnded, organizationId, initialRole, initialCanCreateChannels, initialChannels, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
@@ -144,7 +146,12 @@ export function createAuth(deps: AuthDeps = defaults) {
       else organizationStatus = 'error'
       return
     }
-    // The REST reads above overlap core loading; no sync controller exists until the core is ready.
+    // A superseded selection's 401 can still end this Account Session.
+    const initialChannels = deps.readInitialChannels?.(id, accountRequests.signal)
+      .then(list => {
+        if (!list.ok && list.kind === 'http' && list.status === 401) ended(account)
+        return list
+      })
     if (deps.coreReady) {
       try { await deps.coreReady() } catch { return }
       if (account !== accountGeneration || selection !== selectionGeneration) return
@@ -155,7 +162,7 @@ export function createAuth(deps: AuthDeps = defaults) {
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
-    }, result.data.member.role, accountRequests.signal, result.data.organization.capabilities.can_create_channels.allowed)
+    }, result.data.member.role, accountRequests.signal, result.data.organization.capabilities.can_create_channels.allowed, initialChannels)
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
