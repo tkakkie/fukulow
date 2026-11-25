@@ -305,6 +305,51 @@ describe('Cold / startup REST read counts (#980)', () => {
     }
   })
 
+  it('does not re-read the Owner member directory when a delayed first Channel list resolves after Ready reconciliation', async () => {
+    let releaseChannels!: (res: Response) => void
+    const pendingChannels = new Promise<Response>(resolve => { releaseChannels = resolve })
+    let channelRequests = 0
+    const h = installHarness({
+      onFetch(path, url) {
+        if (path === `/api/v1/orgs/${ORG}/channels` && !url.searchParams.has('archived')) {
+          channelRequests++
+          if (channelRequests === 1) return pendingChannels
+          return json(channelList(GEN))
+        }
+        return undefined
+      },
+    })
+    const auth = createAuth()
+    try {
+      await auth.load()
+      await flush()
+      expect(auth.session!.channels.state.status).toBe('loading')
+
+      // Owner opens the member directory before activity_ready while the first Channel list is still pending.
+      auth.members!.activate()
+      await flush()
+      expect(h.counts.members).toBe(1)
+
+      // Ready reconciliation completes before the delayed first Channel list resolves.
+      h.openAndReady(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+      expect(h.counts.members).toBe(2)
+      expect(auth.session!.channels.state.status).toBe('loading')
+
+      // Releasing the delayed Channel list must not trigger a third Member directory read.
+      releaseChannels(json(channelList(GEN)))
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+      expect(auth.session!.channels.state.status).toBe('ready')
+      expect(h.counts.channels).toBeLessThanOrEqual(2)
+      expect(h.counts.members).toBeLessThanOrEqual(2)
+    } finally {
+      auth.session?.close()
+      auth.members?.close()
+    }
+  })
+
   it('refreshes an active Guest member directory when a delayed first Channel list reveals a newly accessible Channel', async () => {
     const guestId = SELF
     const peerId = '00000000-0000-4000-8000-000000000088'

@@ -44,7 +44,7 @@ export type SessionModel = {
   unread?(id: string): UnreadAdapter
   channelMembers?(id: string): ReturnType<typeof createChannelMembers>
   memberListAccess?(): MemberListAccess
-  onMemberListRefresh?(listener: (reason: 'access' | 'refresh') => void): () => void
+  onMemberListRefresh?(listener: (reason: 'access' | 'refresh') => void, onDirectoryLoad?: (listener: () => void) => () => void): () => void
   onChannelRevoked?(listener: (channelId: string) => void): () => void
   close(): void
 }
@@ -79,7 +79,7 @@ const defaults: AuthDeps = {
       searchAnchor: searchAnchorAdapter(session.searchAnchor),
       searchSource: session.searchSource,
       onChannelRevoked: session.onChannelRevoked,
-      onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener, { skipConnectRefresh: true }),
+      onMemberListRefresh: (listener, onDirectoryLoad) => watchMemberAccess(session.channels, session.sync, listener, { skipConnectRefresh: true, memberListAccess: session.memberListAccess, onDirectoryLoad }),
       channels: channelsAdapter(session.channels, session.channelCreation),
       sections: sectionsAdapter(session.sections),
       dms: dmsAdapter(session.dms),
@@ -196,7 +196,7 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
     stopMemberRefresh = session.onMemberListRefresh?.(reason => {
       if (reason === 'access') currentMembers?.activityTarget.invalidate('access')
       else void currentMembers?.refreshIfActive()
-    })
+    }, currentMembers?.onLoad)
     changes++
   }
   async function show(next: AuthState) {
