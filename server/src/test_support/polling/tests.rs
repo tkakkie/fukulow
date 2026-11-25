@@ -54,7 +54,11 @@ async fn counts_lock_queries_advisory_waits_and_pids(pool: PgPool) {
 
     for blocked in [
         Blocked::LockQuery("SELECT pg_advisory_xact_lock_shared(847,%"),
-        Blocked::LockQueries(&[statement, "SELECT pg_advisory_xact_lock_shared%"]),
+        Blocked::LockQueries(&[
+            "SELECT unrelated%",
+            statement,
+            "SELECT pg_advisory_xact_lock_shared%",
+        ]),
         Blocked::LockQueryBehind(statement, holder),
         Blocked::LockBehind(holder),
         Blocked::OtherLock,
@@ -74,6 +78,17 @@ async fn counts_lock_queries_advisory_waits_and_pids(pool: PgPool) {
         wait_blocked(&pool, blocked, Count::Exactly(2), DEADLINE).await;
     }
     assert_eq!(
+        Blocked::Advisory(Advisory::Key {
+            class_id: None,
+            object_id: 1,
+            current_database: true,
+        })
+        .count(&pool)
+        .await,
+        2,
+        "an unspecified class ID should match both waiters",
+    );
+    assert_eq!(
         Blocked::LockQuery("SELECT unrelated%").count(&pool).await,
         0
     );
@@ -86,6 +101,57 @@ async fn counts_lock_queries_advisory_waits_and_pids(pool: PgPool) {
             .unwrap()
             .unwrap();
     }
+}
+
+#[sqlx::test(migrations = false)]
+async fn counts_advisory_waits_from_another_database(pool: PgPool) {
+    let observer = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let mut blocker = pool.begin().await.unwrap();
+    // The holder's PID keeps this key distinct across concurrent test databases.
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let statement = "SELECT pg_advisory_xact_lock(973, $1)";
+    sqlx::query(statement)
+        .bind(holder)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let mut waiter = pool.acquire().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *waiter)
+        .await
+        .unwrap();
+    let waiter = tokio::spawn(async move {
+        sqlx::query(statement)
+            .bind(holder)
+            .execute(&mut *waiter)
+            .await
+            .unwrap();
+    });
+    wait_blocked(&pool, Blocked::Pid(pid), Count::Exactly(1), DEADLINE).await;
+
+    assert_eq!(
+        Blocked::Advisory(Advisory::Key {
+            class_id: Some(973),
+            object_id: u32::try_from(holder).unwrap(),
+            current_database: false,
+        })
+        .count(&observer)
+        .await,
+        1,
+        "the waiter in the test database should be visible from the control database",
+    );
+
+    blocker.rollback().await.unwrap();
+    tokio::time::timeout(DEADLINE, waiter)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[sqlx::test(migrations = false)]
@@ -138,6 +204,11 @@ async fn wait_blocked_fails_on_timeout(pool: PgPool) {
     .unwrap_err();
     let message = failure.downcast::<String>().unwrap();
     assert!(message.contains("waiting for AtLeast(1) Pid(0)"));
+}
+
+#[sqlx::test(migrations = false)]
+async fn wait_blocked_or_exits_when_done_without_a_matching_waiter(pool: PgPool) {
+    wait_blocked_or(&pool, Blocked::Pid(0), Count::AtLeast(1), DEADLINE, || true).await;
 }
 
 #[tokio::test(start_paused = true)]
