@@ -310,7 +310,8 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     const net = fakeNetwork()
     const session = createSession({ selfId: 'me', onEnded: () => {}, ...net.options('me') })
     net.socket.onReady()
-    net.pages.general = ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: ([record(1, 'general')]).at(-1)?.created_seq ?? 0,  messages: [record(1, 'general')], has_more: false })
+    const confirmed = { ...record(1, 'general'), body: 'アクセス喪失前に読み込んだメッセージ' }
+    net.pages.general = ok({ history_generation: confirmed.history_generation, as_of_seq: 1, messages: [confirmed], has_more: false })
     net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('general', 'general')] }))
     await settle()
     net.subscribed('general', 1)
@@ -337,6 +338,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
       props: {
         channel: ch,
         channelId: 'general',
+        topics: topicsAdapter(session.topics, 'general'),
         selfId: 'me',
         ongoToChannelList: () => {},
       },
@@ -354,6 +356,7 @@ describe('Timeline, MessageRow and Workspace component states (docs/ui.md §3, �
     flushSync()
 
     expect(timelineHost.textContent).toContain('このチャンネルは利用できません。')
+    expect(timelineHost.textContent).toContain(confirmed.body)
     expect(buttonsByText(timelineHost, 'チャンネル一覧へ')).toHaveLength(1)
     expect(buttonsByText(timelineHost, '再試行')).toHaveLength(0)
     expect(buttonsByText(timelineHost, '再送する')).toHaveLength(0)

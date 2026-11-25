@@ -9,7 +9,7 @@ import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
 import { getOrganizationMe, isOrganizationUnavailable, listTimeline, type Identity, type Role } from './api'
-import { startInitialTimeline } from './initial-timeline'
+import { startInitialSelection } from './initial-timeline'
 import type { Navigation } from './navigation'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
@@ -121,10 +121,10 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
   let accountGeneration = 0
   let accountRequests = new AbortController()
   let selectionGeneration = 0
-  let stopInitialTimeline: (() => void) | undefined
+  let startup: ReturnType<typeof startInitialSelection> | undefined
 
   function closeOrganization() {
-    stopInitialTimeline?.(); stopInitialTimeline = undefined
+    startup?.close(); startup = undefined
     stopMemberAvailability?.(); stopMemberAvailability = undefined
     stopMemberRefresh?.(); stopMemberRefresh = undefined
     session?.close(); session = null
@@ -162,45 +162,28 @@ export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
         if (!list.ok && list.kind === 'http' && list.status === 401) ended(account)
         return list
       })
-    const initialChannelHint = () => {
-      const target = route()
-      return target?.organizationId === id ? target.channelId : null
-    }
-    let hint = initialChannelHint()
-    let membershipLost = false
-    const initialTimeline = deps.readInitialTimeline && startInitialTimeline({
-      organizationId: id, channelHint: hint, channels: initialChannels, accountSignal: accountRequests.signal,
+    const initial = startInitialSelection({
+      organizationId: id, route, navigation, channels: initialChannels, accountSignal: accountRequests.signal,
       load: deps.readInitialTimeline, onEnded: () => ended(account),
-      onUnavailable() {
-        if (account !== accountGeneration || selection !== selectionGeneration) return
-        membershipLost = true
-        stopInitialTimeline?.()
-        if (session) void session.sync.markUnavailable()
-        else organizationStatus = 'unavailable'
-      },
+      onUnavailableBeforeSession: () => { organizationStatus = 'unavailable' },
     })
-    if (initialTimeline && !initialTimeline.signal.aborted) {
-      const unsubscribe = navigation?.subscribe(() => {
-        const next = initialChannelHint()
-        if (next !== hint) initialTimeline.select(next)
-        hint = next
-      })
-      if (unsubscribe) initialTimeline.signal.addEventListener('abort', unsubscribe, { once: true })
-      stopInitialTimeline = initialTimeline.discard
-    }
+    startup = initial
     if (deps.coreReady) {
-      try { await deps.coreReady() } catch { initialTimeline?.discard(); return }
+      try { await deps.coreReady() } catch { initial.close(); return }
       if (account !== accountGeneration || selection !== selectionGeneration) return
     }
-    if (membershipLost) return
+    if (initial.unavailable) return
+    const { initialChannelHint, initialTimeline } = initial
     organization = result.data
-    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
+    const opened = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
     }, result.data.member.role, accountRequests.signal, result.data.organization.capabilities.can_create_channels.allowed, initialChannels,
     { initialChannelHint, initialTimeline })
+    session = opened
+    initial.attachSession(() => { void opened.sync.markUnavailable() })
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return

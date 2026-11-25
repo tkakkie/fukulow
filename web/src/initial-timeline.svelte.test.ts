@@ -9,6 +9,8 @@ import { channel, fakeNetwork, ok, record, settle, type FakeNetwork } from './ad
 import { deferred, summary } from './topic-test-helpers'
 import { dm } from './dm-test-helpers'
 import { createNavigation, type NavigationBrowser } from './navigation'
+import { startInitialTimeline } from './initial-timeline'
+import { createTopicSync } from './topic-sync'
 
 beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
@@ -78,7 +80,7 @@ it('discards a buffered early Timeline when the URL leaves and returns before wa
     await settle()
     expect(readInitialTimeline).toHaveBeenCalledExactlyOnceWith('o', 'A', { history_generation: undefined }, undefined, expect.any(AbortSignal))
     early.resolve(initialPage(7, { kind: 'message', message: record(7, 'A') }))
-    await settle()
+    await vi.advanceTimersByTimeAsync(11_000)
     go('B'); go('A')
     core.resolve(); await loading; await settle()
     expect(s.nets[0].history).toEqual([{ channel: 'A', query: undefined }])
@@ -153,7 +155,7 @@ it('switches a pending early Timeline to Message history as soon as DM discovery
   } finally { navigation.destroy(); await s.auth.signOut() }
 })
 
-it('starts the default Timeline after Organization authorization and replays from an empty early snapshot', async () => {
+it.each([0, 11_000])('reuses an empty early Timeline after %s ms of wasm loading', async wasmDelay => {
   const core = deferred<void>()
   const membership = deferred<Result<ReturnType<typeof member>>>()
   const readInitialChannels = vi.fn(async () => list('A'))
@@ -167,6 +169,7 @@ it('starts the default Timeline after Organization authorization and replays fro
   await settle()
   expect(readInitialTimeline).toHaveBeenCalledExactlyOnceWith('o', 'A', { history_generation: generation }, undefined, expect.any(AbortSignal))
   expect(s.nets).toHaveLength(0)
+  await vi.advanceTimersByTimeAsync(wasmDelay)
   core.resolve(); await loading; await settle()
   const [net] = s.nets
   const [session] = s.sessions
@@ -178,6 +181,64 @@ it('starts the default Timeline after Organization authorization and replays fro
   expect(session.sync.get().channels.A.cursor).toBe(8)
   expect(session.topics.get('A').lines).toMatchObject([{ kind: 'message', message: { id: 'id8' } }])
   await s.auth.signOut()
+})
+
+it.each(['A', 'B'])('honors a discard for %s before the default Channel pick', async discarded => {
+  const channels = deferred<Result<ChannelList>>()
+  const load = vi.fn(async () => initialPage(7))
+  const early = startInitialTimeline({
+    organizationId: 'o', channelHint: null, channels: channels.promise, accountSignal: new AbortController().signal,
+    load, onEnded: vi.fn(), onUnavailable: vi.fn(),
+  })
+  early.discard(discarded)
+  channels.resolve(list('A'))
+  await settle()
+  if (discarded === 'A') {
+    expect(load).not.toHaveBeenCalled()
+    expect(early.take('A')).toBeUndefined()
+  } else {
+    expect(load).toHaveBeenCalledOnce()
+    expect(await early.take('A')?.result).toEqual(initialPage(7))
+  }
+})
+
+it('Session replacement fences an early Timeline before watch', async () => {
+  const early = startInitialTimeline({
+    organizationId: 'o', channelHint: 'A', accountSignal: new AbortController().signal,
+    load: async () => initialPage(7), onEnded: vi.fn(), onUnavailable: vi.fn(),
+  })
+  const net = fakeNetwork()
+  const { sync, topics } = createTopicSync({ selfId: 'old', ...net.options().sync, topicsApi: net.options().topicsApi, initialTimeline: early })
+  try {
+    await settle()
+    await sync.replaceSession('new')
+    net.socket.onReady()
+    net.timelines.A = initialPage(1)
+    await sync.watch('A')
+    expect(net.history).toEqual([{ channel: 'A', query: undefined }])
+    expect(topics.get('A').main.asOfSeq).toBe(1)
+  } finally { await sync.close() }
+})
+
+it.each(['members_changed', 'activity_reset'] as const)('keeps the early Timeline across %s and handles a refused subscribe with C9', async type => {
+  const late = deferred<Result<TimelinePage>>()
+  const s = stack({ readInitialTimeline: () => late.promise, readInitialChannels: async () => list('A') })
+  try {
+    await s.auth.load(); await settle()
+    const [net] = s.nets
+    const [session] = s.sessions
+    net.event({ type })
+    const message = record(7, 'A')
+    late.resolve(initialPage(7, { kind: 'message', message }))
+    await settle()
+    expect(net.history).toEqual([])
+    expect(net.socket.sent).toContainEqual({ type: 'subscribe', channel_id: 'A', after_seq: 7, history_generation: generation })
+    net.event({ type: 'error', channel_id: 'A', code: 'channel_not_found' })
+    await settle()
+    expect(session.sync.get().channels.A.state).toBe('unavailable')
+    expect(session.topics.get('A')).toMatchObject({ unavailable: true, lines: [{ kind: 'message', message }] })
+    expect(net.history).toEqual([])
+  } finally { await s.auth.signOut() }
 })
 
 it.each([
@@ -266,13 +327,21 @@ it('a late early Timeline 401 still ends the same Account Session after Channel 
 it('late early Timeline Membership loss cannot end a different Organization selection', async () => {
   const core = deferred<void>()
   const late = deferred<Result<TimelinePage>>()
+  const { navigation } = testNavigation('A')
+  const subscribe = navigation.subscribe
+  const unsubscribe = vi.fn()
+  vi.spyOn(navigation, 'subscribe').mockImplementationOnce(listener => {
+    const stop = subscribe(listener)
+    return () => { unsubscribe(); stop() }
+  })
   const readInitialTimeline = vi.fn().mockReturnValueOnce(late.promise).mockResolvedValue(initialPage(0))
-  const s = stack({ coreReady: () => core.promise, readInitialTimeline, readInitialChannels: async () => list('A') })
+  const s = stack({ coreReady: () => core.promise, readInitialTimeline, readInitialChannels: async () => list('A') }, undefined, navigation)
   const loading = s.auth.load()
   await settle()
   expect(readInitialTimeline).toHaveBeenCalledOnce()
   const switching = s.auth.selectOrganization('other')
   await settle()
+  expect(unsubscribe).toHaveBeenCalledOnce()
   late.resolve({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
   await settle()
   expect(s.auth.organizationStatus).toBe('loading')
@@ -282,6 +351,23 @@ it('late early Timeline Membership loss cannot end a different Organization sele
   expect(s.sessions[0].sync.get().organization).toBe('available')
   expect(s.nets[0].history).toEqual([])
   await s.auth.signOut()
+  navigation.destroy()
+})
+
+it('an early Timeline Membership denial stops the Organization after the Session opens', async () => {
+  const late = deferred<Result<TimelinePage>>()
+  const s = stack({ readInitialTimeline: () => late.promise, readInitialChannels: async () => list('A') })
+  try {
+    await s.auth.load(); await settle()
+    const [session] = s.sessions
+    expect(s.auth.organizationStatus).toBe('ready')
+    late.resolve({ ok: false, kind: 'http', status: 404, error: 'organization_unavailable' })
+    await settle()
+    expect(s.auth.view.screen).toBe('app')
+    expect(s.auth.organizationStatus).toBe('unavailable')
+    expect(session.sync.get().organization).toBe('unavailable')
+    expect(s.nets[0].history).toEqual([])
+  } finally { await s.auth.signOut() }
 })
 
 it('a newer main projection supersedes a pending early Timeline', async () => {
@@ -331,7 +417,7 @@ it('an expired core bootstrap cannot issue a fresh Timeline from the retired rea
   await s.auth.signOut()
 })
 
-it.each(['selection', 'reconnect', 'history reset', 'revoke and re-grant', 'deadline'])(
+it.each(['selection', 'reconnect', 'history reset', 'channel_access_revoked', 'channel_access_gained', 'deadline'])(
   'discards a pending early Timeline across %s', async reason => {
     const core = deferred<void>()
     const late = deferred<Result<TimelinePage>>()
@@ -355,9 +441,8 @@ it.each(['selection', 'reconnect', 'history reset', 'revoke and re-grant', 'dead
     } else if (reason === 'history reset') {
       session.sync.observeHistoryGeneration()
       expect(session.sync.get().historyEpoch).toBe(1)
-    } else if (reason === 'revoke and re-grant') {
-      net.event({ type: 'channel_access_revoked', channel_id: 'A' })
-      net.event({ type: 'channel_access_gained', channel_id: 'A' })
+    } else if (reason === 'channel_access_revoked' || reason === 'channel_access_gained') {
+      net.event({ type: reason, channel_id: 'A' })
     } else {
       await vi.advanceTimersByTimeAsync(10_000)
     }

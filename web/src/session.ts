@@ -296,7 +296,7 @@ export function createSession(options: SessionOptions) {
     if (same && sync.get().channels[id]?.state === 'unavailable') void sync.watch(id)
   }, random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs })
   const stopActivity = sync.onActivity(notice => {
-    if (notice.type === 'members_changed' || notice.type === 'activity_reset') options.initialTimeline?.discard()
+    // Subscribe rechecks Channel access (C9) and Organization Membership (C10) after the startup snapshot.
     if (notice.type === 'activity_ready') { dms?.ready(); sections.ready() }
     activity.notice(notice)
   })
