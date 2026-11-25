@@ -44,7 +44,7 @@ test('options validate cells, durations, repeats, controls and the stall', () =>
 });
 
 test('stall options stay within the send burst, the body limit and half the live queue', () => {
-  assert.equal(STALL_DEFAULT.senders * STALL_DEFAULT.messages, 80);
+  assert.equal(STALL_DEFAULT.senders * STALL_DEFAULT.messages, 120);
   assert.deepEqual(checkStall({ senders: 12, messages: 10, chars: 4000 }), { senders: 12, messages: 10, chars: 4000 });
   assert.throws(() => checkStall({ senders: 13, messages: 10, chars: 4000 }), /at most 128/);
   assert.throws(() => checkStall({ senders: 1, messages: 11, chars: 4000 }), /send limit/);
@@ -53,6 +53,23 @@ test('stall options stay within the send burst, the body limit and half the live
   const body = stallBody(4000);
   assert.equal([...body].length, 4000);
   assert.equal(Buffer.byteLength(body), 16_000);
+});
+
+test('stall overrides require rehearsal and leave the 120-Message formal fixture fixed', () => {
+  for (const args of [
+    ['--stall-senders', '10'], ['--stall-messages', '8'], ['--stall-chars', '1000'], ['--stall-messages=8'],
+  ]) {
+    assert.throws(() => parseOptions(['--out', '/x', ...args]), /stall-\* options require --rehearsal/);
+  }
+  const options = parseOptions(['--out', '/x', '--rehearsal', '--stall-senders', '10', '--stall-messages', '8', '--stall-chars', '1000']);
+  assert.deepEqual(options.stall, { senders: 10, messages: 8, chars: 1000 });
+});
+
+test('the saved overhead summary option takes a file for formal runs', () => {
+  const args = ['--out', '/x', '--overhead-summary'];
+  assert.throws(() => parseOptions(args), /saved overhead summary file/);
+  assert.throws(() => parseOptions([...args, 'summary.json', '--rehearsal']), /formal run/);
+  assert.equal(parseOptions([...args, 'summary.json']).overheadSummary, 'summary.json');
 });
 
 test('the log reader keeps holds samples, send records, clock samples and 60 s events', () => {
