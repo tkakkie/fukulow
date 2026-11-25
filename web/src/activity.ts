@@ -36,6 +36,7 @@ export function createActivityTarget<T>(options: {
   let failure: Exclude<Result<T>, { ok: true }> | undefined
   let completion: (() => void) | undefined
   let controller: AbortController | undefined
+  let running: Promise<void> | undefined
   function schedule(ms: number) {
     if (timer !== undefined || closed) return
     due = Date.now() + ms
@@ -47,7 +48,17 @@ export function createActivityTarget<T>(options: {
     const cap = Math.min(30_000, 1000 * 2 ** Math.min(attempt++, 5))
     schedule(Math.max(retryAfterMs, cap / 2 + random() * cap / 2))
   }
-  async function run() {
+  // ensure() joins the load in flight instead of settling before it.
+  function run() {
+    const started = !inFlight, pending = execute()
+    if (started && inFlight) {
+      running = pending
+      // Callers observe the rejection on pending itself; the bookkeeping chain must not add another.
+      void pending.finally(() => { if (running === pending) running = undefined }).catch(() => {})
+    }
+    return pending
+  }
+  async function execute() {
     if (closed || !dirty) return
     if (inFlight) { queued = true; return }
     if (retry || options.canLoad?.() === false) return
@@ -129,7 +140,10 @@ export function createActivityTarget<T>(options: {
     // An in-flight snapshot can cover a newer notice if it passes covers().
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
-    ensure() { if (!closed && !stopped && !dirty && !inFlight && timer === undefined && !retry) { dirty = true; return run() } },
+    ensure() {
+      if (inFlight) return running
+      if (!closed && !stopped && !dirty && timer === undefined && !retry) { dirty = true; return run() }
+    },
     refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
     suspend() { generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },

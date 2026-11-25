@@ -1017,3 +1017,67 @@ it('real update notices arriving after a covering read still trigger a follow-up
     expect(load).toHaveBeenCalledTimes(4)
   } finally { activity.close() }
 })
+
+it.each(['U', 'T'] as const)('an awaited Unread summary survives the topic window opening %s (#956)', async opened => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const late = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(late.promise)
+    const pending = c.topics.activitySummary('A', 'U')
+    await flush()
+    const signal = (c.topicsApi.getTopicSummary.mock.calls as unknown[][])[0]![2] as AbortSignal
+    // Opening a Topic prunes the window's activity targets before it registers the opened Topic.
+    void c.topics.loadTopic('A', opened)
+    await flush()
+    expect(signal.aborted).toBe(false)
+    late.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, topic: summary('U', 12, 4) }))
+    const result = await pending
+    expect(result.ok && result.data.topic.id).toBe('U')
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('an Unread summary joins a window summary read already in flight instead of failing early (#956)', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const late = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(late.promise)
+    const windowRead = c.topics.loadSummary('A', 'U')
+    await flush()
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'U').finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    late.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 12, topic: summary('U', 12, 4) }))
+    const result = await pending
+    await windowRead
+    expect(result.ok && result.data.topic.id).toBe('U')
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('a failed Unread summary releases its demand so the next prune drops the target (#956)', async () => {
+  const { topicClient } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const heldKeys = new Set<string>(), hold = activity.hold.bind(activity)
+  vi.spyOn(activity, 'hold').mockImplementation((key, target) => {
+    heldKeys.add(key)
+    const release = hold(key, target)
+    return () => { heldKeys.delete(key); release() }
+  })
+  const c = topicClient(activity)
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockResolvedValueOnce({ ok: false, kind: 'network' })
+    const result = await c.topics.activitySummary('A', 'U')
+    expect(result.ok).toBe(false)
+    expect(heldKeys.has('topic:A:U')).toBe(true)
+    void c.topics.loadTopic('A', 'T')
+    await flush()
+    expect(heldKeys.has('topic:A:U')).toBe(false)
+  } finally { activity.close(); await c.sync.close() }
+})
