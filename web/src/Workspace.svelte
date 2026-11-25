@@ -334,6 +334,93 @@
   $effect(() => { void selectedChannelId; members?.authors.retry() })
   $effect(() => { if (currentLive) members?.authors.retry() })
 
+  const initialDisplayViewKey = $derived(
+    selected && currentChannel && !search
+      ? `${currentOrganizationId}:${selected.id}:${route?.topicId ?? ''}`
+      : '',
+  )
+  const activeTopicView = $derived(
+    route?.topicId && currentTopicsState ? currentTopicsState.topic(route.topicId) : null,
+  )
+  const activeViewBaseReady = $derived.by(() => {
+    if (!selected || !currentChannel || search || organizationUnavailable) return false
+    if (route?.topicId && currentTopics) {
+      return Boolean(
+        activeTopicView?.initialized &&
+          !activeTopicView.notFound &&
+          currentTimeline?.status !== 'unavailable' &&
+          !currentTopicsState?.unavailable,
+      )
+    }
+    if (currentTimeline?.status !== 'ready' || currentTopicsState?.unavailable) return false
+    if (currentTopics) return currentTopicsState?.main.asOfSeq !== undefined
+    return true
+  })
+  const initialViewSenderIds = $derived.by((): string[] => {
+    if (!activeViewBaseReady || !members || resolveSenderName) return []
+    const selfId = organization?.member.id ?? ''
+    const ids = new Set<string>()
+    if (route?.topicId && activeTopicView) {
+      for (const message of activeTopicView.messages) {
+        if (message.sender !== selfId) ids.add(message.sender)
+      }
+    } else {
+      const lines = currentTopicsState?.lines ?? (currentTimeline?.messages ?? []).map(message => ({ kind: 'message' as const, message }))
+      for (const line of lines) {
+        if (line.kind === 'message' && line.message.sender !== selfId) ids.add(line.message.sender)
+      }
+    }
+    return [...ids]
+  })
+  let initialDisplayCompletedKey = $state('')
+  const awaitingInitialSenders = $derived(
+    Boolean(
+      initialDisplayViewKey &&
+        activeViewBaseReady &&
+        members &&
+        !resolveSenderName &&
+        initialDisplayCompletedKey !== initialDisplayViewKey &&
+        !members.authors.isInitialDisplayTimedOut(initialDisplayViewKey) &&
+        initialViewSenderIds.some(id => !memberNames.has(id) && members.authors.isPending(id)),
+    ),
+  )
+  const firstDisplayReached = $derived.by(() => {
+    if (organizationUnavailable) return false
+    if (searchOpen) return true
+    if (selected && currentChannel) {
+      if (route?.topicId && currentTopics) {
+        const topicStatus = session.navigationTargets?.state.topic.status ?? 'idle'
+        const terminal = Boolean(
+          currentTimeline?.status === 'unavailable' ||
+            currentTopicsState?.unavailable ||
+            activeTopicView?.notFound ||
+            activeTopicView?.error ||
+            topicStatus === 'unavailable' ||
+            topicStatus === 'error',
+        )
+        return terminal || (activeViewBaseReady && !awaitingInitialSenders)
+      }
+      const terminal = Boolean(
+        currentTimeline?.status === 'unavailable' ||
+          currentTimeline?.status === 'error' ||
+          currentTopicsState?.unavailable ||
+          (currentTopics && currentTimeline?.status === 'ready' && currentTopicsState?.main.asOfSeq === undefined && currentTopicsState?.main.error),
+      )
+      return terminal || (activeViewBaseReady && !awaitingInitialSenders)
+    }
+    return channelListStatus === 'ready' || channelListStatus === 'error'
+  })
+  $effect(() => {
+    if (!members) return
+    members.authors.syncInitialDisplay(initialDisplayViewKey, awaitingInitialSenders)
+    if (initialDisplayViewKey && activeViewBaseReady && !awaitingInitialSenders && initialDisplayCompletedKey !== initialDisplayViewKey) {
+      initialDisplayCompletedKey = initialDisplayViewKey
+    }
+  })
+  $effect(() => {
+    if (firstDisplayReached) members?.scheduleActivate()
+  })
+
   function resolveSender(senderId: string): string {
     if (resolveSenderName) return resolveSenderName(senderId)
     const listed = memberNames.get(senderId)
@@ -924,6 +1011,7 @@
       channelListStatus={s.status}
       {panelOpen}
       {mainViewSelected}
+      {awaitingInitialSenders}
       members={members?.state.members ?? []}
       resolveSenderName={resolveSender}
       {resolveSearchContext}

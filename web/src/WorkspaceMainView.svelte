@@ -47,6 +47,7 @@
     channelListStatus,
     panelOpen = false,
     mainViewSelected = true,
+    awaitingInitialSenders = false,
     members = [],
     resolveSenderName,
     resolveSearchContext = () => '',
@@ -103,6 +104,7 @@
     channelListStatus: 'loading' | 'ready' | 'error'
     panelOpen?: boolean
     mainViewSelected?: boolean
+    awaitingInitialSenders?: boolean
     members?: readonly Member[]
     resolveSenderName?: (senderId: string) => string
     resolveSearchContext?: (hit: SearchHit) => string
@@ -259,6 +261,7 @@
             {search}
             {selfId}
             viewSelected={mainViewSelected}
+            {awaitingInitialSenders}
             {organizationUnavailable}
             {sendDisabled}
             {reconnecting}
@@ -286,6 +289,7 @@
             {search}
             {selfId}
             viewSelected={mainViewSelected}
+            {awaitingInitialSenders}
             {organizationUnavailable}
             {reconnecting}
             {resolveSenderName}

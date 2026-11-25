@@ -50,6 +50,7 @@
     channelId = '',
     selfId = '',
     viewSelected = true,
+    awaitingInitialSenders = false,
     organizationUnavailable = false,
     reconnecting = false,
     sendDisabled = false,
@@ -73,6 +74,7 @@
     channelId?: string
     selfId?: string
     viewSelected?: boolean
+    awaitingInitialSenders?: boolean
     organizationUnavailable?: boolean
     reconnecting?: boolean
     sendDisabled?: boolean
@@ -152,7 +154,7 @@
       : search ? (!search.view || search.view.status === 'loading' ? 'loading' : 'ready')
       : s.status === 'error' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.error)
         ? 'error'
-        : s.status === 'loading' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.loading)
+        : s.status === 'loading' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.loading) || awaitingInitialSenders
           ? 'loading'
           : 'ready',
   )
@@ -556,7 +558,7 @@
   {/if}
 
   <div class="timeline-scroll" bind:this={scrollEl} onscroll={handleScroll}>
-    {#if !organizationUnavailable && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && lines.length === 0 && mainPending.length === 0}
+    {#if !organizationUnavailable && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && (awaitingInitialSenders || (lines.length === 0 && mainPending.length === 0))}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
 
@@ -577,7 +579,7 @@
       </div>
     {/if}
 
-    {#if lines.length > 0 || mainPending.length > 0}
+    {#if !awaitingInitialSenders && (lines.length > 0 || mainPending.length > 0)}
       <VirtualRows
         class="timeline-list"
         bind:this={rowWindow}

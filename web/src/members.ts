@@ -1,6 +1,6 @@
 import { createInvites } from './invites'
 import { sessionEndedMessage } from './auth'
-import { createActivityTarget } from './activity'
+import { createActivityTarget, type Invalidation } from './activity'
 import { listMembers, changeRole, deactivateMember, createInvite, acceptInvite, isOrganizationUnavailable, type Identity, type Member, type Role, type Result, type AcceptInviteRequest } from './api'
 
 import { createAuthors } from './authors'
@@ -63,7 +63,7 @@ export function memberError(r: Exclude<Result<unknown>, { ok: true }>): string {
   return '入力内容と権限を確認してください。'
 }
 
-type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; lookupAuthors?: typeof lookupAuthors; baseUrl(): string }
+type MembersDeps = { listMembers: typeof listMembers; changeRole: typeof changeRole; deactivateMember: typeof deactivateMember; createInvite: typeof createInvite; lookupAuthors?: typeof lookupAuthors; firstDisplayTimeoutMs?: number; baseUrl(): string }
 const defaults: MembersDeps = { listMembers, changeRole, deactivateMember, createInvite, baseUrl: () => `${location.origin}${location.pathname}` }
 // Only a previously verified non-Guest can retain rows during revalidation.
 export type MemberListAccess = Role | 'revalidating' | null
@@ -76,13 +76,19 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   let loadSequence = 0
   // Standalone loads keep sequence fencing; held UI loads share the reconciliation queue.
   let activityManaged = false
+  // Defer directory reads until first use or the first-display milestone (#954 R1).
+  let activated = false
+  let activateTimer: ReturnType<typeof setTimeout> | undefined
   const listeners = new Set<() => void>()
   const invites = createInvites(organizationId, onEnded, membershipLost)
-  const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors)
+  const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors, deps.firstDisplayTimeoutMs)
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
+  function clearActivateTimer() {
+    if (activateTimer !== undefined) { clearTimeout(activateTimer); activateTimer = undefined }
+  }
   function unavailable() {
     if (closed) return
-    closed = true; loadSequence++; activityTarget.close(); invites.close(); authors.unavailable()
+    closed = true; loadSequence++; clearActivateTimer(); activityTarget.close(); invites.close(); authors.unavailable()
     state = { ...state, members: [], loading: false, error: '', retryable: false }
     listeners.forEach(l => l())
   }
@@ -100,7 +106,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     set({ members: [], loading: false, error: memberError(r), retryable: r.kind === 'network' || r.status === 429 || r.status >= 500 })
   }
   const activityTarget = createActivityTarget({
-    canLoad: () => canLoadMemberList(memberListAccess()),
+    canLoad: () => activated && canLoadMemberList(memberListAccess()),
     async load(signal) {
       const sequence = ++loadSequence
       const r = await deps.listMembers(organizationId, undefined, signal)
@@ -123,6 +129,8 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   })
   async function load() {
     if (closed) return
+    clearActivateTimer()
+    activated = true
     if (activityManaged) { await activityTarget.refresh(); return }
     if (!canLoadMemberList(memberListAccess())) return
     const sequence = ++loadSequence
@@ -139,15 +147,59 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
       set({ members: r.data.members, loading: false, error: '', retryable: false })
     }
   }
+  function activate() {
+    if (closed || activated) return
+    clearActivateTimer()
+    void load()
+  }
+  function scheduleActivate() {
+    if (closed || activated || activateTimer !== undefined) return
+    activateTimer = setTimeout(() => {
+      activateTimer = undefined
+      activate()
+    }, 0)
+  }
+  function refreshIfActive() {
+    if (closed || !activated) return
+    return load()
+  }
+  const managedActivityTarget = {
+    ...activityTarget,
+    held() { activityManaged = true },
+    invalidate(reason?: Invalidation, delay?: number) {
+      if (!activated || closed) return
+      activityTarget.invalidate(reason, delay)
+    },
+    refresh() {
+      if (closed) return
+      clearActivateTimer()
+      activated = true
+      return activityTarget.refresh()
+    },
+    retryNow() {
+      if (closed) return
+      clearActivateTimer()
+      activated = true
+      return activityTarget.retryNow()
+    },
+  }
   return {
-    activityTarget: { ...activityTarget, held() { activityManaged = true } },
+    activityTarget: managedActivityTarget,
     authors, invites,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
     unavailable,
-    close() { invites.close(); closed = true; activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
+    close() { invites.close(); closed = true; clearActivateTimer(); activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
     load,
-    async retry() { if (!closed) await (activityManaged ? activityTarget.retryNow() : load()) },
+    activate,
+    scheduleActivate,
+    refreshIfActive,
+    async retry() {
+      if (closed) return
+      clearActivateTimer()
+      activated = true
+      await (activityManaged ? activityTarget.retryNow() : load())
+    },
     async invite(email: string, role: Role) {
       if (closed || state.busy) return
       set({ busy: true, error: '', inviteLink: '' })

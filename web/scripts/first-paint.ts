@@ -47,6 +47,7 @@ type ApiTiming = {
   transferBytes: number
   status: number
   latestEndedBefore: string | null
+  startedBeforeTimeline: boolean
   completedBeforeTimeline: boolean
 }
 
@@ -69,11 +70,14 @@ type RunMetrics = {
   wsSubscribedMs: number
   timelineVisibleMs: number
   timelinePaintedMs: number
+  firstNamedRowMs: number
+  directoryStartMs: number | null
+  authorLookupStartMs: number | null
   apiCalls: ApiTiming[]
   timingChain: string[]
 }
 
-type PercentilePair = { p50: number; p95: number }
+type PercentileSummary = { p50: number; p90: number; p95: number; max: number }
 
 type CellSummary = {
   pathLabel: '/' | '/o/:org/c/:channel'
@@ -81,26 +85,30 @@ type CellSummary = {
   network: 'unthrottled' | 'throttled'
   cache: 'cold' | 'warm'
   runs: number
-  ttfbMs: PercentilePair
-  fcpMs: PercentilePair
-  blankScreenMs: PercentilePair
-  assetsEndMs: PercentilePair
-  jsEndMs: PercentilePair
-  cssEndMs: PercentilePair
-  wasmEndMs: PercentilePair
-  appMountMs: PercentilePair
-  wsSubscribedMs: PercentilePair
-  timelineVisibleMs: PercentilePair
-  assetsTransferBytes: PercentilePair
-  htmlTransferBytes: PercentilePair
+  ttfbMs: PercentileSummary
+  fcpMs: PercentileSummary
+  blankScreenMs: PercentileSummary
+  assetsEndMs: PercentileSummary
+  jsEndMs: PercentileSummary
+  cssEndMs: PercentileSummary
+  wasmEndMs: PercentileSummary
+  appMountMs: PercentileSummary
+  wsSubscribedMs: PercentileSummary
+  timelineVisibleMs: PercentileSummary
+  firstNamedRowMs: PercentileSummary
+  directoryStartMs: PercentileSummary | null
+  authorLookupStartMs: PercentileSummary | null
+  assetsTransferBytes: PercentileSummary
+  htmlTransferBytes: PercentileSummary
   apiByLabel: Record<
     string,
     {
-      start: PercentilePair
-      end: PercentilePair
-      duration: PercentilePair
-      transferBytes: PercentilePair
+      start: PercentileSummary
+      end: PercentileSummary
+      duration: PercentileSummary
+      transferBytes: PercentileSummary
       latestEndedBefore: string | null
+      startedBeforeTimelineCount: number
       completedBeforeTimelineCount: number
     }
   >
@@ -114,8 +122,18 @@ function nearestRank(values: number[], percentile: number): number {
   return Number(sorted[index].toFixed(2))
 }
 
-function summarizeNumbers(values: number[]): PercentilePair {
-  return { p50: nearestRank(values, 50), p95: nearestRank(values, 95) }
+function summarizeNumbers(values: number[]): PercentileSummary {
+  return {
+    p50: nearestRank(values, 50),
+    p90: nearestRank(values, 90),
+    p95: nearestRank(values, 95),
+    max: nearestRank(values, 100),
+  }
+}
+
+function summarizeOptionalNumbers(values: Array<number | null>): PercentileSummary | null {
+  const present = values.filter((v): v is number => v !== null)
+  return present.length > 0 ? summarizeNumbers(present) : null
 }
 
 mkdirSync(outDir, { recursive: true })
@@ -227,6 +245,7 @@ async function measurePageLoad(
           fcpMs: null as number | null,
           timelineVisibleMs: null as number | null,
           timelinePaintedMs: null as number | null,
+          firstNamedRowMs: null as number | null,
           wsConnectStartMs: null as number | null,
           wsOpenMs: null as number | null,
           wsSubscribeSentMs: null as number | null,
@@ -257,8 +276,20 @@ async function measurePageLoad(
               })
             }
           }
+          if (state.firstNamedRowMs === null) {
+            const senders = document.querySelectorAll('.timeline-list .timeline-list__item .ui-message-row__sender')
+            if (
+              senders.length > 0 &&
+              Array.from(senders).every((el) => {
+                const text = (el.textContent ?? '').trim()
+                return text.length > 0 && text !== 'メンバー'
+              })
+            ) {
+              state.firstNamedRowMs = performance.now()
+            }
+          }
         }
-        new MutationObserver(checkDom).observe(document, { childList: true, subtree: true })
+        new MutationObserver(checkDom).observe(document, { childList: true, subtree: true, characterData: true })
         document.addEventListener('DOMContentLoaded', checkDom)
 
         const counts = new Map<string, number>()
@@ -395,9 +426,11 @@ async function measurePageLoad(
           window as unknown as {
             __fp345?: {
               timelineVisibleMs: number | null
+              firstNamedRowMs: number | null
               wsSubscribedMs: number | null
               fcpMs: number | null
               timelinePaintedMs: number | null
+              apiCalls: Array<{ method: string; path: string }>
             }
           }
         ).__fp345
@@ -406,11 +439,16 @@ async function measurePageLoad(
           const fcpEntry = performance.getEntriesByName('first-contentful-paint')[0]
           if (fcpEntry) s.fcpMs = fcpEntry.startTime
         }
+        const directoryStarted = s.apiCalls.some(
+          (c) => c.method === 'GET' && c.path === '/api/v1/orgs/{org}/members',
+        )
         return Boolean(
           s.timelineVisibleMs !== null &&
+            s.firstNamedRowMs !== null &&
             s.wsSubscribedMs !== null &&
             s.fcpMs !== null &&
-            s.timelinePaintedMs !== null,
+            s.timelinePaintedMs !== null &&
+            directoryStarted,
         )
       },
       undefined,
@@ -437,6 +475,7 @@ async function measurePageLoad(
             fcpMs: number
             timelineVisibleMs: number
             timelinePaintedMs: number
+            firstNamedRowMs: number
             wsConnectStartMs: number
             wsOpenMs: number
             wsSubscribeSentMs: number
@@ -446,8 +485,8 @@ async function measurePageLoad(
         }
       ).__fp345
 
-      const startedBeforeTimeline = s.apiCalls.filter((c) => c.start <= s.timelineVisibleMs)
-      await Promise.all(startedBeforeTimeline.map((c) => c.done))
+      const trackedCalls = [...s.apiCalls]
+      await Promise.all(trackedCalls.map((c) => c.done))
 
       const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming
       const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
@@ -464,7 +503,7 @@ async function measurePageLoad(
       )
 
       const usedResourceIndices = new Set<number>()
-      const apiCalls: ApiTiming[] = startedBeforeTimeline.map((c) => {
+      const apiCalls: ApiTiming[] = trackedCalls.map((c) => {
         const end = c.end ?? performance.now()
         let transferBytes = 0
         for (let idx = 0; idx < resources.length; idx++) {
@@ -497,9 +536,13 @@ async function measurePageLoad(
           transferBytes,
           status: c.status,
           latestEndedBefore: c.latestEndedBefore,
+          startedBeforeTimeline: c.start <= s.timelineVisibleMs,
           completedBeforeTimeline: end <= s.timelineVisibleMs,
         }
       })
+
+      const directoryCall = apiCalls.find((c) => c.method === 'GET' && c.path === '/api/v1/orgs/{org}/members')
+      const authorLookupCall = apiCalls.find((c) => c.method === 'POST' && c.path === '/api/v1/orgs/{org}/authors/lookup')
 
       // Time order only: each link is the latest API request that ended before the next one started.
       // It does not prove that a request waited for that response; actual dependencies come from the source.
@@ -531,6 +574,9 @@ async function measurePageLoad(
         wsSubscribedMs: Number(s.wsSubscribedMs.toFixed(2)),
         timelineVisibleMs: Number(s.timelineVisibleMs.toFixed(2)),
         timelinePaintedMs: Number(s.timelinePaintedMs.toFixed(2)),
+        firstNamedRowMs: Number(s.firstNamedRowMs.toFixed(2)),
+        directoryStartMs: directoryCall ? directoryCall.start : null,
+        authorLookupStartMs: authorLookupCall ? authorLookupCall.start : null,
         apiCalls,
         timingChain: chain,
       }
@@ -563,6 +609,7 @@ function summarizeCell(
       duration: summarizeNumbers(matching.map((m) => m.duration)),
       transferBytes: summarizeNumbers(matching.map((m) => m.transferBytes)),
       latestEndedBefore: matching[0].latestEndedBefore,
+      startedBeforeTimelineCount: matching.filter((m) => m.startedBeforeTimeline).length,
       completedBeforeTimelineCount: matching.filter((m) => m.completedBeforeTimeline).length,
     }
   }
@@ -582,6 +629,9 @@ function summarizeCell(
     appMountMs: summarizeNumbers(runs.map((r) => r.appMountMs)),
     wsSubscribedMs: summarizeNumbers(runs.map((r) => r.wsSubscribedMs)),
     timelineVisibleMs: summarizeNumbers(runs.map((r) => r.timelineVisibleMs)),
+    firstNamedRowMs: summarizeNumbers(runs.map((r) => r.firstNamedRowMs)),
+    directoryStartMs: summarizeOptionalNumbers(runs.map((r) => r.directoryStartMs)),
+    authorLookupStartMs: summarizeOptionalNumbers(runs.map((r) => r.authorLookupStartMs)),
     assetsTransferBytes: summarizeNumbers(runs.map((r) => r.assetsTransferBytes)),
     htmlTransferBytes: summarizeNumbers(runs.map((r) => r.htmlTransferBytes)),
     apiByLabel,
@@ -660,6 +710,15 @@ try {
 
     const pgVersion = dc(['exec', '-T', 'db', 'psql', '-U', 'fukulow', '-d', 'fukulow', '-Atc', 'SHOW server_version'])
     const commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+    const sourceSha = process.env.FIRST_PAINT_SOURCE_SHA?.trim() || commitSha
+    let imageDigest = process.env.FIRST_PAINT_IMAGE_DIGEST?.trim() || null
+    if (!imageDigest && (!external || prebuiltImage)) {
+      try {
+        imageDigest = docker(['image', 'inspect', '--format', '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}', image]) || null
+      } catch {
+        imageDigest = null
+      }
+    }
     const spkiHashes = await getServerSpkiHashes(Number(port))
 
     // Trust Caddy's ephemeral SPKI at the CertVerifier layer so Chromium's HTTP disk cache
@@ -729,6 +788,9 @@ try {
         baseUrl,
         measuredAt: new Date().toISOString(),
         commit: commitSha,
+        sourceSha,
+        image,
+        imageDigest,
         host: {
           platform: platform(),
           release: release(),

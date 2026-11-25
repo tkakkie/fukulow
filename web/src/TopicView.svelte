@@ -52,6 +52,7 @@
     topicStatus = 'idle',
     selfId = '',
     viewSelected = true,
+    awaitingInitialSenders = false,
     organizationUnavailable = false,
     sendDisabled = false,
     reconnecting = false,
@@ -77,6 +78,7 @@
     topicStatus?: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
     selfId?: string
     viewSelected?: boolean
+    awaitingInitialSenders?: boolean
     organizationUnavailable?: boolean
     sendDisabled?: boolean
     reconnecting?: boolean
@@ -393,7 +395,7 @@
       : search ? (!search.view || search.view.status === 'loading' ? 'loading' : 'ready')
       : topicStatus === 'error' || (view.error && view.messages.length === 0)
         ? 'error'
-        : (topicStatus === 'loading' || view.loading) && view.messages.length === 0
+        : ((topicStatus === 'loading' || view.loading) && view.messages.length === 0) || awaitingInitialSenders
           ? 'loading'
           : 'ready',
   )
@@ -570,7 +572,7 @@
         title="このトピックは利用できません。"
         description="削除されたか、URLが正しくない可能性があります。"
       />
-    {:else if effectiveStatus === 'loading' && !scrollView.loadingTimedOut && view.messages.length === 0 && pending.length === 0}
+    {:else if effectiveStatus === 'loading' && !scrollView.loadingTimedOut && (awaitingInitialSenders || (view.messages.length === 0 && pending.length === 0))}
       <Skeleton rows={4} label="トピックを読み込み中" />
     {:else}
       {#if topicUnavailable}

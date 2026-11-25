@@ -219,4 +219,38 @@ describe('author identities', () => {
     expect(c.get().members).toEqual([])
     c.close()
   })
+
+  it('bounds initial display wait with a timeout and clears the timer on settlement, view change or close', async () => {
+    vi.useFakeTimers()
+    try {
+      const lookup = vi.fn(() => new Promise<ReturnType<typeof ok>>(() => {}))
+      const c = createAuthors('org', vi.fn(), vi.fn(), lookup, 500)
+      const notify = vi.fn()
+      c.subscribe(notify)
+
+      c.syncInitialDisplay('org:c1:', true)
+      expect(c.isInitialDisplayTimedOut('org:c1:')).toBe(false)
+      await vi.advanceTimersByTimeAsync(499)
+      expect(c.isInitialDisplayTimedOut('org:c1:')).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(c.isInitialDisplayTimedOut('org:c1:')).toBe(true)
+      expect(notify).toHaveBeenCalledOnce()
+
+      // Switching view resets the timeout state and cancels prior timers when waiting becomes false.
+      c.syncInitialDisplay('org:c2:', true)
+      expect(c.isInitialDisplayTimedOut('org:c2:')).toBe(false)
+      await vi.advanceTimersByTimeAsync(250)
+      c.syncInitialDisplay('org:c2:', false)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(c.isInitialDisplayTimedOut('org:c2:')).toBe(false)
+      expect(notify).toHaveBeenCalledOnce()
+
+      // Close clears pending timers and never blocks display.
+      c.syncInitialDisplay('org:c3:', true)
+      c.close()
+      expect(c.isInitialDisplayTimedOut('org:c3:')).toBe(true)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(notify).toHaveBeenCalledOnce()
+    } finally { vi.useRealTimers() }
+  })
 })
