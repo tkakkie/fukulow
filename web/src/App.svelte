@@ -23,7 +23,7 @@
 
   const invitation = inviteAcceptanceAdapter(inviteFromLocation())
   const navigation = createNavigation()
-  const auth = createAuth()
+  const auth = createAuth(undefined, navigation)
   $effect(() => () => navigation.destroy())
   $effect(() => navigation.subscribe(() => {
     const target = navigation.get().target

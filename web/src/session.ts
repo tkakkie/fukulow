@@ -9,6 +9,7 @@ import { createChannelMembers } from './channel-members'
 import type { MemberListAccess } from './members'
 import { createChannels, type ChannelsApi } from './channels'
 import { createDms, dmsApi, type Dms, type DmsApi } from './dms'
+import type { InitialTimeline } from './initial-timeline'
 import { createMoveChain, type MoveChainApi } from './move-chain'
 import { repliesApi, type RepliesApi } from './replies'
 import { createReplyCounts, type ReplyCountsApi } from './reply-counts'
@@ -44,6 +45,8 @@ export type SessionOptions = {
   channelsApi?: ChannelsApi
   /** The first ordinary Channel list may already be in flight when the core starts. */
   initialChannels?: ReturnType<typeof api.listChannels>
+  initialTimeline?: InitialTimeline
+  initialChannelHint?(): string | null
   topicsApi?: TopicsApi
   replyCountsApi?: ReplyCountsApi
   repliesApi?: RepliesApi
@@ -105,10 +108,11 @@ export function createSession(options: SessionOptions) {
       return false
     },
     revoke: id => {
+      options.initialTimeline?.discard(id)
       sections.hideChannel(id); dms?.access(id, true); channels.revoke(id); unread.activityRevoke(id); memberControllers.get(id)?.controller.unavailable()
       for (const listener of [...channelRevokeListeners]) listener(id)
     },
-    access: id => { dms?.access(id); unread.activityAccess(id); topics.activityAccess(id) },
+    access: id => { options.initialTimeline?.discard(id); dms?.access(id); unread.activityAccess(id); topics.activityAccess(id) },
     reconcile: () => unread.activityReconcile(),
     random: options.sync?.random,
   })
@@ -129,7 +133,7 @@ export function createSession(options: SessionOptions) {
   const replySource = options.repliesApi ?? repliesApi(organizationId)
   const unreadSource = options.unreadApi ?? unreadApi(organizationId, () => history?.get().historyGeneration)
   const topicComposition = createTopicSync({ ...options.sync, activity, selfId: options.selfId, organizationId,
-    isDm,
+    isDm, initialTimeline: options.initialTimeline,
     api: { listChannelEvents: (channel, query) => observe(timeline.listChannelEvents(channel, query)),
       listMessages: (channel, query) => observe(timeline.listMessages(channel, query)),
       sendMessage: async (channel, body) => {
@@ -256,6 +260,7 @@ export function createSession(options: SessionOptions) {
       if (baselines.length || rows.length === 0) unread.activitySnapshot(baselines)
     },
     {
+      initialHint: options.initialChannelHint,
       canOpen: id => !isDm(id) && sync.get().channels[id]?.state !== 'unavailable',
       verifyOrdinary: (id, signal) => observe(topicSource.listTopics(id, { limit: 1 }, signal)),
       unavailable: id => { void sync.channelUnavailable(id) },
@@ -291,6 +296,7 @@ export function createSession(options: SessionOptions) {
     if (same && sync.get().channels[id]?.state === 'unavailable') void sync.watch(id)
   }, random: options.sync?.random, timeoutMs: options.sync?.requestTimeoutMs })
   const stopActivity = sync.onActivity(notice => {
+    if (notice.type === 'members_changed' || notice.type === 'activity_reset') options.initialTimeline?.discard()
     if (notice.type === 'activity_ready') { dms?.ready(); sections.ready() }
     activity.notice(notice)
   })
@@ -384,6 +390,7 @@ export function createSession(options: SessionOptions) {
   const stopFollowing = channels.subscribe(() => {
     const id = channels.get().selectedId
     if (id === watched) return
+    options.initialTimeline?.select(id)
     if (watched !== null) void sync.unwatch(watched)
     watched = id
     dms?.trackSelection(id)
