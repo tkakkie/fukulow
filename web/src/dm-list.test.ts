@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import type { Dm, DmChanges, DmDiscovery, DmList } from './api-schema'
-import { chooseDmBaseline, dmListState, stepDmList, type DmInput, type DmLane, type DmRequest } from './dm-list'
+import { chooseDmBaseline, dmListState, dmNextWake, stepDmList, type DmInput, type DmLane, type DmRequest } from './dm-list'
 
 import { dm } from './dm-test-helpers'
 
@@ -266,4 +266,46 @@ it('transitions preserve frozen prior state and input across retained rows reque
   feed({ type: 'pause' }); feed({ type: 'resume' }); feed({ type: 'close' })
   feed({ type: 'demand', boundary: true, periodic: true, replace: [] })
   expect(state.closed).toBe(true)
+})
+
+it('a notice after the run delta slot gets one delta beyond the five-attempt allowance, once per run (#956)', () => {
+  const c = client(); c.discovery()
+  const notice = () => c.feed({ type: 'demand', boundary: true, notice: true, replace: [] })
+  // Ready, reset and own work never spend it.
+  c.feed({ type: 'demand', boundary: true, replace: [] }); expect(c.wake()).toBeUndefined()
+  notice()
+  const extra = c.wake(); expect(extra.lane).toBe('delta')
+  expect(c.state.budget).toBe(3)
+  c.result(extra, changes([dm('new')]))
+  expect(c.state.rows.map(r => r.identity.id)).toEqual(['new'])
+  notice(); expect(c.wake()?.lane).not.toBe('delta')
+  // A spent allowance still leaves the notice delta, and only O5 re-arms it.
+  const d = client(); d.discovery(); d.feed({ type: 'browse' }); d.feed({ type: 'recover', peer: 'absent' })
+  for (let i = 0; i < 3; i++) d.feed({ type: 'failure', request: d.wake(), retryAt: 0, terminal: false })
+  expect(d.state.budget).toBe(0)
+  d.feed({ type: 'demand', boundary: true, notice: true, replace: [] })
+  d.feed({ type: 'failure', request: d.wake(), retryAt: 0, terminal: false })
+  d.feed({ type: 'demand', boundary: true, notice: true, replace: [] }); expect(d.wake()).toBeUndefined()
+  d.run(); d.discovery(); d.feed({ type: 'demand', boundary: true, notice: true, replace: [] }); expect(d.wake()?.lane).toBe('delta')
+})
+
+it('a notice before the run delta slot is used is served by that slot and arms nothing (#956)', () => {
+  const c = client()
+  c.feed({ type: 'demand', boundary: true, notice: true, replace: [] })
+  expect(c.state.noticeDelta).toBe('idle')
+  c.discovery()
+  expect(c.state.budget).toBe(3)
+  c.feed({ type: 'demand', boundary: true, notice: true, replace: [] })
+  expect(c.state.noticeDelta).toBe('armed')
+})
+
+it('an armed notice delta schedules a wake even with no other pending lane or attempt left (#956)', () => {
+  const c = client(); c.discovery()
+  expect(dmNextWake(c.state, 1000)).toBeUndefined()
+  c.feed({ type: 'demand', boundary: true, notice: true, replace: [] })
+  expect(dmNextWake(c.state, 1000)).toBe(1000)
+  const d = client(); d.discovery(); d.feed({ type: 'browse' }); d.feed({ type: 'recover', peer: 'absent' })
+  for (let i = 0; i < 3; i++) d.feed({ type: 'failure', request: d.wake(), retryAt: 0, terminal: false })
+  d.feed({ type: 'demand', boundary: true, notice: true, replace: [] })
+  expect(dmNextWake(d.state, 1000)).toBe(1000)
 })

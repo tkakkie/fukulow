@@ -78,7 +78,8 @@ it('duplicate reordered notices coalesce behind one in-flight request and one qu
   expect(c.dms.get().rows).toEqual([]); expect(c.dms.get().lanes.delta.cursor).toBeUndefined()
   c.rows = [dm('fresh')]
   await vi.advanceTimersByTimeAsync(1000)
-  expect(c.api.changes).toHaveBeenCalledTimes(2) // coverage still owns its reserved initial slot
+  // Coverage still owns its reserved initial slot; the 100 coalesced notices add one delta for the fenced boundary.
+  expect(c.api.changes.mock.calls.map(([q]) => [q.lane, q.cursor])).toEqual([['delta', undefined], ['coverage', undefined], ['delta', undefined]])
   expect(c.dms.get().rows.map(r => r.identity.id)).toEqual(['fresh'])
   expect(c.dms.get().lanes.coverage.cursor).toBe('coverage-cursor')
   c.close()
@@ -331,5 +332,21 @@ it('Unread-only DM responses cannot cover Mention invalidations and retry throug
   expect(c.baseline).not.toHaveBeenCalled()
   await vi.advanceTimersByTimeAsync(16_000)
   expect(c.baseline).toHaveBeenCalledWith(dm('A', { mention_unread_count: 2 }), true)
+  c.close()
+})
+
+it('a DM list notice after the initial discovery attempts discovers the new DM before the next O5 run (#956)', async () => {
+  const c = client(); await c.ready()
+  const deltas = () => c.api.changes.mock.calls.filter(([q]) => q.lane === 'delta').length
+  expect(deltas()).toBe(1)
+  // Own open work never spends the notice delta.
+  c.rows = [dm('own')]
+  await c.dms.open('peer-own'); await vi.advanceTimersByTimeAsync(1000)
+  expect(deltas()).toBe(1)
+  c.rows = [dm('own'), dm('new')]
+  c.activity.notice({ type: 'dm_list_changed' })
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(deltas()).toBe(2)
+  expect(c.dms.get().rows.map(r => r.identity.id)).toContain('new')
   c.close()
 })

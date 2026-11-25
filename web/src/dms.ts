@@ -73,14 +73,15 @@ export function createDms(options: {
     },
     settled() { active = undefined; plan() },
   })
-  function invalidate(reason: Invalidation = 'notice', delay = 200) {
+  function invalidate(reason: Invalidation = 'notice', delay = 200, notice = false) {
     if (closed) return
-    dispatch({ type: 'demand', boundary: reason !== 'notice', periodic: reason === 'periodic',
+    dispatch({ type: 'demand', boundary: reason !== 'notice', periodic: reason === 'periodic', notice,
       replace: reason === 'reconcile' || reason === 'periodic' ? state.rows.filter(r => !options.watched(r.identity.id)).map(r => r.identity.id) : [] })
     plan(delay)
   }
   const activityTarget: ActivityTarget = {
-    invalidate,
+    // Server notices (not ready, reset or O5) may spend the run's notice delta; own work never does.
+    invalidate: (reason = 'notice', delay) => invalidate(reason, delay, reason === 'notice' || reason === 'access'),
     disconnected() { if (!state.paused) { dispatch({ type: 'pause' }); target.suspend() } },
     close,
   }
