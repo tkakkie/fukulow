@@ -67,6 +67,7 @@
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
+    onpositioningchange,
   }: {
     channel: ChannelSync
     topics: TopicsAdapter
@@ -93,6 +94,7 @@
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
+    onpositioningchange?: (positioning: boolean) => void
   } = $props()
 
   const currentChannelId = $derived(channelId)
@@ -299,6 +301,10 @@
     void topics.retrySummary(topicId).catch(console.error)
     void topics.loadTopic(topicId).catch(console.error)
   }
+
+  $effect(() => {
+    onpositioningchange?.(positioning)
+  })
 
   $effect(() => () => scrollController.destroy())
   onMount(() => {

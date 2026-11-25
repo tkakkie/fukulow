@@ -639,4 +639,259 @@ describe('Deferred Member directory and first-display author resolution (#954 R1
       expect(queryAll(w.host, '.timeline-list .ui-message-row__sender').map(el => el.textContent)).toEqual(['アリス改', 'ボブ（無効）'])
     } finally { await w.cleanup() }
   })
+
+  it.each(['main', 'topic'] as const)('does not start the Member directory while the positioning Skeleton covers the %s timeline even after sender lookup settles', async (view) => {
+    vi.useFakeTimers()
+    const generation = '00000000-0000-4000-8000-000000000515'
+    const lookupAuthorsFn = vi.fn<typeof lookupAuthors>(async () => ok({
+      identities: [{ id: 'alice', name: 'アリス', deactivated: false }],
+    }))
+    const listMembersFn = vi.fn<typeof listMembers>(async () => ok({
+      members: [
+        { id: 'me', name: '自分', role: 'member' },
+        { id: 'alice', name: 'アリス', role: 'member' },
+      ],
+    }))
+    const topicMsg = { ...record(1, 'c1'), topic_id: 't1', sender: 'alice', body: 'トピック本文' }
+    const mainMsg = { ...record(2, 'c1'), sender: 'alice', body: 'メイン本文' }
+    const w = makeWorkspace({
+      initialHref: view === 'topic' ? '/o/org-1/c/c1/t/t1' : '/o/org-1/c/c1',
+      timelineItems: [{ kind: 'message', message: mainMsg }],
+      listMembers: listMembersFn,
+      lookupAuthors: lookupAuthorsFn,
+    })
+    w.net.topicLists.c1 = ok({ history_generation: generation, as_of_seq: 2, has_more: false, topics: [] })
+    w.net.topicMessages['c1:t1'] = ok({
+      history_generation: generation,
+      as_of_seq: 2,
+      has_more: false,
+      messages: [topicMsg],
+    })
+    const unreadRow = {
+      history_generation: generation,
+      ...channel('c1', 'general'),
+      as_of_seq: 2,
+      read_seq: 2,
+      unread_count: 0,
+      main_unread_count: 0,
+      mention_unread_count: 0,
+      main_mention_unread_count: 0,
+    }
+    const topicSummaryRes = ok({
+      history_generation: generation,
+      as_of_seq: 2,
+      topic: {
+        id: 't1',
+        name: '設計相談',
+        first_seq: 1,
+        last_seq: 1,
+        message_count: 1,
+        latest_message: topicMsg,
+        read_seq: 1,
+        unread_count: 0,
+        mention_unread_count: 0,
+      },
+    })
+    let releaseBoundary!: () => void
+    if (view === 'topic') {
+      w.net.topicSummaries['c1:t1'] = new Promise((resolve) => {
+        releaseBoundary = () => resolve(topicSummaryRes)
+      }) as unknown as typeof topicSummaryRes
+    } else {
+      w.net.unreadListResult = new Promise((resolve) => {
+        releaseBoundary = () => resolve(ok({ history_generation: generation, channels: [unreadRow] }))
+      }) as unknown as NonNullable<typeof w.net.unreadListResult>
+    }
+    try {
+      w.net.socket.onReady()
+      w.net.lists[0].resolve(ok({
+        history_generation: generation,
+        channels: [channel('c1', 'general')],
+      }))
+      await settle()
+      w.net.subscribed('c1', 2)
+      await settle()
+      await settle()
+
+      // Sender lookup has already settled, but positioning Skeleton still covers the inert timeline.
+      expect(lookupAuthorsFn).toHaveBeenCalled()
+      const scrollSel = view === 'topic' ? '.topic-view__scroll' : '.timeline-scroll'
+      const posSel = view === 'topic' ? '.topic-view__positioning' : '.timeline-positioning'
+      const scrollEl = w.host.querySelector(scrollSel) as MiniElement
+      expect(scrollEl.getAttribute('aria-busy')).toBe('true')
+      expect(scrollEl.inert).toBe(true)
+      expect(w.host.querySelector(posSel)).not.toBeNull()
+
+      // Directory must NOT start while positioning covers the timeline.
+      await vi.advanceTimersByTimeAsync(10)
+      await settle()
+      expect(listMembersFn).not.toHaveBeenCalled()
+
+      // Resolve the Unread boundary -> positioning finishes, Skeleton clears, and directory activates once.
+      releaseBoundary()
+      await settle()
+      await settle()
+      expect(scrollEl.getAttribute('aria-busy')).toBeNull()
+      expect(scrollEl.inert).toBe(false)
+      expect(w.host.querySelector(posSel)).toBeNull()
+
+      await vi.advanceTimersByTimeAsync(1)
+      await settle()
+      expect(listMembersFn).toHaveBeenCalledTimes(1)
+    } finally { await w.cleanup() }
+  })
+
+  it('keeps topic-summary return focus pending while the timeline is inert during positioning and focuses the summary once positioning ends', async () => {
+    vi.useFakeTimers()
+    const generation = '00000000-0000-4000-8000-000000000515'
+    const lookupAuthorsFn = vi.fn<typeof lookupAuthors>(async () => ok({
+      identities: [{ id: 'alice', name: 'アリス', deactivated: false }],
+    }))
+    const listMembersFn = vi.fn<typeof listMembers>(() => new Promise(() => {}))
+    const topicLatest = { ...record(1, 'c1'), topic_id: 't1', sender: 'me', body: 'トピック本文' }
+    const mainMsg = { ...record(2, 'c1'), sender: 'alice', body: 'メイン本文' }
+    const w = makeWorkspace({
+      initialHref: '/o/org-1/c/c1/t/t1',
+      timelineItems: [
+        {
+          kind: 'topic',
+          topic: {
+            id: 't1',
+            name: '設計相談',
+            first_seq: 1,
+            last_seq: 1,
+            message_count: 1,
+            latest_message: topicLatest,
+            read_seq: 1,
+            unread_count: 0,
+            mention_unread_count: 0,
+          },
+        },
+        { kind: 'message', message: mainMsg },
+      ],
+      listMembers: listMembersFn,
+      lookupAuthors: lookupAuthorsFn,
+    })
+    w.net.topicMessages['c1:t1'] = ok({
+      history_generation: generation,
+      as_of_seq: 2,
+      has_more: false,
+      messages: [topicLatest],
+    })
+    const unreadRow = {
+      history_generation: generation,
+      ...channel('c1', 'general'),
+      as_of_seq: 2,
+      read_seq: 2,
+      unread_count: 0,
+      main_unread_count: 0,
+      mention_unread_count: 0,
+      main_mention_unread_count: 0,
+    }
+    let releaseMainBoundary!: () => void
+    w.net.unreadListResult = new Promise((resolve) => {
+      releaseMainBoundary = () => resolve(ok({ history_generation: generation, channels: [unreadRow] }))
+    }) as unknown as NonNullable<typeof w.net.unreadListResult>
+    try {
+      w.net.socket.onReady()
+      w.net.lists[0].resolve(ok({
+        history_generation: generation,
+        channels: [channel('c1', 'general')],
+      }))
+      await settle()
+      w.net.subscribed('c1', 2)
+      await settle()
+      await settle()
+
+      // Return from Topic t1 while the main timeline's Unread boundary is held and sender lookup already settled.
+      w.navigation.navigate({ type: 'topic-back' })
+      await settle()
+      await settle()
+
+      const scrollEl = w.host.querySelector('#main-content .timeline-scroll') as MiniElement
+      const summary = w.host.querySelector('#main-content [data-topic-id="t1"]')
+      const composer = w.host.querySelector('#main-content textarea[name="body"]')
+      expect(scrollEl.inert).toBe(true)
+      expect(scrollEl.getAttribute('aria-busy')).toBe('true')
+      // Summary is mounted inside the inert container, so focus must neither be consumed nor fall back to Composer.
+      expect(summary).not.toBeNull()
+      expect(dom.doc.activeElement).not.toBe(summary)
+      expect(dom.doc.activeElement).not.toBe(composer)
+
+      // Release the Unread boundary -> positioning ends, inert clears, and the pending request focuses the summary.
+      releaseMainBoundary()
+      await settle()
+      await settle()
+
+      expect(scrollEl.inert).toBe(false)
+      expect(dom.doc.activeElement).toBe(summary)
+    } finally { await w.cleanup() }
+  })
+
+  it('falls back to Composer on topic-summary return only after positioning ends when the returning Topic summary is absent', async () => {
+    vi.useFakeTimers()
+    const generation = '00000000-0000-4000-8000-000000000515'
+    const lookupAuthorsFn = vi.fn<typeof lookupAuthors>(async () => ok({
+      identities: [{ id: 'alice', name: 'アリス', deactivated: false }],
+    }))
+    const listMembersFn = vi.fn<typeof listMembers>(() => new Promise(() => {}))
+    const topicLatest = { ...record(1, 'c1'), topic_id: 't1', sender: 'me', body: 'トピック本文' }
+    const mainMsg = { ...record(2, 'c1'), sender: 'alice', body: 'メイン本文' }
+    // Main timeline does not contain Topic t1's summary line.
+    const w = makeWorkspace({
+      initialHref: '/o/org-1/c/c1/t/t1',
+      timelineItems: [{ kind: 'message', message: mainMsg }],
+      listMembers: listMembersFn,
+      lookupAuthors: lookupAuthorsFn,
+    })
+    w.net.topicMessages['c1:t1'] = ok({
+      history_generation: generation,
+      as_of_seq: 2,
+      has_more: false,
+      messages: [topicLatest],
+    })
+    const unreadRow = {
+      history_generation: generation,
+      ...channel('c1', 'general'),
+      as_of_seq: 2,
+      read_seq: 2,
+      unread_count: 0,
+      main_unread_count: 0,
+      mention_unread_count: 0,
+      main_mention_unread_count: 0,
+    }
+    let releaseMainBoundary!: () => void
+    w.net.unreadListResult = new Promise((resolve) => {
+      releaseMainBoundary = () => resolve(ok({ history_generation: generation, channels: [unreadRow] }))
+    }) as unknown as NonNullable<typeof w.net.unreadListResult>
+    try {
+      w.net.socket.onReady()
+      w.net.lists[0].resolve(ok({
+        history_generation: generation,
+        channels: [channel('c1', 'general')],
+      }))
+      await settle()
+      w.net.subscribed('c1', 2)
+      await settle()
+      await settle()
+
+      w.navigation.navigate({ type: 'topic-back' })
+      await settle()
+      await settle()
+
+      const scrollEl = w.host.querySelector('#main-content .timeline-scroll') as MiniElement
+      const composer = w.host.querySelector('#main-content textarea[name="body"]')
+      expect(scrollEl.inert).toBe(true)
+      expect(w.host.querySelector('#main-content [data-topic-id="t1"]')).toBeNull()
+      // Must not fall back to Composer while positioning is still active.
+      expect(dom.doc.activeElement).not.toBe(composer)
+
+      releaseMainBoundary()
+      await settle()
+      await settle()
+
+      expect(scrollEl.inert).toBe(false)
+      expect(dom.doc.activeElement).toBe(composer)
+    } finally { await w.cleanup() }
+  })
 })

@@ -289,4 +289,31 @@ describe('author identities', () => {
     expect(c.get().get('carol')?.deactivated).toBe(false)
     c.close()
   })
+
+  it('drops deactivated identities whose Messages left every retained view across directory refreshes so disjoint batches do not accumulate', async () => {
+    const lookup = vi.fn(async (_org: string, { ids }: { ids: string[] }) =>
+      ok(ids.map(id => identity(id, true))))
+    const c = createAuthors('org', vi.fn(), vi.fn(), lookup)
+
+    // Five disjoint batches of 100 deactivated authors, each followed by a directory refresh.
+    for (let batchIndex = 0; batchIndex < 5; batchIndex++) {
+      const batch = Array.from({ length: 100 }, (_, i) => `b${batchIndex}-${i}`)
+      c.watch(batch)
+      await settle()
+      c.replaceMembers([])
+      expect(c.get().size).toBe(100)
+      for (const id of batch) {
+        expect(c.get().get(id)?.deactivated).toBe(true)
+      }
+      if (batchIndex > 0) {
+        expect(c.get().has(`b${batchIndex - 1}-0`)).toBe(false)
+      }
+    }
+
+    // Once all deactivated authors leave retained views, the next refresh drops them too.
+    c.watch([])
+    c.replaceMembers([])
+    expect(c.get().size).toBe(0)
+    c.close()
+  })
 })

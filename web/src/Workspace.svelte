@@ -381,6 +381,14 @@
     return [...ids]
   })
   let initialDisplayCompletedKey = $state('')
+  let reportedPositioning = $state<{ key: string; positioning: boolean }>({ key: '', positioning: false })
+  const activeViewPositioning = $derived(
+    Boolean(
+      initialDisplayViewKey &&
+        !activeViewUnavailable &&
+        (reportedPositioning.key !== initialDisplayViewKey || reportedPositioning.positioning),
+    ),
+  )
   const awaitingInitialSenders = $derived(
     Boolean(
       initialDisplayViewKey &&
@@ -406,7 +414,7 @@
             topicStatus === 'unavailable' ||
             topicStatus === 'error',
         )
-        return terminal || (activeViewBaseReady && !awaitingInitialSenders)
+        return terminal || (activeViewBaseReady && !awaitingInitialSenders && !activeViewPositioning)
       }
       const terminal = Boolean(
         currentTimeline?.status === 'unavailable' ||
@@ -414,7 +422,7 @@
           currentTopicsState?.unavailable ||
           (currentTopics && currentTimeline?.status === 'ready' && currentTopicsState?.main.asOfSeq === undefined && currentTopicsState?.main.error),
       )
-      return terminal || (activeViewBaseReady && !awaitingInitialSenders)
+      return terminal || (activeViewBaseReady && !awaitingInitialSenders && !activeViewPositioning)
     }
     return channelListStatus === 'ready' || channelListStatus === 'error'
   })
@@ -605,6 +613,7 @@
           currentTimeline?.pending.some((p) => p.status === 'sending' && !p.replyTo && p.topicId === returningTopicId),
       ),
       awaitingInitialSenders,
+      positioning: activeViewPositioning,
     })
     const composer = mainComposerRef
     let cancelled = false
@@ -613,8 +622,12 @@
       topicSummaryFocus.step({
         revision,
         status,
-        findSummary: (topic) =>
-          document.querySelector<HTMLElement>(`#main-content [data-topic-id="${CSS.escape(topic)}"]`),
+        findSummary: (topic) => {
+          if (activeViewPositioning) return null
+          const el = document.querySelector<HTMLElement>(`#main-content [data-topic-id="${CSS.escape(topic)}"]`)
+          if (!el || el.closest('[inert], [aria-busy="true"]')) return null
+          return el
+        },
         composer: mainComposerRef ?? composer,
       })
     })
@@ -1052,6 +1065,9 @@
       ongoToChannelList={goToChannelList}
       onrecheckmembership={onselectorganization && currentOrganizationId ? () => onselectorganization(currentOrganizationId) : undefined}
       onswitchorganization={otherOrg && onselectorganization ? () => onselectorganization(otherOrg.organization_id) : undefined}
+      onpositioningchange={(positioning) => {
+        reportedPositioning = { key: initialDisplayViewKey, positioning }
+      }}
     />
   </main>
 

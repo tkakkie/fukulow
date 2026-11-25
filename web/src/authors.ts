@@ -116,7 +116,7 @@ export function createAuthors(
       }))
       stale = new Set()
       for (const [id, existing] of identities) {
-        if (existing.deactivated && !next.has(id)) {
+        if (existing.deactivated && observed.has(id) && !next.has(id)) {
           next.set(id, existing)
           stale.add(id)
         }

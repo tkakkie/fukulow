@@ -66,6 +66,7 @@
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
+    onpositioningchange,
   }: {
     channel: ChannelSync
     topics?: TopicsAdapter | null
@@ -90,6 +91,7 @@
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
+    onpositioningchange?: (positioning: boolean) => void
   } = $props()
 
   const currentChannelId = $derived(channelId)
@@ -300,6 +302,10 @@
   let requestedMainFor = ''
   let currentVisitId: symbol | undefined
   let enteredTarget = false
+
+  $effect(() => {
+    onpositioningchange?.(positioning)
+  })
 
   $effect(() => () => scrollController.destroy())
 

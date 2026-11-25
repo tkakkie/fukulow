@@ -127,13 +127,6 @@ export type MilestoneProbe = {
   apiCalls: ReadonlyArray<{ method: string; path: string }>
 }
 
-export function hasResolvedSenderLabel(labels: ReadonlyArray<string | null | undefined>): boolean {
-  return labels.some((raw) => {
-    const text = (raw ?? '').trim()
-    return text.length > 0 && text !== 'メンバー'
-  })
-}
-
 export function isPrimaryMilestonesReady(s: MilestoneProbe): boolean {
   return (
     s.timelineVisibleMs !== null &&
@@ -181,7 +174,7 @@ export function resolveArmSourceSha(options: {
 export async function waitForPageMilestones(
   page: Pick<import('@playwright/test').Page, 'waitForFunction'>,
   options: { primaryTimeoutMs?: number; diagnosticTimeoutMs?: number } = {},
-): Promise<void> {
+): Promise<number> {
   const primaryTimeoutMs = options.primaryTimeoutMs ?? 60_000
   const diagnosticTimeoutMs = options.diagnosticTimeoutMs ?? 5_000
   await page.waitForFunction(
@@ -202,8 +195,9 @@ export async function waitForPageMilestones(
     undefined,
     { timeout: primaryTimeoutMs },
   )
-  // Record named-row and deferred directory diagnostics separately with a bounded non-fatal wait
-  // so an unresolved sender never times out a usable FCP/Timeline sample.
+  // Record named-row and deferred directory diagnostics separately with one shared end-to-end
+  // non-fatal budget so an unresolved sender or stalled directory response never blocks a usable FCP/Timeline sample.
+  const diagnosticDeadline = Date.now() + diagnosticTimeoutMs
   try {
     await page.waitForFunction(
       (directoryPath) => {
@@ -213,10 +207,376 @@ export async function waitForPageMilestones(
         return s.firstNamedRowMs !== null && directoryStarted
       },
       DIRECTORY_API_PATH,
-      { timeout: diagnosticTimeoutMs },
+      { timeout: Math.max(1, diagnosticDeadline - Date.now()) },
     )
   } catch {
     // Keep the usable FCP/Timeline sample even if diagnostics do not settle within the bounded wait.
+  }
+  return Math.max(0, diagnosticDeadline - Date.now())
+}
+
+export function installFirstPaintProbe({
+  expectedOrg,
+  expectedChannel,
+}: {
+  expectedOrg: string
+  expectedChannel: string
+}): void {
+  type RawApiCall = {
+    seq: number
+    method: string
+    path: string
+    label: string
+    start: number
+    headersEnd: number
+    end: number | null
+    status: number
+    latestEndedBefore: string | null
+    done: Promise<void>
+  }
+  const state = {
+    appMountMs: null as number | null,
+    fcpMs: null as number | null,
+    timelineVisibleMs: null as number | null,
+    timelinePaintedMs: null as number | null,
+    firstNamedRowMs: null as number | null,
+    wsConnectStartMs: null as number | null,
+    wsOpenMs: null as number | null,
+    wsSubscribeSentMs: null as number | null,
+    wsSubscribedMs: null as number | null,
+    apiCalls: [] as RawApiCall[],
+  }
+  Object.assign(window, { __fp345: state })
+
+  new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      if (entry.name === 'first-contentful-paint' && state.fcpMs === null) {
+        state.fcpMs = entry.startTime
+      }
+    }
+  }).observe({ type: 'paint', buffered: true })
+
+  const isVisibleRow = (el: Element): boolean => {
+    if (
+      el.closest(
+        '[inert], [aria-busy="true"], [hidden], [aria-hidden="true"], .timeline-scroll--positioning, .topic-view__scroll--positioning',
+      )
+    ) {
+      return false
+    }
+    if (typeof window.getComputedStyle === 'function') {
+      const style = window.getComputedStyle(el)
+      if (style && (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse')) {
+        return false
+      }
+    }
+    return true
+  }
+
+  const checkDom = () => {
+    if (state.appMountMs === null) {
+      const app = document.getElementById('app')
+      if (app && app.childElementCount > 0) state.appMountMs = performance.now()
+    }
+    if (state.timelineVisibleMs === null) {
+      const items = document.querySelectorAll('.timeline-list .timeline-list__item')
+      if (Array.from(items).some(isVisibleRow)) {
+        state.timelineVisibleMs = performance.now()
+        requestAnimationFrame(() => {
+          if (state.timelinePaintedMs === null) state.timelinePaintedMs = performance.now()
+        })
+      }
+    }
+    if (state.firstNamedRowMs === null) {
+      const senders = document.querySelectorAll('.timeline-list .timeline-list__item .ui-message-row__sender')
+      if (
+        Array.from(senders).some((el) => {
+          if (!isVisibleRow(el)) return false
+          const text = (el.textContent ?? '').trim()
+          return text.length > 0 && text !== 'メンバー'
+        })
+      ) {
+        state.firstNamedRowMs = performance.now()
+      }
+    }
+  }
+  new MutationObserver(checkDom).observe(document, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['class', 'inert', 'aria-busy', 'hidden', 'aria-hidden', 'style'],
+  })
+  document.addEventListener('DOMContentLoaded', checkDom)
+
+  const counts = new Map<string, number>()
+  const normalizePath = (rawUrl: string): string => {
+    const u = new URL(rawUrl, window.location.origin)
+    return u.pathname
+      .replaceAll(expectedOrg, '{org}')
+      .replaceAll(expectedChannel, '{channel}')
+  }
+
+  const origFetch = window.fetch.bind(window)
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+    const path = normalizePath(rawUrl)
+    if (!path.startsWith('/api/')) return origFetch(input, init)
+
+    const start = performance.now()
+    let latestPrior: RawApiCall | null = null
+    for (const c of state.apiCalls) {
+      if (c.end !== null && c.end <= start && (!latestPrior || c.end > (latestPrior.end ?? 0))) {
+        latestPrior = c
+      }
+    }
+    const baseKey = `${method} ${path}`
+    const count = (counts.get(baseKey) ?? 0) + 1
+    counts.set(baseKey, count)
+    const label = count === 1 ? baseKey : `${baseKey} #${count}`
+    let resolveDone = () => {}
+    const done = new Promise<void>((r) => {
+      resolveDone = r
+    })
+    const record: RawApiCall = {
+      seq: state.apiCalls.length + 1,
+      method,
+      path,
+      label,
+      start,
+      headersEnd: start,
+      end: null,
+      status: 0,
+      latestEndedBefore: latestPrior ? latestPrior.label : null,
+      done,
+    }
+    state.apiCalls.push(record)
+    try {
+      const response = await origFetch(input, init)
+      record.headersEnd = performance.now()
+      record.status = response.status
+      const markEnd = () => {
+        if (record.end === null) {
+          record.end = performance.now()
+          resolveDone()
+        }
+      }
+      const origJson = response.json.bind(response)
+      response.json = async () => {
+        try {
+          return await origJson()
+        } finally {
+          markEnd()
+        }
+      }
+      const origText = response.text.bind(response)
+      response.text = async () => {
+        try {
+          return await origText()
+        } finally {
+          markEnd()
+        }
+      }
+      void response
+        .clone()
+        .arrayBuffer()
+        .then(markEnd, markEnd)
+      return response
+    } catch (err) {
+      record.end = performance.now()
+      resolveDone()
+      throw err
+    }
+  }
+
+  const OrigWebSocket = window.WebSocket
+  class TimedWebSocket extends OrigWebSocket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      if (state.wsConnectStartMs === null) state.wsConnectStartMs = performance.now()
+      super(url, protocols)
+      this.addEventListener('open', () => {
+        if (state.wsOpenMs === null) state.wsOpenMs = performance.now()
+      })
+      this.addEventListener('message', (ev) => {
+        if (typeof ev.data === 'string' && state.wsSubscribedMs === null) {
+          try {
+            const parsed = JSON.parse(ev.data) as { type?: string }
+            if (parsed.type === 'subscribed') state.wsSubscribedMs = performance.now()
+          } catch {
+            // ignore non-JSON
+          }
+        }
+      })
+    }
+    override send(data: string | Blob | BufferSource) {
+      if (typeof data === 'string' && state.wsSubscribeSentMs === null && data.includes('"subscribe"')) {
+        state.wsSubscribeSentMs = performance.now()
+      }
+      super.send(data)
+    }
+  }
+  window.WebSocket = TimedWebSocket
+}
+
+export async function extractRunMetricsInPage(args: {
+  run: number
+  expectedOrg: string
+  expectedChannel: string
+  settleTimeoutMs: number
+}): Promise<Omit<RunMetrics, 'directoryStartMs' | 'authorLookupStartMs'>> {
+  type RawApiCall = {
+    seq: number
+    method: string
+    path: string
+    label: string
+    start: number
+    headersEnd: number
+    end: number | null
+    status: number
+    latestEndedBefore: string | null
+    done: Promise<void>
+  }
+  const s = (
+    window as unknown as {
+      __fp345: {
+        appMountMs: number
+        fcpMs: number
+        timelineVisibleMs: number
+        timelinePaintedMs: number
+        firstNamedRowMs: number | null
+        wsConnectStartMs: number
+        wsOpenMs: number
+        wsSubscribeSentMs: number
+        wsSubscribedMs: number
+        apiCalls: RawApiCall[]
+      }
+    }
+  ).__fp345
+
+  const trackedCalls = [...s.apiCalls]
+  if (args.settleTimeoutMs > 0 && trackedCalls.some((c) => c.end === null)) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.all(trackedCalls.map((c) => c.done)),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, args.settleTimeoutMs)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+  const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
+  const jsResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.js'))
+  const cssResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.css'))
+  const wasmResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.wasm'))
+  const jsEndMs = jsResources.length > 0 ? Math.max(...jsResources.map((r) => r.responseEnd)) : 0
+  const cssEndMs = cssResources.length > 0 ? Math.max(...cssResources.map((r) => r.responseEnd)) : 0
+  const wasmEndMs = wasmResources.length > 0 ? Math.max(...wasmResources.map((r) => r.responseEnd)) : 0
+  const assetsEndMs = Math.max(jsEndMs, cssEndMs, wasmEndMs)
+  const assetsTransferBytes = [...jsResources, ...cssResources, ...wasmResources].reduce(
+    (sum, r) => sum + (r.transferSize ?? 0),
+    0,
+  )
+
+  const usedResourceIndices = new Set<number>()
+  const apiCalls: ApiTiming[] = trackedCalls.map((c) => {
+    const end = c.end ?? performance.now()
+    let transferBytes = 0
+    for (let idx = 0; idx < resources.length; idx++) {
+      if (usedResourceIndices.has(idx)) continue
+      const r = resources[idx]
+      const rPath = new URL(r.name, window.location.origin).pathname
+        .replaceAll(args.expectedOrg, '{org}')
+        .replaceAll(args.expectedChannel, '{channel}')
+      if (rPath === c.path) {
+        usedResourceIndices.add(idx)
+        transferBytes = r.transferSize ?? 0
+        break
+      }
+    }
+    return {
+      seq: c.seq,
+      method: c.method,
+      path: c.path,
+      label: c.label,
+      start: Number(c.start.toFixed(2)),
+      headersEnd: Number(c.headersEnd.toFixed(2)),
+      end: Number(end.toFixed(2)),
+      duration: Number((end - c.start).toFixed(2)),
+      transferBytes,
+      status: c.status,
+      latestEndedBefore: c.latestEndedBefore,
+      startedBeforeTimeline: c.start <= s.timelineVisibleMs,
+      completedBeforeTimeline: c.end !== null && c.end <= s.timelineVisibleMs,
+    }
+  })
+
+  // Time order only: each link is the latest API request that ended before the next one started.
+  // It does not prove that a request waited for that response; actual dependencies come from the source.
+  const byLabel = new Map(apiCalls.map((c) => [c.label, c]))
+  const timelineCall = apiCalls.find((c) => c.path.endsWith('/timeline'))
+  const chain: string[] = []
+  let cursor: ApiTiming | undefined = timelineCall
+  while (cursor) {
+    chain.unshift(cursor.label)
+    cursor = cursor.latestEndedBefore ? byLabel.get(cursor.latestEndedBefore) : undefined
+  }
+
+  return {
+    run: args.run,
+    ttfbMs: Number((nav?.responseStart ?? 0).toFixed(2)),
+    htmlEndMs: Number((nav?.responseEnd ?? 0).toFixed(2)),
+    htmlTransferBytes: nav?.transferSize ?? 0,
+    fcpMs: Number(s.fcpMs.toFixed(2)),
+    blankScreenMs: Number(s.fcpMs.toFixed(2)),
+    jsEndMs: Number(jsEndMs.toFixed(2)),
+    cssEndMs: Number(cssEndMs.toFixed(2)),
+    wasmEndMs: Number(wasmEndMs.toFixed(2)),
+    assetsEndMs: Number(assetsEndMs.toFixed(2)),
+    assetsTransferBytes,
+    appMountMs: Number(s.appMountMs.toFixed(2)),
+    wsConnectStartMs: Number(s.wsConnectStartMs.toFixed(2)),
+    wsOpenMs: Number(s.wsOpenMs.toFixed(2)),
+    wsSubscribeSentMs: Number(s.wsSubscribeSentMs.toFixed(2)),
+    wsSubscribedMs: Number(s.wsSubscribedMs.toFixed(2)),
+    timelineVisibleMs: Number(s.timelineVisibleMs.toFixed(2)),
+    timelinePaintedMs: Number(s.timelinePaintedMs.toFixed(2)),
+    firstNamedRowMs: s.firstNamedRowMs !== null ? Number(s.firstNamedRowMs.toFixed(2)) : null,
+    apiCalls,
+    timingChain: chain,
+  }
+}
+
+export async function collectRunMetrics(
+  page: Pick<import('@playwright/test').Page, 'waitForFunction' | 'evaluate'>,
+  options: {
+    runNumber: number
+    expectedOrg?: string
+    expectedChannel?: string
+    primaryTimeoutMs?: number
+    diagnosticTimeoutMs?: number
+  },
+): Promise<RunMetrics> {
+  const remainingDiagnosticMs = await waitForPageMilestones(page, {
+    primaryTimeoutMs: options.primaryTimeoutMs,
+    diagnosticTimeoutMs: options.diagnosticTimeoutMs,
+  })
+  const rawMetrics = await page.evaluate(extractRunMetricsInPage, {
+    run: options.runNumber,
+    expectedOrg: options.expectedOrg ?? orgId,
+    expectedChannel: options.expectedChannel ?? hotChannelId,
+    settleTimeoutMs: remainingDiagnosticMs,
+  })
+  const { directoryStartMs, authorLookupStartMs } = findDiagnosticStarts(rawMetrics.apiCalls)
+  return {
+    ...rawMetrics,
+    directoryStartMs,
+    authorLookupStartMs,
   }
 }
 
@@ -295,182 +655,7 @@ async function measurePageLoad(
 ): Promise<RunMetrics> {
   const page = await context.newPage()
   try {
-    await page.addInitScript(
-      ({ expectedOrg, expectedChannel }) => {
-        type RawApiCall = {
-          seq: number
-          method: string
-          path: string
-          label: string
-          start: number
-          headersEnd: number
-          end: number | null
-          status: number
-          latestEndedBefore: string | null
-          done: Promise<void>
-        }
-        const state = {
-          appMountMs: null as number | null,
-          fcpMs: null as number | null,
-          timelineVisibleMs: null as number | null,
-          timelinePaintedMs: null as number | null,
-          firstNamedRowMs: null as number | null,
-          wsConnectStartMs: null as number | null,
-          wsOpenMs: null as number | null,
-          wsSubscribeSentMs: null as number | null,
-          wsSubscribedMs: null as number | null,
-          apiCalls: [] as RawApiCall[],
-        }
-        Object.assign(window, { __fp345: state })
-
-        new PerformanceObserver((list) => {
-          for (const entry of list.getEntries()) {
-            if (entry.name === 'first-contentful-paint' && state.fcpMs === null) {
-              state.fcpMs = entry.startTime
-            }
-          }
-        }).observe({ type: 'paint', buffered: true })
-
-        const checkDom = () => {
-          if (state.appMountMs === null) {
-            const app = document.getElementById('app')
-            if (app && app.childElementCount > 0) state.appMountMs = performance.now()
-          }
-          if (state.timelineVisibleMs === null) {
-            const firstLine = document.querySelector('.timeline-list .timeline-list__item')
-            if (firstLine) {
-              state.timelineVisibleMs = performance.now()
-              requestAnimationFrame(() => {
-                if (state.timelinePaintedMs === null) state.timelinePaintedMs = performance.now()
-              })
-            }
-          }
-          if (state.firstNamedRowMs === null) {
-            const senders = document.querySelectorAll('.timeline-list .timeline-list__item .ui-message-row__sender')
-            if (
-              Array.from(senders).some((el) => {
-                const text = (el.textContent ?? '').trim()
-                return text.length > 0 && text !== 'メンバー'
-              })
-            ) {
-              state.firstNamedRowMs = performance.now()
-            }
-          }
-        }
-        new MutationObserver(checkDom).observe(document, { childList: true, subtree: true, characterData: true })
-        document.addEventListener('DOMContentLoaded', checkDom)
-
-        const counts = new Map<string, number>()
-        const normalizePath = (rawUrl: string): string => {
-          const u = new URL(rawUrl, window.location.origin)
-          return u.pathname
-            .replaceAll(expectedOrg, '{org}')
-            .replaceAll(expectedChannel, '{channel}')
-        }
-
-        const origFetch = window.fetch.bind(window)
-        window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-          const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-          const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
-          const path = normalizePath(rawUrl)
-          if (!path.startsWith('/api/')) return origFetch(input, init)
-
-          const start = performance.now()
-          let latestPrior: RawApiCall | null = null
-          for (const c of state.apiCalls) {
-            if (c.end !== null && c.end <= start && (!latestPrior || c.end > (latestPrior.end ?? 0))) {
-              latestPrior = c
-            }
-          }
-          const baseKey = `${method} ${path}`
-          const count = (counts.get(baseKey) ?? 0) + 1
-          counts.set(baseKey, count)
-          const label = count === 1 ? baseKey : `${baseKey} #${count}`
-          let resolveDone = () => {}
-          const done = new Promise<void>((r) => {
-            resolveDone = r
-          })
-          const record: RawApiCall = {
-            seq: state.apiCalls.length + 1,
-            method,
-            path,
-            label,
-            start,
-            headersEnd: start,
-            end: null,
-            status: 0,
-            latestEndedBefore: latestPrior ? latestPrior.label : null,
-            done,
-          }
-          state.apiCalls.push(record)
-          try {
-            const response = await origFetch(input, init)
-            record.headersEnd = performance.now()
-            record.status = response.status
-            const markEnd = () => {
-              if (record.end === null) {
-                record.end = performance.now()
-                resolveDone()
-              }
-            }
-            const origJson = response.json.bind(response)
-            response.json = async () => {
-              try {
-                return await origJson()
-              } finally {
-                markEnd()
-              }
-            }
-            const origText = response.text.bind(response)
-            response.text = async () => {
-              try {
-                return await origText()
-              } finally {
-                markEnd()
-              }
-            }
-            void response
-              .clone()
-              .arrayBuffer()
-              .then(markEnd, markEnd)
-            return response
-          } catch (err) {
-            record.end = performance.now()
-            resolveDone()
-            throw err
-          }
-        }
-
-        const OrigWebSocket = window.WebSocket
-        class TimedWebSocket extends OrigWebSocket {
-          constructor(url: string | URL, protocols?: string | string[]) {
-            if (state.wsConnectStartMs === null) state.wsConnectStartMs = performance.now()
-            super(url, protocols)
-            this.addEventListener('open', () => {
-              if (state.wsOpenMs === null) state.wsOpenMs = performance.now()
-            })
-            this.addEventListener('message', (ev) => {
-              if (typeof ev.data === 'string' && state.wsSubscribedMs === null) {
-                try {
-                  const parsed = JSON.parse(ev.data) as { type?: string }
-                  if (parsed.type === 'subscribed') state.wsSubscribedMs = performance.now()
-                } catch {
-                  // ignore non-JSON
-                }
-              }
-            })
-          }
-          override send(data: string | Blob | BufferSource) {
-            if (typeof data === 'string' && state.wsSubscribeSentMs === null && data.includes('"subscribe"')) {
-              state.wsSubscribeSentMs = performance.now()
-            }
-            super.send(data)
-          }
-        }
-        window.WebSocket = TimedWebSocket
-      },
-      { expectedOrg: orgId, expectedChannel: hotChannelId },
-    )
+    await page.addInitScript(installFirstPaintProbe, { expectedOrg: orgId, expectedChannel: hotChannelId })
 
     const cdp = await context.newCDPSession(page)
     await cdp.send('Network.enable')
@@ -488,136 +673,11 @@ async function measurePageLoad(
     }
 
     await page.goto(`${baseUrl}${targetPath}`, { waitUntil: 'commit', timeout: 60_000 })
-    await waitForPageMilestones(page)
-
-    const rawMetrics = await page.evaluate(async (run) => {
-      type RawApiCall = {
-        seq: number
-        method: string
-        path: string
-        label: string
-        start: number
-        headersEnd: number
-        end: number | null
-        status: number
-        latestEndedBefore: string | null
-        done: Promise<void>
-      }
-      const s = (
-        window as unknown as {
-          __fp345: {
-            appMountMs: number
-            fcpMs: number
-            timelineVisibleMs: number
-            timelinePaintedMs: number
-            firstNamedRowMs: number | null
-            wsConnectStartMs: number
-            wsOpenMs: number
-            wsSubscribeSentMs: number
-            wsSubscribedMs: number
-            apiCalls: RawApiCall[]
-          }
-        }
-      ).__fp345
-
-      const trackedCalls = [...s.apiCalls]
-      await Promise.all(trackedCalls.map((c) => c.done))
-
-      const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming
-      const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
-      const jsResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.js'))
-      const cssResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.css'))
-      const wasmResources = resources.filter((r) => r.name.includes('/assets/') && r.name.endsWith('.wasm'))
-      const jsEndMs = jsResources.length > 0 ? Math.max(...jsResources.map((r) => r.responseEnd)) : 0
-      const cssEndMs = cssResources.length > 0 ? Math.max(...cssResources.map((r) => r.responseEnd)) : 0
-      const wasmEndMs = wasmResources.length > 0 ? Math.max(...wasmResources.map((r) => r.responseEnd)) : 0
-      const assetsEndMs = Math.max(jsEndMs, cssEndMs, wasmEndMs)
-      const assetsTransferBytes = [...jsResources, ...cssResources, ...wasmResources].reduce(
-        (sum, r) => sum + (r.transferSize ?? 0),
-        0,
-      )
-
-      const usedResourceIndices = new Set<number>()
-      const apiCalls: ApiTiming[] = trackedCalls.map((c) => {
-        const end = c.end ?? performance.now()
-        let transferBytes = 0
-        for (let idx = 0; idx < resources.length; idx++) {
-          if (usedResourceIndices.has(idx)) continue
-          const r = resources[idx]
-          const rPath = new URL(r.name, window.location.origin).pathname
-            .replaceAll(
-              (window as unknown as { __fpOrg?: string }).__fpOrg ?? '00000000-0000-4000-8000-00000000000a',
-              '{org}',
-            )
-            .replaceAll(
-              (window as unknown as { __fpChan?: string }).__fpChan ?? '386df2c5-c664-ee3d-2a08-b1c9f0a0275c',
-              '{channel}',
-            )
-          if (rPath === c.path) {
-            usedResourceIndices.add(idx)
-            transferBytes = r.transferSize ?? 0
-            break
-          }
-        }
-        return {
-          seq: c.seq,
-          method: c.method,
-          path: c.path,
-          label: c.label,
-          start: Number(c.start.toFixed(2)),
-          headersEnd: Number(c.headersEnd.toFixed(2)),
-          end: Number(end.toFixed(2)),
-          duration: Number((end - c.start).toFixed(2)),
-          transferBytes,
-          status: c.status,
-          latestEndedBefore: c.latestEndedBefore,
-          startedBeforeTimeline: c.start <= s.timelineVisibleMs,
-          completedBeforeTimeline: end <= s.timelineVisibleMs,
-        }
-      })
-
-      // Time order only: each link is the latest API request that ended before the next one started.
-      // It does not prove that a request waited for that response; actual dependencies come from the source.
-      const byLabel = new Map(apiCalls.map((c) => [c.label, c]))
-      const timelineCall = apiCalls.find((c) => c.path.endsWith('/timeline'))
-      const chain: string[] = []
-      let cursor: ApiTiming | undefined = timelineCall
-      while (cursor) {
-        chain.unshift(cursor.label)
-        cursor = cursor.latestEndedBefore ? byLabel.get(cursor.latestEndedBefore) : undefined
-      }
-
-      return {
-        run,
-        ttfbMs: Number(nav.responseStart.toFixed(2)),
-        htmlEndMs: Number(nav.responseEnd.toFixed(2)),
-        htmlTransferBytes: nav.transferSize ?? 0,
-        fcpMs: Number(s.fcpMs.toFixed(2)),
-        blankScreenMs: Number(s.fcpMs.toFixed(2)),
-        jsEndMs: Number(jsEndMs.toFixed(2)),
-        cssEndMs: Number(cssEndMs.toFixed(2)),
-        wasmEndMs: Number(wasmEndMs.toFixed(2)),
-        assetsEndMs: Number(assetsEndMs.toFixed(2)),
-        assetsTransferBytes,
-        appMountMs: Number(s.appMountMs.toFixed(2)),
-        wsConnectStartMs: Number(s.wsConnectStartMs.toFixed(2)),
-        wsOpenMs: Number(s.wsOpenMs.toFixed(2)),
-        wsSubscribeSentMs: Number(s.wsSubscribeSentMs.toFixed(2)),
-        wsSubscribedMs: Number(s.wsSubscribedMs.toFixed(2)),
-        timelineVisibleMs: Number(s.timelineVisibleMs.toFixed(2)),
-        timelinePaintedMs: Number(s.timelinePaintedMs.toFixed(2)),
-        firstNamedRowMs: s.firstNamedRowMs !== null ? Number(s.firstNamedRowMs.toFixed(2)) : null,
-        apiCalls,
-        timingChain: chain,
-      }
-    }, runNumber)
-
-    const { directoryStartMs, authorLookupStartMs } = findDiagnosticStarts(rawMetrics.apiCalls)
-    return {
-      ...rawMetrics,
-      directoryStartMs,
-      authorLookupStartMs,
-    }
+    return await collectRunMetrics(page, {
+      runNumber,
+      expectedOrg: orgId,
+      expectedChannel: hotChannelId,
+    })
   } finally {
     await page.close()
   }

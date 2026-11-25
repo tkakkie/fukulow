@@ -75,6 +75,7 @@
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
+    onpositioningchange,
   }: {
     searchState?: SearchState
     searchOpen?: boolean
@@ -132,6 +133,7 @@
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
+    onpositioningchange?: (positioning: boolean) => void
   } = $props()
 </script>
 
@@ -275,6 +277,7 @@
             {ongoToChannelList}
             {onrecheckmembership}
             {onswitchorganization}
+            {onpositioningchange}
           />
         {/key}
       {:else}
@@ -303,6 +306,7 @@
             {ongoToChannelList}
             {onrecheckmembership}
             {onswitchorganization}
+            {onpositioningchange}
           />
         {/key}
       {/if}

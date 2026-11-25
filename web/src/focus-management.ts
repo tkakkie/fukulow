@@ -163,6 +163,7 @@ export function resolveMainTimelineFocusStatus(options: {
   topicsUnavailable: boolean
   topicPendingSend: boolean
   awaitingInitialSenders?: boolean
+  positioning?: boolean
 }): MainTimelineFocusStatus {
   if (options.organizationUnavailable || options.timelineStatus === 'unavailable' || options.topicsUnavailable) {
     return 'unavailable'
@@ -182,7 +183,7 @@ export function resolveMainTimelineFocusStatus(options: {
       return options.topicsMain.error ? 'error' : 'loading'
     }
   }
-  if (options.topicPendingSend || options.awaitingInitialSenders) {
+  if (options.topicPendingSend || options.awaitingInitialSenders || options.positioning) {
     return 'loading'
   }
   return 'ready'

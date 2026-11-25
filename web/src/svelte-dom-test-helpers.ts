@@ -183,6 +183,10 @@ export class MiniNode extends MiniEventTarget {
     return this.childNodes.filter((c): c is MiniElement => c instanceof MiniElement)
   }
 
+  get childElementCount(): number {
+    return this.children.length
+  }
+
   get isConnected(): boolean {
     let cur: MiniNode | null = this
     while (cur) {
@@ -586,7 +590,7 @@ export class MiniElement extends MiniNode {
 
   focus(): void {
     const opts = this.ownerDocument?.options
-    if (this.disabled || !this.ownerDocument) return
+    if (this.disabled || !this.ownerDocument || this.closest('[inert]')) return
     if (!opts?.allowDetachedFocus && !this.isConnected) return
     const changed = this.ownerDocument.activeElement !== this
     this.ownerDocument.activeElement = this
@@ -681,6 +685,15 @@ export class MiniElement extends MiniNode {
   set hidden(v: boolean) {
     if (v) this.setAttribute('hidden', '')
     else this.removeAttribute('hidden')
+  }
+
+  get inert(): boolean {
+    return this.attrs.has('inert')
+  }
+
+  set inert(v: boolean) {
+    if (v) this.setAttribute('inert', '')
+    else this.removeAttribute('inert')
   }
 
   // Minimal non-emulated box so components that check connection/non-zero rect work in Node.
