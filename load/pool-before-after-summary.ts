@@ -17,7 +17,7 @@ export function sequence(mode:Mode) {
   if (mode==='rehearsal') return scenarios.flatMap(scenario=>(['B','A'] as const).map(arm=>({scenario,pair:1,arm})));
   return scenarios.flatMap(scenario=>pairs().flatMap((arms,i)=>arms.map(arm=>({scenario,pair:i+1,arm}))));
 }
-export function plan(smoke = false) { return throughputPlan(smoke ? '50' : settings.rates.join(','), smoke ? '10' : '60',10); }
+export function plan(smoke = false, rates = settings.rates) { return throughputPlan(smoke ? '50' : rates.join(','), smoke ? '10' : '60',10); }
 export type Counts = { attempted:number; accepted:number; rejected429:number; rejected503:number;
   otherErrors:number; clientTimeouts:number; transportErrors:number; droppedIterations:number;
   p95:number|null; p99:number|null };
