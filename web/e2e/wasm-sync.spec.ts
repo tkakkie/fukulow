@@ -2,20 +2,38 @@ import { expect, test } from '@playwright/test'
 import type { components } from '../src/api-schema.d.ts'
 import { createChannel, secretSafe, signInOwner } from './helpers.ts'
 
-// #466: the shell and the Organization check (C10) no longer wait for the core; sync never starts without it.
-const syncPath = (path: string) => ['/channels', '/timeline', '/messages', '/unread', '/dms'].some(part => path.includes(part))
+function gate() {
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  return { held, release }
+}
+
+// The initial Channel list can run with the shell. Controller reads still wait for wasm.
+const startupChannelList = (url: URL, org: string) => url.pathname === `/api/v1/orgs/${org}/channels` && !url.search
+const syncRead = (url: URL, org: string) => !startupChannelList(url, org) &&
+  ['/channels', '/timeline', '/messages', '/unread', '/dms'].some(part => url.pathname.includes(part))
+
 test('wasm init failure shows an error and never starts sync', async ({ page }) => {
   const org = await signInOwner(page.request)
   const sync: string[] = [], sockets: string[] = []
-  page.on('request', request => { const path = new URL(request.url()).pathname; if (syncPath(path)) sync.push(path) })
+  let listed = false
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (startupChannelList(url, org)) listed = true
+    if (syncRead(url, org)) sync.push(url.pathname)
+  })
   page.on('websocket', socket => sockets.push(socket.url()))
-  await page.route('**/*.wasm', route => route.abort())
-  await page.goto(`/o/${org}`)
-  await expect(page.getByRole('alert')).toHaveText('アプリを起動できませんでした。ページを再読み込みしてください。')
-  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 500)))
-  expect(sync).toEqual([])
-  expect(sockets).toEqual([])
-  await expect(page.getByRole('textbox')).toHaveCount(0)
+  const core = gate()
+  await page.route('**/*.wasm', async route => { await core.held; await route.abort() })
+  try {
+    await page.goto(`/o/${org}`, { waitUntil: 'commit' })
+    await expect.poll(() => listed).toBe(true)
+    core.release()
+    await expect(page.getByRole('alert')).toHaveText('アプリを起動できませんでした。ページを再読み込みしてください。')
+    expect(sync).toEqual([])
+    expect(sockets).toEqual([])
+    await expect(page.getByRole('textbox')).toHaveCount(0)
+  } finally { core.release() }
 })
 
 test('a slow core delays only sync: the Organization check runs first and sync starts once after it loads', async ({ page }) => {
@@ -26,26 +44,27 @@ test('a slow core delays only sync: the Organization check runs first and sync s
   }))
   expect(sent.status()).toBe(201)
   const sync: string[] = [], sockets: string[] = []
-  let checked = false
+  let checked = false, lists = 0
   page.on('request', request => {
-    const path = new URL(request.url()).pathname
-    if (path === `/api/v1/orgs/${org}/me`) checked = true
-    if (syncPath(path)) sync.push(path)
+    const url = new URL(request.url())
+    if (url.pathname === `/api/v1/orgs/${org}/me`) checked = true
+    if (startupChannelList(url, org)) lists++
+    if (syncRead(url, org)) sync.push(url.pathname)
   })
   page.on('websocket', socket => sockets.push(socket.url()))
-  let release!: () => void
-  const held = new Promise<void>(resolve => { release = resolve })
+  const { release, held } = gate()
   await page.route('**/*.wasm', async route => { await held; await route.continue() })
   try {
-    await page.goto(`/o/${org}/c/${channel.id}`)
+    await page.goto(`/o/${org}/c/${channel.id}`, { waitUntil: 'commit' })
     await expect.poll(() => checked).toBe(true)
-    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 500)))
+    await expect.poll(() => lists).toBe(1)
     expect(sync).toEqual([])
     expect(sockets).toEqual([])
     release()
     await expect(page.getByRole('article').filter({ hasText: channel.name })).toBeVisible()
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     expect(sockets).toHaveLength(1)
+    expect(lists).toBe(1)
   } finally { release() }
 })
 

@@ -1757,3 +1757,54 @@ Waits took the tuple form, the transaction form or both (merged per pid), so bot
 - **Raw data:** run directories (`status.json`, `results.json`, `metadata.json`, `server-evidence.json`), the aggregate and the chain log are kept outside Git on the maintainer's Mac and may be removed later.
 
 Reproduce with `node load/signin-owner-burst.ts --recorded --harness-commit <SHA> --out <new absolute dir>` ×3 under the #769 pre-run gates (plan review [comment 7081883602](https://github.com/tkakkie/fukulow/issues/756#issuecomment-7081883602)), then `node load/signin-owner-burst-aggregate.ts <run1> <run2> <run3>`.
+
+## wasm preload (#954, 2026-11-25)
+
+PR #962 adds a wasm preload. It ran on 2026-11-25 09:26–09:57 JST on the Mac (M5) with Docker Desktop, the Caddy profile and Node 26.13.1, under the PR's pre-registration (#466 first-display conditions, the same 8 cells, 5 runs per cell).
+- **Arms:**
+  - B is `main` at `bef3963d`.
+  - A is the PR head `2f587237`, which is that `main` merged in.
+- **Images:** `fukulow-954:{before,after}` were built once before timing.
+- **Rounds:** 5 interleaved rounds, B/A in round 1 with the order swapped each round. No cell was INCONCLUSIVE, so the extension to 9 rounds did not run.
+- **Host:** AC power on before and after every arm. Load average 1.02–3.09; Spotlight indexing raised it before timing, and timing started at 2.66.
+
+**Statistics:**
+- Per cell: the median of the round p50 and p95 values, and the paired round-delta p50 with a bootstrap 95% CI (median of deltas, 10,000 resamples, fixed seed).
+- Target 1 (MET): the CI is entirely below 0.
+- Target 2, at most +5.0%:
+  - MET when the CI upper bound is at most +5.0% of B's p50;
+  - MISSED when the CI lower bound is above +5.0%;
+  - INCONCLUSIVE otherwise.
+
+Result: **Target 1 MISSED on both routes. Target 2 MISSED for throttled cold FCP on both routes.** MAC-RELATIVE.
+
+| Cell | Metric | B p50 / p95 | A p50 / p95 | Change | Paired Δ p50 (95% CI), ms | Target | Status |
+|---|---|---:|---:|---:|---|---|---|
+| `/` unthrottled cold | FCP | 56.0 / 60.0 | 56.0 / 56.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/` unthrottled cold | Timeline | 443.2 / 449.0 | 104.3 / 106.1 | -76.5% | -335.8 (-358.2 to -318.2) | <= +5.0% | MET |
+| `/` unthrottled warm | FCP | 52.0 / 56.0 | 52.0 / 52.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/` unthrottled warm | Timeline | 435.5 / 454.0 | 99.0 / 104.3 | -77.3% | -335.5 (-369.5 to -330.7) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled cold | FCP | 56.0 / 60.0 | 56.0 / 56.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled cold | Timeline | 442.6 / 444.9 | 104.4 / 106.1 | -76.4% | -338.3 (-350.9 to -325.1) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled warm | FCP | 52.0 / 56.0 | 52.0 / 52.0 | +0.0% | 0.0 (0.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled warm | Timeline | 432.6 / 440.6 | 100.8 / 422.7 | -76.7% | -331.4 (-341.9 to -326.0) | <= +5.0% | MET |
+| `/` throttled cold | FCP | 1028.0 / 1036.0 | 1584.0 / 1596.0 | +54.1% | 564.0 (548.0 to 580.0) | <= +5.0% | MISSED |
+| `/` throttled cold | Timeline | 3635.0 / 3652.0 | 3724.4 / 3732.6 | +2.5% | 85.8 (80.0 to 101.1) | improves, CI < 0 | MISSED |
+| `/` throttled warm | FCP | 240.0 / 244.0 | 244.0 / 244.0 | +1.7% | 4.0 (0.0 to 8.0) | <= +5.0% | MET |
+| `/` throttled warm | Timeline | 2388.8 / 2398.3 | 2373.8 / 2398.0 | -0.6% | -15.0 (-23.4 to 0.7) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled cold | FCP | 1024.0 / 1032.0 | 1588.0 / 1596.0 | +55.1% | 564.0 (556.0 to 572.0) | <= +5.0% | MISSED |
+| `/o/:org/c/:channel` throttled cold | Timeline | 3635.3 / 3644.0 | 3719.1 / 3727.1 | +2.3% | 81.9 (72.4 to 112.8) | improves, CI < 0 | MISSED |
+| `/o/:org/c/:channel` throttled warm | FCP | 240.0 / 244.0 | 240.0 / 248.0 | +0.0% | 4.0 (-4.0 to 8.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled warm | Timeline | 2377.9 / 2399.9 | 2368.2 / 2386.3 | -0.4% | -10.2 (-23.2 to -6.5) | <= +5.0% | MET |
+
+**Reading:**
+- **Throttled cold:** the wasm fetch ends about 200 ms earlier (`wasmEndMs` p50 about 1,795 → 1,595 ms). But on the 1.6 Mbps profile the preload competes with the critical CSS and JS, so FCP moves out to about the wasm end (+564 ms), and Timeline is 82–86 ms later. That is the opposite of the expected 0.4–0.8 s improvement.
+- **Unthrottled:** Timeline improves by about 335 ms (−77%) on every unthrottled cell, and warm throttled cells are unchanged.
+- **Outlier:** one unthrottled warm `/o/:org/c/:channel` round had a Timeline p95 of 422.7 ms in A; the median p50 is unaffected.
+
+**Raw data:** per-arm `results.json` and `run.log`, the chain log and `fp-evaluation.json` are kept outside Git on the maintainer's Mac. sha256 values:
+- `chain.ts` `2be6a769…`
+- `chain.log` `78aa63eb…`
+- `fp-evaluation.json` `18e2ecba…`
+
+Reproduce each arm with `FIRST_PAINT_IMAGE=fukulow-954:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`, interleaved as above.
