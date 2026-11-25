@@ -12,6 +12,7 @@ test('turbostat argv has no whitespace inside an element, so sudo-rs can match t
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { withSpotCheck, type SpotCheck } from './frequency-spot-check.ts';
 
 const limit = { timeout: 15_000 };
@@ -38,9 +39,9 @@ async function gone(pid: number) {
   }
   return false;
 }
-// Wait for a file the child writes once it is running, bounded by the test timeout.
-async function waitFor(path: string) {
-  while (!existsSync(path)) await new Promise(r => setTimeout(r, 10));
+// Wait for a file the child writes once it is running. The test's signal ends the poll on timeout or failure.
+async function waitFor(path: string, signal: AbortSignal) {
+  while (!existsSync(path)) await sleep(10, undefined, { signal });
   return readFileSync(path, 'utf8');
 }
 
@@ -72,13 +73,14 @@ test('a child that exits before echoing the marker is refused and work never run
 
 test('an abort before the marker ends the child with the existing refusal and leaves no child (#979)', limit, async t => {
   const abort = new AbortController(), dir = scratch(t), pidFile = join(dir, 'pid');
+  t.after(() => abort.abort());
   let ran = false;
   // Never echoes: stands in for a turbostat that has not taken its opening sample. The pid file, written
   // atomically once the child runs, is the barrier, so the abort always hits a live child.
   const run = withSpotCheck(async () => { ran = true; }, abort.signal, () => {},
     node(`const fs=require('fs');fs.writeFileSync(${JSON.stringify(pidFile + '.tmp')},String(process.pid));
       fs.renameSync(${JSON.stringify(pidFile + '.tmp')},${JSON.stringify(pidFile)});process.stdin.resume();setInterval(()=>{},1000);`));
-  const pid = validPid(Number(await waitFor(pidFile)));
+  const pid = validPid(Number(await waitFor(pidFile, t.signal)));
   abort.abort();
   await assert.rejects(run, /turbostat exited before its opening sample/);
   assert.equal(ran, false);
