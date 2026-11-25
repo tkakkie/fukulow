@@ -1851,7 +1851,7 @@ Result: **Target 1 MET on both routes. Target 2 MET in every other cell.** MAC-R
 
 **Reading:**
 - Throttled cold cells drop to 2 reads in every round, which matches the -1.0 s. Warm throttled cells keep 3–4 reads and do not change.
-- **Residual tail:** on `/o/:org/c/:channel` unthrottled cold, rounds 1, 2 and 4 each had one run with the B-like Timeline (round p95 422.7, 443.3, 438.7 ms against p50 about 105 ms). Those are the rounds where A still shows 3 reads, so in some unthrottled runs the third read still happens. The p50 gate is unaffected.
+- **Residual tail:** on `/o/:org/c/:channel` unthrottled cold, rounds 1, 2 and 4 each had one run with the B-like Timeline (round p95 422.7, 443.3, 438.7 ms against p50 about 105 ms). Each of those rounds shows a third read in A, but other cells with 3 reads in A show no tail, so a third read is necessary but not sufficient for it. The review traced the third read to a coalescing race between the connect-edge refresh and `activity_ready`. The p50 gate is unaffected.
 
 **Raw data:** per-arm `results.json` and `run.log`, the chain log and `fp-evaluation.json` are kept outside Git on the maintainer's Mac. sha256 values:
 - `chain.ts` `b3e6314f…`
