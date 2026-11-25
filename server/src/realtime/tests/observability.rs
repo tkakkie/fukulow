@@ -11,6 +11,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
         ("snapshot", "websocket_replay"),
         ("subscribed_seq", "websocket_subscribed_seq"),
         ("handoff_generation", "websocket_authorize"),
+        ("duplicate_generation", "websocket_authorize"),
     ] {
         let f = fixture(&pool).await;
         if phase == "snapshot" {
@@ -60,12 +61,37 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
             )
             .with_state(f.state.clone());
         let server = Server::start(router).await;
-        let gate = access_loss::gate(f.channel, phase, 0);
+        // The duplicate branch has no pause point: a second Subscribe reaches it.
+        let gate =
+            (phase != "duplicate_generation").then(|| access_loss::gate(f.channel, phase, 0));
         let mut socket = server.connect(&f.token).await;
         subscribe(&mut socket, f.channel, 0).await;
-        gate.entered().await;
-        f.state.pool.close().await;
-        gate.release();
+        if let Some(gate) = gate {
+            gate.entered().await;
+            f.state.pool.close().await;
+            gate.release();
+        } else {
+            let ServerEvent::Subscribed {
+                history_generation,
+                channel_id,
+                caught_up_seq,
+            } = serde_json::from_value(event(&mut socket).await).unwrap()
+            else {
+                panic!("expected the initial subscription to succeed");
+            };
+            assert_eq!((channel_id, caught_up_seq), (f.channel, 0));
+            f.state.pool.close().await;
+            control(
+                &mut socket,
+                ClientMessage::Subscribe {
+                    history_generation: Some(history_generation),
+                    channel_id,
+                    after_seq: caught_up_seq,
+                },
+            )
+            .await
+            .unwrap();
+        }
         closed(&mut socket, 1011).await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), completion.recv())
@@ -73,19 +99,26 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                 .unwrap(),
             Some(1011)
         );
-        let failures: Vec<_> = output
-            .events()
-            .into_iter()
-            .filter(|event| event["fields"]["event"] == "database_failure")
+        let events = output.events();
+        let failures: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event["fields"]["event"] == "database_failure")
             .collect();
         assert_eq!(failures.len(), 1, "{phase}: {}", output.text());
+        let (failure_index, failure) = failures[0];
+        let close_index = events
+            .iter()
+            .position(|event| event["fields"]["event"] == "websocket_closed")
+            .unwrap_or_else(|| panic!("{phase}: {}", output.text()));
+        assert!(failure_index < close_index, "{phase}: {}", output.text());
         assert_eq!(
-            failures[0]["fields"],
+            failure["fields"],
             json!({"event":"database_failure", "kind":"pool_closed"}),
             "{phase}"
         );
         assert_eq!(
-            failures[0]["span"],
+            failure["span"],
             json!({"name":"database", "operation":operation}),
             "{phase}"
         );
