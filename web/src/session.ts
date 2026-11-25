@@ -291,6 +291,7 @@ export function createSession(options: SessionOptions) {
     changes: (query, signal) => observe(dmSource.changes(query, signal)),
     open: (body, signal) => observe(dmSource.open(body, signal)),
   }, activity, watched: id => sync.get().channels[id]?.subscription?.confirmed === true,
+  waitForReady: true,
   baseline: (dm, replace) => unread.activityDmSnapshot(dm, replace),
   processed: identity => {
     if (channels.get().selectedId === identity.id) channels.refreshOpen()

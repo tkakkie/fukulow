@@ -50,11 +50,14 @@ test('a slow core delays only sync: the Organization check runs first and sync s
   // Keep periodic reconciliation outside the startup observation window.
   await page.addInitScript(() => { Math.random = () => 0.5 })
   const sync: string[] = [], sockets: string[] = []
-  let checked = false, lists = 0
+  let checked = false, lists = 0, me = 0, sections = 0, dmChanges = 0, members = 0
   page.on('request', request => {
     const url = new URL(request.url())
-    if (url.pathname === `/api/v1/orgs/${org}/me`) checked = true
+    if (request.method() === 'GET' && url.pathname === `/api/v1/orgs/${org}/me`) { checked = true; me++ }
     if (request.method() === 'GET' && url.pathname === `/api/v1/orgs/${org}/channels` && !url.searchParams.has('archived')) lists++
+    if (request.method() === 'GET' && url.pathname === `/api/v1/orgs/${org}/me/sections`) sections++
+    if (request.method() === 'GET' && url.pathname === `/api/v1/orgs/${org}/dms/changes`) dmChanges++
+    if (request.method() === 'GET' && url.pathname === `/api/v1/orgs/${org}/members`) members++
     if (syncRead(url, org)) sync.push(url.pathname)
   })
   page.on('websocket', socket => sockets.push(socket.url()))
@@ -82,6 +85,10 @@ test('a slow core delays only sync: the Organization check runs first and sync s
     await page.waitForTimeout(1_000)
     expect(sockets).toHaveLength(1)
     expect(lists).toBeLessThanOrEqual(2)
+    expect(me).toBeLessThanOrEqual(2)
+    expect(sections).toBeLessThanOrEqual(2)
+    expect(dmChanges).toBeLessThanOrEqual(2)
+    expect(members).toBeLessThanOrEqual(2)
     expect(sync.filter(path => path.endsWith('/timeline'))).toEqual([timeline])
   } finally { release() }
 })

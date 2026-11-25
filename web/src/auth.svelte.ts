@@ -79,7 +79,7 @@ const defaults: AuthDeps = {
       searchAnchor: searchAnchorAdapter(session.searchAnchor),
       searchSource: session.searchSource,
       onChannelRevoked: session.onChannelRevoked,
-      onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener),
+      onMemberListRefresh: listener => watchMemberAccess(session.channels, session.sync, listener, { skipConnectRefresh: true, skipInitialList: true }),
       channels: channelsAdapter(session.channels, session.channelCreation),
       sections: sectionsAdapter(session.sections),
       dms: dmsAdapter(session.dms),
