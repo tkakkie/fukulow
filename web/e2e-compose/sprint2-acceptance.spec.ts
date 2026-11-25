@@ -443,6 +443,9 @@ test('Reply chain (P6, P7)', async ({ browser, baseURL }) => {
     // starts around that descendant; its older-history action restarts at the root.
     for (const p of [ownerPage, peerPage]) {
       const topicScroll = p.locator('#main-content .topic-view__scroll')
+      // The peer enters with the whole Topic Unread, so older pages load while positioning: the row count is final
+      // only once the entry position is applied (docs/ui.md §8, #968).
+      await expect(topicScroll).not.toHaveAttribute('aria-busy', 'true')
       const total = Number(await topicScroll.locator('[aria-setsize]').first().getAttribute('aria-setsize'))
       await revealVirtualRow(topicScroll, total)
       const visibleTopicRow = p.locator(`#main-content [data-message-id="${chainMessages[51].id}"]`)
