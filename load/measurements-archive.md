@@ -1808,3 +1808,54 @@ Result: **Target 1 MISSED on both routes. Target 2 MISSED for throttled cold FCP
 - `fp-evaluation.json` `18e2ecba…`
 
 Reproduce each arm with `FIRST_PAINT_IMAGE=fukulow-954:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`, interleaved as above.
+
+## Early Channel list (#954 PR-1, 2026-11-25)
+
+PR #978 starts the Channel list read at startup. It ran on 2026-11-25 11:00–11:31 JST on the Mac (M5) with Docker Desktop, the Caddy profile and Node 26.13.1. It followed the plan fixed on the PR before any run: PR #962's conditions, the same 8 cells, 5 runs per cell and the same statistics.
+- **Arms:** B is `main` at `8a460b99`. A is the PR head `b9b801ed`, which is that `main` merged in.
+- **Images:** `fukulow-978:{before,after}` were built once before timing.
+- **Rounds:** 5 interleaved rounds, B/A in round 1 with the order swapped each round. No cell was INCONCLUSIVE, so the extension to 9 rounds did not run.
+- **Host:** AC power on before and after all 10 arms. Load average 1.56–3.35; timing started at 2.93.
+
+Result: **Target 1 MET on both routes. Target 2 MET in every other cell.** MAC-RELATIVE.
+
+| Cell | Metric | B p50 / p95 | A p50 / p95 | Change | Paired Δ p50 (95% CI), ms | Target | Status |
+|---|---|---:|---:|---:|---|---|---|
+| `/` unthrottled cold | FCP | 60.0 / 60.0 | 56.0 / 56.0 | -6.7% | -4.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/` unthrottled cold | Timeline | 441.4 / 446.3 | 105.0 / 106.6 | -76.2% | -336.7 (-347.6 to -331.7) | improves, CI < 0 | MET |
+| `/` unthrottled warm | FCP | 52.0 / 56.0 | 52.0 / 52.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/` unthrottled warm | Timeline | 438.4 / 440.9 | 100.0 / 101.6 | -77.2% | -339.0 (-341.1 to -330.5) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled cold | FCP | 56.0 / 60.0 | 56.0 / 56.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled cold | Timeline | 442.3 / 445.4 | 105.7 / 422.7 | -76.1% | -336.4 (-337.7 to -329.1) | improves, CI < 0 | MET |
+| `/o/:org/c/:channel` unthrottled warm | FCP | 52.0 / 52.0 | 52.0 / 52.0 | +0.0% | 0.0 (-4.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` unthrottled warm | Timeline | 434.9 / 439.1 | 101.8 / 104.7 | -76.6% | -333.2 (-336.2 to -326.6) | <= +5.0% | MET |
+| `/` throttled cold | FCP | 1032.0 / 1044.0 | 1032.0 / 1040.0 | +0.0% | 0.0 (-8.0 to 4.0) | <= +5.0% | MET |
+| `/` throttled cold | Timeline | 3649.5 / 3657.0 | 2644.2 / 2654.0 | -27.5% | -1001.7 (-1011.5 to -997.4) | <= +5.0% | MET |
+| `/` throttled warm | FCP | 240.0 / 244.0 | 240.0 / 248.0 | +0.0% | 0.0 (-4.0 to 8.0) | <= +5.0% | MET |
+| `/` throttled warm | Timeline | 2390.1 / 2405.3 | 2376.4 / 2397.6 | -0.6% | -16.5 (-30.5 to 1.6) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled cold | FCP | 1040.0 / 1044.0 | 1040.0 / 1048.0 | +0.0% | 0.0 (-8.0 to 8.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled cold | Timeline | 3640.8 / 3652.0 | 2652.2 / 2661.6 | -27.2% | -990.7 (-998.6 to -983.1) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled warm | FCP | 240.0 / 248.0 | 240.0 / 244.0 | +0.0% | -4.0 (-8.0 to 0.0) | <= +5.0% | MET |
+| `/o/:org/c/:channel` throttled warm | Timeline | 2389.6 / 2393.7 | 2377.4 / 2389.7 | -0.5% | -7.5 (-26.2 to 1.6) | <= +5.0% | MET |
+
+**Reported, not gated (fixed before the run):**
+- **Throttled cold Timeline against the Issue's expected 0.4–0.8 s:** about -1.0 s on both routes (`/` -1,001.7 ms, `/o/:org/c/:channel` -990.7 ms). That is more than expected; the plan had expected no throttled gain, because three Channel list reads gate it.
+- **Startup Channel list reads** (per round, B → A):
+
+| Cell | B | A |
+|---|---|---|
+| `/` unthrottled cold / warm | 3,3,3,3,3 / 3,3,3,3,3 | 2,2,2,2,3 / 2,2,3,2,3 |
+| `/o/:org/c/:channel` unthrottled cold / warm | 3,3,3,3,3 / 3,3,3,3,3 | 3,3,2,3,2 / 2,3,2,3,2 |
+| `/` throttled cold / warm | 3,4,4,3,3 / 3,3,3,3,3 | 2,2,2,2,2 / 3,4,4,3,3 |
+| `/o/:org/c/:channel` throttled cold / warm | 3,4,3,3,3 / 3,3,3,3,3 | 2,2,2,2,2 / 3,4,3,3,3 |
+
+**Reading:**
+- Throttled cold cells drop to 2 reads in every round, which matches the -1.0 s. Warm throttled cells keep 3–4 reads and do not change.
+- **Residual tail:** on `/o/:org/c/:channel` unthrottled cold, rounds 1, 2 and 4 each had one run with the B-like Timeline (round p95 422.7, 443.3, 438.7 ms against p50 about 105 ms). Those are the rounds where A still shows 3 reads, so in some unthrottled runs the third read still happens. The p50 gate is unaffected.
+
+**Raw data:** per-arm `results.json` and `run.log`, the chain log and `fp-evaluation.json` are kept outside Git on the maintainer's Mac. sha256 values:
+- `chain.ts` `b3e6314f…`
+- `chain.log` `60dc95dc…`
+- `fp-evaluation.json` `84136e83…`
+
+Reproduce each arm with `FIRST_PAINT_IMAGE=fukulow-978:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`, interleaved as above.
