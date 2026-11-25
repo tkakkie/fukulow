@@ -4,7 +4,7 @@ import { createRequestDeadlines } from './request-deadlines'
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
 export type FencedInvalidation = Exclude<Invalidation, 'notice'>
-export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
+export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number, discovery?: boolean): void; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
@@ -29,6 +29,7 @@ export function createActivityTarget<T>(options: {
   let failure: Exclude<Result<T>, { ok: true }> | undefined
   let completion: (() => void) | undefined
   let controller: AbortController | undefined
+  let running: Promise<void> | undefined
   function schedule(ms: number) {
     if (timer !== undefined || closed) return
     due = Date.now() + ms
@@ -40,7 +41,17 @@ export function createActivityTarget<T>(options: {
     const cap = Math.min(30_000, 1000 * 2 ** Math.min(attempt++, 5))
     schedule(Math.max(retryAfterMs, cap / 2 + random() * cap / 2))
   }
-  async function run() {
+  // ensure() joins the load in flight instead of settling before it.
+  function run() {
+    const started = !inFlight, pending = execute()
+    if (started && inFlight) {
+      running = pending
+      // Callers observe the rejection on pending itself; the bookkeeping chain must not add another.
+      void pending.finally(() => { if (running === pending) running = undefined }).catch(() => {})
+    }
+    return pending
+  }
+  async function execute() {
     if (closed || !dirty) return
     if (inFlight) { queued = true; return }
     if (retry || options.canLoad?.() === false) return
@@ -104,7 +115,10 @@ export function createActivityTarget<T>(options: {
     // An in-flight snapshot can cover a newer notice if it passes covers().
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
-    ensure() { if (!closed && !stopped && !dirty && !inFlight && timer === undefined && !retry) { dirty = true; return run() } },
+    ensure() {
+      if (inFlight) return running
+      if (!closed && !stopped && !dirty && timer === undefined && !retry) { dirty = true; return run() }
+    },
     refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
     suspend() { generation++; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
@@ -127,7 +141,7 @@ export function createActivity(options: {
   const random = options.random ?? Math.random, period = options.periodMs ?? 30_000
   let timer: ReturnType<typeof setTimeout> | undefined, generation = 0, closed = false
   const retire = (target: ActivityTarget | undefined) => { if (target?.suspend) target.suspend(); else target?.close() }
-  const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200) => targets.get(key)?.invalidate(reason, delay)
+  const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200, discovery?: boolean) => targets.get(key)?.invalidate(reason, delay, discovery)
   const invalidateMemberLists = () => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access') }
   function all(delay: number, reason: Invalidation = 'reconcile') {
     options.reconcile?.()
@@ -149,7 +163,8 @@ export function createActivity(options: {
   }
   const lists = (kind: 'dm' | 'channel' | undefined, reason: Invalidation = 'notice') => {
     if (kind !== 'dm') channelLists(reason)
-    if (kind !== 'channel') invalidate('dms', reason)
+    // Only access changes and unknown kinds can reveal a DM the list has not discovered (P-D5 notice delta).
+    if (kind !== 'channel') invalidate('dms', reason, 200, reason === 'access' || kind === undefined)
   }
   return {
     hold(key: string, target: ActivityTarget) { target.held?.(); if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
@@ -187,7 +202,7 @@ export function createActivity(options: {
           invalidateMemberLists()
           break
         }
-        case 'dm_list_changed': invalidate('dms', 'access'); break
+        case 'dm_list_changed': invalidate('dms', 'access', 200, true); break
         case 'channel_list_changed': channelLists('access'); invalidate('open-channel', 'access'); break
         case 'channel_members_changed': invalidate(`channel-members:${event.channel_id}`, 'access'); break
         case 'members_changed': invalidate('capabilities', 'access'); invalidateMemberLists(); break

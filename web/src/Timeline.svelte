@@ -108,6 +108,8 @@
     return search.view?.lines ?? []
   })
   let skipUnreadVisit = $state(false)
+  // The visit stops waiting for its entry position (loading timeout or own send) and opens at the bottom, as after a failed boundary.
+  let entryPositionAbandoned = $state(false)
   let scrolledFirstUnreadId = $state<string | null>(null)
   const entry = $derived(uState?.entry?.scope.topicId === null ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
@@ -138,7 +140,7 @@
     ),
   )
   const firstUnreadMessageId = $derived(
-    !search && !skipUnreadVisit && entry &&
+    !search && !skipUnreadVisit && !entryPositionAbandoned && entry &&
       entry.boundary !== null &&
       (entry.unreadAtEntry ?? 0) > 0 &&
       !needsOlderUnreadPage &&
@@ -173,7 +175,17 @@
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
+  // Until the first history page arrives, `hasOlder` cannot tell whether the first Unread is still to load.
+  const mainHistoryPending = $derived(Boolean(tState && tState.main.asOfSeq === undefined && !tState.main.error))
+  const awaitingEntryPosition = $derived(
+    !search && !skipUnreadVisit && !entryPositionAbandoned &&
+      (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && (hasOlder || mainHistoryPending) && !olderError)),
+  )
   let initialScrollApplied = $state(false)
+  // Rows stay mounted because positioning needs them, but are hidden and inert until the entry position is applied (`docs/ui.md` §8).
+  const positioning = $derived(!initialScrollApplied && (awaitingEntryPosition || firstUnreadMessageId !== null))
+  // The retryable error replaces the loading state (`docs/ui.md` §5), so the positioning Skeleton yields to it.
+  const loadFailed = $derived(effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))
   let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
   let lastScrollScopeKey = ''
   let lastScrollEntryId: symbol | null = null
@@ -198,7 +210,8 @@
       if (!initialScrollApplied || search.view?.status !== 'ready') return
     } else if (!skipUnreadVisit) {
       if (currentEntry.boundary === null || needsOlderUnreadPage) return
-      if ((currentEntry.unreadAtEntry ?? 0) > 0) {
+      // A visit that opened at the bottom without a marker presents what is visible, as with no Unread.
+      if ((currentEntry.unreadAtEntry ?? 0) > 0 && !entryPositionAbandoned) {
         if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
       } else if (!initialScrollApplied) {
         return
@@ -211,7 +224,8 @@
   }
 
   async function focusMessage(id: string | undefined) {
-    if (!id) return
+    // Hidden rows cannot take focus, and revealing one would scroll the list positioning still owns.
+    if (!id || positioning) return
     activeRowId = id
     await rowWindow?.reveal(id, true)
   }
@@ -374,7 +388,8 @@
   })
 
   $effect(() => {
-    if (search || skipUnreadVisit || !needsOlderUnreadPage || !hasOlder || loadingOlder || olderError || targetUnavailable) return
+    // A visit that opened at the bottom no longer positions at the first Unread, so it pages no older history toward it.
+    if (search || skipUnreadVisit || entryPositionAbandoned || !needsOlderUnreadPage || !hasOlder || loadingOlder || olderError || targetUnavailable) return
     if (effectiveStatus !== 'ready') return
     loadOlderWithAnchor()
   })
@@ -392,6 +407,7 @@
       lastScrollEntryId = currentEntryId
       initialScrollApplied = false
       scrolledFirstUnreadId = null
+      entryPositionAbandoned = false
       pendingScrollAction = null
     }
     const displayed = !awaitingInitialSenders && isTimelineDisplayed(scrollEl, viewSelected)
@@ -405,10 +421,11 @@
           },
     )
     const pendingIds = mainPending.map((p) => p.clientMessageId)
-    const status = effectiveStatus
+    // Positioning counts as loading so the controller's loading timeout bounds it; a hidden view defers positioning
+    // to its display (`docs/ui.md` §8), so its wait starts only once displayed.
+    const status = positioning && displayed && effectiveStatus === 'ready' ? 'loading' : effectiveStatus
     const targetFirstUnreadId = firstUnreadMessageId
-    const awaitingFirstUnread =
-      !skipUnreadVisit && (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && hasOlder && !olderError))
+    const awaitingFirstUnread = awaitingEntryPosition
     const { action, anchor } = scrollController.sync({
       channelId: id,
       visitId: currentEntryId,
@@ -458,16 +475,25 @@
           scrolledFirstUnreadId = targetFirstUnreadId
         }
         if (deferred.action === 'scroll_bottom' || deferred.action === 'scroll_first_unread') {
+          // Opening at the bottom ends this visit's wait, so a boundary resolving later neither marks nor moves it (`docs/ui.md` §8).
+          if (deferred.action === 'scroll_bottom' && !initialScrollApplied && !search) entryPositionAbandoned = true
           initialScrollApplied = true
         }
       } else {
         captureCurrentAnchor()
         if (!search && status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
+          // An empty view opening without its entry position ends the wait, as an opening at the bottom does.
+          if (!initialScrollApplied) entryPositionAbandoned = true
           initialScrollApplied = true
         }
       }
       reportPresented()
     }).catch(console.error)
+  })
+
+  $effect(() => {
+    // An initial history read that times out shows the retryable error instead; `再試行` restarts the same wait.
+    if (positioning && scrollView.loadingTimedOut && effectiveStatus === 'ready') entryPositionAbandoned = true
   })
 
   $effect(() => {
@@ -523,6 +549,7 @@
     if (!ok) return false
     if (search) { await jumpToBottom(); return true }
     if (tState?.main.hasNewer) await topics?.loadMainLatest()
+    if (positioning) entryPositionAbandoned = true
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
       applyScrollAction(action, null)
@@ -546,7 +573,7 @@
     <div class="timeline-section__banner">
       <ChannelUnavailableBanner {ongoToChannelList} />
     </div>
-  {:else if !search && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
+  {:else if !search && loadFailed}
     <div class="timeline-section__banner">
       <StatusBanner
         tone="danger"
@@ -558,8 +585,20 @@
     </div>
   {/if}
 
-  <div class="timeline-scroll" bind:this={scrollEl} onscroll={handleScroll}>
-    {#if !organizationUnavailable && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && (awaitingInitialSenders || (lines.length === 0 && mainPending.length === 0))}
+  {#if positioning && !targetUnavailable && !loadFailed}
+    <div class="timeline-positioning">
+      <Skeleton rows={4} label="メッセージを読み込み中" />
+    </div>
+  {/if}
+  <div
+    class="timeline-scroll"
+    class:timeline-scroll--positioning={positioning}
+    aria-busy={positioning ? 'true' : undefined}
+    inert={positioning}
+    bind:this={scrollEl}
+    onscroll={handleScroll}
+  >
+    {#if !organizationUnavailable && !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && (awaitingInitialSenders || (lines.length === 0 && mainPending.length === 0))}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
 
@@ -725,7 +764,9 @@
   }
 
   .timeline-scroll {
+    /* Explicit column: the positioning overlay shares this cell, and auto-placement would move this into an implicit column. */
     grid-row: 2;
+    grid-column: 1;
     overflow-y: auto;
     overflow-anchor: none;
     padding: var(--space-8) var(--space-16);
@@ -733,6 +774,18 @@
     flex-direction: column;
     gap: var(--space-8);
     min-height: 0;
+    min-width: 0;
+  }
+
+  .timeline-scroll--positioning {
+    visibility: hidden;
+  }
+
+  .timeline-positioning {
+    grid-row: 2;
+    grid-column: 1;
+    padding: var(--space-8) var(--space-16);
+    overflow: hidden;
     min-width: 0;
   }
 

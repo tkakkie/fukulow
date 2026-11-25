@@ -24,8 +24,13 @@ for (const role of ['member', 'guest'] as const) test(`DM discovery and live Unr
         if (frame.type === 'unsubscribe') subscriptions.delete(frame.channel_id)
       })
     })
+    // Open only after the peer's initial delta and coverage attempts: the list then finds the DM only through its
+    // notice, never through the initial allowance or a lucky O5 run (#956).
+    const lanes = (lane: string) => peer!.page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/dms/changes') && new URL(r.url()).searchParams.get('lane') === lane)
+    const initialDiscovery = Promise.all([lanes('delta'), lanes('coverage')])
     await peer.page.goto(role === 'member' ? `/o/${org}/c/${channel.id}` : `/o/${org}`)
     await expect.poll(() => frames.some(frame => frame.type === 'activity_ready')).toBe(true)
+    await initialDiscovery
     // Start from the Member action; discovery on the peer must not need a Message subscription.
     const details = owner.locator('details.member-list')
     if (!(await details.evaluate((el: HTMLDetailsElement) => el.open))) await details.locator('summary').click()
