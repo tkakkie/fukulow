@@ -23,7 +23,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into()
         });
     }
-    server_main(command)
+    let trace = if command.is_empty() {
+        fukulow_server::observability::revocation_trace::start()?
+    } else {
+        None
+    };
+    let result = server_main(command);
+    if let Some(trace) = trace {
+        let drained = trace.finish();
+        result?;
+        return Ok(drained?);
+    }
+    result
 }
 
 #[tokio::main]
