@@ -49,7 +49,7 @@ function isMessage(value: unknown): value is Message {
 function isServerEvent(value: unknown): value is ServerEvent {
   if (!isObject(value)) return false
   switch (value.type) {
-    case 'activity_ready': case 'activity_reset': case 'channel_list_changed': case 'members_changed':
+    case 'activity_ready': case 'activity_reset': case 'channel_list_changed': case 'dm_list_changed': case 'members_changed':
       return Object.keys(value).every(k => k === 'type')
     case 'sections_changed':
       return sectionGeneration(value.generation) !== undefined && Object.keys(value).every(k => k === 'type' || k === 'generation')
