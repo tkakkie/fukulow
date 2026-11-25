@@ -23,6 +23,8 @@ const org = `${base}/api/v1/orgs/${data.organization}`;
 const channel = `${org}/channels/${data.chain.channel}`;
 const otherChannels = data.channels.filter(id => id !== data.chain.channel);
 const { lanes, topicScenarios, options: workload } = workloadOptions(p, step, __ENV.MOVE_READ_LANES);
+// k6 replaces options.scenarios with its Go ScenarioConfigs before handleSummary runs.
+const scenarioNames = Object.keys(workload.scenarios ?? {});
 const counter = Object.fromEntries(counts.map(name => [name, new Counter(`move_${name}`)])) as Record<typeof counts[number], Counter>;
 const latency = new Trend('move_success_ms', true);
 const start = new Counter('move_start_ms');
@@ -145,6 +147,6 @@ export function handleSummary(summary: { metrics: Record<string, { values: Recor
   }]));
   return { stdout: 'MOVE_RESULT ' + JSON.stringify({ lanes: rows, started: value('move_start_ms'),
     topicReaders: topicScenarios.map(name => value(`move_topic_reads{scenario:${name}}`) ?? (diagnostic ? -1 : 0)),
-    ...(diagnostic && { scenarioDrops: Object.fromEntries(Object.keys(workload.scenarios ?? {}).map(name =>
+    ...(diagnostic && { scenarioDrops: Object.fromEntries(scenarioNames.map(name =>
       [name, value(`dropped_iterations{scenario:${name}}`) ?? null])) }) }) + '\n' };
 }
