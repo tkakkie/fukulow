@@ -115,19 +115,12 @@ async fn append_counts_concurrent_first_inserts_accumulate(pool: PgPool) {
         .await;
         second.commit().await.unwrap();
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let blocked: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
-                .bind(pid)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            if blocked {
-                break;
-            }
-            assert!(!pending.is_finished(), "the second INSERT did not wait");
-            tokio::task::yield_now().await;
+    crate::test_support::poll_until(Duration::from_secs(5), async || {
+        if crate::test_support::Blocked::Pid(pid).count(&pool).await > 0 {
+            return Some(());
         }
+        assert!(!pending.is_finished(), "the second INSERT did not wait");
+        None
     })
     .await
     .expect("the second INSERT did not wait on the first transaction");

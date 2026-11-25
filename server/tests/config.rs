@@ -29,6 +29,32 @@ fn assert_config_error(output: Output, diagnostic: &str) {
 }
 
 #[test]
+fn measured_server_requires_a_new_dedicated_trace_file_in_both_modes() {
+    let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir(&dir).unwrap();
+    let existing = dir.join("trace");
+    std::fs::write(&existing, "existing logs").unwrap();
+    for switch in ["0", "1"] {
+        for path in [None, Some(existing.as_path())] {
+            let mut server = server_command();
+            server
+                .env("FUKULOW_REVOCATION_MEASUREMENT", "1")
+                .env("FUKULOW_REVOCATION_TRACE_EVENTS", switch);
+            if let Some(path) = path {
+                server.env("FUKULOW_REVOCATION_TRACE_PATH", path);
+            }
+            let output = server.output().unwrap();
+            assert!(!output.status.success());
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(stderr.contains("FUKULOW_REVOCATION_TRACE_PATH"), "{stderr}");
+            assert!(!stderr.contains("DATABASE_URL"), "{stderr}");
+        }
+    }
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), "existing logs");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn startup_panics_never_echo_payloads_or_secrets() {
     let output = Command::new(env!("CARGO_BIN_EXE_fukulow-server"))
         .env_clear()

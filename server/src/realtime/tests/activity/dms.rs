@@ -285,14 +285,10 @@ async fn dm_loss_retires_paused_query_enqueue_and_first_handoff_without_revival(
         } else {
             None
         };
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered().await;
         // Conservative A8 epoch retirement is irreversible even when current access exists again.
         delivery.retire(f.organization, peer);
-        gate.release.add_permits(1);
+        gate.release();
         delivery.drained().await;
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), allowed.next())
@@ -345,11 +341,7 @@ async fn dm_fallback_retires_lost_grant_provenance_before_regrant_and_fresh_work
             vec![(channel, f.member, false), (channel, peer, false)],
         )
         .committed(f.state.pool.clone());
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     // Lose the fast signal and replace the durable lifetime while the old query is paused.
     sqlx::query("UPDATE channel_members SET grant_id=$4 WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3")
         .bind(f.organization).bind(channel).bind(peer).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
@@ -359,7 +351,7 @@ async fn dm_fallback_retires_lost_grant_provenance_before_regrant_and_fresh_work
             crate::auth::SubscriptionScope::Member(f.organization, peer),
         )
         .await;
-    gate.release.add_permits(1);
+    gate.release();
     delivery.drained().await;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), allowed.next())
@@ -516,11 +508,7 @@ async fn dm_notice_first_handoff_yields_to_known_session_and_membership_loss(poo
                 vec![(channel, peer, false), (channel, f.member, false)],
             )
             .committed(f.state.pool.clone());
-        tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered().await;
         let (method, path) = if code == 4001 {
             ("DELETE", "/api/v1/session".to_owned())
         } else {
@@ -539,7 +527,7 @@ async fn dm_notice_first_handoff_yields_to_known_session_and_membership_loss(poo
         .await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
         raw_closed(&mut denied, code).await;
-        gate.release.add_permits(1);
+        gate.release();
         assert!(notices(&f, &mut allowed).await.contains(&changed()));
     }
 }

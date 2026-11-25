@@ -2,7 +2,7 @@
 // The release build enables measurement tracing; failures are simulated outside the server.
 // Run: ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir [--smoke] [--sizes 256,1024] [--kinds recheck,outage] [--repeats 3]
 // Recheck only: ulimit -n 65536; node load/revocation-burst.ts --out /absolute/new/dir --kinds recheck --sizes 4096 --repeats 3
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync, createWriteStream } from 'node:fs';
 import { cpus, totalmem, platform, arch, release } from 'node:os';
@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
 import { Relay } from './revocation-burst-relay.ts';
 import { startRssSampler } from './revocation-burst-rss.ts';
+import { spawnMeasuredServer } from './revocation-measured-server.ts';
 import { installGate, removeDatabase, seedMembers, Session, sql, startDatabase, waitReady, type Database } from './revocation-burst-db.ts';
 import { encloseClockBrackets, intersectClockBrackets, judge, runUncertaintyMs, verdictBySize, KINDS, SIZES, THRESHOLDS, type ClockSample, type Kind, type Member, type PoolSample, type Probe, type Revocation, type Run, type RunVerdict, type SendRecord, type SendTiming } from './revocation-burst-judgment.ts';
 import type { Channel, CreateChannelRequest, NativeSessionResponse, ServerEvent, SetupRequest } from '../web/src/api-schema.d.ts';
@@ -101,8 +102,7 @@ async function measure(kind: Kind | 'control', size: number, repeat: number): Pr
   const relayPort = await relay.listen();
   const appPort = 20000 + Math.floor(Math.random() * 20000);
   const setupToken = randomBytes(16).toString('hex');
-  const server = spawn(binary, [], { env: { PATH: process.env.PATH, FUKULOW_ADDR: `127.0.0.1:${appPort}`, FUKULOW_COOKIE_SECURE: 'false', FUKULOW_SETUP_TOKEN: setupToken,
-    FUKULOW_REVOCATION_MEASUREMENT: '1', DATABASE_URL: owner('fukulow_app', db.appPassword, relayPort) }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const server = spawnMeasuredServer(binary, dir, appPort, setupToken, owner('fukulow_app', db.appPassword, relayPort));
   active.server = server;
   const log = createWriteStream(resolve(dir, 'server.log'));
   const serverLogsClosed = new Promise<void>(resolve => server.once('close', () => log.end(resolve)));

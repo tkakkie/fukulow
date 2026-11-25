@@ -20,7 +20,6 @@
   <button
     type="button"
     class="ui-chip"
-    class:ui-chip--selected={selected}
     {disabled}
     aria-label={ariaLabel}
     aria-pressed={selected}
@@ -29,7 +28,7 @@
     {#if children}{@render children()}{/if}
   </button>
 {:else}
-  <span class="ui-chip" class:ui-chip--selected={selected} aria-label={ariaLabel}>
+  <span class="ui-chip" aria-current={selected ? 'true' : undefined} aria-label={ariaLabel}>
     {#if children}{@render children()}{/if}
   </span>
 {/if}
@@ -62,7 +61,8 @@
     color: var(--text);
   }
 
-  .ui-chip--selected {
+  .ui-chip[aria-pressed='true'],
+  .ui-chip[aria-current='true'] {
     background-color: var(--tint);
     color: var(--on-tint);
   }

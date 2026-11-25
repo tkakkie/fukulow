@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, poll_until, wait_blocked};
 
 async fn failed_send(f: &Fixture, key: Uuid, body: &str) {
     let response = request(
@@ -19,26 +20,13 @@ async fn failed_send(f: &Fixture, key: Uuid, body: &str) {
 }
 
 async fn waiting_for_commit(pool: &PgPool, pid: i32) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_locks waiter JOIN pg_locks holder \
-                 USING (locktype, database, classid, objid, objsubid) \
-                 WHERE holder.pid = $1 AND holder.granted AND waiter.mode = 'ShareLock' \
-                 AND NOT waiter.granted AND waiter.locktype = 'advisory')",
-            )
-            .bind(pid)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-            if waiting {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_blocked(
+        pool,
+        Blocked::Advisory(Advisory::SharedBehind(pid)),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
 }
 
 #[fukulow_test::test]
@@ -55,7 +43,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
         let mut during = f.server.connect(&f.token).await;
         let replay = pause(f.channel);
         subscribe(&mut during, f.channel, initial_seq).await;
-        entered(&replay).await;
+        replay.entered().await;
 
         let key = Uuid::new_v4();
         let pending = messages::ambiguous_commit(key);
@@ -360,13 +348,9 @@ async fn send_deadline_during_commit_signals_and_reconnect_waits_for_final_messa
         )
         .await
     });
-    let committing = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE query = 'COMMIT' AND $1 = ANY(pg_blocking_pids(pid))")
-                .bind(holder).fetch_optional(&pool).await.unwrap();
-            if let Some(pid) = pid { break pid; }
-            tokio::task::yield_now().await;
-        }
+    let committing = poll_until(Duration::from_secs(2), async || {
+        sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE query = 'COMMIT' AND $1 = ANY(pg_blocking_pids(pid))")
+            .bind(holder).fetch_optional(&pool).await.unwrap()
     }).await.unwrap();
     tokio::time::pause();
     tokio::time::advance(messages::NOTIFICATION_TIMEOUT).await;
@@ -423,20 +407,14 @@ async fn send_deadline_during_sleeping_commit_ends_backend_and_releases_locks(po
         )
         .await
     });
-    let pid: i32 = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let pid = sqlx::query_scalar(
-                "SELECT pid FROM pg_stat_activity \
-                WHERE datname = current_database() AND query = 'COMMIT' AND wait_event = 'PgSleep'",
-            )
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
-            if let Some(pid) = pid {
-                break pid;
-            }
-            tokio::task::yield_now().await;
-        }
+    let pid: i32 = poll_until(Duration::from_secs(2), async || {
+        sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity \
+             WHERE datname = current_database() AND query = 'COMMIT' AND wait_event = 'PgSleep'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
     })
     .await
     .unwrap();

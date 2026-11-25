@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-#[path = "../src/test_support.rs"]
+#[path = "../src/test_support/pools.rs"]
 mod test_support;
 
 use futures_util::FutureExt;

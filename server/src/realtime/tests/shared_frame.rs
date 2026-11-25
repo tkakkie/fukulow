@@ -27,7 +27,7 @@ async fn live_serialization_is_once_per_fanout_including_shared_gap_recovery(poo
         let key = Uuid::new_v4();
         let gate = messages::pause_publication(key);
         let recovered = send(&f, &f.token, f.channel, key, "recovered prefix").await;
-        entered_publication(&gate).await;
+        gate.entered().await;
         let later = send(&f, &f.token, f.channel, Uuid::new_v4(), "publishes first").await;
         tokio::time::timeout(Duration::from_secs(5), async {
             while delivery.publication_cursor(f.organization, f.channel).await != Some(3) {
@@ -45,7 +45,7 @@ async fn live_serialization_is_once_per_fanout_including_shared_gap_recovery(poo
             3 * expected
         );
         assert_eq!(delivery.live_refills.load(Ordering::Relaxed), 0);
-        gate.release.add_permits(1);
+        gate.release();
         delivery.flush().await;
         // The delayed duplicate publication must neither serialize nor deliver again.
         let last = send(&f, &f.token, f.channel, Uuid::new_v4(), "after duplicate").await;
@@ -131,14 +131,6 @@ fn measure_live_frame_serialization_and_sharing() {
     }
 }
 
-async fn entered_publication(gate: &messages::PublicationGate) {
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-}
-
 #[fukulow_test::test]
 async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed_mentions(
     pool: PgPool,
@@ -175,7 +167,7 @@ async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed
     assert_eq!(response.status(), StatusCode::CREATED);
     let ack: messages::Message =
         serde_json::from_slice(&to_bytes(response.into_body(), 32 * 1024).await.unwrap()).unwrap();
-    entered_publication(&gate).await;
+    gate.entered().await;
     assert_eq!(ack.mentions.as_ref().unwrap()[0].name, "Member");
     sqlx::query("UPDATE users SET name=$1 WHERE organization_id=$2 AND id=$3")
         .bind("現在の名前 \"quoted\"\\\n")
@@ -184,7 +176,7 @@ async fn shared_live_frame_matches_old_json_bytes_with_topic_reply_and_refreshed
         .execute(&pool)
         .await
         .unwrap();
-    gate.release.add_permits(1);
+    gate.release();
     f.state.message_delivery.flush().await;
     let enriched = queues[0].events.try_recv().unwrap();
     assert!(Arc::ptr_eq(

@@ -562,9 +562,7 @@ test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency ha
   r.frequency = { ...evidence, startSession: sid, endSession: sid };
   r.launchCheck = { ...r.launchCheck, frequencyPolicy: evidence.before };
   for (const s of r.sends) {
-    s.counters = block(s.order).counters;
-    s.counters.open.launchSession = sid;
-    s.counters.close.launchSession = sid;
+    s.counters = block(s.order, { launchSession: sid }).counters;
     if (s.measuredWindow && s.pgbenchWindow) s.measuredWindow = { ...s.pgbenchWindow, monoMs: 120_000 };
     s.affinity = [
       { kind: 'client', pid: 10, cpus: sets796.client },

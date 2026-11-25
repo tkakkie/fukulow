@@ -1,14 +1,15 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use std::time::Duration;
 
 pub(crate) async fn wait_lock(pool: &PgPool, pattern: &str) {
-    tokio::time::timeout(Duration::from_secs(5),async {
-        loop {
-            let count:i64=sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1")
-                .bind(pattern).fetch_one(pool).await.unwrap();
-            if count>0 {break}tokio::task::yield_now().await;
-        }
-    }).await.unwrap_or_else(|_|panic!("no matching lock waiter: {pattern}"));
+    wait_blocked(
+        pool,
+        Blocked::LockQuery(pattern),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
 }
 
 #[fukulow_test::test]

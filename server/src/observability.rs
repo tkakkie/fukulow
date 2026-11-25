@@ -18,6 +18,9 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
+pub mod revocation_trace;
+mod revocation_trace_writer;
+
 pub const INTERVAL: Duration = Duration::from_secs(60);
 const REVOCATION_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 const TARGET: &str = "fukulow";

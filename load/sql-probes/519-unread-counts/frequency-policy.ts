@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import type { PolicySnapshot } from '../../harness-core/cpu-policy.ts';
+import { capKHz } from './frequency-evidence.ts';
 
 const sys = '/sys/devices/system/cpu';
 const read = (path: string) => readFileSync(path, 'utf8').trim();
@@ -32,7 +33,7 @@ export function verifyLimits(values: Limits) {
 export async function withCap<T>(saved: Limits, work: () => Promise<T>, io: {
   write(values: Limits): Promise<void>; verify(values: Limits): void; pending(saved: Limits): void; restored(): void;
 }) {
-  const capped = Object.fromEntries(Object.keys(saved).map(p => [p, '1700000']));
+  const capped = Object.fromEntries(Object.keys(saved).map(p => [p, capKHz]));
   io.pending(saved);
   try {
     await io.write(capped);

@@ -3,6 +3,7 @@ use super::*;
 use crate::test_support::TestPools;
 use axum::Extension;
 
+mod concurrency;
 mod denials;
 mod limits;
 mod maintenance;

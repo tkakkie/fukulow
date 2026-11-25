@@ -80,7 +80,6 @@
           type="button"
           role="tab"
           class="ui-panel__tab"
-          class:ui-panel__tab--active={activeTab === tab.id}
           aria-selected={activeTab === tab.id}
           aria-controls={activeTab === tab.id ? `panel-tabpanel-${tab.id}` : undefined}
           tabindex={activeTab === tab.id ? 0 : -1}
@@ -124,6 +123,14 @@
     color: var(--text);
     border-radius: var(--radius-16);
     overflow: hidden;
+    transform: translateX(0);
+    transition: transform var(--duration-panel) var(--ease-out);
+  }
+
+  @starting-style {
+    .ui-panel {
+      transform: translateX(100%);
+    }
   }
 
   .ui-panel--reply {
@@ -183,7 +190,7 @@
     color: var(--text);
   }
 
-  .ui-panel__tab--active {
+  .ui-panel__tab[aria-selected='true'] {
     background-color: var(--tint);
     color: var(--on-tint);
     font-weight: var(--font-weight-semibold);

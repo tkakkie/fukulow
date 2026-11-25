@@ -1,13 +1,15 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 use std::time::Duration;
 
 async fn waiting(pool: &PgPool) {
-    tokio::time::timeout(Duration::from_secs(3),async {
-        loop {
-            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND pid<>pg_backend_pid())").fetch_one(pool).await.unwrap();
-            if blocked {break;} tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        pool,
+        Blocked::OtherLock,
+        Count::AtLeast(1),
+        Duration::from_secs(3),
+    )
+    .await;
 }
 
 async fn loss(app: &Router, author: &str, channel: Uuid, target: Uuid, deactivate: bool) {
@@ -64,11 +66,7 @@ async fn mention_send_before_revoke_or_deactivate_holds_authority_through_commit
         let sending = tokio::spawn(async move {
             sent(&work_app, &work_author, channel, input(key, &work_text)).await
         });
-        tokio::time::timeout(Duration::from_secs(3), gate.entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        gate.entered_within(Duration::from_secs(3)).await;
         // These locks, independent of the #135 barrier, prove the Member and
         // grant authority itself is retained until COMMIT.
         for sql in [
@@ -96,7 +94,7 @@ async fn mention_send_before_revoke_or_deactivate_holds_authority_through_commit
         });
         waiting(&pool).await;
         assert!(!losing.is_finished());
-        gate.release.add_permits(1);
+        gate.release();
         let accepted = sending.await.unwrap();
         losing.await.unwrap();
         assert_eq!(

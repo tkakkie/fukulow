@@ -75,6 +75,7 @@ pub fn groups(pmu: u32) -> io::Result<Vec<(Counter, Counter)>> {
 pub fn sweep(groups: &mut [(Counter, Counter)]) -> io::Result<Vec<Value>> {
     groups.iter_mut().enumerate().map(|(cpu, (leader, member))| {
         let data = leader.read_group()?;
+        let raw = now(ClockId::MonotonicRaw);
         let stamp = now(ClockId::Monotonic);
         if data.len() != 2 {
             return Err(missing("group size"));
@@ -83,7 +84,8 @@ pub fn sweep(groups: &mut [(Counter, Counter)]) -> io::Result<Vec<Value>> {
         let m = data.get(member).ok_or_else(|| missing("MPERF"))?;
         let enabled = data.time_enabled().ok_or_else(|| missing("enabled time"))?;
         let running = data.time_running().ok_or_else(|| missing("running time"))?;
-        Ok(json!({"cpu": cpu, "monoNs": stamp.to_string(), "aperfId": a.id().to_string(), "mperfId": m.id().to_string(),
+        Ok(json!({"cpu": cpu, "monoNs": stamp.to_string(), "rawNs": raw.to_string(),
+            "aperfId": a.id().to_string(), "mperfId": m.id().to_string(),
             "aperf": a.value().to_string(), "mperf": m.value().to_string(), "enabled": enabled.as_nanos().to_string(),
             "running": running.as_nanos().to_string()}))
     }).collect()

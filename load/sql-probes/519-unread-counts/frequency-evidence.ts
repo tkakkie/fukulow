@@ -1,15 +1,17 @@
 // Validates raw collector evidence before it can be used to derive per-CPU work.
 import type { PolicySnapshot } from '../../harness-core/cpu-policy.ts';
 import { below, multiply, store, unsigned, type Ratio } from './frequency-ratios.ts';
+import type { HousekeepingSamples } from './frequency-housekeeping.ts';
 
 export const cpus796 = Array.from({ length: 16 }, (_, cpu) => cpu);
 export const sets796 = { server: cpus796.filter(cpu => cpu % 2 === 0), client: cpus796.filter(cpu => cpu % 2 === 1) };
 export const setNames = ['server', 'client'] as const;
 export type SetName = typeof setNames[number];
 export const controlIdleMs = 10_000;
+export const capKHz = '1700000';
 const slackNs = 3_000_000_000n;
 const million = 1_000_000n;
-const c0Floor: Ratio = [20_000_000n, 1n];
+export const c0Floor: Ratio = [1_000_000_000n, 1n];
 
 export type Identity = {
   bootId: string; kernel: string; version: string; pmuType: number; online: string;
@@ -17,17 +19,22 @@ export type Identity = {
 };
 type ClockCount = { cpu: number; id: string; beforeNs: string; afterNs: string; count: string; enabled: string; running: string };
 export type Calibration = { identity: Identity; open: ClockCount[]; close: ClockCount[] };
-type PerfRead = { cpu: number; monoNs: string; aperfId: string; mperfId: string; aperf: string; mperf: string; enabled: string; running: string };
+type PerfRead = { cpu: number; monoNs: string; rawNs: string; aperfId: string; mperfId: string; aperf: string; mperf: string; enabled: string; running: string };
 export type Sweep = { phase: 'open' | 'idle' | 'close'; identity: Identity; launchSession: string; order: number; reads: PerfRead[] };
-export type CounterBlock = {
+export type CounterWindow = {
   open: Sweep; close: Sweep; idle?: Sweep; startNs: string; exitNs: string;
   policyBefore: PolicySnapshot; policyAfter: PolicySnapshot;
+  housekeeping?: HousekeepingSamples;
 };
+export type ReferenceWindow = CounterWindow & { checkpointNs: string };
+export type CounterBlock = CounterWindow & { reference?: ReferenceWindow };
 export type FrequencyEvidence = {
   calibration: Calibration; before: PolicySnapshot; after: PolicySnapshot; startSession: string; endSession: string;
   permissionCheck?: { go: { exit: number }; identity: Identity } | null;
 };
 export const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+export const cappedPolicy = (policy: PolicySnapshot): PolicySnapshot =>
+  ({ ...policy, policies: policy.policies.map(p => ({ ...p, max: capKHz })) });
 const requireEvidence = (ok: boolean, reason: string) => { if (!ok) throw new Error(reason); };
 const cpuListMatches = (rows: { cpu: number }[]) => same(rows.map(r => r.cpu), cpus796);
 
@@ -80,12 +87,13 @@ function workBetween(a: Sweep, b: Sweep, hz: Ratio[]) {
   return a.reads.map((open, cpu) => {
     const close = b.reads[cpu];
     const interval = unsigned(close.monoNs) - unsigned(open.monoNs);
+    const rawSpan = unsigned(close.rawNs) - unsigned(open.rawNs);
     const enabled = unsigned(close.enabled) - unsigned(open.enabled);
     const running = unsigned(close.running) - unsigned(open.running);
     requireEvidence(open.aperfId === close.aperfId && open.mperfId === close.mperfId &&
-      interval > 0n && enabled > 0n && enabled === running && unsigned(open.running) === unsigned(open.enabled) &&
+      interval > 0n && rawSpan > 0n && enabled > 0n && enabled === running && unsigned(open.running) === unsigned(open.enabled) &&
       unsigned(close.running) === unsigned(close.enabled) &&
-      enabled >= interval - million && enabled <= interval + million,
+      enabled >= rawSpan - million && enabled <= rawSpan + million,
     `F1 CPU ${cpu}: counter identity or counting time changed`);
     const aperf = unsigned(close.aperf) - unsigned(open.aperf);
     const mperf = unsigned(close.mperf) - unsigned(open.mperf);
@@ -112,7 +120,7 @@ export function checkPermissionEvidence(record: { mode: string; identity: Identi
   return identity;
 }
 
-export function counterWork(block: CounterBlock, order: number, pgbenchMs: number, session: string | null, identity: Identity,
+export function counterWork(block: CounterWindow, order: number, pgbenchMs: number, session: string | null, identity: Identity,
   policy: PolicySnapshot, rates: Ratio[], control: boolean) {
   validatePolicy(policy, identity);
   requireEvidence(same(policy, block.policyBefore) && same(policy, block.policyAfter), 'F1 policy changed around block');
@@ -126,10 +134,10 @@ export function counterWork(block: CounterBlock, order: number, pgbenchMs: numbe
   requireEvidence(pgbenchNs > 0n && last(block.open) <= start && exit >= start + pgbenchNs - million &&
     first(block.close) >= exit + idleNs && last(block.close) - first(block.open) <= pgbenchNs + idleNs + slackNs,
   'F2 perf span fails pgbench boundaries or 3 s slack limit');
-  const work = workBetween(block.open, block.close, rates);
+  const fullSpan = workBetween(block.open, block.close, rates);
   if (!control) {
     requireEvidence(block.idle === undefined, 'F2 unexpected idle sweep');
-    return { work, idle: null };
+    return { work: fullSpan, fullSpan, idle: null };
   }
   const idle = block.idle;
   if (!idle) throw new Error('F6 missing idle-only sweep');
@@ -138,23 +146,11 @@ export function counterWork(block: CounterBlock, order: number, pgbenchMs: numbe
     last(block.close) <= first(idle) + idleNs + 100_000_000n,
     'F2 idle tail did not start after pgbench or missed its 10 s target');
   // Validate both intervals independently so a reset at the extra sweep also fails.
-  const measured = workBetween(block.open, idle, rates);
-  return { work, idle: idleCoverage(workBetween(idle, block.close, rates), measured) };
+  return { work: workBetween(block.open, idle, rates), fullSpan, idle: workBetween(idle, block.close, rates) };
 }
 
-type CpuWork = ReturnType<typeof workBetween>[number];
+export type CpuWork = ReturnType<typeof workBetween>[number];
 export const reportWork = (w: CpuWork) => ({
   cpu: w.cpu, aperf: String(w.aperf), mperf: String(w.mperf), c0Ns: store(w.c0Ns),
   busyHz: w.busyHz && store(w.busyHz), qualifies: w.qualifies,
 });
-function idleCoverage(work: CpuWork[], measured: CpuWork[]) {
-  const perCpu = work.map((w, cpu) => {
-    const blockSpanNs = measured[cpu].interval;
-    const projectedC0Ns = multiply(w.c0Ns, [blockSpanNs, w.interval]);
-    return { ...reportWork(w), blockSpanNs: String(blockSpanNs), idleSpanNs: String(w.interval),
-      projectedC0Ns: store(projectedC0Ns), projectedQualifies: !below(projectedC0Ns, c0Floor) };
-  });
-  const cpus = perCpu.filter(w => w.projectedQualifies).map(w => w.cpu);
-  return { perCpu, cpusAtFloor: cpus,
-    couldQualify: Object.fromEntries(setNames.map(set => [set, sets796[set].filter(cpu => cpus.includes(cpu)).length >= 4])) };
-}

@@ -7,20 +7,12 @@ async fn reply_counts_bound_anchors_and_descendants_by_watermark_in_data_snapsho
     let child = sent(&app, &token, channel, reply_input(Uuid::new_v4(), &root)).await;
     let future = Uuid::new_v4();
     let ids = vec![id(&root), id(&child), future];
-    let gate = Arc::new(Gate {
-        entered: Semaphore::new(0),
-        release: Semaphore::new(0),
-    });
-    GATES.lock().unwrap().insert(channel, gate.clone());
+    let gate = GATES.register(channel);
     let read = {
         let (app, token, ids) = (app.clone(), token.clone(), ids.clone());
         tokio::spawn(async move { page(&app, &token, channel, &ids).await })
     };
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+    gate.entered().await;
     let late = sent(&app, &token, channel, reply_input(Uuid::new_v4(), &child)).await;
     assert_eq!(late["created_seq"], 3);
     sqlx::query("INSERT INTO messages (organization_id,channel_id,id,seq,sender,client_message_id,body,reply_to_id,reply_root_id) VALUES ($1,$2,$3,4,$4,gen_random_uuid(),'Future Reply',$5,$6)")
@@ -34,7 +26,7 @@ async fn reply_counts_bound_anchors_and_descendants_by_watermark_in_data_snapsho
     .await
     .unwrap();
     seed_channel_log(&pool).await;
-    gate.release.add_permits(1);
+    gate.release();
     let result = read.await.unwrap();
     assert_eq!(result["as_of_seq"], 2);
     assert_eq!(result["counts"].as_array().unwrap().len(), 2);

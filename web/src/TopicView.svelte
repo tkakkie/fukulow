@@ -110,6 +110,8 @@
     loading: search.view?.paging ?? false, error: search.view?.pageError === 'older', notFound: false,
   } : topicView)
   let skipUnreadVisit = $state(false)
+  // The visit stops waiting for its entry position (loading timeout or own send) and opens at the bottom, as after a failed boundary.
+  let entryPositionAbandoned = $state(false)
   let scrolledFirstUnreadId = $state<string | null>(null)
   const entry = $derived(uState?.entry?.scope.topicId === currentTopicId ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
@@ -126,7 +128,7 @@
     ),
   )
   const firstUnreadMessageId = $derived(
-    !search && !skipUnreadVisit && entry &&
+    !search && !skipUnreadVisit && !entryPositionAbandoned && entry &&
       entry.boundary !== null &&
       (entry.unreadAtEntry ?? 0) > 0 &&
       !needsOlderUnreadPage &&
@@ -154,6 +156,10 @@
         (entry === null || entry.boundary === null),
     ),
   )
+  const awaitingEntryPosition = $derived(
+    !search && !skipUnreadVisit && !entryPositionAbandoned &&
+      (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error)),
+  )
   const pending = $derived(
     s.pending.filter(
       (p) =>
@@ -179,6 +185,8 @@
   let activeRowId = $state<string | null>(null)
   let requestedHistoryFor = ''
   let initialScrollApplied = $state(false)
+  // Rows stay mounted because positioning needs them, but are hidden and inert until the entry position is applied (`docs/ui.md` §8).
+  const positioning = $derived(!initialScrollApplied && (awaitingEntryPosition || firstUnreadMessageId !== null))
   let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
   let lastScrollScopeKey = ''
   let lastScrollEntryId: symbol | null = null
@@ -203,7 +211,8 @@
       if (!initialScrollApplied || search.view?.status !== 'ready') return
     } else if (!skipUnreadVisit) {
       if (currentEntry.boundary === null || needsOlderUnreadPage) return
-      if ((currentEntry.unreadAtEntry ?? 0) > 0) {
+      // A visit that opened at the bottom without a marker presents what is visible, as with no Unread.
+      if ((currentEntry.unreadAtEntry ?? 0) > 0 && !entryPositionAbandoned) {
         if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
       } else if (!initialScrollApplied) {
         return
@@ -216,7 +225,8 @@
   }
 
   async function focusMessage(id: string | undefined) {
-    if (!id) return
+    // Hidden rows cannot take focus, and revealing one would scroll the list positioning still owns.
+    if (!id || positioning) return
     activeRowId = id
     await rowWindow?.reveal(id, true)
   }
@@ -380,7 +390,8 @@
   })
 
   $effect(() => {
-    if (search || skipUnreadVisit || !needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
+    // A visit that opened at the bottom no longer positions at the first Unread, so it pages no older history toward it.
+    if (search || skipUnreadVisit || entryPositionAbandoned || !needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
       return
     }
     if (effectiveStatus !== 'ready') return
@@ -397,6 +408,8 @@
           ? 'loading'
           : 'ready',
   )
+  // The retryable error replaces the loading state (`docs/ui.md` §5), so the positioning Skeleton yields to it.
+  const loadFailed = $derived(effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))
 
   $effect(() => {
     const scopeKey = `${currentChannelId}/${currentTopicId}${searchId ? ':search' : ''}`
@@ -410,15 +423,17 @@
       lastScrollEntryId = currentEntryId
       initialScrollApplied = false
       scrolledFirstUnreadId = null
+      entryPositionAbandoned = false
       pendingScrollAction = null
     }
     const displayed = isTimelineDisplayed(scrollEl, viewSelected)
     const messages = view.messages
     const pendingIds = pending.map((p) => p.clientMessageId)
-    const status = effectiveStatus
+    // Positioning counts as loading so the controller's loading timeout bounds it; a hidden view defers positioning
+    // to its display (`docs/ui.md` §8), so its wait starts only once displayed.
+    const status = positioning && displayed && effectiveStatus === 'ready' ? 'loading' : effectiveStatus
     const targetFirstUnreadId = firstUnreadMessageId
-    const awaitingFirstUnread =
-      !skipUnreadVisit && (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && view.hasMore && !view.error))
+    const awaitingFirstUnread = awaitingEntryPosition
     const { action, anchor } = scrollController.sync({
       channelId: scopeKey,
       visitId: currentEntryId,
@@ -468,6 +483,8 @@
           scrolledFirstUnreadId = targetFirstUnreadId
         }
         if (deferred.action === 'scroll_bottom' || deferred.action === 'scroll_first_unread') {
+          // Opening at the bottom ends this visit's wait, so a boundary resolving later neither marks nor moves it (`docs/ui.md` §8).
+          if (deferred.action === 'scroll_bottom' && !initialScrollApplied && !search) entryPositionAbandoned = true
           initialScrollApplied = true
         }
       } else {
@@ -478,6 +495,11 @@
       }
       reportPresented()
     }).catch(console.error)
+  })
+
+  $effect(() => {
+    // An initial history read that times out shows the retryable error instead; `再試行` restarts the same wait.
+    if (positioning && scrollView.loadingTimedOut && effectiveStatus === 'ready') entryPositionAbandoned = true
   })
 
   $effect(() => {
@@ -529,6 +551,7 @@
     if (!ok) return false
     if (search) { await jumpToBottom(); return true }
     if (view.hasNewer) await topics.loadTopicLatest(topicId)
+    if (positioning) entryPositionAbandoned = true
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
       applyScrollAction(action, null)
@@ -552,7 +575,7 @@
     <div class="topic-view__banner">
       <ChannelUnavailableBanner {ongoToChannelList} />
     </div>
-  {:else if !search && !targetUnavailable && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
+  {:else if !search && !targetUnavailable && loadFailed}
     <div class="topic-view__banner">
       <StatusBanner
         tone="danger"
@@ -564,13 +587,25 @@
     </div>
   {/if}
 
-  <div class="topic-view__scroll" bind:this={scrollEl} onscroll={handleScroll}>
+  {#if positioning && !targetUnavailable && !loadFailed}
+    <div class="topic-view__positioning">
+      <Skeleton rows={4} label="トピックを読み込み中" />
+    </div>
+  {/if}
+  <div
+    class="topic-view__scroll"
+    class:topic-view__scroll--positioning={positioning}
+    aria-busy={positioning ? 'true' : undefined}
+    inert={positioning}
+    bind:this={scrollEl}
+    onscroll={handleScroll}
+  >
     {#if topicUnavailable && view.messages.length === 0 && pending.length === 0}
       <EmptyState
         title="このトピックは利用できません。"
         description="削除されたか、URLが正しくない可能性があります。"
       />
-    {:else if effectiveStatus === 'loading' && !scrollView.loadingTimedOut && view.messages.length === 0 && pending.length === 0}
+    {:else if !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && view.messages.length === 0 && pending.length === 0}
       <Skeleton rows={4} label="トピックを読み込み中" />
     {:else}
       {#if topicUnavailable}
@@ -720,7 +755,9 @@
   }
 
   .topic-view__scroll {
+    /* Explicit column: the positioning overlay shares this cell, and auto-placement would move this into an implicit column. */
     grid-row: 2;
+    grid-column: 1;
     overflow-y: auto;
     overflow-anchor: none;
     padding: var(--space-8) var(--space-16);
@@ -728,6 +765,18 @@
     flex-direction: column;
     gap: var(--space-8);
     min-height: 0;
+    min-width: 0;
+  }
+
+  .topic-view__scroll--positioning {
+    visibility: hidden;
+  }
+
+  .topic-view__positioning {
+    grid-row: 2;
+    grid-column: 1;
+    padding: var(--space-8) var(--space-16);
+    overflow: hidden;
     min-width: 0;
   }
 
