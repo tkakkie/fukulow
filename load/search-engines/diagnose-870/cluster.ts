@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { allowedCpus, cpuList, pinned, type CpuSets } from '../../harness-core/cpusets.ts';
+import { measuredSetsArg } from '../../harness-core/frequency-layout.ts';
 import { appSessionArguments, docker, percentile } from '../bench.ts';
 import { timeouts } from '../runtime.ts';
 import { snapshotLaunch } from '../d3r/snapshot.ts';
@@ -12,9 +13,8 @@ import { snapshotLaunch } from '../d3r/snapshot.ts';
 
 // The #689 snapshot this diagnosis restores (receipt in the #689 backfill directory).
 export const expectedSnapshotSha256 = '087a24f896f7f2e05a9e67b820edd47205c1ca63cad6a741f01a746700edbdac';
-// The #796 CPU sets fixed before qualification (2026-11-24): PostgreSQL on the Zen 5 CPUs, the clients on
-// the Zen 5c CPUs. A Linux run uses exactly these, so a swapped or other split is refused.
-export const qualifiedCpuSets = 'server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15';
+// #870 takes the measured pair from the #796 qualification.
+export const qualifiedCpuSets = measuredSetsArg;
 
 // Diagnostic logging only; every frozen setting stays as it is and is checked after start.
 export const diagnosticSettings = ['-c', 'log_autovacuum_min_duration=0', '-c', 'log_checkpoints=on'];

@@ -12,12 +12,14 @@ import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, e
   quantile, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
+import { containerCpuArgs, containerCpuReadback, probeSocket } from './frequency-containers.ts';
+import { hostAffinityProblems, readHostAffinity } from './frequency-host-affinity.ts';
 import type { CounterBlock, ReferenceWindow } from './frequency-evidence.ts';
 import { makeTraversable, stageSql } from './stage-sql.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
-const usage = 'node load/sql-probes/519-unread-counts/final.ts (--smoke | --diagnostic) [--sends-only] [--cpu-sets "server=LIST;client=LIST"] [--frequency-v3 control|rehearsal2|formal --perf-helper BINARY] --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
+const usage = 'node load/sql-probes/519-unread-counts/final.ts (--smoke | --diagnostic) [--sends-only] [--cpu-sets "server=LIST;client=LIST[;housekeeping=LIST]"] [--frequency-v3 control|rehearsal2|formal --perf-helper BINARY] --out NEW_DIRECTORY_OUTSIDE_CHECKOUT';
 const { values } = parseArgs({ options: { out: { type: 'string' }, smoke: { type: 'boolean' }, diagnostic: { type: 'boolean' },
   'sends-only': { type: 'boolean' }, 'frequency-v3': { type: 'string' }, 'perf-helper': { type: 'string' }, 'control-review': { type: 'string' }, 'permission-check': { type: 'string' }, 'cpu-sets': { type: 'string' }, help: { type: 'boolean' } } });
 if (values.help) { console.log(usage); process.exit(0); }
@@ -79,7 +81,8 @@ const work = mkdtempSync(join(realpathSync(tmpdir()), 'fk519f-'));
 // files (repository SQL only, nothing secret).
 makeTraversable(work);
 const container = 'fk519f-' + randomUUID();
-// The launcher's workloadLabel for this probe: a stopped run's container is found and removed by it.
+const clientContainer = request ? `${container}-client` : container;
+// The launcher's workloadLabel for this probe: it finds and removes both containers after a STOP.
 const workloadLabel = 'io.fukulow.probe=519-final';
 
 // Schema and roles from the current pin; the final arm adds only the A3 migration from its pin,
@@ -102,7 +105,7 @@ for (const arm of ['current', 'final'] as FinalArm[]) {
 const migrations = readdirSync(join(work, 'server/migrations')).filter(f => f.endsWith('.sql')).sort();
 
 // psql (setup, WAL counters, checks) runs on the client set too, so only the server works on the server set.
-const psqlArgs = (db: string, user = 'postgres', stdin = true) => ['exec', ...(stdin ? ['-i'] : []), container, ...pinned(cpuSets?.client, ['psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', db])];
+const psqlArgs = (db: string, user = 'postgres', stdin = true) => ['exec', ...(stdin ? ['-i'] : []), clientContainer, ...pinned(cpuSets?.client, ['psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', db])];
 const psql = (db: string, script: string, user = 'postgres') => run('docker', psqlArgs(db, user), script);
 const file = (db: string, path: string) => psql(db, `\\i /work/${path}\n`);
 const checks: Record<string, unknown>[] = [];
@@ -124,10 +127,11 @@ const migrateA3 = (db: string) => bounded(db, `A3 migration on ${db} (backfill g
 // container; after the block, any container still running or started during it fails the block.
 // sinceSeconds is taken before the pre-block `docker ps` (eventsSince), so the windows overlap.
 function hostState(sinceSeconds?: number) {
-  const otherContainers = run('docker', ['ps', '--format', '{{.Names}}']).split('\n').filter(n => n !== '' && n !== container);
+  const foreign = (name: string) => name !== '' && name !== container && name !== clientContainer;
+  const otherContainers = run('docker', ['ps', '--format', '{{.Names}}']).split('\n').filter(foreign);
   const startedDuringBlock = sinceSeconds === undefined ? undefined : run('docker', ['events', '--since', String(sinceSeconds),
     '--until', String(Math.ceil(Date.now() / 1000)), '--filter', 'type=container', '--filter', 'event=start', '--format', '{{.Actor.Attributes.name}}'])
-    .split('\n').filter(n => n !== '' && n !== container);
+    .split('\n').filter(foreign);
   const busy = [...otherContainers, ...(startedDuringBlock ?? [])];
   return { at: new Date().toISOString(), loadavg: loadavg(), otherContainers, startedDuringBlock, busy: !smoke && busy.length > 0 };
 }
@@ -186,7 +190,7 @@ function forcedCheckpoint(db: string) {
   return requestMs;
 }
 // Sends run as the application role under RLS, like the app, so A3's policy checks are paid.
-const pgbenchArgs = (seconds: number) => ['exec', ...(request ? ['--user', 'postgres'] : []), container, ...pinned(cpuSets?.client,
+const pgbenchArgs = (seconds: number) => ['exec', ...(request ? ['--user', 'postgres'] : []), clientContainer, ...pinned(cpuSets?.client,
   ['pgbench', '-U', 'fukulow_app', '-n', '-c', '8', '-j', '4', '-T', String(seconds), '-f', '/work/sql/bench.pgb'])];
 function sendRole(db: string) {
   psql('postgres', `ALTER ROLE fukulow_app IN DATABASE ${db} SET fukulow.organization_id = '${organization}';`);
@@ -217,7 +221,7 @@ function sendBlock(db: string, label: string, order: number, reference?: Referen
       const steps = {
         run: () => run('docker', argv),
         after: () => walStats(db),
-        log: () => run('docker', ['exec', container, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]),
+        log: () => run('docker', ['exec', clientContainer, 'sh', '-c', `cat ${prefix}.* && rm -f ${prefix}.*`]),
       };
       let counters: CounterBlock | undefined;
       let affinity: Affinity | undefined;
@@ -237,7 +241,7 @@ function sendBlock(db: string, label: string, order: number, reference?: Referen
           const captured = await frequency.measure(order, reference, prepare, () => {
             const workload = exec('docker', argv, { signal, timeout: (measuredSeconds + 10) * 1000, maxBuffer });
             if (request?.stage === 'rehearsal2') {
-              observed = readAffinity(container, prefix, db, affinitySignal).catch(error => new Error(String(error)));
+              observed = readAffinity(container, clientContainer, prefix, db, affinitySignal).catch(error => new Error(String(error)));
             }
             return workload.then(result => result.stdout);
           });
@@ -323,6 +327,12 @@ async function freshSends() {
 const started = new Date().toISOString();
 let failed = false;
 try {
+  if (request) {
+    const readback = readHostAffinity(request.session);
+    save('frequency-host-affinity.json', readback);
+    const problems = hostAffinityProblems(readback, request.session, request.launchPolicy.bootId);
+    if (problems.length) throw new Error(`STOP: #796 housekeeping preflight: ${problems.join('; ')}`);
+  }
   const preflight = idleHost();
   const recordBefore = hostRecord(out);
   save('host-record-before.json', recordBefore);
@@ -331,14 +341,16 @@ try {
   if (request) {
     // Fail before the frequency calibration if the send user cannot read the bench file (#796 control run 1).
     if (spawnSync('docker', ['run', '--rm', '--label', workloadLabel, '--network', 'none', '--user', 'postgres', '-v', `${work}:/work:ro`,
-      '--entrypoint', 'test', image, '-r', '/work/sql/bench.pgb']).status !== 0) throw new Error('the container postgres user cannot read /work/sql/bench.pgb');
+      ...containerCpuArgs('client'), '--entrypoint', 'test', image, '-r', '/work/sql/bench.pgb']).status !== 0) throw new Error('the container postgres user cannot read /work/sql/bench.pgb');
     frequency = frequencyRun(request, out);
     await frequency.start();
   }
   // With CPU sets, taskset wraps the image's entrypoint, so the postmaster and every backend inherit the server set.
   const serverStart = cpuSets ? ['--entrypoint', 'taskset', image, '-c', cpuList(cpuSets.server), 'docker-entrypoint.sh', 'postgres'] : [image];
   run('docker', ['run', '-d', '--rm', '--name', container, '--label', workloadLabel, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
-    '-v', `${work}:/work:ro`, ...serverStart, '-c', 'shared_buffers=512MB', '-c', 'jit=off',
+    '-v', `${work}:/work:ro`, ...(request ? containerCpuArgs('server') : []), ...serverStart,
+    ...(request ? ['-c', `unix_socket_directories=/var/run/postgresql,${probeSocket}`] : []),
+    '-c', 'shared_buffers=512MB', '-c', 'jit=off',
     // No automatic checkpoint inside a send block: each block starts at its forced CHECKPOINT and
     // full-page images settle during warm-up, as the plan requires. A crossing block fails the run.
     '-c', 'max_wal_size=64GB', '-c', 'checkpoint_timeout=1h', '-c', 'log_checkpoints=on']);
@@ -346,13 +358,21 @@ try {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
   }
-  frequency?.observeHousekeeping(() => run('docker', ['inspect', '--format', '{{.State.Pid}}', container]).trim());
+  if (request) {
+    run('docker', ['run', '-d', '--rm', '--name', clientContainer, '--label', workloadLabel, '--network', `container:${container}`,
+      '-e', `PGHOST=${probeSocket}`, '-v', `${work}:/work:ro`, ...containerCpuArgs('client'), '--entrypoint', 'sleep', image, 'infinity']);
+    const inspect = (name: string) => run('docker', ['inspect', '--format', '{{.Id}} {{.State.Pid}}', name]);
+    save('frequency-container-cpusets.json', {
+      launchSession, server: containerCpuReadback(inspect(container), 'server'), client: containerCpuReadback(inspect(clientContainer), 'client'),
+    });
+    frequency?.observeHousekeeping();
+  }
   // Max frequencies per set make a swapped or mixed split visible in the record (Zen 5 vs Zen 5c).
   const maxKHz = (set: number[]) => [...new Set(set.map(c => Object.entries(recordBefore.maxFrequencyKHz ?? {}).find(([, cs]) => cs.includes(c))?.[0] ?? 'unknown'))];
   const cpuPins = cpuSets === undefined ? null : {
-    server: cpuSets.server, client: cpuSets.client, serverMaxKHz: maxKHz(cpuSets.server), clientMaxKHz: maxKHz(cpuSets.client),
+    ...cpuSets, serverMaxKHz: maxKHz(cpuSets.server), clientMaxKHz: maxKHz(cpuSets.client),
     postmasterAllowed: allowedCpus(run('docker', ['exec', container, 'cat', '/proc/1/status'])),
-    clientAllowed: allowedCpus(run('docker', ['exec', container, ...pinned(cpuSets.client, ['cat', '/proc/self/status'])])),
+    clientAllowed: allowedCpus(run('docker', ['exec', clientContainer, ...pinned(cpuSets.client, ['cat', '/proc/self/status'])])),
   };
   if (cpuPins && (cpuList(cpuPins.postmasterAllowed) !== cpuList(cpuPins.server) || cpuList(cpuPins.clientAllowed) !== cpuList(cpuPins.client))) {
     throw new Error(`CPU sets did not take effect: postmaster ${cpuList(cpuPins.postmasterAllowed)}, client ${cpuList(cpuPins.clientAllowed)}`);
@@ -437,6 +457,7 @@ try {
   failed = true;
   console.error(error);
 } finally {
+  if (request) spawnSync('docker', ['rm', '-f', clientContainer]);
   spawnSync('docker', ['rm', '-f', container]);
   rmSync(work, { recursive: true, force: true });
   try { frequency?.finish(); } catch (e) { failed = true; console.error('frequency completion:', e); }

@@ -11,8 +11,8 @@ Raw logs, artifact directories and local paths outside Git may be gone ([2026-11
 
 - **Mac (M5):** formal. #689, #519 and #426 B7 keep Mac conditions and results.
 - **Ubuntu (Zen 5/Zen 5c):** investigation until #796 PASS, then formal and Mac for development. No Mac comparison or gate.
-- **Ubuntu conditions:** AC, masked sleep, performance governor, held updates, HOST-BUSY, fixed even/odd CPU sets, pre/post host records. Boost on except #796 cooling.
-- **#796:** first FAIL stands. Control INVALID (first F1 CPU 0). Option A needs a rebuilt `setcap` helper. Permission check, control and Rehearsal 2 each need a go. Go B awaits review and frozen floors. [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
+- **Ubuntu:** AC, masked sleep, performance governor, held updates, HOST-BUSY, fixed CPU sets, pre/post records. Boost on except #796 cooling.
+- **#796:** first FAIL stands. Control INVALID (F1 CPU 0). Option A `e54d8d0a` STOPped at idle reference 1 (CPU 6 755 ms, CPU 0 586 ms per 120 s). Each stage needs a go. Go B needs reviewed floors. [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
 - Move series only with fresh Ubuntu baselines and fixed criteria, never for Mac failures.
 
 ## Topic projection paging (#137)

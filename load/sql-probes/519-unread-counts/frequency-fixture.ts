@@ -1,12 +1,14 @@
 import { cappedPolicy, cpus796, sets796, type Calibration, type CounterBlock, type FrequencyEvidence, type Identity, type ReferenceWindow } from './frequency-evidence.ts';
 import type { PolicySnapshot } from '../../harness-core/cpu-policy.ts';
 import type { Floors } from './frequency-judge.ts';
+import { measuredCpus, measurementSlice } from '../../harness-core/frequency-layout.ts';
+import type { HostAffinity } from './frequency-host-affinity.ts';
 
 export const session = 'fixture-session';
 export { sets796 };
 export const floors: Floors = { server: ['1900000000', '1'], client: ['1900000000', '1'] };
 const identity: Identity = { bootId: 'boot-test', kernel: 'kernel-test', version: 'test', online: '0-15', pmuType: 13,
-  topology: cpus796.map(cpu => ({ cpu, package: '0', core: String(cpu), siblings: String(cpu) })) };
+  topology: cpus796.map(cpu => ({ cpu, package: '0', core: String(cpu % 8), siblings: `${cpu % 8},${cpu % 8 + 8}` })) };
 export const policy: PolicySnapshot = { bootId: identity.bootId, kernel: identity.kernel, online: identity.online,
   profile: 'performance', boost: '0', paranoid: '4',
   policies: cpus796.map(cpu => ({ cpu, policy: `policy${cpu}`, related: String(cpu), affected: String(cpu), driver: 'amd-pstate-epp',
@@ -18,6 +20,22 @@ const calReads = (offset: bigint): Calibration['open'] => cpus796.map(cpu => ({
 export const evidence: FrequencyEvidence = {
   calibration: { identity, open: calReads(1_000_000_000n), close: calReads(2_000_000_000n) }, before: policy, after: policy, startSession: session, endSession: session,
 };
+export const primaryVoters = measuredCpus.filter(cpu => cpu < 8);
+
+export function hostAffinity(launchSession = session): HostAffinity {
+  const cpus = sets796.housekeeping;
+  const background = { cpus, populated: true };
+  const daemon = (unit: string) => ({ pid: '100', cgroup: `/system.slice/${unit}`, cpus, threads: { '100': cpus } });
+  return {
+    launchSession, unreadable: [], bootId: identity.bootId, online: cpus796,
+    siblings: cpus796.map(cpu => [cpu % 8, cpu % 8 + 8]), docker: 'systemd 2',
+    groups: { 'init.scope': background, 'system.slice': background, 'user.slice': background,
+      [measurementSlice]: { cpus: measuredCpus, populated: false } },
+    daemons: Object.fromEntries(['containerd.service', 'docker.service', 'tailscaled.service'].map(unit => [unit, daemon(unit)])),
+    irqbalance: 'inactive', workqueue: cpus, defaultIrq: cpus,
+    irqs: { active: ['10'], rows: { '10': { writable: true, configured: cpus, effective: [0] } } },
+  };
+}
 
 type FixtureOptions = {
   ratios?: (cpu: number) => [bigint, bigint]; mperf?: (cpu: number) => bigint;
@@ -33,7 +51,7 @@ function fixtureCounters(order: number, options: FixtureOptions, offset: bigint,
     phase, launchSession: options.launchSession ?? session, order, identity,
     reads: cpus796.map(cpu => {
       const [a, b] = options.ratios?.(cpu) ?? [1n, 1n];
-      const work = options.mperf?.(cpu) ?? (cpu < 8 ? 2_800_000_000n : 0n);
+      const work = options.mperf?.(cpu) ?? (primaryVoters.includes(cpu) ? 2_800_000_000n : 0n);
       const idle = phase === 'close' ? options.idleMperf?.(cpu) ?? 0n : 0n;
       const [ia, ib] = options.idleRatios?.(cpu) ?? [a, b];
       const count = phase === 'open' ? 0n : work + idle;
@@ -59,7 +77,7 @@ export function referenceWindow(order: number, options: FixtureOptions = {}): Re
   return { ...counters, policyBefore: scope, policyAfter: scope, checkpointNs: String(start - 30_000_000_000n) };
 }
 
-// Four active CPUs in each set, each at 1.4 s of C0 in a 120 s window.
+// Three active CPUs in each measured set, each at 1.4 s of C0 in a 120 s window.
 export function block(order: number, options: FixtureOptions = {}) {
   const counters = fixtureCounters(order, options, offset(order), order * 100);
   if (options.control || order === 1) {

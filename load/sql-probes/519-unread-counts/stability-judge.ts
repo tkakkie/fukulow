@@ -5,6 +5,8 @@ import type { PolicySnapshot } from '../../harness-core/cpu-policy.ts';
 import type { PgbenchWindow } from './probe.ts';
 import { judgeFrequency, type Floors } from './frequency-judge.ts';
 import { affinityProblems, type Affinity } from './frequency-affinity.ts';
+import { hostAffinityProblems, type HostAffinity } from './frequency-host-affinity.ts';
+import type { CpuSets } from '../../harness-core/cpusets.ts';
 import { same, type CounterBlock, type FrequencyEvidence } from './frequency-evidence.ts';
 import { isQuote, type FrequencyStage } from './frequency-approval.ts';
 import { legacyFrequencyProblems } from './legacy-frequency.ts';
@@ -51,9 +53,10 @@ export type ClockEvents = (Bound & { ok?: boolean; events?: unknown; problem?: u
 export type Cooldown = (Bound & { ok?: boolean; maxTctlC?: number; maxWaitSeconds?: number; readings?: { elapsedMs?: number; tctlC?: number | null }[] }) | null;
 export type RunInput = {
   name: string; out: string; complete: boolean; statusSession: unknown; sends: Send[];
-  metadata: { frequencyStage?: FrequencyStage; frequencyApproval?: string; frequencyGo?: { quote: string; date: string }; mode?: string; sendsOnly?: boolean; launchSession?: unknown; cpuSets: { server: number[]; client: number[] } | null; sends: { measuredSeconds: number } };
+  metadata: { frequencyStage?: FrequencyStage; frequencyApproval?: string; frequencyGo?: { quote: string; date: string }; mode?: string; sendsOnly?: boolean; launchSession?: unknown; cpuSets: CpuSets | null; sends: { measuredSeconds: number } };
   hostBefore: (HostRecord & Bound) | null; cooldown: Cooldown; launchCheck: LaunchCheck; clockEvents: ClockEvents;
   samples: SampleLine[]; frequency?: FrequencyEvidence | null; hostAfter?: (HostRecord & Bound) | null;
+  hostAffinity?: HostAffinity | null;
 };
 // What the judged launcher session says: its id, and the sampling period it actually used for the run.
 export type Binding = { id: string | null; thermalSampleSeconds: unknown; go?: { quote: string; date: string } };
@@ -182,6 +185,7 @@ export function judgeRun(r: RunInput, bound: Binding, floors: Floors | null, sta
   if (!r.launchCheck?.frequencyPolicy || !same(r.launchCheck.frequencyPolicy, r.frequency?.before)) {
     invalid.push('F1 launcher and run CPU policy snapshots differ');
   }
+  invalid.push(...hostAffinityProblems(r.hostAffinity, bound.id, r.launchCheck?.frequencyPolicy?.bootId));
   const frequency = judgeFrequency(r.sends, r.metadata.cpuSets, r.frequency, bound.id, floors, control);
   if (control && !(r.frequency?.permissionCheck?.go.exit === 0 && same(r.frequency.permissionCheck.identity, r.frequency.calibration.identity))) {
     invalid.push('no passed permission check for the control collector');

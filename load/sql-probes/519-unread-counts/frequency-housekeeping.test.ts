@@ -5,7 +5,7 @@ import { housekeepingSampler, workloadCgroup } from './frequency-housekeeping.ts
 import { block, evidence, floors, session, sets796 } from './frequency-fixture.ts';
 import { judgeFrequency } from './frequency-judge.ts';
 
-const workload = '/system.slice/docker-fixture.scope';
+const workload = '/fukulow796.slice';
 const capture = (count: number) => housekeepingSampler(workload, 100, path => {
   if (path === '/proc/stat') return cpus796.map(cpu => `cpu${cpu} 0 0 0 0 0 ${count} ${count * 2} 0`).join('\n');
   if (path === '/proc/softirqs') return `${cpus796.map(cpu => `CPU${cpu}`).join(' ')}\nNET_RX: ${cpus796.map(() => count).join(' ')}\n`;
@@ -16,7 +16,7 @@ const capture = (count: number) => housekeepingSampler(workload, 100, path => {
 test('housekeeping reports host-wide C0 minus workload usage, cgroups, IRQs and the aggregate burst ratio', () => {
   assert.equal(workloadCgroup('42', () => `0::${workload}\n`), workload);
   assert.equal(workloadCgroup('42', () => '0::/../invalid\n'), null);
-  const first = block(1);
+  const first = block(1, { mperf: cpu => cpu < 8 ? 2_800_000_000n : 0n });
   const reference = first.counters.reference!;
   first.counters.housekeeping = { workload, ticksPerSecond: 100, open: capture(1), close: capture(5) };
   reference.housekeeping = { workload, ticksPerSecond: 100, open: capture(1), close: capture(2) };
@@ -53,13 +53,13 @@ test('control burst ratio uses the largest of all three reference aggregates', (
 });
 
 test('control housekeeping reports the work and tail snapshots without changing F4', () => {
-  const first = block(1, { control: true, mperf: cpu => cpu < 6 ? 2_800_000_000n : 0n, idleMperf: () => 2_800_000_000n });
+  const first = block(1, { control: true, mperf: cpu => cpu < 5 ? 2_800_000_000n : 0n, idleMperf: () => 2_800_000_000n });
   const run = () => judgeFrequency([first], sets796, evidence, session, null, true);
   const without = run();
   first.counters.housekeeping = { workload, ticksPerSecond: 100, open: capture(1), idle: capture(2), close: capture(5) };
   const withSnapshots = run();
   assert.deepEqual(withSnapshots.reasons, without.reasons);
-  assert.match(withSnapshots.reasons.join(), /F4 client coverage 3\/8/);
+  assert.match(withSnapshots.reasons.join(), /F4 client coverage 2\/6/);
   assert.equal(withSnapshots.blocks[0].housekeeping.work?.perCpu[0].irqTicks, 1);
   assert.equal(withSnapshots.blocks[0].housekeeping.tail?.perCpu[0].irqTicks, 3);
 });

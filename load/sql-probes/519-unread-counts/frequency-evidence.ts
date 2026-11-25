@@ -1,10 +1,10 @@
 // Validates raw collector evidence before it can be used to derive per-CPU work.
 import type { PolicySnapshot } from '../../harness-core/cpu-policy.ts';
+import { cpus796 } from '../../harness-core/frequency-layout.ts';
 import { below, multiply, store, unsigned, type Ratio } from './frequency-ratios.ts';
 import type { HousekeepingSamples } from './frequency-housekeeping.ts';
 
-export const cpus796 = Array.from({ length: 16 }, (_, cpu) => cpu);
-export const sets796 = { server: cpus796.filter(cpu => cpu % 2 === 0), client: cpus796.filter(cpu => cpu % 2 === 1) };
+export { cpus796, sets796 } from '../../harness-core/frequency-layout.ts';
 export const setNames = ['server', 'client'] as const;
 export type SetName = typeof setNames[number];
 export const controlIdleMs = 10_000;

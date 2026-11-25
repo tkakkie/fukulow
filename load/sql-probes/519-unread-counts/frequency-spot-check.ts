@@ -4,9 +4,11 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { unsigned } from './frequency-ratios.ts';
 
 const ready = 'FUKULOW_TURBOSTAT_READY';
-// The exact argv the scoped sudoers entry allows. sudo-rs matches sudoers arguments word by word, so no
-// element may contain whitespace (a `/bin/sh -c` script never matches).
-export const turbostatArgv = ['/usr/bin/turbostat', '--quiet', '--show', 'CPU,TSC_MHz',
+// Turbostat migrates across all CPUs for its snapshots. Give only this bounded observer a root-slice scope.
+// sudo-rs matches arguments word by word, so every argument in the scoped sudoers entry has no whitespace.
+export const turbostatArgv = ['/usr/bin/systemd-run', '--scope', '--quiet', '--collect', '--slice=-.slice',
+  '--unit=fukulow796turbostat.scope', '--property=AllowedCPUs=0-15', '--property=RuntimeMaxSec=150s',
+  '--', '/usr/bin/turbostat', '--quiet', '--show', 'CPU,TSC_MHz',
   '--add', 'msr0xe8,u64,cpu,delta,APERF', '--add', 'msr0xe7,u64,cpu,delta,MPERF', '--', '/usr/bin/cat'];
 // Command mode takes its opening sample before spawning cat, the stdin barrier. The ready line written to
 // stdin comes back on stdout only once cat runs; ending stdin ends cat and takes the closing sample.

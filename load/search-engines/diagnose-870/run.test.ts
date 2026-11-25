@@ -10,8 +10,8 @@ import { finishRecords, limitedExitCode, options, parseCount, prerequisites, rea
 
 const hash = 'h'.repeat(64);
 const sets = qualifiedCpuSets;
-const swapped = 'server=1,3,5,7,9,11,13,15;client=0,2,4,6,8,10,12,14';
-const parsed = {server: [0, 2, 4, 6, 8, 10, 12, 14], client: [1, 3, 5, 7, 9, 11, 13, 15]};
+const swapped = 'server=1,3,5,9,11,13;client=2,4,6,10,12,14';
+const parsed = {server: [2, 4, 6, 10, 12, 14], client: [1, 3, 5, 9, 11, 13]};
 const json = (file: string, value: unknown) => writeFileSync(file, JSON.stringify(value));
 
 function host() {

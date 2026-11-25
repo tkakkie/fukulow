@@ -165,7 +165,7 @@ export function prerequisites(args: ReturnType<typeof options>, manifestHash: st
   // §3.2: the launcher holds HOST-BUSY for this queue and this job (it also ran the preflight and logged the go).
   assert.ok(launchedJob(env), 'Start through the launcher: HOST-BUSY is not held for this job');
   const [given, fixed] = [args.cpuSets, qualifiedCpuSets].map(t => parseCpuSets(t, logicalCpus));
-  assert.ok(cpuList(given.server) === cpuList(fixed.server) && cpuList(given.client) === cpuList(fixed.client),
+  assert.ok(!given.housekeeping && cpuList(given.server) === cpuList(fixed.server) && cpuList(given.client) === cpuList(fixed.client),
     `CPU sets must be the #796 sets ${qualifiedCpuSets}`);
   // §3.1: the #796 qualification record, PASS, on these sets.
   const q = readIf(args.qualification);

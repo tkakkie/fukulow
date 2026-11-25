@@ -5,7 +5,8 @@ import type { SampleLine } from '../../harness-core/thermal.ts';
 import type { Session } from '../../launcher/launcher.ts';
 import { judgeRun as judgeV3, replayLegacyRun as judgeRun, type RunInput } from './stability-judge.ts';
 
-import { block, evidence, floors, sets796 } from './frequency-fixture.ts';
+import { block, evidence, floors, hostAffinity, sets796 } from './frequency-fixture.ts';
+import { cpus796 } from './frequency-evidence.ts';
 import { judgeChain, limits, sessionProblems } from './stability-chain.ts';
 
 const judge = (runs: RunInput[], session: Session | null, queue: string) => judgeChain(runs, session, queue, judgeRun);
@@ -554,12 +555,13 @@ test('block problems and a wrong run count FAIL the check', () => {
 test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency has no vote', async t => {
   const r = run('s1', {}, { ncpu: 16, cpu: () => ({ busy: 0.005, khz: null }) });
   const go = { quote: 'go', date: '2026-11-25' };
-  r.metadata = { ...r.metadata, frequencyStage: 'rehearsal2', frequencyApproval: 'control-digest', frequencyGo: go };
-  r.hostAfter = { ...host, launchSession: sid, logicalCpus: 16, policyBoost: { '0': [...sets796.server, ...sets796.client].sort((a, b) => a - b) },
+  r.metadata = { ...r.metadata, cpuSets: sets796, frequencyStage: 'rehearsal2', frequencyApproval: 'control-digest', frequencyGo: go };
+  r.hostAfter = { ...host, launchSession: sid, logicalCpus: 16, policyBoost: { '0': cpus796 },
     ac: [{ supply: 'AC', online: true }], governors: { performance: Array.from({ length: 16 }, (_, cpu) => cpu) },
     updateUnits: [...updateUnits, ...timerServices].map(unit => ({ unit, enabled: 'disabled', active: 'inactive' })),
     sleepUnits: sleepUnits.map(unit => ({ unit, enabled: 'masked', active: 'inactive' })), snapHold: 'absent' };
   r.frequency = { ...evidence, startSession: sid, endSession: sid };
+  r.hostAffinity = hostAffinity(sid);
   r.launchCheck = { ...r.launchCheck, frequencyPolicy: evidence.before };
   for (const s of r.sends) {
     s.counters = block(s.order, { launchSession: sid }).counters;
@@ -573,11 +575,13 @@ test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency ha
   const assess = (run: RunInput) => judgeV3(run, { id: sid, thermalSampleSeconds: 5, go }, floors, 'rehearsal2', 'control-digest');
   assert.equal(judgeRun(r, { id: sid, thermalSampleSeconds: 5 }).valid, false);
   assert.deepEqual(assess(r).invalid, []);
+  assert.match(assess({ ...r, hostAffinity: undefined }).invalid.join(), /missing housekeeping preflight/);
+  assert.match(assess({ ...r, hostAffinity: { ...r.hostAffinity, workqueue: cpus796 } }).invalid.join(), /workqueue cpumask/);
   assert.deepEqual(limits, { tpsSpread: 0.05, walSpread: 0.02, throttle: 0.05 });
   const changed = structuredClone(r);
   const tick = changed.samples.find(s => s.at === new Date(t0 + 90_000).toISOString());
-  if (!tick || !('procStat' in tick) || !tick.procStat?.[15]) throw new Error('missing fixture tick');
-  tick.procStat[15][4] = 1;
+  if (!tick || !('procStat' in tick) || !tick.procStat?.[13]) throw new Error('missing fixture tick');
+  tick.procStat[13][4] = 1;
   assert.match(assess(changed).invalid.join(), /F6.*failed thermal samples/);
   const gap = { ...r, samples: r.samples.filter(s => s.at !== new Date(t0 + 90_000).toISOString()) };
   assert.match(assess(gap).invalid.join(), /missing 5 s thermal tick/);

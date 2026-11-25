@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { controlFloors, frozenFloors, permissionCheck } from './frequency-approval.ts';
-import { block, floors } from './frequency-fixture.ts';
+import { block, evidence, floors, hostAffinity, session } from './frequency-fixture.ts';
+
+const reviewedControl = {
+  stage: 'control', valid: true, frequency: { floorProposal: floors }, session: { id: session },
+  evidence: { hostAffinity: hostAffinity(), calibration: evidence },
+};
 
 function artifacts(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), 'fukulow-frequency-artifacts-'));
@@ -43,15 +48,16 @@ test('control requires a separate successful, complete permission-check record',
 
 test('Rehearsal 2 requires a reviewed control report with matching digest and valid floors', t => {
   const { write } = artifacts(t);
-  const r = { stage: 'control', valid: true, frequency: { floorProposal: floors } };
+  const r = reviewedControl;
   assert.deepEqual(controlFloors(write(r)).floors, floors);
   assert.throws(() => controlFloors(write(r, { sha256: 'f'.repeat(64) })), /hash differs/);
   assert.throws(() => controlFloors(write({ ...r, valid: false })), /did not validate/);
+  assert.throws(() => controlFloors(write({ ...r, evidence: undefined })), /no valid #796 housekeeping preflight/);
 });
 
 test('formal binds frozen floors to the valid reviewed control report', t => {
   const { write, report } = artifacts(t);
-  const valid = { stage: 'control', valid: true, frequency: { floorProposal: floors } };
+  const valid = reviewedControl;
   const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   const file = (value: unknown, sha256 = hash(valid), frozen = floors) => pathToFileURL(write(value, {
     version: 3, floors: frozen, control: { report, quote: 'control reviewed', date: '2026-11-24', sha256 },

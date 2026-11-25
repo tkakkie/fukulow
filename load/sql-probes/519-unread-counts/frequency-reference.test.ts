@@ -11,10 +11,10 @@ const assess = (window: ReferenceWindow) => assessReference(window, 1, session, 
 const normalized = (mperf: (cpu: number) => bigint) => referenceWindow(1, { mperf, slack: 100_000_000n });
 
 test('references stop at exactly 500 ms normalized and accept one tick below', () => {
-  const window = normalized(cpu => cpu === 15 ? 1_001_000_000n : 0n);
+  const window = normalized(cpu => cpu === 13 ? 1_001_000_000n : 0n);
   const at = assess(window);
-  assert.deepEqual(at.reasons, ['reference 1: client CPU 15 reached 500 ms C0 normalized to 120 s']);
-  assert.equal(at.sets.client.maxCpu, 15);
+  assert.deepEqual(at.reasons, ['reference 1: client CPU 13 reached 500 ms C0 normalized to 120 s']);
+  assert.equal(at.sets.client.maxCpu, 13);
   assert.equal(at.sets.client.n_F, 0);
   const [n, d] = at.sets.client.maxC0Ns.map(BigInt);
   assert.equal(n, 500_000_000n * d);
@@ -22,20 +22,28 @@ test('references stop at exactly 500 ms normalized and accept one tick below', (
   assert.equal(mn, 2n * md);
   const [hn, hd] = at.sets.client.halfFloorMargin!.map(BigInt);
   assert.equal(hn, hd);
-  assert.deepEqual(assess(normalized(cpu => cpu === 15 ? 1_000_999_999n : 0n)).reasons, []);
+  assert.deepEqual(assess(normalized(cpu => cpu === 13 ? 1_000_999_999n : 0n)).reasons, []);
 });
 
-test('references count exactly 1,000 ms normalized on four CPUs of either set', () => {
+test('references flag exactly 1,000 ms normalized on three of six CPUs in either set', () => {
   for (const set of ['client', 'server'] as const) {
-    for (const count of [3, 4]) {
-      const voters = sets796[set].slice(0, 4);
+    for (const count of [2, 3]) {
+      const voters = sets796[set];
       const got = assess(normalized(cpu => voters.slice(0, count).includes(cpu) ? 2_002_000_000n
         : cpu === voters[count] ? 2_001_999_999n : 0n));
       assert.equal(got.sets[set].n_F, count);
-      assert.equal(got.reasons.includes(`reference 1: ${set} n_F=4/8 reached 4`), count === 4);
+      assert.equal(got.reasons.includes(`reference 1: ${set} n_F=3/6 reached 3`), count === 3);
       assert.ok(got.reasons.some(r => r.includes('500 ms')));
     }
   }
+});
+
+test('references retain housekeeping C0 without giving those CPUs a STOP vote', () => {
+  const got = assess(normalized(cpu => sets796.housekeeping.includes(cpu) ? 2_002_000_000n : 0n));
+  assert.deepEqual(got.reasons, []);
+  assert.equal(got.cpus[0].qualifies, true);
+  assert.equal(got.sets.client.n_F, 0);
+  assert.equal(got.sets.server.n_F, 0);
 });
 
 test('references require a settled full window with matching CPU, policy, counter and session evidence', () => {
@@ -76,8 +84,8 @@ test('report rejects missing, extra, overlapping and reused reference evidence',
   assert.deepEqual(assess(window).reasons, []);
   assert.match(judge([overlap]).reasons.join(), /reference 1: stale reference or overlap/);
   const busy = structuredClone(first);
-  busy.counters.reference = normalized(cpu => cpu === 15 ? 1_001_000_000n : 0n);
-  assert.match(judge([busy]).reasons.join(), /reference 1: client CPU 15 reached 500 ms/);
+  busy.counters.reference = normalized(cpu => cpu === 13 ? 1_001_000_000n : 0n);
+  assert.match(judge([busy]).reasons.join(), /reference 1: client CPU 13 reached 500 ms/);
   const duplicate = structuredClone(first);
   for (const phase of ['open', 'close'] as const) {
     duplicate.counters.reference![phase].reads[0].aperfId = duplicate.counters[phase].reads[0].aperfId;

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { blockStopReasons, runFrequencyBlock } from './frequency-run.ts';
 import { withCap } from './frequency-policy.ts';
-import { block, evidence, floors, referenceWindow, session, sets796 } from './frequency-fixture.ts';
+import { block, evidence, floors, primaryVoters, referenceWindow, session, sets796 } from './frequency-fixture.ts';
 import { judgeFrequency } from './frequency-judge.ts';
 
 async function stagePlan(control: boolean, seen: string[], fault?: 'reference' | 'cooldown') {
@@ -95,8 +95,8 @@ for (const stage of ['rehearsal2', 'formal'] as const) {
       block(1, { mperf: all }),
       block(2, { mperf: all, ratios: () => [94n, 100n] }),
       block(3, { mperf: cpu => cpu === 1 || cpu === 3 ? 0n : all(),
-        ratios: cpu => cpu < 10 ? [94n, 100n] : [1n, 1n] }),
-      block(4, { mperf: cpu => cpu < 6 ? all() : 0n }),
+        ratios: cpu => cpu <= 10 ? [94n, 100n] : [1n, 1n] }),
+      block(4, { mperf: cpu => cpu < 5 ? all() : 0n }),
       block(5, { mperf: all }),
       block(6, { mperf: all }),
     ];
@@ -108,7 +108,7 @@ for (const stage of ['rehearsal2', 'formal'] as const) {
     assert.ok(report.reasons.includes('block 1: floor server below reviewed minimum'));
     assert.ok(report.reasons.includes('block 2: F5 throttled client'));
     assert.ok(report.reasons.includes('block 3: F5 client median bounds straddle 19/20'));
-    assert.ok(report.reasons.includes('block 4: F4 client coverage 3/8'));
+    assert.ok(report.reasons.includes('block 4: F4 client coverage 2/6'));
   });
 
   test(`${stage} stops for bad counter evidence or a busy reference`, () => {
@@ -118,21 +118,21 @@ for (const stage of ['rehearsal2', 'formal'] as const) {
       ['block 2: F6 missing, duplicate or unordered CPU pair']);
 
     const first = block(1);
-    first.counters.reference = referenceWindow(1, { mperf: cpu => cpu === 15 ? 1_002_000_000n : 0n });
+    first.counters.reference = referenceWindow(1, { mperf: cpu => cpu === 13 ? 1_002_000_000n : 0n });
     assert.deepEqual(blockStopReasons(stage, 1, [first], evidence, null),
-      ['reference 1: client CPU 15 reached 500 ms C0 normalized to 120 s']);
+      ['reference 1: client CPU 13 reached 500 ms C0 normalized to 120 s']);
   });
 }
 
 test('control stops when the baseline has insufficient coverage', () => {
   assert.deepEqual(blockStopReasons('control', 1, [block(1, { control: true })], evidence, null), []);
-  const first = block(1, { control: true, mperf: cpu => cpu < 7 ? 2_800_000_000n : 0n });
+  const first = block(1, { control: true, mperf: cpu => cpu < 8 && cpu !== 5 ? 2_800_000_000n : 0n });
   assert.deepEqual(blockStopReasons('control', 1, [first], evidence, null),
-    ['block 1: F4 client coverage 3/8', 'block 1: F4 client common coverage 3/8']);
+    ['block 1: F4 client coverage 2/6', 'block 1: F4 client common coverage 2/6']);
 });
 
 function controlSpot(capped: ReturnType<typeof block>, aperf: number) {
-  const rows = capped.counters.open.reads.map(({ cpu }) => `${cpu} 2000 ${cpu < 8 ? aperf : 0} ${cpu < 8 ? 2000 : 0}`);
+  const rows = capped.counters.open.reads.map(({ cpu }) => `${cpu} 2000 ${primaryVoters.includes(cpu) ? aperf : 0} ${primaryVoters.includes(cpu) ? 2000 : 0}`);
   return { startNs: capped.counters.open.reads[0].monoNs, stopNs: capped.counters.close.reads.at(-1)!.monoNs,
     stdout: '', stderr: ['CPU TSC_MHz APERF MPERF', ...rows].join('\n') };
 }

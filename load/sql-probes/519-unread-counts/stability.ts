@@ -39,6 +39,7 @@ const runs: RunInput[] = q.jobs.map(job => {
     clockEvents: json(join(q.chainDir, `${job.name}-clock-events.json`)),
     samples: parseSamples(text(join(q.chainDir, `${job.name}-thermal.jsonl`)) ?? ''),
     frequency: frequencyStart && frequencyEnd ? { ...frequencyStart, ...frequencyEnd } : null,
+    hostAffinity: json(join(job.out, 'frequency-host-affinity.json')),
   };
 });
 const session = json(join(q.chainDir, 'session.json'));
@@ -62,7 +63,7 @@ const coolProblems = stage === 'control' && !(baselineCooldown?.ok === true && l
 const reasons = [...coolProblems, ...sessionProblems(session, q.name, runs), ...judged.invalid, ...(spot?.problems ?? [])];
 const report = {
   stage, valid: reasons.length === 0, reasons, approval, session, go: binding.go,
-  evidence: { calibration: run.frequency, sends: run.sends, metadata: run.metadata, hostBefore: run.hostBefore,
+  evidence: { calibration: run.frequency, hostAffinity: run.hostAffinity, sends: run.sends, metadata: run.metadata, hostBefore: run.hostBefore,
     hostAfter: run.hostAfter, baselineCooldown, cooldown: run.cooldown, launchCheck: run.launchCheck, clockEvents: run.clockEvents },
   frequency: judged.frequency, blocks: judged.blocks, clientCpuEquivalents: clientCpuEquivalents(judged.frequency),
   turbostat: spot, legacy: legacy && { valid: legacy.valid, invalid: legacy.invalid, disagreements: legacyDisagreements(legacy.legacy, judged.frequency, run.sends.map(s => s.order)) },
