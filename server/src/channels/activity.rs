@@ -1187,19 +1187,24 @@ async fn directory_guests(
     channels: &[Uuid],
 ) -> Result<HashSet<Uuid>, sqlx::Error> {
     let guests: Vec<_> = entries.iter().map(|entry| entry.member.0).collect();
-    let rows: Vec<Uuid> = crate::database::organization_statement(
-        pool,
+    let sql = format!(
         "SELECT DISTINCT cm.member_id FROM channel_members cm \
-         JOIN users u ON u.organization_id=cm.organization_id AND u.id=cm.member_id \
+         JOIN ({}) u ON u.organization_id=cm.organization_id AND u.id=cm.member_id \
          AND u.membership_revision=cm.membership_revision \
          JOIN channels c ON c.organization_id=cm.organization_id AND c.id=cm.channel_id \
          WHERE cm.organization_id=$1 AND cm.channel_id=ANY($2) AND cm.member_id=ANY($3) \
-         AND u.deactivated_at IS NULL AND u.role='guest'",
+         AND u.role=$4",
+        auth::members::ACTIVE_SCOPED_MEMBERS_SQL
+    );
+    let rows: Vec<Uuid> = crate::database::organization_statement(
+        pool,
+        &sql,
         async |tx: &mut sqlx::PgConnection, sql: &str| {
             sqlx::query_scalar(sql)
                 .bind(organization)
                 .bind(channels)
                 .bind(guests)
+                .bind(Role::Guest)
                 .fetch_all(tx)
                 .await
         },
@@ -2000,6 +2005,85 @@ mod tests {
             rechecks,
             [false, false, false, true, true],
             "Channel mismatch, Channel cap, identity cap, identity cache mismatch, revocation identity mismatch"
+        );
+    }
+
+    #[fukulow_test::test]
+    async fn directory_guests_require_active_current_guest_grants_in_the_organization(
+        pool: sqlx::PgPool,
+    ) {
+        use crate::channels::tests::{member, organization};
+
+        let org = organization(&pool).await;
+        let other = organization(&pool).await;
+        let channel = Uuid::new_v4();
+        for scope in [org, other] {
+            sqlx::query("INSERT INTO channels(organization_id,id,name,visibility) VALUES($1,$2,'Public','public')")
+                .bind(scope).bind(channel).execute(&pool).await.unwrap();
+        }
+
+        let guest = Uuid::new_v4();
+        let inactive = Uuid::new_v4();
+        let stale = Uuid::new_v4();
+        let non_guest = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        let candidates = [
+            (org, guest, "guest", 0_i64),
+            (org, inactive, "guest", 1),
+            (org, stale, "guest", 0),
+            (org, non_guest, "member", 0),
+            (other, foreign, "guest", 0),
+        ];
+        // A foreign Guest with the same Member id cannot supply the local Member's Role.
+        member(&pool, other, non_guest, "guest").await;
+        let mut entries = Vec::new();
+        for (scope, id, role, grant_revision) in candidates {
+            member(&pool, scope, id, role).await;
+            if id == inactive || id == stale {
+                sqlx::query(
+                    "UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2",
+                )
+                .bind(scope)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            if id == stale {
+                sqlx::query(
+                    "UPDATE users SET deactivated_at=NULL WHERE organization_id=$1 AND id=$2",
+                )
+                .bind(scope)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            // The inactive grant deliberately matches its Member's bumped revision.
+            sqlx::query("INSERT INTO channel_members(organization_id,channel_id,member_id,membership_revision) VALUES($1,$2,$3,$4)")
+                .bind(scope).bind(channel).bind(id).bind(grant_revision).execute(&pool).await.unwrap();
+            entries.push(Arc::new(Entry {
+                id: Uuid::new_v4(),
+                organization: scope,
+                member: (id, i64::from(id == inactive || id == stale)),
+                hash: Vec::new(),
+                buffer: Default::default(),
+                wake: Notify::new(),
+            }));
+        }
+
+        // Use the fixture owner so RLS cannot hide a missing Organization predicate.
+        assert_eq!(
+            directory_guests(&pool, org, &entries, &[channel])
+                .await
+                .unwrap(),
+            HashSet::from([guest])
+        );
+        assert_eq!(
+            directory_guests(&pool, other, &entries, &[channel])
+                .await
+                .unwrap(),
+            HashSet::from([foreign])
         );
     }
 
