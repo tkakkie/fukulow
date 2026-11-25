@@ -73,14 +73,15 @@ export function createDms(options: {
     },
     settled() { active = undefined; plan() },
   })
-  function invalidate(reason: Invalidation = 'notice', delay = 200) {
+  function invalidate(reason: Invalidation = 'notice', delay = 200, notice = false) {
     if (closed) return
-    dispatch({ type: 'demand', boundary: reason !== 'notice', periodic: reason === 'periodic',
+    dispatch({ type: 'demand', boundary: reason !== 'notice', periodic: reason === 'periodic', notice,
       replace: reason === 'reconcile' || reason === 'periodic' ? state.rows.filter(r => !options.watched(r.identity.id)).map(r => r.identity.id) : [] })
     plan(delay)
   }
   const activityTarget: ActivityTarget = {
-    invalidate,
+    // Server notices that may reveal an undiscovered DM spend the run's notice delta; ready, reset, O5 and own work never do.
+    invalidate: (reason = 'notice', delay, discovery = false) => invalidate(reason, delay, discovery && (reason === 'notice' || reason === 'access')),
     disconnected() { if (!state.paused) { dispatch({ type: 'pause' }); target.suspend() } },
     close,
   }

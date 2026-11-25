@@ -1,15 +1,39 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { Session } from './revocation-burst-db.ts';
 import { bindStatement, FALLBACK_MARKER, frame, Framer, gateQuery, RECHECK_MARKER, Relay, rewriteParse } from './revocation-burst-relay.ts';
 import { startRssSampler } from './revocation-burst-rss.ts';
+import { spawnMeasuredServer } from './revocation-measured-server.ts';
 import { encloseClockBrackets, intersectClockBrackets, judge, peaks, percentile, poolWindow, runUncertaintyMs, verdictBySize, type Kind, type Run, type RunVerdict } from './revocation-burst-judgment.ts';
 
 const z = (s: string) => Buffer.from(`${s}\0`, 'utf8');
 const parseBody = (name: string, query: string) => Buffer.concat([z(name), z(query), Buffer.from([0, 1, 0, 0, 0, 25])]);
+
+test('each measured server start creates a fresh trace in the run directory', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'fukulow-measured-server-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const binary = join(dir, 'server');
+  writeFileSync(binary, `#!/usr/bin/env bash
+set -euo pipefail
+set -C
+test "$FUKULOW_REVOCATION_MEASUREMENT" = 1
+printf '%s\\n' "$FUKULOW_ADDR" > "$FUKULOW_REVOCATION_TRACE_PATH"
+`, { mode: 0o700 });
+  for (const port of [20000, 20001]) {
+    const server = spawnMeasuredServer(binary, dir, port, 'test-setup-token', 'test-database-url');
+    assert.deepEqual(await once(server, 'close'), [0, null]);
+  }
+  const traces = readdirSync(dir).filter(name => name !== 'server');
+  assert.deepEqual(traces.map(name => readFileSync(join(dir, name), 'utf8')).sort(), [
+    '127.0.0.1:20000\n', '127.0.0.1:20001\n',
+  ]);
+});
 
 test('Session enables psql error stopping and fails when psql exits without the success tag', async t => {
   const session = new Session({ name: 'fk592-test', port: 0, ownerPassword: '', appPassword: '' }, (file, args, options) => {

@@ -1,5 +1,6 @@
 //! Organization notices are invalidations, never Message delivery or authorization grants.
 use super::*;
+use crate::observability::revocation_trace;
 use crate::{get_mut_ignoring_poison, lock_ignoring_poison};
 use auth::activity::ChangeScope;
 use std::{
@@ -15,6 +16,7 @@ use tokio::{
     time::Instant,
 };
 mod dms;
+mod fallback_trace;
 mod holds;
 mod revocations;
 pub(crate) use dms::DmPublication;
@@ -1686,6 +1688,13 @@ enum Recheck {
 }
 impl Activity {
     pub(crate) async fn check(&self, pool: &sqlx::PgPool, scope: auth::SubscriptionScope) {
+        let timing =
+            matches!(scope, auth::SubscriptionScope::All) && revocation_trace::timing_enabled();
+        let mut trace = if timing {
+            fallback_trace::FallbackTrace::start()
+        } else {
+            None
+        };
         let entries: Vec<_> = lock_ignoring_poison(&self.entries)
             .values()
             .filter(|e| match scope {
@@ -1697,6 +1706,7 @@ impl Activity {
             })
             .cloned()
             .collect();
+        let scanned = entries.len();
         let mut organizations = std::collections::BTreeMap::<_, Vec<_>>::new();
         let mut revocation_cutoffs = HashMap::new();
         for entry in entries {
@@ -1727,12 +1737,18 @@ impl Activity {
             let checks = b.revocations.checks();
             if let Some(last) = checks.last() {
                 revocation_cutoffs.insert(entry.id, last.id);
+                if let Some(trace) = &mut trace {
+                    trace.capture(&entry, &b, &checks, last.id);
+                }
             }
             rows.extend(
                 checks
                     .into_iter()
                     .map(|check| (entry.clone(), Recheck::Revocation(check))),
             );
+        }
+        if let Some(trace) = &mut trace {
+            trace.snapshot(scanned);
         }
         for rows in organizations.values() {
             let mut remaining = rows.as_slice();
@@ -1761,6 +1777,9 @@ impl Activity {
                 }
                 let (chunk, rest) = remaining.split_at(offsets.len());
                 remaining = rest;
+                if let Some(trace) = &mut trace {
+                    trace.chunk(selected.len());
+                }
                 #[cfg(test)]
                 for (entry, channel) in &selected {
                     test_pause(
@@ -1772,15 +1791,23 @@ impl Activity {
                     .await;
                 }
                 let Ok(proofs) = authorize_batch(pool, &selected).await else {
+                    if let Some(trace) = &mut trace {
+                        trace.failed_chunk();
+                    }
                     if let Some((entry, _)) = chunk.first() {
                         lock_ignoring_poison(&entry.buffer).holds.recheck_error();
                     }
                     let mut seen = HashSet::new();
+                    let mut admission_attempted = false;
                     for (entry, row) in chunk {
                         let mut b = if let Some(&cutoff) = revocation_cutoffs.get(&entry.id)
                             && seen.insert(entry.id)
                         {
                             let (mut b, now) = holds::lock_for_admission(entry);
+                            admission_attempted |= timing;
+                            let mut admission = trace
+                                .as_mut()
+                                .and_then(|trace| trace.first_admission(entry.id));
                             let Buffer {
                                 holds, revocations, ..
                             } = &mut *b;
@@ -1792,9 +1819,20 @@ impl Activity {
                             if checks.peek().is_some() {
                                 for check in checks {
                                     holds.start(entry, revocations, check.id, now);
+                                    if let Some(record) = &mut admission {
+                                        let held = holds.deadline(check.id).is_some();
+                                        record.record(
+                                            check.id,
+                                            held,
+                                            !held && revocations.check(check.id).is_some(),
+                                        );
+                                    }
                                 }
                                 b.retire_notices();
                                 entry.wake.notify_one();
+                            }
+                            if let Some(record) = admission {
+                                record.complete();
                             }
                             b
                         } else {
@@ -1805,6 +1843,9 @@ impl Activity {
                         {
                             b.retire_notices();
                         }
+                    }
+                    if admission_attempted {
+                        revocation_trace::admission_finished();
                     }
                     continue;
                 };
@@ -1820,6 +1861,9 @@ impl Activity {
                     }
                 }
             }
+        }
+        if let Some(trace) = trace {
+            trace.finish();
         }
     }
 }

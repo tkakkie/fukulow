@@ -858,9 +858,13 @@ async fn queued_invite_expiry_and_new_account_uniqueness_race_never_attach_by_em
     assert_eq!(memberships, 1);
     let (_, _, email, token) = account(&pool, other, Role::Member).await;
     let i = invite(&app, org, &owner, &email, Role::Member).await;
+    let invite_id = i["id"].as_str().unwrap().parse::<Uuid>().unwrap();
     let mut tx = pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
     members::lock_organization(&mut tx, org).await.unwrap();
-    sqlx::query("UPDATE invites SET expires_at=clock_timestamp()+interval '150 milliseconds' WHERE organization_id=$1 AND id=$2").bind(org).bind(i["id"].as_str().unwrap().parse::<Uuid>().unwrap()).execute(&pool).await.unwrap();
     let task = tokio::spawn({
         let app = app.clone();
         async move {
@@ -874,7 +878,24 @@ async fn queued_invite_expiry_and_new_account_uniqueness_race_never_attach_by_em
             .await
         }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    wait_blocked(
+        &pool,
+        Blocked::LockQueryBehind(
+            "SELECT organization_id FROM organizations%FOR NO KEY UPDATE",
+            blocker,
+        ),
+        Count::Exactly(1),
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE invites SET expires_at=clock_timestamp() WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(org)
+    .bind(invite_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(task.await.unwrap().status(), StatusCode::NOT_FOUND);
 }

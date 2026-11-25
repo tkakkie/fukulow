@@ -16,9 +16,27 @@ export function restore(r: StoredRatio): Ratio {
   return [n, d];
 }
 
-export function medianRatio(rs: Ratio[]): Ratio {
-  const s = [...rs].sort((a, b) => below(a, b) ? -1 : below(b, a) ? 1 : 0);
-  const lo = s[(s.length - 1) >> 1];
-  const hi = s[s.length >> 1];
+const sorted = (rs: Ratio[]) => [...rs].sort((a, b) => below(a, b) ? -1 : below(b, a) ? 1 : 0);
+const mean = (lo: Ratio, hi: Ratio): Ratio => {
   return lo === hi ? lo : [lo[0] * hi[1] + hi[0] * lo[1], 2n * lo[1] * hi[1]];
+};
+
+export function medianRatio(rs: Ratio[]): Ratio {
+  const s = sorted(rs);
+  return mean(s[(s.length - 1) >> 1], s[s.length >> 1]);
+}
+
+export function medianBounds(votes: Ratio[], cohortSize: number) {
+  const s = sorted(votes);
+  const at = (offset: number) => {
+    const lo = s[((cohortSize - 1) >> 1) - offset];
+    const hi = s[(cohortSize >> 1) - offset];
+    // A missing middle rank makes this bound open in its direction.
+    return lo && hi ? mean(lo, hi) : null;
+  };
+  const lower = at(cohortSize - s.length);
+  const upper = at(0);
+  const verdict = upper && below(upper, keepFrequency) ? 'throttled'
+    : lower && !below(lower, keepFrequency) ? 'clear' : 'invalid';
+  return { lower: lower && store(lower), upper: upper && store(upper), verdict };
 }

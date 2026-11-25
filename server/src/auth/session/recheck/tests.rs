@@ -2,6 +2,7 @@ use super::*;
 use crate::auth::session::tests::{Phase, fixture};
 
 mod exit;
+mod revocation_trace;
 
 #[fukulow_test::test]
 async fn readiness_rejects_abnormal_worker_until_process_replacement(pool: PgPool) {

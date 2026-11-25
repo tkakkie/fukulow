@@ -3,16 +3,25 @@ import { createInterface } from 'node:readline';
 import { setTimeout as wait } from 'node:timers/promises';
 import { hrtime } from 'node:process';
 import { promisify } from 'node:util';
-import { controlIdleMs, cpus796, type Calibration, type CounterBlock, type Sweep } from './frequency-evidence.ts';
+import { controlIdleMs, cpus796, type Calibration, type CounterWindow, type Sweep } from './frequency-evidence.ts';
 import { readCpuPolicy } from '../../harness-core/cpu-policy.ts';
+import type { housekeepingSampler } from './frequency-housekeeping.ts';
 
 const exec = promisify(execFile);
 export async function calibrate(helper: string, signal: AbortSignal): Promise<Calibration> {
   return JSON.parse((await exec(helper, ['calibrate'], { timeout: 5000, signal })).stdout);
 }
 
+export async function waitUntil(deadline: bigint, signal: AbortSignal) {
+  let remaining = deadline - hrtime.bigint();
+  while (remaining > 0n) {
+    await wait(Number((remaining + 999_999n) / 1_000_000n), undefined, { signal });
+    remaining = deadline - hrtime.bigint();
+  }
+}
+
 export async function timedCounters<T>(helper: string, session: string, order: number, control: boolean,
-  signal: AbortSignal, pgbench: () => Promise<T>) {
+  signal: AbortSignal, pgbench: () => Promise<T>, sampler?: ReturnType<typeof housekeepingSampler>) {
   signal.throwIfAborted();
   const policyBefore = readCpuPolicy(cpus796);
   const child = spawn(helper, [control ? 'control' : 'block', session, String(order)], { stdio: ['pipe', 'pipe', 'inherit'], signal });
@@ -38,23 +47,22 @@ export async function timedCounters<T>(helper: string, session: string, order: n
   }
   try {
     if ((await receive()).ready !== true) throw new Error('F6 perf helper readiness missing');
+    const openSample = sampler?.sample();
     const open = await sample('open');
     const startMs = Date.now(), start = hrtime.bigint();
     const output = await pgbench();
     const exit = hrtime.bigint(), endMs = Date.now();
     const idle = control ? await sample('idle') : undefined;
-    if (idle) {
-      const deadline = BigInt(idle.reads.at(-1)!.monoNs) + BigInt(controlIdleMs) * 1_000_000n;
-      let remaining = deadline - hrtime.bigint();
-      while (remaining > 0n) {
-        await wait(Number((remaining + 999_999n) / 1_000_000n), undefined, { signal });
-        remaining = deadline - hrtime.bigint();
-      }
-    }
+    const idleSample = idle && sampler?.sample();
+    if (idle) await waitUntil(BigInt(idle.reads.at(-1)!.monoNs) + BigInt(controlIdleMs) * 1_000_000n, signal);
     const close = await sample('close');
+    const closeSample = sampler?.sample();
     if (!await exited) throw new Error('F6 perf helper failed');
     const policyAfter = readCpuPolicy(cpus796);
-    const counters: CounterBlock = { open, close, idle, startNs: String(start), exitNs: String(exit), policyBefore, policyAfter };
+    const housekeeping = sampler && openSample && closeSample ? {
+      workload: sampler.workload, ticksPerSecond: sampler.ticksPerSecond, open: openSample, idle: idleSample, close: closeSample,
+    } : undefined;
+    const counters: CounterWindow = { open, close, idle, startNs: String(start), exitNs: String(exit), policyBefore, policyAfter, housekeeping };
     return { output, measuredWindow: { startMs, endMs, monoMs: Number(exit - start) / 1e6 }, counters };
   } finally {
     lines.close();
