@@ -79,6 +79,39 @@ test('a scope without its own cpuset controller reads the nearest ancestor up to
   }), /EACCES/);
 });
 
+test('the nearest ancestor wins and an empty or malformed cpuset aborts instead of falling back', () => {
+  const slice = `/${measurementSlice}`;
+  const middle = `${slice}/inner.slice`;
+  const scope = `${middle}/fukulow668-client-42.scope`;
+  const nested = (middleCpuset: string | undefined) => {
+    const base = procFiles(sets796.client, measuredCpus, scope, slice);
+    return (path: string) => path === `/sys/fs/cgroup${middle}/cpuset.cpus.effective` && middleCpuset !== undefined
+      ? middleCpuset : base(path);
+  };
+  assert.deepEqual(checkPlacement('client', 42, nested(cpuList(sets796.client))),
+    { pid: 42, cgroup: scope, affinity: sets796.client, cpuset: sets796.client, cpusetCgroup: middle });
+  assert.equal(checkPlacement('client', 42, nested(undefined)).cpusetCgroup, slice);
+  assert.throws(() => checkPlacement('client', 42, nested('')), /invalid CPU list/);
+  assert.throws(() => checkPlacement('client', 42, nested('1-x')), /invalid CPU list/);
+});
+
+test('Postgres needs its own container cpuset even when an ancestor has the exact server CPUs', () => {
+  const slice = `/${measurementSlice}`;
+  const container = `${slice}/docker-${'a'.repeat(64)}.scope`;
+  assert.equal(checkPlacement('postgres', 42, procFiles(sets796.server, sets796.server, container)).cpusetCgroup, container);
+  assert.throws(() => checkPlacement('postgres', 42, procFiles(sets796.server, sets796.server, container, slice)), /ENOENT/);
+});
+
+test('placement rejects a lookalike slice, dot path components and invalid process ids', () => {
+  for (const scope of [`/${measurementSlice}X/run-test.scope`, `/${measurementSlice}/../user.slice/run.scope`,
+    `/${measurementSlice}/./run.scope`]) {
+    assert.throws(() => checkPlacement('client', 42, procFiles(sets796.client, measuredCpus, scope)), /outside fukulow796/);
+  }
+  for (const pid of [0, -1, 1.5, Number.NaN]) {
+    assert.throws(() => checkPlacement('client', pid, procFiles(sets796.client)), /no process id/);
+  }
+});
+
 test('startup records effective placement and aborts setup on mismatch', t => {
   const dir = mkdtempSync(join(tmpdir(), 'revocation-placement-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

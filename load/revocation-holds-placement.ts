@@ -19,7 +19,8 @@ export function checkPlacement(role: Role, pid: number | undefined, read = readF
   if (!cgroup || !cgroup.startsWith(`/${measurementSlice}/`) || cgroup.split('/').some(part => part === '.' || part === '..')) {
     throw new Error(`${role} affinity ${cpuList(affinity)} in cgroup ${cgroup ?? 'missing'} is outside ${measurementSlice}`);
   }
-  const { cpuset, cpusetCgroup } = effectiveCpuset(cgroup, read);
+  // Postgres must have its own Docker cpuset; the processes in the launch scope may inherit one.
+  const { cpuset, cpusetCgroup } = effectiveCpuset(cgroup, role !== 'postgres', read);
   const expected = cpuSet(role);
   if (cpuList(affinity) !== cpuList(expected)) throw new Error(`${role} effective affinity ${cpuList(affinity)} differs from ${cpuList(expected)}`);
   if (cpuset.some(cpu => !measuredCpus.includes(cpu)) || expected.some(cpu => !cpuset.includes(cpu)) ||
@@ -29,19 +30,22 @@ export function checkPlacement(role: Role, pid: number | undefined, read = readF
   return { pid, cgroup, affinity, cpuset, cpusetCgroup };
 }
 
-// systemd enables the cpuset controller only for units that set AllowedCPUs, so a
-// fukulow668 scope has no cpuset file and runs on its nearest ancestor's effective CPUs.
-function effectiveCpuset(cgroup: string, read: (file: string) => string) {
-  for (let group = cgroup; group.startsWith(`/${measurementSlice}`); group = group.slice(0, group.lastIndexOf('/'))) {
+// A cgroup has no cpuset files unless systemd enabled the controller for it, which it does
+// for units that set AllowedCPUs (or their siblings). Without the file, a cgroup runs on its
+// nearest ancestor's effective CPUs, as a fukulow668 scope does under fukulow796.slice.
+function effectiveCpuset(cgroup: string, inherit: boolean, read: (file: string) => string) {
+  const slice = `/${measurementSlice}`;
+  for (let group = cgroup; ; group = group.slice(0, group.lastIndexOf('/'))) {
     let text: string;
     try { text = read(`/sys/fs/cgroup${group}/cpuset.cpus.effective`); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || !inherit) throw error;
+      if (group === slice) break;
+      continue;
     }
     return { cpuset: parseCpuList(text.trim()), cpusetCgroup: group };
   }
-  throw new Error(`no cpuset.cpus.effective in ${cgroup} or its ancestors up to /${measurementSlice}`);
+  throw new Error(`no cpuset.cpus.effective in ${cgroup} or its ancestors up to ${slice}`);
 }
 
 export function placementEnabled(platform: string, mode: 'preflight' | 'rehearsal' | 'overhead' | 'formal') {
