@@ -21,13 +21,27 @@ function scratch(t: { after: (fn: () => void) => void }) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
-const pidOf = (raw: SpotCheck | null) => Number(/pid=(\d+)/.exec(raw?.stderr ?? '')?.[1]);
+function validPid(pid: number) {
+  assert.ok(Number.isInteger(pid) && pid > 0, `no child pid: ${pid}`);
+  return pid;
+}
+const pidOf = (raw: SpotCheck | null) => validPid(Number(/pid=(\d+)/.exec(raw?.stderr ?? '')?.[1]));
+// True only once the kernel reports no such process; any other error is a test failure, not "gone".
 async function gone(pid: number) {
+  validPid(pid);
   for (let i = 0; i < 100; i++) {
-    try { process.kill(pid, 0); } catch { return true; }
+    try { process.kill(pid, 0); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ESRCH') return true;
+      throw err;
+    }
     await new Promise(r => setTimeout(r, 20));
   }
   return false;
+}
+// Wait for a file the child writes once it is running, bounded by the test timeout.
+async function waitFor(path: string) {
+  while (!existsSync(path)) await new Promise(r => setTimeout(r, 10));
+  return readFileSync(path, 'utf8');
 }
 
 test('work runs only after the echoed ready marker, then stdin reaches EOF and the child exits 0 (#979)', limit, async t => {
@@ -56,16 +70,19 @@ test('a child that exits before echoing the marker is refused and work never run
   assert.equal(await gone(pidOf(raw)), true);
 });
 
-test('an abort before the marker ends the child with the existing refusal and leaves no child (#979)', limit, async () => {
-  const abort = new AbortController();
-  let raw: SpotCheck | null = null, ran = false;
-  // Never echoes: stands in for a turbostat that has not taken its opening sample.
-  const run = withSpotCheck(async () => { ran = true; }, abort.signal, r => { raw = r; },
-    node(`process.stderr.write('pid='+process.pid+'\\n');process.stdin.resume();setInterval(()=>{},1000);`));
-  setTimeout(() => abort.abort(), 300);
+test('an abort before the marker ends the child with the existing refusal and leaves no child (#979)', limit, async t => {
+  const abort = new AbortController(), dir = scratch(t), pidFile = join(dir, 'pid');
+  let ran = false;
+  // Never echoes: stands in for a turbostat that has not taken its opening sample. The pid file, written
+  // atomically once the child runs, is the barrier, so the abort always hits a live child.
+  const run = withSpotCheck(async () => { ran = true; }, abort.signal, () => {},
+    node(`const fs=require('fs');fs.writeFileSync(${JSON.stringify(pidFile + '.tmp')},String(process.pid));
+      fs.renameSync(${JSON.stringify(pidFile + '.tmp')},${JSON.stringify(pidFile)});process.stdin.resume();setInterval(()=>{},1000);`));
+  const pid = validPid(Number(await waitFor(pidFile)));
+  abort.abort();
   await assert.rejects(run, /turbostat exited before its opening sample/);
   assert.equal(ran, false);
-  assert.equal(await gone(pidOf(raw)), true);
+  assert.equal(await gone(pid), true);
 });
 
 test('an abort during the work fails the closing sample and leaves no child (#979)', limit, async () => {
