@@ -1,5 +1,28 @@
 use super::*;
 
+fn write_response(outcome: WriteOutcome) -> Response {
+    match outcome {
+        WriteOutcome::Created { id, generation } => {
+            created_section(StatusCode::CREATED, id, generation)
+        }
+        WriteOutcome::Existing { id, generation } => {
+            created_section(StatusCode::OK, id, generation)
+        }
+        WriteOutcome::Layout => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+fn created_section(status: StatusCode, id: Uuid, generation: i64) -> Response {
+    (
+        status,
+        Json(CreatedSection {
+            id,
+            generation: generation.to_string(),
+        }),
+    )
+        .into_response()
+}
+
 #[utoipa::path(post, path="/api/v1/orgs/{org}/me/sections",request_body=CreateSection,
     params(("org"=Uuid,Path)), security(("cookie"=[]),("bearer"=[])),
     responses((status=201,description="Section appended",body=CreatedSection),
@@ -17,7 +40,9 @@ pub(crate) async fn create(
     ApiJson(input): ApiJson<CreateSection>,
 ) -> Result<Response, ApiError> {
     validate_name(&input.name)?;
-    write(&state, activity, owner, Mutation::Create(input)).await
+    write(&state, activity, owner, Mutation::Create(input))
+        .await
+        .map(write_response)
 }
 
 #[utoipa::path(patch, path="/api/v1/orgs/{org}/me/sections/{id}",request_body=RenameSection,
@@ -36,7 +61,9 @@ pub(crate) async fn rename(
     ApiJson(input): ApiJson<RenameSection>,
 ) -> Result<Response, ApiError> {
     validate_name(&input.name)?;
-    write(&state, activity, owner, Mutation::Rename(id, input)).await
+    write(&state, activity, owner, Mutation::Rename(id, input))
+        .await
+        .map(write_response)
 }
 
 #[utoipa::path(delete, path="/api/v1/orgs/{org}/me/sections/{id}",
@@ -51,7 +78,9 @@ pub(crate) async fn delete(
     owner: Owner,
     TargetId(id): TargetId,
 ) -> Result<Response, ApiError> {
-    write(&state, activity, owner, Mutation::Delete(id)).await
+    write(&state, activity, owner, Mutation::Delete(id))
+        .await
+        .map(write_response)
 }
 
 #[utoipa::path(put, path="/api/v1/orgs/{org}/me/sections/order",request_body=SectionOrder,
@@ -70,7 +99,9 @@ pub(crate) async fn section_order(
     ApiJson(input): ApiJson<SectionOrder>,
 ) -> Result<Response, ApiError> {
     validate_order(&input.section_ids, MAX_SECTIONS)?;
-    write(&state, activity, owner, Mutation::SectionOrder(input)).await
+    write(&state, activity, owner, Mutation::SectionOrder(input))
+        .await
+        .map(write_response)
 }
 
 #[utoipa::path(put, path="/api/v1/orgs/{org}/me/channel-sections/{channel_id}",request_body=MoveChannel,
@@ -89,7 +120,9 @@ pub(crate) async fn move_channel(
     TargetId(channel): TargetId,
     ApiJson(input): ApiJson<MoveChannel>,
 ) -> Result<Response, ApiError> {
-    write(&state, activity, owner, Mutation::Move(channel, input)).await
+    write(&state, activity, owner, Mutation::Move(channel, input))
+        .await
+        .map(write_response)
 }
 
 #[utoipa::path(put, path="/api/v1/orgs/{org}/me/section-channel-order",request_body=ChannelOrder,
@@ -108,5 +141,7 @@ pub(crate) async fn channel_order(
     ApiJson(input): ApiJson<ChannelOrder>,
 ) -> Result<Response, ApiError> {
     validate_order(&input.channel_ids, MAX_CHANNELS)?;
-    write(&state, activity, owner, Mutation::ChannelOrder(input)).await
+    write(&state, activity, owner, Mutation::ChannelOrder(input))
+        .await
+        .map(write_response)
 }

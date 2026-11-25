@@ -24,6 +24,13 @@ enum Change {
     Unchanged(Option<(Uuid, i64)>),
 }
 
+#[cfg_attr(test, derive(Debug))]
+pub(super) enum WriteOutcome {
+    Created { id: Uuid, generation: i64 },
+    Existing { id: Uuid, generation: i64 },
+    Layout,
+}
+
 enum WriteExit {
     Unchanged(Option<(Uuid, i64)>),
     RestartDelete(Uuid),
@@ -89,7 +96,7 @@ pub(super) async fn write(
     activity: activity::Activity,
     owner: Owner,
     mutation: Mutation,
-) -> Result<Response, ApiError> {
+) -> Result<WriteOutcome, ApiError> {
     // A disconnected request drops the join handle. The task still owns COMMIT
     // and the publication of its outcome.
     tokio::spawn(write_and_publish(state.pool.clone(), activity, owner, mutation).in_current_span())
@@ -102,21 +109,21 @@ async fn write_and_publish(
     activity: activity::Activity,
     owner: Owner,
     mut mutation: Mutation,
-) -> Result<Response, ApiError> {
+) -> Result<WriteOutcome, ApiError> {
     for _ in 0..DELETE_ATTEMPTS {
         let committed = write_attempt(&pool, &activity, owner, mutation).await;
         match committed {
-            Ok((created, committed_generation, notice)) => {
+            Ok((created, generation, notice)) => {
                 notice.committed(pool);
                 return Ok(match created {
-                    Some(id) => created_section(StatusCode::CREATED, id, committed_generation),
-                    None => StatusCode::NO_CONTENT.into_response(),
+                    Some(id) => WriteOutcome::Created { id, generation },
+                    None => WriteOutcome::Layout,
                 });
             }
             Err(WriteExit::Unchanged(existing)) => {
                 return Ok(match existing {
-                    Some((id, generation)) => created_section(StatusCode::OK, id, generation),
-                    None => StatusCode::NO_CONTENT.into_response(),
+                    Some((id, generation)) => WriteOutcome::Existing { id, generation },
+                    None => WriteOutcome::Layout,
                 });
             }
             Err(WriteExit::RestartDelete(id)) => mutation = Mutation::Delete(id),
@@ -221,15 +228,4 @@ async fn lock_layout(tx: &mut PgConnection, owner: Owner) -> Result<(), sqlx::Er
 
 fn unchanged() -> Change {
     Change::Unchanged(None)
-}
-
-fn created_section(status: StatusCode, id: Uuid, generation: i64) -> Response {
-    (
-        status,
-        Json(CreatedSection {
-            id,
-            generation: generation.to_string(),
-        }),
-    )
-        .into_response()
 }
