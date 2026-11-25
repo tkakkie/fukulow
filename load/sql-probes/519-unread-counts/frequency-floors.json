@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "control": {
+    "report": "/home/tomoya/dev/fukulow/runs/chain-796-control-v989/control-report.json",
+    "sha256": "f9f1aed7169483232f45600d5e3df61d1a6376478b27634f6ac92abec1f8efab",
+    "quote": "承認して Rehearsal 2 の準備に進む",
+    "date": "2026-11-25"
+  },
+  "rehearsal2": {
+    "sha256": "7c8e1e855c2940c5dac9874640a50a9871d1a2de563227a195ed86742f5aced3",
+    "quote": "承認して本番準備へ",
+    "date": "2026-11-25"
+  },
+  "floors": {
+    "server": ["4772916757509068095078975171741002312593600000000000", "2547903093911232373813909875381171686160000"],
+    "client": ["492340432627109249920000000000", "260831432403911447200"]
+  }
+}
