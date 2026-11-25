@@ -161,6 +161,70 @@ async fn subscribe_handoff_generation_recheck_preserves_access_and_organization_
 }
 
 #[fukulow_test::test]
+async fn duplicate_subscribe_with_generation_rechecks_access_and_retires_denied_channels(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let private = channel(&pool, f.organization, f.member, true).await;
+    let changes = crate::auth::SessionChanges::with_recheck_timing(
+        Duration::from_millis(50),
+        Duration::from_secs(5),
+    );
+    let fallback = changes.pause_fallback();
+    let server = Server::start(crate::app(AppState {
+        session_changes: changes,
+        ..f.state.clone()
+    }))
+    .await;
+    let mut socket = server.connect(&f.token).await;
+    subscribe(&mut socket, private, 0).await;
+    ready(&mut socket, private, 0).await;
+    fallback.entered().await;
+
+    let stale = Some(Uuid::new_v4());
+    let duplicate = |channel_id| ClientMessage::Subscribe {
+        history_generation: stale,
+        channel_id,
+        after_seq: 0,
+    };
+    control(&mut socket, duplicate(private)).await.unwrap();
+    assert_eq!(
+        event(&mut socket).await,
+        json!({"type":"error","code":"history_generation_changed","channel_id":private})
+    );
+    // A subscribe without a carried epoch would be silent if the cursor survived.
+    subscribe(&mut socket, private, 0).await;
+    ready(&mut socket, private, 0).await;
+
+    // Leave the fast signals undelivered so each duplicate performs the recheck.
+    sqlx::query(
+        "DELETE FROM channel_members WHERE organization_id=$1 AND channel_id=$2 AND member_id=$3",
+    )
+    .bind(f.organization)
+    .bind(private)
+    .bind(f.member)
+    .execute(&pool)
+    .await
+    .unwrap();
+    control(&mut socket, duplicate(private)).await.unwrap();
+    denied(&mut socket, private).await;
+    subscribe(&mut socket, private, 0).await;
+    denied(&mut socket, private).await;
+
+    subscribe(&mut socket, f.channel, 0).await;
+    ready(&mut socket, f.channel, 0).await;
+    sqlx::query("UPDATE users SET deactivated_at=now() WHERE organization_id=$1 AND id=$2")
+        .bind(f.organization)
+        .bind(f.member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    control(&mut socket, duplicate(f.channel)).await.unwrap();
+    closed(&mut socket, CLOSE_ORGANIZATION_UNAVAILABLE).await;
+    fallback.release();
+}
+
+#[fukulow_test::test]
 async fn generation_subscribe_denial_hides_private_channels_and_reconnect_uses_rotated_epoch(
     pool: PgPool,
 ) {

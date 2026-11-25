@@ -19,6 +19,12 @@ fn database_failure(operation: &'static str, error: &sqlx::Error) -> u16 {
     1011
 }
 
+enum SubscriptionVisibility {
+    Visible(Uuid),
+    HistoryGenerationChanged,
+    NotFound,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Lifecycle {
     pub ping_interval: Duration,
@@ -258,8 +264,12 @@ impl Connection<'_> {
         .await
     }
 
-    async fn visible(&self, channel: Uuid, generation: Option<Uuid>) -> Result<Uuid, MessageError> {
-        messages::history::authorized_generation(
+    async fn visible(
+        &self,
+        channel: Uuid,
+        generation: Option<Uuid>,
+    ) -> Result<SubscriptionVisibility, u16> {
+        match messages::history::authorized_generation(
             &self.state.pool,
             self.auth.identity.organization.organization_id,
             (self.auth.identity.member.id, self.auth.membership_revision),
@@ -267,6 +277,20 @@ impl Connection<'_> {
             generation,
         )
         .await
+        {
+            Ok(generation) => Ok(SubscriptionVisibility::Visible(generation)),
+            Err(MessageError::HistoryGenerationChanged) => {
+                Ok(SubscriptionVisibility::HistoryGenerationChanged)
+            }
+            Err(MessageError::NotFound) => Ok(SubscriptionVisibility::NotFound),
+            Err(MessageError::OrganizationUnavailable) => {
+                Err(super::CLOSE_ORGANIZATION_UNAVAILABLE)
+            }
+            Err(MessageError::Database(error)) => {
+                Err(database_failure("websocket_authorize", &error))
+            }
+            Err(_) => Err(1011),
+        }
     }
 
     // Subscription replay also handles a cursor gap after access was lost and restored.
@@ -369,9 +393,9 @@ impl Connection<'_> {
                 // still requires fresh authorization before it can be compared.
                 if self.cursors.contains_key(&channel_id) {
                     if history_generation.is_some() {
-                        match self.visible(channel_id, history_generation).await {
-                            Ok(_) => {}
-                            Err(MessageError::HistoryGenerationChanged) => {
+                        match self.visible(channel_id, history_generation).await? {
+                            SubscriptionVisibility::Visible(_) => {}
+                            SubscriptionVisibility::HistoryGenerationChanged => {
                                 self.unsubscribe(channel_id);
                                 return Self::error(
                                     socket,
@@ -380,18 +404,11 @@ impl Connection<'_> {
                                 )
                                 .await;
                             }
-                            Err(MessageError::NotFound) => {
+                            SubscriptionVisibility::NotFound => {
                                 self.unsubscribe(channel_id);
                                 return Self::error(socket, Some(channel_id), "channel_not_found")
                                     .await;
                             }
-                            Err(MessageError::OrganizationUnavailable) => {
-                                return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
-                            }
-                            Err(MessageError::Database(error)) => {
-                                return Err(database_failure("websocket_authorize", &error));
-                            }
-                            Err(_) => return Err(1011),
                         }
                     }
                     return Ok(());
@@ -404,22 +421,15 @@ impl Connection<'_> {
                 }
                 #[cfg(test)]
                 super::tests::access_loss::pause(channel_id, "authorize", 0).await;
-                match self.visible(channel_id, history_generation).await {
-                    Ok(_) => {}
-                    Err(MessageError::HistoryGenerationChanged) => {
+                match self.visible(channel_id, history_generation).await? {
+                    SubscriptionVisibility::Visible(_) => {}
+                    SubscriptionVisibility::HistoryGenerationChanged => {
                         return Self::error(socket, Some(channel_id), "history_generation_changed")
                             .await;
                     }
-                    Err(MessageError::NotFound) => {
+                    SubscriptionVisibility::NotFound => {
                         return Self::error(socket, Some(channel_id), "channel_not_found").await;
                     }
-                    Err(MessageError::OrganizationUnavailable) => {
-                        return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
-                    }
-                    Err(MessageError::Database(error)) => {
-                        return Err(database_failure("websocket_authorize", &error));
-                    }
-                    Err(_) => return Err(1011),
                 }
                 #[cfg(test)]
                 super::tests::access_loss::pause(channel_id, "access_subscribe", 0).await;
@@ -479,9 +489,9 @@ impl Connection<'_> {
                     }
                     #[cfg(test)]
                     super::tests::access_loss::pause(channel_id, "handoff_generation", 0).await;
-                    let history_generation = match self.visible(channel_id, None).await {
-                        Ok(generation) => generation,
-                        Err(MessageError::NotFound) => {
+                    let history_generation = match self.visible(channel_id, None).await? {
+                        SubscriptionVisibility::Visible(generation) => generation,
+                        SubscriptionVisibility::NotFound => {
                             self.unsubscribe(channel_id);
                             return Self::event(
                                 socket,
@@ -489,13 +499,8 @@ impl Connection<'_> {
                             )
                             .await;
                         }
-                        Err(MessageError::OrganizationUnavailable) => {
-                            return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
-                        }
-                        Err(MessageError::Database(error)) => {
-                            return Err(database_failure("websocket_authorize", &error));
-                        }
-                        Err(_) => return Err(1011),
+                        // Handoff carries no expected epoch, so a mismatch here is internal.
+                        SubscriptionVisibility::HistoryGenerationChanged => return Err(1011),
                     };
                     self.protected_event(
                         socket,
