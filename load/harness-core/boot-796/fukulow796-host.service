@@ -1,0 +1,16 @@
+# #796 boot-time host setup; installed by load/harness-core/boot-796.ts (#996).
+# Ordered after the daemons so their startup cannot undo it. power-profiles-daemon is pulled in, not only
+# ordered: multi-user.target alone would leave it to D-Bus activation later, which re-applies its saved profile.
+[Unit]
+Description=fukulow #796 measurement host setup (frequency, housekeeping affinity)
+Wants=fukulow796.slice power-profiles-daemon.service
+After=fukulow796.slice power-profiles-daemon.service fukulow-cpu-performance.service containerd.service docker.service tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/fukulow796/frequency.sh
+ExecStart=/usr/local/libexec/fukulow796/affinity.sh
+
+[Install]
+WantedBy=multi-user.target
