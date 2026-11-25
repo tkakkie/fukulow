@@ -159,7 +159,7 @@ export function createSession(options: SessionOptions) {
       unreadApi: {
         listChannels: () => observe(unreadSource.listChannels()),
         markRead: (scope, body) => observe(unreadSource.markRead(scope, body)),
-        getTopicSummary: (channel, topic) => observe(options.unreadApi ? unreadSource.getTopicSummary(channel, topic) : topics.activitySummary(channel, topic, unread.get(channel).topics[topic]?.position ?? 0)),
+        getTopicSummary: (channel, topic) => observe(options.unreadApi ? unreadSource.getTopicSummary(channel, topic) : topics.activitySummary(channel, topic, unread.get(channel).topics[topic]?.position ?? 0, unread.activityRequiredBase(channel))),
       },
       onSessionEnded: notifyEnded,
     },

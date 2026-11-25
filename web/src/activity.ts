@@ -115,6 +115,7 @@ export function createActivityTarget<T>(options: {
     // An in-flight snapshot can cover a newer notice if it passes covers().
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
+    inFlight: () => inFlight,
     ensure() {
       if (inFlight) return running
       if (!closed && !stopped && !dirty && timer === undefined && !retry) { dirty = true; return run() }

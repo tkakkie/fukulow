@@ -957,6 +957,8 @@ it('stale cached activitySummary waits for an in-flight load and returns the fre
     expect(result.ok && result.data.as_of_seq).toBe(11)
     expect(result.ok && result.data.topic.read_seq).toBe(2)
     expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
   } finally { activity.close(); await c.sync.close() }
 })
 
@@ -1070,4 +1072,107 @@ it('stale cached activitySummary without an in-flight load issues a single fetch
     await vi.advanceTimersByTimeAsync(1_000)
     expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
   } finally { activity.close(); await c.sync.close() }
+})
+
+it('evicted Topic Unread resolves under continuous unrelated Channel traffic (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const fullMain = Array.from({ length: 400 }, (_, i) => ({ kind: 'message' as const, message: msg(11 + i, null) }))
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }))
+  let socket!: import('./realtime').RealtimeHandlers
+  let seq = 410
+  const getTopicSummary = vi.fn(async () => {
+    const snapshotW = seq
+    const pending = held<Result<import('./api').TopicSummaryResponse>>()
+    queueMicrotask(() => {
+      const next = ++seq
+      socket.onEvent({ type: 'message', kind: 'create', seq: next, message: { ...msg(next, null), sender: 'other' } })
+      pending.resolve(ok({ history_generation: gen, as_of_seq: snapshotW, topic: { ...summary('T', 2, 1, 1), read_seq: 1, unread_count: 1, mention_unread_count: 0 } }))
+    })
+    return pending.promise
+  })
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: true, items: fullMain }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: false, topics: [] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(2, 'T')], has_more: false }),
+    },
+    sync: {
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(410, null)], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 410 }); await flush()
+    expect(session.topics.get('A').lines).toHaveLength(400)
+    await session.unread.enter({ channel: 'A', topicId: 'T' })
+    await flush(); await flush()
+    expect(session.topics.get('A').topics.some(t => t.topicId === 'T')).toBe(false)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(1)
+    expect(session.unread.get('A').entry?.boundary).toBe(1)
+    expect(getTopicSummary).toHaveBeenCalledOnce()
+  } finally { session.close(); listChannels.mockRestore() }
+})
+
+it('transient snapshot_expired on Edit does not terminally stop Topic Unread (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 11, unread_count: 2 })] }))
+  let socket!: import('./realtime').RealtimeHandlers
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const getTopicSummary = vi.fn<() => Promise<Result<import('./api').TopicSummaryResponse>>>()
+    .mockReturnValueOnce(first.promise)
+    .mockResolvedValue(ok({ history_generation: gen, as_of_seq: 12, topic: { ...summary('T', 10, 2, 0), unread_count: 2, mention_unread_count: 0 } }))
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 11, unread_count: 2 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 11, has_more: false, items: [{ kind: 'topic', topic: { ...summary('T', 10, 2, 0), unread_count: 2, mention_unread_count: 0 } }] }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 11, has_more: false, topics: [{ ...summary('T', 10, 2, 0), unread_count: 2, mention_unread_count: 0 }] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 11, messages: [msg(10, 'T')], has_more: false }),
+    },
+    sync: {
+      random: () => 0,
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 11, messages: [msg(10, 'T')], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 11 }); await flush()
+    const inFlight = session.topics.loadSummary('A', 'T')
+    await flush()
+    // An Edit at seq 12 invalidates the W=11 baseline and causes read() to synthesize 409 snapshot_expired.
+    socket.onEvent({ type: 'message', kind: 'edit', seq: 12, message: { ...msg(10, 'T'), version: 12, body: 'edited' } })
+    await flush()
+    first.resolve(ok({ history_generation: gen, as_of_seq: 11, topic: { ...summary('T', 10, 2, 0), unread_count: 2, mention_unread_count: 0 } }))
+    await inFlight; await flush()
+    expect(session.unread.get('A').topics.T?.stopped).toBe(false)
+    await vi.advanceTimersByTimeAsync(2_000)
+    await flush()
+    expect(session.unread.get('A').topics.T?.stopped).toBe(false)
+    expect(session.unread.get('A').topics.T?.error).toBe(false)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(2)
+  } finally { session.close(); listChannels.mockRestore() }
 })

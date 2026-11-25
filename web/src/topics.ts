@@ -324,7 +324,11 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         const pending = options.api.getTopicSummary(channel, topic, signal)
         try {
           const { result } = await read(channel, w, `summary:${topic}`, () => pending, false, false, signal)
-          return sync.get().channels[channel]?.versionEpoch === epoch ? result : { ok: false, kind: 'network' }
+          if (sync.get().channels[channel]?.versionEpoch !== epoch) return { ok: false, kind: 'network' }
+          // A concurrent mutation can make a server-selected summary transiently stale; never turn it into a terminal 4xx.
+          return !result.ok && result.kind === 'http' && result.status === 409 && result.error === 'snapshot_expired'
+            ? { ok: false, kind: 'network' }
+            : result
         }
         finally { if (signal.aborted) w.summaries.delete(topic) }
       },
@@ -797,22 +801,31 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       for (const [key, entry] of activityTargets) if (key.startsWith(`topic:${channel}:`) || key === `main:${channel}`) entry.target.invalidate('access')
       notify(channel)
     },
-    async activitySummary(channel: string, topic: string, minimumPosition = 0): Promise<Result<TopicSummaryResponse>> {
+    async activitySummary(channel: string, topic: string, minimumPosition = 0, minimumAsOfSeq?: number): Promise<Result<TopicSummaryResponse>> {
       const w = getWindow(channel)
       if (!current(channel, w)) return { ok: false, kind: 'network' }
+      const cursorAtStart = sync.get().channels[channel]?.cursor ?? 0
+      const requiredAsOfSeq = minimumAsOfSeq ?? cursorAtStart
       const isFresh = (asOfSeq: number, readSeq: number) =>
-        asOfSeq >= (sync.get().channels[channel]?.cursor ?? 0) && readSeq >= minimumPosition
+        asOfSeq >= requiredAsOfSeq && readSeq >= minimumPosition
       const target = holdSummary(w, topic)
       const cached = w.baselines.get(topic)
-      if (cached && isFresh(cached.asOfSeq, cached.summary.read_seq)) return { ok: true, data: { history_generation: cached.summary.latest_message.history_generation, as_of_seq: cached.asOfSeq, topic: cached.summary } }
+      if (cached && cached.asOfSeq >= Math.max(requiredAsOfSeq, cursorAtStart) && cached.summary.read_seq >= minimumPosition) {
+        return { ok: true, data: { history_generation: cached.summary.latest_message.history_generation, as_of_seq: cached.asOfSeq, topic: cached.summary } }
+      }
       // Return accepted REST evidence even if display trimming immediately evicts its body.
       let accepted: TopicSummaryResponse | undefined
       const stop = activityTargets.get(`topic:${channel}:${topic}`)?.observeSummary?.(response => { accepted = response })
       w.summaryDemands.set(topic, (w.summaryDemands.get(topic) ?? 0) + 1)
       try {
-        if (cached) await target?.refresh()
+        const joined = target?.inFlight() ?? false
+        if (joined) await target?.ensure()
+        else if (cached) await target?.refresh()
         else await target?.ensure()
-        if (current(channel, w) && !(accepted && isFresh(accepted.as_of_seq, accepted.topic.read_seq))) await target?.flushQueued()
+        if (current(channel, w) && !target?.failure() && !(accepted && isFresh(accepted.as_of_seq, accepted.topic.read_seq))) {
+          if (joined && accepted) await (target?.inFlight() ? target.ensure() : target?.refresh())
+          else await target?.flushQueued()
+        }
       } finally {
         stop?.()
         const left = (w.summaryDemands.get(topic) ?? 1) - 1
@@ -824,7 +837,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       const failed = target?.failure()
       if (failed) return failed
       const baseline = w.baselines.get(topic)
-      return baseline && isFresh(baseline.asOfSeq, baseline.summary.read_seq)
+      return baseline && baseline !== cached && isFresh(baseline.asOfSeq, baseline.summary.read_seq)
         ? { ok: true, data: { history_generation: baseline.summary.latest_message.history_generation, as_of_seq: baseline.asOfSeq, topic: baseline.summary } }
         : { ok: false, kind: 'network' }
     },

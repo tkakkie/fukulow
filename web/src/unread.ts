@@ -629,6 +629,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   return {
     subscribe,
     activityMainCoverage(id: string) { const row = channels.get(id)?.aggregate; return row && completeCountFields(row) ? row.read_seq : -1 },
+    activityRequiredBase(id: string) { return channels.get(id)?.requiredBase ?? 0 },
     activitySnapshot(rows: UnreadChannel[]) {
       if (!active()) return
       const blocked = visitBlocked()
