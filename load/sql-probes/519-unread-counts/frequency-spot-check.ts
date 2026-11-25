@@ -10,7 +10,7 @@ export const turbostatArgv = ['/usr/bin/turbostat', '--quiet', '--show', 'CPU,TS
   '--add', 'msr0xe8,u64,cpu,delta,APERF', '--add', 'msr0xe7,u64,cpu,delta,MPERF', '--', '/usr/bin/cat'];
 // Command mode takes its opening sample before spawning cat, the stdin barrier. The ready line written to
 // stdin comes back on stdout only once cat runs; ending stdin ends cat and takes the closing sample.
-export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSignal, keep: (raw: unknown) => void) {
+export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSignal, keep: (raw: SpotCheck) => void) {
   const child = spawn('sudo', ['-n', ...turbostatArgv], { signal });
   let stdout = '', stderr = '';
   let startNs: string | null = null, stopNs: string | null = null;
@@ -51,7 +51,7 @@ export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSign
   }
 }
 
-export type SpotCheck = { startNs: string; stopNs: string; stdout: string; stderr: string };
+export type SpotCheck = { startNs: string | null; stopNs: string | null; stdout: string; stderr: string };
 export function spotReadings(raw: SpotCheck) {
   const rows = `${raw.stdout}\n${raw.stderr}`.trim().split('\n').map(l => l.trim().split(/\s+/));
   const fields = ['CPU', 'TSC_MHz', 'APERF', 'MPERF'];
