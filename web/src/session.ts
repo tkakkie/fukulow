@@ -20,6 +20,20 @@ import { topicsApi, type TopicsApi } from './topics'
 import { unreadApi, type UnreadApi } from './unread'
 import { createUnreadSync } from './unread-sync'
 
+export async function startInitialChannels(organizationId: string, accountSignal: AbortSignal) {
+  const request = new AbortController()
+  const abort = () => request.abort()
+  accountSignal.addEventListener('abort', abort, { once: true })
+  // Match the Channel list deadline while there is no session controller.
+  const timeout = setTimeout(abort, 10_000)
+  try {
+    return await api.listChannels(organizationId, undefined, request.signal)
+  } finally {
+    clearTimeout(timeout)
+    accountSignal.removeEventListener('abort', abort)
+  }
+}
+
 export type SessionOptions = {
   selfId: string
   organizationId?: string
@@ -28,6 +42,8 @@ export type SessionOptions = {
   /** Aborted by the Account owner after it fences the ended Account Session. */
   accountSignal?: AbortSignal
   channelsApi?: ChannelsApi
+  /** The first ordinary Channel list may already be in flight when the core starts. */
+  initialChannels?: ReturnType<typeof api.listChannels>
   topicsApi?: TopicsApi
   replyCountsApi?: ReplyCountsApi
   repliesApi?: RepliesApi
@@ -200,9 +216,22 @@ export function createSession(options: SessionOptions) {
   })
   let watched: string | null = null
   const { listArchivedChannels, getChannel, updateChannel } = source
+  let initialChannels = options.initialChannels
+  const readChannels = (signal?: AbortSignal) => options.channelsApi ? source.listChannels(signal) : unreadSource.listChannels(signal)
+  function listChannels(signal?: AbortSignal) {
+    const initial = initialChannels
+    initialChannels = undefined
+    return observe(initial ? initial.then(result => {
+      if (signal?.aborted && result.ok) return { ok: false, kind: 'network' } as const
+      const generation = sync.get().historyGeneration
+      // An unversioned startup response cannot supersede a generation learned while it was in flight.
+      if (result.ok && generation !== undefined && result.data.history_generation !== generation) return readChannels(signal)
+      return result
+    }) : readChannels(signal))
+  }
   const channels = createChannels(
     {
-      listChannels: signal => observe(options.channelsApi ? source.listChannels(signal) : unreadSource.listChannels(signal)),
+      listChannels,
       createChannel: body => observe(source.createChannel(body)),
       listArchivedChannels: listArchivedChannels && (signal => observe(listArchivedChannels(signal))),
       getChannel: getChannel && ((id, signal) => observe(getChannel(id, signal))),
