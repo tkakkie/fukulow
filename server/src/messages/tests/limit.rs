@@ -187,7 +187,11 @@ async fn concurrent_identical_requests_consume_one_token_and_share_one_message(p
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
         tokio::spawn(async move { send(&app, &token, channel, input(key, "once")).await })
     };
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let limiter = &l.state.message_delivery.send_limiter;
+    eventually(Duration::from_secs(5), || {
+        limiter.waiters((l.organization, l.member, key)) == 1
+    })
+    .await;
     assert!(!second.is_finished());
     gate.release();
     let (first, second) = (first.await.unwrap(), second.await.unwrap());
@@ -270,7 +274,11 @@ async fn a_waiter_with_another_intent_executes_itself_and_pays_without_the_free_
         let (app, token, channel) = (l.app.clone(), l.token.clone(), l.channel);
         tokio::spawn(async move { send(&app, &token, channel, input(key, "other")).await })
     };
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let limiter = &l.state.message_delivery.send_limiter;
+    eventually(Duration::from_secs(5), || {
+        limiter.waiters((l.organization, l.member, key)) == 1
+    })
+    .await;
     assert!(!other.is_finished());
     gate.release();
     assert_error(leader.await.unwrap(), StatusCode::INTERNAL_SERVER_ERROR).await;

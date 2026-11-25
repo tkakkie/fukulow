@@ -9,11 +9,11 @@ Raw logs, artifact directories and local paths outside Git may be gone ([2026-11
 
 ## Measurement hosts (#796)
 
-- **Mac (M5):** formal today. #689, #519 and #426 B7 keep their Mac conditions and results.
-- **Ubuntu (Zen 5/Zen 5c):** investigation only until #796 PASS. No Mac comparison or gate. After PASS, Ubuntu is formal and Mac is for development.
-- **Ubuntu conditions:** AC, sleep masked, performance governor, updates held, HOST-BUSY, fixed even/odd CPU sets and before/after host records. Boost on except for #796 cooling.
-- **#796:** first FAIL stands. V3 uses hardware counters. Control and Rehearsal 2 need separate goes. Go B STOPs pending review and frozen floors. [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
-- Move a series only with a new Ubuntu baseline and fixed criteria, never for a bad Mac result.
+- **Mac (M5):** formal. #689, #519 and #426 B7 keep Mac conditions and results.
+- **Ubuntu (Zen 5/Zen 5c):** investigation until #796 PASS, then formal and Mac for development. No Mac comparison or gate.
+- **Ubuntu conditions:** AC, masked sleep, performance governor, held updates, HOST-BUSY, fixed even/odd CPU sets, pre/post host records. Boost on except #796 cooling.
+- **#796:** first FAIL stands. Control INVALID (first F1 CPU 0). Option A needs a rebuilt `setcap` helper. Permission check, control and Rehearsal 2 each need a go. Go B awaits review and frozen floors. [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
+- Move series only with fresh Ubuntu baselines and fixed criteria, never for Mac failures.
 
 ## Topic projection paging (#137)
 
@@ -123,7 +123,7 @@ Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-pl
 
 ## Rust/wasm sync core (#466, #487)
 
-2026-11-21 JST. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466; at `d2fc5ea`, throttled cold `/` Timeline p95 2806.7 → 3260.3 ms, FCP 960.0 ms both). #487 `06264eab` → `c02e1a78`, 5 rounds: `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, steady 18.19 → 18.35 MiB. Open, not passed: bulk INCONCLUSIVE, slope HOLD (#489).
+2026-11-21 JST. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466, `d2fc5ea`: throttled cold `/` Timeline p95 +16%). #487 (`c02e1a78`, 5 rounds): `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, 18.19 → 18.35 MiB; bulk INCONCLUSIVE, slope HOLD (#489). #954: preload (#962) MISSED, early list (#978) MET ([records](../load/measurements-archive.md#wasm-preload-954-2026-11-25)).
 
 Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`; `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --arm B|W --out <dir> --round <n>`, then `--aggregate`. Mac, Node 26.13.1. [Record](../load/measurements-archive.md#rustwasm-sync-core-typed-deltas-487-2026-11-21-jst-mac)
 

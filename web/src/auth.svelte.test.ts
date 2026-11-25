@@ -5,12 +5,12 @@ import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createInviteAcceptance, createMembers, watchMemberAccess } from './members'
 import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
-import { listReplyChain, type lookupAuthors, type listMembers, type MemberList, type Result } from './api'
+import { listReplyChain, type ChannelList, type lookupAuthors, type listMembers, type MemberList, type Result } from './api'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
 import { channel, fakeNetwork, mount, ok, record, sentBy, settle, type FakeNetwork } from './adapter-test-helpers.svelte'
-import type { AuthState } from './auth'
+import { sessionEndedMessage, type AuthState } from './auth'
 import { replyPage } from './topic-test-helpers'
 
 beforeEach(() => vi.useFakeTimers())
@@ -37,13 +37,13 @@ function stack(over: Partial<AuthDeps> = {}, holdMemberLists = false, replyFetch
     setupAndSignIn: vi.fn(),
     signOut: vi.fn(async () => true),
     getOrganization: vi.fn(async () => ok(member(signedIn))),
-    openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels): SessionModel {
+    openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels): SessionModel {
       if (drafts) stores.push(drafts)
       const net = fakeNetwork()
       nets.push(net)
       ended.push(onEnded)
       const options = net.options(selfId)
-      const session = createSession({ selfId, onEnded, ...options, organizationId, accountSignal, initialRole, initialCanCreateChannels,
+      const session = createSession({ selfId, onEnded, ...options, organizationId, accountSignal, initialRole, initialCanCreateChannels, initialChannels,
         onIdentity, onIdentityInvalidated: () => onIdentity?.(null), sync: { ...options.sync, drafts },
         repliesApi: replyFetch ? { listReplyChain: (channel, anchor, query, signal) =>
           listReplyChain(organizationId, channel, anchor, query, replyFetch, signal) } : options.repliesApi })
@@ -61,8 +61,9 @@ type Stack = ReturnType<typeof stack>
 
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>(done => { resolve = done })
-  return { promise, resolve }
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 
 it.each(['sign-in', 'restore', 'setup', 'Invite'] as const)('%s releases cookie mutation busy before a delayed Organization lookup, allowing switching and sign-out', async action => {
@@ -1269,12 +1270,20 @@ it('channel_access_lost alone withholds a Guest directory and fences its in-flig
 
 describe('sync controllers wait for the core, REST reads do not (#466)', () => {
   const restored = () => vi.fn(async () => ({ screen: 'app' as const, identity: identity('owner') }))
+  const generation = '00000000-0000-4000-8000-000000000515'
+  const list = (id: string, historyGeneration = generation) => ok<ChannelList>({
+    history_generation: historyGeneration,
+    channels: [{ ...channel(id), history_generation: historyGeneration, as_of_seq: 0, read_seq: 0,
+      unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 }],
+  })
   it('reads the Organization while the core loads and opens exactly one session once it is ready', async () => {
     const core = deferred<void>()
-    const s = stack({ restore: restored(), coreReady: () => core.promise })
+    const readInitialChannels = vi.fn(async () => list('initial'))
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels })
     const loading = s.auth.load()
     await settle()
     expect(s.deps.getOrganization).toHaveBeenCalledOnce()
+    expect(readInitialChannels).toHaveBeenCalledExactlyOnceWith('o', expect.any(AbortSignal))
     expect(s.nets).toHaveLength(0)
     expect(s.auth.session).toBeNull()
     expect(s.auth.organizationStatus).toBe('loading')
@@ -1282,24 +1291,82 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
     expect(s.nets).toHaveLength(1)
     expect(s.auth.organizationStatus).toBe('ready')
     expect(s.nets[0].socket.closed).toBe(false)
+    expect(s.sessions[0].channels.get().channels.map(c => c.id)).toEqual(['initial'])
+    expect(s.nets[0].lists).toHaveLength(0)
+  })
+  it.each([
+    { order: 'the connect-edge refresh is already in flight', refreshFirst: true, total: 3 },
+    { order: 'activity_ready arrives in the 200 ms window', refreshFirst: false, total: 2 },
+  ])('documents the current bound of $total startup Channel list reads when $order', async ({ refreshFirst, total }) => {
+    const core = deferred<void>()
+    // An empty list isolates startup and socket refreshes from Channel selection and history reads.
+    const channels = ok<ChannelList>({ history_generation: generation, channels: [] })
+    const reads = vi.fn(async () => channels)
+    const net = fakeNetwork()
+    const options = net.options()
+    const s = stack({
+      restore: restored(), coreReady: () => core.promise, readInitialChannels: reads,
+      openSession(selfId, onEnded, organizationId, _drafts, _onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
+        const session = createSession({
+          ...options, selfId, onEnded, organizationId, initialRole, accountSignal, initialCanCreateChannels, initialChannels,
+          // Exercise the production path where Unread refreshes the Channel list through the activity target.
+          channelsApi: undefined, unreadApi: { ...options.unreadApi!, listChannels: reads },
+          sync: { ...options.sync, random: () => 0.5 },
+        })
+        return {
+          channels: channelsAdapter(session.channels, session.channelCreation), sync: syncAdapter(session.sync),
+          topics: id => topicsAdapter(session.topics, id), close: session.close,
+        }
+      },
+    })
+    try {
+      const loading = s.auth.load()
+      await settle()
+      expect(reads).toHaveBeenCalledOnce()
+      core.resolve(); await loading; await settle()
+      await vi.advanceTimersByTimeAsync(100)
+
+      const refresh = deferred<typeof channels>()
+      reads.mockReturnValueOnce(refresh.promise)
+      net.socket.onReady()
+      if (refreshFirst) await settle()
+      net.event({ type: 'activity_ready' })
+      refresh.resolve(channels)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(reads).toHaveBeenCalledTimes(total)
+    } finally { await s.auth.signOut() }
   })
   it('never opens a session when the core fails to load', async () => {
-    const s = stack({ restore: restored(), coreReady: () => Promise.reject(new Error('invalid wasm')) })
-    await s.auth.load(); await settle()
+    const core = deferred<void>()
+    const channels = deferred<Result<ChannelList>>()
+    const readInitialChannels = vi.fn(() => channels.promise)
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels })
+    const loading = s.auth.load()
+    await settle()
     expect(s.deps.getOrganization).toHaveBeenCalledOnce()
+    expect(readInitialChannels).toHaveBeenCalledOnce()
+    core.reject(new Error('invalid wasm'))
+    await loading
+    channels.resolve(list('late'))
+    await settle()
     expect(s.nets).toHaveLength(0)
     expect(s.auth.session).toBeNull()
   })
   it('a switch or sign-out while the core loads leaves at most the latest selection, opened once', async () => {
     const core = deferred<void>()
-    const s = stack({ restore: restored(), coreReady: () => core.promise })
+    const stale = deferred<Result<ChannelList>>()
+    const readInitialChannels = vi.fn(async (id: string) => id === 'o' ? stale.promise : list('current'))
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels })
     const first = s.auth.load()
     await settle()
     const second = s.auth.selectOrganization('other')
     await settle()
+    expect(readInitialChannels.mock.calls).toEqual([['o', expect.any(AbortSignal)], ['other', expect.any(AbortSignal)]])
     core.resolve(); await first; await second; await settle()
+    stale.resolve(list('stale')); await settle()
     expect(s.nets).toHaveLength(1)
     expect(s.auth.selectedOrganizationId).toBe('other')
+    expect(s.sessions[0].channels.get().channels.map(c => c.id)).toEqual(['current'])
     expect(await s.auth.signOut()).toBe(true)
 
     const late = deferred<void>()
@@ -1310,6 +1377,41 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
     late.resolve(); await pending; await settle()
     expect(t.nets).toHaveLength(0)
     expect(t.auth.session).toBeNull()
+  })
+
+  it('a Channel list 401 from a superseded Organization ends the Account Session before the core is ready', async () => {
+    const core = deferred<void>()
+    const channels = deferred<Result<ChannelList>>()
+    const readInitialChannels = vi.fn(async (id: string) => id === 'o' ? channels.promise : list('current'))
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels })
+    const first = s.auth.load()
+    await settle()
+    const second = s.auth.selectOrganization('other')
+    await settle()
+    channels.resolve({ ok: false, kind: 'http', status: 401 })
+    await settle()
+    expect(s.auth.view).toEqual({ screen: 'signin', notice: sessionEndedMessage })
+    core.resolve(); await first; await second
+    expect(s.nets).toHaveLength(0)
+  })
+
+  it('a pending initial list cannot supersede the core’s known history generation', async () => {
+    const core = deferred<void>()
+    const channels = deferred<Result<ChannelList>>()
+    const s = stack({ restore: restored(), coreReady: () => core.promise, readInitialChannels: () => channels.promise })
+    const loading = s.auth.load()
+    await settle()
+    core.resolve(); await loading; await settle()
+    const session = s.sessions[0], net = s.nets[0]
+    expect(net.lists).toHaveLength(0)
+
+    expect(session.sync.get().historyGeneration).toBe(generation)
+    channels.resolve(list('stale', '00000000-0000-4000-8000-000000000516')); await settle()
+    expect(session.sync.get().historyGeneration).toBe(generation)
+    expect(session.channels.get().channels).toEqual([])
+    expect(net.lists).toHaveLength(1)
+    net.lists[0].resolve(list('current')); await settle()
+    expect(session.channels.get().channels.map(c => c.id)).toEqual(['current'])
   })
 })
 

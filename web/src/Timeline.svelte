@@ -103,13 +103,7 @@
   )
   const lines = $derived.by((): MainTimelineLine[] => {
     if (!search) return tState?.lines ?? s.messages.map(message => ({ kind: 'message', message }))
-    const messages = search.view?.messages ?? []
-    const first = messages[0]?.created_seq ?? Infinity
-    const last = messages.at(-1)?.created_seq ?? 0
-    // A raw page can contain only part of a Topic. Use the normal projection for summary lines.
-    const summaries = tState?.lines.filter(line => line.kind === 'topic' && line.position >= first && line.position <= last) ?? []
-    const main: MainTimelineLine[] = messages.filter(message => message.topic_id === null).map(message => ({ kind: 'message', message }))
-    return [...main, ...summaries].sort((a, b) => linePosition(a) - linePosition(b))
+    return search.view?.lines ?? []
   })
   let skipUnreadVisit = $state(false)
   // The visit stops waiting for its entry position (loading timeout or own send) and opens at the bottom, as after a failed boundary.
