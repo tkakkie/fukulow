@@ -190,7 +190,7 @@
   }
 
   function reportPresented() {
-    if (!unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
+    if (awaitingInitialSenders || !unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
     if (!isDocumentVisible()) return
     const currentEntry = uState?.entry
     if (!currentEntry || currentEntry.scope.topicId !== null) return
@@ -233,6 +233,7 @@
   }
 
   function handleScroll() {
+    if (awaitingInitialSenders) return
     handleTimelineContainerScroll(scrollEl, scrollController)
     topics?.setMainPinned(scrollController.get().pinned)
     reportPresented()
@@ -393,7 +394,7 @@
       scrolledFirstUnreadId = null
       pendingScrollAction = null
     }
-    const displayed = isTimelineDisplayed(scrollEl, viewSelected)
+    const displayed = !awaitingInitialSenders && isTimelineDisplayed(scrollEl, viewSelected)
     const syncMessages = lines.map((line) =>
       line.kind === 'message'
         ? { id: line.message.id, created_seq: line.message.created_seq, sender: line.message.sender }
@@ -427,7 +428,7 @@
     const revealVisit = searchVisit
     void tick().then(() => {
       if (searchVisit !== revealVisit) return
-      if (!isTimelineDisplayed(scrollEl, viewSelected)) {
+      if (awaitingInitialSenders || !isTimelineDisplayed(scrollEl, viewSelected)) {
         if (
           !initialScrollApplied &&
           pendingScrollAction &&

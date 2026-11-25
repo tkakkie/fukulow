@@ -356,8 +356,16 @@
     if (currentTopics) return currentTopicsState?.main.asOfSeq !== undefined
     return true
   })
+  const activeViewUnavailable = $derived(
+    Boolean(
+      organizationUnavailable ||
+        currentTimeline?.status === 'unavailable' ||
+        currentTopicsState?.unavailable ||
+        (route?.topicId && activeTopicView?.notFound),
+    ),
+  )
   const initialViewSenderIds = $derived.by((): string[] => {
-    if (!activeViewBaseReady || !members || resolveSenderName) return []
+    if (!initialDisplayViewKey || activeViewUnavailable || !members || resolveSenderName) return []
     const selfId = organization?.member.id ?? ''
     const ids = new Set<string>()
     if (route?.topicId && activeTopicView) {
@@ -376,7 +384,7 @@
   const awaitingInitialSenders = $derived(
     Boolean(
       initialDisplayViewKey &&
-        activeViewBaseReady &&
+        !activeViewUnavailable &&
         members &&
         !resolveSenderName &&
         initialDisplayCompletedKey !== initialDisplayViewKey &&

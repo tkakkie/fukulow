@@ -14,6 +14,7 @@ import { navigationTargetsAdapter } from './navigation-targets.svelte'
 import { createSession } from './session'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
+import { unreadAdapter } from './unread.svelte'
 import Workspace from './Workspace.svelte'
 import { buttonsByText, installMiniDom, MiniDomEvent, MiniElement, queryAll } from './svelte-dom-test-helpers'
 
@@ -86,6 +87,7 @@ function makeWorkspace(options: {
     channels: channelsAdapter(rawSession.channels),
     sync: syncAdapter(rawSession.sync),
     topics: (id: string) => topicsAdapter(rawSession.topics, id),
+    unread: (id: string) => unreadAdapter(rawSession.unread, id),
     navigationTargets: navigationTargetsAdapter(rawSession.navigationTargets),
     channelMembers: vi.fn(() => channelMembers),
     close: rawSession.close,
@@ -445,6 +447,81 @@ describe('Deferred Member directory and first-display author resolution (#954 R1
       w.net.socket.onClose(4003)
       await settle()
       expect(w.host.querySelector('details.member-list')).toBeNull()
+    } finally { await w.cleanup() }
+  })
+
+  it('defers initial unread scroll and presentation until first-display senders resolve, then positions at first Unread with 未読 marker', async () => {
+    vi.useFakeTimers()
+    let finishLookup!: (result: Result<{ identities: DisplayIdentity[] }>) => void
+    const lookupAuthorsFn = vi.fn<typeof lookupAuthors>(() => new Promise(resolve => { finishLookup = resolve }))
+    const listMembersFn = vi.fn<typeof listMembers>(() => new Promise(() => {}))
+    const ownMsg = { ...record(1, 'c1'), sender: 'me', body: '既読メッセージ' }
+    const unreadMsgs = Array.from({ length: 10 }, (_, i) => ({
+      ...record(i + 2, 'c1'),
+      sender: 'bob',
+      body: `未読メッセージ ${i + 1}`,
+    }))
+    const allMsgs = [ownMsg, ...unreadMsgs]
+    const w = makeWorkspace({
+      timelineItems: allMsgs.map(message => ({ kind: 'message' as const, message })),
+      listMembers: listMembersFn,
+      lookupAuthors: lookupAuthorsFn,
+    })
+    w.net.pages.c1 = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: allMsgs.length,
+      messages: allMsgs,
+      has_more: false,
+    })
+    w.net.unreadChannels.c1 = {
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      ...channel('c1', 'general'),
+      as_of_seq: allMsgs.length,
+      read_seq: 1,
+      unread_count: unreadMsgs.length,
+      main_unread_count: unreadMsgs.length,
+      mention_unread_count: 0,
+      main_mention_unread_count: 0,
+    }
+    try {
+      w.net.socket.onReady()
+      w.net.lists[0].resolve(ok({
+        history_generation: '00000000-0000-4000-8000-000000000515',
+        channels: [w.net.unreadChannels.c1],
+      }))
+      await settle()
+      w.net.subscribed('c1', allMsgs.length)
+      await settle()
+
+      const scrollEl = w.host.querySelector('#main-content .timeline-scroll') as MiniElement
+      expect(scrollEl).not.toBeNull()
+      scrollEl.clientHeight = 300
+      scrollEl.scrollHeight = 1500
+      scrollEl.getBoundingClientRect = () => ({ top: 0, bottom: 300, left: 0, right: 375, width: 375, height: 300, x: 0, y: 0, toJSON: () => ({}) })
+
+      // While first-display senders are pending, rows are held behind Skeleton and no read mark is sent.
+      expect(w.host.querySelector('.timeline-list .timeline-list__item')).toBeNull()
+      expect(w.net.markReads).toHaveLength(0)
+
+      // Resolve author lookup -> rows mount, scroll positions at first Unread (not bottom), and 未読 marker is rendered.
+      finishLookup(ok({ identities: [{ id: 'bob', name: 'ボブ', deactivated: false }] }))
+      // Position the first unread row at top = 120 relative to scrollEl once mounted.
+      const origQuery = scrollEl.querySelector.bind(scrollEl)
+      scrollEl.querySelector = (selector: string) => {
+        const el = origQuery(selector)
+        if (el && (selector.includes('data-read-marker') || selector.includes(unreadMsgs[0].id))) {
+          el.getBoundingClientRect = () => ({ top: 120, bottom: 200, left: 0, right: 375, width: 375, height: 80, x: 0, y: 120, toJSON: () => ({}) })
+        }
+        return el
+      }
+      await settle()
+      await settle()
+
+      const firstUnreadItem = w.host.querySelector(`#main-content [data-message-id="${unreadMsgs[0].id}"]`)
+      expect(firstUnreadItem).not.toBeNull()
+      expect(firstUnreadItem?.querySelector('[data-read-marker="true"]')?.textContent?.trim()).toBe('未読')
+      expect(firstUnreadItem?.querySelector('.ui-message-row__sender')?.textContent).toBe('ボブ')
+      expect(scrollEl.scrollTop).toBe(120)
     } finally { await w.cleanup() }
   })
 })
