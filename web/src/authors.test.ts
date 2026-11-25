@@ -253,4 +253,40 @@ describe('author identities', () => {
       expect(notify).toHaveBeenCalledOnce()
     } finally { vi.useRealTimers() }
   })
+
+  it('retains deactivated author labels across deferred directory loads, lets newer authorized identities win, and keeps labels if refresh fails', async () => {
+    const lookup = vi.fn()
+      .mockResolvedValueOnce(ok([
+        { id: 'bob', name: 'ボブ', deactivated: true },
+        { id: 'carol', name: 'キャロル', deactivated: true },
+      ]))
+      .mockResolvedValueOnce({ ok: false as const, kind: 'network' as const })
+      .mockResolvedValueOnce(ok([{ id: 'bob', name: 'ボブ改', deactivated: true }]))
+    const c = createAuthors('org', vi.fn(), vi.fn(), lookup)
+    c.watch(['bob', 'carol'])
+    await settle()
+    expect(senderName(c.get().get('bob'))).toBe('ボブ（無効）')
+    expect(senderName(c.get().get('carol'))).toBe('キャロル（無効）')
+
+    // Deferred directory arrives with active members only: deactivated labels must not be erased synchronously.
+    c.replaceMembers([member('alice')])
+    expect(senderName(c.get().get('bob'))).toBe('ボブ（無効）')
+    expect(senderName(c.get().get('carol'))).toBe('キャロル（無効）')
+
+    // Even when the follow-up refresh lookup fails, deactivated labels must not fall back to メンバー.
+    await settle()
+    expect(senderName(c.get().get('bob'))).toBe('ボブ（無効）')
+    expect(senderName(c.get().get('carol'))).toBe('キャロル（無効）')
+
+    // A newer authorized lookup identity wins for bob.
+    c.retry()
+    await settle()
+    expect(senderName(c.get().get('bob'))).toBe('ボブ改（無効）')
+
+    // A newer authorized directory identity wins when carol is reactivated.
+    c.replaceMembers([member('alice'), { id: 'carol', name: 'キャロル復帰', role: 'member' }])
+    expect(senderName(c.get().get('carol'))).toBe('キャロル復帰')
+    expect(c.get().get('carol')?.deactivated).toBe(false)
+    c.close()
+  })
 })

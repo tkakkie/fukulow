@@ -524,4 +524,119 @@ describe('Deferred Member directory and first-display author resolution (#954 R1
       expect(scrollEl.scrollTop).toBe(120)
     } finally { await w.cleanup() }
   })
+
+  it('keeps topic-summary return focus pending during main-timeline sender hold and restores focus to the Topic summary once released', async () => {
+    vi.useFakeTimers()
+    const finishes: Array<(result: Result<{ identities: DisplayIdentity[] }>) => void> = []
+    const lookupAuthorsFn = vi.fn<typeof lookupAuthors>(() => new Promise(resolve => { finishes.push(resolve) }))
+    const listMembersFn = vi.fn<typeof listMembers>(() => new Promise(() => {}))
+    const topicLatest = { ...record(1, 'c1'), topic_id: 't1', sender: 'me', body: 'トピック本文' }
+    const mainMsg = { ...record(2, 'c1'), sender: 'alice', body: 'メイン本文' }
+    const w = makeWorkspace({
+      initialHref: '/o/org-1/c/c1/t/t1',
+      timelineItems: [
+        {
+          kind: 'topic',
+          topic: {
+            id: 't1',
+            name: '設計相談',
+            first_seq: 1,
+            last_seq: 1,
+            message_count: 1,
+            latest_message: topicLatest,
+            read_seq: 1,
+            unread_count: 0,
+            mention_unread_count: 0,
+          },
+        },
+        { kind: 'message', message: mainMsg },
+      ],
+      listMembers: listMembersFn,
+      lookupAuthors: lookupAuthorsFn,
+    })
+    w.net.topicMessages['c1:t1'] = ok({
+      history_generation: '00000000-0000-4000-8000-000000000515',
+      as_of_seq: 2,
+      has_more: false,
+      messages: [topicLatest],
+    })
+    try {
+      w.net.socket.onReady()
+      w.net.lists[0].resolve(ok({
+        history_generation: '00000000-0000-4000-8000-000000000515',
+        channels: [channel('c1', 'general')],
+      }))
+      await settle()
+      await settle()
+
+      // Return from Topic t1 while main-timeline sender 'alice' is still unresolved.
+      w.navigation.navigate({ type: 'topic-back' })
+      await settle()
+      await settle()
+
+      const composer = w.host.querySelector('#main-content textarea[name="body"]')
+      expect(w.host.querySelector('#main-content [data-topic-id="t1"]')).toBeNull()
+      // Focus must NOT fall back to the Composer while the sender hold is active.
+      expect(dom.doc.activeElement).not.toBe(composer)
+
+      // Release the sender hold -> Topic summary mounts and receives focus.
+      finishes.at(-1)!(ok({ identities: [{ id: 'alice', name: 'アリス', deactivated: false }] }))
+      await settle()
+      await settle()
+
+      const summary = w.host.querySelector('#main-content [data-topic-id="t1"]')
+      expect(summary).not.toBeNull()
+      expect(dom.doc.activeElement).toBe(summary)
+    } finally { await w.cleanup() }
+  })
+
+  it('retains deactivated author label after deferred directory loads and even when a refresh lookup fails', async () => {
+    vi.useFakeTimers()
+    let lookupCalls = 0
+    const lookupAuthorsFn = vi.fn<typeof lookupAuthors>(async () => {
+      lookupCalls++
+      if (lookupCalls === 1) {
+        return ok({
+          identities: [
+            { id: 'alice', name: 'アリス', deactivated: false },
+            { id: 'bob', name: 'ボブ', deactivated: true },
+          ],
+        })
+      }
+      return { ok: false, kind: 'network' }
+    })
+    let finishDirectory!: (result: Result<MemberList>) => void
+    const listMembersFn = vi.fn<typeof listMembers>(() => new Promise(resolve => { finishDirectory = resolve }))
+    const w = makeWorkspace({
+      timelineItems: [
+        { kind: 'message', message: { ...record(1, 'c1'), sender: 'alice', body: 'こんにちは' } },
+        { kind: 'message', message: { ...record(2, 'c1'), sender: 'bob', body: '退会済み' } },
+      ],
+      listMembers: listMembersFn,
+      lookupAuthors: lookupAuthorsFn,
+    })
+    try {
+      w.net.socket.onReady()
+      w.net.lists[0].resolve(ok({
+        history_generation: '00000000-0000-4000-8000-000000000515',
+        channels: [channel('c1', 'general')],
+      }))
+      await settle()
+      expect(queryAll(w.host, '.timeline-list .ui-message-row__sender').map(el => el.textContent)).toEqual(['アリス', 'ボブ（無効）'])
+
+      // Deferred directory arrives with only active members, and the follow-up refresh lookup fails.
+      await vi.advanceTimersByTimeAsync(1)
+      finishDirectory(ok({
+        members: [
+          { id: 'me', name: '自分', role: 'member' },
+          { id: 'alice', name: 'アリス改', role: 'member' },
+        ],
+      }))
+      await settle()
+      await settle()
+
+      // Newer active directory identity wins for alice; bob keeps ボブ（無効） and never drops to メンバー.
+      expect(queryAll(w.host, '.timeline-list .ui-message-row__sender').map(el => el.textContent)).toEqual(['アリス改', 'ボブ（無効）'])
+    } finally { await w.cleanup() }
+  })
 })

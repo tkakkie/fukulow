@@ -604,6 +604,7 @@
         returningTopicId &&
           currentTimeline?.pending.some((p) => p.status === 'sending' && !p.replyTo && p.topicId === returningTopicId),
       ),
+      awaitingInitialSenders,
     })
     const composer = mainComposerRef
     let cancelled = false

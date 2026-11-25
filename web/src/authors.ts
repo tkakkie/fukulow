@@ -20,6 +20,8 @@ export function createAuthors(
   let observed = new Set<string>()
   let attempted = new Set<string>()
   let pending = new Set<string>()
+  // Retained deactivated identities stay visible across directory loads while eligible for refresh.
+  let stale = new Set<string>()
   let generation = 0
   let closed = false
   let unavailable = false
@@ -40,8 +42,8 @@ export function createAuthors(
   }
   async function request() {
     const current = generation
-    const ids = [...observed].filter(id => !identities.has(id) && !attempted.has(id))
-    ids.forEach(id => { attempted.add(id); pending.add(id) })
+    const ids = [...observed].filter(id => (!identities.has(id) || stale.has(id)) && !attempted.has(id))
+    ids.forEach(id => { attempted.add(id); if (!identities.has(id)) pending.add(id) })
     await Promise.all(Array.from({ length: Math.ceil(ids.length / 100) }, async (_, index) => {
       const batch = ids.slice(index * 100, (index + 1) * 100)
       try {
@@ -58,7 +60,11 @@ export function createAuthors(
         const next = new Map(identities)
         const requested = new Set(batch)
         for (const identity of result.data.identities) {
-          if (requested.has(identity.id)) { rememberIdentityResponse(identity); next.set(identity.id, identity) }
+          if (requested.has(identity.id)) {
+            rememberIdentityResponse(identity)
+            next.set(identity.id, identity)
+            stale.delete(identity.id)
+          }
         }
         identities = next
       } finally {
@@ -102,12 +108,20 @@ export function createAuthors(
     replaceMembers(members: Member[]) {
       if (closed || unavailable) return
       generation++
-      identities = new Map(members.map(member => {
+      const next = new Map<string, DisplayIdentity>(members.map(member => {
         rememberIdentityResponse(member)
         const identity = { id: member.id, name: member.name, deactivated: false }
         rememberIdentityResponse(identity, identityOrder(member))
         return [member.id, identity]
       }))
+      stale = new Set()
+      for (const [id, existing] of identities) {
+        if (existing.deactivated && !next.has(id)) {
+          next.set(id, existing)
+          stale.add(id)
+        }
+      }
+      identities = next
       attempted = new Set()
       pending = new Set()
       notify()
@@ -117,6 +131,6 @@ export function createAuthors(
     /** Channel selection and reconnect retry unresolved ids, keeping known identities. */
     retry() { if (!closed && !unavailable) { generation++; attempted = new Set(); pending = new Set(); notify(); schedule() } },
     unavailable: stop,
-    close() { closed = true; generation++; clearGateTimer(); identities = new Map(); observed.clear(); pending.clear(); listeners.clear() },
+    close() { closed = true; generation++; clearGateTimer(); identities = new Map(); observed.clear(); pending.clear(); stale.clear(); listeners.clear() },
   }
 }
