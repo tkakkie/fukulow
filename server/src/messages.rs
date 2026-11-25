@@ -39,6 +39,7 @@ pub use log::list_channel_events;
 mod mentions;
 pub(crate) mod move_topic;
 pub use move_topic::move_chain;
+mod page;
 pub mod reactions;
 pub mod receipts;
 pub use fukulow_api::{ListMessagesQuery, Mention, Message, MessagePage, SendMessageRequest};
