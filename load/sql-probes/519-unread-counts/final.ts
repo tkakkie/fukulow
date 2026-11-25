@@ -12,7 +12,7 @@ import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, e
   quantile, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
-import type { CounterBlock } from './frequency-evidence.ts';
+import type { CounterBlock, ReferenceWindow } from './frequency-evidence.ts';
 import { makeTraversable, stageSql } from './stage-sql.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
@@ -201,7 +201,7 @@ function sendRole(db: string) {
 // soon as pgbench completes; closeCheckpoint() then forces the closing CHECKPOINT and judges the
 // block from server-log timestamps (see checkpointWindow). The counters and the control file's redo
 // LSN up to the end of the measured block are kept as a second, completed-checkpoint signal.
-function sendBlock(db: string, label: string, order: number) {
+function sendBlock(db: string, label: string, order: number, reference?: ReferenceWindow) {
   let openRequestMs = NaN;
   let blockEndMs = NaN;
   return {
@@ -234,7 +234,7 @@ function sendBlock(db: string, label: string, order: number) {
             const { stdout } = await exec('docker', [...psqlArgs(db, 'postgres', false), '-c', walQuery], { signal, timeout: 5000, maxBuffer });
             return JSON.parse(stdout);
           };
-          const captured = await frequency.measure(order, prepare, () => {
+          const captured = await frequency.measure(order, reference, prepare, () => {
             const workload = exec('docker', argv, { signal, timeout: (measuredSeconds + 10) * 1000, maxBuffer });
             if (request?.stage === 'rehearsal2') {
               observed = readAffinity(container, prefix, db, affinitySignal).catch(error => new Error(String(error)));
@@ -301,15 +301,20 @@ async function freshSends() {
   if (!control) countsCheck('t_final', 'final template, before the sends');
   const plan = control ? [1, 2, 3].map(order => ({ order, pair: 1, arm: 'current', db: `s${order}_current` })) : sendBlocks(benchOrder);
   for (const b of plan) {
-    frequency?.signal.throwIfAborted();
-    psql('postgres', `CREATE DATABASE ${b.db} TEMPLATE t_${b.arm};`);
-    const role = sendRole(b.db);
-    const since = eventsSince(Date.now());
-    const host = idleHost();
-    if (b.order === 1) await frequency?.coolBaseline();
-    const steps = sendBlock(b.db, `block${b.order}-${b.arm}`, b.order);
-    finishBlock({ ...b, role, host, ...await steps.measure() }, { label: `block ${b.order}`, closeCheckpoint: steps.closeCheckpoint,
-      hostAfter: () => hostState(since), keep: keepBlock() });
+    const template = `t_${b.arm}`;
+    const clone = () => {
+      psql('postgres', `CREATE DATABASE ${b.db} TEMPLATE ${template};`);
+      const role = sendRole(b.db);
+      const since = eventsSince(Date.now());
+      return { role, since, host: idleHost() };
+    };
+    const block = async ({ role, since, host }: ReturnType<typeof clone>, reference?: ReferenceWindow) => {
+      const steps = sendBlock(b.db, `block${b.order}-${b.arm}`, b.order, reference);
+      return finishBlock({ ...b, role, host, ...await steps.measure() }, { label: `block ${b.order}`, closeCheckpoint: steps.closeCheckpoint,
+        hostAfter: () => hostState(since), keep: keepBlock() });
+    };
+    if (frequency) await frequency.runBlock(b.order, () => psql(template, 'CHECKPOINT;'), clone, block);
+    else await block(clone());
     if (b.arm === 'final') countsCheck(b.db, `after block ${b.order}`);
     psql('postgres', `DROP DATABASE ${b.db} WITH (FORCE);`);
   }
@@ -341,6 +346,7 @@ try {
     if (i > 60) throw new Error('PostgreSQL did not become ready');
     spawnSync('sleep', ['1']);
   }
+  frequency?.observeHousekeeping(() => run('docker', ['inspect', '--format', '{{.State.Pid}}', container]).trim());
   // Max frequencies per set make a swapped or mixed split visible in the record (Zen 5 vs Zen 5c).
   const maxKHz = (set: number[]) => [...new Set(set.map(c => Object.entries(recordBefore.maxFrequencyKHz ?? {}).find(([, cs]) => cs.includes(c))?.[0] ?? 'unknown'))];
   const cpuPins = cpuSets === undefined ? null : {

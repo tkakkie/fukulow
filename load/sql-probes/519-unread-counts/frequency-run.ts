@@ -1,4 +1,5 @@
 import { rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { isAbsolute, join } from 'node:path';
 import { platform } from 'node:os';
 import { hrtime } from 'node:process';
@@ -6,10 +7,14 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { readCpuPolicy } from '../../harness-core/cpu-policy.ts';
 import { hwmon } from '../../harness-core/host-record.ts';
 import { controlFloors, frozenFloors, isQuote, permissionCheck } from './frequency-approval.ts';
-import { cpus796, referenceRates, same, sets796, validatePolicy, type Calibration } from './frequency-evidence.ts';
+import { cappedPolicy, cpus796, referenceRates, same, setNames, sets796, validatePolicy, type Calibration, type ReferenceWindow } from './frequency-evidence.ts';
 import { maxLimits, verifyLimits, withCap, writeLimits } from './frequency-policy.ts';
-import { calibrate, timedCounters } from './frequency-collector.ts';
-import { withSpotCheck } from './frequency-spot-check.ts';
+import { calibrate, timedCounters, waitUntil } from './frequency-collector.ts';
+import { withSpotCheck, type SpotCheck } from './frequency-spot-check.ts';
+import { assessReference, referenceMs, referenceRequired, settleMs } from './frequency-reference.ts';
+import { diagnostic, housekeepingSampler, workloadCgroup } from './frequency-housekeeping.ts';
+import { judgeFrequency, type FrequencyBlock } from './frequency-judge.ts';
+import { controlSpotCheck } from './frequency-turbostat.ts';
 import type { CpuSets } from '../../harness-core/cpusets.ts';
 
 export function frequencyRequest(stage: string, helper: string | undefined, review: string | undefined, permission: string | undefined,
@@ -27,6 +32,26 @@ export function frequencyRequest(stage: string, helper: string | undefined, revi
   return { stage, helper, session, approval, check, go: launch.go, launchPolicy: launch.policy };
 }
 
+export async function runFrequencyBlock<P, T>(order: number, control: boolean, steps: {
+  checkpoint(): bigint; settle(deadline: bigint): Promise<void>;
+  reference(checkpointNs: bigint): Promise<ReferenceWindow>;
+  clone(): P; coolBaseline(): Promise<void>;
+  work(clone: P, reference?: ReferenceWindow): Promise<T>; cap(work: () => Promise<T>): Promise<T>;
+}) {
+  const run = async () => {
+    let reference: ReferenceWindow | undefined;
+    if (referenceRequired(order, control)) {
+      const checkpointNs = steps.checkpoint();
+      await steps.settle(checkpointNs + BigInt(settleMs) * 1_000_000n);
+      reference = await steps.reference(checkpointNs);
+    }
+    const clone = steps.clone();
+    if (control && order === 1) await steps.coolBaseline();
+    return steps.work(clone, reference);
+  };
+  return control && order === 2 ? steps.cap(run) : run();
+}
+
 export function frequencyRun(request: ReturnType<typeof frequencyRequest>, out: string) {
   const before = readCpuPolicy(cpus796);
   if (!same(request.launchPolicy, before)) throw new Error('F1 policy changed between launcher and job setup');
@@ -38,12 +63,67 @@ export function frequencyRun(request: ReturnType<typeof frequencyRequest>, out: 
   const pending = join(out, 'frequency-restore-pending.json');
   const control = request.stage === 'control';
   let calibration: Calibration;
+  let rates: ReturnType<typeof referenceRates>;
+  let sampler: ReturnType<typeof housekeepingSampler> | undefined;
+  let spot: SpotCheck | null = null;
+  const completed: FrequencyBlock[] = [];
+  const policyFor = (order: number) => control && order === 2 ? cappedPolicy(before) : before;
+
+  async function reference(order: number, checkpointNs: bigint) {
+    const expected = policyFor(order);
+    if (!same(expected, readCpuPolicy(cpus796))) throw new Error('F1 unexpected policy before settled reference');
+    const { counters } = await timedCounters(request.helper, request.session, order, false, signal.signal,
+      () => waitUntil(hrtime.bigint() + BigInt(referenceMs) * 1_000_000n, signal.signal), sampler);
+    const window = { ...counters, checkpointNs: String(checkpointNs) };
+    let assessment: ReturnType<typeof assessReference> | undefined;
+    try {
+      assessment = assessReference(window, order, request.session, calibration.identity, expected, rates);
+      if (assessment.reasons.length) throw new Error(`STOP: ${assessment.reasons.join('; ')}`);
+    } finally { save(`frequency-reference-${order}.json`, { window, assessment }); }
+    return window;
+  }
+
+  function verifyBlock(row: FrequencyBlock) {
+    completed.push(row);
+    const judged = judgeFrequency(completed, sets796, { calibration, before, after: before,
+      startSession: request.session, endSession: request.session }, request.session, request.approval?.floors ?? null, control);
+    const capped = control && row.order >= 2;
+    const expected = capped ? setNames.map(set => `block 2: F5 throttled ${set}`) : [];
+    const problems = judged.reasons.filter(reason => !expected.includes(reason));
+    problems.push(...expected.filter(reason => !judged.reasons.includes(reason)).map(reason => `control failed to show ${reason}`));
+    if (control && row.order === 2) problems.push(...controlSpotCheck(spot, judged).problems);
+    if (problems.length) throw new Error(`STOP: ${problems.join('; ')}`);
+  }
+
+  async function coolBaseline() {
+    const wall = Date.now(), mono = hrtime.bigint();
+    const readings: { elapsedMs: number; tctlC: number | null }[] = [];
+    let ok = false, problem = '';
+    try {
+      for (;;) {
+        signal.signal.throwIfAborted();
+        const tctlC = hwmon(/^temp\d+_input$/, 1000)?.['k10temp/Tctl'] ?? null;
+        const elapsedMs = Number(hrtime.bigint() - mono) / 1e6;
+        readings.push({ elapsedMs, tctlC });
+        if (Math.abs(Date.now() - wall - elapsedMs) > 1000) throw new Error('wall clock stepped during control cool-down');
+        if (elapsedMs > 1_200_000 || tctlC === null) throw new Error('control baseline Tctl cool-down failed');
+        if (tctlC <= 50) { ok = true; break; }
+        await wait(Math.min(5000, 1_200_000 - elapsedMs), undefined, { signal: signal.signal });
+      }
+    } catch (error) { problem = String(error); throw error; }
+    finally { save('frequency-baseline-cooldown.json', { ok, problem, readings }); }
+  }
 
   return {
     signal: signal.signal,
+    observeHousekeeping(containerPid: () => string) {
+      const workload = diagnostic(() => workloadCgroup(containerPid()));
+      const ticks = diagnostic(() => Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8', timeout: 3000 })));
+      sampler = housekeepingSampler(workload, ticks && Number.isSafeInteger(ticks) && ticks > 0 ? ticks : null);
+    },
     async start() {
       calibration = await calibrate(request.helper, signal.signal);
-      referenceRates(calibration);
+      rates = referenceRates(calibration);
       validatePolicy(before, calibration.identity);
       if (request.check && !same(request.check.identity, calibration.identity)) {
         throw new Error('STOP: permission check belongs to a different helper or host identity');
@@ -51,51 +131,45 @@ export function frequencyRun(request: ReturnType<typeof frequencyRequest>, out: 
       if (!same(before, readCpuPolicy(cpus796))) throw new Error('F1 policy changed during calibration');
       save('frequency-start.json', { before, calibration, permissionCheck: request.check, startSession: request.session });
     },
-    async coolBaseline() {
-      if (!control) return;
-      const wall = Date.now(), mono = hrtime.bigint();
-      const readings: { elapsedMs: number; tctlC: number | null }[] = [];
-      let ok = false, problem = '';
-      try {
-        for (;;) {
-          signal.signal.throwIfAborted();
-          const tctlC = hwmon(/^temp\d+_input$/, 1000)?.['k10temp/Tctl'] ?? null;
-          const elapsedMs = Number(hrtime.bigint() - mono) / 1e6;
-          readings.push({ elapsedMs, tctlC });
-          if (Math.abs(Date.now() - wall - elapsedMs) > 1000) throw new Error('wall clock stepped during control cool-down');
-          if (elapsedMs > 1_200_000 || tctlC === null) throw new Error('control baseline Tctl cool-down failed');
-          if (tctlC <= 50) { ok = true; break; }
-          await wait(Math.min(5000, 1_200_000 - elapsedMs), undefined, { signal: signal.signal });
-        }
-      } catch (error) { problem = String(error); throw error; }
-      finally { save('frequency-baseline-cooldown.json', { ok, problem, readings }); }
-    },
-    async measure<T, P>(order: number, prepare: () => Promise<P>, work: () => Promise<T>) {
+    async runBlock<P>(order: number, checkpoint: () => void, clone: () => P,
+      work: (prepared: P, reference?: ReferenceWindow) => Promise<FrequencyBlock>) {
       signal.signal.throwIfAborted();
-      const expected = control && order === 2
-        ? { ...before, policies: before.policies.map(p => ({ ...p, max: '1700000' })) } : before;
+      return runFrequencyBlock(order, control, {
+        checkpoint: () => { checkpoint(); return hrtime.bigint(); },
+        settle: deadline => waitUntil(deadline, signal.signal),
+        reference: checkpointNs => reference(order, checkpointNs),
+        clone, coolBaseline,
+        work: async (prepared, window) => {
+          const measured = await work(prepared, window);
+          verifyBlock(measured);
+          return measured;
+        },
+        cap: block => withCap(maxLimits(before), block, {
+          write: writeLimits, verify: verifyLimits,
+          pending: saved => save('frequency-restore-pending.json', saved),
+          restored: () => rmSync(pending),
+        }),
+      });
+    },
+    async measure<T, P>(order: number, reference: ReferenceWindow | undefined, prepare: () => Promise<P>, work: () => Promise<T>) {
+      signal.signal.throwIfAborted();
+      const expected = policyFor(order);
       const block = async () => {
         if (!same(expected, readCpuPolicy(cpus796))) throw new Error('F1 unexpected policy before block');
-        const measured = await timedCounters(request.helper, request.session, order, control, signal.signal, work);
-        save(`frequency-block-${order}.json`, measured.counters);
-        if (!same(expected, measured.counters.policyBefore) || !same(expected, measured.counters.policyAfter)) {
+        const measured = await timedCounters(request.helper, request.session, order, control, signal.signal, work, sampler);
+        const counters = { ...measured.counters, reference };
+        save(`frequency-block-${order}.json`, counters);
+        if (!same(expected, counters.policyBefore) || !same(expected, counters.policyAfter)) {
           throw new Error('F1 policy changed around block');
         }
-        return measured;
+        return { ...measured, counters };
       };
-      const capped = control && order === 2;
-      const preparedBlock = async () => {
-        signal.signal.throwIfAborted();
-        const preparation = await prepare();
-        const measured = capped ? await withSpotCheck(block, signal.signal, raw => save('frequency-turbostat.json', raw)) : await block();
-        return { ...measured, preparation };
-      };
-      if (!capped) return preparedBlock();
-      return withCap(maxLimits(before), preparedBlock, {
-        write: writeLimits, verify: verifyLimits,
-        pending: saved => save('frequency-restore-pending.json', saved),
-        restored: () => rmSync(pending),
-      });
+      const preparation = await prepare();
+      const measured = control && order === 2 ? await withSpotCheck(block, signal.signal, raw => {
+        spot = raw;
+        save('frequency-turbostat.json', raw);
+      }) : await block();
+      return { ...measured, preparation };
     },
     finish() {
       try {

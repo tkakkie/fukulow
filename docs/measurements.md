@@ -9,11 +9,11 @@ Raw logs, artifact directories and local paths outside Git may be gone ([2026-11
 
 ## Measurement hosts (#796)
 
-- **Mac (M5):** formal today. #689, #519 and #426 B7 keep their Mac conditions and results.
-- **Ubuntu (Zen 5/Zen 5c):** investigation only until #796 PASS. No Mac comparison or gate. After PASS, Ubuntu is formal and Mac is for development.
-- **Ubuntu conditions:** AC, sleep masked, performance governor, updates held, HOST-BUSY, fixed even/odd CPU sets and before/after host records. Boost on except for #796 cooling.
-- **#796:** first FAIL stands. V3 uses hardware counters. Control and Rehearsal 2 need separate goes. Go B STOPs pending review and frozen floors. [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
-- Move a series only with a new Ubuntu baseline and fixed criteria, never for a bad Mac result.
+- **Mac (M5):** formal. #689, #519 and #426 B7 keep Mac conditions and results.
+- **Ubuntu (Zen 5/Zen 5c):** investigation until #796 PASS, then formal and Mac for development. No Mac comparison or gate.
+- **Ubuntu conditions:** AC, masked sleep, performance governor, held updates, HOST-BUSY, fixed even/odd CPU sets, pre/post host records. Boost on except #796 cooling.
+- **#796:** first FAIL stands. Control INVALID (first F1 CPU 0). Option A needs a rebuilt `setcap` helper. Permission check, control and Rehearsal 2 each need a go. Go B awaits review and frozen floors. [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
+- Move series only with fresh Ubuntu baselines and fixed criteria, never for Mac failures.
 
 ## Topic projection paging (#137)
 
