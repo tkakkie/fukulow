@@ -8,19 +8,22 @@ function gate() {
   return { held, release }
 }
 
-// The initial Channel list can run with the shell. Controller reads still wait for wasm.
+// Startup can read the Channel list and one Timeline while the sync core is loading.
 const startupChannelList = (url: URL, org: string) => url.pathname === `/api/v1/orgs/${org}/channels` && !url.search
 const syncRead = (url: URL, org: string) => !startupChannelList(url, org) &&
   ['/channels', '/timeline', '/messages', '/unread', '/dms'].some(part => url.pathname.includes(part))
 
 test('wasm init failure shows an error and never starts sync', async ({ page }) => {
   const org = await signInOwner(page.request)
+  await createChannel(page.request, org, `failed-core-${crypto.randomUUID().slice(0, 8)}`)
   const sync: string[] = [], sockets: string[] = []
+  const timelines: string[] = []
   let listed = false
   page.on('request', request => {
     const url = new URL(request.url())
     if (startupChannelList(url, org)) listed = true
-    if (syncRead(url, org)) sync.push(url.pathname)
+    if (url.pathname.endsWith('/timeline')) timelines.push(url.pathname)
+    else if (syncRead(url, org)) sync.push(url.pathname)
   })
   page.on('websocket', socket => sockets.push(socket.url()))
   const core = gate()
@@ -28,6 +31,7 @@ test('wasm init failure shows an error and never starts sync', async ({ page }) 
   try {
     await page.goto(`/o/${org}`, { waitUntil: 'commit' })
     await expect.poll(() => listed).toBe(true)
+    await expect.poll(() => timelines.length).toBe(1)
     core.release()
     await expect(page.getByRole('alert')).toHaveText('アプリを起動できませんでした。ページを再読み込みしてください。')
     expect(sync).toEqual([])
@@ -55,20 +59,30 @@ test('a slow core delays only sync: the Organization check runs first and sync s
   })
   page.on('websocket', socket => sockets.push(socket.url()))
   const { release, held } = gate()
+  const timeline = `/api/v1/orgs/${org}/channels/${channel.id}/timeline`
+  const response = page.waitForResponse(r => new URL(r.url()).pathname === timeline, { timeout: 5_000 })
   await page.route('**/*.wasm', async route => { await held; await route.continue() })
   try {
     await page.goto(`/o/${org}/c/${channel.id}`, { waitUntil: 'commit' })
     await expect.poll(() => checked).toBe(true)
     await expect.poll(() => lists).toBe(1)
-    expect(sync).toEqual([])
+    expect((await response).status()).toBe(200)
+    expect(sync).toEqual([timeline])
     expect(sockets).toEqual([])
+    const duringWasm = `${channel.name} (after snapshot)`
+    const committed = await secretSafe(() => page.request.post(`/api/v1/orgs/${org}/channels/${channel.id}/messages`, {
+      data: { client_message_id: crypto.randomUUID(), body: duringWasm },
+    }))
+    expect(committed.status()).toBe(201)
     release()
-    await expect(page.getByRole('article').filter({ hasText: channel.name })).toBeVisible()
+    await expect(page.getByRole('article').getByText(channel.name, { exact: true })).toBeVisible()
+    await expect(page.getByRole('article').getByText(duringWasm, { exact: true })).toBeVisible()
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
     // Allow the 200 ms activity_ready refresh to run before checking the startup total.
     await page.waitForTimeout(1_000)
     expect(sockets).toHaveLength(1)
     expect(lists).toBeLessThanOrEqual(3)
+    expect(sync.filter(path => path.endsWith('/timeline'))).toEqual([timeline])
   } finally { release() }
 })
 
@@ -83,23 +97,24 @@ for (const status of [200, 403]) test(`wasm fences an old history generation aft
     }))
     expect(response.status()).toBe(201)
   }
-  let release!: () => void, requested!: () => void
-  const held = new Promise<void>(resolve => { release = resolve })
-  const ready = new Promise<void>(resolve => { requested = resolve })
-  let first = true
+  const { release, held } = gate()
+  let first = true, snapshotReady = false
+  const core = gate()
+  await page.route('**/*.wasm', async route => { await core.held; await route.continue() })
   await page.route(`**${base}/${a.id}/timeline*`, async route => {
     if (!first) return route.continue()
     first = false
     const response = await secretSafe(() => route.fetch())
     const data = await response.json() as components['schemas']['TimelinePage']
     for (const item of data.items) if (item.kind === 'message') item.message.body = 'stale generation text'
-    requested()
+    snapshotReady = true
     await held
     await route.fulfill({ status, json: status === 200 ? data : { error: 'channel_not_found' } })
   })
   try {
     await page.goto(`/o/${org}/c/${a.id}`)
-    await ready
+    await expect.poll(() => snapshotReady).toBe(true)
+    core.release()
     await page.locator('#channel-content button').filter({ hasText: b.name }).first().click()
     await expect(page.getByRole('article').filter({ hasText: b.name })).toBeVisible()
     await page.locator('#channel-content button').filter({ hasText: a.name }).first().click()
@@ -112,5 +127,5 @@ for (const status of [200, 403]) test(`wasm fences an old history generation aft
     await expect(page.getByText('stale generation text')).toHaveCount(0)
     await expect(page.getByText('このチャンネルは利用できません。', { exact: true })).toHaveCount(0)
     await expect(page.getByTestId('live-status')).toHaveAttribute('data-live', 'true')
-  } finally { release() }
+  } finally { release(); core.release() }
 })

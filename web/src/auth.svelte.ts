@@ -8,7 +8,9 @@ import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.s
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
-import { getOrganizationMe, isOrganizationUnavailable, type Identity, type Role } from './api'
+import { getOrganizationMe, isOrganizationUnavailable, listTimeline, type Identity, type Role } from './api'
+import { startInitialSelection } from './initial-timeline'
+import type { Navigation } from './navigation'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
 import { createSession, startInitialChannels, type SessionOptions } from './session'
@@ -26,6 +28,7 @@ import { unreadAdapter, type UnreadAdapter } from './unread.svelte'
 import type { SearchSource } from './search-source'
 
 export type { AuthState } from './auth'
+type InitialSelection = Pick<SessionOptions, 'initialTimeline' | 'initialChannelHint'>
 export type SessionModel = {
   holdActivity?(key: string, target: ActivityTarget): unknown
   dms?: DmsAdapter
@@ -52,18 +55,20 @@ export type AuthDeps = {
   signOut: typeof signOut
   getOrganization: typeof getOrganizationMe
   readInitialChannels?: typeof startInitialChannels
+  readInitialTimeline?: typeof listTimeline
   /** Resolves once the sync core is ready; rejects if it never will (main.ts shows the startup error). */
   coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean, initialChannels?: SessionOptions['initialChannels']): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean, initialChannels?: SessionOptions['initialChannels'], initialSelection?: InitialSelection): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
   readInitialChannels: startInitialChannels,
+  readInitialTimeline: listTimeline,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
-  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
-    const session = createSession({ selfId, onEnded, organizationId, initialRole, initialCanCreateChannels, initialChannels, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
+  openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels, initialSelection) {
+    const session = createSession({ selfId, onEnded, organizationId, initialRole, initialCanCreateChannels, initialChannels, ...initialSelection, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
     const topicAdapters = new Map<string, TopicsAdapter>()
     const replyAdapters = new Map<string, RepliesAdapter>()
     const unreadAdapters = new Map<string, UnreadAdapter>()
@@ -101,7 +106,7 @@ const defaults: AuthDeps = {
   },
 }
 /** Account lifetime owns the 401 fence; each Organization selection owns a separate data generation. */
-export function createAuth(deps: AuthDeps = defaults) {
+export function createAuth(deps: AuthDeps = defaults, navigation?: Navigation) {
   let view = $state<AuthState>({ screen: 'loading' })
   let organization = $state<Identity | null>(null)
   let selectedOrganizationId = $state('')
@@ -116,8 +121,10 @@ export function createAuth(deps: AuthDeps = defaults) {
   let accountGeneration = 0
   let accountRequests = new AbortController()
   let selectionGeneration = 0
+  let startup: ReturnType<typeof startInitialSelection> | undefined
 
   function closeOrganization() {
+    startup?.close(); startup = undefined
     stopMemberAvailability?.(); stopMemberAvailability = undefined
     stopMemberRefresh?.(); stopMemberRefresh = undefined
     session?.close(); session = null
@@ -130,6 +137,9 @@ export function createAuth(deps: AuthDeps = defaults) {
   function ended(generation: number) {
     if (generation === accountGeneration) void show({ screen: 'signin', notice: sessionEndedMessage })
   }
+  const route = () => navigation ? navigation.get().target
+    : typeof window !== 'undefined' ? parseNavigation(window.location.href) : null
+
   async function selectOrganization(id: string) {
     if (view.screen !== 'app') return
     operations.clearError()
@@ -152,17 +162,28 @@ export function createAuth(deps: AuthDeps = defaults) {
         if (!list.ok && list.kind === 'http' && list.status === 401) ended(account)
         return list
       })
+    const initial = startInitialSelection({
+      organizationId: id, route, navigation, channels: initialChannels, accountSignal: accountRequests.signal,
+      load: deps.readInitialTimeline, onEnded: () => ended(account),
+      onUnavailableBeforeSession: () => { organizationStatus = 'unavailable' },
+    })
+    startup = initial
     if (deps.coreReady) {
-      try { await deps.coreReady() } catch { return }
+      try { await deps.coreReady() } catch { initial.close(); return }
       if (account !== accountGeneration || selection !== selectionGeneration) return
     }
+    if (initial.unavailable) return
+    const { initialChannelHint, initialTimeline } = initial
     organization = result.data
-    session = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
+    const opened = deps.openSession(result.data.member.id, () => ended(account), id, drafts.scope(), identity => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
       if (identity) organization = identity
       else if (organization) organization = { ...organization, organization: { ...organization.organization,
         capabilities: Object.fromEntries(Object.keys(organization.organization.capabilities).map(key => [key, { allowed: false }])) as Identity['organization']['capabilities'] } }
-    }, result.data.member.role, accountRequests.signal, result.data.organization.capabilities.can_create_channels.allowed, initialChannels)
+    }, result.data.member.role, accountRequests.signal, result.data.organization.capabilities.can_create_channels.allowed, initialChannels,
+    { initialChannelHint, initialTimeline })
+    session = opened
+    initial.attachSession(() => { void opened.sync.markUnavailable() })
     organizationStatus = 'ready'
     members = deps.openMembers?.(id, () => ended(account), () => {
       if (account !== accountGeneration || selection !== selectionGeneration) return
@@ -193,7 +214,7 @@ export function createAuth(deps: AuthDeps = defaults) {
     if (next.screen === 'app') {
       const account = accountGeneration
       security = accountSecurityAdapter((deps.openSecurity ?? createAccountSecurity)(() => ended(account)))
-      const requested = typeof window !== 'undefined' ? parseNavigation(window.location.href)?.organizationId : null
+      const requested = route()?.organizationId
       const id = requested ?? next.identity.organizations[0]?.organization_id
       if (id) await selectOrganization(id)
     }
