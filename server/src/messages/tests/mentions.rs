@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 
 mod counts;
 mod denials;
@@ -388,14 +389,17 @@ async fn mention_canonical_duplicate_rollback_and_uncertain_commit_are_atomic(po
             send(&app2, &author, other, input(key, &text))
         )
     });
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND classid=152 AND objid=391 AND NOT granted")
-                .fetch_one(&pool).await.unwrap();
-            if waiting == 2 { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pool,
+        Blocked::Advisory(Advisory::Key {
+            class_id: Some(152),
+            object_id: 391,
+            current_database: true,
+        }),
+        Count::Exactly(2),
+        std::time::Duration::from_secs(3),
+    )
+    .await;
     sqlx::query("SELECT pg_advisory_unlock(152,391)")
         .execute(&mut *gate)
         .await

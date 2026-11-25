@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{Blocked, Count, wait_blocked};
 
 #[fukulow_test::test]
 async fn reply_waiting_on_move_rereads_parent_and_inherits_destination(pool: PgPool) {
@@ -104,24 +105,13 @@ async fn move_ambiguous_commit_recovers_by_same_key_without_reallocating(pool: P
 }
 
 pub(super) async fn wait_for_lock(pool: &PgPool, query: &str) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
-                 AND wait_event_type='Lock' AND query LIKE $1)",
-            )
-            .bind(query)
-            .fetch_one(pool)
-            .await
-            .unwrap();
-            if waiting {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_blocked(
+        pool,
+        Blocked::LockQuery(query),
+        Count::AtLeast(1),
+        Duration::from_secs(3),
+    )
+    .await;
 }
 
 #[fukulow_test::test]

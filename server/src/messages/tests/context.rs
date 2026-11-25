@@ -1,5 +1,6 @@
 use super::*;
 use crate::auth::{SubscriptionRecheck, SubscriptionScope};
+use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 
 #[fukulow_test::test]
 async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool) {
@@ -23,14 +24,13 @@ async fn conflict_lookup_topic_reply_and_mark_read_require_context(pool: PgPool)
     }
     // Both preflight lookups must see no Message before the winner commits.
     // The loser then necessarily exercises the post-conflict canonical lookup.
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE '%135%'")
-                .fetch_one(&pools.admin).await.unwrap();
-            if waiting == 2 { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_blocked(
+        &pools.admin,
+        Blocked::Advisory(Advisory::Query("%135%")),
+        Count::Exactly(2),
+        std::time::Duration::from_secs(3),
+    )
+    .await;
     held.rollback().await.unwrap();
     let root = sends.join_next().await.unwrap().unwrap();
     assert_eq!(sends.join_next().await.unwrap().unwrap(), root);

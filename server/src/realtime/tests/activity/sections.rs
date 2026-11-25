@@ -3,6 +3,7 @@ use crate::channels::{
     activity::{Notice, Registration, TestFault, fail, pause_member},
     tests::{body, extract_auth},
 };
+use crate::test_support::{Blocked, Count, wait_blocked};
 use sqlx::postgres::{PgPoolOptions, PgSslMode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -400,24 +401,13 @@ async fn section_write_survives_request_cancellation_and_rollback_is_silent(pool
         let f = f.clone();
         async move { create(&f, id, "Survives cancellation").await }
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
-                 AND wait_event_type='Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
-            )
-            .bind(blocker_pid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            if waiting {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("section write must wait for the Organization lock");
+    wait_blocked(
+        &pool,
+        Blocked::LockBehind(blocker_pid),
+        Count::AtLeast(1),
+        Duration::from_secs(5),
+    )
+    .await;
     assert_eq!(layout(&f).await["generation"], "0");
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
