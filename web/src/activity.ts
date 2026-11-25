@@ -24,6 +24,7 @@ export function createActivityTarget<T>(options: {
   const random = options.random ?? Math.random
   const deadlines = createRequestDeadlines()
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
+  let noticePending = false, servingNotice = false
   let timer: ReturnType<typeof setTimeout> | undefined
   let retry = false, due = 0, stopped = false
   let failure: Exclude<Result<T>, { ok: true }> | undefined
@@ -56,6 +57,7 @@ export function createActivityTarget<T>(options: {
     if (inFlight) { queued = true; return }
     if (retry || options.canLoad?.() === false) return
     inFlight = true; queued = false; failure = undefined
+    servingNotice = noticePending; noticePending = false
     const own = generation
     const request = new AbortController()
     controller = request
@@ -72,6 +74,7 @@ export function createActivityTarget<T>(options: {
     completion = undefined
     if (controller === request) controller = undefined
     inFlight = false
+    servingNotice = false
     if (closed) return
     if (cancelled) { if (dirty) schedule(0); return }
     try { if (result.ok) {
@@ -86,12 +89,13 @@ export function createActivityTarget<T>(options: {
       if (dirty) schedule(200)
     } else {
       if (own === generation) { belowFloor = 0; failure = result; options.error?.(result) }
-      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; stopped = true; return }
-      if (options.manualRetry) { dirty = false; queued = false; return }
+      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; stopped = true; return }
+      if (options.manualRetry) { dirty = false; queued = false; noticePending = false; return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
+        noticePending = false
         scheduleRetry(result.retryAfterMs ?? 0)
       } else if (own !== generation) { if (dirty) schedule(200) }
-      else { dirty = false; queued = false; stopped = true }
+      else { dirty = false; queued = false; noticePending = false; stopped = true }
     } } finally { options.settled?.() }
   }
   function fence() {
@@ -103,6 +107,7 @@ export function createActivityTarget<T>(options: {
   function invalidate(reason: Invalidation = 'notice', delay = 200) {
     if (closed) return
     if (reason !== 'notice') { fence(); options.hide?.(reason) }
+    else noticePending = true
     stopped = false; failure = undefined; dirty = true
     if (inFlight) { queued = true; return }
     // Multi-lane admission may make other work eligible before a retained retry deadline.
@@ -116,6 +121,7 @@ export function createActivityTarget<T>(options: {
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
     inFlight: () => inFlight,
+    pendingNotice: () => !closed && (servingNotice || (noticePending && dirty && !retry)),
     ensure() {
       if (inFlight) return running
       if (!closed && !stopped && !dirty && timer === undefined && !retry) { dirty = true; return run() }
@@ -132,8 +138,8 @@ export function createActivityTarget<T>(options: {
       if (dirty && !retry && timer !== undefined) { clearTimeout(timer); timer = undefined; return run() }
     },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
-    suspend() { generation++; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
-    close() { closed = true; generation++; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
+    suspend() { generation++; dirty = false; queued = false; noticePending = false; servingNotice = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
+    close() { closed = true; generation++; noticePending = false; servingNotice = false; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
   }
 }
 

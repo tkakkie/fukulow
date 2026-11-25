@@ -54,6 +54,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const activityTargets = new Map<string, { close(): void; release(): void; target: ReturnType<typeof createActivityTarget>; observeSummary?(listener: (response: TopicSummaryResponse) => void): () => void }>()
   const listeners = new Set<(channels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
+  const summaryListeners = new Set<(channel: string, response: TopicSummaryResponse) => void>()
   const pendingChannels = new Set<string>()
   const deadlines = createRequestDeadlines()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
@@ -359,6 +360,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         w.summaries.delete(topic)
         withSync(channel, () => { void sync.settleHistory(channel, [response.topic.latest_message]) })
         notify(channel)
+        if (!w.baselines.has(topic) && !w.summaryDemands.has(topic) && !target.pendingNotice()) {
+          summaryListeners.forEach(listener => listener(channel, response))
+        }
       },
       error: r => {
         if (!current(channel, w)) return
@@ -425,11 +429,11 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   function pruneActivity(w: Window) {
     const channel = [...windows].find(([, value]) => value === w)?.[0]
     if (!channel) return
-    // An awaited activitySummary() owns its target until it settles; pruning it would abort that read.
+    // An awaited activitySummary() or queued non-retry follow-up owns its target until it settles.
     const retained = new Set([...w.baselines.keys(), ...w.topics.keys(), ...w.summaryDemands.keys()])
     for (const m of w.messages.values()) if (m.topic_id) retained.add(m.topic_id)
-    for (const key of activityTargets.keys()) if (key.startsWith(`topic:${channel}:`) &&
-      !retained.has(key.slice(`topic:${channel}:`.length))) releaseActivity(key)
+    for (const [key, entry] of activityTargets) if (key.startsWith(`topic:${channel}:`) &&
+      !retained.has(key.slice(`topic:${channel}:`.length)) && !entry.target.pendingNotice()) releaseActivity(key)
   }
   async function ensureSummaryForWindow(w: Window, topicId: string) {
     if (w.evidenceRefresh.has(topicId)) return
@@ -793,6 +797,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       return w ? [w.messages.values(), ...[...w.topics.values()].map(t => t.messages.values())] : []
     },
     subscribe,
+    subscribeSummary(listener: (channel: string, response: TopicSummaryResponse) => void): () => void {
+      summaryListeners.add(listener)
+      return () => { summaryListeners.delete(listener) }
+    },
     activityAccess(channel: string) {
       const w = windows.get(channel)
       if (!w) return
@@ -815,6 +823,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       }
       // Return accepted REST evidence even if display trimming immediately evicts its body.
       let accepted: TopicSummaryResponse | undefined
+      let baselineBefore = cached
       const stop = activityTargets.get(`topic:${channel}:${topic}`)?.observeSummary?.(response => { accepted = response })
       w.summaryDemands.set(topic, (w.summaryDemands.get(topic) ?? 0) + 1)
       try {
@@ -822,9 +831,16 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         if (joined) await target?.ensure()
         else if (cached) await target?.refresh()
         else await target?.ensure()
-        if (current(channel, w) && !target?.failure() && !(accepted && isFresh(accepted.as_of_seq, accepted.topic.read_seq))) {
-          if (joined && accepted) await (target?.inFlight() ? target.ensure() : target?.refresh())
-          else await target?.flushQueued()
+        if (current(channel, w) && !target?.failure()) {
+          const previous = accepted
+          const followUp = joined && accepted && !isFresh(accepted.as_of_seq, accepted.topic.read_seq)
+            ? (target?.inFlight() ? target.ensure() : target?.refresh())
+            : target?.flushQueued()
+          if (followUp) {
+            if (accepted === previous) accepted = undefined
+            baselineBefore = w.baselines.get(topic)
+            await followUp
+          }
         }
       } finally {
         stop?.()
@@ -837,7 +853,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       const failed = target?.failure()
       if (failed) return failed
       const baseline = w.baselines.get(topic)
-      return baseline && baseline !== cached && isFresh(baseline.asOfSeq, baseline.summary.read_seq)
+      return baseline && baseline !== baselineBefore && isFresh(baseline.asOfSeq, baseline.summary.read_seq)
         ? { ok: true, data: { history_generation: baseline.summary.latest_message.history_generation, as_of_seq: baseline.asOfSeq, topic: baseline.summary } }
         : { ok: false, kind: 'network' }
     },
@@ -991,7 +1007,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     replaceSession() { clearActivity(); sessionToken++; cancelReads(); windows.clear(); notify() },
     close() {
       closed = true; clearActivity(); unsubscribe(); cancelReads(); windows.clear()
-      notify(); listeners.clear(); channelListeners.clear()
+      notify(); listeners.clear(); channelListeners.clear(); summaryListeners.clear()
     },
   }
   return controller

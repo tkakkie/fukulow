@@ -1197,3 +1197,121 @@ it('transient snapshot_expired on Edit does not terminally stop Topic Unread (#9
     expect(session.unread.get('A').topics.T?.unreadCount).toBe(2)
   } finally { session.close(); listChannels.mockRestore() }
 })
+
+it('joined summary read flushes a queued read-position notice and updates evicted Topic Unread count and boundary (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const fullMain = Array.from({ length: 400 }, (_, i) => ({ kind: 'message' as const, message: msg(11 + i, null) }))
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }))
+  let socket!: import('./realtime').RealtimeHandlers
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const getTopicSummary = vi.fn<() => Promise<Result<import('./api').TopicSummaryResponse>>>()
+    .mockReturnValueOnce(first.promise)
+    .mockResolvedValueOnce(ok({ history_generation: gen, as_of_seq: 411, topic: { ...summary('T', 2, 1, 0), read_seq: 2, unread_count: 0, mention_unread_count: 0 } }))
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: true, items: fullMain }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: false, topics: [] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(2, 'T')], has_more: false }),
+    },
+    sync: {
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(410, null)], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    await flush()
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 410 }); await flush()
+    expect(session.sync.get().channels.A?.subscription?.confirmed).toBe(true)
+    await session.topics.loadTopic('A', 'T')
+    const initial = session.topics.loadSummary('A', 'T')
+    await flush()
+    await session.unread.enter({ channel: 'A', topicId: 'T' })
+    await flush()
+    expect(getTopicSummary).toHaveBeenCalledOnce()
+    socket.onEvent({ type: 'message', kind: 'create', seq: 411, message: { ...msg(411, null), sender: 'other' } })
+    socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 2 })
+    first.resolve(ok({ history_generation: gen, as_of_seq: 410, topic: { ...summary('T', 2, 1, 1), read_seq: 1, unread_count: 1, mention_unread_count: 0 } }))
+    await initial; await flush()
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    expect(getTopicSummary).toHaveBeenCalledTimes(2)
+    expect(session.topics.get('A').topics.some(t => t.topicId === 'T')).toBe(false)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(0)
+    expect(session.unread.get('A').entry?.boundary).toBe(2)
+  } finally { session.close(); listChannels.mockRestore() }
+})
+
+it('pruning an evicted Topic with no active Topic window does not cancel a pending read-position follow-up (#988)', async () => {
+  const { createSession } = await import('./session')
+  const { row, summary } = await import('./unread-test-helpers')
+  const { msg } = await import('./topic-test-helpers')
+  const api = await import('./api')
+  const gen = '00000000-0000-4000-8000-000000000515'
+  const fullMain = Array.from({ length: 400 }, (_, i) => ({ kind: 'message' as const, message: msg(11 + i, null) }))
+  const listChannels = vi.spyOn(api, 'listChannels').mockResolvedValue(ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }))
+  let socket!: import('./realtime').RealtimeHandlers
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const second = held<Result<import('./api').TopicSummaryResponse>>()
+  const getTopicSummary = vi.fn<() => Promise<Result<import('./api').TopicSummaryResponse>>>()
+    .mockReturnValueOnce(first.promise)
+    .mockReturnValueOnce(second.promise)
+    .mockResolvedValueOnce(ok({ history_generation: gen, as_of_seq: 412, topic: { ...summary('T', 3, 2, 0), read_seq: 3, unread_count: 0, mention_unread_count: 0 } }))
+  const session = createSession({
+    selfId: 'me',
+    onEnded() {},
+    channelsApi: { listChannels: async () => ok({ history_generation: gen, channels: [row({ as_of_seq: 410, unread_count: 1 })] }), createChannel: async () => ({ ok: false, kind: 'network' }) },
+    topicsApi: {
+      getTopicSummary,
+      listTimeline: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: true, items: fullMain }),
+      listTopics: async () => ok({ history_generation: gen, as_of_seq: 410, has_more: false, topics: [] }),
+      listTopicMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(2, 'T'), msg(3, 'T')], has_more: false }),
+    },
+    sync: {
+      connect(h) { socket = h; return { send() {}, close() {} } },
+      api: {
+        listChannelEvents: async () => ({ ok: false, kind: 'network' }),
+        listMessages: async () => ok({ history_generation: gen, as_of_seq: 410, messages: [msg(410, null)], has_more: false }),
+        sendMessage: async () => ({ ok: false, kind: 'network' }),
+      },
+    },
+  })
+  try {
+    await flush()
+    socket.onReady(); await flush()
+    socket.onEvent({ history_generation: gen, type: 'subscribed', channel_id: 'A', caught_up_seq: 410 }); await flush()
+    expect(session.sync.get().channels.A?.subscription?.confirmed).toBe(true)
+    // No active Topic window; hold the first summary read and join via Unread.
+    const initial = session.topics.loadSummary('A', 'T')
+    await flush()
+    await session.unread.enter({ channel: 'A', topicId: 'T' })
+    await flush()
+    socket.onEvent({ type: 'message', kind: 'create', seq: 411, message: { ...msg(411, null), sender: 'other' } })
+    socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 2 })
+    first.resolve(ok({ history_generation: gen, as_of_seq: 410, topic: { ...summary('T', 3, 2, 2), read_seq: 1, unread_count: 2, mention_unread_count: 0 } }))
+    await initial; await flush()
+    // A second read-position notice arrives while the flushed follow-up is in flight.
+    socket.onEvent({ type: 'read_position_changed', channel_id: 'A', topic_id: 'T', read_seq: 3 })
+    second.resolve(ok({ history_generation: gen, as_of_seq: 411, topic: { ...summary('T', 3, 2, 1), read_seq: 2, unread_count: 1, mention_unread_count: 0 } }))
+    await flush()
+    // Demand is now released and a live Message triggers pruneActivity before the 200ms debounce fires.
+    socket.onEvent({ type: 'message', kind: 'create', seq: 412, message: { ...msg(412, null), sender: 'other' } })
+    await flush()
+    await vi.advanceTimersByTimeAsync(200); await flush()
+    expect(getTopicSummary).toHaveBeenCalledTimes(3)
+    expect(session.unread.get('A').topics.T?.unreadCount).toBe(0)
+    expect(session.unread.get('A').topics.T?.position).toBe(3)
+    expect(session.unread.get('A').entry?.boundary).toBe(2)
+  } finally { session.close(); listChannels.mockRestore() }
+})
