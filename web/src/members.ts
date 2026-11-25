@@ -8,17 +8,45 @@ import type { lookupAuthors } from './api'
 import type { createChannels } from './channels'
 import type { createSync } from './sync'
 
+type WatchMemberAccessOptions = {
+  skipConnectRefresh?: boolean
+  memberListAccess?: () => MemberListAccess
+  onDirectoryLoad?: (listener: () => void) => () => void
+}
+
 /** Follow access changes for this Organization selection; panel opens call load directly. */
 export function watchMemberAccess(
   channels: Pick<ReturnType<typeof createChannels>, 'get' | 'subscribe'>,
   sync: Pick<ReturnType<typeof createSync>, 'get' | 'subscribe'>,
   refresh: (reason: 'access' | 'refresh') => void,
+  options?: WatchMemberAccessOptions,
 ) {
+  let listReady = channels.get().status === 'ready'
   let channelIds = new Set(channels.get().channels.map(c => c.id))
+  let loadedChannelIds: Set<string> | null = null
+  const stopDirectoryLoad = options?.onDirectoryLoad?.(() => {
+    loadedChannelIds = new Set(channels.get().channels.map(c => c.id))
+  })
   let connection = sync.get().connected ? sync.get().connection : null
   let lost = new Set<string>()
   const stopChannels = channels.subscribe(() => {
-    const ids = new Set(channels.get().channels.map(c => c.id))
+    const state = channels.get()
+    const ids = new Set(state.channels.map(c => c.id))
+    if (!listReady) {
+      if (state.status !== 'ready') return
+      listReady = true
+      const added = [...ids].some(id => !channelIds.has(id))
+      channelIds = ids
+      if (!options?.onDirectoryLoad) {
+        if (added) refresh('refresh')
+        return
+      }
+      // Only a Guest's directory is scoped by Channel grants; non-Guests already list all active Members.
+      if ((options.memberListAccess?.() ?? 'guest') === 'guest' && loadedChannelIds !== null && [...ids].some(id => !loadedChannelIds!.has(id))) {
+        refresh('refresh')
+      }
+      return
+    }
     const removed = [...channelIds].some(id => !ids.has(id))
     const added = [...ids].some(id => !channelIds.has(id))
     channelIds = ids
@@ -34,9 +62,9 @@ export function watchMemberAccess(
     const reconnected = state.connected && state.connection !== connection
     if (state.connected) connection = state.connection
     if (accessLost) refresh('access')
-    else if (reconnected) refresh('refresh')
+    else if (reconnected && !options?.skipConnectRefresh) refresh('refresh')
   })
-  return () => { stopChannels(); stopSync() }
+  return () => { stopChannels(); stopSync(); stopDirectoryLoad?.() }
 }
 
 export const roleNames: Record<Role, string> = { owner: 'オーナー', admin: '管理者', member: 'メンバー', guest: 'ゲスト' }
@@ -78,8 +106,11 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   let activityManaged = false
   // Defer directory reads until first use or the first-display milestone (#954 R1).
   let activated = false
+  let hasLoaded = false
   let activateTimer: ReturnType<typeof setTimeout> | undefined
   const listeners = new Set<() => void>()
+  const loadListeners = new Set<() => void>()
+  const notifyLoad = () => { hasLoaded = true; loadListeners.forEach(l => l()) }
   const invites = createInvites(organizationId, onEnded, membershipLost)
   const authors = createAuthors(organizationId, onEnded, membershipLost, deps.lookupAuthors, deps.firstDisplayTimeoutMs)
   const set = (patch: Partial<typeof state>) => { if (!closed) { state = { ...state, ...patch }; listeners.forEach(l => l()) } }
@@ -88,7 +119,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   }
   function unavailable() {
     if (closed) return
-    closed = true; loadSequence++; clearActivateTimer(); activityTarget.close(); invites.close(); authors.unavailable()
+    closed = true; loadSequence++; clearActivateTimer(); activityTarget.close(); invites.close(); authors.unavailable(); loadListeners.clear()
     state = { ...state, members: [], loading: false, error: '', retryable: false }
     listeners.forEach(l => l())
   }
@@ -109,6 +140,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     canLoad: () => activated && canLoadMemberList(memberListAccess()),
     async load(signal) {
       const sequence = ++loadSequence
+      notifyLoad()
       const r = await deps.listMembers(organizationId, undefined, signal)
       // Account rejection and current-selection Membership loss outlive freshness fences.
       if (!r.ok && (r.kind === 'http' && r.status === 401 || !closed && isOrganizationUnavailable(r))) failed(r)
@@ -134,6 +166,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     if (activityManaged) { await activityTarget.refresh(); return }
     if (!canLoadMemberList(memberListAccess())) return
     const sequence = ++loadSequence
+    notifyLoad()
     const r = await deps.listMembers(organizationId)
     if (!r.ok && r.kind === 'http' && r.status === 401) { failed(r); return }
     if (closed) return
@@ -161,6 +194,7 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
   }
   function refreshIfActive() {
     if (closed || !activated) return
+    if (activityManaged) { activityTarget.invalidate('notice'); return }
     return load()
   }
   const managedActivityTarget = {
@@ -188,8 +222,14 @@ export function createMembers(organizationId: string, onEnded: () => void, onUna
     authors, invites,
     get: () => state,
     subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l) },
+    onLoad(l: () => void) {
+      if (closed) return () => {}
+      loadListeners.add(l)
+      if (hasLoaded) l()
+      return () => loadListeners.delete(l)
+    },
     unavailable,
-    close() { invites.close(); closed = true; clearActivateTimer(); activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear() },
+    close() { invites.close(); closed = true; clearActivateTimer(); activityTarget.close(); authors.close(); state = { ...state, inviteLink: '' }; listeners.clear(); loadListeners.clear() },
     load,
     activate,
     scheduleActivate,

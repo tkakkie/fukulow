@@ -26,9 +26,11 @@ export function createDms(options: {
   api: DmsApi; activity: Activity; watched(id: string): boolean
   baseline(dm: api.Dm, replace: boolean): void; drop(id: string): void
   select(id: string): void; processed?(identity: api.DmDiscovery): void
+  waitForReady?: boolean
   random?: () => number; timeoutMs?: number
 }) {
-  let state = dmListState(), busy = false, error = '', mutation: api.OpenDmRequest | undefined
+  let state = options.waitForReady ? { ...dmListState(), paused: true } : dmListState()
+  let busy = false, error = '', mutation: api.OpenDmRequest | undefined
   let mutationGeneration = 0, active: DmRequest | undefined, closed = false
   // A confirmed open whose POST snapshot a boundary fenced; re-read once by id (B2.5, #956).
   let fenced: api.Dm | undefined, rereadGeneration = 0
@@ -139,7 +141,7 @@ export function createDms(options: {
     if (closed) return
     closed = true; dispatch({ type: 'close' }); target.close(); mutationTarget.close(); rereadTarget.close(); listeners.clear()
   }
-  plan()
+  if (!options.waitForReady) plan()
   return {
     get: () => ({ ...state, busy, message: error || (state.error ? 'ダイレクトメッセージを確認できませんでした。通信状況を確認して、もう一度お試しください。' : '') }),
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
@@ -150,7 +152,7 @@ export function createDms(options: {
       active = undefined; mutation = undefined; busy = false; error = ''; fenced = undefined
       dispatch({ type: 'history_reset' })
     },
-    ready() { dispatch({ type: 'resume' }); invalidate('reconcile') },
+    ready() { dispatch({ type: 'resume' }); plan() },
     trackSelection(id: string | null) { dispatch({ type: 'select', id }) },
     select(id: string) { dispatch({ type: 'select', id }); options.select(id) },
     browse() { dispatch({ type: 'browse' }); plan() },
