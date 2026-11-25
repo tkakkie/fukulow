@@ -30,7 +30,9 @@ async function expectVirtualTotal(container: Locator, total: number): Promise<vo
 }
 
 // Scroll the real viewport until the requested logical row is mounted, then reveal it.
+// Rows are presented only once the entry position is applied (docs/ui.md §8, #968); a user cannot scroll before that.
 async function revealVirtualRow(container: Locator, position: number): Promise<Locator> {
+  await expect(container).not.toHaveAttribute('aria-busy', 'true')
   await expect.poll(async () => container.evaluate(async (el, position) => {
     const row = el.querySelector<HTMLElement>(`[aria-posinset="${position}"]`)
     if (row) {

@@ -112,6 +112,8 @@
     return [...main, ...summaries].sort((a, b) => linePosition(a) - linePosition(b))
   })
   let skipUnreadVisit = $state(false)
+  // The visit stops waiting for its entry position (loading timeout or own send) and opens at the bottom, as after a failed boundary.
+  let entryPositionAbandoned = $state(false)
   let scrolledFirstUnreadId = $state<string | null>(null)
   const entry = $derived(uState?.entry?.scope.topicId === null ? uState.entry : null)
   const uGeneration = $derived(uState?.generation ?? null)
@@ -142,7 +144,7 @@
     ),
   )
   const firstUnreadMessageId = $derived(
-    !search && !skipUnreadVisit && entry &&
+    !search && !skipUnreadVisit && !entryPositionAbandoned && entry &&
       entry.boundary !== null &&
       (entry.unreadAtEntry ?? 0) > 0 &&
       !needsOlderUnreadPage &&
@@ -177,7 +179,13 @@
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
+  const awaitingEntryPosition = $derived(
+    !search && !skipUnreadVisit && !entryPositionAbandoned &&
+      (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && hasOlder && !olderError)),
+  )
   let initialScrollApplied = $state(false)
+  // Rows stay mounted because positioning needs them, but are hidden and inert until the entry position is applied (`docs/ui.md` §8).
+  const positioning = $derived(!initialScrollApplied && (awaitingEntryPosition || firstUnreadMessageId !== null))
   let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
   let lastScrollScopeKey = ''
   let lastScrollEntryId: symbol | null = null
@@ -395,6 +403,7 @@
       lastScrollEntryId = currentEntryId
       initialScrollApplied = false
       scrolledFirstUnreadId = null
+      entryPositionAbandoned = false
       pendingScrollAction = null
     }
     const displayed = isTimelineDisplayed(scrollEl, viewSelected)
@@ -408,10 +417,10 @@
           },
     )
     const pendingIds = mainPending.map((p) => p.clientMessageId)
-    const status = effectiveStatus
+    // Positioning counts as loading so the controller's loading timeout bounds it.
+    const status = positioning && effectiveStatus === 'ready' ? 'loading' : effectiveStatus
     const targetFirstUnreadId = firstUnreadMessageId
-    const awaitingFirstUnread =
-      !skipUnreadVisit && (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && hasOlder && !olderError))
+    const awaitingFirstUnread = awaitingEntryPosition
     const { action, anchor } = scrollController.sync({
       channelId: id,
       visitId: currentEntryId,
@@ -474,6 +483,10 @@
   })
 
   $effect(() => {
+    if (positioning && scrollView.loadingTimedOut) entryPositionAbandoned = true
+  })
+
+  $effect(() => {
     if (!unread || !viewSelected || targetUnavailable) return
     if (entry?.boundary === null || needsOlderUnreadPage) return
     void tick().then(() => {
@@ -526,6 +539,7 @@
     if (!ok) return false
     if (search) { await jumpToBottom(); return true }
     if (tState?.main.hasNewer) await topics?.loadMainLatest()
+    if (positioning) entryPositionAbandoned = true
     const action = scrollController.onUserSubmit()
     void tick().then(() => {
       applyScrollAction(action, null)
@@ -561,7 +575,19 @@
     </div>
   {/if}
 
-  <div class="timeline-scroll" bind:this={scrollEl} onscroll={handleScroll}>
+  {#if positioning && (lines.length > 0 || mainPending.length > 0)}
+    <div class="timeline-positioning">
+      <Skeleton rows={4} label="メッセージを読み込み中" />
+    </div>
+  {/if}
+  <div
+    class="timeline-scroll"
+    class:timeline-scroll--positioning={positioning}
+    aria-busy={positioning ? 'true' : undefined}
+    inert={positioning}
+    bind:this={scrollEl}
+    onscroll={handleScroll}
+  >
     {#if !organizationUnavailable && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && lines.length === 0 && mainPending.length === 0}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
@@ -736,6 +762,18 @@
     flex-direction: column;
     gap: var(--space-8);
     min-height: 0;
+    min-width: 0;
+  }
+
+  .timeline-scroll--positioning {
+    visibility: hidden;
+  }
+
+  .timeline-positioning {
+    grid-row: 2;
+    grid-column: 1;
+    padding: var(--space-8) var(--space-16);
+    overflow: hidden;
     min-width: 0;
   }
 
