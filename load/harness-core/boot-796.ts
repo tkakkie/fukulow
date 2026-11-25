@@ -1,5 +1,5 @@
 // Installs or removes the #796 boot setup (#996) under a filesystem root; the maintainer runs it once with sudo.
-// Usage: sudo "$(command -v node)" load/harness-core/boot-796.ts install|uninstall [--measurement-user USER]
+// Usage: sudo "$(command -v node)" load/harness-core/boot-796.ts install --measurement-user USER | uninstall
 //        node load/harness-core/boot-796.ts check   (unprivileged; exit 0 when installed and current)
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -170,12 +170,18 @@ if (import.meta.main) {
       root: { type: 'string', default: '/' }, 'measurement-user': { type: 'string' },
     } });
     root = values.root;
-    measurementUser = values['measurement-user'] ?? process.env.SUDO_USER;
+    measurementUser = values['measurement-user'];
     if (!['install', 'uninstall', 'check'].includes(command) || !root || measurementUser === '') throw new Error();
   } catch {
     console.error('usage: boot-796.ts install|uninstall|check [--root DIR] [--measurement-user USER]');
     process.exit(2);
   }
+  // On the live host the rule must name the measurement account, never whoever ran sudo.
+  if (command !== 'uninstall' && root === '/' && measurementUser === undefined) {
+    console.error(`${command} on the live host needs --measurement-user USER`);
+    process.exit(2);
+  }
+  measurementUser ??= process.env.SUDO_USER;
   if (command !== 'check' && root === '/' && process.getuid?.() !== 0) {
     console.error(`${command} changes the host: run it with sudo`);
     process.exit(2);

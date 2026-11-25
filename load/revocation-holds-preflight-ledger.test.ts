@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict';
 import { hash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { acceptedPreflight, preflightIdentity as identity, preflightReadbackValue } from './revocation-holds-preflight-fixture.ts';
-import { preflightLedgerPath, recordPreflight } from './revocation-holds-preflight-ledger.ts';
+import { preflightLedgerPath, recordPreflight, requireRecordedLedger } from './revocation-holds-preflight-ledger.ts';
 import { requirePreflight, SetupAbort } from './revocation-holds-setup.ts';
 import type { SessionIdentity } from './revocation-holds-provenance.ts';
 
 function outputs(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'revocation-ledger-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const ledger = preflightLedgerPath(join(root, 'first'), identity.hostname);
+  const ledger = preflightLedgerPath(identity.hostname, undefined, { XDG_STATE_HOME: join(root, 'state') });
+  mkdirSync(join(root, 'evidence'));
   const stage = (name: string) => {
     const output = join(root, name);
     mkdirSync(output);
@@ -26,11 +27,44 @@ function outputs(t: TestContext) {
 const pass = async (identity: SessionIdentity) => acceptedPreflight(identity);
 const fail = async (identity: SessionIdentity) => ({ ...acceptedPreflight(identity), passed: false, readback: null });
 
-test('the host ledger defaults to the output parent and can be configured across output roots', () => {
+test('the host ledger is one fixed state path per host unless configured', () => {
   const configured = '/shared/host-ledger.ndjson';
-  assert.equal(preflightLedgerPath('/evidence/preflight', 'first-host'), '/evidence/revocation-holds-preflights.first-host.ndjson');
-  assert.equal(preflightLedgerPath('/evidence/rehearsal', 'second-host'), '/evidence/revocation-holds-preflights.second-host.ndjson');
-  assert.equal(preflightLedgerPath('/separate/rehearsal', 'first-host', configured), configured);
+  assert.equal(preflightLedgerPath('first-host', undefined, { XDG_STATE_HOME: '/state' }, '/home/m'),
+    '/state/fukulow/revocation-holds-preflights.first-host.ndjson');
+  for (const env of [{}, { XDG_STATE_HOME: '' }, { XDG_STATE_HOME: 'relative/state' }]) {
+    assert.equal(preflightLedgerPath('first-host', undefined, env, '/home/m'),
+      '/home/m/.local/state/fukulow/revocation-holds-preflights.first-host.ndjson', JSON.stringify(env));
+  }
+  assert.equal(preflightLedgerPath('second host', undefined, {}, '/home/m'),
+    '/home/m/.local/state/fukulow/revocation-holds-preflights.second%20host.ndjson');
+  assert.equal(preflightLedgerPath('first-host', configured, { XDG_STATE_HOME: '/state' }), configured);
+});
+
+test('stages with different --out parents share the fixed ledger, so a later failed preflight blocks the earlier pass', async t => {
+  const { ledger, stage, readback } = outputs(t);
+  const first = stage('first');
+  await recordPreflight(ledger, first.output, identity, async () => identity, pass);
+  assert.equal(JSON.parse(readFileSync(first.artifact, 'utf8')).ledger, ledger);
+  requireRecordedLedger(first.artifact, ledger);
+  assert.equal(readback(first.artifact), preflightReadbackValue);
+  const later = stage(join('evidence', 'later'));
+  await recordPreflight(ledger, later.output, identity, async () => identity, fail);
+  assert.throws(() => readback(first.artifact), SetupAbort);
+});
+
+test('a later stage refuses a ledger other than the one its preflight recorded', async t => {
+  const { ledger, stage } = outputs(t);
+  const { output, artifact } = stage('first');
+  await recordPreflight(ledger, output, identity, async () => identity, pass);
+  const other = `${ledger}.other`;
+  assert.throws(() => requireRecordedLedger(artifact, other), /differs from .* recorded in/);
+  assert.throws(() => requireRecordedLedger(join(output, 'missing.json'), ledger), /Cannot read the ledger/);
+  const legacy = join(output, 'legacy.json');
+  writeFileSync(legacy, JSON.stringify({ passed: true }));
+  assert.throws(() => requireRecordedLedger(legacy, ledger), /differs from none recorded/);
+  // A copy of the ledger with the same entries still cannot authorize SA2 for that artifact.
+  writeFileSync(other, readFileSync(ledger));
+  assert.throws(() => requirePreflight({ kind: 'measured', identity, ledger: other, preflightFile: artifact }), SetupAbort);
 });
 
 test('SA2 accepts an exact passing artifact only with a readable matching ledger', async t => {

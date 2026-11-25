@@ -293,3 +293,20 @@ test('the CLI with a staging --root installs there without touching the live hos
   assert.equal(check.status, 0, check.stderr);
   assert.equal(cli('check', 'other-user').status, 1);
 });
+
+test('install and check on the live root refuse to run without --measurement-user; a staging root does not need it', () => {
+  const cli = (...args: string[]) => spawnSync(process.execPath, [join(import.meta.dirname, 'boot-796.ts'), ...args],
+    { encoding: 'utf8', env: { ...process.env, PATH: '', SUDO_USER: 'sudo-caller' }, timeout: 10_000 });
+  for (const command of ['install', 'check']) {
+    for (const args of [[command], [command, '--root', '/']]) {
+      const result = cli(...args);
+      assert.equal(result.status, 2, args.join(' '));
+      assert.match(result.stderr, new RegExp(`${command} on the live host needs --measurement-user USER`));
+      assert.equal(result.stdout, '');
+    }
+  }
+  const root = fakeHost();
+  assert.equal(cli('install', '--root', root).status, 0);
+  assert.equal(cli('check', '--root', root).status, 0, 'falls back to SUDO_USER on a staging root');
+  assert.equal(cli('check', '--root', root, '--measurement-user', 'other-user').status, 1);
+});

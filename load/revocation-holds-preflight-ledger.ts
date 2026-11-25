@@ -1,6 +1,7 @@
 import { hash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join } from 'node:path';
 import { sameSessionIdentity, type SessionIdentity } from './revocation-holds-provenance.ts';
 
 type HostSession = Pick<SessionIdentity, 'hostname' | 'session'>;
@@ -8,8 +9,21 @@ type Status = 'started' | 'failed' | 'passed';
 type Entry = HostSession & { id: string; status: Status; at: string; artifactSha256?: string };
 type Result = { passed: boolean; readback: number | null };
 
-export const preflightLedgerPath = (output: string, hostname: string, configured?: string) =>
-  configured ?? join(dirname(output), `revocation-holds-preflights.${encodeURIComponent(hostname)}.ndjson`);
+// One ledger per host, whatever --out each stage uses, so a later failed preflight is never missed.
+export function preflightLedgerPath(hostname: string, configured?: string, env = process.env, home = homedir()) {
+  const state = env.XDG_STATE_HOME && isAbsolute(env.XDG_STATE_HOME) ? env.XDG_STATE_HOME : join(home, '.local/state');
+  return configured ?? join(state, 'fukulow', `revocation-holds-preflights.${encodeURIComponent(hostname)}.ndjson`);
+}
+
+// A later stage must read the ledger its preflight wrote to, or it could miss a newer failure.
+export function requireRecordedLedger(preflightFile: string, ledger: string) {
+  let recorded: unknown;
+  try { recorded = (JSON.parse(readFileSync(preflightFile, 'utf8')) as { ledger?: unknown }).ledger; }
+  catch (error) { throw new Error(`Cannot read the ledger recorded in ${preflightFile}: ${(error as Error).message}`); }
+  if (recorded !== ledger) {
+    throw new Error(`Preflight ledger ${ledger} differs from ${typeof recorded === 'string' ? recorded : 'none'} recorded in ${preflightFile}`);
+  }
+}
 
 export async function recordPreflight<T extends Result>(
   ledger: string, output: string, key: HostSession, readIdentity: () => Promise<SessionIdentity>,
@@ -22,7 +36,7 @@ export async function recordPreflight<T extends Result>(
     appendFileSync(ledger, `${JSON.stringify(entry)}\n`, { flush: true });
   };
   const save = (result: T) => {
-    const content = JSON.stringify({ ...result, id }, null, 2);
+    const content = JSON.stringify({ ...result, id, ledger }, null, 2);
     writeFileSync(artifact, content, { flush: true });
     return hash('sha256', content);
   };
@@ -56,5 +70,7 @@ export function loadLedgerPreflight(ledger: string, artifact: string, key: HostS
   const latest = entries.findLast(entry => entry.hostname === key.hostname && entry.session === key.session);
   if (latest?.status !== 'passed') return;
   const content = readFileSync(artifact);
-  if (latest.artifactSha256 === hash('sha256', content)) return JSON.parse(content.toString('utf8'));
+  if (latest.artifactSha256 !== hash('sha256', content)) return;
+  const result = JSON.parse(content.toString('utf8'));
+  if (result?.ledger === ledger) return result;
 }

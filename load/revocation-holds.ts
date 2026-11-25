@@ -14,7 +14,7 @@ import { CELLS, DURATIONS, parseOptions, planRuns, replacementQueue, runId, setu
 import { cleanup, measure, type Active } from './revocation-holds-run.ts';
 import { SetupAbort, type Setup } from './revocation-holds-setup.ts';
 import { clientScope, placementEnabled } from './revocation-holds-placement.ts';
-import { preflightLedgerPath, recordPreflight } from './revocation-holds-preflight-ledger.ts';
+import { preflightLedgerPath, recordPreflight, requireRecordedLedger } from './revocation-holds-preflight-ledger.ts';
 import { preflightSession } from './revocation-holds-preflight-session.ts';
 import { collectSessionIdentity, type SessionIdentity } from './revocation-holds-provenance.ts';
 
@@ -34,7 +34,7 @@ if (args.includes('--help')) {
     'Options after preflight: --out /absolute/new/dir --preflight-result /absolute/path/preflight.json [--session ID]',
     '  [--rehearsal | --overhead | --overhead-summary <summary.json>] [--cells ...] [--durations short,long]',
     'Use a clean checkout and the same server and stall-helper binaries on the same boot.',
-    'Use the same host ledger across stages. The default is revocation-holds-preflights.<hostname>.ndjson beside the output directory. Override with --preflight-ledger /absolute/path.',
+    'Every stage uses one host ledger: by default ${XDG_STATE_HOME:-$HOME/.local/state}/fukulow/revocation-holds-preflights.<hostname>.ndjson, or --preflight-ledger /absolute/path. A later stage refuses a ledger other than the one its preflight.json records.',
     'Use FUKULOW_LAUNCH_SESSION or choose a fresh --session ID for each measurement session.',
   ].join('\n'));
   process.exit(0);
@@ -64,7 +64,8 @@ const mode = preflight ? 'preflight' : overhead ? 'overhead' : options.rehearsal
 const linuxPlacement = placementEnabled(platform(), mode);
 const output = outsideCheckout(options.out);
 const host = hostname();
-const ledger = outsideCheckout(preflightLedgerPath(output, host, value('--preflight-ledger')));
+const ledger = outsideCheckout(preflightLedgerPath(host, value('--preflight-ledger')));
+if (preflightFile) requireRecordedLedger(preflightFile, ledger);
 if (existsSync(output)) throw new Error('Output directory already exists');
 mkdirSync(output, { recursive: true });
 
