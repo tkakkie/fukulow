@@ -173,9 +173,11 @@
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
+  // Until the first history page arrives, `hasOlder` cannot tell whether the first Unread is still to load.
+  const mainHistoryPending = $derived(Boolean(tState && tState.main.asOfSeq === undefined && !tState.main.error))
   const awaitingEntryPosition = $derived(
     !search && !skipUnreadVisit && !entryPositionAbandoned &&
-      (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && hasOlder && !olderError)),
+      (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && (hasOlder || mainHistoryPending) && !olderError)),
   )
   let initialScrollApplied = $state(false)
   // Rows stay mounted because positioning needs them, but are hidden and inert until the entry position is applied (`docs/ui.md` §8).
@@ -206,7 +208,8 @@
       if (!initialScrollApplied || search.view?.status !== 'ready') return
     } else if (!skipUnreadVisit) {
       if (currentEntry.boundary === null || needsOlderUnreadPage) return
-      if ((currentEntry.unreadAtEntry ?? 0) > 0) {
+      // A visit that opened at the bottom without a marker presents what is visible, as with no Unread.
+      if ((currentEntry.unreadAtEntry ?? 0) > 0 && !entryPositionAbandoned) {
         if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
       } else if (!initialScrollApplied) {
         return
@@ -469,11 +472,15 @@
           scrolledFirstUnreadId = targetFirstUnreadId
         }
         if (deferred.action === 'scroll_bottom' || deferred.action === 'scroll_first_unread') {
+          // Opening at the bottom ends this visit's wait, so a boundary resolving later neither marks nor moves it (`docs/ui.md` §8).
+          if (deferred.action === 'scroll_bottom' && !initialScrollApplied && !search) entryPositionAbandoned = true
           initialScrollApplied = true
         }
       } else {
         captureCurrentAnchor()
         if (!search && status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
+          // An empty view opening without its entry position ends the wait, as an opening at the bottom does.
+          if (!initialScrollApplied) entryPositionAbandoned = true
           initialScrollApplied = true
         }
       }

@@ -67,6 +67,8 @@ export type FakeSocket = RealtimeHandlers & { sent: ClientMessage[]; closed: boo
 export function fakeNetwork() {
   const sockets: FakeSocket[] = []
   const history: { channel: string; query?: { after_seq?: number; before_seq?: number } }[] = []
+  // トピック history reads, kept apart from `history` so tests asserting the main timeline's reads are unaffected.
+  const topicHistory: { channel: string; topic: string; beforeSeq?: number }[] = []
   const pages: Record<string, Result<MessagePage>> = {}
   const timelines: Record<string, Result<TimelinePage>> = {}
   const topicLists: Record<string, Result<TopicPage>> = {}
@@ -185,7 +187,8 @@ export function fakeNetwork() {
         if (found?.kind === 'topic') return { ok: true, data: { history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: tl.as_of_seq, topic: found.topic } }
         return { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
       },
-      async listTopicMessages(channel, topic) {
+      async listTopicMessages(channel, topic, query) {
+        topicHistory.push({ channel, topic, ...(query?.before_seq !== undefined ? { beforeSeq: query.before_seq } : {}) })
         const custom = topicMessages[`${channel}:${topic}`]
         if (custom) return custom
         const page = pages[channel]
@@ -322,6 +325,7 @@ export function fakeNetwork() {
   return {
     sockets,
     history,
+    topicHistory,
     pages,
     timelines,
     topicLists,
