@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
-import { frequency, hostFiles, housekeepingMask, layoutProblems, sourceDir } from './boot-796-files.ts';
+import { runInNewContext } from 'node:vm';
+import { frequency, hostFiles, housekeepingMask, layoutProblems, scopeRule, sourceDir } from './boot-796-files.ts';
 import { installBootSetup, reloadPending, uninstallBootSetup } from './boot-796.ts';
 import { measuredCpus, sets796 } from './frequency-layout.ts';
 
@@ -24,7 +25,8 @@ function tamperedSource(file: string, from: string, to: string) {
 // A host as found before install: graphical default target, irqbalance enabled, the hand-made governor unit.
 function fakeHost({ irqbalanceMasked = false, defaultTarget = true } = {}) {
   const root = tempDir('boot-796-');
-  for (const dir of ['usr/lib/systemd/system', 'etc/systemd/system/multi-user.target.wants', 'etc/default/grub.d', 'usr/local/libexec']) {
+  for (const dir of ['usr/lib/systemd/system', 'etc/systemd/system/multi-user.target.wants', 'etc/default/grub.d', 'usr/local/libexec',
+    'usr/share/polkit-1/rules.d']) {
     mkdirSync(join(root, dir), { recursive: true });
   }
   for (const target of ['multi-user.target', 'graphical.target']) writeFileSync(join(root, 'usr/lib/systemd/system', target), '[Unit]\n');
@@ -69,7 +71,8 @@ test('install writes every file, mask, link and the previous state, then reloads
   assert.equal(changed.length, hostFiles.length + 4);
   assert.deepEqual(calls, ['systemctl daemon-reload', 'update-grub']);
   for (const file of hostFiles) {
-    assert.equal(readFileSync(join(root, file.target), 'utf8'), readSource(file.source), file.target);
+    const expected = file.source === scopeRule ? readSource(file.source).replace('"MEASUREMENT_USER"', JSON.stringify(userInfo().username)) : readSource(file.source);
+    assert.equal(readFileSync(join(root, file.target), 'utf8'), expected, file.target);
     assert.equal(lstatSync(join(root, file.target)).mode & 0o777, file.mode, file.target);
   }
   assert.equal(readFileSync(join(root, 'etc/systemd/system/docker.service.d/fukulow-796.conf'), 'utf8'), readSource('housekeeping-service.conf'));
@@ -89,6 +92,44 @@ test('a second install changes nothing and runs nothing', () => {
   assert.deepEqual(installBootSetup(root, { run, dryRun: true }), []);
   assert.deepEqual(calls, []);
   assert.deepEqual(snapshot(root), before);
+});
+
+test('the installed polkit rule only authorizes starting a #668 scope as the configured user', () => {
+  const root = fakeHost();
+  const measurementUser = 'measurement-test';
+  const target = 'usr/share/polkit-1/rules.d/49-fukulow668-scopes.rules';
+  installBootSetup(root, { measurementUser, run: () => {} });
+  const source = readFileSync(join(root, target), 'utf8');
+  assert.match(source, /scope runs the caller's own process/);
+  type Action = { id: string; lookup: (name: string) => string | undefined };
+  let rule: ((action: Action, subject: { user: string }) => unknown) | undefined;
+  const yes = Symbol('YES');
+  runInNewContext(source, { polkit: { Result: { YES: yes }, addRule: (fn: typeof rule) => { rule = fn; } } });
+  assert.ok(rule);
+
+  const id = 'org.freedesktop.systemd1.manage-units';
+  const details = { unit: 'fukulow668-client-42.scope', verb: 'start' };
+  const action = (id: string, details: Record<string, string | undefined>) => ({ id, lookup: (name: string) => details[name] });
+  assert.equal(rule(action(id, details), { user: measurementUser }), yes);
+  assert.equal(rule(action(id, details), { user: 'other-user' }), undefined);
+  assert.equal(rule(action(id, details), { user: 'MEASUREMENT_USER' }), undefined);
+  assert.equal(rule(action('org.freedesktop.systemd1.reload-daemon', details), { user: measurementUser }), undefined);
+  for (const patch of [{ verb: 'stop' }, { verb: 'restart' }, { verb: undefined }, { unit: undefined },
+    { unit: 'other-fukulow668-client-42.scope' }, { unit: 'fukulow668-client-42.service' }, { unit: 'fukulow668-client-42.scope.service' }]) {
+    assert.equal(rule(action(id, { ...details, ...patch }), { user: measurementUser }), undefined, JSON.stringify(patch));
+  }
+});
+
+test('boot check detects a missing, modified or differently configured #668 polkit rule', () => {
+  const root = fakeHost(), target = 'usr/share/polkit-1/rules.d/49-fukulow668-scopes.rules';
+  const run = () => {};
+  installBootSetup(root, { run, measurementUser: 'first-user' });
+  assert.deepEqual(installBootSetup(root, { run, dryRun: true, measurementUser: 'first-user' }), []);
+  assert.deepEqual(installBootSetup(root, { run, dryRun: true, measurementUser: 'second-user' }), [`/${target}`]);
+  writeFileSync(join(root, target), 'changed');
+  assert.deepEqual(installBootSetup(root, { run, dryRun: true, measurementUser: 'first-user' }), [`/${target}`]);
+  unlinkSync(join(root, target));
+  assert.deepEqual(installBootSetup(root, { run, dryRun: true, measurementUser: 'first-user' }), [`/${target}`]);
 });
 
 test('check (dry run) lists the pending changes without writing', () => {
@@ -242,11 +283,13 @@ test('a failed uninstall reload keeps the state file, so the rerun reloads again
 
 test('the CLI with a staging --root installs there without touching the live host', () => {
   const root = fakeHost();
-  const result = spawnSync(process.execPath, [join(import.meta.dirname, 'boot-796.ts'), 'install', '--root', root], {
-    encoding: 'utf8', env: { ...process.env, PATH: '' }, timeout: 10_000,
-  });
+  const cli = (command: string, measurementUser: string) => spawnSync(process.execPath,
+    [join(import.meta.dirname, 'boot-796.ts'), command, '--root', root, '--measurement-user', measurementUser],
+    { encoding: 'utf8', env: { ...process.env, PATH: '' }, timeout: 10_000 });
+  const result = cli('install', 'measurement-cli');
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).changed.length, hostFiles.length + 4);
-  const check = spawnSync(process.execPath, [join(import.meta.dirname, 'boot-796.ts'), 'check', '--root', root], { encoding: 'utf8', timeout: 10_000 });
+  const check = cli('check', 'measurement-cli');
   assert.equal(check.status, 0, check.stderr);
+  assert.equal(cli('check', 'other-user').status, 1);
 });

@@ -1,0 +1,11 @@
+// A scope runs the caller's own process with its existing credentials, so this grants no privilege escalation.
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units" ||
+        subject.user !== "MEASUREMENT_USER" || action.lookup("verb") !== "start") {
+        return;
+    }
+    var unit = action.lookup("unit");
+    if (typeof unit === "string" && unit.indexOf("fukulow668-") === 0 && unit.slice(-6) === ".scope") {
+        return polkit.Result.YES;
+    }
+});
