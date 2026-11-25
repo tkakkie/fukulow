@@ -27,6 +27,8 @@ const counter = Object.fromEntries(counts.map(name => [name, new Counter(`move_$
 const latency = new Trend('move_success_ms', true);
 const start = new Counter('move_start_ms');
 const topicItems = new Counter('move_topic_reads');
+const diagnostic = __ENV.MOVE_DIAGNOSTIC === '1';
+const scenarioStart = new Counter('move_scenario_start_ms');
 export const options: Options = workload;
 
 function observe(lane: LaneName, outcome: Outcome, ms: number) {
@@ -40,13 +42,19 @@ function json<T>(response: Response): T | undefined {
   try { return response.json() as T; } catch { return undefined; }
 }
 
+function recordScenarioStart() {
+  if (diagnostic && execution.scenario.iterationInTest === 0) scenarioStart.add(execution.scenario.startTime);
+}
+
 export function reader() {
+  recordScenarioStart();
   if (execution.scenario.iterationInTest === 0) start.add(execution.scenario.startTime);
   const r = http.get(`${base}/api/v1/orgs/${data.otherOrganization}/channels`, params('other_organization', data.reader));
   observe('reader', httpOutcome(r, 200), r.timings.duration);
 }
 
 export function send() {
+  recordScenarioStart();
   const i = execution.scenario.iterationInTest;
   const member = i % tokens.length;
   const target = step.part === 'C' ? otherChannels[i % otherChannels.length] : data.chain.channel;
@@ -56,6 +64,7 @@ export function send() {
 
 let version = data.chain.version, destination = 1;
 export function move() {
+  recordScenarioStart();
   const topic = data.chain.topics[destination];
   const input: MoveChainRequest = { operation_id: uuid(), expected_version: version, history_generation: data.generation, topic_id: topic };
   const r = http.post(`${channel}/messages/${data.chain.root}/move`, JSON.stringify(input),
@@ -70,12 +79,14 @@ export function move() {
 }
 
 export function channels() {
+  recordScenarioStart();
   const r = http.get(`${org}/channels`, { ...params('channel_list', data.reader), responseType: 'text' });
   const full = r.status === 200 && json<ChannelList>(r)?.channels?.length === data.channels.length;
   observe('channels', r.status === 200 && !full ? 'otherErrors' : httpOutcome(r, 200), r.timings.duration);
 }
 
 export function topics() {
+  recordScenarioStart();
   const r = http.get(`${channel}/topics?limit=${p.topicLimit}`, { ...params('topic_list', data.reader), responseType: 'text' });
   const full = r.status === 200 && json<TopicPage>(r)?.topics?.length === p.topicLimit;
   topicItems.add(1);
@@ -133,5 +144,7 @@ export function handleSummary(summary: { metrics: Record<string, { values: Recor
     p99: value(`move_success_ms{scenario:${lane}}`, 'p(99)') ?? null,
   }]));
   return { stdout: 'MOVE_RESULT ' + JSON.stringify({ lanes: rows, started: value('move_start_ms'),
-    topicReaders: topicScenarios.map(name => value(`move_topic_reads{scenario:${name}}`) ?? 0) }) + '\n' };
+    topicReaders: topicScenarios.map(name => value(`move_topic_reads{scenario:${name}}`) ?? (diagnostic ? -1 : 0)),
+    ...(diagnostic && { scenarioDrops: Object.fromEntries(Object.keys(workload.scenarios ?? {}).map(name =>
+      [name, value(`dropped_iterations{scenario:${name}}`) ?? null])) }) }) + '\n' };
 }

@@ -1,13 +1,17 @@
+import { diagnosticScenarios as scenarios, diagnosticStream, timestamp as time } from './diagnostic-stream.ts';
+
+export const diagnosticScope = {
+  sendLane: 'Main-timeline sends',
+  sendTopicRecord: 'send_topic_record is the hook on main-timeline sends, where the Topic record operation is a no-op.',
+  notEvaluated: ['send into a Topic', 'send-time topics_last_seq update'].map(metric => ({ metric, status: 'NOT EVALUATED' as const })),
+};
+
 const integer = (n: unknown): n is number => Number.isSafeInteger(n) && Number(n) >= 0;
 const nonnegative = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
 const object = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' ? value as Record<string, unknown> : {};
 const parseLine = (line: string) => object(JSON.parse(line));
-const time = (value: unknown) => {
-  if (typeof value !== 'string') return NaN;
-  const fraction = /\.\d{3}(\d+)Z$/.exec(value)?.[1];
-  return Date.parse(value) + (fraction ? Number(`0.${fraction}`) : 0);
-};
+
 
 export function cgroupSample(raw: string) {
   const value = (key: string) => Number(new RegExp(`^${key} (\\d+)$`, 'm').exec(raw)?.[1]);
@@ -25,8 +29,7 @@ export function distributions(numbers: number[]) {
 const lanes = ['send', 'move'] as const;
 // The server tags the Part D read routes too. The second-Organization reader shares the
 // Channel-list route, so Channel-list events are split by their Organization.
-const serverLanes = [...lanes, 'channels', 'topics', 'reader'] as const;
-const scenarios = [...lanes, 'reader', 'channels', 'topic0', 'topic1', 'topic2', 'topic3'] as const;
+export const serverLanes = [...lanes, 'channels', 'topics', 'reader'] as const;
 type Lane = typeof lanes[number];
 type ServerLane = typeof serverLanes[number];
 type Scenario = typeof scenarios[number];
@@ -67,20 +70,54 @@ function serverLane(lane: unknown, organization: unknown, organizations?: Organi
   return undefined;
 }
 
-export function appEvidence(log: string, organizations?: Organizations) {
+export type Window = { start: number; end: number };
+const inside = (at: number, window?: Window) => !window || (at >= window.start && at <= window.end);
+
+const routes = {
+  'POST /api/v1/orgs/{org}/channels/{id}/messages': 'send',
+  'POST /api/v1/orgs/{org}/channels/{id}/messages/{message_id}/move': 'move',
+  'GET /api/v1/orgs/{org}/channels/{id}/topics': 'topics',
+  'GET /api/v1/orgs/{org}/channels': 'channelLists',
+} as const;
+
+// The completion log has no Organization. Its two Channel-list workloads share one route;
+// the diagnostic 503 and sampled phase records carry the lane's Organization.
+export function appEvidence(log: string, organizations?: Organizations, window?: Window) {
   const timing: Timing[] = [];
   const unavailable: { at: number; lane: ServerLane; reason: typeof reasons[number] }[] = [];
+  const completed: Record<string, Record<string, number>> = {};
+  const completionWindows: Record<string, Window> = {};
+  let invalidLines = 0, outsideWindow = 0;
   for (const line of log.split('\n')) {
-    if (!line.includes('move_diag_')) continue;
-    const { timestamp, fields } = parseLine(line);
-    const at = time(timestamp);
-    const { event, lane: tagged, organization, phase, us, interrupted, reason, request_id, send_children } = object(fields);
+    if (!line.includes('move_diag_') && !line.includes('http_completed')) continue;
+    let entry: Record<string, unknown>;
+    try { entry = parseLine(line); } catch { invalidLines++; continue; }
+    const at = time(entry.timestamp);
+    const { event, lane: tagged, organization, phase, us, interrupted, reason, request_id, send_children } = object(entry.fields);
+    if (event === 'http_completed') {
+      const { method, route, status } = object(entry.span);
+      const lane = routes[`${method} ${route}` as keyof typeof routes];
+      if (!lane) continue;
+      if (!Number.isFinite(at) || !integer(status)) { invalidLines++; continue; }
+      if (!inside(at, window)) { outsideWindow++; continue; }
+      const observed = completionWindows[lane] ??= { start: at, end: at };
+      observed.start = Math.min(observed.start, at);
+      observed.end = Math.max(observed.end, at);
+      const statuses = completed[lane] ??= {};
+      statuses[status] = (statuses[status] ?? 0) + 1;
+      continue;
+    }
     const lane = serverLane(tagged, organization, organizations);
-    if (!Number.isFinite(at) || !lane) continue;
-    if (event === 'move_diag_timing' && member(phases, phase) && nonnegative(us) && typeof interrupted === 'boolean')
+    if (!Number.isFinite(at) || !lane) { invalidLines++; continue; }
+    if (!inside(at, window)) { outsideWindow++; continue; }
+    if (event === 'move_diag_timing' && member(phases, phase) && nonnegative(us) && typeof interrupted === 'boolean') {
       timing.push({ at, lane, phase, us, interrupted, requestId: integer(request_id) ? request_id : undefined,
         sendChildren: integer(send_children) ? send_children : undefined });
-    if (event === 'move_diag_503' && member(reasons, reason)) unavailable.push({ at, lane, reason });
+    } else if (event === 'move_diag_503' && member(reasons, reason)) {
+      unavailable.push({ at, lane, reason });
+    } else {
+      invalidLines++;
+    }
   }
   const byLane = Object.fromEntries(serverLanes.map(lane => [lane, {
     reasons: Object.fromEntries(reasons.map(reason => [reason, unavailable.filter(sample => sample.lane === lane && sample.reason === reason).length])),
@@ -93,7 +130,7 @@ export function appEvidence(log: string, organizations?: Organizations) {
   const send = sendBreakdown(timing);
   if (send) byLane.send.phasesUs.send_unattributed = send;
   return {
-    timing, unavailable, byLane,
+    timing, unavailable, byLane, completed, completionWindows, invalidLines, outsideWindow,
     writeUnavailable: unavailable.filter(sample => member(lanes, sample.lane)).length,
   };
 }
@@ -174,7 +211,9 @@ export async function k6Evidence(lines: AsyncIterable<string>) {
   const drops: { at: number; scenario: Scenario; count: number }[] = [];
   const busy: Record<Lane, { at: number; change: number }[]> = { send: [], move: [] };
   const completed503: Record<Scenario, number> = Object.fromEntries(scenarios.map(s => [s, 0])) as Record<Scenario, number>;
+  const stream = diagnosticStream();
   for await (const line of lines) {
+    stream.add(line);
     if (!/"metric"\s*:\s*"(vus|vus_max|dropped_iterations|iteration_duration|http_reqs)"/.test(line)) continue;
     const { type, metric, data } = parseLine(line);
     if (type !== 'Point') continue;
@@ -204,7 +243,7 @@ export async function k6Evidence(lines: AsyncIterable<string>) {
       activeAtDrop.set(drop, inFlight);
     }
   }
-  return { vus: [...vus.values()].sort((a, b) => a.at - b.at), completed503,
+  return { stream: stream.finish(), vus: [...vus.values()].sort((a, b) => a.at - b.at), completed503,
     drops: drops.map(drop => ({ ...drop, reconstructedWriteIterationsInFlight: activeAtDrop.get(drop) ?? null })) };
 }
 

@@ -5,7 +5,9 @@ import { arch, cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:o
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
-import { k6CeilingWarnings, readTimingProblems, sendTimingProblems } from './diagnostic-evidence.ts';
+import { diagnosticScope, k6CeilingWarnings } from './diagnostic-evidence.ts';
+import type { DiagnosticSummary } from './diagnostic-integrity.ts';
+import { diagnosticLaneLabels, diagnosticRunComplete, reconcileDiagnostic } from './diagnostic-reconcile.ts';
 import { captureDiagnostic, diagnosticImage, diagnosticOutput } from './diagnostic.ts';
 import { attributionLabel, diagnosticLabel, diagnosticMode, diagnosticSelection, readSampleEnvironment, rejectDiagnosticImage, remainingArmsSkipped,
   type ReadLanes } from './diagnostic-mode.ts';
@@ -13,7 +15,7 @@ import { buildFixture, committedMoves, head, type Seeded } from './fixture.ts';
 import { armInvalid, infrastructureFailure, judge, type Attempt, type Measurement, type Result } from './judge.ts';
 import { latency, storage } from './measure.ts';
 import { moveLimits, plan, rehearsalPlan, rehearsalSteps, stepId, steps, thresholds, type Plan, type Step } from './plan.ts';
-import { render } from './report.ts';
+import { render, renderDiagnostic } from './report.ts';
 import { command, docker, sampler, sleep, startStack, type Stack } from '../slice5/stack.ts';
 import { assertDockerHeadroom } from '../harness-core/host.ts';
 import { stages, type Mode } from '../harness-core/stages.ts';
@@ -76,19 +78,21 @@ export async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Ste
     '-v', `${repo}:/work:ro`, '-v', `${dir}:/fixture:ro`, '-w', '/work',
     '-e', 'BASE_URL=http://app:8080', '-e', 'REQUEST_TIMEOUT_SECONDS=10', '-e', `MOVE_STEP=${JSON.stringify(step)}`,
     '-e', `MOVE_SMOKE=${Number(p.smoke)}`, ...(p.rehearsal ? ['-e', 'MOVE_REHEARSAL=1'] : []), ...(readLanes === 'all' ? [] : ['-e', `MOVE_READ_LANES=${readLanes}`]),
-    ...(output?.dockerArgs ?? []),
+    ...(output ? ['-e', 'MOVE_DIAGNOSTIC=1', ...output.dockerArgs] : []),
     k6, 'run', '--quiet', ...(output?.k6Args ?? []), 'load/move/workload-k6.ts'];
   const prior = head(stack, seeded.data);
   const resources = diagnosticRun ? undefined : sampler(stack, () => name);
-  const capture = output ? captureDiagnostic(stack, name, output.file,
+  const capture = output ? await captureDiagnostic(stack, name, output.file,
     { partD: seeded.data.organization, reader: seeded.data.otherOrganization }) : undefined;
   const seconds = step.part === 'E' ? p.replaySeconds : p.seconds;
   let stdout = '', stderr = '';
   let problem: string | undefined;
   let diagnostic: string | undefined;
-  let extra: (Awaited<ReturnType<NonNullable<typeof capture>['finish']>> & {
+  let extra: (Awaited<ReturnType<Awaited<NonNullable<typeof capture>>['finish']>> & {
     k6CeilingWarnings: ReturnType<typeof k6CeilingWarnings>;
   }) | undefined;
+  let raw: DiagnosticSummary | undefined;
+  const startedWall = Date.now(), startedMono = performance.now();
   try {
     const result = await exec('docker', generatorArgs, { signal, timeout: (seconds + 2 * p.drain + 30) * 1000 });
     stdout = result.stdout;
@@ -103,30 +107,38 @@ export async function generator(stack: Stack, seeded: Seeded, p: Plan, step: Ste
     if (first && first.includes('workload-k6.ts') && /ReferenceError|TypeError|SyntaxError/.test(first))
       diagnostic = first.split(/ReferenceError|TypeError|SyntaxError/)[0].slice(0, 100);
   } finally {
+    const endedWall = Date.now(), elapsedMono = performance.now() - startedMono;
+    const line = stdout.split('\n').find(l => l.startsWith('MOVE_RESULT '));
+    try {
+      if (line) raw = JSON.parse(line.slice('MOVE_RESULT '.length)) as DiagnosticSummary;
+    } catch {
+      problem ??= 'Malformed k6 summary';
+    }
     await resources?.stop();
     try {
-      if (capture) extra = { ...await capture.finish(), k6CeilingWarnings: k6CeilingWarnings(stderr) };
+      if (capture) {
+        const steady = raw?.started ? { start: raw.started, end: raw.started + seconds * 1000 } : undefined;
+        extra = { ...await capture.finish({ start: startedWall, end: endedWall }, elapsedMono, steady),
+          k6CeilingWarnings: k6CeilingWarnings(stderr) };
+      }
     } finally {
-      // Fixture files, the start position, capture setup and the k6 launch are setup. Sampling started only
-      // if the k6 container was confirmed running or k6 reported its measured window.
       if (k6Started(stdout, (resources?.samples.length ?? 0) + (extra?.containers.summary.k6?.samples ?? 0))) startSampling();
     }
   }
-  const line = stdout.split('\n').find(l => l.startsWith('MOVE_RESULT '));
-  if (!line) return { problem: problem ?? 'Missing k6 summary', diagnostic, samples: resources?.samples, extra };
-  const raw = JSON.parse(line.slice('MOVE_RESULT '.length)) as Pick<Measurement, 'lanes' | 'topicReaders'> & { started?: number };
+  if (!raw?.lanes) return { problem: problem ?? 'Missing k6 summary', diagnostic, samples: resources?.samples, extra };
   const evidence = raw.started ? resources?.window(raw.started, raw.started + seconds * 1000) : undefined;
   const measurement: Measurement = { lanes: raw.lanes, topicReaders: raw.topicReaders, evidence: evidence?.evidence };
   if (step.arm === 'move' && step.part !== 'E') {
     try {
       const committed = committedMoves(stack, seeded.data, prior);
+      if (diagnosticRun) raw.committedMoves = committed;
       measurement.moveVerified = committed > 0 && committed === raw.lanes.move?.accepted;
     } catch (error) {
       if (!diagnosticRun) throw error;
       problem ??= 'DIAGNOSTIC Move verification query failed';
     }
   }
-  return { measurement, problem, diagnostic, samples: resources?.samples, cpu: evidence?.cpu, started: raw.started, extra };
+  return { measurement, problem, diagnostic, samples: resources?.samples, cpu: evidence?.cpu, started: raw.started, extra, summary: diagnosticRun ? { ...raw, moveVerified: measurement.moveVerified } : undefined };
 }
 
 const usage = 'Usage: node load/move/run.ts --out NEW_DIRECTORY [--commit FULL_SHA --image IMAGE | --diagnostic [--commit PINNED_SHA] [--sizes 100,1000] [--round 1] [--read-lanes all|channels|topics]] [--smoke | --rehearsal]';
@@ -180,14 +192,6 @@ export function statusFlags(o: { passed: boolean; finished: boolean; cleanupIssu
     invalidEvidence: incomplete || o.diagnostic === true || (o.judged !== undefined && verdictInvalid(o.judged.p, o.judged.results, o.judged.verdict)) };
 }
 
-// A DIAGNOSTIC smoke needs a verified Move and its timings; a DIAGNOSTIC rehearsal is never complete
-// when committed Move verification failed. The recorded DIAGNOSTIC job keeps its own rules.
-export function diagnosticMoveMissing(p: Plan, step: Step, measurement: Measurement | undefined, moveApplyTimed: boolean) {
-  if (p.smoke && step.arm === 'move' && (!measurement?.moveVerified || !moveApplyTimed)) return ['verified Move and Move timings'];
-  if (p.rehearsal && step.arm === 'move' && step.part !== 'E' && !measurement?.moveVerified) return ['verified Move'];
-  return [];
-}
-
 // results.json: complete is false and skipped lists the arms when scheduled work did not all run (for
 // example a fail-fast stop). The verdict is still judged with the run's own completeness.
 export function scheduledWork(finished: boolean, orderedSteps: Step[], ran: number) {
@@ -221,7 +225,7 @@ async function main() {
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   const results: Result[] = [];
-  const diagnosticArms: object[] = [];
+  const diagnosticArms: (Parameters<typeof renderDiagnostic>[0][number] & Record<string, unknown>)[] = [];
   let rerun = false, complete = false;
   let stoppedEarly: string | undefined;
   const cleanupIssues: string[] = [];
@@ -250,6 +254,7 @@ async function main() {
     const k6 = command('make', ['-s', '-C', repo, 'load-image']);
     const k6Id = docker('image', 'inspect', '--format', '{{.Id}}', k6);
     if (selection) {
+      console.log(`DIAGNOSTIC ${diagnosticScope.sendLane} · NOT EVALUATED — ${diagnosticScope.notEvaluated.map(row => row.metric).join(' and ')}`);
       console.log('DIAGNOSTIC: building the instrumented Part D image' + (attribution ? ` (${attribution})` : ''));
       image = await diagnosticImage(repo, scratch, tag, abort.signal, selection);
     }
@@ -261,8 +266,8 @@ async function main() {
       'load/harness-core/stages.ts', 'load/harness-core/host.ts', ...harnessFiles];
     save(join(output, selection ? 'DIAGNOSTIC-metadata.json' : 'metadata.json'), {
       // Formal metadata keeps its pre-diagnostic key order; a rehearsal says so first.
-      ...(selection ? { mode: diagnosticMode, ...(p.rehearsal && { rehearsal: true, evidence: false }), sendTimingSampleEvery: 32,
-        readTimingSampleEvery: selection.readTimingSampleEvery, readLanes: selection.readLanes, attribution, commit, image, k6, k6Id, project, plan: p }
+      ...(selection ? { mode: diagnosticMode, evidence: false, ...(p.rehearsal && { rehearsal: true }),
+        scope: diagnosticScope, laneLabels: diagnosticLaneLabels, sendTimingSampleEvery: 32, readTimingSampleEvery: selection.readTimingSampleEvery, readLanes: selection.readLanes, attribution, commit, image, k6, k6Id, project, plan: p }
         : { ...(p.rehearsal && { mode, evidence: false }), commit, image, k6, k6Id, project, plan: p,
           thresholds: { ...thresholds, moveP95Ms: moveLimits } }),
       orderedSteps,
@@ -285,7 +290,8 @@ async function main() {
         row.attempts.push(attempt);
         let stage = 'stack launch';
         let artifacts: object = {};
-        let captured: Pick<Awaited<ReturnType<typeof generator>>, 'extra' | 'started'> | undefined;
+        let captured: Pick<Awaited<ReturnType<typeof generator>>, 'extra' | 'started' | 'summary'> | undefined;
+        let reconciliation: ReturnType<typeof reconcileDiagnostic> | undefined;
         let stepCleaned = false;
         const startSampling = () => { stage = 'measurement'; run.startSampling(); };
         run.enter(selection ? `DIAGNOSTIC ${id}` : id);
@@ -304,25 +310,10 @@ async function main() {
           attempt.measurement = measured.measurement;
           if ('problem' in measured) attempt.problem = measured.problem;
           artifacts = measured;
-          if (selection && 'extra' in measured && measured.extra) {
-            captured = measured;
-            const { app, k6: generator, postgres, containers } = measured.extra;
-            const missing = [
-              ...(!app?.byLane.send.phasesUs.before_admission ? ['send timings'] : []),
-              ...(selection.sendBreakdown ? sendTimingProblems(app) : []),
-              ...(selection.readTimingSampleEvery ? readTimingProblems(app?.byLane, selection.readLanes) : []),
-              ...(!generator?.vus.some(point => point.active !== undefined && point.allocated !== undefined) ? ['k6 VU gauges'] : []),
-              ...(!postgres.statementsAvailable ? ['PostgreSQL execution statistics'] : []),
-              ...(!postgres.samples.length ? ['PostgreSQL wait samples'] : []),
-              // A starved sampler (one query in flight) still yields samples; require half the window covered.
-              ...(postgres.coveredMs < 500 * (step.part === 'E' ? p.replaySeconds : p.seconds) ? ['PostgreSQL wait sample coverage'] : []),
-              // Log rotation can drop early events: the app must account for every 503 k6 saw on write lanes.
-              ...(app && generator && app.writeUnavailable < generator.completed503.send + generator.completed503.move
-                ? ['app 503 reasons (log incomplete)'] : []),
-              ...Object.entries(containers.summary).filter(([, container]) => !container.samples).map(([name]) => name + ' cgroup samples'),
-              ...diagnosticMoveMissing(p, step, measured.measurement, Boolean(app?.byLane.move.phasesUs.move_apply)),
-            ];
-            if (missing.length) attempt.problem ??= 'Missing DIAGNOSTIC evidence (' + missing.join(', ') + ')';
+          if (selection) {
+            if ('extra' in measured) captured = measured;
+            reconciliation = reconcileDiagnostic(p, step, selection, captured?.summary, captured?.extra, attempt.problem);
+            if (reconciliation.problems.length) attempt.problem ??= 'DIAGNOSTIC arm integrity failed';
           }
         } catch (error) {
           // SQL/Compose failures can embed disposable credentials in child-process errors.
@@ -330,12 +321,18 @@ async function main() {
         } finally {
           if (!selection && attempt.problem && !abort.signal.aborted && await daemonUnavailable())
             attempt.infrastructure = infrastructureFailure;
-          try { cleanup(project, id); stepCleaned = true; } catch { cleanupIssues.push(`${id}: step cleanup failed`); }
+          try { cleanup(project, id); stepCleaned = true; } catch {
+            cleanupIssues.push(`${id}: step cleanup failed`);
+            if (selection) attempt.problem ??= 'DIAGNOSTIC arm cleanup failed';
+          }
           if (selection) {
             const capture = captured?.extra;
-            const arm = { mode: diagnosticMode, readLanes: selection.readLanes, attribution, step, problem: attempt.problem,
-              started: captured?.started,
-              workload: attempt.measurement && { ...attempt.measurement, mode: diagnosticMode }, server: capture?.app?.byLane };
+            const { checks, windows, clock, problems } = reconciliation ?? reconcileDiagnostic(p, step, selection, captured?.summary, capture, attempt.problem);
+            const arm = { mode: diagnosticMode, evidence: false, scope: diagnosticScope, laneLabels: diagnosticLaneLabels,
+              readLanes: selection.readLanes, attribution, step, problem: attempt.problem,
+              started: captured?.started, windows, clock, checks, problems,
+              workload: captured?.summary && { ...captured.summary, mode: diagnosticMode },
+              server: capture?.app?.byLane };
             diagnosticArms.push(arm);
             save(join(output, `DIAGNOSTIC-${id}.json`), { ...arm, capture });
           } else {
@@ -358,7 +355,7 @@ async function main() {
       run.done(stepId(step));
       if (remainingArmsSkipped(Boolean(selection), row.attempts[0]?.problem) && results.length < orderedSteps.length) {
         stoppedEarly = `${stepId(step)}: ${row.attempts[0]?.problem}`;
-        console.log(`DIAGNOSTIC stopped after ${stepId(step)}: ${row.attempts[0]?.problem}`);
+        console.log(`DIAGNOSTIC stopped after ${stepId(step)}: ${row.attempts[0]?.problem}. See DIAGNOSTIC-report.md.`);
         break;
       }
       const invalid = results.length === 1 && results.length < orderedSteps.length ? firstArmInvalid(p, Boolean(selection), row) : [];
@@ -380,7 +377,7 @@ async function main() {
     process.removeListener('SIGTERM', stop);
     const finished = complete && cleaned && !abort.signal.aborted;
     const allArms = finished && cleanupIssues.length === 0 && results.length === orderedSteps.length;
-    const captured = allArms && results.every(result => !result.attempts[0]?.problem);
+    const captured = diagnosticRunComplete(allArms, orderedSteps.length, diagnosticArms);
     const armProblem = results.some(row => row.attempts.at(-1)?.problem !== undefined);
     // Judge before status.json so its flags follow the verdict; a judge() error still reaches run.finish as a summary failure.
     let summary: { report: ReturnType<typeof render>; checks: ReturnType<typeof rehearsalChecks>; clean: boolean } | undefined;
@@ -397,9 +394,11 @@ async function main() {
     let line = '';
     const status = run.finish(() => {
       if (selection) {
-        save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, ...(p.rehearsal && { rehearsal: true, evidence: false }),
-          readLanes: selection.readLanes, attribution, complete: captured, cleanupIssues, arms: diagnosticArms,
-          skipped: orderedSteps.slice(results.length).map(stepId) });
+        const skipped = orderedSteps.slice(diagnosticArms.length).map(stepId);
+        save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, evidence: false, scope: diagnosticScope,
+          ...(p.rehearsal && { rehearsal: true }), readLanes: selection.readLanes, attribution, complete: captured,
+          cleanupIssues, arms: diagnosticArms, skipped });
+        writeFileSync(join(output, 'DIAGNOSTIC-report.md'), renderDiagnostic(diagnosticArms, skipped, captured), { mode: 0o600 });
         line = `DIAGNOSTIC ${p.rehearsal ? 'REHEARSAL ' : ''}capture ${captured ? 'complete' : 'incomplete'}` + (attribution ? ` · ${attribution}` : '')
           + (p.rehearsal ? ' (never evidence)' : '');
       } else {
