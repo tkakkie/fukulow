@@ -166,7 +166,8 @@ test('every other wrong value in a versioned file is rejected', () => {
     ['housekeeping-scope.conf', '[Scope]', '[Slice]', /housekeeping-scope\.conf: needs a \[Scope\]/],
     ['fukulow796-host.service', 'ExecStart=/usr/local/libexec/fukulow796/affinity.sh', 'ExecStart=/usr/local/bin/affinity.sh', /ExecStart must run/],
     ['fukulow796-host.service', 'Wants=fukulow796.slice power-profiles-daemon.service', 'Wants=fukulow796.slice', /Wants must be/],
-    ['fukulow796-host.service', 'After=fukulow796.slice power-profiles-daemon.service', 'After=fukulow796.slice', /After must include power-profiles-daemon/],
+    ['fukulow796-host.service', 'After=multi-user.target fukulow796.slice power-profiles-daemon.service', 'After=multi-user.target fukulow796.slice', /After must include power-profiles-daemon/],
+    ['fukulow796-host.service', 'After=multi-user.target fukulow796.slice', 'After=fukulow796.slice', /After must include multi-user\.target/],
     ['fukulow796-host.service', 'WantedBy=multi-user.target', 'WantedBy=graphical.target', /WantedBy must be/],
   ] as const;
   for (const [file, from, to, problem] of tamper) {
