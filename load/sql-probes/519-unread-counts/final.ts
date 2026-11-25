@@ -1,6 +1,6 @@
 import { execFile, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,7 @@ import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, e
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
 import type { CounterBlock } from './frequency-evidence.ts';
+import { makeTraversable, stageSql } from './stage-sql.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
 // against the commit before it. DIAGNOSTIC: it chooses nothing formal; only the stop rule applies.
@@ -74,6 +75,9 @@ const git = (...args: string[]) => run('git', args).trim();
 const commits = { current: git('rev-parse', pins.current + '^{commit}'), final: git('rev-parse', pins.final + '^{commit}') };
 if (git('rev-parse', commits.final + '^') !== commits.current) throw new Error('final pin must be the direct child of current');
 const work = mkdtempSync(join(realpathSync(tmpdir()), 'fk519f-'));
+// mkdtemp gives 0700; the v3 sends run as the container's postgres user, which must read the bind-mounted
+// files (repository SQL only, nothing secret).
+makeTraversable(work);
 const container = 'fk519f-' + randomUUID();
 // The launcher's workloadLabel for this probe: a stopped run's container is found and removed by it.
 const workloadLabel = 'io.fukulow.probe=519-final';
@@ -89,7 +93,9 @@ if (spawnSync('git', ['merge-base', '--is-ancestor', commits.final, update]).sta
 if (git('diff', '--name-status', commits.final, update, '--', `server/migrations/${a3Migration}`, `server/migrations/${a3Update}`) !== `A\tserver/migrations/${a3Update}`)
   throw new Error('update pin must add only the UPDATE-first migration and keep the A3 migration unchanged');
 writeFileSync(join(work, a3Update), git('show', `${update}:server/migrations/${a3Update}`) + '\n');
-cpSync(join(root, 'load/sql-probes/519-unread-counts/sql'), join(work, 'sql'), { recursive: true });
+// Only the SQL this probe opens, readable by the container postgres user whatever the umask; a
+// symlinked input throws (stage-sql.ts).
+stageSql(join(root, 'load/sql-probes/519-unread-counts/sql'), work);
 for (const arm of ['current', 'final'] as FinalArm[]) {
   writeFileSync(join(work, `sql/list-${arm}.sql`), extractListCounts(git('show', `${commits[arm]}:server/src/messages/unread.rs`)) + '\n');
 }
@@ -318,6 +324,9 @@ try {
   const violations = linuxViolations(recordBefore);
   if (!smoke && violations.length > 0) throw new Error(`measurement conditions not met: ${violations.join('; ')}`);
   if (request) {
+    // Fail before the frequency calibration if the send user cannot read the bench file (#796 control run 1).
+    if (spawnSync('docker', ['run', '--rm', '--label', workloadLabel, '--network', 'none', '--user', 'postgres', '-v', `${work}:/work:ro`,
+      '--entrypoint', 'test', image, '-r', '/work/sql/bench.pgb']).status !== 0) throw new Error('the container postgres user cannot read /work/sql/bench.pgb');
     frequency = frequencyRun(request, out);
     await frequency.start();
   }
