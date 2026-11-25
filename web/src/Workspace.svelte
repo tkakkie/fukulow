@@ -202,6 +202,7 @@
   let mainComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let mainHeadingRef = $state<HTMLElement | null>(null)
   let mainTopicInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
+  let mainTimelineRef = $state<{ isPositioning(): boolean } | null>(null)
   let replyComposerRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let searchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
   let channelListSearchInputRef = $state<HTMLInputElement | HTMLTextAreaElement | null>(null)
@@ -494,6 +495,7 @@
     ) {
       return
     }
+    if (mainTimelineRef?.isPositioning()) return
     const revision = state.revision
     void currentTimeline?.messages.length
     void currentTopicsState?.lines.length
@@ -513,7 +515,7 @@
     const composer = mainComposerRef
     let cancelled = false
     void tick().then(() => {
-      if (cancelled || nav.state.revision !== revision) return
+      if (cancelled || nav.state.revision !== revision || mainTimelineRef?.isPositioning()) return
       topicSummaryFocus.step({
         revision,
         status,
@@ -934,6 +936,7 @@
       bind:panelToggleBtn={panelToggleBtn}
       bind:composerRef={mainComposerRef}
       bind:topicInputRef={mainTopicInputRef}
+      bind:timelineRef={mainTimelineRef}
       onsearchinput={(value) => searchModel?.setInput(value)}
       onsearchsubmit={(value) => handleSubmitSearch(value, 'main')}
       onclosesearch={handleCloseSearch}

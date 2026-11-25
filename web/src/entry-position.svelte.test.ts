@@ -1,6 +1,6 @@
 import { flushSync, mount, unmount } from 'svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Result, TopicSummaryResponse, UnreadChannel } from './api'
+import type { Result, TimelinePage, TopicSummaryResponse, UnreadChannel } from './api'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import { LOADING_TIMEOUT_MS } from './announcements'
 import { channelsAdapter } from './channels.svelte'
@@ -44,7 +44,7 @@ const views = {
 // `emptyMain` opens a main timeline with no Messages and nothing Unread; `unreadRow` is what later boundary reads return.
 async function openWithHeldBoundary(
   scope: Scope,
-  opts: { phonePanel?: boolean; holdHistory?: boolean | 'reopen-main'; olderUnread?: boolean; latestOnly?: boolean; emptyMain?: boolean } = {},
+  opts: { phonePanel?: boolean; holdHistory?: boolean | 'reopen-main'; olderUnread?: boolean; latestOnly?: boolean; emptyMain?: boolean; returnFromTopic?: boolean } = {},
 ) {
   const net = fakeNetwork()
   const options = net.options('me')
@@ -103,11 +103,11 @@ async function openWithHeldBoundary(
   const shownMain = opts.emptyMain ? [] : opts.olderUnread || opts.latestOnly ? mainMsgs.slice(2) : mainMsgs
   const shownTopic = opts.olderUnread ? topicMsgs.slice(4) : opts.latestOnly ? topicMsgs.slice(5) : topicMsgs
   const mainItems = shownMain.map((message) => ({ kind: 'message' as const, message }))
-  const mainPage = ok({
+  const mainPage = ok<TimelinePage>({
     history_generation: generation,
     as_of_seq: 9,
     has_more: Boolean(opts.olderUnread || opts.latestOnly),
-    items: mainItems,
+    items: opts.returnFromTopic ? [...mainItems, { kind: 'topic', topic: t1Summary }] : mainItems,
   })
   const topicPage = ok({ history_generation: generation, as_of_seq: 9, messages: shownTopic, has_more: Boolean(opts.olderUnread || opts.latestOnly) })
   net.timelines.c1 = mainPage
@@ -188,7 +188,7 @@ async function openWithHeldBoundary(
   }
 
   if (opts.phonePanel) dom.win.innerWidth = 375
-  let href: string = opts.phonePanel ? `${views[scope].href}?panel=topics` : views[scope].href
+  let href: string = opts.phonePanel ? `${views[scope].href}?panel=topics` : views[opts.returnFromTopic ? 'topic' : scope].href
   let historyState: unknown = null
   const browser: NavigationBrowser = {
     location: { get href() { return href } } as Location,
@@ -264,7 +264,7 @@ async function openWithHeldBoundary(
     ? net.topicHistory.filter((h) => h.topic === 't1' && h.beforeSeq !== undefined).length
     : net.history.filter((h) => h.channel === 'c1' && h.query?.before_seq !== undefined).length
   return {
-    host, net, navigation, latest, releaseBoundary, failBoundary, succeedRetries, releaseHistory, failHistory, olderReads, olderReadCount, unreadRow,
+    host, net, navigation, sync: sessionModel.sync, latest, releaseBoundary, failBoundary, succeedRetries, releaseHistory, failHistory, olderReads, olderReadCount, unreadRow,
     scroll, positioning, skeletons, composer, retry, marker, boundary, cleanup, wantBoundary: scope === 'topic' ? 4 : 2, latestSeq: latest.created_seq,
   }
 }
@@ -448,14 +448,17 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
     }
   })
 
-  it('keeps waiting for the first Unread while the main history loads, even with an own send still pending', async () => {
-    const v = await openWithHeldBoundary('main', { holdHistory: 'reopen-main' })
+  it.each([
+    { visit: 'first visit', holdHistory: true, hasCursor: false },
+    { visit: 're-entry', holdHistory: 'reopen-main', hasCursor: true },
+  ] as const)('keeps waiting for the first Unread while the main history loads on $visit, even with an own send still pending', async ({ holdHistory, hasCursor }) => {
+    const v = await openWithHeldBoundary('main', { holdHistory })
     try {
       v.releaseBoundary()
       await settle()
       await settle()
       flushSync()
-      expect(v.boundary()).toBe(v.wantBoundary)
+      expect(v.boundary()).toBe(hasCursor ? v.wantBoundary : null)
       const composer = [...v.host.querySelectorAll('#main-content textarea')].find((el) => el.getAttribute('aria-label') === 'メッセージ')!
       composer.value = '読み込み中の送信'
       composer.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
@@ -472,6 +475,7 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
       await settle()
       await settle()
       flushSync()
+      expect(v.boundary()).toBe(v.wantBoundary)
       expect(v.marker()).not.toBeNull()
       expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
     } finally {
@@ -545,6 +549,52 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
       await step()
       expect(v.retry()).toBeDefined()
       expect(v.skeletons()).toBe(0)
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  it('shows a confirmed Message and a draft when the first main history read fails before bootstrap', async () => {
+    const v = await openWithHeldBoundary('main', { holdHistory: true })
+    try {
+      const timeline = v.sync.channel('c1')
+      timeline.setDraft('送信するメッセージ')
+      const sending = timeline.submit()
+      await step()
+      const send = v.net.sends.at(-1)!
+      send.resolve(ok({ ...record(10, 'c1'), sender: 'me', client_message_id: send.body.client_message_id }))
+      await sending
+      timeline.setDraft('送信していない下書き')
+      await step()
+      expect(v.positioning()).toEqual({ busy: true, inert: true, skeleton: true })
+
+      v.failHistory()
+      await step()
+      expect(v.retry()).toBeDefined()
+      expect(v.boundary()).toBeNull()
+      expect(v.scroll().querySelector(`[data-message-id="${record(10, 'c1').id}"]`)).not.toBeNull()
+      expect(v.composer().value).toBe('送信していない下書き')
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  it('focuses the returning Topic summary once the first main visit finishes positioning', async () => {
+    const v = await openWithHeldBoundary('main', { returnFromTopic: true })
+    try {
+      v.navigation.navigate({ type: 'topic-back' })
+      await step()
+      const summary = v.scroll().querySelector('[data-topic-id="t1"]')
+      expect(summary).not.toBeNull()
+      expect(v.positioning()).toEqual({ busy: true, inert: true, skeleton: true })
+      expect(dom.doc.activeElement).not.toBe(summary)
+
+      v.releaseBoundary()
+      await step()
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+      expect(dom.doc.activeElement).toBe(summary)
     } finally {
       await v.cleanup()
     }
