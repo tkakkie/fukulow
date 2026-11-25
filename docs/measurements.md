@@ -123,7 +123,7 @@ Run `node load/hot-plans/fanout.ts <container> <database> <out>` on `load/hot-pl
 
 ## Rust/wasm sync core (#466, #487)
 
-2026-11-21 JST. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466; at `d2fc5ea`, throttled cold `/` Timeline p95 2806.7 → 3260.3 ms, FCP 960.0 ms both). #487 `06264eab` → `c02e1a78`, 5 rounds: `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, steady 18.19 → 18.35 MiB. Open, not passed: bulk INCONCLUSIVE, slope HOLD (#489).
+2026-11-21 JST. [Rust/wasm default](decisions/web.md#web-client) accepted with misses (#466, `d2fc5ea`: throttled cold `/` Timeline p95 +16%). #487 (`c02e1a78`, 5 rounds): `step()` p95 426 → 346 µs, 100 msg/s p95 1.94 → 1.70 ms, 18.19 → 18.35 MiB; bulk INCONCLUSIVE, slope HOLD (#489). #954 preload MISSED (throttled cold FCP +55%) ([record](../load/measurements-archive.md#wasm-preload-954-2026-11-25)).
 
 Run `FIRST_PAINT_IMAGE=fukulow-466:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`; `node --expose-gc web/scripts/measure-wasm-core.ts --core wasm --arm B|W --out <dir> --round <n>`, then `--aggregate`. Mac, Node 26.13.1. [Record](../load/measurements-archive.md#rustwasm-sync-core-typed-deltas-487-2026-11-21-jst-mac)
 
