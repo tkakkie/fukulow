@@ -7,40 +7,48 @@ use uuid::Uuid;
 pub(super) struct Case {
     insert: &'static str,
     set: &'static str,
+    constant_set: &'static str,
     move_error: &'static str,
 }
 
 pub(super) fn case(table: &str) -> Option<Case> {
-    let (insert, set, move_error) = match table {
+    let (insert, set, constant_set, move_error) = match table {
         "dm_discovery_counters" => (
             "INSERT INTO dm_discovery_counters (organization_id, member_id, membership_revision, position) VALUES ($1, $2, 0, 3)",
             "position = position + 1",
+            "position = 5",
             "42501",
         ),
         "dm_discovery" => (
             "INSERT INTO dm_discovery (organization_id, member_id, membership_revision, channel_id, grant_id, birth_position, latest_position) VALUES ($1, $2, 0, $4, $5, 1, 1)",
             "latest_position = latest_position + 1",
+            "latest_position = 5",
             "23514",
         ),
         "member_sections" => (
+            // Foreign INSERT gets 42501 from the nested member_section_ids reservation insert. schema.rs checks WITH CHECK.
             "INSERT INTO member_sections (organization_id, member_id, id, name, position) VALUES ($1, $2, $3, 'Section', 0)",
             "position = position + 1",
+            "position = 5",
             "23514",
         ),
         "member_section_ids" => (
             // A standalone reservation, distinct from the one created for the Section.
             "INSERT INTO member_section_ids (organization_id, member_id, id) VALUES ($1, $2, $2)",
             "id = id",
+            "id = '00000000-0000-0000-0000-000000000000'",
             "23514",
         ),
         "member_section_placements" => (
             "INSERT INTO member_section_placements (organization_id, member_id, channel_id, section_id, position) VALUES ($1, $2, $3, $3, 0)",
             "position = position + 1",
+            "position = 5",
             "42501",
         ),
         "member_section_generations" => (
             "INSERT INTO member_section_generations (organization_id, member_id) VALUES ($1, $2)",
             "generation = generation + 1",
+            "generation = 5",
             "42501",
         ),
         _ => return None,
@@ -48,6 +56,7 @@ pub(super) fn case(table: &str) -> Option<Case> {
     Some(Case {
         insert,
         set,
+        constant_set,
         move_error,
     })
 }
@@ -137,6 +146,22 @@ pub(super) async fn check_inserts(pools: &TestPools, foreign: Uuid, tenant: &Ten
         )
         .await;
         assert_affected(own, 1, &format!("{table}: own INSERT"));
+    }
+}
+
+pub(super) async fn check_blind_updates_and_deletes(app: &PgPool, foreign: Uuid) {
+    // Column reads would add the SELECT policy and could hide a weaker write policy.
+    for (table, case) in cases().rev() {
+        for sql in [
+            format!("UPDATE {table} SET {}", case.constant_set),
+            format!("DELETE FROM {table}"),
+        ] {
+            let result = database::organization(app, foreign, async |tx: &mut PgConnection| {
+                sqlx::query(&sql).execute(tx).await
+            })
+            .await;
+            assert_affected(result, 0, &format!("foreign: {sql}"));
+        }
     }
 }
 
