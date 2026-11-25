@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { runFrequencyBlock } from './frequency-run.ts';
+import { blockStopReasons, runFrequencyBlock } from './frequency-run.ts';
 import { withCap } from './frequency-policy.ts';
-import { referenceWindow } from './frequency-fixture.ts';
+import { block, evidence, floors, referenceWindow, session, sets796 } from './frequency-fixture.ts';
+import { judgeFrequency } from './frequency-judge.ts';
 
 async function stagePlan(control: boolean, seen: string[], fault?: 'reference' | 'cooldown') {
   const saved = { policy0: '2000000' };
@@ -85,4 +86,81 @@ test('control stops on a failed cool-baseline recheck before checkpointing the c
   const seen: string[] = [];
   await assert.rejects(stagePlan(true, seen, 'cooldown'), /cooldown STOP/);
   assert.deepEqual(seen.slice(-3), ['1: reference @2000000', '1: clone @2000000', '1: cool baseline']);
+});
+
+for (const stage of ['rehearsal2', 'formal'] as const) {
+  test(`${stage} collects all six blocks despite throttling and invalid frequency verdicts`, () => {
+    const all = () => 2_800_000_000n;
+    const blocks = [
+      block(1, { mperf: all }),
+      block(2, { mperf: all, ratios: () => [94n, 100n] }),
+      block(3, { mperf: cpu => cpu === 1 || cpu === 3 ? 0n : all(),
+        ratios: cpu => cpu < 10 ? [94n, 100n] : [1n, 1n] }),
+      block(4, { mperf: cpu => cpu < 6 ? all() : 0n }),
+      block(5, { mperf: all }),
+      block(6, { mperf: all }),
+    ];
+    for (const { order } of blocks) {
+      assert.deepEqual(blockStopReasons(stage, order, blocks.slice(0, order), evidence, null), []);
+    }
+    const report = judgeFrequency(blocks, sets796, evidence, session, { ...floors, server: ['2000000001', '1'] });
+    assert.deepEqual(report.blocks.map(b => b.order), [1, 2, 3, 4, 5, 6]);
+    assert.ok(report.reasons.includes('block 1: floor server below reviewed minimum'));
+    assert.ok(report.reasons.includes('block 2: F5 throttled client'));
+    assert.ok(report.reasons.includes('block 3: F5 client median bounds straddle 19/20'));
+    assert.ok(report.reasons.includes('block 4: F4 client coverage 3/8'));
+  });
+
+  test(`${stage} stops for bad counter evidence or a busy reference`, () => {
+    const second = block(2);
+    second.counters.close.reads.pop();
+    assert.deepEqual(blockStopReasons(stage, 2, [block(1), second], evidence, null),
+      ['block 2: F6 missing, duplicate or unordered CPU pair']);
+
+    const first = block(1);
+    first.counters.reference = referenceWindow(1, { mperf: cpu => cpu === 15 ? 1_002_000_000n : 0n });
+    assert.deepEqual(blockStopReasons(stage, 1, [first], evidence, null),
+      ['reference 1: client CPU 15 reached 500 ms C0 normalized to 120 s']);
+  });
+}
+
+test('control stops when the baseline has insufficient coverage', () => {
+  assert.deepEqual(blockStopReasons('control', 1, [block(1, { control: true })], evidence, null), []);
+  const first = block(1, { control: true, mperf: cpu => cpu < 7 ? 2_800_000_000n : 0n });
+  assert.deepEqual(blockStopReasons('control', 1, [first], evidence, null),
+    ['block 1: F4 client coverage 3/8', 'block 1: F4 client common coverage 3/8']);
+});
+
+function controlSpot(capped: ReturnType<typeof block>, aperf: number) {
+  const rows = capped.counters.open.reads.map(({ cpu }) => `${cpu} 2000 ${cpu < 8 ? aperf : 0} ${cpu < 8 ? 2000 : 0}`);
+  return { startNs: capped.counters.open.reads[0].monoNs, stopNs: capped.counters.close.reads.at(-1)!.monoNs,
+    stdout: '', stderr: ['CPU TSC_MHz APERF MPERF', ...rows].join('\n') };
+}
+
+test('control requires capped work and full-span throttling plus a matching turbostat observation', () => {
+  const first = block(1, { control: true });
+  const capped = block(2, { control: true, ratios: () => [17n, 20n] });
+  assert.deepEqual(blockStopReasons('control', 2, [first, capped], evidence, controlSpot(capped, 1700)), []);
+  assert.deepEqual(blockStopReasons('control', 2, [first, capped], evidence, null),
+    ['Error: no capped turbostat observation or calibrated counters']);
+
+  const clear = block(2, { control: true });
+  const clearReasons = blockStopReasons('control', 2, [first, clear], evidence, controlSpot(clear, 2000));
+  assert.ok(clearReasons.includes('control failed to show block 2: F5 throttled server'));
+  assert.ok(clearReasons.includes('control failed to show block 2: F5 throttled client'));
+
+  const clearTail = block(2, { control: true, ratios: () => [9n, 10n],
+    idleMperf: cpu => cpu < 8 ? 2_800_000_000n : 0n, idleRatios: () => [1n, 1n] });
+  assert.deepEqual(blockStopReasons('control', 2, [first, clearTail], evidence, controlSpot(clearTail, 1900)),
+    ['block 2: F5 server full span must show throttling', 'block 2: F5 client full span must show throttling']);
+});
+
+test('control accepts the prior capped result and stops if the restored phase still throttles', () => {
+  const first = block(1, { control: true });
+  const capped = block(2, { control: true, ratios: () => [17n, 20n] });
+  const restored = block(3, { control: true });
+  assert.deepEqual(blockStopReasons('control', 3, [first, capped, restored], evidence, null), []);
+  const throttled = block(3, { control: true, ratios: () => [94n, 100n] });
+  assert.deepEqual(blockStopReasons('control', 3, [first, capped, throttled], evidence, null),
+    ['block 3: F5 throttled server', 'block 3: F5 throttled client']);
 });

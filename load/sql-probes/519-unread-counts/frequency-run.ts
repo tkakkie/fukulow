@@ -7,13 +7,14 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { readCpuPolicy } from '../../harness-core/cpu-policy.ts';
 import { hwmon } from '../../harness-core/host-record.ts';
 import { controlFloors, frozenFloors, isQuote, permissionCheck } from './frequency-approval.ts';
-import { cappedPolicy, cpus796, referenceRates, same, setNames, sets796, validatePolicy, type Calibration, type ReferenceWindow } from './frequency-evidence.ts';
+import { cappedPolicy, cpus796, referenceRates, same, setNames, sets796, validatePolicy, type Calibration, type FrequencyEvidence,
+  type ReferenceWindow } from './frequency-evidence.ts';
 import { maxLimits, verifyLimits, withCap, writeLimits } from './frequency-policy.ts';
 import { calibrate, timedCounters, waitUntil } from './frequency-collector.ts';
 import { withSpotCheck, type SpotCheck } from './frequency-spot-check.ts';
 import { assessReference, referenceMs, referenceRequired, settleMs } from './frequency-reference.ts';
 import { diagnostic, housekeepingSampler, workloadCgroup } from './frequency-housekeeping.ts';
-import { judgeFrequency, type FrequencyBlock } from './frequency-judge.ts';
+import { checkFrequencyEvidence, judgeFrequency, type FrequencyBlock } from './frequency-judge.ts';
 import { controlSpotCheck } from './frequency-turbostat.ts';
 import type { CpuSets } from '../../harness-core/cpusets.ts';
 
@@ -52,6 +53,19 @@ export async function runFrequencyBlock<P, T>(order: number, control: boolean, s
   return control && order === 2 ? steps.cap(run) : run();
 }
 
+export function blockStopReasons(stage: ReturnType<typeof frequencyRequest>['stage'], order: number,
+  completed: FrequencyBlock[], evidence: FrequencyEvidence, spot: SpotCheck | null) {
+  const session = evidence.startSession;
+  if (stage !== 'control') return checkFrequencyEvidence(completed, sets796, evidence, session, false).reasons;
+
+  const judged = judgeFrequency(completed, sets796, evidence, session, null, true);
+  const expected = order >= 2 ? setNames.map(set => `block 2: F5 throttled ${set}`) : [];
+  const problems = judged.reasons.filter(reason => !expected.includes(reason));
+  problems.push(...expected.filter(reason => !judged.reasons.includes(reason)).map(reason => `control failed to show ${reason}`));
+  if (order === 2) problems.push(...controlSpotCheck(spot, judged).problems);
+  return problems;
+}
+
 export function frequencyRun(request: ReturnType<typeof frequencyRequest>, out: string) {
   const before = readCpuPolicy(cpus796);
   if (!same(request.launchPolicy, before)) throw new Error('F1 policy changed between launcher and job setup');
@@ -81,18 +95,6 @@ export function frequencyRun(request: ReturnType<typeof frequencyRequest>, out: 
       if (assessment.reasons.length) throw new Error(`STOP: ${assessment.reasons.join('; ')}`);
     } finally { save(`frequency-reference-${order}.json`, { window, assessment }); }
     return window;
-  }
-
-  function verifyBlock(row: FrequencyBlock) {
-    completed.push(row);
-    const judged = judgeFrequency(completed, sets796, { calibration, before, after: before,
-      startSession: request.session, endSession: request.session }, request.session, request.approval?.floors ?? null, control);
-    const capped = control && row.order >= 2;
-    const expected = capped ? setNames.map(set => `block 2: F5 throttled ${set}`) : [];
-    const problems = judged.reasons.filter(reason => !expected.includes(reason));
-    problems.push(...expected.filter(reason => !judged.reasons.includes(reason)).map(reason => `control failed to show ${reason}`));
-    if (control && row.order === 2) problems.push(...controlSpotCheck(spot, judged).problems);
-    if (problems.length) throw new Error(`STOP: ${problems.join('; ')}`);
   }
 
   async function coolBaseline() {
@@ -141,7 +143,10 @@ export function frequencyRun(request: ReturnType<typeof frequencyRequest>, out: 
         clone, coolBaseline,
         work: async (prepared, window) => {
           const measured = await work(prepared, window);
-          verifyBlock(measured);
+          completed.push(measured);
+          const problems = blockStopReasons(request.stage, order, completed, { calibration, before, after: before,
+            startSession: request.session, endSession: request.session }, spot);
+          if (problems.length) throw new Error(`STOP: ${problems.join('; ')}`);
           return measured;
         },
         cap: block => withCap(maxLimits(before), block, {

@@ -121,6 +121,18 @@ test('F1 rejects a block that opens before the previous block closes', () => {
   assert.ok(judge([first, second]).reasons.includes('block 2: F1 reused event IDs or stale block'));
 });
 
+test('rejects a reference whose checkpoint precedes the previous block closing sweep', () => {
+  const first = block(1, { control: true });
+  const second = block(2, { control: true, ratios: () => [17n, 20n] });
+  const judgeControl = () => judgeFrequency([first, second], sets796, evidence, session, null, true).reasons;
+  const expected = ['block 2: F5 throttled server', 'block 2: F5 throttled client'];
+  assert.deepEqual(judgeControl(), expected);
+
+  const closingSweep = BigInt(first.counters.close.reads.at(-1)!.monoNs);
+  second.counters.reference!.checkpointNs = String(closingSweep - 1n);
+  assert.deepEqual(judgeControl(), ['reference 2: stale reference or overlap with measured block', ...expected]);
+});
+
 test('F2 bounds perf slack and requires opening before launch and closing after exit', () => {
   assert.deepEqual(judge([block(1, { slack: 2_979_999_985n })]).reasons, []); // exactly 3 s total
   assert.match(judge([block(1, { slack: 2_979_999_986n })]).reasons.join(), /F2.*3 s slack/);

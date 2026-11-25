@@ -69,6 +69,16 @@ function checkCounterEvidence(blocks: FrequencyBlock[], host: ReturnType<typeof 
   return judged;
 }
 
+export function checkFrequencyEvidence(blocks: FrequencyBlock[], sets: CpuSets | null, evidence: FrequencyEvidence | null | undefined,
+  session: string | null, control: boolean) {
+  const reasons: string[] = [];
+  let host: ReturnType<typeof calibration>;
+  try { host = calibration(sets, evidence, session); }
+  catch (err) { return { reasons: [errorText(err)], host: null, judged: [] }; }
+  const judged = checkCounterEvidence(blocks, host, session, control, reasons);
+  return { reasons, host, judged };
+}
+
 const ratio = (w: CpuWork, base: CpuWork): Ratio => [w.aperf * base.mperf, w.mperf * base.aperf];
 type Judged = ReturnType<typeof checkCounterEvidence>[number];
 
@@ -109,11 +119,8 @@ function judgeSet(b: Judged, base: Judged | undefined, set: SetName, floors: Flo
 
 export function judgeFrequency(blocks: FrequencyBlock[], sets: CpuSets | null, evidence: FrequencyEvidence | null | undefined,
   session: string | null, floors: Floors | null, control = false) {
-  const reasons: string[] = [];
-  let host: ReturnType<typeof calibration>;
-  try { host = calibration(sets, evidence, session); }
-  catch (err) { return { reasons: [errorText(err)], blocks: [], floorProposal: null, referenceHz: null }; }
-  const judged = checkCounterEvidence(blocks, host, session, control, reasons);
+  const { reasons, host, judged } = checkFrequencyEvidence(blocks, sets, evidence, session, control);
+  if (!host) return { reasons, blocks: [], floorProposal: null, referenceHz: null };
   const base = judged.find(b => b.order === 1);
   if (!base) reasons.push('F4 missing block 1');
   const referenceTotals = judged.filter(b => referenceRequired(b.order, control)).map(b => b.referenceHousekeeping?.aggregateUsec);
