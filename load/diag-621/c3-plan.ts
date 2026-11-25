@@ -35,11 +35,14 @@ export function scheduleReason(smoke: boolean, observed: readonly Window[]): str
 export const smokeWarmup = (late: boolean) => late ? 10 : 3;
 
 export async function prepareWindow(window: Window, operations: {
-  clone(db: string): void; disableMaintenance(db: string): void; restart(arm: Arm, db: string): Promise<void>;
+  clone(db: string): void; disableMaintenance(db: string): void; settle(db: string): Promise<unknown>;
+  restart(arm: Arm, db: string): Promise<void>;
 }) {
   const db = `diag_${window.index}`;
   operations.clone(db);
   operations.disableMaintenance(db);
+  // Before the app starts, so the existing readiness-to-warm-up sequence is unchanged.
+  await operations.settle(db);
   await operations.restart(window.arm, db);
   return db;
 }

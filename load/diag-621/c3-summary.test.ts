@@ -32,16 +32,20 @@ test('the exact 12 units are published and checked, not just the balance', () =>
   assert.match(scheduleReason(true, full)!, /published schedule/);
 });
 
-test('each scheduled arm restarts on its own freshly prepared clone; failed preparation cannot start the arm', async () => {
+test('each scheduled arm restarts on its own freshly prepared and settled clone; failed preparation cannot start the arm', async () => {
   const calls: string[] = [];
   const operations = { clone: (db: string) => { calls.push(`clone ${db}`); },
-    disableMaintenance: (db: string) => { calls.push(`disable ${db}`); }, restart: async (arm: string, db: string) => { calls.push(`start ${arm} ${db}`); } };
+    disableMaintenance: (db: string) => { calls.push(`disable ${db}`); }, settle: async (db: string) => { calls.push(`settle ${db}`); },
+    restart: async (arm: string, db: string) => { calls.push(`start ${arm} ${db}`); } };
   const [first, second, third] = schedule(true);
   assert.equal(await prepareWindow(first, operations), 'diag_1');
   assert.equal(await prepareWindow(second, operations), 'diag_2');
-  assert.deepEqual(calls, ['clone diag_1', 'disable diag_1', 'start base diag_1', 'clone diag_2', 'disable diag_2', 'start split diag_2']);
+  assert.deepEqual(calls, ['clone diag_1', 'disable diag_1', 'settle diag_1', 'start base diag_1',
+    'clone diag_2', 'disable diag_2', 'settle diag_2', 'start split diag_2']);
   await assert.rejects(prepareWindow(third, { ...operations, disableMaintenance: () => { throw new Error('cannot prepare clone'); } }), /cannot prepare/);
   assert.equal(calls.at(-1), 'clone diag_3');
+  await assert.rejects(prepareWindow(third, { ...operations, settle: async () => { throw new Error('catalog settle failed'); } }), /settle failed/);
+  assert.deepEqual(calls.slice(-2), ['clone diag_3', 'disable diag_3'], 'a failed settle cannot start the arm');
 });
 
 test('statement signatures reject wrong calls, changing query ID or text, missing families, evictions and total drift', () => {
