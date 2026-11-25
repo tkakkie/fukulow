@@ -17,7 +17,7 @@ export type Identity = {
 };
 type ClockCount = { cpu: number; id: string; beforeNs: string; afterNs: string; count: string; enabled: string; running: string };
 export type Calibration = { identity: Identity; open: ClockCount[]; close: ClockCount[] };
-type PerfRead = { cpu: number; monoNs: string; aperfId: string; mperfId: string; aperf: string; mperf: string; enabled: string; running: string };
+type PerfRead = { cpu: number; monoNs: string; rawNs: string; aperfId: string; mperfId: string; aperf: string; mperf: string; enabled: string; running: string };
 export type Sweep = { phase: 'open' | 'idle' | 'close'; identity: Identity; launchSession: string; order: number; reads: PerfRead[] };
 export type CounterBlock = {
   open: Sweep; close: Sweep; idle?: Sweep; startNs: string; exitNs: string;
@@ -80,12 +80,13 @@ function workBetween(a: Sweep, b: Sweep, hz: Ratio[]) {
   return a.reads.map((open, cpu) => {
     const close = b.reads[cpu];
     const interval = unsigned(close.monoNs) - unsigned(open.monoNs);
+    const rawSpan = unsigned(close.rawNs) - unsigned(open.rawNs);
     const enabled = unsigned(close.enabled) - unsigned(open.enabled);
     const running = unsigned(close.running) - unsigned(open.running);
     requireEvidence(open.aperfId === close.aperfId && open.mperfId === close.mperfId &&
-      interval > 0n && enabled > 0n && enabled === running && unsigned(open.running) === unsigned(open.enabled) &&
+      interval > 0n && rawSpan > 0n && enabled > 0n && enabled === running && unsigned(open.running) === unsigned(open.enabled) &&
       unsigned(close.running) === unsigned(close.enabled) &&
-      enabled >= interval - million && enabled <= interval + million,
+      enabled >= rawSpan - million && enabled <= rawSpan + million,
     `F1 CPU ${cpu}: counter identity or counting time changed`);
     const aperf = unsigned(close.aperf) - unsigned(open.aperf);
     const mperf = unsigned(close.mperf) - unsigned(open.mperf);

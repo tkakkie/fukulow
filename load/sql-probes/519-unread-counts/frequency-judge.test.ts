@@ -68,6 +68,43 @@ test('F1 binds the helper metadata, true event IDs, full counting time and CPU p
   assert.match(judge([block(1)], jitter).reasons.join(), /F1 TSC calibration bracket exceeds 1 ms/);
 });
 
+test('F1 allows counting time to differ from the raw span by exactly 1 ms in either direction', () => {
+  for (const [counting, passes] of [
+    ['120019000500', true],
+    ['120021000500', true],
+    ['120019000499', false],
+    ['120021000501', false],
+  ] as const) {
+    const b = block(2);
+    const close = b.counters.close.reads[15];
+    close.enabled = close.running = counting;
+    const { reasons } = judge([block(1), b]);
+    if (passes) assert.deepEqual(reasons, [], counting);
+    else assert.ok(reasons.includes('block 2: F1 CPU 15: counter identity or counting time changed'), counting);
+  }
+});
+
+test('F1 accepts a 130 s raw span matching counting time with 2 ms of monotonic slew', () => {
+  const b = block(1);
+  b.pgbenchWindow.endMs = 150_000;
+  b.counters.startNs = '200001000000';
+  b.counters.exitNs = '330001000000';
+  for (const close of b.counters.close.reads) {
+    close.monoNs = String(330_002_000_000n + BigInt(close.cpu));
+    close.rawNs = '330000000000';
+    close.enabled = close.running = '130000000500';
+  }
+  assert.deepEqual(judge([b]).reasons, []);
+});
+
+test('F1 requires a raw timestamp at both ends of the counting interval', () => {
+  for (const phase of ['open', 'close'] as const) {
+    const b = block(1);
+    Reflect.deleteProperty(b.counters[phase].reads[15], 'rawNs');
+    assert.ok(judge([b]).reasons.includes('block 1: invalid unsigned integer'));
+  }
+});
+
 test('F1 rejects event IDs reused across otherwise valid blocks', () => {
   const first = block(1), second = block(2);
   assert.deepEqual(judge([first, second]).reasons, []);

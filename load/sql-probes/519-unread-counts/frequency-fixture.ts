@@ -40,7 +40,7 @@ export function block(order: number, options: {
       const count = phase === 'open' ? 0n : work + idle;
       return { cpu, aperfId: String(order * 100 + cpu * 2), mperfId: String(order * 100 + cpu * 2 + 1),
         aperf: String(1n + count * a / b), mperf: String(1n + count), monoNs: String(stamp + (options.control && phase !== 'open' ? 0n : BigInt(cpu))),
-        running: String(stamp - offset + 500n), enabled: String(stamp - offset + 500n) };
+        rawNs: String(stamp), running: String(stamp - offset + 500n), enabled: String(stamp - offset + 500n) };
     }),
   });
   const counters: CounterBlock = {

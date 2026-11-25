@@ -29,12 +29,16 @@ test('control requires a separate successful, complete permission-check record',
   for (const [cpu, x] of close.reads.entries()) {
     const start = open.reads[cpu];
     x.monoNs = String(BigInt(start.monoNs) + 1_000_000_000n);
+    x.rawNs = String(BigInt(start.rawNs) + 1_000_000_000n);
     x.running = x.enabled = String(BigInt(start.enabled) + 1_000_000_000n);
   }
   const record = { mode: 'check', identity: open.identity, open: open.reads, close: close.reads };
   assert.equal(permissionCheck(write(record, { exit: 0 })).identity.bootId, open.identity.bootId);
   assert.throws(() => permissionCheck(write(record, { exit: 1 })), /no passed permission check/);
   assert.throws(() => permissionCheck(write({ ...record, close: close.reads.slice(0, -1) }, { exit: 0 })), /F6 missing/);
+  const drifted = structuredClone(record);
+  drifted.close[0].rawNs = '201001000001';
+  assert.throws(() => permissionCheck(write(drifted, { exit: 0 })), /F1 CPU 0: counter identity or counting time changed/);
 });
 
 test('Rehearsal 2 requires a reviewed control report with matching digest and valid floors', t => {
