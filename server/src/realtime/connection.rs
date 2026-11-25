@@ -13,6 +13,12 @@ use uuid::Uuid;
 
 const MAX_SUBSCRIPTIONS: usize = 256;
 
+fn database_failure(operation: &'static str, error: &sqlx::Error) -> u16 {
+    tracing::info_span!(target: "fukulow", "database", operation)
+        .in_scope(|| crate::observability::database_failure(error));
+    1011
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Lifecycle {
     pub ping_interval: Duration,
@@ -108,11 +114,10 @@ impl Connection<'_> {
         if let Some(watch) = self.access.get(&channel) {
             #[cfg(test)]
             super::tests::access_loss::pause(channel, "refresh", 0).await;
-            watch.refresh(&self.state.pool).await.map_err(|error| {
-                tracing::info_span!(target: "fukulow", "database", operation = "websocket_refresh")
-                    .in_scope(|| crate::observability::database_failure(&error));
-                1011u16
-            })?;
+            watch
+                .refresh(&self.state.pool)
+                .await
+                .map_err(|error| database_failure("websocket_refresh", &error))?;
         }
         self.protected(socket, channel).await
     }
@@ -283,11 +288,7 @@ impl Connection<'_> {
             .message_delivery
             .latest_seq(&self.state.pool, organization, channel)
             .await
-            .map_err(|error| {
-                tracing::info_span!(target: "fukulow", "database", operation = "websocket_latest_seq")
-                    .in_scope(|| crate::observability::database_failure(&error));
-                1011u16
-            })?;
+            .map_err(|error| database_failure("websocket_latest_seq", &error))?;
         if !self.refresh(socket, channel).await? {
             return Ok(());
         }
@@ -322,9 +323,7 @@ impl Connection<'_> {
                     return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                 }
                 Err(MessageError::Database(error)) => {
-                    tracing::info_span!(target: "fukulow", "database", operation = "websocket_replay")
-                        .in_scope(|| crate::observability::database_failure(&error));
-                    return Err(1011);
+                    return Err(database_failure("websocket_replay", &error));
                 }
                 Err(_) => return Err(1011),
             };
@@ -390,11 +389,7 @@ impl Connection<'_> {
                                 return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                             }
                             Err(MessageError::Database(error)) => {
-                                tracing::info_span!(
-                                    target: "fukulow", "database", operation = "websocket_authorize"
-                                )
-                                .in_scope(|| crate::observability::database_failure(&error));
-                                return Err(1011);
+                                return Err(database_failure("websocket_authorize", &error));
                             }
                             Err(_) => return Err(1011),
                         }
@@ -422,11 +417,7 @@ impl Connection<'_> {
                         return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                     }
                     Err(MessageError::Database(error)) => {
-                        tracing::info_span!(
-                            target: "fukulow", "database", operation = "websocket_authorize"
-                        )
-                        .in_scope(|| crate::observability::database_failure(&error));
-                        return Err(1011);
+                        return Err(database_failure("websocket_authorize", &error));
                     }
                     Err(_) => return Err(1011),
                 }
@@ -443,13 +434,7 @@ impl Connection<'_> {
                         channel_id,
                     )
                     .await
-                    .map_err(|error| {
-                        tracing::info_span!(
-                            target: "fukulow", "database", operation = "websocket_subscribe"
-                        )
-                        .in_scope(|| crate::observability::database_failure(&error));
-                        1011u16
-                    })?;
+                    .map_err(|error| database_failure("websocket_subscribe", &error))?;
                 let Some(watch) = watch else {
                     return Self::error(socket, Some(channel_id), "channel_not_found").await;
                 };
@@ -488,11 +473,7 @@ impl Connection<'_> {
                             channel_id,
                         )
                         .await
-                        .map_err(|error| {
-                            tracing::info_span!(target: "fukulow", "database", operation = "websocket_subscribed_seq")
-                                .in_scope(|| crate::observability::database_failure(&error));
-                            1011u16
-                        })?;
+                        .map_err(|error| database_failure("websocket_subscribed_seq", &error))?;
                     if !self.protected(socket, channel_id).await? {
                         return Ok(());
                     }
@@ -512,9 +493,7 @@ impl Connection<'_> {
                             return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                         }
                         Err(MessageError::Database(error)) => {
-                            tracing::info_span!(target: "fukulow", "database", operation = "websocket_authorize")
-                                .in_scope(|| crate::observability::database_failure(&error));
-                            return Err(1011);
+                            return Err(database_failure("websocket_authorize", &error));
                         }
                         Err(_) => return Err(1011),
                     };
