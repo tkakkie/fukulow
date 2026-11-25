@@ -572,10 +572,19 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const c = channels.get(id)
     if (!c || c.stopped) return
     const s = c.topics.get(response.topic.id)
-    if (!s || !completeCountFields(response.topic)) return
+    if (!s || !completeCountFields(response.topic) || response.topic.read_seq < s.position) return
     const previous = s.baseline, prevPos = s.position, prevErr = s.error, prevStop = s.stopped
     acceptScope(s, topicBaseline(response.as_of_seq, response.topic))
     if (s.topicMissing && response.as_of_seq >= c.requiredBase) { s.topicMissing = undefined; s.stopped = false }
+    const topic = response.topic.id
+    if (s.baseline && (s.baseline.asOfSeq < c.requiredBase || s.error)) {
+      if (!s.stopped && !c.summaryTimers.has(topic)) void refreshTopic(id, topic)
+    } else if (!s.error && !s.stopped) {
+      const retry = c.summaryTimers.get(topic)
+      if (retry !== undefined) clearTimeout(retry)
+      c.summaryTimers.delete(topic); c.summaryAttempts.delete(topic)
+      c.summaryReads.delete(topic); c.queuedSummaries.delete(topic)
+    }
     if (s.baseline !== previous || s.position !== prevPos || s.error !== prevErr || s.stopped !== prevStop) {
       prune(c)
       const changed = new Set([id])

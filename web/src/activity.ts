@@ -73,13 +73,19 @@ export function createActivityTarget<T>(options: {
     })
     completion = undefined
     if (controller === request) controller = undefined
+    const wasServingNotice = servingNotice
     inFlight = false
     servingNotice = false
     if (closed) return
     if (cancelled) { if (dirty) schedule(0); return }
     try { if (result.ok) {
-      if (own !== generation) { if (dirty && !retry) schedule(200); return }
+      if (own !== generation) {
+        if (wasServingNotice) noticePending = true
+        if (dirty && !retry) schedule(200)
+        return
+      }
       if (options.covers?.(result.data) === false) {
+        if (wasServingNotice) noticePending = true
         if (++belowFloor >= 3) scheduleRetry()
         else schedule(200)
         return
@@ -92,10 +98,12 @@ export function createActivityTarget<T>(options: {
       if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; stopped = true; return }
       if (options.manualRetry) { dirty = false; queued = false; noticePending = false; return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
-        noticePending = false
+        if (wasServingNotice) noticePending = true
         scheduleRetry(result.retryAfterMs ?? 0)
-      } else if (own !== generation) { if (dirty) schedule(200) }
-      else { dirty = false; queued = false; noticePending = false; stopped = true }
+      } else if (own !== generation) {
+        if (wasServingNotice) noticePending = true
+        if (dirty) schedule(200)
+      } else { dirty = false; queued = false; noticePending = false; stopped = true }
     } } finally { options.settled?.() }
   }
   function fence() {
@@ -121,7 +129,7 @@ export function createActivityTarget<T>(options: {
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
     inFlight: () => inFlight,
-    pendingNotice: () => !closed && (servingNotice || (noticePending && dirty && !retry)),
+    pendingNotice: () => !closed && (servingNotice || (noticePending && dirty)),
     ensure() {
       if (inFlight) return running
       if (!closed && !stopped && !dirty && timer === undefined && !retry) { dirty = true; return run() }
