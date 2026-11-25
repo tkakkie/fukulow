@@ -209,54 +209,46 @@ pub async fn topic_history(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.validate()?;
     let organization = auth.identity.organization.organization_id;
-    require_visible_scoped(
-        &state.pool,
-        organization,
-        (auth.identity.member.id, auth.membership_revision),
+    let snapshot = history::prepare_snapshot(
+        &state,
+        &auth,
         channel,
+        query.history_generation,
+        query.as_of_seq,
+        async |tx| reject_dm_topics(tx, organization, channel).await,
+        async |tx: &mut sqlx::PgConnection, history_generation, w| {
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
+                .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
+            if !exists {
+                return Err(MessageError::TopicNotFound);
+            }
+            let page = DirectionalPage::new(&query, limit);
+            let (comparison, order) = if page.ascending {
+                (">", "ASC")
+            } else {
+                ("<=", "DESC")
+            };
+            let sql = format!(
+                "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
+                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
+                FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
+                ORDER BY seq {order} LIMIT $5"
+            );
+            let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
+            let messages = sqlx::query(&sql)
+                .bind(organization)
+                .bind(channel)
+                .bind(topic)
+                .bind(page.cursor)
+                .bind(page.fetch_limit())
+                .bind(w)
+                .try_map(|row| message_from_row(&row))
+                .fetch_all(&mut *tx)
+                .await?;
+            let (messages, has_more) = page.finish(messages);
+            Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
+        },
     )
     .await?;
-    watermark::read(&state, organization, channel).await?;
-    crate::database::organization_read_only(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
-        require_visible(
-            &mut *tx,
-            organization,
-            (auth.identity.member.id, auth.membership_revision),
-            channel,
-        )
-        .await?;
-        reject_dm_topics(tx,organization,channel).await?;
-        let (history_generation, w) = history::page(tx, organization, channel, query.history_generation, query.as_of_seq).await?;
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE organization_id = $1 AND channel_id = $2 AND id = $3)")
-            .bind(organization).bind(channel).bind(topic).fetch_one(&mut *tx).await?;
-        if !exists {
-            return Err(MessageError::TopicNotFound);
-        }
-        let page = DirectionalPage::new(&query, limit);
-        let (comparison, order) = if page.ascending {
-            (">", "ASC")
-        } else {
-            ("<=", "DESC")
-        };
-        let sql = format!(
-            "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
-            to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
-            FROM messages WHERE organization_id = $1 AND channel_id = $2 AND topic_id = $3 AND seq {comparison} $4 AND seq <= $6 \
-            ORDER BY seq {order} LIMIT $5"
-        );
-        let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
-        let messages = sqlx::query(&sql)
-            .bind(organization)
-            .bind(channel)
-            .bind(topic)
-            .bind(page.cursor)
-            .bind(page.fetch_limit())
-            .bind(w)
-            .try_map(|row| message_from_row(&row))
-            .fetch_all(&mut *tx)
-            .await?;
-        let (messages, has_more) = page.finish(messages);
-        Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
-    })
-    .await
+    snapshot.await
 }

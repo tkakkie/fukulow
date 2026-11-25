@@ -1,6 +1,42 @@
-use super::{MessageError, guards::check_visibility};
+use super::{
+    MessageError,
+    guards::{check_visibility, require_visible, require_visible_scoped},
+    watermark,
+};
+use crate::{AppState, auth::Auth};
 use sqlx::PgConnection;
 use uuid::Uuid;
+
+/// Check visibility before returning the pending history snapshot read.
+/// Callers can run pre-admission checks or apply a work deadline before polling it.
+pub(super) async fn prepare_snapshot<T>(
+    state: &AppState,
+    auth: &Auth,
+    channel: Uuid,
+    requested: Option<Uuid>,
+    fixed_w: Option<i64>,
+    before_page: impl AsyncFnOnce(&mut PgConnection) -> Result<(), MessageError>,
+    body: impl AsyncFnOnce(&mut PgConnection, Uuid, i64) -> Result<T, MessageError>,
+) -> Result<impl Future<Output = Result<T, MessageError>>, MessageError> {
+    let organization = auth.identity.organization.organization_id;
+    let member = (auth.identity.member.id, auth.membership_revision);
+    require_visible_scoped(&state.pool, organization, member, channel).await?;
+
+    Ok(async move {
+        watermark::read(state, organization, channel).await?;
+        crate::database::organization_read_only(
+            &state.pool,
+            organization,
+            async |tx: &mut PgConnection| {
+                require_visible(&mut *tx, organization, member, channel).await?;
+                before_page(tx).await?;
+                let (generation, w) = page(tx, organization, channel, requested, fixed_w).await?;
+                body(tx, generation, w).await
+            },
+        )
+        .await
+    })
+}
 
 /// The commit barrier must complete before opening this snapshot. Choose W here,
 /// alongside M and the mutable rows, rather than using the barrier's older W.
