@@ -72,10 +72,7 @@ impl Step<'_> {
             Err(_) => {
                 if page == Page::After {
                     if Self::gap(c) {
-                        let attempt = c.fill_attempt;
-                        c.fill_attempt += 1;
-                        let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
-                        self.channel(id).wait = Some(n);
+                        self.fill_backoff_or_reconcile(id, true);
                     }
                 } else if page == Page::Latest {
                     c.history_error = true;
@@ -110,15 +107,8 @@ impl Step<'_> {
                     }
                 }
                 let c = self.channel(id);
-                if c.cursor == before && Self::gap(c) {
-                    let attempt = c.fill_attempt;
-                    c.fill_attempt += 1;
-                    let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
-                    self.channel(id).wait = Some(n);
-                } else {
-                    c.fill_attempt = 0;
-                    self.reconcile(id, true);
-                }
+                let back_off = c.cursor == before && Self::gap(c);
+                self.fill_backoff_or_reconcile(id, back_off);
             }
             Ok(HistoryPage::Messages(result)) => {
                 let before = c.cursor;
@@ -157,15 +147,8 @@ impl Step<'_> {
                 }
                 if page == Page::After {
                     let c = self.channel(id);
-                    if c.cursor == before && Self::gap(c) {
-                        let attempt = c.fill_attempt;
-                        c.fill_attempt += 1;
-                        let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
-                        self.channel(id).wait = Some(n);
-                    } else {
-                        c.fill_attempt = 0;
-                        self.reconcile(id, true);
-                    }
+                    let back_off = c.cursor == before && Self::gap(c);
+                    self.fill_backoff_or_reconcile(id, back_off);
                 } else {
                     self.subscribe(id);
                     self.reconcile(id, false);
@@ -173,6 +156,20 @@ impl Step<'_> {
             }
         }
     }
+
+    fn fill_backoff_or_reconcile(&mut self, id: Uuid, back_off: bool) {
+        let c = self.channel(id);
+        if back_off {
+            let attempt = c.fill_attempt;
+            c.fill_attempt += 1;
+            let n = self.wait(Purpose::FillBackoff, Some(id), attempt);
+            self.channel(id).wait = Some(n);
+        } else {
+            c.fill_attempt = 0;
+            self.reconcile(id, true);
+        }
+    }
+
     pub(super) fn send_response(
         &mut self,
         request: Token,
@@ -305,6 +302,33 @@ impl Step<'_> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fill_backoff_uses_the_current_nonzero_attempt_for_its_wait() {
+        let channel = Uuid::from_u128(1);
+        let mut core = Core::new(Uuid::from_u128(2));
+        let mut step = Step::new(&mut core);
+        let c = step.channel(channel);
+        c.cursor = Some(1);
+        c.held_through = Some(3);
+        c.fill_attempt = 2;
+
+        step.fill_backoff_or_reconcile(channel, true);
+
+        let c = step.channel(channel);
+        assert_eq!(c.fill_attempt, 3);
+        let wait = c.wait.unwrap();
+        assert!(matches!(
+            step.out.effects.as_slice(),
+            [Effect::Wait {
+                id,
+                purpose: Purpose::FillBackoff,
+                channel: Some(wait_channel),
+                delay_ms: None,
+                attempt: Some(2),
+            }] if *id == wait && *wait_channel == channel
+        ));
+    }
 
     #[test]
     fn latest_page_clears_retired_floor_at_minimum_creation_position() {
