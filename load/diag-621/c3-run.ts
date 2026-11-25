@@ -1,9 +1,11 @@
 // Harness history (#621 C3):
 // - 2026-11-21 (#961, b04a5288): C3 diagnostic harness for the send path.
-// - 2026-11-26: the first smoke was INVALID because autovacuum of system catalogs, triggered by CREATE DATABASE, ran in
-//   5 windows. Before each window's measurement, every connectable database now gets VACUUM (ANALYZE) of its catalogs and
-//   the run waits until autovacuum has finished (c3-catalog-settle.ts). The evidence goes into manifest.json and each
-//   window's catalog-settle.json. Measurement conditions, INVALID rules and evaluation criteria are unchanged.
+// - 2026-11-26 (#1034): the first smoke stays INVALID (#621 comment 7172147501). Autovacuum of system catalogs, triggered
+//   by CREATE DATABASE, ran in 3 windows, and 2 more were INVALID through their INVALID paired base. Each clone and the
+//   seed now get VACUUM (ANALYZE) of every connectable database's catalogs, then a plain VACUUM of pg_statistic, and the
+//   run waits until autovacuum has finished, before the app starts (c3-catalog-settle.ts). Every attempt, failed ones
+//   included, goes into manifest.json and the window's catalog-settle.json. Measurement conditions, INVALID rules and
+//   evaluation criteria are unchanged.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,7 +19,7 @@ import { verifyPins, verifySmoke, type Pin, type Pins } from './c3-pins.ts';
 import { countChecks, disableMaintenance, fixtureChecks, fixtureReasons, maintenanceReasons, maintenanceSQL,
   settleFixture, shapeSQL, workersSQL, type Maintenance, type Workers } from './c3-fixture.ts';
 import { connectionEvidence, logSettings, parseTraffic } from './c3-logs.ts';
-import { settleCatalogs, type CatalogSettle } from './c3-catalog-settle.ts';
+import { settleCatalogs, settleRecorder, type CatalogSettle } from './c3-catalog-settle.ts';
 import { c3ExitCode, summarizeC3, type WindowResult } from './c3-summary.ts';
 import { evictionReason, statementEvidence, statementSQL } from './c3-statements.ts';
 import { cpuWindow, DrainPending, latency, loadBoundaries, storageCoverage, storageReason, trafficReasons } from './c3-timing.ts';
@@ -58,12 +60,11 @@ const reason = (error: unknown) => (error instanceof SyntaxError ? 'malformed di
   .replaceAll(password, '[redacted]').replaceAll(setupToken, '[redacted]');
 let pins: Pins, recordedPins: Pins | undefined, dbStarted = false, networkStarted = false;
 const manifest: Record<string, unknown> = {}, catalogSettles: CatalogSettle[] = [];
-const settle = async (stage: string) => {
-  const evidence = await settleCatalogs(stage, sql, { capMs: Math.min(60000, active()), signal });
-  catalogSettles.push(evidence);
-  dump(resolve(output, 'manifest.json'), { ...manifest, catalogSettles });
-  return evidence;
-};
+const settle = (stage: string, windowFile?: string) => settleCatalogs(stage, sql, { capMs: Math.min(60000, active()), signal,
+  report: settleRecorder(catalogSettles, (settles, latest) => {
+    dump(resolve(output, 'manifest.json'), { ...manifest, catalogSettles: settles });
+    if (windowFile) dump(windowFile, latest);
+  }) });
 
 const stop = runtimeEnv.remove;
 
@@ -168,9 +169,9 @@ async function windowRun(window: Window, seedFixture: Fixture): Promise<WindowRe
         clone = name;
       },
       disableMaintenance: name => { sql(name, disableMaintenance, 'disable automatic maintenance on clone'); },
+      settle: () => settle(window.id, resolve(dir, 'catalog-settle.json')),
       async restart(arm, name) { appUp = true; await appStart(app, name, pins[arm]); },
     });
-    record('catalog-settle', await settle(window.id));
     const cpuTask = observe(observer, cpuPath, app);
     cpuUp = true;
     await wait('first cgroup sample', () => ticks(cpuPath).length);
