@@ -356,137 +356,161 @@ impl<'a> Connection<'a> {
 
     async fn control(&mut self, socket: &mut WebSocket, control: ClientMessage) -> Result<(), u16> {
         match control {
-            ClientMessage::Unsubscribe { channel_id } => self.unsubscribe(channel_id),
+            ClientMessage::Unsubscribe { channel_id } => {
+                self.unsubscribe(channel_id);
+                Ok(())
+            }
             ClientMessage::Subscribe {
                 channel_id,
                 after_seq,
                 history_generation,
             } => {
-                // Duplicate controls never replay or change the cursor. A carried epoch
-                // still requires fresh authorization before it can be compared.
                 if self.cursors.contains_key(&channel_id) {
-                    if history_generation.is_some() {
-                        match self.visible(channel_id, history_generation).await? {
-                            SubscriptionVisibility::Visible(_) => {}
-                            SubscriptionVisibility::HistoryGenerationChanged => {
-                                self.unsubscribe(channel_id);
-                                return Self::error(
-                                    socket,
-                                    Some(channel_id),
-                                    "history_generation_changed",
-                                )
-                                .await;
-                            }
-                            SubscriptionVisibility::NotFound => {
-                                self.unsubscribe(channel_id);
-                                return Self::error(socket, Some(channel_id), "channel_not_found")
-                                    .await;
-                            }
-                        }
-                    }
-                    return Ok(());
-                }
-                if after_seq < 0 {
-                    return Self::error(socket, Some(channel_id), "invalid_input").await;
-                }
-                if self.cursors.len() >= MAX_SUBSCRIPTIONS {
-                    return Self::error(socket, Some(channel_id), "subscription_limit").await;
-                }
-                #[cfg(test)]
-                super::tests::access_loss::pause(channel_id, "authorize", 0).await;
-                match self.visible(channel_id, history_generation).await? {
-                    SubscriptionVisibility::Visible(_) => {}
-                    SubscriptionVisibility::HistoryGenerationChanged => {
-                        return Self::error(socket, Some(channel_id), "history_generation_changed")
-                            .await;
-                    }
-                    SubscriptionVisibility::NotFound => {
-                        return Self::error(socket, Some(channel_id), "channel_not_found").await;
-                    }
-                }
-                #[cfg(test)]
-                super::tests::access_loss::pause(channel_id, "access_subscribe", 0).await;
-                let watch = self
-                    .state
-                    .message_delivery
-                    .channel_access
-                    .subscribe(
-                        &self.state.pool,
-                        self.auth.identity.organization.organization_id,
-                        (self.auth.identity.member.id, self.auth.membership_revision),
-                        channel_id,
-                    )
-                    .await
-                    .map_err(|error| database_failure("websocket_subscribe", &error))?;
-                let Some(watch) = watch else {
-                    return Self::error(socket, Some(channel_id), "channel_not_found").await;
-                };
-                self.access.insert(channel_id, watch);
-                #[cfg(test)]
-                super::tests::access_loss::pause(channel_id, "registered", 0).await;
-                self.queue.subscribe(channel_id);
-                self.cursors.insert(channel_id, after_seq);
-                self.catch_up(socket, channel_id).await?;
-                // Flush the bounded set queued during history. New arrivals stay queued for live.
-                let queued = self.queue.events.len();
-                for _ in 0..queued {
-                    if let Ok(message) = self.queue.events.try_recv() {
-                        self.live(socket, message).await?;
-                    }
-                }
-                if !self.refresh(socket, channel_id).await? {
-                    return Ok(());
-                }
-                #[cfg(test)]
-                super::tests::access_loss::pause(channel_id, "subscribed_seq", 0).await;
-                if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
-                    #[cfg(test)]
-                    self.state.message_delivery.record_watermark_caller(
-                        &self.state.pool,
-                        self.auth.identity.organization.organization_id,
-                        channel_id,
-                        "confirmation",
-                    );
-                    let latest = self
-                        .state
-                        .message_delivery
-                        .latest_seq(
-                            &self.state.pool,
-                            self.auth.identity.organization.organization_id,
-                            channel_id,
-                        )
+                    self.subscribe_again(socket, channel_id, history_generation)
                         .await
-                        .map_err(|error| database_failure("websocket_subscribed_seq", &error))?;
-                    if !self.protected(socket, channel_id).await? {
-                        return Ok(());
-                    }
-                    #[cfg(test)]
-                    super::tests::access_loss::pause(channel_id, "handoff_generation", 0).await;
-                    let history_generation = match self.visible(channel_id, None).await? {
-                        SubscriptionVisibility::Visible(generation) => generation,
-                        SubscriptionVisibility::NotFound => {
-                            self.unsubscribe(channel_id);
-                            return Self::event(
-                                socket,
-                                ServerEvent::ChannelAccessLost { channel_id },
-                            )
-                            .await;
-                        }
-                        // Handoff carries no expected epoch, so a mismatch here is internal.
-                        SubscriptionVisibility::HistoryGenerationChanged => return Err(1011),
-                    };
-                    self.protected_event(
-                        socket,
-                        channel_id,
-                        ServerEvent::Subscribed {
-                            history_generation,
-                            channel_id,
-                            caught_up_seq: caught_up_seq.min(latest),
-                        },
-                    )
-                    .await?;
+                } else {
+                    self.subscribe(socket, channel_id, after_seq, history_generation)
+                        .await
                 }
             }
+        }
+    }
+
+    async fn subscribe_again(
+        &mut self,
+        socket: &mut WebSocket,
+        channel_id: Uuid,
+        history_generation: Option<Uuid>,
+    ) -> Result<(), u16> {
+        // Duplicate controls never replay or change the cursor. A carried epoch
+        // still requires fresh authorization before it can be compared.
+        if history_generation.is_some() {
+            match self.visible(channel_id, history_generation).await? {
+                SubscriptionVisibility::Visible(_) => {}
+                SubscriptionVisibility::HistoryGenerationChanged => {
+                    self.unsubscribe(channel_id);
+                    return Self::error(socket, Some(channel_id), "history_generation_changed")
+                        .await;
+                }
+                SubscriptionVisibility::NotFound => {
+                    self.unsubscribe(channel_id);
+                    return Self::error(socket, Some(channel_id), "channel_not_found").await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn subscribe(
+        &mut self,
+        socket: &mut WebSocket,
+        channel_id: Uuid,
+        after_seq: i64,
+        history_generation: Option<Uuid>,
+    ) -> Result<(), u16> {
+        if after_seq < 0 {
+            return Self::error(socket, Some(channel_id), "invalid_input").await;
+        }
+        if self.cursors.len() >= MAX_SUBSCRIPTIONS {
+            return Self::error(socket, Some(channel_id), "subscription_limit").await;
+        }
+        #[cfg(test)]
+        super::tests::access_loss::pause(channel_id, "authorize", 0).await;
+        match self.visible(channel_id, history_generation).await? {
+            SubscriptionVisibility::Visible(_) => {}
+            SubscriptionVisibility::HistoryGenerationChanged => {
+                return Self::error(socket, Some(channel_id), "history_generation_changed").await;
+            }
+            SubscriptionVisibility::NotFound => {
+                return Self::error(socket, Some(channel_id), "channel_not_found").await;
+            }
+        }
+        #[cfg(test)]
+        super::tests::access_loss::pause(channel_id, "access_subscribe", 0).await;
+        let watch = self
+            .state
+            .message_delivery
+            .channel_access
+            .subscribe(
+                &self.state.pool,
+                self.auth.identity.organization.organization_id,
+                (self.auth.identity.member.id, self.auth.membership_revision),
+                channel_id,
+            )
+            .await
+            .map_err(|error| database_failure("websocket_subscribe", &error))?;
+        let Some(watch) = watch else {
+            return Self::error(socket, Some(channel_id), "channel_not_found").await;
+        };
+        self.access.insert(channel_id, watch);
+        #[cfg(test)]
+        super::tests::access_loss::pause(channel_id, "registered", 0).await;
+        self.queue.subscribe(channel_id);
+        self.cursors.insert(channel_id, after_seq);
+        self.catch_up(socket, channel_id).await?;
+        // Flush the bounded set queued during history. New arrivals stay queued for live.
+        let queued = self.queue.events.len();
+        for _ in 0..queued {
+            if let Ok(message) = self.queue.events.try_recv() {
+                self.live(socket, message).await?;
+            }
+        }
+        self.confirm_subscribed(socket, channel_id).await
+    }
+
+    async fn confirm_subscribed(
+        &mut self,
+        socket: &mut WebSocket,
+        channel_id: Uuid,
+    ) -> Result<(), u16> {
+        if !self.refresh(socket, channel_id).await? {
+            return Ok(());
+        }
+        #[cfg(test)]
+        super::tests::access_loss::pause(channel_id, "subscribed_seq", 0).await;
+        if let Some(&caught_up_seq) = self.cursors.get(&channel_id) {
+            #[cfg(test)]
+            self.state.message_delivery.record_watermark_caller(
+                &self.state.pool,
+                self.auth.identity.organization.organization_id,
+                channel_id,
+                "confirmation",
+            );
+            let latest = self
+                .state
+                .message_delivery
+                .latest_seq(
+                    &self.state.pool,
+                    self.auth.identity.organization.organization_id,
+                    channel_id,
+                )
+                .await
+                .map_err(|error| database_failure("websocket_subscribed_seq", &error))?;
+            if !self.protected(socket, channel_id).await? {
+                return Ok(());
+            }
+            #[cfg(test)]
+            super::tests::access_loss::pause(channel_id, "handoff_generation", 0).await;
+            let history_generation = match self.visible(channel_id, None).await? {
+                SubscriptionVisibility::Visible(generation) => generation,
+                SubscriptionVisibility::NotFound => {
+                    self.unsubscribe(channel_id);
+                    return Self::event(socket, ServerEvent::ChannelAccessLost { channel_id })
+                        .await;
+                }
+                // Handoff carries no expected epoch, so a mismatch here is internal.
+                SubscriptionVisibility::HistoryGenerationChanged => return Err(1011),
+            };
+            self.protected_event(
+                socket,
+                channel_id,
+                ServerEvent::Subscribed {
+                    history_generation,
+                    channel_id,
+                    caught_up_seq: caught_up_seq.min(latest),
+                },
+            )
+            .await?;
         }
         Ok(())
     }
