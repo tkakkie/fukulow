@@ -226,7 +226,7 @@ export function verdictByCell(results: Result[]) {
   const verdicts: Record<string, CellVerdict> = {};
   for (const cell of CELL_NAMES) for (const duration of ['short', 'long'] as const) {
     const valid = results.filter(r => r.kind === 'fault' && r.cell === cell && r.duration === duration && r.verdict !== 'INVALID').slice(0, REPEATS);
-    const barred = results.some(r => r.cell === cell && barsPass(r));
+    const barred = results.some(r => r.cell === cell && (r.kind === 'control' || r.duration === duration) && barsPass(r));
     verdicts[`${cell}/${duration}`] = valid.some(r => r.verdict === 'FAIL') ? 'FAIL'
       : !barred && valid.length === REPEATS && valid.every(r => r.verdict === 'PASS') ? 'PASS' : 'NOT EVALUATED';
   }

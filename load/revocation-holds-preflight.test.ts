@@ -2,16 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { channelId, holdsFixture, jsonl, memberId, target, traceLines, watermarkLine } from './revocation-holds-fixture.ts';
 import { BYSTANDERS, STALL_DEFAULT } from './revocation-holds-plan.ts';
-import { messagesForSender, preflightPlan, preflightReadback, preflightResult, preflightTrialEvidence, type PreflightTrial, type SessionIdentity } from './revocation-holds-preflight.ts';
+import { messagesForSender, preflightPlan, preflightReadback, preflightResult, preflightTrialEvidence, type PreflightTrial } from './revocation-holds-preflight.ts';
 import { preflightSession } from './revocation-holds-preflight-session.ts';
+import { preflightIdentity as identity, preflightReadbackValue as after } from './revocation-holds-preflight-fixture.ts';
 import { SetupAbort } from './revocation-holds-setup.ts';
 import { parseTrace } from './revocation-holds-trace.ts';
-
-const identity = {
-  hostname: 'measurement-host', platform: 'linux', arch: 'x64', cpus: 16, memoryBytes: 32 * 1024 ** 3,
-  release: 'test-kernel', node: 'v26.13.1', commit: 'test-commit', session: 'test-session',
-} satisfies SessionIdentity;
-const after = 32_768;
 
 function trialRun(trial: PreflightTrial) {
   const run = holdsFixture('control');
@@ -86,16 +81,22 @@ test('preflight acceptance depends on all three k=60 runs and one common readbac
     assert.equal(preflightResult(identity, [...results.slice(0, -1), { ...results.at(-1)!, ...patch }]).passed, false);
   }
   assert.equal(preflightResult(identity, results.slice(1)).passed, false);
+  assert.equal(preflightResult({ ...identity, gitClean: false }, results).passed, false);
 });
 
 test('SA2 validates saved readback provenance and acceptance evidence', () => {
   const saved = JSON.parse(JSON.stringify(preflightResult(identity, rows())));
   assert.equal(preflightReadback(saved, identity), after);
   for (const [field, value] of Object.entries(identity)) {
-    const changed = typeof value === 'number' ? value + 1 : value + '-different';
+    const changed = typeof value === 'number' ? value + 1 : typeof value === 'boolean' ? !value : value + '-different';
     assert.equal(preflightReadback(saved, { ...identity, [field]: changed }), undefined, field);
   }
   assert.equal(preflightReadback(saved, { ...identity, session: '' }), undefined);
+  for (const field of ['gitClean', 'bootId', 'serverSha256', 'stallHelperSha256']) {
+    const incomplete = { ...saved.identity };
+    delete incomplete[field];
+    assert.equal(preflightReadback({ ...saved, identity: incomplete }, identity), undefined, field);
+  }
   assert.equal(preflightReadback({ ...saved, passed: false }, identity), undefined);
   assert.equal(preflightReadback({ ...saved, readback: after + 1 }, identity), undefined);
   assert.equal(preflightReadback({ ...saved, runs: saved.runs.slice(0, -1) }, identity), undefined);
@@ -113,7 +114,8 @@ test('preflight retries one setup abort in place and reports only completed slot
   assert.equal(result.passed, true);
   assert.deepEqual(result.runs.map(row => row.id), plan.map(trial => trial.id));
   assert.equal(result.runs[0].attemptId, `${plan[0].id}-setup-retry`);
-  assert.deepEqual(seen.at(-1), { ...result, setupAborts: [{ id: plan[0].id, message: 'SA1: wrong readback' }] });
+  assert.deepEqual(result.setupAborts, [{ id: plan[0].id, message: 'SA1: wrong readback' }]);
+  assert.deepEqual(seen.at(-1), result);
 });
 
 test('a second preflight setup abort stops the session without running another slot', async () => {

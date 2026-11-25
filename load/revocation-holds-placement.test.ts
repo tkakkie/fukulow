@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { cpuList } from './harness-core/cpusets.ts';
+import { postgresServerContainer } from './harness-core/frequency-container-args.ts';
 import { measuredCpus, measurementSlice, sets796 } from './harness-core/frequency-layout.ts';
 import { checkPlacement, clientScope, placementEnabled, postgresContainer, recordPlacement, serverPrefix } from './revocation-holds-placement.ts';
 import { SetupAbort } from './revocation-holds-setup.ts';
@@ -21,14 +23,25 @@ function procFiles(affinity: number[], cpuset = measuredCpus, scope = cgroup) {
   };
 }
 
-test('Linux launch pins Node, the server and Postgres using #796 settings', () => {
-  assert.deepEqual(clientScope(), ['systemd-run', '--scope', '--quiet', '--collect', '--no-ask-password',
-    `--slice=${measurementSlice}`, '--', 'taskset', '-c', cpuList(sets796.client)]);
+test('Linux launch names the client scope by PID and pins Node on #796', () => {
+  assert.deepEqual(clientScope(42), ['systemd-run', '--scope', '--quiet', '--collect', '--no-ask-password',
+    `--slice=${measurementSlice}`, '--unit=fukulow668-client-42.scope', '--', 'taskset', '-c', cpuList(sets796.client)]);
+  assert.ok(clientScope('$$').includes('--unit=fukulow668-client-$$.scope'));
   assert.deepEqual(serverPrefix(), ['taskset', '-c', cpuList(sets796.server)]);
+});
+
+test('Linux Postgres placement reuses the #796 server container arguments', () => {
+  assert.equal(postgresContainer, postgresServerContainer);
   assert.deepEqual(postgresContainer(), {
     options: ['--cgroup-parent', measurementSlice, '--cpuset-cpus', cpuList(sets796.server), '--entrypoint', 'taskset'],
     command: ['-c', cpuList(sets796.server), 'docker-entrypoint.sh', 'postgres'],
   });
+});
+
+test('CLI help gives the one-time install and a noninteractive PID-named launch', () => {
+  const help = execFileSync(process.execPath, [join(import.meta.dirname, 'revocation-holds.ts'), '--help'], { encoding: 'utf8' });
+  assert.match(help, /boot-796.ts install --measurement-user USER/);
+  assert.match(help, /^Linux launch as the measurement user\n  systemd-run .*--no-ask-password .*--unit=fukulow668-client-\$\$\.scope -- /m);
 });
 
 test('placement reads back each expected affinity and rejects an incorrect slice, affinity or cpuset', () => {

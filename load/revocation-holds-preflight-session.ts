@@ -1,7 +1,8 @@
 // Execute the nine preflight slots and preserve setup aborts separately from runs.
 import type { HoldsRun } from './revocation-holds-judgment.ts';
 import { setupQueue } from './revocation-holds-plan.ts';
-import { preflightPlan, preflightResult, preflightTrialEvidence, type PreflightRow, type PreflightTrial, type SessionIdentity } from './revocation-holds-preflight.ts';
+import { preflightPlan, preflightResult, preflightTrialEvidence, type PreflightRow, type PreflightTrial } from './revocation-holds-preflight.ts';
+import type { SessionIdentity } from './revocation-holds-provenance.ts';
 import { SetupAbort } from './revocation-holds-setup.ts';
 
 export async function preflightSession(
@@ -24,5 +25,5 @@ export async function preflightSession(
     }
     save({ ...preflightResult(identity, runs), setupAborts });
   }
-  return preflightResult(identity, runs);
+  return { ...preflightResult(identity, runs), setupAborts };
 }

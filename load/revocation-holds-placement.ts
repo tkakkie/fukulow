@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { allowedCpus, cpuList, parseCpuList, pinned } from './harness-core/cpusets.ts';
 import { measuredCpus, measurementSlice, sets796 } from './harness-core/frequency-layout.ts';
 import { SetupAbort } from './revocation-holds-setup.ts';
+export { postgresServerContainer as postgresContainer } from './harness-core/frequency-container-args.ts';
 
 type Role = 'client' | 'server' | 'helper' | 'postgres';
 type Placement = { pid: number; cgroup: string; affinity: number[]; cpuset: number[] };
@@ -49,12 +50,9 @@ export function recordPlacement(dir: string, enabled: boolean, read = readFile) 
   };
 }
 
-export const clientScope = () => ['systemd-run', '--scope', '--quiet', '--collect', '--no-ask-password', `--slice=${measurementSlice}`, '--', ...pinned(sets796.client, [])];
+export const clientScope = (pid: number | '$$') => ['systemd-run', '--scope', '--quiet', '--collect', '--no-ask-password',
+  `--slice=${measurementSlice}`, `--unit=fukulow668-client-${pid}.scope`, '--', ...pinned(sets796.client, [])];
 export const serverPrefix = () => pinned(sets796.server, []);
-export const postgresContainer = () => ({
-  options: ['--cgroup-parent', measurementSlice, '--cpuset-cpus', cpuList(sets796.server), '--entrypoint', 'taskset'],
-  command: ['-c', cpuList(sets796.server), 'docker-entrypoint.sh', 'postgres'],
-});
 
 export const postgresPid = (name: string) =>
   Number(execFileSync('docker', ['inspect', '--format', '{{.State.Pid}}', name], { encoding: 'utf8' }).trim());

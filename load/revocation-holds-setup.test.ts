@@ -25,6 +25,11 @@ test('SA1 requires a started helper and a post-connect value per target matching
     error => error instanceof SetupAbort && error.message === 'SA1: stall helper did not start: ENOENT');
 });
 
+test('SA1 aborts when all targets agree on a value different from the recorded preflight', async () => {
+  const rows = [readback(16_384), readback(16_384)];
+  await assert.rejects(requireReadbacks(async () => rows, 2, 32_768), SetupAbort);
+});
+
 test('preflight discovers a positive post-connect value shared by all targets', async () => {
   assert.equal(requirePreflight({ kind: 'preflight' }), undefined);
   const rows = [readback(55_555), readback(55_555)];

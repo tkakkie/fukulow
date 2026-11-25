@@ -2,11 +2,7 @@
 import { evidence } from './revocation-holds-evidence.ts';
 import { REPEATS, runId, targetSockets, type PlannedRun } from './revocation-holds-plan.ts';
 import type { HoldsRun } from './revocation-holds-judgment.ts';
-
-export type SessionIdentity = {
-  session: string; commit: string; node: string;
-  hostname: string; platform: string; arch: string; cpus: number; memoryBytes: number; release: string;
-};
+import { sameSessionIdentity, type SessionIdentity } from './revocation-holds-provenance.ts';
 
 export const PREFLIGHT_VOLUMES = [20, 40, 60] as const;
 const ACCEPTANCE_VOLUME = 60;
@@ -49,7 +45,7 @@ export function preflightResult(identity: SessionIdentity, runs: readonly Prefli
     runs.filter(row => row?.id === trial.id && row.volume === trial.volume && row.repeat === trial.run.repeat).length === 1);
   const acceptance = runs.filter(row => row.volume === ACCEPTANCE_VOLUME);
   const readback = acceptance[0]?.readback;
-  const passed = complete && runs.length === PREFLIGHT_VOLUMES.length * REPEATS && acceptance.length === REPEATS &&
+  const passed = identity.gitClean === true && complete && runs.length === PREFLIGHT_VOLUMES.length * REPEATS && acceptance.length === REPEATS &&
     typeof readback === 'number' && Number.isSafeInteger(readback) && readback > 0 &&
     acceptance.every(row => row.passed === true && row.snapshotRecords === SNAPSHOT_RECORDS && row.readback === readback);
   return { identity, passed, readback: passed ? readback : null, runs };
@@ -58,9 +54,8 @@ export function preflightResult(identity: SessionIdentity, runs: readonly Prefli
 export function preflightReadback(value: unknown, current: SessionIdentity): number | undefined {
   const result = value as Partial<ReturnType<typeof preflightResult>> | null;
   const identity = result?.identity;
-  if (!current.session || !identity || result.passed !== true || !Array.isArray(result.runs) || result.runs.some(row => !row)) return;
-  const keys = ['session', 'commit', 'node', 'hostname', 'platform', 'arch', 'cpus', 'memoryBytes', 'release'] as const;
-  if (keys.some(key => identity[key] !== current[key])) return;
+  if (!identity || result.passed !== true || !Array.isArray(result.runs) || result.runs.some(row => !row)) return;
+  if (!sameSessionIdentity(identity, current)) return;
   const verified = preflightResult(current, result.runs);
   if (verified.passed && verified.readback === result.readback) return verified.readback ?? undefined;
 }

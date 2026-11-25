@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { cpuList, parseCpuList } from '../../harness-core/cpusets.ts';
+import { containerCpuArgs, postgresServerContainer, postgresTaskset } from '../../harness-core/frequency-container-args.ts';
 import { cpus796, measurementSlice, sets796 } from '../../harness-core/frequency-layout.ts';
 import { workloadCgroup } from './frequency-housekeeping.ts';
 
@@ -7,16 +8,17 @@ import { workloadCgroup } from './frequency-housekeeping.ts';
 // Only the client container joins the server's private network namespace.
 export const probeSocket = '@/fukulow796';
 export const probeImage = 'postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42';
-export const containerCpuArgs = (set: 'server' | 'client') =>
-  ['--cgroup-parent', measurementSlice, '--cpuset-cpus', cpuList(sets796[set])];
 
-export const serverImageArgs = (cpus?: number[]) => cpus
-  ? ['--entrypoint', 'taskset', probeImage, '-c', cpuList(cpus), 'docker-entrypoint.sh', 'postgres'] : [probeImage];
+export function serverImageArgs(cpus?: number[]) {
+  if (!cpus) return [probeImage];
+  const { options, command } = postgresTaskset(cpus);
+  return [...options, probeImage, ...command];
+}
 
-export const frequencyServerArgs = () => [
-  ...containerCpuArgs('server'), ...serverImageArgs(sets796.server),
-  '-c', `unix_socket_directories=/var/run/postgresql,${probeSocket}`,
-];
+export function frequencyServerArgs() {
+  const { options, command } = postgresServerContainer();
+  return [...options, probeImage, ...command, '-c', `unix_socket_directories=/var/run/postgresql,${probeSocket}`];
+}
 
 export const frequencyClientArgs = (server: string, options: string[] = []) => [
   '--network', `container:${server}`, '-e', `PGHOST=${probeSocket}`, ...options,

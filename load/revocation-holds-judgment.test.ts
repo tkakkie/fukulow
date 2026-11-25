@@ -636,7 +636,7 @@ test('V6 a floor-INVALID attempt evaluates accessible gates and blocks PASS perm
   const results = [attempt, ...passes];
   for (const duration of ['short', 'long'] as const) {
     assert.equal(verdictByCell(passes)[`H512/${duration}`], 'PASS');
-    assert.equal(verdictByCell(results)[`H512/${duration}`], 'NOT EVALUATED');
+    assert.equal(verdictByCell(results)[`H512/${duration}`], duration === 'short' ? 'NOT EVALUATED' : 'PASS');
     assert.equal(verdictByCell([{ ...replacement, duration, verdict: 'FAIL' }, ...results])[`H512/${duration}`], 'FAIL');
   }
   assert.deepEqual(passBarEvidence(results), [{ id: attempt.id, cell: 'H512', duration: 'short', gates: ['1 bystander sockets closed during the run'] }]);
@@ -646,6 +646,15 @@ test('V6 a floor-INVALID attempt evaluates accessible gates and blocks PASS perm
   const partial = judgeHolds(run);
   assert.ok(partial.missingGateInputs.some(input => input.startsWith('hold residual: missing input:')));
   assert.deepEqual(partial.independentFailures, ['2 holds retired by timeout']);
+});
+
+test('V6 a floor-INVALID short fault leaves three valid long passes eligible for PASS', () => {
+  const short = { kind: 'fault', cell: 'H512', duration: 'short', verdict: 'INVALID', floorInvalid: true,
+    independentFailures: ['1 bystander sockets closed during the run'] } satisfies Parameters<typeof verdictByCell>[0][number];
+  const long = { kind: 'fault', cell: 'H512', duration: 'long', verdict: 'PASS' } as const;
+  const control = { kind: 'control', cell: 'H512', verdict: 'CONTROL' } as const;
+  const verdicts = verdictByCell([short, long, long, long, control]);
+  assert.equal(verdicts['H512/long'], 'PASS');
 });
 
 test('V6 each independent gate applies to both a valid and an INVALID control', () => {

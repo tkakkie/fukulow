@@ -1,15 +1,18 @@
 // Installs or removes the #796 boot setup (#996) under a filesystem root; the maintainer runs it once with sudo.
-// Usage: sudo "$(command -v node)" load/harness-core/boot-796.ts install|uninstall
+// Usage: sudo "$(command -v node)" load/harness-core/boot-796.ts install|uninstall [--measurement-user USER]
 //        node load/harness-core/boot-796.ts check   (unprivileged; exit 0 when installed and current)
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
+import { parseArgs } from 'node:util';
 import {
-  defaultTargetLink, grubTarget, hostFiles, hostService, irqbalanceLink, layoutProblems, multiUserTarget, sourceDir, stateFile, unitDir, wantsLink,
+  defaultTargetLink, grubTarget, hostFiles, hostService, irqbalanceLink, layoutProblems, multiUserTarget, polkitDir,
+  scopeRule, scopeRuleContent, sourceDir, stateFile, unitDir, wantsLink,
 } from './boot-796-files.ts';
 
 export type Run = (program: string, args: string[]) => void;
-type Options = { source?: string; run?: Run; dryRun?: boolean };
+type Options = { source?: string; run?: Run; dryRun?: boolean; measurementUser?: string };
 // What install found before its first change, so uninstall can put it back.
 type State = { version: 1; defaultTarget: string | null; irqbalanceMasked: boolean };
 type Reload = { daemonReload: boolean; updateGrub: boolean };
@@ -85,9 +88,10 @@ function reload(root: string, run: Run, changed: string[]) {
 }
 
 // Returns the paths it changed (or would change, with dryRun). A second run returns none.
-export function installBootSetup(root: string, { source = sourceDir, run = realRun, dryRun = false }: Options = {}) {
+export function installBootSetup(root: string, { source = sourceDir, run = realRun, dryRun = false, measurementUser = userInfo().username }: Options = {}) {
   const problems = layoutProblems(name => readFileSync(join(source, name), 'utf8'));
   if (problems.length) throw new Error(`boot-796 files disagree with the #796 layout: ${problems.join('; ')}`);
+  const rule = Buffer.from(scopeRuleContent(readFileSync(join(source, scopeRule), 'utf8'), measurementUser));
   if (!existsSync(join(root, multiUserTarget))) throw new Error(`${multiUserTarget} is missing`);
   const irqbalance = found(join(root, irqbalanceLink));
   if (irqbalance.kind !== 'none' && irqbalance.to !== '/dev/null') throw new Error(`/${irqbalanceLink} is not a mask; resolve it by hand first`);
@@ -105,7 +109,7 @@ export function installBootSetup(root: string, { source = sourceDir, run = realR
     change(stateFile, () => writeAtomic(join(root, stateFile), `${JSON.stringify(previous, null, 2)}\n`, 0o644));
   }
   for (const file of hostFiles) {
-    const content = readFileSync(join(source, file.source));
+    const content = file.source === scopeRule ? rule : readFileSync(join(source, file.source));
     const path = join(root, file.target);
     if (!sameFile(path, content, file.mode)) change(file.target, () => writeAtomic(path, content, file.mode));
   }
@@ -150,7 +154,7 @@ export function uninstallBootSetup(root: string, { run = realRun, dryRun = false
   unlinkSync(join(root, stateFile));
   // Only directories install creates (drop-in, libexec, state), and only when empty.
   const owned = new Set([...hostFiles.map(file => dirname(file.target)), dirname(stateFile)]);
-  for (const directory of [...owned].filter(d => d !== unitDir && d !== dirname(grubTarget))) {
+  for (const directory of [...owned].filter(d => d !== unitDir && d !== dirname(grubTarget) && d !== polkitDir)) {
     try { rmdirSync(join(root, directory)); }
     catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
   }
@@ -159,10 +163,17 @@ export function uninstallBootSetup(root: string, { run = realRun, dryRun = false
 
 if (import.meta.main) {
   const [command, ...rest] = process.argv.slice(2);
-  const rootAt = rest.indexOf('--root');
-  const root = rootAt >= 0 ? rest[rootAt + 1] : '/';
-  if (!['install', 'uninstall', 'check'].includes(command) || (rootAt >= 0 && !root) || rest.length !== (rootAt >= 0 ? 2 : 0)) {
-    console.error('usage: boot-796.ts install|uninstall|check [--root DIR]');
+  let root: string;
+  let measurementUser: string | undefined;
+  try {
+    const { values } = parseArgs({ args: rest, options: {
+      root: { type: 'string', default: '/' }, 'measurement-user': { type: 'string' },
+    } });
+    root = values.root;
+    measurementUser = values['measurement-user'] ?? process.env.SUDO_USER;
+    if (!['install', 'uninstall', 'check'].includes(command) || !root || measurementUser === '') throw new Error();
+  } catch {
+    console.error('usage: boot-796.ts install|uninstall|check [--root DIR] [--measurement-user USER]');
     process.exit(2);
   }
   if (command !== 'check' && root === '/' && process.getuid?.() !== 0) {
@@ -171,7 +182,8 @@ if (import.meta.main) {
   }
   // A staging root never touches the live host's systemd or GRUB.
   const run = root === '/' ? realRun : noRun;
-  const changed = command === 'uninstall' ? uninstallBootSetup(root, { run }) : installBootSetup(root, { run, dryRun: command === 'check' });
+  const changed = command === 'uninstall' ? uninstallBootSetup(root, { run })
+    : installBootSetup(root, { run, dryRun: command === 'check', measurementUser });
   console.log(JSON.stringify({ command, changed }, null, 2));
   if (command === 'check' && changed.length) process.exitCode = 1;
   else if (command !== 'check' && changed.length) console.error('reboot to apply: sudo systemctl reboot');

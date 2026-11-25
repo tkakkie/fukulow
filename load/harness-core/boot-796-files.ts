@@ -8,6 +8,9 @@ export const unitDir = 'etc/systemd/system';
 export const hostService = 'fukulow796-host.service';
 export const libexecDir = 'usr/local/libexec/fukulow796';
 export const grubTarget = 'etc/default/grub.d/fukulow-796.cfg';
+// Ubuntu's local rules directory is restricted. The packaged rules directory supports unprivileged check.
+export const polkitDir = 'usr/share/polkit-1/rules.d';
+export const scopeRule = '49-fukulow668-scopes.rules';
 export const stateFile = 'etc/fukulow-796/install-state.json';
 export const multiUserTarget = '/usr/lib/systemd/system/multi-user.target';
 export const wantsLink = `${unitDir}/multi-user.target.wants/${hostService}`;
@@ -34,7 +37,15 @@ export const hostFiles: HostFile[] = [
   { source: 'frequency.sh', target: `${libexecDir}/frequency.sh`, mode: 0o755 },
   { source: 'affinity.sh', target: `${libexecDir}/affinity.sh`, mode: 0o755 },
   { source: 'grub.cfg', target: grubTarget, mode: 0o644 },
+  { source: scopeRule, target: `${polkitDir}/${scopeRule}`, mode: 0o644 },
 ];
+
+export function scopeRuleContent(template: string, measurementUser: string): string {
+  if (!measurementUser.trim() || !template.includes('"MEASUREMENT_USER"')) {
+    throw new Error(`${scopeRule}: a measurement user and its template placeholder are required`);
+  }
+  return template.replace('"MEASUREMENT_USER"', () => JSON.stringify(measurementUser));
+}
 
 // The #796 queue's requireHost and the Control's restore baseline (README "#796 frequency validity v3").
 export const frequency = { profile: 'performance', governor: 'performance', boost: '0', max_khz: '2000000' };

@@ -1,20 +1,23 @@
 // SA1/SA2 are evaluated before the baseline, while there is no run to judge.
-import { preflightReadback, type SessionIdentity } from './revocation-holds-preflight.ts';
+import { preflightReadback } from './revocation-holds-preflight.ts';
+import { loadLedgerPreflight } from './revocation-holds-preflight-ledger.ts';
+import type { SessionIdentity } from './revocation-holds-provenance.ts';
 import type { Readback } from './revocation-holds-native-stall.ts';
 
 export class SetupAbort extends Error {}
 
 export type Setup =
   | { kind: 'preflight' }
-  | { kind: 'measured'; identity: SessionIdentity; loadPreflight: () => unknown };
+  | { kind: 'measured'; identity: SessionIdentity; ledger: string; preflightFile?: string };
 
 export function requirePreflight(setup: Setup): number | undefined {
   if (setup.kind === 'preflight') return;
   try {
-    const readback = preflightReadback(setup.loadPreflight(), setup.identity);
-    if (readback !== undefined) return readback;
+    const { identity, ledger, preflightFile } = setup;
+    const readback = preflightFile && preflightReadback(loadLedgerPreflight(ledger, preflightFile, identity), identity);
+    if (typeof readback === 'number') return readback;
   } catch { /* An absent or unreadable result cannot authorize a run. */ }
-  throw new SetupAbort('SA2: a passing preflight from this host, commit, Node version and session is required');
+  throw new SetupAbort('SA2: the latest preflight for this host and session must pass and match this boot, checkout, binaries and Node version');
 }
 
 export async function startStall<T>(start: () => Promise<T>): Promise<T> {

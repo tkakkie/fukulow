@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { STALL_DEFAULT } from './revocation-holds-plan.ts';
 import { checkPlacement } from './revocation-holds-placement.ts';
+import { preflightIdentity } from './revocation-holds-preflight-fixture.ts';
 import { measure } from './revocation-holds-run.ts';
 import { SetupAbort } from './revocation-holds-setup.ts';
 
@@ -37,12 +38,8 @@ test('a database startup error retains its original error type', async t => {
 
 test('measure aborts on missing SA2 before provisioning or producing a run', async t => {
   const output = withoutDocker(t);
-  const identity = {
-    hostname: 'test', platform: 'linux', arch: 'x64', cpus: 16, memoryBytes: 1,
-    release: 'test', node: 'v26.13.1', commit: 'test', session: 'test',
-  };
   await assert.rejects(measure({
-    ...context(output), setup: { kind: 'measured', identity, loadPreflight: () => undefined },
+    ...context(output), setup: { kind: 'measured', identity: preflightIdentity, ledger: join(output, 'missing.ndjson') },
   }, slot), { name: 'Error', message: /^SA2:/ });
   assert.equal(existsSync(join(output, 'H512-short-r1', 'run.json')), false);
 });

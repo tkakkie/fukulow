@@ -1,13 +1,11 @@
 // #668 session entry point. The maintainer approves rehearsal and formal runs separately.
-import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { arch, cpus, hostname, platform, release, totalmem } from 'node:os';
+import { hostname, platform } from 'node:os';
 import { resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { outsideCheckout } from './proxy-target.ts';
 import { THRESHOLDS } from './revocation-burst-judgment.ts';
 import { judgeHolds, passBarEvidence, verdictByCell } from './revocation-holds-judgment.ts';
-import { memoryEntry } from './revocation-holds-memory.ts';
+import { memoryEntry, type RssCorrectionKb } from './revocation-holds-memory.ts';
 import { formalMemoryVerdicts, memoryWithInclusions, type AttemptMemory } from './revocation-holds-memory-inclusions.ts';
 import { noticeCorrectness } from './revocation-holds-notices.ts';
 import { overheadCorrection, overheadPlan, overheadReport, overheadSample } from './revocation-holds-overhead.ts';
@@ -16,8 +14,9 @@ import { CELLS, DURATIONS, parseOptions, planRuns, replacementQueue, runId, setu
 import { cleanup, measure, type Active } from './revocation-holds-run.ts';
 import { SetupAbort, type Setup } from './revocation-holds-setup.ts';
 import { clientScope, placementEnabled } from './revocation-holds-placement.ts';
+import { preflightLedgerPath, recordPreflight } from './revocation-holds-preflight-ledger.ts';
 import { preflightSession } from './revocation-holds-preflight-session.ts';
-import type { SessionIdentity } from './revocation-holds-preflight.ts';
+import { collectSessionIdentity, type SessionIdentity } from './revocation-holds-provenance.ts';
 
 const checkout = resolve(import.meta.dirname, '..');
 const binary = resolve(checkout, 'target/release/fukulow-server');
@@ -27,11 +26,15 @@ if (args.includes('--help')) {
   const node = 'mise exec node@26.13.1 -- node load/revocation-holds.ts';
   console.log([
     'Build the helper with cargo build --release --locked --manifest-path load/harness-core/stall-helper/Cargo.toml.',
-    `Linux launch: ${clientScope().join(' ')} bash -ic 'ulimit -n 65536; exec ${node} "$@"' bash <options>`,
+    'On Linux, the maintainer installs the #796 scope rule once with sudo "$(command -v node)" load/harness-core/boot-796.ts install --measurement-user USER.',
+    'Linux launch as the measurement user',
+    `  ${clientScope('$$').join(' ')} bash -ic 'ulimit -n 65536; exec ${node} "$@"' bash <options>`,
     `macOS local preflight and rehearsal: bash -ic 'ulimit -n 65536; exec ${node} "$@"' bash <options>`,
     'Options for preflight: --out /absolute/new/dir --preflight [--session ID]',
     'Options after preflight: --out /absolute/new/dir --preflight-result /absolute/path/preflight.json [--session ID]',
     '  [--rehearsal | --overhead | --overhead-summary <summary.json>] [--cells ...] [--durations short,long]',
+    'Use a clean checkout and the same server and stall-helper binaries on the same boot.',
+    'Use the same host ledger across stages. The default is revocation-holds-preflights.<hostname>.ndjson beside the output directory. Override with --preflight-ledger /absolute/path.',
     'Use FUKULOW_LAUNCH_SESSION or choose a fresh --session ID for each measurement session.',
   ].join('\n'));
   process.exit(0);
@@ -45,7 +48,7 @@ const value = (name: string) => {
 };
 const preflight = args.includes('--preflight');
 const overhead = args.includes('--overhead');
-const fixedOptions = new Set(['--out', '--session', '--preflight-result']);
+const fixedOptions = new Set(['--out', '--session', '--preflight-result', '--preflight-ledger']);
 if ((preflight || overhead) && args.some(arg => arg.startsWith('--') &&
   !fixedOptions.has(arg) && arg !== (preflight ? '--preflight' : '--overhead'))) {
   throw new Error('Preflight and overhead use fixed Hcap plans');
@@ -60,12 +63,9 @@ const options = parseOptions(overhead ? [...args, '--rehearsal'] : args);
 const mode = preflight ? 'preflight' : overhead ? 'overhead' : options.rehearsal ? 'rehearsal' : 'formal';
 const linuxPlacement = placementEnabled(platform(), mode);
 const output = outsideCheckout(options.out);
+const host = hostname();
+const ledger = outsideCheckout(preflightLedgerPath(output, host, value('--preflight-ledger')));
 if (existsSync(output)) throw new Error('Output directory already exists');
-if (process.version !== 'v26.13.1') throw new Error('Use Node 26.13.1');
-if (!existsSync(binary)) throw new Error('Build the release server first: cargo build --release --locked -p fukulow-server');
-const correctionKb = options.overheadSummary
-  ? overheadCorrection(JSON.parse(readFileSync(options.overheadSummary, 'utf8')))
-  : undefined;
 mkdirSync(output, { recursive: true });
 
 const active: Active = {};
@@ -75,35 +75,36 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => {
   interrupted = true;
   void cleanup(active).then(() => process.exit(130));
 });
-const identity: SessionIdentity = {
-  session, node: process.version, hostname: hostname(), platform: platform(), arch: arch(), release: release(), cpus: cpus().length, memoryBytes: totalmem(),
-  commit: (await promisify(execFile)('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim(),
+const readIdentity = async () => {
+  if (process.version !== 'v26.13.1') throw new Error('Use Node 26.13.1');
+  if (!existsSync(binary)) throw new Error('Build the release server first: cargo build --release --locked -p fukulow-server');
+  const identity = await collectSessionIdentity({ session, checkout, binary, helperBinary });
+  if (interrupted) throw new Error('Measurement interrupted');
+  return identity;
 };
-const environment = {
-  ...identity, mode, linuxPlacement, preflightFile,
+const environmentFor = (identity: SessionIdentity, correctionKb?: RssCorrectionKb) => ({
+  ...identity, mode, linuxPlacement, preflightFile, preflightLedger: ledger,
   cells: CELLS, durations: DURATIONS, timeline: TIMELINE, stall: options.stall, thresholds: THRESHOLDS,
   ...(mode === 'formal' ? { overheadCorrectionKb: correctionKb ?? null } : {}),
-};
-const setup: Setup = preflight ? { kind: 'preflight' } : {
-  kind: 'measured', identity, loadPreflight: () => preflightFile && JSON.parse(readFileSync(preflightFile, 'utf8')),
-};
+});
 const save = (name: string, value: unknown) => writeFileSync(resolve(output, name), JSON.stringify(value, null, 2));
-save('environment.json', environment);
-const context = { binary, helperBinary, output, stall: environment.stall, active, interrupted: () => interrupted, setup, linuxPlacement };
+const contextFor = (setup: Setup) => ({
+  binary, helperBinary, output, stall: options.stall, active, interrupted: () => interrupted, setup, linuxPlacement,
+});
 const runAttempt: typeof measure = async (...args) => {
   try { return await measure(...args); }
   catch (error) { await cleanup(active); throw error; }
 };
 
-try {
-  if (preflight) {
-    const result = await preflightSession(identity, (trial, id) => {
-      console.log(`#668 preflight ${id}`);
-      return runAttempt({ ...context, preflightVolume: trial.volume }, trial.run, id);
-    }, result => save('preflight.json', result));
-    console.log(`#668 preflight ${result.passed ? 'passed' : 'failed'}`);
-    if (!result.passed) process.exitCode = 1;
-  } else if (overhead) {
+async function runLaterStage() {
+  const identity = await readIdentity();
+  const correctionKb = options.overheadSummary
+    ? overheadCorrection(JSON.parse(readFileSync(options.overheadSummary, 'utf8')))
+    : undefined;
+  const environment = environmentFor(identity, correctionKb);
+  save('environment.json', environment);
+  const context = contextFor({ kind: 'measured', identity, ledger, preflightFile });
+  if (overhead) {
     const samples: ReturnType<typeof overheadSample>[] = [];
     const errors: { id: string; message: string }[] = [];
     const setupAborts: typeof errors = [];
@@ -182,6 +183,21 @@ try {
       if (stopped) break;
     }
   }
+}
+
+try {
+  if (preflight) {
+    const result = await recordPreflight(ledger, output, { hostname: host, session }, readIdentity, (identity, saveProgress) => {
+      save('environment.json', environmentFor(identity));
+      const context = contextFor({ kind: 'preflight' });
+      return preflightSession(identity, (trial, id) => {
+        console.log(`#668 preflight ${id}`);
+        return runAttempt({ ...context, preflightVolume: trial.volume }, trial.run, id);
+      }, saveProgress);
+    });
+    console.log(`#668 preflight ${result.passed ? 'passed' : 'failed'}`);
+    if (!result.passed) process.exitCode = 1;
+  } else await runLaterStage();
 } finally {
   await cleanup(active);
 }
