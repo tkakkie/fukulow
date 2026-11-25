@@ -1,0 +1,15 @@
+# #796 boot-time host setup; installed by load/harness-core/boot-796.ts (#996).
+# Ordered after the daemons and the power-profiles daemon so their startup cannot undo it.
+[Unit]
+Description=fukulow #796 measurement host setup (frequency, housekeeping affinity)
+Wants=fukulow796.slice
+After=fukulow796.slice power-profiles-daemon.service fukulow-cpu-performance.service containerd.service docker.service tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/fukulow796/frequency.sh
+ExecStart=/usr/local/libexec/fukulow796/affinity.sh
+
+[Install]
+WantedBy=multi-user.target

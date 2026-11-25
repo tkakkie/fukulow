@@ -65,44 +65,21 @@ Build on x86-64 Linux with `cargo build --release --locked --manifest-path load/
 
 Reserve both SMT siblings of core 0 (boot CPU and observed background activity) and core 7 (observed GPU and NVMe IRQs). Each workload gives up one core to make room for background work while keeping equal sets, whole cores and the original even/odd placement. CPU 6 stays measured to check whether moving background work resolves the first-reference STOP on that CPU. Wi-Fi stays up and its IRQ moves when the kernel permits it.
 
-Before the go, the maintainer applies the following on the idle Ubuntu host with the graphical session stopped. Use rootful Docker with the systemd driver on cgroup v2. This setup is #796-only. After any pending frequency restoration, run `sudo systemctl reboot` before any other series. [Ubuntu cpuset setup](https://ubuntu.com/real-time/docs/how-to/isolate-workload-cpusets/) · [Docker cgroup parent](https://docs.docker.com/reference/cli/dockerd/#default-cgroup-parent)
+The #796 host setup applies at boot (#996). Use rootful Docker with the systemd driver on cgroup v2. From a clean checkout of `main`, the maintainer installs it once on the idle Ubuntu host and reboots:
 
 ```bash
-(
-  set -euo pipefail
-  for unit in init.scope system.slice user.slice containerd.service docker.service tailscaled.service; do
-    sudo systemctl set-property --runtime "$unit" AllowedCPUs=0,7,8,15
-  done
-  printf '[Slice]\nAllowedCPUs=1-6,9-14\n' | sudo tee /run/systemd/system/fukulow796.slice
-  sudo systemctl daemon-reload
-  sudo systemctl start fukulow796.slice
-  if systemctl is-active --quiet irqbalance.service; then
-    sudo systemctl stop irqbalance.service
-  fi
-  sudo systemctl mask --runtime irqbalance.service
-  printf '8181\n' | sudo tee /sys/devices/virtual/workqueue/cpumask /proc/irq/default_smp_affinity
-  sudo bash -euc 'for path in /proc/irq/[0-9]*/smp_affinity_list; do
-    if ! mode=$(stat -c %a "$path"); then
-      printf "IRQ affinity mode read failed: %s\n" "$path" >&2
-      continue
-    fi
-    if (( (8#$mode & 0200) != 0 )); then
-      printf "0,7,8,15\n" > "$path" || printf "IRQ affinity write failed: %s\n" "$path" >&2
-    fi
-  done
-  children=$(cat /proc/2/task/2/children)
-  for tid in 2 $children; do
-    if ! result=$(LC_ALL=C taskset -pc 0,7,8,15 "$tid" 2>&1 >/dev/null); then
-      case "$result" in
-        *": Invalid argument") : ;;
-        *) printf "%s\n" "$result" >&2; test ! -d "/proc/$tid" ;;
-      esac
-    fi
-  done'
-)
+sudo "$(command -v node)" load/harness-core/boot-796.ts install
+sudo systemctl reboot
 ```
 
-Investigate each failed IRQ write. If a writable IRQ's configured or effective mask fails the host check, correct its routing or reboot and reapply the setup before proceeding. Per-CPU kworkers, local timers, work-triggered IPIs, kernel-managed IRQs and threaded NAPI can still run on measured CPUs. Kthreads created after setup fall outside the kthreadd pin, so only the readbacks can detect new movable kthreads outside housekeeping. The report requires both housekeeping readbacks (`frequency-host-affinity.json` before calibration and `frequency-host-affinity-after.json` after container cleanup) and `frequency-container-cpusets.json`. [Linux IRQ interface](https://www.kernel.org/doc/html/latest/core-api/irq/irq-affinity.html) · [Managed IRQs](https://www.kernel.org/doc/html/latest/core-api/irq/managed_irq.html)
+`boot-796.ts` installs the versioned files in `boot-796/` and refuses them if they disagree with `frequency-layout.ts`:
+- `fukulow796.slice` (`AllowedCPUs=1-6,9-14`), and housekeeping `AllowedCPUs=0,7,8,15` drop-ins for `init.scope`, `system.slice`, `user.slice`, `containerd.service`, `docker.service` and `tailscaled.service`;
+- `fukulow796-host.service` (oneshot, enabled, after the daemons, `power-profiles-daemon` and `fukulow-cpu-performance`), which starts the slice and runs `frequency.sh` (platform profile `performance`, boost 0 globally and per policy, governor `performance`, every `scaling_max_freq` 2000000) and `affinity.sh` (workqueue and default IRQ mask `8181`, every writable IRQ to `0,7,8,15`, kthreadd and its children pinned to housekeeping);
+- an `irqbalance.service` mask, `multi-user.target` as the default target (no graphical session) and `/etc/default/grub.d/fukulow-796.cfg` with `irqaffinity=0,7,8,15`, so IRQs that never fire (IRQ 27, AMD-Vi) boot on housekeeping; install runs `update-grub`.
+
+Install records the previous default target and irqbalance mask in `/etc/fukulow-796/install-state.json`. A second install changes nothing. The scoped sudoers entry below stays separate. After each boot, verify as the measurement user: `node load/harness-core/boot-796.ts check` exits 0, `systemctl is-active fukulow796-host.service` prints `active`, and `journalctl -b -u fukulow796-host.service` shows no failed IRQ write. Then run the pre-go checks below. This setup is #796-only: before any other series, after any pending frequency restoration, run `sudo "$(command -v node)" load/harness-core/boot-796.ts uninstall` and `sudo systemctl reboot`. [Ubuntu cpuset setup](https://ubuntu.com/real-time/docs/how-to/isolate-workload-cpusets/) · [Docker cgroup parent](https://docs.docker.com/reference/cli/dockerd/#default-cgroup-parent)
+
+Investigate each failed IRQ write. If a writable IRQ's configured or effective mask fails the host check, correct its routing, or run `sudo systemctl restart fukulow796-host.service` on the idle host, before proceeding. Per-CPU kworkers, local timers, work-triggered IPIs, kernel-managed IRQs and threaded NAPI can still run on measured CPUs. Kthreads created after the boot service fall outside the kthreadd pin, so only the readbacks can detect new movable kthreads outside housekeeping. The report requires both housekeeping readbacks (`frequency-host-affinity.json` before calibration and `frequency-host-affinity-after.json` after container cleanup) and `frequency-container-cpusets.json`. [Linux IRQ interface](https://www.kernel.org/doc/html/latest/core-api/irq/irq-affinity.html) · [Managed IRQs](https://www.kernel.org/doc/html/latest/core-api/irq/managed_irq.html)
 
 Use `load/launch.ts --queue FILE` with a new quoted #796 go for each diagnostic stage. Use a single job for each diagnostic, with `thermalSampleSeconds: 5`, `cooldown: {maxTctlC: 50, maxWaitSeconds: 1200}`, `requireHost: {boost: "0", policyBoost: "0", platformProfile: "performance"}`, the L3 `airflow` confirmation and workload label `io.fukulow.probe=519-final`. Run `node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --cpu-sets 'server=2,4,6,10,12,14;client=1,3,5,9,11,13;housekeeping=0,7,8,15' --frequency-v3 STAGE --perf-helper BINARY --out NEW_DIRECTORY`. Keep the #519 image and disk preflight. The two containers use separate cpusets under `fukulow796.slice` and share a private network namespace for an abstract Unix socket. Produce a fresh report via `node load/sql-probes/519-unread-counts/stability.ts --stage STAGE --queue FILE --out NEW_REPORT`.
 
