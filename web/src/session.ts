@@ -185,6 +185,7 @@ export function createSession(options: SessionOptions) {
     channelUnavailable: channel => { void sync.channelUnavailable(channel) },
   })
   const searchAnchor = createSearchAnchor(sync, {
+    timeline: ({ channelId }, query, signal) => observe(topicSource.listTimeline(channelId, query, signal)),
     messages: ({ channelId, topicId }, query, signal) => observe(topicId
       ? topicSource.listTopicMessages(channelId, topicId, query, signal)
       : timeline.listMessages(channelId, query, signal)),
