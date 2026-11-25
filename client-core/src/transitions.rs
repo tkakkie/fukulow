@@ -299,24 +299,25 @@ impl Step<'_> {
             } => {
                 if self.core.requests.get(&request).is_some_and(|r| !r.stale())
                     && status == Failure::Status(409)
-                    && error.as_deref() == Some("history_generation_changed")
                 {
-                    self.core.requests.remove(&request);
-                    self.reset_history(None);
-                } else if self.core.requests.get(&request).is_some_and(|r| !r.stale())
-                    && status == Failure::Status(409)
-                    && error.as_deref() == Some("snapshot_expired")
-                {
-                    let r = self.core.requests.remove(&request);
-                    if let Some(Request::History {
-                        channel: id, page, ..
-                    }) = r
-                    {
-                        self.expire_window(id, page != Page::Latest);
+                    match error.as_deref() {
+                        Some("history_generation_changed") => {
+                            self.core.requests.remove(&request);
+                            self.reset_history(None);
+                            return;
+                        }
+                        Some("snapshot_expired") => {
+                            if let Some(Request::History { channel, page, .. }) =
+                                self.core.requests.remove(&request)
+                            {
+                                self.expire_window(channel, page != Page::Latest);
+                            }
+                            return;
+                        }
+                        _ => {}
                     }
-                } else {
-                    self.history_response(request, Err(status));
                 }
+                self.history_response(request, Err(status));
             }
             Input::Ack { request, message } => self.send_response(request, Ok(message)),
             Input::SendFailed {
@@ -427,6 +428,56 @@ impl Step<'_> {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unhandled_history_conflicts_use_the_ordinary_failure_path() {
+        let channel = Uuid::from_u128(1);
+        let self_id = Uuid::from_u128(2);
+        let step = |core: &mut Core, input| {
+            core.step(StepInput {
+                input,
+                refresh_mention_names: false,
+            })
+        };
+
+        for (stale, error) in [
+            (true, Some("history_generation_changed")),
+            (true, Some("snapshot_expired")),
+            (false, Some("unknown_conflict")),
+            (false, None),
+        ] {
+            let mut core = Core::new(self_id);
+            step(&mut core, Input::SessionStart { self_id });
+            step(&mut core, Input::Watch { channel });
+            let request = core.channel(channel).unwrap().latest.unwrap();
+            if stale {
+                step(&mut core, Input::Unwatch { channel });
+            }
+            assert_eq!(core.request(request).unwrap().stale(), stale);
+
+            let result = step(
+                &mut core,
+                Input::HistoryFailed {
+                    request,
+                    status: Failure::Status(409),
+                    error: error.map(str::to_owned),
+                },
+            );
+
+            let case = format!("stale={stale}, error={error:?}");
+            assert!(core.request(request).is_none(), "{case}");
+            assert_eq!(core.session().history_epoch, 0, "{case}");
+            assert!(result.effects.is_empty(), "{case}");
+            let view = core.channel(channel).unwrap();
+            assert_eq!(view.latest, None, "{case}");
+            assert_eq!(view.history_error, !stale, "{case}");
         }
     }
 }
