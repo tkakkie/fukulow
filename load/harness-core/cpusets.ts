@@ -1,7 +1,7 @@
 // Fixed, non-overlapping CPU sets for the PostgreSQL server and the load clients (#796 item 3).
 // Processes are pinned with taskset, which the postgres image ships (util-linux); children inherit it.
 
-export type CpuSets = { server: number[]; client: number[] };
+export type CpuSets = { server: number[]; client: number[]; housekeeping?: number[] };
 
 // Endpoints are bounded before expansion, so an oversized range cannot loop or allocate.
 export function parseCpuList(text: string, limit = 65_536): number[] {
@@ -17,15 +17,23 @@ export function parseCpuList(text: string, limit = 65_536): number[] {
   return [...out].sort((a, b) => a - b);
 }
 
-// "server=0,2,4;client=1,3,5". Both sets are required, disjoint and within the host's CPUs.
+// Server and client are required. All supplied sets are disjoint and within the host's CPUs.
 export function parseCpuSets(text: string, logicalCpus: number): CpuSets {
-  const fields = Object.fromEntries(text.split(';').map(p => p.split('=').map(s => s.trim())));
-  const keys = Object.keys(fields).sort().join(',');
-  if (keys !== 'client,server') throw new Error(`--cpu-sets needs exactly server=... and client=..., got: ${text}`);
-  const sets = { server: parseCpuList(fields.server, logicalCpus), client: parseCpuList(fields.client, logicalCpus) };
-  const overlap = sets.server.filter(c => sets.client.includes(c));
-  if (overlap.length > 0) throw new Error(`CPU sets overlap on ${overlap.join(',')}`);
-  return sets;
+  const fields = new Map<string, number[]>();
+  for (const field of text.split(';')) {
+    const match = /^\s*(server|client|housekeeping)\s*=([^=]+)$/.exec(field);
+    if (!match || fields.has(match[1])) throw new Error(`invalid or repeated --cpu-sets field: ${field}`);
+    fields.set(match[1], parseCpuList(match[2], logicalCpus));
+  }
+  const server = fields.get('server'), client = fields.get('client'), housekeeping = fields.get('housekeeping');
+  if (!server || !client) throw new Error('--cpu-sets needs exactly server=... and client=..., with optional housekeeping=...');
+  const all = [...server, ...client, ...(housekeeping ?? [])];
+  const seen = new Set<number>();
+  for (const cpu of all) {
+    if (seen.has(cpu)) throw new Error(`CPU sets overlap on ${cpu}`);
+    seen.add(cpu);
+  }
+  return { server, client, ...(housekeeping ? { housekeeping } : {}) };
 }
 
 export const cpuList = (cpus: number[]) => cpus.join(',');

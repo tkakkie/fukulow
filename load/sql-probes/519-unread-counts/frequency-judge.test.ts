@@ -1,30 +1,31 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { block, evidence, floors, session, sets796 } from './frequency-fixture.ts';
+import { block, evidence, floors, primaryVoters, session, sets796 } from './frequency-fixture.ts';
 import { judgeFrequency } from './frequency-judge.ts';
 import { below, restore } from './frequency-ratios.ts';
 import { legacyDisagreements } from './frequency-legacy-report.ts';
 
 const judge = (blocks: ReturnType<typeof block>[], host = evidence, min = floors) => judgeFrequency(blocks, sets796, host, session, min);
-const work = (cpu: number) => cpu < 8 ? 2_800_000_000n : 0n;
+const work = (cpu: number) => primaryVoters.includes(cpu) ? 2_800_000_000n : 0n;
 test('worked examples: .92 busy client ratios fail and sparse idle-heavy 1.00 ratios clear', () => {
   const throttled = judge([block(1), block(2, { ratios: cpu => cpu % 2 ? [92n, 100n] : [1n, 1n] })]);
   assert.deepEqual(throttled.reasons, ['block 2: F5 throttled client']);
   const clean = judge([block(1), block(2, { mperf: cpu => cpu === 15 ? 2_000_000n : work(cpu) })]);
   assert.deepEqual(clean.reasons, []);
-  assert.deepEqual(clean.blocks[1].sets.client.common, [1, 3, 5, 7]);
-  assert.deepEqual(clean.blocks[0].sets.server.qualifying, [0, 2, 4, 6]);
+  assert.deepEqual(clean.blocks[1].sets.client.common, [1, 3, 5]);
+  assert.deepEqual(clean.blocks[0].sets.server.qualifying, [2, 4, 6]);
   assert.equal(clean.blocks[1].cpus[15].qualifies, false);
   assert.equal(clean.blocks[0].cpus[15].busyHz, null);
-  assert.deepEqual(legacyDisagreements(['block 2: too few active CPUs to judge frequency, client set 0 of 8 qualify'], clean, [1, 2])
+  assert.deepEqual(legacyDisagreements(['block 2: too few active CPUs to judge frequency, client set 0 of 6 qualify'], clean, [1, 2])
     .map(x => [x.block, x.set]), [[2, 'client']]);
 });
 
 test('F5 uses the even median and compares exactly at and just below 19/20', () => {
-  const ratios = (cpu: number): [bigint, bigint] => cpu < 4 ? [90n, 100n] : [1n, 1n];
-  assert.deepEqual(judge([block(1), block(2, { ratios })]).reasons, []);
-  const altered = (cpu: number) => cpu < 4 ? [2_519_999_999n, 2_800_000_000n] as [bigint, bigint] : ratios(cpu);
-  assert.deepEqual(judge([block(1), block(2, { ratios: altered })]).reasons, ['block 2: F5 throttled server', 'block 2: F5 throttled client']);
+  const ratios = (cpu: number): [bigint, bigint] => cpu < 8 ? [90n, 100n] : [1n, 1n];
+  assert.deepEqual(judge([block(1, { mperf: all }), block(2, { mperf: all, ratios })]).reasons, []);
+  const altered = (cpu: number) => cpu < 8 ? [2_519_999_999n, 2_800_000_000n] as [bigint, bigint] : ratios(cpu);
+  assert.deepEqual(judge([block(1, { mperf: all }), block(2, { mperf: all, ratios: altered })]).reasons,
+    ['block 2: F5 throttled server', 'block 2: F5 throttled client']);
 });
 
 test('F3 qualifies exactly 1,000 ms, omits below-floor CPUs, and rejects negative and inconsistent deltas', () => {
@@ -39,12 +40,15 @@ test('F3 qualifies exactly 1,000 ms, omits below-floor CPUs, and rejects negativ
   }
 });
 
-test('F4 independently needs 4 qualifying CPUs and 4 common CPU IDs', () => {
-  const sparse = judge([block(1), block(2, { mperf: cpu => cpu === 7 ? 1_999_999_999n : work(cpu) })]);
-  assert.ok(sparse.reasons.includes('block 2: F4 client coverage 3/8'));
-  const moved = judge([block(1), block(2, { mperf: cpu => cpu === 7 ? 0n : cpu === 9 ? work(7) : work(cpu) })]);
-  assert.deepEqual(moved.reasons, ['block 2: F4 client common coverage 3/8']);
-  assert.deepEqual(moved.blocks[1].sets.client.qualifying, [1, 3, 5, 9]);
+test('F4 independently needs 3 of 6 qualifying CPUs and 3 block-1 CPUs in each set', () => {
+  assert.deepEqual(judge([block(1), block(2)]).reasons, []);
+  for (const [set, missing, replacement, housekeeping] of [['client', 5, 9, 7], ['server', 6, 10, 0]] as const) {
+    const sparse = judge([block(1), block(2, { mperf: cpu => cpu === missing ? 1_999_999_999n : cpu === housekeeping ? all() : work(cpu) })]);
+    assert.ok(sparse.reasons.includes(`block 2: F4 ${set} coverage 2/6`));
+    const moved = judge([block(1), block(2, { mperf: cpu => cpu === missing ? 0n : cpu === replacement ? all() : work(cpu) })]);
+    assert.deepEqual(moved.reasons, [`block 2: F4 ${set} common coverage 2/6`]);
+    assert.deepEqual(moved.blocks[1].sets[set].qualifying, [...sets796[set].slice(0, 2), replacement]);
+  }
 });
 
 test('F1 binds the helper metadata, true event IDs, full counting time and CPU policy', () => {
@@ -144,7 +148,7 @@ test('F2 bounds perf slack and requires opening before launch and closing after 
   assert.match(judge([close]).reasons.join(), /F2.*boundaries/);
 });
 
-test('F6 rejects even one missing pair when both sets still have their four voters', () => {
+test('F6 rejects even one missing pair when both sets still have their three voters', () => {
   const b = block(1);
   b.counters.close.reads.pop();
   assert.match(judge([b]).reasons.join(), /F6 missing.*CPU pair/);
@@ -168,10 +172,10 @@ function checkBound(stored: NonNullable<typeof floors.server> | null, n: bigint,
   assert.equal(a * d, b * n);
 }
 const all = () => 2_800_000_000n;
-const fiveSlow = (cpu: number): [bigint, bigint] => cpu < 10 ? [94n, 100n] : [1n, 1n];
+const fourSlow = (cpu: number): [bigint, bigint] => cpu <= 10 ? [94n, 100n] : [1n, 1n];
 
-test('F5 eight cohort votes give a throttled median of 0.94', () => {
-  const got = judge([block(1, { mperf: all }), block(2, { mperf: all, ratios: fiveSlow })]);
+test('F5 six cohort votes give a throttled median of 0.94', () => {
+  const got = judge([block(1, { mperf: all }), block(2, { mperf: all, ratios: fourSlow })]);
   const { f5 } = got.blocks[1].sets.client;
   assert.equal(f5?.verdict, 'throttled');
   checkBound(f5!.lower, 94n, 100n);
@@ -181,7 +185,7 @@ test('F5 eight cohort votes give a throttled median of 0.94', () => {
 
 test('F5 two missing slow votes yield [0.94, 1.00] and invalidate the block', () => {
   const got = judge([block(1, { mperf: all }),
-    block(2, { mperf: cpu => cpu === 1 || cpu === 3 ? 0n : all(), ratios: fiveSlow })]);
+    block(2, { mperf: cpu => cpu === 1 || cpu === 3 ? 0n : all(), ratios: fourSlow })]);
   const { f5 } = got.blocks[1].sets.client;
   assert.equal(f5?.verdict, 'invalid');
   checkBound(f5!.lower, 94n, 100n);
@@ -189,17 +193,17 @@ test('F5 two missing slow votes yield [0.94, 1.00] and invalidate the block', ()
   assert.ok(got.reasons.includes('block 2: F5 client median bounds straddle 19/20'));
 });
 
-test('F5 six capped votes in a seven-CPU cohort bound the upper median at 0.86', () => {
-  const got = judge([block(1, { mperf: cpu => cpu === 15 ? 0n : all() }),
-    block(2, { mperf: cpu => cpu === 5 ? 0n : all(), ratios: cpu => cpu === 15 ? [3n, 1n] : [86n, 100n] })]);
+test('F5 four capped votes in a five-CPU cohort bound the upper median at 0.86', () => {
+  const got = judge([block(1, { mperf: cpu => cpu === 13 ? 0n : all() }),
+    block(2, { mperf: cpu => cpu === 5 ? 0n : all(), ratios: cpu => cpu === 13 ? [3n, 1n] : [86n, 100n] })]);
   const { f5, qualifying, common } = got.blocks[1].sets.client;
   assert.equal(f5?.verdict, 'throttled');
   checkBound(f5!.upper, 86n, 100n);
-  assert.ok(qualifying.includes(15));
-  assert.ok(!common.includes(15));
+  assert.ok(qualifying.includes(13));
+  assert.ok(!common.includes(13));
 });
 
-test('F5 seven restored votes in an eight-CPU cohort bound the lower median at 1.00', () => {
+test('F5 five restored votes in a six-CPU cohort bound the lower median at 1.00', () => {
   const got = judge([block(1, { mperf: all }), block(2, { mperf: cpu => cpu === 5 ? 0n : all() })]);
   const { f5 } = got.blocks[1].sets.client;
   assert.equal(f5?.verdict, 'clear');
@@ -231,9 +235,9 @@ test('control qualification and the Hz floors use work before the idle tail', ()
   assert.equal(got.blocks[0].sets.server.floorMet, true);
   assert.equal(got.blocks[0].cpus[8].qualifies, false);
   assert.equal(got.blocks[0].fullSpanCpus[8].qualifies, true);
-  assert.deepEqual(got.blocks[0].sets.server.cohort, [0, 2, 4, 6]);
+  assert.deepEqual(got.blocks[0].sets.server.cohort, [2, 4, 6]);
   const short = block(1, { control: true, mperf: cpu => cpu < 6 ? all() : 0n, idleMperf: all });
-  assert.match(judgeFrequency([short], sets796, evidence, session, null, true).reasons.join(), /F4 server coverage 3\/8/);
+  assert.match(judgeFrequency([short], sets796, evidence, session, null, true).reasons.join(), /F4 server coverage 2\/6/);
 });
 
 test('capped control requires work and stale-after-work throttling with work-only votes', () => {

@@ -14,7 +14,7 @@ Plumbing that every measurement harness needs, so a fix lands once. New harnesse
 - `host-record.ts` (#796): the host record. It covers CPU model, governors, max frequency per CPU, boost, RAM and swap, AC, temperatures, disk, Docker, update jobs, sleep targets and the snap hold.
   - `linuxViolations` lists the unmet Linux measurement conditions.
   - `node load/host-record.ts --out FILE --check` exits 3 on any violation.
-- `cpusets.ts` (#796): `--cpu-sets "server=LIST;client=LIST"`, checked to be disjoint. Processes are pinned with `taskset`, and the pin is read back from `/proc/<pid>/status`.
+- `cpusets.ts` accepts `--cpu-sets 'server=LIST;client=LIST[;housekeeping=LIST]'` with pairwise disjoint sets. #796 v3 requires all three sets and verifies container cpusets and process pins.
 - `provenance.ts` (#866): `harnessHashes(paths)`, the SHA-256 of each listed file. A missing file, an empty or duplicate list, an absolute or escaping path, or a symlink resolving outside the checkout throws.
 - `provenance-coverage.ts` (#866, tests only): `missingFromProvenance(entries, list)` returns the entries and every local file they reach that the list lacks. It follows imports (type-only included) and `new URL('<literal>', import.meta.url)` loads, transitively. Any other `import.meta` form that may name a file (a non-literal URL, `import.meta.dirname`, a directory URL) throws; teach the walker the form or use the literal one. Working-directory reads such as `readFileSync('compose.yml')` are not seen, so those stay listed by hand.
 - `nearest-rank.ts` (#866): `nearestRank(sorted, fraction, outOfRange)` and `nearestRankIndex(length, fraction, outOfRange)` for samples that are not plain numbers (the #515 app rows, sorted by latency with an ID tie-break). Empty input gives `undefined`. `outOfRange` keeps each copy's clamping: `clamp`, `clamp-low`, `clamp-high` or `none`, listed per copy in the source; the default `reject` throws.
@@ -63,13 +63,64 @@ A STOP or a failed job ends the queue. Nothing reruns: a `setup-failure` rerun u
 
 Build on x86-64 Linux with `cargo build --release --locked --manifest-path load/harness-core/perf-helper/Cargo.toml`. For an authorized installation, install the resulting `fukulow-perf-helper` as root-owned and executable only by root and the measurement user's group, under a root-owned directory. Apply only `sudo setcap cap_perfmon=ep <installed-binary>` and verify with `getcap`. Keep `perf_event_paranoid=4`. The launcher and pgbench run without that capability. After the separate permission-check go, run the installed binary with `--check` as the launcher user. It applies F1 to a one-second sample on each CPU. Retain its output and exit status. STOP on a nonzero exit.
 
-Use `load/launch.ts --queue FILE` with a new quoted #796 go for each diagnostic stage. Use a single job for each diagnostic, with `thermalSampleSeconds: 5`, `cooldown: {maxTctlC: 50, maxWaitSeconds: 1200}`, `requireHost: {boost: "0", policyBoost: "0", platformProfile: "performance"}`, the L3 `airflow` confirmation and workload label `io.fukulow.probe=519-final`. The job command is `node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --cpu-sets 'server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15' --frequency-v3 STAGE --perf-helper BINARY --out NEW_DIRECTORY`. Use the installed helper and the existing #519 image and disk preflight. Produce a fresh report via `node load/sql-probes/519-unread-counts/stability.ts --stage STAGE --queue FILE --out NEW_REPORT`.
+Reserve both SMT siblings of core 0 (boot CPU and observed background activity) and core 7 (observed GPU and NVMe IRQs). Each workload gives up one core to make room for background work while keeping equal sets, whole cores and the original even/odd placement. CPU 6 stays measured to check whether moving background work resolves the first-reference STOP on that CPU. Wi-Fi stays up and its IRQ moves when the kernel permits it.
 
-- **Control (`control`).** Pass `--permission-check FILE`, a JSON record of the preceding check with `report` (absolute path to its stdout JSON), `sha256`, `exit: 0`, and the check go's `quote` and `date`. The report must match the control helper and boot. Run the block-1 arm three times on fresh clones. Start phase 1 cool, then cap all 16 policies to 1.7 GHz for phase 2's warm and measured workloads, then verify restoration before phase 3. Allow only the control's fixed sysfs writes through noninteractive `sudo` with `/usr/bin/tee`, plus one `/usr/bin/turbostat` command-mode observation across phase 2. Scope those permissions to the exact control arguments. No elevated launcher or pgbench. An unconfirmed restoration leaves `frequency-restore-pending.json` and holds HOST-BUSY for maintainer recovery. Keep the two boundary sweeps plus a control-only sweep at the start of the fixed 10 s idle tail. Before each fresh clone (three in the control, one in Rehearsal 2 and formal), inside that block's policy scope and outside turbostat, run CHECKPOINT, a 30 s settle and a 120 s idle reference; STOP if 4 or more CPUs reach F (1,000 ms) or any CPU reaches 500 ms, normalized to exactly 120 s. Block 1 rechecks the cool baseline first. F4 needs 4 of 8 qualifying CPUs and 4 block-1 cohort CPUs; F5 ranks missing votes at both extremes and is INVALID when the bounds straddle 19/20. The in-run housekeeping breakdown (C0 minus cgroup usage, IRQ/softirq) is diagnostic only: no subtraction and no verdict (#796 option A).
+Before the go, the maintainer applies the following on the idle Ubuntu host with the graphical session stopped. Use rootful Docker with the systemd driver on cgroup v2. This setup is #796-only. After any pending frequency restoration, run `sudo systemctl reboot` before any other series. [Ubuntu cpuset setup](https://ubuntu.com/real-time/docs/how-to/isolate-workload-cpusets/) · [Docker cgroup parent](https://docs.docker.com/reference/cli/dockerd/#default-cgroup-parent)
+
+```bash
+(
+  set -euo pipefail
+  for unit in init.scope system.slice user.slice containerd.service docker.service tailscaled.service; do
+    sudo systemctl set-property --runtime "$unit" AllowedCPUs=0,7,8,15
+  done
+  printf '[Slice]\nAllowedCPUs=1-6,9-14\n' | sudo tee /run/systemd/system/fukulow796.slice
+  sudo systemctl daemon-reload
+  sudo systemctl start fukulow796.slice
+  if systemctl is-active --quiet irqbalance.service; then
+    sudo systemctl stop irqbalance.service
+  fi
+  sudo systemctl mask --runtime irqbalance.service
+  printf '8181\n' | sudo tee /sys/devices/virtual/workqueue/cpumask /proc/irq/default_smp_affinity
+  sudo bash -euc 'for path in /proc/irq/[0-9]*/smp_affinity_list; do
+    if ! mode=$(stat -c %a "$path"); then
+      printf "IRQ affinity mode read failed: %s\n" "$path" >&2
+      continue
+    fi
+    if (( (8#$mode & 0200) != 0 )); then
+      printf "0,7,8,15\n" > "$path" || printf "IRQ affinity write failed: %s\n" "$path" >&2
+    fi
+  done
+  children=$(cat /proc/2/task/2/children)
+  for tid in 2 $children; do
+    if ! result=$(LC_ALL=C taskset -pc 0,7,8,15 "$tid" 2>&1 >/dev/null); then
+      case "$result" in
+        *": Invalid argument") : ;;
+        *) printf "%s\n" "$result" >&2; test ! -d "/proc/$tid" ;;
+      esac
+    fi
+  done'
+)
+```
+
+Investigate each failed IRQ write. If a writable IRQ's configured or effective mask fails the host check, correct its routing or reboot and reapply the setup before proceeding. Per-CPU kworkers, local timers, work-triggered IPIs, kernel-managed IRQs and threaded NAPI can still run on measured CPUs. Kthreads created after setup fall outside the kthreadd pin, so only the readbacks can detect new movable kthreads outside housekeeping. The report requires both housekeeping readbacks (`frequency-host-affinity.json` before calibration and `frequency-host-affinity-after.json` after container cleanup) and `frequency-container-cpusets.json`. [Linux IRQ interface](https://www.kernel.org/doc/html/latest/core-api/irq/irq-affinity.html) · [Managed IRQs](https://www.kernel.org/doc/html/latest/core-api/irq/managed_irq.html)
+
+Use `load/launch.ts --queue FILE` with a new quoted #796 go for each diagnostic stage. Use a single job for each diagnostic, with `thermalSampleSeconds: 5`, `cooldown: {maxTctlC: 50, maxWaitSeconds: 1200}`, `requireHost: {boost: "0", policyBoost: "0", platformProfile: "performance"}`, the L3 `airflow` confirmation and workload label `io.fukulow.probe=519-final`. Run `node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --cpu-sets 'server=2,4,6,10,12,14;client=1,3,5,9,11,13;housekeeping=0,7,8,15' --frequency-v3 STAGE --perf-helper BINARY --out NEW_DIRECTORY`. Keep the #519 image and disk preflight. The two containers use separate cpusets under `fukulow796.slice` and share a private network namespace for an abstract Unix socket. Produce a fresh report via `node load/sql-probes/519-unread-counts/stability.ts --stage STAGE --queue FILE --out NEW_REPORT`.
+
+- **Control (`control`).** Pass `--permission-check FILE` with `report` (absolute stdout JSON path), `sha256`, `exit: 0`, and the check go's `quote` and `date`. The report must match the helper and boot. Run three fresh clones of the block-1 arm. Start phase 1 cool, cap all 16 policies at 1.7 GHz for phase 2 warmup and measurement, then verify restoration before phase 3. Scope noninteractive sudo to the fixed control writes via `/usr/bin/tee` and the fixed observer command below. Run the launcher and pgbench unprivileged. Unconfirmed restoration leaves `frequency-restore-pending.json` and holds HOST-BUSY. Keep the boundary sweeps and the control sweep at the start of the 10 s tail. Run CHECKPOINT, a 30 s settle and a 120 s idle reference before the clone in each control phase and before block 1 in Rehearsal 2 and formal, inside that block's policy scope and outside turbostat. Recheck a cool baseline for control block 1.
 - **Rehearsal 2 (`rehearsal2`).** After control review, pass `--control-review FILE` to the job and report command. This JSON contains the control report's absolute `report` path, `sha256`, and the review's `quote` and `date`. Only this stage probes and checks the live pgbench and PostgreSQL CPU masks. The six-block report records both judgments, their per-block/set disagreements and v3's two floor results. The legacy replay has no vote in the v3 verdict.
 - **Formal (`formal`).** After Rehearsal 2 review and a separate Go B, the pinned checkout must contain `load/sql-probes/519-unread-counts/frequency-floors.json`. This reviewed artifact has `version: 3`, `control` and `rehearsal2` reviews (each `quote`, `date`, `sha256`), and `floors` (`server` and `client`, each a pair of exact decimal-string integers for the Hz numerator and denominator). Keep the reviewed control report readable at the absolute `control.report` path; the harness verifies its SHA-256, valid control verdict and exact floor proposal before accepting the freeze. Three consecutive six-block runs keep the 5% TPS and 2% WAL/send spreads. Any INVALID run fails the series. The report command accepts newly collected v3 evidence only.
 
-Every job calibrates the invariant TSC per CPU on the current boot. A raw-clock read bracket over 1 ms is unusable. F1 requires perf enabled and running deltas to match the CLOCK_MONOTONIC_RAW span (`rawNs`) within 1 ms. The helper also emits CLOCK_MONOTONIC (`monoNs`) for timing checks. A perf span may exceed the pgbench log span by at most 3 s, with the fixed 10 s tail added for the control only (100 ms tail timing allowance). The control compares its TSC rate and qualifying CPUs' APERF/MPERF ratios to turbostat's `TSC_MHz` and its raw APERF/MPERF deltas. The report flags a discrepancy over 2% for review. The v3 frequency cutoff is exact, with a ratio of 19/20 allowed.
+Freeze the following rules before running. For either measured set the idle reference STOPs at 3 of 6 CPUs reaching F (1,000 ms), or at any measured CPU reaching 500 ms, normalized to 120 s. F4 requires 3 of 6 qualifying CPUs and at least 3 from the block-1 cohort in each set. Both counts preserve the half-set rule. F5 ranks the 3–6 block-1 votes, filling missing votes at the low end and then the high end. Take the middle vote for an odd cohort and the exact mean of both middle votes for an even cohort. A bound whose middle rank is missing is open in that direction. Straddling 19/20 is INVALID, and equality qualifies as clear. Housekeeping CPU readings and C0 attribution remain diagnostic.
+
+Turbostat must briefly migrate across all CPUs for its opening and closing snapshots. Allow exactly the following sudoers command for the measurement user via `visudo`, replacing `MEASUREMENT_USER`. Remove the entry after the control. The scored observer scope runs during the capped measurement and tail. [systemd-run](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html)
+
+```sudoers
+MEASUREMENT_USER ALL=(root) NOPASSWD: /usr/bin/systemd-run --scope --quiet --collect --slice\=-.slice --unit\=fukulow796turbostat.scope --property\=AllowedCPUs\=0-15 --property\=RuntimeMaxSec\=180s -- /usr/bin/turbostat --quiet --show CPU\,TSC_MHz --add msr0xe8\,u64\,cpu\,delta\,APERF --add msr0xe7\,u64\,cpu\,delta\,MPERF -- /usr/bin/cat
+```
+
+Before the Control go, record a passing `sudo visudo -c` with sudo-rs on the prepared host. Then run `node load/sql-probes/519-unread-counts/frequency-host-check.ts > HOST_CHECK.json` as the measurement user on that idle host with the pinned image already available. Require exit 0 and `ok: true`. The check verifies host affinity before launch and after cleanup. It starts both containers, verifies their cpusets and queries PostgreSQL over the abstract socket. Its short `sudo -n` spawn uses the exact observer argv, requires the ready marker and a successful exit, and thus checks that systemd accepts `--slice=-.slice` for a transient scope. Record both checks with their output and exit statuses on #796. The checks are **not evidence**.
+
+Every job calibrates the invariant TSC per CPU on the current boot. A raw-clock read bracket over 1 ms is unusable. F1 requires perf enabled and running deltas to match the CLOCK_MONOTONIC_RAW span (`rawNs`) within 1 ms. The helper also emits CLOCK_MONOTONIC (`monoNs`) for timing checks. A perf span may exceed the pgbench log span by at most 3 s, with the fixed 10 s tail added for the control only (100 ms tail timing allowance). The control compares its TSC rate and qualifying CPUs' APERF/MPERF ratios to turbostat's `TSC_MHz` and its raw APERF/MPERF deltas. The report flags a discrepancy over 2% for review.
 
 ## Run rules (maintainer decisions, 2026-11-21 and 2026-11-22, #769)
 

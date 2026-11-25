@@ -75,7 +75,15 @@ test('host readings are parsed from their sources', () => {
 test('CPU sets are parsed, disjoint and on the host', () => {
   assert.deepEqual(parseCpuList('0,2,4-6'), [0, 2, 4, 5, 6]);
   assert.deepEqual(parseCpuSets('server=0,2;client=1,3', 4), { server: [0, 2], client: [1, 3] });
+  assert.deepEqual(parseCpuSets('housekeeping=0,7-8,15;client=1,3,5,9,11,13;server=2,4,6,10,12,14', 16),
+    { server: [2, 4, 6, 10, 12, 14], client: [1, 3, 5, 9, 11, 13], housekeeping: [0, 7, 8, 15] });
   assert.throws(() => parseCpuSets('server=0,1;client=1,3', 4), /overlap on 1/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=0,2', 4), /overlap on 0/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=1,2', 4), /overlap on 1/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=4', 4), /CPU 4 does not exist/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=', 4), /invalid.*field/);
+  assert.throws(() => parseCpuSets('server=0;client=1;housekeeping=2;housekeeping=3', 4), /repeated/);
+  assert.throws(() => parseCpuSets('server=0;client=1=2', 4), /invalid.*field/);
   assert.throws(() => parseCpuSets('server=0;client=4', 4), /CPU 4 does not exist/);
   assert.throws(() => parseCpuSets('server=0', 4), /exactly server/);
   assert.throws(() => parseCpuList('0,x'), /invalid CPU list/);

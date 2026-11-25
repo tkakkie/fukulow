@@ -33,14 +33,20 @@ done
 `;
 
 export type Affinity = { kind: string; pid: number; cpus: number[] }[];
-export async function readAffinity(container: string, prefix: string, db: string, signal: AbortSignal): Promise<Affinity> {
+export async function readAffinity(server: string, client: string, prefix: string, db: string, signal: AbortSignal): Promise<Affinity> {
   await wait(2000, undefined, { signal });
-  const { stdout } = await exec('docker', ['exec', container,
-    ...pinned(sets796.client, ['sh', '-c', inspect, 'inspect', `--log-prefix=${prefix}`, db])], { signal, timeout: 5000 });
-  const lines = stdout.trim().split('\n');
-  return lines.flatMap((line, i) => {
-    const m = /^(client|thread|backend) (\d+)$/.exec(line);
-    return m ? [{ kind: m[1], pid: Number(m[2]), cpus: allowedCpus(lines[i + 1] ?? '') }] : [];
+  const probe = (container: string, cpus: number[], logArg: string, database: string) =>
+    exec('docker', ['exec', container, ...pinned(cpus, ['sh', '-c', inspect, 'inspect', logArg, database])], { signal, timeout: 5000 });
+  const results = await Promise.all([
+    probe(client, sets796.client, `--log-prefix=${prefix}`, ''),
+    probe(server, sets796.server, '', db),
+  ]);
+  return results.flatMap(({ stdout }) => {
+    const lines = stdout.trim().split('\n');
+    return lines.flatMap((line, i) => {
+      const m = /^(client|thread|backend) (\d+)$/.exec(line);
+      return m ? [{ kind: m[1], pid: Number(m[2]), cpus: allowedCpus(lines[i + 1] ?? '') }] : [];
+    });
   });
 }
 
