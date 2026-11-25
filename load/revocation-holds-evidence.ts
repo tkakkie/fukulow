@@ -104,12 +104,15 @@ export function evidence(run: HoldsRun) {
 
   const lagMs = run.times.resume - (run.times.pass + TIMELINE.resume);
   const s4FinishAfterPassMs = s4 && bounds ? s4.finished + bounds[1] - run.times.pass : undefined;
+  const completeAdmissions = members.size === cell.accounts && [...members].every(([member, registrations]) =>
+    registrations === SOCKETS_PER_ACCOUNT && admissions.filter(a => a.member === member).length === registrations);
   return {
     issues, admissions, held: heldTotal, refused: refusedTotal,
     workerCompletionMarginMs: s1 && bounds ? run.times.resume - (s1.completed + bounds[1]) : undefined,
     s4SpanMs: s4 && s4.finished - s4.started, s1SpanMs: s1 && s1.completed - s1.started,
     s4FinishAfterPassMs,
-    q2AdmissionReview: run.kind === 'fault' && ((s4FinishAfterPassMs ?? -Infinity) > 50 || admissions.some(a => a.marginMs <= 0)),
+    q2AdmissionReview: run.kind === 'fault' && (s4FinishAfterPassMs === undefined || s4FinishAfterPassMs > 50 ||
+      !completeAdmissions || admissions.some(a => a.marginMs <= 0)),
     e7ResumeLagMs: lagMs, q8Over50Ms: lagMs > 50,
   };
 }

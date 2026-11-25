@@ -249,13 +249,12 @@ async function prepare(ctx: Context, run: PlannedRun, dir: string) {
   return { started, fixture, proxies, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass };
 }
 
+/** Reserved for explicit SA1/SA2 failures before the baseline window. */
 export class SetupAbort extends Error {}
 
-export async function measure(ctx: Context, run: PlannedRun): Promise<HoldsRun> {
-  const dir = resolve(ctx.output, runId(run)); mkdirSync(dir);
-  const prepared = await prepare(ctx, run, dir).catch(error => {
-    throw new SetupAbort((error as Error).message, { cause: error });
-  });
+export async function measure(ctx: Context, run: PlannedRun, attemptId = runId(run)): Promise<HoldsRun> {
+  const dir = resolve(ctx.output, attemptId); mkdirSync(dir);
+  const prepared = await prepare(ctx, run, dir);
   const { started, fixture, proxies, sockets, calibrationErrors, calibrate, clockStart, probes, control, pass } = prepared;
   const { relay, log } = started;
   const restoreIndex = restoreAccount(run.cell);

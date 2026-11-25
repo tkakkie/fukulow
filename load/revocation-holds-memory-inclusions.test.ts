@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { memoryWithInclusions, type AttemptMemory } from './revocation-holds-memory-inclusions.ts';
+import { formalMemoryVerdicts, memoryWithInclusions, type AttemptMemory } from './revocation-holds-memory-inclusions.ts';
+import { overheadCorrection } from './revocation-holds-overhead.ts';
 
 function entry(id: string, kind: 'fault' | 'control', kb: number, excluded = false, evidenceOnly = true): AttemptMemory {
   return {
@@ -37,4 +38,46 @@ test('V5 evaluates controls jointly with fault exclusions and never includes flo
   assert.equal(memoryWithInclusions(group)[result].memory.result, 'NOT EVALUATED');
   // Even a later input set with no failing subset cannot erase an observed failure.
   assert.equal(memoryWithInclusions(group, history)[result].memory.result, 'FAIL');
+});
+
+function formalHistory(dKb: number) {
+  return memoryWithInclusions([
+    ...[1, 2, 3].map(i => entry(`f${i}`, 'fault', dKb + 10)),
+    ...[0, 10, 25].map((kb, i) => entry(`c${i + 1}`, 'control', kb)),
+  ]);
+}
+
+const savedScreen = { overhead: { withinBounds: true, rss: { correctionKb: [10, 40] } } };
+
+test('formal memory flags a possible verdict flip using the cell noise and bound', () => {
+  const correction = overheadCorrection(JSON.parse(JSON.stringify(savedScreen)));
+  assert.deepEqual(correction, [10, 40]);
+  const verdicts = formalMemoryVerdicts(formalHistory(58), correction);
+  assert.deepEqual(verdicts[result], { result: 'measured within bound', dKb: 58, nKb: 25, bKb: 1024, overheadInconclusive: true });
+  assert.equal(formalMemoryVerdicts(formalHistory(1010), correction)[result].overheadInconclusive, true);
+});
+
+test('formal memory keeps a clean verdict when the full interval is within thresholds', () => {
+  const verdicts = formalMemoryVerdicts(formalHistory(500), overheadCorrection(savedScreen));
+  assert.deepEqual(verdicts[result], { result: 'measured within bound', dKb: 500, nKb: 25, bKb: 1024, overheadInconclusive: false });
+});
+
+test('formal memory flags a missing or unusable overhead screen as inconclusive', () => {
+  const history = formalHistory(500);
+  for (const summary of [
+    undefined, {}, { overhead: { withinBounds: false, rss: savedScreen.overhead.rss } },
+    { overhead: { withinBounds: true, rss: { correctionKb: [40, 10] } } },
+    { overhead: { withinBounds: true, rss: { correctionKb: [null, 40] } } },
+  ]) {
+    const correction = overheadCorrection(summary);
+    assert.equal(correction, undefined);
+    assert.equal(formalMemoryVerdicts(history, correction)[result].overheadInconclusive, true);
+  }
+});
+
+test('formal memory preserves a sticky FAIL when the correction could change its label', () => {
+  const history = memoryWithInclusions([], formalHistory(1060));
+  const verdicts = formalMemoryVerdicts(history, overheadCorrection(savedScreen));
+  assert.deepEqual(verdicts[result], { result: 'FAIL', dKb: 1060, nKb: 25, bKb: 1024, overheadInconclusive: true });
+  assert.deepEqual(formalMemoryVerdicts(history)[result], verdicts[result]);
 });

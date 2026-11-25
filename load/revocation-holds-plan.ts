@@ -91,27 +91,33 @@ export function planRuns(cells: readonly Cell[], durations: readonly Duration[],
   return runs;
 }
 
-/** Append up to three replacements per shape. Stop after two consecutive setup aborts for a shape. */
+/** Append up to three replacements per shape. Retry a setup abort once in the same slot. */
 export function replacementQueue(initial: PlannedRun[]) {
   const runs = [...initial];
-  const aborts = new Set<string>();
+  let setupAborts = 0;
+  function* attempts() {
+    for (const run of runs) {
+      setupAborts = 0;
+      const id = runId(run);
+      yield { run, id };
+      if (setupAborts === 1) yield { run, id: `${id}-setup-retry` };
+      if (setupAborts === 2) return;
+    }
+  }
   const record = (run: PlannedRun, outcome: 'setup abort' | 'INVALID' | 'PASS' | 'FAIL' | 'CONTROL') => {
-    const key = shape(run);
-    if (outcome === 'setup abort') {
-      if (aborts.has(key)) return false;
-      aborts.add(key);
-    } else aborts.delete(key);
-    if (outcome === 'INVALID' || outcome === 'setup abort') {
+    if (outcome === 'setup abort') return ++setupAborts < 2;
+    if (outcome === 'INVALID') {
+      const key = shape(run);
       const scheduled = runs.filter(r => shape(r) === key).length;
       if (scheduled < 2 * REPEATS) runs.push({ ...run, repeat: scheduled + 1 });
     }
     return true;
   };
-  return { runs, record };
+  return { attempts, record };
 }
 
 // A rehearsal reports counts only. A formal run is the registered 3 repeats with controls.
-export type Options = { out: string; cells: Cell[]; durations: Duration[]; repeats: number; controls: boolean; rehearsal: boolean; stall: Stall };
+export type Options = { out: string; cells: Cell[]; durations: Duration[]; repeats: number; controls: boolean; rehearsal: boolean; stall: Stall; overheadSummary?: string };
 export function parseOptions(args: readonly string[]): Options {
   const option = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
   const out = option('--out');
@@ -125,13 +131,19 @@ export function parseOptions(args: readonly string[]): Options {
   if (!Number.isInteger(repeats) || repeats < 1) throw new Error('--repeats must be a positive integer');
   const controls = option('--controls') ?? 'on';
   if (controls !== 'on' && controls !== 'off') throw new Error('--controls accepts on,off');
+  const rehearsal = args.includes('--rehearsal');
+  if (!rehearsal && args.some(arg => arg.startsWith('--stall-'))) throw new Error('--stall-* options require --rehearsal');
+  const overheadSummary = option('--overhead-summary');
+  if (args.includes('--overhead-summary') && (rehearsal || !overheadSummary || overheadSummary.startsWith('--'))) {
+    throw new Error('--overhead-summary requires a saved overhead summary file and a formal run');
+  }
   const number = (name: string, fallback: number) => Number(option(name) ?? fallback);
   const stall = checkStall({
     senders: number('--stall-senders', STALL_DEFAULT.senders),
     messages: number('--stall-messages', STALL_DEFAULT.messages),
     chars: number('--stall-chars', STALL_DEFAULT.chars),
   });
-  const rehearsal = args.includes('--rehearsal');
   if (!rehearsal && (repeats !== REPEATS || controls !== 'on')) throw new Error(`a formal run needs --repeats ${REPEATS} and --controls on; use --rehearsal for anything else`);
-  return { out, cells: list('--cells', CELL_NAMES), durations: list('--durations', ['short', 'long'] as const), repeats, controls: controls === 'on', rehearsal, stall };
+  return { out, cells: list('--cells', CELL_NAMES), durations: list('--durations', ['short', 'long'] as const), repeats, controls: controls === 'on', rehearsal, stall,
+    ...(overheadSummary ? { overheadSummary } : {}) };
 }

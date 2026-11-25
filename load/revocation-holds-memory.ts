@@ -23,6 +23,15 @@ export function rssDeltaKb(run: Pick<HoldsRun, 'rss' | 'times'>, recovery: numbe
 }
 
 export type MemoryResult = { result: 'FAIL' | 'measured within bound' | 'upper bound only (never PASS)' | 'NOT EVALUATED'; dKb?: number; nKb?: number; bKb?: number; upperBoundKb?: number };
+export type RssCorrectionKb = [low: number, high: number];
+
+export function stableMemoryVerdict(result: MemoryResult['result'], [low, high]: [number, number], noise: number, bound: number) {
+  if (result === 'FAIL') return low - noise > bound;
+  if (result === 'measured within bound') return low > noise && high + noise <= bound;
+  const couldMeasure = bound - noise > noise && high > noise && low <= bound - noise;
+  return result === 'upper bound only (never PASS)' && high - noise <= bound && !couldMeasure;
+}
+
 /** D, N and B as pre-registered, over exactly three valid fault runs and three valid controls. */
 export function memoryVerdict(faults: { deltaKb: number; hwm: number }[], controlDeltasKb: number[]): MemoryResult {
   if (faults.length !== REPEATS || controlDeltasKb.length !== REPEATS || [...faults.flatMap(f => [f.deltaKb, f.hwm]), ...controlDeltasKb].some(v => !Number.isFinite(v))) return { result: 'NOT EVALUATED' };

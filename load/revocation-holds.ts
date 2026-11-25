@@ -1,6 +1,6 @@
 // #668 session entry point. The maintainer approves rehearsal and formal runs separately.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { arch, cpus, platform, release, totalmem } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -8,9 +8,9 @@ import { outsideCheckout } from './proxy-target.ts';
 import { THRESHOLDS } from './revocation-burst-judgment.ts';
 import { judgeHolds, verdictByCell } from './revocation-holds-judgment.ts';
 import { memoryEntry } from './revocation-holds-memory.ts';
-import { memoryWithInclusions, type AttemptMemory } from './revocation-holds-memory-inclusions.ts';
+import { formalMemoryVerdicts, memoryWithInclusions, type AttemptMemory } from './revocation-holds-memory-inclusions.ts';
 import { noticeCorrectness } from './revocation-holds-notices.ts';
-import { overheadPlan, overheadReport, overheadSample } from './revocation-holds-overhead.ts';
+import { overheadCorrection, overheadPlan, overheadReport, overheadSample } from './revocation-holds-overhead.ts';
 import { rehearsalCounts } from './revocation-holds-rehearsal.ts';
 import { CELLS, DURATIONS, parseOptions, planRuns, replacementQueue, runId, STALL_DEFAULT, TIMELINE } from './revocation-holds-plan.ts';
 import { cleanup, measure, SetupAbort, type Active } from './revocation-holds-run.ts';
@@ -19,7 +19,7 @@ const checkout = resolve(import.meta.dirname, '..');
 const binary = resolve(checkout, 'target/release/fukulow-server');
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('ulimit -n 65536; node load/revocation-holds.ts --out /absolute/new/dir [--rehearsal | --overhead] [--cells ...] [--durations short,long]');
+  console.log('ulimit -n 65536; node load/revocation-holds.ts --out /absolute/new/dir [--rehearsal | --overhead | --overhead-summary <summary.json>] [--cells ...] [--durations short,long]');
   process.exit(0);
 }
 const overhead = args.includes('--overhead');
@@ -31,6 +31,9 @@ const output = outsideCheckout(options.out);
 if (existsSync(output)) throw new Error('Output directory already exists');
 if (process.version !== 'v26.13.1') throw new Error('Use Node 26.13.1');
 if (!existsSync(binary)) throw new Error('Build the release server first: cargo build --release --locked -p fukulow-server');
+const correctionKb = options.overheadSummary
+  ? overheadCorrection(JSON.parse(readFileSync(options.overheadSummary, 'utf8')))
+  : undefined;
 mkdirSync(output, { recursive: true });
 
 const active: Active = {};
@@ -44,6 +47,7 @@ const environment = {
   node: process.version, platform: platform(), arch: arch(), release: release(), cpus: cpus().length, memoryBytes: totalmem(),
   mode: overhead ? 'overhead' : options.rehearsal ? 'rehearsal' : 'formal',
   cells: CELLS, durations: DURATIONS, timeline: TIMELINE, stall: overhead ? STALL_DEFAULT : options.stall, thresholds: THRESHOLDS,
+  ...(!options.rehearsal ? { overheadCorrectionKb: correctionKb ?? null } : {}),
   commit: (await promisify(execFile)('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim(),
 };
 const save = (name: string, value: unknown) => writeFileSync(resolve(output, name), JSON.stringify(value, null, 2));
@@ -66,19 +70,19 @@ try {
   } else {
     const queue = replacementQueue(planRuns(options.cells, options.durations, options.repeats, options.controls));
     const results: ({ id: string; kind: 'fault' | 'control'; cell: keyof typeof CELLS; duration?: keyof typeof DURATIONS; repeat: number } &
-      (ReturnType<typeof judgeHolds> | { verdict: 'INVALID'; floorReasons: string[]; reasons: string[]; setupAbort: boolean }) &
+      (ReturnType<typeof judgeHolds> | { verdict: 'INVALID'; floorReasons: string[]; reasons: string[] }) &
       { correctness?: ReturnType<typeof noticeCorrectness>['details'] })[] = [];
+    const setupAborts: { id: string; message: string }[] = [];
     const memory: AttemptMemory[] = [];
     let history = memoryWithInclusions(memory);
     let stopped: string | undefined;
     const rehearsal: { id: string; counts?: ReturnType<typeof rehearsalCounts>; error?: string }[] = [];
-    for (const planned of queue.runs) {
-      const id = runId(planned);
+    for (const { run: planned, id } of queue.attempts()) {
       const base = { id, kind: planned.kind, cell: planned.cell, duration: planned.kind === 'fault' ? planned.duration : undefined, repeat: planned.repeat };
       console.log(`#668 ${id}`);
       let run: Awaited<ReturnType<typeof measure>> | undefined;
       let error: unknown;
-      try { run = await measure(context, planned); }
+      try { run = await measure(context, planned, id); }
       catch (failure) { error = failure; await cleanup(active); }
       if (options.rehearsal) {
         rehearsal.push(run ? { id, counts: rehearsalCounts(run) } : { id, error: (error as Error).message });
@@ -95,15 +99,16 @@ try {
         history = memoryWithInclusions(memory, history);
         queue.record(planned, judged.verdict);
         console.log(JSON.stringify({ id, verdict: judged.verdict, floorReasons: judged.floorReasons, reasons: judged.reasons, evidence: judged.evidence.issues }));
+      } else if (error instanceof SetupAbort) {
+        setupAborts.push({ id, message: error.message });
+        if (!queue.record(planned, 'setup abort')) stopped = `two consecutive setup aborts for ${runId(planned)}`;
       } else {
-        const setupAbort = error instanceof SetupAbort;
-        results.push({ ...base, verdict: 'INVALID', floorReasons: [`run did not complete: ${(error as Error).message}`], reasons: [], setupAbort });
-        if (!queue.record(planned, setupAbort ? 'setup abort' : 'INVALID')) stopped = `two consecutive setup aborts for ${id}`;
+        results.push({ ...base, verdict: 'INVALID', floorReasons: [`run did not complete: ${(error as Error).message}`], reasons: [] });
+        queue.record(planned, 'INVALID');
       }
       save('results.json', results);
-      const memoryVerdicts = Object.fromEntries(Object.entries(history).map(([key, group]) => [key, group.memory]));
       const memoryFailures = Object.fromEntries(Object.entries(history).map(([key, group]) => [key, group.failures]));
-      save('summary.json', { environment, byCell: verdictByCell(results), memory: memoryVerdicts, memoryFailures, results, stopped });
+      save('summary.json', { environment, byCell: verdictByCell(results), memory: formalMemoryVerdicts(history, correctionKb), memoryFailures, results, setupAborts, stopped });
       if (stopped) break;
     }
   }

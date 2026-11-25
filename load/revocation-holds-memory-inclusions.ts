@@ -1,5 +1,5 @@
 // V5 evaluates evidence-only exclusions jointly in run order and retains every observed FAIL.
-import { lessFavourable, memoryForGroup, type MemoryEntry, type MemoryResult } from './revocation-holds-memory.ts';
+import { lessFavourable, memoryForGroup, stableMemoryVerdict, type MemoryEntry, type MemoryResult, type RssCorrectionKb } from './revocation-holds-memory.ts';
 import { CELL_NAMES } from './revocation-holds-plan.ts';
 
 export type AttemptMemory = MemoryEntry & { id: string; evidenceOnly: boolean };
@@ -31,4 +31,13 @@ export function memoryWithInclusions(entries: AttemptMemory[], previous: MemoryH
     groups[key] = { memory: memory ?? { result: 'NOT EVALUATED' }, failures: [...failures.values()] };
   }
   return groups;
+}
+
+export function formalMemoryVerdicts(history: MemoryHistory, correctionKb?: RssCorrectionKb) {
+  return Object.fromEntries(Object.entries(history).map(([key, { memory }]) => {
+    const { result, dKb, nKb, bKb } = memory;
+    const stable = correctionKb && dKb !== undefined && nKb !== undefined && bKb !== undefined &&
+      stableMemoryVerdict(result, [dKb - correctionKb[1], dKb - correctionKb[0]], nKb, bKb);
+    return [key, { ...memory, overheadInconclusive: !stable }];
+  }));
 }

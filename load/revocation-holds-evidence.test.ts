@@ -178,6 +178,31 @@ test('Q2 reports late admission without changing release or adding a verdict rul
   assert.equal(judgeHolds(run).verdict, 'PASS');
 });
 
+test('Q2 requests review when a target registration lacks a finite admission margin', () => {
+  const run = holdsFixture();
+  assert.equal(evidence(run).q2AdmissionReview, false);
+  const outcome = run.trace!.events.find(event => event.name === 'revocation_fallback_outcome')!;
+  const records = outcome.records.split(',');
+  for (const first of [records[0].replace(/:40020$/, ':-'), records[0].replace(/:40020$/, ':Infinity')]) {
+    outcome.records = [first, ...records.slice(1)].join(',');
+    const result = evidence(run);
+    assert.equal(result.admissions.length, 31);
+    assert.equal(result.q2AdmissionReview, true);
+  }
+  outcome.records = records.slice(0, -1).join(',');
+  assert.equal(evidence(run).q2AdmissionReview, true);
+});
+
+test('Q2 requests review for a fault with no matching S4', () => {
+  for (const kind of ['fault', 'control'] as const) {
+    const run = holdsFixture(kind);
+    run.trace!.events = run.trace!.events.filter(event => event.name !== 'revocation_fallback_check');
+    const result = evidence(run);
+    assert.equal(result.s4FinishAfterPassMs, undefined);
+    assert.equal(result.q2AdmissionReview, kind === 'fault');
+  }
+});
+
 test('V1 preserves a certain in-fault send failure when E4 reports gone checks', () => {
   const run = holdsFixture();
   const outcome = run.trace!.events.find(event => event.name === 'revocation_fallback_outcome')!;

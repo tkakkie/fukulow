@@ -655,3 +655,16 @@ test('V6 reports evidenced residual and pool timeout failures even with missing 
     'hold residual -1 < 0', '1 pool acquire timeouts in the fault window', '1 pool acquire timeouts in the recovery window',
   ]);
 });
+
+test('V6 a fault with a missing gate input never gives PASS or an evidence-only exclusion', () => {
+  const run = holdsFixture();
+  // The notice's socket exists, but its Account association has no revoke timestamp.
+  run.targets[0].account = run.accounts.length;
+  const judged = judgeHolds(run);
+  assert.deepEqual(judged.floorReasons, []);
+  assert.deepEqual(judged.reasons, []);
+  assert.deepEqual(judged.evidence.issues, []);
+  assert.deepEqual(judged.missingGateInputs, ['client revocation order: missing input: revoke start time']);
+  assert.equal(judged.verdict, 'INVALID');
+  assert.equal(judged.evidenceOnly, false);
+});

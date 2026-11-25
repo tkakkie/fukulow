@@ -55,6 +55,23 @@ test('stall options stay within the send burst, the body limit and half the live
   assert.equal(Buffer.byteLength(body), 16_000);
 });
 
+test('stall overrides require rehearsal and leave the 120-Message formal fixture fixed', () => {
+  for (const args of [
+    ['--stall-senders', '10'], ['--stall-messages', '8'], ['--stall-chars', '1000'], ['--stall-messages=8'],
+  ]) {
+    assert.throws(() => parseOptions(['--out', '/x', ...args]), /stall-\* options require --rehearsal/);
+  }
+  const options = parseOptions(['--out', '/x', '--rehearsal', '--stall-senders', '10', '--stall-messages', '8', '--stall-chars', '1000']);
+  assert.deepEqual(options.stall, { senders: 10, messages: 8, chars: 1000 });
+});
+
+test('the saved overhead summary option takes a file for formal runs', () => {
+  const args = ['--out', '/x', '--overhead-summary'];
+  assert.throws(() => parseOptions(args), /saved overhead summary file/);
+  assert.throws(() => parseOptions([...args, 'summary.json', '--rehearsal']), /formal run/);
+  assert.equal(parseOptions([...args, 'summary.json']).overheadSummary, 'summary.json');
+});
+
 test('the log reader keeps holds samples, send records, clock samples and 60 s events', () => {
   const log = emptyLog();
   const line = (target: string, fields: Record<string, unknown>) => JSON.stringify({ target, fields });

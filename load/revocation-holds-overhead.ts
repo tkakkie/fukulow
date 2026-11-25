@@ -2,7 +2,7 @@
 import { evidence, stallMessagesAfterResume } from './revocation-holds-evidence.ts';
 import { holdsValues } from './revocation-holds-floors.ts';
 import type { HoldsRun } from './revocation-holds-judgment.ts';
-import { median, memoryVerdict, rssDeltaKb, type MemoryResult } from './revocation-holds-memory.ts';
+import { median, memoryVerdict, rssDeltaKb, stableMemoryVerdict, type RssCorrectionKb } from './revocation-holds-memory.ts';
 import { BYSTANDERS, DURATIONS, REPEATS, STALL_MESSAGES, targetSockets, type PlannedRun } from './revocation-holds-plan.ts';
 import { TRACE_EVENTS } from './revocation-holds-trace.ts';
 
@@ -99,20 +99,13 @@ function rssScreen(arms: FourArms) {
   }
   const changeKb = on.dKb - off.dKb;
   // Envelope of observed fault-minus-control differences in each mode, then difference of envelopes.
-  const correctionKb: [number, number] = [
+  const correctionKb: RssCorrectionKb = [
     Math.min(...fOn) - Math.max(...cOn) - (Math.max(...fOff) - Math.min(...cOff)),
     Math.max(...fOn) - Math.min(...cOn) - (Math.min(...fOff) - Math.max(...cOff)),
   ];
   const corrected: [number, number] = [on.dKb - correctionKb[1], on.dKb - correctionKb[0]];
   const stable = on.result === off.result && stableMemoryVerdict(on.result, corrected, off.nKb, off.bKb);
   return { fault, control, on, off, changeKb, correctionKb, verdict: stable ? 'stable' as const : 'inconclusive' as const };
-}
-
-function stableMemoryVerdict(result: MemoryResult['result'], [low, high]: [number, number], noise: number, bound: number) {
-  if (result === 'FAIL') return low - noise > bound;
-  if (result === 'measured within bound') return low > noise && high + noise <= bound;
-  const couldMeasure = bound - noise > noise && high > noise && low <= bound - noise;
-  return result === 'upper bound only (never PASS)' && high - noise <= bound && !couldMeasure;
 }
 
 export function overheadReport(samples: Sample[]) {
@@ -131,4 +124,13 @@ export function overheadReport(samples: Sample[]) {
   const withinBounds = equalCounts && samples.every(s => !s.problems.length) && Object.values(timing).every(t => t?.within) &&
     rss.fault?.within === true && rss.control?.within === true && rss.verdict === 'stable';
   return { withinBounds, equalCounts, timing, rss, samples };
+}
+
+export function overheadCorrection(summary: unknown): RssCorrectionKb | undefined {
+  const report = (summary as { overhead?: { withinBounds?: unknown; rss?: { correctionKb?: unknown } } } | null)?.overhead;
+  if (report?.withinBounds !== true) return undefined;
+  const interval = report.rss?.correctionKb;
+  if (!Array.isArray(interval) || interval.length !== 2) return undefined;
+  const [low, high] = interval as unknown[];
+  if (typeof low === 'number' && typeof high === 'number' && finite(low) && finite(high) && low <= high) return [low, high];
 }
