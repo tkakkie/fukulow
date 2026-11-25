@@ -1,4 +1,5 @@
 import { diagnosticScope } from './diagnostic-evidence.ts';
+import type { ReadLanes } from './diagnostic-mode.ts';
 import type { DiagnosticCheck, reconcileDiagnostic } from './diagnostic-reconcile.ts';
 import { judge, type Result } from './judge.ts';
 import { moveLimits, stepId, thresholds, type Plan, type Step } from './plan.ts';
@@ -40,16 +41,17 @@ export function render(p: Plan, results: Result[], complete: boolean) {
 }
 
 export function renderDiagnostic(arms: { step: Step; problem?: string; checks: DiagnosticCheck[];
-  clock?: ReturnType<typeof reconcileDiagnostic>['clock'] }[], skipped: string[], complete: boolean) {
+  clock?: ReturnType<typeof reconcileDiagnostic>['clock'] }[], skipped: string[], complete: boolean, readLanes: ReadLanes) {
   return [
     '# Part D diagnostic', '',
-    'Main-timeline send performance under mixed read load and the Topic-list change. DIAGNOSTIC evidence: false.',
+    `Main-timeline send performance under mixed read load${readLanes === 'channels' ? '' : ' and the Topic-list change'}. DIAGNOSTIC evidence: false.`,
     '', ...diagnosticScope.notEvaluated.map(row => `- **${row.status}** — ${row.metric}`),
     '', diagnosticScope.sendTopicRecord, '',
     ...(!complete ? ['**NOT EVALUATED** — A/B comparison requires two complete, matched captures.', ''] : []),
     ...arms.flatMap(arm => [
       `## ${stepId(arm.step)}`, '',
       ...(arm.clock ? [`Wall-clock elapsed ${arm.clock.wallMs.toFixed(1)} ms, monotonic elapsed ${arm.clock.monotonicMs.toFixed(1)} ms, drift ${arm.clock.driftMs.toFixed(1)} ms.`, ''] : []),
+      ...(arm.clock ? [`Docker VM minus host clock offset (ms) was ${arm.clock.start?.offsetMs.toFixed(1) ?? 'unavailable'} at arm start and ${arm.clock.end?.offsetMs.toFixed(1) ?? 'unavailable'} at arm end.`, ''] : []),
       ...(arm.problem ? [`**NOT EVALUATED** — Arm attribution (${arm.problem}).`, ''] : []),
       ...arm.checks.map(row => `- **${row.status}** — ${row.metric}${row.reasons.length ? ` (${row.reasons.join('; ')})` : ''}`),
       '',

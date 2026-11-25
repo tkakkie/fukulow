@@ -10,6 +10,8 @@ export const diagnosticLaneLabels = { send: diagnosticScope.sendLane, move: 'Mov
   channels: 'Channel list', reader: 'Second-Organization Channel list' } satisfies Record<DiagnosticLane, string>;
 
 const movePhases = ['move_access_sql', 'move_chain_lookup', 'move_apply'];
+const sendAdmission503s = ['channel_queue_full', 'global_queue_full', 'channel_admission_timeout',
+  'global_admission_timeout', 'channel_admission_closed', 'global_admission_closed'];
 function requiredPhases(lane: DiagnosticLane, selection: DiagnosticSelection) {
   if (lane === 'send') return ['before_admission', 'channel_admission_wait', 'admitted_work',
     ...(selection.sendBreakdown ? ['send_unattributed', 'send_topic_record'] : [])];
@@ -52,6 +54,12 @@ export function reconcileDiagnostic(p: Plan, step: Step, selection: DiagnosticSe
   const { app, k6, window, clock, postgres, containers } = capture ?? {};
   const clockProblems = !window || !clock || !Number.isFinite(clock.driftMs) || clock.wallMs <= 0 ||
     Math.abs(clock.driftMs) > clockAllowanceMs ? ['wall-clock vs monotonic elapsed drift or missing clock record'] : [];
+  for (const boundary of ['start', 'end'] as const) {
+    const reading = clock?.[boundary];
+    if (!reading || !Number.isFinite(reading.offsetMs)) clockProblems.push(`missing host vs Docker VM clock reading at arm ${boundary}`);
+    else if (Math.abs(reading.offsetMs) > clockAllowanceMs)
+      clockProblems.push(`host vs Docker VM clock offset at arm ${boundary} exceeds ${clockAllowanceMs} ms`);
+  }
   const streamProblems = [
     ...(generatorProblem ? [generatorProblem] : []),
     ...(!k6 ? ['missing k6 stream'] : k6.stream.invalidPoints ? ['invalid k6 stream points'] : []),
@@ -98,7 +106,8 @@ export function reconcileDiagnostic(p: Plan, step: Step, selection: DiagnosticSe
     const scenarioWindow = { start: first, end: last };
     laneWindows[lane] = scenarioWindow;
     if (lane === 'topics') for (const [metric, points] of Object.entries(k6?.stream.series.topics ?? {})) {
-      if (!inside(points.first, scenarioWindow) || !inside(points.last, scenarioWindow))
+      if (!window || !inside(points.first, scenarioWindow) || !inside(points.last, scenarioWindow) ||
+          !inside(points.first, window) || !inside(points.last, window))
         problems.push(`Topic list: ${metric} outside its window`);
     }
     const row = summary?.lanes?.[lane];
@@ -143,17 +152,20 @@ export function reconcileDiagnostic(p: Plan, step: Step, selection: DiagnosticSe
   }
 
   if (app && summary?.lanes) {
-    // Every sample anchor fires once per selected request. Missing successes or early
-    // rejections can move the count only within these bounds.
-    const checkSampleCoverage = (group: DiagnosticLane[], phase: string, every: number) => {
+    const checkSampleCoverage = (group: DiagnosticLane[], phase: string, every: number, failuresAfterHook = 0) => {
       const observed = group.reduce((sum, lane) => sum + (app.byLane[lane].phasesUs[phase]?.count ?? 0), 0);
       const offers = group.reduce((sum, lane) => sum + (summary.lanes[lane]?.attempted ?? 0), 0);
       const accepted = group.reduce((sum, lane) => sum + (summary.lanes[lane]?.accepted ?? 0), 0);
-      const minimum = Math.max(0, Math.floor(offers / every) - (offers - accepted));
+      const possiblyMissed = offers - accepted - failuresAfterHook;
+      const minimum = Math.max(0, Math.floor(offers / every) - possiblyMissed);
       if (observed < minimum || observed > Math.ceil(offers / every))
         for (const lane of group) failures[lane]?.push(`incomplete or excess ${phase} sample coverage`);
     };
-    checkSampleCoverage(['send'], 'before_admission', 32);
+    // Both patches advance the send counter in the request wrapper. Queue refusals
+    // and wait failures follow before_admission; shutdown and limiter refusals precede it.
+    const sendAdmissionFailures = app.unavailable.filter(event =>
+      event.lane === 'send' && sendAdmission503s.includes(event.reason)).length;
+    checkSampleCoverage(['send'], 'before_admission', 32, sendAdmissionFailures);
     if (step.arm === 'move') checkSampleCoverage(['move'], 'move_apply', 1);
     if (selection.readTimingSampleEvery !== null) {
       checkSampleCoverage(lanes.filter(lane => lane === 'channels' || lane === 'reader'), 'channel_list_total', selection.readTimingSampleEvery);
@@ -176,7 +188,7 @@ export function reconcileDiagnostic(p: Plan, step: Step, selection: DiagnosticSe
     for (const phase of new Set([...required, ...Object.keys(phases)])) {
       const missing = !usablePhase(phases[phase]) ||
         (phase === 'send_unattributed' && sendTimingProblems(app).length > 0);
-      const metric = phase === 'send_topic_record' ? 'send_topic_record hook on the main timeline' : phase;
+      const metric = phase === 'send_topic_record' ? 'send_topic_record no-op hook on the main timeline' : phase;
       const reasons = [...laneProblems, ...(missing ? ['missing usable timing samples'] : [])];
       check(`${label} ${metric}`, reasons);
     }
@@ -190,8 +202,10 @@ export function reconcileDiagnostic(p: Plan, step: Step, selection: DiagnosticSe
     ...checks.find(row => row.metric === 'PostgreSQL statements')!.reasons]);
   check('k6 VU gauges and in-flight drop reconstruction', [...clockProblems, ...streamProblems, ...integrity, ...lanes.flatMap(lane => failures[lane] ?? []),
     ...(!k6?.vus.some(point => point.active !== undefined && point.allocated !== undefined) ? ['missing paired k6 VU gauges'] : [])]);
+  const minimumCgroupSamples = p.smoke ? 1 : 2;
   check('Container CPU and memory', [...clockProblems, ...(!containers ? ['missing cgroup samples'] :
-    Object.entries(containers.summary).filter(([, sample]) => !sample.samples).map(([name]) => `missing ${name} cgroup samples`))]);
+    Object.entries(containers.summary).filter(([, sample]) => sample.samples < minimumCgroupSamples)
+      .map(([name, sample]) => `insufficient ${name} cgroup samples (${sample.samples} of ${minimumCgroupSamples} required)`))]);
   return { windows, clock, checks, problems: [...new Set(checks.flatMap(row => row.reasons))] };
 }
 

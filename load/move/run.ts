@@ -213,6 +213,7 @@ async function main() {
   if (!values.out || (!selection && (!values.commit || !values.image))) throw new Error(usage);
   const commit = selection ? selection.commit : values.commit!;
   const attribution = selection && attributionLabel(selection.readLanes);
+  const diagnosticExclusions = `NOT EVALUATED — ${diagnosticScope.notEvaluated.map(row => row.metric).join(' and ')}`;
   const output = resolve(values.out);
   mkdirSync(output, { mode: 0o700 });
   const project = `fukulow-move-${randomUUID()}`;
@@ -254,7 +255,7 @@ async function main() {
     const k6 = command('make', ['-s', '-C', repo, 'load-image']);
     const k6Id = docker('image', 'inspect', '--format', '{{.Id}}', k6);
     if (selection) {
-      console.log(`DIAGNOSTIC ${diagnosticScope.sendLane} · NOT EVALUATED — ${diagnosticScope.notEvaluated.map(row => row.metric).join(' and ')}`);
+      console.log(`DIAGNOSTIC ${diagnosticScope.sendLane} · ${diagnosticExclusions}`);
       console.log('DIAGNOSTIC: building the instrumented Part D image' + (attribution ? ` (${attribution})` : ''));
       image = await diagnosticImage(repo, scratch, tag, abort.signal, selection);
     }
@@ -398,9 +399,9 @@ async function main() {
         save(join(output, 'DIAGNOSTIC-results.json'), { mode: diagnosticMode, evidence: false, scope: diagnosticScope,
           ...(p.rehearsal && { rehearsal: true }), readLanes: selection.readLanes, attribution, complete: captured,
           cleanupIssues, arms: diagnosticArms, skipped });
-        writeFileSync(join(output, 'DIAGNOSTIC-report.md'), renderDiagnostic(diagnosticArms, skipped, captured), { mode: 0o600 });
+        writeFileSync(join(output, 'DIAGNOSTIC-report.md'), renderDiagnostic(diagnosticArms, skipped, captured, selection.readLanes), { mode: 0o600 });
         line = `DIAGNOSTIC ${p.rehearsal ? 'REHEARSAL ' : ''}capture ${captured ? 'complete' : 'incomplete'}` + (attribution ? ` · ${attribution}` : '')
-          + (p.rehearsal ? ' (never evidence)' : '');
+          + (p.rehearsal ? ' (never evidence)' : '') + ` · ${diagnosticExclusions}`;
       } else {
         if (!summary) throw summaryError;
         const { report, checks, clean } = summary;

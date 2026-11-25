@@ -151,8 +151,9 @@ export function retainedAppLog(log: string, anchor: ReturnType<typeof appLogAnch
   });
   const truncationSigns = lines.filter(line => {
     const split = line.indexOf(' ');
-    const message = Number.isFinite(timestamp(line.slice(0, split))) ? line.slice(split + 1) : line;
-    return !message.startsWith('{') &&
+    const prefixed = Number.isFinite(timestamp(line.slice(0, split)));
+    const message = prefixed ? line.slice(split + 1) : line;
+    return (!prefixed || !message.startsWith('{')) &&
       /move_diag_|http_completed|truncat|error (?:from daemon|while reading)|error grabbing logs|corrupt/i.test(message);
   }).length;
   return { ...appEvidence(body.join('\n'), organizations, window), anchorRetained, truncationSigns };
@@ -168,6 +169,25 @@ function collectorFailure(name: string, error: unknown) {
   return `${name}: ${reason}`;
 }
 
+async function sampleVmClock(app: string, boundary: 'start' | 'end', failures: string[]) {
+  const hostBeforeMs = Date.now();
+  try {
+    const { stdout } = await exec('docker', ['exec', app, 'date', '+%s%3N'], { timeout: 5000 });
+    const hostAfterMs = Date.now();
+    const raw = stdout.trim();
+    const vmMs = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(vmMs) || hostAfterMs < hostBeforeMs) {
+      failures.push(`Docker VM clock at arm ${boundary}: invalid clock reading`);
+      return null;
+    }
+    // Use the midpoint of the host timestamps to account for the Docker round trip.
+    return { hostBeforeMs, hostAfterMs, vmMs, offsetMs: vmMs - (hostBeforeMs + hostAfterMs) / 2 };
+  } catch (error) {
+    failures.push(collectorFailure(`Docker VM clock at arm ${boundary}`, error));
+    return null;
+  }
+}
+
 export async function captureDiagnostic(stack: Stack, name: string, metricsFile: string, organizations: Organizations) {
   stack.sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements; SELECT pg_stat_statements_reset();');
   let anchor: ReturnType<typeof appLogAnchor>;
@@ -178,10 +198,13 @@ export async function captureDiagnostic(stack: Stack, name: string, metricsFile:
   } catch (error) {
     failures.push(collectorFailure('Docker log anchor', error));
   }
+  const start = await sampleVmClock(stack.app, 'start', failures);
   const db = samplePostgres(stack);
   const resources = sampleContainers(stack, name);
   return { async finish(window: Window, monotonicMs: number, steady?: Window) {
-    const [postgres, containers] = await Promise.all([db.stop(), resources.stop(window)]);
+    const [end, postgres, containers] = await Promise.all([
+      sampleVmClock(stack.app, 'end', failures), db.stop(), resources.stop(window),
+    ]);
     const since = new Date((anchor?.at ?? window.start) - 1000).toISOString();
     const [app, generator, statements] = await Promise.allSettled([
       exec('docker', ['logs', '--timestamps', '--since', since, stack.app], { timeout: 15000, maxBuffer: 128 * 1024 * 1024 })
@@ -200,7 +223,7 @@ export async function captureDiagnostic(stack: Stack, name: string, metricsFile:
     // Keep analyzed waits on the same scope as the statement totals (startup through drain).
     const armSamples = postgres.samples.filter(sample => sample.at >= window.start && sample.at <= window.end);
     const wallMs = window.end - window.start;
-    return { since, window, clock: { wallMs, monotonicMs, driftMs: wallMs - monotonicMs },
+    return { since, window, clock: { wallMs, monotonicMs, driftMs: wallMs - monotonicMs, start, end },
       app: value(app, 'Docker app logs'), k6: value(generator, 'k6 stream'), failures, containers, postgres: {
         ...postgres, ...dbEvidence(armSamples, statementRows), steadyCoverageMs: dbEvidence(waited, []).coveredMs,
         statementsAvailable: statementRows.some(row => row.calls > 0),
