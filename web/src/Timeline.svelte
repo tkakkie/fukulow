@@ -179,9 +179,11 @@
   let scrollEl = $state<HTMLElement | null>(null)
   let confirmReplaceId = $state<string | null>(null)
   let activeRowId = $state<string | null>(null)
+  // Until the first history page arrives, `hasOlder` cannot tell whether the first Unread is still to load.
+  const mainHistoryPending = $derived(Boolean(tState && tState.main.asOfSeq === undefined && !tState.main.error))
   const awaitingEntryPosition = $derived(
     !search && !skipUnreadVisit && !entryPositionAbandoned &&
-      (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && hasOlder && !olderError)),
+      (awaitingEntryBoundary || Boolean(needsOlderUnreadPage && (hasOlder || mainHistoryPending) && !olderError)),
   )
   let initialScrollApplied = $state(false)
   // Rows stay mounted because positioning needs them, but are hidden and inert until the entry position is applied (`docs/ui.md` §8).
@@ -386,7 +388,8 @@
   })
 
   $effect(() => {
-    if (search || skipUnreadVisit || !needsOlderUnreadPage || !hasOlder || loadingOlder || olderError || targetUnavailable) return
+    // A visit that opened at the bottom no longer positions at the first Unread, so it pages no older history toward it.
+    if (search || skipUnreadVisit || entryPositionAbandoned || !needsOlderUnreadPage || !hasOlder || loadingOlder || olderError || targetUnavailable) return
     if (effectiveStatus !== 'ready') return
     loadOlderWithAnchor()
   })
@@ -479,6 +482,8 @@
       } else {
         captureCurrentAnchor()
         if (!search && status === 'ready' && !awaitingFirstUnread && !targetFirstUnreadId) {
+          // An empty view opening without its entry position ends the wait, as an opening at the bottom does.
+          if (!initialScrollApplied) entryPositionAbandoned = true
           initialScrollApplied = true
         }
       }

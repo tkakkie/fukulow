@@ -389,7 +389,8 @@
   })
 
   $effect(() => {
-    if (search || skipUnreadVisit || !needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
+    // A visit that opened at the bottom no longer positions at the first Unread, so it pages no older history toward it.
+    if (search || skipUnreadVisit || entryPositionAbandoned || !needsOlderUnreadPage || !view.initialized || !view.hasMore || view.loading || view.error || targetUnavailable) {
       return
     }
     if (effectiveStatus !== 'ready') return
