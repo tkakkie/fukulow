@@ -80,8 +80,8 @@ export function createDms(options: {
     plan(delay)
   }
   const activityTarget: ActivityTarget = {
-    // Server notices (not ready, reset or O5) may spend the run's notice delta; own work never does.
-    invalidate: (reason = 'notice', delay) => invalidate(reason, delay, reason === 'notice' || reason === 'access'),
+    // Server notices that may reveal an undiscovered DM spend the run's notice delta; ready, reset, O5 and own work never do.
+    invalidate: (reason = 'notice', delay, discovery = false) => invalidate(reason, delay, discovery && (reason === 'notice' || reason === 'access')),
     disconnected() { if (!state.paused) { dispatch({ type: 'pause' }); target.suspend() } },
     close,
   }

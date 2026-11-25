@@ -309,3 +309,35 @@ it('an armed notice delta schedules a wake even with no other pending lane or at
   d.feed({ type: 'demand', boundary: true, notice: true, replace: [] })
   expect(dmNextWake(d.state, 1000)).toBe(1000)
 })
+
+it('a non-boundary notice while the run delta is in flight still gets the notice delta after that delta returns (#956)', () => {
+  const c = client()
+  const first = c.wake(); expect(first.lane).toBe('delta')
+  c.feed({ type: 'demand', boundary: false, notice: true, replace: [] })
+  expect(c.state.noticeDelta).toBe('armed')
+  c.result(first, changes())
+  c.result(c.wake(), changes())
+  const extra = c.wake(); expect(extra?.lane).toBe('delta')
+  expect(c.state.noticeDelta).toBe('spent'); expect(c.state.budget).toBe(3)
+  c.result(extra, changes())
+  expect(c.state.lanes.delta.pending).toBe(false)
+})
+
+it('an armed notice delta waits out delta backoff with and without attempts left (#956)', () => {
+  for (const exhaust of [false, true]) {
+    const c = client()
+    c.feed({ type: 'failure', request: c.wake(), retryAt: 5000, terminal: false })
+    c.result(c.wake(), changes())
+    if (exhaust) {
+      c.feed({ type: 'browse' }); c.feed({ type: 'recover', peer: 'absent' })
+      for (let i = 0; i < 3; i++) c.feed({ type: 'failure', request: c.wake(), retryAt: 0, terminal: false })
+      expect(c.state.budget).toBe(0)
+    }
+    c.feed({ type: 'demand', boundary: false, notice: true, replace: [] })
+    expect(c.state.noticeDelta).toBe('armed')
+    expect(dmNextWake(c.state, 1000)).toBe(5000)
+    c.feed({ type: 'wake', now: 4999 }); expect(c.state.request).toBeUndefined()
+    c.feed({ type: 'wake', now: 5000 }); expect(c.state.request?.lane).toBe('delta')
+    expect(c.state.noticeDelta).toBe('spent')
+  }
+})

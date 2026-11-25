@@ -350,3 +350,19 @@ it('a DM list notice after the initial discovery attempts discovers the new DM b
   expect(c.dms.get().rows.map(r => r.identity.id)).toContain('new')
   c.close()
 })
+
+it('a notice about a known DM leaves the notice delta for a later undiscovered DM (#956)', async () => {
+  const c = client(); c.rows = [dm('known')]; await c.ready()
+  const deltas = () => c.api.changes.mock.calls.filter(([q]) => q.lane === 'delta').length
+  expect(c.dms.get().rows.map(r => r.identity.id)).toEqual(['known'])
+  expect(deltas()).toBe(1)
+  c.activity.notice({ type: 'channel_activity', channel_id: 'known', seq: 5 })
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(deltas()).toBe(1)
+  c.rows = [dm('known'), dm('new')]
+  c.activity.notice({ type: 'channel_activity', channel_id: 'new', seq: 1 })
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(deltas()).toBe(2)
+  expect(c.dms.get().rows.map(r => r.identity.id)).toContain('new')
+  c.close()
+})

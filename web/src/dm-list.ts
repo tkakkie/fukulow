@@ -227,7 +227,8 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       } else {
         if ((q.lane === 'browse' || q.lane === 'recovery') && l.cursor !== q.cursor) break
         l.cursor = input.data.next_cursor ?? undefined
-        if ('caught_up' in input.data) { l.done = input.data.caught_up; l.pending = false }
+        // A notice that armed the notice delta while this delta was in flight still gets it.
+        if ('caught_up' in input.data) { l.done = input.data.caught_up; l.pending = q.lane === 'delta' && s.noticeDelta === 'armed' }
         else { l.done = input.data.next_cursor === null; l.pending = q.lane === 'recovery' && !l.done && !s.recovered }
         if (q.lane === 'recovery' && l.done && !s.recovered) s.recoveryAbsent = true
       }
