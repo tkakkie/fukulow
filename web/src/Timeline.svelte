@@ -188,6 +188,8 @@
   let initialScrollApplied = $state(false)
   // Rows stay mounted because positioning needs them, but are hidden and inert until the entry position is applied (`docs/ui.md` §8).
   const positioning = $derived(!initialScrollApplied && (awaitingEntryPosition || firstUnreadMessageId !== null))
+  // The retryable error replaces the loading state (`docs/ui.md` §5), so the positioning Skeleton yields to it.
+  const loadFailed = $derived(effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))
   let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
   let lastScrollScopeKey = ''
   let lastScrollEntryId: symbol | null = null
@@ -226,7 +228,8 @@
   }
 
   async function focusMessage(id: string | undefined) {
-    if (!id) return
+    // Hidden rows cannot take focus, and revealing one would scroll the list positioning still owns.
+    if (!id || positioning) return
     activeRowId = id
     await rowWindow?.reveal(id, true)
   }
@@ -492,7 +495,8 @@
   })
 
   $effect(() => {
-    if (positioning && scrollView.loadingTimedOut) entryPositionAbandoned = true
+    // An initial history read that times out shows the retryable error instead; `再試行` restarts the same wait.
+    if (positioning && scrollView.loadingTimedOut && effectiveStatus === 'ready') entryPositionAbandoned = true
   })
 
   $effect(() => {
@@ -572,7 +576,7 @@
     <div class="timeline-section__banner">
       <ChannelUnavailableBanner {ongoToChannelList} />
     </div>
-  {:else if !search && (effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))}
+  {:else if !search && loadFailed}
     <div class="timeline-section__banner">
       <StatusBanner
         tone="danger"
@@ -584,7 +588,7 @@
     </div>
   {/if}
 
-  {#if positioning && (lines.length > 0 || mainPending.length > 0)}
+  {#if positioning && !targetUnavailable && !loadFailed}
     <div class="timeline-positioning">
       <Skeleton rows={4} label="メッセージを読み込み中" />
     </div>
@@ -597,7 +601,7 @@
     bind:this={scrollEl}
     onscroll={handleScroll}
   >
-    {#if !organizationUnavailable && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && lines.length === 0 && mainPending.length === 0}
+    {#if !organizationUnavailable && !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && lines.length === 0 && mainPending.length === 0}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
 

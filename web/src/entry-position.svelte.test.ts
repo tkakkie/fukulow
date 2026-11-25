@@ -22,6 +22,12 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+async function step() {
+  await settle()
+  await settle()
+  flushSync()
+}
+
 type Scope = 'main' | 'topic'
 const views = {
   main: { href: '/o/org-1/c/c1', scroll: '.timeline-scroll', overlay: '.timeline-positioning [aria-label="メッセージを読み込み中"]' },
@@ -30,12 +36,33 @@ const views = {
 
 // Opens Workspace directly on an Unread scope of c1 while that scope's entry boundary read is held:
 // the Unread Channel list for the main timeline, the トピック summary for トピック t1.
-// `olderUnread` loads only the latest Message with older history left, so the first Unread is on an older page.
-// `heldHistory` also holds the main timeline's first history page until `releaseHistory`.
+// `holdHistory` also holds the view's first history read; `olderUnread` loads only the newest Unread Messages, so the
+// first Unread needs an older page, and holds each older-page read in `olderReads` until the test answers it.
+// `latestOnly` loads only the latest Message with older history left, so the first Unread is on an older page; its
+// older-page reads reach the fake network unheld and `olderReadCount` counts them.
 // `emptyMain` opens a main timeline with no Messages and nothing Unread; `unreadRow` is what later boundary reads return.
-async function openWithHeldBoundary(scope: Scope, opts: { phonePanel?: boolean; olderUnread?: boolean; heldHistory?: boolean; emptyMain?: boolean } = {}) {
+async function openWithHeldBoundary(
+  scope: Scope,
+  opts: { phonePanel?: boolean; holdHistory?: boolean; olderUnread?: boolean; latestOnly?: boolean; emptyMain?: boolean } = {},
+) {
   const net = fakeNetwork()
-  const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
+  const options = net.options('me')
+  // Each held older-page read answers with one more Unread Message that is still newer than the boundary.
+  const olderReads: (() => void)[] = []
+  const topicsApi = options.topicsApi
+  if (!topicsApi) throw new Error('fakeNetwork provides topicsApi')
+  const { listTimeline, listTopicMessages } = topicsApi
+  if (opts.olderUnread) options.topicsApi = {
+    ...topicsApi,
+    listTimeline: (c, q, signal) => q?.before_position === undefined ? listTimeline(c, q, signal) : new Promise((resolve) => {
+      const message = { ...record(5, 'c1'), id: 'main-older-5', sender: 'other' }
+      olderReads.push(() => resolve(ok({ history_generation: generation, as_of_seq: 9, has_more: true, items: [{ kind: 'message' as const, message }] })))
+    }),
+    listTopicMessages: (c, t, q, signal) => q?.before_seq === undefined ? listTopicMessages(c, t, q, signal) : new Promise((resolve) => {
+      olderReads.push(() => resolve(ok({ history_generation: generation, as_of_seq: 9, has_more: true, messages: [topicMsgs[3]] })))
+    }),
+  }
+  const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...options })
   const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
   const sessionModel = {
     channels: channelsAdapter(rawSession.channels),
@@ -71,20 +98,34 @@ async function openWithHeldBoundary(scope: Scope, opts: { phonePanel?: boolean; 
     unread_count: 4,
   }
   net.pages.c1 = ok({ history_generation: generation, as_of_seq: 9, messages: mainMsgs, has_more: false })
-  net.timelines.c1 = ok({
+  const shownMain = opts.emptyMain ? [] : opts.olderUnread || opts.latestOnly ? mainMsgs.slice(2) : mainMsgs
+  const shownTopic = opts.olderUnread ? topicMsgs.slice(4) : opts.latestOnly ? topicMsgs.slice(5) : topicMsgs
+  const mainPage = ok({
     history_generation: generation,
     as_of_seq: 9,
-    has_more: false,
-    items: mainMsgs.map((message) => ({ kind: 'message' as const, message })),
+    has_more: Boolean(opts.olderUnread || opts.latestOnly),
+    items: shownMain.map((message) => ({ kind: 'message' as const, message })),
   })
+  const topicPage = ok({ history_generation: generation, as_of_seq: 9, messages: shownTopic, has_more: Boolean(opts.olderUnread || opts.latestOnly) })
+  net.timelines.c1 = mainPage
   // No projection carries t1, so its entry boundary can come only from the held summary.
   net.topicLists.c1 = ok({ history_generation: generation, as_of_seq: 9, has_more: false, topics: [] })
-  net.topicMessages['c1:t1'] = ok({ history_generation: generation, as_of_seq: 9, messages: topicMsgs, has_more: false })
-  if (opts.olderUnread) {
-    if (scope === 'main') {
-      net.timelines.c1 = ok({ history_generation: generation, as_of_seq: 9, has_more: true, items: [{ kind: 'message' as const, message: mainMsgs[2] }] })
+  net.topicMessages['c1:t1'] = topicPage
+  let releaseHistory = () => {}
+  let failHistory = () => {}
+  const historyFailure = { ok: false as const, kind: 'http' as const, status: 500, error: 'internal_error' }
+  if (opts.holdHistory) {
+    // Same pending-promise hold as the boundary below; only the read of the scope under test is held.
+    if (scope === 'topic') {
+      net.topicMessages['c1:t1'] = new Promise((resolve) => {
+        releaseHistory = () => resolve(topicPage)
+        failHistory = () => resolve(historyFailure)
+      }) as unknown as typeof topicPage
     } else {
-      net.topicMessages['c1:t1'] = ok({ history_generation: generation, as_of_seq: 9, messages: [topicMsgs[5]], has_more: true })
+      net.timelines.c1 = new Promise((resolve) => {
+        releaseHistory = () => resolve(mainPage)
+        failHistory = () => resolve(historyFailure)
+      }) as unknown as typeof mainPage
     }
   }
   const unreadRow = {
@@ -98,15 +139,7 @@ async function openWithHeldBoundary(scope: Scope, opts: { phonePanel?: boolean; 
     main_unread_count: 1,
   }
   net.unreadChannels.c1 = unreadRow
-  if (opts.emptyMain) {
-    net.timelines.c1 = ok({ history_generation: generation, as_of_seq: 9, has_more: false, items: [] })
-    Object.assign(unreadRow, { read_seq: 9, unread_count: 0, main_unread_count: 0 })
-  }
-  let releaseHistory = () => {}
-  if (opts.heldHistory) {
-    const page = net.timelines.c1
-    net.timelines.c1 = new Promise((resolve) => { releaseHistory = () => resolve(page) }) as unknown as typeof page
-  }
+  if (opts.emptyMain) Object.assign(unreadRow, { read_seq: 9, unread_count: 0, main_unread_count: 0 })
   // The fake API returns these values from async functions, so a pending promise holds every read of that boundary.
   let releaseBoundary!: () => void
   let failBoundary!: () => void
@@ -185,6 +218,9 @@ async function openWithHeldBoundary(scope: Scope, opts: { phonePanel?: boolean; 
       skeleton: host.querySelector(`#main-content ${views[scope].overlay}`) !== null,
     }
   }
+  const skeletons = () => host.querySelectorAll(`#main-content [aria-label="${scope === 'topic' ? 'トピックを読み込み中' : 'メッセージを読み込み中'}"]`).length
+  const composer = () => [...host.querySelectorAll('#main-content textarea')].find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+  const retry = () => [...host.querySelectorAll('#main-content button')].find((b) => b.textContent.trim() === '再試行')
   const firstUnread = scope === 'topic' ? topicMsgs[2] : mainMsgs[2]
   const latest = scope === 'topic' ? topicMsgs[5] : mainMsgs[2]
   const marker = () => host.querySelector(`#main-content [data-message-id="${firstUnread.id}"] [data-read-marker="true"]`)
@@ -198,11 +234,14 @@ async function openWithHeldBoundary(scope: Scope, opts: { phonePanel?: boolean; 
     await unmount(instance)
     sessionModel.close()
   }
-  // Older-page reads of the opened scope.
-  const olderReads = () => scope === 'topic'
+  // Unheld older-page reads of the opened scope.
+  const olderReadCount = () => scope === 'topic'
     ? net.topicHistory.filter((h) => h.topic === 't1' && h.beforeSeq !== undefined).length
     : net.history.filter((h) => h.channel === 'c1' && h.query?.before_seq !== undefined).length
-  return { host, net, navigation, latest, olderReads, releaseHistory, unreadRow, releaseBoundary, failBoundary, succeedRetries, scroll, positioning, marker, boundary, cleanup, wantBoundary: scope === 'topic' ? 4 : 2, latestSeq: latest.created_seq }
+  return {
+    host, net, navigation, latest, releaseBoundary, failBoundary, succeedRetries, releaseHistory, failHistory, olderReads, olderReadCount, unreadRow,
+    scroll, positioning, skeletons, composer, retry, marker, boundary, cleanup, wantBoundary: scope === 'topic' ? 4 : 2, latestSeq: latest.created_seq,
+  }
 }
 
 describe('Entry position before the first-Unread boundary resolves (#968)', () => {
@@ -298,7 +337,7 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
 
   it.each<Scope>(['topic', 'main'])('stops loading older %s pages toward the first Unread once a failed boundary read opened the visit at the bottom', async (scope) => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const v = await openWithHeldBoundary(scope, { olderUnread: true })
+    const v = await openWithHeldBoundary(scope, { latestOnly: true })
     try {
       v.failBoundary()
       await settle()
@@ -322,7 +361,7 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
       expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
       // The first Unread is older than the loaded page, but the visit no longer positions there, so it pages no older history
       // toward it, which could trim the newest rows the visit is showing. The トピック's one read is the user's retry itself.
-      expect(v.olderReads()).toBe(scope === 'topic' ? 1 : 0)
+      expect(v.olderReadCount()).toBe(scope === 'topic' ? 1 : 0)
       expect(v.marker()).toBeNull()
     } finally {
       await v.cleanup()
@@ -385,7 +424,7 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
   })
 
   it('keeps waiting for the first Unread while the main history loads, even with an own send still pending', async () => {
-    const v = await openWithHeldBoundary('main', { heldHistory: true })
+    const v = await openWithHeldBoundary('main', { holdHistory: true })
     try {
       v.releaseBoundary()
       await settle()
@@ -420,7 +459,7 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
     const v = await openWithHeldBoundary('main')
     try {
       expect(v.positioning().busy).toBe(true)
-      const composer = [...v.host.querySelectorAll('#main-content textarea')].find((el) => el.getAttribute('aria-label') === 'メッセージ')!
+      const composer = v.composer()
       composer.value = '位置決め中の送信'
       composer.dispatchEvent(new MiniDomEvent('input', { bubbles: true }))
       flushSync()
@@ -444,6 +483,121 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
       expect(v.boundary()).toBe(v.wantBoundary)
       expect(v.marker()).toBeNull()
       expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  // Review findings on #976: each case below fails without its fix.
+  it.each<Scope>(['topic', 'main'])('shows exactly one Skeleton while the %s view positions with no rows yet', async (scope) => {
+    const v = await openWithHeldBoundary(scope, { holdHistory: true })
+    try {
+      // The inner loading Skeleton sits in the hidden scroll container, so only the overlay can be seen.
+      expect(v.scroll().querySelector('[data-message-id]')).toBeNull()
+      expect(v.positioning()).toEqual({ busy: true, inert: true, skeleton: true })
+      expect(v.skeletons()).toBe(1)
+
+      v.releaseHistory()
+      await step()
+      expect(v.scroll().querySelector(`[data-message-id="${v.latest.id}"]`)).not.toBeNull()
+      expect(v.positioning()).toEqual({ busy: true, inert: true, skeleton: true })
+      expect(v.skeletons()).toBe(1)
+
+      v.releaseBoundary()
+      await step()
+      expect(v.marker()).not.toBeNull()
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+      expect(v.skeletons()).toBe(0)
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  it.each<Scope>(['topic', 'main'])('shows the retryable error instead of the positioning Skeleton when the first %s history read fails', async (scope) => {
+    const v = await openWithHeldBoundary(scope, { holdHistory: true })
+    try {
+      v.failHistory()
+      await step()
+      expect(v.retry()).toBeDefined()
+      expect(v.skeletons()).toBe(0)
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  it.each<Scope>(['topic', 'main'])('loads an older %s page while positioning when the first Unread is older than the loaded rows', async (scope) => {
+    const v = await openWithHeldBoundary(scope, { olderUnread: true })
+    try {
+      expect(v.olderReads).toEqual([])
+      v.releaseBoundary()
+      await step()
+      expect(v.boundary()).toBe(v.wantBoundary)
+      expect(v.olderReads).toHaveLength(1)
+      expect(v.positioning().busy).toBe(true)
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  // A トピック summary still held at the loading timeout fails the トピック itself, so the boundary arrives first here and
+  // the timeout abandons positioning with an older page in flight.
+  it.each<Scope>(['topic', 'main'])('loads no further older %s page for the first Unread once the loading timeout abandoned positioning', async (scope) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const v = await openWithHeldBoundary(scope, { olderUnread: true })
+    try {
+      v.releaseBoundary()
+      await step()
+      expect(v.olderReads).toHaveLength(1)
+
+      vi.advanceTimersByTime(LOADING_TIMEOUT_MS)
+      await step()
+      expect(v.positioning().busy).toBe(false)
+
+      // The page in flight still leaves the first Unread older than the loaded rows.
+      v.olderReads[0]()
+      await step()
+      expect(v.olderReads).toHaveLength(1)
+      expect(v.marker()).toBeNull()
+      expect(v.positioning().busy).toBe(false)
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  it.each<Scope>(['topic', 'main'])('positions the %s view at the first Unread after 再試行 following an initial-load timeout', async (scope) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const v = await openWithHeldBoundary(scope, { holdHistory: true })
+    try {
+      vi.advanceTimersByTime(LOADING_TIMEOUT_MS)
+      await step()
+      const retry = v.retry()
+      expect(retry).toBeDefined()
+      retry!.dispatchEvent(new MiniDomEvent('click', { bubbles: true }))
+      await step()
+      expect(v.positioning()).toEqual({ busy: true, inert: true, skeleton: true })
+
+      v.releaseHistory()
+      v.releaseBoundary()
+      await step()
+      expect(v.boundary()).toBe(v.wantBoundary)
+      expect(v.marker()).not.toBeNull()
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  it.each<Scope>(['topic', 'main'])('keeps focus in the empty %s Composer on ↑ while positioning', async (scope) => {
+    const v = await openWithHeldBoundary(scope)
+    try {
+      expect(v.positioning().busy).toBe(true)
+      const composer = v.composer()
+      composer.focus()
+      const up = new MiniDomEvent('keydown', { bubbles: true, cancelable: true })
+      up.key = 'ArrowUp'
+      composer.dispatchEvent(up)
+      await step()
+      expect(dom.doc.activeElement).toBe(composer)
     } finally {
       await v.cleanup()
     }
