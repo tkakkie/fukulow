@@ -146,12 +146,24 @@ async fn counts_advisory_waits_from_another_database(pool: PgPool) {
         1,
         "the waiter in the test database should be visible from the control database",
     );
+    assert_eq!(
+        Blocked::Advisory(Advisory::Key {
+            class_id: Some(973),
+            object_id: u32::try_from(holder).unwrap(),
+            current_database: true,
+        })
+        .count(&observer)
+        .await,
+        0,
+        "a count scoped to the control database should exclude the waiter",
+    );
 
     blocker.rollback().await.unwrap();
     tokio::time::timeout(DEADLINE, waiter)
         .await
         .unwrap()
         .unwrap();
+    observer.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -208,7 +220,13 @@ async fn wait_blocked_fails_on_timeout(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 async fn wait_blocked_or_exits_when_done_without_a_matching_waiter(pool: PgPool) {
-    wait_blocked_or(&pool, Blocked::Pid(0), Count::AtLeast(1), DEADLINE, || true).await;
+    let mut polls = 0;
+    wait_blocked_or(&pool, Blocked::Pid(0), Count::AtLeast(1), DEADLINE, || {
+        polls += 1;
+        polls == 2
+    })
+    .await;
+    assert_eq!(polls, 2);
 }
 
 #[tokio::test(start_paused = true)]
