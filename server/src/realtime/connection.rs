@@ -2,7 +2,7 @@ use super::{CLOSE_QUEUE_OVERFLOW, ClientMessage, ServerEvent};
 use crate::{
     AppState,
     auth::Auth,
-    channels::activity::NoticeFrame,
+    channels::activity::{NoticeFrame, Registration},
     messages::{self, LiveQueue, MessageError},
     observability::{REVOCATION_MEASUREMENT_TARGET, measurement_ms},
 };
@@ -527,13 +527,12 @@ impl Connection<'_> {
         Ok(())
     }
 
-    pub async fn run(&mut self, socket: &mut WebSocket, lifecycle: Lifecycle) -> Result<(), u16> {
-        let activity = self
-            .state
-            .message_delivery
-            .channel_access
-            .activity
-            .register(self.auth);
+    pub async fn run(
+        &mut self,
+        socket: &mut WebSocket,
+        activity: Registration,
+        lifecycle: Lifecycle,
+    ) -> Result<(), u16> {
         #[cfg(test)]
         crate::channels::activity::test_pause(
             self.auth.identity.organization.organization_id,

@@ -19,12 +19,18 @@ async fn lifecycle_socket(f: &Fixture) -> (Server, Client, oneshot::Receiver<()>
                     async move {
                         let work = state.shutdown.sockets.enter();
                         let permit = state.socket_gate.admit(auth.account_id).unwrap();
+                        let activity = state
+                            .message_delivery
+                            .channel_access
+                            .activity
+                            .register(&auth);
                         ws.on_upgrade(move |socket| async move {
                             connected_with_lifecycle(
                                 socket,
                                 state,
                                 auth,
                                 permit,
+                                activity,
                                 Lifecycle {
                                     ping_interval: PING_INTERVAL,
                                     idle_timeout: IDLE_TIMEOUT,

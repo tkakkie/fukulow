@@ -927,8 +927,13 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
                         {
                             let work = state.shutdown.sockets.enter();
                             let permit = state.socket_gate.admit(auth.account_id).unwrap();
+                            let activity = state
+                                .message_delivery
+                                .channel_access
+                                .activity
+                                .register(&auth);
                             ws.on_upgrade(move |socket| {
-                                connected(socket, state, auth, permit, work)
+                                connected(socket, state, auth, permit, activity, work)
                             })
                         }
                     }
@@ -938,7 +943,7 @@ async fn session_check_database_timeout_at_connect_closes_with_internal_error(po
         .with_state(f.state.clone());
     let server = Server::start(router).await;
     let mut socket = server.connect(&f.token).await;
-    closed(&mut socket, 1011).await;
+    activity::raw_closed(&mut socket, 1011).await;
     drop(held);
     exhausted.close().await;
 }

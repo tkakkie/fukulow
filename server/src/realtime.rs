@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::{Auth, ErrorBody},
+    channels::activity::Registration,
     messages::LIVE_QUEUE_CAPACITY,
 };
 
@@ -99,12 +100,18 @@ pub async fn upgrade(
             .into_response();
     };
     let socket_work = state.shutdown.sockets.enter();
+    // A Channel-list read issued after the 101 must start after activity registration.
+    let activity = state
+        .message_delivery
+        .channel_access
+        .activity
+        .register(&auth);
     let span = tracing::Span::current();
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
         .read_buffer_size(state.socket_gate.limits().read_buffer)
         .on_upgrade(move |socket| {
-            connected(socket, state, auth, permit, socket_work).instrument(span)
+            connected(socket, state, auth, permit, activity, socket_work).instrument(span)
         })
 }
 
@@ -113,10 +120,11 @@ async fn connected(
     state: AppState,
     auth: Auth,
     permit: limits::Permit,
+    activity: Registration,
     work: crate::shutdown::Guard,
 ) {
     let lifecycle = connection::Lifecycle::default();
-    connected_with_lifecycle(socket, state, auth, permit, lifecycle, work).await;
+    connected_with_lifecycle(socket, state, auth, permit, activity, lifecycle, work).await;
 }
 
 async fn connected_with_lifecycle(
@@ -124,6 +132,7 @@ async fn connected_with_lifecycle(
     state: AppState,
     auth: Auth,
     permit: limits::Permit,
+    activity: Registration,
     lifecycle: connection::Lifecycle,
     _work: crate::shutdown::Guard,
 ) {
@@ -169,7 +178,7 @@ async fn connected_with_lifecycle(
         result = session.ended() => Some(result.unwrap_or(1011)),
         _ = overflow.wait_for(|full| *full) => Some(CLOSE_QUEUE_OVERFLOW),
         _ = notification_failed.failed() => Some(1011),
-        result = connection.run(&mut socket, lifecycle) => result.err(),
+        result = connection.run(&mut socket, activity, lifecycle) => result.err(),
     };
     if let Some(code) = code {
         close(&mut socket, code).await;

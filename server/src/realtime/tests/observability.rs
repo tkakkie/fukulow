@@ -29,9 +29,14 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                         let capture = capture.clone();
                         let finished = finished.clone();
                         async move {
+                            let permit = state.socket_gate.admit(auth.account_id).unwrap();
+                            let activity = state
+                                .message_delivery
+                                .channel_access
+                                .activity
+                                .register(&auth);
                             ws.on_upgrade(move |mut socket| {
                                 async move {
-                                    let permit = state.socket_gate.admit(auth.account_id).unwrap();
                                     let queue = state.message_delivery.queue(
                                         auth.identity.organization.organization_id,
                                         (auth.identity.member.id, auth.membership_revision),
@@ -46,7 +51,11 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                                         permit,
                                     };
                                     let code = connection
-                                        .run(&mut socket, connection::Lifecycle::default())
+                                        .run(
+                                            &mut socket,
+                                            activity,
+                                            connection::Lifecycle::default(),
+                                        )
                                         .await
                                         .unwrap_err();
                                     close(&mut socket, code).await;

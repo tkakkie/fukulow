@@ -27,6 +27,10 @@ impl SessionChanges {
         self.pause(Phase::Started)
     }
 
+    pub(crate) fn pause_session_check(&self) -> Arc<Gate> {
+        self.pause(Phase::Registered)
+    }
+
     pub(super) fn pause(&self, phase: Phase) -> Arc<Gate> {
         self.gate.register_replacing(phase)
     }
