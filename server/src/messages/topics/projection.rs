@@ -165,62 +165,42 @@ async fn read(
     let limit = query.validate()?;
     let newer = query.after_position.is_some();
     let organization = auth.identity.organization.organization_id;
-    // Cheap denial before watermark admission; reauthorize in the page snapshot.
-    require_visible_scoped(
-        &state.pool,
-        organization,
-        (auth.identity.member.id, auth.membership_revision),
+    let snapshot = history::prepare_snapshot(
+        state,
+        auth,
         channel,
+        query.history_generation,
+        query.as_of_seq,
+        async |_| Ok(()),
+        async |tx: &mut sqlx::PgConnection, history_generation, w| {
+            let sql = if newer {
+                page_sql_in_direction(true)
+            } else {
+                page_sql()
+            };
+            let rows = sqlx::query(&sql)
+                // Repeated reads otherwise select a much slower generic plan (#326).
+                .persistent(false)
+                .bind(organization)
+                .bind(auth.identity.member.id)
+                .bind(auth.membership_revision)
+                .bind(channel)
+                .bind(w)
+                .bind(query.after_position.or(query.before_position))
+                .bind(i64::from(limit) + 1)
+                .bind(topics_only)
+                .bind(topic)
+                .fetch_all(tx)
+                .await?;
+            Ok((history_generation, rows))
+        },
     )
     .await?;
     if topics_only || topic.is_some() {
         reject_dm_topics_scoped(state, auth, channel).await?;
     }
     admission::within_work_deadline(async {
-        watermark::read(state, organization, channel).await?;
-        // Admission resolves prior ambiguous commits; W is selected in the page snapshot.
-        let (history_generation, rows) = crate::database::organization_read_only(
-            &state.pool,
-            organization,
-            async |tx: &mut sqlx::PgConnection| {
-                require_visible(
-                    &mut *tx,
-                    organization,
-                    (auth.identity.member.id, auth.membership_revision),
-                    channel,
-                )
-                .await?;
-                let (history_generation, w) = history::page(
-                    tx,
-                    organization,
-                    channel,
-                    query.history_generation,
-                    query.as_of_seq,
-                )
-                .await?;
-                let sql = if newer {
-                    page_sql_in_direction(true)
-                } else {
-                    page_sql()
-                };
-                let rows = sqlx::query(&sql)
-                    // Repeated reads otherwise select a much slower generic plan (#326).
-                    .persistent(false)
-                    .bind(organization)
-                    .bind(auth.identity.member.id)
-                    .bind(auth.membership_revision)
-                    .bind(channel)
-                    .bind(w)
-                    .bind(query.after_position.or(query.before_position))
-                    .bind(i64::from(limit) + 1)
-                    .bind(topics_only)
-                    .bind(topic)
-                    .fetch_all(tx)
-                    .await?;
-                Ok::<_, MessageError>((history_generation, rows))
-            },
-        )
-        .await?;
+        let (history_generation, rows) = snapshot.await?;
         let first = rows.first().ok_or(sqlx::Error::RowNotFound)?;
         check_visibility(first.try_get::<Option<bool>, _>("visible")?)?;
         let w: i64 = first.try_get("as_of_seq")?;
