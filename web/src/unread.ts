@@ -37,7 +37,7 @@ type Channel = ReturnType<typeof channelState>
 type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAtEntry: number | null; presented: Set<number>; covered: Coverage[]; needsPresentation: boolean; firstUnread?: UnreadRecord }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
-export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
+export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; ensureList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -182,6 +182,13 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       s.requiredPosition = Math.max(s.requiredPosition, s.position)
     }
     s.error = s.baseline.readSeq < s.requiredPosition
+  }
+  async function ensure() {
+    if (!active()) return
+    options.refreshArchived?.()
+    options.refreshDms?.()
+    if (options.ensureList) return options.ensureList()
+    return refresh()
   }
   async function refresh(retryTokens?: Map<string, symbol>) {
     if (!active()) return
@@ -477,7 +484,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     previous = next
     if (!next.running || next.organization !== 'available') { if (before.running) reset(); return }
     if (before.historyEpoch !== next.historyEpoch) reset()
-    let rebootstrap = false, moveRefresh = false
+    let rebootstrap = false, needBaseline = false, topicRebootstrap = false, moveRefresh = false
     const changed = new Set<string>()
     const selfChanged = before.selfId !== next.selfId
     if (selfChanged) {
@@ -510,14 +517,24 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const oldBaselines = options.topics?.get(id).topics.flatMap(t => t.baseline ? [t.baseline] : []) ?? []
         const oldVisit = resetHistory && visit?.scope.channel === id ? visit : undefined
         const archived = c.archived
-        fence(id, c); channels.set(id, c = { ...channelState(), archived }); rebootstrap = true
+        const keepBaseline = !resetHistory && old?.state !== 'unavailable' && options.refreshList !== undefined &&
+          !c.stopped && c.main.baseline !== undefined && c.aggregate !== undefined && !listNeedsRecovery(c)
+        const main = keepBaseline ? c.main : undefined
+        const aggregate = keepBaseline ? c.aggregate : undefined
+        fence(id, c)
+        channels.set(id, c = { ...channelState(), archived, ...(main ? { main } : {}), ...(aggregate ? { aggregate } : {}) })
+        if (resetHistory || old?.state === 'unavailable' || !options.ensureList) rebootstrap = true
+        else if (!keepBaseline) needBaseline = true
+        topicRebootstrap = true
         for (const b of oldBaselines) { c.ignoredBaselines.add(b); getScope(c, b.summary.id) }
         if (oldVisit) visit = { id: Symbol(), scope: oldVisit.scope, boundary: null, unreadAtEntry: null, presented: new Set(), covered: [], needsPresentation: false }
         channelChanged = true
       }
       // Bootstrap omits history <= B from replay. A REST snapshot older than B cannot cover that prefix.
       if (now?.watched && old?.cursor == null && now.cursor !== null) {
-        c.requiredBase = now.cursor; rebootstrap = true
+        c.requiredBase = now.cursor
+        if (!c.main.baseline || !c.aggregate || listNeedsRecovery(c)) rebootstrap = true
+        topicRebootstrap = true
         channelChanged = true
       }
       // Out-of-order lower Moves leave moveSeq unchanged; moveEpoch still re-prunes records
@@ -549,8 +566,17 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     notify(changed)
     if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); deadlines.cancel() }
     if (moveRefresh && !rebootstrap) void refresh()
-    if ((!before.running && next.running) || (!before.connected && next.connected) || rebootstrap) {
-      if (channels.size === 0 || [...channels.keys()].some(watched)) void refresh()
+    const started = !before.running && next.running
+    const connected = !before.connected && next.connected
+    if (started || connected || rebootstrap) {
+      if (channels.size === 0 || [...channels.keys()].some(watched)) {
+        if (connected || rebootstrap || !options.ensureList) void refresh()
+        else void ensure()
+      }
+    } else if (needBaseline) {
+      if (channels.size === 0 || [...channels.keys()].some(watched)) void ensure()
+    }
+    if (started || connected || rebootstrap || topicRebootstrap) {
       for (const [id, c] of channels) if (watched(id)) for (const topic of c.topics.keys()) void refreshTopic(id, topic)
     }
   }
@@ -700,8 +726,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       const id = visit.id
       collect(scope.channel, c); resolveBoundary(); notify(scope.channel)
       if (!s.baseline || s.baseline.asOfSeq < c.requiredBase || wasStopped) {
-        if (scope.topicId === null) void refresh()
-        else void refreshTopic(scope.channel, scope.topicId)
+        if (scope.topicId === null) {
+          if (!s.baseline && !wasStopped && options.ensureList) void ensure()
+          else void refresh()
+        } else void refreshTopic(scope.channel, scope.topicId)
       }
       return id
     },

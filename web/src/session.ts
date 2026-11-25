@@ -169,6 +169,7 @@ export function createSession(options: SessionOptions) {
       selfId: options.selfId,
       organizationId,
       refreshList: !options.channelsApi ? () => Promise.resolve().then(() => channels.load()) : undefined,
+      ensureList: !options.channelsApi ? () => channels.ensure() : undefined,
       refreshArchived: () => channels.refreshArchived(),
       refreshDms: () => dms?.refresh(),
       isDm,
@@ -399,7 +400,7 @@ export function createSession(options: SessionOptions) {
     onUnavailable: () => { if (!closed) terminate() },
   })
   void sync.start()
-  void channels.load()
+  void channels.ensure()
   sections.hold()
   return {
     sync, topics, replies, moveChain, replyCounts, unread, channels, channelCreation, sections, dms, navigationTargets, searchAnchor, searchSource,

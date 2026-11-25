@@ -179,11 +179,11 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       hasList = true
       const previous = state.channels.find(c => c.id === state.selectedId)
       const departed = previous && api.getChannel && details?.canOpen(previous.id) && !data.channels.some(c => c.id === previous.id)
+      onSnapshot?.(data.channels)
       set({
         status: 'ready', channels: data.channels, selectedId: state.selectedId ?? data.channels[0]?.id ?? null,
         ...(departed ? { openChannel: previous, openChannelPending: true } : {}),
       })
-      onSnapshot?.(data.channels)
       setAuthorized(data.channels, true)
     },
     hide: () => setAuthorized(authorized.channels, false),
@@ -261,6 +261,10 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     subscribe(l: () => void) {
       listeners.add(l)
       return () => listeners.delete(l)
+    },
+    async ensure() {
+      if (target) return target.ensure()
+      return this.load()
     },
     async load() {
       if (target) return target.refresh()
