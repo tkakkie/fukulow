@@ -36,7 +36,14 @@ sudo() {
 stat() { case "$3" in */12/*) printf '444\n' ;; */13/*) return 1 ;; *) printf '644\n' ;; esac; }
 taskset() {
   printf '%s\n' "$*" >> "$FUKULOW_SETUP_TEST/pins"
-  if [ "$3" = 30 ]; then printf 'taskset: Invalid argument\n' >&2; return 1; fi
+  if [ "$3" = 30 ]; then
+    # util-linux prints to buffered stdout first, which flushes at exit after the stderr error.
+    local current
+    printf -v current "pid %s's current affinity list: 5\n" "$3"
+    printf "taskset: failed to set pid %s's affinity: Invalid argument\n" "$3" >&2
+    printf '%s' "$current"
+    return 1
+  fi
 }
 export -f stat taskset
 `;

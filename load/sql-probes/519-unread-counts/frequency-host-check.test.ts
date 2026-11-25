@@ -8,13 +8,17 @@ import { hostAffinity } from './frequency-fixture.ts';
 type CheckIo = NonNullable<Parameters<typeof checkFrequencyHost>[1]>;
 type Record = Parameters<Parameters<typeof checkFrequencyHost>[0]>[0];
 
-function fixture({ badAffinity = false, busy = false, badCpuset = false, badSocket = false, badSpot = false, badCleanup = false } = {}) {
+function fixture({ badAffinity = false, busy = false, badCpuset = false, badSocket = false,
+  badSpot = false, badCleanup = false, lateRootTask = false } = {}) {
   const calls: string[][] = [], launched: string[] = [], removed: string[] = [];
   let spotCalls = 0;
   const io: CheckIo = {
     readHostAffinity: session => {
       const affinity = hostAffinity(session);
       if (badAffinity) affinity.irqbalance = 'active';
+      if (lateRootTask && launched.length === 2 && removed.length === 2) {
+        affinity.rootTasks = { '42': { name: 'late-kthread', cpus: [6], movable: true } };
+      }
       return affinity;
     },
     docker: argv => {
@@ -74,6 +78,16 @@ test('the host check exercises two pinned containers, the abstract socket and th
   assert.equal(spotCalls, 1);
   assert.match(record.turbostat?.stdout ?? '', /FUKULOW_TURBOSTAT_READY/);
   assert.deepEqual(removed, [...launched].reverse());
+  assert.deepEqual(record.affinityAfter, record.affinity);
+});
+
+test('host check fails on a movable kthread outside housekeeping in the post-cleanup readback', async () => {
+  const { ok, record, launched, removed } = await fixture({ lateRootTask: true })();
+  assert.deepEqual(removed, [...launched].reverse());
+  assert.deepEqual(record.affinity?.rootTasks, {});
+  assert.deepEqual(record.affinityAfter?.rootTasks, { '42': { name: 'late-kthread', cpus: [6], movable: true } });
+  assert.equal(ok, false);
+  assert.deepEqual(record.problems, ['finish: movable root task 42 (late-kthread) affinity differs from housekeeping']);
 });
 
 test('host check stops before containers when affinity fails', async () => {

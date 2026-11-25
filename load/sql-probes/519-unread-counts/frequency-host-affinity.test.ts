@@ -97,6 +97,13 @@ test('root cgroup readback records broad masks and rejects movable tasks on meas
   assert.match(problems(f.readback()).join(), /movable root task 2 \(kthreadd\) affinity/);
 });
 
+test('a movable root task with an empty CPU list fails affinity validation', () => {
+  const record = fixture().readback();
+  assert.ok(record.rootTasks);
+  record.rootTasks['2'].cpus = [];
+  assert.deepEqual(problems(record), ['unreadable root task 2 affinity evidence']);
+});
+
 test('preflight fails closed on changed or unreadable host affinity', () => {
   const cases: [RegExp, (f: ReturnType<typeof fixture>) => void][] = [
     [/system\.slice effective cpuset/, ({ files, root }) => { files[`${root}/system.slice/cpuset.cpus.effective`] = '0-15'; }],

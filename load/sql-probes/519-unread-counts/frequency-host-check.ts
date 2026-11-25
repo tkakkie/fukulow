@@ -13,7 +13,8 @@ const docker = (argv: string[]) => execFileSync('docker', argv, { encoding: 'utf
 const host = { docker, readHostAffinity, containerCpuReadback, withSpotCheck };
 
 type HostCheckRecord = {
-  label: 'not evidence'; at: string; ok: boolean; affinity: HostAffinity | null; containerCpusets: ContainerCpusets | null;
+  label: 'not evidence'; at: string; ok: boolean; affinity: HostAffinity | null; affinityAfter: HostAffinity | null;
+  containerCpusets: ContainerCpusets | null;
   abstractSocket: string | null; turbostat: SpotCheck | null; problems: string[];
 };
 
@@ -24,7 +25,7 @@ export async function checkFrequencyHost(keep: (record: HostCheckRecord) => void
   const ownedContainers = () => io.docker(['ps', '-a', '--filter', `label=${label}`, '--format', '{{.Names}}']).split('\n').filter(Boolean);
   const record: HostCheckRecord = {
     label: 'not evidence', at: new Date().toISOString(), ok: false,
-    affinity: null, containerCpusets: null, abstractSocket: null, turbostat: null, problems: [],
+    affinity: null, affinityAfter: null, containerCpusets: null, abstractSocket: null, turbostat: null, problems: [],
   };
   let startingContainers = false;
   try {
@@ -66,6 +67,13 @@ export async function checkFrequencyHost(keep: (record: HostCheckRecord) => void
         if (ownedContainers().length) throw new Error('host check containers remain');
       } catch (error) {
         record.problems.push(`Docker cleanup: ${String(error)}`);
+      }
+      try {
+        record.affinityAfter = io.readHostAffinity(session);
+        const problems = hostAffinityProblems(record.affinityAfter, session, record.affinity?.bootId ?? undefined);
+        record.problems.push(...problems.map(problem => `finish: ${problem}`));
+      } catch (error) {
+        record.problems.push(`finish: ${String(error)}`);
       }
     }
     record.ok = record.problems.length === 0;
