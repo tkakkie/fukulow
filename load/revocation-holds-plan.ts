@@ -60,7 +60,8 @@ export const potentialHolds = (cell: Cell) => targetSockets(cell) * CELLS[cell].
 export const socketAccount = (socket: number) => Math.floor(socket / SOCKETS_PER_ACCOUNT);
 
 export type Stall = { senders: number; messages: number; chars: number };
-export const STALL_DEFAULT: Stall = { senders: 8, messages: 10, chars: MAX_BODY_CHARS };
+export const STALL_MESSAGES = 120;
+export const STALL_DEFAULT: Stall = { senders: 12, messages: 10, chars: MAX_BODY_CHARS };
 export function checkStall(stall: Stall) {
   if (![stall.senders, stall.messages, stall.chars].every(n => Number.isInteger(n) && n > 0)) throw new Error('stall options must be positive integers');
   if (stall.messages > SEND_BURST) throw new Error(`at most ${SEND_BURST} stall Messages per sender (send limit burst)`);
@@ -74,6 +75,7 @@ export const stallBody = (chars: number) => '\u{1F989}'.repeat(chars);
 
 export type PlannedRun = { kind: 'fault'; cell: Cell; duration: Duration; repeat: number } | { kind: 'control'; cell: Cell; repeat: number };
 export const runId = (run: PlannedRun) => run.kind === 'fault' ? `${run.cell}-${run.duration}-r${run.repeat}` : `${run.cell}-control-r${run.repeat}`;
+const shape = (run: PlannedRun) => run.kind === 'fault' ? `${run.cell}/${run.duration}` : `${run.cell}/control`;
 
 /** Interleaved order: each repeat visits every cell, alternating direction so host drift affects all alike. */
 export function planRuns(cells: readonly Cell[], durations: readonly Duration[], repeats: number, controls: boolean): PlannedRun[] {
@@ -87,6 +89,25 @@ export function planRuns(cells: readonly Cell[], durations: readonly Duration[],
     }
   }
   return runs;
+}
+
+/** Append up to three replacements per shape. Stop after two consecutive setup aborts for a shape. */
+export function replacementQueue(initial: PlannedRun[]) {
+  const runs = [...initial];
+  const aborts = new Set<string>();
+  const record = (run: PlannedRun, outcome: 'setup abort' | 'INVALID' | 'PASS' | 'FAIL' | 'CONTROL') => {
+    const key = shape(run);
+    if (outcome === 'setup abort') {
+      if (aborts.has(key)) return false;
+      aborts.add(key);
+    } else aborts.delete(key);
+    if (outcome === 'INVALID' || outcome === 'setup abort') {
+      const scheduled = runs.filter(r => shape(r) === key).length;
+      if (scheduled < 2 * REPEATS) runs.push({ ...run, repeat: scheduled + 1 });
+    }
+    return true;
+  };
+  return { runs, record };
 }
 
 // A rehearsal reports counts only. A formal run is the registered 3 repeats with controls.

@@ -44,7 +44,7 @@ test('options validate cells, durations, repeats, controls and the stall', () =>
 });
 
 test('stall options stay within the send burst, the body limit and half the live queue', () => {
-  assert.equal(STALL_DEFAULT.senders * STALL_DEFAULT.messages, 80);
+  assert.equal(STALL_DEFAULT.senders * STALL_DEFAULT.messages, 120);
   assert.deepEqual(checkStall({ senders: 12, messages: 10, chars: 4000 }), { senders: 12, messages: 10, chars: 4000 });
   assert.throws(() => checkStall({ senders: 13, messages: 10, chars: 4000 }), /at most 128/);
   assert.throws(() => checkStall({ senders: 1, messages: 11, chars: 4000 }), /send limit/);
