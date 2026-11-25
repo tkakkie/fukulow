@@ -424,8 +424,9 @@
     const displayed = isTimelineDisplayed(scrollEl, viewSelected)
     const messages = view.messages
     const pendingIds = pending.map((p) => p.clientMessageId)
-    // Positioning counts as loading so the controller's loading timeout bounds it.
-    const status = positioning && effectiveStatus === 'ready' ? 'loading' : effectiveStatus
+    // Positioning counts as loading so the controller's loading timeout bounds it; a hidden view defers positioning
+    // to its display (`docs/ui.md` §8), so its wait starts only once displayed.
+    const status = positioning && displayed && effectiveStatus === 'ready' ? 'loading' : effectiveStatus
     const targetFirstUnreadId = firstUnreadMessageId
     const awaitingFirstUnread = awaitingEntryPosition
     const { action, anchor } = scrollController.sync({

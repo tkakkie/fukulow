@@ -30,7 +30,7 @@ const views = {
 
 // Opens Workspace directly on an Unread scope of c1 while that scope's entry boundary read is held:
 // the Unread Channel list for the main timeline, the トピック summary for トピック t1.
-async function openWithHeldBoundary(scope: Scope) {
+async function openWithHeldBoundary(scope: Scope, opts: { phonePanel?: boolean } = {}) {
   const net = fakeNetwork()
   const rawSession = createSession({ selfId: 'me', organizationId: 'org-1', onEnded: () => {}, ...net.options('me') })
   const unreadAdapters = new Map<string, ReturnType<typeof unreadAdapter>>()
@@ -90,14 +90,18 @@ async function openWithHeldBoundary(scope: Scope) {
   net.unreadChannels.c1 = unreadRow
   // The fake API returns these values from async functions, so a pending promise holds every read of that boundary.
   let releaseBoundary!: () => void
+  let failBoundary!: () => void
+  const failure = { ok: false as const, kind: 'http' as const, status: 500, error: 'internal_error' }
   if (scope === 'topic') {
     net.topicSummaries['c1:t1'] = new Promise<Result<TopicSummaryResponse>>((resolve) => {
       releaseBoundary = () => resolve(ok({ history_generation: generation, as_of_seq: 9, topic: t1Summary }))
+      failBoundary = () => resolve(failure)
     }) as unknown as Result<TopicSummaryResponse>
   } else {
     net.topicSummaries['c1:t1'] = ok({ history_generation: generation, as_of_seq: 9, topic: t1Summary })
     net.unreadListResult = new Promise<Result<{ history_generation: string; channels: UnreadChannel[] }>>((resolve) => {
       releaseBoundary = () => resolve(ok({ history_generation: generation, channels: [unreadRow] }))
+      failBoundary = () => resolve(failure)
     }) as unknown as Result<{ history_generation: string; channels: UnreadChannel[] }>
   }
 
@@ -106,7 +110,8 @@ async function openWithHeldBoundary(scope: Scope) {
   net.subscribed('c1', 9)
   await settle()
 
-  let href: string = views[scope].href
+  if (opts.phonePanel) dom.win.innerWidth = 375
+  let href: string = opts.phonePanel ? `${views[scope].href}?panel=topics` : views[scope].href
   let historyState: unknown = null
   const browser: NavigationBrowser = {
     location: { get href() { return href } } as Location,
@@ -165,10 +170,11 @@ async function openWithHeldBoundary(scope: Scope) {
   }
   const cleanup = async () => {
     navigation.destroy()
+    dom.win.innerWidth = 1280
     await unmount(instance)
     sessionModel.close()
   }
-  return { host, net, latest, releaseBoundary, scroll, positioning, marker, boundary, cleanup, wantBoundary: scope === 'topic' ? 4 : 2 }
+  return { host, net, navigation, latest, releaseBoundary, failBoundary, scroll, positioning, marker, boundary, cleanup, wantBoundary: scope === 'topic' ? 4 : 2 }
 }
 
 describe('Entry position before the first-Unread boundary resolves (#968)', () => {
@@ -212,6 +218,47 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
       flushSync()
       expect(v.boundary()).toBe(v.wantBoundary)
       expect(v.marker()).toBeNull()
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+    } finally {
+      await v.cleanup()
+    }
+  })
+  it.each<Scope>(['topic', 'main'])('falls back to the %s bottom without a marker as soon as the boundary read fails', async (scope) => {
+    const v = await openWithHeldBoundary(scope)
+    try {
+      expect(v.positioning().busy).toBe(true)
+      v.failBoundary()
+      await settle()
+      await settle()
+      flushSync()
+      expect(v.boundary()).toBeNull()
+      expect(v.marker()).toBeNull()
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  it.each<Scope>(['topic', 'main'])('starts the %s loading timeout only once a phone panel stops hiding the view, so the first Unread survives a long panel stay', async (scope) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const v = await openWithHeldBoundary(scope, { phonePanel: true })
+    try {
+      v.releaseBoundary()
+      await settle()
+      await settle()
+      flushSync()
+      expect(v.boundary()).toBe(v.wantBoundary)
+      // The panel hides the view, which defers positioning to its display; that wait is the user's, not a load.
+      vi.advanceTimersByTime(LOADING_TIMEOUT_MS * 2)
+      await settle()
+      flushSync()
+      expect(v.positioning().busy).toBe(true)
+
+      v.navigation.navigate({ type: 'close' })
+      await settle()
+      await settle()
+      flushSync()
+      expect(v.marker()).not.toBeNull()
       expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
     } finally {
       await v.cleanup()
