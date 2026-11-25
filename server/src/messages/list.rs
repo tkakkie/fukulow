@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::{
     ListMessagesQuery, MessageError, MessagePage, ValidateListMessages, history, mentions,
-    message_from_row, require_visible_scoped, topics,
+    message_from_row, page::DirectionalPage, require_visible_scoped, topics,
 };
 use crate::{
     AppState,
@@ -69,8 +69,8 @@ pub async fn list_messages(
         #[cfg(test)]
         super::tests::membership::pause_history(channel_id).await;
         let (history_generation, w) = history::page(tx, organization_id, channel_id, query.history_generation, query.as_of_seq).await?;
-        let ascending = query.after_seq.is_some();
-        let sql = if ascending {
+        let page = DirectionalPage::new(&query, limit);
+        let sql = if page.ascending {
             "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at \
              FROM messages WHERE organization_id = $1 AND channel_id = $2 AND seq > $3 AND seq <= $5 \
@@ -81,27 +81,17 @@ pub async fn list_messages(
              FROM messages WHERE organization_id = $1 AND channel_id = $2 \
                AND seq <= $3 AND seq <= $5 ORDER BY seq DESC LIMIT $4"
         };
-        let cursor = if ascending {
-            query.after_seq.unwrap_or(0)
-        } else {
-            // Convert exclusive before to an inclusive upper bound; validation guarantees >= 1.
-            query.before_seq.map(|seq| seq - 1).unwrap_or(i64::MAX)
-        };
-        let sql = mentions::page_sql(sql, if ascending { "p.seq ASC" } else { "p.seq DESC" });
-        let mut messages = sqlx::query(&sql)
+        let sql = mentions::page_sql(sql, if page.ascending { "p.seq ASC" } else { "p.seq DESC" });
+        let messages = sqlx::query(&sql)
             .bind(organization_id)
             .bind(channel_id)
-            .bind(cursor)
-            .bind(i64::from(limit) + 1)
+            .bind(page.cursor)
+            .bind(page.fetch_limit())
             .bind(w)
             .try_map(|row| message_from_row(&row))
             .fetch_all(&mut *tx)
             .await?;
-        let has_more = messages.len() > usize::from(limit);
-        messages.truncate(usize::from(limit));
-        if !ascending {
-            messages.reverse();
-        }
+        let (messages, has_more) = page.finish(messages);
         Ok((
             [(header::CACHE_CONTROL, "no-store")],
             Json(MessagePage { history_generation, as_of_seq: w, messages, has_more }),

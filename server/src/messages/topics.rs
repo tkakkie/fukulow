@@ -1,3 +1,4 @@
+use super::page::DirectionalPage;
 use super::*;
 
 pub(crate) mod projection;
@@ -231,15 +232,11 @@ pub async fn topic_history(
         if !exists {
             return Err(MessageError::TopicNotFound);
         }
-        let ascending = query.after_seq.is_some();
-        let (comparison, order, cursor) = if ascending {
-            (">", "ASC", query.after_seq.unwrap_or(0))
+        let page = DirectionalPage::new(&query, limit);
+        let (comparison, order) = if page.ascending {
+            (">", "ASC")
         } else {
-            (
-                "<=",
-                "DESC",
-                query.before_seq.map(|s| s - 1).unwrap_or(i64::MAX),
-            )
+            ("<=", "DESC")
         };
         let sql = format!(
             "SELECT id, channel_id, seq, version, deleted, client_message_id, sender, body, topic_id, reply_to_id AS reply_to, reply_root_id, \
@@ -248,21 +245,17 @@ pub async fn topic_history(
             ORDER BY seq {order} LIMIT $5"
         );
         let sql = mentions::page_sql(&sql, &format!("p.seq {order}"));
-        let mut messages = sqlx::query(&sql)
+        let messages = sqlx::query(&sql)
             .bind(organization)
             .bind(channel)
             .bind(topic)
-            .bind(cursor)
-            .bind(i64::from(limit) + 1)
+            .bind(page.cursor)
+            .bind(page.fetch_limit())
             .bind(w)
             .try_map(|row| message_from_row(&row))
             .fetch_all(&mut *tx)
             .await?;
-        let has_more = messages.len() > usize::from(limit);
-        messages.truncate(usize::from(limit));
-        if !ascending {
-            messages.reverse()
-        }
+        let (messages, has_more) = page.finish(messages);
         Ok((
             [(header::CACHE_CONTROL, "no-store")],
             Json(MessagePage { history_generation, as_of_seq: w, messages, has_more }),
