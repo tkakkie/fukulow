@@ -80,7 +80,7 @@ async fn run(
     pool: PgPool,
     interval: Duration,
     timeout: Duration,
-    subscriptions: Arc<Mutex<Option<Arc<dyn SubscriptionRecheck>>>>,
+    subscriptions: SubscriptionHook,
     mut measurement: Option<Worker>,
     #[cfg(test)] gate: Arc<super::tests::SessionGates>,
 ) {
@@ -111,7 +111,7 @@ async fn run(
         if let Some(tick) = &mut tick {
             tick.sessions_checked();
         }
-        let check = lock_ignoring_poison(&subscriptions).clone();
+        let check = subscriptions.current();
         if let Some(check) = check {
             let work = tokio::time::timeout_at(bound, check.check(&pool, SubscriptionScope::All));
             let result = if let Some(tick) = &mut tick {
