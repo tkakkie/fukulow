@@ -1,5 +1,6 @@
 use super::*;
-use sqlx::Row;
+use sqlx::{PgConnection, Row};
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UnreadChannel {
@@ -133,6 +134,58 @@ CROSS JOIN LATERAL (
 ) topic
 "#;
 
+pub(super) struct ListCounts {
+    pub(super) as_of_seq: i64,
+    pub(super) read_seq: i64,
+    pub(super) main_unread_count: i64,
+    pub(super) unread_count: i64,
+    pub(super) main_mention_unread_count: i64,
+    pub(super) mention_unread_count: i64,
+}
+
+pub(super) enum MissingPositionLog {
+    Emit,
+    Suppress,
+}
+
+pub(super) async fn list_counts(
+    tx: &mut PgConnection,
+    auth: &Auth,
+    ids: &[Uuid],
+    missing_position_log: MissingPositionLog,
+) -> Result<HashMap<Uuid, ListCounts>, sqlx::Error> {
+    let rows = sqlx::query(LIST_COUNTS_SQL)
+        .bind(auth.identity.organization.organization_id)
+        .bind(auth.identity.member.id)
+        .bind(auth.membership_revision)
+        .bind(ids)
+        .fetch_all(tx)
+        .await?;
+    let mut counts = HashMap::new();
+    for row in rows {
+        if matches!(missing_position_log, MissingPositionLog::Emit)
+            && row.try_get::<bool, _>("missing_position")?
+        {
+            tracing::error!(target: "fukulow", event = "missing_unread_position");
+        }
+        if row.try_get::<bool, _>("count_drift")? {
+            tracing::error!(target: "fukulow", event = "unread_count_drift");
+        }
+        counts.insert(
+            row.try_get::<Uuid, _>("channel_id")?,
+            ListCounts {
+                as_of_seq: row.try_get("as_of_seq")?,
+                read_seq: row.try_get("read_seq")?,
+                main_unread_count: row.try_get("main_unread_count")?,
+                unread_count: row.try_get("unread_count")?,
+                main_mention_unread_count: row.try_get("main_mention_unread_count")?,
+                mention_unread_count: row.try_get("mention_unread_count")?,
+            },
+        );
+    }
+    Ok(counts)
+}
+
 /// List visible Channels with the current Member's read positions and Unread counts.
 ///
 /// Public Channels require a non-Guest Role or a current grant; private Channels require a current grant.
@@ -170,43 +223,17 @@ pub async fn list_channels(
             let ids = channels.iter().map(|c| c.id).collect::<Vec<_>>();
             // Two batched queries in one authorization/data snapshot, independent of the
             // number of Channels or Topics. No Message or position outside ids is read.
-            let rows = sqlx::query(LIST_COUNTS_SQL)
-                .bind(auth.identity.organization.organization_id)
-                .bind(auth.identity.member.id)
-                .bind(auth.membership_revision)
-                .bind(&ids)
-                .fetch_all(&mut *tx)
-                .await?;
-            let mut counts = std::collections::HashMap::new();
-            for row in rows {
-                if row.try_get::<bool, _>("missing_position")? {
-                    tracing::error!(target: "fukulow", event = "missing_unread_position");
-                }
-                if row.try_get::<bool, _>("count_drift")? {
-                    tracing::error!(target: "fukulow", event = "unread_count_drift");
-                }
-                counts.insert(
-                    row.try_get::<Uuid, _>("channel_id")?,
-                    (
-                        row.try_get::<i64, _>("as_of_seq")?,
-                        row.try_get::<i64, _>("read_seq")?,
-                        row.try_get::<i64, _>("main_unread_count")?,
-                        row.try_get::<i64, _>("unread_count")?,
-                        row.try_get::<i64, _>("main_mention_unread_count")?,
-                        row.try_get::<i64, _>("mention_unread_count")?,
-                    ),
-                );
-            }
+            let mut counts = list_counts(tx, &auth, &ids, MissingPositionLog::Emit).await?;
             let mut result = Vec::with_capacity(channels.len());
             for channel in channels {
-                let (
+                let ListCounts {
                     as_of_seq,
                     read_seq,
                     main_unread_count,
                     unread_count,
                     main_mention_unread_count,
                     mention_unread_count,
-                ) = counts.remove(&channel.id).ok_or(sqlx::Error::RowNotFound)?;
+                } = counts.remove(&channel.id).ok_or(sqlx::Error::RowNotFound)?;
                 result.push(UnreadChannel {
                     channel,
                     history_generation,
