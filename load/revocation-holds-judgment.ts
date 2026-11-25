@@ -7,6 +7,7 @@ import { noticeCorrectness } from './revocation-holds-notices.ts';
 import { holdsEndSamples, poolBrackets, retryPeakPerSecond, timedSamples } from './revocation-holds-samples.ts';
 import { baselineWindow, CELL_NAMES, edges, REPEATS, type Cell, type Duration, type GateTimes } from './revocation-holds-plan.ts';
 import type { StallRecord } from './revocation-holds-stall.ts';
+import type { Readback } from './revocation-holds-native-stall.ts';
 import type { ServerPoolSample, Stamped } from './revocation-holds-log.ts';
 import type { HoldsTrace } from './revocation-holds-trace.ts';
 
@@ -20,12 +21,13 @@ export type HoldsRun = {
   // gateOn and gateOff bound each gate change: [statement sent, acknowledged]. A control has no
   // gate and records [t, t] at the nominal times; its gateOff is the long recovery.
   // nominalRecovery serves the memory groups.
-  times: GateTimes & { pass: number; stall: number; revoke: number; resume: number; restore?: number; end: number; nominalRecovery: Partial<Record<Duration, number>> };
+  times: GateTimes & { pass: number; stall: number; revoke: number; resume: number; resumeBoundsMs?: [number, number]; resumeUnobserved?: boolean; restore?: number; end: number; nominalRecovery: Partial<Record<Duration, number>> };
   // Readiness is counted when the stall starts, so a late socket cannot satisfy floor 1.
-  setup: { bystanders: number; bystandersReadyAtStall: number; targetsReadyAtStall: number; calibrationErrors: string[]; stallPostFailures: number; gateErrors?: string[] };
+  setup: { bystanders: number; bystandersReadyAtStall: number; targetsReadyAtStall: number; calibrationErrors: string[]; stallPostFailures: number; gateErrors?: string[]; stallErrors?: string[] };
   revokedChannels: string[];
   accounts: AccountMutations[];
   targets: TargetSocket[];
+  stallReadbacks?: Readback[];
   notices: Notice[];
   bystanderNotices: number; bystanderCloses: number[];
   serverCloses: Stamped[]; // each server `websocket_closed` log event (any socket)
@@ -167,21 +169,24 @@ export function judgeHolds(run: HoldsRun) {
   const floor = floors(run);
   const info = informational(run);
   const v4 = evidence(run);
-  const base = { floors: floor.values, informational: info, evidence: v4, evidenceOnly: false, independentFailures: [] as string[], missingGateInputs: [] as string[] };
-  if (!floor.reasons.length && run.kind === 'control' && !v4.issues.length) {
-    return { ...base, verdict: 'CONTROL' as HoldsVerdict, floorReasons: [], reasons: [] };
-  }
-  const notices = noticeCorrectness(run);
   const end = holdsEndGates(run);
-  const recovery = recoveryGateReasons(run);
   const missing = [...end.missing];
-  const baseline = baselineP99(run);
-  const fault = faultWindowReasons(run);
   const independentFailures = [...end.independent];
   for (const [phase, pool] of Object.entries(info.pool)) {
     if (!pool) missing.push(`${phase} pool timeouts: missing input: pool brackets`);
     else if (pool.timeouts) independentFailures.push(`${pool.timeouts} pool acquire timeouts in the ${phase} window`);
   }
+  const base = {
+    floors: floor.values, informational: info, evidence: v4, evidenceOnly: false, floorInvalid: floor.reasons.length > 0,
+    independentFailures, missingGateInputs: [] as string[],
+  };
+  if (!floor.reasons.length && run.kind === 'control' && !v4.issues.length) {
+    return { ...base, verdict: 'CONTROL' as HoldsVerdict, floorReasons: [], reasons: independentFailures, missingGateInputs: missing };
+  }
+  const notices = noticeCorrectness(run);
+  const recovery = recoveryGateReasons(run);
+  const baseline = baselineP99(run);
+  const fault = faultWindowReasons(run);
   for (const kind of ['db', 'http'] as const) {
     if (!Number.isFinite(baseline[kind])) missing.push(`${kind} fault and recovery p99: missing input: baseline probes`);
   }
@@ -194,7 +199,7 @@ export function judgeHolds(run: HoldsRun) {
   missing.push(...notices.missing);
   const reasons = [...(floor.reasons.length ? recovery.filter(reason => reason !== 'pool acquire timeouts unavailable in the recovery window') : recovery),
     ...fault, ...notices.reasons, ...end.reasons];
-  if (floor.reasons.length) return { ...base, verdict: 'INVALID' as HoldsVerdict, floorReasons: floor.reasons, reasons, independentFailures, missingGateInputs: missing };
+  if (floor.reasons.length) return { ...base, verdict: 'INVALID' as HoldsVerdict, floorReasons: floor.reasons, reasons, missingGateInputs: missing };
   if (run.kind === 'control') return { ...base, verdict: 'INVALID' as HoldsVerdict, floorReasons: [], reasons, evidenceOnly: true, missingGateInputs: missing };
   // Only a run that would otherwise PASS becomes INVALID here, so this never hides a FAIL.
   if (!reasons.length && notices.details.ambiguous.length) {
@@ -210,11 +215,18 @@ export type CellVerdict = 'PASS' | 'FAIL' | 'NOT EVALUATED';
  * Uses exactly the first three valid repeats in run order; INVALID never counts. PASS needs
  * three, all PASS; any FAIL among them fails; fewer is NOT EVALUATED.
  */
-export function verdictByCell(results: { kind: 'fault' | 'control'; cell: Cell; duration?: Duration; verdict: HoldsVerdict; independentFailures?: string[] }[]) {
+type Result = { kind: 'fault' | 'control'; cell: Cell; duration?: Duration; verdict: HoldsVerdict; floorInvalid?: boolean; independentFailures?: string[] };
+
+const barsPass = (r: Result) => (r.kind === 'control' || r.floorInvalid) && Boolean(r.independentFailures?.length);
+
+export const passBarEvidence = (results: (Result & { id: string })[]) =>
+  results.filter(barsPass).map(r => ({ id: r.id, cell: r.cell, duration: r.duration, gates: r.independentFailures }));
+
+export function verdictByCell(results: Result[]) {
   const verdicts: Record<string, CellVerdict> = {};
   for (const cell of CELL_NAMES) for (const duration of ['short', 'long'] as const) {
     const valid = results.filter(r => r.kind === 'fault' && r.cell === cell && r.duration === duration && r.verdict !== 'INVALID').slice(0, REPEATS);
-    const barred = results.some(r => r.cell === cell && (r.kind === 'control' || r.duration === duration) && r.verdict === 'INVALID' && r.independentFailures?.length);
+    const barred = results.some(r => r.cell === cell && barsPass(r));
     verdicts[`${cell}/${duration}`] = valid.some(r => r.verdict === 'FAIL') ? 'FAIL'
       : !barred && valid.length === REPEATS && valid.every(r => r.verdict === 'PASS') ? 'PASS' : 'NOT EVALUATED';
   }

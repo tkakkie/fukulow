@@ -3,9 +3,10 @@ import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
-export function spawnMeasuredServer(binary: string, dir: string, port: number, setupToken: string, databaseUrl: string, events = true) {
+export function spawnMeasuredServer(binary: string, dir: string, port: number, setupToken: string, databaseUrl: string, events = true, prefix: string[] = []) {
   const tracePath = resolve(dir, `revocation-trace-${randomUUID()}.jsonl`);
-  const server = spawn(binary, [], {
+  const [file, ...args] = [...prefix, binary];
+  const server = spawn(file, args, {
     env: {
       PATH: process.env.PATH,
       FUKULOW_ADDR: `127.0.0.1:${port}`,

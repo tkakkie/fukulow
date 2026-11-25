@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { channelId, CHANNELS, GATE_OFF, GATE_ON, holdsFixture, poolSample, sample, target, TIMES, timeoutsFrom } from './revocation-holds-fixture.ts';
 import { floors, holdsReasons, holdsValues, setupReasons, stallReasons } from './revocation-holds-floors.ts';
-import { faultWindowReasons, holdsEndReasons, informational, judgeHolds, recoveryGateReasons, verdictByCell, type HoldsRun } from './revocation-holds-judgment.ts';
+import { faultWindowReasons, holdsEndReasons, informational, judgeHolds, passBarEvidence, recoveryGateReasons, verdictByCell, type HoldsRun } from './revocation-holds-judgment.ts';
 import { lessFavourable, median, memoryByCell, memoryEntry, memoryVerdict, rssDeltaKb } from './revocation-holds-memory.ts';
 import { noticeCorrectness } from './revocation-holds-notices.ts';
 import { rehearsalCounts } from './revocation-holds-rehearsal.ts';
@@ -629,17 +629,49 @@ test('V6 a floor-INVALID attempt evaluates accessible gates and blocks PASS perm
   assert.ok(judged.reasons.includes('7 active holds at recovery + 10 s'));
   assert.ok(judged.reasons.includes('a revocation arrived after the drain limit'));
   assert.deepEqual(judged.independentFailures, ['1 bystander sockets closed during the run']);
-  const attempt = { kind: run.kind, cell: run.cell, duration: run.duration, verdict: judged.verdict, independentFailures: judged.independentFailures };
+  const attempt = { id: 'H512-short-r1', kind: run.kind, cell: run.cell, duration: run.duration, ...judged };
   const replacement = { ...attempt, verdict: 'PASS' as const, independentFailures: [] };
-  const results = [attempt, replacement, replacement, replacement];
-  assert.equal(verdictByCell(results)['H512/short'], 'NOT EVALUATED'); // Q5's alternate FAIL label is undecided
-  assert.equal(verdictByCell([{ ...replacement, verdict: 'FAIL' }, ...results])['H512/short'], 'FAIL');
+  const long = { ...replacement, duration: 'long' as const };
+  const passes = [replacement, replacement, replacement, long, long, long];
+  const results = [attempt, ...passes];
+  for (const duration of ['short', 'long'] as const) {
+    assert.equal(verdictByCell(passes)[`H512/${duration}`], 'PASS');
+    assert.equal(verdictByCell(results)[`H512/${duration}`], 'NOT EVALUATED');
+    assert.equal(verdictByCell([{ ...replacement, duration, verdict: 'FAIL' }, ...results])[`H512/${duration}`], 'FAIL');
+  }
+  assert.deepEqual(passBarEvidence(results), [{ id: attempt.id, cell: 'H512', duration: 'short', gates: ['1 bystander sockets closed during the run'] }]);
 
   run.bystanderCloses = [];
   run.metrics = { revocation_retired_timeout: 2 };
   const partial = judgeHolds(run);
   assert.ok(partial.missingGateInputs.some(input => input.startsWith('hold residual: missing input:')));
   assert.deepEqual(partial.independentFailures, ['2 holds retired by timeout']);
+});
+
+test('V6 each independent gate applies to both a valid and an INVALID control', () => {
+  const observations: [string, (run: HoldsRun) => void][] = [
+    ['1 bystander sockets closed during the run', run => { run.bystanderCloses = [run.times.resume + 1_600]; }],
+    ['2 holds retired by timeout', run => { run.metrics!.revocation_retired_timeout = 2; run.metrics!.revocation_held += 2; }],
+    ['hold residual -1 < 0', run => { run.metrics!.revocation_held -= 1; }],
+    ['1 pool acquire timeouts in the fault window', run => { timeoutsFrom(run, 44_000, 1); }],
+    ['1 pool acquire timeouts in the recovery window', run => { timeoutsFrom(run, 80_000, 1); }],
+  ];
+  const replacements = (['short', 'long'] as const).flatMap(duration =>
+    Array.from({ length: 3 }, () => ({ kind: 'fault', cell: 'H512', duration, verdict: 'PASS' }) as const));
+  for (const [gate, mutate] of observations) for (const invalid of [false, true]) {
+    const run = holdsFixture('control');
+    if (invalid) run.trace!.evidenceErrors.push('trace lost');
+    mutate(run);
+    const judged = judgeHolds(run);
+    assert.equal(judged.verdict, invalid ? 'INVALID' : 'CONTROL', gate);
+    assert.ok(judged.independentFailures.includes(gate), gate);
+    const id = 'H512-control-r1';
+    const results = [{ id, kind: run.kind, cell: run.cell, ...judged }, ...replacements.map(r => ({ ...r, id: 'replacement' }))];
+    const verdicts = verdictByCell(results);
+    assert.equal(verdicts['H512/short'], 'NOT EVALUATED');
+    assert.equal(verdicts['H512/long'], 'NOT EVALUATED');
+    assert.deepEqual(passBarEvidence(results), [{ id, cell: 'H512', duration: undefined, gates: judged.independentFailures }]);
+  }
 });
 
 test('V6 reports evidenced residual and pool timeout failures even with missing timing', () => {

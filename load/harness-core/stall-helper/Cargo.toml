@@ -1,0 +1,19 @@
+[package]
+name = "fukulow-stall-helper"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# The proxy is only used by the #668 load harness.
+[workspace]
+
+[dependencies]
+socket2 = "=0.6.5"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
