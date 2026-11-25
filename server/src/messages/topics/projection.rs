@@ -176,7 +176,7 @@ async fn read(
     if topics_only || topic.is_some() {
         reject_dm_topics_scoped(state, auth, channel).await?;
     }
-    tokio::time::timeout(admission::WORK_TIMEOUT, async {
+    admission::within_work_deadline(async {
         super::watermark(state, organization, channel).await?;
         // Admission resolves prior ambiguous commits; W is selected in the page snapshot.
         let (history_generation, rows) = crate::database::organization_read_only(
@@ -222,11 +222,7 @@ async fn read(
         )
         .await?;
         let first = rows.first().ok_or(sqlx::Error::RowNotFound)?;
-        match first.try_get::<Option<bool>, _>("visible")? {
-            None => return Err(MessageError::OrganizationUnavailable),
-            Some(false) => return Err(MessageError::NotFound),
-            Some(true) => {}
-        }
+        check_visibility(first.try_get::<Option<bool>, _>("visible")?)?;
         let w: i64 = first.try_get("as_of_seq")?;
         let mut items = Vec::new();
         for row in &rows {
@@ -267,7 +263,6 @@ async fn read(
         })
     })
     .await
-    .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
 }
 
 /// Main timeline projection at a fixed W. Topic Messages are represented once by their summary.
@@ -291,16 +286,12 @@ pub async fn list_timeline(
     let Path((_, channel)) = path.map_err(|_| MessageError::InvalidInput)?;
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let p = read(&state, &auth, channel, query, false, None).await?;
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(TimelinePage {
-            history_generation: p.history_generation,
-            as_of_seq: p.w,
-            items: p.items,
-            has_more: p.has_more,
-        }),
-    )
-        .into_response())
+    Ok(no_store_json(TimelinePage {
+        history_generation: p.history_generation,
+        as_of_seq: p.w,
+        items: p.items,
+        has_more: p.has_more,
+    }))
 }
 
 /// Topic summaries as of W, ordered by their W-relative latest activity.
@@ -332,16 +323,12 @@ pub async fn list_topics(
             _ => None,
         })
         .collect();
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(TopicPage {
-            history_generation: p.history_generation,
-            as_of_seq: p.w,
-            topics,
-            has_more: p.has_more,
-        }),
-    )
-        .into_response())
+    Ok(no_store_json(TopicPage {
+        history_generation: p.history_generation,
+        as_of_seq: p.w,
+        topics,
+        has_more: p.has_more,
+    }))
 }
 
 /// Current bounded baseline for a Topic first encountered through live delivery.
@@ -382,13 +369,9 @@ pub async fn topic_summary(
     let Some(TimelineItem::Topic { topic }) = p.items.into_iter().next() else {
         return Err(MessageError::TopicNotFound);
     };
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(TopicSummaryResponse {
-            history_generation: p.history_generation,
-            as_of_seq: p.w,
-            topic,
-        }),
-    )
-        .into_response())
+    Ok(no_store_json(TopicSummaryResponse {
+        history_generation: p.history_generation,
+        as_of_seq: p.w,
+        topic,
+    }))
 }

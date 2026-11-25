@@ -245,14 +245,10 @@ pub async fn list_channels(
                     mention_unread_count,
                 });
             }
-            Ok((
-                [(header::CACHE_CONTROL, "no-store")],
-                Json(ChannelList {
-                    history_generation,
-                    channels: result,
-                }),
-            )
-                .into_response())
+            Ok(no_store_json(ChannelList {
+                history_generation,
+                channels: result,
+            }))
         },
     )
     .await
@@ -314,12 +310,7 @@ async fn mark(
     if input.read_seq < 0 {
         return Err(MessageError::InvalidInput);
     }
-    tokio::time::timeout(
-        admission::WORK_TIMEOUT,
-        mark_inner(state, auth, channel, topic, input),
-    )
-    .await
-    .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
+    admission::within_work_deadline(mark_inner(state, auth, channel, topic, input)).await
 }
 
 async fn mark_inner(
@@ -342,11 +333,7 @@ async fn mark_inner(
         sqlx::query(crate::database::LOCK_TIMEOUT_SQL)
             .execute(&mut *tx)
             .await?;
-        match channels::is_visible_for_write(&mut *tx, organization, member, channel).await? {
-            None => return Err(MessageError::OrganizationUnavailable),
-            Some(false) => return Err(MessageError::NotFound),
-            Some(true) => {}
-        }
+        check_visibility(channels::is_visible_for_write(&mut *tx, organization, member, channel).await?)?;
         let history_generation = history::validate(tx, organization, channel, input.history_generation, None).await?;
         #[cfg(test)]
         tests::removal::pause(member.0).await;
@@ -386,12 +373,8 @@ async fn mark_inner(
     if changed { state.message_delivery.channel_access.activity.spawn(state.pool.clone(), organization, channels::activity::Notice::ReadPositionChanged { channel_id: channel, topic_id: topic, read_seq }, Some(member.0)); }
     Ok::<_, MessageError>((read_seq, history_generation))
     }).await.map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
-    Ok((
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(ReadPosition {
-            read_seq,
-            history_generation,
-        }),
-    )
-        .into_response())
+    Ok(no_store_json(ReadPosition {
+        read_seq,
+        history_generation,
+    }))
 }

@@ -1,4 +1,7 @@
-use super::{Message, MessageError, REPLAY_PAGE_SIZE, mentions, message_from_row};
+use super::{
+    Message, MessageError, REPLAY_PAGE_SIZE, check_visibility, mentions, message_from_row,
+    no_store_json, valid_page_limit,
+};
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -302,15 +305,11 @@ async fn authorized_page(
         },
     )
     .await?;
-    match rows
-        .first()
-        .ok_or(sqlx::Error::RowNotFound)?
-        .try_get::<Option<bool>, _>("visible")?
-    {
-        None => return Err(MessageError::OrganizationUnavailable),
-        Some(false) => return Err(MessageError::NotFound),
-        Some(true) => {}
-    }
+    check_visibility(
+        rows.first()
+            .ok_or(sqlx::Error::RowNotFound)?
+            .try_get::<Option<bool>, _>("visible")?,
+    )?;
     let history_generation: Uuid = rows
         .first()
         .ok_or(sqlx::Error::RowNotFound)?
@@ -342,11 +341,10 @@ pub async fn list_channel_events(
         axum::extract::rejection::QueryRejection,
     >,
 ) -> Result<axum::response::Response, MessageError> {
-    use axum::response::IntoResponse;
     let axum::extract::Path((_, channel)) = path.map_err(|_| MessageError::InvalidInput)?;
     let axum::extract::Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.limit.unwrap_or(50);
-    if query.after_seq < 0 || !(1..=200).contains(&limit) {
+    if query.after_seq < 0 || !valid_page_limit(limit) {
         return Err(MessageError::InvalidInput);
     }
     let organization = auth.identity.organization.organization_id;
@@ -366,13 +364,9 @@ pub async fn list_channel_events(
     let has_more = events.len() > usize::from(limit);
     events.truncate(usize::from(limit));
     let events = events.into_iter().map(ChannelEvent::into_wire).collect();
-    Ok((
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        axum::Json(fukulow_api::ChannelEventPage {
-            history_generation,
-            events,
-            has_more,
-        }),
-    )
-        .into_response())
+    Ok(no_store_json(fukulow_api::ChannelEventPage {
+        history_generation,
+        events,
+        has_more,
+    }))
 }

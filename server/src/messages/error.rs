@@ -4,7 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::limiter;
+use super::{limiter, no_store_json};
 use crate::auth::{ApiError, ErrorBody};
 
 #[derive(Debug)]
@@ -121,30 +121,19 @@ impl IntoResponse for MessageError {
                 );
             }
             rejection @ (Self::AdmissionRejected | Self::ProjectionAdmissionRejected) => {
-                return (
+                return retry_later(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    [
-                        (header::CACHE_CONTROL, "no-store".to_owned()),
-                        (
-                            header::RETRY_AFTER,
-                            rand::random_range(1..=5_u64).to_string(),
-                        ),
-                    ],
-                    Json(ErrorBody {
-                        error: match rejection {
-                            Self::ProjectionAdmissionRejected => "projection admission unavailable",
-                            _ => "send admission unavailable",
-                        }
-                        .into(),
-                    }),
-                )
-                    .into_response();
+                    rand::random_range(1..=5_u64),
+                    match rejection {
+                        Self::ProjectionAdmissionRejected => "projection admission unavailable",
+                        _ => "send admission unavailable",
+                    },
+                );
             }
         };
         (
             status,
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(ErrorBody {
+            no_store_json(ErrorBody {
                 error: error.into(),
             }),
         )

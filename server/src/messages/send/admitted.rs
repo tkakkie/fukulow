@@ -4,8 +4,9 @@ use super::receipt::{committed, receipt};
 use crate::{
     channels,
     messages::{
-        Delivery, Message, MessageError, SendMessageRequest, admission, commit, dm_error, history,
-        log, mentions, message_from_row, replies, require_visible, search, topics,
+        Delivery, Message, MessageError, SendMessageRequest, admission, commit, dm_error,
+        guards::check_visibility, history, log, mentions, message_from_row, replies,
+        require_visible, search, topics,
     },
 };
 
@@ -123,11 +124,7 @@ async fn persist_admitted(
             &targets,
         )
         .await?;
-        match visible {
-            Some(true) => {}
-            Some(false) => return Err(MessageError::NotFound),
-            None => return Err(MessageError::OrganizationUnavailable),
-        }
+        check_visibility(visible)?;
         if archived {
             // Another send can commit before our Channel lock is granted.
             // Resolve its receipt in the locked state before refusing new work.

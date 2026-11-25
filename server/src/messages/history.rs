@@ -1,4 +1,4 @@
-use super::MessageError;
+use super::{MessageError, guards::check_visibility};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -79,11 +79,7 @@ pub(crate) async fn authorized_generation(
             },
         )
         .await?;
-    match visible {
-        None => return Err(MessageError::OrganizationUnavailable),
-        Some(false) => return Err(MessageError::NotFound),
-        Some(true) => {}
-    }
+    check_visibility(visible)?;
     let generation = generation.ok_or(sqlx::Error::RowNotFound)?;
     if expected.is_some_and(|old| old != generation) {
         return Err(MessageError::HistoryGenerationChanged);

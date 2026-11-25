@@ -108,14 +108,14 @@ pub async fn reply_chain(
     let Query(query) = query.map_err(|_| MessageError::InvalidInput)?;
     let limit = query.limit.unwrap_or(50);
     let after = query.after_seq.unwrap_or(0);
-    if query.as_of_seq.is_some_and(|w| w < 0) || after < 0 || !(1..=200).contains(&limit) {
+    if query.as_of_seq.is_some_and(|w| w < 0) || after < 0 || !valid_page_limit(limit) {
         return Err(MessageError::InvalidInput);
     }
     let auth = auth.ok_or(MessageError::OrganizationUnavailable)?;
     let organization = auth.identity.organization.organization_id;
     let member = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization, member, channel).await?;
-    tokio::time::timeout(admission::WORK_TIMEOUT, async {
+    admission::within_work_deadline(async {
         topics::watermark(&state, organization, channel).await?;
         crate::database::organization_read_only(
             &state.pool,
@@ -154,22 +154,17 @@ pub async fn reply_chain(
                     .await?;
                 let has_more = messages.len() > usize::from(limit);
                 messages.truncate(usize::from(limit));
-                Ok((
-                    [(header::CACHE_CONTROL, "no-store")],
-                    Json(ReplyChainPage {
-                        history_generation,
-                        as_of_seq: w,
-                        root_id,
-                        chain_version,
-                        messages,
-                        has_more,
-                    }),
-                )
-                    .into_response())
+                Ok(no_store_json(ReplyChainPage {
+                    history_generation,
+                    as_of_seq: w,
+                    root_id,
+                    chain_version,
+                    messages,
+                    has_more,
+                }))
             },
         )
         .await
     })
     .await
-    .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
 }

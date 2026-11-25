@@ -1,14 +1,13 @@
 use axum::{
-    Json,
     extract::{Path, State, rejection::PathRejection},
-    http::{StatusCode, header},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use uuid::Uuid;
 
 use super::{
-    Message, MessageError, SendMessageRequest, commit, limiter, reject_dm_topics_scoped,
-    require_visible_scoped, topics,
+    Message, MessageError, SendMessageRequest, commit, limiter, no_store_json,
+    reject_dm_topics_scoped, require_visible_scoped, topics,
 };
 use crate::{
     AppState,
@@ -156,12 +155,7 @@ fn send_intent(channel_id: Uuid, input: &SendMessageRequest) -> limiter::Intent 
 }
 
 fn created(message: Message) -> Response {
-    (
-        StatusCode::CREATED,
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(message),
-    )
-        .into_response()
+    (StatusCode::CREATED, no_store_json(message)).into_response()
 }
 
 pub(super) trait ValidateSendMessage {

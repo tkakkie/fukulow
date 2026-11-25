@@ -1,22 +1,20 @@
 use axum::{
-    Json,
     extract::{
         Path, Query, State,
         rejection::{PathRejection, QueryRejection},
     },
-    http::header,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use uuid::Uuid;
 
 use super::{
     ListMessagesQuery, MessageError, MessagePage, ValidateListMessages, history, mentions,
-    message_from_row, page::DirectionalPage, require_visible_scoped, topics,
+    message_from_row, no_store_json, page::DirectionalPage, require_visible,
+    require_visible_scoped, topics,
 };
 use crate::{
     AppState,
     auth::{Auth, ErrorBody},
-    channels,
 };
 
 /// List visible channel messages using exclusive per-channel sequence cursors.
@@ -54,18 +52,13 @@ pub async fn list_messages(
     .await?;
     topics::watermark(&state, organization_id, channel_id).await?;
     crate::database::organization_read_only(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
-        match channels::is_visible(
+        require_visible(
             &mut *tx,
             organization_id,
             (auth.identity.member.id, auth.membership_revision),
             channel_id,
         )
-        .await?
-        {
-            Some(true) => {}
-            Some(false) => return Err(MessageError::NotFound),
-            None => return Err(MessageError::OrganizationUnavailable),
-        }
+        .await?;
         #[cfg(test)]
         super::tests::membership::pause_history(channel_id).await;
         let (history_generation, w) = history::page(tx, organization_id, channel_id, query.history_generation, query.as_of_seq).await?;
@@ -92,11 +85,7 @@ pub async fn list_messages(
             .fetch_all(&mut *tx)
             .await?;
         let (messages, has_more) = page.finish(messages);
-        Ok((
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(MessagePage { history_generation, as_of_seq: w, messages, has_more }),
-        )
-            .into_response())
+        Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
     })
     .await
 }

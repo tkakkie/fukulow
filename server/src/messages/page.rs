@@ -1,5 +1,9 @@
 use super::ListMessagesQuery;
 
+pub(super) fn valid_page_limit(limit: u16) -> bool {
+    (1..=200).contains(&limit)
+}
+
 pub(super) struct DirectionalPage {
     pub(super) ascending: bool,
     pub(super) cursor: i64,
