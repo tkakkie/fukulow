@@ -20,6 +20,20 @@ import { topicsApi, type TopicsApi } from './topics'
 import { unreadApi, type UnreadApi } from './unread'
 import { createUnreadSync } from './unread-sync'
 
+export async function startInitialChannels(organizationId: string, accountSignal: AbortSignal) {
+  const request = new AbortController()
+  const abort = () => request.abort()
+  accountSignal.addEventListener('abort', abort, { once: true })
+  // Match the Channel list deadline while there is no session controller.
+  const timeout = setTimeout(abort, 10_000)
+  try {
+    return await api.listChannels(organizationId, undefined, request.signal)
+  } finally {
+    clearTimeout(timeout)
+    accountSignal.removeEventListener('abort', abort)
+  }
+}
+
 export type SessionOptions = {
   selfId: string
   organizationId?: string

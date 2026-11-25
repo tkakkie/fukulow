@@ -1294,6 +1294,48 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
     expect(s.sessions[0].channels.get().channels.map(c => c.id)).toEqual(['initial'])
     expect(s.nets[0].lists).toHaveLength(0)
   })
+  it.each([
+    { order: 'the connect-edge refresh is already in flight', refreshFirst: true, total: 3 },
+    { order: 'activity_ready arrives in the 200 ms window', refreshFirst: false, total: 2 },
+  ])('documents the current bound of $total startup Channel list reads when $order', async ({ refreshFirst, total }) => {
+    const core = deferred<void>()
+    // An empty list isolates startup and socket refreshes from Channel selection and history reads.
+    const channels = ok<ChannelList>({ history_generation: generation, channels: [] })
+    const reads = vi.fn(async () => channels)
+    const net = fakeNetwork()
+    const options = net.options()
+    const s = stack({
+      restore: restored(), coreReady: () => core.promise, readInitialChannels: reads,
+      openSession(selfId, onEnded, organizationId, _drafts, _onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
+        const session = createSession({
+          ...options, selfId, onEnded, organizationId, initialRole, accountSignal, initialCanCreateChannels, initialChannels,
+          // Exercise the production path where Unread refreshes the Channel list through the activity target.
+          channelsApi: undefined, unreadApi: { ...options.unreadApi!, listChannels: reads },
+          sync: { ...options.sync, random: () => 0.5 },
+        })
+        return {
+          channels: channelsAdapter(session.channels, session.channelCreation), sync: syncAdapter(session.sync),
+          topics: id => topicsAdapter(session.topics, id), close: session.close,
+        }
+      },
+    })
+    try {
+      const loading = s.auth.load()
+      await settle()
+      expect(reads).toHaveBeenCalledOnce()
+      core.resolve(); await loading; await settle()
+      await vi.advanceTimersByTimeAsync(100)
+
+      const refresh = deferred<typeof channels>()
+      reads.mockReturnValueOnce(refresh.promise)
+      net.socket.onReady()
+      if (refreshFirst) await settle()
+      net.event({ type: 'activity_ready' })
+      refresh.resolve(channels)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(reads).toHaveBeenCalledTimes(total)
+    } finally { await s.auth.signOut() }
+  })
   it('never opens a session when the core fails to load', async () => {
     const core = deferred<void>()
     const channels = deferred<Result<ChannelList>>()

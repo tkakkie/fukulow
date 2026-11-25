@@ -8,10 +8,10 @@ import { searchAnchorAdapter, type SearchAnchorAdapter } from './search-anchor.s
 import { createDraftStore, type DraftStore } from './drafts'
 import { parseNavigation } from './navigation-url'
 import { restore, sessionEndedMessage, setupAndSignIn, signIn, signOut, type AuthState } from './auth'
-import { getOrganizationMe, isOrganizationUnavailable, listChannels, type Identity, type Role } from './api'
+import { getOrganizationMe, isOrganizationUnavailable, type Identity, type Role } from './api'
 import type { createChannelMembers } from './channel-members'
 import { channelsAdapter, type ChannelsAdapter } from './channels.svelte'
-import { createSession } from './session'
+import { createSession, startInitialChannels, type SessionOptions } from './session'
 import { initCore } from '#sync-core'
 import { dmsAdapter, type DmsAdapter } from './dms.svelte'
 import { createMembers, watchMemberAccess, type MemberListAccess } from './members'
@@ -51,28 +51,16 @@ export type AuthDeps = {
   setupAndSignIn: typeof setupAndSignIn
   signOut: typeof signOut
   getOrganization: typeof getOrganizationMe
-  readInitialChannels?: (organizationId: string, signal: AbortSignal) => ReturnType<typeof listChannels>
+  readInitialChannels?: typeof startInitialChannels
   /** Resolves once the sync core is ready; rejects if it never will (main.ts shows the startup error). */
   coreReady?: () => Promise<void>
   openMembers?: (organizationId: string, onEnded: () => void, onUnavailable: () => void, memberListAccess: () => MemberListAccess) => ReturnType<typeof membersAdapter>
   openSecurity?: typeof createAccountSecurity
-  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean, initialChannels?: ReturnType<typeof listChannels>): SessionModel
+  openSession(selfId: string, onEnded: () => void, organizationId: string, drafts?: DraftStore, onIdentity?: (identity: Identity | null) => void, initialRole?: Role, accountSignal?: AbortSignal, initialCanCreateChannels?: boolean, initialChannels?: SessionOptions['initialChannels']): SessionModel
 }
 const defaults: AuthDeps = {
   restore, signIn, setupAndSignIn, signOut, getOrganization: getOrganizationMe, coreReady: initCore,
-  async readInitialChannels(id, accountSignal) {
-    const request = new AbortController()
-    const abort = () => request.abort()
-    accountSignal.addEventListener('abort', abort, { once: true })
-    // Match the Channel list deadline while there is no session controller.
-    const timeout = setTimeout(abort, 10_000)
-    try {
-      return await listChannels(id, undefined, request.signal)
-    } finally {
-      clearTimeout(timeout)
-      accountSignal.removeEventListener('abort', abort)
-    }
-  },
+  readInitialChannels: startInitialChannels,
   openMembers: (id, ended, unavailable, memberListAccess) => membersAdapter(createMembers(id, ended, unavailable, undefined, memberListAccess)),
   openSession(selfId, onEnded, organizationId, drafts, onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
     const session = createSession({ selfId, onEnded, organizationId, initialRole, initialCanCreateChannels, initialChannels, onIdentity, accountSignal, onIdentityInvalidated: () => onIdentity?.(null), sync: { drafts } })
