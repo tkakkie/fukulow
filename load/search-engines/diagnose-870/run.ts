@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { cpuList, parseCpuSets, type CpuSets } from '../../harness-core/cpusets.ts';
+import { measuredSetsArg, measurementSlice, sets796 } from '../../harness-core/frequency-layout.ts';
 import { CommandTimeoutError, docker as rawDocker, save } from '../bench.ts';
 import { resolveImage } from '../manifest.ts';
 import { ownedContainer, ownedVolume, ownershipLabel, refuseLeftovers, supervise, timeouts } from '../runtime.ts';
@@ -161,14 +162,21 @@ function launchedJob(env: NodeJS.ProcessEnv) {
 
 // §3 prerequisites and the stage's go, all checked before anything touches Docker or a database. Each
 // missing one is a STOP before start.
-export function prerequisites(args: ReturnType<typeof options>, manifestHash: string, env = process.env, logicalCpus = cpus().length) {
+export function prerequisites(args: ReturnType<typeof options>, manifestHash: string, env = process.env, logicalCpus = cpus().length,
+  exists: (path: string) => boolean = existsSync) {
   // §3.2: the launcher holds HOST-BUSY for this queue and this job (it also ran the preflight and logged the go).
   assert.ok(launchedJob(env), 'Start through the launcher: HOST-BUSY is not held for this job');
   const [given, fixed] = [args.cpuSets, qualifiedCpuSets].map(t => parseCpuSets(t, logicalCpus));
-  assert.ok(cpuList(given.server) === cpuList(fixed.server) && cpuList(given.client) === cpuList(fixed.client),
+  const q = readIf(args.qualification);
+  const housekeepingPair = cpuList(given.server) === cpuList(sets796.server) && cpuList(given.client) === cpuList(sets796.client);
+  const housekeepingQualification = typeof q?.cpuSets === 'string' &&
+    (q.cpuSets === measuredSetsArg || q.cpuSets.startsWith(`${measuredSetsArg};housekeeping=`));
+  assert.ok(!housekeepingPair && !housekeepingQualification && !exists(`/run/systemd/system/${measurementSlice}`) &&
+    !exists(`/sys/fs/cgroup/${measurementSlice}`),
+    'STOP: #870 cannot use the #796 housekeeping layout until it adopts the two-container layout and host preflight');
+  assert.ok(!given.housekeeping && cpuList(given.server) === cpuList(fixed.server) && cpuList(given.client) === cpuList(fixed.client),
     `CPU sets must be the #796 sets ${qualifiedCpuSets}`);
   // §3.1: the #796 qualification record, PASS, on these sets.
-  const q = readIf(args.qualification);
   assert.ok(q?.issue === 796 && q.result === 'PASS' && q.cpuSets === qualifiedCpuSets, 'The #796 qualification is not recorded as PASS on the #796 CPU sets');
   // §3.4: a passed smoke before Stage 1; §5.3: a finished Stage 1 before Stage 2.
   const prior = args.stage === '1' ? finishedStage(args.smokeOut!, 'smoke', manifestHash, args.cpuSets, logicalCpus)
@@ -467,10 +475,11 @@ async function worker(env: NodeJS.ProcessEnv) {
 // the launch's arguments and checks every prerequisite again, binds stage and output to them, and claims the
 // one-time token the launching process wrote into the output directory. A second worker, or one started
 // with inherited settings, finds the token claimed or missing and stops before Docker.
-export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logicalCpus = cpus().length, os = platform()) {
+export function workerGate(env: NodeJS.ProcessEnv, manifestHash: string, logicalCpus = cpus().length, os = platform(),
+  exists: (path: string) => boolean = existsSync) {
   assert.ok(env.DIAG870_ARGV && env.DIAG870_TOKEN && env.DIAG870_OUT, 'Not a supervised #870 worker launch');
   const args = options(JSON.parse(env.DIAG870_ARGV) as string[], os);
-  const checked = prerequisites(args, manifestHash, env, logicalCpus);
+  const checked = prerequisites(args, manifestHash, env, logicalCpus, exists);
   assert.ok(env.DIAG870_STAGE === args.stage && env.DIAG870_FROM === args.from && env.DIAG870_CPU_SETS === args.cpuSets,
     'The worker settings do not match the launch arguments');
   const file = `${env.DIAG870_OUT}/worker-token`, claimed = `${file}.claimed`;

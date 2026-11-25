@@ -5,6 +5,7 @@ import { assessReference, referenceRequired } from './frequency-reference.ts';
 import { diagnostic } from './frequency-housekeeping.ts';
 import { housekeepingReport } from './frequency-housekeeping-report.ts';
 import type { CpuSets } from '../../harness-core/cpusets.ts';
+import { halfSet, matches796 } from '../../harness-core/frequency-layout.ts';
 
 export type Floors = Record<SetName, StoredRatio>;
 export type FrequencyBlock = { order: number; pgbenchWindow?: { startMs: number; endMs: number } | null; counters?: CounterBlock };
@@ -13,7 +14,7 @@ const errorText = (e: unknown) => e instanceof Error ? e.message : String(e);
 function calibration(sets: CpuSets | null, evidence: FrequencyEvidence | null | undefined, session: string | null) {
   if (!evidence) throw new Error('F6 no calibrated counter evidence');
   if (session === null || evidence.startSession !== session || evidence.endSession !== session) throw new Error('F1 calibration or policy snapshots from another session');
-  if (!sets || !setNames.every(set => same(sets[set], sets796[set]))) throw new Error('F4 unexpected CPU sets');
+  if (!matches796(sets)) throw new Error('F4 unexpected CPU sets');
   const rates = referenceRates(evidence.calibration);
   validatePolicy(evidence.before, evidence.calibration.identity);
   if (!same(evidence.before, evidence.after)) throw new Error('F1 policy changed between launch and completion');
@@ -85,17 +86,19 @@ type Judged = ReturnType<typeof checkCounterEvidence>[number];
 function judgeSet(b: Judged, base: Judged | undefined, set: SetName, floors: Floors | null,
   proposed: Partial<Floors>, capped: boolean, reasons: string[]) {
   const label = `block ${b.order}:`;
-  const qualifying = b.work.filter(w => sets796[set].includes(w.cpu) && w.qualifies);
-  const cohort = base?.work.filter(w => sets796[set].includes(w.cpu) && w.qualifies) ?? [];
+  const cpus = sets796[set];
+  const minimum = halfSet(cpus);
+  const qualifying = b.work.filter(w => cpus.includes(w.cpu) && w.qualifies);
+  const cohort = base?.work.filter(w => cpus.includes(w.cpu) && w.qualifies) ?? [];
   const common = cohort.flatMap(w => {
     const current = qualifying.find(q => q.cpu === w.cpu);
     return current ? [{ cpu: w.cpu, ratio: ratio(current, w) }] : [];
   });
-  if (qualifying.length < 4) reasons.push(`${label} F4 ${set} coverage ${qualifying.length}/8`);
-  if (common.length < 4) reasons.push(`${label} F4 ${set} common coverage ${common.length}/8`);
+  if (qualifying.length < minimum) reasons.push(`${label} F4 ${set} coverage ${qualifying.length}/${cpus.length}`);
+  if (common.length < minimum) reasons.push(`${label} F4 ${set} common coverage ${common.length}/${cpus.length}`);
   const medianHz = qualifying.length ? medianRatio(qualifying.map(w => w.busyHz!)) : null;
   let floorMet: boolean | null = null;
-  if (b.order === 1 && medianHz && qualifying.length >= 4) {
+  if (b.order === 1 && medianHz && qualifying.length >= minimum) {
     proposed[set] = store(multiply(keepFrequency, medianHz));
     if (floors) {
       try {
@@ -104,8 +107,8 @@ function judgeSet(b: Judged, base: Judged | undefined, set: SetName, floors: Flo
       } catch (err) { reasons.push(`${label} floor ${set} invalid (${errorText(err)})`); }
     }
   }
-  const f5 = common.length >= 4 ? medianBounds(common.map(w => w.ratio), cohort.length) : null;
-  const fullSpanF5 = capped && base && common.length >= 4
+  const f5 = common.length >= minimum ? medianBounds(common.map(w => w.ratio), cohort.length) : null;
+  const fullSpanF5 = capped && base && common.length >= minimum
     ? medianBounds(common.map(({ cpu }) => ratio(b.fullSpan[cpu], base.fullSpan[cpu])), cohort.length) : null;
   const throttled = b.order !== 1 && f5?.verdict === 'throttled';
   if (throttled) reasons.push(`${label} F5 throttled ${set}`);

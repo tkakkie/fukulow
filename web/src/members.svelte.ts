@@ -11,7 +11,8 @@ export function membersAdapter(controller: ReturnType<typeof createMembers>) {
     get state() { subscribe(); return controller.get() },
     activityTarget: controller.activityTarget,
     retry: controller.retry,
-    load: controller.load, invite: controller.invite, role: controller.role, deactivate: controller.deactivate, unavailable: controller.unavailable, close: controller.close,
+    load: controller.load, activate: controller.activate, scheduleActivate: controller.scheduleActivate, refreshIfActive: controller.refreshIfActive,
+    invite: controller.invite, role: controller.role, deactivate: controller.deactivate, unavailable: controller.unavailable, close: controller.close,
   }
 }
 export function inviteAcceptanceAdapter(controller: ReturnType<typeof createInviteAcceptance>) {

@@ -3,16 +3,19 @@ import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { measuredSetsArg, measurementSlice } from '../../harness-core/frequency-layout.ts';
 import { qualifiedCpuSets } from './cluster.ts';
 import { stage1, type Measurement } from './judge.ts';
 import { sequence, type MeasuredStep } from './plan.ts';
-import { finishRecords, limitedExitCode, options, parseCount, prerequisites, readCounterWaitMs, readsDelta, signalStop, stopExitCode, sweepLeftovers, workerGate } from './run.ts';
+import { finishRecords, limitedExitCode, options, parseCount, prerequisites as checkPrerequisites, readCounterWaitMs, readsDelta, signalStop, stopExitCode, sweepLeftovers, workerGate } from './run.ts';
 
 const hash = 'h'.repeat(64);
 const sets = qualifiedCpuSets;
 const swapped = 'server=1,3,5,7,9,11,13,15;client=0,2,4,6,8,10,12,14';
 const parsed = {server: [0, 2, 4, 6, 8, 10, 12, 14], client: [1, 3, 5, 7, 9, 11, 13, 15]};
 const json = (file: string, value: unknown) => writeFileSync(file, JSON.stringify(value));
+const prerequisites = (args: ReturnType<typeof options>, manifestHash: string, env: NodeJS.ProcessEnv, logicalCpus: number,
+  exists = (_path: string) => false) => checkPrerequisites(args, manifestHash, env, logicalCpus, exists);
 
 function host() {
   const dir = mkdtempSync(join(tmpdir(), 'diag870-'));
@@ -89,6 +92,22 @@ test('swapped CPU sets or a qualification that is not PASS on the #796 sets are 
   assert.throws(() => prerequisites(options(argv(h, 'smoke', [], swapped), 'linux'), hash, env, 16), /must be the #796 sets/);
   json(h.qualification, {issue: 796, result: 'FAIL', cpuSets: sets});
   assert.throws(() => prerequisites(options(argv(h, 'smoke'), 'linux'), hash, env, 16), /not recorded as PASS/);
+});
+
+test('#870 preserves its frozen sets and refuses the #796 housekeeping layout before Docker', () => {
+  const h = host();
+  const env = {...h.env, FUKULOW_LAUNCH_JOB: 'smoke-870'};
+  const blocked = /cannot use the #796 housekeeping layout until it adopts the two-container layout and host preflight/;
+  const check = (cpuSets = sets, exists = (_path: string) => false) =>
+    prerequisites(options(argv(h, 'smoke', [], cpuSets), 'linux'), hash, env, 16, exists);
+  assert.equal(sets, 'server=0,2,4,6,8,10,12,14;client=1,3,5,7,9,11,13,15');
+  assert.throws(() => check(measuredSetsArg), blocked);
+  assert.throws(() => check(`${measuredSetsArg};housekeeping=0,7,8,15`), blocked);
+  for (const path of [`/run/systemd/system/${measurementSlice}`, `/sys/fs/cgroup/${measurementSlice}`]) {
+    assert.throws(() => check(sets, candidate => candidate === path), blocked);
+  }
+  json(h.qualification, {issue: 796, result: 'PASS', cpuSets: measuredSetsArg});
+  assert.throws(() => check(), blocked);
 });
 
 test('Stage 1 needs a smoke the supervisor finalized as valid, not only the worker completion', () => {
@@ -226,11 +245,14 @@ test('the worker checks the prerequisites itself and claims a one-time token; SE
   writeFileSync(join(out, 'worker-token'), 'tok');
   const env = {...smokeEnv, SEARCH_WORKER: '1', DIAG870_ARGV: JSON.stringify(args), DIAG870_TOKEN: 'tok', DIAG870_OUT: out,
     DIAG870_STAGE: 'smoke', DIAG870_FROM: parsed.from, DIAG870_CPU_SETS: sets};
-  const gate = (e: Record<string, string>) => workerGate(e, hash, 16, 'linux');
+  const gate = (e: Record<string, string>) => workerGate(e, hash, 16, 'linux', () => false);
   // Inherited worker settings without a launch: refused.
   assert.throws(() => gate({SEARCH_WORKER: '1', ...h.env}), /Not a supervised #870 worker launch/);
   // A launch whose prerequisites no longer hold (HOST-BUSY gone): refused.
   assert.throws(() => gate({...env, FUKULOW_HOST_BUSY: join(h.dir, 'gone')}), /HOST-BUSY is not held/);
+  assert.throws(() => workerGate(env, hash, 16, 'linux', path => path.endsWith(measurementSlice)),
+    /cannot use the #796 housekeeping layout/);
+  assert.ok(existsSync(join(out, 'worker-token')));
   assert.throws(() => gate({...env, DIAG870_STAGE: '1'}), /do not match the launch arguments/);
   assert.throws(() => gate({...env, DIAG870_TOKEN: 'other'}), /token does not match/);
   // The failed attempt above already claimed the token; a fresh one is claimed once only.

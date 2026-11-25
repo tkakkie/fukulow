@@ -47,6 +47,7 @@
     channelListStatus,
     panelOpen = false,
     mainViewSelected = true,
+    awaitingInitialSenders = false,
     members = [],
     resolveSenderName,
     resolveSearchContext = () => '',
@@ -75,6 +76,7 @@
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
+    onpositioningchange,
   }: {
     searchState?: SearchState
     searchOpen?: boolean
@@ -104,6 +106,7 @@
     channelListStatus: 'loading' | 'ready' | 'error'
     panelOpen?: boolean
     mainViewSelected?: boolean
+    awaitingInitialSenders?: boolean
     members?: readonly Member[]
     resolveSenderName?: (senderId: string) => string
     resolveSearchContext?: (hit: SearchHit) => string
@@ -132,6 +135,7 @@
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
+    onpositioningchange?: (positioning: boolean) => void
   } = $props()
 </script>
 
@@ -261,6 +265,7 @@
             {search}
             {selfId}
             viewSelected={mainViewSelected}
+            {awaitingInitialSenders}
             {organizationUnavailable}
             {sendDisabled}
             {reconnecting}
@@ -274,6 +279,7 @@
             {ongoToChannelList}
             {onrecheckmembership}
             {onswitchorganization}
+            {onpositioningchange}
           />
         {/key}
       {:else}
@@ -289,6 +295,7 @@
             {search}
             {selfId}
             viewSelected={mainViewSelected}
+            {awaitingInitialSenders}
             {organizationUnavailable}
             {reconnecting}
             {resolveSenderName}
@@ -302,6 +309,7 @@
             {ongoToChannelList}
             {onrecheckmembership}
             {onswitchorganization}
+            {onpositioningchange}
           />
         {/key}
       {/if}

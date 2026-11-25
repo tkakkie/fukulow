@@ -437,3 +437,75 @@ it('ignores an older unscoped response after a newer Guest directory load comple
   expect([...c.authors.get().keys()]).toEqual(['self'])
   c.close()
 })
+
+it('defers directory reads across activity invalidations until first activation, coalesces concurrent triggers and keeps Role revalidation', async () => {
+  const { createActivity } = await import('./activity')
+  vi.useFakeTimers()
+  const finishes: ((result: Result<MemberList>) => void)[] = []
+  const listMembers = vi.fn(() => new Promise<Result<MemberList>>(resolve => { finishes.push(resolve) }))
+  let access: import('./members').MemberListAccess = 'member'
+  const c = createMembers(org, vi.fn(), vi.fn(), {
+    listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  }, () => access)
+  const activity = createActivity({ watched: () => false })
+  activity.hold('members', c.activityTarget)
+  try {
+    // Before activation, every activity and access-refresh path is gated.
+    activity.notice({ type: 'activity_ready' })
+    activity.notice({ type: 'activity_reset' })
+    activity.notice({ type: 'members_changed' })
+    activity.notice({ type: 'channel_access_revoked', channel_id: 'c1' })
+    activity.notice({ type: 'channel_access_gained', channel_id: 'c2' })
+    void c.refreshIfActive()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(listMembers).not.toHaveBeenCalled()
+
+    // Activation while Role is revalidating waits for confirmation instead of fetching unverified.
+    access = 'revalidating'
+    c.scheduleActivate()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(listMembers).not.toHaveBeenCalled()
+
+    // Confirming Role resumes the activated directory once and coalesces concurrent triggers.
+    access = 'member'
+    activity.invalidateMemberLists()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(listMembers).toHaveBeenCalledTimes(1)
+    c.activate()
+    c.scheduleActivate()
+    void c.load()
+    void c.refreshIfActive()
+    expect(listMembers).toHaveBeenCalledTimes(1)
+    finishes[0](ok({ members: [member] }))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(listMembers).toHaveBeenCalledTimes(2)
+    finishes[1](ok({ members: [member] }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(c.get().members).toEqual([member])
+  } finally { activity.close(); c.close(); vi.useRealTimers() }
+})
+
+it('preserves error, empty and unavailable directory views after deferred activation', async () => {
+  vi.useFakeTimers()
+  const listMembers = vi.fn<typeof import('./api').listMembers>()
+    .mockResolvedValueOnce({ ok: false, kind: 'http', status: 503, retryAfterMs: 1_000 })
+    .mockResolvedValueOnce(ok({ members: [] }))
+  const c = createMembers(org, vi.fn(), vi.fn(), {
+    listMembers, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+  }, () => 'member')
+  try {
+    c.scheduleActivate()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(c.get()).toMatchObject({ members: [], loading: false, retryable: true })
+    expect(c.get().error).not.toBe('')
+
+    await c.retry()
+    expect(c.get()).toMatchObject({ members: [], loading: false, error: '', retryable: false })
+
+    c.unavailable()
+    expect(c.get()).toMatchObject({ members: [], loading: false, error: '', retryable: false })
+    c.activate(); c.scheduleActivate(); await c.load(); await c.retry()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(listMembers).toHaveBeenCalledTimes(2)
+  } finally { c.close(); vi.useRealTimers() }
+})

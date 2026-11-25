@@ -4,6 +4,8 @@ import { isAbsolute } from 'node:path';
 import { restore } from './frequency-ratios.ts';
 import { checkPermissionEvidence, same, setNames } from './frequency-evidence.ts';
 import type { Floors } from './frequency-judge.ts';
+import { runHostAffinityProblems } from './frequency-host-affinity.ts';
+import { containerCpuProblems } from './frequency-containers.ts';
 
 export type FrequencyStage = 'control' | 'rehearsal2' | 'formal';
 type Quote = { quote: string; date: string };
@@ -55,5 +57,12 @@ function reviewedControlFloors(review: (Review & { report?: unknown }) | null | 
   if (digest(raw) !== review.sha256) throw new Error('STOP: control report hash differs from its review');
   const report = JSON.parse(raw.toString());
   if (report.stage !== 'control' || report.valid !== true) throw new Error('STOP: control did not validate');
+  if (runHostAffinityProblems(report.evidence?.hostAffinity, report.evidence?.hostAffinityAfter, report.session?.id,
+    report.evidence?.calibration?.calibration?.identity?.bootId).length > 0) {
+    throw new Error('STOP: reviewed control needs valid #796 housekeeping readbacks at start and finish');
+  }
+  if (containerCpuProblems(report.evidence?.containerCpusets, report.session?.id).length > 0) {
+    throw new Error('STOP: reviewed control has no valid #796 container cpuset readback');
+  }
   return { floors: validateFloors(report.frequency.floorProposal), sha256: review.sha256 };
 }

@@ -6,10 +6,10 @@ import type { HoldsRun } from './revocation-holds-judgment.ts';
 
 const count = (counts: Map<string, number>, key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
 
-function clientReasons(run: HoldsRun, revoked: Set<string>, clientCounts: Map<string, number>) {
+function clientReasons(run: HoldsRun, revoked: Set<string>, clientCounts: Map<string, number>, missing: string[]) {
   const reasons: string[] = [];
   const seen = new Set<string>();
-  let wrong = run.bystanderNotices > 0, duplicate = false, early = false, afterRestore = false;
+  let wrong = run.bystanderNotices > 0, duplicate = false, early = false, afterRestore = false, missingRevoke = false;
   for (const notice of run.notices) {
     const target = run.targets[notice.socket];
     if (!target || notice.channelId === null || !revoked.has(notice.channelId)) { wrong = true; continue; }
@@ -18,23 +18,26 @@ function clientReasons(run: HoldsRun, revoked: Set<string>, clientCounts: Map<st
     seen.add(key);
     count(clientCounts, notice.channelId);
     const account = run.accounts[target.account];
-    if (account?.revokeStartedAt === undefined || notice.at < account.revokeStartedAt) early = true;
+    if (account?.revokeStartedAt === undefined) missingRevoke = true;
+    else if (notice.at < account.revokeStartedAt) early = true;
     if (account?.restoredAt !== undefined && notice.at >= account.restoredAt) afterRestore = true;
   }
   if (wrong) reasons.push('a revocation reached a bystander or a Channel that was not revoked');
   if (duplicate) reasons.push('duplicate revocation on a (socket, Channel)');
   if (early) reasons.push('a revocation arrived before its revoke started');
   if (afterRestore) reasons.push('a restored registration received a revocation');
+  if (missingRevoke) missing.push('client revocation order: missing input: revoke start time');
   return reasons;
 }
 
 export function noticeCorrectness(run: HoldsRun) {
   const revoked = new Set(run.revokedChannels);
   const clientCounts = new Map<string, number>(), serverCounts = new Map<string, number>();
-  const reasons = clientReasons(run, revoked, clientCounts);
+  const missing: string[] = [];
+  const reasons = clientReasons(run, revoked, clientCounts, missing);
   const timing = run.sendTiming;
   const faultSends: (SendRecord & { sentAt: number })[] = [], ambiguous: typeof faultSends = [], wrongRecords: SendRecord[] = [];
-  if (!timing) reasons.push('no server send timing');
+  if (!timing) missing.push('send timing and send counts: missing input: calibrated server send records');
   else {
     const offset = (timing.offsetBoundsMs[0] + timing.offsetBoundsMs[1]) / 2, u = timing.uncertaintyMs;
     // Legal before the gate-on statement was sent or after the gate-off one was acknowledged; a FAIL
@@ -54,5 +57,5 @@ export function noticeCorrectness(run: HoldsRun) {
   }
   const mismatched = timing ? [...revoked].filter(channel => (serverCounts.get(channel) ?? 0) !== (clientCounts.get(channel) ?? 0)) : [];
   if (mismatched.length) reasons.push(`${mismatched.length} Channels whose server send count differs from the client notice count`);
-  return { reasons, details: { faultSends, ambiguous, wrongRecords: wrongRecords.length, mismatched, clientNotices: Object.fromEntries(clientCounts), serverSends: Object.fromEntries(serverCounts) } };
+  return { reasons, missing, details: { faultSends, ambiguous, wrongRecords: wrongRecords.length, mismatched, clientNotices: Object.fromEntries(clientCounts), serverSends: Object.fromEntries(serverCounts) } };
 }

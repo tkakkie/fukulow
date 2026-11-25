@@ -31,6 +31,7 @@ export function createActivityTarget<T>(options: {
   const deadlines = createRequestDeadlines()
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
   let inFlightEpoch: number | null = null, inFlightGen = -1, acceptedEpoch: number | null = null
+  let noticePending = false, servingNotice = false
   let timer: ReturnType<typeof setTimeout> | undefined
   let retry = false, due = 0, stopped = false
   let failure: Exclude<Result<T>, { ok: true }> | undefined
@@ -62,7 +63,8 @@ export function createActivityTarget<T>(options: {
     if (closed || !dirty) return
     if (inFlight) { queued = true; return }
     if (retry || options.canLoad?.() === false) return
-    inFlight = true; queued = false
+    inFlight = true; queued = false; failure = undefined
+    servingNotice = noticePending; noticePending = false
     const own = generation
     const epoch = options.connectionEpoch?.() ?? null
     inFlightEpoch = epoch; inFlightGen = own
@@ -80,13 +82,21 @@ export function createActivityTarget<T>(options: {
     })
     completion = undefined
     if (controller === request) controller = undefined
+    const wasServingNotice = servingNotice
     inFlight = false; inFlightEpoch = null; inFlightGen = -1
+    servingNotice = false
     if (closed) return
     if (cancelled) { if (dirty) schedule(0); return }
     try { if (result.ok) {
-      if (own !== generation) { if (dirty && !retry) schedule(200); return }
+      if (own !== generation) {
+        if (wasServingNotice) noticePending = true
+        if (dirty && !retry) schedule(200)
+        return
+      }
       const covered = options.covers?.(result.data) !== false
       if (!covered) {
+        // A below-floor snapshot never satisfies the notice, even when acceptBelowFloor applies its data.
+        if (wasServingNotice) noticePending = true
         if (++belowFloor >= 3) scheduleRetry()
         else schedule(200)
         if (!options.acceptBelowFloor) return
@@ -97,12 +107,15 @@ export function createActivityTarget<T>(options: {
       if (covered && dirty) schedule(200)
     } else {
       if (own === generation) { belowFloor = 0; acceptedEpoch = null; failure = result; options.error?.(result) }
-      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; stopped = true; return }
-      if (options.manualRetry) { dirty = false; queued = false; return }
+      if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; stopped = true; return }
+      if (options.manualRetry) { dirty = false; queued = false; noticePending = false; return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
+        if (wasServingNotice) noticePending = true
         scheduleRetry(result.retryAfterMs ?? 0)
-      } else if (own !== generation) { if (dirty) schedule(200) }
-      else { dirty = false; queued = false; stopped = true }
+      } else if (own !== generation) {
+        if (wasServingNotice) noticePending = true
+        if (dirty) schedule(200)
+      } else { dirty = false; queued = false; noticePending = false; stopped = true }
     } } finally { options.settled?.() }
   }
   function fence() {
@@ -115,6 +128,7 @@ export function createActivityTarget<T>(options: {
   function invalidate(reason: Invalidation = 'notice', delay = 200) {
     if (closed) return
     if (reason !== 'notice') { fence(); options.hide?.(reason) }
+    else noticePending = true
     stopped = false; failure = undefined; dirty = true
     if (inFlight) { queued = true; return }
     // Multi-lane admission may make other work eligible before a retained retry deadline.
@@ -140,14 +154,26 @@ export function createActivityTarget<T>(options: {
     // An in-flight snapshot can cover a newer notice if it passes covers().
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
+    inFlight: () => inFlight,
+    pendingNotice: () => !closed && (servingNotice || (noticePending && dirty)),
     ensure() {
       if (inFlight) return running
       if (!closed && !stopped && !dirty && timer === undefined && !retry) { dirty = true; return run() }
     },
-    refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
+    refresh() {
+      if (closed) return
+      stopped = false; dirty = true
+      if (inFlight) { queued = true; return running }
+      if (!retry) { clearTimeout(timer); timer = undefined; return run() }
+    },
+    flushQueued() {
+      if (closed) return
+      if (inFlight) return running
+      if (dirty && !retry && timer !== undefined) { clearTimeout(timer); timer = undefined; return run() }
+    },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
-    suspend() { generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
-    close() { closed = true; generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
+    suspend() { generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; dirty = false; queued = false; noticePending = false; servingNotice = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
+    close() { closed = true; generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; noticePending = false; servingNotice = false; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
   }
 }
 

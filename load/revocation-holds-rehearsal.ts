@@ -1,9 +1,9 @@
-// #668 rehearsal: counts only. It never computes a verdict, a floor, a gate or a memory result,
-// so a rehearsal cannot be read as a measurement.
+// #668 rehearsal diagnostics without scored verdicts.
 import { bytesBetween } from './revocation-holds-stall.ts';
 import { holdsEndSamples, retriesWithin, timedSamples } from './revocation-holds-samples.ts';
 import { edges } from './revocation-holds-plan.ts';
 import { median } from './revocation-holds-memory.ts';
+import { evidence, stallMessagesAfterResume } from './revocation-holds-evidence.ts';
 import type { HoldsRun } from './revocation-holds-judgment.ts';
 
 const spread = (values: number[]) => values.length ? { min: Math.min(...values), median: median(values), max: Math.max(...values) } : null;
@@ -19,11 +19,11 @@ export function rehearsalCounts(run: HoldsRun) {
     kind: run.kind, cell: run.cell, duration: run.duration, repeat: run.repeat,
     readyAtStall: { targets: run.setup.targetsReadyAtStall, bystanders: run.setup.bystandersReadyAtStall },
     stallBytesAfterResume: spread(run.targets.map(t => bytesBetween(t.stall, resumed(t), Infinity))),
-    stallMessagesAfterResume: spread(run.targets.map(t => t.stallMessagesAt.filter(at => at >= resumed(t)).length)),
+    stallMessagesAfterResume: spread(run.targets.map(stallMessagesAfterResume)),
     closes: {
       targetClient: run.targets.filter(t => t.close).length,
       proxy: run.targets.reduce((sum, t) => sum + t.stall.closes.length, 0),
-      bystander: run.bystanderCloses,
+      bystander: run.bystanderCloses.length,
       server: run.serverCloses.length,
     },
     highWaterMarkAtHoldsEnd: { lowest: end[0]?.highWaterMark ?? null, highest: end.at(-1)?.highWaterMark ?? null },
@@ -35,5 +35,7 @@ export function rehearsalCounts(run: HoldsRun) {
       revoke: spread(run.accounts.map(a => span(a.revokeStartedAt, a.revokedAt)).filter((v): v is number => v !== null)),
       restore: spread(run.accounts.map(a => span(a.restoreStartedAt, a.restoredAt)).filter((v): v is number => v !== null)),
     },
+    fallbackMarkersNearPass: run.statements.filter(s => s.fallback && Math.abs(s.at - run.times.pass) <= 1000).length,
+    evidence: evidence(run),
   };
 }

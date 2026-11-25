@@ -13,10 +13,11 @@ import { maxLimits, verifyLimits, withCap, writeLimits } from './frequency-polic
 import { calibrate, timedCounters, waitUntil } from './frequency-collector.ts';
 import { withSpotCheck, type SpotCheck } from './frequency-spot-check.ts';
 import { assessReference, referenceMs, referenceRequired, settleMs } from './frequency-reference.ts';
-import { diagnostic, housekeepingSampler, workloadCgroup } from './frequency-housekeeping.ts';
+import { diagnostic, housekeepingSampler } from './frequency-housekeeping.ts';
 import { checkFrequencyEvidence, judgeFrequency, type FrequencyBlock } from './frequency-judge.ts';
 import { controlSpotCheck } from './frequency-turbostat.ts';
 import type { CpuSets } from '../../harness-core/cpusets.ts';
+import { matches796, measurementSlice } from '../../harness-core/frequency-layout.ts';
 
 export function frequencyRequest(stage: string, helper: string | undefined, review: string | undefined, permission: string | undefined,
   session: string | null, sets: CpuSets | undefined, marker: string | null) {
@@ -25,7 +26,7 @@ export function frequencyRequest(stage: string, helper: string | undefined, revi
   if (platform() !== 'linux' || !session || !marker?.endsWith(`session ${session}`) || !launch ||
       launch.issue !== 796 || !isQuote(launch.go) || !isQuote(launch.airflow) || launch.sampleSeconds !== 5 ||
       launch.maxTctlC !== 50 || launch.maxWaitSeconds !== 1200 || launch.boost !== '0' ||
-      launch.policyBoost !== '0' || launch.profile !== 'performance' || !launch.policy || !same(sets, sets796) || !helper || !isAbsolute(helper)) {
+      launch.policyBoost !== '0' || launch.profile !== 'performance' || !launch.policy || !matches796(sets) || !helper || !isAbsolute(helper)) {
     throw new Error('STOP: #796 v3 needs its own approved Linux launcher job, cooldown, 5 s sampling, fixed CPU sets and absolute --perf-helper');
   }
   const approval = stage === 'formal' ? frozenFloors() : stage === 'rehearsal2' ? controlFloors(review) : null;
@@ -118,10 +119,9 @@ export function frequencyRun(request: ReturnType<typeof frequencyRequest>, out: 
 
   return {
     signal: signal.signal,
-    observeHousekeeping(containerPid: () => string) {
-      const workload = diagnostic(() => workloadCgroup(containerPid()));
+    observeHousekeeping() {
       const ticks = diagnostic(() => Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8', timeout: 3000 })));
-      sampler = housekeepingSampler(workload, ticks && Number.isSafeInteger(ticks) && ticks > 0 ? ticks : null);
+      sampler = housekeepingSampler(`/${measurementSlice}`, ticks && Number.isSafeInteger(ticks) && ticks > 0 ? ticks : null);
     },
     async start() {
       calibration = await calibrate(request.helper, signal.signal);

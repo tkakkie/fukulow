@@ -219,4 +219,101 @@ describe('author identities', () => {
     expect(c.get().members).toEqual([])
     c.close()
   })
+
+  it('bounds initial display wait with a timeout and clears the timer on settlement, view change or close', async () => {
+    vi.useFakeTimers()
+    try {
+      const lookup = vi.fn(() => new Promise<ReturnType<typeof ok>>(() => {}))
+      const c = createAuthors('org', vi.fn(), vi.fn(), lookup, 500)
+      const notify = vi.fn()
+      c.subscribe(notify)
+
+      c.syncInitialDisplay('org:c1:', true)
+      expect(c.isInitialDisplayTimedOut('org:c1:')).toBe(false)
+      await vi.advanceTimersByTimeAsync(499)
+      expect(c.isInitialDisplayTimedOut('org:c1:')).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(c.isInitialDisplayTimedOut('org:c1:')).toBe(true)
+      expect(notify).toHaveBeenCalledOnce()
+
+      // Switching view resets the timeout state and cancels prior timers when waiting becomes false.
+      c.syncInitialDisplay('org:c2:', true)
+      expect(c.isInitialDisplayTimedOut('org:c2:')).toBe(false)
+      await vi.advanceTimersByTimeAsync(250)
+      c.syncInitialDisplay('org:c2:', false)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(c.isInitialDisplayTimedOut('org:c2:')).toBe(false)
+      expect(notify).toHaveBeenCalledOnce()
+
+      // Close clears pending timers and never blocks display.
+      c.syncInitialDisplay('org:c3:', true)
+      c.close()
+      expect(c.isInitialDisplayTimedOut('org:c3:')).toBe(true)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(notify).toHaveBeenCalledOnce()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('retains deactivated author labels across deferred directory loads, lets newer authorized identities win, and keeps labels if refresh fails', async () => {
+    const lookup = vi.fn()
+      .mockResolvedValueOnce(ok([
+        { id: 'bob', name: 'ボブ', deactivated: true },
+        { id: 'carol', name: 'キャロル', deactivated: true },
+      ]))
+      .mockResolvedValueOnce({ ok: false as const, kind: 'network' as const })
+      .mockResolvedValueOnce(ok([{ id: 'bob', name: 'ボブ改', deactivated: true }]))
+    const c = createAuthors('org', vi.fn(), vi.fn(), lookup)
+    c.watch(['bob', 'carol'])
+    await settle()
+    expect(senderName(c.get().get('bob'))).toBe('ボブ（無効）')
+    expect(senderName(c.get().get('carol'))).toBe('キャロル（無効）')
+
+    // Deferred directory arrives with active members only: deactivated labels must not be erased synchronously.
+    c.replaceMembers([member('alice')])
+    expect(senderName(c.get().get('bob'))).toBe('ボブ（無効）')
+    expect(senderName(c.get().get('carol'))).toBe('キャロル（無効）')
+
+    // Even when the follow-up refresh lookup fails, deactivated labels must not fall back to メンバー.
+    await settle()
+    expect(senderName(c.get().get('bob'))).toBe('ボブ（無効）')
+    expect(senderName(c.get().get('carol'))).toBe('キャロル（無効）')
+
+    // A newer authorized lookup identity wins for bob.
+    c.retry()
+    await settle()
+    expect(senderName(c.get().get('bob'))).toBe('ボブ改（無効）')
+
+    // A newer authorized directory identity wins when carol is reactivated.
+    c.replaceMembers([member('alice'), { id: 'carol', name: 'キャロル復帰', role: 'member' }])
+    expect(senderName(c.get().get('carol'))).toBe('キャロル復帰')
+    expect(c.get().get('carol')?.deactivated).toBe(false)
+    c.close()
+  })
+
+  it('drops deactivated identities whose Messages left every retained view across directory refreshes so disjoint batches do not accumulate', async () => {
+    const lookup = vi.fn(async (_org: string, { ids }: { ids: string[] }) =>
+      ok(ids.map(id => identity(id, true))))
+    const c = createAuthors('org', vi.fn(), vi.fn(), lookup)
+
+    // Five disjoint batches of 100 deactivated authors, each followed by a directory refresh.
+    for (let batchIndex = 0; batchIndex < 5; batchIndex++) {
+      const batch = Array.from({ length: 100 }, (_, i) => `b${batchIndex}-${i}`)
+      c.watch(batch)
+      await settle()
+      c.replaceMembers([])
+      expect(c.get().size).toBe(100)
+      for (const id of batch) {
+        expect(c.get().get(id)?.deactivated).toBe(true)
+      }
+      if (batchIndex > 0) {
+        expect(c.get().has(`b${batchIndex - 1}-0`)).toBe(false)
+      }
+    }
+
+    // Once all deactivated authors leave retained views, the next refresh drops them too.
+    c.watch([])
+    c.replaceMembers([])
+    expect(c.get().size).toBe(0)
+    c.close()
+  })
 })

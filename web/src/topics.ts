@@ -54,6 +54,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   const activityTargets = new Map<string, { close(): void; release(): void; target: ReturnType<typeof createActivityTarget>; observeSummary?(listener: (response: TopicSummaryResponse) => void): () => void }>()
   const listeners = new Set<(channels: ReadonlySet<string>) => void>()
   const channelListeners = new Map<string, Set<() => void>>()
+  const summaryListeners = new Set<(channel: string, response: TopicSummaryResponse) => void>()
   const pendingChannels = new Set<string>()
   const deadlines = createRequestDeadlines()
   const snapshots = new Map<string, ReturnType<typeof snapshot>>()
@@ -324,7 +325,11 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         const pending = options.api.getTopicSummary(channel, topic, signal)
         try {
           const { result } = await read(channel, w, `summary:${topic}`, () => pending, false, false, signal)
-          return sync.get().channels[channel]?.versionEpoch === epoch ? result : { ok: false, kind: 'network' }
+          if (sync.get().channels[channel]?.versionEpoch !== epoch) return { ok: false, kind: 'network' }
+          // A concurrent mutation can make a server-selected summary transiently stale; never turn it into a terminal 4xx.
+          return !result.ok && result.kind === 'http' && result.status === 409 && result.error === 'snapshot_expired'
+            ? { ok: false, kind: 'network' }
+            : result
         }
         finally { if (signal.aborted) w.summaries.delete(topic) }
       },
@@ -355,6 +360,9 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
         w.summaries.delete(topic)
         withSync(channel, () => { void sync.settleHistory(channel, [response.topic.latest_message]) })
         notify(channel)
+        if (!w.baselines.has(topic) && !w.summaryDemands.has(topic) && !target.pendingNotice()) {
+          summaryListeners.forEach(listener => listener(channel, response))
+        }
       },
       error: r => {
         if (!current(channel, w)) return
@@ -421,11 +429,11 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
   function pruneActivity(w: Window) {
     const channel = [...windows].find(([, value]) => value === w)?.[0]
     if (!channel) return
-    // An awaited activitySummary() owns its target until it settles; pruning it would abort that read.
+    // An awaited activitySummary() or queued non-retry follow-up owns its target until it settles.
     const retained = new Set([...w.baselines.keys(), ...w.topics.keys(), ...w.summaryDemands.keys()])
     for (const m of w.messages.values()) if (m.topic_id) retained.add(m.topic_id)
-    for (const key of activityTargets.keys()) if (key.startsWith(`topic:${channel}:`) &&
-      !retained.has(key.slice(`topic:${channel}:`.length))) releaseActivity(key)
+    for (const [key, entry] of activityTargets) if (key.startsWith(`topic:${channel}:`) &&
+      !retained.has(key.slice(`topic:${channel}:`.length)) && !entry.target.pendingNotice()) releaseActivity(key)
   }
   async function ensureSummaryForWindow(w: Window, topicId: string) {
     if (w.evidenceRefresh.has(topicId)) return
@@ -789,6 +797,10 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       return w ? [w.messages.values(), ...[...w.topics.values()].map(t => t.messages.values())] : []
     },
     subscribe,
+    subscribeSummary(listener: (channel: string, response: TopicSummaryResponse) => void): () => void {
+      summaryListeners.add(listener)
+      return () => { summaryListeners.delete(listener) }
+    },
     activityAccess(channel: string) {
       const w = windows.get(channel)
       if (!w) return
@@ -797,29 +809,53 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
       for (const [key, entry] of activityTargets) if (key.startsWith(`topic:${channel}:`) || key === `main:${channel}`) entry.target.invalidate('access')
       notify(channel)
     },
-    async activitySummary(channel: string, topic: string, minimumPosition = 0): Promise<Result<TopicSummaryResponse>> {
+    async activitySummary(channel: string, topic: string, minimumPosition = 0, minimumAsOfSeq?: number): Promise<Result<TopicSummaryResponse>> {
       const w = getWindow(channel)
       if (!current(channel, w)) return { ok: false, kind: 'network' }
+      const cursorAtStart = sync.get().channels[channel]?.cursor ?? 0
+      const requiredAsOfSeq = minimumAsOfSeq ?? cursorAtStart
+      const isFresh = (asOfSeq: number, readSeq: number) =>
+        asOfSeq >= requiredAsOfSeq && readSeq >= minimumPosition
       const target = holdSummary(w, topic)
       const cached = w.baselines.get(topic)
-      if (cached && cached.asOfSeq >= (sync.get().channels[channel]?.cursor ?? 0) && cached.summary.read_seq >= minimumPosition) return { ok: true, data: { history_generation: cached.summary.latest_message.history_generation, as_of_seq: cached.asOfSeq, topic: cached.summary } }
+      if (cached && cached.asOfSeq >= Math.max(requiredAsOfSeq, cursorAtStart) && cached.summary.read_seq >= minimumPosition) {
+        return { ok: true, data: { history_generation: cached.summary.latest_message.history_generation, as_of_seq: cached.asOfSeq, topic: cached.summary } }
+      }
       // Return accepted REST evidence even if display trimming immediately evicts its body.
       let accepted: TopicSummaryResponse | undefined
+      let baselineBefore = cached
       const stop = activityTargets.get(`topic:${channel}:${topic}`)?.observeSummary?.(response => { accepted = response })
       w.summaryDemands.set(topic, (w.summaryDemands.get(topic) ?? 0) + 1)
       try {
-        if (cached) { target?.invalidate(); await target?.refresh() } else await target?.ensure()
+        const joined = target?.inFlight() ?? false
+        if (joined) await target?.ensure()
+        else if (cached) await target?.refresh()
+        else await target?.ensure()
+        if (current(channel, w) && !target?.failure()) {
+          const previous = accepted
+          const followUp = joined && accepted && !isFresh(accepted.as_of_seq, accepted.topic.read_seq)
+            ? (target?.inFlight() ? target.ensure() : target?.refresh())
+            : target?.flushQueued()
+          if (followUp) {
+            if (accepted === previous) accepted = undefined
+            baselineBefore = w.baselines.get(topic)
+            await followUp
+          }
+        }
       } finally {
         stop?.()
         const left = (w.summaryDemands.get(topic) ?? 1) - 1
         if (left > 0) w.summaryDemands.set(topic, left)
         else w.summaryDemands.delete(topic)
       }
-      if (accepted && current(channel, w)) return { ok: true, data: accepted }
+      if (!current(channel, w)) return { ok: false, kind: 'network' }
+      if (accepted && isFresh(accepted.as_of_seq, accepted.topic.read_seq)) return { ok: true, data: accepted }
       const failed = target?.failure()
       if (failed) return failed
       const baseline = w.baselines.get(topic)
-      return baseline && current(channel, w) ? { ok: true, data: { history_generation: baseline.summary.latest_message.history_generation, as_of_seq: baseline.asOfSeq, topic: baseline.summary } } : { ok: false, kind: 'network' }
+      return baseline && baseline !== baselineBefore && isFresh(baseline.asOfSeq, baseline.summary.read_seq)
+        ? { ok: true, data: { history_generation: baseline.summary.latest_message.history_generation, as_of_seq: baseline.asOfSeq, topic: baseline.summary } }
+        : { ok: false, kind: 'network' }
     },
     get(channel: string) {
       if (!closed) reconcileSync()
@@ -971,7 +1007,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     replaceSession() { clearActivity(); sessionToken++; cancelReads(); windows.clear(); notify() },
     close() {
       closed = true; clearActivity(); unsubscribe(); cancelReads(); windows.clear()
-      notify(); listeners.clear(); channelListeners.clear()
+      notify(); listeners.clear(); channelListeners.clear(); summaryListeners.clear()
     },
   }
   return controller

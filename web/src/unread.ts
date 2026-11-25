@@ -609,6 +609,31 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     if (resolveBoundary() && visit) changed.add(visit.scope.channel)
     notify(changed)
   })
+  const unsubscribeSummaries = options.topics?.subscribeSummary?.((id, response) => {
+    if (!active() || !watched(id)) return
+    const c = channels.get(id)
+    if (!c || c.stopped) return
+    const s = c.topics.get(response.topic.id)
+    if (!s || !completeCountFields(response.topic) || response.topic.read_seq < s.position) return
+    const previous = s.baseline, prevPos = s.position, prevErr = s.error, prevStop = s.stopped
+    acceptScope(s, topicBaseline(response.as_of_seq, response.topic))
+    if (s.topicMissing && response.as_of_seq >= c.requiredBase) { s.topicMissing = undefined; s.stopped = false }
+    const topic = response.topic.id
+    if (s.baseline && (s.baseline.asOfSeq < c.requiredBase || s.error)) {
+      if (!s.stopped && !c.summaryTimers.has(topic)) void refreshTopic(id, topic)
+    } else if (!s.error && !s.stopped) {
+      const retry = c.summaryTimers.get(topic)
+      if (retry !== undefined) clearTimeout(retry)
+      c.summaryTimers.delete(topic); c.summaryAttempts.delete(topic)
+      c.summaryReads.delete(topic); c.queuedSummaries.delete(topic)
+    }
+    if (s.baseline !== previous || s.position !== prevPos || s.error !== prevErr || s.stopped !== prevStop) {
+      prune(c)
+      const changed = new Set([id])
+      if (resolveBoundary() && visit) changed.add(visit.scope.channel)
+      notify(changed)
+    }
+  })
   function snapshot(id: string) {
     const c = channels.get(id)
     const topicRecords = new Map<string, UnreadRecord[]>()
@@ -678,6 +703,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       return main.asOfSeq >= c.requiredBase && Math.max(c.aggregate?.as_of_seq ?? 0, row.as_of_seq) >= c.requiredBase &&
         main.readSeq >= Math.max(c.main.position, c.main.requiredPosition)
     },
+    activityRequiredBase(id: string) { return channels.get(id)?.requiredBase ?? 0 },
     activitySnapshot(rows: UnreadChannel[]) {
       if (!active()) return
       const blocked = visitBlocked()
@@ -783,7 +809,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       enqueue(visit)
     },
     replaceSession() { session++; reset() },
-    close() { closed = true; unsubscribe(); unsubscribeTopics?.(); reset(); listeners.clear(); channelListeners.clear() },
+    close() { closed = true; unsubscribe(); unsubscribeTopics?.(); unsubscribeSummaries?.(); reset(); listeners.clear(); channelListeners.clear() },
   }
 }
 export type Unread = ReturnType<typeof createUnread>
