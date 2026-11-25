@@ -350,7 +350,7 @@ pub async fn list_channel_events(
     let organization = auth.identity.organization.organization_id;
     let member = (auth.identity.member.id, auth.membership_revision);
     super::require_visible_scoped(&state.pool, organization, member, channel).await?;
-    let through = super::topics::watermark(&state, organization, channel).await?;
+    let through = super::watermark::read(&state, organization, channel).await?;
     let (history_generation, mut events) = authorized_page(
         &state.pool,
         auth.identity.organization.organization_id,

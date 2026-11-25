@@ -177,7 +177,7 @@ async fn read(
         reject_dm_topics_scoped(state, auth, channel).await?;
     }
     admission::within_work_deadline(async {
-        super::watermark(state, organization, channel).await?;
+        watermark::read(state, organization, channel).await?;
         // Admission resolves prior ambiguous commits; W is selected in the page snapshot.
         let (history_generation, rows) = crate::database::organization_read_only(
             &state.pool,

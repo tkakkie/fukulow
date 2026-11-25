@@ -216,7 +216,7 @@ pub async fn topic_history(
         channel,
     )
     .await?;
-    watermark(&state, organization, channel).await?;
+    watermark::read(&state, organization, channel).await?;
     crate::database::organization_read_only(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {
         require_visible(
             &mut *tx,
@@ -259,22 +259,4 @@ pub async fn topic_history(
         Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
     })
     .await
-}
-
-// Keep HTTP admission rejection distinct from database/barrier work timeouts.
-pub(super) async fn watermark(
-    state: &AppState,
-    organization: Uuid,
-    channel: Uuid,
-) -> Result<i64, MessageError> {
-    let w = state.message_delivery.latest_seq(&state.pool, organization, channel).await.map_err(|error| {
-        if matches!(&error, sqlx::Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock) {
-            MessageError::ProjectionAdmissionRejected
-        } else {
-            MessageError::Database(error)
-        }
-    })?;
-    #[cfg(test)]
-    tests::history::pause(channel, "barrier").await;
-    Ok(w)
 }

@@ -57,6 +57,7 @@ pub use send::send_message;
 use send::{ValidateSendMessage, committed, existing, persist};
 pub(crate) mod topics;
 pub(crate) mod unread;
+mod watermark;
 #[cfg(test)]
 pub(crate) use commit::{ambiguous_commit, pause_commit};
 pub use delivery::Delivery;
@@ -127,30 +128,6 @@ impl ValidateListMessages for ListMessagesQuery {
 }
 
 pub(crate) use delivery::{LiveMessage, LiveQueue};
-
-async fn latest_seq(
-    pool: &sqlx::PgPool,
-    organization: Uuid,
-    channel: Uuid,
-    permit: admission::Permit,
-) -> Result<i64, sqlx::Error> {
-    // A post-failure subscription must not snapshot behind an unresolved COMMIT.
-    // Take a fresh READ COMMITTED snapshot *after* acquiring the shared barrier.
-    let mut tx =
-        commit::Transaction::begin(pool, permit, "BEGIN ISOLATION LEVEL READ COMMITTED", None)
-            .await?;
-    commit::lock(tx.connection()?, organization, channel, true).await?;
-    let sql = "SELECT seq FROM channel_message_sequences \
-                   WHERE organization_id = $1 AND channel_id = $2";
-    let seq = sqlx::query_scalar::<_, i64>(sql)
-        .bind(organization)
-        .bind(channel)
-        .fetch_optional(tx.connection()?)
-        .await?
-        .unwrap_or(0);
-    tx.commit().await?;
-    Ok(seq)
-}
 
 const REPLAY_PAGE_SIZE: i64 = 50;
 

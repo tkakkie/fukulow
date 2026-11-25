@@ -326,7 +326,7 @@ async fn mark_inner(
     if topic.is_some() {
         reject_dm_topics_scoped(state, auth, channel).await?;
     }
-    let w = topics::watermark(state, organization, channel).await?;
+    let w = watermark::read(state, organization, channel).await?;
     let state = state.clone();
     let (read_seq, history_generation) = tokio::spawn(async move {
     let (read_seq, changed, history_generation) = crate::database::organization(&state.pool, organization, async |tx: &mut sqlx::PgConnection| {

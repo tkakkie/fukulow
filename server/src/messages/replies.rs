@@ -116,7 +116,7 @@ pub async fn reply_chain(
     let member = (auth.identity.member.id, auth.membership_revision);
     require_visible_scoped(&state.pool, organization, member, channel).await?;
     admission::within_work_deadline(async {
-        topics::watermark(&state, organization, channel).await?;
+        watermark::read(&state, organization, channel).await?;
         crate::database::organization_read_only(
             &state.pool,
             organization,
