@@ -4,7 +4,7 @@ import { createRequestDeadlines } from './request-deadlines'
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
 export type FencedInvalidation = Exclude<Invalidation, 'notice'>
-export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; ready?(): boolean; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
+export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number, discovery?: boolean): void; ready?(): boolean; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
@@ -148,7 +148,7 @@ export function createActivity(options: {
   const random = options.random ?? Math.random, period = options.periodMs ?? 30_000
   let timer: ReturnType<typeof setTimeout> | undefined, generation = 0, closed = false
   const retire = (target: ActivityTarget | undefined) => { if (target?.suspend) target.suspend(); else target?.close() }
-  const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200) => targets.get(key)?.invalidate(reason, delay)
+  const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200, discovery?: boolean) => targets.get(key)?.invalidate(reason, delay, discovery)
   const invalidateMemberLists = () => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access') }
   function all(delay: number, reason: Invalidation = 'reconcile', ready = false) {
     options.reconcile?.()
@@ -174,7 +174,8 @@ export function createActivity(options: {
   }
   const lists = (kind: 'dm' | 'channel' | undefined, reason: Invalidation = 'notice') => {
     if (kind !== 'dm') channelLists(reason)
-    if (kind !== 'channel') invalidate('dms', reason)
+    // Only access changes and unknown kinds can reveal a DM the list has not discovered (P-D5 notice delta).
+    if (kind !== 'channel') invalidate('dms', reason, 200, reason === 'access' || kind === undefined)
   }
   return {
     hold(key: string, target: ActivityTarget) { target.held?.(); if (targets.get(key) !== target) retire(targets.get(key)); targets.set(key, target); return () => { if (targets.get(key) === target) { retire(target); targets.delete(key) } } },
@@ -212,7 +213,7 @@ export function createActivity(options: {
           invalidateMemberLists()
           break
         }
-        case 'dm_list_changed': invalidate('dms', 'access'); break
+        case 'dm_list_changed': invalidate('dms', 'access', 200, true); break
         case 'channel_list_changed': channelLists('access'); invalidate('open-channel', 'access'); break
         case 'channel_members_changed': invalidate(`channel-members:${event.channel_id}`, 'access'); break
         case 'members_changed': invalidate('capabilities', 'access'); invalidateMemberLists(); break

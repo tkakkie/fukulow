@@ -11,16 +11,18 @@ export type DmListState = {
   request?: DmRequest; queued: boolean; paused: boolean; closed: boolean
   recoveryPeer?: string; recovered?: string; recoveryAbsent: boolean; recoveryRenewed: boolean
   status: 'loading' | 'ready' | 'error'; error: boolean
+  // One notice-driven delta beyond the run allowance once the run's delta slot is spent (P-D5, #956).
+  noticeDelta: 'idle' | 'armed' | 'spent'
   sendBlocks: Record<string, 'dm_peer_deactivated' | 'dm_peer_access_lapsed'>
 }
 const lane = (pending = false): Lane => ({ pending, done: false, retryAt: 0, attempt: 0, stopped: false, error: false })
 export const dmListState = (): DmListState => ({ rows: [], selected: null, generation: 0, serial: 0, clock: 0,
   lanes: { delta: lane(true), coverage: lane(true), held: lane(), browse: lane(), recovery: lane() },
   round: [], needsRound: true, budget: 5, discoveryUsed: [], sharedUsed: [], rotation: 0,
-  queued: false, paused: false, closed: false, recoveryAbsent: false, recoveryRenewed: false, status: 'loading', error: false, sendBlocks: {} })
+  queued: false, paused: false, closed: false, recoveryAbsent: false, recoveryRenewed: false, status: 'loading', error: false, noticeDelta: 'idle', sendBlocks: {} })
 
 export type DmInput =
-  | { type: 'demand'; boundary: boolean; periodic?: boolean; replace: string[] }
+  | { type: 'demand'; boundary: boolean; periodic?: boolean; notice?: boolean; replace: string[] }
   | { type: 'select'; id: string | null }
   | { type: 'browse' }
   | { type: 'recover'; peer: string; renewed?: boolean }
@@ -54,19 +56,24 @@ function freezeRound(s: DmListState) {
   s.needsRound = false
   s.lanes.held.pending = s.round.length > 0
 }
-function nextLane(s: DmListState, now: number): DmLane | undefined {
-  if (!s.budget || s.request || s.paused || s.closed) return
+const noticeDelta = (s: DmListState) => s.noticeDelta === 'armed' && s.lanes.delta.pending && !s.lanes.delta.stopped
+function nextLane(s: DmListState, now: number): { lane: DmLane; extra: boolean } | undefined {
+  if (s.request || s.paused || s.closed) return
   const eligible = (name: DmLane) => s.lanes[name].pending && !s.lanes[name].stopped && s.lanes[name].retryAt <= now
-  for (const name of discovery) if (!s.discoveryUsed.includes(name) && eligible(name)) return name
-  if (s.sharedUsed.length >= 3) return
+  if (s.budget) for (const name of discovery) if (!s.discoveryUsed.includes(name) && eligible(name)) return { lane: name, extra: false }
+  if (noticeDelta(s) && s.lanes.delta.retryAt <= now) return { lane: 'delta', extra: true }
+  if (!s.budget || s.sharedUsed.length >= 3) return
   freezeRound(s)
   const order = [...shared.slice(s.rotation), ...shared.slice(0, s.rotation)]
-  return order.find(name => eligible(name) && !s.sharedUsed.includes(name)) ?? order.find(eligible)
+  const lane = order.find(name => eligible(name) && !s.sharedUsed.includes(name)) ?? order.find(eligible)
+  return lane && { lane, extra: false }
 }
 export function dmNextWake(s: DmListState, now: number): number | undefined {
-  if (s.paused || s.closed || s.request || !s.budget) return
+  if (s.paused || s.closed || s.request) return
+  if (!s.budget) return noticeDelta(s) ? Math.max(now, s.lanes.delta.retryAt) : undefined
   const allowed = (name: DmLane) => name === 'delta' || name === 'coverage' ? !s.discoveryUsed.includes(name) : s.sharedUsed.length < 3
   const times = [...discovery, ...shared].filter(name => allowed(name) && s.lanes[name].pending && !s.lanes[name].stopped).map(name => Math.max(now, s.lanes[name].retryAt))
+  if (noticeDelta(s)) times.push(Math.max(now, s.lanes.delta.retryAt))
   if (s.needsRound && !s.round.length && s.rows.length && s.sharedUsed.length < 3 && !s.lanes.held.stopped) times.push(Math.max(now, s.lanes.held.retryAt))
   return times.length ? Math.min(...times) : undefined
 }
@@ -103,8 +110,10 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
         }
       }
       if (input.periodic) {
-        s.budget = 5; s.discoveryUsed = []; s.sharedUsed = []; s.rotation = (s.rotation + 1) % 3
+        s.budget = 5; s.discoveryUsed = []; s.sharedUsed = []; s.rotation = (s.rotation + 1) % 3; s.noticeDelta = 'idle'
       }
+      // A notice after this run's delta slot (spent or in flight) may be served once without waiting for O5.
+      if (input.notice && s.noticeDelta === 'idle' && s.discoveryUsed.includes('delta')) s.noticeDelta = 'armed'
       demand(); break
     case 'pause': s.paused = true; s.generation++; s.request = undefined; s.queued = false; break
     case 'resume': s.paused = false; s.generation++; demand(); break
@@ -151,8 +160,9 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       }
       demand(); break
     case 'wake': {
-      const name = nextLane(s, input.now)
-      if (!name) break
+      const next = nextLane(s, input.now)
+      if (!next) break
+      const name = next.lane
       const l = s.lanes[name]
       const access = Object.fromEntries(s.rows.map(r => [r.identity.id, r.access]))
       const request: DmRequest = { id: ++s.serial, lane: name, generation: s.generation,
@@ -160,9 +170,13 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
         ...(name === 'held' ? { ids: s.round[0]!.filter(id => Object.hasOwn(access, id)) } : {}),
         ...(name === 'recovery' ? { recoveryPeer: s.recoveryPeer } : {}),
         access }
-      if (name === 'delta' || name === 'coverage') s.discoveryUsed.push(name)
-      else s.sharedUsed.push(name)
-      s.budget--; s.request = request; s.queued = false
+      if (next.extra) s.noticeDelta = 'spent'
+      else {
+        if (name === 'delta' || name === 'coverage') s.discoveryUsed.push(name)
+        else s.sharedUsed.push(name)
+        s.budget--
+      }
+      s.request = request; s.queued = false
       effects.push({ type: 'request', request }); break
     }
     case 'failure': {
@@ -213,7 +227,8 @@ export function stepDmList(state: DmListState, input: DmInput): { state: DmListS
       } else {
         if ((q.lane === 'browse' || q.lane === 'recovery') && l.cursor !== q.cursor) break
         l.cursor = input.data.next_cursor ?? undefined
-        if ('caught_up' in input.data) { l.done = input.data.caught_up; l.pending = false }
+        // A notice that armed the notice delta while this delta was in flight still gets it.
+        if ('caught_up' in input.data) { l.done = input.data.caught_up; l.pending = q.lane === 'delta' && s.noticeDelta === 'armed' }
         else { l.done = input.data.next_cursor === null; l.pending = q.lane === 'recovery' && !l.done && !s.recovered }
         if (q.lane === 'recovery' && l.done && !s.recovered) s.recoveryAbsent = true
       }
