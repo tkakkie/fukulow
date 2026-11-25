@@ -9,6 +9,9 @@ export type SetName = typeof setNames[number];
 export const controlIdleMs = 10_000;
 const slackNs = 3_000_000_000n;
 const million = 1_000_000n;
+// perf counting time is not NTP-slewed but CLOCK_MONOTONIC is; 500 ppm is the kernel's maximum slew (#796).
+const maxSlewPpm = 500n;
+export const countingAllowanceNs = (interval: bigint) => million + interval * maxSlewPpm / million;
 const c0Floor: Ratio = [20_000_000n, 1n];
 
 export type Identity = {
@@ -85,7 +88,7 @@ function workBetween(a: Sweep, b: Sweep, hz: Ratio[]) {
     requireEvidence(open.aperfId === close.aperfId && open.mperfId === close.mperfId &&
       interval > 0n && enabled > 0n && enabled === running && unsigned(open.running) === unsigned(open.enabled) &&
       unsigned(close.running) === unsigned(close.enabled) &&
-      enabled >= interval - million && enabled <= interval + million,
+      enabled >= interval - countingAllowanceNs(interval) && enabled <= interval + countingAllowanceNs(interval),
     `F1 CPU ${cpu}: counter identity or counting time changed`);
     const aperf = unsigned(close.aperf) - unsigned(open.aperf);
     const mperf = unsigned(close.mperf) - unsigned(open.mperf);

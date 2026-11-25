@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { block, evidence, floors, session, sets796 } from './frequency-fixture.ts';
 import { judgeFrequency } from './frequency-judge.ts';
+import { countingAllowanceNs } from './frequency-evidence.ts';
 import { below, restore, type StoredRatio } from './frequency-ratios.ts';
 import { legacyDisagreements } from './frequency-legacy-report.ts';
 
@@ -66,6 +67,23 @@ test('F1 binds the helper metadata, true event IDs, full counting time and CPU p
   const jitter = structuredClone(evidence);
   jitter.calibration.open[0].afterNs = '1001000002';
   assert.match(judge([block(1)], jitter).reasons.join(), /F1 TSC calibration bracket exceeds 1 ms/);
+});
+
+test('F1 allows counting time to differ from the read clock by 1 ms plus 500 ppm, and no more', () => {
+  const shifted = (sign: bigint, extra: bigint) => {
+    const b = block(2);
+    const open = b.counters.open.reads[15], close = b.counters.close.reads[15];
+    const allowance = countingAllowanceNs(BigInt(close.monoNs) - BigInt(open.monoNs));
+    close.enabled = close.running = String(BigInt(close.enabled) + sign * (allowance + extra));
+    return judge([block(1), b]).reasons.join();
+  };
+  for (const sign of [1n, -1n]) {
+    assert.doesNotMatch(shifted(sign, 0n), /F1 CPU 15/);
+    assert.match(shifted(sign, 1n), /block 2: F1 CPU 15: counter identity or counting time changed/);
+  }
+  // The #796 control on Ubuntu: chrony 14.9 ppm fast gave +1.92 ms over 130.1 s, which the old 1 ms bound rejected.
+  assert.ok(countingAllowanceNs(130_100_000_000n) > 1_925_000n);
+  assert.equal(countingAllowanceNs(130_000_000_000n), 66_000_000n);
 });
 
 test('F1 rejects event IDs reused across otherwise valid blocks', () => {
