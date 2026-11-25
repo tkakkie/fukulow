@@ -68,7 +68,7 @@ test('a slow core delays only sync: the Organization check runs first and sync s
     // Allow the 200 ms activity_ready refresh to run before checking the startup total.
     await page.waitForTimeout(1_000)
     expect(sockets).toHaveLength(1)
-    expect(lists).toBeLessThanOrEqual(3)
+    expect(lists).toBeLessThanOrEqual(2)
   } finally { release() }
 })
 

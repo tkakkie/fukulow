@@ -870,3 +870,129 @@ it('retryNow resets the below-floor streak', async () => {
   expect(error).not.toHaveBeenCalled()
   target.close()
 })
+
+it('only reads issued after the current connection started cover activity_ready, and reconnect always refetches', async () => {
+  let epoch: number | null = null
+  const load = vi.fn(async (): Promise<Result<number>> => ok(load.mock.calls.length))
+  const accept = vi.fn(), hide = vi.fn(), onReadyCovered = vi.fn()
+  const activity = createActivity({ watched: () => false, random: () => 0.5 })
+  const target = createActivityTarget({ load, accept, hide, connectionEpoch: () => epoch, onReadyCovered, random: () => 0 })
+  activity.hold('channels', target)
+  try {
+    // Pre-connect read accepted before connection 1 never covers connection 1's activity_ready.
+    await target.refresh()
+    expect(load).toHaveBeenCalledTimes(1)
+    epoch = 1
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(accept).toHaveBeenLastCalledWith(2)
+
+    // An accepted read from connection 1 covers activity_ready on connection 1 without another read.
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(onReadyCovered).toHaveBeenCalledOnce()
+
+    // Reconnect advances to connection 2: connection 1's accepted read never covers connection 2's activity_ready.
+    epoch = null
+    activity.disconnected()
+    epoch = 2
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(3)
+    expect(accept).toHaveBeenLastCalledWith(3)
+
+    // A pre-connect in-flight read is fenced by activity_ready and still followed by a post-connect read.
+    epoch = null
+    activity.disconnected()
+    const stale = held<Result<number>>()
+    load.mockReturnValueOnce(stale.promise)
+    void target.refresh()
+    await flush()
+    expect(load).toHaveBeenCalledTimes(4)
+    epoch = 3
+    activity.notice({ type: 'activity_ready' })
+    stale.resolve(ok(99))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(5)
+    expect(accept).not.toHaveBeenCalledWith(99)
+    expect(accept).toHaveBeenLastCalledWith(5)
+  } finally { activity.close() }
+})
+
+it('a failed or aborted covering read never suppresses activity_ready recovery', async () => {
+  let epoch: number | null = 1
+  const load = vi.fn<(signal: AbortSignal) => Promise<Result<number>>>()
+  const accept = vi.fn()
+  const activity = createActivity({ watched: () => false, random: () => 0.5 })
+  const target = createActivityTarget({ load, accept, connectionEpoch: () => epoch, timeoutMs: 500, random: () => 0 })
+  activity.hold('channels', target)
+  try {
+    // 1. Covering read in flight fails with network error -> retries and converges.
+    const failed = held<Result<number>>()
+    load.mockReturnValueOnce(failed.promise).mockResolvedValueOnce(ok(2))
+    void target.refresh()
+    await flush()
+    activity.notice({ type: 'activity_ready' })
+    failed.resolve({ ok: false, kind: 'network' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(accept).toHaveBeenCalledExactlyOnceWith(2)
+
+    // 2. Covering read in flight times out (aborted) -> retries and converges.
+    epoch = 2
+    const hung = held<Result<number>>()
+    load.mockReturnValueOnce(hung.promise).mockResolvedValueOnce(ok(4))
+    void target.refresh()
+    await flush()
+    const abortedSignal = load.mock.calls[2]![0]
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(abortedSignal.aborted).toBe(true)
+    hung.resolve(ok(99))
+    await vi.advanceTimersByTimeAsync(500)
+    expect(load).toHaveBeenCalledTimes(4)
+    expect(accept).toHaveBeenLastCalledWith(4)
+
+    // 3. Covering read fails with ordinary 400 before activity_ready -> does not count as coverage.
+    epoch = 3
+    load.mockResolvedValueOnce({ ok: false, kind: 'http', status: 400, error: 'bad' }).mockResolvedValueOnce(ok(6))
+    await target.refresh()
+    expect(load).toHaveBeenCalledTimes(5)
+    activity.notice({ type: 'activity_ready' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(6)
+    expect(accept).toHaveBeenLastCalledWith(6)
+  } finally { activity.close() }
+})
+
+it('real update notices arriving after a covering read still trigger a follow-up read', async () => {
+  let epoch: number | null = 1
+  const load = vi.fn(async (): Promise<Result<number>> => ok(load.mock.calls.length))
+  const accept = vi.fn()
+  const activity = createActivity({ watched: () => false, covered: () => false, random: () => 0.5 })
+  const target = createActivityTarget({ load, accept, connectionEpoch: () => epoch, random: () => 0 })
+  activity.hold('channels', target)
+  try {
+    // Covering read in flight: activity_ready is covered, then channel_activity queues a follow-up.
+    const inflight = held<Result<number>>()
+    load.mockReturnValueOnce(inflight.promise)
+    void target.refresh()
+    await flush()
+    activity.notice({ type: 'activity_ready' })
+    activity.notice({ type: 'channel_activity', channel_id: 'c1', seq: 5 })
+    inflight.resolve(ok(1))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(2)
+
+    // After acceptance: channel_activity and channel_list_changed both trigger reads.
+    activity.notice({ type: 'channel_activity', channel_id: 'c1', seq: 6 })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(3)
+
+    activity.notice({ type: 'channel_list_changed' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(load).toHaveBeenCalledTimes(4)
+  } finally { activity.close() }
+})

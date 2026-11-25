@@ -264,6 +264,11 @@ export function createSession(options: SessionOptions) {
         const active = new Set(channels.get().channels.map(c => c.id))
         unread.activityArchivedSnapshot(rows.filter(row => !active.has(row.id)))
       },
+      connectionEpoch: () => {
+        if (initialChannels !== undefined) return null
+        const state = sync.get()
+        return state.connected && state.connection !== null ? state.connection : null
+      },
     },
   )
   const channelCreation = createChannelCreation(options.initialCanCreateChannels ?? false, channels.create)

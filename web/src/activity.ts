@@ -4,7 +4,7 @@ import { createRequestDeadlines } from './request-deadlines'
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
 export type FencedInvalidation = Exclude<Invalidation, 'notice'>
-export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
+export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number): void; ready?(): boolean; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
@@ -12,6 +12,10 @@ export function createActivityTarget<T>(options: {
   load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   covers?(value: T): boolean
+  /** Current active connection epoch, or null while disconnected. */
+  connectionEpoch?(): number | null
+  /** Re-applies already-accepted current-connection state after reconcile clears derived baselines. */
+  onReadyCovered?(): void
   hide?(reason: FencedInvalidation): void
   error?(result: Exclude<Result<T>, { ok: true }>): void
   terminal?(result: Result<T>): boolean
@@ -24,6 +28,7 @@ export function createActivityTarget<T>(options: {
   const random = options.random ?? Math.random
   const deadlines = createRequestDeadlines()
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
+  let inFlightEpoch: number | null = null, inFlightGen = -1, acceptedEpoch: number | null = null
   let timer: ReturnType<typeof setTimeout> | undefined
   let retry = false, due = 0, stopped = false
   let failure: Exclude<Result<T>, { ok: true }> | undefined
@@ -46,6 +51,8 @@ export function createActivityTarget<T>(options: {
     if (retry || options.canLoad?.() === false) return
     inFlight = true; queued = false
     const own = generation
+    const epoch = options.connectionEpoch?.() ?? null
+    inFlightEpoch = epoch; inFlightGen = own
     const request = new AbortController()
     controller = request
     let cancelled = false
@@ -60,7 +67,7 @@ export function createActivityTarget<T>(options: {
     })
     completion = undefined
     if (controller === request) controller = undefined
-    inFlight = false
+    inFlight = false; inFlightEpoch = null; inFlightGen = -1
     if (closed) return
     if (cancelled) { if (dirty) schedule(0); return }
     try { if (result.ok) {
@@ -71,10 +78,10 @@ export function createActivityTarget<T>(options: {
         return
       }
       dirty = queued
-      failure = undefined; stopped = false; attempt = 0; belowFloor = 0; options.accept(result.data)
+      failure = undefined; stopped = false; attempt = 0; belowFloor = 0; acceptedEpoch = epoch; options.accept(result.data)
       if (dirty) schedule(200)
     } else {
-      if (own === generation) { belowFloor = 0; failure = result; options.error?.(result) }
+      if (own === generation) { belowFloor = 0; acceptedEpoch = null; failure = result; options.error?.(result) }
       if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; stopped = true; return }
       if (options.manualRetry) { dirty = false; queued = false; return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
@@ -85,6 +92,7 @@ export function createActivityTarget<T>(options: {
   }
   function fence() {
     generation++
+    inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null
     if (timer === undefined) return
     const remaining = Math.max(0, due - Date.now())
     clearTimeout(timer); timer = undefined; schedule(remaining)
@@ -101,14 +109,27 @@ export function createActivityTarget<T>(options: {
   return {
     invalidate,
     fence,
+    ready() {
+      const epoch = options.connectionEpoch?.() ?? null
+      if (closed || epoch === null) return false
+      if (inFlight && inFlightGen === generation && inFlightEpoch === epoch) {
+        options.hide?.('reconcile')
+        return true
+      }
+      if (acceptedEpoch === epoch) {
+        options.onReadyCovered?.()
+        return true
+      }
+      return false
+    },
     // An in-flight snapshot can cover a newer notice if it passes covers().
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
     ensure() { if (!closed && !stopped && !dirty && !inFlight && timer === undefined && !retry) { dirty = true; return run() } },
     refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
-    suspend() { generation++; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
-    close() { closed = true; generation++; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
+    suspend() { generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
+    close() { closed = true; generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
   }
 }
 
@@ -129,11 +150,15 @@ export function createActivity(options: {
   const retire = (target: ActivityTarget | undefined) => { if (target?.suspend) target.suspend(); else target?.close() }
   const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200) => targets.get(key)?.invalidate(reason, delay)
   const invalidateMemberLists = () => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access') }
-  function all(delay: number, reason: Invalidation = 'reconcile') {
+  function all(delay: number, reason: Invalidation = 'reconcile', ready = false) {
     options.reconcile?.()
     // Identity authority must be invalidated before the Member lists decide what to retain.
     invalidate('capabilities', reason, delay)
-    for (const [key, target] of targets) if (key !== 'capabilities') target.invalidate(reason, delay)
+    for (const [key, target] of targets) {
+      if (key === 'capabilities') continue
+      if (ready && target.ready?.()) continue
+      target.invalidate(reason, delay)
+    }
   }
   function periodic(own: number, first: boolean) {
     timer = setTimeout(() => {
@@ -159,7 +184,7 @@ export function createActivity(options: {
       if (closed) return
       switch (event.type) {
         case 'activity_ready':
-          clearTimeout(timer); periodic(++generation, true); all(200); break
+          clearTimeout(timer); periodic(++generation, true); all(200, 'reconcile', true); break
         case 'activity_reset': all(random() * 2000); break
         case 'sections_changed': targets.get('sections')?.notice?.(event); break
         case 'channel_activity': {
