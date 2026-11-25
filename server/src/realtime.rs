@@ -21,6 +21,7 @@ use crate::{
     messages::LIVE_QUEUE_CAPACITY,
 };
 
+mod activity;
 mod connection;
 mod limits;
 mod origin;
@@ -201,38 +202,3 @@ async fn close(socket: &mut WebSocket, code: u16) {
 
 #[cfg(test)]
 mod tests;
-
-impl From<crate::channels::activity::Notice> for ServerEvent {
-    fn from(notice: crate::channels::activity::Notice) -> Self {
-        use crate::channels::activity::Notice;
-        match notice {
-            Notice::ActivityReady => Self::ActivityReady,
-            Notice::ActivityReset => Self::ActivityReset,
-            Notice::ChannelActivity { channel_id, seq } => {
-                Self::ChannelActivity { channel_id, seq }
-            }
-            Notice::ReadPositionChanged {
-                channel_id,
-                topic_id,
-                read_seq,
-            } => Self::ReadPositionChanged {
-                channel_id,
-                topic_id,
-                read_seq,
-            },
-            Notice::ChannelAccessGained { channel_id } => Self::ChannelAccessGained { channel_id },
-            Notice::ChannelAccessRevoked { channel_id } => {
-                Self::ChannelAccessRevoked { channel_id }
-            }
-            Notice::ChannelListChanged => Self::ChannelListChanged,
-            Notice::DmListChanged => Self::DmListChanged,
-            Notice::SectionsChanged { generation } => Self::SectionsChanged {
-                generation: generation.to_string(),
-            },
-            Notice::ChannelMembersChanged { channel_id } => {
-                Self::ChannelMembersChanged { channel_id }
-            }
-            Notice::MembersChanged => Self::MembersChanged,
-        }
-    }
-}
