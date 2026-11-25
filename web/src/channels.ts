@@ -54,6 +54,8 @@ type ChannelDetails = {
   unavailable(id: string): void
   onOpen(channel: Channel): void
   onArchivedSnapshot(rows: ChannelList['channels']): void
+  connectionEpoch?(): number | null
+  coversUnread?(rows: Channel[]): boolean
 }
 
 const terminal = (r: Result<unknown>) => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r))
@@ -173,15 +175,19 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
   const target = activity ? createActivityTarget<{ channels: Channel[] }>({
     canLoad: () => !awaitingReady,
     load: async signal => validList(await api.listChannels(signal)),
+    connectionEpoch: details?.connectionEpoch,
+    covers: data => details?.coversUnread?.(data.channels) ?? true,
+    acceptBelowFloor: true,
+    onReadyCovered() { if (hasList) onSnapshot?.(state.channels) },
     accept(data) {
       hasList = true
       const previous = state.channels.find(c => c.id === state.selectedId)
       const departed = previous && api.getChannel && details?.canOpen(previous.id) && !data.channels.some(c => c.id === previous.id)
+      onSnapshot?.(data.channels)
       set({
         status: 'ready', channels: data.channels, selectedId: state.selectedId ?? details?.initialHint?.() ?? data.channels[0]?.id ?? null,
         ...(departed ? { openChannel: previous, openChannelPending: true } : {}),
       })
-      onSnapshot?.(data.channels)
       setAuthorized(data.channels, true)
     },
     hide: () => setAuthorized(authorized.channels, false),
@@ -259,6 +265,10 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     subscribe(l: () => void) {
       listeners.add(l)
       return () => listeners.delete(l)
+    },
+    async ensure() {
+      if (target) return target.ensure()
+      return this.load()
     },
     async load() {
       if (target) return target.refresh()

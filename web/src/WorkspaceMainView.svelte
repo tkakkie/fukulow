@@ -58,6 +58,7 @@
     panelToggleBtn = $bindable<HTMLButtonElement | null>(null),
     composerRef = $bindable<HTMLInputElement | HTMLTextAreaElement | null>(null),
     topicInputRef = $bindable<HTMLInputElement | HTMLTextAreaElement | null>(null),
+    timelineRef = $bindable<{ isPositioning(): boolean } | null>(null),
     onsearchinput,
     onsearchsubmit,
     onclosesearch,
@@ -116,6 +117,7 @@
     panelToggleBtn?: HTMLButtonElement | null
     composerRef?: HTMLInputElement | HTMLTextAreaElement | null
     topicInputRef?: HTMLInputElement | HTMLTextAreaElement | null
+    timelineRef?: { isPositioning(): boolean } | null
     onsearchinput?: (value: string) => void
     onsearchsubmit?: (value: string) => void
     onclosesearch?: () => void
@@ -283,6 +285,7 @@
       {:else}
         {#key selected.id}
           <Timeline
+            bind:this={timelineRef}
             channel={currentChannel}
             topics={currentTopics}
             replies={currentReplies}

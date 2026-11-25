@@ -5,7 +5,7 @@ import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createInviteAcceptance, createMembers, watchMemberAccess } from './members'
 import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
-import { listReplyChain, type ChannelList, type lookupAuthors, type listMembers, type MemberList, type Result } from './api'
+import { listReplyChain, type ChannelList, type lookupAuthors, type listMembers, type MemberList, type Result, type TimelinePage } from './api'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
@@ -1350,9 +1350,10 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
     expect(s.nets[0].lists).toHaveLength(0)
   })
   it.each([
-    { order: 'the connect-edge refresh is already in flight', refreshFirst: true, total: 3 },
-    { order: 'activity_ready arrives in the 200 ms window', refreshFirst: false, total: 2 },
-  ])('documents the current bound of $total startup Channel list reads when $order', async ({ refreshFirst, total }) => {
+    { order: 'activity_ready arrives while the connect-edge refresh is in flight', mode: 'in-flight' as const },
+    { order: 'activity_ready arrives after the connect-edge refresh is accepted', mode: 'accepted' as const },
+    { order: 'activity_ready arrives before the connect-edge refresh starts', mode: 'before' as const },
+  ])('bounds startup Channel list reads to at most 2 when $order', async ({ mode }) => {
     const core = deferred<void>()
     // An empty list isolates startup and socket refreshes from Channel selection and history reads.
     const channels = ok<ChannelList>({ history_generation: generation, channels: [] })
@@ -1384,11 +1385,155 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
       const refresh = deferred<typeof channels>()
       reads.mockReturnValueOnce(refresh.promise)
       net.socket.onReady()
-      if (refreshFirst) await settle()
+      if (mode !== 'before') await settle()
+      if (mode === 'accepted') { refresh.resolve(channels); await settle() }
       net.event({ type: 'activity_ready' })
-      refresh.resolve(channels)
+      if (mode !== 'accepted') refresh.resolve(channels)
       await vi.advanceTimersByTimeAsync(1_000)
-      expect(reads).toHaveBeenCalledTimes(total)
+      expect(reads).toHaveBeenCalledTimes(2)
+    } finally { await s.auth.signOut() }
+  })
+  it('retains post-connect unwatched baselines across covered activity_ready and refetches on reconnect', async () => {
+    const core = deferred<void>()
+    const makeList = (asOfSeq: number, unreadCount: number) => ok<ChannelList>({
+      history_generation: generation,
+      channels: [
+        { ...channel('watched'), history_generation: generation, as_of_seq: asOfSeq, read_seq: 0,
+          unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 },
+        { ...channel('unwatched'), history_generation: generation, as_of_seq: asOfSeq, read_seq: 2,
+          unread_count: unreadCount, main_unread_count: unreadCount, mention_unread_count: 0, main_mention_unread_count: 0 },
+      ],
+    })
+    let phase: 'initial' | 'postConnect' | 'reconnected' = 'initial'
+    const reads = vi.fn(async (): Promise<Result<ChannelList>> => phase === 'initial'
+      ? makeList(2, 0) : phase === 'postConnect' ? makeList(5, 3) : makeList(8, 6))
+    const net = fakeNetwork()
+    const options = net.options()
+    let sessionRef!: ReturnType<typeof createSession>
+    const s = stack({
+      restore: restored(), coreReady: () => core.promise, readInitialChannels: reads,
+      openSession(selfId, onEnded, organizationId, _drafts, _onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
+        sessionRef = createSession({
+          ...options, selfId, onEnded, organizationId, initialRole, accountSignal, initialCanCreateChannels, initialChannels,
+          channelsApi: undefined, unreadApi: { ...options.unreadApi!, listChannels: reads },
+          sync: { ...options.sync, random: () => 0.5 },
+        })
+        return {
+          channels: channelsAdapter(sessionRef.channels, sessionRef.channelCreation), sync: syncAdapter(sessionRef.sync),
+          topics: id => topicsAdapter(sessionRef.topics, id), close: sessionRef.close,
+        }
+      },
+    })
+    try {
+      const loading = s.auth.load()
+      await settle()
+      core.resolve(); await loading; await settle()
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      phase = 'postConnect'
+      expect(reads).toHaveBeenCalledOnce()
+      net.socket.onReady()
+      await settle()
+      expect(reads).toHaveBeenCalledTimes(2)
+      net.event({ type: 'activity_ready' })
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(reads).toHaveBeenCalledTimes(2)
+      expect(sessionRef.unread.get('unwatched').unreadCount).toBe(3)
+
+      phase = 'reconnected'
+      net.socket.onClose(1006)
+      await vi.advanceTimersByTimeAsync(2_000)
+      net.socket.onReady()
+      net.event({ type: 'activity_ready' })
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(reads).toHaveBeenCalledTimes(3)
+      expect(sessionRef.unread.get('unwatched').unreadCount).toBe(6)
+    } finally { await s.auth.signOut() }
+  })
+  it.each([
+    { order: 'Workspace selects target after initial list accept and bootstrap completes before socket connect', selectAfterAccept: true, bootstrapBeforeConnect: true },
+    { order: 'Workspace selects target after initial list accept and socket connects before bootstrap completes', selectAfterAccept: true, bootstrapBeforeConnect: false },
+    { order: 'target is hinted before initial list accept and bootstrap completes before socket connect', selectAfterAccept: false, bootstrapBeforeConnect: true },
+  ])('bounds startup Channel list reads to at most 2 with a populated direct-link Channel when $order', async ({ selectAfterAccept, bootstrapBeforeConnect }) => {
+    const core = deferred<void>()
+    const initial = deferred<Result<ChannelList>>()
+    const listResponse = ok<ChannelList>({
+      history_generation: generation,
+      channels: [
+        { ...channel('general'), history_generation: generation, as_of_seq: 0, read_seq: 0,
+          unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 },
+        { ...channel('target'), history_generation: generation, as_of_seq: 1, read_seq: 1,
+          unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 },
+      ],
+    })
+    const reads = vi.fn(async () => listResponse).mockReturnValueOnce(initial.promise)
+    const net = fakeNetwork()
+    const options = net.options()
+    const history = deferred<Result<TimelinePage>>()
+    const listTimeline = vi.fn<NonNullable<typeof options.topicsApi>['listTimeline']>((id, query) =>
+      id === 'target' ? history.promise : options.topicsApi!.listTimeline(id, query))
+    let sessionRef!: ReturnType<typeof createSession>
+    const s = stack({
+      restore: restored(), coreReady: () => core.promise, readInitialChannels: reads,
+      openSession(selfId, onEnded, organizationId, _drafts, _onIdentity, initialRole, accountSignal, initialCanCreateChannels, initialChannels) {
+        sessionRef = createSession({
+          ...options, selfId, onEnded, organizationId, initialRole, accountSignal, initialCanCreateChannels, initialChannels,
+          channelsApi: undefined, unreadApi: { ...options.unreadApi!, listChannels: reads },
+          topicsApi: { ...options.topicsApi!, listTimeline },
+          sync: { ...options.sync, random: () => 0.5 },
+        })
+        return {
+          channels: channelsAdapter(sessionRef.channels, sessionRef.channelCreation), sync: syncAdapter(sessionRef.sync),
+          topics: id => topicsAdapter(sessionRef.topics, id), close: sessionRef.close,
+        }
+      },
+    })
+    try {
+      const loading = s.auth.load()
+      await settle()
+      expect(reads).toHaveBeenCalledOnce()
+
+      core.resolve(); await loading
+      if (selectAfterAccept) {
+        initial.resolve(listResponse)
+        await settle()
+        expect(sessionRef.channels.get().selectedId).toBe('general')
+      } else expect(sessionRef.channels.get().status).toBe('loading')
+      sessionRef.channels.selectHint('target')
+      void sessionRef.unread.enter({ channel: 'target', topicId: null })
+      if (!selectAfterAccept) initial.resolve(listResponse)
+      await settle()
+      expect(listTimeline).toHaveBeenCalledWith('target', expect.any(Object))
+      const target = () => sessionRef.sync.get().channels.target
+      expect(target().cursor).toBeNull()
+
+      const bootstrapPage = ok<TimelinePage>({
+        history_generation: generation,
+        as_of_seq: 1,
+        items: [{ kind: 'message', message: record(1, 'target') }],
+        has_more: false,
+      })
+      if (bootstrapBeforeConnect) {
+        history.resolve(bootstrapPage)
+        await settle()
+        expect(target().cursor).toBe(1)
+        expect(sessionRef.sync.get().connected).toBe(false)
+        await vi.advanceTimersByTimeAsync(250)
+        net.socket.onReady()
+        await settle()
+        net.event({ type: 'activity_ready' })
+      } else {
+        net.socket.onReady()
+        await settle()
+        net.event({ type: 'activity_ready' })
+        await settle()
+        expect(target().cursor).toBeNull()
+        expect(sessionRef.sync.get().connected).toBe(true)
+        history.resolve(bootstrapPage)
+      }
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(target().cursor).toBe(1)
+      expect(reads).toHaveBeenCalledTimes(2)
     } finally { await s.auth.signOut() }
   })
   it('never opens a session when the core fails to load', async () => {

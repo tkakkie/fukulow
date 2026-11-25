@@ -173,6 +173,7 @@ export function createSession(options: SessionOptions) {
       selfId: options.selfId,
       organizationId,
       refreshList: !options.channelsApi ? () => Promise.resolve().then(() => channels.load()) : undefined,
+      ensureList: !options.channelsApi ? () => channels.ensure() : undefined,
       refreshArchived: () => channels.refreshArchived(),
       refreshDms: () => dms?.refresh(),
       isDm,
@@ -233,6 +234,7 @@ export function createSession(options: SessionOptions) {
       return result
     }) : readChannels(signal))
   }
+  const hasUnread = (row: api.Channel): row is api.UnreadChannel => 'as_of_seq' in row && completeCountFields(row)
   const channels = createChannels(
     {
       listChannels,
@@ -256,7 +258,7 @@ export function createSession(options: SessionOptions) {
     },
     activity,
     rows => {
-      const baselines = rows.filter((row): row is api.UnreadChannel => 'as_of_seq' in row && completeCountFields(row))
+      const baselines = rows.filter(hasUnread)
       if (baselines.length || rows.length === 0) unread.activitySnapshot(baselines)
     },
     {
@@ -269,6 +271,12 @@ export function createSession(options: SessionOptions) {
         const active = new Set(channels.get().channels.map(c => c.id))
         unread.activityArchivedSnapshot(rows.filter(row => !active.has(row.id)))
       },
+      connectionEpoch: () => {
+        if (initialChannels !== undefined) return null
+        const state = sync.get()
+        return state.connected && state.connection !== null ? state.connection : null
+      },
+      coversUnread: rows => rows.every(row => !hasUnread(row) || unread.activityCoversListBaseline(row)),
     },
   )
   const channelCreation = createChannelCreation(options.initialCanCreateChannels ?? false, channels.create)
@@ -401,7 +409,7 @@ export function createSession(options: SessionOptions) {
     onUnavailable: () => { if (!closed) terminate() },
   })
   void sync.start()
-  void channels.load()
+  void channels.ensure()
   sections.hold()
   return {
     sync, topics, replies, moveChain, replyCounts, unread, channels, channelCreation, sections, dms, navigationTargets, searchAnchor, searchSource,

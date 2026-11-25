@@ -29,7 +29,7 @@ type Scope = { baseline?: ScopeBaseline; position: number; requiredPosition: num
 const scopeState = (): Scope => ({ position: 0, requiredPosition: 0, stopped: false, error: false, attempt: 0 })
 const channelState = () => ({ token: Symbol(), main: scopeState(), topics: new Map<string, Scope>(),
   archived: undefined as boolean | undefined,
-  records: new Map<number, UnreadRecord>(), lostThrough: 0, aggregate: undefined as AggregateBaseline | undefined, accepted: 0, requiredAfter: 0, requiredAggregateAfter: 0, requiredBase: 0,
+  records: new Map<number, UnreadRecord>(), lostThrough: 0, unwatchedThrough: 0, aggregate: undefined as AggregateBaseline | undefined, accepted: 0, requiredAfter: 0, requiredAggregateAfter: 0, requiredBase: 0,
   heldPositions: new Map<string, number>(), stopped: false, error: false,
   summaryReads: new Map<string, symbol>(), queuedSummaries: new Set<string>(), ignoredBaselines: new WeakSet<TopicBaseline>(), observedBaselines: new WeakSet<TopicBaseline>(),
   summaryTimers: new Map<string, ReturnType<typeof setTimeout>>(), summaryAttempts: new Map<string, number>() })
@@ -37,7 +37,7 @@ type Channel = ReturnType<typeof channelState>
 type Visit = { id: symbol; scope: UnreadScope; boundary: number | null; unreadAtEntry: number | null; presented: Set<number>; covered: Coverage[]; needsPresentation: boolean; firstUnread?: UnreadRecord }
 
 /** Session/Organization-owned CRUD controller. The sync protocol supplies records and lifecycle only. */
-export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
+export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Topics; onSessionEnded?: () => void; requestTimeoutMs?: number; refreshList?: () => Promise<void>; ensureList?: () => Promise<void>; refreshArchived?(): void; refreshDms?(): void; isDm?(id: string): boolean }) {
   const channels = new Map<string, Channel>()
   const listeners = new Set<() => void>()
   const channelListeners = new Map<string, Set<() => void>>()
@@ -183,6 +183,13 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     }
     s.error = s.baseline.readSeq < s.requiredPosition
   }
+  async function ensure() {
+    if (!active()) return
+    options.refreshArchived?.()
+    options.refreshDms?.()
+    if (options.ensureList) return options.ensureList()
+    return refresh()
+  }
   async function refresh(retryTokens?: Map<string, symbol>) {
     if (!active()) return
     options.refreshArchived?.()
@@ -290,6 +297,8 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   }
   function resolveBoundary(): boolean {
     if (!visit || visit.boundary !== null) return false
+    // A retained list baseline cannot account for history omitted by a pending bootstrap.
+    if (sync.get().channels[visit.scope.channel]?.cursor == null) return false
     const c = getChannel(visit.scope.channel), s = getScope(c, visit.scope.topicId)
     const unread = count(visit.scope.channel, c, visit.scope.topicId)
     if (unread === null) return false
@@ -477,7 +486,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     previous = next
     if (!next.running || next.organization !== 'available') { if (before.running) reset(); return }
     if (before.historyEpoch !== next.historyEpoch) reset()
-    let rebootstrap = false, moveRefresh = false
+    let rebootstrap = false, needBaseline = false, topicRebootstrap = false, moveRefresh = false
     const changed = new Set<string>()
     const selfChanged = before.selfId !== next.selfId
     if (selfChanged) {
@@ -501,6 +510,9 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         continue
       }
       if (old?.watched && !now?.watched) {
+        // Replay can resume at the cached cursor after the inactive window drops records.
+        c.unwatchedThrough = Math.max(c.unwatchedThrough, old.cursor ?? 0)
+        for (const m of c.records.values()) c.unwatchedThrough = Math.max(c.unwatchedThrough, m.version ?? m.created_seq)
         fence(id, c); c.records.clear(); c.heldPositions.clear()
         channelChanged = true
       }
@@ -510,14 +522,35 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
         const oldBaselines = options.topics?.get(id).topics.flatMap(t => t.baseline ? [t.baseline] : []) ?? []
         const oldVisit = resetHistory && visit?.scope.channel === id ? visit : undefined
         const archived = c.archived
-        fence(id, c); channels.set(id, c = { ...channelState(), archived }); rebootstrap = true
+        const sameHistory = !resetHistory && old?.state !== 'unavailable' && !c.stopped
+        const lostThrough = sameHistory ? Math.max(c.lostThrough, c.unwatchedThrough, now?.cursor ?? 0) : 0
+        const requiredBase = sameHistory ? Math.max(c.requiredBase, lostThrough) : 0
+        const keepBaseline = sameHistory && options.refreshList !== undefined && !c.error &&
+          c.main.baseline !== undefined && c.main.baseline.readSeq >= c.main.position && c.aggregate !== undefined &&
+          c.main.baseline.asOfSeq >= requiredBase && c.aggregate.as_of_seq >= requiredBase && !listNeedsRecovery(c)
+        const main = keepBaseline ? c.main : scopeState()
+        if (sameHistory && !keepBaseline) {
+          main.position = c.main.position
+          main.requiredPosition = Math.max(c.main.requiredPosition, c.main.position)
+        }
+        const aggregate = keepBaseline ? c.aggregate : undefined
+        fence(id, c)
+        channels.set(id, c = { ...channelState(), archived, main, aggregate, requiredBase, lostThrough })
+        if (resetHistory || old?.state === 'unavailable' || !options.ensureList) rebootstrap = true
+        else if (!keepBaseline) needBaseline = true
+        topicRebootstrap = true
         for (const b of oldBaselines) { c.ignoredBaselines.add(b); getScope(c, b.summary.id) }
         if (oldVisit) visit = { id: Symbol(), scope: oldVisit.scope, boundary: null, unreadAtEntry: null, presented: new Set(), covered: [], needsPresentation: false }
         channelChanged = true
       }
       // Bootstrap omits history <= B from replay. A REST snapshot older than B cannot cover that prefix.
       if (now?.watched && old?.cursor == null && now.cursor !== null) {
-        c.requiredBase = now.cursor; rebootstrap = true
+        c.requiredBase = Math.max(c.requiredBase, now.streamBase ?? now.cursor)
+        if (!c.main.baseline || !c.aggregate || listNeedsRecovery(c)) {
+          if (options.ensureList) needBaseline = true
+          else rebootstrap = true
+        }
+        topicRebootstrap = true
         channelChanged = true
       }
       // Out-of-order lower Moves leave moveSeq unchanged; moveEpoch still re-prunes records
@@ -549,8 +582,17 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     notify(changed)
     if (channels.size > 0 && [...channels.values()].every(c => c.stopped)) { cancelList(); deadlines.cancel() }
     if (moveRefresh && !rebootstrap) void refresh()
-    if ((!before.running && next.running) || (!before.connected && next.connected) || rebootstrap) {
-      if (channels.size === 0 || [...channels.keys()].some(watched)) void refresh()
+    const started = !before.running && next.running
+    const connected = !before.connected && next.connected
+    if (started || connected || rebootstrap) {
+      if (channels.size === 0 || [...channels.keys()].some(watched)) {
+        if (connected || rebootstrap || !options.ensureList) void refresh()
+        else void ensure()
+      }
+    } else if (needBaseline) {
+      if (channels.size === 0 || [...channels.keys()].some(watched)) void ensure()
+    }
+    if (started || connected || rebootstrap || topicRebootstrap) {
       for (const [id, c] of channels) if (watched(id)) for (const topic of c.topics.keys()) void refreshTopic(id, topic)
     }
   }
@@ -654,6 +696,13 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
   return {
     subscribe,
     activityMainCoverage(id: string) { const row = channels.get(id)?.aggregate; return row && completeCountFields(row) ? row.read_seq : -1 },
+    activityCoversListBaseline(row: UnreadChannel) {
+      const c = channels.get(row.id)
+      if (!c || !watched(row.id)) return true
+      const main = chooseBaseline(c.main.baseline, mainBaseline(row))
+      return main.asOfSeq >= c.requiredBase && Math.max(c.aggregate?.as_of_seq ?? 0, row.as_of_seq) >= c.requiredBase &&
+        main.readSeq >= Math.max(c.main.position, c.main.requiredPosition)
+    },
     activityRequiredBase(id: string) { return channels.get(id)?.requiredBase ?? 0 },
     activitySnapshot(rows: UnreadChannel[]) {
       if (!active()) return
@@ -726,8 +775,10 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
       const id = visit.id
       collect(scope.channel, c); resolveBoundary(); notify(scope.channel)
       if (!s.baseline || s.baseline.asOfSeq < c.requiredBase || wasStopped) {
-        if (scope.topicId === null) void refresh()
-        else void refreshTopic(scope.channel, scope.topicId)
+        if (scope.topicId === null) {
+          if (!wasStopped && options.ensureList) void ensure()
+          else void refresh()
+        } else void refreshTopic(scope.channel, scope.topicId)
       }
       return id
     },

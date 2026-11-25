@@ -2,6 +2,7 @@ use super::*;
 
 mod archive;
 mod sections;
+mod upgrade;
 
 async fn raw_event(socket: &mut Client) -> Value {
     loop {
@@ -1028,7 +1029,7 @@ async fn measure_multi_sender_activity_batching(pool: PgPool) {
     );
 }
 
-async fn raw_closed(socket: &mut Client, code: u16) {
+pub(super) async fn raw_closed(socket: &mut Client, code: u16) {
     loop {
         match tokio::time::timeout(Duration::from_secs(5), socket.next())
             .await

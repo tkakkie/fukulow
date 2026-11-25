@@ -189,8 +189,6 @@
   let activeRowId = $state<string | null>(null)
   let requestedHistoryFor = ''
   let initialScrollApplied = $state(false)
-  // Rows stay mounted because positioning needs them, but are hidden and inert until the entry position is applied (`docs/ui.md` §8).
-  const positioning = $derived(!initialScrollApplied && (awaitingEntryPosition || firstUnreadMessageId !== null))
   let pendingScrollAction: { action: ScrollAction; anchor: ScrollAnchor | null } | null = null
   let lastScrollScopeKey = ''
   let lastScrollEntryId: symbol | null = null
@@ -417,8 +415,10 @@
           ? 'loading'
           : 'ready',
   )
-  // The retryable error replaces the loading state (`docs/ui.md` §5), so the positioning Skeleton yields to it.
   const loadFailed = $derived(effectiveStatus === 'error' || (effectiveStatus === 'loading' && scrollView.loadingTimedOut))
+  const canPosition = $derived(!targetUnavailable && !loadFailed)
+  // Keep rows mounted for positioning. Error and unavailable states show the loaded rows (§5, §8).
+  const positioning = $derived(canPosition && !initialScrollApplied && (awaitingEntryPosition || firstUnreadMessageId !== null))
 
   $effect(() => {
     const scopeKey = `${currentChannelId}/${currentTopicId}${searchId ? ':search' : ''}`
@@ -441,8 +441,8 @@
     // Positioning counts as loading so the controller's loading timeout bounds it; a hidden view defers positioning
     // to its display (`docs/ui.md` §8), so its wait starts only once displayed.
     const status = positioning && displayed && effectiveStatus === 'ready' ? 'loading' : effectiveStatus
-    const targetFirstUnreadId = firstUnreadMessageId
-    const awaitingFirstUnread = awaitingEntryPosition
+    const targetFirstUnreadId = canPosition ? firstUnreadMessageId : null
+    const awaitingFirstUnread = canPosition && awaitingEntryPosition
     const { action, anchor } = scrollController.sync({
       channelId: scopeKey,
       visitId: currentEntryId,
@@ -596,7 +596,7 @@
     </div>
   {/if}
 
-  {#if positioning && !targetUnavailable && !loadFailed}
+  {#if positioning}
     <div class="topic-view__positioning">
       <Skeleton rows={4} label="トピックを読み込み中" />
     </div>

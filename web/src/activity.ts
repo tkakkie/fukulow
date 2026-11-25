@@ -4,7 +4,7 @@ import { createRequestDeadlines } from './request-deadlines'
 export type ActivityNotice = Exclude<ServerEvent, { type: 'message' | 'subscribed' | 'channel_access_lost' | 'error' }>
 export type Invalidation = 'notice' | 'access' | 'reconcile' | 'periodic'
 export type FencedInvalidation = Exclude<Invalidation, 'notice'>
-export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number, discovery?: boolean): void; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
+export type ActivityTarget = { held?(): void; invalidate(reason?: Invalidation, delay?: number, discovery?: boolean): void; ready?(): boolean; disconnected?(): void; suspend?(): void; close(): void; notice?(event: ActivityNotice): void }
 
 /** Shared bounds for every held REST target; late completions never regain authority. */
 export function createActivityTarget<T>(options: {
@@ -12,6 +12,12 @@ export function createActivityTarget<T>(options: {
   load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   covers?(value: T): boolean
+  /** A snapshot can carry authoritative data even when a derived baseline needs a follow-up. */
+  acceptBelowFloor?: boolean
+  /** Current active connection epoch, or null while disconnected. */
+  connectionEpoch?(): number | null
+  /** Re-applies already-accepted current-connection state after reconcile clears derived baselines. */
+  onReadyCovered?(): void
   hide?(reason: FencedInvalidation): void
   error?(result: Exclude<Result<T>, { ok: true }>): void
   terminal?(result: Result<T>): boolean
@@ -24,6 +30,7 @@ export function createActivityTarget<T>(options: {
   const random = options.random ?? Math.random
   const deadlines = createRequestDeadlines()
   let generation = 0, closed = false, dirty = false, inFlight = false, queued = false, attempt = 0, belowFloor = 0
+  let inFlightEpoch: number | null = null, inFlightGen = -1, acceptedEpoch: number | null = null
   let noticePending = false, servingNotice = false
   let timer: ReturnType<typeof setTimeout> | undefined
   let retry = false, due = 0, stopped = false
@@ -59,6 +66,8 @@ export function createActivityTarget<T>(options: {
     inFlight = true; queued = false; failure = undefined
     servingNotice = noticePending; noticePending = false
     const own = generation
+    const epoch = options.connectionEpoch?.() ?? null
+    inFlightEpoch = epoch; inFlightGen = own
     const request = new AbortController()
     controller = request
     let cancelled = false
@@ -74,7 +83,7 @@ export function createActivityTarget<T>(options: {
     completion = undefined
     if (controller === request) controller = undefined
     const wasServingNotice = servingNotice
-    inFlight = false
+    inFlight = false; inFlightEpoch = null; inFlightGen = -1
     servingNotice = false
     if (closed) return
     if (cancelled) { if (dirty) schedule(0); return }
@@ -84,17 +93,20 @@ export function createActivityTarget<T>(options: {
         if (dirty && !retry) schedule(200)
         return
       }
-      if (options.covers?.(result.data) === false) {
+      const covered = options.covers?.(result.data) !== false
+      if (!covered) {
+        // A below-floor snapshot never satisfies the notice, even when acceptBelowFloor applies its data.
         if (wasServingNotice) noticePending = true
         if (++belowFloor >= 3) scheduleRetry()
         else schedule(200)
-        return
+        if (!options.acceptBelowFloor) return
+      } else {
+        dirty = queued; attempt = 0; belowFloor = 0
       }
-      dirty = queued
-      failure = undefined; stopped = false; attempt = 0; belowFloor = 0; options.accept(result.data)
-      if (dirty) schedule(200)
+      failure = undefined; stopped = false; acceptedEpoch = epoch; options.accept(result.data)
+      if (covered && dirty) schedule(200)
     } else {
-      if (own === generation) { belowFloor = 0; failure = result; options.error?.(result) }
+      if (own === generation) { belowFloor = 0; acceptedEpoch = null; failure = result; options.error?.(result) }
       if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; noticePending = false; stopped = true; return }
       if (options.manualRetry) { dirty = false; queued = false; noticePending = false; return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
@@ -108,6 +120,7 @@ export function createActivityTarget<T>(options: {
   }
   function fence() {
     generation++
+    inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null
     if (timer === undefined) return
     const remaining = Math.max(0, due - Date.now())
     clearTimeout(timer); timer = undefined; schedule(remaining)
@@ -125,6 +138,19 @@ export function createActivityTarget<T>(options: {
   return {
     invalidate,
     fence,
+    ready() {
+      const epoch = options.connectionEpoch?.() ?? null
+      if (closed || epoch === null) return false
+      if (inFlight && inFlightGen === generation && inFlightEpoch === epoch) {
+        options.hide?.('reconcile')
+        return true
+      }
+      if (acceptedEpoch === epoch) {
+        options.onReadyCovered?.()
+        return true
+      }
+      return false
+    },
     // An in-flight snapshot can cover a newer notice if it passes covers().
     demandCoverage() { if (belowFloor < 3) belowFloor = 0; if (!inFlight) invalidate() },
     failure: () => failure,
@@ -146,8 +172,8 @@ export function createActivityTarget<T>(options: {
       if (dirty && !retry && timer !== undefined) { clearTimeout(timer); timer = undefined; return run() }
     },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
-    suspend() { generation++; dirty = false; queued = false; noticePending = false; servingNotice = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
-    close() { closed = true; generation++; noticePending = false; servingNotice = false; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
+    suspend() { generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; dirty = false; queued = false; noticePending = false; servingNotice = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
+    close() { closed = true; generation++; inFlightEpoch = null; inFlightGen = -1; acceptedEpoch = null; noticePending = false; servingNotice = false; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },
   }
 }
 
@@ -168,11 +194,15 @@ export function createActivity(options: {
   const retire = (target: ActivityTarget | undefined) => { if (target?.suspend) target.suspend(); else target?.close() }
   const invalidate = (key: string, reason: Invalidation = 'notice', delay = 200, discovery?: boolean) => targets.get(key)?.invalidate(reason, delay, discovery)
   const invalidateMemberLists = () => { for (const [key] of targets) if (key === 'members' || key.startsWith('channel-members:')) invalidate(key, 'access') }
-  function all(delay: number, reason: Invalidation = 'reconcile') {
+  function all(delay: number, reason: Invalidation = 'reconcile', ready = false) {
     options.reconcile?.()
     // Identity authority must be invalidated before the Member lists decide what to retain.
     invalidate('capabilities', reason, delay)
-    for (const [key, target] of targets) if (key !== 'capabilities') target.invalidate(reason, delay)
+    for (const [key, target] of targets) {
+      if (key === 'capabilities') continue
+      if (ready && target.ready?.()) continue
+      target.invalidate(reason, delay)
+    }
   }
   function periodic(own: number, first: boolean) {
     timer = setTimeout(() => {
@@ -199,7 +229,7 @@ export function createActivity(options: {
       if (closed) return
       switch (event.type) {
         case 'activity_ready':
-          clearTimeout(timer); periodic(++generation, true); all(200); break
+          clearTimeout(timer); periodic(++generation, true); all(200, 'reconcile', true); break
         case 'activity_reset': all(random() * 2000); break
         case 'sections_changed': targets.get('sections')?.notice?.(event); break
         case 'channel_activity': {
