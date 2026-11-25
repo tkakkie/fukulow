@@ -1,60 +1,21 @@
 use std::{
     cell::Cell,
-    fs::OpenOptions,
     io,
-    os::unix::fs::OpenOptionsExt,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering::Relaxed},
     },
     thread::JoinHandle,
 };
 
 use super::{
-    REVOCATION_MEASUREMENT_TARGET as TARGET, measurement_ms, revocation_measurement_enabled,
+    REVOCATION_MEASUREMENT_TARGET as TARGET, measurement_ms,
     revocation_trace_writer::{Counters, TIMING_EVENT, TraceWriter},
 };
 
-const SINK_ENV: &str = "FUKULOW_REVOCATION_TRACE_PATH";
-static RECORDER: Mutex<Option<Arc<Recorder>>> = Mutex::new(None);
+mod sink;
 
-pub struct Drain(JoinHandle<io::Result<()>>);
-
-pub fn start() -> io::Result<Option<Drain>> {
-    if !revocation_measurement_enabled() {
-        return Ok(None);
-    }
-    let path = std::env::var_os(SINK_ENV).ok_or_else(|| {
-        io::Error::other("FUKULOW_REVOCATION_TRACE_PATH is required for measurement")
-    })?;
-    // A new file cannot alias stderr or be an existing FIFO or device.
-    let sink = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|error| {
-            io::Error::other(format!("could not create {SINK_ENV}: {}", error.kind()))
-        })?;
-    let events = std::env::var("FUKULOW_REVOCATION_TRACE_EVENTS").as_deref() != Ok("0");
-    let (recorder, thread) = Recorder::start(sink, events)?;
-    *crate::lock_ignoring_poison(&RECORDER) = Some(recorder);
-    Ok(Some(Drain(thread)))
-}
-
-impl Drain {
-    /// Call after the runtime has stopped all trace producers.
-    pub fn finish(self) -> io::Result<()> {
-        crate::lock_ignoring_poison(&RECORDER).take();
-        join(self.0)
-    }
-}
-
-fn join(thread: JoinHandle<io::Result<()>>) -> io::Result<()> {
-    thread
-        .join()
-        .map_err(|_| io::Error::other("revocation trace writer stopped"))?
-}
+pub use sink::{Drain, start};
 
 struct Recorder {
     dispatch: tracing::Dispatch,
@@ -95,12 +56,7 @@ pub(crate) struct Worker {
 
 impl Worker {
     pub(crate) fn current() -> Option<Self> {
-        if !revocation_measurement_enabled() {
-            return None;
-        }
-        crate::lock_ignoring_poison(&RECORDER)
-            .clone()
-            .map(|recorder| Self { recorder, tick: 0 })
+        sink::current().map(|recorder| Self { recorder, tick: 0 })
     }
 
     pub(crate) fn tick(&mut self) -> Tick {
@@ -151,7 +107,10 @@ impl Tick {
                     let result = work.await;
                     (
                         result,
-                        CHECK.with(|context| context.final_admission_ms.get()),
+                        CHECK
+                            .try_with(|context| context.final_admission_ms.get())
+                            .ok()
+                            .flatten(),
                     )
                 },
             )
@@ -201,6 +160,7 @@ pub(crate) fn admission_finished() {
 }
 
 pub(crate) struct Pass {
+    recorder: Arc<Recorder>,
     check_seq: u64,
     started_ms: f64,
     registrations: usize,
@@ -214,6 +174,7 @@ impl Pass {
         CHECK
             .try_with(|context| {
                 context.recorder.events.then(|| Self {
+                    recorder: context.recorder.clone(),
                     check_seq: context.recorder.check_seq.fetch_add(1, Relaxed) + 1,
                     started_ms: measurement_ms(),
                     registrations: 0,
@@ -236,7 +197,7 @@ impl Pass {
         if registrations != 0 {
             let check_seq = self.check_seq;
             let server_ms = measurement_ms();
-            emit(|trace_seq| {
+            self.recorder.event(|trace_seq, _| {
                 tracing::trace!(target: TARGET, parent: None,
                 event = "revocation_fallback_snapshot", check_seq, server_ms,
                 registrations, trace_seq, records = %records)
@@ -255,6 +216,7 @@ impl Pass {
 
     pub(crate) fn finish(self, has_records: bool, records: impl std::fmt::Display) {
         let Self {
+            recorder,
             check_seq,
             started_ms,
             registrations,
@@ -264,22 +226,18 @@ impl Pass {
         } = self;
         let finished_ms = measurement_ms();
         if has_records {
-            emit(|trace_seq| {
+            recorder.event(|trace_seq, _| {
                 tracing::trace!(target: TARGET, parent: None,
                 event = "revocation_fallback_outcome", check_seq, server_ms = finished_ms,
                 trace_seq, records = %records)
             });
         }
-        emit(|trace_seq| {
+        recorder.event(|trace_seq, _| {
             tracing::trace!(target: TARGET, parent: None,
             event = "revocation_fallback_check", check_seq, trace_seq, started_ms, finished_ms,
             registrations, rows, chunks, failed_chunks)
         });
     }
-}
-
-fn emit(event: impl FnOnce(u64)) {
-    CHECK.with(|context| context.recorder.event(|seq, _| event(seq)));
 }
 
 #[cfg(test)]
@@ -288,7 +246,7 @@ pub(crate) fn test_worker(
     events: bool,
 ) -> (Worker, impl FnOnce() -> io::Result<()>) {
     let (recorder, thread) = Recorder::start(sink, events).unwrap();
-    (Worker { recorder, tick: 0 }, || join(thread))
+    (Worker { recorder, tick: 0 }, || sink::join(thread))
 }
 
 #[cfg(test)]

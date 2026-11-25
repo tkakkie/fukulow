@@ -1,8 +1,10 @@
+use super::sink::join;
 use super::*;
 use crate::observability::tests::Capture;
 use serde_json::Value;
 use std::{
     io::Write,
+    os::unix::fs::PermissionsExt,
     process::Command,
     sync::mpsc::{Receiver, Sender, channel},
     time::Duration,
@@ -107,6 +109,36 @@ fn queued_byte_limit_drops_lines_and_s1_reports_the_gap() {
     assert_eq!(events[3]["fields"]["dropped"], 2);
 }
 
+#[tokio::test]
+async fn pass_emits_after_leaving_the_task_local_scope() {
+    let output = Capture::default();
+    let (mut worker, drain) = test_worker(output.clone(), true);
+    let mut pass = worker.tick().check(async { Pass::start().unwrap() }).await;
+    assert!(!timing_enabled());
+    drop(worker);
+
+    pass.snapshot(1, 1, "snapshot");
+    pass.finish(true, "outcome");
+    drain().unwrap();
+
+    let events = output.events();
+    assert_eq!(events.len(), 4);
+    for (index, name) in [
+        "revocation_fallback_snapshot",
+        "revocation_fallback_outcome",
+        "revocation_fallback_check",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fields = &events[index]["fields"];
+        assert_eq!(fields["event"], name);
+        assert_eq!(fields["check_seq"], 1);
+        assert_eq!(fields["trace_seq"], index + 1);
+    }
+    assert_eq!(events[3]["fields"]["written"], 3);
+}
+
 #[test]
 fn revocation_trace_switch_is_nested_and_existing_measurement_stays_on() {
     const CHILD: &str = "FUKULOW_TEST_REVOCATION_TRACE_MODE";
@@ -147,7 +179,7 @@ fn revocation_trace_switch_is_nested_and_existing_measurement_stays_on() {
         let path = dir.join(index.to_string());
         let mut command = Command::new(std::env::current_exe().unwrap());
         command.args(["--exact", "observability::revocation_trace::tests::revocation_trace_switch_is_nested_and_existing_measurement_stays_on", "--nocapture"])
-            .env(CHILD, "1").env(SINK_ENV, &path).env_remove(OUTER).env_remove(INNER);
+            .env(CHILD, "1").env("FUKULOW_REVOCATION_TRACE_PATH", &path).env_remove(OUTER).env_remove(INNER);
         if let Some(value) = mode {
             command.env(OUTER, value);
         }
@@ -161,6 +193,8 @@ fn revocation_trace_switch_is_nested_and_existing_measurement_stays_on() {
         if mode == Some("1") {
             assert!(stderr.contains("revocation_holds_sample"));
             assert!(!stderr.contains("subscription_fallback_"));
+            let permissions = std::fs::metadata(&path).unwrap().permissions();
+            assert_eq!(permissions.mode() & 0o777, 0o600);
             let trace = std::fs::read_to_string(&path).unwrap();
             assert!(!trace.contains("revocation_holds_sample"));
             assert!(trace.contains(TIMING_EVENT));
