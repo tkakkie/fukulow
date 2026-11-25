@@ -96,7 +96,7 @@ impl<'a> Step<'a> {
             }
         }
     }
-    pub fn stop(&mut self, sign_in: bool) {
+    pub(super) fn teardown(&mut self) {
         let timers: Vec<_> = self.core.timers.keys().copied().collect();
         for id in timers {
             self.cancel(Some(id));
@@ -106,8 +106,11 @@ impl<'a> Step<'a> {
         self.core.session.connection = None;
         self.core.requests.clear();
         self.metadata_changed = true;
-        self.clear_channels();
         self.out.effects.push(Effect::Close);
+    }
+    pub fn stop(&mut self, sign_in: bool) {
+        self.teardown();
+        self.clear_channels();
         if sign_in {
             self.core.session.session = Session::SignInRequired;
             self.out.effects.push(Effect::SignIn);
