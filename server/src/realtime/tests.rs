@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 use crate::{
-    messages,
+    messages::{self, LIVE_QUEUE_CAPACITY},
     test_support::{Gate, Gates},
 };
 use axum::{
@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::{
     net::{TcpListener, TcpStream},
     task::JoinHandle,

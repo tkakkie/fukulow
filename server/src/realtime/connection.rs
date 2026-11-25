@@ -3,7 +3,7 @@ use crate::{
     AppState,
     auth::Auth,
     channels::activity::Registration,
-    messages::{self, LiveQueue, MessageError},
+    messages::{self, LIVE_QUEUE_CAPACITY, LiveQueue, MessageError},
 };
 use axum::extract::ws::{Message as Frame, WebSocket};
 use std::{collections::HashMap, time::Duration};
@@ -40,15 +40,30 @@ impl Default for Lifecycle {
 }
 
 pub(super) struct Connection<'a> {
-    pub state: &'a AppState,
-    pub auth: &'a Auth,
-    pub queue: LiveQueue,
-    pub cursors: HashMap<Uuid, i64>,
-    pub access: HashMap<Uuid, crate::channels::AccessWatch>,
-    pub permit: super::limits::Permit,
+    state: &'a AppState,
+    auth: &'a Auth,
+    pub(super) queue: LiveQueue,
+    cursors: HashMap<Uuid, i64>,
+    access: HashMap<Uuid, crate::channels::AccessWatch>,
+    permit: super::limits::Permit,
 }
 
-impl Connection<'_> {
+impl<'a> Connection<'a> {
+    pub(super) fn new(state: &'a AppState, auth: &'a Auth, permit: super::limits::Permit) -> Self {
+        Self {
+            state,
+            auth,
+            queue: state.message_delivery.queue(
+                auth.identity.organization.organization_id,
+                (auth.identity.member.id, auth.membership_revision),
+                LIVE_QUEUE_CAPACITY,
+            ),
+            cursors: HashMap::new(),
+            access: HashMap::new(),
+            permit,
+        }
+    }
+
     async fn protected_event(
         &mut self,
         socket: &mut WebSocket,
