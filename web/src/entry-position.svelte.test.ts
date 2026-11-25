@@ -92,6 +92,11 @@ async function openWithHeldBoundary(scope: Scope, opts: { phonePanel?: boolean }
   let releaseBoundary!: () => void
   let failBoundary!: () => void
   const failure = { ok: false as const, kind: 'http' as const, status: 500, error: 'internal_error' }
+  // Later reads of the boundary (the unread controller's retries) succeed at once.
+  const succeedRetries = () => {
+    if (scope === 'topic') net.topicSummaries['c1:t1'] = ok({ history_generation: generation, as_of_seq: 9, topic: t1Summary })
+    else net.unreadListResult = ok({ history_generation: generation, channels: [unreadRow] })
+  }
   if (scope === 'topic') {
     net.topicSummaries['c1:t1'] = new Promise<Result<TopicSummaryResponse>>((resolve) => {
       releaseBoundary = () => resolve(ok({ history_generation: generation, as_of_seq: 9, topic: t1Summary }))
@@ -174,7 +179,7 @@ async function openWithHeldBoundary(scope: Scope, opts: { phonePanel?: boolean }
     await unmount(instance)
     sessionModel.close()
   }
-  return { host, net, navigation, latest, releaseBoundary, failBoundary, scroll, positioning, marker, boundary, cleanup, wantBoundary: scope === 'topic' ? 4 : 2 }
+  return { host, net, navigation, latest, releaseBoundary, failBoundary, succeedRetries, scroll, positioning, marker, boundary, cleanup, wantBoundary: scope === 'topic' ? 4 : 2, latestSeq: latest.created_seq }
 }
 
 describe('Entry position before the first-Unread boundary resolves (#968)', () => {
@@ -219,6 +224,7 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
       expect(v.boundary()).toBe(v.wantBoundary)
       expect(v.marker()).toBeNull()
       expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+      expect(v.net.markReads.at(-1)?.body.read_seq).toBe(v.latestSeq)
     } finally {
       await v.cleanup()
     }
@@ -234,6 +240,34 @@ describe('Entry position before the first-Unread boundary resolves (#968)', () =
       expect(v.boundary()).toBeNull()
       expect(v.marker()).toBeNull()
       expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+    } finally {
+      await v.cleanup()
+    }
+  })
+
+  it.each<Scope>(['topic', 'main'])('keeps the %s bottom fallback after a failed boundary read when the retried read later resolves the boundary', async (scope) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const v = await openWithHeldBoundary(scope)
+    try {
+      v.failBoundary()
+      await settle()
+      await settle()
+      flushSync()
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+      expect(v.marker()).toBeNull()
+
+      // The failure was retryable, so the unread controller retries after its backoff and now gets the boundary.
+      v.succeedRetries()
+      vi.advanceTimersByTime(LOADING_TIMEOUT_MS)
+      await settle()
+      await settle()
+      flushSync()
+      expect(v.boundary()).toBe(v.wantBoundary)
+      // The visit already opened at the bottom, so the later boundary neither adds the marker nor moves the view (`docs/ui.md` §8).
+      expect(v.marker()).toBeNull()
+      expect(v.positioning()).toEqual({ busy: false, inert: false, skeleton: false })
+      // Visible rows still count as presented, so the read position advances without the first-Unread scroll.
+      expect(v.net.markReads.at(-1)?.body.read_seq).toBe(v.latestSeq)
     } finally {
       await v.cleanup()
     }

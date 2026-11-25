@@ -211,7 +211,8 @@
       if (!initialScrollApplied || search.view?.status !== 'ready') return
     } else if (!skipUnreadVisit) {
       if (currentEntry.boundary === null || needsOlderUnreadPage) return
-      if ((currentEntry.unreadAtEntry ?? 0) > 0) {
+      // A visit that opened at the bottom without a marker presents what is visible, as with no Unread.
+      if ((currentEntry.unreadAtEntry ?? 0) > 0 && !entryPositionAbandoned) {
         if (!firstUnreadMessageId || scrolledFirstUnreadId !== firstUnreadMessageId) return
       } else if (!initialScrollApplied) {
         return
@@ -478,6 +479,8 @@
           scrolledFirstUnreadId = targetFirstUnreadId
         }
         if (deferred.action === 'scroll_bottom' || deferred.action === 'scroll_first_unread') {
+          // Opening at the bottom ends this visit's wait, so a boundary resolving later neither marks nor moves it (`docs/ui.md` §8).
+          if (deferred.action === 'scroll_bottom' && !initialScrollApplied && !search) entryPositionAbandoned = true
           initialScrollApplied = true
         }
       } else {
