@@ -1,3 +1,9 @@
+// Harness history (#621 C3):
+// - 2026-11-21 (#961, b04a5288): C3 diagnostic harness for the send path.
+// - 2026-11-26: the first smoke was INVALID because autovacuum of system catalogs, triggered by CREATE DATABASE, ran in
+//   5 windows. Before each window's measurement, every connectable database now gets VACUUM (ANALYZE) of its catalogs and
+//   the run waits until autovacuum has finished (c3-catalog-settle.ts). The evidence goes into manifest.json and each
+//   window's catalog-settle.json. Measurement conditions, INVALID rules and evaluation criteria are unchanged.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -11,6 +17,7 @@ import { verifyPins, verifySmoke, type Pin, type Pins } from './c3-pins.ts';
 import { countChecks, disableMaintenance, fixtureChecks, fixtureReasons, maintenanceReasons, maintenanceSQL,
   settleFixture, shapeSQL, workersSQL, type Maintenance, type Workers } from './c3-fixture.ts';
 import { connectionEvidence, logSettings, parseTraffic } from './c3-logs.ts';
+import { settleCatalogs, type CatalogSettle } from './c3-catalog-settle.ts';
 import { c3ExitCode, summarizeC3, type WindowResult } from './c3-summary.ts';
 import { evictionReason, statementEvidence, statementSQL } from './c3-statements.ts';
 import { cpuWindow, DrainPending, latency, loadBoundaries, storageCoverage, storageReason, trafficReasons } from './c3-timing.ts';
@@ -50,6 +57,13 @@ const source = (name: string) => fileURLToPath(new URL(name, import.meta.url));
 const reason = (error: unknown) => (error instanceof SyntaxError ? 'malformed diagnostic evidence' : (error as Error).message)
   .replaceAll(password, '[redacted]').replaceAll(setupToken, '[redacted]');
 let pins: Pins, recordedPins: Pins | undefined, dbStarted = false, networkStarted = false;
+const manifest: Record<string, unknown> = {}, catalogSettles: CatalogSettle[] = [];
+const settle = async (stage: string) => {
+  const evidence = await settleCatalogs(stage, sql, { capMs: Math.min(60000, active()), signal });
+  catalogSettles.push(evidence);
+  dump(resolve(output, 'manifest.json'), { ...manifest, catalogSettles });
+  return evidence;
+};
 
 const stop = runtimeEnv.remove;
 
@@ -156,6 +170,7 @@ async function windowRun(window: Window, seedFixture: Fixture): Promise<WindowRe
       disableMaintenance: name => { sql(name, disableMaintenance, 'disable automatic maintenance on clone'); },
       async restart(arm, name) { appUp = true; await appStart(app, name, pins[arm]); },
     });
+    record('catalog-settle', await settle(window.id));
     const cpuTask = observe(observer, cpuPath, app);
     cpuUp = true;
     await wait('first cgroup sample', () => ticks(cpuPath).length);
@@ -261,7 +276,8 @@ try {
   if (!busy || !existsSync(busy) || !process.env.FUKULOW_LAUNCH_JOB) throw new Error('run requires the approved launcher and its HOST-BUSY marker');
   pins = json<Pins>(read(resolve(pinsArg)));
   recordedPins = pins;
-  dump(resolve(output, 'manifest.json'), { smoke, warmSeconds, rate, measuredSeconds, schedule: plan, pins, pgImage, k6Image, observerImage, logSettings });
+  Object.assign(manifest, { smoke, warmSeconds, rate, measuredSeconds, schedule: plan, pins, pgImage, k6Image, observerImage, logSettings });
+  dump(resolve(output, 'manifest.json'), manifest);
   if (!smoke) verifySmoke(json(read(resolve(smokeArg))), pins, warmSeconds);
   verifyPins(pins, git, image => json(docker('inspect pinned image', ['image', 'inspect', '--format',
     '{"id":{{json .Id}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}', image])),
@@ -285,6 +301,7 @@ try {
   sql('postgres', 'CREATE EXTENSION pg_walinspect; ALTER ROLE fukulow_app SET pg_stat_statements.track_planning=off;', 'enable checkpoint evidence');
   const seedFixture = await prepareSeed();
   if (sql('seed_base', 'SHOW pg_stat_statements.track_planning;', 'verify app planning setting', 'fukulow_app') !== 'off') throw new Error('planning tracking mismatch');
+  await settle('after seed');
   for (const window of plan) {
     active();
     console.log(`Window ${window.index}/${plan.length}: ${window.id}`);
