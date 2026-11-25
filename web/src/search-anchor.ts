@@ -1,36 +1,49 @@
-import { isOrganizationUnavailable, type ListMessagesQuery, type Message, type MessagePage, type ReplyChainPage, type ReplyChainQuery, type Result } from './api'
+import { isOrganizationUnavailable, type ListMessagesQuery, type ListTimelineQuery, type Message, type MessagePage, type ReplyChainPage, type ReplyChainQuery, type Result, type TimelinePage } from './api'
 import { knownMessageState } from './identity-order'
 import type { SearchResultTarget } from './navigation'
 import type { createSync } from './sync'
 import { createSearchRequestControl, type SearchRequest } from './search-request-control'
 import { MAIN_MESSAGE_LIMIT } from './protocol-types'
+import { readMainSearch, type MainSearchDirection as PageRead } from './search-main-read'
+import { capMainSearch, itemMessage, mainSearchBounds, mainSearchLines, reconcileMainSearch,
+  SEARCH_PAGE_SIZE as PAGE_SIZE, SEARCH_WINDOW_LIMIT, type MainSearchBounds, type MainSearchWindow } from './search-main-window'
+import type { MainTimelineLine } from './topic-selectors'
 
-const PAGE_SIZE = 25
-export const SEARCH_WINDOW_LIMIT = 100
-type PageRead = 'older' | 'newer' | 'refresh'
+export { SEARCH_WINDOW_LIMIT }
+const expired = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' } as const
+const isExpired = (result: Exclude<Result<unknown>, { ok: true }>) =>
+  result.kind === 'http' && result.error === 'snapshot_expired'
+const isMain = (target: SearchResultTarget) => !target.topicId && !target.replyRootId
 type Reads = {
+  timeline(target: SearchResultTarget, query: ListTimelineQuery, signal?: AbortSignal): Promise<Result<TimelinePage>>
   messages(target: SearchResultTarget, query: ListMessagesQuery, signal?: AbortSignal): Promise<Result<MessagePage>>
   reply(target: SearchResultTarget, query: ReplyChainQuery, signal?: AbortSignal): Promise<Result<ReplyChainPage>>
 }
 const initial = (target: SearchResultTarget) => ({
   target, visit: Symbol(), status: 'loading' as 'loading' | 'ready' | 'missing' | 'error',
-  messages: [] as Message[], reply: undefined as Message | undefined,
+  lines: [] as MainTimelineLine[], messages: [] as Message[], reply: undefined as Message | undefined,
   hasOlder: false, hasNewer: false, detached: false, paging: false, pageError: undefined as PageRead | undefined,
   asOfSeq: undefined as number | undefined,
 })
 type View = ReturnType<typeof initial>
+type TopicRecovery = Pick<View, 'hasOlder' | 'hasNewer' | 'detached'> & { before: number; after: number }
 
 /** An authorized display projection. Only unfiltered sync can establish the Channel cursor. */
 export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: Reads) {
   let view: View | undefined
+  let mainWindow: MainSearchWindow | undefined
+  let mainRecovery: MainSearchBounds | undefined
+  let topicRecovery: TopicRecovery | undefined
   let before = 0, after = 0
   let refreshWatermark = 0, forwardWatermark = 0
   let previous = sync.get()
   const requests = createSearchRequestControl()
   const listeners = new Set<() => void>()
   const publish = (next: View | undefined) => { view = next; listeners.forEach(listener => listener()) }
+  function clearWindow() { mainWindow = undefined; mainRecovery = undefined; topicRecovery = undefined }
   function missing(w: View) {
     requests.cancel()
+    clearWindow()
     publish({ ...initial(w.target), visit: w.visit, status: 'missing' })
   }
   const channelFor = (target: SearchResultTarget) => sync.get().channels[target.channelId]
@@ -53,30 +66,124 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
 
   function canRead(w: View | undefined, mode?: PageRead): w is View {
     return Boolean(w && sync.get().organization !== 'unavailable' && channelFor(w.target)?.watched &&
-      (mode !== 'older' || w.hasOlder) && (mode !== 'newer' || w.hasNewer))
+      (mode !== 'older' || w.hasOlder || mainRecovery?.hasOlder || topicRecovery?.hasOlder) &&
+      (mode !== 'newer' || w.hasNewer || mainRecovery?.hasNewer || topicRecovery?.hasNewer))
   }
 
   function showError(mode?: PageRead) {
     if (!view) return
-    publish(mode ? { ...view, paging: false, pageError: mode } : { ...view, status: 'error', paging: false })
+    publish({ ...view, paging: false, pageError: mode, status: view.status === 'loading' ? 'error' : view.status })
   }
 
-  function read(mode?: PageRead) {
+  function read(mode?: PageRead, automatic = false) {
     if (!canRead(view, mode)) return Promise.resolve()
-    return requests.enqueue(mode ?? 'initial', request => executeRead(request, mode), () => {
+    const visit = view.visit
+    let installed = false
+    return requests.enqueue(mode ?? 'initial', async request => {
+      if (automatic && view?.pageError) return
+      installed = await executeRead(request, mode)
+    }, () => {
       if (canRead(view, mode)) showError(mode)
+    }).then(() => {
+      if (!installed || view?.visit !== visit || view.pageError || !mainWindow) return
+      if (reconcileMainSearch(mainWindow, channelFor(view.target)).refresh) void read('refresh', true)
     })
   }
 
-  async function executeRead(request: SearchRequest, mode?: PageRead, restarted = false): Promise<void> {
+  function handleFailure(w: View, failure: Exclude<Result<unknown>, { ok: true }>, mode?: PageRead) {
+    if (failure.kind === 'http' && (failure.status === 403 || failure.status === 404)) {
+      missing(w)
+      if (!isOrganizationUnavailable(failure) && failure.error !== 'topic_not_found' && failure.error !== 'reply_chain_not_found') {
+        void sync.channelUnavailable(w.target.channelId)
+      }
+    } else showError(mode)
+  }
+
+  function dropMain(w: View) {
+    if (!mainWindow) return
+    mainRecovery = mainSearchBounds(mainWindow, w.target.createdSeq)
+    mainWindow = undefined
+    publish({ ...initial(w.target), visit: w.visit })
+  }
+
+  function publishMain(w: View, next: MainSearchWindow, readCompleted = false) {
+    mainWindow = next
+    const lines = mainSearchLines(next)
+    const messages = lines.flatMap(line => line.kind === 'message' ? [line.message] : [])
+    publish({ ...w, status: 'ready', lines, messages, asOfSeq: next.watermark,
+      ...(readCompleted ? { paging: false, pageError: undefined } : {}),
+      hasOlder: next.hasOlder, hasNewer: next.hasNewer, detached: next.detached })
+  }
+
+  async function executeMain(request: SearchRequest, w: View, mode?: PageRead, restarted = false): Promise<boolean> {
+    const { target } = w
+    const current = mainWindow
+    if (mode === 'refresh' && current && !reconcileMainSearch(current, channelFor(target)).refresh && !w.pageError) return false
+    publish(current ? { ...w, paging: true, pageError: undefined } :
+      { ...w, status: 'loading', paging: true, pageError: undefined })
+    const versionEpoch = channelFor(target)?.versionEpoch
+    let snapshot: { generation: string; watermark: number } | undefined = current?.items.length && mode !== 'refresh'
+      ? { generation: current.generation, watermark: current.watermark } : undefined
+    const overtaken = (watermark: number) => {
+      const state = channelFor(target)
+      return state && (state.versionEpoch !== versionEpoch || state.mutationSeq > watermark)
+    }
+    const result = await readMainSearch(async query => {
+      const page = await request.run(signal => reads.timeline(target, query, signal))
+      if (!request.isCurrent() || !page.ok) return page
+      const { history_generation: generation, as_of_seq: watermark, items } = page.data
+      if (snapshot && (snapshot.generation !== generation || snapshot.watermark !== watermark)) return expired
+      if (!snapshot && mode === 'refresh' && current && watermark > current.watermark && view) dropMain(view)
+      snapshot = { generation, watermark }
+      // Authorized reads may settle a pending send even if a later page invalidates the view.
+      void sync.settleHistory(target.channelId, items.map(itemMessage))
+      return overtaken(watermark) ? expired : page
+    }, target, sync.get().historyGeneration, mode, current, mainRecovery ?? (current && mainSearchBounds(current, target.createdSeq)))
+    if (!request.isCurrent() || !view) return false
+    const checked = result.ok && overtaken(result.data.watermark) ? expired : result
+    if (!checked.ok) {
+      if (isExpired(checked)) {
+        dropMain(view)
+        if (!restarted) return executeMain(request, view, mode, true)
+      }
+      handleFailure(view, checked, mode)
+      return false
+    }
+    let next = checked.data
+    const bounds = mainSearchBounds(next, target.createdSeq)
+    const coversHit = bounds.first <= target.createdSeq && target.createdSeq <= bounds.last
+    if ((!mode || (mainRecovery && coversHit)) && !next.items.some(item => contains(target, itemMessage(item)))) {
+      missing(view)
+      return false
+    }
+    if (mode === 'refresh' && mainRecovery?.detached && !current?.detached) {
+      next = capMainSearch(next, mainRecovery.last)
+    } else if (mode === 'older' && mainWindow?.detached && mainWindow.watermark === next.watermark) {
+      const tail = next.hasNewer ? [] : mainWindow.tail.slice(0, SEARCH_WINDOW_LIMIT - next.items.length)
+      next = { ...next, detached: true, tail }
+    }
+    mainRecovery = undefined
+    publishMain(view, reconcileMainSearch(next, channelFor(target)).window, true)
+    return true
+  }
+
+  async function executeRead(request: SearchRequest, mode?: PageRead) {
+    const w = view
+    if (!canRead(w, mode)) return false
+    if (!Number.isSafeInteger(w.target.createdSeq) || w.target.createdSeq < 1) {
+      missing(w)
+      return false
+    }
+    if (isMain(w.target)) return executeMain(request, w, mode)
+    await executeMessageRead(request, mode)
+    return false
+  }
+
+  async function executeMessageRead(request: SearchRequest, mode?: PageRead, restarted = false): Promise<void> {
     const w = view
     if (!canRead(w, mode)) return
     const { target } = w
     const channel = target.channelId
-    if (!Number.isSafeInteger(target.createdSeq) || target.createdSeq < 1) {
-      missing(w)
-      return
-    }
     const versionEpoch = channelFor(target)?.versionEpoch
     publish(w.status === 'ready' || mode
       ? { ...w, paging: true, pageError: undefined }
@@ -93,15 +200,48 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       return result
     }
     const fail = (result: Exclude<Result<unknown>, { ok: true }>) => {
-      if (result.kind === 'http' && result.error === 'snapshot_expired' && !restarted && mode !== 'refresh') {
-        return executeRead(request, mode, true)
-      }
-      if (result.kind === 'http' && (result.status === 403 || result.status === 404)) {
-        missing(w)
-        if (!isOrganizationUnavailable(result) && result.error !== 'topic_not_found' && result.error !== 'reply_chain_not_found') {
-          void sync.channelUnavailable(channel)
+      if (isExpired(result)) {
+        if (view?.asOfSeq !== undefined) {
+          topicRecovery = { before, after: Math.max(after, view.messages.at(-1)?.created_seq ?? 0),
+            hasOlder: view.hasOlder, hasNewer: view.hasNewer, detached: view.detached }
+          publish({ ...initial(w.target), visit: w.visit })
         }
-      } else showError(mode)
+        if (!restarted) return executeMessageRead(request, mode, true)
+      }
+      handleFailure(w, result, mode)
+    }
+    if (topicRecovery) {
+      const bounds = topicRecovery
+      const lower = bounds.hasOlder ? bounds.before - 1 : 0
+      const range = await request.run(signal => reads.messages(target, {
+        ...query, after_seq: lower, limit: SEARCH_WINDOW_LIMIT + 1,
+      }, signal))
+      if (!request.isCurrent()) return
+      if (!range.ok) return fail(range)
+      const { as_of_seq: watermark, history_generation } = range.data
+      if (overtaken(watermark)) return fail(expired)
+      const held = range.data.messages.filter(message =>
+        (!bounds.hasNewer && !bounds.detached) || message.created_seq <= bounds.after)
+      const fixed = { history_generation, as_of_seq: watermark }
+      const more = mode === 'older' && lower > 0 ? { before_seq: bounds.before }
+        : mode === 'newer' ? { after_seq: bounds.after } : undefined
+      const page = more ? checked(await request.run(signal => reads.messages(target, { ...fixed, ...more, limit: PAGE_SIZE }, signal))) : undefined
+      if (!request.isCurrent()) return
+      if (page && !page.ok) return fail(page)
+      if (overtaken(watermark)) return fail(expired)
+      const ordered = merge(w, [...held, ...(page?.data.messages ?? [])], [])
+      const keepStart = mode !== 'newer'
+      const messages = keepStart ? ordered.slice(0, SEARCH_WINDOW_LIMIT) : ordered.slice(-SEARCH_WINDOW_LIMIT)
+      const trimmed = messages.length < ordered.length
+      before = messages[0]?.created_seq ?? bounds.before
+      after = messages.at(-1)?.created_seq ?? bounds.after
+      refreshWatermark = forwardWatermark = watermark
+      topicRecovery = undefined
+      publish({ ...w, status: 'ready', paging: false, pageError: undefined, asOfSeq: watermark, messages,
+        detached: bounds.detached, hasOlder: (mode === 'older' ? page?.data.has_more ?? false : bounds.hasOlder) || (trimmed && !keepStart),
+        hasNewer: (mode === 'newer' ? page?.data.has_more ?? false : bounds.hasNewer || range.data.has_more) || (trimmed && keepStart) })
+      void sync.settleHistory(channel, [...held, ...(page?.data.messages ?? [])])
+      return
     }
     if (target.replyRootId) {
       const result = await request.run(signal => reads.reply(target, { ...query, after_seq: target.createdSeq - 1, limit: 1 }, signal))
@@ -210,6 +350,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     }
     if (state.historyEpoch !== old.historyEpoch || (prior?.cursor != null && channel?.cursor === null)) {
       requests.cancel()
+      clearWindow()
       publish(initial(w.target))
       void read()
       return
@@ -217,6 +358,18 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     if (w.status === 'missing' || !changed.has(id) || !channel?.watched) return
     if (!prior?.watched && w.status === 'loading') { void read(); return }
     const incoming = records?.get(id) ?? []
+    if (isMain(w.target)) {
+      if (incoming.some(m => m.id === w.target.messageId && !contains(w.target, m))) { missing(w); return }
+      if (mainWindow && channel.mutationSeq > mainWindow.watermark) {
+        dropMain(w)
+        void read('refresh', true)
+      } else if (mainWindow) {
+        const next = reconcileMainSearch(mainWindow, channel)
+        if (next.window !== mainWindow) publishMain(w, next.window)
+        if (next.refresh && !w.pageError) void read('refresh', true)
+      }
+      return
+    }
     const heldHit = w.reply ?? w.messages.find(m => m.id === w.target.messageId)
     const hitUpdate = incoming.find(m => m.id === w.target.messageId)
     const canonicalHit = hitUpdate && knownMessageState(channel, heldHit, hitUpdate)
@@ -227,6 +380,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       move.channel_id === id && move.destination_topic_id === w.target.topicId &&
       move.version > (watermark === undefined ? 0 : refreshWatermark))
     if (watermark === undefined) {
+      if (topicRecovery) return
       if (topicMove || moves?.some(move => move.channel_id === id && move.root_id === w.target.replyRootId)) {
         requests.cancel()
         void read()
@@ -272,6 +426,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     open(target: SearchResultTarget | undefined) {
       if (view?.target === target) return
       requests.cancel()
+      clearWindow()
       publish(target ? initial(target) : undefined)
       const channel = target && channelFor(target)
       if (view && channel?.state === 'unavailable') missing(view)
@@ -280,6 +435,6 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     retry: () => read(view?.pageError),
     loadOlder: () => view?.hasOlder ? read('older') : undefined,
     loadNewer: () => view?.hasNewer ? read('newer') : undefined,
-    close() { stop(); requests.cancel(); publish(undefined); listeners.clear() },
+    close() { stop(); requests.cancel(); clearWindow(); publish(undefined); listeners.clear() },
   }
 }
