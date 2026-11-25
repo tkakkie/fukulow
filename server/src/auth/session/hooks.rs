@@ -25,6 +25,12 @@ pub trait SubscriptionRecheck: Send + Sync {
 #[derive(Clone, Default)]
 pub(super) struct ActivityHook(Arc<Mutex<Option<activity::Hook>>>);
 
+impl ActivityHook {
+    fn current(&self) -> Option<activity::Hook> {
+        lock_ignoring_poison(&self.0).clone()
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct SubscriptionHook(Arc<Mutex<Option<Arc<dyn SubscriptionRecheck>>>>);
 
@@ -46,7 +52,7 @@ impl SessionChanges {
         target: Uuid,
         scope: activity::ChangeScope,
     ) -> Result<Option<Box<dyn activity::ActivityChange>>, sqlx::Error> {
-        let hook = lock_ignoring_poison(&self.activity.0).clone();
+        let hook = self.activity.current();
         match hook {
             Some(hook) => hook
                 .capture(connection, organization, target, scope)
@@ -62,15 +68,13 @@ impl SessionChanges {
         organization: Uuid,
         change: activity::ChannelChange,
     ) {
-        let hook = lock_ignoring_poison(&self.activity.0).clone();
-        if let Some(hook) = hook {
+        if let Some(hook) = self.activity.current() {
             hook.channel(pool, organization, change);
         }
     }
 
     pub(crate) fn directory_changed(&self, pool: PgPool, organization: Uuid, target: Uuid) {
-        let hook = lock_ignoring_poison(&self.activity.0).clone();
-        if let Some(hook) = hook {
+        if let Some(hook) = self.activity.current() {
             hook.directory(pool, organization, target);
         }
     }
