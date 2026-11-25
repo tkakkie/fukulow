@@ -1,7 +1,7 @@
 use super::*;
 use crate::auth;
 use channels::dms::{self, Cursor, DmDiscovery, DmKind, DmPeer, OpenDmRequest};
-use sqlx::{PgConnection, Row};
+use sqlx::PgConnection;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Dm {
@@ -37,33 +37,18 @@ async fn baselines(
     let history_generation =
         auth::history::generation(tx, auth.identity.organization.organization_id).await?;
     let ids = identities.iter().map(|d| d.id).collect::<Vec<_>>();
-    let rows = sqlx::query(unread::LIST_COUNTS_SQL)
-        .bind(auth.identity.organization.organization_id)
-        .bind(auth.identity.member.id)
-        .bind(auth.membership_revision)
-        .bind(&ids)
-        .fetch_all(tx)
-        .await?;
-    let mut counts = std::collections::HashMap::new();
-    for row in rows {
-        if row.try_get::<bool, _>("count_drift")? {
-            tracing::error!(target: "fukulow", event = "unread_count_drift");
-        }
-        counts.insert(
-            row.try_get::<Uuid, _>("channel_id")?,
-            (
-                row.try_get::<i64, _>("as_of_seq")?,
-                row.try_get::<i64, _>("read_seq")?,
-                row.try_get::<i64, _>("unread_count")?,
-                row.try_get::<i64, _>("mention_unread_count")?,
-            ),
-        );
-    }
+    let mut counts =
+        unread::list_counts(tx, auth, &ids, unread::MissingPositionLog::Suppress).await?;
     identities
         .into_iter()
         .map(|d| {
-            let (as_of_seq, read_seq, unread_count, mention_unread_count) =
-                counts.remove(&d.id).ok_or(sqlx::Error::RowNotFound)?;
+            let unread::ListCounts {
+                as_of_seq,
+                read_seq,
+                unread_count,
+                mention_unread_count,
+                ..
+            } = counts.remove(&d.id).ok_or(sqlx::Error::RowNotFound)?;
             Ok(Dm {
                 history_generation,
                 id: d.id,
