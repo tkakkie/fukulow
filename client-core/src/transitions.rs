@@ -73,16 +73,8 @@ impl Step<'_> {
         if !self.core.session.running {
             return;
         }
-        let timers: Vec<_> = self.core.timers.keys().copied().collect();
-        for id in timers {
-            self.cancel(Some(id));
-        }
+        self.teardown();
         self.core.session.organization = Organization::Unavailable;
-        self.core.session.running = false;
-        self.core.session.connected = false;
-        self.core.session.connection = None;
-        self.core.requests.clear();
-        self.metadata_changed = true;
         for id in self.ids() {
             let c = self.channel(id);
             c.state = Availability::Unavailable;
@@ -99,7 +91,6 @@ impl Step<'_> {
                     .collect(),
             );
         }
-        self.out.effects.push(Effect::Close);
     }
     fn running(&mut self, input: Input) {
         match input {
