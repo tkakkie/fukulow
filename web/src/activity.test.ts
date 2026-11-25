@@ -659,8 +659,9 @@ it('a successful held active-Topic summary evicted by newer main history cannot 
     expect(getSummary).toHaveBeenCalledTimes(2)
     expect(c.topics.get('A').topic('T').summaryError).toBeNull()
     for (let seq = 1001; seq <= 1500; seq++) c.event(msg(seq))
+    getSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 1500, topic: summary('T', 1, 1) }))
     const refreshed = await c.topics.activitySummary('A', 'T')
-    expect(refreshed.ok && refreshed.data.as_of_seq).toBe(1000)
+    expect(refreshed.ok && refreshed.data.as_of_seq).toBe(1500)
     expect(c.topics.get('A').lines.some(l => l.kind === 'topic')).toBe(false)
   } finally { activity.close(); await c.close() }
 })
@@ -932,5 +933,141 @@ it('a failed Unread summary releases its demand so the next prune drops the targ
     void c.topics.loadTopic('A', 'T')
     await flush()
     expect(heldKeys.has('topic:A:U')).toBe(false)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('stale cached activitySummary waits for an in-flight load and returns the fresh summary (#988)', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise)
+    const inFlight = c.topics.loadSummary('A', 'T')
+    await flush()
+    c.event(11, 'T')
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'T', 2).finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topic: { ...summary('T', 11, 4), read_seq: 2 } }))
+    const result = await pending
+    await inFlight
+    expect(result.ok && result.data.as_of_seq).toBe(11)
+    expect(result.ok && result.data.topic.read_seq).toBe(2)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('stale cached activitySummary waits through a stale in-flight load for the one queued follow-up (#988)', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const second = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const inFlight = c.topics.loadSummary('A', 'T')
+    await flush()
+    c.event(11, 'T')
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'T', 2).finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+    first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: { ...summary('T', 10, 3), read_seq: 1 } }))
+    await flush()
+    expect(settled).toBe(false)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+    second.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 11, topic: { ...summary('T', 11, 4), read_seq: 2 } }))
+    const result = await pending
+    await inFlight
+    expect(result.ok && result.data.as_of_seq).toBe(11)
+    expect(result.ok && result.data.topic.read_seq).toBe(2)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it.each([
+  { reason: 'as_of_seq below cursor', asOfSeq: 10, readSeq: 2 },
+  { reason: 'read_seq below minimumPosition', asOfSeq: 11, readSeq: 1 },
+])('stale cached activitySummary returns non-ok when completed loads still fail freshness ($reason) (#988)', async ({ asOfSeq, readSeq }) => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  const second = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const inFlight = c.topics.loadSummary('A', 'T')
+    await flush()
+    c.event(11, 'T')
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'T', 2).finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    first.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: { ...summary('T', 10, 3), read_seq: 1 } }))
+    await flush()
+    expect(settled).toBe(false)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+    second.resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: asOfSeq, topic: { ...summary('T', asOfSeq, 4), read_seq: readSeq } }))
+    const result = await pending
+    await inFlight
+    expect(result).toEqual({ ok: false, kind: 'network' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledTimes(2)
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it.each(['network', 'http-404', 'suspend', 'close', 'replaceSession'] as const)('stale cached activitySummary settles promptly with non-ok when in-flight load ends by %s (#988)', async outcome => {
+  const { topicClient } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true })
+  const targets = new Map<string, import('./activity').ActivityTarget>()
+  const hold = activity.hold.bind(activity)
+  vi.spyOn(activity, 'hold').mockImplementation((key, target) => {
+    targets.set(key, target)
+    return hold(key, target)
+  })
+  const c = topicClient(activity)
+  const first = held<Result<import('./api').TopicSummaryResponse>>()
+  try {
+    await c.boot()
+    c.topicsApi.getTopicSummary.mockReturnValueOnce(first.promise)
+    const inFlight = c.topics.loadSummary('A', 'T')
+    await flush()
+    c.event(11, 'T')
+    let settled = false
+    const pending = c.topics.activitySummary('A', 'T').finally(() => { settled = true })
+    await flush()
+    expect(settled).toBe(false)
+    if (outcome === 'network') first.resolve({ ok: false, kind: 'network' })
+    else if (outcome === 'http-404') first.resolve({ ok: false, kind: 'http', status: 404, error: 'topic_not_found' })
+    else if (outcome === 'suspend') targets.get('topic:A:T')!.suspend?.()
+    else if (outcome === 'close') c.topics.close()
+    else c.topics.replaceSession()
+    const result = await pending
+    await inFlight
+    expect(result).toEqual(
+      outcome === 'http-404'
+        ? { ok: false, kind: 'http', status: 404, error: 'topic_not_found' }
+        : { ok: false, kind: 'network' },
+    )
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
+  } finally { activity.close(); await c.sync.close() }
+})
+
+it('stale cached activitySummary without an in-flight load issues a single fetch and rejects stale results (#988)', async () => {
+  const { topicClient, summary } = await import('./topic-test-helpers')
+  const activity = createActivity({ watched: () => true }), c = topicClient(activity)
+  try {
+    await c.boot()
+    c.event(11, 'T')
+    c.topicsApi.getTopicSummary.mockResolvedValueOnce(ok({ history_generation: '00000000-0000-4000-8000-000000000515', as_of_seq: 10, topic: { ...summary('T', 10, 3), read_seq: 0 } }))
+    const result = await c.topics.activitySummary('A', 'T')
+    expect(result).toEqual({ ok: false, kind: 'network' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(c.topicsApi.getTopicSummary).toHaveBeenCalledOnce()
   } finally { activity.close(); await c.sync.close() }
 })

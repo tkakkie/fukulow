@@ -55,7 +55,7 @@ export function createActivityTarget<T>(options: {
     if (closed || !dirty) return
     if (inFlight) { queued = true; return }
     if (retry || options.canLoad?.() === false) return
-    inFlight = true; queued = false
+    inFlight = true; queued = false; failure = undefined
     const own = generation
     const request = new AbortController()
     controller = request
@@ -119,7 +119,17 @@ export function createActivityTarget<T>(options: {
       if (inFlight) return running
       if (!closed && !stopped && !dirty && timer === undefined && !retry) { dirty = true; return run() }
     },
-    refresh() { if (closed) return; stopped = false; dirty = true; if (inFlight) { queued = true; return }; if (!retry) { clearTimeout(timer); timer = undefined; return run() } },
+    refresh() {
+      if (closed) return
+      stopped = false; dirty = true
+      if (inFlight) { queued = true; return running }
+      if (!retry) { clearTimeout(timer); timer = undefined; return run() }
+    },
+    flushQueued() {
+      if (closed) return
+      if (inFlight) return running
+      if (dirty && !retry && timer !== undefined) { clearTimeout(timer); timer = undefined; return run() }
+    },
     retryNow() { clearTimeout(timer); timer = undefined; retry = false; stopped = false; failure = undefined; belowFloor = 0; dirty = true; return run() },
     suspend() { generation++; dirty = false; queued = false; retry = false; belowFloor = 0; clearTimeout(timer); timer = undefined; completion?.(); controller?.abort() },
     close() { closed = true; generation++; clearTimeout(timer); completion?.(); controller?.abort(); timer = undefined },

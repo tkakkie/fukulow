@@ -800,26 +800,33 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; onSessionEnd
     async activitySummary(channel: string, topic: string, minimumPosition = 0): Promise<Result<TopicSummaryResponse>> {
       const w = getWindow(channel)
       if (!current(channel, w)) return { ok: false, kind: 'network' }
+      const isFresh = (asOfSeq: number, readSeq: number) =>
+        asOfSeq >= (sync.get().channels[channel]?.cursor ?? 0) && readSeq >= minimumPosition
       const target = holdSummary(w, topic)
       const cached = w.baselines.get(topic)
-      if (cached && cached.asOfSeq >= (sync.get().channels[channel]?.cursor ?? 0) && cached.summary.read_seq >= minimumPosition) return { ok: true, data: { history_generation: cached.summary.latest_message.history_generation, as_of_seq: cached.asOfSeq, topic: cached.summary } }
+      if (cached && isFresh(cached.asOfSeq, cached.summary.read_seq)) return { ok: true, data: { history_generation: cached.summary.latest_message.history_generation, as_of_seq: cached.asOfSeq, topic: cached.summary } }
       // Return accepted REST evidence even if display trimming immediately evicts its body.
       let accepted: TopicSummaryResponse | undefined
       const stop = activityTargets.get(`topic:${channel}:${topic}`)?.observeSummary?.(response => { accepted = response })
       w.summaryDemands.set(topic, (w.summaryDemands.get(topic) ?? 0) + 1)
       try {
-        if (cached) { target?.invalidate(); await target?.refresh() } else await target?.ensure()
+        if (cached) await target?.refresh()
+        else await target?.ensure()
+        if (current(channel, w) && !(accepted && isFresh(accepted.as_of_seq, accepted.topic.read_seq))) await target?.flushQueued()
       } finally {
         stop?.()
         const left = (w.summaryDemands.get(topic) ?? 1) - 1
         if (left > 0) w.summaryDemands.set(topic, left)
         else w.summaryDemands.delete(topic)
       }
-      if (accepted && current(channel, w)) return { ok: true, data: accepted }
+      if (!current(channel, w)) return { ok: false, kind: 'network' }
+      if (accepted && isFresh(accepted.as_of_seq, accepted.topic.read_seq)) return { ok: true, data: accepted }
       const failed = target?.failure()
       if (failed) return failed
       const baseline = w.baselines.get(topic)
-      return baseline && current(channel, w) ? { ok: true, data: { history_generation: baseline.summary.latest_message.history_generation, as_of_seq: baseline.asOfSeq, topic: baseline.summary } } : { ok: false, kind: 'network' }
+      return baseline && isFresh(baseline.asOfSeq, baseline.summary.read_seq)
+        ? { ok: true, data: { history_generation: baseline.summary.latest_message.history_generation, as_of_seq: baseline.asOfSeq, topic: baseline.summary } }
+        : { ok: false, kind: 'network' }
     },
     get(channel: string) {
       if (!closed) reconcileSync()
