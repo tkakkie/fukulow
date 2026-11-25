@@ -1,3 +1,4 @@
+import { messageTimeline, records } from './search-main-test-helpers'
 import { flushSync, mount, tick, unmount } from 'svelte'
 import { describe, expect, it, vi } from 'vitest'
 import type * as api from './api'
@@ -691,7 +692,12 @@ describe('Search result navigation', () => {
     const older = deferred<api.Result<api.MessagePage>>()
     const read = async (query?: api.ListMessagesQuery) => query?.before_seq === 4 ? older.promise
       : ok({ history_generation, as_of_seq: 100, messages: query?.after_seq === 3 ? [message(4), message(5), message(6)] : [message(100)], has_more: false })
-    options.sync!.api!.listMessages = (_channel, query) => read(query)
+    const normalTimeline = options.topicsApi!.listTimeline
+    options.topicsApi!.listTimeline = async (id, query, signal) => {
+      if (!signal || !query) return normalTimeline(id, query)
+      const page = await read({ before_seq: query.before_position, after_seq: query.after_position })
+      return page.ok ? ok(messageTimeline(page.data.messages, 100, query)) : page
+    }
     options.topicsApi!.listTopicMessages = (_channel, _topic, query) => read(query)
     const app = openWorkspace(net, options)
     try {
@@ -716,10 +722,10 @@ describe('Search result navigation', () => {
     const options = net.options()
     const history_generation = record(1).history_generation
     net.pages.A = ok({ history_generation, as_of_seq: 100, messages: [record(100)], has_more: false })
-    options.sync!.api!.listMessages = async (_id, query) => ok({
-      history_generation, as_of_seq: 100, messages: query?.after_seq === 39 ? [record(40)] : [],
-      has_more: query?.after_seq === 39,
-    })
+    const normalTimeline = options.topicsApi!.listTimeline
+    options.topicsApi!.listTimeline = async (id, query, signal) => signal && query
+      ? ok(messageTimeline([record(40), ...Array.from({ length: 30 }, (_, index) => record(71 + index))], 100, query))
+      : normalTimeline(id, query)
     const app = openWorkspace(net, options)
     try {
       await settle()
@@ -782,4 +788,51 @@ describe('Search result navigation', () => {
       await app.close()
     }
   })
+
+  function searchHistory(messages: api.Message[], hit: number) {
+    const net = fakeNetwork()
+    const options = net.options()
+    const history_generation = record(1).history_generation
+    net.pages.A = ok({ history_generation, as_of_seq: 500, messages: [record(500)], has_more: false })
+    const normalTimeline = options.topicsApi!.listTimeline
+    options.topicsApi!.listTimeline = async (id, query, signal) => signal && query
+      ? ok(messageTimeline(messages, 500, query)) : normalTimeline(id, query)
+    const app = openWorkspace(net, options)
+    return { ...app, async open() {
+      await settle()
+      net.subscribed('A', 500)
+      await settle()
+      app.navigation.openSearchResult('org', { channelId: 'A', messageId: `id${hit}`, createdSeq: hit })
+      await settle()
+    } }
+  }
+
+  it('renders Topic summary lines outside the live window in normal timeline order during Channel search', async () => {
+    const app = searchHistory([record(30), { ...record(35), topic_id: '設計議論' },
+      record(40), { ...record(45), topic_id: 'リリース準備' }, record(50)], 40)
+    try {
+      await app.open()
+      const text = app.host.querySelector('#main-content')?.textContent ?? ''
+      const positions = ['m30', '設計議論', 'm40', 'リリース準備', 'm50'].map(label => text.indexOf(label))
+      expect(positions[0]).toBeGreaterThanOrEqual(0)
+      expect(positions.every((position, index) => !index || position > positions[index - 1])).toBe(true)
+      expect(app.host.querySelector('.ui-message-row--search-match')?.closest('[data-message-id]')?.getAttribute('data-message-id')).toBe('id40')
+      expect(app.session.sync.get().channels.A.cursor).toBe(500)
+    } finally { await app.close() }
+  })
+
+  it('renders a Topic-heavy Channel search window with both Channel-level Messages and Topic summary lines', async () => {
+    const topics = records(101, 130, '大量トピック')
+    const app = searchHistory([record(80), record(100), ...topics, record(131), record(132)], 100)
+    try {
+      await app.open()
+      const text = app.host.querySelector('#main-content')?.textContent ?? ''
+      const positions = ['m80', 'm100', '大量トピック', 'm131', 'm132'].map(label => text.indexOf(label))
+      expect(positions[0]).toBeGreaterThanOrEqual(0)
+      expect(positions.every((position, index) => !index || position > positions[index - 1])).toBe(true)
+      expect(app.host.querySelector('[data-message-id="id101"]')).toBeNull()
+      expect(app.session.sync.get().channels.A.cursor).toBe(500)
+    } finally { await app.close() }
+  })
+
 })

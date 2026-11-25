@@ -324,6 +324,7 @@
     }
     for (const message of currentRepliesState?.messages ?? []) ids.push(message.sender)
     for (const message of searchView?.messages ?? []) ids.push(message.sender)
+    for (const line of searchView?.lines ?? []) if (line.kind === 'topic') ids.push(line.latestMessage.sender)
     if (searchOpen && searchState) {
       for (const hit of searchState.items) ids.push(hit.message.sender)
     }
