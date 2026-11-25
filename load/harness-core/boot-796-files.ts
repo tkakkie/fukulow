@@ -14,6 +14,11 @@ export const wantsLink = `${unitDir}/multi-user.target.wants/${hostService}`;
 export const irqbalanceLink = `${unitDir}/irqbalance.service`;
 export const defaultTargetLink = `${unitDir}/default.target`;
 
+// power-profiles-daemon is pulled in at boot: on multi-user.target it would otherwise start later by D-Bus activation
+// and re-apply its saved profile over the sysfs one.
+export const powerProfiles = 'power-profiles-daemon.service';
+const serviceWants = `${measurementSlice} ${powerProfiles}`;
+
 export type HostFile = { source: string; target: string; mode: number };
 const dropIn = (unit: string, source: string): HostFile => ({ source, target: `${unitDir}/${unit}.d/fukulow-796.conf`, mode: 0o644 });
 // The units whose cpusets the host check reads (frequency-host-affinity.ts).
@@ -63,13 +68,15 @@ export function layoutProblems(read: (source: string) => string): string[] {
   const service = read(hostService);
   check(JSON.stringify(values(service, 'ExecStart')) === JSON.stringify(['frequency.sh', 'affinity.sh'].map(s => `/${libexecDir}/${s}`)),
     `${hostService}: ExecStart must run frequency.sh, then affinity.sh, from /${libexecDir}`);
-  check(one(service, 'Wants') === measurementSlice, `${hostService}: Wants must be ${measurementSlice}`);
+  check(one(service, 'Wants') === serviceWants, `${hostService}: Wants must be ${serviceWants}`);
+  check(one(service, 'After')?.split(' ').includes(powerProfiles) === true, `${hostService}: After must include ${powerProfiles}`);
   check(one(service, 'WantedBy') === 'multi-user.target', `${hostService}: WantedBy must be multi-user.target`);
   const affinity = read('affinity.sh');
   check(sameCpus(one(affinity, 'housekeeping'), sets796.housekeeping), `affinity.sh: housekeeping differs from ${sets796.housekeeping.join(',')}`);
   check(one(affinity, 'mask') === housekeepingMask, `affinity.sh: mask differs from ${housekeepingMask}`);
   const freq = read('frequency.sh');
   for (const [key, value] of Object.entries(frequency)) check(one(freq, key) === value, `frequency.sh: ${key} must be ${value}`);
+  check(freq.includes('powerprofilesctl set "$profile"'), 'frequency.sh: must store the profile in power-profiles-daemon');
   const irq = [...read('grub.cfg').matchAll(/\birqaffinity=(\S+?)"?$/gm)].map(m => m[1]);
   check(irq.length === 1 && sameCpus(irq[0], sets796.housekeeping), `grub.cfg: irqaffinity ${JSON.stringify(irq)} differs from ${sets796.housekeeping.join(',')}`);
   return problems;

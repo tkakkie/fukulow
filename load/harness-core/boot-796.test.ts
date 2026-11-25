@@ -1,24 +1,35 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { frequency, hostFiles, housekeepingMask, layoutProblems, sourceDir } from './boot-796-files.ts';
-import { installBootSetup, uninstallBootSetup } from './boot-796.ts';
+import { installBootSetup, reloadPending, uninstallBootSetup } from './boot-796.ts';
 import { measuredCpus, sets796 } from './frequency-layout.ts';
 
 const readSource = (name: string) => readFileSync(join(sourceDir, name), 'utf8');
+const temporary: string[] = [];
+after(() => { for (const dir of temporary) rmSync(dir, { recursive: true, force: true }); });
+const tempDir = (prefix: string) => { const dir = mkdtempSync(join(tmpdir(), prefix)); temporary.push(dir); return dir; };
+// A copy of the versioned files with one replacement, for negative tests.
+function tamperedSource(file: string, from: string, to: string) {
+  const source = tempDir('boot-796-source-');
+  cpSync(sourceDir, source, { recursive: true });
+  assert.ok(readSource(file).includes(from), `${file} contains ${from}`);
+  writeFileSync(join(source, file), readSource(file).replace(from, to));
+  return source;
+}
 
 // A host as found before install: graphical default target, irqbalance enabled, the hand-made governor unit.
-function fakeHost({ irqbalanceMasked = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'boot-796-'));
+function fakeHost({ irqbalanceMasked = false, defaultTarget = true } = {}) {
+  const root = tempDir('boot-796-');
   for (const dir of ['usr/lib/systemd/system', 'etc/systemd/system/multi-user.target.wants', 'etc/default/grub.d', 'usr/local/libexec']) {
     mkdirSync(join(root, dir), { recursive: true });
   }
   for (const target of ['multi-user.target', 'graphical.target']) writeFileSync(join(root, 'usr/lib/systemd/system', target), '[Unit]\n');
   writeFileSync(join(root, 'etc/systemd/system/fukulow-cpu-performance.service'), '[Service]\nType=oneshot\n');
-  symlinkSync('/lib/systemd/system/graphical.target', join(root, 'etc/systemd/system/default.target'));
+  if (defaultTarget) symlinkSync('/lib/systemd/system/graphical.target', join(root, 'etc/systemd/system/default.target'));
   symlinkSync('/usr/lib/systemd/system/irqbalance.service', join(root, 'etc/systemd/system/multi-user.target.wants/irqbalance.service'));
   if (irqbalanceMasked) symlinkSync('/dev/null', join(root, 'etc/systemd/system/irqbalance.service'));
   return root;
@@ -112,9 +123,7 @@ test('a wrong CPU set in a versioned file is rejected before anything changes', 
   ] as const;
   for (const [file, from, to, problem] of tamper) {
     const root = fakeHost(), before = snapshot(root), { calls, run } = recorder();
-    const source = mkdtempSync(join(tmpdir(), 'boot-796-source-'));
-    cpSync(sourceDir, source, { recursive: true });
-    writeFileSync(join(source, file), readSource(file).replace(from, to));
+    const source = tamperedSource(file, from, to);
     assert.throws(() => installBootSetup(root, { source, run }), problem);
     assert.deepEqual(calls, []);
     assert.deepEqual(snapshot(root), before);
@@ -125,10 +134,10 @@ test('install refuses an unexpected irqbalance unit, default target file or miss
   const cases: [string, (root: string) => void, RegExp][] = [
     ['irqbalance override', root => writeFileSync(join(root, 'etc/systemd/system/irqbalance.service'), '[Service]\n'), /irqbalance\.service is not a mask/],
     ['default target file', root => {
-      execFileSync('rm', [join(root, 'etc/systemd/system/default.target')]);
+      unlinkSync(join(root, 'etc/systemd/system/default.target'));
       writeFileSync(join(root, 'etc/systemd/system/default.target'), '[Unit]\n');
-    }, /default\.target is not a symlink/],
-    ['no multi-user target', root => execFileSync('rm', [join(root, 'usr/lib/systemd/system/multi-user.target')]), /multi-user\.target is missing/],
+    }, /default\.target is a file, not a symlink/],
+    ['no multi-user target', root => unlinkSync(join(root, 'usr/lib/systemd/system/multi-user.target')), /multi-user\.target is missing/],
   ];
   for (const [name, prepare, problem] of cases) {
     const root = fakeHost();
@@ -142,6 +151,101 @@ test('install refuses an unexpected irqbalance unit, default target file or miss
 test('uninstall refuses installed files without the recorded previous state', () => {
   const root = fakeHost();
   installBootSetup(root, { run: () => {} });
-  execFileSync('rm', [join(root, 'etc/fukulow-796/install-state.json')]);
+  unlinkSync(join(root, 'etc/fukulow-796/install-state.json'));
   assert.throws(() => uninstallBootSetup(root, { run: () => assert.fail('ran') }), /previous boot state is unknown/);
+});
+
+test('every other wrong value in a versioned file is rejected', () => {
+  const tamper = [
+    ['frequency.sh', 'profile=performance', 'profile=balanced', /frequency\.sh: profile/],
+    ['frequency.sh', 'governor=performance', 'governor=powersave', /frequency\.sh: governor/],
+    ['frequency.sh', 'boost=0', 'boost=1', /frequency\.sh: boost/],
+    ['frequency.sh', 'max_khz=2000000', 'max_khz=1700000', /frequency\.sh: max_khz/],
+    ['frequency.sh', 'powerprofilesctl set "$profile"', 'true', /frequency\.sh: must store the profile/],
+    ['affinity.sh', 'housekeeping=0,7,8,15', 'housekeeping=0,8', /affinity\.sh: housekeeping/],
+    ['housekeeping-scope.conf', '[Scope]', '[Slice]', /housekeeping-scope\.conf: needs a \[Scope\]/],
+    ['fukulow796-host.service', 'ExecStart=/usr/local/libexec/fukulow796/affinity.sh', 'ExecStart=/usr/local/bin/affinity.sh', /ExecStart must run/],
+    ['fukulow796-host.service', 'Wants=fukulow796.slice power-profiles-daemon.service', 'Wants=fukulow796.slice', /Wants must be/],
+    ['fukulow796-host.service', 'After=fukulow796.slice power-profiles-daemon.service', 'After=fukulow796.slice', /After must include power-profiles-daemon/],
+    ['fukulow796-host.service', 'WantedBy=multi-user.target', 'WantedBy=graphical.target', /WantedBy must be/],
+  ] as const;
+  for (const [file, from, to, problem] of tamper) {
+    const source = tamperedSource(file, from, to);
+    assert.ok(layoutProblems(name => readFileSync(join(source, name), 'utf8')).some(p => problem.test(p)), `${file}: ${to}`);
+  }
+});
+
+test('install and uninstall round-trip a host that had no default.target link', () => {
+  const root = fakeHost({ defaultTarget: false }), before = snapshot(root);
+  installBootSetup(root, { run: () => {} });
+  assert.equal(JSON.parse(readFileSync(join(root, 'etc/fukulow-796/install-state.json'), 'utf8')).defaultTarget, null);
+  assert.equal(readlinkSync(join(root, 'etc/systemd/system/default.target')), '/usr/lib/systemd/system/multi-user.target');
+  uninstallBootSetup(root, { run: () => {} });
+  assert.deepEqual(snapshot(root), before);
+});
+
+test('install refuses a symlinked target, a file at the wants link or an irqbalance link elsewhere, before any change', () => {
+  const cases: [string, (root: string) => void, RegExp][] = [
+    ['grub drop-in symlink', root => symlinkSync('/etc/hostname', join(root, 'etc/default/grub.d/fukulow-796.cfg')), /fukulow-796\.cfg is a link/],
+    ['wants file', root => writeFileSync(join(root, 'etc/systemd/system/multi-user.target.wants/fukulow796-host.service'), ''), /fukulow796-host\.service is a file/],
+    ['irqbalance link', root => symlinkSync('/etc/irqbalance.service', join(root, 'etc/systemd/system/irqbalance.service')), /irqbalance\.service is not a mask/],
+  ];
+  for (const [name, prepare, problem] of cases) {
+    const root = fakeHost();
+    prepare(root);
+    const before = snapshot(root);
+    assert.throws(() => installBootSetup(root, { run: () => assert.fail(name) }), problem, name);
+    assert.deepEqual(snapshot(root), before, name);
+  }
+});
+
+test('uninstall refuses a default.target replaced by a file before removing anything', () => {
+  const root = fakeHost();
+  installBootSetup(root, { run: () => {} });
+  unlinkSync(join(root, 'etc/systemd/system/default.target'));
+  writeFileSync(join(root, 'etc/systemd/system/default.target'), '[Unit]\n');
+  const before = snapshot(root);
+  assert.throws(() => uninstallBootSetup(root, { run: () => assert.fail('ran') }), /default\.target is a file/);
+  assert.deepEqual(snapshot(root), before);
+});
+
+test('a corrupted or unknown-version state file is refused', () => {
+  for (const content of ['{', '{"version":2,"defaultTarget":null,"irqbalanceMasked":false}', '{"version":1,"defaultTarget":3,"irqbalanceMasked":false}', 'null']) {
+    const root = fakeHost();
+    installBootSetup(root, { run: () => {} });
+    writeFileSync(join(root, 'etc/fukulow-796/install-state.json'), content);
+    assert.throws(() => installBootSetup(root, { run: () => {} }), /unreadable \/etc\/fukulow-796\/install-state\.json/, content);
+    assert.throws(() => uninstallBootSetup(root, { run: () => {} }), /unreadable \/etc\/fukulow-796\/install-state\.json/, content);
+  }
+});
+
+test('a failed reload stays visible: check fails and the next install reruns it', () => {
+  const root = fakeHost();
+  assert.throws(() => installBootSetup(root, { run: program => { if (program === 'update-grub') throw new Error('grub failed'); } }), /grub failed/);
+  assert.deepEqual(installBootSetup(root, { run: () => {}, dryRun: true }), [`/${reloadPending}`]);
+  const { calls, run } = recorder();
+  assert.deepEqual(installBootSetup(root, { run }), [`/${reloadPending}`]);
+  assert.deepEqual(calls, ['systemctl daemon-reload', 'update-grub']);
+  assert.deepEqual(installBootSetup(root, { run, dryRun: true }), []);
+});
+
+test('a failed uninstall reload keeps the state file, so the rerun reloads again', () => {
+  const root = fakeHost(), before = snapshot(root);
+  installBootSetup(root, { run: () => {} });
+  assert.throws(() => uninstallBootSetup(root, { run: program => { if (program === 'update-grub') throw new Error('grub failed'); } }), /grub failed/);
+  const { calls, run } = recorder();
+  assert.deepEqual(uninstallBootSetup(root, { run }), ['/etc/fukulow-796/install-state.json']);
+  assert.deepEqual(calls, ['systemctl daemon-reload', 'update-grub']);
+  assert.deepEqual(snapshot(root), before);
+});
+
+test('the CLI with a staging --root installs there without touching the live host', () => {
+  const root = fakeHost();
+  const result = spawnSync(process.execPath, [join(import.meta.dirname, 'boot-796.ts'), 'install', '--root', root], {
+    encoding: 'utf8', env: { ...process.env, PATH: '' }, timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).changed.length, hostFiles.length + 4);
+  const check = spawnSync(process.execPath, [join(import.meta.dirname, 'boot-796.ts'), 'check', '--root', root], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(check.status, 0, check.stderr);
 });
