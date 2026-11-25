@@ -1,25 +1,34 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import test from 'node:test';
-import { turbostatArgv } from './frequency-spot-check.ts';
-
-test('turbostat argv has no whitespace inside an element, so sudo-rs can match the scoped sudoers entry', () => {
-  for (const arg of turbostatArgv) assert.doesNotMatch(arg, /\s/, arg);
-  assert.deepEqual(turbostatArgv.slice(0, 9), ['/usr/bin/systemd-run', '--scope', '--quiet', '--collect', '--slice=-.slice',
-    '--unit=fukulow796turbostat.scope', '--property=AllowedCPUs=0-15', '--property=RuntimeMaxSec=150s', '--']);
-  assert.deepEqual(turbostatArgv.slice(-2), ['--', '/usr/bin/cat']);
-  const readme = readFileSync(new URL('../../harness-core/README.md', import.meta.url), 'utf8');
-  assert.equal(/^MEASUREMENT_USER ALL=\(root\) NOPASSWD: (.+)$/m.exec(readme)?.[1].replaceAll('\\,', ','), turbostatArgv.join(' '));
-});
-
-// #979: drive the real control flow with an unprivileged Node child in place of `sudo -n turbostat ... -- cat`.
-// Production argv, sudoers and timing are unchanged; only the spawned command is replaced.
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { withSpotCheck, type SpotCheck } from './frequency-spot-check.ts';
+import { controlIdleMs } from './frequency-evidence.ts';
+import { spotSampleTimeoutMs, turbostatArgv, withSpotCheck, type SpotCheck } from './frequency-spot-check.ts';
+import { frequencyWorkSeconds, helperResponseMs, pgbenchTimeoutGraceSeconds } from './frequency-timing.ts';
 
+test('turbostat argv has no whitespace inside an element, so sudo-rs can match the scoped sudoers entry', () => {
+  for (const arg of turbostatArgv) assert.doesNotMatch(arg, /\s/, arg);
+  assert.deepEqual(turbostatArgv.slice(0, 7), ['/usr/bin/systemd-run', '--scope', '--quiet', '--collect', '--slice=-.slice',
+    '--unit=fukulow796turbostat.scope', '--property=AllowedCPUs=0-15']);
+  assert.deepEqual(turbostatArgv.slice(-2), ['--', '/usr/bin/cat']);
+  const readme = readFileSync(new URL('../../harness-core/README.md', import.meta.url), 'utf8');
+  const sudoers = /^MEASUREMENT_USER ALL=\(root\) NOPASSWD: (.+)$/m.exec(readme)?.[1];
+  assert.equal(sudoers?.replaceAll('\\,', ',').replaceAll('\\=', '='), turbostatArgv.join(' '));
+  assert.equal(sudoers, turbostatArgv.map(arg => arg.replace(/[,:=\\]/g, '\\$&')).join(' '));
+});
+
+test('the observer scope outlasts the worst-case bounded Control span', () => {
+  const runtime = /^--property=RuntimeMaxSec=(\d+)s$/.exec(turbostatArgv[7]);
+  assert.ok(runtime);
+  const pgbenchMs = (frequencyWorkSeconds + pgbenchTimeoutGraceSeconds) * 1000;
+  // Allow both observer snapshots and the helper's ready, open, idle, close and exit steps.
+  const worstCaseMs = 2 * spotSampleTimeoutMs + pgbenchMs + controlIdleMs + 5 * helperResponseMs;
+  assert.ok(Number(runtime[1]) * 1000 > worstCaseMs, `observer must cover ${worstCaseMs} ms`);
+});
+
+// #979: drive the real control flow with an unprivileged Node child in place of `sudo -n turbostat ... -- cat`.
 const limit = { timeout: 15_000 };
 const node = (script: string): [string, ...string[]] => [process.execPath, '-e', script];
 function scratch(t: { after: (fn: () => void) => void }) {

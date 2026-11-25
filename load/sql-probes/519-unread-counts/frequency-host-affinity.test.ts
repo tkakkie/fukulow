@@ -16,6 +16,13 @@ function fixture() {
   const modes: Record<string, number> = {};
   const files: Record<string, string> = {
     '/proc/sys/kernel/random/boot_id': policy.bootId,
+    [`${root}/cgroup.threads`]: '2\n48\n65\n',
+    '/proc/2/status': 'Cpus_allowed_list:\t0,7,8,15\n',
+    '/proc/2/stat': '2 (kthreadd) S 0 0 0 0 -1 2129920 0',
+    '/proc/48/status': 'Cpus_allowed_list:\t5\n',
+    '/proc/48/stat': '48 (kworker/5:0) I 2 0 0 0 -1 69238784 0',
+    '/proc/65/status': 'Cpus_allowed_list:\t1-6,9-14\n',
+    '/proc/65/stat': '65 (bound ) thread) I 2 0 0 0 -1 69238784 0',
     '/sys/devices/system/cpu/online': '0-15\n',
     '/proc/interrupts': '            CPU0 CPU1\n  10: 12 0 device\n  11:  0 5 managed\n  12: 0 0 idle\nLOC: 5 2 local timers\n',
     [workqueue]: '00000000,00008181\n',
@@ -78,6 +85,18 @@ test('readback records daemon threads, slice masks, workqueues and movable and r
   assert.match(hostAffinityProblems(record, 'other-session', policy.bootId).join(), /session and boot/);
 });
 
+test('root cgroup readback records broad masks and rejects movable tasks on measured CPUs', () => {
+  const f = fixture();
+  assert.deepEqual(f.readback().rootTasks, {
+    '2': { name: 'kthreadd', cpus: sets796.housekeeping, movable: true },
+    '65': { name: 'bound ) thread', cpus: [...sets796.server, ...sets796.client].sort((a, b) => a - b), movable: false },
+  });
+  f.files['/proc/2/status'] = 'Cpus_allowed_list:\t0-15\n';
+  assert.match(problems(f.readback()).join(), /movable root task 2 \(kthreadd\) affinity/);
+  f.files['/proc/2/status'] = 'Cpus_allowed_list:\t6\n';
+  assert.match(problems(f.readback()).join(), /movable root task 2 \(kthreadd\) affinity/);
+});
+
 test('preflight fails closed on changed or unreadable host affinity', () => {
   const cases: [RegExp, (f: ReturnType<typeof fixture>) => void][] = [
     [/system\.slice effective cpuset/, ({ files, root }) => { files[`${root}/system.slice/cpuset.cpus.effective`] = '0-15'; }],
@@ -90,8 +109,13 @@ test('preflight fails closed on changed or unreadable host affinity', () => {
       files[`${root}/unconfined.slice/cgroup.events`] = 'populated 1';
     }],
     [/docker\.service cgroup or thread affinity/, ({ files }) => { files['/proc/100/task/101/status'] = 'Cpus_allowed_list:\t2'; }],
+    [/docker\.service cgroup or thread affinity/, ({ files, root }) => {
+      files[`${root}/system.slice/docker.service/cpuset.cpus.effective`] = '0-15';
+    }],
     [/containerd\.service cgroup or thread affinity/, ({ files }) => { files['/proc/110/cgroup'] = '0::/user.slice'; }],
     [/tailscaled\.service.*unreadable/, ({ files }) => { delete files['/proc/120/task/121/status']; }],
+    [/root cgroup tasks:.*unreadable root task 2 stat/, ({ files }) => { files['/proc/2/stat'] = '2 (kthreadd) S'; }],
+    [/missing root cgroup task affinities/, ({ files, root }) => { delete files[`${root}/cgroup.threads`]; }],
     [/unbound workqueue cpumask/, ({ files, workqueue }) => { files[workqueue] = 'ffff'; }],
     [/invalid CPU mask/, ({ files, workqueue }) => { files[workqueue] = 'not hex'; }],
     [/default IRQ affinity/, ({ files, irq }) => { files[`${irq}/default_smp_affinity`] = 'ffff'; }],

@@ -4,10 +4,11 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { unsigned } from './frequency-ratios.ts';
 
 const ready = 'FUKULOW_TURBOSTAT_READY';
+export const spotSampleTimeoutMs = 5000;
 // Turbostat migrates across all CPUs for its snapshots. Give only this bounded observer a root-slice scope.
 // sudo-rs matches arguments word by word, so every argument in the scoped sudoers entry has no whitespace.
 export const turbostatArgv = ['/usr/bin/systemd-run', '--scope', '--quiet', '--collect', '--slice=-.slice',
-  '--unit=fukulow796turbostat.scope', '--property=AllowedCPUs=0-15', '--property=RuntimeMaxSec=150s',
+  '--unit=fukulow796turbostat.scope', '--property=AllowedCPUs=0-15', '--property=RuntimeMaxSec=180s',
   '--', '/usr/bin/turbostat', '--quiet', '--show', 'CPU,TSC_MHz',
   '--add', 'msr0xe8,u64,cpu,delta,APERF', '--add', 'msr0xe7,u64,cpu,delta,MPERF', '--', '/usr/bin/cat'];
 // Command mode takes its opening sample before spawning cat, the stdin barrier. The ready line written to
@@ -37,7 +38,7 @@ export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSign
   const bounded = async <R>(step: Promise<R>, phase: string) => {
     const timer = new AbortController();
     try {
-      return await Promise.race([step, wait(5000, undefined, { signal: timer.signal })
+      return await Promise.race([step, wait(spotSampleTimeoutMs, undefined, { signal: timer.signal })
         .then(() => { throw new Error(`turbostat ${phase} sample timed out`); })]);
     } finally { timer.abort(); }
   };

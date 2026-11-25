@@ -5,7 +5,7 @@ import type { SampleLine } from '../../harness-core/thermal.ts';
 import type { Session } from '../../launcher/launcher.ts';
 import { judgeRun as judgeV3, replayLegacyRun as judgeRun, type RunInput } from './stability-judge.ts';
 
-import { block, evidence, floors, hostAffinity, sets796 } from './frequency-fixture.ts';
+import { block, containerCpusets, evidence, floors, hostAffinity, sets796 } from './frequency-fixture.ts';
 import { cpus796 } from './frequency-evidence.ts';
 import { judgeChain, limits, sessionProblems } from './stability-chain.ts';
 
@@ -562,6 +562,8 @@ test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency ha
     sleepUnits: sleepUnits.map(unit => ({ unit, enabled: 'masked', active: 'inactive' })), snapHold: 'absent' };
   r.frequency = { ...evidence, startSession: sid, endSession: sid };
   r.hostAffinity = hostAffinity(sid);
+  r.hostAffinityAfter = hostAffinity(sid);
+  r.containerCpusets = containerCpusets(sid);
   r.launchCheck = { ...r.launchCheck, frequencyPolicy: evidence.before };
   for (const s of r.sends) {
     s.counters = block(s.order, { launchSession: sid }).counters;
@@ -575,8 +577,23 @@ test('v3 keeps F6 proc-stat and thermal cadence vetoes while legacy frequency ha
   const assess = (run: RunInput) => judgeV3(run, { id: sid, thermalSampleSeconds: 5, go }, floors, 'rehearsal2', 'control-digest');
   assert.equal(judgeRun(r, { id: sid, thermalSampleSeconds: 5 }).valid, false);
   assert.deepEqual(assess(r).invalid, []);
-  assert.match(assess({ ...r, hostAffinity: undefined }).invalid.join(), /missing housekeeping preflight/);
-  assert.match(assess({ ...r, hostAffinity: { ...r.hostAffinity, workqueue: cpus796 } }).invalid.join(), /workqueue cpumask/);
+  await t.test('v3 requires both same-session host readbacks and both container cpusets', () => {
+    assert.match(assess({ ...r, hostAffinity: undefined }).invalid.join(), /start: missing housekeeping readback/);
+    assert.match(assess({ ...r, hostAffinity: { ...hostAffinity(sid), workqueue: cpus796 } }).invalid.join(), /start:.*workqueue cpumask/);
+    assert.match(assess({ ...r, hostAffinityAfter: undefined }).invalid.join(), /finish: missing housekeeping readback/);
+    assert.match(assess({ ...r, hostAffinityAfter: hostAffinity('earlier-session') }).invalid.join(), /finish: missing housekeeping readback/);
+    assert.match(assess({ ...r, hostAffinityAfter: { ...hostAffinity(sid), workqueue: cpus796 } }).invalid.join(), /finish:.*workqueue cpumask/);
+    assert.match(assess({ ...r, containerCpusets: undefined }).invalid.join(), /missing frequency-container-cpusets\.json/);
+    assert.match(assess({ ...r, containerCpusets: containerCpusets('earlier-session') }).invalid.join(), /missing frequency-container-cpusets\.json/);
+    const wrong = containerCpusets(sid);
+    wrong.client.effective = sets796.server;
+    assert.match(assess({ ...r, containerCpusets: wrong }).invalid.join(), /client container effective cpuset/);
+    wrong.client.effective = [...sets796.client];
+    wrong.client.cgroup = wrong.server.cgroup;
+    assert.match(assess({ ...r, containerCpusets: wrong }).invalid.join(), /server and client share a Docker scope/);
+    wrong.client.cgroup = wrong.server.cgroup.replace('fukulow796.slice', 'fukulow796xslice');
+    assert.match(assess({ ...r, containerCpusets: wrong }).invalid.join(), /client container is outside fukulow796.slice/);
+  });
   assert.deepEqual(limits, { tpsSpread: 0.05, walSpread: 0.02, throttle: 0.05 });
   const changed = structuredClone(r);
   const tick = changed.samples.find(s => s.at === new Date(t0 + 90_000).toISOString());

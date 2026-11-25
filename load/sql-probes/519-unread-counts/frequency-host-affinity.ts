@@ -47,6 +47,31 @@ function readDaemon(io: typeof host, unit: string) {
   return { pid, cgroup, cpus, threads };
 }
 
+function readRootTasks(io: typeof host) {
+  const tids = io.read(`${cgroupRoot}/cgroup.threads`).trim().split(/\s+/);
+  if (!tids.every(tid => /^[1-9]\d*$/.test(tid))) throw new Error('unreadable root cgroup thread list');
+  const tasks: Record<string, { name: string; cpus: number[]; movable: boolean }> = {};
+  for (const tid of new Set(tids)) {
+    try {
+      const cpus = allowedCpus(io.read(`/proc/${tid}/status`));
+      const stat = io.read(`/proc/${tid}/stat`);
+      const end = stat.lastIndexOf(')');
+      const flags = stat.slice(end + 2).split(/\s+/)[6]; // Field 9 follows the parenthesized comm.
+      if (!stat.startsWith(`${tid} (`) || end < 0 || !/^\d+$/.test(flags ?? '')) {
+        throw new Error(`unreadable root task ${tid} stat`);
+      }
+      const movable = (Number(flags) & 0x04000000) === 0; // Linux PF_NO_SETAFFINITY
+      if (cpus.length > 1 || (movable && !onHousekeeping(cpus))) {
+        tasks[tid] = { name: stat.slice(stat.indexOf('(') + 1, end), cpus, movable };
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ESRCH') throw error;
+    }
+  }
+  return tasks;
+}
+
 function readIrqs(io: typeof host) {
   const active = [...io.read('/proc/interrupts').matchAll(/^\s*(\d+):/gm)].map(match => match[1]);
   const rows = Object.fromEntries(io.directories(irqRoot).filter(id => /^\d+$/.test(id)).map(id => {
@@ -75,6 +100,7 @@ export function readHostAffinity(launchSession: string, io = host) {
       list(io.read(`${cpuRoot}/cpu${cpu}/topology/thread_siblings_list`)))),
     docker: capture('Docker cgroup settings', () => io.command('docker', ['info', '--format', '{{.CgroupDriver}} {{.CgroupVersion}}'])),
     groups: capture('top-level cgroups', () => readGroups(io)),
+    rootTasks: capture('root cgroup tasks', () => readRootTasks(io)),
     daemons: Object.fromEntries(services.map(unit => [unit, capture(unit, () => readDaemon(io, unit))])),
     irqbalance: capture('irqbalance', () => io.command('systemctl', ['show', '--property=ActiveState', '--value', 'irqbalance.service'])),
     workqueue: capture('workqueue cpumask', () => maskList(io.read('/sys/devices/virtual/workqueue/cpumask'))),
@@ -91,7 +117,7 @@ const isCpuList = (cpus: number[]) => Array.isArray(cpus) && cpus.every(cpu => c
 
 export function hostAffinityProblems(record: HostAffinity | undefined | null, session: string | null, bootId: string | undefined) {
   if (!record || !session || record.launchSession !== session || !bootId || record.bootId !== bootId) {
-    return ['missing housekeeping preflight for this session and boot'];
+    return ['missing housekeeping readback for this session and boot'];
   }
   const problems = Array.isArray(record.unreadable) ? [...record.unreadable] : ['missing housekeeping readback status'];
   if (!exact(record.online, cpus796) || record.siblings?.length !== cpus796.length ||
@@ -108,6 +134,16 @@ export function hostAffinityProblems(record: HostAffinity | undefined | null, se
   for (const [name, group] of Object.entries(record.groups ?? {})) {
     if (name !== measurementSlice && group.populated && (!group.cpus.length || !onHousekeeping(group.cpus))) {
       problems.push(`${name} has processes outside housekeeping`);
+    }
+  }
+  if (!record.rootTasks || typeof record.rootTasks !== 'object' || Array.isArray(record.rootTasks)) {
+    problems.push('missing root cgroup task affinities');
+  }
+  for (const [tid, task] of Object.entries(record.rootTasks ?? {})) {
+    if (typeof task?.movable !== 'boolean' || !isCpuList(task.cpus) || !task.cpus.length) {
+      problems.push(`unreadable root task ${tid} affinity evidence`);
+    } else if (task.movable && !onHousekeeping(task.cpus)) {
+      problems.push(`movable root task ${tid} (${task.name}) affinity differs from housekeeping`);
     }
   }
   for (const unit of services) {
@@ -130,4 +166,12 @@ export function hostAffinityProblems(record: HostAffinity | undefined | null, se
     }
   }
   return problems;
+}
+
+export function runHostAffinityProblems(before: HostAffinity | null | undefined, after: HostAffinity | null | undefined,
+  session: string | null, bootId: string | undefined) {
+  return [
+    ...hostAffinityProblems(before, session, bootId).map(problem => `start: ${problem}`),
+    ...hostAffinityProblems(after, session, bootId).map(problem => `finish: ${problem}`),
+  ];
 }

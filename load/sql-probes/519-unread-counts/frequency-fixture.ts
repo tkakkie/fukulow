@@ -3,6 +3,7 @@ import type { PolicySnapshot } from '../../harness-core/cpu-policy.ts';
 import type { Floors } from './frequency-judge.ts';
 import { measuredCpus, measurementSlice } from '../../harness-core/frequency-layout.ts';
 import type { HostAffinity } from './frequency-host-affinity.ts';
+import type { ContainerCpusets } from './frequency-containers.ts';
 
 export const session = 'fixture-session';
 export { sets796 };
@@ -22,12 +23,21 @@ export const evidence: FrequencyEvidence = {
 };
 export const primaryVoters = measuredCpus.filter(cpu => cpu < 8);
 
+export function containerCpusets(launchSession = session): ContainerCpusets {
+  return {
+    launchSession,
+    server: { cgroup: `/${measurementSlice}/docker-${'a'.repeat(64)}.scope`, effective: [...sets796.server] },
+    client: { cgroup: `/${measurementSlice}/docker-${'b'.repeat(64)}.scope`, effective: [...sets796.client] },
+  };
+}
+
 export function hostAffinity(launchSession = session): HostAffinity {
   const cpus = sets796.housekeeping;
   const background = { cpus, populated: true };
   const daemon = (unit: string) => ({ pid: '100', cgroup: `/system.slice/${unit}`, cpus, threads: { '100': cpus } });
   return {
     launchSession, unreadable: [], bootId: identity.bootId, online: cpus796,
+    rootTasks: {},
     siblings: cpus796.map(cpu => [cpu % 8, cpu % 8 + 8]), docker: 'systemd 2',
     groups: { 'init.scope': background, 'system.slice': background, 'user.slice': background,
       [measurementSlice]: { cpus: measuredCpus, populated: false } },

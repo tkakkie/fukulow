@@ -6,11 +6,11 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { controlFloors, frozenFloors, permissionCheck } from './frequency-approval.ts';
-import { block, evidence, floors, hostAffinity, session } from './frequency-fixture.ts';
+import { block, containerCpusets, evidence, floors, hostAffinity, session } from './frequency-fixture.ts';
 
 const reviewedControl = {
   stage: 'control', valid: true, frequency: { floorProposal: floors }, session: { id: session },
-  evidence: { hostAffinity: hostAffinity(), calibration: evidence },
+  evidence: { hostAffinity: hostAffinity(), hostAffinityAfter: hostAffinity(), containerCpusets: containerCpusets(), calibration: evidence },
 };
 
 function artifacts(t: TestContext) {
@@ -52,7 +52,9 @@ test('Rehearsal 2 requires a reviewed control report with matching digest and va
   assert.deepEqual(controlFloors(write(r)).floors, floors);
   assert.throws(() => controlFloors(write(r, { sha256: 'f'.repeat(64) })), /hash differs/);
   assert.throws(() => controlFloors(write({ ...r, valid: false })), /did not validate/);
-  assert.throws(() => controlFloors(write({ ...r, evidence: undefined })), /no valid #796 housekeeping preflight/);
+  assert.throws(() => controlFloors(write({ ...r, evidence: undefined })), /needs valid #796 housekeeping readbacks/);
+  assert.throws(() => controlFloors(write({ ...r, evidence: { ...r.evidence, hostAffinityAfter: undefined } })), /needs valid #796 housekeeping readbacks/);
+  assert.throws(() => controlFloors(write({ ...r, evidence: { ...r.evidence, containerCpusets: undefined } })), /no valid #796 container cpuset readback/);
 });
 
 test('formal binds frozen floors to the valid reviewed control report', t => {

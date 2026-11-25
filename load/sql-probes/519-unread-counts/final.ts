@@ -12,9 +12,11 @@ import { bindLiterals, channels, checksumSql, countsCheckOutcome, eventsSince, e
   quantile, sendBlocks, stopRule, timings, waitForCheckpointWindow } from './probe.ts';
 import { frequencyRequest, frequencyRun } from './frequency-run.ts';
 import { affinityProblems, readAffinity, type Affinity } from './frequency-affinity.ts';
-import { containerCpuArgs, containerCpuReadback, probeSocket } from './frequency-containers.ts';
+import { containerCpuArgs, frequencyClientArgs, frequencyContainerReadbacks, frequencyServerArgs, probeImage as image,
+  serverImageArgs } from './frequency-containers.ts';
 import { hostAffinityProblems, readHostAffinity } from './frequency-host-affinity.ts';
 import type { CounterBlock, ReferenceWindow } from './frequency-evidence.ts';
+import { frequencyWorkSeconds, pgbenchTimeoutGraceSeconds } from './frequency-timing.ts';
 import { makeTraversable, stageSql } from './stage-sql.ts';
 
 // #519 §10 step 1: focused SQL probe of the final A3 design (merged triggers and list SQL)
@@ -51,11 +53,10 @@ const a3Migration = '202611221100_unread_counts.sql';
 // follow-up, taken from its own pin. Unrelated migrations merged in between are not applied.
 const updatePin = 'c672b0a4';
 const a3Update = '202611231100_unread_counts_update_first.sql';
-const image = 'postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42';
 const cuts = smoke ? [75] : [75, 150, 575, 2150];
 const samples = smoke ? 5 : 30;
 const warmSeconds = smoke ? 5 : 60;
-const measuredSeconds = smoke ? 5 : 120;
+const measuredSeconds = smoke ? 5 : frequencyWorkSeconds;
 const benchOrder: FinalArm[][] = smoke ? [['current', 'final']] : [['current', 'final'], ['final', 'current'], ['current', 'final']];
 
 const root = realpathSync(fileURLToPath(new URL('../../../', import.meta.url)));
@@ -239,7 +240,9 @@ function sendBlock(db: string, label: string, order: number, reference?: Referen
             return JSON.parse(stdout);
           };
           const captured = await frequency.measure(order, reference, prepare, () => {
-            const workload = exec('docker', argv, { signal, timeout: (measuredSeconds + 10) * 1000, maxBuffer });
+            const workload = exec('docker', argv, {
+              signal, timeout: (measuredSeconds + pgbenchTimeoutGraceSeconds) * 1000, killSignal: 'SIGKILL', maxBuffer,
+            });
             if (request?.stage === 'rehearsal2') {
               observed = readAffinity(container, clientContainer, prefix, db, affinitySignal).catch(error => new Error(String(error)));
             }
@@ -326,13 +329,15 @@ async function freshSends() {
 
 const started = new Date().toISOString();
 let failed = false;
+function checkHostAffinity(stage: 'preflight' | 'finish') {
+  if (!request) return;
+  const readback = readHostAffinity(request.session);
+  save(stage === 'finish' ? 'frequency-host-affinity-after.json' : 'frequency-host-affinity.json', readback);
+  const problems = hostAffinityProblems(readback, request.session, request.launchPolicy.bootId);
+  if (problems.length) throw new Error(`STOP: #796 housekeeping ${stage}: ${problems.join('; ')}`);
+}
 try {
-  if (request) {
-    const readback = readHostAffinity(request.session);
-    save('frequency-host-affinity.json', readback);
-    const problems = hostAffinityProblems(readback, request.session, request.launchPolicy.bootId);
-    if (problems.length) throw new Error(`STOP: #796 housekeeping preflight: ${problems.join('; ')}`);
-  }
+  checkHostAffinity('preflight');
   const preflight = idleHost();
   const recordBefore = hostRecord(out);
   save('host-record-before.json', recordBefore);
@@ -346,10 +351,8 @@ try {
     await frequency.start();
   }
   // With CPU sets, taskset wraps the image's entrypoint, so the postmaster and every backend inherit the server set.
-  const serverStart = cpuSets ? ['--entrypoint', 'taskset', image, '-c', cpuList(cpuSets.server), 'docker-entrypoint.sh', 'postgres'] : [image];
   run('docker', ['run', '-d', '--rm', '--name', container, '--label', workloadLabel, '--network', 'none', '-e', 'POSTGRES_PASSWORD=probe',
-    '-v', `${work}:/work:ro`, ...(request ? containerCpuArgs('server') : []), ...serverStart,
-    ...(request ? ['-c', `unix_socket_directories=/var/run/postgresql,${probeSocket}`] : []),
+    '-v', `${work}:/work:ro`, ...(request ? frequencyServerArgs() : serverImageArgs(cpuSets?.server)),
     '-c', 'shared_buffers=512MB', '-c', 'jit=off',
     // No automatic checkpoint inside a send block: each block starts at its forced CHECKPOINT and
     // full-page images settle during warm-up, as the plan requires. A crossing block fails the run.
@@ -359,12 +362,10 @@ try {
     spawnSync('sleep', ['1']);
   }
   if (request) {
-    run('docker', ['run', '-d', '--rm', '--name', clientContainer, '--label', workloadLabel, '--network', `container:${container}`,
-      '-e', `PGHOST=${probeSocket}`, '-v', `${work}:/work:ro`, ...containerCpuArgs('client'), '--entrypoint', 'sleep', image, 'infinity']);
-    const inspect = (name: string) => run('docker', ['inspect', '--format', '{{.Id}} {{.State.Pid}}', name]);
-    save('frequency-container-cpusets.json', {
-      launchSession, server: containerCpuReadback(inspect(container), 'server'), client: containerCpuReadback(inspect(clientContainer), 'client'),
-    });
+    run('docker', ['run', '-d', '--rm', '--name', clientContainer, '--label', workloadLabel,
+      ...frequencyClientArgs(container, ['-v', `${work}:/work:ro`])]);
+    save('frequency-container-cpusets.json',
+      frequencyContainerReadbacks(request.session, container, clientContainer, args => run('docker', args)));
     frequency?.observeHousekeeping();
   }
   // Max frequencies per set make a swapped or mixed split visible in the record (Zen 5 vs Zen 5c).
@@ -459,9 +460,10 @@ try {
 } finally {
   if (request) spawnSync('docker', ['rm', '-f', clientContainer]);
   spawnSync('docker', ['rm', '-f', container]);
-  rmSync(work, { recursive: true, force: true });
+  try { rmSync(work, { recursive: true, force: true }); } catch (e) { failed = true; console.error('work directory cleanup:', e); }
   try { frequency?.finish(); } catch (e) { failed = true; console.error('frequency completion:', e); }
   // Each write is attempted on its own, so a failed record or checks write cannot skip status.json.
+  try { checkHostAffinity('finish'); } catch (e) { failed = true; console.error(e); }
   try { save('host-record-after.json', hostRecord(out)); } catch (e) { if (request) failed = true; console.error('host record after the run:', e); }
   try { save('checks.json', checks); } catch (e) { failed = true; console.error('checks.json:', e); }
   save('status.json', { complete: !failed, launchSession, finished: new Date().toISOString() });

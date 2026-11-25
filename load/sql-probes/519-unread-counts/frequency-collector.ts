@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { controlIdleMs, cpus796, type Calibration, type CounterWindow, type Sweep } from './frequency-evidence.ts';
 import { readCpuPolicy } from '../../harness-core/cpu-policy.ts';
 import type { housekeepingSampler } from './frequency-housekeeping.ts';
+import { helperResponseMs } from './frequency-timing.ts';
 
 const exec = promisify(execFile);
 export async function calibrate(helper: string, signal: AbortSignal): Promise<Calibration> {
@@ -21,9 +22,9 @@ export async function waitUntil(deadline: bigint, signal: AbortSignal) {
 }
 
 export async function timedCounters<T>(helper: string, session: string, order: number, control: boolean,
-  signal: AbortSignal, pgbench: () => Promise<T>, sampler?: ReturnType<typeof housekeepingSampler>) {
+  signal: AbortSignal, pgbench: () => Promise<T>, sampler?: ReturnType<typeof housekeepingSampler>, readPolicy = readCpuPolicy) {
   signal.throwIfAborted();
-  const policyBefore = readCpuPolicy(cpus796);
+  const policyBefore = readPolicy(cpus796);
   const child = spawn(helper, [control ? 'control' : 'block', session, String(order)], { stdio: ['pipe', 'pipe', 'inherit'], signal });
   child.stdin.on('error', () => {}); // The reader and exit status report helper failure.
   const exited = new Promise<boolean>(resolve => {
@@ -32,14 +33,17 @@ export async function timedCounters<T>(helper: string, session: string, order: n
   });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const rows = lines[Symbol.asyncIterator]();
-  async function receive() {
+  async function bounded<R>(result: Promise<R>, activity: string) {
     const timer = new AbortController();
     try {
-      const row = await Promise.race([rows.next(),
-        wait(2500, undefined, { signal: timer.signal }).then(() => { throw new Error('F6 perf helper response timed out'); })]);
-      if (row.done) throw new Error('F6 perf helper exited before sending evidence');
-      return JSON.parse(row.value);
+      return await Promise.race([result,
+        wait(helperResponseMs, undefined, { signal: timer.signal }).then(() => { throw new Error(`F6 perf helper ${activity} timed out`); })]);
     } finally { timer.abort(); }
+  }
+  async function receive() {
+    const row = await bounded(rows.next(), 'response');
+    if (row.done) throw new Error('F6 perf helper exited before sending evidence');
+    return JSON.parse(row.value);
   }
   async function sample(command: Sweep['phase']): Promise<Sweep> {
     child.stdin.write(command + '\n');
@@ -57,8 +61,8 @@ export async function timedCounters<T>(helper: string, session: string, order: n
     if (idle) await waitUntil(BigInt(idle.reads.at(-1)!.monoNs) + BigInt(controlIdleMs) * 1_000_000n, signal);
     const close = await sample('close');
     const closeSample = sampler?.sample();
-    if (!await exited) throw new Error('F6 perf helper failed');
-    const policyAfter = readCpuPolicy(cpus796);
+    if (!await bounded(exited, 'exit')) throw new Error('F6 perf helper failed');
+    const policyAfter = readPolicy(cpus796);
     const housekeeping = sampler && openSample && closeSample ? {
       workload: sampler.workload, ticksPerSecond: sampler.ticksPerSecond, open: openSample, idle: idleSample, close: closeSample,
     } : undefined;

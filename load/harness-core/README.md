@@ -63,9 +63,9 @@ A STOP or a failed job ends the queue. Nothing reruns: a `setup-failure` rerun u
 
 Build on x86-64 Linux with `cargo build --release --locked --manifest-path load/harness-core/perf-helper/Cargo.toml`. For an authorized installation, install the resulting `fukulow-perf-helper` as root-owned and executable only by root and the measurement user's group, under a root-owned directory. Apply only `sudo setcap cap_perfmon=ep <installed-binary>` and verify with `getcap`. Keep `perf_event_paranoid=4`. The launcher and pgbench run without that capability. After the separate permission-check go, run the installed binary with `--check` as the launcher user. It applies F1 to a one-second sample on each CPU. Retain its output and exit status. STOP on a nonzero exit.
 
-Reserve both SMT siblings of core 0 (boot CPU and observed background activity) and core 7 (observed GPU and NVMe IRQs). Each measured set keeps three whole cores and its original even/odd placement. The trade-off is one fewer core per workload in exchange for equal CPU counts, no SMT sharing between sets, and room for background work. Wi-Fi stays up and its IRQ moves when the kernel permits it.
+Reserve both SMT siblings of core 0 (boot CPU and observed background activity) and core 7 (observed GPU and NVMe IRQs). Each workload gives up one core to make room for background work while keeping equal sets, whole cores and the original even/odd placement. CPU 6 stays measured to check whether moving background work resolves the first-reference STOP on that CPU. Wi-Fi stays up and its IRQ moves when the kernel permits it.
 
-Before the go, the maintainer applies the following on the idle Ubuntu host with the graphical session stopped. Use rootful Docker with the systemd driver on cgroup v2. These settings last for the current boot. After the series and any pending frequency restoration, `sudo systemctl reboot` rolls them back. [Ubuntu cpuset setup](https://ubuntu.com/real-time/docs/how-to/isolate-workload-cpusets/) · [Docker cgroup parent](https://docs.docker.com/reference/cli/dockerd/#default-cgroup-parent)
+Before the go, the maintainer applies the following on the idle Ubuntu host with the graphical session stopped. Use rootful Docker with the systemd driver on cgroup v2. This setup is #796-only. After any pending frequency restoration, run `sudo systemctl reboot` before any other series. [Ubuntu cpuset setup](https://ubuntu.com/real-time/docs/how-to/isolate-workload-cpusets/) · [Docker cgroup parent](https://docs.docker.com/reference/cli/dockerd/#default-cgroup-parent)
 
 ```bash
 (
@@ -76,16 +76,33 @@ Before the go, the maintainer applies the following on the idle Ubuntu host with
   printf '[Slice]\nAllowedCPUs=1-6,9-14\n' | sudo tee /run/systemd/system/fukulow796.slice
   sudo systemctl daemon-reload
   sudo systemctl start fukulow796.slice
+  if systemctl is-active --quiet irqbalance.service; then
+    sudo systemctl stop irqbalance.service
+  fi
   sudo systemctl mask --runtime irqbalance.service
   printf '8181\n' | sudo tee /sys/devices/virtual/workqueue/cpumask /proc/irq/default_smp_affinity
   sudo bash -euc 'for path in /proc/irq/[0-9]*/smp_affinity_list; do
-    mode=$(stat -c %a "$path")
-    if (( (8#$mode & 0200) != 0 )); then printf "0,7,8,15\n" > "$path"; fi
+    if ! mode=$(stat -c %a "$path"); then
+      printf "IRQ affinity mode read failed: %s\n" "$path" >&2
+      continue
+    fi
+    if (( (8#$mode & 0200) != 0 )); then
+      printf "0,7,8,15\n" > "$path" || printf "IRQ affinity write failed: %s\n" "$path" >&2
+    fi
+  done
+  children=$(cat /proc/2/task/2/children)
+  for tid in 2 $children; do
+    if ! result=$(LC_ALL=C taskset -pc 0,7,8,15 "$tid" 2>&1); then
+      case "$result" in
+        *": Invalid argument") : ;;
+        *) printf "%s\n" "$result" >&2; test ! -d "/proc/$tid" ;;
+      esac
+    fi
   done'
 )
 ```
 
-Before applying, stop irqbalance with `sudo systemctl stop irqbalance.service` if it is active. Stop setup on any command error. Per-CPU kworkers, local timers, work-triggered IPIs and kernel-managed IRQs can still run on measured CPUs. The preflight records read-only IRQ masks, and requires the configured and effective affinities of movable IRQs to stay on housekeeping. It also checks the daemon threads, slice cpusets, workqueue mask and SMT topology before calibration. The run retains the readback in `frequency-host-affinity.json`. [Linux IRQ interface](https://www.kernel.org/doc/html/latest/core-api/irq/irq-affinity.html) · [Managed IRQs](https://www.kernel.org/doc/html/latest/core-api/irq/managed_irq.html)
+Investigate each failed IRQ write. If a writable IRQ's configured or effective mask fails the host check, correct its routing or reboot and reapply the setup before proceeding. Per-CPU kworkers, local timers, work-triggered IPIs, kernel-managed IRQs and threaded NAPI can still run on measured CPUs. The report requires both housekeeping readbacks (`frequency-host-affinity.json` before calibration and `frequency-host-affinity-after.json` after container cleanup) and `frequency-container-cpusets.json`. [Linux IRQ interface](https://www.kernel.org/doc/html/latest/core-api/irq/irq-affinity.html) · [Managed IRQs](https://www.kernel.org/doc/html/latest/core-api/irq/managed_irq.html)
 
 Use `load/launch.ts --queue FILE` with a new quoted #796 go for each diagnostic stage. Use a single job for each diagnostic, with `thermalSampleSeconds: 5`, `cooldown: {maxTctlC: 50, maxWaitSeconds: 1200}`, `requireHost: {boost: "0", policyBoost: "0", platformProfile: "performance"}`, the L3 `airflow` confirmation and workload label `io.fukulow.probe=519-final`. Run `node load/sql-probes/519-unread-counts/final.ts --diagnostic --sends-only --cpu-sets 'server=2,4,6,10,12,14;client=1,3,5,9,11,13;housekeeping=0,7,8,15' --frequency-v3 STAGE --perf-helper BINARY --out NEW_DIRECTORY`. Keep the #519 image and disk preflight. The two containers use separate cpusets under `fukulow796.slice` and share a private network namespace for an abstract Unix socket. Produce a fresh report via `node load/sql-probes/519-unread-counts/stability.ts --stage STAGE --queue FILE --out NEW_REPORT`.
 
@@ -95,11 +112,13 @@ Use `load/launch.ts --queue FILE` with a new quoted #796 go for each diagnostic 
 
 Freeze the following rules before running. For either measured set the idle reference STOPs at 3 of 6 CPUs reaching F (1,000 ms), or at any measured CPU reaching 500 ms, normalized to 120 s. F4 requires 3 of 6 qualifying CPUs and at least 3 from the block-1 cohort in each set. Both counts preserve the half-set rule. F5 ranks the 3–6 block-1 votes, filling missing votes at the low end and then the high end. Take the middle vote for an odd cohort and the exact mean of both middle votes for an even cohort. A bound whose middle rank is missing is open in that direction. Straddling 19/20 is INVALID, and equality qualifies as clear. Housekeeping CPU readings and C0 attribution remain diagnostic.
 
-Turbostat must briefly migrate across all CPUs for its opening and closing snapshots. Allow exactly the following sudoers command for the measurement user via `visudo`, replacing `MEASUREMENT_USER`. Remove the entry after the control. Only the observer runs in this transient scope, during the capped measurement and tail. [systemd-run](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html)
+Turbostat must briefly migrate across all CPUs for its opening and closing snapshots. Allow exactly the following sudoers command for the measurement user via `visudo`, replacing `MEASUREMENT_USER`. Remove the entry after the control. The scored observer scope runs during the capped measurement and tail. [systemd-run](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html)
 
 ```sudoers
-MEASUREMENT_USER ALL=(root) NOPASSWD: /usr/bin/systemd-run --scope --quiet --collect --slice=-.slice --unit=fukulow796turbostat.scope --property=AllowedCPUs=0-15 --property=RuntimeMaxSec=150s -- /usr/bin/turbostat --quiet --show CPU\,TSC_MHz --add msr0xe8\,u64\,cpu\,delta\,APERF --add msr0xe7\,u64\,cpu\,delta\,MPERF -- /usr/bin/cat
+MEASUREMENT_USER ALL=(root) NOPASSWD: /usr/bin/systemd-run --scope --quiet --collect --slice\=-.slice --unit\=fukulow796turbostat.scope --property\=AllowedCPUs\=0-15 --property\=RuntimeMaxSec\=180s -- /usr/bin/turbostat --quiet --show CPU\,TSC_MHz --add msr0xe8\,u64\,cpu\,delta\,APERF --add msr0xe7\,u64\,cpu\,delta\,MPERF -- /usr/bin/cat
 ```
+
+Before the Control go, record a passing `sudo visudo -c` with sudo-rs on the prepared host. Then run `node load/sql-probes/519-unread-counts/frequency-host-check.ts > HOST_CHECK.json` as the measurement user on that idle host with the pinned image already available. Require exit 0 and `ok: true`. The check verifies affinity, starts both containers, verifies their cpusets and queries PostgreSQL over the abstract socket. Its short `sudo -n` spawn uses the exact observer argv, requires the ready marker and a successful exit, and thus checks that systemd accepts `--slice=-.slice` for a transient scope. Record both checks with their output and exit statuses on #796. The checks are **not evidence**.
 
 Every job calibrates the invariant TSC per CPU on the current boot. A raw-clock read bracket over 1 ms is unusable. F1 requires perf enabled and running deltas to match the CLOCK_MONOTONIC_RAW span (`rawNs`) within 1 ms. The helper also emits CLOCK_MONOTONIC (`monoNs`) for timing checks. A perf span may exceed the pgbench log span by at most 3 s, with the fixed 10 s tail added for the control only (100 ms tail timing allowance). The control compares its TSC rate and qualifying CPUs' APERF/MPERF ratios to turbostat's `TSC_MHz` and its raw APERF/MPERF deltas. The report flags a discrepancy over 2% for review.
 
