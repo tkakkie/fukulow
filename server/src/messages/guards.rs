@@ -3,17 +3,21 @@ use uuid::Uuid;
 use super::MessageError;
 use crate::{AppState, auth::Auth, channels};
 
+pub(super) fn check_visibility(visible: Option<bool>) -> Result<(), MessageError> {
+    match visible {
+        Some(true) => Ok(()),
+        Some(false) => Err(MessageError::NotFound),
+        None => Err(MessageError::OrganizationUnavailable),
+    }
+}
+
 pub(crate) async fn require_visible_scoped(
     pool: &sqlx::PgPool,
     organization: Uuid,
     member: (Uuid, i64),
     channel: Uuid,
 ) -> Result<(), MessageError> {
-    match channels::is_visible_scoped(pool, organization, member, channel).await? {
-        Some(true) => Ok(()),
-        Some(false) => Err(MessageError::NotFound),
-        None => Err(MessageError::OrganizationUnavailable),
-    }
+    check_visibility(channels::is_visible_scoped(pool, organization, member, channel).await?)
 }
 
 pub(crate) async fn require_visible<'e, E: sqlx::PgExecutor<'e>>(
@@ -22,11 +26,7 @@ pub(crate) async fn require_visible<'e, E: sqlx::PgExecutor<'e>>(
     member: (Uuid, i64),
     channel_id: Uuid,
 ) -> Result<(), MessageError> {
-    match channels::is_visible(executor, organization_id, member, channel_id).await? {
-        Some(true) => Ok(()),
-        Some(false) => Err(MessageError::NotFound),
-        None => Err(MessageError::OrganizationUnavailable),
-    }
+    check_visibility(channels::is_visible(executor, organization_id, member, channel_id).await?)
 }
 
 pub(super) async fn reject_dm_topics(

@@ -1,3 +1,4 @@
+use super::MessageError;
 use crate::lock_ignoring_poison;
 use crate::observability::{Admission as Rejection, admission};
 use std::{
@@ -14,6 +15,14 @@ const SEND_ADMISSION_WAIT: Duration = Duration::from_secs(30);
 pub(super) const CHANNEL_QUEUE_CAP: usize = 256;
 pub(super) const GLOBAL_QUEUE_CAP: usize = 2_048;
 pub(super) const WORK_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(super) async fn within_work_deadline<T>(
+    work: impl Future<Output = Result<T, MessageError>>,
+) -> Result<T, MessageError> {
+    tokio::time::timeout(WORK_TIMEOUT, work)
+        .await
+        .map_err(|_| MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())))?
+}
 
 pub(super) struct Admission {
     send: Arc<Semaphore>,

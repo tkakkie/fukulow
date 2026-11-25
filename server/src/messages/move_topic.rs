@@ -132,15 +132,11 @@ pub async fn move_chain(
     let outcome = tokio::spawn(async move {
         let _work = work;
         let permit = waiter.acquire().await?;
-        tokio::time::timeout(admission::WORK_TIMEOUT, persist(&state, &request, permit))
-            .await
-            .map_err(|_| {
-                MessageError::Database(sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()))
-            })?
+        admission::within_work_deadline(persist(&state, &request, permit)).await
     })
     .await
     .map_err(|_| MessageError::Database(sqlx::Error::WorkerCrashed))??;
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(outcome)).into_response())
+    Ok(no_store_json(outcome))
 }
 
 #[derive(sqlx::FromRow)]

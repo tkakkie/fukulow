@@ -84,7 +84,7 @@ pub struct ListProjectionQuery {
 impl ListProjectionQuery {
     fn validate(&self) -> Result<u16, MessageError> {
         let limit = self.limit.unwrap_or(50);
-        if !(1..=200).contains(&limit)
+        if !valid_page_limit(limit)
             || self.as_of_seq.is_some_and(|w| w < 0)
             || self.before_position.is_some_and(|p| p < 1)
             || self.after_position.is_some_and(|p| p < 0)
@@ -256,11 +256,7 @@ pub async fn topic_history(
             .fetch_all(&mut *tx)
             .await?;
         let (messages, has_more) = page.finish(messages);
-        Ok((
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(MessagePage { history_generation, as_of_seq: w, messages, has_more }),
-        )
-            .into_response())
+        Ok(no_store_json(MessagePage { history_generation, as_of_seq: w, messages, has_more }))
     })
     .await
 }

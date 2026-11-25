@@ -121,8 +121,7 @@ pub async fn open(
         } else {
             StatusCode::OK
         },
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(result.0),
+        no_store_json(result.0),
     )
         .into_response())
 }
@@ -205,15 +204,11 @@ pub async fn list(
                 selected.into_iter().map(|d| d.identity).collect(),
             )
             .await?;
-            Ok((
-                [(header::CACHE_CONTROL, "no-store")],
-                Json(DmList {
-                    history_generation,
-                    dms,
-                    next_cursor,
-                }),
-            )
-                .into_response())
+            Ok(no_store_json(DmList {
+                history_generation,
+                dms,
+                next_cursor,
+            }))
         },
     )
     .await

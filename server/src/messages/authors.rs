@@ -45,6 +45,6 @@ pub async fn lookup_authors(
             "SELECT DISTINCT sender FROM messages WHERE organization_id=$1 AND sender=ANY($2) AND channel_id=ANY($3)",
         ).bind(organization).bind(&input.ids).bind(channels).fetch_all(&mut *tx).await?;
         let identities = display_identities(tx, organization, &authors).await?;
-        Ok(([(header::CACHE_CONTROL, "no-store")], Json(AuthorIdentities { identities })).into_response())
+        Ok(no_store_json(AuthorIdentities { identities }))
     }).await
 }

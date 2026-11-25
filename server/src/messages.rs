@@ -27,7 +27,7 @@ pub use error::MessageError;
 use error::dm_error;
 mod failure;
 mod guards;
-use guards::{reject_dm_topics, reject_dm_topics_scoped};
+use guards::{check_visibility, reject_dm_topics, reject_dm_topics_scoped};
 pub(crate) use guards::{require_visible, require_visible_scoped};
 pub(crate) mod history;
 mod limiter;
@@ -40,10 +40,13 @@ mod mentions;
 pub(crate) mod move_topic;
 pub use move_topic::move_chain;
 mod page;
+use page::valid_page_limit;
 pub mod reactions;
 pub mod receipts;
+mod response;
 pub use fukulow_api::{ListMessagesQuery, Mention, Message, MessagePage, SendMessageRequest};
 pub use limiter::SendLimit;
+use response::no_store_json;
 pub(crate) mod replies;
 pub use replies::counts::{ReplyCount, ReplyCountPage, ReplyCountRequest, reply_counts};
 pub use replies::{ReplyChainPage, ReplyChainQuery, reply_chain};
@@ -115,7 +118,7 @@ impl ValidateListMessages for ListMessagesQuery {
             || self.as_of_seq.is_some_and(|seq| seq < 0)
             || self.after_seq.is_some_and(|seq| seq < 0)
             || self.before_seq.is_some_and(|seq| seq < 1)
-            || !(1..=200).contains(&limit)
+            || !valid_page_limit(limit)
         {
             return Err(MessageError::InvalidInput);
         }
