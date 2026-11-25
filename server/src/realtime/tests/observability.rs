@@ -38,19 +38,8 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
                                 .register(&auth);
                             ws.on_upgrade(move |mut socket| {
                                 async move {
-                                    let queue = state.message_delivery.queue(
-                                        auth.identity.organization.organization_id,
-                                        (auth.identity.member.id, auth.membership_revision),
-                                        LIVE_QUEUE_CAPACITY,
-                                    );
-                                    let mut connection = connection::Connection {
-                                        state: &state,
-                                        auth: &auth,
-                                        queue,
-                                        cursors: HashMap::new(),
-                                        access: HashMap::new(),
-                                        permit,
-                                    };
+                                    let mut connection =
+                                        connection::Connection::new(&state, &auth, permit);
                                     let code = connection
                                         .run(
                                             &mut socket,

@@ -9,7 +9,7 @@ use axum::{
 };
 #[cfg(test)]
 use serde::Serialize;
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 use tracing::Instrument;
 #[cfg(test)]
 use uuid::Uuid;
@@ -18,7 +18,6 @@ use crate::{
     AppState,
     auth::{Auth, ErrorBody},
     channels::activity::Registration,
-    messages::LIVE_QUEUE_CAPACITY,
 };
 
 mod activity;
@@ -157,21 +156,13 @@ async fn connected_with_lifecycle(
     };
     // Session admission checks worker health after SQL as well as at registration.
     // A stopped fallback worker must never admit an unmonitored subscription.
-    let queue = state.message_delivery.queue(
-        auth.identity.organization.organization_id,
-        (auth.identity.member.id, auth.membership_revision),
-        LIVE_QUEUE_CAPACITY,
-    );
-    let mut overflow = queue.overflow.clone();
-    // Frame/live/heartbeat wakes must only poll a oneshot, not every epoch wait.
-    let mut notification_failed = queue.notification_failed.clone().spawn();
-    let mut connection = connection::Connection {
-        state: &state,
-        auth: &auth,
-        queue,
-        cursors: HashMap::new(),
-        access: HashMap::new(),
-        permit,
+    // Declare the watchers first so the connection drops before them.
+    let (mut overflow, mut notification_failed, mut connection) = {
+        let connection = connection::Connection::new(&state, &auth, permit);
+        let overflow = connection.queue.overflow.clone();
+        // Frame/live/heartbeat wakes must only poll a oneshot, not every epoch wait.
+        let notification_failed = connection.queue.notification_failed.clone().spawn();
+        (overflow, notification_failed, connection)
     };
     let code = tokio::select! {
         biased;
