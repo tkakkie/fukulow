@@ -3,7 +3,7 @@ mod notification;
 mod publication;
 mod registry;
 
-use super::admission::{Admission, WORK_TIMEOUT};
+use super::admission::Admission;
 use super::failure::Failures;
 use crate::channels;
 use notification::{MAX_PENDING_NOTIFICATIONS, OrganizationReservations};
@@ -12,6 +12,7 @@ use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use std::{collections::HashSet, sync::Mutex};
 use tokio::sync::Semaphore;
+#[cfg(test)]
 use uuid::Uuid;
 
 pub(crate) use frame::LiveMessage;
@@ -134,26 +135,6 @@ impl Delivery {
             .acquire(organization, channel, false)
             .await
             .unwrap()
-    }
-
-    pub(crate) async fn latest_seq(
-        &self,
-        pool: &sqlx::PgPool,
-        organization: Uuid,
-        channel: Uuid,
-    ) -> Result<i64, sqlx::Error> {
-        tokio::time::timeout(WORK_TIMEOUT, async {
-            let _permit = self
-                .admission(pool)
-                .acquire(organization, channel, false)
-                .await?;
-            super::latest_seq(pool, organization, channel, _permit).await
-        })
-        .await
-        .map_err(|_| {
-            tracing::warn!(target: "fukulow", event = "work_deadline_expired", operation = "watermark");
-            sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())
-        })?
     }
 }
 

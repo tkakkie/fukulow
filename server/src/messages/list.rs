@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::{
     ListMessagesQuery, MessageError, MessagePage, ValidateListMessages, history, mentions,
     message_from_row, no_store_json, page::DirectionalPage, require_visible,
-    require_visible_scoped, topics,
+    require_visible_scoped, watermark,
 };
 use crate::{
     AppState,
@@ -50,7 +50,7 @@ pub async fn list_messages(
         channel_id,
     )
     .await?;
-    topics::watermark(&state, organization_id, channel_id).await?;
+    watermark::read(&state, organization_id, channel_id).await?;
     crate::database::organization_read_only(&state.pool, organization_id, async |tx: &mut sqlx::PgConnection| {
         require_visible(
             &mut *tx,
