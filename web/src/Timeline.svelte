@@ -754,7 +754,9 @@
   }
 
   .timeline-scroll {
+    /* Explicit column: the positioning overlay shares this cell, and auto-placement would move this into an implicit column. */
     grid-row: 2;
+    grid-column: 1;
     overflow-y: auto;
     overflow-anchor: none;
     padding: var(--space-8) var(--space-16);
