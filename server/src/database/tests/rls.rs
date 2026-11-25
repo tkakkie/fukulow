@@ -4,7 +4,10 @@ use crate::database;
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-const TABLES: [&str; 17] = [
+mod coverage;
+mod dm_sections;
+
+const TABLES: &[&str] = &[
     "organizations",
     "users",
     "channels",
@@ -22,16 +25,29 @@ const TABLES: [&str; 17] = [
     "topic_read_positions",
     "invites",
     "invite_tombstones",
+    // Parent rows precede dependent rows for INSERT. DELETE uses the reverse order.
+    "dm_discovery_counters",
+    "dm_discovery",
+    "member_sections",
+    "member_section_ids",
+    "member_section_placements",
+    "member_section_generations",
 ];
 
 struct Tenant {
     organization: Uuid,
     account: Uuid,
     member: Uuid,
+    channel: Uuid,
 }
 
-/// One row (or more) in every target table, written as the owner.
 async fn tenant(admin: &PgPool) -> Tenant {
+    let tenant = tenant_base(admin).await;
+    dm_sections::seed(admin, &tenant).await;
+    tenant
+}
+
+async fn tenant_base(admin: &PgPool) -> Tenant {
     let (organization, account, member, channel, topic) = (
         Uuid::new_v4(),
         Uuid::new_v4(),
@@ -81,6 +97,7 @@ async fn tenant(admin: &PgPool) -> Tenant {
         organization,
         account,
         member,
+        channel,
     }
 }
 
@@ -132,17 +149,23 @@ async fn insertable(admin: &PgPool, table: &str) -> String {
 #[fukulow_test::test]
 async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(pool: PgPool) {
     let pools = pools(pool).await;
-    let (a, b) = (tenant(&pools.admin).await, tenant(&pools.admin).await);
-    database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
-        for (table, (all, own)) in TABLES.iter().zip(counts(tx, a.organization).await) {
-            assert!(own > 0, "{table}: own rows visible");
-            assert_eq!(all, own, "{table}: only own Organization visible");
+    let (a, b) = (tenant(&pools.admin).await, tenant_base(&pools.admin).await);
+    dm_sections::check_inserts(&pools, a.organization, &b).await;
+    for id in [a.organization, b.organization] {
+        database::organization(&pools.app, id, async |tx: &mut PgConnection| {
+            for (table, (all, own)) in TABLES.iter().zip(counts(tx, id).await) {
+                assert!(own > 0, "{table}: own rows visible in {id}");
+                assert_eq!(all, own, "{table}: only own Organization visible in {id}");
+            }
+            Ok::<_, sqlx::Error>(())
+        })
+        .await
+        .unwrap();
+    }
+    for &table in TABLES {
+        if dm_sections::case(table).is_some() {
+            continue;
         }
-        Ok::<_, sqlx::Error>(())
-    })
-    .await
-    .unwrap();
-    for table in TABLES {
         let copy = copy_sql(&pools.admin, table).await;
         // Each case runs in its own transaction: an error aborts it.
         let insert =
@@ -159,11 +182,17 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
             Some("42501"),
             "{table}: INSERT other: {insert}"
         );
+        // The DM identity trigger would mask the ordinary Channel's RLS check.
+        let move_row = if table == "channels" {
+            "UPDATE channels SET organization_id = $1 WHERE kind = 'channel'".to_owned()
+        } else {
+            format!("UPDATE {table} SET organization_id = $1")
+        };
         let moved =
             database::organization(&pools.app, a.organization, async |tx: &mut PgConnection| {
-                sqlx::query(&format!("UPDATE {table} SET organization_id = $1"))
+                sqlx::query(&move_row)
                     .bind(b.organization)
-                    .execute(&mut *tx)
+                    .execute(tx)
                     .await
             })
             .await
@@ -197,6 +226,7 @@ async fn rls_hides_and_rejects_other_organization_rows_in_every_target_table(poo
         assert!(own > 0, "{table}: B rows survive");
     }
     drop(admin);
+    dm_sections::check_updates_and_deletes(&pools.app, a.organization, b.organization).await;
     pools.app.close().await;
 }
 
@@ -325,7 +355,7 @@ async fn rls_account_context_reads_only_own_members_and_writes_nothing(pool: PgP
 #[fukulow_test::test]
 async fn rls_context_never_survives_commit_rollback_or_abort_on_a_reused_connection(pool: PgPool) {
     let pools = pools(pool).await;
-    let a = tenant(&pools.admin).await;
+    let a = tenant_base(&pools.admin).await;
     let single = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(pools.app.connect_options().as_ref().clone())
@@ -376,7 +406,7 @@ async fn setup_required_is_boolean_only_and_executable_only_by_the_app_role(pool
         .await
         .unwrap();
     assert!(required);
-    tenant(&pools.admin).await;
+    tenant_base(&pools.admin).await;
     let required: bool = sqlx::query_scalar("SELECT fukulow_setup_required()")
         .fetch_one(&pools.app)
         .await
