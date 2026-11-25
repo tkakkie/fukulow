@@ -686,6 +686,27 @@ it('DM and ordinary Channel notices route independently while unknown kinds inva
   activity.close()
 })
 
+it('only access changes and unknown kinds mark a DM list notice as possible discovery (#956)', () => {
+  const dms = { invalidate: vi.fn(), close() {} }
+  const activity = createActivity({ watched: () => false, covered: () => false, random: () => 0,
+    kind: id => id === 'D' ? 'dm' : undefined })
+  activity.hold('dms', dms)
+  activity.notice({ type: 'activity_ready' })
+  expect(dms.invalidate.mock.calls.some(call => call[2] === true)).toBe(false)
+  dms.invalidate.mockClear()
+  activity.notice({ type: 'channel_activity', channel_id: 'D', seq: 1 })
+  activity.notice({ type: 'read_position_changed', channel_id: 'D', topic_id: null, read_seq: 1 })
+  activity.notice({ type: 'channel_activity', channel_id: 'unknown', seq: 1 })
+  activity.notice({ type: 'read_position_changed', channel_id: 'unknown', topic_id: null, read_seq: 1 })
+  activity.notice({ type: 'channel_access_gained', channel_id: 'D' })
+  activity.notice({ type: 'dm_list_changed' })
+  expect(dms.invalidate.mock.calls).toEqual([
+    ['notice', 200, false], ['notice', 200, false], ['notice', 200, true], ['notice', 200, true],
+    ['access', 200, true], ['access', 200, true],
+  ])
+  activity.close()
+})
+
 it('consecutive below-floor rejections switch to A10 backoff after 3 rejections without accepting or showing an error', async () => {
   const load = vi.fn(async (): Promise<Result<number>> => ok(1))
   const accept = vi.fn(), error = vi.fn()

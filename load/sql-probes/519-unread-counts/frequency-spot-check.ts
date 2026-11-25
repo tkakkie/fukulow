@@ -12,8 +12,10 @@ export const turbostatArgv = ['/usr/bin/systemd-run', '--scope', '--quiet', '--c
   '--add', 'msr0xe8,u64,cpu,delta,APERF', '--add', 'msr0xe7,u64,cpu,delta,MPERF', '--', '/usr/bin/cat'];
 // Command mode takes its opening sample before spawning cat, the stdin barrier. The ready line written to
 // stdin comes back on stdout only once cat runs; ending stdin ends cat and takes the closing sample.
-export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSignal, keep: (raw: SpotCheck) => void) {
-  const child = spawn('sudo', ['-n', ...turbostatArgv], { signal });
+// `command` is replaceable only so tests can drive this control flow without sudo or turbostat (#979).
+export async function withSpotCheck<T>(work: () => Promise<T>, signal: AbortSignal, keep: (raw: SpotCheck) => void,
+  command: readonly [string, ...string[]] = ['sudo', '-n', ...turbostatArgv]) {
+  const child = spawn(command[0], command.slice(1), { signal });
   let stdout = '', stderr = '';
   let startNs: string | null = null, stopNs: string | null = null;
   child.stdin.on('error', () => {});
