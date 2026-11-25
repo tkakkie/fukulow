@@ -2,7 +2,7 @@
 // Timeline (path A), aligned to the expected fallback pass P as the #592 runner does:
 // stall at P - 4 s, Role change to Guest at P - 3 s, gate on at P - 0.3 s, resume at P + 0.1 s,
 // Hfence restore at P + 2 s, gate off at P + 3.5 s or P + 15 s. Controls skip only the gate.
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -15,6 +15,7 @@ import { startRssSampler } from './revocation-burst-rss.ts';
 import { emptyLog, readLogLine } from './revocation-holds-log.ts';
 import { BYSTANDERS, CELLS, DURATIONS, restoreAccount, runId, socketAccount, stallBody, targetSockets, TIMELINE, type PlannedRun, type Stall } from './revocation-holds-plan.ts';
 import { StallProxy } from './revocation-holds-stall.ts';
+import { spawnMeasuredServer } from './revocation-measured-server.ts';
 import type { AccountMutations, HoldsRun, Notice, TargetSocket } from './revocation-holds-judgment.ts';
 import type { Channel, ChangeRoleRequest, ClientMessage, CreateChannelRequest, NativeSessionResponse, SendMessageRequest, ServerEvent, SetupRequest } from '../web/src/api-schema.d.ts';
 
@@ -76,8 +77,7 @@ async function startServer(ctx: Context, dir: string) {
   const relayPort = await relay.listen();
   const appPort = 20000 + Math.floor(Math.random() * 20000);
   const setupToken = randomBytes(16).toString('hex');
-  const server = spawn(ctx.binary, [], { env: { PATH: process.env.PATH, FUKULOW_ADDR: `127.0.0.1:${appPort}`, FUKULOW_COOKIE_SECURE: 'false', FUKULOW_SETUP_TOKEN: setupToken,
-    FUKULOW_REVOCATION_MEASUREMENT: '1', DATABASE_URL: url('fukulow_app', db.appPassword, relayPort) }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const server = spawnMeasuredServer(ctx.binary, dir, appPort, setupToken, url('fukulow_app', db.appPassword, relayPort));
   ctx.active.server = server;
   const file = createWriteStream(resolve(dir, 'server.log'));
   const logsClosed = new Promise<void>(done => server.once('close', () => file.end(done)));
