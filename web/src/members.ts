@@ -13,20 +13,13 @@ export function watchMemberAccess(
   channels: Pick<ReturnType<typeof createChannels>, 'get' | 'subscribe'>,
   sync: Pick<ReturnType<typeof createSync>, 'get' | 'subscribe'>,
   refresh: (reason: 'access' | 'refresh') => void,
-  options?: { skipConnectRefresh?: boolean; skipInitialList?: boolean },
+  options?: { skipConnectRefresh?: boolean },
 ) {
-  let listReady = channels.get().status === 'ready'
   let channelIds = new Set(channels.get().channels.map(c => c.id))
   let connection = sync.get().connected ? sync.get().connection : null
   let lost = new Set<string>()
   const stopChannels = channels.subscribe(() => {
-    const state = channels.get()
-    const ids = new Set(state.channels.map(c => c.id))
-    if (options?.skipInitialList && !listReady) {
-      channelIds = ids
-      if (state.status === 'ready') listReady = true
-      return
-    }
+    const ids = new Set(channels.get().channels.map(c => c.id))
     const removed = [...channelIds].some(id => !ids.has(id))
     const added = [...ids].some(id => !channelIds.has(id))
     channelIds = ids

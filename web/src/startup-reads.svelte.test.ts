@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createActivity } from './activity'
 import { createAuth } from './auth.svelte'
+import { createDms } from './dms'
 import type { ChannelList, DmChanges, DmList, Identity, MemberList, SectionLayout, ServerEvent, TimelinePage } from './api'
 
 const ORG = '00000000-0000-4000-8000-000000000001'
@@ -180,6 +182,17 @@ function installHarness(options?: {
     fetchMock,
     setGeneration(gen: string) { currentGeneration = gen },
     setSectionGeneration(gen: string) { currentSectionGeneration = gen },
+    open(index = sockets.length - 1) {
+      const ws = sockets[index]!
+      ws.onopen?.()
+      return ws
+    },
+    ready(index = sockets.length - 1) {
+      const ws = sockets[index]!
+      ws.emit({ type: 'activity_ready' })
+      ws.emit({ type: 'subscribed', history_generation: currentGeneration, channel_id: CHANNEL, caught_up_seq: 1 })
+      return ws
+    },
     openAndReady(index = sockets.length - 1) {
       const ws = sockets[index]!
       ws.onopen?.()
@@ -199,11 +212,11 @@ describe('Cold / startup REST read counts (#980)', () => {
   })
 
   it.each([
-    { label: 'unthrottled (fast socket, members after ready)', socketDelayMs: 0, activateBeforeReady: false, expectedMembers: 1 },
-    { label: 'unthrottled (fast socket, members before ready)', socketDelayMs: 0, activateBeforeReady: true, expectedMembers: 2 },
-    { label: 'throttled (slow socket > 200 ms, members after ready)', socketDelayMs: 600, activateBeforeReady: false, expectedMembers: 1 },
-    { label: 'throttled (slow socket > 200 ms, members before ready)', socketDelayMs: 600, activateBeforeReady: true, expectedMembers: 2 },
-  ])('bounds all five startup reads on cold /: $label', async ({ socketDelayMs, activateBeforeReady, expectedMembers }) => {
+    { label: 'unthrottled (fast socket, members after ready)', socketDelayMs: 0, readyDelayMs: 0, activateBeforeReady: false, expectedMembers: 1 },
+    { label: 'unthrottled (fast socket, members before ready, 600 ms open-to-ready gap)', socketDelayMs: 0, readyDelayMs: 600, activateBeforeReady: true, expectedMembers: 2 },
+    { label: 'throttled (slow socket > 200 ms, members after ready)', socketDelayMs: 600, readyDelayMs: 600, activateBeforeReady: false, expectedMembers: 1 },
+    { label: 'throttled (slow socket > 200 ms, members before ready, 600 ms open-to-ready gap)', socketDelayMs: 600, readyDelayMs: 600, activateBeforeReady: true, expectedMembers: 2 },
+  ])('bounds all five startup reads on cold /: $label', async ({ socketDelayMs, readyDelayMs, activateBeforeReady, expectedMembers }) => {
     const h = installHarness()
     const auth = createAuth()
     try {
@@ -223,7 +236,13 @@ describe('Cold / startup REST read counts (#980)', () => {
         expect(h.counts.dmChanges).toBe(0)
       }
 
-      h.openAndReady(0)
+      h.open(0)
+      if (readyDelayMs > 0) {
+        await vi.advanceTimersByTimeAsync(readyDelayMs)
+        await flush()
+        expect(h.counts.dmChanges).toBe(0)
+      }
+      h.ready(0)
       await vi.advanceTimersByTimeAsync(1_000)
       await flush()
 
@@ -241,6 +260,172 @@ describe('Cold / startup REST read counts (#980)', () => {
         members: expectedMembers,
       })
       expect(h.dmLanes).toEqual(['delta', 'coverage'])
+    } finally {
+      auth.session?.close()
+      auth.members?.close()
+    }
+  })
+
+  it('holds DM discovery until activity_ready without pre-connect reads even before any disconnect', async () => {
+    const dmLanes: string[] = []
+    let dmChangesCount = 0
+    const activity = createActivity({ watched: () => false, random: () => 0.5 })
+    const dms = createDms({
+      api: {
+        list: async () => ({ ok: true as const, data: dmList(GEN) }),
+        changes: async query => {
+          dmChangesCount++
+          dmLanes.push(query.lane)
+          return { ok: true as const, data: dmChanges(query.lane) }
+        },
+        open: async () => ({ ok: false as const, kind: 'http' as const, status: 500, error: 'server_error' }),
+      },
+      activity,
+      watched: () => false,
+      baseline: () => {},
+      drop: () => {},
+      select: () => {},
+      waitForReady: true,
+      random: () => 0.5,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(600)
+      await flush()
+      expect(dmChangesCount).toBe(0)
+
+      dms.ready()
+      activity.notice({ type: 'activity_ready' })
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+      expect(dmChangesCount).toBe(2)
+      expect(dmLanes).toEqual(['delta', 'coverage'])
+    } finally {
+      dms.close()
+      activity.close()
+    }
+  })
+
+  it('refreshes an active Guest member directory when a delayed first Channel list reveals a newly accessible Channel', async () => {
+    const guestId = SELF
+    const peerId = '00000000-0000-4000-8000-000000000088'
+    const guestMe: Identity = {
+      member: { id: guestId, name: 'Guest', role: 'guest' },
+      organization: {
+        organization_id: ORG,
+        name: 'Acme',
+        capabilities: {
+          can_create_channels: { allowed: false },
+          can_invite: { allowed: false },
+          can_deactivate_members: { allowed: false },
+          can_manage_roles: { allowed: false },
+        },
+      },
+    }
+    let grantVisible = false
+    let releaseChannels!: (res: Response) => void
+    const pendingChannels = new Promise<Response>(resolve => { releaseChannels = resolve })
+    let channelRequests = 0
+    const h = installHarness({
+      onFetch(path, url) {
+        if (path === `/api/v1/orgs/${ORG}/me`) return json(guestMe)
+        if (path === `/api/v1/orgs/${ORG}/channels` && !url.searchParams.has('archived')) {
+          channelRequests++
+          if (channelRequests === 1) return pendingChannels
+          return json(channelList(GEN))
+        }
+        if (path === `/api/v1/orgs/${ORG}/members`) {
+          return json({
+            members: grantVisible
+              ? [{ id: guestId, name: 'Guest', role: 'guest' }, { id: peerId, name: 'Peer', role: 'member' }]
+              : [{ id: guestId, name: 'Guest', role: 'guest' }],
+          })
+        }
+        return undefined
+      },
+    })
+    const auth = createAuth()
+    try {
+      await auth.load()
+      await flush()
+      h.openAndReady(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+
+      // Guest opens the member directory before the delayed first Channel list resolves.
+      expect(auth.session!.channels.state.status).toBe('loading')
+      auth.members!.activate()
+      await flush()
+      expect(auth.members!.state.members.map(m => m.id)).toEqual([guestId])
+
+      // A missed grant notice is revealed when the first Channel list finally succeeds.
+      grantVisible = true
+      releaseChannels(json(channelList(GEN)))
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flush()
+      expect(auth.session!.channels.state.status).toBe('ready')
+      expect(auth.members!.state.members.map(m => m.id)).toEqual([guestId, peerId])
+    } finally {
+      auth.session?.close()
+      auth.members?.close()
+    }
+  })
+
+  it('refreshes an active Guest member directory when the Channel list recovers from an initial error with a new Channel', async () => {
+    const guestId = SELF
+    const peerId = '00000000-0000-4000-8000-000000000088'
+    const guestMe: Identity = {
+      member: { id: guestId, name: 'Guest', role: 'guest' },
+      organization: {
+        organization_id: ORG,
+        name: 'Acme',
+        capabilities: {
+          can_create_channels: { allowed: false },
+          can_invite: { allowed: false },
+          can_deactivate_members: { allowed: false },
+          can_manage_roles: { allowed: false },
+        },
+      },
+    }
+    let grantVisible = false
+    let channelFailuresRemaining = 2
+    const h = installHarness({
+      onFetch(path, url) {
+        if (path === `/api/v1/orgs/${ORG}/me`) return json(guestMe)
+        if (path === `/api/v1/orgs/${ORG}/channels` && !url.searchParams.has('archived')) {
+          if (channelFailuresRemaining > 0) {
+            channelFailuresRemaining--
+            return json({ error: 'server_error' }, 503)
+          }
+          return json(channelList(GEN))
+        }
+        if (path === `/api/v1/orgs/${ORG}/members`) {
+          return json({
+            members: grantVisible
+              ? [{ id: guestId, name: 'Guest', role: 'guest' }, { id: peerId, name: 'Peer', role: 'member' }]
+              : [{ id: guestId, name: 'Guest', role: 'guest' }],
+          })
+        }
+        return undefined
+      },
+    })
+    const auth = createAuth()
+    try {
+      await auth.load()
+      await flush()
+      h.openAndReady(0)
+      await vi.advanceTimersByTimeAsync(500)
+      await flush()
+
+      expect(auth.session!.channels.state.status).toBe('error')
+      auth.members!.activate()
+      await flush()
+      expect(auth.members!.state.members.map(m => m.id)).toEqual([guestId])
+
+      grantVisible = true
+      await vi.advanceTimersByTimeAsync(3_000)
+      await flush()
+      expect(auth.session!.channels.state.status).toBe('ready')
+      expect(auth.members!.state.members.map(m => m.id)).toEqual([guestId, peerId])
     } finally {
       auth.session?.close()
       auth.members?.close()
