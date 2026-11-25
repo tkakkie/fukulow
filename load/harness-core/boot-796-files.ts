@@ -69,7 +69,10 @@ export function layoutProblems(read: (source: string) => string): string[] {
   check(JSON.stringify(values(service, 'ExecStart')) === JSON.stringify(['frequency.sh', 'affinity.sh'].map(s => `/${libexecDir}/${s}`)),
     `${hostService}: ExecStart must run frequency.sh, then affinity.sh, from /${libexecDir}`);
   check(one(service, 'Wants') === serviceWants, `${hostService}: Wants must be ${serviceWants}`);
-  check(one(service, 'After')?.split(' ').includes(powerProfiles) === true, `${hostService}: After must include ${powerProfiles}`);
+  const after = one(service, 'After')?.split(' ') ?? [];
+  check(after.includes(powerProfiles), `${hostService}: After must include ${powerProfiles}`);
+  // power-profiles-daemon is After=multi-user.target on Ubuntu; without this the boot transaction has an ordering cycle.
+  check(after.includes('multi-user.target'), `${hostService}: After must include multi-user.target`);
   check(one(service, 'WantedBy') === 'multi-user.target', `${hostService}: WantedBy must be multi-user.target`);
   const affinity = read('affinity.sh');
   check(sameCpus(one(affinity, 'housekeeping'), sets796.housekeeping), `affinity.sh: housekeeping differs from ${sets796.housekeeping.join(',')}`);
