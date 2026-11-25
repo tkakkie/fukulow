@@ -389,6 +389,13 @@ impl Connection<'_> {
                             Err(MessageError::OrganizationUnavailable) => {
                                 return Err(super::CLOSE_ORGANIZATION_UNAVAILABLE);
                             }
+                            Err(MessageError::Database(error)) => {
+                                tracing::info_span!(
+                                    target: "fukulow", "database", operation = "websocket_authorize"
+                                )
+                                .in_scope(|| crate::observability::database_failure(&error));
+                                return Err(1011);
+                            }
                             Err(_) => return Err(1011),
                         }
                     }
