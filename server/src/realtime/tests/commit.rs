@@ -41,7 +41,7 @@ async fn ambiguous_commit_visible_after_failure_signal_replays_without_a_later_s
         subscribe(&mut before, f.channel, initial_seq).await;
         ready(&mut before, f.channel, initial_seq).await;
         let mut during = f.server.connect(&f.token).await;
-        let replay = pause(f.channel);
+        let replay = hooks::register_replay(f.channel);
         subscribe(&mut during, f.channel, initial_seq).await;
         replay.entered().await;
 

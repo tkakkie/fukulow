@@ -2,7 +2,7 @@ use super::*;
 use crate::test_support::{Advisory, Blocked, Count, wait_blocked};
 use crate::{
     messages::{self, LIVE_QUEUE_CAPACITY},
-    test_support::{Gate, Gates},
+    test_support::Gate,
 };
 use axum::{
     Router,
@@ -25,15 +25,6 @@ use tokio_tungstenite::{
 use tower::ServiceExt;
 
 type Client = WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
-
-// Test-only pause after registration and the history snapshot, before replay/handoff.
-static REPLAY_GATES: Gates<Uuid> = Gates::new();
-fn pause(channel: Uuid) -> Arc<Gate> {
-    REPLAY_GATES.register(channel)
-}
-pub(super) async fn replay_gate(channel: Uuid) {
-    REPLAY_GATES.pause(channel).await;
-}
 
 /// A socket to a server whose `Server` handle another task owns.
 async fn connect_at(address: std::net::SocketAddr, token: &str) -> Client {
@@ -707,7 +698,7 @@ async fn replay_pages_handoff_and_reconnect_keep_independent_channel_sequences_w
         post(&f, second).await;
     }
     let mut socket = f.server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut socket, f.channel, 7).await;
     gate.entered().await;
     // These commit after the history high-water mark and must survive the handoff.
@@ -786,7 +777,7 @@ async fn overflow_closes_socket_and_reconnect_replays_every_committed_message(po
     let f = fixture(&pool).await;
     post(&f, f.channel).await;
     let mut socket = f.server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut socket, f.channel, 0).await;
     gate.entered().await;
     for _ in 0..257 {
@@ -813,7 +804,7 @@ async fn sign_out_closes_idle_and_replaying_sockets_but_leaves_other_sessions_us
     subscribe(&mut idle, f.channel, 0).await;
     ready(&mut idle, f.channel, 0).await;
     let mut replay = f.server.connect(&f.token).await;
-    let gate = pause(f.channel);
+    let gate = hooks::register_replay(f.channel);
     subscribe(&mut replay, f.channel, 0).await;
     gate.entered().await;
     let mut other = f.server.connect(&other_token).await;
@@ -882,7 +873,7 @@ async fn session_expiry_closes_idle_and_replaying_sockets(pool: PgPool) {
         subscribe(&mut idle, f.channel, 0).await;
         ready(&mut idle, f.channel, 0).await;
         let mut replay = f.server.connect(&f.token).await;
-        let gate = pause(f.channel);
+        let gate = hooks::register_replay(f.channel);
         subscribe(&mut replay, f.channel, 0).await;
         gate.entered().await;
         fallback.entered().await;
@@ -1220,6 +1211,7 @@ mod roles;
 mod replies;
 
 pub(super) mod access_loss;
+pub(super) mod hooks;
 
 mod account_security;
 mod mentions;
