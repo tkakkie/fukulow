@@ -66,8 +66,10 @@ test('placement reads back each expected affinity and rejects an incorrect slice
 test('a scope without its own cpuset controller reads the nearest ancestor up to the measurement slice only', () => {
   const slice = `/${measurementSlice}`;
   const scope = `${slice}/fukulow668-client-42.scope`;
-  assert.deepEqual(checkPlacement('client', 42, procFiles(sets796.client, measuredCpus, scope, slice)),
-    { pid: 42, cgroup: scope, affinity: sets796.client, cpuset: measuredCpus, cpusetCgroup: slice });
+  for (const [role, affinity] of [['client', sets796.client], ['server', sets796.server], ['helper', sets796.client]] as const) {
+    assert.deepEqual(checkPlacement(role, 42, procFiles(affinity, measuredCpus, scope, slice)),
+      { pid: 42, cgroup: scope, affinity, cpuset: measuredCpus, cpusetCgroup: slice });
+  }
   assert.throws(() => checkPlacement('client', 42, procFiles(sets796.client, [...measuredCpus, sets796.housekeeping[0]], scope, slice)),
     /effective cpuset/);
   // The cgroup root is above the slice and never counts as the scope's cpuset.
