@@ -54,6 +54,7 @@ type ChannelDetails = {
   onOpen(channel: Channel): void
   onArchivedSnapshot(rows: ChannelList['channels']): void
   connectionEpoch?(): number | null
+  coversUnread?(rows: Channel[]): boolean
 }
 
 const terminal = (r: Result<unknown>) => !r.ok && r.kind === 'http' && (r.status === 401 || isOrganizationUnavailable(r))
@@ -174,6 +175,8 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
     canLoad: () => !awaitingReady,
     load: async signal => validList(await api.listChannels(signal)),
     connectionEpoch: details?.connectionEpoch,
+    covers: data => details?.coversUnread?.(data.channels) ?? true,
+    acceptBelowFloor: true,
     onReadyCovered() { if (hasList) onSnapshot?.(state.channels) },
     accept(data) {
       hasList = true

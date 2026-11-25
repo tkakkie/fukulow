@@ -12,6 +12,8 @@ export function createActivityTarget<T>(options: {
   load(signal: AbortSignal): Promise<Result<T>>
   accept(value: T): void
   covers?(value: T): boolean
+  /** A snapshot can carry authoritative data even when a derived baseline needs a follow-up. */
+  acceptBelowFloor?: boolean
   /** Current active connection epoch, or null while disconnected. */
   connectionEpoch?(): number | null
   /** Re-applies already-accepted current-connection state after reconcile clears derived baselines. */
@@ -72,14 +74,16 @@ export function createActivityTarget<T>(options: {
     if (cancelled) { if (dirty) schedule(0); return }
     try { if (result.ok) {
       if (own !== generation) { if (dirty && !retry) schedule(200); return }
-      if (options.covers?.(result.data) === false) {
+      const covered = options.covers?.(result.data) !== false
+      if (!covered) {
         if (++belowFloor >= 3) scheduleRetry()
         else schedule(200)
-        return
+        if (!options.acceptBelowFloor) return
+      } else {
+        dirty = queued; attempt = 0; belowFloor = 0
       }
-      dirty = queued
-      failure = undefined; stopped = false; attempt = 0; belowFloor = 0; acceptedEpoch = epoch; options.accept(result.data)
-      if (dirty) schedule(200)
+      failure = undefined; stopped = false; acceptedEpoch = epoch; options.accept(result.data)
+      if (covered && dirty) schedule(200)
     } else {
       if (own === generation) { belowFloor = 0; acceptedEpoch = null; failure = result; options.error?.(result) }
       if (own === generation && options.terminal?.(result)) { dirty = false; queued = false; stopped = true; return }

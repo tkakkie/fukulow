@@ -5,7 +5,7 @@ import { channelsAdapter } from './channels.svelte'
 import { createSession } from './session'
 import { createInviteAcceptance, createMembers, watchMemberAccess } from './members'
 import { inviteAcceptanceAdapter, membersAdapter } from './members.svelte'
-import { listReplyChain, type ChannelList, type lookupAuthors, type listMembers, type MemberList, type Result } from './api'
+import { listReplyChain, type ChannelList, type lookupAuthors, type listMembers, type MemberList, type Result, type TimelinePage } from './api'
 import { syncAdapter } from './sync.svelte'
 import { topicsAdapter } from './topics.svelte'
 import type { DraftStore } from './drafts'
@@ -1401,6 +1401,7 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
     { order: 'target is hinted before initial list accept and bootstrap completes before socket connect', selectAfterAccept: false, bootstrapBeforeConnect: true },
   ])('bounds startup Channel list reads to at most 2 with a populated direct-link Channel when $order', async ({ selectAfterAccept, bootstrapBeforeConnect }) => {
     const core = deferred<void>()
+    const initial = deferred<Result<ChannelList>>()
     const listResponse = ok<ChannelList>({
       history_generation: generation,
       channels: [
@@ -1410,10 +1411,12 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
           unread_count: 0, main_unread_count: 0, mention_unread_count: 0, main_mention_unread_count: 0 },
       ],
     })
-    const reads = vi.fn(async () => listResponse)
+    const reads = vi.fn(async () => listResponse).mockReturnValueOnce(initial.promise)
     const net = fakeNetwork()
     const options = net.options()
-    const history = deferred<Awaited<ReturnType<NonNullable<NonNullable<typeof options.sync>['api']>['listMessages']>>>()
+    const history = deferred<Result<TimelinePage>>()
+    const listTimeline = vi.fn<NonNullable<typeof options.topicsApi>['listTimeline']>((id, query) =>
+      id === 'target' ? history.promise : options.topicsApi!.listTimeline(id, query))
     let sessionRef!: ReturnType<typeof createSession>
     const s = stack({
       restore: restored(), coreReady: () => core.promise, readInitialChannels: reads,
@@ -1421,11 +1424,8 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
         sessionRef = createSession({
           ...options, selfId, onEnded, organizationId, initialRole, accountSignal, initialCanCreateChannels, initialChannels,
           channelsApi: undefined, unreadApi: { ...options.unreadApi!, listChannels: reads },
-          sync: {
-            ...options.sync,
-            random: () => 0.5,
-            api: { ...options.sync!.api!, listMessages: vi.fn(() => history.promise) },
-          },
+          topicsApi: { ...options.topicsApi!, listTimeline },
+          sync: { ...options.sync, random: () => 0.5 },
         })
         return {
           channels: channelsAdapter(sessionRef.channels, sessionRef.channelCreation), sync: syncAdapter(sessionRef.sync),
@@ -1439,20 +1439,30 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
       expect(reads).toHaveBeenCalledOnce()
 
       core.resolve(); await loading
-      if (selectAfterAccept) await settle()
+      if (selectAfterAccept) {
+        initial.resolve(listResponse)
+        await settle()
+        expect(sessionRef.channels.get().selectedId).toBe('general')
+      } else expect(sessionRef.channels.get().status).toBe('loading')
       sessionRef.channels.selectHint('target')
       void sessionRef.unread.enter({ channel: 'target', topicId: null })
+      if (!selectAfterAccept) initial.resolve(listResponse)
       await settle()
+      expect(listTimeline).toHaveBeenCalledWith('target', expect.any(Object))
+      const target = () => sessionRef.sync.get().channels.target
+      expect(target().cursor).toBeNull()
 
-      const bootstrapPage = ok({
+      const bootstrapPage = ok<TimelinePage>({
         history_generation: generation,
         as_of_seq: 1,
-        messages: [{ ...record(1), channel_id: 'target' }],
+        items: [{ kind: 'message', message: record(1, 'target') }],
         has_more: false,
       })
       if (bootstrapBeforeConnect) {
         history.resolve(bootstrapPage)
         await settle()
+        expect(target().cursor).toBe(1)
+        expect(sessionRef.sync.get().connected).toBe(false)
         await vi.advanceTimersByTimeAsync(250)
         net.socket.onReady()
         await settle()
@@ -1462,9 +1472,12 @@ describe('sync controllers wait for the core, REST reads do not (#466)', () => {
         await settle()
         net.event({ type: 'activity_ready' })
         await settle()
+        expect(target().cursor).toBeNull()
+        expect(sessionRef.sync.get().connected).toBe(true)
         history.resolve(bootstrapPage)
       }
       await vi.advanceTimersByTimeAsync(1_000)
+      expect(target().cursor).toBe(1)
       expect(reads).toHaveBeenCalledTimes(2)
     } finally { await s.auth.signOut() }
   })
