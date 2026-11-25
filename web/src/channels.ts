@@ -48,6 +48,7 @@ function updateError(r: Extract<Result<unknown>, { ok: false }>): string {
 }
 
 type ChannelDetails = {
+  initialHint?(): string | null
   canOpen(id: string): boolean
   verifyOrdinary(id: string, signal: AbortSignal): Promise<Result<unknown>>
   unavailable(id: string): void
@@ -184,7 +185,7 @@ export function createChannels(api: ChannelsApi, onReselect?: (id: string) => vo
       const departed = previous && api.getChannel && details?.canOpen(previous.id) && !data.channels.some(c => c.id === previous.id)
       onSnapshot?.(data.channels)
       set({
-        status: 'ready', channels: data.channels, selectedId: state.selectedId ?? data.channels[0]?.id ?? null,
+        status: 'ready', channels: data.channels, selectedId: state.selectedId ?? details?.initialHint?.() ?? data.channels[0]?.id ?? null,
         ...(departed ? { openChannel: previous, openChannelPending: true } : {}),
       })
       setAuthorized(data.channels, true)
