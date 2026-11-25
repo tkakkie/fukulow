@@ -3,7 +3,7 @@ import test from 'node:test';
 import { appEvidence, k6Evidence, parseStatements, requiredReadPhases } from './diagnostic-evidence.ts';
 import { diagnosticCounters } from './diagnostic-stream.ts';
 import { diagnosticRunComplete, reconcileDiagnostic, statementProblems } from './diagnostic-reconcile.ts';
-import { appLogAnchor, retainedAppLog } from './diagnostic.ts';
+import { appLogAnchor, retainedAppLog, selectVmClockReading } from './diagnostic.ts';
 import { rehearsalPlan, type Step } from './plan.ts';
 import { remainingArmsSkipped } from './diagnostic-mode.ts';
 import { canRerun, statusFlags } from './run.ts';
@@ -100,8 +100,8 @@ async function fixture(arm = step, send: { attempted: number; rejected503: numbe
   const capture = {
     since: iso(at - 500), window: { start: at - 500, end: at + 45_000 },
     clock: { wallMs: 45_500, monotonicMs: 45_500, driftMs: 0,
-      start: { hostBeforeMs: at - 520, hostAfterMs: at - 500, vmMs: at - 510, offsetMs: 0 },
-      end: { hostBeforeMs: at + 45_000, hostAfterMs: at + 45_020, vmMs: at + 45_010, offsetMs: 0 } },
+      start: { hostBeforeMs: at - 520, hostAfterMs: at - 500, vmMs: at - 510, offsetMs: 0, roundTripMs: 20, readingCount: 3 },
+      end: { hostBeforeMs: at + 45_000, hostAfterMs: at + 45_020, vmMs: at + 45_010, offsetMs: 0, roundTripMs: 20, readingCount: 3 } },
     app, k6: await k6Evidence(lines()), failures: [] as string[],
     postgres: { statementsAvailable: true, statements: groups.map((group, i) => ({ group, queryId: String(i), calls: 2,
       execMs: 1, text: null, estimatedLockMs: 0, estimatedExecExcludingLockMs: 1 })),
@@ -237,6 +237,38 @@ test('missing Docker anchors, malformed log output, collector errors and clock d
   assert.match(result.problems.join(), /wall-clock vs monotonic elapsed drift/);
 });
 
+test('Docker VM clock selection uses the shortest round trip and its host midpoint', () => {
+  const best = { hostBeforeMs: 1300, hostAfterMs: 1341, vmMs: 1325 };
+  assert.deepEqual(selectVmClockReading([
+    { hostBeforeMs: 1000, hostAfterMs: 1270, vmMs: 1135 },
+    best,
+    { hostBeforeMs: 1400, hostAfterMs: 1450, vmMs: 1425 },
+  ]), { ...best, offsetMs: 4.5, roundTripMs: 41, readingCount: 3 });
+  assert.equal(selectVmClockReading([]), null);
+});
+
+test('diagnostic accepts Docker VM clock readings within the round-trip and offset allowances', async () => {
+  const { capture, check } = await fixture();
+  capture.clock.end = { ...capture.clock.end, hostAfterMs: at + 45_200, vmMs: at + 45_200, offsetMs: 100, roundTripMs: 200 };
+  const result = check();
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.checks.find(row => row.metric === 'Collector integrity')?.status, 'EVALUATED');
+});
+
+test('diagnostic reports a too-slow Docker VM clock reading at either arm boundary', async () => {
+  for (const boundary of ['start', 'end'] as const) {
+    const { capture, check } = await fixture();
+    const reading = capture.clock[boundary];
+    reading.hostAfterMs = reading.hostBeforeMs + 201;
+    reading.vmMs = reading.hostBeforeMs + 250;
+    reading.roundTripMs = 201;
+    reading.offsetMs = 149.5;
+    const result = check();
+    assert.deepEqual(result.problems, [`host vs Docker VM clock reading too slow at arm ${boundary} (round trip 201 ms)`]);
+    assert.equal(result.checks.find(row => row.metric === 'Collector integrity')?.status, 'NOT EVALUATED');
+  }
+});
+
 test('diagnostic rejects a 2 s Docker VM clock offset at either arm boundary', async () => {
   for (const [boundary, offsetMs] of [['start', 2000], ['end', -2000]] as const) {
     const { capture, check } = await fixture();
@@ -255,6 +287,8 @@ test('diagnostic report labels main-timeline sends and excludes Topic sends and 
     metric: 'Main-timeline sends send_topic_record no-op hook on the main timeline', status: 'EVALUATED', reasons: [],
   });
   const markdown = renderDiagnostic([{ step, checks, clock }], [], true, 'all');
+  for (const boundary of ['start', 'end'])
+    assert.ok(markdown.includes(`Docker VM minus host clock offset at arm ${boundary} was 0.0 ms (round trip 20 ms).`));
   assert.match(markdown, /Main-timeline sends send_topic_record no-op hook on the main timeline/);
   assert.match(markdown, /NOT EVALUATED\*\* — send into a Topic/);
   assert.match(markdown, /NOT EVALUATED\*\* — send-time topics_last_seq update/);

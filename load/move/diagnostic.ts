@@ -110,9 +110,12 @@ function sampleContainers(stack: Stack, k6: string) {
   };
   tick();
   const timer = setInterval(tick, 1000);
-  return { async stop(window: Window) {
+  const pause = async () => {
     clearInterval(timer);
     await pending;
+  };
+  return { pause, async stop(window: Window) {
+    await pause();
     const scoped = samples.filter(sample => sample.at >= window.start && sample.at <= window.end);
     const summary = Object.fromEntries(names.map(name => {
       const present = scoped.flatMap(s => s.containers[name] ?? []);
@@ -169,19 +172,36 @@ function collectorFailure(name: string, error: unknown) {
   return `${name}: ${reason}`;
 }
 
+type VmClockReading = { hostBeforeMs: number; hostAfterMs: number; vmMs: number };
+
+export function selectVmClockReading(readings: readonly VmClockReading[]) {
+  const roundTrip = (reading: VmClockReading) => reading.hostAfterMs - reading.hostBeforeMs;
+  let best = readings[0];
+  if (!best) return null;
+  for (const reading of readings.slice(1)) {
+    if (roundTrip(reading) < roundTrip(best)) best = reading;
+  }
+  const roundTripMs = roundTrip(best);
+  return { ...best, offsetMs: best.vmMs - (best.hostBeforeMs + roundTripMs / 2),
+    roundTripMs, readingCount: readings.length };
+}
+
 async function sampleVmClock(app: string, boundary: 'start' | 'end', failures: string[]) {
-  const hostBeforeMs = Date.now();
+  const readings: VmClockReading[] = [];
   try {
-    const { stdout } = await exec('docker', ['exec', app, 'date', '+%s%3N'], { timeout: 5000 });
-    const hostAfterMs = Date.now();
-    const raw = stdout.trim();
-    const vmMs = Number(raw);
-    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(vmMs) || hostAfterMs < hostBeforeMs) {
-      failures.push(`Docker VM clock at arm ${boundary}: invalid clock reading`);
-      return null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const hostBeforeMs = Date.now();
+      const { stdout } = await exec('docker', ['exec', app, 'date', '+%s%3N'], { timeout: 5000 });
+      const hostAfterMs = Date.now();
+      const raw = stdout.trim();
+      const vmMs = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(vmMs) || hostAfterMs < hostBeforeMs) {
+        failures.push(`Docker VM clock at arm ${boundary}: invalid clock reading`);
+        return null;
+      }
+      readings.push({ hostBeforeMs, hostAfterMs, vmMs });
     }
-    // Use the midpoint of the host timestamps to account for the Docker round trip.
-    return { hostBeforeMs, hostAfterMs, vmMs, offsetMs: vmMs - (hostBeforeMs + hostAfterMs) / 2 };
+    return selectVmClockReading(readings);
   } catch (error) {
     failures.push(collectorFailure(`Docker VM clock at arm ${boundary}`, error));
     return null;
@@ -202,9 +222,10 @@ export async function captureDiagnostic(stack: Stack, name: string, metricsFile:
   const db = samplePostgres(stack);
   const resources = sampleContainers(stack, name);
   return { async finish(window: Window, monotonicMs: number, steady?: Window) {
-    const [end, postgres, containers] = await Promise.all([
-      sampleVmClock(stack.app, 'end', failures), db.stop(), resources.stop(window),
-    ]);
+    // Let any in-flight cgroup docker exec finish before timing the clock commands.
+    await resources.pause();
+    const end = await sampleVmClock(stack.app, 'end', failures);
+    const [postgres, containers] = await Promise.all([db.stop(), resources.stop(window)]);
     const since = new Date((anchor?.at ?? window.start) - 1000).toISOString();
     const [app, generator, statements] = await Promise.allSettled([
       exec('docker', ['logs', '--timestamps', '--since', since, stack.app], { timeout: 15000, maxBuffer: 128 * 1024 * 1024 })

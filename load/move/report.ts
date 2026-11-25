@@ -51,7 +51,11 @@ export function renderDiagnostic(arms: { step: Step; problem?: string; checks: D
     ...arms.flatMap(arm => [
       `## ${stepId(arm.step)}`, '',
       ...(arm.clock ? [`Wall-clock elapsed ${arm.clock.wallMs.toFixed(1)} ms, monotonic elapsed ${arm.clock.monotonicMs.toFixed(1)} ms, drift ${arm.clock.driftMs.toFixed(1)} ms.`, ''] : []),
-      ...(arm.clock ? [`Docker VM minus host clock offset (ms) was ${arm.clock.start?.offsetMs.toFixed(1) ?? 'unavailable'} at arm start and ${arm.clock.end?.offsetMs.toFixed(1) ?? 'unavailable'} at arm end.`, ''] : []),
+      ...(arm.clock ? (['start', 'end'] as const).map(boundary => {
+        const reading = arm.clock?.[boundary];
+        return `Docker VM minus host clock offset at arm ${boundary} ${reading ?
+          `was ${reading.offsetMs.toFixed(1)} ms (round trip ${reading.roundTripMs} ms)` : 'was unavailable'}.`;
+      }).concat('') : []),
       ...(arm.problem ? [`**NOT EVALUATED** — Arm attribution (${arm.problem}).`, ''] : []),
       ...arm.checks.map(row => `- **${row.status}** — ${row.metric}${row.reasons.length ? ` (${row.reasons.join('; ')})` : ''}`),
       '',

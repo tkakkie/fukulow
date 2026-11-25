@@ -56,7 +56,10 @@ export function reconcileDiagnostic(p: Plan, step: Step, selection: DiagnosticSe
     Math.abs(clock.driftMs) > clockAllowanceMs ? ['wall-clock vs monotonic elapsed drift or missing clock record'] : [];
   for (const boundary of ['start', 'end'] as const) {
     const reading = clock?.[boundary];
-    if (!reading || !Number.isFinite(reading.offsetMs)) clockProblems.push(`missing host vs Docker VM clock reading at arm ${boundary}`);
+    if (!reading || !Number.isFinite(reading.offsetMs) || !Number.isFinite(reading.roundTripMs) || reading.roundTripMs < 0)
+      clockProblems.push(`missing host vs Docker VM clock reading at arm ${boundary}`);
+    else if (reading.roundTripMs / 2 > clockAllowanceMs)
+      clockProblems.push(`host vs Docker VM clock reading too slow at arm ${boundary} (round trip ${reading.roundTripMs} ms)`);
     else if (Math.abs(reading.offsetMs) > clockAllowanceMs)
       clockProblems.push(`host vs Docker VM clock offset at arm ${boundary} exceeds ${clockAllowanceMs} ms`);
   }
