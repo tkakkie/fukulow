@@ -1859,3 +1859,22 @@ Result: **Target 1 MET on both routes. Target 2 MET in every other cell.** MAC-R
 - `fp-evaluation.json` `84136e83…`
 
 Reproduce each arm with `FIRST_PAINT_IMAGE=fukulow-978:<arm> FIRST_PAINT_RUNS=5 node web/scripts/first-paint.ts`, interleaved as above.
+
+## Ubuntu host qualification (#796, 2026-11-25)
+
+Superseded summary from `docs/measurements.md`, kept verbatim:
+
+> **#796:** first FAIL stands. Control INVALID (F1 CPU 0). Option A `e54d8d0a` STOPped at idle reference 1 (CPU 6 755 ms, CPU 0 586 ms per 120 s). Each stage needs a go. Go B needs reviewed floors.
+
+Formal qualification: three runs, each once with no rerun, at harness `2b441bd9`. Each run had its own go (Go B). `stability.ts --stage formal` against the frozen floors gave PASS, with no reasons. The limits are pre-registered in `load/sql-probes/519-unread-counts/stability-chain.ts` and were unchanged.
+
+| Run | current TPS | current WAL B/send | final TPS | final WAL B/send | max Tctl |
+|---|---|---|---|---|---|
+| formal-1 | 7,420.4 | 1,787.2 | 6,209.9 | 2,025.8 | 52.3 °C |
+| formal-2 | 7,369.8 | 1,787.5 | 6,194.9 | 2,021.9 | 53.6 °C |
+| formal-3 | 7,413.1 | 1,787.2 | 6,200.1 | 2,027.8 | 53.6 °C |
+
+- **Spread.** TPS spread was 0.68 % for current and 0.24 % for final, against a 5 % limit. WAL/send spread was 0.017 % for current and 0.29 % for final, against a 2 % limit.
+- **Starting temperatures.** formal-1 started from a cold idle host: the cool-down gate read 18.4 °C and the host record read 18.8 °C. formal-2 and formal-3 started at 45–46 °C.
+- **Clean-up.** Every run left 0 containers.
+- **Evidence.** Result: [comment 7164817955](https://github.com/tkakkie/fukulow/issues/796#issuecomment-7164817955). Report SHA-256 `cb639ff1…`, kept on the host.

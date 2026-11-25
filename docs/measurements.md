@@ -9,11 +9,11 @@ Raw logs, artifact directories and local paths outside Git may be gone ([2026-11
 
 ## Measurement hosts (#796)
 
-- **Mac (M5):** formal. #689, #519 and #426 B7 keep Mac conditions and results.
-- **Ubuntu (Zen 5/Zen 5c):** investigation until #796 PASS, then formal and Mac for development. No Mac comparison or gate.
+- **Mac (M5):** development; only #689, #519 and #426 B7 keep existing Mac conditions and results.
+- **Ubuntu (Zen 5/Zen 5c):** formal since #796 PASS (2026-11-25). No Mac comparison or gate.
 - **Ubuntu:** AC, masked sleep, performance governor, held updates, HOST-BUSY, fixed CPU sets, pre/post records. Boost on except #796 cooling.
-- **#796:** first FAIL stands. Control INVALID (F1 CPU 0). Option A `e54d8d0a` STOPped at idle reference 1 (CPU 6 755 ms, CPU 0 586 ms per 120 s). Each stage needs a go. Go B needs reviewed floors. [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
-- Move series only with fresh Ubuntu baselines and fixed criteria, never for Mac failures.
+- **#796 PASS:** 3/3 formal runs valid at `2b441bd9`; spread TPS ≤ 0.68 % (limit 5 %), WAL/send ≤ 0.29 % (limit 2 %). [Full record](../load/measurements-archive.md#ubuntu-host-qualification-796-2026-11-25) · [Harness](../load/harness-core/README.md#796-frequency-validity-v3)
+- Move series only with fresh Ubuntu baselines and criteria fixed first, never for Mac failures. First: #515.
 
 ## Topic projection paging (#137)
 
