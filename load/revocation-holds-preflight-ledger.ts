@@ -25,22 +25,25 @@ export function requireRecordedLedger(preflightFile: string, ledger: string) {
   }
 }
 
+// Every preflight is also written to the fixed host ledger, so one run through --preflight-ledger cannot hide a failure
+// from a stage that reads the other ledger: SA2 requires the pass to be the latest entry in both.
 export async function recordPreflight<T extends Result>(
   ledger: string, output: string, key: HostSession, readIdentity: () => Promise<SessionIdentity>,
-  run: (identity: SessionIdentity, saveProgress: (result: T) => void) => Promise<T>,
+  run: (identity: SessionIdentity, saveProgress: (result: T) => void) => Promise<T>, hostLedger = ledger,
 ) {
   const id = randomUUID();
   const artifact = join(output, 'preflight.json');
+  const ledgers = [...new Set([ledger, hostLedger])];
   const append = (status: Status, artifactSha256?: string) => {
     const entry: Entry = { ...key, id, status, at: new Date().toISOString(), artifactSha256 };
-    appendFileSync(ledger, `${JSON.stringify(entry)}\n`, { flush: true });
+    for (const file of ledgers) appendFileSync(file, `${JSON.stringify(entry)}\n`, { flush: true });
   };
   const save = (result: T) => {
     const content = JSON.stringify({ ...result, id, ledger }, null, 2);
     writeFileSync(artifact, content, { flush: true });
     return hash('sha256', content);
   };
-  mkdirSync(dirname(ledger), { recursive: true });
+  for (const file of ledgers) mkdirSync(dirname(file), { recursive: true });
   // A crash or interruption must supersede a previous pass before any provisioning starts.
   append('started');
   let result: T;
@@ -60,17 +63,19 @@ export async function recordPreflight<T extends Result>(
   return result;
 }
 
-export function loadLedgerPreflight(ledger: string, artifact: string, key: HostSession): unknown {
-  const entries: Entry[] = readFileSync(ledger, 'utf8').trimEnd().split('\n').map(line => {
-    const entry: Entry = JSON.parse(line);
-    if (typeof entry?.hostname !== 'string' || typeof entry.session !== 'string' ||
-      !['started', 'failed', 'passed'].includes(entry.status)) throw new Error('Invalid preflight ledger entry');
-    return entry;
-  });
-  const latest = entries.findLast(entry => entry.hostname === key.hostname && entry.session === key.session);
-  if (latest?.status !== 'passed') return;
+export function loadLedgerPreflight(ledger: string, artifact: string, key: HostSession, hostLedger = ledger): unknown {
   const content = readFileSync(artifact);
-  if (latest.artifactSha256 !== hash('sha256', content)) return;
+  const sha256 = hash('sha256', content);
+  for (const file of new Set([ledger, hostLedger])) {
+    const entries: Entry[] = readFileSync(file, 'utf8').trimEnd().split('\n').map(line => {
+      const entry: Entry = JSON.parse(line);
+      if (typeof entry?.hostname !== 'string' || typeof entry.session !== 'string' ||
+        !['started', 'failed', 'passed'].includes(entry.status)) throw new Error('Invalid preflight ledger entry');
+      return entry;
+    });
+    const latest = entries.findLast(entry => entry.hostname === key.hostname && entry.session === key.session);
+    if (latest?.status !== 'passed' || latest.artifactSha256 !== sha256) return;
+  }
   const result = JSON.parse(content.toString('utf8'));
   if (result?.ledger === ledger) return result;
 }

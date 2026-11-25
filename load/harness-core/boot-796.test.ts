@@ -298,7 +298,7 @@ test('install and check on the live root refuse to run without --measurement-use
   const cli = (...args: string[]) => spawnSync(process.execPath, [join(import.meta.dirname, 'boot-796.ts'), ...args],
     { encoding: 'utf8', env: { ...process.env, PATH: '', SUDO_USER: 'sudo-caller' }, timeout: 10_000 });
   for (const command of ['install', 'check']) {
-    for (const args of [[command], [command, '--root', '/']]) {
+    for (const args of [[command], [command, '--root', '/'], [command, '--root', '/.'], [command, '--root', '//'], [command, '--root', '/tmp/..']]) {
       const result = cli(...args);
       assert.equal(result.status, 2, args.join(' '));
       assert.match(result.stderr, new RegExp(`${command} on the live host needs --measurement-user USER`));

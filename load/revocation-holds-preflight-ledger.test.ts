@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { hash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -136,4 +137,37 @@ test('a preflight publishes passing evidence only after confirming unchanged pro
   assert.equal(JSON.parse(readFileSync(artifact, 'utf8')).passed, false);
   assert.equal(entries().at(-1).status, 'failed');
   assert.throws(() => readback(artifact), SetupAbort);
+});
+
+test('a preflight through either ledger is mirrored into the host ledger, so a later failure through the other is never missed', async t => {
+  const { ledger: host, stage } = outputs(t);
+  const override = `${host}.override`;
+  const authorizes = (selected: string, artifact: string) =>
+    requirePreflight({ kind: 'measured', identity, ledger: selected, hostLedger: host, preflightFile: artifact });
+  const viaHost = stage('via-host');
+  await recordPreflight(host, viaHost.output, identity, async () => identity, pass, host);
+  assert.equal(authorizes(host, viaHost.artifact), preflightReadbackValue);
+  await recordPreflight(override, stage('fail-override').output, identity, async () => identity, fail, host);
+  assert.throws(() => authorizes(host, viaHost.artifact), SetupAbort, 'failure through the override');
+
+  const viaOverride = stage('via-override');
+  await recordPreflight(override, viaOverride.output, identity, async () => identity, pass, host);
+  assert.equal(authorizes(override, viaOverride.artifact), preflightReadbackValue);
+  await recordPreflight(host, stage('fail-host').output, identity, async () => identity, fail, host);
+  assert.throws(() => authorizes(override, viaOverride.artifact), SetupAbort, 'failure through the host ledger');
+});
+
+test('every later stage refuses a mismatched ledger before it creates its output', async t => {
+  const { ledger, stage } = outputs(t);
+  const { output, artifact } = stage('first');
+  await recordPreflight(ledger, output, identity, async () => identity, pass);
+  const cli = join(import.meta.dirname, 'revocation-holds.ts');
+  for (const extra of [['--rehearsal'], ['--overhead'], [], ['--overhead-summary', join(output, 'summary.json')]]) {
+    const out = join(output, `later-${extra.join('') || 'formal'}`);
+    const result = spawnSync(process.execPath, [cli, '--out', out, '--session', identity.session, '--preflight-result', artifact,
+      '--preflight-ledger', `${ledger}.other`, ...extra], { encoding: 'utf8', timeout: 10_000 });
+    assert.notEqual(result.status, 0, extra.join(' '));
+    assert.match(result.stderr, /Preflight ledger .* differs from .* recorded in/, extra.join(' '));
+    assert.equal(existsSync(out), false, extra.join(' '));
+  }
 });

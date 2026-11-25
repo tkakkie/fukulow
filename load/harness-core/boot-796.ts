@@ -1,10 +1,10 @@
 // Installs or removes the #796 boot setup (#996) under a filesystem root; the maintainer runs it once with sudo.
 // Usage: sudo "$(command -v node)" load/harness-core/boot-796.ts install --measurement-user USER | uninstall
-//        node load/harness-core/boot-796.ts check   (unprivileged; exit 0 when installed and current)
+//        node load/harness-core/boot-796.ts check --measurement-user USER   (unprivileged; exit 0 when installed and current)
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
   defaultTargetLink, grubTarget, hostFiles, hostService, irqbalanceLink, layoutProblems, multiUserTarget, polkitDir,
@@ -169,7 +169,8 @@ if (import.meta.main) {
     const { values } = parseArgs({ args: rest, options: {
       root: { type: 'string', default: '/' }, 'measurement-user': { type: 'string' },
     } });
-    root = values.root;
+    // An alias such as /. or // is still the live host.
+    root = realpathSync(resolve(values.root));
     measurementUser = values['measurement-user'];
     if (!['install', 'uninstall', 'check'].includes(command) || !root || measurementUser === '') throw new Error();
   } catch {

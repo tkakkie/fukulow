@@ -61,11 +61,13 @@ if (preflight && (!session || args.includes('--preflight-result'))) throw new Er
 const preflightFile = value('--preflight-result');
 const options = parseOptions(overhead ? [...args, '--rehearsal'] : args);
 const mode = preflight ? 'preflight' : overhead ? 'overhead' : options.rehearsal ? 'rehearsal' : 'formal';
-const linuxPlacement = placementEnabled(platform(), mode);
-const output = outsideCheckout(options.out);
 const host = hostname();
 const ledger = outsideCheckout(preflightLedgerPath(host, value('--preflight-ledger')));
+const hostLedger = outsideCheckout(preflightLedgerPath(host));
+// Refused before anything else, including the Linux placement check, so every later stage fails the same way.
 if (preflightFile) requireRecordedLedger(preflightFile, ledger);
+const linuxPlacement = placementEnabled(platform(), mode);
+const output = outsideCheckout(options.out);
 if (existsSync(output)) throw new Error('Output directory already exists');
 mkdirSync(output, { recursive: true });
 
@@ -104,7 +106,7 @@ async function runLaterStage() {
     : undefined;
   const environment = environmentFor(identity, correctionKb);
   save('environment.json', environment);
-  const context = contextFor({ kind: 'measured', identity, ledger, preflightFile });
+  const context = contextFor({ kind: 'measured', identity, ledger, hostLedger, preflightFile });
   if (overhead) {
     const samples: ReturnType<typeof overheadSample>[] = [];
     const errors: { id: string; message: string }[] = [];
@@ -195,7 +197,7 @@ try {
         console.log(`#668 preflight ${id}`);
         return runAttempt({ ...context, preflightVolume: trial.volume }, trial.run, id);
       }, saveProgress);
-    });
+    }, hostLedger);
     console.log(`#668 preflight ${result.passed ? 'passed' : 'failed'}`);
     if (!result.passed) process.exitCode = 1;
   } else await runLaterStage();
