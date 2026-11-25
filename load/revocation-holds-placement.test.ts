@@ -11,14 +11,18 @@ import { checkPlacement, clientScope, placementEnabled, postgresContainer, recor
 import { SetupAbort } from './revocation-holds-setup.ts';
 
 const cgroup = `/${measurementSlice}/run-test.scope`;
-function procFiles(affinity: number[], cpuset = measuredCpus, scope = cgroup) {
+function missing(path: string) {
+  return Object.assign(new Error(`ENOENT: no such file or directory, open '${path}'`), { code: 'ENOENT' });
+}
+
+function procFiles(affinity: number[], cpuset = measuredCpus, scope = cgroup, cpusetAt = scope) {
   const files: Record<string, string> = {
     '/proc/42/status': `Name:\ttest\nCpus_allowed_list:\t${cpuList(affinity)}\n`,
     '/proc/42/cgroup': `0::${scope}\n`,
-    [`/sys/fs/cgroup${scope}/cpuset.cpus.effective`]: cpuList(cpuset),
+    [`/sys/fs/cgroup${cpusetAt}/cpuset.cpus.effective`]: cpuList(cpuset),
   };
   return (path: string) => {
-    if (files[path] === undefined) throw new Error(`missing ${path}`);
+    if (files[path] === undefined) throw missing(path);
     return files[path];
   };
 }
@@ -49,7 +53,7 @@ test('placement reads back each expected affinity and rejects an incorrect slice
     ['server', sets796.server], ['postgres', sets796.server], ['client', sets796.client], ['helper', sets796.client],
   ] as const) {
     const cpuset = role === 'postgres' ? sets796.server : measuredCpus;
-    assert.deepEqual(checkPlacement(role, 42, procFiles(affinity, cpuset)), { pid: 42, cgroup, affinity, cpuset });
+    assert.deepEqual(checkPlacement(role, 42, procFiles(affinity, cpuset)), { pid: 42, cgroup, affinity, cpuset, cpusetCgroup: cgroup });
     assert.throws(() => checkPlacement(role, 42, procFiles(affinity.slice(1), cpuset)), /effective affinity/);
     assert.throws(() => checkPlacement(role, 42, procFiles(affinity, cpuset, '/user.slice/run-test.scope')), /outside fukulow796/);
     assert.throws(() => checkPlacement(role, undefined, procFiles(affinity, cpuset)), /no process id/);
@@ -59,6 +63,22 @@ test('placement reads back each expected affinity and rejects an incorrect slice
   assert.throws(() => checkPlacement('postgres', 42, procFiles(sets796.server)), /effective cpuset/);
 });
 
+test('a scope without its own cpuset controller reads the nearest ancestor up to the measurement slice only', () => {
+  const slice = `/${measurementSlice}`;
+  const scope = `${slice}/fukulow668-client-42.scope`;
+  assert.deepEqual(checkPlacement('client', 42, procFiles(sets796.client, measuredCpus, scope, slice)),
+    { pid: 42, cgroup: scope, affinity: sets796.client, cpuset: measuredCpus, cpusetCgroup: slice });
+  assert.throws(() => checkPlacement('client', 42, procFiles(sets796.client, [...measuredCpus, sets796.housekeeping[0]], scope, slice)),
+    /effective cpuset/);
+  // The cgroup root is above the slice and never counts as the scope's cpuset.
+  assert.throws(() => checkPlacement('client', 42, procFiles(sets796.client, measuredCpus, scope, '')), /no cpuset\.cpus\.effective/);
+  const denied = procFiles(sets796.client, measuredCpus, scope, slice);
+  assert.throws(() => checkPlacement('client', 42, path => {
+    if (path.endsWith('.scope/cpuset.cpus.effective')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    return denied(path);
+  }), /EACCES/);
+});
+
 test('startup records effective placement and aborts setup on mismatch', t => {
   const dir = mkdtempSync(join(tmpdir(), 'revocation-placement-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -66,7 +86,7 @@ test('startup records effective placement and aborts setup on mismatch', t => {
   check('client', () => 42);
   assert.throws(() => check('server', () => 42), SetupAbort);
   const record = JSON.parse(readFileSync(join(dir, 'environment.json'), 'utf8'));
-  assert.deepEqual(record.placement.client, { pid: 42, cgroup, affinity: sets796.client, cpuset: measuredCpus });
+  assert.deepEqual(record.placement.client, { pid: 42, cgroup, affinity: sets796.client, cpuset: measuredCpus, cpusetCgroup: cgroup });
   assert.match(record.placement.server.error, /server effective affinity/);
   assert.doesNotThrow(() => recordPlacement(dir, false, () => { throw new Error('unexpected /proc read'); })('client', () => 42));
 });

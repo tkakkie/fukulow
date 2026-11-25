@@ -8,7 +8,7 @@ import { SetupAbort } from './revocation-holds-setup.ts';
 export { postgresServerContainer as postgresContainer } from './harness-core/frequency-container-args.ts';
 
 type Role = 'client' | 'server' | 'helper' | 'postgres';
-type Placement = { pid: number; cgroup: string; affinity: number[]; cpuset: number[] };
+type Placement = { pid: number; cgroup: string; affinity: number[]; cpuset: number[]; cpusetCgroup: string };
 const readFile = (file: string) => readFileSync(file, 'utf8');
 const cpuSet = (role: Role) => sets796[role === 'client' || role === 'helper' ? 'client' : 'server'];
 
@@ -19,14 +19,29 @@ export function checkPlacement(role: Role, pid: number | undefined, read = readF
   if (!cgroup || !cgroup.startsWith(`/${measurementSlice}/`) || cgroup.split('/').some(part => part === '.' || part === '..')) {
     throw new Error(`${role} affinity ${cpuList(affinity)} in cgroup ${cgroup ?? 'missing'} is outside ${measurementSlice}`);
   }
-  const cpuset = parseCpuList(read(`/sys/fs/cgroup${cgroup}/cpuset.cpus.effective`).trim());
+  const { cpuset, cpusetCgroup } = effectiveCpuset(cgroup, read);
   const expected = cpuSet(role);
   if (cpuList(affinity) !== cpuList(expected)) throw new Error(`${role} effective affinity ${cpuList(affinity)} differs from ${cpuList(expected)}`);
   if (cpuset.some(cpu => !measuredCpus.includes(cpu)) || expected.some(cpu => !cpuset.includes(cpu)) ||
     (role === 'postgres' && cpuList(cpuset) !== cpuList(expected))) {
     throw new Error(`${role} effective cpuset ${cpuList(cpuset)} does not match #796 placement`);
   }
-  return { pid, cgroup, affinity, cpuset };
+  return { pid, cgroup, affinity, cpuset, cpusetCgroup };
+}
+
+// systemd enables the cpuset controller only for units that set AllowedCPUs, so a
+// fukulow668 scope has no cpuset file and runs on its nearest ancestor's effective CPUs.
+function effectiveCpuset(cgroup: string, read: (file: string) => string) {
+  for (let group = cgroup; group.startsWith(`/${measurementSlice}`); group = group.slice(0, group.lastIndexOf('/'))) {
+    let text: string;
+    try { text = read(`/sys/fs/cgroup${group}/cpuset.cpus.effective`); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    return { cpuset: parseCpuList(text.trim()), cpusetCgroup: group };
+  }
+  throw new Error(`no cpuset.cpus.effective in ${cgroup} or its ancestors up to /${measurementSlice}`);
 }
 
 export function placementEnabled(platform: string, mode: 'preflight' | 'rehearsal' | 'overhead' | 'formal') {
