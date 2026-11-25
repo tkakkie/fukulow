@@ -61,6 +61,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
             )
             .with_state(f.state.clone());
         let server = Server::start(router).await;
+        // The duplicate branch has no pause point: a second Subscribe reaches it.
         let gate =
             (phase != "duplicate_generation").then(|| access_loss::gate(f.channel, phase, 0));
         let mut socket = server.connect(&f.token).await;
@@ -109,7 +110,7 @@ async fn connection_database_failures_emit_once_with_fixed_operation_and_no_deta
         let close_index = events
             .iter()
             .position(|event| event["fields"]["event"] == "websocket_closed")
-            .unwrap();
+            .unwrap_or_else(|| panic!("{phase}: {}", output.text()));
         assert!(failure_index < close_index, "{phase}: {}", output.text());
         assert_eq!(
             failure["fields"],
