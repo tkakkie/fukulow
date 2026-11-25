@@ -50,6 +50,7 @@
     channelId = '',
     selfId = '',
     viewSelected = true,
+    awaitingInitialSenders = false,
     organizationUnavailable = false,
     reconnecting = false,
     sendDisabled = false,
@@ -65,6 +66,7 @@
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
+    onpositioningchange,
   }: {
     channel: ChannelSync
     topics?: TopicsAdapter | null
@@ -73,6 +75,7 @@
     channelId?: string
     selfId?: string
     viewSelected?: boolean
+    awaitingInitialSenders?: boolean
     organizationUnavailable?: boolean
     reconnecting?: boolean
     sendDisabled?: boolean
@@ -88,6 +91,7 @@
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
+    onpositioningchange?: (positioning: boolean) => void
   } = $props()
 
   const currentChannelId = $derived(channelId)
@@ -154,7 +158,7 @@
       : search ? (!search.view || search.view.status === 'loading' ? 'loading' : 'ready')
       : s.status === 'error' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.error)
         ? 'error'
-        : s.status === 'loading' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.loading)
+        : s.status === 'loading' || Boolean(tState && s.status === 'ready' && tState.main.asOfSeq === undefined && tState.main.loading) || awaitingInitialSenders
           ? 'loading'
           : 'ready',
   )
@@ -200,7 +204,7 @@
   }
 
   function reportPresented() {
-    if (!unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
+    if (awaitingInitialSenders || !unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
     if (!isDocumentVisible()) return
     const currentEntry = uState?.entry
     if (!currentEntry || currentEntry.scope.topicId !== null) return
@@ -245,6 +249,7 @@
   }
 
   function handleScroll() {
+    if (awaitingInitialSenders) return
     handleTimelineContainerScroll(scrollEl, scrollController)
     topics?.setMainPinned(scrollController.get().pinned)
     reportPresented()
@@ -297,6 +302,10 @@
   let requestedMainFor = ''
   let currentVisitId: symbol | undefined
   let enteredTarget = false
+
+  $effect(() => {
+    onpositioningchange?.(positioning)
+  })
 
   $effect(() => () => scrollController.destroy())
 
@@ -407,7 +416,7 @@
       entryPositionAbandoned = false
       pendingScrollAction = null
     }
-    const displayed = isTimelineDisplayed(scrollEl, viewSelected)
+    const displayed = !awaitingInitialSenders && isTimelineDisplayed(scrollEl, viewSelected)
     const syncMessages = lines.map((line) =>
       line.kind === 'message'
         ? { id: line.message.id, created_seq: line.message.created_seq, sender: line.message.sender }
@@ -442,7 +451,7 @@
     const revealVisit = searchVisit
     void tick().then(() => {
       if (searchVisit !== revealVisit) return
-      if (!isTimelineDisplayed(scrollEl, viewSelected)) {
+      if (awaitingInitialSenders || !isTimelineDisplayed(scrollEl, viewSelected)) {
         if (
           !initialScrollApplied &&
           pendingScrollAction &&
@@ -595,7 +604,7 @@
     bind:this={scrollEl}
     onscroll={handleScroll}
   >
-    {#if !organizationUnavailable && !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && lines.length === 0 && mainPending.length === 0}
+    {#if !organizationUnavailable && !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && (awaitingInitialSenders || (lines.length === 0 && mainPending.length === 0))}
       <Skeleton rows={4} label="メッセージを読み込み中" />
     {/if}
 
@@ -616,7 +625,7 @@
       </div>
     {/if}
 
-    {#if lines.length > 0 || mainPending.length > 0}
+    {#if !awaitingInitialSenders && (lines.length > 0 || mainPending.length > 0)}
       <VirtualRows
         class="timeline-list"
         bind:this={rowWindow}

@@ -52,6 +52,7 @@
     topicStatus = 'idle',
     selfId = '',
     viewSelected = true,
+    awaitingInitialSenders = false,
     organizationUnavailable = false,
     sendDisabled = false,
     reconnecting = false,
@@ -66,6 +67,7 @@
     ongoToChannelList,
     onrecheckmembership,
     onswitchorganization,
+    onpositioningchange,
   }: {
     channel: ChannelSync
     topics: TopicsAdapter
@@ -77,6 +79,7 @@
     topicStatus?: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
     selfId?: string
     viewSelected?: boolean
+    awaitingInitialSenders?: boolean
     organizationUnavailable?: boolean
     sendDisabled?: boolean
     reconnecting?: boolean
@@ -91,6 +94,7 @@
     ongoToChannelList?: () => void
     onrecheckmembership?: () => void
     onswitchorganization?: () => void
+    onpositioningchange?: (positioning: boolean) => void
   } = $props()
 
   const currentChannelId = $derived(channelId)
@@ -203,7 +207,7 @@
   }
 
   function reportPresented() {
-    if (!unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
+    if (awaitingInitialSenders || !unread || !isTimelineDisplayed(scrollEl, viewSelected) || targetUnavailable) return
     if (!isDocumentVisible()) return
     const currentEntry = uState?.entry
     if (!currentEntry || currentEntry.scope.topicId !== topicId) return
@@ -248,6 +252,7 @@
   }
 
   function handleScroll() {
+    if (awaitingInitialSenders) return
     handleTimelineContainerScroll(scrollEl, scrollController)
     topics.setTopicPinned(topicId, scrollController.get().pinned)
     reportPresented()
@@ -296,6 +301,10 @@
     void topics.retrySummary(topicId).catch(console.error)
     void topics.loadTopic(topicId).catch(console.error)
   }
+
+  $effect(() => {
+    onpositioningchange?.(positioning)
+  })
 
   $effect(() => () => scrollController.destroy())
   onMount(() => {
@@ -404,7 +413,7 @@
       : search ? (!search.view || search.view.status === 'loading' ? 'loading' : 'ready')
       : topicStatus === 'error' || (view.error && view.messages.length === 0)
         ? 'error'
-        : (topicStatus === 'loading' || view.loading) && view.messages.length === 0
+        : ((topicStatus === 'loading' || view.loading) && view.messages.length === 0) || awaitingInitialSenders
           ? 'loading'
           : 'ready',
   )
@@ -426,7 +435,7 @@
       entryPositionAbandoned = false
       pendingScrollAction = null
     }
-    const displayed = isTimelineDisplayed(scrollEl, viewSelected)
+    const displayed = !awaitingInitialSenders && isTimelineDisplayed(scrollEl, viewSelected)
     const messages = view.messages
     const pendingIds = pending.map((p) => p.clientMessageId)
     // Positioning counts as loading so the controller's loading timeout bounds it; a hidden view defers positioning
@@ -453,7 +462,7 @@
     const revealVisit = searchVisit
     void tick().then(() => {
       if (searchVisit !== revealVisit) return
-      if (!isTimelineDisplayed(scrollEl, viewSelected)) {
+      if (awaitingInitialSenders || !isTimelineDisplayed(scrollEl, viewSelected)) {
         if (
           !initialScrollApplied &&
           pendingScrollAction &&
@@ -605,7 +614,7 @@
         title="このトピックは利用できません。"
         description="削除されたか、URLが正しくない可能性があります。"
       />
-    {:else if !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && view.messages.length === 0 && pending.length === 0}
+    {:else if !positioning && effectiveStatus === 'loading' && !scrollView.loadingTimedOut && (awaitingInitialSenders || (view.messages.length === 0 && pending.length === 0))}
       <Skeleton rows={4} label="トピックを読み込み中" />
     {:else}
       {#if topicUnavailable}

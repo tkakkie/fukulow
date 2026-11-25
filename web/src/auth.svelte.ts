@@ -171,11 +171,10 @@ export function createAuth(deps: AuthDeps = defaults) {
     if (members) session.holdActivity?.('members', members.activityTarget)
     stopMemberAvailability = session.sync.onUnavailable(() => members?.unavailable())
     if (session.sync.unavailable) members?.unavailable()
-    void members?.load()
     const currentMembers = members
     stopMemberRefresh = session.onMemberListRefresh?.(reason => {
       if (reason === 'access') currentMembers?.activityTarget.invalidate('access')
-      else void currentMembers?.load()
+      else void currentMembers?.refreshIfActive()
     })
     changes++
   }

@@ -85,7 +85,7 @@ Compose screens from the shared components (one per kind) in `web/src/ui/`: Butt
 - `Button` accepts optional `tabindex` (`0 | -1`) and `buttonRef` so composite widgets can exclude secondary pointer buttons from `Tab` while keeping a programmatic return-focus target.
 - `MessageRow` accepts `focusable`, `rovingTabindex` (`0 | -1`), `onrowfocus`, `onrowkeydown`, `onopenreplies(opener)`. Each timeline gives exactly one confirmed row `rovingTabindex={0}` (active, otherwise latest, §9). `Tab` enters without clearing the Composer draft. Row `Enter`/`R` passes `rowRef` as opener; clicking the inline reply Button (`tabindex={-1}`) passes `buttonRef`.
 - `Timeline`, `TopicView` and `ReplyPanel` share `createTimelineScrollController`, `measureTimelineItems`, `handleTimelineContainerScroll` and `applyTimelineScrollAction` from `web/src/timeline-scroll.ts` for pinned tracking, anchoring, own-send scroll to bottom and `新着 n件 ↓` (§8).
-- Sender labels: see §10 for deactivated authors. Use `メンバー` for unknown authors.
+- Sender labels: resolve first-page authors before display with a bounded timeout so failed or slow lookups never block display; see §10 for deactivated authors and use `メンバー` for unknown or pending authors.
 
 Render states consistently everywhere (A2-2). Each state with fixed copy is one component, and views pass only its actions (target until #835 merges).
 

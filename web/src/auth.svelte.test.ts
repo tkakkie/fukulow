@@ -397,6 +397,8 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     await signInAs(s, 'm1')
     const net = await openChannelA(s)
     const session = s.auth.session!, members = s.auth.members!
+    expect(listMembers).not.toHaveBeenCalled()
+    await members.load()
     const ch = session.sync.channel('A')
     void ch.send('pending text')
     await settle()
@@ -423,7 +425,7 @@ describe('auth adapter: session lifetime belongs to Sign in .. sign-out / 4001, 
     await vi.advanceTimersByTimeAsync(60_000)
     await settle()
     expect(lookup).toHaveBeenCalledTimes(2)
-    expect(listMembers).toHaveBeenCalledTimes(2) // Selection and initial Channel list change.
+    expect(listMembers).toHaveBeenCalledTimes(1)
     expect(net.history).toHaveLength(historyCount)
     expect(net.sends).toHaveLength(1)
     expect(net.sockets).toHaveLength(1)
@@ -1212,19 +1214,23 @@ it('Guest Organization selection and reconnect reload Members and stop old selec
     })),
   })
   await signInAs(s, 'guest')
-  expect(list).toHaveBeenCalledTimes(1)
+  expect(list).toHaveBeenCalledTimes(0)
   const old = s.nets[0]
   old.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] })); await settle()
-  expect(list).toHaveBeenCalledTimes(2)
+  expect(list).toHaveBeenCalledTimes(0)
+  s.auth.members!.activate(); await settle()
+  expect(list).toHaveBeenCalledTimes(1)
   old.subscribed('A', 0); await settle()
   old.socket.onClose(1011); await settle()
   await vi.advanceTimersByTimeAsync(1_000)
   old.socket.onReady(); await settle()
-  expect(list).toHaveBeenCalledTimes(3)
+  expect(list).toHaveBeenCalledTimes(2)
   await s.auth.selectOrganization('o'); await settle()
-  expect(list).toHaveBeenCalledTimes(4)
+  expect(list).toHaveBeenCalledTimes(2)
+  s.auth.members!.activate(); await settle()
+  expect(list).toHaveBeenCalledTimes(3)
   old.event({ type: 'channel_access_lost', channel_id: 'A' }); await settle()
-  expect(list).toHaveBeenCalledTimes(4)
+  expect(list).toHaveBeenCalledTimes(3)
   await s.auth.signOut()
 })
 
@@ -1233,7 +1239,6 @@ it('channel_access_lost alone withholds a Guest directory and fences its in-flig
   const peer = { id: 'peer', name: '佐藤', role: 'member' as const }
   const stale = deferred<Result<MemberList>>()
   const list = vi.fn<typeof listMembers>()
-    .mockResolvedValueOnce(ok({ members: [self, peer] }))
     .mockResolvedValueOnce(ok({ members: [self, peer] }))
     .mockReturnValueOnce(stale.promise)
     .mockResolvedValue(ok({ members: [self] }))
@@ -1250,9 +1255,11 @@ it('channel_access_lost alone withholds a Guest directory and fences its in-flig
     await settle()
     net.subscribed('A', 0); await settle()
     const directory = s.auth.members!
+    expect(list).toHaveBeenCalledTimes(0)
+    await directory.load()
     expect(directory.state.members).toEqual([self, peer])
     const pending = directory.load()
-    expect(list).toHaveBeenCalledTimes(3)
+    expect(list).toHaveBeenCalledTimes(2)
 
     net.event({ type: 'channel_access_lost', channel_id: 'A' })
     await settle()
@@ -1261,10 +1268,58 @@ it('channel_access_lost alone withholds a Guest directory and fences its in-flig
     stale.resolve(ok({ members: [self, peer] }))
     await pending
     expect(directory.state.members, 'after the pre-loss response').toEqual([])
-    expect(list).toHaveBeenCalledTimes(3)
+    expect(list).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(200)
     expect(directory.state.members).toEqual([self])
-    expect(list).toHaveBeenCalledTimes(4)
+    expect(list).toHaveBeenCalledTimes(3)
+  } finally { await s.auth.signOut() }
+})
+
+it('defers the Member directory through startup, initial Channel additions, connect edge, activity_ready and invalidations until activation', async () => {
+  const self = { id: 'm1', name: '自分', role: 'member' as const }
+  const list = vi.fn<typeof listMembers>(async () => ok({ members: [self] }))
+  const lookup = vi.fn<typeof lookupAuthors>(async () => ok({ identities: [{ id: 'other', name: '佐藤', deactivated: false }] }))
+  const s = stack({
+    getOrganization: async () => ok({ ...member('m1'), member: self }),
+    openMembers: (org, ended, unavailable, access) => membersAdapter(createMembers(org, ended, unavailable, {
+      listMembers: list, lookupAuthors: lookup, changeRole: vi.fn(), deactivateMember: vi.fn(), createInvite: vi.fn(), baseUrl: () => '',
+    }, access)),
+  }, true)
+  try {
+    await signInAs(s, 'm1')
+    const net = s.nets[0]
+    // Connect edge
+    net.socket.onReady(); await settle()
+    // Initial Channel additions
+    net.lists[0].resolve(ok({ history_generation: '00000000-0000-4000-8000-000000000515', channels: [channel('A')] }))
+    await settle()
+    net.subscribed('A', 0); await settle()
+    // activity_ready and later invalidations before activation
+    net.socket.onEvent({ type: 'activity_ready' })
+    net.socket.onEvent({ type: 'members_changed' })
+    net.socket.onEvent({ type: 'channel_access_gained', channel_id: 'B' })
+    net.socket.onEvent({ type: 'channel_access_revoked', channel_id: 'B' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    await settle()
+    expect(list).not.toHaveBeenCalled()
+
+    // Scoped author lookup works independently while the directory is still deferred.
+    s.auth.members!.authors.watch(['other'])
+    await settle()
+    expect(lookup).toHaveBeenCalledExactlyOnceWith('o', { ids: ['other'] })
+    expect(list).not.toHaveBeenCalled()
+
+    // Activate once; repeated activate() calls do not re-fetch.
+    s.auth.members!.activate()
+    s.auth.members!.activate()
+    await settle()
+    expect(list).toHaveBeenCalledTimes(1)
+
+    // Once active, later invalidations reload the directory normally.
+    net.socket.onEvent({ type: 'members_changed' })
+    await vi.advanceTimersByTimeAsync(200)
+    await settle()
+    expect(list).toHaveBeenCalledTimes(2)
   } finally { await s.auth.signOut() }
 })
 
