@@ -1,5 +1,5 @@
 import type { Message, TimelineItem, TimelinePage } from './api'
-import type { ChannelState } from './protocol-types'
+import type { ChannelState, MoveVersion } from './protocol-types'
 import { MAIN_MESSAGE_LIMIT } from './protocol-types'
 import { selectMainTimeline } from './topic-selectors'
 
@@ -58,6 +58,7 @@ export function extendMainSearch(window: MainSearchWindow, page: TimelinePage, d
 }
 
 export function reconcileMainSearch(window: MainSearchWindow, channel: ChannelState | undefined) {
+  if (channel && channel.mutationSeq > window.watermark) return { window, refresh: true }
   if (window.detached || window.hasNewer || !channel) return { window, refresh: false }
   const { watermark } = window
   if ((channel.streamBase ?? 0) > watermark ||
@@ -76,8 +77,20 @@ export function reconcileMainSearch(window: MainSearchWindow, channel: ChannelSt
   }
 }
 
+export function discardStaleMainRows(window: MainSearchWindow, channel: ChannelState,
+  records: readonly Message[], moves: readonly MoveVersion[]) {
+  const changes = new Map(records.map(message => [message.id, message.version]))
+  const current = (message: Message) =>
+    (channel.versions[message.id]?.[0] ?? 0) <= message.version &&
+    (changes.get(message.id) ?? 0) <= message.version &&
+    !moves.some(move => move.channel_id === message.channel_id &&
+      move.root_id === (message.reply_root_id ?? message.id) && move.version > message.version)
+  const items = window.items.filter(item => current(itemMessage(item)))
+  const tail = window.tail.filter(current)
+  return items.length === window.items.length && tail.length === window.tail.length ? window : { ...window, items, tail }
+}
+
 export function capMainSearch(window: MainSearchWindow, last: number): MainSearchWindow {
   const items = window.items.filter(item => itemPosition(item) <= last)
   return { ...window, items, detached: true, hasNewer: window.hasNewer || items.length < window.items.length }
 }
-

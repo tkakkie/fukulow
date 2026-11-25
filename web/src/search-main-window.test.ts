@@ -76,6 +76,7 @@ it('refreshes all visible Topic baselines on Move even when one Topic has more t
     expect(f.lines()).toEqual(['m:10', 't:big@158:148', 'm:160', 't:source@170:3', 'm:180', 'm:190'])
     f.put({ ...moved, topic_id: 'big', version: 251 })
     f.net.event({ ...moveEvent(251, moved.id), source_topic_id: 'source', destination_topic_id: 'big' })
+    expect(f.lines()).toEqual(['m:10', 't:big@158:148', 'm:160', 'm:180', 'm:190'])
     await flushSearch()
     expect(f.lines()).toEqual(['m:10', 'm:160', 't:source@162:2', 't:big@170:149', 'm:180', 'm:190'])
     expect(f.anchor.get()?.asOfSeq).toBe(251)
@@ -106,6 +107,8 @@ it.each(['move', 'delete'] as const)('coalesces a bounded projection refresh whe
   try {
     await f.open()
     expect(f.lines()?.some(line => line.startsWith('t:T@'))).toBe(false)
+    const seen: (string[] | undefined)[] = []
+    f.anchor.subscribe(() => seen.push(f.lines()))
     const changed = { ...off, topic_id: kind === 'move' ? 'other' : off.topic_id, version: 101, deleted: kind === 'delete' }
     f.put(changed)
     f.read.mockImplementationOnce(async () => probe.promise)
@@ -120,6 +123,7 @@ it.each(['move', 'delete'] as const)('coalesces a bounded projection refresh whe
     }
     probe.resolve(overtaken)
     await flushSearch()
+    expect(seen.every(lines => lines?.includes('m:40'))).toBe(true)
     expect(f.lines()).toContain('t:T@35:1')
     expect(f.read.mock.calls.filter(([query]) => isProbe(query))).toHaveLength(3)
     expect(f.anchor.get()?.asOfSeq).toBe(106)
@@ -228,6 +232,37 @@ it.each([
     const bodies = lines.flatMap(l => l.kind === 'message' ? [l.message.id] : [l.latestMessage.id, l.baseline?.summary.latest_message.id])
     expect(new Set(bodies.filter(Boolean)).size).toBe(100)
     expect(f.anchor.get()?.detached).toBe(true)
+  } finally { f.close() }
+})
+
+it.each(['Topic Create', 'off-window Edit', 'held Edit'] as const)('never publishes an empty view while a live %s refreshes the Channel search window', async kind => {
+  const topic = { ...record(35), topic_id: 'T' }
+  const f = searchTimelineFixture([record(20), topic, record(40), ...records(41, 75)])
+  const range = deferred<Result<TimelinePage>>()
+  try {
+    await f.open()
+    if (kind === 'Topic Create') await f.anchor.loadNewer()
+    const previous = f.lines()!
+    const seen: { lines: string[] | undefined; status?: string; watermark?: number }[] = []
+    f.anchor.subscribe(() => seen.push({ lines: f.lines(), status: f.anchor.get()?.status, watermark: f.anchor.get()?.asOfSeq }))
+    const message = kind === 'Topic Create' ? { ...record(101), topic_id: 'T' }
+      : { ...record(kind === 'held Edit' ? 20 : 75), version: 101, body: 'edited' }
+    f.put(message)
+    f.read.mockImplementation(async query => isProbe(query) ? f.serve(query) : range.promise)
+    f.net.event({ type: 'message', kind: kind === 'Topic Create' ? 'create' : 'edit', seq: 101, message })
+    await flushSearch()
+    const query = f.read.mock.lastCall![0]
+    expect(query.as_of_seq).toBe(101)
+    expect(f.anchor.get()).toMatchObject({ status: 'ready', paging: true, asOfSeq: 100 })
+    expect(f.lines()).toEqual(kind === 'held Edit' ? previous.filter(line => line !== 'm:20') : previous)
+    range.resolve(f.serve(query))
+    await flushSearch()
+    expect(f.anchor.get()).toMatchObject({ status: 'ready', paging: false, asOfSeq: 101 })
+    if (kind === 'Topic Create') expect(f.lines()?.at(-1)).toBe('t:T@101:2')
+    if (kind === 'held Edit') expect(f.anchor.get()?.messages).toContainEqual(message)
+    expect(seen.filter(view => view.watermark === 101)).toEqual([{ lines: f.lines(), status: 'ready', watermark: 101 }])
+    expect(seen.every(view => view.status === 'ready' && view.lines?.includes('m:40'))).toBe(true)
+    expect(f.cursor()).toBe(101)
   } finally { f.close() }
 })
 

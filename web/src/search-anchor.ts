@@ -4,35 +4,25 @@ import type { SearchResultTarget } from './navigation'
 import type { createSync } from './sync'
 import { createSearchRequestControl, type SearchRequest } from './search-request-control'
 import { MAIN_MESSAGE_LIMIT } from './protocol-types'
-import { readMainSearch, type MainSearchDirection as PageRead } from './search-main-read'
-import { capMainSearch, itemMessage, mainSearchBounds, mainSearchLines, reconcileMainSearch,
-  SEARCH_PAGE_SIZE as PAGE_SIZE, SEARCH_WINDOW_LIMIT, type MainSearchBounds, type MainSearchWindow } from './search-main-window'
-import type { MainTimelineLine } from './topic-selectors'
+import { initialSearchView as initial, isSearchSnapshotExpired as isExpired,
+  matchesSearchTarget as contains, type SearchAnchorView as View } from './search-anchor-view'
+import { createMainSearchAnchor } from './search-main-anchor'
+import type { MainSearchDirection as PageRead } from './search-main-read'
+import { SEARCH_PAGE_SIZE as PAGE_SIZE, SEARCH_WINDOW_LIMIT } from './search-main-window'
 
 export { SEARCH_WINDOW_LIMIT }
 const expired = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' } as const
-const isExpired = (result: Exclude<Result<unknown>, { ok: true }>) =>
-  result.kind === 'http' && result.error === 'snapshot_expired'
 const isMain = (target: SearchResultTarget) => !target.topicId && !target.replyRootId
 type Reads = {
   timeline(target: SearchResultTarget, query: ListTimelineQuery, signal?: AbortSignal): Promise<Result<TimelinePage>>
   messages(target: SearchResultTarget, query: ListMessagesQuery, signal?: AbortSignal): Promise<Result<MessagePage>>
   reply(target: SearchResultTarget, query: ReplyChainQuery, signal?: AbortSignal): Promise<Result<ReplyChainPage>>
 }
-const initial = (target: SearchResultTarget) => ({
-  target, visit: Symbol(), status: 'loading' as 'loading' | 'ready' | 'missing' | 'error',
-  lines: [] as MainTimelineLine[], messages: [] as Message[], reply: undefined as Message | undefined,
-  hasOlder: false, hasNewer: false, detached: false, paging: false, pageError: undefined as PageRead | undefined,
-  asOfSeq: undefined as number | undefined,
-})
-type View = ReturnType<typeof initial>
 type TopicRecovery = Pick<View, 'hasOlder' | 'hasNewer' | 'detached'> & { before: number; after: number }
 
 /** An authorized display projection. Only unfiltered sync can establish the Channel cursor. */
 export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: Reads) {
   let view: View | undefined
-  let mainWindow: MainSearchWindow | undefined
-  let mainRecovery: MainSearchBounds | undefined
   let topicRecovery: TopicRecovery | undefined
   let before = 0, after = 0
   let refreshWatermark = 0, forwardWatermark = 0
@@ -40,18 +30,14 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
   const requests = createSearchRequestControl()
   const listeners = new Set<() => void>()
   const publish = (next: View | undefined) => { view = next; listeners.forEach(listener => listener()) }
-  function clearWindow() { mainWindow = undefined; mainRecovery = undefined; topicRecovery = undefined }
+  const main = createMainSearchAnchor(sync, reads.timeline, { get: () => view, publish, missing, fail: handleFailure })
+  function clearWindow() { main.clear(); topicRecovery = undefined }
   function missing(w: View) {
     requests.cancel()
     clearWindow()
     publish({ ...initial(w.target), visit: w.visit, status: 'missing' })
   }
   const channelFor = (target: SearchResultTarget) => sync.get().channels[target.channelId]
-  const contains = (target: SearchResultTarget, message: Message) =>
-    message.id === target.messageId && message.created_seq === target.createdSeq &&
-    message.channel_id === target.channelId && message.topic_id === (target.topicId ?? null) &&
-    (!target.replyRootId || (message.reply_root_id ?? message.id) === target.replyRootId) && !message.deleted
-
   function merge(w: View, incoming: Message[], starting: Message[] = w.messages) {
     const records = new Map(starting.map(message => [message.id, message]))
     const channel = channelFor(w.target)
@@ -66,13 +52,12 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
 
   function canRead(w: View | undefined, mode?: PageRead): w is View {
     return Boolean(w && sync.get().organization !== 'unavailable' && channelFor(w.target)?.watched &&
-      (mode !== 'older' || w.hasOlder || mainRecovery?.hasOlder || topicRecovery?.hasOlder) &&
-      (mode !== 'newer' || w.hasNewer || mainRecovery?.hasNewer || topicRecovery?.hasNewer))
+      (mode !== 'older' || w.hasOlder || main.canPage('older') || topicRecovery?.hasOlder) &&
+      (mode !== 'newer' || w.hasNewer || main.canPage('newer') || topicRecovery?.hasNewer))
   }
 
-  function showError(mode?: PageRead) {
-    if (!view) return
-    publish({ ...view, paging: false, pageError: mode, status: view.status === 'loading' ? 'error' : view.status })
+  function showError(w: View, mode?: PageRead) {
+    publish({ ...w, paging: false, pageError: mode, status: w.status === 'loading' ? 'error' : w.status })
   }
 
   function read(mode?: PageRead, automatic = false) {
@@ -80,13 +65,12 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     const visit = view.visit
     let installed = false
     return requests.enqueue(mode ?? 'initial', async request => {
-      if (automatic && view?.pageError) return
+      if (automatic && view?.pageError && !main.needsMutationRefresh(view.target)) return
       installed = await executeRead(request, mode)
     }, () => {
-      if (canRead(view, mode)) showError(mode)
+      if (canRead(view, mode)) showError(isMain(view.target) ? main.afterTimeout(view, mode) : view, mode)
     }).then(() => {
-      if (!installed || view?.visit !== visit || view.pageError || !mainWindow) return
-      if (reconcileMainSearch(mainWindow, channelFor(view.target)).refresh) void read('refresh', true)
+      if (installed && view?.visit === visit && !view.pageError && main.needsRefresh(view.target)) void read('refresh', true)
     })
   }
 
@@ -96,75 +80,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       if (!isOrganizationUnavailable(failure) && failure.error !== 'topic_not_found' && failure.error !== 'reply_chain_not_found') {
         void sync.channelUnavailable(w.target.channelId)
       }
-    } else showError(mode)
-  }
-
-  function dropMain(w: View) {
-    if (!mainWindow) return
-    mainRecovery = mainSearchBounds(mainWindow, w.target.createdSeq)
-    mainWindow = undefined
-    publish({ ...initial(w.target), visit: w.visit })
-  }
-
-  function publishMain(w: View, next: MainSearchWindow, readCompleted = false) {
-    mainWindow = next
-    const lines = mainSearchLines(next)
-    const messages = lines.flatMap(line => line.kind === 'message' ? [line.message] : [])
-    publish({ ...w, status: 'ready', lines, messages, asOfSeq: next.watermark,
-      ...(readCompleted ? { paging: false, pageError: undefined } : {}),
-      hasOlder: next.hasOlder, hasNewer: next.hasNewer, detached: next.detached })
-  }
-
-  async function executeMain(request: SearchRequest, w: View, mode?: PageRead, restarted = false): Promise<boolean> {
-    const { target } = w
-    const current = mainWindow
-    if (mode === 'refresh' && current && !reconcileMainSearch(current, channelFor(target)).refresh && !w.pageError) return false
-    publish(current ? { ...w, paging: true, pageError: undefined } :
-      { ...w, status: 'loading', paging: true, pageError: undefined })
-    const versionEpoch = channelFor(target)?.versionEpoch
-    let snapshot: { generation: string; watermark: number } | undefined = current?.items.length && mode !== 'refresh'
-      ? { generation: current.generation, watermark: current.watermark } : undefined
-    const overtaken = (watermark: number) => {
-      const state = channelFor(target)
-      return state && (state.versionEpoch !== versionEpoch || state.mutationSeq > watermark)
-    }
-    const result = await readMainSearch(async query => {
-      const page = await request.run(signal => reads.timeline(target, query, signal))
-      if (!request.isCurrent() || !page.ok) return page
-      const { history_generation: generation, as_of_seq: watermark, items } = page.data
-      if (snapshot && (snapshot.generation !== generation || snapshot.watermark !== watermark)) return expired
-      if (!snapshot && mode === 'refresh' && current && watermark > current.watermark && view) dropMain(view)
-      snapshot = { generation, watermark }
-      // Authorized reads may settle a pending send even if a later page invalidates the view.
-      void sync.settleHistory(target.channelId, items.map(itemMessage))
-      return overtaken(watermark) ? expired : page
-    }, target, sync.get().historyGeneration, mode, current, mainRecovery ?? (current && mainSearchBounds(current, target.createdSeq)))
-    if (!request.isCurrent() || !view) return false
-    const checked = result.ok && overtaken(result.data.watermark) ? expired : result
-    if (!checked.ok) {
-      if (isExpired(checked)) {
-        dropMain(view)
-        if (!restarted) return executeMain(request, view, mode, true)
-      }
-      handleFailure(view, checked, mode)
-      return false
-    }
-    let next = checked.data
-    const bounds = mainSearchBounds(next, target.createdSeq)
-    const coversHit = bounds.first <= target.createdSeq && target.createdSeq <= bounds.last
-    if ((!mode || (mainRecovery && coversHit)) && !next.items.some(item => contains(target, itemMessage(item)))) {
-      missing(view)
-      return false
-    }
-    if (mode === 'refresh' && mainRecovery?.detached && !current?.detached) {
-      next = capMainSearch(next, mainRecovery.last)
-    } else if (mode === 'older' && mainWindow?.detached && mainWindow.watermark === next.watermark) {
-      const tail = next.hasNewer ? [] : mainWindow.tail.slice(0, SEARCH_WINDOW_LIMIT - next.items.length)
-      next = { ...next, detached: true, tail }
-    }
-    mainRecovery = undefined
-    publishMain(view, reconcileMainSearch(next, channelFor(target)).window, true)
-    return true
+    } else showError(w, mode)
   }
 
   async function executeRead(request: SearchRequest, mode?: PageRead) {
@@ -174,7 +90,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
       missing(w)
       return false
     }
-    if (isMain(w.target)) return executeMain(request, w, mode)
+    if (isMain(w.target)) return main.execute(request, w, mode)
     await executeMessageRead(request, mode)
     return false
   }
@@ -208,7 +124,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
         }
         if (!restarted) return executeMessageRead(request, mode, true)
       }
-      handleFailure(w, result, mode)
+      handleFailure(view ?? w, result, mode)
     }
     if (topicRecovery) {
       const bounds = topicRecovery
@@ -359,15 +275,7 @@ export function createSearchAnchor(sync: ReturnType<typeof createSync>, reads: R
     if (!prior?.watched && w.status === 'loading') { void read(); return }
     const incoming = records?.get(id) ?? []
     if (isMain(w.target)) {
-      if (incoming.some(m => m.id === w.target.messageId && !contains(w.target, m))) { missing(w); return }
-      if (mainWindow && channel.mutationSeq > mainWindow.watermark) {
-        dropMain(w)
-        void read('refresh', true)
-      } else if (mainWindow) {
-        const next = reconcileMainSearch(mainWindow, channel)
-        if (next.window !== mainWindow) publishMain(w, next.window)
-        if (next.refresh && !w.pageError) void read('refresh', true)
-      }
+      if (main.update(w, channel, incoming, moves ?? [])) void read('refresh', true)
       return
     }
     const heldHit = w.reply ?? w.messages.find(m => m.id === w.target.messageId)

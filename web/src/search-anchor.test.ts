@@ -281,6 +281,41 @@ it.each(['generation change', 'cursor clamp'])('reopens the result after a %s an
 
 const expired = { ok: false, kind: 'http', status: 409, error: 'snapshot_expired' } as const
 
+it('never displays a deleted Message in a Topic search window when Delete replay arrives after the replacement snapshot', async () => {
+  const older = { ...record(30), topic_id: 'T' }
+  const hit = { ...record(40), topic_id: 'T' }
+  const removed = { ...record(45), topic_id: 'T', body: 'deleted Topic body' }
+  const tombstone = { ...removed, deleted: true, version: 101 }
+  const newer = { ...record(55), topic_id: 'T' }
+  const read = async (query?: ListMessagesQuery) => {
+    if (query?.after_seq === 39) return page([hit, removed], 100, true)
+    if (query?.before_seq === 40) return page([older], 100)
+    if (query?.after_seq === 45 && query.as_of_seq === 100) return expired
+    if (query?.after_seq === 0) return page([older, hit, newer], 101)
+    if (query?.after_seq === 45 && query.as_of_seq === 101) return page([newer], 101)
+    throw new Error('Unexpected Topic history query')
+  }
+  const { anchor, cursor, net, ready, session } = client(read)
+  try {
+    await ready()
+    anchor.open({ ...target, topicId: 'T' })
+    await flushSearch()
+    expect(anchor.get()?.messages).toEqual([older, hit, removed])
+    const reading = anchor.loadNewer()
+    const seen: (Message[] | undefined)[] = []
+    anchor.subscribe(() => seen.push(anchor.get()?.messages))
+    await reading
+    expect(anchor.get()).toMatchObject({ status: 'ready', asOfSeq: 101, messages: [older, hit, newer] })
+    expect(cursor()).toBe(100)
+    net.event({ type: 'message', kind: 'delete', seq: 101, message: tombstone })
+    await flushSearch()
+    expect(cursor()).toBe(101)
+    expect(anchor.get()?.messages).toEqual([older, hit, newer])
+    expect(seen).toContainEqual([])
+    expect(seen.flat().some(message => message?.id === removed.id)).toBe(false)
+  } finally { session.close() }
+})
+
 it.each([
   ['edit', 'older'], ['edit', 'newer'],
   ['delete', 'older'], ['delete', 'newer'],
