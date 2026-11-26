@@ -169,7 +169,7 @@ export function createReplies(sync: Sync, options: { api: RepliesApi; requestTim
       .catch((): Result<ReplyChainPage> => ({ ok: false, kind: 'network' }))
     // C6 late 401 and C10 remain authoritative for this Account Session, even after timeout or unwatch.
     void operation.then(r => {
-      if (session === sessionToken) sync.reportAccess?.(r, sync)
+      if (session === sessionToken) sync.reportAccess(r, sync)
     })
     const apply = operation.then(result => {
       if (!isCurrent()) return

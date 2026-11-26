@@ -107,7 +107,7 @@ export function createReplyCounts(sync: Sync, sources: { replies: Replies; topic
         // C6: cancellation/timeout/unwatch does not hide a same-Account-Session late 401.
         if (account !== session) return
         if (!result.ok && result.kind === 'http' && (result.status === 401 || (!closed && api.isOrganizationUnavailable(result)))) {
-          sync.reportAccess?.(result, sync)
+          sync.reportAccess(result, sync)
           return
         }
         if (!current()) return

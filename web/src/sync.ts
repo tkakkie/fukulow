@@ -116,6 +116,15 @@ export function createSync(options: SyncOptions) {
   const random = options.random ?? Math.random
   const schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms))
   const cancel = options.cancel ?? (handle => clearTimeout(handle as ReturnType<typeof setTimeout>))
+  const reportOrganizationUnavailable = options.reportOrganizationUnavailable ?? (apply => { void apply() })
+  const reportAccess: NonNullable<SyncOptions['reportSyncAccess']> = options.reportSyncAccess ?? ((result, source) => {
+    if (!result.ok && result.kind === 'http' && result.status === 401) {
+      void (source?.close() ?? dispatch({ type: 'stop' }))
+      options.onSessionEnded?.()
+    } else if (api.isOrganizationUnavailable(result)) {
+      void (source?.unavailable() ?? dispatch({ type: 'organization_unavailable' }))
+    }
+  })
   const core = createCore(options.selfId)
   let state = core.get()
   let socket: { transport: Connection; subscriptions: Map<string, number[]> } | undefined
@@ -431,7 +440,7 @@ export function createSync(options: SyncOptions) {
             onClose: code => {
               if (opened || !options.checkMembership) {
                 if (code === 4003) {
-                  if (state.connection === effect.id) options.reportOrganizationUnavailable?.(
+                  if (state.connection === effect.id) reportOrganizationUnavailable(
                     () => dispatch({ type: 'socket_closed', connection: effect.id, code }))
                   return
                 }
@@ -441,7 +450,7 @@ export function createSync(options: SyncOptions) {
               void request(options.checkMembership).then(result => {
                 if (state.connection !== effect.id || !state.running) return
                 if (api.isOrganizationUnavailable(result)) {
-                  options.reportOrganizationUnavailable?.(() => dispatch({ type: 'organization_unavailable' }))
+                  reportOrganizationUnavailable(() => dispatch({ type: 'organization_unavailable' }))
                 } else if (!result.ok && result.kind === 'http' && result.status === 401) void dispatch({ type: 'socket_closed', connection: effect.id, code: 4001 })
                 else void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 })
               }, () => { void dispatch({ type: 'socket_closed', connection: effect.id, code: 1006 }) })
@@ -837,7 +846,7 @@ export function createSync(options: SyncOptions) {
     onInput(listener: (input: Input, result: ReturnType<SyncCore['step']>, previous: ReturnType<SyncCore['get']>) => void) { inputListeners.add(listener); return () => { inputListeners.delete(listener) } },
     onActivity(listener: (notice: ActivityNotice) => void) { noticeListeners.add(listener); return () => { noticeListeners.delete(listener) } },
     get: () => state,
-    reportAccess: options.reportSyncAccess,
+    reportAccess,
     request: (id: number) => core.request(id),
     timer: (id: number) => core.timer(id),
     subscribe(listener: SyncListener) { listeners.add(listener); return () => { listeners.delete(listener) } },

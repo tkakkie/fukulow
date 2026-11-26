@@ -102,6 +102,7 @@ export function createSession(options: SessionOptions) {
     return result
   }
   const observe = <T>(promise: Promise<api.Result<T>>) => observeResponse(promise, reportAccess)
+  // These controllers report access through sync.reportAccess.
   const observeHistory = <T>(promise: Promise<api.Result<T>>) => observeResponse(promise)
   const channelRevokeListeners = new Set<(channelId: string) => void>()
   const activity = createActivity({

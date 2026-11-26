@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { channel, fakeNetwork, ok, record, settle } from './adapter-test-helpers.svelte'
 import * as api from './api'
+import { createAuth } from './auth.svelte'
+import { channelsAdapter } from './channels.svelte'
+import type { RepliesApi } from './replies'
+import { repliesAdapter } from './replies.svelte'
 import { createSession } from './session'
+import { syncAdapter } from './sync.svelte'
 import * as topicSync from './topic-sync'
 import { deferred } from './topic-test-helpers'
+import { topicsAdapter } from './topics.svelte'
 
 const timeout = 100
 const unauthorized = { ok: false, kind: 'http', status: 401 } as const
@@ -94,6 +100,53 @@ it.each(sources)('reports a late %s 401 before the Account owner closes sync', a
     expect(c.session.sync.get().running).toBe(false)
     expect(c.net.socket.closed).toBe(true)
   } finally { c.close() }
+})
+
+it('signs out the Account when a Reply chain read returns 401 after switching Organizations', async () => {
+  const net = fakeNetwork()
+  const result = deferred<api.Result<never>>()
+  const listReplyChain = vi.fn<RepliesApi['listReplyChain']>(() => result.promise)
+  const capabilities = { can_invite: { allowed: false }, can_deactivate_members: { allowed: false },
+    can_manage_roles: { allowed: false }, can_create_channels: { allowed: false } }
+  const organization = { organization_id: 'org', name: 'Org', capabilities }
+  const auth = createAuth({
+    restore: async () => ({ screen: 'app', identity: { account: { id: 'me', email: 'me@example.com' }, organizations: [organization] } }),
+    signIn: vi.fn(), setupAndSignIn: vi.fn(), signOut: async () => true,
+    getOrganization: async id => ok({ organization: { ...organization, organization_id: id }, member: { id: 'me', name: 'Me', role: 'member' } }),
+    openSession(selfId, onEnded, organizationId, _drafts, _onIdentity, _role, accountSignal) {
+      const session = createSession({ ...net.options(), selfId, onEnded, organizationId, accountSignal,
+        repliesApi: { listReplyChain } })
+      return { channels: channelsAdapter(session.channels, session.channelCreation), sync: syncAdapter(session.sync),
+        topics: id => topicsAdapter(session.topics, id), close: session.close,
+        replies: id => repliesAdapter(session.replies, id, session.replyCounts, session.moveChain) }
+    },
+  })
+  try {
+    await auth.load()
+    const oldSocket = net.socket
+    net.pages.A = ok({ history_generation: anchor.history_generation, as_of_seq: 100, messages: [anchor], has_more: false })
+    net.lists[0].resolve(ok({ history_generation: anchor.history_generation, channels: [channel('A')] }))
+    oldSocket.onReady()
+    await settle()
+    net.subscribed('A', 100)
+    void auth.session!.replies!('A').open(anchor)
+    await settle()
+    expect(listReplyChain).toHaveBeenCalledOnce()
+    const signal = listReplyChain.mock.calls[0][3]
+
+    await auth.selectOrganization('other')
+    expect(auth.selectedOrganizationId).toBe('other')
+    expect(oldSocket.closed).toBe(true)
+    expect(net.socket.closed).toBe(false)
+    expect(signal?.aborted).toBe(false)
+
+    result.resolve(unauthorized)
+    await settle()
+    expect(auth.view.screen).toBe('signin')
+    expect(auth.session).toBeNull()
+    expect(net.socket.closed).toBe(true)
+    expect(signal?.aborted).toBe(true)
+  } finally { await auth.signOut() }
 })
 
 it.each(sources)('reports late %s Membership loss through the Session C10 transition', async source => {

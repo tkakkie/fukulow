@@ -268,7 +268,7 @@ export function createTopics(sync: Sync, options: { api: TopicsApi; requestTimeo
     const session = sessionToken
     const operation = (reuse ? Promise.resolve(prefetched) : Promise.resolve().then(() => { startedAt = stampTopicEvidence(); return run() })).catch((): Result<T> => ({ ok: false, kind: 'network' }))
     void operation.then(r => {
-      if (session === sessionToken) sync.reportAccess?.(r, sync)
+      if (session === sessionToken) sync.reportAccess(r, sync)
     })
     const deadline = withTimeout || signal ? deadlines.start<Result<T>>({ ok: false, kind: 'network' }, {
       timeoutMs: withTimeout ? options.requestTimeoutMs ?? 30_000 : undefined,

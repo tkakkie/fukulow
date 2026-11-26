@@ -158,7 +158,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const operation = Promise.resolve().then(run).catch((): Result<T> => ({ ok: false, kind: 'network' }))
     // Authentication failures outlive data authority; the old Organization's sync alone receives C10.
     void operation.then(r => {
-      if (account === session) sync.reportAccess?.(r, sync)
+      if (account === session) sync.reportAccess(r, sync)
     })
     const historyEpoch = sync.get().historyEpoch
     const deadline = deadlines.start<Result<T>>({ ok: false, kind: 'network' }, { channel, timeoutMs: options.requestTimeoutMs ?? 30_000 })
