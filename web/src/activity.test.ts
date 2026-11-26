@@ -1516,7 +1516,7 @@ it('accumulates and restores read reasons across ensure, refresh, periodic, belo
     await vi.advanceTimersByTimeAsync(200); await flush()
     expect(seen.at(-1)).toEqual(['periodic', 'notice'])
 
-    // generation mismatch while in flight restores reasons if still dirty
+    // generation mismatch while in flight restores reasons by union with pending reasons
     gate = held<Result<number>>()
     const inFlight = gate
     void target.refresh('reconcile'); await flush()
@@ -1525,7 +1525,7 @@ it('accumulates and restores read reasons across ensure, refresh, periodic, belo
     target.invalidate('access', 200)
     inFlight.resolve(ok(1)); await flush()
     await vi.advanceTimersByTimeAsync(200); await flush()
-    expect(seen.at(-1)).toEqual(['access'])
+    expect(new Set(seen.at(-1))).toEqual(new Set(['access', 'reconcile']))
   } finally { target.close() }
 })
 

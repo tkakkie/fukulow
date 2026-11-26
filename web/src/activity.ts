@@ -84,13 +84,13 @@ export function createActivityTarget<T>(options: {
     try { if (result.ok) {
       if (own !== generation) {
         if (wasServingNotice) noticePending = true
-        if (dirty && pendingReasons.size === 0) for (const r of reasons) pendingReasons.add(r)
+        if (dirty) for (const r of reasons) pendingReasons.add(r)
         if (dirty && !retry) schedule(200)
         return
       }
       if (options.covers?.(result.data) === false) {
         if (wasServingNotice) noticePending = true
-        if (pendingReasons.size === 0) for (const r of reasons) pendingReasons.add(r)
+        for (const r of reasons) pendingReasons.add(r)
         if (++belowFloor >= 3) scheduleRetry()
         else schedule(200)
         return
@@ -104,11 +104,11 @@ export function createActivityTarget<T>(options: {
       if (options.manualRetry) { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); return }
       if (result.kind === 'network' || result.status === 429 || result.status >= 500) {
         if (wasServingNotice) noticePending = true
-        if (pendingReasons.size === 0) for (const r of reasons) pendingReasons.add(r)
+        for (const r of reasons) pendingReasons.add(r)
         scheduleRetry(result.retryAfterMs ?? 0)
       } else if (own !== generation) {
         if (wasServingNotice) noticePending = true
-        if (dirty && pendingReasons.size === 0) for (const r of reasons) pendingReasons.add(r)
+        if (dirty) for (const r of reasons) pendingReasons.add(r)
         if (dirty) schedule(200)
       } else { dirty = false; queued = false; noticePending = false; pendingReasons.clear(); stopped = true }
     } } finally { options.settled?.() }

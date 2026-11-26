@@ -1,4 +1,5 @@
 import * as api from './api'
+import { markChannelsRead } from './channels'
 import { createRequestDeadlines } from './request-deadlines'
 import type { ChannelList, Dm, MarkReadRequest, Message, ReadPosition, Result, TopicSummaryResponse, UnreadChannel } from './api'
 import type { createSync } from './sync'
@@ -197,7 +198,7 @@ export function createUnread(sync: Sync, options: { api: UnreadApi; topics?: Top
     const token = Symbol(), generation = epoch, number = ++issue
     list = token
     const tokens = new Map([...channels].filter(([id, c]) => eligible(id, c)).map(([id, c]) => [id, c.token]))
-    const r = await request(() => options.api.listChannels())
+    const r = await request(() => options.api.listChannels(undefined, markChannelsRead([discovering ? 'initial' : 'reconcile'])))
     if (!active() || generation !== epoch || list !== token) return
     list = undefined
     if (r.ok) {
